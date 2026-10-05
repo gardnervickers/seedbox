@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "scheduler": {"tick_ns": 10, "quantum_min": 1000, "quantum_max": 10000, "max_instructions": 30000000},
+  "network": {"latency_ns": 100000, "jitter_ns": 25000},
+  "nodes": [
+    {"name": "redis", "ip": "10.0.0.2", "executable": "../build/redis/redis-server", "argv": ["/redis-server", "/redis.conf"], "files": {"/redis.conf": "bind 10.0.0.2\nport 6379\nprotected-mode no\nsave \"\"\nappendonly no\nmaxclients 64\nhz 10\nloglevel notice\ndir /\nenable-debug-command yes\n"}},
+    {"name": "client", "ip": "10.0.0.1", "executable": "../build/redis/redis-ttl-client"}
+  ]
+}

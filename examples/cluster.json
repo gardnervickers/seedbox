@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "scheduler": {"tick_ns": 10, "quantum_min": 3, "quantum_max": 17},
+  "network": {"latency_ns": 10000, "jitter_ns": 500, "loss_ppm": 0},
+  "nodes": [
+    {"name": "client", "ip": "10.0.0.1", "executable": "../build/guests/client"},
+    {"name": "server", "ip": "10.0.0.2", "executable": "../build/guests/server"},
+    {"name": "storage", "ip": "10.0.0.3", "executable": "../build/guests/disk"}
+  ]
+}
