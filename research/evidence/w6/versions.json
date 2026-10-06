@@ -1,0 +1,44 @@
+[
+  {
+    "name": "shadow",
+    "revision": "74e57f24043cc00ead484d20880f685b10cc51a1",
+    "date": "2026-09-30T16:44:27Z",
+    "commit_url": "https://github.com/shadow/shadow/commit/74e57f24043cc00ead484d20880f685b10cc51a1"
+  },
+  {
+    "name": "hermit",
+    "revision": "f4f583e5d3044bcc34ca01c3aa1055cb94deee2e",
+    "date": "2026-10-04T07:59:33Z",
+    "commit_url": "https://github.com/facebookexperimental/hermit/commit/f4f583e5d3044bcc34ca01c3aa1055cb94deee2e"
+  },
+  {
+    "name": "reverie",
+    "revision": "3030b0ca962421520400acdb09365bcc35c85d22",
+    "date": "2026-10-05T19:02:09Z",
+    "commit_url": "https://github.com/facebookexperimental/reverie/commit/3030b0ca962421520400acdb09365bcc35c85d22"
+  },
+  {
+    "name": "dettrace",
+    "revision": "657ff07bbfad5bac5ce680c412d66acb1008ae3b",
+    "date": "2020-09-20T04:47:54Z",
+    "commit_url": "https://github.com/dettrace/dettrace/commit/657ff07bbfad5bac5ce680c412d66acb1008ae3b"
+  },
+  {
+    "name": "rr",
+    "revision": "858a9fbcc5ac71cc578c2e1966f573d7c4ff8257",
+    "date": "2026-10-01T10:04:59Z",
+    "commit_url": "https://github.com/rr-debugger/rr/commit/858a9fbcc5ac71cc578c2e1966f573d7c4ff8257"
+  },
+  {
+    "name": "gvisor",
+    "revision": "b9961ddfa6c68aa97538c1b81a21b49e734feedd",
+    "date": "2026-10-05T23:23:43Z",
+    "commit_url": "https://github.com/google/gvisor/commit/b9961ddfa6c68aa97538c1b81a21b49e734feedd"
+  },
+  {
+    "name": "ltp",
+    "revision": "78e6353fdff663b2fc2f77704ceec6c3ca786b96",
+    "date": "2026-10-05T13:16:53Z",
+    "commit_url": "https://github.com/linux-test-project/ltp/commit/78e6353fdff663b2fc2f77704ceec6c3ca786b96"
+  }
+]

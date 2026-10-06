@@ -1,0 +1,424 @@
+1791246790.771676 [ 186] gettid()       = 907983 <0.000022>
+1791246790.771742 [ 131] sigaltstack(NULL, {ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0 <0.000030>
+1791246790.771790 [ 131] sigaltstack({ss_sp=0x221f8c55e000, ss_flags=0, ss_size=32768}, NULL) = 0 <0.000005>
+1791246790.771811 [  14] rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0 <0.000005>
+1791246790.771832 [ 186] gettid()       = 907983 <0.000012>
+1791246790.771879 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000169>
+1791246790.772093 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.003918>
+1791246790.776033 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000006>
+1791246790.776058 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000182>
+1791246790.776265 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000006>
+1791246790.776314 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000033>
+1791246790.776364 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000010>
+1791246790.776411 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000032>
+1791246790.776461 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000010>
+1791246790.776508 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000060>
+1791246790.776607 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000005>
+1791246790.776629 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000031>
+1791246790.776703 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000006>
+1791246790.776725 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000040>
+1791246790.776818 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000006>
+1791246790.777201 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000646>
+1791246790.777886 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000016>
+1791246790.777958 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000143>
+1791246790.778142 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000034>
+1791246790.778207 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000082>
+1791246790.778335 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000020>
+1791246790.778400 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000064>
+1791246790.778504 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000030>
+1791246790.778586 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000058>
+1791246790.778677 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000027>
+1791246790.778733 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000114>
+1791246790.778875 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000022>
+1791246790.778938 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000082>
+1791246790.779048 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000025>
+1791246790.779100 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000116>
+1791246790.779248 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000030>
+1791246790.779329 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000052>
+1791246790.779409 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000013>
+1791246790.779451 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000121>
+1791246790.779589 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000023>
+1791246790.779646 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000083>
+1791246790.779766 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000049>
+1791246790.779842 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000106>
+1791246790.779976 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000013>
+1791246790.780013 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000220>
+1791246790.780263 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000015>
+1791246790.780307 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000063>
+1791246790.780405 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000232>
+1791246790.780670 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000631>
+1791246790.781324 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000006>
+1791246790.781347 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000209>
+1791246790.781575 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000006>
+1791246790.781597 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000032>
+1791246790.781646 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000006>
+1791246790.781668 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000031>
+1791246790.781715 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000006>
+1791246790.781737 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000040>
+1791246790.781794 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000019>
+1791246790.781882 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000019>
+1791246790.781936 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000018>
+1791246790.781984 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000110>
+1791246790.782125 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000023>
+1791246790.782186 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000061>
+1791246790.782276 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000009>
+1791246790.782331 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000075>
+1791246790.782449 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000015>
+1791246790.782489 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000091>
+1791246790.782611 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000013>
+1791246790.782654 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000052>
+1791246790.782745 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000024>
+1791246790.782807 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000050>
+1791246790.782891 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000011>
+1791246790.782947 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000023>
+1791246790.783012 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000014>
+1791246790.783055 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000064>
+1791246790.783165 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000009>
+1791246790.783205 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000008>
+1791246790.783246 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000041>
+1791246790.783317 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000022>
+1791246790.783368 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000018>
+1791246790.783416 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000022>
+1791246790.783474 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000029>
+1791246790.783523 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000057>
+1791246790.783617 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000009>
+1791246790.783654 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000014>
+1791246790.783695 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000021>
+1791246790.783741 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000065>
+1791246790.783842 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000016>
+1791246790.783887 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000053>
+1791246790.783973 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000028>
+1791246790.784029 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000123>
+1791246790.784170 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000024>
+1791246790.784214 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000093>
+1791246790.784339 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000014>
+1791246790.784377 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000074>
+1791246790.784494 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000012>
+1791246790.784543 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000088>
+1791246790.784669 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000013>
+1791246790.784712 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000058>
+1791246790.784808 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000013>
+1791246790.784865 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000076>
+1791246790.784970 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000024>
+1791246790.785037 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000098>
+1791246790.785177 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000025>
+1791246790.785236 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000140>
+1791246790.785402 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000016>
+1791246790.785447 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000091>
+1791246790.785566 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000036>
+1791246790.785618 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000097>
+1791246790.785741 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000016>
+1791246790.785785 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000085>
+1791246790.785901 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000114>
+1791246790.786046 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000086>
+1791246790.786150 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000006>
+1791246790.786172 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000203>
+1791246790.786391 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000022>
+1791246790.786442 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000073>
+1791246790.786544 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000022>
+1791246790.786605 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000054>
+1791246790.786728 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000006>
+1791246790.786750 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.061201>
+1791246790.847982 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.062787>
+1791246790.910818 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.058192>
+1791246790.969050 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 4<TCP:[127.0.0.1:19391]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15e000004}) = 0 <0.000024>
+1791246790.969116 [  51] getsockname(4<TCP:[127.0.0.1:19391]>, {sa_family=AF_INET, sin_port=htons(19391), sin_addr=inet_addr("127.0.0.1")}, [112 => 16]) = 0 <0.000006>
+1791246790.969168 [  41] socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, IPPROTO_MPTCP) = 7<socket:[58328920]> <0.000011>
+1791246790.987563 [  54] setsockopt(7<socket:[58328920]>, SOL_SOCKET, SO_REUSEADDR, [1], 4) = 0 <0.000042>
+1791246791.006031 [  49] bind(7<socket:[58328920]>, {sa_family=AF_INET, sin_port=htons(19390), sin_addr=inet_addr("127.0.0.1")}, 16) = 0 <0.000032>
+1791246791.024538 [  50] listen(7<TCP:[127.0.0.1:19390]>, 4096) = 0 <0.000009>
+1791246791.026395 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19390]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15d000001}) = 0 <0.000023>
+1791246791.026457 [  51] getsockname(7<TCP:[127.0.0.1:19390]>, {sa_family=AF_INET, sin_port=htons(19390), sin_addr=inet_addr("127.0.0.1")}, [112 => 16]) = 0 <0.000018>
+1791246791.026512 [ 302] prlimit64(0, RLIMIT_NOFILE, NULL, {rlim_cur=512*1024, rlim_max=512*1024}) = 0 <0.000018>
+1791246791.026557 [ 302] --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=907980, si_uid=1000} ---
+1791246791.026591 [  15] rt_sigreturn({mask=[]}) = 0 <0.000006>
+1791246791.026622 [ 257] openat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal", O_RDONLY|O_CLOEXEC) = 8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal> <0.000012>
+1791246791.026680 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_GETFL) = 0x8000 (flags O_RDONLY|O_LARGEFILE) <0.000013>
+1791246791.026731 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_SETFL, O_RDONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000005>
+1791246791.026756 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c000001}) = -1 EPERM (Operation not permitted) <0.000005>
+1791246791.026790 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_GETFL) = 0x8800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE) <0.000005>
+1791246791.026829 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_SETFL, O_RDONLY|O_LARGEFILE) = 0 <0.000018>
+1791246791.026870 [ 217] getdents64(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, [{d_ino=13935671, d_off=5269572225127789821, d_reclen=24, d_type=DT_DIR, d_name="."}, {d_ino=13935672, d_off=6329155247818659080, d_reclen=64, d_type=DT_REG, d_name="0000000000000000-0000000000000000.wal"}, {d_ino=13935668, d_off=9223372036854775807, d_reclen=24, d_type=DT_DIR, d_name=".."}], 8192) = 112 <0.000012>
+1791246791.026909 [ 217] getdents64(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, [], 8192) = 0 <0.000010>
+1791246791.026943 [   3] close(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>) = 0 <0.000014>
+1791246791.027026 [ 262] newfstatat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data", {st_dev=makedev(0x103, 0x6), st_ino=13935667, st_mode=S_IFDIR|0700, st_nlink=3, st_uid=1000, st_gid=100, st_blksize=4096, st_blocks=8, st_size=4096, st_atime=1791246790 /* 2026-10-05T20:33:10.788699550-0400 */, st_atime_nsec=788699550, st_mtime=1791246788 /* 2026-10-05T20:33:08.778530908-0400 */, st_mtime_nsec=778530908, st_ctime=1791246788 /* 2026-10-05T20:33:08.778530908-0400 */, st_ctime_nsec=778530908}, 0) = 0 <0.000006>
+1791246791.027083 [ 262] newfstatat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data", {st_dev=makedev(0x103, 0x6), st_ino=13935667, st_mode=S_IFDIR|0700, st_nlink=3, st_uid=1000, st_gid=100, st_blksize=4096, st_blocks=8, st_size=4096, st_atime=1791246790 /* 2026-10-05T20:33:10.788699550-0400 */, st_atime_nsec=788699550, st_mtime=1791246788 /* 2026-10-05T20:33:08.778530908-0400 */, st_mtime_nsec=778530908, st_ctime=1791246788 /* 2026-10-05T20:33:08.778530908-0400 */, st_ctime_nsec=778530908}, 0) = 0 <0.000015>
+1791246791.027146 [ 262] newfstatat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data", {st_dev=makedev(0x103, 0x6), st_ino=13935667, st_mode=S_IFDIR|0700, st_nlink=3, st_uid=1000, st_gid=100, st_blksize=4096, st_blocks=8, st_size=4096, st_atime=1791246790 /* 2026-10-05T20:33:10.788699550-0400 */, st_atime_nsec=788699550, st_mtime=1791246788 /* 2026-10-05T20:33:08.778530908-0400 */, st_mtime_nsec=778530908, st_ctime=1791246788 /* 2026-10-05T20:33:08.778530908-0400 */, st_ctime_nsec=778530908}, 0) = 0 <0.000006>
+1791246791.027186 [ 257] openat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/.touch", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0600) = 8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/.touch> <0.000029>
+1791246791.027250 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/.touch>, F_GETFL) = 0x8001 (flags O_WRONLY|O_LARGEFILE) <0.000023>
+1791246791.027295 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/.touch>, F_SETFL, O_WRONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000005>
+1791246791.027324 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/.touch>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c000002}) = -1 EPERM (Operation not permitted) <0.000005>
+1791246791.027360 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/.touch>, F_GETFL) = 0x8801 (flags O_WRONLY|O_NONBLOCK|O_LARGEFILE) <0.000012>
+1791246791.027406 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/.touch>, F_SETFL, O_WRONLY|O_LARGEFILE) = 0 <0.000005>
+1791246791.027432 [   1] write(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/.touch>, "", 0) = 0 <0.000005>
+1791246791.027458 [   3] close(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/.touch>) = 0 <0.000010>
+1791246791.027496 [ 263] unlinkat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/.touch", 0) = 0 <0.000033>
+1791246791.027553 [ 262] newfstatat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member", {st_dev=makedev(0x103, 0x6), st_ino=13935668, st_mode=S_IFDIR|0700, st_nlink=4, st_uid=1000, st_gid=100, st_blksize=4096, st_blocks=8, st_size=4096, st_atime=1791246788 /* 2026-10-05T20:33:08.777665035-0400 */, st_atime_nsec=777665035, st_mtime=1791246788 /* 2026-10-05T20:33:08.799665412-0400 */, st_mtime_nsec=799665412, st_ctime=1791246788 /* 2026-10-05T20:33:08.799665412-0400 */, st_ctime_nsec=799665412}, 0) = 0 <0.000006>
+1791246791.027593 [ 262] newfstatat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member", {st_dev=makedev(0x103, 0x6), st_ino=13935668, st_mode=S_IFDIR|0700, st_nlink=4, st_uid=1000, st_gid=100, st_blksize=4096, st_blocks=8, st_size=4096, st_atime=1791246788 /* 2026-10-05T20:33:08.777665035-0400 */, st_atime_nsec=777665035, st_mtime=1791246788 /* 2026-10-05T20:33:08.799665412-0400 */, st_mtime_nsec=799665412, st_ctime=1791246788 /* 2026-10-05T20:33:08.799665412-0400 */, st_ctime_nsec=799665412}, 0) = 0 <0.000011>
+1791246791.027644 [ 262] newfstatat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member", {st_dev=makedev(0x103, 0x6), st_ino=13935668, st_mode=S_IFDIR|0700, st_nlink=4, st_uid=1000, st_gid=100, st_blksize=4096, st_blocks=8, st_size=4096, st_atime=1791246788 /* 2026-10-05T20:33:08.777665035-0400 */, st_atime_nsec=777665035, st_mtime=1791246788 /* 2026-10-05T20:33:08.799665412-0400 */, st_mtime_nsec=799665412, st_ctime=1791246788 /* 2026-10-05T20:33:08.799665412-0400 */, st_ctime_nsec=799665412}, 0) = 0 <0.000023>
+1791246791.027700 [ 257] openat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/.touch", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0600) = 8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/.touch> <0.000019>
+1791246791.027750 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/.touch>, F_GETFL) = 0x8001 (flags O_WRONLY|O_LARGEFILE) <0.000013>
+1791246791.027799 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/.touch>, F_SETFL, O_WRONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000005>
+1791246791.027824 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/.touch>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c000003}) = -1 EPERM (Operation not permitted) <0.000005>
+1791246791.027855 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/.touch>, F_GETFL) = 0x8801 (flags O_WRONLY|O_NONBLOCK|O_LARGEFILE) <0.000005>
+1791246791.027894 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/.touch>, F_SETFL, O_WRONLY|O_LARGEFILE) = 0 <0.000019>
+1791246791.027937 [   1] write(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/.touch>, "", 0) = 0 <0.000005>
+1791246791.027962 [   3] close(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/.touch>) = 0 <0.000006>
+1791246791.027989 [ 263] unlinkat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/.touch", 0) = 0 <0.000015>
+1791246791.028040 [ 262] newfstatat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap", {st_dev=makedev(0x103, 0x6), st_ino=13935669, st_mode=S_IFDIR|0700, st_nlink=2, st_uid=1000, st_gid=100, st_blksize=4096, st_blocks=8, st_size=4096, st_atime=1791246790 /* 2026-10-05T20:33:10.525695037-0400 */, st_atime_nsec=525695037, st_mtime=1791246790 /* 2026-10-05T20:33:10.697697989-0400 */, st_mtime_nsec=697697989, st_ctime=1791246790 /* 2026-10-05T20:33:10.697697989-0400 */, st_ctime_nsec=697697989}, 0) = 0 <0.000028>
+1791246791.028103 [ 262] newfstatat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap", {st_dev=makedev(0x103, 0x6), st_ino=13935669, st_mode=S_IFDIR|0700, st_nlink=2, st_uid=1000, st_gid=100, st_blksize=4096, st_blocks=8, st_size=4096, st_atime=1791246790 /* 2026-10-05T20:33:10.525695037-0400 */, st_atime_nsec=525695037, st_mtime=1791246790 /* 2026-10-05T20:33:10.697697989-0400 */, st_mtime_nsec=697697989, st_ctime=1791246790 /* 2026-10-05T20:33:10.697697989-0400 */, st_ctime_nsec=697697989}, 0) = 0 <0.000006>
+1791246791.028142 [ 262] newfstatat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap", {st_dev=makedev(0x103, 0x6), st_ino=13935669, st_mode=S_IFDIR|0700, st_nlink=2, st_uid=1000, st_gid=100, st_blksize=4096, st_blocks=8, st_size=4096, st_atime=1791246790 /* 2026-10-05T20:33:10.525695037-0400 */, st_atime_nsec=525695037, st_mtime=1791246790 /* 2026-10-05T20:33:10.697697989-0400 */, st_mtime_nsec=697697989, st_ctime=1791246790 /* 2026-10-05T20:33:10.697697989-0400 */, st_ctime_nsec=697697989}, 0) = 0 <0.000006>
+1791246791.028193 [ 257] openat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/.touch", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0600) = 8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/.touch> <0.000033>
+1791246791.028253 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/.touch>, F_GETFL) = 0x8001 (flags O_WRONLY|O_LARGEFILE) <0.000005>
+1791246791.028279 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/.touch>, F_SETFL, O_WRONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000005>
+1791246791.028304 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/.touch>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c000004}) = -1 EPERM (Operation not permitted) <0.000006>
+1791246791.028349 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/.touch>, F_GETFL) = 0x8801 (flags O_WRONLY|O_NONBLOCK|O_LARGEFILE) <0.000018>
+1791246791.028388 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/.touch>, F_SETFL, O_WRONLY|O_LARGEFILE) = 0 <0.000005>
+1791246791.028414 [   1] write(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/.touch>, "", 0) = 0 <0.000005>
+1791246791.028439 [   3] close(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/.touch>) = 0 <0.000006>
+1791246791.028479 [ 263] unlinkat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/.touch", 0) = 0 <0.000030>
+1791246791.028534 [ 262] newfstatat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap", {st_dev=makedev(0x103, 0x6), st_ino=13935669, st_mode=S_IFDIR|0700, st_nlink=2, st_uid=1000, st_gid=100, st_blksize=4096, st_blocks=8, st_size=4096, st_atime=1791246790 /* 2026-10-05T20:33:10.525695037-0400 */, st_atime_nsec=525695037, st_mtime=1791246791 /* 2026-10-05T20:33:11.028011842-0400 */, st_mtime_nsec=28011842, st_ctime=1791246791 /* 2026-10-05T20:33:11.028011842-0400 */, st_ctime_nsec=28011842}, 0) = 0 <0.000006>
+1791246791.028575 [ 257] openat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap", O_RDONLY|O_CLOEXEC) = 8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap> <0.000012>
+1791246791.028620 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, F_GETFL) = 0x8000 (flags O_RDONLY|O_LARGEFILE) <0.000018>
+1791246791.028659 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, F_SETFL, O_RDONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000005>
+1791246791.028685 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c000005}) = -1 EPERM (Operation not permitted) <0.000005>
+1791246791.028715 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, F_GETFL) = 0x8800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE) <0.000005>
+1791246791.028754 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, F_SETFL, O_RDONLY|O_LARGEFILE) = 0 <0.000018>
+1791246791.028793 [ 217] getdents64(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, [{d_ino=13935669, d_off=2045809827056323916, d_reclen=24, d_type=DT_DIR, d_name="."}, {d_ino=13935678, d_off=4855741742815416107, d_reclen=64, d_type=DT_REG, d_name="0000000000000002-000000000000002a.snap"}, {d_ino=13935677, d_off=5615328877156703178, d_reclen=64, d_type=DT_REG, d_name="0000000000000002-0000000000000015.snap"}, {d_ino=13935679, d_off=6329155247818659080, d_reclen=24, d_type=DT_REG, d_name="db"}, {d_ino=13935668, d_off=9223372036854775807, d_reclen=24, d_type=DT_DIR, d_name=".."}], 8192) = 200 <0.000010>
+1791246791.028829 [ 217] getdents64(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, [], 8192) = 0 <0.000005>
+1791246791.028861 [   3] close(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>) = 0 <0.000014>
+1791246791.028935 [ 257] openat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal", O_RDONLY|O_CLOEXEC) = 8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal> <0.000008>
+1791246791.028969 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_GETFL) = 0x8000 (flags O_RDONLY|O_LARGEFILE) <0.000005>
+1791246791.028996 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_SETFL, O_RDONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000006>
+1791246791.029038 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c000006}) = -1 EPERM (Operation not permitted) <0.000027>
+1791246791.029092 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_GETFL) = 0x8800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE) <0.000005>
+1791246791.029119 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_SETFL, O_RDONLY|O_LARGEFILE) = 0 <0.000005>
+1791246791.029145 [ 217] getdents64(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, [{d_ino=13935671, d_off=5269572225127789821, d_reclen=24, d_type=DT_DIR, d_name="."}, {d_ino=13935672, d_off=6329155247818659080, d_reclen=64, d_type=DT_REG, d_name="0000000000000000-0000000000000000.wal"}, {d_ino=13935668, d_off=9223372036854775807, d_reclen=24, d_type=DT_DIR, d_name=".."}], 8192) = 112 <0.000008>
+1791246791.029194 [ 217] getdents64(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, [], 8192) = 0 <0.000018>
+1791246791.029235 [   3] close(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>) = 0 <0.000006>
+1791246791.029273 [ 262] newfstatat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db", {st_dev=makedev(0x103, 0x6), st_ino=13935679, st_mode=S_IFREG|0600, st_nlink=1, st_uid=1000, st_gid=100, st_blksize=4096, st_blocks=48, st_size=32768, st_atime=1791246790 /* 2026-10-05T20:33:10.720698383-0400 */, st_atime_nsec=720698383, st_mtime=1791246790 /* 2026-10-05T20:33:10.737698675-0400 */, st_mtime_nsec=737698675, st_ctime=1791246790 /* 2026-10-05T20:33:10.737698675-0400 */, st_ctime_nsec=737698675}, 0) = 0 <0.000007>
+1791246791.029364 [ 257] openat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db", O_RDWR|O_CREAT|O_CLOEXEC, 0600) = 8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db> <0.000017>
+1791246791.029423 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, F_GETFL) = 0x8002 (flags O_RDWR|O_LARGEFILE) <0.000005>
+1791246791.029449 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, F_SETFL, O_RDWR|O_NONBLOCK|O_LARGEFILE) = 0 <0.000005>
+1791246791.029474 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c000007}) = -1 EPERM (Operation not permitted) <0.000010>
+1791246791.029518 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, F_GETFL) = 0x8802 (flags O_RDWR|O_NONBLOCK|O_LARGEFILE) <0.000018>
+1791246791.029556 [  72] fcntl(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, F_SETFL, O_RDWR|O_LARGEFILE) = 0 <0.000005>
+1791246791.029582 [  73] flock(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, LOCK_EX|LOCK_NB) = 0 <0.000006>
+1791246791.029609 [   5] fstat(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, {st_dev=makedev(0x103, 0x6), st_ino=13935679, st_mode=S_IFREG|0600, st_nlink=1, st_uid=1000, st_gid=100, st_blksize=4096, st_blocks=48, st_size=32768, st_atime=1791246790 /* 2026-10-05T20:33:10.720698383-0400 */, st_atime_nsec=720698383, st_mtime=1791246790 /* 2026-10-05T20:33:10.737698675-0400 */, st_mtime_nsec=737698675, st_ctime=1791246790 /* 2026-10-05T20:33:10.737698675-0400 */, st_ctime_nsec=737698675}) = 0 <0.000006>
+1791246791.029683 [  17] pread64(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, "\0\0\0\0\0\0\0\0\4\0\0\0\0\0\0\0\355\332\f\355\2\0\0\0\0\20\0\0\0\0\0\0\5\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\377\377\377\377\377\377\377\377\6\0\0\0\0\0\0\0\4\0\0\0\0\0\0\0d\301\266\334\"\323d\363\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 4096, 0) = 4096 <0.000022>
+1791246791.029731 [   5] fstat(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, {st_dev=makedev(0x103, 0x6), st_ino=13935679, st_mode=S_IFREG|0600, st_nlink=1, st_uid=1000, st_gid=100, st_blksize=4096, st_blocks=48, st_size=32768, st_atime=1791246791 /* 2026-10-05T20:33:11.028703669-0400 */, st_atime_nsec=28703669, st_mtime=1791246790 /* 2026-10-05T20:33:10.737698675-0400 */, st_mtime_nsec=737698675, st_ctime=1791246790 /* 2026-10-05T20:33:10.737698675-0400 */, st_ctime_nsec=737698675}) = 0 <0.000005>
+1791246791.029775 [   9] mmap(NULL, 10737418240, PROT_READ, MAP_SHARED|MAP_POPULATE, 8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, 0) = 0x7ffd31200000 <0.000019>
+1791246791.029832 [  28] madvise(0x7ffd31200000, 10737418240, MADV_RANDOM) = 0 <0.000020>
+1791246791.029919 [ 257] openat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal", O_RDONLY|O_CLOEXEC) = 9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal> <0.000009>
+1791246791.029975 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_GETFL) = 0x8000 (flags O_RDONLY|O_LARGEFILE) <0.000019>
+1791246791.030015 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_SETFL, O_RDONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000005>
+1791246791.030041 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c000008}) = -1 EPERM (Operation not permitted) <0.000018>
+1791246791.030096 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_GETFL) = 0x8800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE) <0.000019>
+1791246791.030138 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_SETFL, O_RDONLY|O_LARGEFILE) = 0 <0.000005>
+1791246791.030165 [ 217] getdents64(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, [{d_ino=13935671, d_off=5269572225127789821, d_reclen=24, d_type=DT_DIR, d_name="."}, {d_ino=13935672, d_off=6329155247818659080, d_reclen=64, d_type=DT_REG, d_name="0000000000000000-0000000000000000.wal"}, {d_ino=13935668, d_off=9223372036854775807, d_reclen=24, d_type=DT_DIR, d_name=".."}], 8192) = 112 <0.000008>
+1791246791.030203 [ 217] getdents64(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, [], 8192) = 0 <0.000014>
+1791246791.030252 [   3] close(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>) = 0 <0.000006>
+1791246791.030287 [ 257] openat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal", O_RDONLY|O_CLOEXEC) = 9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal> <0.000008>
+1791246791.030326 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, F_GETFL) = 0x8000 (flags O_RDONLY|O_LARGEFILE) <0.000029>
+1791246791.030378 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, F_SETFL, O_RDONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000006>
+1791246791.030407 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c000009}) = -1 EPERM (Operation not permitted) <0.000011>
+1791246791.030473 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, F_GETFL) = 0x8800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE) <0.000006>
+1791246791.030502 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, F_SETFL, O_RDONLY|O_LARGEFILE) = 0 <0.000007>
+1791246791.030544 [   5] fstat(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, {st_dev=makedev(0x103, 0x6), st_ino=13935672, st_mode=S_IFREG|0600, st_nlink=1, st_uid=1000, st_gid=100, st_blksize=4096, st_blocks=125000, st_size=64000000, st_atime=1791246788 /* 2026-10-05T20:33:08.790911548-0400 */, st_atime_nsec=790911548, st_mtime=1791246790 /* 2026-10-05T20:33:10.732541077-0400 */, st_mtime_nsec=732541077, st_ctime=1791246790 /* 2026-10-05T20:33:10.732541077-0400 */, st_ctime_nsec=732541077}) = 0 <0.000029>
+1791246791.030612 [   0] read(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, "\4\0\0\0\0\0\0\204\10\4\20\0\0\0\0\0\37\0\0\0\0\0\0\201\10\1\20\370\207\202\342\5\32\25\10\206\227\302\341\341\224\321\275D\20\245\213\355\201\221\217\260\200\215\1\0\16\0\0\0\0\0\0\202\10\5\20\237\332\367\224\3\32\4\10\0\20\0\0\0n\0\0\0\0\0\0\202\10\2\20\222\254\203\250\4\32d\10\1\20\1\30\1\"\\\10\0\20\0\30\206\227\302\341\341\224\321\275D\"L{\"id\":4934613296942713734,\"peerURLs\":[\"http://127.0.0.1:19391\"],\"name\":\"w4\"}\0\0\20\0\0\0\0\0\0\0\10\3\20\267\245\276\271\1\32\6\10\1\20\0\30\1\27\0\0\0\0\0\0\201\10\3\20\302\276\266s\32\16\10\2\20\206\227\302\341\341\224\321\275D\30\1\0"..., 4096) = 4096 <0.000013>
+1791246791.030709 [   0] read(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, "5\0\0\0\0\0\0\203\10\2\20\217\347\253\302\16\32+\10\0\20\2\30*\"#\"\23\n\6/w4/36\22\tseed42-36\242\6\v\10\251\222\243\207\352\241\250\303\213\1\0\0\0\30\0\0\0\0\0\0\0\10\3\20\243\334\366\261\4\32\16\10\2\20\206\227\302\341\341\224\321\275D\30*5\0\0\0\0\0\0\203\10\2\20\275\203\342\325\3\32+\10\0\20\2\30+\"#\"\23\n\6/w4/37\22\tseed42-37\242\6\v\10\252\222\243\207\352\241\250\303\213\1\0\0\0\30\0\0\0\0\0\0\0\10\3\20\264\336\361\247\10\32\16\10\2\20\206\227\302\341\341\224\321\275D\30+\34\0\0\0\0\0\0\204\10\5\20\264\272\245\327\5\32\22\10*\20\2\32\f\10\206\227\302\341\341\224\321\275D(\0\0\0\0\0005\0\0\0\0\0\0\203\10\2\20\377\355\320\273\3\32+\10\0\20\2\30,"..., 4096) = 4096 <0.000007>
+1791246791.030747 [   3] close(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>) = 0 <0.000030>
+1791246791.030806 [ 257] openat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap", O_RDONLY|O_CLOEXEC) = 9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap> <0.000009>
+1791246791.030842 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, F_GETFL) = 0x8000 (flags O_RDONLY|O_LARGEFILE) <0.000011>
+1791246791.030898 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, F_SETFL, O_RDONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000006>
+1791246791.030926 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c00000a}) = -1 EPERM (Operation not permitted) <0.000007>
+1791246791.030960 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, F_GETFL) = 0x8800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE) <0.000029>
+1791246791.031015 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, F_SETFL, O_RDONLY|O_LARGEFILE) = 0 <0.000006>
+1791246791.031044 [ 217] getdents64(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, [{d_ino=13935669, d_off=2045809827056323916, d_reclen=24, d_type=DT_DIR, d_name="."}, {d_ino=13935678, d_off=4855741742815416107, d_reclen=64, d_type=DT_REG, d_name="0000000000000002-000000000000002a.snap"}, {d_ino=13935677, d_off=5615328877156703178, d_reclen=64, d_type=DT_REG, d_name="0000000000000002-0000000000000015.snap"}, {d_ino=13935679, d_off=6329155247818659080, d_reclen=24, d_type=DT_REG, d_name="db"}, {d_ino=13935668, d_off=9223372036854775807, d_reclen=24, d_type=DT_DIR, d_name=".."}], 8192) = 200 <0.000020>
+1791246791.031123 [ 217] getdents64(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, [], 8192) = 0 <0.000007>
+1791246791.031155 [   3] close(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>) = 0 <0.000009>
+1791246791.031191 [ 257] openat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/0000000000000002-000000000000002a.snap", O_RDONLY|O_CLOEXEC) = 9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/0000000000000002-000000000000002a.snap> <0.000037>
+1791246791.031257 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/0000000000000002-000000000000002a.snap>, F_GETFL) = 0x8000 (flags O_RDONLY|O_LARGEFILE) <0.000007>
+1791246791.031286 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/0000000000000002-000000000000002a.snap>, F_SETFL, O_RDONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000011>
+1791246791.031341 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/0000000000000002-000000000000002a.snap>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c00000b}) = -1 EPERM (Operation not permitted) <0.000007>
+1791246791.031375 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/0000000000000002-000000000000002a.snap>, F_GETFL) = 0x8800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE) <0.000006>
+1791246791.031404 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/0000000000000002-000000000000002a.snap>, F_SETFL, O_RDONLY|O_LARGEFILE) = 0 <0.000029>
+1791246791.031460 [   5] fstat(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/0000000000000002-000000000000002a.snap>, {st_dev=makedev(0x103, 0x6), st_ino=13935678, st_mode=S_IFREG|0644, st_nlink=1, st_uid=1000, st_gid=100, st_blksize=4096, st_blocks=16, st_size=7114, st_atime=1791246790 /* 2026-10-05T20:33:10.513694831-0400 */, st_atime_nsec=513694831, st_mtime=1791246790 /* 2026-10-05T20:33:10.514988756-0400 */, st_mtime_nsec=514988756, st_ctime=1791246790 /* 2026-10-05T20:33:10.514988756-0400 */, st_ctime_nsec=514988756}) = 0 <0.000007>
+1791246791.031508 [   0] read(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/0000000000000002-000000000000002a.snap>, "\10\366\215\364\353\n\22\3017\n\2527{\"Root\":{\"Path\":\"/\",\"CreatedIndex\":0,\"ModifiedIndex\":0,\"ExpireTime\":\"0001-01-01T00:00:00Z\",\"Value\":\"\",\"Children\":{\"0\":{\"Path\":\"/0\",\"CreatedIndex\":0,\"ModifiedIndex\":0,\"ExpireTime\":\"0001-01-01T00:00:00Z\",\"Value\":\"\",\"Children\":{\"members\":{\"Path\":\""..., 7115) = 7114 <0.000032>
+1791246791.031571 [   0] read(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/0000000000000002-000000000000002a.snap>, "", 1) = 0 <0.000007>
+1791246791.031600 [   3] close(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/0000000000000002-000000000000002a.snap>) = 0 <0.000012>
+1791246791.032074 [ 257] openat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/.touch", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0600) = 9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/.touch> <0.000020>
+1791246791.032132 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/.touch>, F_GETFL) = 0x8001 (flags O_WRONLY|O_LARGEFILE) <0.000031>
+1791246791.032187 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/.touch>, F_SETFL, O_WRONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000007>
+1791246791.032222 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/.touch>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c00000c}) = -1 EPERM (Operation not permitted) <0.000034>
+1791246791.032284 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/.touch>, F_GETFL) = 0x8801 (flags O_WRONLY|O_NONBLOCK|O_LARGEFILE) <0.000006>
+1791246791.032313 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/.touch>, F_SETFL, O_WRONLY|O_LARGEFILE) = 0 <0.000006>
+1791246791.032371 [   1] write(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/.touch>, "", 0) = 0 <0.000007>
+1791246791.032400 [   3] close(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/.touch>) = 0 <0.000007>
+1791246791.032429 [ 263] unlinkat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/.touch", 0) = 0 <0.000039>
+1791246791.032498 [ 257] openat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal", O_RDONLY|O_CLOEXEC) = 9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal> <0.000009>
+1791246791.032535 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_GETFL) = 0x8000 (flags O_RDONLY|O_LARGEFILE) <0.000035>
+1791246791.032599 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_SETFL, O_RDONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000006>
+1791246791.032628 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c00000d}) = -1 EPERM (Operation not permitted) <0.000007>
+1791246791.032694 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_GETFL) = 0x8800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE) <0.000006>
+1791246791.032722 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_SETFL, O_RDONLY|O_LARGEFILE) = 0 <0.000006>
+1791246791.032751 [ 217] getdents64(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, [{d_ino=13935671, d_off=5269572225127789821, d_reclen=24, d_type=DT_DIR, d_name="."}, {d_ino=13935672, d_off=6329155247818659080, d_reclen=64, d_type=DT_REG, d_name="0000000000000000-0000000000000000.wal"}, {d_ino=13935668, d_off=9223372036854775807, d_reclen=24, d_type=DT_DIR, d_name=".."}], 8192) = 112 <0.000010>
+1791246791.032821 [ 217] getdents64(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, [], 8192) = 0 <0.000007>
+1791246791.032851 [   3] close(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>) = 0 <0.000007>
+1791246791.032887 [ 257] openat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal", O_RDWR|O_CLOEXEC) = 9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal> <0.000009>
+1791246791.032924 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, F_GETFL) = 0x8002 (flags O_RDWR|O_LARGEFILE) <0.000011>
+1791246791.032980 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, F_SETFL, O_RDWR|O_NONBLOCK|O_LARGEFILE) = 0 <0.000006>
+1791246791.033009 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c00000e}) = -1 EPERM (Operation not permitted) <0.000007>
+1791246791.033047 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, F_GETFL) = 0x8802 (flags O_RDWR|O_NONBLOCK|O_LARGEFILE) <0.000012>
+1791246791.033084 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, F_SETFL, O_RDWR|O_LARGEFILE) = 0 <0.000006>
+1791246791.033113 [  72] fcntl(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, F_OFD_SETLK, {l_type=F_WRLCK, l_whence=SEEK_SET, l_start=0, l_len=0}) = 0 <0.000007>
+1791246791.033147 [   5] fstat(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, {st_dev=makedev(0x103, 0x6), st_ino=13935672, st_mode=S_IFREG|0600, st_nlink=1, st_uid=1000, st_gid=100, st_blksize=4096, st_blocks=125000, st_size=64000000, st_atime=1791246791 /* 2026-10-05T20:33:11.029703686-0400 */, st_atime_nsec=29703686, st_mtime=1791246790 /* 2026-10-05T20:33:10.732541077-0400 */, st_mtime_nsec=732541077, st_ctime=1791246790 /* 2026-10-05T20:33:10.732541077-0400 */, st_ctime_nsec=732541077}) = 0 <0.000007>
+1791246791.033223 [ 257] openat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal", O_RDONLY|O_CLOEXEC) = 10</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal> <0.000009>
+1791246791.033263 [  72] fcntl(10</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_GETFL) = 0x8000 (flags O_RDONLY|O_LARGEFILE) <0.000006>
+1791246791.033292 [  72] fcntl(10</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_SETFL, O_RDONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000006>
+1791246791.033320 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 10</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c00000f}) = -1 EPERM (Operation not permitted) <0.000006>
+1791246791.033354 [  72] fcntl(10</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_GETFL) = 0x8800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE) <0.000006>
+1791246791.033382 [  72] fcntl(10</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_SETFL, O_RDONLY|O_LARGEFILE) = 0 <0.000006>
+1791246791.033411 [   0] read(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, "\4\0\0\0\0\0\0\204\10\4\20\0\0\0\0\0\37\0\0\0\0\0\0\201\10\1\20\370\207\202\342\5\32\25\10\206\227\302\341\341\224\321\275D\20\245\213\355\201\221\217\260\200\215\1\0\16\0\0\0\0\0\0\202\10\5\20\237\332\367\224\3\32\4\10\0\20\0\0\0n\0\0\0\0\0\0\202\10\2\20\222\254\203\250\4\32d\10\1\20\1\30\1\"\\\10\0\20\0\30\206\227\302\341\341\224\321\275D\"L{\"id\":4934613296942713734,\"peerURLs\":[\"http://127.0.0.1:19391\"],\"name\":\"w4\"}\0\0\20\0\0\0\0\0\0\0\10\3\20\267\245\276\271\1\32\6\10\1\20\0\30\1\27\0\0\0\0\0\0\201\10\3\20\302\276\266s\32\16\10\2\20\206\227\302\341\341\224\321\275D\30\1\0"..., 4096) = 4096 <0.000010>
+1791246791.033468 [   0] read(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, "5\0\0\0\0\0\0\203\10\2\20\217\347\253\302\16\32+\10\0\20\2\30*\"#\"\23\n\6/w4/36\22\tseed42-36\242\6\v\10\251\222\243\207\352\241\250\303\213\1\0\0\0\30\0\0\0\0\0\0\0\10\3\20\243\334\366\261\4\32\16\10\2\20\206\227\302\341\341\224\321\275D\30*5\0\0\0\0\0\0\203\10\2\20\275\203\342\325\3\32+\10\0\20\2\30+\"#\"\23\n\6/w4/37\22\tseed42-37\242\6\v\10\252\222\243\207\352\241\250\303\213\1\0\0\0\30\0\0\0\0\0\0\0\10\3\20\264\336\361\247\10\32\16\10\2\20\206\227\302\341\341\224\321\275D\30+\34\0\0\0\0\0\0\204\10\5\20\264\272\245\327\5\32\22\10*\20\2\32\f\10\206\227\302\341\341\224\321\275D(\0\0\0\0\0005\0\0\0\0\0\0\203\10\2\20\377\355\320\273\3\32+\10\0\20\2\30,"..., 4096) = 4096 <0.000007>
+1791246791.033512 [   8] lseek(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, 4600, SEEK_SET) = 4600 <0.000007>
+1791246791.033543 [   8] lseek(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, 0, SEEK_CUR) = 4600 <0.000006>
+1791246791.033571 [   8] lseek(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, 0, SEEK_END) = 64000000 <0.000029>
+1791246791.033627 [  77] ftruncate(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, 4600) = 0 <0.000027>
+1791246791.033680 [ 285] fallocate(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, 0, 0, 64000000) = 0 <0.000116>
+1791246791.033824 [   8] lseek(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, 4600, SEEK_SET) = 4600 <0.000007>
+1791246791.033856 [   8] lseek(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, 0, SEEK_CUR) = 4600 <0.000006>
+1791246791.033923 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000007>
+1791246791.034055 [ 257] openat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/.touch", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0600) = 11</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/.touch> <0.000019>
+1791246791.034122 [  72] fcntl(11</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/.touch>, F_GETFL) = 0x8001 (flags O_WRONLY|O_LARGEFILE) <0.000006>
+1791246791.034152 [  72] fcntl(11</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/.touch>, F_SETFL, O_WRONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000006>
+1791246791.034181 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 11</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/.touch>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c000010}) = -1 EPERM (Operation not permitted) <0.000007>
+1791246791.034215 [  72] fcntl(11</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/.touch>, F_GETFL) = 0x8801 (flags O_WRONLY|O_NONBLOCK|O_LARGEFILE) <0.000006>
+1791246791.034244 [  72] fcntl(11</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/.touch>, F_SETFL, O_WRONLY|O_LARGEFILE) = 0 <0.000006>
+1791246791.034272 [   1] write(11</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/.touch>, "", 0) = 0 <0.000006>
+1791246791.034306 [   3] close(11</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/.touch>) = 0 <0.000038>
+1791246791.034366 [ 263] unlinkat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/.touch", 0) = 0 <0.000016>
+1791246791.034492 [   9] mmap(NULL, 65536, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7ffff7e03000 <0.000011>
+1791246791.034710 [   9] mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_DROPPABLE|MAP_ANONYMOUS, -1, 0) = 0x7ffff7e02000 <0.000010>
+1791246791.034753 [ 318] getrandom("\x12\xa1\x99\x12\xf3\x25\x8e\x76\xc6\xd5\xf1\x57\xd1\x8b\xfe\x21\x27\x28\x4e\x63\xbc\x82\x45\x82\xf3\xda\x4e\xeb\x3d\x79\x2b\x7e", 32, 0) = 32 <0.000007>
+1791246791.035156 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000007>
+1791246791.035202 [   9] mmap(NULL, 262144, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7fffb1260000 <0.000009>
+1791246791.035379 [  18] pwrite64(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, "\2\0\0\0\0\0\0\0\2\0\n\0\0\0\0\0\1\0\0\0\240\0\0\0\5\0\0\0 \0\0\0\1\0\0\0\265\0\0\0\4\0\0\0D\0\0\0\1\0\0\0\355\0\0\0\t\0\0\0 \0\0\0\1\0\0\0\6\1\0\0\t\0\0\0 \0\0\0\1\0\0\0\37\1\0\0\7\0\0\0C\0\0\0\1\0\0\0Y\1\0\0\3\0\0\0\20\0\0\0\1\0\0\0\\\1\0\0\5\0\0\0 \0\0\0\1\0\0\0q\1\0\0\7\0\0\0\264\0\0\0\1\0\0\0\34\2\0\0\17\0\0\0 \0\0\0\1\0\0\0;\2\0\0\4\0\0\0:\1\0\0alarm\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\2\0\0\0\0\0\0\0auth\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\2\0\1\0\0\0\0\0\0\0\0\0\20\0\0"..., 4096, 8192) = 4096 <0.000011>
+1791246791.035422 [  75] fdatasync(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>) = 0 <0.002670>
+1791246791.038129 [  18] pwrite64(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, "\1\0\0\0\0\0\0\0\4\0\0\0\0\0\0\0\355\332\f\355\2\0\0\0\0\20\0\0\0\0\0\0\2\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\377\377\377\377\377\377\377\377\6\0\0\0\0\0\0\0\5\0\0\0\0\0\0\0\"\2KCm\311n\21\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 4096, 4096) = 4096 <0.000012>
+1791246791.038177 [  75] fdatasync(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>) = 0 <0.002663>
+1791246791.040872 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000010>
+1791246791.040950 [   1] write(2</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-recovered.stderr>, "{\"level\":\"warn\",\"ts\":\"2026-10-05T20:33:11.040923-0400\",\"caller\":\"auth/store.go:1137\",\"msg\":\"simple token is not cryptographically signed\"}\n", 139) = 139 <0.000037>
+1791246791.041142 [  18] pwrite64(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, "\3\0\0\0\0\0\0\0\2\0\n\0\0\0\0\0\1\0\0\0\240\0\0\0\5\0\0\0 \0\0\0\1\0\0\0\265\0\0\0\4\0\0\0D\0\0\0\1\0\0\0\355\0\0\0\t\0\0\0 \0\0\0\1\0\0\0\6\1\0\0\t\0\0\0 \0\0\0\1\0\0\0\37\1\0\0\7\0\0\0C\0\0\0\1\0\0\0Y\1\0\0\3\0\0\0\20\0\0\0\1\0\0\0\\\1\0\0\5\0\0\0 \0\0\0\1\0\0\0q\1\0\0\7\0\0\0\264\0\0\0\1\0\0\0\34\2\0\0\17\0\0\0 \0\0\0\1\0\0\0;\2\0\0\4\0\0\0:\1\0\0alarm\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\2\0\0\0\0\0\0\0auth\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\2\0\1\0\0\0\0\0\0\0\0\0\20\0\0"..., 4096, 12288) = 4096 <0.000012>
+1791246791.041196 [  75] fdatasync(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>) = 0 <0.002802>
+1791246791.044029 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000009>
+1791246791.044089 [  18] pwrite64(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, "\0\0\0\0\0\0\0\0\4\0\0\0\0\0\0\0\355\332\f\355\2\0\0\0\0\20\0\0\0\0\0\0\3\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\377\377\377\377\377\377\377\377\6\0\0\0\0\0\0\0\6\0\0\0\0\0\0\0`]7\356ds\177m\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 4096, 0) = 4096 <0.000036>
+1791246791.044160 [  75] fdatasync(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>) = 0 <0.002659>
+1791246791.046864 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000010>
+1791246791.046936 [   9] mmap(0x221f8cc00000, 4194304, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x221f8cc00000 <0.000043>
+1791246791.047399 [  18] pwrite64(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, "\2\0\0\0\0\0\0\0\2\0\n\0\0\0\0\0\1\0\0\0\240\0\0\0\5\0\0\0 \0\0\0\1\0\0\0\265\0\0\0\4\0\0\0D\0\0\0\1\0\0\0\355\0\0\0\t\0\0\0 \0\0\0\1\0\0\0\6\1\0\0\t\0\0\0 \0\0\0\1\0\0\0\37\1\0\0\7\0\0\0C\0\0\0\1\0\0\0Y\1\0\0\3\0\0\0\20\0\0\0\1\0\0\0\\\1\0\0\5\0\0\0 \0\0\0\1\0\0\0q\1\0\0\7\0\0\0\264\0\0\0\1\0\0\0\34\2\0\0\17\0\0\0 \0\0\0\1\0\0\0;\2\0\0\4\0\0\0:\1\0\0alarm\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\2\0\0\0\0\0\0\0auth\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\2\0\1\0\0\0\0\0\0\0\0\0\20\0\0"..., 4096, 8192) = 4096 <0.000013>
+1791246791.047460 [  75] fdatasync(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>) = 0 <0.002643>
+1791246791.050144 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000009>
+1791246791.050190 [  18] pwrite64(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, "\1\0\0\0\0\0\0\0\4\0\0\0\0\0\0\0\355\332\f\355\2\0\0\0\0\20\0\0\0\0\0\0\2\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\377\377\377\377\377\377\377\377\6\0\0\0\0\0\0\0\7\0\0\0\0\0\0\0\340ml-[;y\323\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 4096, 4096) = 4096 <0.000034>
+1791246791.050257 [  75] fdatasync(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>) = 0 <0.002638>
+1791246791.052926 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000009>
+1791246791.052992 [  18] pwrite64(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, "\3\0\0\0\0\0\0\0\2\0\n\0\0\0\0\0\1\0\0\0\240\0\0\0\5\0\0\0 \0\0\0\1\0\0\0\265\0\0\0\4\0\0\0D\0\0\0\1\0\0\0\355\0\0\0\t\0\0\0 \0\0\0\1\0\0\0\6\1\0\0\t\0\0\0 \0\0\0\1\0\0\0\37\1\0\0\7\0\0\0C\0\0\0\1\0\0\0Y\1\0\0\3\0\0\0\20\0\0\0\1\0\0\0\\\1\0\0\5\0\0\0 \0\0\0\1\0\0\0q\1\0\0\7\0\0\0\264\0\0\0\1\0\0\0\34\2\0\0\17\0\0\0 \0\0\0\1\0\0\0;\2\0\0\4\0\0\0:\1\0\0alarm\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\2\0\0\0\0\0\0\0auth\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\2\0\1\0\0\0\0\0\0\0\0\0\20\0\0"..., 4096, 12288) = 4096 <0.000035>
+1791246791.053077 [  75] fdatasync(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>) = 0 <0.002678>
+1791246791.055788 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000012>
+1791246791.055842 [  18] pwrite64(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, "\0\0\0\0\0\0\0\0\4\0\0\0\0\0\0\0\355\332\f\355\2\0\0\0\0\20\0\0\0\0\0\0\3\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\377\377\377\377\377\377\377\377\6\0\0\0\0\0\0\0\10\0\0\0\0\0\0\0.kM\207\343U6\37\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 4096, 0) = 4096 <0.000026>
+1791246791.055902 [  75] fdatasync(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>) = 0 <0.002607>
+1791246791.058541 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000009>
+1791246791.058624 [  18] pwrite64(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, "\5\0\0\0\0\0\0\0\2\0\n\0\0\0\0\0\1\0\0\0\240\0\0\0\5\0\0\0 \0\0\0\1\0\0\0\265\0\0\0\4\0\0\0D\0\0\0\1\0\0\0\355\0\0\0\t\0\0\0 \0\0\0\1\0\0\0\6\1\0\0\t\0\0\0 \0\0\0\1\0\0\0\37\1\0\0\7\0\0\0C\0\0\0\1\0\0\0Y\1\0\0\3\0\0\0\20\0\0\0\1\0\0\0\\\1\0\0\5\0\0\0 \0\0\0\1\0\0\0q\1\0\0\7\0\0\0\264\0\0\0\1\0\0\0\34\2\0\0\17\0\0\0 \0\0\0\1\0\0\0;\2\0\0\4\0\0\0:\1\0\0alarm\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\2\0\0\0\0\0\0\0auth\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\2\0\1\0\0\0\0\0\0\0\0\0\20\0\0"..., 4096, 20480) = 4096 <0.000038>
+1791246791.058702 [  75] fdatasync(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>) = 0 <0.002733>
+1791246791.061469 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000010>
+1791246791.061518 [  18] pwrite64(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, "\1\0\0\0\0\0\0\0\4\0\0\0\0\0\0\0\355\332\f\355\2\0\0\0\0\20\0\0\0\0\0\0\5\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\377\377\377\377\377\377\377\377\6\0\0\0\0\0\0\0\t\0\0\0\0\0\0\0\t4c\23P\266J\216\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 4096, 4096) = 4096 <0.000055>
+1791246791.061648 [  75] fdatasync(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>) = 0 <0.002704>
+1791246791.064383 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000009>
+1791246791.064675 [ 257] openat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal", O_RDONLY|O_CLOEXEC) = 12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal> <0.000040>
+1791246791.064762 [  72] fcntl(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_GETFL) = 0x8000 (flags O_RDONLY|O_LARGEFILE) <0.000008>
+1791246791.064802 [  72] fcntl(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_SETFL, O_RDONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000042>
+1791246791.064874 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c000012}) = -1 EPERM (Operation not permitted) <0.000008>
+1791246791.064918 [  72] fcntl(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_GETFL) = 0x8800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE) <0.000036>
+1791246791.064988 [  72] fcntl(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, F_SETFL, O_RDONLY|O_LARGEFILE) = 0 <0.000008>
+1791246791.065025 [ 217] getdents64(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, [{d_ino=13935686, d_off=1778570965913172065, d_reclen=32, d_type=DT_REG, d_name="0.tmp"}, {d_ino=13935671, d_off=5269572225127789821, d_reclen=24, d_type=DT_DIR, d_name="."}, {d_ino=13935672, d_off=6329155247818659080, d_reclen=64, d_type=DT_REG, d_name="0000000000000000-0000000000000000.wal"}, {d_ino=13935668, d_off=9223372036854775807, d_reclen=24, d_type=DT_DIR, d_name=".."}], 8192) = 144 <0.000058>
+1791246791.065118 [ 217] getdents64(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>, [], 8192) = 0 <0.000009>
+1791246791.065162 [   3] close(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>) = 0 <0.000037>
+1791246791.065250 [ 257] openat(AT_FDCWD</home/gvickers>, "/proc/self/fd", O_RDONLY|O_CLOEXEC) = 12</proc/907980/fd> <0.000018>
+1791246791.065332 [  72] fcntl(12</proc/907980/fd>, F_GETFL) = 0x8000 (flags O_RDONLY|O_LARGEFILE) <0.000008>
+1791246791.065367 [  72] fcntl(12</proc/907980/fd>, F_SETFL, O_RDONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000008>
+1791246791.065436 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 12</proc/907980/fd>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c000013}) = -1 EPERM (Operation not permitted) <0.000008>
+1791246791.065479 [  72] fcntl(12</proc/907980/fd>, F_GETFL) = 0x8800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE) <0.000013>
+1791246791.065545 [  72] fcntl(12</proc/907980/fd>, F_SETFL, O_RDONLY|O_LARGEFILE) = 0 <0.000008>
+1791246791.065586 [ 217] getdents64(12</proc/907980/fd>, [{d_ino=58328833, d_off=1, d_reclen=24, d_type=DT_DIR, d_name="."}, {d_ino=58328831, d_off=2, d_reclen=24, d_type=DT_DIR, d_name=".."}, {d_ino=58328835, d_off=3, d_reclen=24, d_type=DT_LNK, d_name="0"}, {d_ino=58328836, d_off=4, d_reclen=24, d_type=DT_LNK, d_name="1"}, {d_ino=58328837, d_off=5, d_reclen=24, d_type=DT_LNK, d_name="2"}, {d_ino=58328834, d_off=6, d_reclen=24, d_type=DT_LNK, d_name="3"}, {d_ino=58328841, d_off=7, d_reclen=24, d_type=DT_LNK, d_name="4"}, {d_ino=58328842, d_off=8, d_reclen=24, d_type=DT_LNK, d_name="5"}, {d_ino=58328843, d_off=9, d_reclen=24, d_type=DT_LNK, d_name="6"}, {d_ino=58328901, d_off=10, d_reclen=24, d_type=DT_LNK, d_name="7"}, {d_ino=58328935, d_off=11, d_reclen=24, d_type=DT_LNK, d_name="8"}, {d_ino=58328936, d_off=12, d_reclen=24, d_type=DT_LNK, d_name="9"}, {d_ino=58328937, d_off=13, d_reclen=24, d_type=DT_LNK, d_name="10"}, {d_ino=58328932, d_off=14, d_reclen=24, d_type=DT_LNK, d_name="11"}, {d_ino=58328938, d_off=66, d_reclen=24, d_type=DT_LNK, d_name="12"}], 8192) = 360 <0.000025>
+1791246791.065686 [ 217] getdents64(12</proc/907980/fd>, [], 8192) = 0 <0.000008>
+1791246791.065722 [   3] close(12</proc/907980/fd>) = 0 <0.000009>
+1791246791.065783 [ 302] prlimit64(0, RLIMIT_NOFILE, NULL, {rlim_cur=512*1024, rlim_max=512*1024}) = 0 <0.000006>
+1791246791.065839 [ 288] accept4(4<TCP:[127.0.0.1:19391]>, 0x221f8c5c4a64, [112], SOCK_CLOEXEC|SOCK_NONBLOCK) = -1 EAGAIN (Resource temporarily unavailable) <0.000035>
+1791246791.065937 [   1] write(6<{eventfd-count=0, eventfd-id=266, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000034>
+1791246791.066037 [ 257] openat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap", O_RDONLY|O_CLOEXEC) = 12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap> <0.000087>
+1791246791.066165 [  72] fcntl(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, F_GETFL) = 0x8000 (flags O_RDONLY|O_LARGEFILE) <0.000026>
+1791246791.066238 [  72] fcntl(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, F_SETFL, O_RDONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000006>
+1791246791.066267 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c000014}) = -1 EPERM (Operation not permitted) <0.000007>
+1791246791.066305 [  72] fcntl(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, F_GETFL) = 0x8800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE) <0.000028>
+1791246791.066356 [  72] fcntl(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, F_SETFL, O_RDONLY|O_LARGEFILE) = 0 <0.000006>
+1791246791.066385 [ 217] getdents64(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, [{d_ino=13935669, d_off=2045809827056323916, d_reclen=24, d_type=DT_DIR, d_name="."}, {d_ino=13935678, d_off=4855741742815416107, d_reclen=64, d_type=DT_REG, d_name="0000000000000002-000000000000002a.snap"}, {d_ino=13935677, d_off=5615328877156703178, d_reclen=64, d_type=DT_REG, d_name="0000000000000002-0000000000000015.snap"}, {d_ino=13935679, d_off=6329155247818659080, d_reclen=24, d_type=DT_REG, d_name="db"}, {d_ino=13935668, d_off=9223372036854775807, d_reclen=24, d_type=DT_DIR, d_name=".."}], 8192) = 200 <0.000010>
+1791246791.066451 [ 217] getdents64(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, [], 8192) = 0 <0.000007>
+1791246791.066481 [   3] close(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>) = 0 <0.000008>
+1791246791.066519 [ 257] openat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap", O_RDONLY|O_CLOEXEC) = 12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap> <0.000032>
+1791246791.066583 [  72] fcntl(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, F_GETFL) = 0x8000 (flags O_RDONLY|O_LARGEFILE) <0.000006>
+1791246791.066612 [  72] fcntl(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, F_SETFL, O_RDONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000008>
+1791246791.066669 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c000015}) = -1 EPERM (Operation not permitted) <0.000007>
+1791246791.066703 [  72] fcntl(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, F_GETFL) = 0x8800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE) <0.000006>
+1791246791.066731 [  72] fcntl(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, F_SETFL, O_RDONLY|O_LARGEFILE) = 0 <0.000029>
+1791246791.066788 [ 217] getdents64(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, [{d_ino=13935669, d_off=2045809827056323916, d_reclen=24, d_type=DT_DIR, d_name="."}, {d_ino=13935678, d_off=4855741742815416107, d_reclen=64, d_type=DT_REG, d_name="0000000000000002-000000000000002a.snap"}, {d_ino=13935677, d_off=5615328877156703178, d_reclen=64, d_type=DT_REG, d_name="0000000000000002-0000000000000015.snap"}, {d_ino=13935679, d_off=6329155247818659080, d_reclen=24, d_type=DT_REG, d_name="db"}, {d_ino=13935668, d_off=9223372036854775807, d_reclen=24, d_type=DT_DIR, d_name=".."}], 8192) = 200 <0.000009>
+1791246791.066824 [ 217] getdents64(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>, [], 8192) = 0 <0.000011>
+1791246791.066880 [   3] close(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap>) = 0 <0.000007>
+1791246791.066912 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000007>
+1791246791.066940 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 68, NULL, 0) = 0 <0.068115>
+1791246791.135094 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000009>
+1791246791.135137 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 1, NULL, 0) = 0 <0.001031>
+1791246791.136216 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000008>
+1791246791.136246 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 2, NULL, 0) = 0 <0.002061>
+1791246791.138333 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000008>
+1791246791.138368 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 1, NULL, 0) = 0 <0.001063>
+1791246791.139496 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000010>
+1791246791.139538 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 8, NULL, 0) = 0 <0.008063>
+1791246791.147629 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000008>
+1791246791.147664 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 1, NULL, 0) = 0 <0.001058>
+1791246791.148776 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000012>
+1791246791.148816 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 86, NULL, 0) = 0 <0.086100>
+1791246791.234949 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000007>
+1791246791.234985 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 1, NULL, 0) = 0 <0.001054>
+1791246791.236119 [   8] lseek(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, 0, SEEK_CUR) = 4600 <0.000010>
+1791246791.236168 [   1] write(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, "\30\0\0\0\0\0\0\0\10\3\20\252\271\215\300\4\32\16\10\3\20\206\227\302\341\341\224\321\275D\30.", 32) = 32 <0.000009>
+1791246791.236203 [  75] fdatasync(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>) = 0 <0.008087>
+1791246791.244324 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000009>
+1791246791.244392 [   8] lseek(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, 0, SEEK_CUR) = 4632 <0.000034>
+1791246791.244457 [   1] write(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, "\20\0\0\0\0\0\0\0\10\2\20\346\213\240\321\f\32\6\10\0\20\3\30/", 24) = 24 <0.000012>
+1791246791.244498 [  75] fdatasync(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>) = 0 <0.002690>
+1791246791.247226 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000009>
+1791246791.247283 [   8] lseek(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, 0, SEEK_CUR) = 4656 <0.000033>
+1791246791.247347 [   1] write(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, "K\0\0\0\0\0\0\205\10\2\20\336\350\276\233\t\32A\10\0\20\3\0300\"9\242\6\v\10\201\366\305\207\352\241\250\303\213\1\252Q(\10\206\227\302\341\341\224\321\275D\22\34\n\2w4\22\26http://127.0.0.1:19390\0\0\0\0\0\30\0\0\0\0\0\0\0\10\3\20\327\373\344\371\4\32\16\10\3\20\206\227\302\341\341\224\321\275D\30/", 120) = 120 <0.000011>
+1791246791.247388 [  75] fdatasync(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>) = 0 <0.002814>
+1791246791.250236 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000008>
+1791246791.250275 [   1] write(6<{eventfd-count=0, eventfd-id=266, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000044>
+1791246791.250454 [   8] lseek(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, 0, SEEK_CUR) = 4776 <0.000009>
+1791246791.250610 [  14] rt_sigprocmask(SIG_SETMASK, ~[], [], 8) = 0 <0.000031>
+1791246791.250674 [  56] clone(child_stack=0x221f8c752000, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS, tls=0x221f8c8ec090) = 908056 <0.000323>
+1791246791.251017 [  14] rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0 <0.000006>
+1791246791.251043 [  14] rt_sigprocmask(SIG_SETMASK, ~[HUP INT QUIT ILL TRAP ABRT BUS FPE SEGV TERM STKFLT CHLD URG PROF SYS RTMIN RT_1 RT_2], NULL, 8) = 0 <0.000006>
+1791246791.251080 [  14] rt_sigprocmask(SIG_SETMASK, ~[HUP INT QUIT ILL TRAP ABRT BUS FPE SEGV TERM STKFLT CHLD URG PROF SYS RTMIN RT_1 RT_2], NULL, 8) = 0 <0.000013>
+1791246791.251126 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000020>
+1791246791.251178 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000157>
+1791246791.251378 [  14] rt_sigprocmask(SIG_SETMASK, ~[HUP INT QUIT ILL TRAP ABRT BUS FPE SEGV TERM STKFLT CHLD URG PROF SYS RTMIN RT_1 RT_2], NULL, 8) = 0 <0.000005>
+1791246791.251402 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000279>
+1791246791.251727 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000911>
+1791246791.252658 [ 202] futex(0x221f8c53a960, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000008>
+1791246791.252683 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.561660>
+1791246791.814367 [  14] rt_sigprocmask(SIG_SETMASK, ~[HUP INT QUIT ILL TRAP ABRT BUS FPE SEGV TERM STKFLT CHLD URG PROF SYS RTMIN RT_1 RT_2], NULL, 8) = 0 <0.000007>
+1791246791.814399 [ 202] futex(0x221f8c94c160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000008>
+1791246791.814429 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000048>
+1791246791.814542 [  14] rt_sigprocmask(SIG_SETMASK, ~[HUP INT QUIT ILL TRAP ABRT BUS FPE SEGV TERM STKFLT CHLD URG PROF SYS RTMIN RT_1 RT_2], NULL, 8) = 0 <0.000031>
+1791246791.814602 [ 202] futex(0x221f8c94c160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000036>
+1791246791.814689 [ 202] futex(0x221f8c53b160, FUTEX_WAIT_PRIVATE, 0, NULL) = ?
+1791246791.815123 [ 202] +++ killed by SIGTERM +++

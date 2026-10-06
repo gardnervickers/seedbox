@@ -1,0 +1,116 @@
+1791246790.771315 [ 186] gettid()       = 907982 <0.000029>
+1791246790.771384 [ 131] sigaltstack(NULL, {ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0 <0.000005>
+1791246790.771405 [ 131] sigaltstack({ss_sp=0x221f8c54a000, ss_flags=0, ss_size=32768}, NULL) = 0 <0.000004>
+1791246790.771432 [  14] rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0 <0.000011>
+1791246790.771472 [ 186] gettid()       = 907982 <0.000004>
+1791246790.771500 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000007>
+1791246790.771560 [ 202] futex(0x221f8c53a960, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.005343>
+1791246790.776922 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000006>
+1791246790.777015 [ 202] futex(0x221f8c53a960, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.006508>
+1791246790.783542 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000022>
+1791246790.783594 [ 202] futex(0x221f8c53a960, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000160>
+1791246790.783769 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000022>
+1791246790.783821 [ 202] futex(0x221f8c53a960, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000073>
+1791246790.783927 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000015>
+1791246790.783981 [ 202] futex(0x221f8c53a960, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000056>
+1791246790.784113 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000006>
+1791246790.784137 [ 202] futex(0x221f8c53a960, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000082>
+1791246790.784247 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000028>
+1791246790.784291 [ 202] futex(0x221f8c53a960, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000097>
+1791246790.784429 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000006>
+1791246790.784469 [ 202] futex(0x221f8c53a960, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000028>
+1791246790.784554 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000020>
+1791246790.784607 [ 202] futex(0x221f8c53a960, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000647>
+1791246790.785295 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000024>
+1791246790.785354 [ 202] futex(0x221f8c53a960, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.467342>
+1791246791.252769 [  41] socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, IPPROTO_IP) = 12<TCP:[58328950]> <0.000012>
+1791246791.261259 [  54] setsockopt(12<TCP:[58328950]>, SOL_SOCKET, SO_KEEPALIVE, [1], 4) = 0 <0.000032>
+1791246791.269516 [  42] connect(12<TCP:[58328950]>, {sa_family=AF_INET, sin_port=htons(19390), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress) <0.000090>
+1791246791.277830 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 12<TCP:[127.0.0.1:50038->127.0.0.1:19390]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c000016}) = 0 <0.000050>
+1791246791.286229 [ 288] accept4(7<TCP:[127.0.0.1:19390]>, {sa_family=AF_INET, sin_port=htons(50038), sin_addr=inet_addr("127.0.0.1")}, [112 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 13<TCP:[127.0.0.1:19390->127.0.0.1:50038]> <0.000032>
+1791246791.292461 [ 288] --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=907980, si_uid=1000} ---
+1791246791.292491 [  15] rt_sigreturn({mask=[]}) = 13 <0.000036>
+1791246791.292574 [ 202] futex(0x221f8c53a960, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.049743>
+1791246791.342340 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000006>
+1791246791.342369 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 6, NULL, 0) = 0 <0.006576>
+1791246791.348967 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000006>
+1791246791.348995 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 86, NULL, 0) = 0 <0.086104>
+1791246791.435136 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000009>
+1791246791.435182 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 1, NULL, 0) = 0 <0.001062>
+1791246791.436307 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000011>
+1791246791.436347 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 12, NULL, 0) = 0 <0.012631>
+1791246791.449015 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000007>
+1791246791.449053 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 86, NULL, 0) = 0 <0.086100>
+1791246791.535190 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000006>
+1791246791.535224 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 1, NULL, 0) = 0 <0.001035>
+1791246791.536287 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000005>
+1791246791.536314 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 5, NULL, 0) = 0 <0.005062>
+1791246791.541408 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000008>
+1791246791.541446 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 7, NULL, 0) = 0 <0.007110>
+1791246791.552084 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000017>
+1791246791.552145 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 83, NULL, 0) = 0 <0.083101>
+1791246791.635285 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000009>
+1791246791.635332 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 1, NULL, 0) = 0 <0.001033>
+1791246791.636419 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000009>
+1791246791.636450 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 15, NULL, 0) = 0 <0.015065>
+1791246791.651546 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000009>
+1791246791.651588 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 1, NULL, 0) = 0 <0.001062>
+1791246791.652686 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000008>
+1791246791.652761 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 82, NULL, 0) = 0 <0.082102>
+1791246791.734905 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000009>
+1791246791.734954 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 1, NULL, 0) = 0 <0.001064>
+1791246791.736090 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000009>
+1791246791.736123 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 16, NULL, 0) = 0 <0.016065>
+1791246791.752222 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000009>
+1791246791.752267 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 1, NULL, 0) = 0 <0.001042>
+1791246791.753382 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000012>
+1791246791.753431 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [{events=EPOLLIN, data=0x3ffffbf15d000001}], 128, 81, NULL, 0) = 1 <0.013986>
+1791246791.767459 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000010>
+1791246791.767507 [ 288] accept4(7<TCP:[127.0.0.1:19390]>, {sa_family=AF_INET, sin_port=htons(50050), sin_addr=inet_addr("127.0.0.1")}, [112 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 14<TCP:[127.0.0.1:19390->127.0.0.1:50050]> <0.000042>
+1791246791.771881 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15a000001}) = 0 <0.000030>
+1791246791.771973 [  51] getsockname(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, {sa_family=AF_INET, sin_port=htons(19390), sin_addr=inet_addr("127.0.0.1")}, [112 => 16]) = 0 <0.000007>
+1791246791.772009 [  54] setsockopt(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, SOL_TCP, TCP_NODELAY, [1], 4) = 0 <0.000008>
+1791246791.772077 [  54] setsockopt(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, SOL_SOCKET, SO_KEEPALIVE, [1], 4) = 0 <0.000008>
+1791246791.772110 [  54] setsockopt(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, SOL_TCP, TCP_KEEPIDLE, [15], 4) = 0 <0.000007>
+1791246791.772144 [  54] setsockopt(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, SOL_TCP, TCP_KEEPINTVL, [15], 4) = 0 <0.000031>
+1791246791.772196 [  54] setsockopt(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, SOL_TCP, TCP_KEEPCNT, [9], 4) = 0 <0.000006>
+1791246791.772225 [  54] setsockopt(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, SOL_SOCKET, SO_KEEPALIVE, [1], 4) = 0 <0.000007>
+1791246791.772288 [  54] setsockopt(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, SOL_TCP, TCP_KEEPIDLE, [30], 4) = 0 <0.000007>
+1791246791.772323 [ 288] accept4(7<TCP:[127.0.0.1:19390]>, 0x221f8c68702c, [112], SOCK_CLOEXEC|SOCK_NONBLOCK) = -1 EAGAIN (Resource temporarily unavailable) <0.000011>
+1791246791.772417 [   0] read(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\4\0\0\0\0\0", 4096) = 33 <0.000009>
+1791246791.772528 [   1] write(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, "\0\0\6\4\0\0\0\0\0\0\5\0\0@\0", 15) = 15 <0.000040>
+1791246791.772638 [   0] read(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, 0x221f8c8e2000, 32768) = -1 EAGAIN (Resource temporarily unavailable) <0.000007>
+1791246791.772677 [   1] write(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, "\0\0\0\4\1\0\0\0\0", 9) = 9 <0.000043>
+1791246791.772760 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000007>
+1791246791.772794 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [{events=EPOLLIN|EPOLLOUT, data=0x3ffffbf15a000001}], 128, 62, NULL, 0) = 1 <0.000232>
+1791246791.773050 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246791.773110 [   0] read(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, "\0\0\0\4\1\0\0\0\0\0\0j\1\4\0\0\0\1\203\206E\220`\251$\210-\235\313eq\257\233\213\33GT\305A\213\10\235\\\v\201p\334\v\354\276\17_\213\35u\320b\r&=LMedz\212\232\312\310\264\307`+\274%\303@\2te\206M\2035\5\261\37@\211\232\312\310\262MIOj\177\206e\367\332i\321[@\215%\6-IXu\231n\345\261\6=_\0033.6\0\0\r\0\1\0\0\0\1\0\0\0\0\10\n\6health", 32768) = 146 <0.000008>
+1791246791.773197 [   0] read(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, 0x221f8c8e2000, 32768) = -1 EAGAIN (Resource temporarily unavailable) <0.000007>
+1791246791.773651 [   1] write(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, "\0\0\4\10\0\0\0\0\0\0\0\0\r\0\0\10\6\0\0\0\0\0\2\4\20\20\t\16\7\7\0\0\16\1\4\0\0\0\1\210_\213\35u\320b\r&=LMed\0\0 \0\0\0\0\0\1\0\0\0\0\33\n\31\10\245\213\355\201\221\217\260\200\215\1\20\206\227\302\341\341\224\321\275D\30) \3\0\0\30\1\5\0\0\0\1@\210\232\312\310\262\0224\332\217\0010@\211\232\312\310\265%B\0071\177\0", 127) = 127 <0.000052>
+1791246791.773736 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000007>
+1791246791.773766 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [{events=EPOLLIN|EPOLLOUT, data=0x3ffffbf15a000001}], 128, 61, NULL, 0) = 1 <0.000246>
+1791246791.774041 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000007>
+1791246791.774101 [   0] read(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, "\0\0\10\6\1\0\0\0\0\2\4\20\20\t\16\7\7\0\0\4\10\0\0\0\0\0\0\0\0 \0\0\10\6\0\0\0\0\0\2\4\20\20\t\16\7\7\0\0(\1\4\0\0\0\3\203\206E\226`\251$\210-\235\313eq\257\240f\251%\250u\20\254C@\354\247\304\303\302\301\177\1\206e\367\331\v\200\267\300\0\0\5\0\1\0\0\0\3\0\0\0\0\0", 32768) = 110 <0.000008>
+1791246791.774151 [   0] read(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, 0x221f8c8e2000, 32768) = -1 EAGAIN (Resource temporarily unavailable) <0.000007>
+1791246791.774248 [   8] lseek(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, 0, SEEK_CUR) = 4776 <0.000008>
+1791246791.774292 [   1] write(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, "\30\0\0\0\0\0\0\0\10\3\20\245\367\306\267\2\32\16\10\3\20\206\227\302\341\341\224\321\275D\0300\"\0\0\0\0\0\0\206\10\2\20\365\363\325\343\4\32\30\10\0\20\3\0301\"\20R\0\242\6\v\10\203\366\305\207\352\241\250\303\213\1\0\0\0\0\0\0", 80) = 80 <0.000012>
+1791246791.774332 [  75] fdatasync(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>) = 0 <0.002786>
+1791246791.777153 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000011>
+1791246791.777219 [   8] lseek(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, 0, SEEK_CUR) = 4856 <0.000037>
+1791246791.777351 [   1] write(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, "\0\0\2\1\4\0\0\0\3\210\300\0\0 \0\0\0\0\0\3\0\0\0\0\33\n\31\10\245\213\355\201\221\217\260\200\215\1\20\206\227\302\341\341\224\321\275D\30) \3\0\0\2\1\5\0\0\0\3\277\276", 63) = 63 <0.000065>
+1791246791.777462 [ 202] futex(0x221f8c53a960, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.014725>
+1791246791.792211 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000009>
+1791246791.792246 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [{events=EPOLLIN|EPOLLOUT, data=0x3ffffbf15a000002}], 128, 43, NULL, 0) = 1 <0.000074>
+1791246791.792343 [ 202] futex(0x221f8c53a960, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.003153>
+1791246791.795534 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19390]>, 0x221f8c68704c) = 0 <0.000008>
+1791246791.795570 [   3] close(7<TCP:[127.0.0.1:19390]>) = 0 <0.000017>
+1791246791.795656 [   1] write(2</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-recovered.stderr>, "{\"level\":\"error\",\"ts\":\"2026-10-05T20:33:11.795627-0400\",\"caller\":\"embed/etcd.go:912\",\"msg\":\"setting up serving from embedded etcd failed.\",\"error\":\"mux: server closed\",\"stacktrace\":\"go.etcd.io/etcd/server/v3/embed.(*Etcd).errHandler\\n\\tgo.etcd.io/etcd/serv"..., 393) = 393 <0.000010>
+1791246791.795718 [   1] write(2</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-recovered.stderr>, "{\"level\":\"error\",\"ts\":\"2026-10-05T20:33:11.795707-0400\",\"caller\":\"embed/etcd.go:912\",\"msg\":\"setting up serving from embedded etcd failed.\",\"error\":\"http: Server closed\",\"stacktrace\":\"go.etcd.io/etcd/server/v3/embed.(*Etcd).errHandler\\n\\tgo.etcd.io/etcd/ser"..., 394) = 394 <0.000009>
+1791246791.795776 [   1] write(13<TCP:[127.0.0.1:19390->127.0.0.1:50038]>, "\0\0\25\7\0\0\0\0\0\177\377\377\377\0\0\0\0graceful_stop\0\0\10\6\0\0\0\0\0\1\6\1\10\0\3\3\t", 47) = 47 <0.000019>
+1791246791.795824 [ 202] futex(0x221f8c53a960, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.001057>
+1791246791.796941 [   1] write(2</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-recovered.stderr>, "{\"level\":\"warn\",\"ts\":\"2026-10-05T20:33:11.796923-0400\",\"caller\":\"embed/serve.go:195\",\"msg\":\"stopping insecure grpc server due to error\",\"error\":\"accept tcp 127.0.0.1:19390: use of closed network connection\"}\n", 208) = 208 <0.000009>
+1791246791.796987 [   1] write(2</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-recovered.stderr>, "{\"level\":\"warn\",\"ts\":\"2026-10-05T20:33:11.796977-0400\",\"caller\":\"embed/serve.go:197\",\"msg\":\"stopped insecure grpc server due to error\",\"error\":\"accept tcp 127.0.0.1:19390: use of closed network connection\"}\n", 207) = 207 <0.000009>
+1791246791.797039 [   1] write(2</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-recovered.stderr>, "{\"level\":\"error\",\"ts\":\"2026-10-05T20:33:11.797019-0400\",\"caller\":\"embed/etcd.go:912\",\"msg\":\"setting up serving from embedded etcd failed.\",\"error\":\"accept tcp 127.0.0.1:19390: use of closed network connection\",\"stacktrace\":\"go.etcd.io/etcd/server/v3/embed."..., 431) = 431 <0.000014>
+1791246791.797082 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000007>
+1791246791.797111 [ 281] epoll_pwait(5<anon_inode:[eventpoll]> <unfinished ...>) = ?
+1791246791.815045 [ 281] +++ killed by SIGTERM +++

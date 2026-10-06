@@ -1,0 +1,43 @@
+{
+  "scope": "Coordinator artifact curation after source findings were retrieved; no source analysis, hardware, system changes or new tests",
+  "removed": [
+    {
+      "path": "fetch.py",
+      "bytes": 2738,
+      "sha256": "9fd5c580252c84ff4cf0aaded96933eb30e7e790f6309f7454498ef5b5abc06d",
+      "reason": "one-off acquisition script"
+    },
+    {
+      "path": "fetch-extra.py",
+      "bytes": 1615,
+      "sha256": "81587e19e254967b363843e34e94b2af3dc5a07fa9a0b8979ebd69f336e94d4e",
+      "reason": "one-off acquisition script"
+    },
+    {
+      "path": "fetch-final.py",
+      "bytes": 893,
+      "sha256": "f4b7948440100cb73f08be258501b4a8abdc60cf32deb09784821456b7ddc8c8",
+      "reason": "one-off acquisition script"
+    },
+    {
+      "path": "amd/56214-B0-PUB.zip",
+      "bytes": 209953,
+      "sha256": "66530cb4550d82623852f1fc6e6f31f4c718af7352f967146e836db22e6d1bdf",
+      "reason": "HTML redirect; not an AMD register specification"
+    },
+    {
+      "path": "etcd/v3.5.3-tree.json",
+      "bytes": 384340,
+      "sha256": "5190e9a38afe5a98a1ee4e8bebb2b93b48c10ffe1c81be8023a85de8fe59c3c8",
+      "reason": "bulk tree search cache; selected source files retained"
+    },
+    {
+      "path": "etcd/v3.5.3-server-history.json",
+      "bytes": 50433,
+      "sha256": "57f5fa367c3978c08137c376a7aa5e27e4ffadac20c500481b65cbd4a20a1486",
+      "reason": "bulk history search cache; exact fix/backport metadata retained"
+    }
+  ],
+  "retained": "results.json, precise supporting primary source files, fix/version/API/checksum metadata and source URL/provenance records",
+  "failed_specification": "Invalid AMD archive was HTML; it is neither preserved nor accepted as bit54 retention evidence"
+}

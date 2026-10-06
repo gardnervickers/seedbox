@@ -1,0 +1,1683 @@
+{
+  "probe_sha256": "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+  "guest_sha256": "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+  "records": 124,
+  "groups": [
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "idle",
+        5308625,
+        524293
+      ],
+      "mode": "rep",
+      "target": 20000,
+      "margin": 10000,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": false,
+      "issues": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.dvBPYp",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.WnS6sC",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.6yTWUf",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.AwdNHz",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.AjkY7Q"
+      ],
+      "counts": [
+        20000
+      ],
+      "step_range": [
+        17220,
+        18808
+      ],
+      "elapsed_ns_range": [
+        124460254,
+        134907336
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.dvBPYp",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.WnS6sC",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.6yTWUf",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.AwdNHz",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.AjkY7Q"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "loaded",
+        5308625,
+        524293
+      ],
+      "mode": "plain",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "correction_off_variation_control",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 5,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        91512,
+        91527,
+        91545,
+        91550,
+        91562
+      ],
+      "step_range": [
+        0,
+        0
+      ],
+      "elapsed_ns_range": [
+        30784631,
+        34446882
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.IQTGnv",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.7Lkbqm",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.SjqLl4",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.jOFcdv",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.BgZ3Wl"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "loaded",
+        5308625,
+        524293
+      ],
+      "mode": "exits",
+      "target": 2000,
+      "margin": 500,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": false,
+      "issues": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.DEoFGM",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.hgoKrb",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.5mjM78",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.9EjG1G",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.qHOs76",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.DEoFGM",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.hgoKrb",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.5mjM78",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.9EjG1G",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.qHOs76"
+      ],
+      "counts": [
+        2000
+      ],
+      "step_range": [
+        3496,
+        3496
+      ],
+      "elapsed_ns_range": [
+        1382309102,
+        1391345496
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.DEoFGM",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.hgoKrb",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.5mjM78",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.9EjG1G",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.qHOs76"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "idle",
+        5308625,
+        524293
+      ],
+      "mode": "user",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": false,
+      "issues": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.mnFPep",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.c2oiiR",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.y4Tu1R",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.pYH76d",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.hcNltJ"
+      ],
+      "counts": [
+        100000
+      ],
+      "step_range": [
+        24878,
+        24985
+      ],
+      "elapsed_ns_range": [
+        174673413,
+        175740540
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.mnFPep",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.c2oiiR",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.y4Tu1R",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.pYH76d",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.hcNltJ"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "idle",
+        5308625,
+        524293
+      ],
+      "mode": "exits",
+      "target": 2000,
+      "margin": 500,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": false,
+      "issues": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.QDFS2t",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.aSrqr4",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.Tx9aXc",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.pWHapN",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.sIiYO6"
+      ],
+      "counts": [
+        2000
+      ],
+      "step_range": [
+        3496,
+        3496
+      ],
+      "elapsed_ns_range": [
+        444962161,
+        453256877
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.QDFS2t",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.aSrqr4",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.Tx9aXc",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.pWHapN",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.sIiYO6"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "loaded",
+        5308625,
+        524293
+      ],
+      "mode": "rep",
+      "target": 20000,
+      "margin": 10000,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": false,
+      "issues": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.J8lQb7",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.lGg3sc",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.ZcFOWx",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.AyMxIP",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.hdrEDG"
+      ],
+      "counts": [
+        20000
+      ],
+      "step_range": [
+        21032,
+        21068
+      ],
+      "elapsed_ns_range": [
+        367713824,
+        371284043
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.J8lQb7",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.lGg3sc",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.ZcFOWx",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.AyMxIP",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.hdrEDG"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "loaded",
+        5308625,
+        524293
+      ],
+      "mode": "plain",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": false,
+      "issues": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.BfCPfb",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.52E4fV",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.ceR2dq",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.5fPKmD",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.HhrHSi",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.BfCPfb",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.52E4fV",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.ceR2dq",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.5fPKmD",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.HhrHSi"
+      ],
+      "counts": [
+        100000
+      ],
+      "step_range": [
+        25277,
+        25484
+      ],
+      "elapsed_ns_range": [
+        433028576,
+        437919080
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.BfCPfb",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.52E4fV",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.ceR2dq",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.5fPKmD",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.HhrHSi"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "loaded",
+        5308625,
+        524293
+      ],
+      "mode": "user",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": false,
+      "issues": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.VjijXo",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.KrgfXw",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.t5U0Aq",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.3XIyLP",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.Ebl8hF"
+      ],
+      "counts": [
+        100000
+      ],
+      "step_range": [
+        25319,
+        25462
+      ],
+      "elapsed_ns_range": [
+        433288786,
+        437173178
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.VjijXo",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.KrgfXw",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.t5U0Aq",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.3XIyLP",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.Ebl8hF"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "loaded",
+        5308625,
+        524293
+      ],
+      "mode": "plain",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": false,
+      "issues": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.Udy7Ml",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.MeOMnL",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.m80Xtx",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.0lB333",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.w5gI1U"
+      ],
+      "counts": [
+        100000
+      ],
+      "step_range": [
+        25338,
+        25418
+      ],
+      "elapsed_ns_range": [
+        434510145,
+        437642237
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.Udy7Ml",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.MeOMnL",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.m80Xtx",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.0lB333",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.w5gI1U"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "idle",
+        5308625,
+        524293
+      ],
+      "mode": "rep",
+      "target": 20000,
+      "margin": 10000,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": false,
+      "issues": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.6SuhQl",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.V0KCLE",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.FQbG4V",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.NLDLEi",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.26e3KR"
+      ],
+      "counts": [
+        20000
+      ],
+      "step_range": [
+        17166,
+        18862
+      ],
+      "elapsed_ns_range": [
+        124354549,
+        136260419
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.6SuhQl",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.V0KCLE",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.FQbG4V",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.NLDLEi",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.26e3KR"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "loaded",
+        5308625,
+        524293
+      ],
+      "mode": "exits",
+      "target": 2000,
+      "margin": 500,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": false,
+      "issues": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.VebHju",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.NcyZy0",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.8hO7Pr",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.taC0xu",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.1AGsdN"
+      ],
+      "counts": [
+        2000
+      ],
+      "step_range": [
+        3489,
+        3496
+      ],
+      "elapsed_ns_range": [
+        1385732216,
+        1393719589
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.VebHju",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.NcyZy0",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.8hO7Pr",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.taC0xu",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.1AGsdN"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "idle",
+        5308625,
+        524293
+      ],
+      "mode": "exits",
+      "target": 2000,
+      "margin": 500,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": false,
+      "issues": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.ZxRDVj",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.vq4TSq",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.KNaNk8",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.7jeXF6",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.XGRouD"
+      ],
+      "counts": [
+        2000
+      ],
+      "step_range": [
+        3489,
+        3496
+      ],
+      "elapsed_ns_range": [
+        444162109,
+        450299046
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.ZxRDVj",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.vq4TSq",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.KNaNk8",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.7jeXF6",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.XGRouD"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "loaded",
+        5308625,
+        524293
+      ],
+      "mode": "uncond",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "unsupported_branchfree_control",
+      "runs": 1,
+      "distinct_tids": 1,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        0
+      ],
+      "step_range": [
+        0,
+        0
+      ],
+      "elapsed_ns_range": [
+        1031245082,
+        1031245082
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.D2vpSf"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "idle",
+        5308625,
+        524293
+      ],
+      "mode": "plain",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "correction_off_variation_control",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 5,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        91677,
+        91678,
+        91696,
+        91700,
+        91733
+      ],
+      "step_range": [
+        0,
+        0
+      ],
+      "elapsed_ns_range": [
+        10757570,
+        11194997
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.G583D5",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.S6H4Ja",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.Xwl2UC",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.ZV5Ykz",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.ZsJV3s"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "idle",
+        5308625,
+        524293
+      ],
+      "mode": "uncond",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "unsupported_branchfree_control",
+      "runs": 1,
+      "distinct_tids": 1,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        0
+      ],
+      "step_range": [
+        0,
+        0
+      ],
+      "elapsed_ns_range": [
+        1013624566,
+        1013624566
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.jFfLqL"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "loaded",
+        5308625,
+        524293
+      ],
+      "mode": "plain",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "correction_off_variation_control",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 5,
+      "accepted": false,
+      "issues": [],
+      "counts": [
+        91521,
+        91523,
+        91530,
+        91557
+      ],
+      "step_range": [
+        0,
+        0
+      ],
+      "elapsed_ns_range": [
+        31241497,
+        34365771
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.wI81cu",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.KmHSfK",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.iIEN7U",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.SO8Pjb",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.DW03Ve"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "idle",
+        5308625,
+        524293
+      ],
+      "mode": "plain",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": false,
+      "issues": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.usKaoQ",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.UqpTmV",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.NZzpMG",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.UdkhAZ",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.iSVSqR"
+      ],
+      "counts": [
+        100000
+      ],
+      "step_range": [
+        24809,
+        25706
+      ],
+      "elapsed_ns_range": [
+        174493973,
+        180098975
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.usKaoQ",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.UqpTmV",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.NZzpMG",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.UdkhAZ",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.iSVSqR"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "idle",
+        5308625,
+        524293
+      ],
+      "mode": "uncond",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "unsupported_branchfree_control",
+      "runs": 1,
+      "distinct_tids": 1,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        0
+      ],
+      "step_range": [
+        0,
+        0
+      ],
+      "elapsed_ns_range": [
+        1011049439,
+        1011049439
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.ZdPLXO"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "loaded",
+        5308625,
+        524293
+      ],
+      "mode": "user",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": false,
+      "issues": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.pDoQBD",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.HeGOY3",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.WgcMX8",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.9W2dIv",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.zk5uuJ",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.pDoQBD",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.HeGOY3",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.WgcMX8",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.9W2dIv",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.zk5uuJ"
+      ],
+      "counts": [
+        100000
+      ],
+      "step_range": [
+        25414,
+        25838
+      ],
+      "elapsed_ns_range": [
+        433150747,
+        441700538
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.pDoQBD",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.HeGOY3",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.WgcMX8",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.9W2dIv",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.zk5uuJ"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "idle",
+        5308625,
+        524293
+      ],
+      "mode": "user",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": false,
+      "issues": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.mo3dqi",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.ID0rr4",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.HR17Y0",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.VmwANs",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.EjSZyf"
+      ],
+      "counts": [
+        100000
+      ],
+      "step_range": [
+        24913,
+        24976
+      ],
+      "elapsed_ns_range": [
+        174649288,
+        175191481
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.mo3dqi",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.ID0rr4",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.HR17Y0",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.VmwANs",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.EjSZyf"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "idle",
+        5308625,
+        524293
+      ],
+      "mode": "plain",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": false,
+      "issues": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.E5FCvK",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.oymiwl",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.BbajBH",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.y8TH79",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.YYtCDg"
+      ],
+      "counts": [
+        100000
+      ],
+      "step_range": [
+        24845,
+        24956
+      ],
+      "elapsed_ns_range": [
+        173916101,
+        175619530
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.E5FCvK",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.oymiwl",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.BbajBH",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.y8TH79",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.YYtCDg"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "loaded",
+        5308625,
+        524293
+      ],
+      "mode": "rep",
+      "target": 20000,
+      "margin": 10000,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": false,
+      "issues": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.cEGe1A",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.rYBP5m",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.pL1yh4",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.9Jctvu",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.RpfELP",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.cEGe1A",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.rYBP5m",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.pL1yh4",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.9Jctvu",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.RpfELP"
+      ],
+      "counts": [
+        20000
+      ],
+      "step_range": [
+        21000,
+        21056
+      ],
+      "elapsed_ns_range": [
+        366403385,
+        370745132
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.cEGe1A",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.rYBP5m",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.pL1yh4",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.9Jctvu",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.RpfELP"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "idle",
+        5308625,
+        524293
+      ],
+      "mode": "plain",
+      "target": 100000,
+      "margin": 1,
+      "kind": "detected_overshoot_control",
+      "runs": 1,
+      "distinct_tids": 1,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        101670
+      ],
+      "step_range": [
+        0,
+        0
+      ],
+      "elapsed_ns_range": [
+        10987886,
+        10987886
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.fTFpdD"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "idle",
+        5308625,
+        524293
+      ],
+      "mode": "plain",
+      "target": 100000,
+      "margin": 1,
+      "kind": "detected_overshoot_control",
+      "runs": 1,
+      "distinct_tids": 1,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        101751
+      ],
+      "step_range": [
+        0,
+        0
+      ],
+      "elapsed_ns_range": [
+        10860203,
+        10860203
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.RpQSYU"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "loaded",
+        5308625,
+        524293
+      ],
+      "mode": "uncond",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "unsupported_branchfree_control",
+      "runs": 1,
+      "distinct_tids": 1,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        0
+      ],
+      "step_range": [
+        0,
+        0
+      ],
+      "elapsed_ns_range": [
+        1034308989,
+        1034308989
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.VJl8tv"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "idle",
+        5308625,
+        524293
+      ],
+      "mode": "plain",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "correction_off_variation_control",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 5,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        91681,
+        91687,
+        91703,
+        91710,
+        91721
+      ],
+      "step_range": [
+        0,
+        0
+      ],
+      "elapsed_ns_range": [
+        10684130,
+        11587016
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.jHYwmi",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.wJvny5",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.KUEZgC",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.WP2d8P",
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.gbpTf2"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "loaded",
+        5308625,
+        524293
+      ],
+      "mode": "plain",
+      "target": 100000,
+      "margin": 1,
+      "kind": "detected_overshoot_control",
+      "runs": 1,
+      "distinct_tids": 1,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        101500
+      ],
+      "step_range": [
+        0,
+        0
+      ],
+      "elapsed_ns_range": [
+        34358939,
+        34358939
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.p9Y6uq"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "loaded",
+        5308625,
+        524293
+      ],
+      "mode": "plain",
+      "target": 100000,
+      "margin": 1,
+      "kind": "detected_overshoot_control",
+      "runs": 1,
+      "distinct_tids": 1,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": false,
+      "issues": [],
+      "counts": [
+        101555
+      ],
+      "step_range": [
+        0,
+        0
+      ],
+      "elapsed_ns_range": [
+        31317911,
+        31317911
+      ],
+      "evidence": [
+        "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.FriyyX"
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.DEoFGM",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.hgoKrb",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.BfCPfb",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.5mjM78",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.wI81cu",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.52E4fV",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.KmHSfK",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.iIEN7U",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.pDoQBD",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.T6QzzO",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.SO8Pjb",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.HeGOY3",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.cEGe1A",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.9EjG1G",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.DW03Ve",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.ceR2dq",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.VJl8tv",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.rYBP5m",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.pL1yh4",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.9Jctvu",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.WgcMX8",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.qHOs76",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.9W2dIv",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.7dtyTX",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.FriyyX",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.zwTD2f",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.wG4PAU",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.RpfELP",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.5fPKmD",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.zk5uuJ",
+      "reason": "guard/restore failure"
+    },
+    {
+      "evidence": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.HhrHSi",
+      "reason": "guard/restore failure"
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "idle",
+        5308625,
+        524293,
+        "rep",
+        20000,
+        10000,
+        true
+      ],
+      "reason": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.dvBPYp",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.WnS6sC",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.6yTWUf",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.AwdNHz",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.AjkY7Q"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "loaded",
+        5308625,
+        524293,
+        "exits",
+        2000,
+        500,
+        true
+      ],
+      "reason": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.DEoFGM",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.hgoKrb",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.5mjM78",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.9EjG1G",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.qHOs76",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.DEoFGM",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.hgoKrb",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.5mjM78",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.9EjG1G",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.qHOs76"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "idle",
+        5308625,
+        524293,
+        "user",
+        100000,
+        10000,
+        true
+      ],
+      "reason": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.mnFPep",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.c2oiiR",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.y4Tu1R",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.pYH76d",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.hcNltJ"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "idle",
+        5308625,
+        524293,
+        "exits",
+        2000,
+        500,
+        true
+      ],
+      "reason": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.QDFS2t",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.aSrqr4",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.Tx9aXc",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.pWHapN",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.sIiYO6"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "loaded",
+        5308625,
+        524293,
+        "rep",
+        20000,
+        10000,
+        true
+      ],
+      "reason": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.J8lQb7",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.lGg3sc",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.ZcFOWx",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.AyMxIP",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.hdrEDG"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "loaded",
+        5308625,
+        524293,
+        "plain",
+        100000,
+        10000,
+        true
+      ],
+      "reason": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.BfCPfb",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.52E4fV",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.ceR2dq",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.5fPKmD",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.HhrHSi",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.BfCPfb",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.52E4fV",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.ceR2dq",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.5fPKmD",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.HhrHSi"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "loaded",
+        5308625,
+        524293,
+        "user",
+        100000,
+        10000,
+        true
+      ],
+      "reason": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.VjijXo",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.KrgfXw",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.t5U0Aq",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.3XIyLP",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.Ebl8hF"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "loaded",
+        5308625,
+        524293,
+        "plain",
+        100000,
+        10000,
+        true
+      ],
+      "reason": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.Udy7Ml",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.MeOMnL",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.m80Xtx",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.0lB333",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.w5gI1U"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "idle",
+        5308625,
+        524293,
+        "rep",
+        20000,
+        10000,
+        true
+      ],
+      "reason": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.6SuhQl",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.V0KCLE",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.FQbG4V",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.NLDLEi",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.26e3KR"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "loaded",
+        5308625,
+        524293,
+        "exits",
+        2000,
+        500,
+        true
+      ],
+      "reason": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.VebHju",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.NcyZy0",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.8hO7Pr",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.taC0xu",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.1AGsdN"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "idle",
+        5308625,
+        524293,
+        "exits",
+        2000,
+        500,
+        true
+      ],
+      "reason": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.ZxRDVj",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.vq4TSq",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.KNaNk8",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.7jeXF6",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.XGRouD"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "loaded",
+        5308625,
+        524293,
+        "plain",
+        100000,
+        10000,
+        false
+      ],
+      "reason": "control requirements not met"
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "idle",
+        5308625,
+        524293,
+        "plain",
+        100000,
+        10000,
+        true
+      ],
+      "reason": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.usKaoQ",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.UqpTmV",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.NZzpMG",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.UdkhAZ",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.iSVSqR"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "loaded",
+        5308625,
+        524293,
+        "user",
+        100000,
+        10000,
+        true
+      ],
+      "reason": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.pDoQBD",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.HeGOY3",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.WgcMX8",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.9W2dIv",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.zk5uuJ",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.pDoQBD",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.HeGOY3",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.WgcMX8",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.9W2dIv",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.zk5uuJ"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "idle",
+        5308625,
+        524293,
+        "user",
+        100000,
+        10000,
+        true
+      ],
+      "reason": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.mo3dqi",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.ID0rr4",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.HR17Y0",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.VmwANs",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.EjSZyf"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "idle",
+        5308625,
+        524293,
+        "plain",
+        100000,
+        10000,
+        true
+      ],
+      "reason": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.E5FCvK",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.oymiwl",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.BbajBH",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.y8TH79",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.YYtCDg"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "loaded",
+        5308625,
+        524293,
+        "rep",
+        20000,
+        10000,
+        true
+      ],
+      "reason": [
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.cEGe1A",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.rYBP5m",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.pL1yh4",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.9Jctvu",
+        "failed state/interval/exit/canary assertion in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.RpfELP",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.cEGe1A",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.rYBP5m",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.pL1yh4",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.9Jctvu",
+        "terminal differs from uninterrupted reference in /private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.RpfELP"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "enabled",
+        "loaded",
+        5308625,
+        524293,
+        "plain",
+        100000,
+        1,
+        true
+      ],
+      "reason": "control requirements not met"
+    }
+  ],
+  "accepted": false
+}

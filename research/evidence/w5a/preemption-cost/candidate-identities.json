@@ -1,0 +1,11 @@
+{
+  "src/bin/preempt.rs": "0c67008eee8fae63df4d2d4ae6f7eae494acb6c9a18288379b673e530563a238",
+  "src/linux_restore_cost.rs": "ef678bb1cb1d6d937867ed1aa04c60719191bd2015a79fd856e28a3c91c6fa82",
+  "msr_guard.py": "6599da4ce7535ba93ba3672270db6d4e64c46999fc28a53b09971e045010ce40",
+  "Cargo.lock": "6bf8bb70b75d4f3b0cfbd2a3db0afff0147f443709caf5316bfae8440c32e78e",
+  "fixtures/preempt.asm": "06ffafd4ab2580b97750c073ec1e775c177fd02e80d781dcebf90f3b55d08b08",
+  "optimized_probe_sha256": "c5de046617c7b539d5737dd317f956b77dbbba4fa603ade74166cc002d6f1bcb",
+  "status": "compiled, unexecuted, submitted for exact review",
+  "shared_lock": "/tmp/seedbox-round-1.S74xJ4/measurement.lock",
+  "remote_owned_root": "/home/gvickers/seedbox-research/w5a-round-1"
+}

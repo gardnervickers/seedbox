@@ -1,0 +1,1 @@
+bash -c research/world/target/debug/seedbox-world\ 42\ \>\ research/runs/w1/relocation-trace.json\ \&\&\ echo\ \"761879333f417f5c2a8d2a9ac421b23db34a8ac357ad86353b77413ad242d79b\ \ research/runs/w1/relocation-trace.json\"\ \|\ sha256sum\ -c 

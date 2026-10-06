@@ -1,0 +1,3 @@
+# Serial captures retain exact CRLF and trailing spaces emitted by guest tc.
+*.console -text whitespace=cr-at-eol,-blank-at-eol
+*.mgmt -text whitespace=cr-at-eol,-blank-at-eol

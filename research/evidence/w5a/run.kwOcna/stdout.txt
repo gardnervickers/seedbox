@@ -1,0 +1,323 @@
+[
+  {
+    "mode": "rep",
+    "target": 20000,
+    "margin": 10000,
+    "correction": true,
+    "workaround": "enabled",
+    "load": "idle",
+    "probe_hash": "e0d52753246173d39ea62bffa79a87608d9b0dbea2a590aa0b06a63cb34f7026",
+    "runs": 5,
+    "initial_state_variants": 1,
+    "landing_variants": 1,
+    "landing_counts": [
+      20000
+    ],
+    "rips": [
+      49178
+    ],
+    "all_landed": true,
+    "overshoots": 0,
+    "steps_range": [
+      17242,
+      17360
+    ],
+    "elapsed_ns_range": [
+      114576468,
+      115701110
+    ],
+    "files": [
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.58HUkQ/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.f7BJbP/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.U6W0t9/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.roqy2Z/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.wlYglU/stdout.txt"
+    ]
+  },
+  {
+    "mode": "plain",
+    "target": 100000,
+    "margin": 10000,
+    "correction": true,
+    "workaround": "enabled",
+    "load": "idle",
+    "probe_hash": "e0d52753246173d39ea62bffa79a87608d9b0dbea2a590aa0b06a63cb34f7026",
+    "runs": 5,
+    "initial_state_variants": 1,
+    "landing_variants": 1,
+    "landing_counts": [
+      100000
+    ],
+    "rips": [
+      40970
+    ],
+    "all_landed": true,
+    "overshoots": 0,
+    "steps_range": [
+      24846,
+      26094
+    ],
+    "elapsed_ns_range": [
+      163849399,
+      172690931
+    ],
+    "files": [
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.kV9QpI/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.s9bo2T/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.pe7ifb/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.MJRz2Z/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.zkHgpo/stdout.txt"
+    ]
+  },
+  {
+    "mode": "user",
+    "target": 100000,
+    "margin": 10000,
+    "correction": true,
+    "workaround": "original",
+    "load": "idle",
+    "probe_hash": "e0d52753246173d39ea62bffa79a87608d9b0dbea2a590aa0b06a63cb34f7026",
+    "runs": 5,
+    "initial_state_variants": 1,
+    "landing_variants": 1,
+    "landing_counts": [
+      100000
+    ],
+    "rips": [
+      57372
+    ],
+    "all_landed": true,
+    "overshoots": 0,
+    "steps_range": [
+      24854,
+      24968
+    ],
+    "elapsed_ns_range": [
+      164004932,
+      165659028
+    ],
+    "files": [
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.3zQgir/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.n5QHgF/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.v0Q3ki/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.pMcnWn/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.HNUxaR/stdout.txt"
+    ]
+  },
+  {
+    "mode": "rep",
+    "target": 20000,
+    "margin": 10000,
+    "correction": true,
+    "workaround": "original",
+    "load": "idle",
+    "probe_hash": "e0d52753246173d39ea62bffa79a87608d9b0dbea2a590aa0b06a63cb34f7026",
+    "runs": 5,
+    "initial_state_variants": 1,
+    "landing_variants": 1,
+    "landing_counts": [
+      20000
+    ],
+    "rips": [
+      49178
+    ],
+    "all_landed": true,
+    "overshoots": 0,
+    "steps_range": [
+      17258,
+      17410
+    ],
+    "elapsed_ns_range": [
+      114849001,
+      115944140
+    ],
+    "files": [
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.VGB1hP/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.jFQtGk/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.TrR7DQ/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.f9KoYS/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.YcEwWR/stdout.txt"
+    ]
+  },
+  {
+    "mode": "plain",
+    "target": 100000,
+    "margin": 10000,
+    "correction": true,
+    "workaround": "original",
+    "load": "idle",
+    "probe_hash": "e0d52753246173d39ea62bffa79a87608d9b0dbea2a590aa0b06a63cb34f7026",
+    "runs": 5,
+    "initial_state_variants": 1,
+    "landing_variants": 1,
+    "landing_counts": [
+      100000
+    ],
+    "rips": [
+      40970
+    ],
+    "all_landed": true,
+    "overshoots": 0,
+    "steps_range": [
+      24926,
+      26028
+    ],
+    "elapsed_ns_range": [
+      165300752,
+      172294969
+    ],
+    "files": [
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.6lQzZD/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.7o6j4D/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.uspIhH/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.85wvuj/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.NijOuL/stdout.txt"
+    ]
+  },
+  {
+    "mode": "plain",
+    "target": 100000,
+    "margin": 10000,
+    "correction": false,
+    "workaround": "enabled",
+    "load": "idle",
+    "probe_hash": "e0d52753246173d39ea62bffa79a87608d9b0dbea2a590aa0b06a63cb34f7026",
+    "runs": 5,
+    "initial_state_variants": 1,
+    "landing_variants": 5,
+    "landing_counts": [
+      91676,
+      91679,
+      91712,
+      91715,
+      91717
+    ],
+    "rips": [
+      40970,
+      40974
+    ],
+    "all_landed": false,
+    "overshoots": 0,
+    "steps_range": [
+      0,
+      0
+    ],
+    "elapsed_ns_range": [
+      739885,
+      751568
+    ],
+    "files": [
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.sQmka7/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.Agh4vH/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.ntH5hQ/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.uu5e0S/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.TYPDZl/stdout.txt"
+    ]
+  },
+  {
+    "mode": "plain",
+    "target": 100000,
+    "margin": 10000,
+    "correction": true,
+    "workaround": "original",
+    "load": "idle",
+    "probe_hash": "9fc8e8b39d04e5d5efd427d9c822de9ba6e43f8f959b6cd67249c06c81aad002",
+    "runs": 1,
+    "initial_state_variants": 1,
+    "landing_variants": 1,
+    "landing_counts": [
+      100000
+    ],
+    "rips": [
+      40970
+    ],
+    "all_landed": true,
+    "overshoots": 0,
+    "steps_range": [
+      26046,
+      26046
+    ],
+    "elapsed_ns_range": [
+      146948873,
+      146948873
+    ],
+    "files": [
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.843YNv/stdout.txt"
+    ]
+  },
+  {
+    "mode": "user",
+    "target": 100000,
+    "margin": 10000,
+    "correction": true,
+    "workaround": "enabled",
+    "load": "idle",
+    "probe_hash": "e0d52753246173d39ea62bffa79a87608d9b0dbea2a590aa0b06a63cb34f7026",
+    "runs": 5,
+    "initial_state_variants": 1,
+    "landing_variants": 1,
+    "landing_counts": [
+      100000
+    ],
+    "rips": [
+      57372
+    ],
+    "all_landed": true,
+    "overshoots": 0,
+    "steps_range": [
+      24676,
+      25012
+    ],
+    "elapsed_ns_range": [
+      163314642,
+      165825997
+    ],
+    "files": [
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.GCqqVo/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.7MoUqn/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.UPS7pW/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.3A0U5I/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.TTFNrx/stdout.txt"
+    ]
+  },
+  {
+    "mode": "plain",
+    "target": 100000,
+    "margin": 10000,
+    "correction": false,
+    "workaround": "original",
+    "load": "idle",
+    "probe_hash": "e0d52753246173d39ea62bffa79a87608d9b0dbea2a590aa0b06a63cb34f7026",
+    "runs": 5,
+    "initial_state_variants": 1,
+    "landing_variants": 5,
+    "landing_counts": [
+      91675,
+      91683,
+      91686,
+      91699,
+      91708
+    ],
+    "rips": [
+      40970,
+      40974
+    ],
+    "all_landed": false,
+    "overshoots": 0,
+    "steps_range": [
+      0,
+      0
+    ],
+    "elapsed_ns_range": [
+      737481,
+      765063
+    ],
+    "files": [
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.hNiJK7/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.setSWd/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.sJudun/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.6MuVWl/stdout.txt",
+      "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.SMKcbS/stdout.txt"
+    ]
+  }
+]

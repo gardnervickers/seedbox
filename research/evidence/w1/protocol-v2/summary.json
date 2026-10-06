@@ -1,0 +1,250 @@
+{
+  "schema": 2,
+  "seed": 42,
+  "scope": "native serializable command/observation controller and scripted service; no executed guest VM or hardware preemption",
+  "time_policy": "branch-count-domain integer ticks; fixture idle event jumps; rational Linux-ns rate is declared integration input, not measured physical time",
+  "sources": {
+    "client_sha256": "6a012943aa10013fff9220df54000fa843c478fa97d9dc78c13ede0c014983de",
+    "fixture_sha256": "c7a212a7095ffc7553e774ff9b11cdcb699a5328f9972507307c36cc38c14705",
+    "lib_sha256": "cb64812634d1d0b18566e3257e28bc24247d9e13db3124c6fb1b55cc094609ab",
+    "protocol_sha256": "c4a5681af0fb1e365429f6adcbd794d36a0f632a739cf4b2f3655bdd1bee4091"
+  },
+  "positive_cases": [
+    {
+      "case": "AZ_partition_partial_loss_heal",
+      "result": {
+        "Ok": null
+      },
+      "tick": 103,
+      "stale": 0,
+      "trace_entries": 848,
+      "controller_commands": 100,
+      "quorum_reads": []
+    },
+    {
+      "case": "crash_pending_io_durability_ownership",
+      "result": {
+        "Ok": null
+      },
+      "tick": 67,
+      "stale": 4,
+      "trace_entries": 286,
+      "controller_commands": 42,
+      "quorum_reads": []
+    },
+    {
+      "case": "rolling_three_replica_service",
+      "result": {
+        "Ok": null
+      },
+      "tick": 361,
+      "stale": 0,
+      "trace_entries": 1904,
+      "controller_commands": 126,
+      "quorum_reads": [
+        {
+          "down": null,
+          "matching_replicas": 3,
+          "value": 100
+        },
+        {
+          "down": 1,
+          "matching_replicas": 2,
+          "value": 100
+        },
+        {
+          "down": 1,
+          "matching_replicas": 2,
+          "value": 101
+        },
+        {
+          "down": null,
+          "matching_replicas": 3,
+          "value": 101
+        },
+        {
+          "down": 2,
+          "matching_replicas": 2,
+          "value": 101
+        },
+        {
+          "down": 2,
+          "matching_replicas": 2,
+          "value": 102
+        },
+        {
+          "down": null,
+          "matching_replicas": 3,
+          "value": 102
+        },
+        {
+          "down": 3,
+          "matching_replicas": 2,
+          "value": 102
+        },
+        {
+          "down": 3,
+          "matching_replicas": 2,
+          "value": 103
+        },
+        {
+          "down": null,
+          "matching_replicas": 3,
+          "value": 103
+        }
+      ]
+    },
+    {
+      "case": "equal_time_continuation",
+      "result": {
+        "Ok": null
+      },
+      "tick": 21,
+      "stale": 0,
+      "trace_entries": 52,
+      "controller_commands": 9,
+      "quorum_reads": []
+    }
+  ],
+  "negative_controls": [
+    {
+      "case": "overlap",
+      "result": {
+        "Err": "healing_one_handle_preserves_overlapping_machine_fault"
+      }
+    },
+    {
+      "case": "early_flush",
+      "result": {
+        "Err": "reboot_reads_flushed_data_and_loses_unflushed_ack"
+      }
+    },
+    {
+      "case": "stale_owner",
+      "result": {
+        "Err": "obsolete_disk_completion_cannot_mutate_new_cache"
+      }
+    },
+    {
+      "case": "wire",
+      "result": {
+        "Err": "wire_survives_sender_and_receiver_reboot"
+      }
+    },
+    {
+      "case": "physical",
+      "result": {
+        "Err": "physical_media_write_survives_reboot_without_old_guest_callback"
+      }
+    },
+    {
+      "case": "rolling",
+      "result": {
+        "Err": "rejoined_replica_recovers_current_data_before_next_reboot"
+      }
+    },
+    {
+      "case": "batch",
+      "result": {
+        "Err": "equal_time_controller_continuation_precedes_later_wire"
+      }
+    }
+  ],
+  "continuation": {
+    "case": "encode_decode_resume_sleep_fault_query",
+    "result": {
+      "Ok": null
+    },
+    "lost_pending_command_control": "pending control command lost",
+    "checkpoints": [
+      {
+        "command": {
+          "command": {
+            "Literal": {
+              "Sleep": {
+                "after_ticks": 5
+              }
+            }
+          },
+          "save": "sleep"
+        },
+        "final_state_sha256": "30f2622845ae04440f229c5c9f2c47928c107954359935355ac87701451c6e8b",
+        "future_trace_entries": 63,
+        "pc": 0,
+        "snapshot_bytes": 3105,
+        "snapshot_sha256": "606ce09f8ad04d2f60fd1ff93f140ee1401bb9a3e42adfdf2f4e2e4c32a482f9"
+      },
+      {
+        "command": {
+          "command": {
+            "Literal": {
+              "Fault": {
+                "rule": {
+                  "bidirectional": false,
+                  "denominator": 1,
+                  "from": {
+                    "Az": 0
+                  },
+                  "numerator": 1,
+                  "to": {
+                    "Az": 1
+                  }
+                }
+              }
+            }
+          },
+          "save": "fault"
+        },
+        "final_state_sha256": "30f2622845ae04440f229c5c9f2c47928c107954359935355ac87701451c6e8b",
+        "future_trace_entries": 54,
+        "pc": 1,
+        "snapshot_bytes": 3478,
+        "snapshot_sha256": "7bde3fb8eeecc8505e21abaf14ef5df0b92563f9e25031f773cbcda7ae041b52"
+      },
+      {
+        "command": {
+          "command": {
+            "Literal": {
+              "Query": {
+                "correlation_u64_offset": 15,
+                "destination": 1,
+                "frame": [
+                  2,
+                  0,
+                  0,
+                  0,
+                  0,
+                  1,
+                  2,
+                  0,
+                  0,
+                  0,
+                  0,
+                  2,
+                  136,
+                  181,
+                  1,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "timeout_ticks": 12
+              }
+            }
+          },
+          "save": "faulted"
+        },
+        "final_state_sha256": "30f2622845ae04440f229c5c9f2c47928c107954359935355ac87701451c6e8b",
+        "future_trace_entries": 49,
+        "pc": 2,
+        "snapshot_bytes": 3999,
+        "snapshot_sha256": "3b46ad74894b63e33ef13e91548949abb883db410ba40d9d58cda78eaa960ad6"
+      }
+    ]
+  }
+}

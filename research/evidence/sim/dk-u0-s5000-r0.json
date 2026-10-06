@@ -1,0 +1,412 @@
+{
+  "frames_delivered": 672643,
+  "frames_dropped": 0,
+  "host_seconds": 1388.561005342,
+  "kills": [
+    {
+      "member": "n3",
+      "start_ns": 4243074004,
+      "stop_ns": 3478995387
+    },
+    {
+      "member": "n1",
+      "start_ns": 6341262097,
+      "stop_ns": 5961453406
+    },
+    {
+      "member": "n3",
+      "start_ns": 8844872400,
+      "stop_ns": 8144322552
+    },
+    {
+      "member": "n3",
+      "start_ns": 11060971763,
+      "stop_ns": 10331796278
+    },
+    {
+      "member": "n2",
+      "start_ns": 12434908880,
+      "stop_ns": 11610174918
+    },
+    {
+      "member": "n1",
+      "start_ns": 15222870746,
+      "stop_ns": 14342795299
+    },
+    {
+      "member": "n1",
+      "start_ns": 16383524623,
+      "stop_ns": 15786253941
+    },
+    {
+      "member": "n3",
+      "start_ns": 17796618992,
+      "stop_ns": 17474529125
+    },
+    {
+      "member": "n1",
+      "start_ns": 19456537411,
+      "stop_ns": 18839718086
+    },
+    {
+      "member": "n2",
+      "start_ns": 20483392872,
+      "stop_ns": 20122286587
+    },
+    {
+      "member": "n2",
+      "start_ns": 22280336937,
+      "stop_ns": 21288024770
+    },
+    {
+      "member": "n2",
+      "start_ns": 23805529328,
+      "stop_ns": 23320125019
+    },
+    {
+      "member": "n2",
+      "start_ns": 25932465272,
+      "stop_ns": 25424954698
+    },
+    {
+      "member": "n2",
+      "start_ns": 27707037941,
+      "stop_ns": 27308652928
+    },
+    {
+      "member": "n3",
+      "start_ns": 30161216397,
+      "stop_ns": 29611934215
+    },
+    {
+      "member": "n2",
+      "start_ns": 31619897200,
+      "stop_ns": 31017808663
+    },
+    {
+      "member": "n1",
+      "start_ns": 34053973257,
+      "stop_ns": 33394168166
+    },
+    {
+      "member": "n2",
+      "start_ns": 35536793260,
+      "stop_ns": 34984367068
+    },
+    {
+      "member": "n3",
+      "start_ns": 37680278985,
+      "stop_ns": 37091080336
+    },
+    {
+      "member": "n2",
+      "start_ns": 38924427735,
+      "stop_ns": 38244001353
+    },
+    {
+      "member": "n1",
+      "start_ns": 41147929782,
+      "stop_ns": 40216738506
+    },
+    {
+      "member": "n1",
+      "start_ns": 43512727514,
+      "stop_ns": 42627365300
+    },
+    {
+      "member": "n2",
+      "start_ns": 44777513965,
+      "stop_ns": 44314882217
+    },
+    {
+      "member": "n1",
+      "start_ns": 46985738048,
+      "stop_ns": 46186588393
+    },
+    {
+      "member": "n1",
+      "start_ns": 48524797267,
+      "stop_ns": 47666584074
+    },
+    {
+      "member": "n2",
+      "start_ns": 49780748216,
+      "stop_ns": 49181747558
+    },
+    {
+      "member": "n2",
+      "start_ns": 52299296865,
+      "stop_ns": 51352859822
+    },
+    {
+      "member": "n2",
+      "start_ns": 53830458370,
+      "stop_ns": 52957089118
+    },
+    {
+      "member": "n3",
+      "start_ns": 56087533701,
+      "stop_ns": 55211171584
+    }
+  ],
+  "machines": [
+    {
+      "branches": 9262574115,
+      "eintr": 30601,
+      "exits": 51063441,
+      "final_margin": 16384,
+      "halts": 64017,
+      "irqs": 269764,
+      "kvm_ms_by_exit": {
+        "debug": 201289.120712,
+        "eintr": 22090.649705,
+        "hlt": 1288.440323,
+        "mmio": 10598.414562,
+        "other": 0.0,
+        "pio": 10576.735687,
+        "window": 102.005827
+      },
+      "kvm_n_by_exit": [
+        30601,
+        49451769,
+        1330471,
+        166259,
+        64017,
+        20324,
+        0,
+        0
+      ],
+      "mmio": 166259,
+      "name": "n1",
+      "net": {
+        "rx": 165244,
+        "rx_dropped": 0,
+        "tx": 162806
+      },
+      "pio": 220766,
+      "precise_stops": 1702,
+      "run_ms": 364336.972809,
+      "skid_count": 30601,
+      "skid_max": 8832,
+      "skid_p50": 192,
+      "skid_p99": 4959,
+      "soft_misses": 0,
+      "soft_misses_clean": 0,
+      "soft_undos": 0,
+      "state": "Halted",
+      "state_digest": "4ecb34ceee497e65633eb8491b2c86d956853a4ba831fe4046f78ab7a48c72f9",
+      "state_digest_parts": {
+        "events": "exc:none int:none shadow:0 nmi:0/0/0",
+        "msrs": "f3d74151fc819c637720657bc05916c8903bca2bfcbe31d6cdb0e0fdd46abeec",
+        "ram": "0d27f0771da6ce802162e9d66f72e7312122514112dc0b5ba85e924363d5f9c8",
+        "regs": "4cc8c08624e3cd5425aade3e833e8b933ad15d156e6040edec55ec7edbf81320",
+        "time_page": "ff0e63df7557033b033b9f77f50f4811049c69ec77afc56e3bdb31b454dcb238",
+        "xcrs": "02bef8f9e42dbabde667aa536a1e761917f1e8264395fba767dd7b1f691a50ac",
+        "xsave": "674118e4f937fcca773cce26553d6efa1359c672308ae725ffa08b34730edd35"
+      },
+      "step_ms": 318023.431451,
+      "steps": 49451784,
+      "time_ns": 60692627601,
+      "undo": null,
+      "window_exits": 20324,
+      "witness": "8c734a334308b9d2f4cb92928292b058d9b5740584e069783d1c808ee17536a7",
+      "yield_stops": 26123,
+      "yields": 1109705
+    },
+    {
+      "branches": 10747080367,
+      "eintr": 34018,
+      "exits": 72711453,
+      "final_margin": 16384,
+      "halts": 59934,
+      "irqs": 262186,
+      "kvm_ms_by_exit": {
+        "debug": 289920.85161,
+        "eintr": 24578.39107,
+        "hlt": 1227.19264,
+        "mmio": 10159.051441,
+        "other": 0.0,
+        "pio": 10703.695027,
+        "window": 96.81884
+      },
+      "kvm_n_by_exit": [
+        34018,
+        71134353,
+        1300753,
+        163173,
+        59934,
+        19222,
+        0,
+        0
+      ],
+      "mmio": 163173,
+      "name": "n2",
+      "net": {
+        "rx": 161975,
+        "rx_dropped": 0,
+        "tx": 159966
+      },
+      "pio": 215214,
+      "precise_stops": 2499,
+      "run_ms": 506302.61742,
+      "skid_count": 34018,
+      "skid_max": 8553,
+      "skid_p50": 205,
+      "skid_p99": 4955,
+      "soft_misses": 0,
+      "soft_misses_clean": 0,
+      "soft_undos": 0,
+      "state": "Halted",
+      "state_digest": "2005fe7088849ca6938a4278857951472dc63bd2d3edbcd66058fff5b3b37b2b",
+      "state_digest_parts": {
+        "events": "exc:none int:none shadow:0 nmi:0/0/0",
+        "msrs": "f3d74151fc819c637720657bc05916c8903bca2bfcbe31d6cdb0e0fdd46abeec",
+        "ram": "a64c0a50e19a90a46af1337a65b226aad1de7f205670c86a988a221aea971e95",
+        "regs": "7f33f002664a19ebece1b73fba9fdb8e2fb057db4f315bda0b714f4b76b896b8",
+        "time_page": "84a7c27b64f8c28c308fab7f90a7e1a6aeaad4b4c2abec24c1ed54f13a51d9ec",
+        "xcrs": "02bef8f9e42dbabde667aa536a1e761917f1e8264395fba767dd7b1f691a50ac",
+        "xsave": "254ea11f0c4dcb35422beb49b88bd5783bd829ccfe9f0a56db8b36849057b642"
+      },
+      "step_ms": 457921.978726,
+      "steps": 71134366,
+      "time_ns": 60686767993,
+      "undo": null,
+      "window_exits": 19222,
+      "witness": "47e8a9ffb1cce6c0d266ec933a457b064a0041ddfdee1f6f05957c0bf70969ac",
+      "yield_stops": 26695,
+      "yields": 1085539
+    },
+    {
+      "branches": 10093820780,
+      "eintr": 37930,
+      "exits": 34586478,
+      "final_margin": 16384,
+      "halts": 69987,
+      "irqs": 361534,
+      "kvm_ms_by_exit": {
+        "debug": 132036.074839,
+        "eintr": 24747.163616,
+        "hlt": 1390.02249,
+        "mmio": 13704.070661,
+        "other": 0.0,
+        "pio": 14008.309536,
+        "window": 116.721637
+      },
+      "kvm_n_by_exit": [
+        37930,
+        32445554,
+        1770283,
+        239469,
+        69987,
+        23255,
+        0,
+        0
+      ],
+      "mmio": 239469,
+      "name": "n3",
+      "net": {
+        "rx": 224537,
+        "rx_dropped": 0,
+        "tx": 236073
+      },
+      "pio": 228542,
+      "precise_stops": 1055,
+      "run_ms": 264295.838413,
+      "skid_count": 37930,
+      "skid_max": 11088,
+      "skid_p50": 176,
+      "skid_p99": 4401,
+      "soft_misses": 0,
+      "soft_misses_clean": 0,
+      "soft_undos": 0,
+      "state": "Halted",
+      "state_digest": "00b3b0be06ca19c3234fb194669de54ac46d0e1212a2ca5900ab923d57d146be",
+      "state_digest_parts": {
+        "events": "exc:none int:none shadow:0 nmi:0/0/0",
+        "msrs": "f3d74151fc819c637720657bc05916c8903bca2bfcbe31d6cdb0e0fdd46abeec",
+        "ram": "c92c22048b0802b6c59e3393a87c1531f5eff6380895bf7a672a330573a7a93d",
+        "regs": "a7a0574abfd1537f91f20acde2b1570e5203393b0f5e40adc51911106d4fc8f1",
+        "time_page": "5f05a14272942e4db095d3293f5c6245b61b67d95c2a1322f14b64271c839ee1",
+        "xcrs": "02bef8f9e42dbabde667aa536a1e761917f1e8264395fba767dd7b1f691a50ac",
+        "xsave": "254ea11f0c4dcb35422beb49b88bd5783bd829ccfe9f0a56db8b36849057b642"
+      },
+      "step_ms": 208289.066135,
+      "steps": 32445555,
+      "time_ns": 60686853160,
+      "undo": null,
+      "window_exits": 23255,
+      "witness": "4d8e3c508932f849637686f46380d56ef9e2e317d74b4da101e78643f6ac9353",
+      "yield_stops": 37371,
+      "yields": 1541741
+    },
+    {
+      "branches": 2784451769,
+      "eintr": 6957,
+      "exits": 37647649,
+      "final_margin": 16384,
+      "halts": 71049,
+      "irqs": 207988,
+      "kvm_ms_by_exit": {
+        "debug": 151493.657966,
+        "eintr": 2452.733318,
+        "hlt": 1283.769446,
+        "mmio": 7672.877067,
+        "other": 0.0,
+        "pio": 2719.209784,
+        "window": 95.862495
+      },
+      "kvm_n_by_exit": [
+        6957,
+        37206566,
+        226928,
+        117342,
+        71049,
+        18807,
+        0,
+        0
+      ],
+      "mmio": 117342,
+      "name": "client",
+      "net": {
+        "rx": 120887,
+        "rx_dropped": 0,
+        "tx": 113782
+      },
+      "pio": 196125,
+      "precise_stops": 1061,
+      "run_ms": 252235.888579,
+      "skid_count": 6957,
+      "skid_max": 5727,
+      "skid_p50": 297,
+      "skid_p99": 2706,
+      "soft_misses": 0,
+      "soft_misses_clean": 0,
+      "soft_undos": 0,
+      "state": "Exited(0)",
+      "state_digest": "77124c18404b558b75eebc1a6f3a8af2833f3186521e44c1f46a41fb57508bfa",
+      "state_digest_parts": {
+        "events": "exc:none int:none shadow:0 nmi:0/0/0",
+        "msrs": "7085b186b6a67a31ec001e8a19ca8cde0ae5f01717f13bb81fbb61ddcecc7060",
+        "ram": "b4ba73f2ba6d33b76916b83a970225011cc79d410c66cdb4702be529f8dd8a6a",
+        "regs": "8ed6e19ab3af79be5068536f4f133d0d1dafea004abf866e80e0b06fc4de15fb",
+        "time_page": "476741a62605e94384fb5c41895892a3a48f82e947dda291b8928e7b5af12753",
+        "xcrs": "02bef8f9e42dbabde667aa536a1e761917f1e8264395fba767dd7b1f691a50ac",
+        "xsave": "70f8dc688871685bdb46f15dc043c85997f90092db3423a22824eee0429ff82c"
+      },
+      "step_ms": 236932.250241,
+      "steps": 37206571,
+      "time_ns": 60693294858,
+      "undo": null,
+      "window_exits": 18807,
+      "witness": "858f99ff797a1b1a8a65a43908e3a5ec86d68bc5fb6ec971eb15a008ad947f67",
+      "yield_stops": 3466,
+      "yields": 30803
+    }
+  ],
+  "outcome": "end_machine_exited",
+  "seed": 5000,
+  "sim_seconds": 60.693294858,
+  "slices": 1019777,
+  "speed": 0.04370949106629374,
+  "world_witness": "1eb01daaddba3733a4ce5e67c42a2d5798c9bb57115815cb5154403757b1c641"
+}

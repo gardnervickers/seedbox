@@ -1,0 +1,24 @@
+{
+  "qualification": "future measurements only; none executed on AMD during this preparation",
+  "native_topology": "three isolated processgroups/data directories, each assigned one allowedCPU; all Redis/JVMthreads restricted to roleCPU; total utilization sums3roles to match serialworld ownership",
+  "baseline": "same pinned Redis/JDK/jars/flags/dataset/warmup/offeredschedule;60s active+actual check/drain; report nofault baseline separately, never substitute proxy fault semantics for VMM partition",
+  "fault_comparison": "if native link-delay/loss baseline becomes necessary, obtain a scoped approved mechanism and quantify its costs; do not alter host firewall, global routes orservices during preparation",
+  "phase_windows": ["coldboot/application startup", "JVMwarmup+reconcile", "active0-25s", "partition25-35s", "healed35-60s inclAOFrewrite", "post60s recovery/checkdrain"],
+  "cpu_measurement": {
+    "primary": "inherited perf groups launched around each role before startup; begin measurement only atready using perf control enable/disable; include all existing/futurethreads and Redisfork descendants",
+    "counters": ["task-clock", "cycles", "instructions", "qualified AMD retired conditional-branch event", "context-switches", "cpu-migrations"],
+    "calibration": "sumCPUexecution_ns / conditional_branches per role and overall, recording perf time_enabled/time_running; reject unaccounted multiplexing; retain phase/JIT/kernel mix, not just an aggregate",
+    "event": "W5a qualified raw config/profile required; retained probe candidate config0x5100d1 is not assumed qualified; native excludes guests but counts CPL0+3",
+    "guard": "no perf permission/sysctl/MSR change bybenchmark; report unavailable counters as missing; kernelwork outside trackedprocesses is a measured coverage limitation",
+    "fallback": "read /proc processgroup CPUtime, including children, with lifetime-aware no-double-count accounting; sampling losses/exitedthreads and kernelworker omission stated"
+  },
+  "wakeup_measurement": {
+    "native_proxy": "delta of per-thread voluntary/involuntarycontextswitches plus optional read-only sched:sched_wakeup tracepoints scoped toownedthreads; report raw counts and sampling/tracepoint coverage",
+    "limitations": ["contextswitch is not a wakeup: preemption and runnable rescheduling count too", "oneguest thread wakeup need not wake a haltedvCPU", "multipleguest wakeups can coalesce into onemachine episode", "nativekernel/irq/disk background differs from pinned guestkernel", "tracepoint permissions and overhead must be recorded"],
+    "deciding_metric": "world/VMM counts actual halted->runnable machineepisodes and timer/devicecauses; accrue exclusive attributedhostsegments until nextHLT; report episodeCPUtime and mechanismoverhead separately",
+    "overhead": "perwake mechanismoverhead requires calibrated guestexecution/entryexit attribution; do not label contextswitch latency or totalepisode wall as hostVMwakeupcost"
+  },
+  "busy_comparison": "per-role active CPU execution versus calibrated countedguestwork at same pinned inputs/phase; report role and total busy slowdown; include kernel/JIT/GC tasks, do not count skippedidle time asCPU work",
+  "host_pin": "before and after each actual run, match full uname/kernelbuild/CPUmodel/CPUID/microcode and W5a counter/workaround profile; reject changes midround",
+  "hardware_handoff": "singleAMDbox/common nonblockinglock; W5a first, benchmark breakdown next; extra hardware unnecessary for prep"
+}

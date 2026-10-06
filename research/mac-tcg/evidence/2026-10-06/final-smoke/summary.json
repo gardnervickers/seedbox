@@ -1,0 +1,15 @@
+{
+  "aggregate_qemu_wall_seconds": 2.986501457999111,
+  "all_expected_outcomes": true,
+  "groups": {
+    "42": {
+      "console_variants": 1,
+      "observation_variants": 1,
+      "runs": 1
+    }
+  },
+  "requested_runs": 1,
+  "runner_children_peak_rss_bytes": 223707136,
+  "runs": 1,
+  "same_seed_observations_equal": true
+}

@@ -1,0 +1,6 @@
+{
+  "args": "SEEDBOX_OUTSIDE=\"north\" \"/private/tmp/seedbox-round-1.S74xJ4/determinism/target/debug/seedbox-witness\" \"run\" \"42\" \"baseline\" \"3\" \"3:6\" \"/private/tmp/seedbox-round-1.S74xJ4/evidence/w3/precise-landing-v2/control-protocol-detail-left.json\"",
+  "exit": 0,
+  "stderr": "",
+  "stdout": ""
+}

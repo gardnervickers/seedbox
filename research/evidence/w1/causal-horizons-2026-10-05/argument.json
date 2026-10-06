@@ -1,0 +1,236 @@
+{
+  "schema": 1,
+  "created_on": "2026-10-05",
+  "slice": "W1",
+  "qualification": {
+    "kind": "conditional_design_argument",
+    "accepted_by": "coordinator chat 01a10ca0-5eb4-7300-ab15-d3eb082b4683",
+    "objectives": [
+      "O1",
+      "O3",
+      "O4",
+      "O5"
+    ],
+    "implementation_or_execution_evidence": false,
+    "hardware_runs": false,
+    "runtime_or_central_document_edits": false
+  },
+  "recommendation": "Use per-machine logical frontiers and conservative safe horizons, initially synchronized safe epochs. Keep exact event timestamps as the default; optimize independent horizons only after qualification.",
+  "parameters": {
+    "provisional_minimum_directed_link_latency_ns": 1000000,
+    "latency_qualification": "Declared benchmark topology parameter, not a proven efficient stop quantum or a guarantee for other effect paths.",
+    "o5_targets_from_conclusions": {
+      "distributed_simulated_time_per_host_time_min": 10,
+      "distributed_target_excludes_boot": true,
+      "cpu_bound_slowdown_relative_to_native_approx_max": 10
+    }
+  },
+  "assumptions": [
+    "One caller OS thread owns all machines, devices, scenarios and scheduling decisions.",
+    "The backend exposes every cross-machine effect and admits the required stopped-guest coordinates.",
+    "Per-machine branch-to-model-nanosecond conversion is pinned, monotonic and qualified for the supported workload profile.",
+    "Every possible effect path has a sound production-time and minimum-latency bound; network latency does not bound controller or shared-resource effects.",
+    "Blocked wake bounds account for unknown incoming traffic and autonomous kernel/device work; an empty queue alone is insufficient."
+  ],
+  "causal_horizon": {
+    "definitions": {
+      "f_i": "Committed local world-nanosecond frontier of participant i.",
+      "P_j": "Proven earliest timestamp of another unregistered effect from producer j. Use its frontier while runnable; lift it only with a sound blocked/wake/output bound.",
+      "L_ji": "Guaranteed minimum effect latency on path j to i, including non-network paths.",
+      "D_i": "Next known timer, fault, device, input or assumption-invalidating barrier affecting i."
+    },
+    "formula": "H_i = min(D_i, min_j(P_j + L_ji))",
+    "rule": "Guest work is permitted strictly before H_i. Close possible equal-time arrivals, dispatch events in deadline/registration order, and give ready controllers their turn before guest continuations at the endpoint.",
+    "argument": "Known affecting effects occur no earlier than D_i; every unregistered effect occurs no earlier than P_j + L_ji. Thus work strictly before their minimum cannot observe an effect that should already have arrived.",
+    "initial_execution_policy": "Use synchronized safe epochs first. Natural exits and newly published deadlines recompute bounds; shared resources and immediate control effects remain coordination points.",
+    "clock_accounting": "Do not sum machine elapsed times into world elapsed time. Store per-machine epochs, count/time anchors, rational rates, fractional remainders and blocked-time anchoring; advance a world causal commit frontier only after closure.",
+    "compute_example": {
+      "machine_A_frontier_ns": 1000000,
+      "machine_B_frontier_ns": 1000000,
+      "earlier_effects_closed": true,
+      "world_elapsed_ns": 1000000,
+      "incorrect_sum_ns": 2000000
+    }
+  },
+  "counterexamples": [
+    {
+      "name": "unknown_peer_send",
+      "peer_frontier_ns": 0,
+      "send_ns": 100000,
+      "minimum_link_latency_ns": 1000000,
+      "arrival_ns": 1100000,
+      "already_advanced_receiver_ns": 2000000,
+      "failure": "The receiver has passed the arrival; publishing the packet later cannot repair committed reads or acknowledgments."
+    },
+    {
+      "name": "known_deadline_before_network_bound",
+      "known_timer_or_fault_ns": 250000,
+      "network_lookahead_ns": 1000000,
+      "required_horizon_ns": 250000
+    },
+    {
+      "name": "immediate_controller_effect",
+      "controller_issue_ns": 500000,
+      "already_advanced_workload_ns": 1000000,
+      "failure": "A reliable crash/heal/inspection command bypasses network latency and arrives behind the workload frontier.",
+      "required_rule": "Timestamp commands by controller-local issue time, queue them, close the affected-machine barrier, then apply and acknowledge them. Host receipt order and a global dispatch cursor are not their simulated issue time."
+    },
+    {
+      "name": "direct_shared_state",
+      "peer_write_ns": 200000,
+      "receiver_read_ns": 300000,
+      "network_minimum_ns": 1000000,
+      "failure": "Shared memory, shared-disk arbitration or direct cross-machine DMA bypasses the link bound.",
+      "required_rule": "Represent a separate effect path, possibly with zero lookahead, and coordinate it. Process sharing inside one VM remains local."
+    },
+    {
+      "name": "fault_evaluation_moved_to_batch_endpoint",
+      "packet_due_ns": 300000,
+      "partition_healed_ns": 500000,
+      "batch_endpoint_ns": 1000000,
+      "failure": "Evaluating all packets against endpoint fault state delivers a packet that should have been dropped at its original timestamp."
+    }
+  ],
+  "controller_and_topology": {
+    "runnable_controller": "Immediate possible commands bound affected workload horizons by the controller frontier. Run the controller to a known blocked continuation or coordinate a barrier.",
+    "command_timestamps": "Control commands are timestamped effects even though their transport is reliable and outside the faultable fabric.",
+    "changes": "A known heal or policy change that reduces a bound is a barrier before affected progress. Invalidate/recompute horizon certificates and explicitly define in-flight rescheduling; never backdate delivery.",
+    "zero_latency": "Zero-latency network/direct-resource cycles provide no positive lookahead. Use coordinated event/microstep ordering or declare them outside the coarse-epoch profile."
+  },
+  "performance": {
+    "quantities": {
+      "beta_i": "Measured guest-branch throughput in branches per host second.",
+      "C_i": "Measured host seconds for stop, correction, completed-I/O, witness and control overhead.",
+      "q_i": "Admitted branch quantum.",
+      "e": "Chosen maximum overhead fraction."
+    },
+    "affordable_quantum_condition": "q_i / beta_i >= C_i * (1 - e) / e",
+    "world_speed_formula": "DeltaT_sim / (sum_i(q_i / beta_i + C_i) + device_and_controller_host_seconds)",
+    "admission": "Invert the local time mapping without upward rounding to find an admitted count/RIP/REP target at or before the safe bound. Rate calibration does not manufacture exact stopping or progress on zero-count paths.",
+    "conflict_rule": "If an affordable quantum cannot fit the safe horizon, preserve exact deadlines and report the O5 conflict. Change qualified costs/profile/architecture rather than silently extending the horizon.",
+    "calibration_inputs": "Freeze calibration and performance policy inputs. Current-run host elapsed time, administrative retries or load must not change canonical scheduling or virtual clocks."
+  },
+  "batching": {
+    "safe": [
+      "A host loop may process original timestamped transitions in deadline/registration order.",
+      "After each callback, resume a ready controller before the next equal-time event.",
+      "Break the batch when guest execution or another newly runnable participant is required before the next timestamp.",
+      "Amortize bookkeeping or commuting bulk work only when no intervening observation, dependency or intervention is possible."
+    ],
+    "rejected": [
+      "Drain an entire timestamp before its awakened controller.",
+      "Move all logical delivery times to an epoch endpoint.",
+      "Evaluate earlier delivery-time faults using later healed state.",
+      "Advance past known deadlines and repair timestamps afterward."
+    ],
+    "lateness_profile": "Bounded lateness is a distinct later profile with an explicit tested bound and scheduled/dispatched/IRQ-ready/injected timestamps. Exact fabric/device arrival and later legal IRQ handling are distinct observations; exact dispatch rejects overruns."
+  },
+  "seeded_scheduling": {
+    "proposed_streams": [
+      "machine_order",
+      "safe_quantum_cut",
+      "guest_timer_irq_or_readiness"
+    ],
+    "bounds": "Seeded cuts and timer/readiness variations stay within admitted causal horizons and the declared legal delivery profile.",
+    "linux_threads": "A host KVM stop alone does not switch Linux threads. Guest timer/IRQ or readiness changes must reach Linux scheduling with meaningful runnable alternatives.",
+    "required_sensitivity": "Observe actual guest task-switch/order or application shared-state changes, not merely different host-stop labels.",
+    "administration": "Debug/completion retries consume no canonical RNG, time or boundary number."
+  },
+  "api_delta": [
+    {
+      "change": "Per-participant ClockState plus world commit time",
+      "fields": [
+        "frontier_ns",
+        "machine_or_controller_incarnation",
+        "branch_epoch",
+        "count_base",
+        "time_base_ns",
+        "rate_numerator",
+        "rate_denominator",
+        "remainder",
+        "activity",
+        "wake_or_output_lower_bound_ns"
+      ]
+    },
+    {
+      "change": "Explicit causal lookahead graph",
+      "fields": [
+        "producer",
+        "target_or_resource",
+        "minimum_effect_latency_ns",
+        "topology_and_calibration_epoch",
+        "known_deadline_or_barrier"
+      ]
+    },
+    {
+      "change": "plan_run and commit_stopped_guest",
+      "fields": [
+        "serializable_horizon_certificate",
+        "strict_endpoint_and_tie_phase",
+        "causal_bounds",
+        "epochs",
+        "admitted_count_RIP_REP_target",
+        "actual_local_progress"
+      ],
+      "invariant": "Reject stale certificates and actual progress beyond their bound."
+    },
+    {
+      "change": "Timestamped publish_effect and control commands",
+      "fields": [
+        "producer",
+        "source_ns",
+        "arrival_or_effect_ns",
+        "owner",
+        "cause",
+        "registration_sequence"
+      ],
+      "invariant": "Reject retroactive effects; direct control effects require affected-machine barrier admission before application/acknowledgment."
+    },
+    {
+      "change": "Ordered dispatch and explicit delivery profile",
+      "fields": [
+        "deadline_ns",
+        "registration_sequence",
+        "controller_turn",
+        "Exact_or_BoundedLateness",
+        "separate_scheduler_and_timer_streams"
+      ]
+    },
+    {
+      "change": "W3 state coverage",
+      "fields": [
+        "per_machine_frontiers",
+        "fractional_remainders",
+        "activity_and_wake_bounds",
+        "horizon_leases_and_epochs",
+        "deferred_effects_and_control_commands"
+      ]
+    }
+  ],
+  "retained_source_gaps": [
+    {
+      "path": "research/world/src/protocol.rs",
+      "symbol": "World::import_stopped_guest",
+      "sha256": "c4a5681af0fb1e365429f6adcbd794d36a0f632a739cf4b2f3655bdd1bee4091",
+      "gap": "Successive branch deltas currently advance one scalar clock; replace this for the real multi-machine exact profile."
+    },
+    {
+      "path": "research/world/src/lib.rs",
+      "symbol": "World::step",
+      "sha256": "cb64812634d1d0b18566e3257e28bc24247d9e13db3124c6fb1b55cc094609ab",
+      "gap": "max(now, due) dispatch is not a qualified exact-production lateness rule; replace it with explicit deadline/overrun handling."
+    }
+  ],
+  "references": [
+    "CONCLUSIONS.md",
+    "NEXT_STEPS.md",
+    "research/world/protocol-contract.json"
+  ],
+  "not_shown": [
+    "implemented horizon scheduler",
+    "qualified Linux exact stopping",
+    "measured per-machine calibration or stop costs",
+    "meeting O5 targets",
+    "qualified zero-lookahead shared-resource execution"
+  ]
+}

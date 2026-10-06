@@ -1,0 +1,1 @@
+nix develop /private/tmp/seedbox-round-1.S74xJ4/env --command bash /private/tmp/seedbox-round-1.S74xJ4/world/freeze.sh /private/tmp/seedbox-round-1.S74xJ4/evidence/w1/run.Skz853 /private/tmp/seedbox-round-1.S74xJ4/evidence/w1/run.ckSd7H 

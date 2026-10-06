@@ -1,0 +1,90 @@
+{
+  "scope": "three one-process original-profile idle exploratory attempts; not a median qualification",
+  "planned": 3,
+  "measured": 3,
+  "all_receipts_and_host_pins_valid": true,
+  "exact_successes": 2,
+  "rejected_overshoots": 1,
+  "records": [
+    {
+      "id": "cost-exploratory-margin-v1-plain-100000-2000-breakpoint",
+      "method": "hardware_RIP_breakpoint",
+      "target": 100000,
+      "margin": 2000,
+      "status": "valid_exact_stop",
+      "raw_exit_code": 0,
+      "overflow_count": 99307,
+      "skid": 1307,
+      "final_count": 100000,
+      "overshoot_branches": 0,
+      "remaining_branches_at_overflow": 693,
+      "correction_exits": 693,
+      "timing_ns": {
+        "normal_stop_overhead_ns": 5302299,
+        "correction_ns": 5294976,
+        "overflow_elapsed_ns": 81384,
+        "landing_witness_ns": 232410,
+        "setup_ns": 22269927,
+        "initial_witness_ns": 327009,
+        "continuation_total_ns": 314946
+      },
+      "eligible_for_success_cost_summary": true
+    },
+    {
+      "id": "cost-exploratory-margin-v1-plain-100000-1500-breakpoint",
+      "method": "hardware_RIP_breakpoint",
+      "target": 100000,
+      "margin": 1500,
+      "status": "rejected_overshoot",
+      "raw_exit_code": 2,
+      "overflow_count": 100215,
+      "skid": 1715,
+      "final_count": 100215,
+      "overshoot_branches": 215,
+      "remaining_branches_at_overflow": 0,
+      "correction_exits": 0,
+      "timing_ns": {
+        "normal_stop_overhead_ns": 16501,
+        "correction_ns": 9578,
+        "overflow_elapsed_ns": 58932,
+        "landing_witness_ns": 223233,
+        "setup_ns": 3427600,
+        "initial_witness_ns": 287354,
+        "continuation_total_ns": 30
+      },
+      "eligible_for_success_cost_summary": false
+    },
+    {
+      "id": "cost-exploratory-margin-v1-plain-100000-2000-count_only",
+      "method": "count_only_single_step",
+      "target": 100000,
+      "margin": 2000,
+      "status": "valid_exact_stop",
+      "raw_exit_code": 0,
+      "overflow_count": 99720,
+      "skid": 1720,
+      "final_count": 100000,
+      "overshoot_branches": 0,
+      "remaining_branches_at_overflow": 280,
+      "correction_exits": 839,
+      "timing_ns": {
+        "normal_stop_overhead_ns": 5188204,
+        "correction_ns": 5181090,
+        "overflow_elapsed_ns": 58761,
+        "landing_witness_ns": 241317,
+        "setup_ns": 3179821,
+        "initial_witness_ns": 287915,
+        "continuation_total_ns": 307652
+      },
+      "eligible_for_success_cost_summary": true
+    }
+  ],
+  "successful_stop_bracket_us": [
+    5302.299,
+    5188.204
+  ],
+  "interpretation": "margin reduction cuts thousands of correction exits, but both successful stops still exceed the100us budget by over50x; margin1500 failed before correction, so its16.501us bracket is not a valid fast stop",
+  "comparison_limit": "breakpoint and count-only overflowed at different counts; their5.30ms and5.19ms totals do not establish equal-tail relative speed",
+  "timing_scope": "normal_stop_overhead_ns starts after overflow returns and includes debug-off/post-counter/scalar validation; signal-return latency excluded. Witness, setup and actual continuation are separately bracketed; no complete overhead or normal-mode throughput claim",
+  "next_step": "No five-process repeats of these configurations. One Linux target1100000/margin4000/count_only smoke would test the generic count-directed primitive on the already pinned Linux snapshot with no PIO in its correction tail. If it remains millisecond-scale, stop margin tuning and design bounded correction/trap cost reduction before a deciding gate matrix."
+}

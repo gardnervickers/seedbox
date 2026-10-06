@@ -1,0 +1,13 @@
+[
+  {
+    "console_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "management_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "reason": "missing or malformed requested witness",
+    "returncode": -6,
+    "seed": 1009,
+    "status": "ERROR",
+    "wall_seconds": 0.29319062500144355,
+    "witness": null,
+    "witness_diagnostics": null
+  }
+]

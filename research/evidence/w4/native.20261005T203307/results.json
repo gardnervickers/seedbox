@@ -1,0 +1,47 @@
+{
+  "redis": {
+    "status": "passed",
+    "keys_before": "1001",
+    "keys_after_aof_restart": "1001",
+    "pipe": "All data transferred. Waiting for the last reply...\nLast reply received from server.\nerrors: 0, replies: 1000",
+    "rewrite": "Background append only file rewriting started",
+    "rdb_save": "Background saving started",
+    "replica_tcp_disconnect_count": "1",
+    "replica_recovered_value": "ok",
+    "wait_replicas": "1",
+    "scope": "2 native loopback processes; graceful AOF restart; induced client disconnect, no packet-loss/power-failure simulation"
+  },
+  "etcd": {
+    "status": "passed",
+    "written_keys": 40,
+    "keys_after_graceful_restart": 40,
+    "revision_compacted": 41,
+    "snapshot_sha256": "aa1d29544838c32aa290710fbf89e8bfb9e7a2adaaf55b5acfd6ede920034561",
+    "scope": "one member; no Raft network partition/cluster recovery"
+  },
+  "postgres": {
+    "status": "passed",
+    "rows_primary_and_replica": 1002,
+    "replica_in_recovery": "t",
+    "terminated_wal_sender": "t",
+    "rows_after_graceful_restart": 1002,
+    "checkpoint": "CHECKPOINT",
+    "scope": "2 native loopback clusters; streamed basebackup and WAL sender termination/reconnect; no promotion, power failure or packet loss"
+  },
+  "tokio-current": {
+    "status": "passed",
+    "requests": 64,
+    "responses_verified": 64,
+    "sum": 2080,
+    "timer_per_request_ms": 1,
+    "scope": "current runtime, finite arithmetic, TCP echo increment, no persistence/signals/fork"
+  },
+  "tokio-multi": {
+    "status": "passed",
+    "requests": 64,
+    "responses_verified": 64,
+    "sum": 2080,
+    "timer_per_request_ms": 1,
+    "scope": "multi runtime, finite arithmetic, TCP echo increment, no persistence/signals/fork"
+  }
+}

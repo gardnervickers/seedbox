@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "reviewed_on": "2026-10-05",
+  "reviewer": "W3",
+  "result": "V6 is suitable for the bounded trusted same-host Linux user-loop correctness experiment, subject to an explicit expected attempt/profile matrix. This is not complete snapshot restoration or the combined correctness/performance gate.",
+  "method": "Independent source review and read-only verification of the retained starting package; no hardware, execution qualification, source changes or privileged-run approval.",
+  "accepted_by_coordinator": true,
+  "source_paths_relative_to_review": {
+    "sources/preempt-probe-v6.rs": "51767d49779bb6ffae6494e90f68d6bc0142914e67f6afa5c38280eba02416a9",
+    "sources/linux-restore-v6.rs": "70f390ac9f0cc8a0eeb278fc7a42eaa46969d7746ff11410e44d366a9b572b8e",
+    "sources/msr-guard-v3.py": "fed00db515067bc04a8995890c97270d599a2f394931c0c340dc1b3eededa559",
+    "sources/preempt-validate-v6.py": "a215352b44f312438fb5dc6314d1a24da1517a86ec32a2356f549780e8586517"
+  },
+  "source_preservation": "Exact frozen review inputs copied without edits. They are evidence snapshots, not replacement runnable sources; module/include paths retain original meaning. Validator fixes after this revision were not reviewed here.",
+  "starting_package": {
+    "repo_path": "research/evidence/w5a/linux-start-package-v2.tar.gz",
+    "sha256": "2f22e316774c618e49da1c01189af1f4db78cc6f3bfe80aacfa66e2a1200abce",
+    "member_index": "research/evidence/w5a/linux-start-package-v2-members.json",
+    "member_index_sha256": "c59d9f8c70ffe181d8db3b08dff8ee70e25b0f407d4e4b0f4dcc549e536b4036",
+    "members_verified": 20,
+    "manifest_member": "linux-start-input-v2/input-manifest.json",
+    "manifest_sha256": "571b39767430b5ecaba9bbcbabfdb1b1ea89600bb13003cb4b8444706f065f8c",
+    "check": "Every retained member size and SHA256 matched the member index; all internal manifest hashes agreed. No files were extracted during this check.",
+    "abi_bytes": {"regs":144,"sregs":312,"fpu":416,"xsave":4096,"xcrs":392,"debug_regs":128,"vcpu_events":64,"mp_state":4,"ram":268435456},
+    "elf_member": "linux-start-source-v2/linux-inputs/two-phase-root/init",
+    "symbols": {"seedbox_busy_first":"0x401097","seedbox_busy_second":"0x4010b2"},
+    "post_pio_code": {"0x4010a8":"XOR RAX followed by MOV RCX,1000000","0x4010c3":"terminal comparison code"},
+    "starting_state": {"rip":"0x40108d","rflags":"0x246","tf_clear":true,"dr0_to_dr3_zero":true,"dr7":"0x400","injected_exception_irq_nmi_bytes_clear":true,"pending_world_irq":false},
+    "qualification": "Trusted same-host kvm-bindings0.14.1 raw ABI input; native TSC is declared unexercised and no new timer/device IRQs are injected during the interval. Member/ELF checks do not verify KVM restore readback."
+  },
+  "deciding_gate_conditions": [
+    {
+      "location":"sources/preempt-validate-v6.py:17,81",
+      "finding":"Missing-receipt attempts are skipped and any nonempty passing subset can produce global acceptance.",
+      "required":"Reconcile every scheduled attempt and require the declared Linux positive/reference/negative target/profile matrix. Lock-busy is non-executed; guard/preflight failures remain failures."
+    },
+    {
+      "location":"sources/preempt-validate-v6.py:24-28",
+      "finding":"Grouping includes binary/guest/helper/mode/load/perf but lacks a verified pinned kernel/microcode identity and actual original workaround-bit state.",
+      "required":"Verify one batch fingerprint against the pinned host and group or constrain actual bit54 values. Do not assume the original profile has the bit clear. Inventory belongs to batch setup, not per-stop work."
+    }
+  ],
+  "source_checks": [
+    {"location":"sources/linux-restore-v6.rs:6-30","result":"Exact manifest/member hashes, exact raw ABI lengths,256MiB RAM length and4096-byte XSAVE2 bound are checked before restore."},
+    {"location":"sources/linux-restore-v6.rs:87-102","result":"Overshoot/count/RIP, analytic RAX/RCX/RFLAGS, perf validity and debug teardown precede continuation to an analytic2M-branch terminal."},
+    {"location":"sources/preempt-probe-v6.rs:266-284; sources/linux-restore-v6.rs:91","result":"PIO completion-only reentry accepts EINTR or a justified debug completion, checks unchanged count and the known post-OUT RIP. Linux does not supply RAM to the optional completion-only RAM comparison."},
+    {"location":"sources/preempt-probe-v6.rs:363-401","result":"Bare REP overshoot, RCX/RSI/RDI, copied prefix/remainder, flags and terminal continuation are checked."},
+    {"location":"sources/preempt-validate-v6.py:61,73-77","result":"The1,000,100 target must encounter PIO during correction; corrected terminal is compared against an uninterrupted restored-input reference."},
+    {"location":"sources/msr-guard-v3.py:25-31,58-66,78-109","result":"Hash-checked sealed-memfd execution; fixedCPU2/18 save/apply/readback; child termination precedes restoration; restoration errors and timeouts fail. Root retains privileged-run approval."},
+    {"location":"sources/preempt-validate-v6.py:27-30","result":"Receipt-backed guard errors are retained and fail global acceptance."}
+  ],
+  "separate_later_obligations": [
+    {"location":"sources/linux-restore-v6.rs:41-57","limit":"Exact GPR/sregs readback is asserted. Several other state classes are set/read/reported without equality to their saved input; successful writable MSRs are not read back. A terminal reference using the same restore path cannot establish complete capture-to-restore equality."},
+    {"location":"sources/preempt-validate-v6.py:4-8","limit":"One userspace owner plus at most one specifically named sleeping NX auxiliary is allowed. This does not mean one total task, prove kernel provenance from name/state alone, or show that the auxiliary never runs."},
+    {"limit":"General guest TF/debug exception, kernel/IRQ transparency, full snapshot completeness, clocks/entropy and cross-host profile acceptance are outside this bounded user-loop review."}
+  ],
+  "cost_review": {
+    "locations":["sources/linux-restore-v6.rs:76-103","sources/preempt-probe-v6.rs:341-403"],
+    "finding":"V6 elapsed includes initial guest execution and landing RAM hashing; Linux omits later debug/event readback, continuation and task inventory. Bare timing also includes host admin work. These are not isolated precise-stop costs.",
+    "required":"Bracket overflow-return through exact validated/debug-off commitment; separate setup/restore, initial run, correction, hashing/readback/inventory and continuation. Report normal and check end-to-end performance separately before applying the performance gate."
+  },
+  "witness_contracts": {
+    "normal": "Preserve execution correctness and complete live world data. Retain scalar boundary kind, CPU/boot identity, count/profile/validity/epoch, RIP/REP identity from required execution reads and application/scenario results. Hash declared coarse committed checkpoints/milestones. No default per-stop RAM/whole-world scan or host inventory.",
+    "determinism_check": "Use identical seed, inputs, time policy and preemption targets. Hash scalar identity, all declared CPU/world/device/control state, guest dirty pages union host DMA/world-written pages at every committed boundary; periodically audit full RAM/state. Cache only guaranteed unchanged stopped CPU state. Correction exits remain diagnostics without extra world charges.",
+    "localization_limit": "An omitted dirty page is first detected at an audit checkpoint; regenerating with finer/full capture is needed to localize the first mutation. No prior execution log is required as an execution input."
+  },
+  "exclusive_cost_accounting": {
+    "buckets":["run window","natural exit/completion handling","precise correction","world/device work","witness work","sampled timing overhead"],
+    "rule":"Attribute each measured host interval once. KVM_RUN includes guest and KVM work and is not pure native CPU. Dirty logging/write-protection overhead inside execution belongs to check-mode total; check-minus-normal includes indirect overhead as well as explicit hash CPU time.",
+    "setup":"Boot/restore/warmup and read-only host inventory/input hashing are separately reported setup. Timing is benchmark instrumentation and never canonical guest/world input or default per-stop observer work."
+  }
+}

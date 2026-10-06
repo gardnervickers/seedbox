@@ -1,0 +1,40 @@
+1791246792.803681 [ 273] set_robust_list(0x7ffff72dc8e0, 24) = 0 <0.000043>
+1791246792.803829 [  14] rt_sigprocmask(SIG_SETMASK, ~[ILL TRAP ABRT BUS FPE KILL SEGV CONT STOP SYS RTMIN RT_1], NULL, 8) = 0 <0.000052>
+1791246792.803974 [  39] getpid()       = 908087 <0.000040>
+1791246792.804102 [   3] close(5<pipe:[58350470]>) = 0 <0.000040>
+1791246792.804211 [   3] close(6<TCP:[127.0.0.1:19410]>) = 0 <0.000052>
+1791246792.804491 [   3] close(7<UNIX-STREAM:[58350477,"/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/pgsocket/.s.PGSQL.19410"]>) = 0 <0.000087>
+1791246792.804707 [  39] getpid()       = 908087 <0.000218>
+1791246792.805009 [  39] getpid()       = 908087 <0.000018>
+1791246792.805085 [ 318] getrandom("\x48\xe0\xd5\xad\xdf\xbf\x02\xdc\x86\x41\x02\x4e\x45\x06\xae\x22\xd6\x5e\x10\x08\x12\x07\xe5\xe1\xc8\xea\x68\x56\xc0\x05\xba\x86", 32, 0) = 32 <0.000052>
+1791246792.805209 [   3] close(3<signalfd:[URG]>) = 0 <0.000061>
+1791246792.805486 [ 289] signalfd4(-1, [URG], 8, SFD_CLOEXEC|SFD_NONBLOCK) = 3<signalfd:[URG]> <0.000030>
+1791246792.805612 [ 291] epoll_create1(EPOLL_CLOEXEC) = 5<anon_inode:[eventpoll]> <0.000215>
+1791246792.805921 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 3<signalfd:[URG]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8878}) = 0 <0.000154>
+1791246792.806177 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 4<pipe:[58350470]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8890}) = 0 <0.000072>
+1791246792.806340 [ 112] setsid()       = 908087 <0.000092>
+1791246792.806529 [  13] rt_sigaction(SIGQUIT, {sa_handler=0x55555611cc30, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000066>
+1791246792.806712 [  14] rt_sigprocmask(SIG_SETMASK, ~[QUIT ILL TRAP ABRT BUS FPE SEGV CONT SYS RTMIN RT_1], NULL, 8) = 0 <0.000077>
+1791246792.806863 [  13] rt_sigaction(SIGPWR, {sa_handler=0x55555611cc30, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000277>
+1791246792.807237 [ 157] prctl(PR_SET_PDEATHSIG, SIGPWR) = 0 <0.000128>
+1791246792.807466 [  72] fcntl(4<pipe:[58350470]>, F_SETFD, FD_CLOEXEC) = 0 <0.000088>
+1791246792.807750 [  13] rt_sigaction(SIGHUP, {sa_handler=0x55555611cc30, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000129>
+1791246792.807993 [  13] rt_sigaction(SIGINT, {sa_handler=0x55555611cc30, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000071>
+1791246792.808189 [  13] rt_sigaction(SIGTERM, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000072>
+1791246792.808367 [  13] rt_sigaction(SIGALRM, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000065>
+1791246792.808494 [  13] rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000072>
+1791246792.808638 [  13] rt_sigaction(SIGUSR1, {sa_handler=0x55555611cc30, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000084>
+1791246792.817230 [  13] rt_sigaction(SIGUSR2, {sa_handler=0x55555611cc30, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000102>
+1791246792.817423 [  14] rt_sigprocmask(SIG_BLOCK, NULL, ~[QUIT ILL TRAP ABRT BUS FPE KILL SEGV CONT STOP SYS RTMIN RT_1], 8) = 0 <0.000071>
+1791246792.817781 [  14] rt_sigprocmask(SIG_SETMASK, [URG], NULL, 8) = 0 <0.000008>
+1791246792.817877 [ 232] epoll_wait(5<anon_inode:[eventpoll]>, [{events=EPOLLIN, data=0x5555561f8878}], 1, -1) = 1 <0.072579>
+1791246792.890522 [   0] read(3<signalfd:[URG]>, "\27\0\0\0\0\0\0\0\0\0\0\0005\333\r\0\350\3\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 1024) = 128 <0.000037>
+1791246792.890617 [ 232] epoll_wait(5<anon_inode:[eventpoll]>, 0x5555561f88a8, 1, -1) = -1 EINTR (Interrupted system call) <4.210045>
+1791246797.100690 [ 232] --- SIGUSR2 {si_signo=SIGUSR2, si_code=SI_USER, si_pid=908081, si_uid=1000} ---
+1791246797.100707 [  39] getpid()       = 908087 <0.000025>
+1791246797.100755 [  62] kill(908087, SIGURG) = 0 <0.000041>
+1791246797.100841 [  15] rt_sigreturn({mask=[URG]}) = -1 EINTR (Interrupted system call) <0.000042>
+1791246797.100937 [  39] getpid()       = 908087 <0.000027>
+1791246797.101009 [  39] getpid()       = 908087 <0.000029>
+1791246797.101521 [ 231] exit_group(0)  = ?
+1791246797.103390 [ 231] +++ exited with 0 +++

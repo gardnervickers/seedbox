@@ -1,0 +1,148 @@
+{
+  "version": 1,
+  "qualification": "off-host source preparation + synthetic/C ABI smoke only",
+  "legacy_handoff": "Retained main.rs, patches, kernel, guest and Nix shell untouched. Existing 1000ns/read runner is historical/W5a bootstrap only; not selected for benchmark time.",
+  "host_pin": {
+    "kernel_release": "6.18.54",
+    "microcode": "0xa20102e",
+    "enforcement": "check_host rejects any mismatch/missing per-CPU microcode; integration must invoke it before opening KVM and after runs. Not run against AMD this round."
+  },
+  "calibration": {
+    "factor": null,
+    "policy": "Per pinned role/profile: native workload CPU ns / matching retired conditional branches. Carry integer remainder; count includes actual guest correction execution and CPL0+CPL3. Repeated import adds zero. Reads/exits/host/debug administration never add time.",
+    "required_inputs": [
+      "native benchmark/app/JDK/kernel/dependency/input identities",
+      "host kernel/microcode/CPU feature profile",
+      "native CPU-time and matching conditional-branch event scopes, multiplex/running-time diagnostics",
+      "guest W5a validated counter event/filter/profile/epoch",
+      "kernel-worker CPU/count coverage or explicitly bounded omission",
+      "calibration evidence and uncertainty by role Redis-primary/replica/JVM-client"
+    ],
+    "limits": [
+      "Native measurement and calibrated factor not produced",
+      "No universal ns/branch fidelity assertion across instruction mixes/JIT/GC/kernel work",
+      "Zero-conditional-branch work cannot advance the clock; require validated bound/progress source, or reject admitted path; host watchdog only aborts infrastructure",
+      "Local counter-derived time does not authorize globally committing progress past another runnable sender"
+    ],
+    "partition_rule": "fractional remainder retained across stops and idle jumps; snapshot it"
+  },
+  "clock_options": [
+    {
+      "name": "passive clock page",
+      "recommendation": "First integration candidate if W5a stop correctness AND budget pass",
+      "abi_bytes": 128,
+      "implemented": "portable page encoder + C read ABI only",
+      "read_cost_ns": 0,
+      "freshness": "constant between qualified semantic stops/idle jumps; maximum staleness is the declared maximum guest progress quantum, not host elapsed time",
+      "progress": "clock-polling conditional branches consume progress; qualified overflow/landing stops permit page publication and due-event delivery. No preemption means frozen page can hang udelay/polling.",
+      "publication": "publish while vCPU stopped, read-only mapping excluded from guest allocation/DMA, even sequence on resume, owner/incarnation/epoch/profile checks",
+      "linux_integration_missing": [
+        "post-mapping custom clocksource .read and sched_clock/get_cycles/udelay coverage",
+        "early boot versus post-boot scoped snapshot bootstrap",
+        "clock-page read-only mapping and writes fail-closed",
+        "vDSO custom page mode or explicitly measured syscall fallback; ordinary TSC/pvclock modes still read TSC",
+        "no replacement kernel/vDSO built or run"
+      ]
+    },
+    {
+      "name": "guest-vPMC interpolation",
+      "recommendation": "Alternative probe, not admitted",
+      "implemented": false,
+      "formula": "page base_ns + floor((guest_vPMC-current_base_count)*native_cpu_ns/native_branches), with declared carry/epoch/wrap handling",
+      "required_proof": [
+        "same conditional-branch event and CPL0+CPL3 scope as W5a host counter",
+        "guest PMC freeze/save/restore and debug-correction behavior",
+        "read permission/isolation for kernel/vDSO and userspace",
+        "runtime counter monotonicity/wraps, epoch changes and clock-page base synchronization",
+        "ordinary guest program cannot reprogram/spoof admitted clock counter"
+      ],
+      "limits": "Live guest reads improve local freshness but never dispatch world events. Exact preemption/event bounds still required."
+    }
+  ],
+  "instruction_and_jvm_admission": {
+    "direct_RDTSC_RDTSCP": "Not admitted by CPUID hiding or by replacing kernel clock_gettime. Must mediate both CPL0/CPL3/direct/JIT sites or explicitly reject that executed profile. Native userspace TSC still passes through current retained msr.h else branch.",
+    "vdso": "Linux6.12 TSC mode and pvclock mode both call rdtsc_ordered; zero pvclock multiplier is not an admitted frequency/progress solution.",
+    "JVM": "Inspected OpenJDK21u Linux os::javaTimeNanos calls clock_gettime(CLOCK_MONOTONIC); this is one source path, not proof that a JDK/native dependency/JIT emits no direct TSC/RNG/CPUID. Pin actual JDK/flags/JIT artifacts/CPU feature table before benchmark.",
+    "realtime": "Pinned epoch/offset separate from monotonic branch-derived clock; Linux offset/drift/jump interventions need declared semantics.",
+    "entropy": "Boot snapshots scope cold boot; they do not reseed CRNG/kernel buffers/Java DRBG/application RNG caches automatically."
+  },
+  "timer_irq_path": {
+    "proposed_kernel": "tickless.config: NO_HZ_IDLE=y,HZ=100 (10ms busy tick),NO_HZ_FULL=n,one-vCPU/PREEMPT_NONE; check resolved olddefconfig, do not merely append requested options",
+    "device": "Owned one-shot clockevent programming/cancellation must replace fixed 4ms PIC tick. For initial no-APIC/PIT profile, decode guest PIT control/reload and honor one-shot next deadline; no in-kernel PIT/irqchip workers.",
+    "implemented": "plain interrupt request/queue/injection records; seeded busy timer target helper; prepared irq-kvm.rs ioctl adapter, not linked/compiled on Linux/executed",
+    "steps": [
+      "Linux programs a timer; save nominal deadline, machine/incarnation/request and world registration",
+      "World selects seed-stream choice; compute exact count target with pinned calibrated ratio; nonzero jitter only when explicitly admitted by timing/fault policy",
+      "Stop through W5a validated mechanism; expose any natural device exits during correction as semantic boundaries",
+      "Finish pending emulated I/O completion-only; import cumulative actual guest count exactly once; publish page and process represented due events",
+      "Queue IRQ and request a legal KVM interrupt window; never force IF or clear genuine TF/debug exceptions",
+      "At KVM ready window with IF set and no STI/MOVSS shadow, call KVM_INTERRUPT; retain request if ioctl fails",
+      "Record requested deadline/count and actual injected count/RIP/time; Linux handles IRQ/tick and schedules normally"
+    ],
+    "seed_sensitivity": "seeded_stop alone does not switch Linux tasks. seeded_timer generates a real queued IRQ target; smoke shows different targets/records only. Linux lost-update/atomic fixture remains later integration.",
+    "correction": "Debugger administration does not advance world/RNG/page publication or boundary numbering; actual guest instructions accumulate for next semantic capture. IRQ-window handling must retain the last completed semantic due request.",
+    "idle": "If all participants blocked, world jumps to earliest represented deadline, publishes clocks and wakes correct VM via legal IRQ; respect ties and other machines. CONFIG_NO_HZ_IDLE does not prove actual device suppression.",
+    "acceptance_vs_handler": "InjectionRecord saves the stopped count/RIP at KVM_INTERRUPT acceptance. It does not prove guest handler entry/EOI; Linux integration must observe those and distinguish queued/accepted/delivered/acknowledged states."
+  },
+  "snapshot_contract": {
+    "priority": [
+      "scoped starting input for W5a first",
+      "pinned post-boot, then post-JVM-warmup inputs for benchmark"
+    ],
+    "implemented": false,
+    "required_state": [
+      "all machine RAM/topology/clock-page bytes and dirty-log epoch",
+      "regs/sregs/FPU/XSAVE/XCRs/debug regs, CPUID, every future-relevant MSR, vCPU events/MP state/pending interrupts and exception/shadow/TF state",
+      "guest PMU and TSC state; logical host counter epoch/base/wraps/config and pending overflow/correction/debug control",
+      "all plain PIC/clockevent/virtio descriptor indices/DMA/completion states, stable ownership/incarnations/requests",
+      "world time/tie registration/RNG streams/fabric/block cache/durable image/scenario control device and immune guest state",
+      "calibrated ratio/carry/native evidence, input and snapshot coverage manifests"
+    ],
+    "host_control": "Recreate kernel-owned perf descriptors from pinned config; rebase logical epoch and prove continuation equality. A host FD or previous execution log is not a portable snapshot state.",
+    "coverage": "Unknown hidden KVM/control state prevents a complete-state claim; narrow W5a snapshot scope remains labeled.",
+    "disk_coherence": "Continuation restores exactly the paired RAM+volatile/durable/device disk image. Do not attach newer surviving disk under a stale pagecache/JVM snapshot. Reboot templates need a clean immutable boot image and proved attach/cache/CRNG reseed protocol.",
+    "seed_policy": "Seed/RNG state captured or explicitly reinitialized by qualified guest/application protocol; changing only host seed does not vary warm guest cached RNG."
+  },
+  "performance": {
+    "measurement_stage": "after W5a, one shared lock; no AMD run now",
+    "target_sim_host_ratio_excluding_boot": 10,
+    "max_busy_slowdown_vs_native": 10,
+    "budgets_requested_not_measured": {
+      "natural_exit_us": 10,
+      "precise_stop_median_us": 100,
+      "wakeup_us": "tens"
+    },
+    "modes": {
+      "normal": "coarse explicit checkpoints plus required boundary/event accounting; no full-state equality claim from omitted hashing",
+      "determinism_check": "W3 full semantic CPU/world/device/dirty-RAM witness with qualified count/landing identity"
+    },
+    "report_fields": [
+      "per-role native CPU utilization",
+      "busy slowdown vs native",
+      "host cost per guest wakeup and native wakeup rate",
+      "host time in native guest execution/natural exits/precise stops/world-device/witness work",
+      "end-to-end sim/host excluding boot and including partition/heal checks",
+      "boot and JVM warmup separately",
+      "actual calibrated ns/branch per pinned profile and witness mode"
+    ]
+  },
+  "sources": [
+    {
+      "url": "https://docs.kernel.org/timers/no_hz.html",
+      "claim": "NO_HZ_IDLE suppresses idle scheduling ticks; one-shot operation still must be verified"
+    },
+    {
+      "url": "https://github.com/torvalds/linux/blob/v6.12/arch/x86/include/asm/vdso/gettimeofday.h",
+      "claim": "vread_pvclock and TSC mode call rdtsc_ordered; source audit of6.12 not runtime acceptance of6.12.112"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/torvalds/linux/v6.12/arch/x86/kernel/kvmclock.c",
+      "claim": "kvmclock routes kernel clock and sched_clock through pvclock and obtains TSC frequency; ordinary pvclock is not a passive no-TSC clock"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/openjdk/jdk21u/master/src/hotspot/os/posix/os_posix.cpp",
+      "claim": "Linux javaTimeNanos uses clock_gettime; moving source branch inspected, benchmark JDK not selected"
+    }
+  ],
+  "blocked_coordination": "Two send_message_to_thread attempts rejected by automatic approval review; retrieved human authority was not accepted as trusted. No alternate outbound message sent. Coordinator can retrieve this chat/files."
+}

@@ -1,0 +1,160 @@
+[
+  {
+    "match": true,
+    "test": "fresh baseline + actual environment perturbation"
+  },
+  {
+    "match": true,
+    "test": "checkpoint cadence does not alter canonical chain"
+  },
+  {
+    "compact_difference": {
+      "boundary": 5,
+      "category": "world",
+      "field": "event/11/completion/incarnation",
+      "left_bytes": null,
+      "left_hash": "35be322d094f9d154a8aba4733b8497f180353bd7ae7b0a15f90b586b549f28b",
+      "right_bytes": null,
+      "right_hash": "f0a0278e4372459cca6159cd5e71cfee638302a7b9ca9b05c34181ac0a65ac5d"
+    },
+    "cpu_ram_equal_at_divergence": true,
+    "detail_difference": {
+      "boundary": 5,
+      "category": "world",
+      "field": "event/11/completion/incarnation",
+      "left_bytes": "0300000000000000",
+      "left_hash": "35be322d094f9d154a8aba4733b8497f180353bd7ae7b0a15f90b586b549f28b",
+      "right_bytes": "0400000000000000",
+      "right_hash": "f0a0278e4372459cca6159cd5e71cfee638302a7b9ca9b05c34181ac0a65ac5d"
+    },
+    "rerun_from_zero": true,
+    "test": "pending"
+  },
+  {
+    "compact_difference": {
+      "boundary": 5,
+      "category": "world",
+      "field": "seed/stream/network/state",
+      "left_bytes": null,
+      "left_hash": "42e715986d3695a1acb9b234c94903942e4d049b3f01b1cdc05488fae6140e43",
+      "right_bytes": null,
+      "right_hash": "b4c2f3c46371bfd95fe69b01988f3cad5c99ffbee1afffb16cb9dc20423a967e"
+    },
+    "cpu_ram_equal_at_divergence": true,
+    "detail_difference": {
+      "boundary": 5,
+      "category": "world",
+      "field": "seed/stream/network/state",
+      "left_bytes": "23187033b4f2178c",
+      "left_hash": "42e715986d3695a1acb9b234c94903942e4d049b3f01b1cdc05488fae6140e43",
+      "right_bytes": "22187033b4f2178c",
+      "right_hash": "b4c2f3c46371bfd95fe69b01988f3cad5c99ffbee1afffb16cb9dc20423a967e"
+    },
+    "rerun_from_zero": true,
+    "test": "rng"
+  },
+  {
+    "compact_difference": {
+      "boundary": 5,
+      "category": "page",
+      "field": "machine/7/boot/3/slot/0/gpa/0000000000001000",
+      "left_bytes": null,
+      "left_hash": "f5a5fd42d16a20302798ef6ed309979b43003d2320d9f0e8ea9831a92759fb4b",
+      "right_bytes": null,
+      "right_hash": "6a6135011906b95dc5d8e9688d810aa2ef3277915b50cc02e93721cb45418644"
+    },
+    "cpu_ram_equal_at_divergence": false,
+    "detail_difference": {
+      "boundary": 5,
+      "category": "page",
+      "field": "machine/7/boot/3/slot/0/gpa/0000000000001000",
+      "left_bytes": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "left_hash": "f5a5fd42d16a20302798ef6ed309979b43003d2320d9f0e8ea9831a92759fb4b",
+      "right_bytes": "00000000000000000000000000000000006300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "right_hash": "6a6135011906b95dc5d8e9688d810aa2ef3277915b50cc02e93721cb45418644"
+    },
+    "rerun_from_zero": true,
+    "test": "page"
+  },
+  {
+    "compact_difference": {
+      "boundary": 5,
+      "category": "register/CPU",
+      "field": "machine/7/boot/3/cpu/0/rax",
+      "left_bytes": null,
+      "left_hash": "dc365e79d41cfae1c3c0d969319ae62165b81b1815a86c32bbc6c64cbdf2311b",
+      "right_bytes": null,
+      "right_hash": "2daa8d4a05dfc643abb44c5d5966430ca30c976e437e0f786de55ffc864b9a98"
+    },
+    "cpu_ram_equal_at_divergence": false,
+    "detail_difference": {
+      "boundary": 5,
+      "category": "register/CPU",
+      "field": "machine/7/boot/3/cpu/0/rax",
+      "left_bytes": "6e6f727468",
+      "left_hash": "dc365e79d41cfae1c3c0d969319ae62165b81b1815a86c32bbc6c64cbdf2311b",
+      "right_bytes": "736f757468",
+      "right_hash": "2daa8d4a05dfc643abb44c5d5966430ca30c976e437e0f786de55ffc864b9a98"
+    },
+    "rerun_from_zero": true,
+    "test": "environment"
+  },
+  {
+    "difference": {
+      "boundary": 5,
+      "category": "register/CPU",
+      "field": "machine/7/boot/3/cpu/0/rax",
+      "left_bytes": null,
+      "left_hash": "66890b83fa645ce4ebd59e1734c7cd1cfc4d2cee7098dd974f9a0b3dee666be4",
+      "right_bytes": null,
+      "right_hash": "bf78ac72f2d5ee696931c668c6dbcdd7f06e94f0990cfec0ecd99978d17ba7fb"
+    },
+    "test": "actual SystemTime clock leak across fresh processes"
+  },
+  {
+    "difference": {
+      "boundary": 6,
+      "category": "world",
+      "field": "event/ties/delivery_order",
+      "left_bytes": "5b31302c392c352c31352c322c31322c302c332c31312c362c382c342c372c31332c312c31345d",
+      "left_hash": "d969375c0dfcf515258c7bcd986e46e7bd2fcf2b3a395d5a4abf2522a8c537bc",
+      "right_bytes": "5b352c382c332c392c31332c312c372c322c31312c31322c31352c302c31302c342c31342c365d",
+      "right_hash": "b5b7fc68f814fcf36ea41eec4615bc32381388a0d16b9e1f13a6c1addb56e760"
+    },
+    "test": "actual randomized HashMap iteration"
+  },
+  {
+    "detected_boundary": 6,
+    "error": "dirty-log omission at checkpoint 6: machine/7/boot/3/slot/0/gpa/0000000000001000",
+    "localization_limit": "first audited checkpoint; must rerun full RAM each boundary to localize",
+    "test": "dirty-log omission audit",
+    "true_mutation_boundary": 5
+  },
+  {
+    "detected_boundary": 5,
+    "error": "dirty-log omission at checkpoint 5: machine/7/boot/3/slot/0/gpa/0000000000001000",
+    "test": "dirty-log omission full-every-boundary"
+  },
+  {
+    "detailed_difference": {
+      "boundary": 5,
+      "category": "world",
+      "field": "event/11/completion/incarnation",
+      "left_bytes": "0300000000000000",
+      "left_hash": "35be322d094f9d154a8aba4733b8497f180353bd7ae7b0a15f90b586b549f28b",
+      "right_bytes": "0400000000000000",
+      "right_hash": "f0a0278e4372459cca6159cd5e71cfee638302a7b9ca9b05c34181ac0a65ac5d"
+    },
+    "first_difference": {
+      "boundary": 5,
+      "category": "world",
+      "field": "event/11/completion/incarnation",
+      "left_bytes": null,
+      "left_hash": "35be322d094f9d154a8aba4733b8497f180353bd7ae7b0a15f90b586b549f28b",
+      "right_bytes": null,
+      "right_hash": "f0a0278e4372459cca6159cd5e71cfee638302a7b9ca9b05c34181ac0a65ac5d"
+    },
+    "rerun_reproduced_original_chains": true,
+    "test": "public automatic investigate API with fresh subprocesses"
+  }
+]

@@ -8,3 +8,15 @@
 /result
 /target/
 target/
+.DS_Store
+**/target/
+**/.direnv/
+**/.seedbox/
+**/__pycache__/
+research/runs/
+research/measurement.lock
+research/kvm-runner/linux-source/
+research/kvm-runner/kernel-out/
+research/kvm-runner/redis-*/
+research/kvm-runner/*-root/
+research/kvm-runner/redis.tar.gz

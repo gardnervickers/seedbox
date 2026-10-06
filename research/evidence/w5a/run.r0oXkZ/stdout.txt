@@ -1,0 +1,318 @@
+{
+  "input_file": "/private/tmp/seedbox-round-1.S74xJ4/evidence/w5a/run.SvZhsV/stdout.txt",
+  "rows": 281,
+  "groups": [
+    {
+      "mode": "branch",
+      "cpl_filter": "both",
+      "event": 209,
+      "initial": 0,
+      "admin_iterations": 0,
+      "guest_iterations": 10000,
+      "fresh_runs": 20,
+      "count_distribution": {
+        "10000": 20
+      },
+      "guest_results": [
+        70000
+      ],
+      "admin_counter_unchanged": true,
+      "configuration_readback_matches": true,
+      "native_speclockmap_counts": [
+        0,
+        1
+      ]
+    },
+    {
+      "mode": "branch",
+      "cpl_filter": "both",
+      "event": 209,
+      "initial": 0,
+      "admin_iterations": 1000000,
+      "guest_iterations": 10000,
+      "fresh_runs": 20,
+      "count_distribution": {
+        "10000": 20
+      },
+      "guest_results": [
+        70000
+      ],
+      "admin_counter_unchanged": true,
+      "configuration_readback_matches": true,
+      "native_speclockmap_counts": [
+        0,
+        1
+      ]
+    },
+    {
+      "mode": "branch",
+      "cpl_filter": "both",
+      "event": 209,
+      "initial": 0,
+      "admin_iterations": 0,
+      "guest_iterations": 10000000,
+      "fresh_runs": 20,
+      "count_distribution": {
+        "10000000": 20
+      },
+      "guest_results": [
+        70000000
+      ],
+      "admin_counter_unchanged": true,
+      "configuration_readback_matches": true,
+      "native_speclockmap_counts": [
+        0,
+        1
+      ]
+    },
+    {
+      "mode": "lock",
+      "cpl_filter": "both",
+      "event": 209,
+      "initial": 0,
+      "admin_iterations": 0,
+      "guest_iterations": 1000000,
+      "fresh_runs": 20,
+      "count_distribution": {
+        "1000000": 20
+      },
+      "guest_results": [
+        1000000
+      ],
+      "admin_counter_unchanged": true,
+      "configuration_readback_matches": true,
+      "native_speclockmap_counts": [
+        0,
+        1
+      ]
+    },
+    {
+      "mode": "extra",
+      "cpl_filter": "both",
+      "event": 209,
+      "initial": 0,
+      "admin_iterations": 0,
+      "guest_iterations": 10000,
+      "fresh_runs": 20,
+      "count_distribution": {
+        "20000": 20
+      },
+      "guest_results": [
+        70000
+      ],
+      "admin_counter_unchanged": true,
+      "configuration_readback_matches": true,
+      "native_speclockmap_counts": [
+        0,
+        1
+      ]
+    },
+    {
+      "mode": "nonbranch",
+      "cpl_filter": "both",
+      "event": 209,
+      "initial": 0,
+      "admin_iterations": 0,
+      "guest_iterations": 10000,
+      "fresh_runs": 20,
+      "count_distribution": {
+        "0": 20
+      },
+      "guest_results": [
+        350000
+      ],
+      "admin_counter_unchanged": true,
+      "configuration_readback_matches": true,
+      "native_speclockmap_counts": [
+        0,
+        1
+      ]
+    },
+    {
+      "mode": "branch",
+      "cpl_filter": "user",
+      "event": 209,
+      "initial": 0,
+      "admin_iterations": 0,
+      "guest_iterations": 10000,
+      "fresh_runs": 20,
+      "count_distribution": {
+        "0": 20
+      },
+      "guest_results": [
+        70000
+      ],
+      "admin_counter_unchanged": true,
+      "configuration_readback_matches": true,
+      "native_speclockmap_counts": [
+        0,
+        1
+      ]
+    },
+    {
+      "mode": "branch",
+      "cpl_filter": "kernel",
+      "event": 209,
+      "initial": 0,
+      "admin_iterations": 0,
+      "guest_iterations": 10000,
+      "fresh_runs": 20,
+      "count_distribution": {
+        "10000": 20
+      },
+      "guest_results": [
+        70000
+      ],
+      "admin_counter_unchanged": true,
+      "configuration_readback_matches": true,
+      "native_speclockmap_counts": [
+        0,
+        1
+      ]
+    },
+    {
+      "mode": "user",
+      "cpl_filter": "both",
+      "event": 209,
+      "initial": 0,
+      "admin_iterations": 0,
+      "guest_iterations": 10000,
+      "fresh_runs": 20,
+      "count_distribution": {
+        "10000": 20
+      },
+      "guest_results": [
+        70000
+      ],
+      "admin_counter_unchanged": true,
+      "configuration_readback_matches": true,
+      "native_speclockmap_counts": [
+        0,
+        1
+      ]
+    },
+    {
+      "mode": "user",
+      "cpl_filter": "user",
+      "event": 209,
+      "initial": 0,
+      "admin_iterations": 0,
+      "guest_iterations": 10000,
+      "fresh_runs": 20,
+      "count_distribution": {
+        "10000": 20
+      },
+      "guest_results": [
+        70000
+      ],
+      "admin_counter_unchanged": true,
+      "configuration_readback_matches": true,
+      "native_speclockmap_counts": [
+        0,
+        1
+      ]
+    },
+    {
+      "mode": "user",
+      "cpl_filter": "kernel",
+      "event": 209,
+      "initial": 0,
+      "admin_iterations": 0,
+      "guest_iterations": 10000,
+      "fresh_runs": 20,
+      "count_distribution": {
+        "0": 20
+      },
+      "guest_results": [
+        70000
+      ],
+      "admin_counter_unchanged": true,
+      "configuration_readback_matches": true,
+      "native_speclockmap_counts": [
+        0,
+        1
+      ]
+    },
+    {
+      "mode": "lock",
+      "cpl_filter": "both",
+      "event": 209,
+      "initial": 0,
+      "admin_iterations": 0,
+      "guest_iterations": 10000,
+      "fresh_runs": 20,
+      "count_distribution": {
+        "10000": 20
+      },
+      "guest_results": [
+        10000
+      ],
+      "admin_counter_unchanged": true,
+      "configuration_readback_matches": true,
+      "native_speclockmap_counts": [
+        0,
+        1
+      ]
+    },
+    {
+      "mode": "lock",
+      "cpl_filter": "both",
+      "event": 2085,
+      "initial": 0,
+      "admin_iterations": 0,
+      "guest_iterations": 10000,
+      "fresh_runs": 20,
+      "count_distribution": {
+        "1327": 1,
+        "1291": 1,
+        "1356": 1,
+        "1309": 1,
+        "1314": 1,
+        "1390": 1,
+        "1294": 1,
+        "1323": 1,
+        "1364": 1,
+        "1292": 1,
+        "1278": 2,
+        "1310": 1,
+        "1350": 1,
+        "1313": 1,
+        "1315": 1,
+        "1321": 1,
+        "1295": 1,
+        "1325": 1,
+        "1353": 1
+      },
+      "guest_results": [
+        10000
+      ],
+      "admin_counter_unchanged": true,
+      "configuration_readback_matches": true,
+      "native_speclockmap_counts": [
+        0,
+        1
+      ]
+    },
+    {
+      "mode": "branch",
+      "cpl_filter": "both",
+      "event": 209,
+      "initial": 281474976710156,
+      "admin_iterations": 0,
+      "guest_iterations": 10000,
+      "fresh_runs": 20,
+      "count_distribution": {
+        "10000": 20
+      },
+      "guest_results": [
+        70000
+      ],
+      "admin_counter_unchanged": true,
+      "configuration_readback_matches": true,
+      "native_speclockmap_counts": [
+        0,
+        1
+      ]
+    }
+  ]
+}

@@ -1,0 +1,688 @@
+1791246798.329443 [  59] execve("/tmp/seedbox-round-1.S74xJ4/workloads/tokio-service/target/release/seedbox-w4-tokio-service", ["/tmp/seedbox-round-1.S74xJ4/workloads/tokio-service/target/release/seedbox-w4-tokio-service", "multi"], ["PATH=/nix/store/hr3npzrq9l029s5hf948by203m6qz3lw-rustc-wrapper-1.98.1/bin:/nix/store/gmgfpzc0w2pgby0lmq9r88m39albiyfw-cargo-1.98.1/bin:/nix/store/9a9y1zij83al5wqvdhx7lrs9b8cqv688-rustfmt-1.98.1/bin:/nix/store/6gm66glch86pxdpmbrn6qrg9m1jyj2vm-clippy-1.98.1/"..., "HOME=/home/gvickers", "LANG=en_US.UTF-8", "TMPDIR=/tmp/nix-shell.IehQor"]) = 0 <0.000136>
+1791246798.329659 [ 262] newfstatat(AT_FDCWD</home/gvickers>, "/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/etc/ld.so.cache", 0x7fffffffc400, 0) = -1 ENOENT (No such file or directory) <0.000009>
+1791246798.329773 [  12] brk(NULL)      = 0x555555600000 <0.000006>
+1791246798.329815 [   9] mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7ffff7fb6000 <0.000013>
+1791246798.329863 [  21] access("/etc/ld-nix.so.preload", R_OK) = -1 ENOENT (No such file or directory) <0.000011>
+1791246798.329902 [ 257] openat(AT_FDCWD</home/gvickers>, "/home/gvickers/outputs/out/lib/glibc-hwcaps/x86-64-v3/libgcc_s.so.1", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory) <0.000009>
+1791246798.329937 [ 262] newfstatat(AT_FDCWD</home/gvickers>, "/home/gvickers/outputs/out/lib/glibc-hwcaps/x86-64-v3/", 0x7fffffffc7a0, 0) = -1 ENOENT (No such file or directory) <0.000007>
+1791246798.329970 [ 257] openat(AT_FDCWD</home/gvickers>, "/home/gvickers/outputs/out/lib/glibc-hwcaps/x86-64-v2/libgcc_s.so.1", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory) <0.000012>
+1791246798.330015 [ 262] newfstatat(AT_FDCWD</home/gvickers>, "/home/gvickers/outputs/out/lib/glibc-hwcaps/x86-64-v2/", 0x7fffffffc7a0, 0) = -1 ENOENT (No such file or directory) <0.000007>
+1791246798.330046 [ 257] openat(AT_FDCWD</home/gvickers>, "/home/gvickers/outputs/out/lib/libgcc_s.so.1", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory) <0.000014>
+1791246798.330085 [ 262] newfstatat(AT_FDCWD</home/gvickers>, "/home/gvickers/outputs/out/lib/", 0x7fffffffc7a0, 0) = -1 ENOENT (No such file or directory) <0.000007>
+1791246798.330114 [ 257] openat(AT_FDCWD</home/gvickers>, "/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/glibc-hwcaps/x86-64-v3/libgcc_s.so.1", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory) <0.000007>
+1791246798.330142 [ 262] newfstatat(AT_FDCWD</home/gvickers>, "/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/glibc-hwcaps/x86-64-v3/", 0x7fffffffc7a0, 0) = -1 ENOENT (No such file or directory) <0.000007>
+1791246798.330169 [ 257] openat(AT_FDCWD</home/gvickers>, "/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/glibc-hwcaps/x86-64-v2/libgcc_s.so.1", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory) <0.000007>
+1791246798.330197 [ 262] newfstatat(AT_FDCWD</home/gvickers>, "/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/glibc-hwcaps/x86-64-v2/", 0x7fffffffc7a0, 0) = -1 ENOENT (No such file or directory) <0.000006>
+1791246798.330224 [ 257] openat(AT_FDCWD</home/gvickers>, "/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libgcc_s.so.1", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory) <0.000007>
+1791246798.330251 [ 262] newfstatat(AT_FDCWD</home/gvickers>, "/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/", {st_dev=makedev(0x103, 0x6), st_ino=59656627, st_mode=S_IFDIR|0555, st_nlink=5, st_uid=0, st_gid=0, st_blksize=4096, st_blocks=8, st_size=4096, st_atime=1791220767 /* 2026-10-05T13:19:27.838610241-0400 */, st_atime_nsec=838610241, st_mtime=1 /* 1969-12-31T19:00:01-0500 */, st_mtime_nsec=0, st_ctime=1791220767 /* 2026-10-05T13:19:27.837729062-0400 */, st_ctime_nsec=837729062}, 0) = 0 <0.000007>
+1791246798.330295 [ 257] openat(AT_FDCWD</home/gvickers>, "/nix/store/j7qx4s4mr17j1wqgvqdzj33lmrnzb387-gcc-16.2.0-lib/lib/glibc-hwcaps/x86-64-v3/libgcc_s.so.1", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory) <0.000009>
+1791246798.330330 [ 262] newfstatat(AT_FDCWD</home/gvickers>, "/nix/store/j7qx4s4mr17j1wqgvqdzj33lmrnzb387-gcc-16.2.0-lib/lib/glibc-hwcaps/x86-64-v3/", 0x7fffffffc7a0, 0) = -1 ENOENT (No such file or directory) <0.000007>
+1791246798.330359 [ 257] openat(AT_FDCWD</home/gvickers>, "/nix/store/j7qx4s4mr17j1wqgvqdzj33lmrnzb387-gcc-16.2.0-lib/lib/glibc-hwcaps/x86-64-v2/libgcc_s.so.1", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory) <0.000007>
+1791246798.330387 [ 262] newfstatat(AT_FDCWD</home/gvickers>, "/nix/store/j7qx4s4mr17j1wqgvqdzj33lmrnzb387-gcc-16.2.0-lib/lib/glibc-hwcaps/x86-64-v2/", 0x7fffffffc7a0, 0) = -1 ENOENT (No such file or directory) <0.000007>
+1791246798.330415 [ 257] openat(AT_FDCWD</home/gvickers>, "/nix/store/j7qx4s4mr17j1wqgvqdzj33lmrnzb387-gcc-16.2.0-lib/lib/libgcc_s.so.1", O_RDONLY|O_CLOEXEC) = 3</nix/store/q2mkz6ca1alqfqf750dygvakmq8kjrwz-gcc-16.2.0-libgcc/lib/libgcc_s.so.1> <0.000013>
+1791246798.330458 [   0] read(3</nix/store/q2mkz6ca1alqfqf750dygvakmq8kjrwz-gcc-16.2.0-libgcc/lib/libgcc_s.so.1>, "\177ELF\2\1\1\0\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0\0\0\0\0\0\0\0\0@\0\0\0\0\0\0\0\230\v\3\0\0\0\0\0\0\0\0\0@\08\0\v\0@\0\37\0\36\0\1\0\0\0\4\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\250<\0\0\0\0\0\0\250<\0\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\5\0\0\0\0@\0\0\0\0\0\0\0@\0\0\0\0\0\0\0@\0\0\0\0\0\0\2455\2\0\0\0\0\0\2455\2\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\4\0\0\0\0\200\2\0\0\0\0\0\0\200\2\0\0\0\0\0\0\200\2\0\0\0\0\0 =\0\0\0\0\0\0 =\0\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\6\0\0\0\220\313\2\0\0\0\0\0\220\313\2\0\0\0\0\0"..., 1024) = 1024 <0.000007>
+1791246798.330490 [   5] fstat(3</nix/store/q2mkz6ca1alqfqf750dygvakmq8kjrwz-gcc-16.2.0-libgcc/lib/libgcc_s.so.1>, {st_dev=makedev(0x103, 0x6), st_ino=59148669, st_mode=S_IFREG|0444, st_nlink=1, st_uid=0, st_gid=0, st_blksize=4096, st_blocks=400, st_size=201560, st_atime=1791220935 /* 2026-10-05T13:22:15.852341741-0400 */, st_atime_nsec=852341741, st_mtime=1 /* 1969-12-31T19:00:01-0500 */, st_mtime_nsec=0, st_ctime=1791220767 /* 2026-10-05T13:19:27.432974884-0400 */, st_ctime_nsec=432974884}) = 0 <0.000007>
+1791246798.330532 [   9] mmap(NULL, 184808, PROT_READ, MAP_PRIVATE|MAP_DENYWRITE, 3</nix/store/q2mkz6ca1alqfqf750dygvakmq8kjrwz-gcc-16.2.0-libgcc/lib/libgcc_s.so.1>, 0) = 0x7ffff7f88000 <0.000010>
+1791246798.330563 [   9] mmap(0x7ffff7f8c000, 147456, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3</nix/store/q2mkz6ca1alqfqf750dygvakmq8kjrwz-gcc-16.2.0-libgcc/lib/libgcc_s.so.1>, 0x4000) = 0x7ffff7f8c000 <0.000012>
+1791246798.330598 [   9] mmap(0x7ffff7fb0000, 16384, PROT_READ, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3</nix/store/q2mkz6ca1alqfqf750dygvakmq8kjrwz-gcc-16.2.0-libgcc/lib/libgcc_s.so.1>, 0x28000) = 0x7ffff7fb0000 <0.000010>
+1791246798.330631 [   9] mmap(0x7ffff7fb4000, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3</nix/store/q2mkz6ca1alqfqf750dygvakmq8kjrwz-gcc-16.2.0-libgcc/lib/libgcc_s.so.1>, 0x2c000) = 0x7ffff7fb4000 <0.000010>
+1791246798.330673 [   3] close(3</nix/store/q2mkz6ca1alqfqf750dygvakmq8kjrwz-gcc-16.2.0-libgcc/lib/libgcc_s.so.1>) = 0 <0.000007>
+1791246798.330704 [ 257] openat(AT_FDCWD</home/gvickers>, "/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libm.so.6", O_RDONLY|O_CLOEXEC) = 3</nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libm.so.6> <0.000009>
+1791246798.330740 [   0] read(3</nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libm.so.6>, "\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0\0\0\0\0\0\0\0\0@\0\0\0\0\0\0\0`\214\23\0\0\0\0\0\0\0\0\0@\08\0\f\0@\0!\0 \0\1\0\0\0\4\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\08\27\1\0\0\0\0\08\27\1\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\5\0\0\0\0 \1\0\0\0\0\0\0 \1\0\0\0\0\0\0 \1\0\0\0\0\0\371i\t\0\0\0\0\0\371i\t\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\4\0\0\0\0\220\n\0\0\0\0\0\0\220\n\0\0\0\0\0\0\220\n\0\0\0\0\0\270P\7\0\0\0\0\0\270P\7\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\6\0\0\0\210\353\21\0\0\0\0\0\210\373\21\0\0\0\0\0"..., 1024) = 1024 <0.000007>
+1791246798.330772 [   5] fstat(3</nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libm.so.6>, {st_dev=makedev(0x103, 0x6), st_ino=59657079, st_mode=S_IFREG|0555, st_nlink=1, st_uid=0, st_gid=0, st_blksize=4096, st_blocks=2512, st_size=1283232, st_atime=1791220771 /* 2026-10-05T13:19:31.580787682-0400 */, st_atime_nsec=580787682, st_mtime=1 /* 1969-12-31T19:00:01-0500 */, st_mtime_nsec=0, st_ctime=1791220767 /* 2026-10-05T13:19:27.840729109-0400 */, st_ctime_nsec=840729109}) = 0 <0.000007>
+1791246798.330818 [   9] mmap(NULL, 1179672, PROT_READ, MAP_PRIVATE|MAP_DENYWRITE, 3</nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libm.so.6>, 0) = 0x7ffff7e67000 <0.000009>
+1791246798.330849 [   9] mmap(0x7ffff7e79000, 618496, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3</nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libm.so.6>, 0x12000) = 0x7ffff7e79000 <0.000014>
+1791246798.330885 [   9] mmap(0x7ffff7f10000, 483328, PROT_READ, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3</nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libm.so.6>, 0xa9000) = 0x7ffff7f10000 <0.000010>
+1791246798.330918 [   9] mmap(0x7ffff7f86000, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3</nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libm.so.6>, 0x11e000) = 0x7ffff7f86000 <0.000010>
+1791246798.330960 [   3] close(3</nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libm.so.6>) = 0 <0.000007>
+1791246798.330993 [ 257] openat(AT_FDCWD</home/gvickers>, "/nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6", O_RDONLY|O_CLOEXEC) = 3</nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6> <0.000008>
+1791246798.331028 [   0] read(3</nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6>, "\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0\260\265\2\0\0\0\0\0@\0\0\0\0\0\0\0\0\242%\0\0\0\0\0\0\0\0\0@\08\0\17\0@\0@\0?\0\6\0\0\0\4\0\0\0@\0\0\0\0\0\0\0@\0\0\0\0\0\0\0@\0\0\0\0\0\0\0H\3\0\0\0\0\0\0H\3\0\0\0\0\0\0\10\0\0\0\0\0\0\0\3\0\0\0\4\0\0\0`\200\35\0\0\0\0\0`\200\35\0\0\0\0\0`\200\35\0\0\0\0\0S\0\0\0\0\0\0\0S\0\0\0\0\0\0\0 \0\0\0\0\0\0\0\1\0\0\0\4\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\300z\2\0\0\0\0\0\300z\2\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\5\0\0\0\0\200\2\0\0\0\0\0\0\200\2\0\0\0\0\0"..., 1024) = 1024 <0.000007>
+1791246798.331059 [   5] fstat(3</nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6>, {st_dev=makedev(0x103, 0x6), st_ino=59657059, st_mode=S_IFREG|0555, st_nlink=1, st_uid=0, st_gid=0, st_blksize=4096, st_blocks=4832, st_size=2470400, st_atime=1791220771 /* 2026-10-05T13:19:31.480786117-0400 */, st_atime_nsec=480786117, st_mtime=1 /* 1969-12-31T19:00:01-0500 */, st_mtime_nsec=0, st_ctime=1791220767 /* 2026-10-05T13:19:27.840729109-0400 */, st_ctime_nsec=840729109}) = 0 <0.000009>
+1791246798.331125 [   9] mmap(NULL, 2198896, PROT_READ, MAP_PRIVATE|MAP_DENYWRITE, 3</nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6>, 0) = 0x7ffff7c00000 <0.000010>
+1791246798.331159 [   9] mmap(0x7ffff7c28000, 1613824, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3</nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6>, 0x28000) = 0x7ffff7c28000 <0.000012>
+1791246798.331193 [   9] mmap(0x7ffff7db2000, 344064, PROT_READ, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3</nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6>, 0x1b2000) = 0x7ffff7db2000 <0.000010>
+1791246798.331226 [   9] mmap(0x7ffff7e06000, 24576, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3</nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6>, 0x205000) = 0x7ffff7e06000 <0.000012>
+1791246798.331264 [   9] mmap(0x7ffff7e0c000, 52592, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x7ffff7e0c000 <0.000009>
+1791246798.331300 [   3] close(3</nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6>) = 0 <0.000007>
+1791246798.331337 [   9] mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7ffff7e65000 <0.000009>
+1791246798.331370 [ 158] arch_prctl(ARCH_SET_FS, 0x7ffff7e66200) = 0 <0.000006>
+1791246798.331398 [ 218] set_tid_address(0x7ffff7e66828) = 908393 <0.000006>
+1791246798.331421 [ 273] set_robust_list(0x7ffff7e664e0, 24) = 0 <0.000006>
+1791246798.331444 [ 334] rseq({cpu_id_start=0, cpu_id=RSEQ_CPU_ID_UNINITIALIZED, rseq_cs=NULL, flags=0, node_id=0, mm_cid=0, slice_ctrl={request=0, granted=0, __reserved=0}, __reserved=0}, 32, 0, 0x53053053) = 0 <0.000006>
+1791246798.331472 [ 318] getrandom("\xee\x65\x71\xb6\xc7\x70\x34\xe0\xe7\x85\x34\x06\x16\x9d\x03\x7a", 16, GRND_NONBLOCK) = 16 <0.000007>
+1791246798.331529 [  10] mprotect(0x7ffff7e06000, 16384, PROT_READ) = 0 <0.000010>
+1791246798.331575 [  10] mprotect(0x7ffff7f86000, 4096, PROT_READ) = 0 <0.000008>
+1791246798.331612 [  10] mprotect(0x7ffff7fb4000, 4096, PROT_READ) = 0 <0.000008>
+1791246798.331667 [  10] mprotect(0x5555555f9000, 24576, PROT_READ) = 0 <0.000009>
+1791246798.331696 [  10] mprotect(0x7ffff7ffb000, 8192, PROT_READ) = 0 <0.000010>
+1791246798.331731 [ 302] prlimit64(0, RLIMIT_STACK, NULL, {rlim_cur=8192*1024, rlim_max=RLIM64_INFINITY}) = 0 <0.000006>
+1791246798.331769 [ 318] getrandom("\xd3\x66\xe6\x1c\xd3\x44\x66\x4b", 8, GRND_NONBLOCK) = 8 <0.000006>
+1791246798.331815 [   7] poll([{fd=0<pipe:[58310944]>, events=0}, {fd=1</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/tokio-multi.stdout>, events=0}, {fd=2</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/tokio-multi.stderr>, events=0}], 3, 0) = 1 ([{fd=0, revents=POLLHUP}]) <0.000007>
+1791246798.331865 [  13] rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[PIPE], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff7c429f0}, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246798.331902 [  12] brk(NULL)      = 0x555555600000 <0.000006>
+1791246798.331925 [  12] brk(0x555555621000) = 0x555555621000 <0.000008>
+1791246798.331954 [ 257] openat(AT_FDCWD</home/gvickers>, "/proc/self/maps", O_RDONLY|O_CLOEXEC) = 3</proc/908393/maps> <0.000013>
+1791246798.331994 [ 302] prlimit64(0, RLIMIT_STACK, NULL, {rlim_cur=8192*1024, rlim_max=RLIM64_INFINITY}) = 0 <0.000006>
+1791246798.332023 [   5] fstat(3</proc/908393/maps>, {st_dev=makedev(0, 0x22), st_ino=58354813, st_mode=S_IFREG|0444, st_nlink=1, st_uid=1000, st_gid=100, st_blksize=1024, st_blocks=0, st_size=0, st_atime=1791246798 /* 2026-10-05T20:33:18.330828877-0400 */, st_atime_nsec=330828877, st_mtime=1791246798 /* 2026-10-05T20:33:18.330828877-0400 */, st_mtime_nsec=330828877, st_ctime=1791246798 /* 2026-10-05T20:33:18.330828877-0400 */, st_ctime_nsec=330828877}) = 0 <0.000006>
+1791246798.332071 [   0] read(3</proc/908393/maps>, "555555554000-55555555e000 r--p 00000000 103:06 13933360                  /tmp/seedbox-round-1.S74xJ4/workloads/tokio-service/target/release/seedbox-w4-tokio-service\n55555555e000-5555555d4000 r-xp 0000a000 103:06 13933360                  /tmp/seedbox-round"..., 1024) = 1024 <0.000016>
+1791246798.332120 [   0] read(3</proc/908393/maps>, "ibc-2.44-25/lib/libc.so.6\n7ffff7c28000-7ffff7db2000 r-xp 00028000 103:06 59657059                  /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libc.so.6\n7ffff7db2000-7ffff7e06000 r--p 001b2000 103:06 59657059                  /nix/store/h"..., 1024) = 1024 <0.000013>
+1791246798.332165 [   0] read(3</proc/908393/maps>, " 000a9000 103:06 59657079                  /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libm.so.6\n7ffff7f86000-7ffff7f87000 r--p 0011e000 103:06 59657079                  /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/libm.s"..., 1024) = 1024 <0.000013>
+1791246798.332204 [   0] read(3</proc/908393/maps>, "b5000-7ffff7fb6000 rw-p 0002d000 103:06 59148669                  /nix/store/q2mkz6ca1alqfqf750dygvakmq8kjrwz-gcc-16.2.0-libgcc/lib/libgcc_s.so.1\n7ffff7fb6000-7ffff7fb8000 rw-p 00000000 00:00 0 \n7ffff7fb8000-7ffff7fbc000 r--p 00000000 00:00 0              "..., 1024) = 1024 <0.000012>
+1791246798.332241 [   0] read(3</proc/908393/maps>, "ry-glibc-2.44-25/lib/ld-linux-x86-64.so.2\n7ffff7ffd000-7ffff7ffe000 rw-p 0003c000 103:06 59657049                  /nix/store/h4wfwic161kxrr74jlzla5lsm28hgary-glibc-2.44-25/lib/ld-linux-x86-64.so.2\n7ffff7ffe000-7ffff7fff000 rw-p 00000000 00:00 0 \n7ffffffdd"..., 1024) = 412 <0.000009>
+1791246798.332278 [   8] lseek(3</proc/908393/maps>, 0, SEEK_CUR) = 4508 <0.000006>
+1791246798.332306 [   8] lseek(3</proc/908393/maps>, 4424, SEEK_SET) = 4424 <0.000030>
+1791246798.332357 [   3] close(3</proc/908393/maps>) = 0 <0.000008>
+1791246798.332386 [ 204] sched_getaffinity(908393, 32, [0]) = 8 <0.000006>
+1791246798.332415 [  13] rt_sigaction(SIGSEGV, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246798.332441 [ 131] sigaltstack(NULL, {ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0 <0.000006>
+1791246798.332466 [   9] mmap(NULL, 12288, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_STACK, -1, 0) = 0x7ffff7e62000 <0.000009>
+1791246798.332493 [  10] mprotect(0x7ffff7e62000, 4096, PROT_NONE) = 0 <0.000010>
+1791246798.332520 [ 131] sigaltstack({ss_sp=0x7ffff7e63000, ss_flags=0, ss_size=8192}, NULL) = 0 <0.000006>
+1791246798.332545 [ 186] gettid()       = 908393 <0.000006>
+1791246798.332568 [  13] rt_sigaction(SIGSEGV, {sa_handler=0x5555555a5670, sa_mask=[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_SIGINFO, sa_restorer=0x7ffff7c429f0}, NULL, 8) = 0 <0.000006>
+1791246798.332593 [  13] rt_sigaction(SIGBUS, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246798.332618 [  13] rt_sigaction(SIGBUS, {sa_handler=0x5555555a5670, sa_mask=[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_SIGINFO, sa_restorer=0x7ffff7c429f0}, NULL, 8) = 0 <0.000006>
+1791246798.332650 [  14] rt_sigprocmask(SIG_BLOCK, ~[], [], 8) = 0 <0.000006>
+1791246798.332678 [   9] mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_DROPPABLE|MAP_ANONYMOUS, -1, 0) = 0x7ffff7e61000 <0.000009>
+1791246798.332705 [   9] mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7ffff7e60000 <0.000008>
+1791246798.332733 [  14] rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0 <0.000006>
+1791246798.332765 [ 318] getrandom("\x69\xde\x66\x92\x73\xff\x15\xde\x80\x65\x56\x36\x86\x52\x1a\xdc\xe8\xe8\xa0\xa7\xc4\xe3\x85\x1b\xf4\xb0\x76\xda\xd2\x60\x69\x79", 32, 0) = 32 <0.000006>
+1791246798.332794 [ 291] epoll_create1(EPOLL_CLOEXEC) = 3<anon_inode:[eventpoll]> <0.000009>
+1791246798.332823 [ 290] eventfd2(0, EFD_CLOEXEC|EFD_NONBLOCK) = 4<{eventfd-count=0, eventfd-id=9, eventfd-semaphore=0}> <0.000008>
+1791246798.332868 [ 233] epoll_ctl(3<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 4<{eventfd-count=0, eventfd-id=9, eventfd-semaphore=0}>, {events=EPOLLIN|EPOLLRDHUP|EPOLLET, data=0}) = 0 <0.000008>
+1791246798.332910 [  72] fcntl(3<anon_inode:[eventpoll]>, F_DUPFD_CLOEXEC, 3) = 5<anon_inode:[eventpoll]> <0.000007>
+1791246798.332962 [  13] rt_sigaction(SIGRT_1, {sa_handler=0x7ffff7c9cae0, sa_mask=[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x7ffff7c429f0}, NULL, 8) = 0 <0.000006>
+1791246798.332990 [  14] rt_sigprocmask(SIG_UNBLOCK, [RTMIN RT_1], NULL, 8) = 0 <0.000006>
+1791246798.333015 [   9] mmap(NULL, 2101248, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_STACK, -1, 0) = 0x7ffff79ff000 <0.000009>
+1791246798.333041 [  28] madvise(0x7ffff79ff000, 4096, MADV_GUARD_INSTALL) = 0 <0.000011>
+1791246798.333080 [  14] rt_sigprocmask(SIG_BLOCK, ~[], [], 8) = 0 <0.000007>
+1791246798.333110 [ 435] clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7ffff7bffce8, parent_tid=0x7ffff7bff990, exit_signal=0, stack=0x7ffff79ff000, stack_size=0x1ffec0, tls=0x7ffff7bff6c0} => {parent_tid=[908394]}, 88) = 908394 <0.000059>
+1791246798.333225 [  14] rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0 <0.000019>
+1791246798.333294 [   9] mmap(NULL, 2101248, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_STACK, -1, 0) = 0x7ffff77fe000 <0.000015>
+1791246798.333340 [  28] madvise(0x7ffff77fe000, 4096, MADV_GUARD_INSTALL) = 0 <0.000023>
+1791246798.333405 [  14] rt_sigprocmask(SIG_BLOCK, ~[], [], 8) = 0 <0.000010>
+1791246798.333441 [ 435] clone3({flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, child_tid=0x7ffff79fece8, parent_tid=0x7ffff79fe990, exit_signal=0, stack=0x7ffff77fe000, stack_size=0x1ffec0, tls=0x7ffff79fe6c0} => {parent_tid=[908395]}, 88) = 908395 <0.000092>
+1791246798.333605 [  14] rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0 <0.000019>
+1791246798.333675 [  41] socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, IPPROTO_IP) = 6<TCP:[58354818]> <0.000023>
+1791246798.342045 [  54] setsockopt(6<TCP:[58354818]>, SOL_SOCKET, SO_REUSEADDR, [1], 4) = 0 <0.000020>
+1791246798.350570 [  49] bind(6<TCP:[58354818]>, {sa_family=AF_INET, sin_port=htons(19400), sin_addr=inet_addr("127.0.0.1")}, 16) = 0 <0.000038>
+1791246798.358924 [  50] listen(6<TCP:[127.0.0.1:19400]>, 128) = 0 <0.000031>
+1791246798.360318 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 6<TCP:[127.0.0.1:19400]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555607800}) = 0 <0.000026>
+1791246798.360394 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 0, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.017431>
+1791246798.377858 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(51640), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:51640]> <0.000012>
+1791246798.386072 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:51640]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555607980}) = 0 <0.000012>
+1791246798.386144 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:51640]>, "\0\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000006>
+1791246798.386176 [   1] write(4<{eventfd-count=0, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000009>
+1791246798.386229 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000014>
+1791246798.386263 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 1, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.004873>
+1791246798.391155 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:51640]>, "\1\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000025>
+1791246798.391209 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:51640]>, NULL) = 0 <0.000007>
+1791246798.391242 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:51640]>) = 0 <0.000016>
+1791246798.391280 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, 0x7fffffffd0a8, [128], SOCK_CLOEXEC|SOCK_NONBLOCK) = -1 EAGAIN (Resource temporarily unavailable) <0.000010>
+1791246798.391316 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 2, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.000199>
+1791246798.391541 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(51656), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:51656]> <0.000023>
+1791246798.397093 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:51656]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555607b00}) = 0 <0.000017>
+1791246798.397181 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 3, NULL, FUTEX_BITSET_MATCH_ANY) = -1 EAGAIN (Resource temporarily unavailable) <0.000031>
+1791246798.397255 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:51656]>, "\1\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000037>
+1791246798.397337 [   1] write(4<{eventfd-count=0x1, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246798.397446 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000016>
+1791246798.397574 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 4, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002106>
+1791246798.399746 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:51656]>, "\2\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000036>
+1791246798.399827 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:51656]>, NULL) = 0 <0.000011>
+1791246798.399879 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:51656]>) = 0 <0.000037>
+1791246798.399965 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(51658), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:51658]> <0.000063>
+1791246798.411372 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:51658]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555607c80}) = 0 <0.000013>
+1791246798.411474 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:51658]>, "\2\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000010>
+1791246798.411519 [   1] write(4<{eventfd-count=0x2, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000011>
+1791246798.411621 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000007>
+1791246798.411710 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 5, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002096>
+1791246798.413855 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:51658]>, "\3\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000034>
+1791246798.413926 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:51658]>, NULL) = 0 <0.000047>
+1791246798.414018 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:51658]>) = 0 <0.000078>
+1791246798.414128 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(51662), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:51662]> <0.000014>
+1791246798.419079 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:51662]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555607c80}) = 0 <0.000010>
+1791246798.419152 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:51662]>, "\3\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000007>
+1791246798.419186 [   1] write(4<{eventfd-count=0x3, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000009>
+1791246798.419259 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000007>
+1791246798.419336 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 6, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002090>
+1791246798.421471 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:51662]>, "\4\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000028>
+1791246798.421532 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:51662]>, NULL) = 0 <0.000047>
+1791246798.421624 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:51662]>) = 0 <0.000070>
+1791246798.421728 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(51670), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:51670]> <0.000015>
+1791246798.433055 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:51670]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555607c80}) = 0 <0.000016>
+1791246798.433185 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:51670]>, "\4\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000015>
+1791246798.433246 [   1] write(4<{eventfd-count=0x4, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000015>
+1791246798.433361 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000028>
+1791246798.433446 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 7, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002186>
+1791246798.435664 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:51670]>, "\5\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000069>
+1791246798.435781 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:51670]>, NULL) = 0 <0.000012>
+1791246798.435834 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:51670]>) = 0 <0.000038>
+1791246798.435907 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(51676), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:51676]> <0.000017>
+1791246798.446363 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:51676]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555607e00}) = 0 <0.000013>
+1791246798.446445 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:51676]>, "\5\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000008>
+1791246798.446480 [   1] write(4<{eventfd-count=0x5, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000009>
+1791246798.446554 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000007>
+1791246798.446632 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 8, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002085>
+1791246798.448763 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:51676]>, "\6\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000030>
+1791246798.448830 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:51676]>, NULL) = 0 <0.000080>
+1791246798.448942 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:51676]>) = 0 <0.000031>
+1791246798.449000 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(51684), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:51684]> <0.000012>
+1791246798.458861 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:51684]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555607f80}) = 0 <0.000016>
+1791246798.458985 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:51684]>, "\6\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000013>
+1791246798.459043 [   1] write(4<{eventfd-count=0x6, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000015>
+1791246798.459173 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000012>
+1791246798.459306 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 9, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002106>
+1791246798.461479 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:51684]>, "\7\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000036>
+1791246798.461560 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:51684]>, NULL) = 0 <0.000065>
+1791246798.461663 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:51684]>) = 0 <0.000092>
+1791246798.461795 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(51692), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:51692]> <0.000016>
+1791246798.472952 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:51692]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555607f80}) = 0 <0.000013>
+1791246798.473055 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:51692]>, "\7\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000012>
+1791246798.473111 [   1] write(4<{eventfd-count=0x7, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000011>
+1791246798.473183 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 10, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002134>
+1791246798.475340 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:51692]>, "\10\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000044>
+1791246798.475414 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:51692]>, NULL) = 0 <0.000035>
+1791246798.475481 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:51692]>) = 0 <0.000057>
+1791246798.475561 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41750), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41750]> <0.000010>
+1791246798.483846 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41750]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555607f80}) = 0 <0.000009>
+1791246798.483918 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41750]>, "\10\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000007>
+1791246798.483952 [   1] write(4<{eventfd-count=0x8, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000009>
+1791246798.484029 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000007>
+1791246798.484112 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 11, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002117>
+1791246798.486291 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41750]>, "\t\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000036>
+1791246798.486370 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41750]>, NULL) = 0 <0.000057>
+1791246798.486476 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41750]>) = 0 <0.000085>
+1791246798.486605 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41758), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41758]> <0.000016>
+1791246798.495500 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41758]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555607f80}) = 0 <0.000016>
+1791246798.495621 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41758]>, "\t\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000013>
+1791246798.495679 [   1] write(4<{eventfd-count=0x9, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000014>
+1791246798.495795 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000012>
+1791246798.495929 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 12, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002107>
+1791246798.498112 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41758]>, "\n\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000036>
+1791246798.498196 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41758]>, NULL) = 0 <0.000012>
+1791246798.498248 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41758]>) = 0 <0.000043>
+1791246798.498326 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41774), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41774]> <0.000062>
+1791246798.504422 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41774]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608100}) = 0 <0.000013>
+1791246798.504521 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41774]>, "\n\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000010>
+1791246798.504566 [   1] write(4<{eventfd-count=0xa, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000011>
+1791246798.504660 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000009>
+1791246798.504762 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 13, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002083>
+1791246798.506890 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41774]>, "\v\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000029>
+1791246798.506957 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41774]>, NULL) = 0 <0.000079>
+1791246798.507074 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41774]>) = 0 <0.000032>
+1791246798.507135 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41786), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41786]> <0.000013>
+1791246798.511442 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41786]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000009>
+1791246798.511516 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41786]>, "\v\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000007>
+1791246798.511550 [   1] write(4<{eventfd-count=0xb, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000009>
+1791246798.511622 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000007>
+1791246798.511699 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 14, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002081>
+1791246798.513818 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41786]>, "\f\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000027>
+1791246798.513879 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41786]>, NULL) = 0 <0.000046>
+1791246798.513969 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41786]>) = 0 <0.000055>
+1791246798.514053 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41802), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41802]> <0.000013>
+1791246798.524980 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41802]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000016>
+1791246798.525110 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41802]>, "\f\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000016>
+1791246798.525175 [   1] write(4<{eventfd-count=0xc, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000014>
+1791246798.525267 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 15, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002166>
+1791246798.527489 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41802]>, "\r\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000036>
+1791246798.527572 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41802]>, NULL) = 0 <0.000011>
+1791246798.527640 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41802]>) = 0 <0.000067>
+1791246798.527787 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41804), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41804]> <0.000015>
+1791246798.538603 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41804]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000012>
+1791246798.538677 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41804]>, "\r\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000006>
+1791246798.538710 [   1] write(4<{eventfd-count=0xd, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000010>
+1791246798.538763 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000018>
+1791246798.538808 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 16, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002155>
+1791246798.541002 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41804]>, "\16\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000032>
+1791246798.541078 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41804]>, NULL) = 0 <0.000047>
+1791246798.541174 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41804]>) = 0 <0.000057>
+1791246798.541260 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41820), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41820]> <0.000014>
+1791246798.551050 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41820]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000020>
+1791246798.551149 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41820]>, "\16\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000035>
+1791246798.551230 [   1] write(4<{eventfd-count=0xe, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246798.551313 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 17, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002149>
+1791246798.553501 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41820]>, "\17\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000038>
+1791246798.553612 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41820]>, NULL) = 0 <0.000026>
+1791246798.553702 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41820]>) = 0 <0.000042>
+1791246798.553793 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41828), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41828]> <0.000042>
+1791246798.564977 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41828]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000020>
+1791246798.565102 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41828]>, "\17\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000011>
+1791246798.565161 [   1] write(4<{eventfd-count=0xf, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246798.565244 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 18, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002129>
+1791246798.567403 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41828]>, "\20\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000026>
+1791246798.567478 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41828]>, NULL) = 0 <0.000018>
+1791246798.567533 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41828]>) = 0 <0.000037>
+1791246798.567607 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41844), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41844]> <0.000010>
+1791246798.575942 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41844]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000012>
+1791246798.576017 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41844]>, "\20\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000006>
+1791246798.576049 [   1] write(4<{eventfd-count=0x10, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000011>
+1791246798.576112 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 19, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002878>
+1791246798.579025 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41844]>, "\21\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000048>
+1791246798.579153 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41844]>, NULL) = 0 <0.000028>
+1791246798.579247 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41844]>) = 0 <0.000059>
+1791246798.579364 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41848), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41848]> <0.000014>
+1791246798.590531 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41848]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000018>
+1791246798.590613 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41848]>, "\21\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000036>
+1791246798.590695 [   1] write(4<{eventfd-count=0x11, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246798.590779 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 20, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002153>
+1791246798.592970 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41848]>, "\22\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000039>
+1791246798.593089 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41848]>, NULL) = 0 <0.000030>
+1791246798.593187 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41848]>) = 0 <0.000057>
+1791246798.593305 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41856), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41856]> <0.000014>
+1791246798.598860 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41856]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000014>
+1791246798.598928 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41856]>, "\22\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000027>
+1791246798.598991 [   1] write(4<{eventfd-count=0x12, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000013>
+1791246798.599069 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000025>
+1791246798.599133 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 21, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002148>
+1791246798.601306 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41856]>, "\23\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000026>
+1791246798.601379 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41856]>, NULL) = 0 <0.000018>
+1791246798.601436 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41856]>) = 0 <0.000038>
+1791246798.601509 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41872), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41872]> <0.000009>
+1791246798.610016 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41872]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000025>
+1791246798.610108 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 22, NULL, FUTEX_BITSET_MATCH_ANY) = -1 EAGAIN (Resource temporarily unavailable) <0.000030>
+1791246798.610183 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41872]>, "\23\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000038>
+1791246798.610266 [   1] write(4<{eventfd-count=0x13, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246798.610348 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 23, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002165>
+1791246798.612568 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41872]>, "\24\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000036>
+1791246798.612645 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41872]>, NULL) = 0 <0.000010>
+1791246798.612719 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41872]>) = 0 <0.000069>
+1791246798.612867 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41884), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41884]> <0.000015>
+1791246798.624030 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41884]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000027>
+1791246798.624125 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 24, NULL, FUTEX_BITSET_MATCH_ANY) = -1 EAGAIN (Resource temporarily unavailable) <0.000031>
+1791246798.624200 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41884]>, "\24\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000036>
+1791246798.624282 [   1] write(4<{eventfd-count=0x14, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246798.624364 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000030>
+1791246798.624437 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 25, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002184>
+1791246798.626660 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41884]>, "\25\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000037>
+1791246798.626770 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41884]>, NULL) = 0 <0.000029>
+1791246798.626865 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41884]>) = 0 <0.000058>
+1791246798.626980 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41898), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41898]> <0.000015>
+1791246798.636448 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41898]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000011>
+1791246798.636522 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41898]>, "\25\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000006>
+1791246798.636555 [   1] write(4<{eventfd-count=0x15, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000010>
+1791246798.636607 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000019>
+1791246798.636656 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 26, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002142>
+1791246798.638824 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41898]>, "\26\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000035>
+1791246798.638917 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41898]>, NULL) = 0 <0.000023>
+1791246798.638991 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41898]>) = 0 <0.000055>
+1791246798.639116 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41902), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41902]> <0.000012>
+1791246798.644328 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41902]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000018>
+1791246798.644412 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 27, NULL, FUTEX_BITSET_MATCH_ANY) = -1 EAGAIN (Resource temporarily unavailable) <0.000029>
+1791246798.644486 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41902]>, "\26\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000037>
+1791246798.644567 [   1] write(4<{eventfd-count=0x16, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000015>
+1791246798.644649 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000026>
+1791246798.644708 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 28, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002203>
+1791246798.646948 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41902]>, "\27\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000038>
+1791246798.647058 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41902]>, NULL) = 0 <0.000014>
+1791246798.647141 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41902]>) = 0 <0.000068>
+1791246798.647289 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41914), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41914]> <0.000015>
+1791246798.649152 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41914]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000017>
+1791246798.649230 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41914]>, "\27\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000036>
+1791246798.649311 [   1] write(4<{eventfd-count=0x17, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246798.649392 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000029>
+1791246798.649465 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 29, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002185>
+1791246798.651687 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41914]>, "\30\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000038>
+1791246798.651799 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41914]>, NULL) = 0 <0.000027>
+1791246798.651887 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41914]>) = 0 <0.000038>
+1791246798.651981 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41916), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41916]> <0.000037>
+1791246798.663012 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41916]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000011>
+1791246798.663077 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 30, NULL, FUTEX_BITSET_MATCH_ANY) = -1 EAGAIN (Resource temporarily unavailable) <0.000018>
+1791246798.663125 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41916]>, "\30\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000022>
+1791246798.663175 [   1] write(4<{eventfd-count=0x18, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000010>
+1791246798.663232 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000018>
+1791246798.663276 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 31, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002154>
+1791246798.665469 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41916]>, "\31\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000032>
+1791246798.665541 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41916]>, NULL) = 0 <0.000009>
+1791246798.665596 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41916]>) = 0 <0.000058>
+1791246798.665695 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41926), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41926]> <0.000031>
+1791246798.674970 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41926]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000020>
+1791246798.675096 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41926]>, "\31\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000011>
+1791246798.675154 [   1] write(4<{eventfd-count=0x19, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246798.675239 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 32, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002149>
+1791246798.677426 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41926]>, "\32\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000038>
+1791246798.677533 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41926]>, NULL) = 0 <0.000011>
+1791246798.677604 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41926]>) = 0 <0.000068>
+1791246798.677723 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41942), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41942]> <0.000042>
+1791246798.683102 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41942]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000018>
+1791246798.683186 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41942]>, "\32\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000035>
+1791246798.683267 [   1] write(4<{eventfd-count=0x1a, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246798.683350 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 33, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002154>
+1791246798.685544 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41942]>, "\33\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000038>
+1791246798.685657 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41942]>, NULL) = 0 <0.000027>
+1791246798.685748 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41942]>) = 0 <0.000058>
+1791246798.685865 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41952), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41952]> <0.000014>
+1791246798.691259 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41952]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000014>
+1791246798.691327 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41952]>, "\33\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000027>
+1791246798.691390 [   1] write(4<{eventfd-count=0x1b, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000012>
+1791246798.691456 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000023>
+1791246798.691514 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 34, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002150>
+1791246798.693689 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41952]>, "\34\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000026>
+1791246798.693762 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41952]>, NULL) = 0 <0.000018>
+1791246798.693822 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41952]>) = 0 <0.000038>
+1791246798.693896 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41966), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41966]> <0.000010>
+1791246798.702204 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41966]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000012>
+1791246798.702275 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41966]>, "\34\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000006>
+1791246798.702307 [   1] write(4<{eventfd-count=0x1c, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000010>
+1791246798.702359 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 35, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002137>
+1791246798.704529 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41966]>, "\35\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000039>
+1791246798.704642 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41966]>, NULL) = 0 <0.000026>
+1791246798.704731 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41966]>) = 0 <0.000036>
+1791246798.704824 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41972), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41972]> <0.000038>
+1791246798.716005 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41972]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000019>
+1791246798.716096 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 36, NULL, FUTEX_BITSET_MATCH_ANY) = -1 EAGAIN (Resource temporarily unavailable) <0.000031>
+1791246798.716174 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41972]>, "\35\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000037>
+1791246798.716256 [   1] write(4<{eventfd-count=0x1d, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246798.716341 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000031>
+1791246798.716415 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 37, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002299>
+1791246798.718753 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41972]>, "\36\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000039>
+1791246798.718870 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41972]>, NULL) = 0 <0.000012>
+1791246798.718936 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41972]>) = 0 <0.000069>
+1791246798.719098 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41974), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41974]> <0.000016>
+1791246798.728845 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41974]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000012>
+1791246798.728902 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 38, NULL, FUTEX_BITSET_MATCH_ANY) = -1 EAGAIN (Resource temporarily unavailable) <0.000018>
+1791246798.728948 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41974]>, "\36\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000020>
+1791246798.728995 [   1] write(4<{eventfd-count=0x1e, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000010>
+1791246798.729049 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000026>
+1791246798.729102 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 39, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002140>
+1791246798.731279 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41974]>, "\37\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000029>
+1791246798.731345 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41974]>, NULL) = 0 <0.000028>
+1791246798.731424 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41974]>) = 0 <0.000046>
+1791246798.731515 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41980), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41980]> <0.000012>
+1791246798.742074 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41980]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000021>
+1791246798.742164 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41980]>, "\37\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000035>
+1791246798.742246 [   1] write(4<{eventfd-count=0x1f, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246798.742331 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 40, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002148>
+1791246798.744517 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41980]>, " \0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000038>
+1791246798.744628 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41980]>, NULL) = 0 <0.000027>
+1791246798.744718 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41980]>) = 0 <0.000059>
+1791246798.744834 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(41988), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:41988]> <0.000014>
+1791246798.746697 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:41988]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000017>
+1791246798.746777 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:41988]>, " \0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000037>
+1791246798.746858 [   1] write(4<{eventfd-count=0x20, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000019>
+1791246798.746945 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 41, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002157>
+1791246798.749140 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:41988]>, "!\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000038>
+1791246798.749251 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:41988]>, NULL) = 0 <0.000030>
+1791246798.749347 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:41988]>) = 0 <0.000055>
+1791246798.749464 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42000), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42000]> <0.000016>
+1791246798.754978 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42000]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000016>
+1791246798.755050 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42000]>, "!\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000029>
+1791246798.755124 [   1] write(4<{eventfd-count=0x21, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000013>
+1791246798.755192 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 42, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002133>
+1791246798.757356 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42000]>, "\"\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000034>
+1791246798.757453 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42000]>, NULL) = 0 <0.000024>
+1791246798.757526 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42000]>) = 0 <0.000050>
+1791246798.757625 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42006), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42006]> <0.000012>
+1791246798.766376 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42006]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000018>
+1791246798.766458 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42006]>, "\"\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000036>
+1791246798.766545 [   1] write(4<{eventfd-count=0x22, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246798.766628 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000031>
+1791246798.766702 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 43, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002194>
+1791246798.768935 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42006]>, "#\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000039>
+1791246798.769046 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42006]>, NULL) = 0 <0.000010>
+1791246798.769131 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42006]>) = 0 <0.000069>
+1791246798.769250 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42014), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42014]> <0.000039>
+1791246798.780424 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42014]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000018>
+1791246798.780535 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42014]>, "#\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000011>
+1791246798.780591 [   1] write(4<{eventfd-count=0x23, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246798.780676 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 44, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002256>
+1791246798.782969 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42014]>, "$\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000038>
+1791246798.783082 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42014]>, NULL) = 0 <0.000033>
+1791246798.783180 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42014]>) = 0 <0.000059>
+1791246798.783299 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42020), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42020]> <0.000014>
+1791246798.792741 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42020]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000011>
+1791246798.792800 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42020]>, "$\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000021>
+1791246798.792850 [   1] write(4<{eventfd-count=0x24, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000010>
+1791246798.792902 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000014>
+1791246798.792937 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 45, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.001145>
+1791246798.794104 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42020]>, "%\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000026>
+1791246798.794175 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42020]>, NULL) = 0 <0.000017>
+1791246798.794230 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42020]>) = 0 <0.000038>
+1791246798.794305 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42030), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42030]> <0.000011>
+1791246798.799044 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42030]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000020>
+1791246798.799137 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42030]>, "%\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000036>
+1791246798.799220 [   1] write(4<{eventfd-count=0x25, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246798.799305 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 46, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002150>
+1791246798.801495 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42030]>, "&\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000038>
+1791246798.801612 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42030]>, NULL) = 0 <0.000009>
+1791246798.801681 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42030]>) = 0 <0.000069>
+1791246798.801800 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42036), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42036]> <0.000038>
+1791246798.806186 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42036]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000018>
+1791246798.806267 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42036]>, "&\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000038>
+1791246798.806350 [   1] write(4<{eventfd-count=0x26, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000017>
+1791246798.806434 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000029>
+1791246798.806506 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 47, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002184>
+1791246798.808729 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42036]>, "'\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000038>
+1791246798.808839 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42036]>, NULL) = 0 <0.000009>
+1791246798.808905 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42036]>) = 0 <0.000067>
+1791246798.809023 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42046), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42046]> <0.000045>
+1791246798.819896 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42046]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000022>
+1791246798.819963 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42046]>, "'\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000021>
+1791246798.820014 [   1] write(4<{eventfd-count=0x27, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000010>
+1791246798.820071 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000019>
+1791246798.820119 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 48, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002146>
+1791246798.822293 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42046]>, "(\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000034>
+1791246798.822389 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42046]>, NULL) = 0 <0.000024>
+1791246798.822462 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42046]>) = 0 <0.000049>
+1791246798.822562 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42048), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42048]> <0.000012>
+1791246798.832072 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42048]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000021>
+1791246798.832192 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42048]>, "(\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000012>
+1791246798.832249 [   1] write(4<{eventfd-count=0x28, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246798.832333 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 49, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002149>
+1791246798.834521 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42048]>, ")\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000038>
+1791246798.834632 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42048]>, NULL) = 0 <0.000031>
+1791246798.834735 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42048]>) = 0 <0.000058>
+1791246798.834853 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42062), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42062]> <0.000015>
+1791246798.846027 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42062]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608280}) = 0 <0.000025>
+1791246798.846116 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42062]>, ")\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000036>
+1791246798.846198 [   1] write(4<{eventfd-count=0x29, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246798.846283 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 50, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002138>
+1791246798.848455 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42062]>, "*\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000032>
+1791246798.848544 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42062]>, NULL) = 0 <0.000008>
+1791246798.848582 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42062]>) = 0 <0.000018>
+1791246798.848628 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, 0x7fffffffd0a8, [128], SOCK_CLOEXEC|SOCK_NONBLOCK) = -1 EAGAIN (Resource temporarily unavailable) <0.000013>
+1791246798.848677 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 51, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.000372>
+1791246798.849090 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42068), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42068]> <0.000012>
+1791246798.857359 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42068]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608500}) = 0 <0.000011>
+1791246798.857426 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42068]>, "*\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000006>
+1791246798.857457 [   1] write(4<{eventfd-count=0x2a, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000010>
+1791246798.857509 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000018>
+1791246798.857553 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 52, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002174>
+1791246798.859777 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42068]>, "+\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000036>
+1791246798.859855 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42068]>, NULL) = 0 <0.000010>
+1791246798.859905 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42068]>) = 0 <0.000037>
+1791246798.859978 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42072), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42072]> <0.000020>
+1791246798.871131 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42072]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608680}) = 0 <0.000016>
+1791246798.871223 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42072]>, "+\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000035>
+1791246798.871304 [   1] write(4<{eventfd-count=0x2b, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246798.871388 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 53, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002149>
+1791246798.873577 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42072]>, ",\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000039>
+1791246798.873693 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42072]>, NULL) = 0 <0.000011>
+1791246798.873757 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42072]>) = 0 <0.000069>
+1791246798.873876 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42082), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42082]> <0.000036>
+1791246798.884107 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42082]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608680}) = 0 <0.000012>
+1791246798.884163 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42082]>, ",\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000022>
+1791246798.884213 [   1] write(4<{eventfd-count=0x2c, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000010>
+1791246798.884265 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000018>
+1791246798.884310 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 54, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002131>
+1791246798.886464 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42082]>, "-\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000033>
+1791246798.886551 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42082]>, NULL) = 0 <0.000023>
+1791246798.886624 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42082]>) = 0 <0.000050>
+1791246798.886723 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42094), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42094]> <0.000013>
+1791246798.896962 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42094]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608680}) = 0 <0.000020>
+1791246798.897048 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 55, NULL, FUTEX_BITSET_MATCH_ANY) = -1 EAGAIN (Resource temporarily unavailable) <0.000034>
+1791246798.897137 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42094]>, "-\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000037>
+1791246798.897220 [   1] write(4<{eventfd-count=0x2d, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246798.897302 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 56, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002147>
+1791246798.899488 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42094]>, ".\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000038>
+1791246798.899602 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42094]>, NULL) = 0 <0.000011>
+1791246798.899667 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42094]>) = 0 <0.000068>
+1791246798.899784 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42106), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42106]> <0.000042>
+1791246798.905175 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42106]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608680}) = 0 <0.000019>
+1791246798.905259 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 57, NULL, FUTEX_BITSET_MATCH_ANY) = -1 EAGAIN (Resource temporarily unavailable) <0.000035>
+1791246798.905340 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42106]>, ".\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000037>
+1791246798.905421 [   1] write(4<{eventfd-count=0x2e, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246798.905506 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 58, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002148>
+1791246798.907692 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42106]>, "/\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000038>
+1791246798.907799 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42106]>, NULL) = 0 <0.000030>
+1791246798.907894 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42106]>) = 0 <0.000058>
+1791246798.908012 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42110), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42110]> <0.000014>
+1791246798.913137 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42110]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608680}) = 0 <0.000012>
+1791246798.913215 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42110]>, "/\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000006>
+1791246798.913249 [   1] write(4<{eventfd-count=0x2f, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000010>
+1791246798.913303 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000018>
+1791246798.913348 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 59, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002150>
+1791246798.915534 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42110]>, "0\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000032>
+1791246798.915607 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42110]>, NULL) = 0 <0.000009>
+1791246798.915662 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42110]>) = 0 <0.000058>
+1791246798.915760 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42122), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42122]> <0.000029>
+1791246798.925282 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42122]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608680}) = 0 <0.000018>
+1791246798.925365 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 60, NULL, FUTEX_BITSET_MATCH_ANY) = -1 EAGAIN (Resource temporarily unavailable) <0.000032>
+1791246798.925440 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42122]>, "0\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000038>
+1791246798.925522 [   1] write(4<{eventfd-count=0x30, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000019>
+1791246798.925609 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 61, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002149>
+1791246798.927797 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42122]>, "1\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000037>
+1791246798.927912 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42122]>, NULL) = 0 <0.000012>
+1791246798.927978 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42122]>) = 0 <0.000078>
+1791246798.928112 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42130), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42130]> <0.000040>
+1791246798.939295 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42130]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608680}) = 0 <0.000018>
+1791246798.939377 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 62, NULL, FUTEX_BITSET_MATCH_ANY) = -1 EAGAIN (Resource temporarily unavailable) <0.000029>
+1791246798.939451 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42130]>, "1\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000038>
+1791246798.939533 [   1] write(4<{eventfd-count=0x31, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246798.939617 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 63, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002138>
+1791246798.941788 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42130]>, "2\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000031>
+1791246798.941877 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42130]>, NULL) = 0 <0.000008>
+1791246798.941915 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42130]>) = 0 <0.000019>
+1791246798.941961 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, 0x7fffffffd0a8, [128], SOCK_CLOEXEC|SOCK_NONBLOCK) = -1 EAGAIN (Resource temporarily unavailable) <0.000013>
+1791246798.942009 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 64, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.000346>
+1791246798.942390 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42142), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42142]> <0.000012>
+1791246798.950749 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42142]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608800}) = 0 <0.000011>
+1791246798.950803 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42142]>, "2\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000021>
+1791246798.950851 [   1] write(4<{eventfd-count=0x32, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000010>
+1791246798.950904 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000015>
+1791246798.950940 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 65, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.001151>
+1791246798.952113 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42142]>, "3\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000026>
+1791246798.952183 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42142]>, NULL) = 0 <0.000018>
+1791246798.952238 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42142]>) = 0 <0.000036>
+1791246798.952319 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42146), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42146]> <0.000013>
+1791246798.963496 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42146]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608800}) = 0 <0.000020>
+1791246798.963586 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 66, NULL, FUTEX_BITSET_MATCH_ANY) = -1 EAGAIN (Resource temporarily unavailable) <0.000030>
+1791246798.963662 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42146]>, "3\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000037>
+1791246798.963744 [   1] write(4<{eventfd-count=0x33, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000018>
+1791246798.963828 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 67, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002147>
+1791246798.966013 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42146]>, "4\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000047>
+1791246798.966140 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42146]>, NULL) = 0 <0.000011>
+1791246798.966207 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42146]>) = 0 <0.000067>
+1791246798.966324 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42158), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42158]> <0.000041>
+1791246798.976791 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42158]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608800}) = 0 <0.000013>
+1791246798.976867 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42158]>, "4\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000006>
+1791246798.976900 [   1] write(4<{eventfd-count=0x34, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000010>
+1791246798.976954 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 68, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.001112>
+1791246798.978091 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42158]>, "5\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000026>
+1791246798.978162 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42158]>, NULL) = 0 <0.000017>
+1791246798.978218 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42158]>) = 0 <0.000034>
+1791246798.978289 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42164), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42164]> <0.000009>
+1791246798.983421 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42164]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608800}) = 0 <0.000010>
+1791246798.983474 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42164]>, "5\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000020>
+1791246798.983524 [   1] write(4<{eventfd-count=0x35, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000010>
+1791246798.983576 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000018>
+1791246798.983615 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 69, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002165>
+1791246798.985812 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42164]>, "6\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000039>
+1791246798.985922 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42164]>, NULL) = 0 <0.000027>
+1791246798.986024 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42164]>) = 0 <0.000044>
+1791246798.986126 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42170), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42170]> <0.000042>
+1791246798.997282 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42170]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608800}) = 0 <0.000019>
+1791246798.997365 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42170]>, "6\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000035>
+1791246798.997444 [   1] write(4<{eventfd-count=0x36, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246798.997529 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 70, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002167>
+1791246798.999751 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42170]>, "7\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000036>
+1791246798.999828 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42170]>, NULL) = 0 <0.000011>
+1791246798.999900 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42170]>) = 0 <0.000066>
+1791246799.000043 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42178), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42178]> <0.000015>
+1791246799.006669 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42178]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608800}) = 0 <0.000011>
+1791246799.006724 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 71, NULL, FUTEX_BITSET_MATCH_ANY) = -1 EAGAIN (Resource temporarily unavailable) <0.000017>
+1791246799.006768 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42178]>, "7\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000021>
+1791246799.006816 [   1] write(4<{eventfd-count=0x37, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000010>
+1791246799.006869 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000018>
+1791246799.006913 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 72, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002149>
+1791246799.009091 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42178]>, "8\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000034>
+1791246799.009186 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42178]>, NULL) = 0 <0.000023>
+1791246799.009260 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42178]>) = 0 <0.000050>
+1791246799.009360 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42182), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42182]> <0.000012>
+1791246799.012581 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42182]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608800}) = 0 <0.000012>
+1791246799.012650 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42182]>, "8\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000006>
+1791246799.012681 [   1] write(4<{eventfd-count=0x38, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000011>
+1791246799.012749 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000014>
+1791246799.012795 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 73, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002124>
+1791246799.014944 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42182]>, "9\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000030>
+1791246799.015028 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42182]>, NULL) = 0 <0.000026>
+1791246799.015106 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42182]>) = 0 <0.000060>
+1791246799.015224 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42192), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42192]> <0.000014>
+1791246799.017214 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42192]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608800}) = 0 <0.000017>
+1791246799.017294 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42192]>, "9\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000037>
+1791246799.017376 [   1] write(4<{eventfd-count=0x39, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000019>
+1791246799.017461 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 74, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002147>
+1791246799.019646 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42192]>, ":\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000039>
+1791246799.019754 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42192]>, NULL) = 0 <0.000029>
+1791246799.019848 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42192]>) = 0 <0.000058>
+1791246799.019965 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42194), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42194]> <0.000014>
+1791246799.031083 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42194]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608800}) = 0 <0.000019>
+1791246799.031168 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42194]>, ":\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000036>
+1791246799.031251 [   1] write(4<{eventfd-count=0x3a, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246799.031335 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 75, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002148>
+1791246799.033523 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42194]>, ";\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000038>
+1791246799.033630 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42194]>, NULL) = 0 <0.000030>
+1791246799.033724 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42194]>) = 0 <0.000057>
+1791246799.033840 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42206), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42206]> <0.000014>
+1791246799.043061 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42206]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608800}) = 0 <0.000014>
+1791246799.043147 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42206]>, ";\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000006>
+1791246799.043180 [   1] write(4<{eventfd-count=0x3b, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000011>
+1791246799.043233 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000017>
+1791246799.043277 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 76, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002144>
+1791246799.045448 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42206]>, "<\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000034>
+1791246799.045541 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42206]>, NULL) = 0 <0.000023>
+1791246799.045614 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42206]>) = 0 <0.000046>
+1791246799.045716 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42218), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42218]> <0.000012>
+1791246799.055817 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42218]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608800}) = 0 <0.000020>
+1791246799.055932 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42218]>, "<\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000011>
+1791246799.055988 [   1] write(4<{eventfd-count=0x3c, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246799.056078 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 77, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002152>
+1791246799.058272 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42218]>, "=\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000038>
+1791246799.058381 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42218]>, NULL) = 0 <0.000029>
+1791246799.058472 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42218]>) = 0 <0.000058>
+1791246799.058593 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42230), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42230]> <0.000015>
+1791246799.069512 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42230]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608800}) = 0 <0.000012>
+1791246799.069568 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42230]>, "=\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000022>
+1791246799.069617 [   1] write(4<{eventfd-count=0x3d, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000010>
+1791246799.069671 [ 202] futex(0x555555606e90, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000018>
+1791246799.069716 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 78, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002135>
+1791246799.071878 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42230]>, ">\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000034>
+1791246799.071972 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42230]>, NULL) = 0 <0.000023>
+1791246799.072045 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42230]>) = 0 <0.000053>
+1791246799.072151 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42244), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42244]> <0.000012>
+1791246799.080838 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42244]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608800}) = 0 <0.000020>
+1791246799.080952 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42244]>, ">\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000011>
+1791246799.081008 [   1] write(4<{eventfd-count=0x3e, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246799.081105 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 79, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002149>
+1791246799.083293 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42244]>, "?\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000038>
+1791246799.083403 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42244]>, NULL) = 0 <0.000011>
+1791246799.083474 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42244]>) = 0 <0.000067>
+1791246799.083591 [ 288] accept4(6<TCP:[127.0.0.1:19400]>, {sa_family=AF_INET, sin_port=htons(42246), sin_addr=inet_addr("127.0.0.1")}, [128 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 7<TCP:[127.0.0.1:19400->127.0.0.1:42246]> <0.000037>
+1791246799.090514 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7<TCP:[127.0.0.1:19400->127.0.0.1:42246]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x555555608800}) = 0 <0.000019>
+1791246799.090599 [  45] recvfrom(7<TCP:[127.0.0.1:19400->127.0.0.1:42246]>, "?\0\0\0\0\0\0\0", 8, 0, NULL, NULL) = 8 <0.000037>
+1791246799.090682 [   1] write(4<{eventfd-count=0x3f, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000016>
+1791246799.090765 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 80, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.002149>
+1791246799.092953 [  44] sendto(7<TCP:[127.0.0.1:19400->127.0.0.1:42246]>, "@\0\0\0\0\0\0\0", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000038>
+1791246799.093068 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7<TCP:[127.0.0.1:19400->127.0.0.1:42246]>, NULL) = 0 <0.000012>
+1791246799.093147 [   3] close(7<TCP:[127.0.0.1:19400->127.0.0.1:42246]>) = 0 <0.000068>
+1791246799.093251 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 6<TCP:[127.0.0.1:19400]>, NULL) = 0 <0.000013>
+1791246799.093303 [   3] close(6<TCP:[127.0.0.1:19400]>) = 0 <0.000016>
+1791246799.093356 [   1] write(4<{eventfd-count=0x40, eventfd-id=9, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000018>
+1791246799.093444 [ 202] futex(0x555555606b88, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000040>
+1791246799.093533 [ 202] futex(0x5555556058a8, FUTEX_WAKE_PRIVATE, 2147483647) = 1 <0.000031>
+1791246799.093610 [ 202] futex(0x555555606f70, FUTEX_WAIT_BITSET_PRIVATE, 81, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.000258>
+1791246799.093907 [ 202] futex(0x7ffff7bffce8, FUTEX_WAIT_BITSET|FUTEX_CLOCK_REALTIME, 1, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.000230>
+1791246799.094239 [ 202] futex(0x7ffff79fece8, FUTEX_WAIT_BITSET|FUTEX_CLOCK_REALTIME, 2, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.000261>
+1791246799.094552 [ 131] sigaltstack({ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=8192}, NULL) = 0 <0.000010>
+1791246799.094591 [  11] munmap(0x7ffff7e62000, 12288) = 0 <0.000014>
+1791246799.094659 [ 231] exit_group(0)  = ?
+1791246799.094964 [ 231] +++ exited with 0 +++

@@ -1,0 +1,17 @@
+name: redis-demo
+services:
+  redis:
+    image: docker.io/library/redis:7.2
+    command: [redis-server, --appendonly, "yes", --save, ""]
+  client:
+    build: ./workload
+    environment:
+      REDIS_ADDRESS: redis:6379
+      SEEDBOX_PLANT_FAILURE: "0"
+x-seedbox:
+  version: 1
+  seed: 1009
+  limits: {simulated_time: 60s, wall_time: 15m}
+  network: {latency: 1ms, jitter: 200us}
+  schedule: {timer_jitter: 1ms, stop_tolerance: 2ms}
+  check: {service: client, exit_code: 0}

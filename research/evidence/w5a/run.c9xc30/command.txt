@@ -1,0 +1,1 @@
+sha256sum Cargo.toml Cargo.lock build.rs src/main.rs fixtures/guest.asm matrix.sh host-info.sh target/debug/seedbox-amd-counter 

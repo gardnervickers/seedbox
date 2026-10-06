@@ -1,0 +1,30 @@
+{
+  "msr": "0xc0011020",
+  "bit": 54,
+  "cpus": [
+    2,
+    18
+  ],
+  "mode": "original",
+  "reviewed_probe_sha256": "b4afdee646ad43885e8059eb5f30b334c584011f1a558a16496e3a6dd9ea6e8b",
+  "child_args": [
+    "plain",
+    "100000",
+    "10000",
+    "correct"
+  ],
+  "start_ns": 1791250783595497036,
+  "original": {
+    "2": "0x4480000000000",
+    "18": "0x4480000000000"
+  },
+  "applied": {},
+  "restored": {
+    "2": "0x4480000000000",
+    "18": "0x4480000000000"
+  },
+  "before_restore": {},
+  "errors": [],
+  "child_exit": 0,
+  "end_ns": 1791250783869708678
+}

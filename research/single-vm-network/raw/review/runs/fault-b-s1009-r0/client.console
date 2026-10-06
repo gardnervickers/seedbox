@@ -1,0 +1,6 @@
+SEEDBOX_PHASE client_start guest_ns=1572026506
+NETWORK pair-partition n1 n2
+NETWORK pair-heal n1 n2
+LOAD acked=681 failed=2 elapsed=3.005025106s
+RESULT pass acked=681 failed=2 rev=684 hash=9d5c52c8
+INIT exit=0

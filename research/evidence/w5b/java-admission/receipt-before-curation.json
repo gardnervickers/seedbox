@@ -1,0 +1,28 @@
+{
+  "scope": "retained_off_host_Java_source_audit_and_portable_fixture_only",
+  "source_files": {
+    "research/intel-probe/java/AdmissionProbe.java": "61eeb7275b3b8349767f595b7a2f98c6624cf6140fd8dda57bf5564ee8332f0b",
+    "research/intel-probe/java/admission-audit.json": "93bd25946b12975375dc1ba37868196eb1eb2f05903aae86caff2e30e6b31f07",
+    "research/intel-probe/java/check.sh": "00549429c795511ac2ccfde39efdec631bd9d95d872f257a86be85fb84b444f4",
+    "research/intel-probe/java/fetch-inputs.py": "7c3f0ce2a0a32262fa459e7f99ed13d0dd13c812bbc24c5945097a6937ed92ac"
+  },
+  "evidence_files": {
+    "portable-fixture/classes/AdmissionProbe.class": "3455638341feee20becd5aef9f56f80949224e0e4e4bf2091d2d004856b1ba2f",
+    "portable-fixture/effective-flags.txt": "f9e7d4fae6e259585d91057457cabf332533daf36ab39f3e544472e4cd6ac6f1",
+    "portable-fixture/fixture-manifest.json": "6af230c2010ce7efe5b45f6f6ab6eec0d054bdfe04fa25b0fc5accdb97bf7b01",
+    "portable-fixture/flags.txt": "15766585ec8f70da189ed85d384ad5915d69c8c09e3adca3bace3d3b57e5c185",
+    "portable-fixture/java-version.txt": "3059e317c01cfef02a389ead79dece5ba1b541c3d403e9b819b8071bea806a72",
+    "portable-fixture/jdk-release.txt": "768478f0d59c1963b155058c44d806e0d5e1b6b45d3998974e978c8a61680fd4",
+    "portable-fixture/observe-42-1.json": "c0eae7a40b00f26d3e3c2806279a8c7f524734e437a00220fc272464c4a3760b",
+    "portable-fixture/observe-42-1.vm.log": "2309b7698a6540e8466e1fbb44bb37c973aa1e8447a51289878c4c43798b4b10",
+    "portable-fixture/observe-42-2.json": "4e0bc8fe399e31129a604288c5d7ed51cb6cfa9a2b8f31727213ed62658a0445",
+    "portable-fixture/observe-42-2.vm.log": "56ecb7cb3742f1ecd193037bb3c524aaf6d86f86196095733635c05b2b413eff",
+    "portable-fixture/observe-43.json": "9d072ae3f57f43313f9bc6f4aef1e01e5ef7f332b17f96ac82a316c3167ebc34",
+    "portable-fixture/observe-43.vm.log": "4212a14a293586dbe1b5e5f03a26c15ea7dcb66572cac301c812c56f82053aed",
+    "portable-fixture/self-check-1.json": "4ab0424a6b4aa85f21bbe6eadd8bfd7429f31f6d703ec7b95cd37817ca696251",
+    "portable-fixture/self-check-2.json": "4ab0424a6b4aa85f21bbe6eadd8bfd7429f31f6d703ec7b95cd37817ca696251",
+    "source-manifest.json": "08bfac45198d621c1c802953f7ea90cd3f4dd6e55a68b39c779b25b4baeaed9b"
+  },
+  "raw_source_files": "ignored research/runs/w5b/java-source; exact URLs and hashes retained in source-manifest.json",
+  "hardware_measurements": false
+}

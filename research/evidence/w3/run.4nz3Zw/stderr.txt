@@ -1,0 +1,5 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Checking seedbox-witness v0.2.0 (/private/tmp/seedbox-round-1.S74xJ4/determinism)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.53s
