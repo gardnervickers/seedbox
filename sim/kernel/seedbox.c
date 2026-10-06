@@ -7,11 +7,18 @@
  * reads use two port reads. Repeated reads with no new publication advance
  * by one tick, so polling loops make progress deterministically. User-mode
  * RDTSC/RDTSCP trap through CR4.TSD and are emulated here.
+ *
+ * Once the page is active, interrupt masking (8259) and virtio-mmio interrupt
+ * status go through the page instead of trapping port and MMIO accesses, and
+ * the PIT is armed with a single port write. The VMM applies page state only
+ * at deterministic points.
  */
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/printk.h>
+#include <asm/cpufeature.h>
+#include <asm/i8259.h>
 #include <asm/insn-eval.h>
 #include <asm/seedbox.h>
 #include <asm/tlbflush.h>
@@ -66,6 +73,13 @@ bool seedbox_emulate_user_tsc(struct pt_regs *regs)
 	return true;
 }
 
+/* The virtual TSC runs at exactly 1 GHz: no calibration against the PIT. */
+unsigned long seedbox_tsc_khz(void)
+{
+	setup_force_cpu_cap(X86_FEATURE_TSC_KNOWN_FREQ);
+	return SEEDBOX_TSC_KHZ;
+}
+
 static int __init seedbox_time_init(void)
 {
 	struct seedbox_time_page *p;
@@ -74,9 +88,10 @@ static int __init seedbox_time_init(void)
 	if (!p)
 		panic("seedbox: cannot map time page");
 	WRITE_ONCE(p->last, seedbox_early_last);
+	WRITE_ONCE(p->pic_imr, cached_irq_mask);
+	outl(SEEDBOX_ABI, SEEDBOX_PORT_TIME_READY);
 	WRITE_ONCE(seedbox_page, p);
 	cr4_set_bits(X86_CR4_TSD);
-	outl(1, SEEDBOX_PORT_TIME_READY);
 	pr_info("seedbox: deterministic time page active\n");
 	return 0;
 }
