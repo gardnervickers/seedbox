@@ -283,3 +283,72 @@ sudo -n target/debug/seedbox replay \
 
 The explicit `--vmm` requires `--allow-engine-change`; in this diagnostic the
 VMM hash is unchanged.
+
+## 2026-10-06 — direct CLI acceptance scenarios
+
+Source `32bef7c` removes the host acceptance matrix, launcher, preparer and result
+parsers. Each checked-in YAML file can be passed directly to `seedbox run`.
+Compose configs supply the guest driver and Python API; build contexts reference
+the existing Go/C source directories. Guest drivers own the packet-drop,
+acknowledgement and atomic-control assertions. The planted negative control
+expects checker exit 1 in YAML, making its normal CLI outcome PASS when the
+checker detects the intended missing acknowledgement.
+
+Source validation passed: six guest-driver tests on Darwin and Linux, four
+public YAML validations, Darwin portable/workspace checks, formatting and strict
+all-target Clippy. Independent review passed. Production Rust, the guest
+supervisor, Python API and Go/C workload sources are unchanged.
+
+Direct hardware validation uses the fresh checkout
+`/home/gvickers/seedbox-direct-acceptance` on `nixos.local`, with CLI state under
+`/home/gvickers/seedbox-direct-runs`. Commands use the CLI, VMM and kernel hashes
+recorded in the preceding section. Runtime paths are supplied explicitly through
+sudo, including the project shell's static BusyBox. There is no workload staging
+or scenario-specific host runner. At most two commands run concurrently, on
+CPUs 2 and 4 with SMT siblings 18 and 20.
+
+The short etcd run (`--full-state`), race run, and sanity run all returned CLI
+exit 0 / PASS. The sanity report records checker exit 1 as declared by its YAML.
+The first long-run command, using the default adaptive margin, returned ERROR /
+exit 2 with this VMM error:
+
+```text
+error: soft overshoot on n2: 12395 branches past (or an ambiguous overflow at) a soft stop before its syscall window opened
+```
+
+That failed execution remains at `runs/aa40e2f2e4b2ef56-dBjdxh` under the CLI state
+directory. It is not a scenario pass. The follow-up command uses the same YAML
+and seed with explicit `--margin 98304`; there is no automatic acceptance retry
+or host verdict rewriting.
+
+The short scenario replay at `--margin 32768` returned PASS / MATCH, including
+all four full-state digests and the fault history. The first larger-margin long
+command failed during image download with a registry TLS error, before guest
+execution; it did not produce a run verdict. A subsequent invocation of the same
+command is recorded separately.
+
+Final direct-command results:
+
+| Scenario / command option | CLI result | Retained run |
+| --- | --- | --- |
+| Short etcd, `--full-state` | PASS / exit 0 | `34679a6bcc7500bf-YlCWGH` |
+| Race, default seed 1 | PASS / exit 0 | `b5b70ed0bfbdd580-jtlrVp` |
+| Sanity, expected checker exit 1 | PASS / exit 0 | `11b4247ba69d5280-WehCHH` |
+| Short replay, `--margin 32768` | PASS / MATCH / exit 0 | `34679a6bcc7500bf-jZCTdx` |
+| Long etcd, default adaptive margin | ERROR / exit 2 (PMU overshoot) | `aa40e2f2e4b2ef56-dBjdxh` |
+| Long etcd, `--margin 98304` | PASS / exit 0 | `ff080b00d539ec53-njFhCs` |
+
+Run paths are relative to `/home/gvickers/seedbox-direct-runs/runs/`. The passing
+long run completed twenty fault rounds, with 80 recorded effects and 245
+partition-dropped packets. The guest driver checked the packet-drop increase and
+acknowledgement ledger itself. Its freshly prepared client image differs from
+the earlier failed attempt, so this is a separate passing scenario execution,
+not proof of replay equivalence or an isolated diagnosis of the PMU failure.
+The short replay is the retained-input performance comparison.
+
+All nineteen relevant scenario, driver, binding and workload files were checked
+by SHA-256 against source `32bef7c`. After all commands finished, CPUs 2/4 and SMT
+siblings 18/20 exactly matched their saved MSR values (`0x4480000000000`). No
+restoration snapshots or scenario-owned CLI/VMM processes remained. The earlier
+clock-bound and current default-margin errors remain retained; this migration
+does not claim they are fixed or that the full eleven-seed sweep is qualified.
