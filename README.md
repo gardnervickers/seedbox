@@ -15,7 +15,7 @@ qualified host (see [host requirements](#host-requirements)) and root.
 nix develop                          # Rust, OCI tools, static BusyBox, musl
 bash kernel/build.sh                 # guest kernel -> ~/seedbox-sim/artifacts/bzImage
 cargo build --release                # target/release/seedbox
-cargo build-vmm                      # target/release/seedbox-vmm (alias in .cargo/config.toml)
+cargo build-vmm                      # crates/seedbox-vmm/target/release/seedbox-vmm (alias)
 
 cargo run -- validate examples/etcd
 sudo -E env PATH="$PATH" target/release/seedbox run examples/etcd
@@ -32,7 +32,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
 | CPU | first free core other than CPU 0's, under the shared lease | `--cpu`, `SEEDBOX_CPU` |
 | Guest kernel | `bzImage` in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`, `./artifacts`, then `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
-| VMM | `seedbox-vmm` next to `seedbox` or in `target/release`, then on `PATH`; `cargo run` builds it if missing | `--vmm`, `SEEDBOX_VMM` |
+| VMM | this checkout's `cargo build-vmm` output, then `seedbox-vmm` next to `seedbox`, then on `PATH`; `cargo run` builds it if missing | `--vmm`, `SEEDBOX_VMM` |
 | Guest supervisor | built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | BusyBox | `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |

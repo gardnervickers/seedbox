@@ -15,10 +15,10 @@ test -f "$kernel"
 test ! -e "$output"
 mkdir "$output"
 cargo build --release -p seedbox --locked
-cargo build-vmm --locked
+cargo build-vmm
 bash guest/build-compose.sh "$output/compose-init"
 cli="$root/target/release/seedbox"
-vmm="$root/target/release/seedbox-vmm"
+vmm="$root/crates/seedbox-vmm/target/release/seedbox-vmm"
 "$cli" init "$output/redis" --template redis
 "$cli" init "$output/etcd" --template etcd
 # Root owns the inputs it will execute and the writable artifact store. Build

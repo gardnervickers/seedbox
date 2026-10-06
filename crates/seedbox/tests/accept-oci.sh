@@ -9,7 +9,7 @@ cd "$root"
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 bash guest/build-compose.sh "$scratch/compose-init"
-cargo check --locked --manifest-path crates/seedbox-vmm/Cargo.toml
+cargo check --locked --manifest-path crates/seedbox-vmm/Cargo.toml --target-dir crates/seedbox-vmm/target
 cargo test -p seedbox --locked
 cargo clippy -p seedbox --locked --all-targets -- -D warnings
 test_binary=$(cargo test -p seedbox --locked \

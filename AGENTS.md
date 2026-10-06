@@ -10,8 +10,11 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   It is its own workspace with its own `Cargo.lock`, because cargo unifies
   dependency features across one build: building it alongside other crates
   would change its binary, and so the engine hash of every run. Build and test
-  it with the aliases in `.cargo/config.toml`: `cargo build-vmm` and
-  `cargo test-vmm`. Both workspaces share the root `target/`.
+  it from the repository root with the aliases in `.cargo/config.toml`:
+  `cargo build-vmm` and `cargo test-vmm`. It builds into
+  `crates/seedbox-vmm/target`, where `seedbox` looks first. Don't set a global
+  `target-dir` in `.cargo/config.toml`: cargo applies it by current directory,
+  so it would also move the research crates' builds and break their scripts.
 - New crates go in `crates/<name>/` and inherit `version`, `edition` and
   `publish` from `[workspace.package]`. Put a dependency used by two or more
   workspace crates in `[workspace.dependencies]`. Commit both lockfiles.
@@ -43,7 +46,7 @@ Run these before committing:
 cargo fmt -p seedbox --check
 cargo clippy -p seedbox --all-targets --locked -- -D warnings
 cargo test --workspace --locked
-cargo test-vmm --locked              # Linux only
+cargo test-vmm                       # Linux only
 bash harness/acceptance.sh portable
 ```
 

@@ -204,7 +204,7 @@ def main():
     return run_batch(Path(os.environ['SEEDBOX_ROOT']), world, prefix, seeds,
                      extra, list(range(cpu0, cpu0 + len(seeds))),
                      float(os.environ.get('SEEDBOX_TIMEOUT', '3600')),
-                     os.environ.get('VMM', './target/release/seedbox-vmm'),
+                     os.environ.get('VMM', './crates/seedbox-vmm/target/release/seedbox-vmm'),
                      os.environ.get('SEEDBOX_MARGIN', 'adaptive'))
 
 

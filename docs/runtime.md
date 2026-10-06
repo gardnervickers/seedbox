@@ -12,11 +12,14 @@ From the repository root:
 nix develop
 bash kernel/build.sh
 cargo build --release --locked
-cargo build-vmm --locked
+cargo build-vmm
 ```
 
-`cargo build-vmm` builds the VMM in its own workspace, so the engine binary, and
-the engine hash recorded in every run, is the same however it is built.
+`cargo build-vmm` builds the VMM in its own workspace with its own lockfile, so
+the engine binary, and the engine hash recorded in every run, does not depend on
+which cargo command built it or what else was built with it. It still depends on
+the toolchain, `RUSTFLAGS` and the checkout's absolute path, which debug
+information embeds.
 
 The `seedbox` build embeds the static guest supervisor from `guest/compose-init.c`,
 compiled with the shell's musl compiler (`SEEDBOX_STATIC_CC`, or `musl-gcc`).

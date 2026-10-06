@@ -82,27 +82,30 @@ fn sudo_home() -> Option<PathBuf> {
     Some(PathBuf::from(std::ffi::OsStr::from_bytes(home.to_bytes())))
 }
 
-/// The VMM: `seedbox-vmm` next to this executable, then in the release
-/// directory of the same Cargo target directory, then on `PATH`. Under
-/// `cargo run` in this checkout, a missing VMM is built in release mode.
+/// The VMM: this checkout's `cargo build-vmm` output, then `seedbox-vmm` next
+/// to this executable (an installed pair), then on `PATH`. Under `cargo run`
+/// in this checkout, a missing VMM is built exactly as `cargo build-vmm` does.
 pub fn engine(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = explicit {
         return existing("--vmm", path);
     }
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent();
+    let vmm = crates.unwrap_or(Path::new(".")).join("seedbox-vmm");
+    let built = vmm.join("target/release/seedbox-vmm");
+    let mut searched = vec![built.clone()];
+    // A cargo profile directory (it holds `.cargo-lock`) never receives the
+    // VMM, which builds in its own workspace; one found there is stale.
     let exe = env::current_exe()?;
-    let sibling = exe.with_file_name("seedbox-vmm");
-    // target/<profile>/seedbox -> target/
-    let target = exe.parent().and_then(Path::parent);
-    let release = target.map(|target| target.join("release/seedbox-vmm"));
-    let mut searched = vec![sibling.clone()];
-    searched.extend(release.clone().filter(|path| *path != sibling));
+    if let Some(directory) = exe.parent().filter(|dir| !dir.join(".cargo-lock").exists()) {
+        searched.push(directory.join("seedbox-vmm"));
+    }
     if let Some(path) = first_file(&searched).or_else(|| on_path("seedbox-vmm")) {
         return Ok(path);
     }
-    if let (Some(cargo), Some(target), Some(release)) = (cargo_run_here(), target, release) {
-        build_engine(&cargo, target)?;
-        if release.is_file() {
-            return Ok(release);
+    if let Some(cargo) = cargo_run_here() {
+        build_engine(&cargo, &vmm)?;
+        if built.is_file() {
+            return Ok(built);
         }
     }
     searched.push(PathBuf::from("$PATH/seedbox-vmm"));
@@ -122,16 +125,14 @@ fn cargo_run_here() -> Option<std::ffi::OsString> {
         .flatten()
 }
 
-/// Build the VMM exactly as `cargo build-vmm` does: release mode, from its own
-/// workspace, so the engine (and its hash) does not depend on how it was built.
-fn build_engine(cargo: &std::ffi::OsStr, target: &Path) -> Result<()> {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../seedbox-vmm/Cargo.toml");
+/// Build the VMM with the same arguments as the `cargo build-vmm` alias.
+fn build_engine(cargo: &std::ffi::OsStr, vmm: &Path) -> Result<()> {
     eprintln!("seedbox-vmm not built; building it with `cargo build-vmm`");
     let status = Command::new(cargo)
-        .args(["build", "--release", "--manifest-path"])
-        .arg(&manifest)
+        .args(["build", "--release", "--locked", "--manifest-path"])
+        .arg(vmm.join("Cargo.toml"))
         .arg("--target-dir")
-        .arg(target)
+        .arg(vmm.join("target"))
         .status()
         .map_err(|error| Error::Setup(format!("running cargo to build seedbox-vmm: {error}")))?;
     if !status.success() {
