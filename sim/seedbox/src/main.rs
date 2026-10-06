@@ -1,4 +1,3 @@
-mod commands;
 use clap::{Args, Parser, Subcommand};
 use seedbox::{
     config,
@@ -24,14 +23,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Execute a bounded list of seeds through the shared Rust executor.
-    Batch(commands::BatchArgs),
-    /// Run the existing engine acceptance properties through the Rust API.
-    Acceptance(commands::AcceptanceArgs),
-    /// Search seeds using retained inputs and the shared Rust executor.
-    Campaign(commands::CampaignArgs),
-    /// Import and execute a low-level world fixture through the common lifecycle.
-    Fixture(commands::FixtureArgs),
     /// Create a self-contained Compose example.
     Init {
         directory: PathBuf,
@@ -222,26 +213,6 @@ fn outcome(run: &orchestration::Run) -> u8 {
 
 fn run(cli: Cli) -> Result<u8> {
     match cli.command {
-        Command::Batch(args) => {
-            let cancellation = CancellationToken::default();
-            let _signals = Signals::register(&cancellation)?;
-            return commands::batch(args, &cancellation);
-        }
-        Command::Acceptance(args) => {
-            let token = CancellationToken::default();
-            let _signals = Signals::register(&token)?;
-            return commands::acceptance(args, &token);
-        }
-        Command::Campaign(args) => {
-            let token = CancellationToken::default();
-            let _signals = Signals::register(&token)?;
-            return commands::campaign(args, &token);
-        }
-        Command::Fixture(args) => {
-            let token = CancellationToken::default();
-            let _signals = Signals::register(&token)?;
-            return Ok(outcome(&commands::fixture(args, &token)?));
-        }
         Command::Init {
             directory,
             template,
@@ -328,11 +299,15 @@ fn run(cli: Cli) -> Result<u8> {
                 }
             };
             let profile = &previous.identity.inputs.profile;
-            let mut actual_profile = profile.clone();
-            actual_profile.engine = store.put_file(&engine)?;
-            let executor = VmmExecutor::from_profile(actual_profile, cpu)?
-                .with_margin(&margin)?
-                .with_undo(undo)?;
+            let memory = profile
+                .semantic_parameters
+                .get("memory_mb")
+                .and_then(|value| value.parse().ok())
+                .ok_or_else(|| Error::Integrity("recorded profile missing memory_mb".into()))?;
+            let executor =
+                VmmExecutor::new(&engine, &store, cpu, memory, profile.witness_mode.clone())?
+                    .with_margin(&margin)?
+                    .with_undo(undo)?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
             let result = orchestrator.replay_with_options(

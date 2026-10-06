@@ -55,7 +55,7 @@ vmm=./sim/vmm/target/release/seedbox-vmm
 
 CPU 2 is illustrative; choose an available qualified core. The executor reserves
 that core and all SMT siblings with the same `/tmp/seedbox-msr-cpu-N.lock` flock
-protocol as `sim/seedbox/src/host.rs`, before reading or changing MSRs. It snapshots exact
+protocol as `sim/batch.py`, before reading or changing MSRs. It snapshots exact
 values, sets bit 54 with readback, pins the VMM, and restores with readback only
 after reaping it. An unsuccessful restore retains `output/msr-original.json`.
 Library cancellation and CLI SIGINT/SIGTERM/SIGHUP cause cleanup through the same
@@ -113,16 +113,17 @@ From the repository root in `nix develop ./sim`:
 ```sh
 bash sim/seedbox/tests/accept-oci.sh
 bash sim/seedbox/tests/accept-runtime.sh KERNEL CPU FRESH_OUTPUT_DIRECTORY
+bash sim/seedbox/tests/accept-runtime.sh KERNEL CPU ANOTHER_FRESH_DIRECTORY lifecycle
 ```
 
 The OCI suite builds/tests as the current user and invokes only its final import
 executable with `sudo -n`. It verifies the registry images and Dockerfile metadata,
 whiteouts, symlinks and build-context filtering. It does not start guests.
-The Rust runtime suite runs both application examples and their intentional
-failure controls, then replays each. It also checks full-state and
+The default runtime suite runs both application examples and their intentional
+failure controls, then replays each. The lifecycle suite checks full-state and
 changed-margin/undo replay, simulated timeout, wall expiry and SIGTERM cancellation.
-The suite starts KVM guests, temporarily applies the scoped MSR workaround,
-and compares original MSR readbacks after every execution. Choose available CPU/SMT
+Both runtime suites start KVM guests, temporarily apply the scoped MSR workaround,
+and compare original MSR readbacks after every execution. Choose available CPU/SMT
 lanes; contention fails without taking over another run's lease.
 
 Fault authoring remains disabled pending #3 integration and effect-time validation.

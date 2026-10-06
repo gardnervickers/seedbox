@@ -27,19 +27,10 @@ sim/campaign.sh sim/worlds/kill-3.5.2.json hunt 1000 8
 ```
 
 These commands require the legacy runtime layout, controlled kernel and etcd
-binary; they are not needed for Compose runs. All commands now use the Rust
-executor and its CPU/SMT lease protocol. The old workload build helper reads
+binary; they are not needed for Compose runs. Both old and new
+executors share the CPU/SMT lease protocol. The old workload build helper reads
 the checker source now housed in `sim/examples/etcd/workload`.
 
 Compose rejects nonempty `x-seedbox.faults` until #3 supplies qualified shared
 fault operations and effect-time acknowledgements. The legacy hunts remain
 available; their bug-finding performance is not established by the new examples.
-
-
-These worlds now enter the shared Rust orchestrator through `fixture::Fixture`.
-`batch.sh` and `campaign.sh` are compatibility argument shims, not separate
-execution implementations. Results use retained run manifests and the Rust
-runner's `report.json`; old console/status triplet parsers are retired. Build
-`sim/seedbox` before using the shims. Existing raw research records retain their
-original format and revision. No world seed is required to keep failing across
-semantic changes.

@@ -6,10 +6,8 @@
 
 #![doc = include_str!("../README.md")]
 
-pub mod acceptance;
 pub mod config;
 pub mod execution;
-pub mod fixture;
 pub mod guest;
 #[cfg(any(target_os = "linux", test))]
 mod host;
@@ -17,17 +15,12 @@ pub mod image;
 pub mod oci;
 pub mod orchestration;
 pub mod preparation;
-pub mod runner;
 pub mod store;
 pub mod templates;
 pub mod vmm;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("CPU {0} lease unavailable")]
-    LeaseBusy(u32),
-    #[error("VMM overshoot: {0}")]
-    Overshoot(String),
     #[error("{path}: {message}")]
     Validation { path: String, message: String },
     #[error(transparent)]

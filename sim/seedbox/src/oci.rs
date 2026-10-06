@@ -90,11 +90,6 @@ impl OciTools {
         provenance.insert("skopeo".into(), version(&self.skopeo)?);
         provenance.insert("umoci".into(), version(&self.umoci)?);
         let source = match &service.source {
-            ImageSource::BootArchive { .. } => {
-                return Err(Error::Execution(
-                    "boot archives require the fixture preparer".into(),
-                ))
-            }
             ImageSource::Registry { reference } => format!("docker://{reference}"),
             ImageSource::Build {
                 context,
