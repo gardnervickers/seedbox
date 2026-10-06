@@ -1,6 +1,7 @@
 //! Seedbox world: several Linux machines, a network fabric and a scenario,
 //! all executed by one host thread. A seed and the config fully determine the run.
 
+mod boundary;
 mod counter;
 mod devices;
 mod machine;
@@ -31,7 +32,11 @@ struct World {
     counter: Counter,
     events: Vec<BTreeMap<(u64, u64), Payload>>,
     seq: u64,
+    /// No frame can arrive sooner than this after it is sent: the horizon.
     lookahead: u64,
+    /// Slices may end, and events be delivered, up to this long before their
+    /// time. Below `lookahead`, so nothing is ever delivered into the past.
+    early: u64,
     latency: u64,
     jitter: u64,
     link_rng: BTreeMap<(usize, usize), Rng>,
@@ -72,8 +77,9 @@ impl World {
         }
     }
 
+    /// Deliver events due by the end of the machine's early window.
     fn deliver_due(&mut self, m: usize) {
-        let now = self.machines[m].time;
+        let now = self.machines[m].time + self.early;
         while let Some((&k, _)) = self.events[m].iter().next() {
             if k.0 > now {
                 break;
@@ -230,6 +236,8 @@ fn run() -> Result<Value, String> {
         events: (0..n).map(|_| BTreeMap::new()).collect(),
         seq: 0,
         lookahead: net["latency_ns"].as_u64().unwrap_or(1_000_000),
+        early: (net["latency_ns"].as_u64().unwrap_or(1_000_000) / 2)
+            .min(cfg["stop_tolerance_ns"].as_u64().unwrap_or(0)),
         latency: net["latency_ns"].as_u64().unwrap_or(1_000_000),
         jitter: net["jitter_ns"].as_u64().unwrap_or(0),
         link_rng: BTreeMap::new(),
@@ -331,7 +339,10 @@ fn run() -> Result<Value, String> {
             .unwrap_or(u64::MAX);
         let limit = horizon.min(world.next_event(m)).min(duration);
         slices += 1;
-        let stop = world.machines[m].run_until(&mut world.counter, limit, &mut frames)?;
+        // A slice ending at the horizon or an event may stop a little early
+        // (at a cheap deterministic point); the run's end is exact.
+        let early = if limit == duration { 0 } else { world.early };
+        let stop = world.machines[m].run_until(&mut world.counter, limit, early, &mut frames)?;
         let t = world.machines[m].time;
         for f in frames.drain(..) {
             world.route(m, t, f);

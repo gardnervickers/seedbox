@@ -19,9 +19,14 @@ start_etcd() {
     --initial-cluster $peers --initial-cluster-state new --logger zap --log-level error >> /tmp/etcd.log 2>&1 &
   echo $! > /tmp/etcd.pid
 }
+concurrency=$(arg concurrency); concurrency=${concurrency:-8}
+writes=$(arg writes); writes=${writes:-0}
+delay=$(arg delay); delay=${delay:-0}
 case $name in
 client)
-  /bin/client --endpoints 10.0.0.1:2379,10.0.0.2:2379,10.0.0.3:2379 --duration "$(arg load)" --concurrency "$(arg concurrency)" --plant "$(arg plant)"
+  sleep "$delay"
+  echo "SEEDBOX_PHASE client_start guest_ns=$(sbx time)"
+  /bin/client --writes "$writes" --endpoints 10.0.0.1:2379,10.0.0.2:2379,10.0.0.3:2379 --duration "$(arg load)" --concurrency "${concurrency}" --plant "$(arg plant)"
   sbx exit $?
   ;;
 *)

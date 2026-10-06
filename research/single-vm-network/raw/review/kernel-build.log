@@ -1,0 +1,18 @@
+building '/nix/store/16mxpa6d84ia2wkq7ll6lrqbdjzz78j0-nix-shell-env.drv'...
+vmlinux.o: warning: objtool: .text+0x0: unreachable instruction
+vmlinux.o: warning: objtool: .text+0x4: unreachable instruction
+vmlinux.o: warning: objtool: .text+0x5: unreachable instruction
+vmlinux.o: warning: objtool: .text+0xc: unreachable instruction
+vmlinux.o: warning: objtool: .text+0x11: unreachable instruction
+vmlinux.o: warning: objtool: .text+0x18: unreachable instruction
+vmlinux.o: warning: objtool: .text+0x1f: unreachable instruction
+vmlinux.o: warning: objtool: .text+0x22: unreachable instruction
+vmlinux.o: warning: objtool: .text+0x27: unreachable instruction
+vmlinux.o: warning: objtool: .text+0x28: unreachable instruction
+vmlinux.o: warning: objtool: .text+0x2a: unreachable instruction
+vmlinux.o: warning: objtool: .text+0x2c: unreachable instruction
+vmlinux.o: warning: objtool: .text+0x2e: unreachable instruction
+vmlinux.o: warning: objtool: .text+0x30: unreachable instruction
+vmlinux.o: warning: objtool: .text+0x32: unreachable instruction
+d80bafbe61cf133476df479b8620fd065aa71759aa4ca874e16c04a95ef0e283  artifacts/bzImage
+b5d7e0198d854ef2d8b9bb72dabfead3673407113b5c87abb502ec12193e4522  artifacts/kernel.config

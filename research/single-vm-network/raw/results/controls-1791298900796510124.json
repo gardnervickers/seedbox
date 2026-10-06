@@ -1,0 +1,60 @@
+{
+  "frames_delivered": 0,
+  "frames_dropped": 0,
+  "host_seconds": 1.221185176,
+  "kills": [],
+  "machines": [
+    {
+      "branches": 76446385,
+      "eintr": 6,
+      "exits": 183890,
+      "final_margin": 16000,
+      "halts": 23,
+      "irqs": 199,
+      "kvm_ms_by_exit": {
+        "debug": 123.837856,
+        "eintr": 186.924133,
+        "hlt": 1.479995,
+        "mmio": 0.0,
+        "other": 0.0,
+        "pio": 744.103628,
+        "window": 0.811226
+      },
+      "kvm_n_by_exit": [
+        6,
+        29621,
+        154069,
+        0,
+        23,
+        171,
+        0,
+        0
+      ],
+      "mmio": 0,
+      "name": "whole",
+      "net": null,
+      "pio": 154056,
+      "precise_stops": 1,
+      "run_ms": 1221.173664,
+      "skid_count": 6,
+      "skid_max": 1202,
+      "skid_p50": 894,
+      "skid_p99": 1202,
+      "state": "Exited(0)",
+      "state_digest": "bb18d571f8a3254c8bb1f564b3e6f45dfd11be94600001d15b63e6eca5958607",
+      "step_ms": 189.380291,
+      "steps": 29621,
+      "time_ns": 193572596,
+      "window_exits": 171,
+      "witness": "b2384d7a30786cf2fa79eaebacf1075496924a8cb3361797c4adda2c4fe64f76",
+      "yield_stops": 4,
+      "yields": 13
+    }
+  ],
+  "outcome": "end_machine_exited",
+  "seed": 1009,
+  "sim_seconds": 0.193572596,
+  "slices": 24,
+  "speed": 0.15851207483049237,
+  "world_witness": "efeea88efa3ea62886299845cdd957ab464a4a82c75566f1fb6cf84dce27d0d6"
+}
