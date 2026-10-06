@@ -1,5 +1,9 @@
 # Seedbox evidence log
 
+The standalone research crates (`kvm-runner`, `world`, `determinism`, the
+`intel-probe` crates and `workloads/tokio-service`) have been removed from the
+tree. Links to them point to commit `bc07f35`.
+
 Updated 2026-10-05. Design and objectives: [CONCLUSIONS.md](CONCLUSIONS.md).
 Current work and runtime observations: [STATUS.md](STATUS.md).
 
@@ -211,7 +215,7 @@ JVM compatibility are the deciding integration uncertainties.
 
 [Report/stub list](evidence/w2/report.json),
 [first comparison](evidence/w2/clean-comparison.json),
-[runner sources](kvm-runner/Cargo.toml).
+[runner sources](https://github.com/gardnervickers/seedbox/blob/bc07f35/research/kvm-runner/Cargo.toml).
 The measured-source variant is retained separately from the compiled normalized
 variant; it was reconstructed by reversing mechanical handoff edits. Useful
 kernel/Redis/busy inputs and exact boundary/serial traces are preserved compressed.
@@ -224,7 +228,7 @@ checker rejects the retained HZ=250 profile. A passive page stays fixed between
 stops, so progress depends on qualified preemption; ordinary pvclock still reads
 TSC. The Linux injection adapter is prepared but uncompiled/unexecuted. Native
 calibration, guest clocksource/IRQ and snapshot execution remain integration work.
-[Clock/IRQ contract](kvm-runner/next-profile/contract.json),
+[Clock/IRQ contract](https://github.com/gardnervickers/seedbox/blob/bc07f35/research/kvm-runner/next-profile/contract.json),
 [smoke provenance](evidence/w2/next-profile/manifest.json).
 
 ## W1: world, protocol and fault semantics
@@ -266,8 +270,8 @@ change for the exact multi-machine profile. Source-time stamped scenario actions
 need the same barrier admission as network effects. This is a conditional design
 argument, not a hardware result.
 
-[World source](world/Cargo.toml),
-[wire contract](world/protocol-contract.json),
+[World source](https://github.com/gardnervickers/seedbox/blob/bc07f35/research/world/Cargo.toml),
+[wire contract](https://github.com/gardnervickers/seedbox/blob/bc07f35/research/world/protocol-contract.json),
 [final summary](evidence/w1/protocol-v2/summary.json),
 [manifest](evidence/w1/protocol-v2/manifest.json).
 
@@ -297,7 +301,7 @@ canonical seed/time/stop choices. Exclusive cost buckets count each host interva
 once; KVM_RUN includes KVM work, and check-minus-normal includes indirect
 dirty-logging costs.
 
-[Witness source](determinism/Cargo.toml),
+[Witness source](https://github.com/gardnervickers/seedbox/blob/bc07f35/research/determinism/Cargo.toml),
 [v2 contract](evidence/w3/integration-contract-v2.json),
 [v2 results](evidence/w3/precise-landing-v2/results.json).
 Normal versus determinism-check witness cost remains useful simtest diagnostics.
@@ -367,7 +371,7 @@ both clock domains and a qualified application/provider reseed policy. These are
 source findings; a local Java probe is not x86/JVM guest admission.
 [Pinned JVM audit](intel-probe/java/admission-audit.json).
 
-[Source probes](intel-probe/validate.sh),
+[Source probes](https://github.com/gardnervickers/seedbox/blob/bc07f35/research/intel-probe/validate.sh),
 [entropy/admission profile](evidence/w5b/entropy-profile.json),
 [native results](evidence/w5b/native/run.5Ap08O/stdout.txt).
 

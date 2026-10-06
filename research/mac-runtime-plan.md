@@ -81,7 +81,7 @@ it as a capability restriction or blocker; do not quietly substitute loopback.
   `/data` lives in tmpfs and survives process restart. The host schedules
   commands but does not yet validate structured application acknowledgments.
   These are current behaviors, not completion of #3's reusable fault contract.
-- `research/world/protocol-contract.json` supplies useful command ownership,
+- `research/world/protocol-contract.json` (removed; see commit `bc07f35`) supplies useful command ownership,
   handles, acknowledgments and ordering ideas. Its modeled storage/snapshots
   are not implemented VMM guarantees; its branch/RIP-specific boundary shape
   should not become the generic backend ABI.

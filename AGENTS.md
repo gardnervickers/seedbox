@@ -18,11 +18,13 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 - New crates go in `crates/<name>/` and inherit `version`, `edition` and
   `publish` from `[workspace.package]`. Put a dependency used by two or more
   workspace crates in `[workspace.dependencies]`. Commit both lockfiles.
-- `research/` is frozen evidence: standalone, version-pinned crates and records
-  of past runs, excluded from the workspace. Don't edit it to fit code changes
-  elsewhere, and don't add it to the workspace. Its scripts predate the
-  workspace layout and some still use `sim/` paths; run those from commit
-  `bc07f35`, the last commit with the old layout.
+- `research/` is frozen: design conclusions, evidence records and the scripts
+  that produced them, excluded from the workspace. Don't edit it to fit code
+  changes elsewhere. The standalone research crates (`kvm-runner`, `world`,
+  `determinism`, the `intel-probe` crates, `workloads/tokio-service`) were
+  removed. They, and scripts that still use `sim/` paths, are at commit
+  `bc07f35`, the last commit with the old layout. The crates under
+  `research/evidence/**/source` stay as the recorded source of measured results.
 - `harness/` holds the Python acceptance suite and legacy world-file runners;
   `kernel/` and `guest/` hold guest build inputs.
 

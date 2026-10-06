@@ -52,7 +52,7 @@ INCOMPLETE and 124 TIMEOUT.
 | `guest/` | Generic OCI guest supervisor plus low-level guest fixtures and builders |
 | `docs/` | [Runtime instructions](docs/runtime.md), [backends](docs/backends.md), [acceptance record](docs/acceptance.md) |
 | `harness/` | Engine acceptance suite, legacy world-file campaign runners and fixtures ([migration map](harness/worlds/README.md)), `msr54.py` |
-| `research/` | Design conclusions, evidence and standalone probes ([status](research/STATUS.md)); not part of the workspace |
+| `research/` | Design conclusions and evidence records ([status](research/STATUS.md)); research crates removed, see commit `bc07f35` |
 
 ## How execution is controlled
 
