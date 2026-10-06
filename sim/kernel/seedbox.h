@@ -27,6 +27,7 @@ struct seedbox_time_page {
 	u64 syscalls;	/* syscalls entered */
 	u64 pic_imr;	/* 8259 masks, master | slave << 8 */
 	u64 net_isr;	/* virtio-mmio interrupt status: VMM sets, guest clears */
+	u64 user_tsc_traps;	/* user RDTSC/RDTSCP emulated (measurement, #11) */
 };
 
 struct pt_regs;

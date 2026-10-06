@@ -1,0 +1,12 @@
+[host 0.587s guest 0.020689s br 20686469] BENCH loop 1000000 start
+[host 0.591s guest 0.025691s br 25687829] BENCH loop 1000000 done 0
+[host 0.591s guest 0.025720s br 25717444] BENCH rdtsc 1000000 start
+[host 1.506s guest 0.133739s br 133722757] BENCH rdtsc 1000000 done 0
+[host 1.506s guest 0.133769s br 133752571] BENCH clock 1000000 start
+[host 2.415s guest 0.273790s br 273759845] BENCH clock 1000000 done 0
+[host 2.416s guest 0.273820s br 273789789] BENCH loop 1000000 start
+[host 2.430s guest 0.278823s br 278791649] BENCH loop 1000000 done 0
+[host 2.430s guest 0.278853s br 278821719] BENCH rdtsc 1000000 start
+[host 3.331s guest 0.386868s br 386826071] BENCH rdtsc 1000000 done 0
+[host 3.332s guest 0.386898s br 386856137] BENCH clock 1000000 start
+[host 4.240s guest 0.526919s br 526863438] BENCH clock 1000000 done 1

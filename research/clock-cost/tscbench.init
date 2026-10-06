@@ -1,0 +1,8 @@
+#!/bin/busybox sh
+/bin/busybox --install -s
+mount -t proc proc /proc
+mount -t devtmpfs devtmpfs /dev
+for mode in loop rdtsc clock loop rdtsc clock; do
+  /bin/tscbench $mode 1000000
+done
+sbx exit 0

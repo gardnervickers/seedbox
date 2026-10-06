@@ -70,6 +70,8 @@ bool seedbox_emulate_user_tsc(struct pt_regs *regs)
 	if (tscp)
 		regs->cx = 0;
 	regs->ip += len;
+	if (seedbox_page)
+		WRITE_ONCE(seedbox_page->user_tsc_traps, seedbox_page->user_tsc_traps + 1);
 	return true;
 }
 

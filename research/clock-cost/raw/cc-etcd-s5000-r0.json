@@ -1,0 +1,408 @@
+{
+  "frames_delivered": 703141,
+  "frames_dropped": 0,
+  "host_seconds": 248.172741506,
+  "kills": [
+    {
+      "member": "n3",
+      "start_ns": 4243074004,
+      "stop_ns": 3478995387
+    },
+    {
+      "member": "n1",
+      "start_ns": 6341262097,
+      "stop_ns": 5961453406
+    },
+    {
+      "member": "n3",
+      "start_ns": 8844872400,
+      "stop_ns": 8144322552
+    },
+    {
+      "member": "n3",
+      "start_ns": 11060971763,
+      "stop_ns": 10331796278
+    },
+    {
+      "member": "n2",
+      "start_ns": 12434908880,
+      "stop_ns": 11610174918
+    },
+    {
+      "member": "n1",
+      "start_ns": 15222870746,
+      "stop_ns": 14342795299
+    },
+    {
+      "member": "n1",
+      "start_ns": 16383524623,
+      "stop_ns": 15786253941
+    },
+    {
+      "member": "n3",
+      "start_ns": 17796618992,
+      "stop_ns": 17474529125
+    },
+    {
+      "member": "n1",
+      "start_ns": 19456537411,
+      "stop_ns": 18839718086
+    },
+    {
+      "member": "n2",
+      "start_ns": 20483392872,
+      "stop_ns": 20122286587
+    },
+    {
+      "member": "n2",
+      "start_ns": 22280336937,
+      "stop_ns": 21288024770
+    },
+    {
+      "member": "n2",
+      "start_ns": 23805529328,
+      "stop_ns": 23320125019
+    },
+    {
+      "member": "n2",
+      "start_ns": 25932465272,
+      "stop_ns": 25424954698
+    },
+    {
+      "member": "n2",
+      "start_ns": 27707037941,
+      "stop_ns": 27308652928
+    },
+    {
+      "member": "n3",
+      "start_ns": 30161216397,
+      "stop_ns": 29611934215
+    },
+    {
+      "member": "n2",
+      "start_ns": 31619897200,
+      "stop_ns": 31017808663
+    },
+    {
+      "member": "n1",
+      "start_ns": 34053973257,
+      "stop_ns": 33394168166
+    },
+    {
+      "member": "n2",
+      "start_ns": 35536793260,
+      "stop_ns": 34984367068
+    },
+    {
+      "member": "n3",
+      "start_ns": 37680278985,
+      "stop_ns": 37091080336
+    },
+    {
+      "member": "n2",
+      "start_ns": 38924427735,
+      "stop_ns": 38244001353
+    },
+    {
+      "member": "n1",
+      "start_ns": 41147929782,
+      "stop_ns": 40216738506
+    },
+    {
+      "member": "n1",
+      "start_ns": 43512727514,
+      "stop_ns": 42627365300
+    },
+    {
+      "member": "n2",
+      "start_ns": 44777513965,
+      "stop_ns": 44314882217
+    },
+    {
+      "member": "n1",
+      "start_ns": 46985738048,
+      "stop_ns": 46186588393
+    },
+    {
+      "member": "n1",
+      "start_ns": 48524797267,
+      "stop_ns": 47666584074
+    },
+    {
+      "member": "n2",
+      "start_ns": 49780748216,
+      "stop_ns": 49181747558
+    },
+    {
+      "member": "n2",
+      "start_ns": 52299296865,
+      "stop_ns": 51352859822
+    },
+    {
+      "member": "n2",
+      "start_ns": 53830458370,
+      "stop_ns": 52957089118
+    },
+    {
+      "member": "n3",
+      "start_ns": 56087533701,
+      "stop_ns": 55211171584
+    }
+  ],
+  "machines": [
+    {
+      "branches": 11618233899,
+      "eintr": 43628,
+      "exits": 4079245,
+      "final_margin": 16384,
+      "halts": 66851,
+      "irqs": 374267,
+      "kvm_ms_by_exit": {
+        "debug": 7542.621011,
+        "eintr": 31778.581534,
+        "hlt": 1390.213514,
+        "mmio": 14299.848762,
+        "other": 0.0,
+        "pio": 16063.374713,
+        "window": 120.321145
+      },
+      "kvm_n_by_exit": [
+        47369,
+        1774153,
+        1919747,
+        251702,
+        66851,
+        23164,
+        0,
+        0
+      ],
+      "mmio": 251702,
+      "name": "n1",
+      "net": {
+        "rx": 235165,
+        "rx_dropped": 0,
+        "tx": 248076
+      },
+      "pio": 227880,
+      "precise_stops": 1729,
+      "run_ms": 78376.334652,
+      "skid_count": 43628,
+      "skid_max": 8386,
+      "skid_p50": 155,
+      "skid_p99": 5055,
+      "soft_misses": 0,
+      "soft_misses_clean": 0,
+      "soft_undos": 0,
+      "state": "Halted",
+      "state_digest": null,
+      "step_ms": 11698.995069,
+      "steps": 1774153,
+      "time_ns": 60717270307,
+      "undo": {
+        "checkpoint_ms": 778.625203,
+        "checkpoints": 1762,
+        "restored_pages": 234900,
+        "rollback_ms": 141.866625,
+        "rollbacks": 3741,
+        "synced_pages": 1108853
+      },
+      "user_tsc_traps": 27216257,
+      "window_exits": 23164,
+      "witness": "931f7b66e2690f35281c0e256b149001e4beebcdc8bd54587ac220aed683a83b",
+      "yield_stops": 41477,
+      "yields": 1691867
+    },
+    {
+      "branches": 11445625246,
+      "eintr": 36562,
+      "exits": 4225841,
+      "final_margin": 16384,
+      "halts": 60492,
+      "irqs": 274379,
+      "kvm_ms_by_exit": {
+        "debug": 10590.717495,
+        "eintr": 30423.068532,
+        "hlt": 1275.198066,
+        "mmio": 10920.997893,
+        "other": 0.0,
+        "pio": 12521.169983,
+        "window": 102.217641
+      },
+      "kvm_n_by_exit": [
+        41855,
+        2492013,
+        1445954,
+        170875,
+        60492,
+        19945,
+        0,
+        0
+      ],
+      "mmio": 170875,
+      "name": "n2",
+      "net": {
+        "rx": 169665,
+        "rx_dropped": 0,
+        "tx": 168026
+      },
+      "pio": 218111,
+      "precise_stops": 2632,
+      "run_ms": 74515.39205,
+      "skid_count": 36562,
+      "skid_max": 10621,
+      "skid_p50": 167,
+      "skid_p99": 5154,
+      "soft_misses": 0,
+      "soft_misses_clean": 0,
+      "soft_undos": 0,
+      "state": "Halted",
+      "state_digest": null,
+      "step_ms": 16433.109821,
+      "steps": 2492013,
+      "time_ns": 60726971916,
+      "undo": {
+        "checkpoint_ms": 946.6631,
+        "checkpoints": 2688,
+        "restored_pages": 371536,
+        "rollback_ms": 205.521781,
+        "rollbacks": 5293,
+        "synced_pages": 1466724
+      },
+      "user_tsc_traps": 24432999,
+      "window_exits": 19945,
+      "witness": "97e9ec83e46796af5a323667c2eedd62e1d7b45086ab1236d501dcd4186d8973",
+      "yield_stops": 29739,
+      "yields": 1227843
+    },
+    {
+      "branches": 9924177195,
+      "eintr": 33917,
+      "exits": 3497670,
+      "final_margin": 16384,
+      "halts": 64570,
+      "irqs": 279513,
+      "kvm_ms_by_exit": {
+        "debug": 6565.188152,
+        "eintr": 30766.864246,
+        "hlt": 1324.626075,
+        "mmio": 11330.985231,
+        "other": 0.0,
+        "pio": 13104.114387,
+        "window": 106.882909
+      },
+      "kvm_n_by_exit": [
+        37174,
+        1553601,
+        1654320,
+        170550,
+        64570,
+        20712,
+        0,
+        0
+      ],
+      "mmio": 170550,
+      "name": "n3",
+      "net": {
+        "rx": 170415,
+        "rx_dropped": 0,
+        "tx": 166957
+      },
+      "pio": 218960,
+      "precise_stops": 1411,
+      "run_ms": 69288.303567,
+      "skid_count": 33917,
+      "skid_max": 9983,
+      "skid_p50": 153,
+      "skid_p99": 5146,
+      "soft_misses": 0,
+      "soft_misses_clean": 0,
+      "soft_undos": 0,
+      "state": "Halted",
+      "state_digest": null,
+      "step_ms": 10165.35291,
+      "steps": 1553601,
+      "time_ns": 60726508024,
+      "undo": {
+        "checkpoint_ms": 620.6794,
+        "checkpoints": 1439,
+        "restored_pages": 192238,
+        "rollback_ms": 117.519775,
+        "rollbacks": 3257,
+        "synced_pages": 872164
+      },
+      "user_tsc_traps": 25109385,
+      "window_exits": 20712,
+      "witness": "beb0e8d5a61ba5e572893330e7de400b504b3cbb7a433efc0485a3bfd68c6bc2",
+      "yield_stops": 31398,
+      "yields": 1435360
+    },
+    {
+      "branches": 2933553540,
+      "eintr": 7177,
+      "exits": 1558122,
+      "final_margin": 16384,
+      "halts": 73476,
+      "irqs": 217985,
+      "kvm_ms_by_exit": {
+        "debug": 4628.863022,
+        "eintr": 3424.958798,
+        "hlt": 1366.650835,
+        "mmio": 8104.31717,
+        "other": 0.0,
+        "pio": 2850.048109,
+        "window": 102.951326
+      },
+      "kvm_n_by_exit": [
+        9143,
+        1102204,
+        231671,
+        123828,
+        73476,
+        19766,
+        0,
+        0
+      ],
+      "mmio": 123828,
+      "name": "client",
+      "net": {
+        "rx": 127896,
+        "rx_dropped": 0,
+        "tx": 120066
+      },
+      "pio": 198151,
+      "precise_stops": 1113,
+      "run_ms": 24560.847423,
+      "skid_count": 7177,
+      "skid_max": 5886,
+      "skid_p50": 221,
+      "skid_p99": 2835,
+      "soft_misses": 0,
+      "soft_misses_clean": 0,
+      "soft_undos": 0,
+      "state": "Exited(0)",
+      "state_digest": null,
+      "step_ms": 7086.149271,
+      "steps": 1102204,
+      "time_ns": 60732450085,
+      "undo": {
+        "checkpoint_ms": 472.712,
+        "checkpoints": 1128,
+        "restored_pages": 60014,
+        "rollback_ms": 60.35161,
+        "rollbacks": 1966,
+        "synced_pages": 695244
+      },
+      "user_tsc_traps": 3910964,
+      "window_exits": 19766,
+      "witness": "3e0f144f28dcd84c040a447da2e30b360adc94509c5145fdd914ff908b3a7735",
+      "yield_stops": 3749,
+      "yields": 33520
+    }
+  ],
+  "outcome": "end_machine_exited",
+  "seed": 5000,
+  "sim_seconds": 60.732450085,
+  "slices": 1062656,
+  "speed": 0.24471845584834986,
+  "world_witness": "8c43e4c00e61b13a1733c135152299a032872b48b2cb04ca12a9798d47ee6636"
+}

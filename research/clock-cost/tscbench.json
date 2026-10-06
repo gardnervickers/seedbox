@@ -1,0 +1,11 @@
+{
+  "kernel": "../../artifacts-cc/bzImage",
+  "mem_mb": 256,
+  "duration_ns": 600000000000,
+  "stop_tolerance_ns": 2000000,
+  "timer_jitter_ns": 0,
+  "end_on_exit": "bench",
+  "machines": [
+    {"name": "bench", "initrd": "../../artifacts-cc/tscbench.cpio"}
+  ]
+}

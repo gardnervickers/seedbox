@@ -1,0 +1,72 @@
+{
+  "frames_delivered": 0,
+  "frames_dropped": 0,
+  "host_seconds": 4.235692573,
+  "kills": [],
+  "machines": [
+    {
+      "branches": 526897212,
+      "eintr": 149,
+      "exits": 132369,
+      "final_margin": 16384,
+      "halts": 0,
+      "irqs": 82,
+      "kvm_ms_by_exit": {
+        "debug": 63.205966,
+        "eintr": 3446.533174,
+        "hlt": 0.0,
+        "mmio": 0.0,
+        "other": 0.0,
+        "pio": 637.238519,
+        "window": 0.183604
+      },
+      "kvm_n_by_exit": [
+        152,
+        15065,
+        117119,
+        0,
+        0,
+        36,
+        0,
+        0
+      ],
+      "mmio": 0,
+      "name": "bench",
+      "net": null,
+      "pio": 117117,
+      "precise_stops": 49,
+      "run_ms": 4235.690549,
+      "skid_count": 149,
+      "skid_max": 1205,
+      "skid_p50": 90,
+      "skid_p99": 1203,
+      "soft_misses": 0,
+      "soft_misses_clean": 0,
+      "soft_undos": 0,
+      "state": "Exited(0)",
+      "state_digest": null,
+      "step_ms": 99.046437,
+      "steps": 15065,
+      "time_ns": 526953212,
+      "undo": {
+        "checkpoint_ms": 13.885764,
+        "checkpoints": 49,
+        "restored_pages": 24,
+        "rollback_ms": 0.066987,
+        "rollbacks": 3,
+        "synced_pages": 8636
+      },
+      "user_tsc_traps": 4000022,
+      "window_exits": 36,
+      "witness": "e09465262831a4379cd6596cdc0ba58f907170ac69c560fd34e6f07382a243ce",
+      "yield_stops": 2,
+      "yields": 2
+    }
+  ],
+  "outcome": "end_machine_exited",
+  "seed": 1,
+  "sim_seconds": 0.526953212,
+  "slices": 1,
+  "speed": 0.12440780413550567,
+  "world_witness": "c16b4b4b44283f131375961130e43dd4164c432dda9ad6c5f8ece9a2e2132875"
+}

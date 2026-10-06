@@ -42,7 +42,8 @@ const ISA_IO_NS: u64 = 1000;
 const PAGE_SYSCALLS: usize = 3;
 const PAGE_PIC_IMR: usize = 4;
 const PAGE_NET_ISR: usize = 5;
-pub const PAGE_FIELDS: usize = 6;
+const PAGE_TSC_TRAPS: usize = 6;
+pub const PAGE_FIELDS: usize = 7;
 
 pub struct BootSpec<'a> {
     pub kernel: &'a [u8],
@@ -408,6 +409,11 @@ impl Machine {
             self.raise_net();
         }
         irq.is_some()
+    }
+
+    /// User RDTSC/RDTSCP instructions the guest emulated (#11 measurement).
+    pub fn user_tsc_traps(&self) -> u64 {
+        self.page_get(PAGE_TSC_TRAPS)
     }
 
     fn page_get(&self, i: usize) -> u64 {
