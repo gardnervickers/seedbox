@@ -19,16 +19,18 @@ x-seedbox:
 ```
 
 The control service must also be the check service, so another application cannot
-complete the run before the scenario finishes. The controller is outside the fault model. Stop/restart cannot target it, and
-partition groups cannot contain it. Its control transport and network links
-remain available during cuts between other guests. A stopped application still
+complete the run before the scenario finishes. The controller service is outside the fault model. Stop/restart cannot target it, and
+partition groups cannot contain it. Other services remain targets, including
+services that share its kernel. Its control transport and network links remain
+available during cuts between other services. A stopped application still
 cannot answer application requests; restart confirmation means successful exec,
 so the scenario must check application readiness separately. Normal controller
 completion supplies the configured check outcome.
 
-Connect to the Unix stream socket `/run/seedbox/control.sock` inside the guest.
-The socket is created only in the configured controller guest, selected by the
-VMM's `seedbox.control=1` kernel boot argument. It is absent from other guests.
+Connect to the Unix stream socket `/run/seedbox/control.sock` inside the
+controller service. The guest supervisor creates it only on the machine the
+VMM selects with its `seedbox.control=1` kernel boot argument, and mounts it
+only into the controller service's filesystem. It is absent from other services.
 Version 1 supports one active controller connection and one outstanding request
 at a time. After receiving a complete response, the client may close its
 connection and open a new session. Handles and simulator fault state survive
@@ -73,8 +75,9 @@ RPC extensions, not implemented by this version.
 ## Requests
 
 Common fields are `version: 1`, `id`, and `op`. Targets are typed objects:
-`{"service":"server"}` resolves through retained placement;
-`{"machine":"server-vm"}` names a prepared machine explicitly.
+`{"service":"server"}` names a service; `{"machine":"server-vm"}` names the
+only service placed on a prepared machine. With the default shared-kernel
+layout every service is on one machine, so name services.
 
 | `op` | Additional fields | Successful `result` |
 | --- | --- | --- |
@@ -89,14 +92,22 @@ Common fields are `version: 1`, `id`, and `op`. Targets are typed objects:
 Partitions cut both directions between their two groups. Each handle is
 independent: a link remains cut while any applicable handle exists. Already
 routed packets stay in flight; new sends crossing an active cut are dropped.
-Inspect returns the retained service-to-machine mapping, application lifecycle
-states (`Running`, `Stopped`, or `Exited(code)`), active partition handles and
-directed-link counters. It exposes simulator state, not application object memory.
-Transient CPU halt state is not an application lifecycle state. Counters include
-sends, drops and arrivals whose nominal simulated timestamps are strictly before
-the admission boundary; equal-time packets follow admission. This excludes
-packets that the scheduler has delivered early but whose nominal arrival is
-still in the future. Partition/heal evidence uses the same counter boundary.
+Between machines the engine's fabric drops them. Among services sharing a
+kernel, the guest's root network namespace drops them with blackhole routing
+rules; packets already queued in a destination's delay queue stay in flight.
+Inspect returns the retained service-to-machine mapping, machine states,
+per-service application lifecycle states in `processes` (`Running`, `Stopped`,
+or `Exited(code)` once the service's machine has exited), active partition
+handles and directed-link counters. A machine hosting one service reports that
+service's state. It exposes simulator state, not application object memory.
+Transient CPU halt state is not an application lifecycle state. A service that
+exits on its own keeps `Running` until it is stopped; stopping it succeeds.
+Counters cover the engine's fabric between machines, so they are empty when
+services share a kernel. They include sends, drops and arrivals whose nominal
+simulated timestamps are strictly before the admission boundary; equal-time
+packets follow admission. This excludes packets that the scheduler has
+delivered early but whose nominal arrival is still in the future.
+Partition/heal evidence uses the same counter boundary.
 
 For example:
 
@@ -125,8 +136,10 @@ An operation error uses `ok: false` and `error` instead of a result:
 A scenario can handle rejected arguments or an inactive partition handle.
 `restart` starts a stopped application using its retained launch recipe. Restarting
 a running application or stopping an already stopped application returns
-`invalid_state`. Commands targeting a VM that has exited return `target_unavailable`;
-the scenario can inspect that exit and decide its own outcome. An inspection
+`invalid_state`. With one service per machine, its application exiting ends that
+machine, and commands targeting it return `target_unavailable`; the scenario can
+inspect that exit and decide its own outcome. A service sharing a kernel that
+exits on its own can be stopped, then restarted. An inspection
 whose response would exceed the frame limit returns `result_too_large`.
 These errors are recoverable: the connection stays usable, the error is retained
 in the transcript, and no operation is reported as applied. Missing or
@@ -146,8 +159,10 @@ It must cover scheduler lookahead and the ordinary early-delivery window.
 - `requested_at_ns = T`: complete request observed.
 - `admitted_at_ns = A = T + L`: all relevant guests have reached the exact
   admission boundary; the operation can start without changing another guest's past.
-- `effect_at_ns = E`: a partition/heal takes effect at admission; stop/restart
-  waits for the supervisor's correlated confirmation; sleep wakes at `A + duration_ns`.
+- `effect_at_ns = E`: a partition/heal between machines takes effect at
+  admission; one among services sharing a kernel, and every stop/restart, waits
+  for that machine supervisor's correlated confirmation; sleep wakes at
+  `A + duration_ns`.
 - `replied_at_ns = R = E + L`: response delivery is scheduled strictly at this
   time, never through the ordinary early packet-delivery window.
 
@@ -156,8 +171,8 @@ next instruction may execute later than `R`. A requested sleep includes the two
 RPC delivery intervals; it is a lower bound on elapsed simulated time. Admission
 and replies never derive their timestamp from host wall time or a performance
 margin. Calls whose timing extends beyond the run limit remain pending and are
-recorded as `cut_off` at termination. Process commands wait for the target
-supervisor's readiness signal. If readiness arrives after admission, dispatch is
+recorded as `cut_off` at termination. Commands for a supervisor wait for its
+readiness signal. If readiness arrives after admission, dispatch is
 scheduled one control-latency interval after that signal; the original deadline
 still applies.
 

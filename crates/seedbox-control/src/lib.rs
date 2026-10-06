@@ -49,14 +49,16 @@ pub struct Header {
     #[serde(flatten)]
     pub arguments: BTreeMap<String, serde_json::Value>,
 }
+/// A scheduled fault. Targets are services; the engine maps them to machines
+/// through the retained placement, so several services may share a machine.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
     Stop {
-        machine: String,
+        service: String,
     },
     Restart {
-        machine: String,
+        service: String,
     },
     Partition {
         handle: String,
@@ -76,12 +78,48 @@ impl Action {
             Self::Heal { .. } => "heal",
         }
     }
-    pub fn machine(&self) -> Option<&str> {
+    pub fn service(&self) -> Option<&str> {
         match self {
-            Self::Stop { machine } | Self::Restart { machine } => Some(machine),
+            Self::Stop { service } | Self::Restart { service } => Some(service),
             _ => None,
         }
     }
+}
+/// Resolve a request target to the service it names. A machine target names
+/// the only service placed on it. The controller is outside the failure model.
+pub fn resolve(
+    target: &Target,
+    placement: &BTreeMap<String, String>,
+    controller: Option<&str>,
+) -> Result<String, &'static str> {
+    let service = match target {
+        Target::Service(service) => {
+            if !placement.contains_key(service) {
+                return Err("unknown service");
+            }
+            service.clone()
+        }
+        Target::Machine(machine) => {
+            let mut hosted = placement.iter().filter(|(_, m)| *m == machine);
+            match (hosted.next(), hosted.next()) {
+                (None, _) => return Err("unknown machine"),
+                (Some((service, _)), None) => service.clone(),
+                (Some(_), Some(_)) => {
+                    if placement
+                        .iter()
+                        .any(|(s, m)| m == machine && Some(s.as_str()) == controller)
+                    {
+                        return Err("controller is outside failure model");
+                    }
+                    return Err("machine hosts several services; target a service");
+                }
+            }
+        }
+    };
+    if Some(service.as_str()) == controller {
+        return Err("controller is outside failure model");
+    }
+    Ok(service)
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Plan {
@@ -109,5 +147,38 @@ mod tests {
         }
         let r:Request=serde_json::from_str(r#"{"version":1,"id":1,"op":"partition","left":[{"service":"c"}],"right":[{"machine":"s"}]}"#).unwrap();
         assert!(matches!(r.operation, Operation::Partition { .. }));
+    }
+    #[test]
+    fn targets_resolve_to_services_and_exclude_the_controller() {
+        let shared: BTreeMap<String, String> = ["a", "b", "scenario"]
+            .into_iter()
+            .map(|s| (s.to_owned(), "kernel".to_owned()))
+            .collect();
+        let service = |s: &str| Target::Service(s.into());
+        let machine = |m: &str| Target::Machine(m.into());
+        assert_eq!(resolve(&service("a"), &shared, Some("scenario")), Ok("a".into()));
+        assert_eq!(resolve(&service("x"), &shared, Some("scenario")), Err("unknown service"));
+        assert_eq!(
+            resolve(&service("scenario"), &shared, Some("scenario")),
+            Err("controller is outside failure model")
+        );
+        assert_eq!(
+            resolve(&machine("kernel"), &shared, Some("scenario")),
+            Err("controller is outside failure model")
+        );
+        assert_eq!(
+            resolve(&machine("kernel"), &shared, None),
+            Err("machine hosts several services; target a service")
+        );
+        let separate: BTreeMap<String, String> = ["a", "scenario"]
+            .into_iter()
+            .map(|s| (s.to_owned(), format!("{s}-vm")))
+            .collect();
+        assert_eq!(resolve(&machine("a-vm"), &separate, Some("scenario")), Ok("a".into()));
+        assert_eq!(resolve(&machine("x-vm"), &separate, Some("scenario")), Err("unknown machine"));
+        assert_eq!(
+            resolve(&machine("scenario-vm"), &separate, Some("scenario")),
+            Err("controller is outside failure model")
+        );
     }
 }

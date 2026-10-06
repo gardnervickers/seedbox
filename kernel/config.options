@@ -75,9 +75,17 @@ n SOFTLOCKUP_DETECTOR
 n DETECT_HUNG_TASK
 n IO_URING
 
-# One-VM service network isolation and fixed-delay/fault controls.
+# Shared-kernel services: each in its own mount, PID, UTS and network
+# namespaces; partitions are blackhole policy-routing rules.
 y NAMESPACES
+y PID_NS
+y UTS_NS
 y NET_NS
+y IP_ADVANCED_ROUTER
+y IP_MULTIPLE_TABLES
+# One read-only copy of each image; each service writes to its own overlay.
+y OVERLAY_FS
+y TMPFS_XATTR
 y VETH
 y NET_SCHED
 y NET_SCH_NETEM

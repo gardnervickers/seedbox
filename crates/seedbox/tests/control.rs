@@ -20,7 +20,7 @@ fn complete(c: &control::Control) -> bool {
         })
 }
 fn control() -> control::Control {
-    control::Control::new(&json!({"machine":"scenario","latency_ns":20,"placement":{"scenario":"scenario","client":"client","server":"server"}}),vec!["scenario".into(),"client".into(),"server".into()],10,5).unwrap()
+    control::Control::new(&json!({"machine":"scenario","service":"scenario","latency_ns":20,"placement":{"scenario":"scenario","client":"client","server":"server"}}),vec!["scenario".into(),"client".into(),"server".into()],10,5).unwrap()
 }
 fn request(
     c: &mut control::Control,
@@ -87,7 +87,7 @@ fn effects_must_finish_before_reply_and_overlapping_handles_survive_partial_heal
     )
     .unwrap();
     c.apply_boundary(&mut f, c.boundary()).unwrap();
-    assert_eq!(f.apply_due(120), vec![(2, b"stop 1\n".to_vec())]);
+    assert_eq!(f.apply_due(120), vec![(2, b"stop 1 server\n".to_vec())]);
     c.observe_faults(&f, 121).unwrap();
     assert!(c.pending.as_ref().unwrap().reply.is_none());
     f.effect(2, 1, 125, true);
@@ -329,8 +329,9 @@ fn bulk_shared_memory_frames_preserve_fragments_and_multiple_messages() {
         .receive(b"SBX_RPC1 1 1 {\"version\":1,")
         .unwrap()
         .is_empty());
-    let frames=framer.receive(b"\"id\":1,\"op\":\"now\"}\nSEEDBOX_EFFECT id=1\nSBX_RPC1 2 1 {\"version\":1,\"id\":2,\"op\":\"inspect\"}\n").unwrap();
-    assert_eq!(frames.len(), 2);
+    let frames=framer.receive(b"\"id\":1,\"op\":\"now\"}\nSEEDBOX_EFFECT id=1\nSBX_RPC1 2 1 {\"version\":1,\"id\":2,\"op\":\"inspect\"}\nSBX_EXIT1 server 3\n").unwrap();
+    assert_eq!(frames.len(), 3);
+    assert_eq!(frames[2], b"SBX_EXIT1 server 3");
     assert_eq!(
         frames[0],
         b"SBX_RPC1 1 1 {\"version\":1,\"id\":1,\"op\":\"now\"}"
@@ -376,9 +377,9 @@ fn process_lifecycle_rejections_are_admission_errors_without_new_faults() {
     .unwrap();
     c.apply_boundary(&mut f, 220).unwrap();
     assert_eq!(f.apply_due(220).len(), 1);
-    assert_eq!(f.process_state(2), "Running"); // State changes only after the actual reap ACK.
+    assert_eq!(f.process_state("server"), "Running"); // State changes only after the actual reap ACK.
     f.effect(2, 1, 225, true);
-    assert_eq!(f.process_state(2), "Stopped");
+    assert_eq!(f.process_state("server"), "Stopped");
     c.observe_faults(&f, 225).unwrap();
     c.apply_boundary(&mut f, 245).unwrap();
     c.mark_delivered(245).unwrap();
@@ -404,7 +405,7 @@ fn process_lifecycle_rejections_are_admission_errors_without_new_faults() {
     c.apply_boundary(&mut f, 420).unwrap();
     assert_eq!(f.apply_due(420).len(), 1);
     f.effect(2, 2, 425, true);
-    assert_eq!(f.process_state(2), "Running");
+    assert_eq!(f.process_state("server"), "Running");
     c.observe_faults(&f, 425).unwrap();
     c.apply_boundary(&mut f, 445).unwrap();
     c.mark_delivered(445).unwrap();
@@ -503,5 +504,77 @@ fn sessions_reset_public_ids_but_cannot_repeat_relays_or_old_sessions() {
         "SBX_RPC1 3 3 {\"version\":1,\"id\":1,\"op\":\"now\"}",
     ] {
         assert!(c.request(0, 300, line.as_bytes(), 315).is_err());
+    }
+}
+
+fn shared_control() -> control::Control {
+    control::Control::new(&json!({"machine":"kernel","service":"scenario","latency_ns":20,"placement":{"scenario":"kernel","client":"kernel","server":"kernel"}}),vec!["kernel".into()],10,5).unwrap()
+}
+fn shared_faults() -> faults::Faults {
+    let placement = ["scenario", "client", "server"]
+        .into_iter()
+        .map(|s| (s.to_owned(), "kernel".to_owned()))
+        .collect();
+    faults::Faults::with_placement(vec![], vec!["kernel".into()], &placement).unwrap()
+}
+#[test]
+fn shared_kernel_services_beside_the_controller_remain_fault_targets() {
+    let mut c = shared_control();
+    let mut f = shared_faults();
+    request(&mut c,1,100,json!({"version":1,"id":1,"op":"partition","left":[{"service":"client"}],"right":[{"service":"server"}]})).unwrap();
+    assert!(c.pending.as_ref().unwrap().error.is_none());
+    c.apply_boundary(&mut f, 120).unwrap();
+    assert_eq!(
+        f.apply_due(120),
+        vec![(0, b"partition 1 p1 client server\n".to_vec())]
+    );
+    c.observe_faults(&f, 121).unwrap();
+    assert!(c.pending.as_ref().unwrap().reply.is_none());
+    f.effect(0, 1, 130, true);
+    c.observe_faults(&f, 130).unwrap();
+    assert_eq!(c.boundary(), 150);
+    let reply = String::from_utf8(c.response(150).unwrap()).unwrap();
+    assert!(reply.contains("\"handle\":\"p1\"") && reply.contains("\"effect_at_ns\":130"));
+    c.mark_delivered(150).unwrap();
+    request(
+        &mut c,
+        2,
+        200,
+        json!({"version":1,"id":2,"op":"stop","target":{"service":"server"}}),
+    )
+    .unwrap();
+    c.apply_boundary(&mut f, 220).unwrap();
+    assert_eq!(f.apply_due(220), vec![(0, b"stop 2 server\n".to_vec())]);
+    // The machine hosts the controller and other services: name a service.
+    for (id, target) in [
+        (3, json!({"machine":"kernel"})),
+        (3, json!({"service":"scenario"})),
+    ] {
+        let mut c = shared_control();
+        request(
+            &mut c,
+            id - 2,
+            300,
+            json!({"version":1,"id":id-2,"op":"stop","target":target}),
+        )
+        .unwrap();
+        assert!(c
+            .pending
+            .as_ref()
+            .unwrap()
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("controller"));
+    }
+}
+#[test]
+fn control_service_must_be_placed_on_the_control_machine() {
+    for config in [
+        json!({"machine":"kernel","latency_ns":20,"placement":{"scenario":"kernel"}}),
+        json!({"machine":"kernel","service":"other","latency_ns":20,"placement":{"scenario":"kernel"}}),
+        json!({"machine":"kernel","service":"scenario","latency_ns":20,"placement":{"scenario":"elsewhere"}}),
+    ] {
+        assert!(control::Control::new(&config, vec!["kernel".into()], 10, 5).is_err());
     }
 }

@@ -1,7 +1,9 @@
 //! Deterministic initramfs assembly around an imported image filesystem.
 //!
 //! Image file metadata and hard links are preserved; only Seedbox-owned bootstrap
-//! files have normalized timestamps. The image runs in a chroot inside the guest.
+//! files have normalized timestamps. Each distinct image is packed once; each
+//! service runs chrooted in its own writable overlay of it, with its own mount,
+//! PID, UTS and (when services share a kernel) network namespaces.
 
 use crate::{image::Launch, Error, Result};
 use std::{
@@ -25,35 +27,89 @@ pub fn minimum_memory_mb(archive_bytes: u64) -> Result<u32> {
         .map_err(|_| Error::Execution("guest memory estimate exceeds supported range".into()))
 }
 
+/// How a machine's services reach the simulated network.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuestNetwork {
+    /// One service uses the machine's virtio NIC (`eth0`) in the root network
+    /// namespace; the engine's fabric carries its packets.
+    Device,
+    /// Each service has its own network namespace joined to the root
+    /// namespace by a veth pair. The root namespace routes between them and
+    /// delays each packet once, on egress towards its destination.
+    Namespaces { latency_ns: u64, jitter_ns: u64 },
+}
+
+/// One service in a machine's launch recipe.
+pub struct GuestService<'a> {
+    pub name: &'a str,
+    /// Directory under `images/` holding its read-only image root.
+    pub image: &'a str,
+    /// IPv4 address on the shared /24 service network.
+    pub address: &'a str,
+    pub launch: &'a Launch,
+    pub configs: &'a BTreeMap<String, Vec<u8>>,
+    /// Its exit status completes the machine (and the run, if it is the check).
+    pub check: bool,
+    /// Receives the runtime control socket.
+    pub controller: bool,
+}
+
 /// This binary recipe is consumed by the small static Linux guest init. Length
 /// prefixes avoid shell evaluation of command, environment or config contents.
 pub fn launch_recipe(
-    launch: &Launch,
-    ip: &str,
+    network: GuestNetwork,
     hosts: &str,
-    configs: &BTreeMap<String, Vec<u8>>,
+    services: &[GuestService<'_>],
 ) -> Result<Vec<u8>> {
-    let mut bytes = b"SBXLAUNCH1".to_vec();
-    for value in [ip, hosts, &launch.user, &launch.working_dir] {
-        field(&mut bytes, value.as_bytes())?;
+    let mut bytes = b"SBXLAUNCH2".to_vec();
+    let (mode, latency, jitter) = match network {
+        GuestNetwork::Device => (0u32, 0, 0),
+        GuestNetwork::Namespaces {
+            latency_ns,
+            jitter_ns,
+        } => (1, latency_ns, jitter_ns),
+    };
+    if mode == 0 && services.len() != 1 {
+        return Err(Error::Execution(
+            "a machine NIC serves exactly one service".into(),
+        ));
     }
-    list(&mut bytes, &launch.argv)?;
-    list(
-        &mut bytes,
-        &launch
-            .environment
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>(),
-    )?;
-    list(&mut bytes, &launch.volumes)?;
-    if configs.len() > 65536 {
-        return Err(Error::Execution("too many config mounts".into()));
+    if services.is_empty() || services.len() > 254 {
+        return Err(Error::Execution("expected 1 to 254 services".into()));
     }
-    bytes.extend_from_slice(&(configs.len() as u32).to_le_bytes());
-    for (target, content) in configs {
-        field(&mut bytes, target.as_bytes())?;
-        field(&mut bytes, content)?;
+    bytes.extend_from_slice(&mode.to_le_bytes());
+    bytes.extend_from_slice(&latency.to_le_bytes());
+    bytes.extend_from_slice(&jitter.to_le_bytes());
+    field(&mut bytes, hosts.as_bytes())?;
+    bytes.extend_from_slice(&(services.len() as u32).to_le_bytes());
+    for service in services {
+        let flags = u32::from(service.check) | u32::from(service.controller) << 1;
+        field(&mut bytes, service.name.as_bytes())?;
+        field(&mut bytes, service.image.as_bytes())?;
+        field(&mut bytes, service.address.as_bytes())?;
+        bytes.extend_from_slice(&flags.to_le_bytes());
+        let launch = service.launch;
+        for value in [&launch.user, &launch.working_dir] {
+            field(&mut bytes, value.as_bytes())?;
+        }
+        list(&mut bytes, &launch.argv)?;
+        list(
+            &mut bytes,
+            &launch
+                .environment
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>(),
+        )?;
+        list(&mut bytes, &launch.volumes)?;
+        if service.configs.len() > 65536 {
+            return Err(Error::Execution("too many config mounts".into()));
+        }
+        bytes.extend_from_slice(&(service.configs.len() as u32).to_le_bytes());
+        for (target, content) in service.configs {
+            field(&mut bytes, target.as_bytes())?;
+            field(&mut bytes, content)?;
+        }
     }
     Ok(bytes)
 }
@@ -77,8 +133,12 @@ fn list(output: &mut Vec<u8>, items: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Package the supervisor, its recipe, one read-only root per distinct image
+/// (`images/<id>`) and an empty mount point per service (`services/<name>`),
+/// where the guest mounts that service's overlay of its image.
 pub fn build_initramfs(
-    rootfs: &Path,
+    images: &[(&str, &Path)],
+    services: &[&str],
     init: &Path,
     busybox: &Path,
     recipe: &[u8],
@@ -89,7 +149,14 @@ pub fn build_initramfs(
     archive.owned("init", 0o100755, &fs::read(init)?)?;
     archive.owned("seedbox/busybox", 0o100755, &fs::read(busybox)?)?;
     archive.owned("seedbox/launch.bin", 0o100400, recipe)?;
-    archive.tree(rootfs, "rootfs")?;
+    archive.owned("images", 0o040755, &[])?;
+    for (id, rootfs) in images {
+        archive.tree(rootfs, &format!("images/{id}"))?;
+    }
+    archive.owned("services", 0o040755, &[])?;
+    for name in services {
+        archive.owned(&format!("services/{name}"), 0o040755, &[])?;
+    }
     archive.finish()
 }
 
@@ -150,6 +217,8 @@ impl<W: Write> Newc<W> {
     }
 
     fn tree(&mut self, root: &Path, prefix: &str) -> Result<()> {
+        // Hard links never cross image roots.
+        self.hardlinks.clear();
         for item in walkdir::WalkDir::new(root)
             .sort_by_file_name()
             .follow_links(false)

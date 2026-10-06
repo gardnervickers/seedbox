@@ -136,7 +136,12 @@ fn bad_values_are_usage_errors() {
     for (args, expected) in [
         (&["run", "--margin", "0"][..], "positive branch count"),
         (&["run", "--undo", "999999999"], "not in 0..=262144"),
-        (&["run", "--memory-mb", "1"], "not in 64..=65536"),
+        (&["run", "--memory-mb", "1"], "not in 64..=3328"),
+        (&["run", "--memory-mb", "4096"], "not in 64..=3328"),
+        (
+            &["run", "--layout", "one-vm"],
+            "possible values: shared-kernel, machine-per-service",
+        ),
         (&["run", "--cpu", "5000"], "not in 0..1024"),
         (
             &["init", "x", "--template", "bogus"],

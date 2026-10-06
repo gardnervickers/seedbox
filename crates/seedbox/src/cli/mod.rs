@@ -7,7 +7,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use seedbox::{
     config,
     execution::{
-        CancellationToken, ExecutionBackend, ExecutionProfile, PreparationBackend, WitnessMode,
+        CancellationToken, ExecutionBackend, ExecutionProfile, Layout, PreparationBackend,
+        WitnessMode,
     },
     oci::OciTools,
     orchestration::{self, Orchestrator, Outcome, ReplayOptions, ReplayStatus, RunOptions},
@@ -15,6 +16,7 @@ use seedbox::{
     store::ContentStore,
     templates::Template,
     vmm::VmmExecutor,
+    vmm::GUEST_ABI,
     Error, Result,
 };
 use signals::Signals;
@@ -137,6 +139,23 @@ impl From<TemplateArg> for Template {
     }
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum LayoutArg {
+    /// Every service in its own namespaces on one shared Linux kernel.
+    SharedKernel,
+    /// Every service on its own machine (independent kernels and clocks).
+    MachinePerService,
+}
+
+impl From<LayoutArg> for Layout {
+    fn from(layout: LayoutArg) -> Self {
+        match layout {
+            LayoutArg::SharedKernel => Layout::SharedKernel,
+            LayoutArg::MachinePerService => Layout::MachinePerService,
+        }
+    }
+}
+
 #[derive(Args)]
 struct ComposeArg {
     /// Compose file, or a directory containing compose.yaml.
@@ -195,9 +214,12 @@ struct RuntimeInputs {
     /// Docker-compatible client for `build:` services.
     #[arg(long, default_value = "podman")]
     builder: PathBuf,
-    /// Guest RAM per service, in MiB.
-    #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(64..=65536))]
-    memory_mb: u32,
+    /// How services are placed on guest machines.
+    #[arg(long, value_enum, default_value_t = LayoutArg::SharedKernel)]
+    layout: LayoutArg,
+    /// Guest RAM per machine, in MiB [default: 2048 with the shared kernel, else 1024].
+    #[arg(long, value_parser = clap::value_parser!(u32).range(64..=seedbox::vmm::MAX_MEMORY_MB as i64))]
+    memory_mb: Option<u32>,
     /// Also record and compare every machine's RAM and registers.
     #[arg(long)]
     full_state: bool,
@@ -217,7 +239,12 @@ impl RuntimeInputs {
         } else {
             WitnessMode::Exits
         };
-        let executor = VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness)?;
+        let memory_mb = self.memory_mb.unwrap_or(match self.layout {
+            LayoutArg::SharedKernel => 2048,
+            LayoutArg::MachinePerService => 1024,
+        });
+        let executor =
+            VmmExecutor::new(&engine, store, cpu, memory_mb, self.layout.into(), witness)?;
         let preparer = self.preparer(engine, store, scratch, executor.profile())?;
         Ok((preparer, executor))
     }
@@ -372,13 +399,22 @@ fn run(cli: Cli) -> Result<u8> {
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
             let profile = &previous.identity.inputs.profile;
+            let recorded = |name: &str| profile.semantic_parameters.get(name).map(String::as_str);
+            if recorded("guest_abi") != Some(GUEST_ABI) {
+                return Err(Error::Setup(format!(
+                    "{}: recorded with guest ABI {}; replay it with the seedbox that recorded it",
+                    run.display(),
+                    recorded("guest_abi").unwrap_or("unknown")
+                )));
+            }
+            let layout = recorded("layout")
+                .and_then(Layout::parse)
+                .ok_or_else(|| Error::Integrity("recorded profile missing layout".into()))?;
             let engine = match vmm {
                 Some(path) => defaults::existing("--vmm", path)?,
                 None => store.materialize(&profile.engine, scratch.path())?,
             };
-            let memory = profile
-                .semantic_parameters
-                .get("memory_mb")
+            let memory = recorded("memory_mb")
                 .and_then(|value| value.parse().ok())
                 .ok_or_else(|| Error::Integrity("recorded profile missing memory_mb".into()))?;
             let executor = performance.apply(VmmExecutor::new(
@@ -386,6 +422,7 @@ fn run(cli: Cli) -> Result<u8> {
                 &store,
                 cpu.cpu,
                 memory,
+                layout,
                 profile.witness_mode.clone(),
             )?)?;
             let cancellation = CancellationToken::default();

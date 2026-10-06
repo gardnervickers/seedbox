@@ -41,8 +41,10 @@ partitioned. Closing the connection does not silently heal outstanding cuts.
 `stop`, `restart`, `heal`, and `sleep` return an `Effect` containing request,
 admission, effect and reply timestamps. `partition` returns a `Partition` with
 its opaque handle and effect. `now_ns()` reads simulated time; `inspect()` returns
-topology, machine state, active handles and packet counters. Strings name services;
-use `Machine("prepared-name")` when explicitly targeting a machine.
+topology, machine and per-service process state, active handles and packet
+counters. Strings name services; `Machine("prepared-name")` names the only
+service on a prepared machine. Services sharing the controller's kernel remain
+valid targets.
 
 `FaultError` carries a structured operation error. `ProtocolError` indicates an
 invalid or interrupted exchange. The client never retries uncertain operations.

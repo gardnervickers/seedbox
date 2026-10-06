@@ -313,6 +313,15 @@ fn run() -> Result<Value, String> {
     }
     let n = machines.len();
     let net = &cfg["network"];
+    // Services may share a machine; without a placement each machine hosts
+    // the service of the same name.
+    let placement: BTreeMap<String, String> = match &cfg["placement"] {
+        Value::Null => names.iter().map(|n| (n.clone(), n.clone())).collect(),
+        value => serde_json::from_value(value.clone()).map_err(|_| "placement")?,
+    };
+    if !cfg["control"].is_null() && cfg["control"]["placement"] != cfg["placement"] {
+        return Err("control placement differs from world placement".into());
+    }
     let mut world = World {
         counter: Counter::new()?,
         events: (0..n).map(|_| BTreeMap::new()).collect(),
@@ -325,9 +334,10 @@ fn run() -> Result<Value, String> {
         link_rng: BTreeMap::new(),
         link_last: BTreeMap::new(),
         partitioned: BTreeMap::new(),
-        faults: faults::Faults::new(
+        faults: faults::Faults::with_placement(
             cfg["faults"].as_array().cloned().unwrap_or_default(),
             names.clone(),
+            &placement,
         )?,
         control: control::Control::new(
             &cfg["control"],
@@ -429,7 +439,23 @@ fn run() -> Result<Value, String> {
                 .as_ref()
                 .is_some_and(|p| !p.admitted_done && matches!(p.operation,Some(seedbox_control::Operation::Inspect{})))
             {
-                world.control.pending.as_mut().unwrap().result = json!({"services":cfg["control"]["placement"],"machines":world.machines.iter().enumerate().map(|(i,m)|json!({"name":m.name,"state":if matches!(m.state,State::Exited(_)) {format!("{:?}",m.state)} else {world.faults.process_state(i).to_owned()}})).collect::<Vec<_>>(),"active_handles":world.faults.active_handles(),"network_counters":world.counter_snapshot(world.semantic_counts.counts())});
+                let process = |service: &str| {
+                    let machine = world.machines.iter().find(|m| placement.get(service) == Some(&m.name));
+                    match machine {
+                        Some(m) if matches!(m.state, State::Exited(_)) => format!("{:?}", m.state),
+                        _ => world.faults.process_state(service),
+                    }
+                };
+                // A machine with one service reports that service's lifecycle.
+                let machine_state = |m: &Machine| {
+                    let mut hosted = placement.iter().filter(|(_, name)| **name == m.name);
+                    match (hosted.next(), hosted.next()) {
+                        _ if matches!(m.state, State::Exited(_)) => format!("{:?}", m.state),
+                        (Some((service, _)), None) => world.faults.process_state(service),
+                        _ => "Running".to_owned(),
+                    }
+                };
+                world.control.pending.as_mut().unwrap().result = json!({"services":placement,"machines":world.machines.iter().map(|m|json!({"name":m.name,"state":machine_state(m)})).collect::<Vec<_>>(),"processes":placement.keys().map(|s|(s.clone(),process(s))).collect::<BTreeMap<_,_>>(),"active_handles":world.faults.active_handles(),"network_counters":world.counter_snapshot(world.semantic_counts.counts())});
             }
             if let Some(bytes) =
                 world
@@ -514,6 +540,10 @@ fn run() -> Result<Value, String> {
             .drain(..)
             .collect::<Vec<_>>()
         {
+            if line.starts_with(b"SBX_EXIT1 ") {
+                world.faults.service_exited(m, at, &line);
+                continue;
+            }
             let max_time = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
             if let Err(e) = world.control.request(m, at, &line, max_time) {
                 world.control.log.push(json!({"status":"rejected","machine":world.machines[m].name,"at_ns":at,"frame":String::from_utf8_lossy(&line),"error":e}));
@@ -633,7 +663,7 @@ fn run() -> Result<Value, String> {
         "kills": kills,
         "faults": world.faults.log, "fault_error":fault_error,
         "control_history":world.control.log,"control_latency_ns":world.control.latency,
-        "rejected_fault_effects":world.faults.rejected_effects,"management_readiness":world.faults.readiness,
+        "rejected_fault_effects":world.faults.rejected_effects,"management_readiness":world.faults.readiness,"service_exits":world.faults.exits,
         "in_flight_policy":"retain_already_routed; drop_new_sends_while_any_handle_active",
         "machines": report,
     }))

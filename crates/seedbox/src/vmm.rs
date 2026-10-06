@@ -13,6 +13,11 @@ use std::{
     path::Path,
 };
 
+/// Launch recipe v2: several services per machine, each in its own namespaces.
+pub const GUEST_ABI: &str = "oci-init-v2";
+/// Guest RAM must end below the engine's device window at 0xd000_0000.
+pub const MAX_MEMORY_MB: u32 = 3328;
+
 #[derive(Clone, Debug)]
 pub struct VmmExecutor {
     /// Host CPU to pin the VMM to; `None` leases the first free eligible core.
@@ -22,17 +27,19 @@ pub struct VmmExecutor {
 }
 
 impl VmmExecutor {
+    /// `memory_mb` is guest RAM per machine.
     pub fn new(
         engine: &Path,
         store: &ContentStore,
         cpu: Option<u32>,
         memory_mb: u32,
+        layout: Layout,
         witness_mode: WitnessMode,
     ) -> Result<Self> {
-        if !(64..=65536).contains(&memory_mb) {
-            return Err(Error::Execution(
-                "guest memory must be 64..65536 MiB".into(),
-            ));
+        if !(64..=MAX_MEMORY_MB).contains(&memory_mb) {
+            return Err(Error::Execution(format!(
+                "guest memory must be 64..{MAX_MEMORY_MB} MiB"
+            )));
         }
         Ok(Self {
             cpu,
@@ -41,8 +48,9 @@ impl VmmExecutor {
                 engine: store.put_file(engine)?,
                 witness_mode,
                 semantic_parameters: BTreeMap::from([
-                    ("guest_abi".into(), "oci-init-v1".into()),
+                    ("guest_abi".into(), GUEST_ABI.into()),
                     ("control_channel".into(), "virtio-console-v1".into()),
+                    ("layout".into(), layout.name().into()),
                     ("memory_mb".into(), memory_mb.to_string()),
                 ]),
             },
@@ -121,39 +129,51 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
     if request.prepared.guests.is_empty() || request.prepared.guests.len() > 254 {
         return Err(Error::Integrity("expected 1..254 prepared machines".into()));
     }
-    let memory: u32 = request
+    if request
         .prepared
         .profile
         .semantic_parameters
+        .get("guest_abi")
+        .map(String::as_str)
+        != Some(GUEST_ABI)
+    {
+        return Err(Error::Integrity(format!("expected guest ABI {GUEST_ABI}")));
+    }
+    let profile = &request.prepared.profile.semantic_parameters;
+    let memory: u32 = profile
         .get("memory_mb")
         .ok_or_else(|| Error::Integrity("profile missing memory_mb".into()))?
         .parse()
         .map_err(|_| Error::Integrity("invalid memory_mb".into()))?;
+    let layout = profile
+        .get("layout")
+        .and_then(|name| Layout::parse(name))
+        .ok_or_else(|| Error::Integrity("profile missing layout".into()))?;
     let artifact = |digest: &ContentDigest| {
         let path = request.artifacts.get(digest).ok_or_else(|| {
             Error::Integrity(format!("missing verified artifact {}", digest.hex()))
         })?;
         Ok::<_, Error>(std::path::absolute(path)?)
     };
-    let workload_machine = request
-        .prepared
-        .placement
+    let placement = &request.prepared.placement;
+    let workload_machine = placement
         .get(&request.check.service)
         .ok_or_else(|| Error::Integrity("missing workload placement".into()))?;
-    // This guest ABI launches one application in each machine. The public
-    // execution contract also permits other backends to co-locate services.
-    if request.prepared.placement.len() != request.prepared.guests.len()
-        || request.prepared.placement.values().collect::<BTreeSet<_>>()
-            != request.prepared.guests.keys().collect::<BTreeSet<_>>()
-    {
-        return Err(Error::Execution(
-            "oci-init-v1 requires one service per machine".into(),
-        ));
+    let machines: BTreeSet<_> = placement.values().collect();
+    let fits = match layout {
+        Layout::SharedKernel => machines.len() == 1,
+        Layout::MachinePerService => machines.len() == placement.len(),
+    };
+    if !fits || machines != request.prepared.guests.keys().collect::<BTreeSet<_>>() {
+        return Err(Error::Integrity(format!(
+            "placement does not match the {} layout",
+            layout.name()
+        )));
     }
     let control = request.control.map(|c| -> Result<Value> {
-        let machine = request.prepared.placement.get(&c.service).ok_or_else(|| Error::Execution("controller placement missing".into()))?;
+        let machine = placement.get(&c.service).ok_or_else(|| Error::Execution("controller placement missing".into()))?;
         let latency_ns = control_latency(request)?;
-        Ok(json!({"machine":machine,"latency_ns":latency_ns,"placement":request.prepared.placement}))
+        Ok(json!({"machine":machine,"service":c.service,"latency_ns":latency_ns,"placement":placement}))
     }).transpose()?;
     let machines = request
         .prepared
@@ -161,14 +181,20 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
         .iter()
         .map(|(name, digest)| Ok(json!({"name":name,"initrd":artifact(digest)?})))
         .collect::<Result<Vec<_>>>()?;
-    Ok(json!({
+    let mut world = json!({
         "kernel":artifact(&request.prepared.kernel)?, "mem_mb":memory,
         "duration_ns":request.limits.simulated_time_ns,"end_on_exit":workload_machine,
         "timer_jitter_ns":request.schedule.timer_jitter_ns,"stop_tolerance_ns":request.schedule.stop_tolerance_ns,
-        "network":{"latency_ns":request.network.latency_ns,"jitter_ns":request.network.jitter_ns},
-        "machines":machines,"control":control,
+        "machines":machines,"placement":placement,"control":control,
         "control_channel":"virtio-console-v1",
-    }))
+    });
+    // Services sharing a kernel exchange packets inside it; only separate
+    // machines need the engine's NICs and fabric.
+    if layout == Layout::MachinePerService {
+        world["network"] =
+            json!({"latency_ns":request.network.latency_ns,"jitter_ns":request.network.jitter_ns});
+    }
+    Ok(world)
 }
 
 #[derive(Deserialize)]
@@ -178,7 +204,7 @@ struct RawFault {
     requested_at_ns: u64,
     applied_at_ns: Option<u64>,
     action: String,
-    machine: Option<String>,
+    service: Option<String>,
     status: String,
     detail: String,
 }
@@ -226,26 +252,16 @@ fn validate_control_history(
         .filter(|n| *n == expected_latency)
         .ok_or_else(|| Error::Integrity("control latency mismatch".into()))?;
     use seedbox_control::{Action, Operation, Plan, Request, Target, PROCESS_EFFECT_TIMEOUT_NS};
-    let controller = request
-        .control
-        .and_then(|control| request.prepared.placement.get(&control.service));
+    let controller = request.control.map(|control| control.service.as_str());
     let resolve = |target: &Target| -> Result<String> {
-        let machine = match target {
-            Target::Service(service) => request.prepared.placement.get(service).map(String::as_str),
-            Target::Machine(machine) => Some(machine.as_str()),
-        }
-        .ok_or_else(|| Error::Integrity("invalid control target".into()))?;
-        if !request.prepared.guests.contains_key(machine)
-            || controller.is_some_and(|name| name == machine)
-        {
-            return Err(Error::Integrity(
-                "invalid fault machine/controller target".into(),
-            ));
-        }
-        Ok(machine.to_owned())
+        seedbox_control::resolve(target, &request.prepared.placement, controller)
+            .map_err(|error| Error::Integrity(format!("invalid fault target: {error}")))
     };
     let bad = || Error::Integrity("control request/response/time correlation mismatch".into());
     let mut expected = ValidatedControlHistory::default();
+    // Partitions between machines take effect at admission; partitions among
+    // services sharing a machine take effect on that kernel's acknowledgement.
+    let mut colocated = BTreeMap::new();
     let mut previous = 0;
     let mut session = 0;
     let mut public_id = 0u64;
@@ -342,10 +358,10 @@ fn validate_control_history(
         let call: Request = serde_json::from_value(r.clone()).map_err(|_| bad())?;
         let action = match call.operation {
             Operation::Stop { target } => Action::Stop {
-                machine: resolve(&target)?,
+                service: resolve(&target)?,
             },
             Operation::Restart { target } => Action::Restart {
-                machine: resolve(&target)?,
+                service: resolve(&target)?,
             },
             Operation::Partition { left, right } => {
                 let handle = if response {
@@ -354,17 +370,27 @@ fn validate_control_history(
                     &row["plan"]["handle"]
                 };
                 let handle = handle.as_str().ok_or_else(bad)?.to_owned();
-                if handle.is_empty() || (response && e != Some(a)) {
+                let left: Vec<String> = left.iter().map(&resolve).collect::<Result<_>>()?;
+                let right: Vec<String> = right.iter().map(&resolve).collect::<Result<_>>()?;
+                let machines: BTreeSet<_> = left
+                    .iter()
+                    .chain(&right)
+                    .map(|service| &request.prepared.placement[service])
+                    .collect();
+                let local = machines.len() == 1;
+                if handle.is_empty() || (response && !local && e != Some(a)) {
                     return Err(bad());
                 }
+                colocated.insert(handle.clone(), local);
                 Action::Partition {
                     handle,
-                    left: left.iter().map(&resolve).collect::<Result<_>>()?,
-                    right: right.iter().map(&resolve).collect::<Result<_>>()?,
+                    left,
+                    right,
                 }
             }
             Operation::Heal { handle } => {
-                if response && e != Some(a) {
+                let local = colocated.get(&handle).copied().unwrap_or(false);
+                if response && !local && e != Some(a) {
                     return Err(bad());
                 }
                 Action::Heal { handle }
@@ -497,7 +523,7 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
             || fault.id as usize != i + 1
             || fault.requested_at_ns != plan.at_ns
             || fault.action != plan.action.name()
-            || fault.machine.as_deref() != plan.action.machine()
+            || fault.service.as_deref() != plan.action.service()
         {
             return Err(Error::Integrity(
                 "fault acknowledgement correlation mismatch".into(),
@@ -510,18 +536,7 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
                     && (request.control.is_none()
                         || expected.effects.get(&fault.id).is_none_or(|e| *e == at)) =>
             {
-                let service = fault
-                    .machine
-                    .as_ref()
-                    .and_then(|machine| {
-                        request
-                            .prepared
-                            .placement
-                            .iter()
-                            .find(|(_, m)| *m == machine)
-                            .map(|(s, _)| s.clone())
-                    })
-                    .unwrap_or_default();
+                let service = fault.service.clone().unwrap_or_default();
                 faults.push(crate::execution::FaultEvent {
                     requested_at_ns: fault.requested_at_ns,
                     applied_at_ns: at,

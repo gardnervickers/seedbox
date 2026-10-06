@@ -33,6 +33,52 @@ pub struct ExecutionProfile {
     pub semantic_parameters: BTreeMap<String, String>,
 }
 
+/// How services are placed on guest machines. Changes results, so it is a
+/// semantic profile parameter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Layout {
+    /// Every service in its own namespaces on one shared Linux kernel.
+    SharedKernel,
+    /// Every service on its own machine, joined by the engine's network fabric.
+    MachinePerService,
+}
+
+impl Layout {
+    /// The one machine of a shared-kernel layout.
+    pub const SHARED_MACHINE: &'static str = "kernel";
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::SharedKernel => "shared-kernel",
+            Self::MachinePerService => "machine-per-service",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        [Self::SharedKernel, Self::MachinePerService]
+            .into_iter()
+            .find(|layout| layout.name() == name)
+    }
+
+    /// Service to machine name.
+    pub fn placement<'a>(
+        self,
+        services: impl IntoIterator<Item = &'a String>,
+    ) -> BTreeMap<String, String> {
+        services
+            .into_iter()
+            .map(|service| {
+                let machine = match self {
+                    Self::SharedKernel => Self::SHARED_MACHINE.to_owned(),
+                    Self::MachinePerService => service.clone(),
+                };
+                (service.clone(), machine)
+            })
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WitnessMode {

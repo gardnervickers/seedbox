@@ -1,6 +1,6 @@
 //! Language-neutral runtime control. Fixed latency is semantic, never selected
 //! from host performance or another machine's observed progress.
-use seedbox_control::{Action, Header, Operation, Plan, Request, Target};
+use seedbox_control::{resolve, Action, Header, Operation, Plan, Request, Target};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -25,8 +25,9 @@ impl ManagementFramer {
         }
         self.byte(byte)
     }
+    /// RPC requests and supervisor exit notices; other lines are only logged.
     fn byte(&mut self,byte:u8)->Result<Option<Vec<u8>>,String> {
-        if byte==b'\n' {let line=std::mem::take(&mut self.line);return Ok(line.starts_with(b"SBX_RPC1 ").then_some(line));}
+        if byte==b'\n' {let line=std::mem::take(&mut self.line);return Ok((line.starts_with(b"SBX_RPC1 ")||line.starts_with(b"SBX_EXIT1 ")).then_some(line));}
         if self.line.len()>=MAX_TRANSPORT_FRAME {return Err("management frame too large".into())}
         self.line.push(byte);Ok(None)
     }
@@ -55,11 +56,12 @@ pub struct Call {
 }
 pub struct Control {
     pub controller: Option<usize>,
+    /// The controlling service; other services on its machine remain targets.
+    controller_service: Option<String>,
     pub latency: u64,
     pub pending: Option<Call>,
     pub log: Vec<Value>,
     pub error: Option<String>,
-    names: Vec<String>,
     placement: BTreeMap<String, String>,
     last_relay: u32,
     last_session: u32,
@@ -97,18 +99,31 @@ impl Control {
         {
             return Err("control latency below causal lookahead".into());
         }
-        let placement = if controller.is_some() {
+        let placement: BTreeMap<String, String> = if controller.is_some() {
             serde_json::from_value(config["placement"].clone()).map_err(|_| "control placement")?
         } else {
             BTreeMap::new()
         };
+        if placement.values().any(|machine| !names.contains(machine)) {
+            return Err("control placement names an unknown machine".into());
+        }
+        let controller_service = match controller {
+            Some(m) => {
+                let service = config["service"].as_str().ok_or("control service")?;
+                if placement.get(service) != Some(&names[m]) {
+                    return Err("control service is not placed on the control machine".into());
+                }
+                Some(service.to_owned())
+            }
+            None => None,
+        };
         Ok(Self {
             controller,
+            controller_service,
             latency,
             pending: None,
             log: vec![],
             error: None,
-            names,
             placement,
             last_relay: 0,
             last_session: 0,
@@ -118,31 +133,17 @@ impl Control {
         })
     }
     fn target(&self, target: &Target) -> Result<String, String> {
-        let name = match target {
-            Target::Service(service) => self
-                .placement
-                .get(service)
-                .cloned()
-                .ok_or("unknown service")?,
-            Target::Machine(machine) => machine.clone(),
-        };
-        if !self.names.contains(&name) {
-            return Err("unknown machine".into());
-        }
-        if Some(name.as_str()) == self.controller.map(|i| self.names[i].as_str()) {
-            return Err("controller is outside failure model".into());
-        }
-        Ok(name)
+        Ok(resolve(target, &self.placement, self.controller_service.as_deref())?)
     }
     fn plan(&mut self, op: &Operation, at: u64) -> Result<(Option<Plan>, Value, u64), String> {
         let mut result = json!({});
         let mut effect = at;
         let action = match op {
             Operation::Stop { target } => Some(Action::Stop {
-                machine: self.target(target)?,
+                service: self.target(target)?,
             }),
             Operation::Restart { target } => Some(Action::Restart {
-                machine: self.target(target)?,
+                service: self.target(target)?,
             }),
             Operation::Partition { left, right } => {
                 if left.is_empty() || right.is_empty() {
@@ -156,7 +157,7 @@ impl Control {
                         let name = self.target(target)?;
                         if !members.insert(name.clone()) {
                             return Err(
-                                "partition sides must be disjoint with unique machines".into()
+                                "partition sides must be disjoint with unique services".into()
                             );
                         }
                         names.push(name);
@@ -294,8 +295,9 @@ impl Control {
     }
     /// Validate target VM existence at the admission barrier, never at request observation.
     pub fn reject_unavailable(&mut self, exited: &[String]) {
+        let placement = &self.placement;
         if let Some(p)=self.pending.as_mut() {
-            if !p.admitted_done && p.plan.as_ref().and_then(|plan|plan.action.machine()).is_some_and(|name|exited.iter().any(|n|n==name)) {
+            if !p.admitted_done && p.plan.as_ref().and_then(|plan|plan.action.service()).and_then(|s|placement.get(s)).is_some_and(|name|exited.iter().any(|n|n==name)) {
                 p.plan=None;p.effect=Some(p.admitted);p.error=Some("target VM has exited; restart only starts a stopped process".into());p.error_code=Some("target_unavailable");
             }
         }

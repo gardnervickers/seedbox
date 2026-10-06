@@ -1,5 +1,5 @@
 use seedbox::{
-    guest::{build_initramfs, launch_recipe},
+    guest::{build_initramfs, launch_recipe, GuestNetwork, GuestService},
     image::Launch,
 };
 use std::{
@@ -40,9 +40,12 @@ fn initramfs_round_trip_preserves_image_files_modes_and_hardlinks() {
     let init = directory.path().join("init");
     fs::write(&init, b"helper").unwrap();
     let archive = directory.path().join("guest.cpio");
-    build_initramfs(&root, &init, &init, b"recipe", &archive).unwrap();
+    // Distinct images are separate trees; services get empty mount points.
+    let trees = [("app", root.as_path()), ("peer", root.as_path())];
+    let services = ["one", "two"];
+    build_initramfs(&trees, &services, &init, &init, b"recipe", &archive).unwrap();
     let archive2 = directory.path().join("repeat.cpio");
-    build_initramfs(&root, &init, &init, b"recipe", &archive2).unwrap();
+    build_initramfs(&trees, &services, &init, &init, b"recipe", &archive2).unwrap();
     assert_eq!(fs::read(&archive).unwrap(), fs::read(&archive2).unwrap());
     let output = directory.path().join("unpacked");
     fs::create_dir(&output).unwrap();
@@ -58,25 +61,30 @@ fn initramfs_round_trip_preserves_image_files_modes_and_hardlinks() {
         "{}",
         String::from_utf8_lossy(&status.stderr)
     );
-    for path in ["file", "hardlink", "third-link", "symlink"] {
+    for service in ["one", "two"] {
+        let mount_point = output.join("services").join(service);
+        assert!(mount_point.is_dir() && fs::read_dir(&mount_point).unwrap().next().is_none());
+    }
+    for image in ["app", "peer"] {
+        let root = output.join("images").join(image);
+        for path in ["file", "hardlink", "third-link", "symlink"] {
+            assert_eq!(fs::read(root.join(path)).unwrap(), b"image data");
+        }
+        let file = fs::metadata(root.join("file")).unwrap();
+        assert_eq!(file.mode() & 0o777, 0o751);
         assert_eq!(
-            fs::read(output.join("rootfs").join(path)).unwrap(),
-            b"image data"
+            file.ino(),
+            fs::metadata(root.join("third-link")).unwrap().ino()
+        );
+        assert_eq!(
+            fs::read_link(root.join("symlink")).unwrap().to_str(),
+            Some("file")
         );
     }
-    let file = fs::metadata(output.join("rootfs/file")).unwrap();
-    assert_eq!(file.mode() & 0o777, 0o751);
-    assert_eq!(
-        file.ino(),
-        fs::metadata(output.join("rootfs/third-link"))
-            .unwrap()
-            .ino()
-    );
-    assert_eq!(
-        fs::read_link(output.join("rootfs/symlink"))
-            .unwrap()
-            .to_str(),
-        Some("file")
+    // Hard links never join files of different images.
+    assert_ne!(
+        fs::metadata(output.join("images/app/file")).unwrap().ino(),
+        fs::metadata(output.join("images/peer/file")).unwrap().ino()
     );
     assert_eq!(
         fs::read(output.join("seedbox/launch.bin")).unwrap(),
@@ -95,7 +103,8 @@ fn unsupported_image_capabilities_are_not_silently_dropped() {
     let init = directory.path().join("init");
     fs::write(&init, b"helper").unwrap();
     let error = build_initramfs(
-        &root,
+        &[("app", root.as_path())],
+        &["app"],
         &init,
         &init,
         b"recipe",
@@ -114,13 +123,36 @@ fn binary_recipe_keeps_arguments_and_config_bytes_literal() {
         user: "123:456".into(),
         volumes: vec!["/data".into()],
     };
-    let recipe = launch_recipe(
-        &launch,
-        "10.0.0.1/24",
-        "10.0.0.1 app\n",
-        &BTreeMap::from([("/config".into(), vec![0, 255, 10])]),
-    )
-    .unwrap();
+    let configs = BTreeMap::from([("/config".into(), vec![0, 255, 10])]);
+    let none = BTreeMap::new();
+    let services = [
+        GuestService {
+            name: "app",
+            image: "abc",
+            address: "10.0.0.1",
+            launch: &launch,
+            configs: &configs,
+            check: true,
+            controller: false,
+        },
+        GuestService {
+            name: "peer",
+            image: "abc",
+            address: "10.0.0.2",
+            launch: &launch,
+            configs: &none,
+            check: false,
+            controller: true,
+        },
+    ];
+    let network = GuestNetwork::Namespaces {
+        latency_ns: 1_000_000,
+        jitter_ns: 200_000,
+    };
+    let recipe = launch_recipe(network, "10.0.0.1 app\n", &services).unwrap();
+    // A machine NIC carries exactly one service.
+    assert!(launch_recipe(GuestNetwork::Device, "", &services).is_err());
+    assert!(launch_recipe(GuestNetwork::Device, "", &services[..1]).is_ok());
     let mut cursor = 10;
     fn count(bytes: &[u8], cursor: &mut usize) -> usize {
         let n = u32::from_le_bytes(bytes[*cursor..*cursor + 4].try_into().unwrap()) as usize;
@@ -133,20 +165,38 @@ fn binary_recipe_keeps_arguments_and_config_bytes_literal() {
         *cursor += n;
         data
     }
-    assert_eq!(&recipe[..10], b"SBXLAUNCH1");
-    for expected in ["10.0.0.1/24", "10.0.0.1 app\n", "123:456", "/"] {
-        assert_eq!(field(&recipe, &mut cursor), expected.as_bytes());
+    fn count64(bytes: &[u8], cursor: &mut usize) -> u64 {
+        let n = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().unwrap());
+        *cursor += 8;
+        n
     }
+    assert_eq!(&recipe[..10], b"SBXLAUNCH2");
+    assert_eq!(count(&recipe, &mut cursor), 1);
+    assert_eq!(count64(&recipe, &mut cursor), 1_000_000);
+    assert_eq!(count64(&recipe, &mut cursor), 200_000);
+    assert_eq!(field(&recipe, &mut cursor), b"10.0.0.1 app\n");
     assert_eq!(count(&recipe, &mut cursor), 2);
-    for expected in &launch.argv {
-        assert_eq!(field(&recipe, &mut cursor), expected.as_bytes());
+    for (service, flags, configs) in [("app", 1, 1), ("peer", 2, 0)] {
+        assert_eq!(field(&recipe, &mut cursor), service.as_bytes());
+        assert_eq!(field(&recipe, &mut cursor), b"abc");
+        field(&recipe, &mut cursor);
+        assert_eq!(count(&recipe, &mut cursor), flags);
+        for expected in ["123:456", "/"] {
+            assert_eq!(field(&recipe, &mut cursor), expected.as_bytes());
+        }
+        assert_eq!(count(&recipe, &mut cursor), 2);
+        for expected in &launch.argv {
+            assert_eq!(field(&recipe, &mut cursor), expected.as_bytes());
+        }
+        assert_eq!(count(&recipe, &mut cursor), 1);
+        assert_eq!(field(&recipe, &mut cursor), b"NAME=a=b\nc");
+        assert_eq!(count(&recipe, &mut cursor), 1);
+        assert_eq!(field(&recipe, &mut cursor), b"/data");
+        assert_eq!(count(&recipe, &mut cursor), configs);
+        if configs == 1 {
+            assert_eq!(field(&recipe, &mut cursor), b"/config");
+            assert_eq!(field(&recipe, &mut cursor), [0, 255, 10]);
+        }
     }
-    assert_eq!(count(&recipe, &mut cursor), 1);
-    assert_eq!(field(&recipe, &mut cursor), b"NAME=a=b\nc");
-    assert_eq!(count(&recipe, &mut cursor), 1);
-    assert_eq!(field(&recipe, &mut cursor), b"/data");
-    assert_eq!(count(&recipe, &mut cursor), 1);
-    assert_eq!(field(&recipe, &mut cursor), b"/config");
-    assert_eq!(field(&recipe, &mut cursor), [0, 255, 10]);
     assert_eq!(cursor, recipe.len());
 }
