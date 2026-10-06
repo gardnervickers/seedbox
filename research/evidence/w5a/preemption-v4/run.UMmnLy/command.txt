@@ -1,1 +1,0 @@
-sudo -n /etc/profiles/per-user/gvickers/bin/python3 /tmp/seedbox-round-1.S74xJ4/amd-counter/msr_guard.py --workaround original --receipt /tmp/seedbox-round-1.S74xJ4/evidence/w5a/guard-v5-task-diagnostic.json --probe-sha256 b4afdee646ad43885e8059eb5f30b334c584011f1a558a16496e3a6dd9ea6e8b plain 100000 10000 correct 

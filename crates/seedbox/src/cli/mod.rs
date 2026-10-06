@@ -208,9 +208,6 @@ struct RuntimeInputs {
     /// Static guest supervisor [default: the copy built into this binary].
     #[arg(long, env = "SEEDBOX_GUEST_INIT")]
     guest_init: Option<PathBuf>,
-    /// Static Linux amd64 BusyBox [default: busybox on PATH, if static].
-    #[arg(long, env = "SEEDBOX_BUSYBOX")]
-    busybox: Option<PathBuf>,
     /// Docker-compatible client for `build:` services.
     #[arg(long, default_value = "podman")]
     builder: PathBuf,
@@ -220,6 +217,9 @@ struct RuntimeInputs {
     /// Guest RAM per machine, in MiB [default: 2048 with the shared kernel, else 1024].
     #[arg(long, value_parser = clap::value_parser!(u32).range(64..=seedbox::vmm::MAX_MEMORY_MB as i64))]
     memory_mb: Option<u32>,
+    /// Writable disk capacity per service, in MiB (allocated from guest RAM as written).
+    #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(1..))]
+    disk_mb: u32,
     /// Also record and compare every machine's RAM and registers.
     #[arg(long)]
     full_state: bool,
@@ -244,7 +244,8 @@ impl RuntimeInputs {
             LayoutArg::MachinePerService => 1024,
         });
         let executor =
-            VmmExecutor::new(&engine, store, cpu, memory_mb, self.layout.into(), witness)?;
+            VmmExecutor::new(&engine, store, cpu, memory_mb, self.layout.into(), witness)?
+                .with_disk_mb(self.disk_mb)?;
         let preparer = self.preparer(engine, store, scratch, executor.profile())?;
         Ok((preparer, executor))
     }
@@ -264,7 +265,6 @@ impl RuntimeInputs {
             kernel: defaults::kernel(self.kernel.clone())?,
             engine,
             init: defaults::guest_init(self.guest_init.clone(), store, scratch)?,
-            busybox: defaults::busybox(self.busybox.clone())?,
             profile,
         })
     }
@@ -417,14 +417,20 @@ fn run(cli: Cli) -> Result<u8> {
             let memory = recorded("memory_mb")
                 .and_then(|value| value.parse().ok())
                 .ok_or_else(|| Error::Integrity("recorded profile missing memory_mb".into()))?;
-            let executor = performance.apply(VmmExecutor::new(
-                &engine,
-                &store,
-                cpu.cpu,
-                memory,
-                layout,
-                profile.witness_mode.clone(),
-            )?)?;
+            let disk = recorded("disk_mb")
+                .and_then(|value| value.parse().ok())
+                .ok_or_else(|| Error::Integrity("recorded profile missing disk_mb".into()))?;
+            let executor = performance.apply(
+                VmmExecutor::new(
+                    &engine,
+                    &store,
+                    cpu.cpu,
+                    memory,
+                    layout,
+                    profile.witness_mode.clone(),
+                )?
+                .with_disk_mb(disk)?,
+            )?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
             let result = orchestrator.replay_with_options(

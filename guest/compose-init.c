@@ -3,7 +3,7 @@
  * configuration values.
  *
  * Each distinct image is unpacked once, read-only, at /images/ID. Each service
- * runs chrooted in its own overlay of its image (/services/NAME, writable layer
+ * runs in its own detached overlay of its image (/services/NAME, writable layer
  * /seedbox/services/NAME) with its own mount, PID and UTS namespaces. With a machine NIC, the machine's single
  * service uses eth0 directly. When services share the kernel, each also has
  * its own network namespace, joined to the root namespace by a veth pair. The
@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <limits.h>
+#include <linux/capability.h>
 #include <linux/fib_rules.h>
 #include <linux/netlink.h>
 #include <linux/pkt_sched.h>
@@ -37,10 +38,12 @@
 #endif
 #include "control.h"
 #include <sys/mount.h>
+#include <sys/prctl.h>
 #include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/sysmacros.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -78,6 +81,7 @@ static struct service services[MAX_SERVICES];
 static uint32_t service_count;
 static int namespaces; /* Services share this kernel, each with its own netns. */
 static uint64_t latency_ns, jitter_ns;
+static uint32_t disk_mb;
 static char *hosts;
 static struct cut *cuts;
 static size_t cut_count;
@@ -127,7 +131,7 @@ static void send_all(int fd, const char *bytes, size_t size) {
     }
 }
 
-/* ---- Launch recipe (SBXLAUNCH2, little-endian length-prefixed fields) ---- */
+/* ---- Launch recipe (SBXLAUNCH3, little-endian length-prefixed fields) ---- */
 static void read_exact(void *buffer, size_t size) {
     char *p = buffer;
     while (size) {
@@ -171,11 +175,13 @@ static void read_recipe(const char *path) {
     recipe_fd = open(path, O_RDONLY|O_CLOEXEC);
     if (recipe_fd < 0) die("launch recipe");
     char magic[10]; read_exact(magic, sizeof(magic));
-    if (memcmp(magic, "SBXLAUNCH2", 10)) { errno = EINVAL; die("launch version"); }
+    if (memcmp(magic, "SBXLAUNCH3", 10)) { errno = EINVAL; die("launch version"); }
     uint32_t mode = count();
     if (mode > 1) { errno = EINVAL; die("network mode"); }
     namespaces = mode == 1;
     latency_ns = count64(); jitter_ns = count64();
+    disk_mb = count();
+    if (!disk_mb) { errno = EINVAL; die("disk capacity"); }
     hosts = text();
     service_count = count();
     if (!service_count || service_count > MAX_SERVICES || (!namespaces && service_count != 1)) { errno = EINVAL; die("service count"); }
@@ -647,7 +653,21 @@ static int heal(const char *handle) {
 
 /* ---- Service lifecycle ---- */
 static int exit_code(int status) { return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status); }
-/* Mount, chroot and prepare the image root inside the service namespaces.
+/* Allocate each service's persistent writable layer in its own sized tmpfs.
+ * Capacity exhaustion produces ENOSPC for that service, while physical memory
+ * remains shared. Mount in the supervisor so the layer survives restarts. */
+static void setup_storage(void) {
+#ifndef SEEDBOX_SUPERVISOR_TEST
+    for (uint32_t i = 0; i < service_count; i++) {
+        char path[PATH_MAX], options[64];
+        snprintf(path, sizeof(path), "/seedbox/services/%s", services[i].name);
+        snprintf(options, sizeof(options), "size=%llu,mode=0755", (unsigned long long)disk_mb * 1024 * 1024);
+        directories(path, 0755);
+        if (mount("tmpfs", path, "tmpfs", MS_NOSUID|MS_NODEV, options)) die("service disk");
+    }
+#endif
+}
+/* Mount, detach and prepare the image root inside the service namespaces.
  * Paths resolve inside the image, so its absolute symlinks stay inside it. */
 static void enter_root(struct service *s) {
 #ifdef SEEDBOX_SUPERVISOR_TEST
@@ -664,12 +684,24 @@ static void enter_root(struct service *s) {
     snprintf(work, sizeof(work), "/seedbox/services/%s/work", s->name);
     snprintf(options, sizeof(options), "lowerdir=/images/%s,upperdir=%s,workdir=%s", s->image, upper, work);
     if (mount(NULL, "/", NULL, MS_REC|MS_PRIVATE, NULL)) die("private service mounts");
+    /* rootfs (the initramfs) itself cannot be pivoted. A recursive self-bind
+     * provides a normal current-root mount which pivot_root can detach. */
+    if (mount("/", "/", NULL, MS_BIND|MS_REC, NULL)) die("bootstrap root bind");
     /* The writable layer persists across restarts; the image never changes. */
     directories(upper, 0755); directories(work, 0755);
     if (mount("overlay", root, "overlay", 0, options)) die("service overlay");
-    if (chdir(root) || chroot(".") || chdir("/")) die("enter image root");
+    if (chdir(root) || syscall(SYS_pivot_root, ".", ".") || umount2(".", MNT_DETACH) || chdir("/")) die("detach image root");
     directories("/dev", 0755); directories("/proc", 0755); directories("/sys", 0755); directories("/tmp", 01777);
-    if (mount("devtmpfs", "/dev", "devtmpfs", 0, NULL) || mount("proc", "/proc", "proc", 0, NULL) || mount("sysfs", "/sys", "sysfs", 0, NULL)) die("mount guest filesystems");
+    /* devtmpfs is global to the kernel and contains the management port.
+     * Give applications only ordinary pseudo-devices in a private /dev. */
+    if (mount("tmpfs", "/dev", "tmpfs", MS_NOSUID, "size=1m,mode=0755") || mount("proc", "/proc", "proc", MS_NOSUID|MS_NODEV|MS_NOEXEC, NULL) || mount("sysfs", "/sys", "sysfs", MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOEXEC, NULL)) die("mount guest filesystems");
+    const struct { const char *path; unsigned int major, minor; } devices[] = {
+        {"/dev/null", 1, 3}, {"/dev/zero", 1, 5}, {"/dev/full", 1, 7},
+        {"/dev/random", 1, 8}, {"/dev/urandom", 1, 9}, {"/dev/tty", 5, 0}
+    };
+    for (size_t i = 0; i < sizeof(devices)/sizeof(devices[0]); i++) {
+        if (mknod(devices[i].path, S_IFCHR|0666, makedev(devices[i].major, devices[i].minor)) || chmod(devices[i].path, 0666)) die("service device");
+    }
     if (sethostname(s->name, strlen(s->name))) die("service hostname");
     write_file("/etc/hosts", hosts, strlen(hosts), 0644);
     for (char **volume = s->volumes; *volume; volume++) directories(*volume, 0755);
@@ -688,6 +720,24 @@ static void enter_root(struct service *s) {
     }
 #endif
 }
+/* Root applications must not recreate the management device, mount the old
+ * root/devtmpfs, access effect I/O ports, reboot, or change the shared clock.
+ * Drop the bounding set too: exec by UID 0 otherwise restores capabilities. */
+static void application_capabilities(void) {
+#ifndef SEEDBOX_SUPERVISOR_TEST
+    const int denied[] = {CAP_SYS_ADMIN, CAP_MKNOD, CAP_SYS_RAWIO, CAP_SYS_BOOT, CAP_SYS_MODULE, CAP_SYS_TIME, CAP_SYS_PTRACE};
+    struct __user_cap_header_struct header = {.version = _LINUX_CAPABILITY_VERSION_3};
+    struct __user_cap_data_struct data[2];
+    if (syscall(SYS_capget, &header, data)) die("read application capabilities");
+    for (size_t i = 0; i < sizeof(denied)/sizeof(denied[0]); i++) {
+        unsigned int word = (unsigned int)denied[i] / 32, bit = (unsigned int)denied[i] % 32;
+        uint32_t mask = ~(1U << bit);
+        if (prctl(PR_CAPBSET_DROP, denied[i], 0, 0, 0)) die("drop application bounding capability");
+        data[word].effective &= mask; data[word].permitted &= mask; data[word].inheritable &= mask;
+    }
+    if (syscall(SYS_capset, &header, data) || prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) die("restrict application capabilities");
+#endif
+}
 /* The service init: PID 1 of the service's PID namespace. It launches the
  * application and exits with its status; the kernel then kills every other
  * process in the namespace before this init can be reaped. */
@@ -699,10 +749,14 @@ static int service_main(void *argument) {
     if (s->netns >= 0 && (setns(s->netns, CLONE_NEWNET) || close(s->netns))) die("join service network namespace");
     if (setpgid(0, 0)) die("service process group");
     enter_root(s);
+#ifndef SEEDBOX_SUPERVISOR_TEST
+    if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0)) die("protect service init");
+#endif
     pid_t application = fork();
     if (application < 0) die("fork application");
     if (!application) {
         if (chdir(s->working_dir)) die("working directory");
+        application_capabilities();
         credentials(s->user);
         environ = s->environment;
         execvp(s->arguments[0], s->arguments);
@@ -821,6 +875,7 @@ static void relay_drain(struct service *s) { if (s->output >= 0) relay_output(s)
 #define SEEDBOX_READY_IOPERM ioperm
 #define SEEDBOX_READY_OUTL outl
 #endif
+static void service_channels(int timeout);
 static void management_ready(void) {
 #ifdef SEEDBOX_TEST_READY_DELAY_NS
     /* Acceptance fixture only: retained per-service opt-in prevents delaying
@@ -828,12 +883,16 @@ static void management_ready(void) {
     for (uint32_t i = 0; i < service_count; i++) {
         for (char **entry = services[i].environment; *entry; entry++) {
             if (strcmp(*entry, "SEEDBOX_TEST_DELAY_READY=1")) continue;
-            struct timespec remaining = {
-                .tv_sec = SEEDBOX_TEST_READY_DELAY_NS / 1000000000ULL,
-                .tv_nsec = SEEDBOX_TEST_READY_DELAY_NS % 1000000000ULL
-            };
-            while (nanosleep(&remaining, &remaining)) {
-                if (errno != EINTR) die("test readiness delay");
+            struct timespec t;
+            if (clock_gettime(CLOCK_MONOTONIC, &t)) die("test readiness clock");
+            uint64_t deadline = (uint64_t)t.tv_sec * 1000000000ULL + t.tv_nsec + SEEDBOX_TEST_READY_DELAY_NS;
+            for (;;) {
+                if (clock_gettime(CLOCK_MONOTONIC, &t)) die("test readiness clock");
+                uint64_t now = (uint64_t)t.tv_sec * 1000000000ULL + t.tv_nsec;
+                if (now >= deadline) break;
+                /* Keep relay requests flowing on the shared machine while
+                 * effects wait for its readiness handshake in the VMM. */
+                service_channels((int)((deadline - now + 999999) / 1000000));
             }
             goto ready;
         }
@@ -974,6 +1033,7 @@ int main(void) {
     watch_children();
     read_recipe("/seedbox/launch.bin");
     setup_network();
+    setup_storage();
     management = open_management("/sys/class/virtio-ports", "/dev");
     for (uint32_t i = 0; i < service_count; i++) {
         if (services[i].controller) relay_socket("/proc/cmdline", CONTROL_SOCKET);

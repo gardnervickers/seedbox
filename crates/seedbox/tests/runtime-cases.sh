@@ -3,6 +3,9 @@
 set -euo pipefail
 cli=$1; vmm=$2; kernel=$3; cpu=$4; output=$5
 state="$output/state"
+layout=${7:-shared-kernel}
+machines=1
+if test "$layout" = machine-per-service; then machines=2; fi
 capture_msr() {
   python3 - "$cpu" <<'PY'
 import sys
@@ -27,7 +30,7 @@ run_case() {
   set +e
   "$cli" run "$compose" --seed 1009 --cpu "$cpu" --state "$state" \
     --vmm "$vmm" --kernel "$kernel" --guest-init "$output/compose-init" \
-    --busybox "$SEEDBOX_BUSYBOX" "$@" > "$output/$name.log" 2>&1
+    --layout "$layout" "$@" > "$output/$name.log" 2>&1
   status=$?
   set -e
   cat "$output/$name.log"
@@ -49,10 +52,16 @@ run_case() {
   "$cli" inspect "$replay" --json > "$output/$name-replay.json"
   jq -e --arg expected "$expected" '.outcome == $expected and .replay.status == "MATCH"' "$output/$name-replay.json" >/dev/null
 }
+if test "${6:-}" = isolation; then
+  run_case isolation "$output/isolation/compose.yaml" PASS 0 --disk-mb 8
+  jq -e '.identity.inputs.profile.semantic_parameters.disk_mb == "8"' "$output/isolation.json" >/dev/null
+  echo 'PASS: detached roots, private devices, restricted capabilities, independent ENOSPC; replay matched; MSRs restored'
+  exit 0
+fi
 if test "${6:-}" = lifecycle; then
   # Reuse the prepared example sources, but every execution gets a fresh attempt.
   run_case redis-full-state "$output/redis/compose.yaml" PASS 0 --full-state
-  jq -e '.replay.full_state_matches == true and (.report.full_state | length) == 2' \
+  jq -e --argjson machines "$machines" '.replay.full_state_matches == true and (.report.full_state | length) == $machines' \
     "$output/redis-full-state-replay.json" >/dev/null
   "$cli" replay "$attempt" --cpu "$cpu" --state "$state" --margin 10000 \
     > "$output/redis-margin-replay.log" 2>&1
@@ -82,7 +91,7 @@ if test "${6:-}" = lifecycle; then
   set +e
   "$cli" run "$output/redis/wall.yaml" --seed 1009 --cpu "$cpu" --state "$state" \
     --vmm "$vmm" --kernel "$kernel" --guest-init "$output/compose-init" \
-    --busybox "$SEEDBOX_BUSYBOX" > "$output/wall.log" 2>&1
+    --layout "$layout" > "$output/wall.log" 2>&1
   status=$?
   set -e
   cat "$output/wall.log"

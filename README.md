@@ -12,7 +12,7 @@ interrupt timing.
 qualified host (see [host requirements](#host-requirements)) and root.
 
 ```sh
-nix develop                          # Rust, OCI tools, static BusyBox, musl
+nix develop                          # Rust, OCI tools, musl
 bash kernel/build.sh                 # guest kernel -> ~/seedbox-sim/artifacts/bzImage
 cargo build --release                # target/release/seedbox
 cargo build-vmm                      # crates/seedbox-vmm/target/release/seedbox-vmm (alias)
@@ -34,7 +34,9 @@ directory. Every runtime input has a default, so no flags are required:
 | Guest kernel | `bzImage` in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`, `./artifacts`, then `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | `seedbox-vmm` next to an installed `seedbox`, then this checkout's `cargo build-vmm` output, then on `PATH`; `cargo run` builds it if missing | `--vmm`, `SEEDBOX_VMM` |
 | Guest supervisor | built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl | `--guest-init`, `SEEDBOX_GUEST_INIT` |
-| BusyBox | `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
+| Layout | every service in its own namespaces on one shared Linux kernel | `--layout shared-kernel` or `--layout machine-per-service` |
+| Guest RAM | 2048 MiB per shared machine; 1024 MiB per machine with `machine-per-service` (64–3328 MiB) | `--memory-mb` |
+| Writable disk | 1024 MiB per service, allocated from guest RAM as written | `--disk-mb` |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
 
 `seedbox help run` lists every option. A run prints `OUTCOME: run-directory`;
@@ -52,7 +54,7 @@ INCOMPLETE and 124 TIMEOUT.
 | `guest/` | Generic OCI guest supervisor plus low-level guest fixtures and builders |
 | `docs/` | [Vision](docs/vision.md), [runtime instructions](docs/runtime.md), [backends](docs/backends.md), [acceptance record](docs/acceptance.md) |
 | `harness/` | Engine acceptance suite, legacy world-file campaign runners and fixtures ([migration map](harness/worlds/README.md)), `msr54.py` |
-| `research/` | Design conclusions and evidence records ([status](research/STATUS.md)); research crates removed, see commit `bc07f35` |
+| [`tools/mac-tcg/`](tools/mac-tcg/README.md) | Experimental local Mac TCG runner and tests; separate from the production KVM backend |
 
 ## How execution is controlled
 
@@ -70,7 +72,11 @@ INCOMPLETE and 124 TIMEOUT.
 - **Guest kernel changes** (`kernel/`): kernel TSC reads return VMM-published
   virtual time; user RDTSC/RDTSCP trap via CR4.TSD and are emulated; a syscall
   hook offers yield exits.
-- **Network and scheduling.** virtio-net over virtio-mmio into an in-memory
+- **Network and scheduling.** The default shared-kernel layout uses a routed veth
+  network, one network namespace per service, and a seeded netem delay queue per
+  destination. Scoped partitions use blackhole routing rules. CPU, memory and
+  clocks are shared; independent kernels and clocks use `--layout machine-per-service`.
+  In that layout, virtio-net runs over virtio-mmio into an in-memory
   fabric with seeded latency/jitter and directed partitions. The world runs the
   machine furthest behind in slices that never pass its causal horizon (the
   other machines' times plus link latency) or its next event. A slice may end
@@ -106,8 +112,10 @@ configuration, engine, logs and result. Replay uses the retained content store
 without registry pulls or builds. PASS, FAIL, ERROR, TIMEOUT and INCOMPLETE are
 separate results; a reproduced FAIL is a successful MATCH. `--full-state` adds
 per-machine RAM/register comparisons. `--margin` and `--undo` change performance without
-changing semantic identity. Application storage is private RAM-backed state for
-each run; the default is 1024 MiB per service. See [runtime instructions](docs/runtime.md)
+changing semantic identity. Each service gets a private, detached overlay root with a sized RAM-backed
+writable disk (1024 MiB by default). Filling that disk yields ENOSPC for that
+service; memory pressure still affects the shared machine. Process restart preserves
+its disk, while fresh run/replay starts empty. See [runtime instructions](docs/runtime.md)
 for compatibility, memory sizing, root access, cancellation and the supported subset.
 
 The [acceptance record](docs/acceptance.md) includes real etcd/Redis passes,
@@ -207,8 +215,9 @@ harness/acceptance.sh full --semantics-change                            # kerne
   (shared with items 1–2), at least one scheduled kill must be acknowledged by
   the member's guest on COM2 (`nX stopped`, then `nX started` in `nX.mgmt`),
   and the client must then report `RESULT pass`. The VMM's `kills` list is only
-  the seeded schedule, so it is not taken as evidence that a fault happened. Partition/heal checks will follow when
-  reusable partition faults exist outside the one-VM fixture.
+  the seeded schedule, so it is not taken as evidence that a fault happened.
+  Partition/heal, overlapping handles and recovery are covered separately by
+  the [runtime fault example](examples/faults/README.md) and its acceptance suite.
 
 Seeds, scenarios, settings and the pinned witness are in
 `harness/acceptance/pins.json`, pinned for PR #18's build (ABI 2 kernel, corrected
@@ -258,9 +267,9 @@ cannot call it directly. Its `seedbox run`/`replay` commands now exist; the Comp
 Rust integration tests over `Orchestrator::run`/`replay`. They are pure
 comparisons over jobs and results, and `acceptance/pins.json` carries over.
 
-## One-VM network fixture
+## Legacy one-VM network fixture
 
-The experimental one-VM layout runs three real etcd members and their client
+The retained comparison fixture runs three real etcd members and their client
 in separate network namespaces. It shares a kernel, clock, memory and tmpfs;
 it does not provide independent machine reboot or kernel failure coverage.
 `kernel/config.options` includes the required veth, netem and ingress filter
@@ -315,10 +324,11 @@ Both layouts read `seedbox.concurrency`.
 
 These worlds deliberately retain a small fixed-delay, zero-jitter fixture.
 They are compatible with the campaign runner but do not port the full
-`kill-3.5.2` hunt or establish its bug-finding rate. Before backend selection,
+`kill-3.5.2` hunt or establish its bug-finding rate. Comparative qualification in
 [issue #10](https://github.com/gardnervickers/seedbox/issues/10) requires a
 matched optimized PV/undo comparison, qualified guest-local jitter, the full
 seeded kill/restart schedule, eight writers for 60 seconds, and etcd 3.5.3
-controls over the same seeds. The historical ABI1 timings are in
-[`research/single-vm-network/REPORT.md`](research/single-vm-network/REPORT.md)
+controls over the same seeds; those gates remain open with the shared-kernel
+default. The historical ABI1 timings are in
+[the historical networking report](https://github.com/gardnervickers/seedbox/blob/788fc4376b7e2cc96d1bc51ed2ae3d4635d16abd/research/single-vm-network/REPORT.md)
 and must not be attributed to these revised sources.

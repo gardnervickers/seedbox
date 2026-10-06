@@ -43,9 +43,9 @@ fn initramfs_round_trip_preserves_image_files_modes_and_hardlinks() {
     // Distinct images are separate trees; services get empty mount points.
     let trees = [("app", root.as_path()), ("peer", root.as_path())];
     let services = ["one", "two"];
-    build_initramfs(&trees, &services, &init, &init, b"recipe", &archive).unwrap();
+    build_initramfs(&trees, &services, &init, b"recipe", &archive).unwrap();
     let archive2 = directory.path().join("repeat.cpio");
-    build_initramfs(&trees, &services, &init, &init, b"recipe", &archive2).unwrap();
+    build_initramfs(&trees, &services, &init, b"recipe", &archive2).unwrap();
     assert_eq!(fs::read(&archive).unwrap(), fs::read(&archive2).unwrap());
     let output = directory.path().join("unpacked");
     fs::create_dir(&output).unwrap();
@@ -106,7 +106,6 @@ fn unsupported_image_capabilities_are_not_silently_dropped() {
         &[("app", root.as_path())],
         &["app"],
         &init,
-        &init,
         b"recipe",
         &directory.path().join("out"),
     )
@@ -149,10 +148,15 @@ fn binary_recipe_keeps_arguments_and_config_bytes_literal() {
         latency_ns: 1_000_000,
         jitter_ns: 200_000,
     };
-    let recipe = launch_recipe(network, "10.0.0.1 app\n", &services).unwrap();
+    let recipe = launch_recipe(network, 1024, "10.0.0.1 app\n", &services).unwrap();
+    assert!(launch_recipe(network, 0, "", &services).is_err());
+    assert_ne!(
+        recipe,
+        launch_recipe(network, 2048, "10.0.0.1 app\n", &services).unwrap()
+    );
     // A machine NIC carries exactly one service.
-    assert!(launch_recipe(GuestNetwork::Device, "", &services).is_err());
-    assert!(launch_recipe(GuestNetwork::Device, "", &services[..1]).is_ok());
+    assert!(launch_recipe(GuestNetwork::Device, 1024, "", &services).is_err());
+    assert!(launch_recipe(GuestNetwork::Device, 1024, "", &services[..1]).is_ok());
     let mut cursor = 10;
     fn count(bytes: &[u8], cursor: &mut usize) -> usize {
         let n = u32::from_le_bytes(bytes[*cursor..*cursor + 4].try_into().unwrap()) as usize;
@@ -170,10 +174,11 @@ fn binary_recipe_keeps_arguments_and_config_bytes_literal() {
         *cursor += 8;
         n
     }
-    assert_eq!(&recipe[..10], b"SBXLAUNCH2");
+    assert_eq!(&recipe[..10], b"SBXLAUNCH3");
     assert_eq!(count(&recipe, &mut cursor), 1);
     assert_eq!(count64(&recipe, &mut cursor), 1_000_000);
     assert_eq!(count64(&recipe, &mut cursor), 200_000);
+    assert_eq!(count(&recipe, &mut cursor), 1024);
     assert_eq!(field(&recipe, &mut cursor), b"10.0.0.1 app\n");
     assert_eq!(count(&recipe, &mut cursor), 2);
     for (service, flags, configs) in [("app", 1, 1), ("peer", 2, 0)] {

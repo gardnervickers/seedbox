@@ -52,6 +52,10 @@ Linux host:
 bash crates/seedbox/tests/accept-runtime.sh /absolute/bzImage 14 /absolute/fault-evidence faults
 ```
 
+The default uses shared-kernel service namespaces. Append `machine-per-service`
+after `faults`, or pass `--layout machine-per-service` to `run.py`, to test
+independent machines in another fresh output directory.
+
 The evidence output must be fresh. The harness writes its report and command logs
 incrementally, preserving completed evidence if a later case fails. The
 [acceptance record](ACCEPTANCE.md) identifies the qualified binaries, retained
@@ -70,14 +74,18 @@ python3 examples/faults/run.py \
 
 The harness checks fixed PASS, broken FAIL, broken-without-faults PASS, and replay
 of all three. The healthy case also replays with margin 131072 and undo 16;
-ordinary replay disables undo. It uses 512 MiB per guest to accommodate the Python
-image, 2 ms stop tolerance, and margin 98304;
+ordinary replay disables undo. It uses the layout defaults for RAM (2048 MiB
+shared-kernel or 1024 MiB machine-per-service), 2 ms stop tolerance, and margin 98304;
 `--margin` overrides the recorded margin. Runs are not silently retried. Every
 run and replay checks restoration of the workaround MSR on every CPU sibling,
 retaining its before and after values.
 
 Raw `output/vmm.json` retains the fault effects, control request/response history,
-simulated timing, and network counters. Counters must show continuing drops after
+simulated timing, and network counters. Shared-kernel logs live in
+`machines/kernel.console` with a `service | ` prefix; the verifier extracts each
+service. The shared-kernel model has no fabric counters; failed TCP probes and
+post-heal writes verify fault effects. With independent machines counters must
+show continuing drops after
 partial healing and renewed NIC acceptance after final healing. Already routed
 frames remain queued; new sends crossing a cut are dropped. NIC acceptance includes
 its bounded backlog, independently of IRQ notification. Receiver drops cannot
@@ -95,7 +103,8 @@ after the existing nine-case matrix. Compile that supervisor with
 `-DSEEDBOX_TEST_READY_DELAY_NS=4000000000ULL`. The focused projects retain
 `SEEDBOX_TEST_DELAY_READY=1` on the server only, so its initial application starts
 normally but its supervisor announces management readiness four simulated seconds
-later. The controller and client retain ordinary startup.
+later. Services sharing that supervisor keep their control relay active during
+the fixture delay, so the readiness race is exercised on both layouts.
 
 The early-request case records 32 generation-1 acknowledgements, requests a stop,
 and checks that its admission precedes the server's management readiness. The stop
@@ -115,9 +124,10 @@ The control-cases scenario runs after the matrix and is replayed once. It reject
 restart on a running server and a second stop, closes its first connection, then
 reconnects to restart the server. The target confirms that it has no fault socket.
 After deliberately exiting with code 17, it is reported as `Exited(17)` and
-stop/restart return `target_unavailable`. The controller completes another time
+stop/restart return `target_unavailable` with independent machines. On the shared
+kernel, stop returns `invalid_state` and restart launches the exited service again. The controller completes another time
 query and classifies that workload exit as FAIL. The verifier checks both sessions,
-all four recoverable errors and the absence of an infrastructure ERROR. With all
+the layout-specific recoverable errors and the absence of an infrastructure ERROR. With all
 optional supervisors supplied, the complete matrix contains fifteen executions.
 Use `verify.py RUN --focused control-cases` to inspect this evidence separately.
 

@@ -19,7 +19,7 @@
             SEEDBOX_STATIC_CC = "${pkgs.pkgsStatic.stdenv.cc}/bin/x86_64-unknown-linux-musl-cc";
             SEEDBOX_IP = "${pkgs.iproute2}/bin/ip";
             SEEDBOX_TC = "${pkgs.iproute2}/bin/tc";
-            SEEDBOX_BUSYBOX = "${pkgs.pkgsStatic.busybox}/bin/busybox";
+            SEEDBOX_FIXTURE_BUSYBOX = "${pkgs.pkgsStatic.busybox}/bin/busybox";
           });
         };
     in {

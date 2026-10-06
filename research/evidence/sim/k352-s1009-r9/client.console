@@ -1,2 +1,0 @@
-LOAD acked=51798 failed=144 elapsed=1m0.005904695s
-RESULT fail acked=51798 failed=144 cluster did not settle: revisions differ: map[10.0.0.1:2379:51839 10.0.0.2:2379:51838 10.0.0.3:2379:51839]

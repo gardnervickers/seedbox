@@ -181,27 +181,6 @@ pub fn guest_init(
     }
 }
 
-/// A static Linux amd64 BusyBox: `busybox` on `PATH` when it is statically
-/// linked (the Nix shell sets SEEDBOX_BUSYBOX instead).
-pub fn busybox(explicit: Option<PathBuf>) -> Result<PathBuf> {
-    if let Some(path) = explicit {
-        return existing("--busybox", path);
-    }
-    match on_path("busybox") {
-        Some(path) if is_static_elf(&path) => Ok(path),
-        Some(path) => Err(Error::Setup(format!(
-            "{} is dynamically linked; install a static BusyBox, or pass --busybox or set \
-             SEEDBOX_BUSYBOX",
-            path.display()
-        ))),
-        None => Err(missing(
-            "static BusyBox",
-            &[PathBuf::from("$PATH/busybox")],
-            "enter `nix develop`, or pass --busybox or set SEEDBOX_BUSYBOX",
-        )),
-    }
-}
-
 /// A recorded run: a directory holding `manifest.json`.
 pub fn run_directory(path: PathBuf) -> Result<PathBuf> {
     let path = existing("run directory", path)?;
@@ -249,6 +228,7 @@ fn on_path(name: &str) -> Option<PathBuf> {
 }
 
 /// A 64-bit little-endian ELF executable with no `PT_INTERP` program header.
+#[cfg(test)]
 fn is_static_elf(path: &Path) -> bool {
     const PT_INTERP: u64 = 3;
     let Ok(bytes) = std::fs::read(path) else {
@@ -306,7 +286,6 @@ mod tests {
         let path = file.path().to_owned();
         assert_eq!(kernel(Some(path.clone())).unwrap(), path);
         assert_eq!(engine(Some(path.clone())).unwrap(), path);
-        assert_eq!(busybox(Some(path.clone())).unwrap(), path);
         let error = kernel(Some("/nonexistent/bzImage".into())).unwrap_err();
         assert_eq!(
             error.to_string(),

@@ -13,8 +13,8 @@ use std::{
     path::Path,
 };
 
-/// Launch recipe v2: several services per machine, each in its own namespaces.
-pub const GUEST_ABI: &str = "oci-init-v2";
+/// Launch recipe v3: namespaced services with independent writable disk limits.
+pub const GUEST_ABI: &str = "oci-init-v3";
 /// Guest RAM must end below the engine's device window at 0xd000_0000.
 pub const MAX_MEMORY_MB: u32 = 3328;
 
@@ -52,6 +52,7 @@ impl VmmExecutor {
                     ("control_channel".into(), "virtio-console-v1".into()),
                     ("layout".into(), layout.name().into()),
                     ("memory_mb".into(), memory_mb.to_string()),
+                    ("disk_mb".into(), "1024".into()),
                 ]),
             },
             performance: BTreeMap::from([
@@ -59,6 +60,17 @@ impl VmmExecutor {
                 ("SEEDBOX_UNDO".into(), "256".into()),
             ]),
         })
+    }
+
+    /// Writable storage capacity per service; tmpfs allocates only written pages.
+    pub fn with_disk_mb(mut self, disk_mb: u32) -> Result<Self> {
+        if disk_mb == 0 {
+            return Err(Error::Execution("guest disk must be positive MiB".into()));
+        }
+        self.profile
+            .semantic_parameters
+            .insert("disk_mb".into(), disk_mb.to_string());
+        Ok(self)
     }
 
     pub fn with_margin(mut self, margin: &str) -> Result<Self> {
@@ -238,6 +250,8 @@ struct VmmReport {
 struct ValidatedControlHistory {
     plans: Vec<seedbox_control::Plan>,
     effects: BTreeMap<u32, u64>,
+    /// Process faults whose target VM exited after admission, before an effect.
+    unavailable: BTreeSet<u32>,
 }
 
 /// Correlate guest-originated requests to responses and applied engine actions.
@@ -337,7 +351,12 @@ fn validate_control_history(
                 if metadata["ok"] != false || !metadata["error"].is_object() {
                     return Err(Error::Integrity("invalid control error reply".into()));
                 }
-                continue;
+                if row["fault_id"].is_null() || metadata["error"]["code"] != "target_unavailable" {
+                    continue;
+                }
+                if row["fault_id"].as_u64() != Some(expected.plans.len() as u64 + 1) {
+                    return Err(bad());
+                }
             }
         } else {
             let c = cut_at.ok_or_else(bad)?;
@@ -355,6 +374,11 @@ fn validate_control_history(
                 return Err(bad());
             }
         }
+        let unavailable = if response {
+            metadata["ok"] == false
+        } else {
+            e.is_some() && row["error"].is_string() && row["fatal"] == false
+        };
         let call: Request = serde_json::from_value(r.clone()).map_err(|_| bad())?;
         let action = match call.operation {
             Operation::Stop { target } => Action::Stop {
@@ -425,7 +449,14 @@ fn validate_control_history(
         {
             return Err(bad());
         }
-        if response {
+        if unavailable {
+            if !matches!(plan.action, Action::Stop { .. } | Action::Restart { .. })
+                || e.is_none_or(|e| e > plan.deadline_ns)
+            {
+                return Err(bad());
+            }
+            expected.unavailable.insert(plan.id);
+        } else if response {
             expected.effects.insert(plan.id, e.ok_or_else(bad)?);
         }
         expected.plans.push(plan);
@@ -530,6 +561,11 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
             ));
         }
         match (fault.status.as_str(), fault.applied_at_ns) {
+            // A target VM exit after admission resolves the call with no effect.
+            ("unavailable", None) if expected.unavailable.contains(&fault.id) => {}
+            _ if expected.unavailable.contains(&fault.id) => {
+                return Err(Error::Integrity("invalid fault effect status/time".into()))
+            }
             ("applied", Some(at))
                 if at >= fault.requested_at_ns
                     && at <= plan.deadline_ns

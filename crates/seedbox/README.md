@@ -237,17 +237,30 @@ early delivery enabled. Replies contain request, admission, effect and delivery
 timestamps. Missing/rejected supervisor effects are infrastructure errors.
 
 Replay runs the retained controller program again and compares the resulting
-history and witness. `inspect()` exposes topology, machine state, active handles
-and packet counters. `delivered` counts receiver NIC acceptance, including bounded
+history and witness. Targets name services; a machine target is valid only if it
+hosts a single service. The controller service is excluded from the failure model
+even when it shares a machine with the targets. `inspect()` exposes topology,
+machine state, per-service `processes`, active handles and packet counters. `delivered` counts receiver NIC acceptance, including bounded
 backlog, independently of IRQ notification; full-backlog/unready drops are separate.
 
 See the [Python API](../../python/README.md) and [public wire protocol](../../python/PROTOCOL.md)
 for custom language bindings. Future declarative tools can call this same API.
-No control configuration preserves the prior no-control serialization/witness path.
+Without control configuration, the RPC endpoint is absent. Shared-kernel services
+run in their own namespaces, on detached overlay roots with private writable
+disks. A natural service exit is reported as `Exited(code)` and can be restarted;
+a stopped service reports `Stopped`. Stop waits for PID-namespace teardown;
+restart reuses the writable disk and network namespace. Neither operation reboots
+the kernel. Shared-kernel partitions take effect at the guest acknowledgement;
+independent-machine partitions take effect at fabric admission. The fabric
+counters are empty with the shared kernel, whose network queues live in the guest.
 
 ## Follow-on scope
 
 The legacy fixtures retain their own pinned inputs and runner. Multi-core campaign
 dispatch, whole-machine persistent storage, and broad guest image qualification
-are separate work. The supported Compose path runs one service per VM with
-explicit host/runtime inputs and RAM-backed storage.
+are separate work. The supported Compose path defaults to one shared kernel with
+private service namespaces; `--layout machine-per-service` provides independent
+kernels/clocks. `--memory-mb` is RAM per machine (2048 MiB shared, 1024 MiB
+independent by default), while `--disk-mb` limits each service to 1024 MiB of
+writable tmpfs capacity by default. Layout and both sizes are replay identity
+inputs. Guest ABI v3 adds disk sizing and requires its matching supervisor.

@@ -34,13 +34,16 @@ must converge at this boundary. `PreparedImage.manifest` is the platform-specifi
 manifest digest, not the registry tag or multi-platform index digest. `placement`
 maps every service to a machine, and `guests` supplies one prepared boot archive
 per machine. Service and image sets must match; the set of placement targets must
-exactly equal the guest set. A single guest can host several service namespaces.
+exactly equal the guest set. A single guest hosts every service with the default `shared-kernel` layout;
+`machine-per-service` keeps distinct guests. Layout, RAM per machine and writable
+disk capacity per service are semantic profile parameters.
 
 The preparer must validate descriptor/digest relationships, image platform, all
 launch metadata, and guest requirements. `image::resolve_launch` supplies the
 shared command/environment override logic. Its `Launch` includes image-declared
 volume paths; silently discarding these would change image behavior. The OCI
-guest implementation provides per-run RAM-backed storage, read-only configs,
+guest implementation provides detached overlay roots and separately sized per-service
+tmpfs disks (`disk_mb`), read-only configs,
 UID/GID lookup, working directory and PATH resolution, and an explicit hosts file
 for service-name resolution. The etcd and Redis application paths have passed
 Linux acceptance; see [acceptance.md](acceptance.md) for the tested profiles and limits.
@@ -96,10 +99,18 @@ fixture tests and hardware acceptance cover contention, catchable interruption,
 and exact register restoration. The current VMM is a single-process engine;
 all other hardware entrypoints must adopt this same protocol before sharing cores.
 
+The shared-kernel supervisor uses PID/mount/UTS/network namespaces, detached roots,
+private ordinary device nodes and restricted application capabilities to keep the
+management channel exclusive to the controller. Writable capacity is private;
+physical memory, CPU and clocks remain shared. It is not a hostile-code sandbox.
+The launch recipe/profile ABI is `oci-init-v3`; older ABIs require their original CLI.
+
 The versioned VMM report provides `guest_exit_code`, `guest_init_error`, and
 `infrastructure_error`. The OCI supervisor reports application completion through
 port 0xf4 and bootstrap failure through 0xf5. `State::Exited` also carries sentinel
 values for failures, so the adapter never parses its debug string for completion.
+Service exits on a live shared machine are also reported in `service_exits` and
+inspection `processes`; stop/restart faults target services through placement.
 The adapter preserves the deterministic
 exit witness and optional per-machine full-state digests. Fault history distinguishes
 request time from the guest-acknowledged effect time; never substitute the request
@@ -125,3 +136,50 @@ the public API.
 These contracts and local fixture tests are not evidence of Linux hardware or
 guest qualification. The orchestration test backend lives only under `tests/`;
 it is never offered as a production execution option.
+
+## Qualification and capability limits
+
+The tested production profile is Linux/KVM on the AMD Ryzen 5950X workstation,
+with the Zen SpeculativeLockMap workaround verified for the leased cores and
+SMT siblings. Guest kernel, supervisor, engine and semantic settings are run
+identity inputs. Host kernel/microcode changes or a new CPU need fresh
+qualification; same-seed equality across hosts is not established. Full host
+inventory admission and drift rejection remain
+[issue #5](https://github.com/gardnervickers/seedbox/issues/5), beyond the current
+KVM/MSR access checks, leases and workaround readbacks.
+
+Clock and entropy evidence admits the tested workloads, not arbitrary Linux
+images or JVM/JIT programs. Broader instruction, CPU-feature, clock and entropy
+coverage belongs to #5; the Java workloads in issues #6 and #7 need admission
+before their historical litmuses can be claimed. Retired native-calibration,
+10x speedup and 100-microsecond stop targets are not acceptance requirements.
+
+Process restart retains guest tmpfs data. It does not model machine reboot,
+power loss, durable block devices or volatile versus flushed writes. Undo
+checkpoints are private precise-stop recovery state, not complete VM/world
+snapshots or a public reverse-execution interface. These capabilities require
+explicit device, storage, RNG, event, controller and incarnation coverage.
+The Kafka litmus in #6 needs a declared storage-loss model; a process kill
+alone does not lose the OS cache. Stale callbacks and commands must not affect
+a new machine incarnation when reboot support is added.
+
+The implemented network timing model permits bounded early ordinary packet
+delivery, as documented in [runtime.md](runtime.md); management barriers are
+exact. Historical prototype proposals are not additional runtime guarantees.
+The shared-kernel layout has distinct scheduling, clocks, memory and storage
+from independent VMs. Its remaining comparative qualification in
+[issue #10](https://github.com/gardnervickers/seedbox/issues/10) requires a
+matched PV/undo comparison, deterministic guest-local jitter, the full seeded
+kill/restart campaign and paired etcd 3.5.3 controls, including completed seeds
+and confirmed failures per allocated core-hour. Making it the default does not
+establish those campaign and throughput results.
+
+The [Mac TCG tool](../tools/mac-tcg/README.md) retains a useful restricted local
+experiment. It is not a production execution backend and its scoped witness
+is not comparable to KVM witnesses or a full-state digest. Automated setup,
+run/replay integration and independent-machine local execution remain open.
+
+The retired research tree and its raw evidence are preserved at
+[commit 788fc43](https://github.com/gardnervickers/seedbox/tree/788fc4376b7e2cc96d1bc51ed2ae3d4635d16abd/research).
+Earlier standalone prototypes are at commit `bc07f35`. These are historical
+inputs, not additional supported backends.

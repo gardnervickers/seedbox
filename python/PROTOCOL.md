@@ -87,7 +87,7 @@ layout every service is on one machine, so name services.
 | `restart` | `target`: a typed target | `{}` after successful exec of its retained launch recipe |
 | `partition` | `left`, `right`: nonempty, disjoint arrays of typed targets | `{"handle":"opaque value"}` |
 | `heal` | `handle`: a previously returned handle | `{}` after releasing that handle |
-| `inspect` | None | `services`, `machines`, `active_handles`, `network_counters` |
+| `inspect` | None | `services`, `machines`, `processes`, `active_handles`, `network_counters` |
 
 Partitions cut both directions between their two groups. Each handle is
 independent: a link remains cut while any applicable handle exists. Already
@@ -97,11 +97,11 @@ kernel, the guest's root network namespace drops them with blackhole routing
 rules; packets already queued in a destination's delay queue stay in flight.
 Inspect returns the retained service-to-machine mapping, machine states,
 per-service application lifecycle states in `processes` (`Running`, `Stopped`,
-or `Exited(code)` once the service's machine has exited), active partition
+or `Exited(code)` once its application has exited), active partition
 handles and directed-link counters. A machine hosting one service reports that
 service's state. It exposes simulator state, not application object memory.
-Transient CPU halt state is not an application lifecycle state. A service that
-exits on its own keeps `Running` until it is stopped; stopping it succeeds.
+Transient CPU halt state is not an application lifecycle state. A service sharing
+a kernel that exits on its own can be restarted; stopping it returns `invalid_state`.
 Counters cover the engine's fabric between machines, so they are empty when
 services share a kernel. They include sends, drops and arrivals whose nominal
 simulated timestamps are strictly before the admission boundary; equal-time
@@ -136,18 +136,21 @@ An operation error uses `ok: false` and `error` instead of a result:
 A scenario can handle rejected arguments or an inactive partition handle.
 `restart` starts a stopped application using its retained launch recipe. Restarting
 a running application or stopping an already stopped application returns
-`invalid_state`. With one service per machine, its application exiting ends that
-machine, and commands targeting it return `target_unavailable`; the scenario can
-inspect that exit and decide its own outcome. A service sharing a kernel that
-exits on its own can be stopped, then restarted. An inspection
-whose response would exceed the frame limit returns `result_too_large`.
+`invalid_state`. A service sharing a kernel that exits on its own can be restarted
+directly; stopping it returns `invalid_state`. With one service per machine its
+application exiting ends that machine. Commands targeting a VM that has exited return `target_unavailable`,
+as does a stop or restart whose target VM exits after admission but before the
+effect is acknowledged; the scenario can inspect that exit and decide its own
+outcome. An inspection whose response would exceed the frame limit returns
+`result_too_large`.
 These errors are recoverable: the connection stays usable, the error is retained
 in the transcript, and no operation is reported as applied. Missing or
 rejected supervisor effects and invalid protocol framing/correlation are
 infrastructure errors. A pending call cut off by normal world termination stays
 in the retained transcript and preserves the workload outcome or TIMEOUT. A
 process command fails if its five-second simulated acknowledgement deadline is
-reached without an effect; this deadline is not shortened to the world limit.
+reached without an effect while its target VM is still running; this deadline is
+not shortened to the world limit.
 
 ## Time and ordering
 

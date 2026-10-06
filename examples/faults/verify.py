@@ -12,12 +12,34 @@ PHASE = re.compile(r"^ACK_PHASE generation=(\d+) acked=(\d+) total=(\d+)$", re.M
 PROBE = re.compile(r"^SCENARIO_PROBE phase=(both|partial) (.+)$", re.M)
 OPERATIONS = ["stop", "restart", "partition", "partition", "heal", "heal", "stop", "restart"]
 
+def shared_kernel(world):
+    return {machine["name"] for machine in world["machines"]} == {"kernel"}
+
+
+def machine_for(world, service):
+    return "kernel" if shared_kernel(world) else service
+
+
+def expected_machines(world):
+    return {"kernel"} if shared_kernel(world) else {"client", "server", "scenario"}
+
+
+def console(run, service):
+    directory = Path(run) / "output/machines"
+    separate = directory / (service + ".console")
+    if separate.exists():
+        return separate.read_text()
+    prefix = service + " | "
+    return "".join(line[len(prefix):] for line in (directory / "kernel.console").read_text().splitlines(keepends=True)
+                   if line.startswith(prefix))
+
+
 def verify_transport(world):
     channels = {machine["name"]: machine["control_channel"] for machine in world["machines"]}
     assert all(channel["transport"] == "virtio-console-v1" for channel in channels.values()), channels
-    assert channels["scenario"]["tx_bytes"] > 0, "controller did not submit shared-memory bytes"
+    assert channels[machine_for(world, "scenario")]["tx_bytes"] > 0, "controller did not submit shared-memory bytes"
     if any(entry.get("delivered_at_ns") is not None for entry in world["control_history"]):
-        assert channels["scenario"]["rx_dma_bytes"] > 0, "controller replies did not use shared-memory DMA"
+        assert channels[machine_for(world, "scenario")]["rx_dma_bytes"] > 0, "controller replies did not use shared-memory DMA"
 
 def verify(run, expected="PASS", faulted=True):
     run = Path(run)
@@ -29,7 +51,7 @@ def verify(run, expected="PASS", faulted=True):
     world = json.loads((run / "output" / "vmm.json").read_text())
     verify_transport(world)
     faults = world["faults"]
-    assert {machine["name"] for machine in world["machines"]} == {"client", "server", "scenario"}
+    assert {machine["name"] for machine in world["machines"]} == expected_machines(world)
     assert world.get("fault_error") is None and not world.get("rejected_fault_effects")
     assert len(faults) == (8 if faulted else 0)
     assert [f["action"] for f in faults] == (OPERATIONS if faulted else [])
@@ -37,7 +59,7 @@ def verify(run, expected="PASS", faulted=True):
         assert fault["id"] == i and fault["status"] == "applied", fault
         assert fault["applied_at_ns"] >= fault["requested_at_ns"], fault
         if fault["action"] in ("stop", "restart"):
-            assert fault["machine"] == "server", fault
+            assert fault["service"] == "server", fault
         elif fault["action"] == "partition":
             assert fault["request"]["left"] == ["client"] and fault["request"]["right"] == ["server"], fault
     transcript = world["control_history"]
@@ -63,14 +85,15 @@ def verify(run, expected="PASS", faulted=True):
         assert len(sleeps) == 3 and all(entry["request"]["duration_ns"] == 100_000_000 for entry in sleeps)
         network = [f for f in faults if f["action"] in ("partition", "heal")]
         assert len(network) == 4
-        before, after = network[2]["network_counters"], network[3]["network_counters"]
-        final = world["network_counters"]
-        links = ["client->server", "server->client"]
-        assert any(after.get(k, {}).get("partition_dropped", 0) > before.get(k, {}).get("partition_dropped", 0) for k in links), "no traffic drops during partial healing"
-        assert any(final.get(k, {}).get("delivered", 0) > after.get(k, {}).get("delivered", 0) for k in links), "no NIC acceptance after final healing"
-    client = (run / "output" / "machines" / "client.console").read_text()
-    server = (run / "output" / "machines" / "server.console").read_text()
-    scenario = (run / "output" / "machines" / "scenario.console").read_text()
+        if not shared_kernel(world):
+            before, after = network[2]["network_counters"], network[3]["network_counters"]
+            final = world["network_counters"]
+            links = ["client->server", "server->client"]
+            assert any(after.get(k, {}).get("partition_dropped", 0) > before.get(k, {}).get("partition_dropped", 0) for k in links), "no traffic drops during partial healing"
+            assert any(final.get(k, {}).get("delivered", 0) > after.get(k, {}).get("delivered", 0) for k in links), "no NIC acceptance after final healing"
+    client = console(run, "client")
+    server = console(run, "server")
+    scenario = console(run, "scenario")
     results = RESULT.findall(client)
     assert len(results) == 1, "missing/ambiguous independent client result"
     status, acked, pre, post, epoch, missing = results[0]
@@ -111,7 +134,7 @@ def focused_evidence(run, outcome, reason):
     assert report and report["reason"] == reason and report["witness"], report
     world = json.loads((run / "output" / "vmm.json").read_text())
     verify_transport(world)
-    assert {machine["name"] for machine in world["machines"]} == {"client", "server", "scenario"}
+    assert {machine["name"] for machine in world["machines"]} == expected_machines(world)
     assert world.get("fault_error") is None and not world.get("rejected_fault_effects"), world
     assert world["control_latency_ns"] > 0
     if record.get("replay"):
@@ -126,11 +149,11 @@ def verify_early_request(run):
     faults = world["faults"]
     assert [fault["action"] for fault in faults] == ["stop", "restart"], faults
     for number, fault in enumerate(faults, 1):
-        assert fault["id"] == number and fault["machine"] == "server" and fault["status"] == "applied", fault
+        assert fault["id"] == number and fault["service"] == "server" and fault["status"] == "applied", fault
         assert fault["requested_at_ns"] <= fault["applied_at_ns"] < fault["request"]["deadline_ns"], fault
     readiness = world["management_readiness"]
-    assert len(readiness) == 3 and {row["machine"] for row in readiness} == {"client", "server", "scenario"}, readiness
-    ready = next(row["at_ns"] for row in readiness if row["machine"] == "server")
+    assert len(readiness) == len(expected_machines(world)) and {row["machine"] for row in readiness} == expected_machines(world), readiness
+    ready = next(row["at_ns"] for row in readiness if row["machine"] == machine_for(world, "server"))
     stop = faults[0]
     assert stop["requested_at_ns"] < ready, "stop was not requested before target supervisor readiness"
     assert stop["applied_at_ns"] >= ready + world["control_latency_ns"], "stop did not wait for readiness and dispatch latency"
@@ -143,9 +166,9 @@ def verify_early_request(run):
         assert response["effect_at_ns"] + world["control_latency_ns"] == response["replied_at_ns"] == entry["delivered_at_ns"], entry
     assert transcript[0]["response"]["effect_at_ns"] == stop["applied_at_ns"]
     assert transcript[2]["response"]["effect_at_ns"] == faults[1]["applied_at_ns"]
-    client = (run / "output/machines/client.console").read_text()
-    server = (run / "output/machines/server.console").read_text()
-    scenario = (run / "output/machines/scenario.console").read_text()
+    client = console(run, "client")
+    server = console(run, "server")
+    scenario = console(run, "scenario")
     assert RESULT.findall(client) == [("pass", "128", "32", "96", "2", "0")], client
     assert [tuple(map(int, phase)) for phase in PHASE.findall(client)] == [(1,32,32),(2,32,64),(2,32,96),(2,32,128)], client
     assert not MISSING.findall(client)
@@ -175,14 +198,15 @@ def verify_cutoff(run):
     faults = world["faults"]
     assert len(faults) == 1, faults
     fault = faults[0]
-    assert fault["id"] == 1 and fault["action"] == "stop" and fault["machine"] == "server", fault
+    assert fault["id"] == 1 and fault["action"] == "stop" and fault["service"] == "server", fault
     assert fault["status"] == "requested" and fault["applied_at_ns"] is None, fault
     assert entry["plan"] == fault["request"] and fault["requested_at_ns"] == entry["admitted_at_ns"], (entry, fault)
     assert cutoff < fault["request"]["deadline_ns"] == entry["admitted_at_ns"] + 5_000_000_000
-    assert all(row["machine"] != "server" for row in world["management_readiness"]), "target became ready before cutoff"
-    assert any(row["machine"] == "scenario" for row in world["management_readiness"])
-    client = (run / "output/machines/client.console").read_text()
-    scenario = (run / "output/machines/scenario.console").read_text()
+    assert all(row["machine"] != machine_for(world, "server") for row in world["management_readiness"]), "target became ready before cutoff"
+    if not shared_kernel(world):
+        assert any(row["machine"] == "scenario" for row in world["management_readiness"])
+    client = console(run, "client")
+    scenario = console(run, "scenario")
     assert not RESULT.findall(client) and "RESULT " not in scenario, "pending stop produced a completed workload result"
     return dict(case="readiness_cutoff", outcome="TIMEOUT", faults_applied=0,
                 requested_at_ns=entry["requested_at_ns"], admitted_at_ns=entry["admitted_at_ns"],
@@ -193,8 +217,11 @@ def verify_cutoff(run):
 def verify_control_cases(run):
     run, record, report, world = focused_evidence(run, "FAIL", "COMPLETED")
     assert report["workload_exit"] == {"service":"scenario", "code":1}
-    assert next(machine["guest_exit_code"] for machine in world["machines"] if machine["name"] == "server") == 17
-    assert [fault["action"] for fault in world["faults"]] == ["stop", "restart"]
+    if shared_kernel(world):
+        assert any(row["service"] == "server" and row["status"] == 17 for row in world["service_exits"])
+    else:
+        assert next(machine["guest_exit_code"] for machine in world["machines"] if machine["name"] == "server") == 17
+    assert [fault["action"] for fault in world["faults"]] == (["stop", "restart", "restart"] if shared_kernel(world) else ["stop", "restart"])
     assert all(fault["status"] == "applied" for fault in world["faults"])
     transcript = world["control_history"]
     assert {entry["session_id"] for entry in transcript} == {1, 2}
@@ -206,11 +233,12 @@ def verify_control_cases(run):
         assert entry["response"]["id"] == ids[session]
         assert entry["delivered_at_ns"] == entry["response"]["replied_at_ns"]
     errors = [entry["response"]["error"]["code"] for entry in transcript if not entry["response"]["ok"]]
-    assert errors == ["invalid_state", "invalid_state", "target_unavailable", "target_unavailable"], errors
+    assert errors == (["invalid_state"] * 3 if shared_kernel(world) else
+                      ["invalid_state", "invalid_state", "target_unavailable", "target_unavailable"]), errors
     assert transcript[-1]["request"]["op"] == "now" and transcript[-1]["response"]["ok"]
-    server = (run / "output/machines/server.console").read_text()
-    assert server.count("TARGET_SOCKET absent") == 2, server
-    scenario = (run / "output/machines/scenario.console").read_text()
+    server = console(run, "server")
+    assert server.count("TARGET_SOCKET absent") == (3 if shared_kernel(world) else 2), server
+    scenario = console(run, "scenario")
     results = re.findall(r"^CONTROL_CASES_RESULT (.+)$", scenario, re.M)
     assert len(results) == 1 and json.loads(results[0]) == {"errors":errors,"target_exit":17,"reconnected":True}, scenario
     return dict(case="control_cases", outcome="FAIL", errors=errors, target_exit=17,

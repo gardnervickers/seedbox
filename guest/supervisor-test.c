@@ -88,7 +88,7 @@ int main(int argc, char **argv) {
      * machine with more than one service. */
     char recipe[] = "/tmp/seedbox-recipe-XXXXXX"; int recipe_file = mkstemp(recipe); assert(recipe_file >= 0);
     FILE *f = fdopen(recipe_file, "w"); assert(f);
-    fputs("SBXLAUNCH2", f); put32(f, 1); put32(f, 1000000); put32(f, 0); put32(f, 200000); put32(f, 0);
+    fputs("SBXLAUNCH3", f); put32(f, 1); put32(f, 1000000); put32(f, 0); put32(f, 200000); put32(f, 0); put32(f, 1024);
     put(f, "10.0.0.1 a\n10.0.0.2 b\n"); put32(f, 2);
     const char *names[] = {"a", "b"}, *addresses[] = {"10.0.0.1", "10.0.0.2"};
     for (int i = 0; i < 2; i++) {

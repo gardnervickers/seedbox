@@ -45,14 +45,19 @@ def run(address, no_faults=False):
             raise AssertionError("target did not exit")
         for _ in range(100):
             snapshot = world.inspect()
-            state = next(machine["state"] for machine in snapshot["machines"] if machine["name"] == "server")
+            state = snapshot["processes"]["server"]
             if state.startswith("Exited"):
                 break
             world.sleep(0.01)
         else:
             raise AssertionError("target VM did not report its exit")
-        rejected(world.stop, "target_unavailable")
-        rejected(world.restart, "target_unavailable")
+        shared = len(set(snapshot["services"].values())) == 1
+        rejected(world.stop, "invalid_state" if shared else "target_unavailable")
+        if shared:
+            world.restart("server")
+            ready()
+        else:
+            rejected(world.restart, "target_unavailable")
         world.now_ns()
     print("CONTROL_CASES_RESULT " + json.dumps({"errors": errors, "target_exit": 17, "reconnected": True}, sort_keys=True), flush=True)
     # The scenario classifies the actual application exit as a workload failure.

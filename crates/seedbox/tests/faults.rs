@@ -368,3 +368,27 @@ fn co_located_service_exits_are_tracked_for_inspection_and_restart() {
         "a second exit needs a restart in between"
     );
 }
+
+#[test]
+fn successful_stop_after_natural_exit_clears_the_exit_state() {
+    let placement = [
+        ("a".to_owned(), "kernel".to_owned()),
+        ("b".to_owned(), "kernel".to_owned()),
+    ]
+    .into_iter()
+    .collect();
+    let mut f = engine::Faults::with_placement(vec![], vec!["kernel".into()], &placement).unwrap();
+    f.append(
+        serde_json::from_value(
+            json!({"id":1,"at_ns":10,"deadline_ns":30,"action":"stop","service":"a"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(f.apply_due(10).len(), 1);
+    f.service_exited(0, 11, b"SBX_EXIT1 a 17");
+    assert_eq!(f.process_state("a"), "Exited(17)");
+    f.effect(0, 1, 12, true);
+    assert_eq!(f.process_state("a"), "Stopped");
+    assert!(f.error.is_none());
+}

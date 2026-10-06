@@ -13,6 +13,7 @@ pub enum Status {
     Waiting,
     Applied(u64),
     Failed,
+    Unavailable(u64),
 }
 struct Entry {
     plan: Plan,
@@ -301,6 +302,13 @@ impl Faults {
         self.log[i]["applied_at_ns"] = json!(time);
         self.log[i]["detail"] = json!(detail);
     }
+    /// A target VM that exits before acknowledging leaves its process fault unavailable, not failed.
+    pub fn target_exited(&mut self, id: u32, machine: usize, time: u64) {
+        let Some(i)=id.checked_sub(1).map(|n|n as usize).filter(|i|*i<self.entries.len()) else {return};
+        if self.entries[i].status!=Status::Waiting || self.entries[i].target!=Some(machine) || time<self.entries[i].plan.at_ns || time>self.entries[i].plan.deadline_ns {return}
+        self.clear_pending(i);self.entries[i].status=Status::Unavailable(time);
+        self.log[i]["status"]=json!("unavailable");self.log[i]["applied_at_ns"]=Value::Null;self.log[i]["detail"]=json!("target VM exited before the process effect");
+    }
     /// Readiness is the reserved success id0; process commands wait for it.
     pub fn management_ready(&mut self, m: usize, time: u64, latency: u64) -> Result<(), String> {
         if m >= self.names.len() || self.ready[m] {
@@ -430,7 +438,7 @@ impl Faults {
         }
         if success {
             let detail = match &self.entries[i].plan.action {
-                Action::Stop { service } => {self.stopped.insert(service.clone()); "guest effect I/O boundary (after reap)".to_owned()}
+                Action::Stop { service } => {self.stopped.insert(service.clone()); self.exited.remove(service); "guest effect I/O boundary (after reap)".to_owned()}
                 Action::Restart { service } => {self.stopped.remove(service); self.exited.remove(service); "guest effect I/O boundary (after exec)".to_owned()}
                 Action::Partition { handle, .. } | Action::Heal { handle } => format!("handle={handle}; guest effect I/O boundary (kernel rules updated)"),
             };

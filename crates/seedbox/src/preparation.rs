@@ -22,7 +22,6 @@ pub struct OciPreparer {
     pub kernel: PathBuf,
     pub engine: PathBuf,
     pub init: PathBuf,
-    pub busybox: PathBuf,
     pub profile: ExecutionProfile,
 }
 
@@ -34,13 +33,8 @@ impl PreparationBackend for OciPreparer {
                 "VMM changed after profile construction".into(),
             ));
         }
-        for path in [&self.init, &self.busybox] {
-            amd64_elf(path)?;
-        }
-        let mut auxiliary = BTreeMap::from([
-            ("guest-init".into(), store.put_file(&self.init)?),
-            ("guest-busybox".into(), store.put_file(&self.busybox)?),
-        ]);
+        amd64_elf(&self.init)?;
+        let mut auxiliary = BTreeMap::from([("guest-init".into(), store.put_file(&self.init)?)]);
         let mut configs = BTreeMap::new();
         for (name, path) in &simulation.configs {
             let mut data = Vec::new();
@@ -65,6 +59,13 @@ impl PreparationBackend for OciPreparer {
             .get("memory_mb")
             .and_then(|value| value.parse::<u32>().ok())
             .ok_or_else(|| Error::Integrity("OCI profile missing memory_mb".into()))?;
+        let disk_mb = self
+            .profile
+            .semantic_parameters
+            .get("disk_mb")
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| Error::Integrity("OCI profile missing positive disk_mb".into()))?;
         // Both layouts use the same addresses and names, in service order.
         let addresses: BTreeMap<_, _> = simulation
             .services
@@ -78,12 +79,7 @@ impl PreparationBackend for OciPreparer {
         }
         let temporary = tempfile::tempdir()?;
         let init = store.materialize(&auxiliary["guest-init"], &temporary.path().join("init"))?;
-        let busybox = store.materialize(
-            &auxiliary["guest-busybox"],
-            &temporary.path().join("busybox"),
-        )?;
         amd64_elf(&init)?;
-        amd64_elf(&busybox)?;
         let mut images = BTreeMap::new();
         // One root per distinct image manifest, shared read-only by services.
         let mut roots: BTreeMap<String, PathBuf> = BTreeMap::new();
@@ -160,7 +156,7 @@ impl PreparationBackend for OciPreparer {
                         .is_some_and(|control| control.service == **name),
                 })
                 .collect::<Vec<_>>();
-            let recipe = launch_recipe(network, &hosts, &services)?;
+            let recipe = launch_recipe(network, disk_mb, &hosts, &services)?;
             let archive = temporary.path().join(format!("{machine}.cpio"));
             let used: std::collections::BTreeSet<_> = hosted
                 .iter()
@@ -170,7 +166,7 @@ impl PreparationBackend for OciPreparer {
             let names: Vec<_> = hosted.iter().map(|name| name.as_str()).collect();
             // Package only retained bootstrap bytes. The source paths may be
             // replaced by another build while an image is being downloaded.
-            build_initramfs(&trees, &names, &init, &busybox, &recipe, &archive)?;
+            build_initramfs(&trees, &names, &init, &recipe, &archive)?;
             let minimum = minimum_memory_mb(fs::metadata(&archive)?.len())?;
             if memory_mb < minimum {
                 return Err(Error::Execution(format!(
@@ -208,7 +204,7 @@ fn amd64_elf(path: &Path) -> Result<()> {
 
 fn validate_config_target(path: &str) -> Result<()> {
     // Mounting over the runtime's devices or name resolution would invalidate
-    // its own contract. Other paths remain inside the guest chroot.
+    // its own contract. Other paths remain inside the service's detached root.
     if path == "/"
         || path == "/etc/hosts"
         || ["/dev", "/proc", "/sys"]

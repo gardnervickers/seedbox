@@ -136,6 +136,11 @@ fn bad_values_are_usage_errors() {
     for (args, expected) in [
         (&["run", "--margin", "0"][..], "positive branch count"),
         (&["run", "--undo", "999999999"], "not in 0..=262144"),
+        (&["run", "--disk-mb", "0"], "not in 1.."),
+        (
+            &["prepare", "--disk-mb", "0", "--output", "x"],
+            "not in 1..",
+        ),
         (&["run", "--memory-mb", "1"], "not in 64..=3328"),
         (&["run", "--memory-mb", "4096"], "not in 64..=3328"),
         (
@@ -158,7 +163,7 @@ fn bad_values_are_usage_errors() {
     }
 }
 
-/// A project plus empty stand-ins for every runtime input but BusyBox.
+/// A project plus empty stand-ins for every runtime input.
 #[cfg(target_os = "linux")]
 fn runtime_project() -> (tempfile::TempDir, Vec<String>) {
     let directory = tempfile::tempdir().unwrap();
@@ -211,33 +216,24 @@ fn explicit_inputs_must_exist() {
     );
 }
 
-#[cfg(target_os = "linux")]
 #[test]
-fn busybox_default_requires_a_static_busybox_on_path() {
-    let (directory, args) = runtime_project();
-    let args: Vec<_> = args.iter().map(String::as_str).collect();
-    let bin = directory.path().join("bin");
-    fs::create_dir(&bin).unwrap();
+fn removed_busybox_flag_is_a_usage_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = seedbox(&["run", "--busybox", "unused"], directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("unexpected argument '--busybox'"));
+}
 
-    let output = seedbox_with(&args, directory.path(), Some(&bin));
-    assert_eq!(
-        stderr(&output),
-        "error: no static BusyBox found; searched:\n  $PATH/busybox\nenter `nix develop`, \
-         or pass --busybox or set SEEDBOX_BUSYBOX\n"
+#[test]
+fn runtime_help_documents_layout_memory_and_disk_defaults() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = seedbox(&["help", "run"], directory.path());
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("--layout") && help.contains("[default: shared-kernel]"));
+    assert!(
+        help.contains("--memory-mb") && help.contains("2048 with the shared kernel, else 1024")
     );
-
-    // The test binary is dynamically linked on glibc hosts.
-    if cfg!(target_env = "gnu") {
-        let busybox = bin.join("busybox");
-        fs::copy(std::env::current_exe().unwrap(), &busybox).unwrap();
-        let output = seedbox_with(&args, directory.path(), Some(&bin));
-        assert_eq!(
-            stderr(&output),
-            format!(
-                "error: {} is dynamically linked; install a static BusyBox, or pass \
-                 --busybox or set SEEDBOX_BUSYBOX\n",
-                busybox.display()
-            )
-        );
-    }
+    assert!(help.contains("--disk-mb") && help.contains("[default: 1024]"));
+    assert!(!help.contains("--busybox"));
 }

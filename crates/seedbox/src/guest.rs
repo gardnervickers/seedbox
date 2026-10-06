@@ -2,7 +2,7 @@
 //!
 //! Image file metadata and hard links are preserved; only Seedbox-owned bootstrap
 //! files have normalized timestamps. Each distinct image is packed once; each
-//! service runs chrooted in its own writable overlay of it, with its own mount,
+//! service runs in a detached writable overlay of it, with its own mount,
 //! PID, UTS and (when services share a kernel) network namespaces.
 
 use crate::{image::Launch, Error, Result};
@@ -58,10 +58,14 @@ pub struct GuestService<'a> {
 /// prefixes avoid shell evaluation of command, environment or config contents.
 pub fn launch_recipe(
     network: GuestNetwork,
+    disk_mb: u32,
     hosts: &str,
     services: &[GuestService<'_>],
 ) -> Result<Vec<u8>> {
-    let mut bytes = b"SBXLAUNCH2".to_vec();
+    if disk_mb == 0 {
+        return Err(Error::Execution("guest disk must be positive MiB".into()));
+    }
+    let mut bytes = b"SBXLAUNCH3".to_vec();
     let (mode, latency, jitter) = match network {
         GuestNetwork::Device => (0u32, 0, 0),
         GuestNetwork::Namespaces {
@@ -80,6 +84,7 @@ pub fn launch_recipe(
     bytes.extend_from_slice(&mode.to_le_bytes());
     bytes.extend_from_slice(&latency.to_le_bytes());
     bytes.extend_from_slice(&jitter.to_le_bytes());
+    bytes.extend_from_slice(&disk_mb.to_le_bytes());
     field(&mut bytes, hosts.as_bytes())?;
     bytes.extend_from_slice(&(services.len() as u32).to_le_bytes());
     for service in services {
@@ -140,14 +145,12 @@ pub fn build_initramfs(
     images: &[(&str, &Path)],
     services: &[&str],
     init: &Path,
-    busybox: &Path,
     recipe: &[u8],
     output: &Path,
 ) -> Result<()> {
     let mut archive = Newc::new(fs::File::create(output)?);
     archive.owned("seedbox", 0o040755, &[])?;
     archive.owned("init", 0o100755, &fs::read(init)?)?;
-    archive.owned("seedbox/busybox", 0o100755, &fs::read(busybox)?)?;
     archive.owned("seedbox/launch.bin", 0o100400, recipe)?;
     archive.owned("images", 0o040755, &[])?;
     for (id, rootfs) in images {

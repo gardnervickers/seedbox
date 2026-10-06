@@ -1,1 +1,0 @@
-sudo -n /etc/profiles/per-user/gvickers/bin/python3 msr_guard.py --workaround original --receipt /tmp/seedbox-round-1.S74xJ4/evidence/w5a/guard-pio-diagnostic-v3-1.json --probe-sha256 2879cff4090bdda983180fa809574bc99453bcd8f5cb10bdbf6de201b84463ce exits 2000 500 correct 

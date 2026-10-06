@@ -62,8 +62,8 @@ The kernel is found in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`,
 under sudo). The VMM is found next to an installed `seedbox`, then in this
 checkout's `cargo build-vmm` output, then on `PATH`. A `seedbox` inside cargo's
 `target/` directories, like the one above, uses the `cargo build-vmm` output.
-The guest supervisor is built into `seedbox`, and BusyBox comes from
-`SEEDBOX_BUSYBOX`. A missing input fails before preparation starts and names
+The guest supervisor is built into `seedbox`. It uses Linux syscalls directly and
+requires no separate BusyBox input. A missing input fails before preparation starts and names
 every location searched.
 
 Without `--cpu`, the executor leases the first free core, in ascending order,
@@ -77,8 +77,14 @@ Library cancellation and CLI SIGINT/SIGTERM/SIGHUP cause cleanup through the sam
 path. SIGKILL and host loss cannot guarantee cleanup.
 
 `--state` chooses the content store and attempts root (default `.seedbox`).
-`--memory-mb` defaults to 1024 MiB per service and is a semantic parameter; `--full-state` requests RAM/register
-digests. Preparation checks a conservative archive boot-memory floor before acquiring
+`--layout shared-kernel` is the default: every service runs in private namespaces
+on one machine named `kernel`. `--layout machine-per-service` uses independent
+kernels and clocks. Layout changes execution and is recorded in the profile.
+`--memory-mb` is RAM per machine: 2048 MiB by default with the shared kernel, 1024
+MiB otherwise, in the range 64–3328 MiB. `--disk-mb` is writable capacity per
+service, defaults to 1024 MiB, and accepts positive unsigned 32-bit MiB values.
+Both sizes are semantic parameters. `--full-state` requests RAM/register
+digests per machine (one with the shared kernel). Preparation checks a conservative archive boot-memory floor before acquiring
 a CPU lease. Application memory can require a larger value; the etcd image failed
 to unpack at 512 MiB and passed at 1024 MiB. `--margin` and `--undo` are recorded per attempt and do not change identity.
 `--undo` defaults to 256 branches; zero disables undo and 16 exercises a smaller
@@ -94,10 +100,38 @@ simulated TIMEOUT. Replay exits are 0 for MATCH (including a reproduced FAIL),
 
 ## Guest semantics and limits
 
-Each service currently gets one machine and one OCI-root chroot. Its complete
-filesystem is writable RAM-backed initramfs storage, freshly instantiated for
-each run/replay; image volume paths have the same per-run lifetime. Process
-stop/start retains that filesystem. No state persists between fresh machine boots.
+Each service runs in its own mount, PID and UTS namespaces with a private overlay
+of a read-only image. Each distinct image is packed once per guest archive.
+`pivot_root` detaches the bootstrap filesystem from the service. Writable layers
+live on separate tmpfs mounts sized by `--disk-mb`; capacity exhaustion returns
+ENOSPC to that service. Image volumes use the same disk and per-run lifetime.
+Process stop/start preserves the writable layer; fresh runs and replays recreate it.
+The disk limit is a capacity limit, not a memory reservation: written pages and
+application memory draw on the machine's RAM, so physical memory exhaustion can
+still affect all services on that machine.
+
+Shared-kernel services also have private network namespaces, joined through a
+routing namespace. Netem delays outgoing packets once at their destination, using
+seeded latency/jitter and preserving destination order. Partitions install paired
+blackhole routing rules, one copy per handle. Queued packets remain in flight.
+Queues are per destination, not per link; broadcast/multicast and per-link counters
+are not implemented in this layout. The independent-machine layout uses the
+engine's fabric and its directed-link counters. Neither model permits external traffic.
+
+CPU, RAM and clocks are shared in the default layout; a kernel failure affects
+all services. Independent clocks/kernel failures require `machine-per-service`.
+Process restart launches retained argv on the existing disk and network namespace;
+it does not model a reboot or loss of unsynced writes.
+
+Services receive private `/dev` mounts containing null, zero, full, random, urandom
+and tty. Only the controller receives `/run/seedbox/control.sock`; applications
+cannot access the raw management port. Applications lose SYS_ADMIN, MKNOD,
+SYS_RAWIO, SYS_BOOT, SYS_MODULE, SYS_TIME and SYS_PTRACE capabilities in all sets,
+including the bounding set, and run with no_new_privs. The service init is not
+dumpable. These limits protect the supervisor's authority; this simulator is not a
+security sandbox for hostile images. `/dev/shm`, `/dev/pts`, custom file-descriptor
+limits, cgroup memory limits and per-service reboot remain follow-up work.
+
 The generic static supervisor is a guest bootstrap alongside the existing C guest
 helpers; configuration, preparation, orchestration, and execution are Rust.
 
@@ -119,7 +153,12 @@ and unsupported guest syscalls are compatibility failures, never workload PASS.
 `output/machines/*.console` / `*.mgmt` files preserve diagnostics on cancellation
 and timeouts. Serial output is capped at 1 GiB total divided equally between the
 two ports of all machines; exceeding that cap fails execution. Trace recording
-is not enabled by this adapter.
+is not enabled by this adapter. With several services per machine, console lines
+are prefixed `service | ` in `kernel.console`; a lone service passes through unchanged.
+
+The launch recipe is `SBXLAUNCH3`, and the profile uses `guest_abi = oci-init-v3`.
+Replay refuses older guest ABIs; use the Seedbox binary that recorded those runs.
+Replay retains the original layout and disk capacity and has no override for either.
 
 ## Reproduce acceptance
 
@@ -130,7 +169,14 @@ bash crates/seedbox/tests/accept-oci.sh
 bash crates/seedbox/tests/accept-runtime.sh KERNEL CPU FRESH_OUTPUT_DIRECTORY
 bash crates/seedbox/tests/accept-runtime.sh KERNEL CPU ANOTHER_FRESH_DIRECTORY lifecycle
 bash crates/seedbox/tests/accept-runtime.sh KERNEL CPU FAULT_OUTPUT_DIRECTORY faults
+bash crates/seedbox/tests/accept-runtime.sh KERNEL CPU ISOLATION_OUTPUT_DIRECTORY isolation
 ```
+
+Runtime suites default to `shared-kernel`; append `machine-per-service` after the
+mode (or an empty mode argument) to qualify the other layout in a fresh directory.
+The isolation suite boots root applications, checks detached roots and denied
+management-device/capability access, fills one 8 MiB disk to ENOSPC, then verifies
+that the other service can still write its own disk. Every semantic case is replayed.
 
 The OCI suite builds/tests as the current user and invokes only its final import
 executable with `sudo -n`. It verifies the registry images and Dockerfile metadata,
@@ -162,7 +208,7 @@ become visible at their recorded simulated time, and device DMA participates in
 undo bookkeeping. The kernel must include `CONFIG_VIRTIO_CONSOLE`; rebuild it
 with `bash kernel/build.sh` when upgrading from the UART-based implementation.
 
-Directed network counters now distinguish NIC acceptance from drops caused by
+In the independent-machine layout, directed network counters distinguish NIC acceptance from drops caused by
 an unready queue or full receive backlog. This corrects the previous delivered
 counter even in runs without faults; compare counters only with that change in
 mind when allowing a different engine for replay.
@@ -170,10 +216,12 @@ mind when allowing a different engine for replay.
 The fault socket exists only on the configured controller. Connections may be
 closed and reopened between completed calls; the transcript preserves both
 run-wide relay IDs and connection-local request IDs. Redundant lifecycle commands
-and commands targeting exited VMs return recoverable RPC errors. The controller
+and commands targeting exited VMs return recoverable RPC errors. A service that
+exits on a shared kernel is reported in `processes` and can be restarted directly;
+stopping an exited service returns `invalid_state`. The controller
 can inspect the application exit and choose PASS or FAIL.
 
-Inspection and partition/heal counter snapshots count nominal send, drop and
+Independent-machine inspection and partition/heal counter snapshots count nominal send, drop and
 arrival times strictly before admission. A packet physically delivered in an
 early scheduler window is excluded until its nominal arrival precedes that
 boundary. Final report counters still record physical NIC acceptance totals.
