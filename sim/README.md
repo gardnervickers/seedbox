@@ -22,16 +22,24 @@ interrupt timing.
   conditional branches (guest only, kernel and user). Virtual time advances
   1 ns per branch; idle machines jump to their next event.
 - **Stops.** Events (timer deadlines, frames, scenario commands) are delivered
-  at deterministic points only: a natural VM exit, the guest's next syscall at
-  or after the event time (a small kernel hook offers that exit), or an exact
-  branch count reached by overflow interrupt plus hardware-breakpoint stepping
-  (no TF). The fallback stop is at most `stop_tolerance_ns` late.
+  at deterministic points only: a natural VM exit, the guest's next syscall
+  (a small kernel hook offers that exit), or an exact branch count reached by
+  overflow interrupt plus hardware-breakpoint stepping (no TF). A timer
+  interrupt fires at the first such point at or after its deadline, at most
+  `stop_tolerance_ns` late. An overflow interrupt that skids past a stop, or
+  past a syscall that would have been one, fails the run rather than moving
+  the stop.
 - **Guest kernel changes** (`kernel/`): kernel TSC reads return VMM-published
   virtual time; user RDTSC/RDTSCP trap via CR4.TSD and are emulated; a syscall
   hook offers yield exits.
-- **Network.** virtio-net over virtio-mmio into an in-memory fabric with
-  seeded latency/jitter and directed partitions. Machines are scheduled by a
-  conservative horizon (link latency) so no frame arrives in a machine's past.
+- **Network and scheduling.** virtio-net over virtio-mmio into an in-memory
+  fabric with seeded latency/jitter and directed partitions. The world runs the
+  machine furthest behind in slices that never pass its causal horizon (the
+  other machines' times plus link latency) or its next event. A slice may end
+  at the first deterministic point in the last half-latency before that
+  boundary (capped by `stop_tolerance_ns`), and events are delivered at the
+  first stop up to that long before they are due: early by a bounded amount,
+  never late, and never before they were sent.
 - **Witness.** Each machine hashes every deterministic exit; `--digest` adds
   a hash of registers and all guest RAM; `--trace` writes every exit.
 
@@ -58,14 +66,19 @@ On the workstation, inside `nix develop`:
 From `~/seedbox-sim`:
 
 ```sh
-./batch.sh sim/worlds/kill-3.5.2.json demo "1009 1009"   # two fresh runs of one seed
-./campaign.sh sim/worlds/kill-3.5.2.json hunt 1000 8     # seeds until a failure, up to 8 h
+sim/batch.sh sim/worlds/kill-3.5.2.json demo "7 7"         # two fresh runs of one seed
+sim/campaign.sh sim/worlds/kill-3.5.2.json hunt 1000 8     # seeds until a failure, up to 8 h
 ```
 
 Each run writes `runs/<name>-s<seed>-r<i>.json` (outcome, witness, timing,
-per-machine stats) and per-machine console/management logs.
+per-machine stats) and per-machine console/management logs. `batch.sh` pins
+runs to consecutive cores from `CPU0` (default 2), runs the binary named by
+`VMM`, and starts nothing unless the counter workaround is set and reads back.
+`campaign.sh` logs every seed's result, marks seeds without one `UNRESOLVED`,
+and then exits nonzero.
 
 `SEEDBOX_MARGIN` sets how many branches before a stop the VMM switches from the
-overflow interrupt to breakpoint stepping. It affects speed only. An overshoot
-(interrupt skid larger than the margin) aborts the run; rerun with a larger
+overflow interrupt to breakpoint stepping, and how early before a soft stop it
+asks for syscall exits. It affects speed only. An overshoot (interrupt skid
+larger than the margin) aborts the run; `campaign.sh` reruns it with a larger
 margin for the identical result.

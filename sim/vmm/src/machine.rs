@@ -26,6 +26,9 @@ pub const MARGIN: u64 = 12288;
 const SKID_NS: f64 = 18_000.0;
 /// Distance of the first, rate-measuring overflow before a hard stop.
 const APPROACH: u64 = 65536;
+/// Floor of the adaptive margin. Skids of 5-14k branches occur in dense code,
+/// and the syscall-exit window before a soft stop must outlast them.
+const MARGIN_MIN: u64 = 16384;
 /// Pending interrupts are injected only when the next stop is further away
 /// than this. Part of the execution semantics: changing it changes runs.
 pub const INJECT_GUARD: u64 = 65536;
@@ -432,16 +435,18 @@ impl Machine {
         }
     }
 
-    /// Run until virtual time reaches `limit`, the guest halts or exits, or it
+    /// Run to the first deterministic point at or after `limit - early` (at
+    /// the latest an exact stop at `limit`), or until the guest halts, exits or
     /// sends frames. Never runs past `limit`.
     pub fn run_until(
         &mut self,
         counter: &mut Counter,
         limit: u64,
+        early: u64,
         frames: &mut Vec<Vec<u8>>,
     ) -> Result<Stop, String> {
         let started = Instant::now();
-        let r = self.run_inner(counter, limit, frames);
+        let r = self.run_inner(counter, limit, early, frames);
         self.stats.run_ns += started.elapsed().as_nanos();
         r
     }
@@ -450,12 +455,14 @@ impl Machine {
         &mut self,
         counter: &mut Counter,
         limit: u64,
+        early: u64,
         frames: &mut Vec<Vec<u8>>,
     ) -> Result<Stop, String> {
         // Invariant: entered at a deterministic point. Guest-visible state (time
         // page, interrupts, timer expiry) changes only at deterministic points:
-        // natural exits and exact counted stops, never at overflow landings or
-        // intermediate single steps.
+        // natural exits, requested syscall exits and exact counted stops, never
+        // at overflow landings or intermediate single steps.
+        let slice_end = limit.saturating_sub(early).max(self.time + 1).min(limit);
         let mut legal = true;
         loop {
             if legal {
@@ -463,22 +470,25 @@ impl Machine {
                 while self.pit.expire(self.time) {
                     self.pic.raise(0);
                 }
-                if self.time >= limit {
+                if self.time >= slice_end {
                     self.set_stepping(false)?;
                     return Ok(Stop::Reached);
                 }
                 self.publish();
             }
-            // Soft stop: the first natural exit at or after `soft`; at the latest
-            // an exact counted stop at `hard`.
+            // Stop at the first deterministic point at or after `soft`, at the
+            // latest by an exact counted stop at `hard`. Two rules combine: the
+            // slice ends in [slice_end, limit], and a timer due at `pit` fires
+            // in [pit, pit + tolerance] (exactly at `pit` if so drawn). Neither
+            // passes `limit`, the world's causal boundary.
             let pit = self.pit.deadline.unwrap_or(u64::MAX);
-            let soft = limit.min(pit);
-            let exact = self.pit_exact && pit <= limit;
-            let hard = if exact {
-                soft
+            let pit_late = if self.pit_exact {
+                pit
             } else {
-                soft.saturating_add(self.tolerance)
+                pit.saturating_add(self.tolerance)
             };
+            let soft = slice_end.min(pit);
+            let hard = limit.min(pit_late);
             let remaining = hard - self.time;
             // Interrupt injection depends only on the distance to the stop, never
             // on the stepping margin, so it is deterministic.
@@ -494,7 +504,8 @@ impl Machine {
             // point, much cheaper than counting our way to `hard`. Earlier yield
             // exits are transparent.
             let rem_soft = soft.saturating_sub(self.time);
-            let window = !exact && self.tolerance > 0 && rem_soft <= self.margin;
+            let windowed = soft < hard;
+            let window = windowed && rem_soft <= self.margin;
             if window != self.exit_req {
                 unsafe { std::ptr::write_volatile(self.page.add(2), window as u64) };
                 self.exit_req = window;
@@ -578,6 +589,16 @@ impl Machine {
                     self.last_plan,
                 ));
             }
+            // With the window closed, a run must not pass `soft`: a syscall
+            // there would have been the stop. (Changing the margin must never
+            // change where a stop lands.)
+            if windowed && !window && delta > rem_soft {
+                return Err(format!(
+                    "soft overshoot on {}: {} branches past a soft stop before its syscall window opened",
+                    self.name,
+                    delta - rem_soft
+                ));
+            }
             if interrupted && !self.stepping {
                 let skid = delta.saturating_sub(self.armed_wake);
                 self.stats.skid_max = self.stats.skid_max.max(skid);
@@ -589,7 +610,7 @@ impl Machine {
             // that rate. Performance only: stops land on the same count.
             if self.adaptive_margin && !self.stepping && run_ns > 20_000 && delta > 0 {
                 let rate = delta as f64 / run_ns as f64; // branches per host ns
-                self.margin = ((rate * SKID_NS) as u64).clamp(6144, APPROACH);
+                self.margin = ((rate * SKID_NS) as u64).clamp(MARGIN_MIN, APPROACH);
             }
             legal = !interrupted;
             if matches!(exit, Ok(VcpuExit::Debug(_))) {
