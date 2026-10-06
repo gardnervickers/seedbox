@@ -27,6 +27,8 @@ def ready(endpoints):
 
 def inject(world, members, rounds, workload):
     """Exercise confirmed process effects and a peer partition during live load."""
+    before = sum(link.get("partition_dropped", 0)
+                 for link in world.inspect()["network_counters"].values())
     for index in range(rounds):
         world.sleep(1)
         if workload.poll() is not None:
@@ -42,6 +44,10 @@ def inject(world, members, rounds, workload):
         world.heal(cut)
         if world.inspect()["active_handles"]:
             raise RuntimeError("partition remained active after healing")
+    after = sum(link.get("partition_dropped", 0)
+                for link in world.inspect()["network_counters"].values())
+    if after <= before:
+        raise RuntimeError("partitions dropped no workload packets")
 
 
 def verify(text, code, planted):
@@ -50,6 +56,8 @@ def verify(text, code, planted):
         raise RuntimeError("missing or contradictory workload verification result")
     if int(lines[0][1]) <= int(planted):
         raise RuntimeError("workload acknowledged no real writes")
+    if planted and (lines[0][0] != "fail" or "k/99/000000@0" not in text):
+        raise RuntimeError("checker did not detect the planted missing acknowledgement")
     return code
 
 

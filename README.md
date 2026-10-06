@@ -150,64 +150,62 @@ must also fit in the hard stop. Crossing it fails with `clock bound exceeded`;
 no device I/O cost is clamped away, and a larger PMU margin does not fix or
 retry this error.
 
-## Engine acceptance suite
+## Acceptance scenarios
 
-Acceptance scenarios are ordinary YAML applications in
-`harness/acceptance/workloads/`, with Python drivers in
-`harness/acceptance/driver/`. The etcd YAML selects its Python driver as both
-`x-seedbox.control.service` and `x-seedbox.check.service`. Inside the guest, the
-driver waits for etcd readiness, starts the existing Go workload/checker, injects
-confirmed process restarts and peer partitions through `seedbox.World`, heals the
-partitions, and checks the workload's acknowledgement-ledger result. The race
-driver runs the existing C example and verifies its atomic control.
-
-The host Python suite stages self-contained projects with the Python binding and
-existing workload sources. It invokes ordinary `seedbox run`, `replay`, and
-`inspect --json` commands. The first execution of each seed/witness mode prepares
-images; repeats and performance variants replay its retained inputs. The CLI owns
-execution, CPU/SMT leases and restoration. No test-only Rust bridge or raw-world
-fault overlays are involved. Scenario policy stays outside the production binary.
-
-From the repository root on the qualified Linux host:
+Acceptance tests are ordinary YAML projects with guest Python drivers. From the
+repository root on the qualified Linux host, after setting up the CLI runtime
+inputs described above:
 
 ```sh
-nix develop
-cargo build-vmm
-bash harness/acceptance.sh portable
-bash harness/acceptance.sh smoke --root "$PWD" --kernel /path/to/bzImage --cpus 2-5
-bash harness/acceptance.sh full --root "$PWD" --kernel /path/to/bzImage --cpus 2-5
+seedbox run harness/acceptance/workloads/short-kill-3.5.2.yaml
+seedbox run harness/acceptance/workloads/sanity.yaml
+seedbox run harness/acceptance/workloads/race.yaml
+seedbox run harness/acceptance/workloads/kill-3.5.3.yaml
 ```
 
-The suite builds this checkout's CLI by default; `--seedbox PATH` chooses another
-build. `--vmm PATH` chooses the engine (default: `cargo build-vmm` output).
-Use the fault-capable kernel described in `kernel/config.options`, including
-virtio-console. OCI preparation requires the Nix shell's tools, registry access
-and passwordless sudo, as does CLI execution. YAML controls the simulated and
-wall-time limits; `--lease-wait SECONDS` waits briefly for busy cores. Both tiers
-default to four workers on CPUs 2–5, excluding overlapping SMT siblings. Size
-`--cpus` for available host memory as well as CPU capacity; an etcd scenario
-runs four guests per worker.
+The YAML references the existing Go/C workload build contexts and loads the
+Python drivers and control API through Compose `configs`. No preparation script,
+generated project, or host scenario runner is required. Paths resolve relative
+to each YAML file, so these commands also work from another directory with an
+absolute YAML path.
 
-| Tier | Checks |
-| --- | --- |
-| `portable` | Shell/Python tests, public YAML validation, Rust tests and Linux VMM tests |
-| `smoke` | Fresh exit/full-state replay; undo 0/16 and margin invariance; varied race outcomes and atomic control; planted checker failure; confirmed process/network fault recovery |
-| `full` | Smoke plus etcd 3.5.3 seeds 4000–4010; optional cross-engine equivalence |
+Inside the simulation, the etcd driver waits for readiness, runs the existing Go
+workload/checker, injects confirmed process restarts and peer partitions, checks
+that packets were actually dropped, heals the partitions, and verifies the
+acknowledgement ledger. The short scenario performs two fault rounds; the long
+etcd 3.5.3 scenario performs twenty. The sanity scenario requires detection of its
+planted missing acknowledgement and uses `check.exit_code: 1`, so the acceptance
+command succeeds when that negative control behaves correctly. The race driver
+checks its output and atomic control inside the guest; it does not require a
+particular seed to lose a fixed number of updates.
 
-`acceptance/cases.json` selects scenarios and seed samples. There are no historical
-failing-seed or witness pins. `--performance-only OLD_VMM` explicitly enables
-cross-engine comparison. Scenario faults and checks rerun inside the guest during
-replay; confirmed fault histories must also match. PMU overshoots retry once with
-margin 98304; clock-bound errors do not. A fixed-margin variant requiring retry
-is UNRESOLVED.
+Each command uses normal CLI outcomes and exit codes. There is no host-side
+console parsing, scenario verdict, seed pin, automatic retry, or acceptance-only
+execution path. Change the seed with `--seed`, request state digests with
+`--full-state`, or compare performance settings using the retained run:
 
-Evidence under `runs/acceptance-<tier>-<time>-<pid>/` includes staged projects,
-CLI command/output logs, the CLI content store and private retained runs, plus a
-Python `report.json`. The suite verifies output hashes against `inspect` records.
-An infrastructure error or failed CLI cleanup cannot count as a completed run.
-Exit status is 0 for PASS, 1 for a failed property, 3 for UNRESOLVED and 2 for
-usage errors. The legacy batch/campaign runners and research fixtures remain
-available separately.
+```sh
+seedbox replay /path/to/retained/run
+seedbox replay /path/to/retained/run --undo 0
+seedbox replay /path/to/retained/run --undo 16
+seedbox replay /path/to/retained/run --margin 32768
+
+(
+  for seed in {4000..4010}; do
+    seedbox run harness/acceptance/workloads/kill-3.5.3.yaml --seed "$seed" || exit "$?"
+  done
+)
+```
+
+The CLI owns image preparation, CPU leases, restoration, retained evidence and
+replay comparison. YAML owns the simulated and wall-time limits. Run the commands
+sequentially unless the host has sufficient resources for multiple worlds; each
+etcd scenario runs four guests.
+
+`bash harness/acceptance.sh portable` runs source/unit tests and validates the
+YAML without starting guests. It has no hardware tiers. Legacy batch/campaign
+runners remain available separately. Hardware results and known runtime failures
+are recorded in [docs/acceptance.md](docs/acceptance.md).
 
 ## One-VM network fixture
 

@@ -37,5 +37,6 @@ The [recovery examples](../../examples/faults/README.md) retain their own inputs
 and results. These low-level fixtures remain available with separate identities.
 
 Acceptance workloads live under `harness/acceptance/workloads/`; their Python
-scenario drivers own faults, workload phases and verification.
+scenario drivers own faults, workload phases and verification. Run them directly
+with `seedbox run path/to/scenario.yaml`; no host scenario harness is required.
 

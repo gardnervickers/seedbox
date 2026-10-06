@@ -185,7 +185,10 @@ encountered main's existing `HostLease::try_acquire_at` dead-code warning;
 all-target Clippy passed with only the `dead_code` lint allowed. Production
 source was left unchanged. Independent review passed after the path/API updates.
 
-## 2026-10-06 — YAML scenarios with guest Python fault drivers
+## 2026-10-06 — guest drivers with host acceptance matrix (superseded)
+
+This records the intermediate host-matrix implementation. The direct-command
+migration below removes that matrix and its preparation and launch adapters.
 
 Source `584fca1` replaces the earlier preparation bridge and batch path with
 ordinary `seedbox run`, `replay` and `inspect` calls. YAML selects the application,
