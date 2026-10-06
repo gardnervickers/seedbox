@@ -10,7 +10,7 @@ through the library by supplying preparation and execution backends.
 The contract tests use an explicitly test-only executor. They do not demonstrate
 that etcd, Redis, or Dockerfile images boot on the controlled guest kernel. This
 increment does not close issue #2. The existing VMM and hardware scripts remain
-unchanged while their interfaces are agreed with the performance work in #1.
+unchanged by this crate. The backend contract now follows main's shared CPU lease and single-VM fixture interfaces.
 
 ## Build and validate
 
@@ -41,7 +41,7 @@ not establish image/kernel compatibility; preparation must check that separately
 | Field | Accepted form and meaning |
 | --- | --- |
 | `name` | Lowercase Compose project name; defaults to the source directory name. |
-| `services` | 1–254 services with lowercase DNS-label names. One service maps to one guest. |
+| `services` | 1–254 services with lowercase DNS-label names. Preparation explicitly places services on machines; multiple services may share one guest. |
 | `image` | Nonempty registry reference, without a transport prefix. Exact reference grammar and platform compatibility are preparation checks. |
 | `build` | Local context string, or `{context, dockerfile}`. Context is relative to the Compose file; Dockerfile is relative to context. Remote contexts and build options are rejected. |
 | `platform` | `linux/amd64`, also the default. |
@@ -55,8 +55,11 @@ not establish image/kernel compatibility; preparation must check that separately
 | `x-seedbox.seed` | Optional unsigned 64-bit fixed seed. The library run option overrides it; absence of both is an error. Zero is valid. |
 | `x-seedbox.limits` | Required positive `simulated_time` and `wall_time`. |
 | `x-seedbox.network` | Optional `latency` (default `1ms`) and `jitter` (default `0ns`). Jitter must be less than latency. |
+| `x-seedbox.schedule` | Optional `timer_jitter` and `stop_tolerance`, each defaulting to `0ns`. These are semantic schedule exploration settings. |
 | `x-seedbox.check` | Required known `service` and optional `exit_code` (default `0`, range 0–255). |
 | `x-seedbox.faults` | Only omitted or `[]` for now; nonempty faults explicitly fail pending #3 integration. |
+
+The current VMM may deliver scheduled events/frames up to `early = min(latency/2, stop_tolerance)` early, never late. Effective one-way delay lies in `[latency - early, latency + jitter]`. Timer jitter and stop tolerance are retained in the simulation identity and passed explicitly to the executor.
 
 Durations use `ns`, `us`, `ms`, `s`, `m`, or `h`, including exact decimals such as
 `1.25ms`. Fractional nanoseconds and overflow are rejected. `image` and `build`
@@ -124,8 +127,12 @@ not the caller. Multi-core scheduling is not implemented by this crate yet.
 
 A run identity hashes the format version, seed, resolved configuration/environment,
 prepared image manifests/configs/layers/guest archives, kernel, execution engine,
-execution profile, auxiliary input hashes, and source/build provenance. Changing
-any recorded input produces a new identity. Each execution receives a distinct
+semantic execution profile, explicit service-to-machine placement, auxiliary input
+hashes, and source/build provenance. Changing an identity input produces a new identity.
+Performance settings returned by `ExecutionBackend::performance_parameters` are
+recorded per attempt and passed explicitly to execution, but excluded from identity
+and profile matching. Only settings with qualified witness invariance belong there
+(e.g. `SEEDBOX_MARGIN` and `SEEDBOX_UNDO`). Each execution receives a distinct
 attempt directory even when its identity is the same. Source paths remain as
 provenance in the manifest; the executor receives verified private artifact copies
 and cannot obtain original paths from its request.
@@ -133,13 +140,24 @@ and cannot obtain original paths from its request.
 The content store verifies SHA-256 on reads and refuses missing or corrupted
 artifacts. It never repairs corruption implicitly. Replay verifies the entire
 declared input closure before calling the backend, and never resolves image tags
-or rebuilds. Engine/profile drift fails before guest execution. A preparer is
-responsible for declaring **all** dependencies; this crate cannot detect undeclared
+or rebuilds. Semantic profile drift always fails before guest execution. Engine
+drift fails by default. Explicit `replay_with_options` with
+`ReplayOptions { allow_engine_change: true, ..Default::default() }` permits a different
+engine whose bytes are already in the content store. The attempt records that mode
+and the actual new engine digest, gets a new identity, and still compares outcomes
+and witnesses against the baseline. It does not relax semantic settings or kernel
+identity. A preparer is responsible for declaring **all** dependencies; this crate cannot detect undeclared
 inputs hidden inside a backend implementation.
 
 `manifest.json` holds a checksummed record, starting as `INCOMPLETE` before execution.
-Updates use atomic replacement. Backend output files are retained in the attempt
-directory and content store, including on backend errors. The checksum detects
+Updates use atomic replacement. Backend output files remain in the attempt
+directory, including on backend errors.
+Content-store retention defaults to 256 MiB per file and 1 GiB total per attempt;
+`Orchestrator::with_log_policy` configures these caps. The manifest records the policy
+and every omitted file/reason. This limits duplicate storage, not original output
+growth; the executor must enforce its output disk budget. Artifact hashing and
+copying stream with a 64 KiB buffer. `ContentStore::read` is limited to 8 MiB of
+metadata; use `copy_to` or `materialize` for larger inputs. The checksum detects
 corruption, not adversarial replacement by someone able to rewrite the store.
 
 | Outcome | Meaning |
@@ -147,8 +165,8 @@ corruption, not adversarial replacement by someone able to rewrite the store.
 | `PASS` | The designated workload completed with its expected exit code and the requested witness data. |
 | `FAIL` | It completed with a different exit code and the requested witness data. |
 | `ERROR` | Backend/preflight failure, invalid result, or missing required witness data. |
-| `TIMEOUT` | Either simulated or wall limit was reached, regardless of any exit code. |
-| `INCOMPLETE` | Cancellation, quiescence, missing workload completion, or an interrupted process with only its initial manifest. |
+| `TIMEOUT` | The deterministic simulated-time limit was reached. |
+| `INCOMPLETE` | Host wall-time expiry, cancellation, quiescence, missing workload completion, or an interrupted process with only its initial manifest. |
 
 Errors before preparation completes are returned as `Err`, because no resolved
 run identity exists yet. Once the attempt manifest exists, ordinary execution or
@@ -159,18 +177,29 @@ Replay records its application outcome separately from `MATCH`, `MISMATCH`, or
 `NOT_COMPARABLE`. A reproduced `FAIL` can be `MATCH`. Comparison checks the exact
 workload exit, outcome, execution witness, and fault history. Optional full-state
 digests are compared separately; `null` explicitly means no full-state comparison
-was available. A profile requesting full-state evidence cannot pass without every
-machine's digest. Incomplete, timeout, and infrastructure-error attempts are not
-treated as successfully reproduced application runs.
+was available. Full-state keys are machine names validated against prepared placement,
+not service names. A profile requesting full-state evidence cannot pass without every
+machine's digest. Simulated-time timeouts can reproduce when witness evidence is
+available. Wall-time expiry and other incomplete/infrastructure-error attempts are
+`NOT_COMPARABLE`. A post-hoc wall deadline check may therefore mark an attempt
+incomplete but never create a semantic TIMEOUT.
+
+Fault history records both `requested_at_ns` and `applied_at_ns`. The latter must
+come from the guest acknowledgement of the actual effect, not host receipt time.
+Changed effect timing is a replay mismatch; effects before their requests or for
+unknown services are rejected.
+
+The draft run-manifest format is now version 2; earlier version 1 records are not
+migrated. Compose authoring remains `x-seedbox.version: 1`.
 
 ## Remaining issue #2 work
 
 - Implement registry resolution and Dockerfile builds through one OCI import path,
   with platform-specific digests, layer/whiteout semantics, metadata validation,
   retained build inputs, and guest filesystem construction.
-- Implement the VMM executor and shared host reservation/restore lifecycle described
-  in `BACKENDS.md`, coordinating with #1. Enforce wall deadlines and cancellation
-  in that executor, including catchable signals and cleanup.
+- Implement the VMM executor using the existing per-core lease and restore lifecycle
+  described in `BACKENDS.md`. Enforce wall deadlines and cancellation in that executor,
+  including catchable signals and cleanup.
 - Add production `init`, `run`, and `replay` CLI commands once those backends exist.
 - Connect the fault support from #3 and service-name resolution in the guest network.
 - Qualify etcd, Redis, and a custom workload on the supported host, documenting the

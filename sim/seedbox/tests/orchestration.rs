@@ -34,6 +34,8 @@ impl PreparationBackend for Preparer {
 
 struct Backend {
     profile: ExecutionProfile,
+    performance: BTreeMap<String, String>,
+    extra_logs: BTreeMap<String, Vec<u8>>,
     report: ExecutionReport,
     calls: AtomicUsize,
     fail: bool,
@@ -43,16 +45,26 @@ impl ExecutionBackend for Backend {
     fn profile(&self) -> ExecutionProfile {
         self.profile.clone()
     }
+    fn performance_parameters(&self) -> BTreeMap<String, String> {
+        self.performance.clone()
+    }
     fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         for (digest, path) in request.artifacts {
             assert_eq!(ContentDigest::of(&fs::read(path)?), *digest);
         }
         assert_eq!(request.prepared.profile, self.profile);
+        assert_eq!(request.performance_parameters, &self.performance);
         fs::write(
             request.output.join("workload.console"),
-            format!("seed={}\n", request.seed),
+            format!(
+                "seed={} timer_jitter={} stop_tolerance={}\n",
+                request.seed, request.schedule.timer_jitter_ns, request.schedule.stop_tolerance_ns
+            ),
         )?;
+        for (name, bytes) in &self.extra_logs {
+            fs::write(request.output.join(name), bytes)?;
+        }
         if self.cancel {
             request.cancellation.cancel();
         }
@@ -80,17 +92,18 @@ impl Fixture {
             backend: "test-only".into(),
             engine,
             witness_mode: WitnessMode::Exits,
-            parameters: BTreeMap::from([("stop_tolerance_ns".into(), "0".into())]),
+            semantic_parameters: BTreeMap::from([("kernel_abi".into(), "v1".into())]),
         };
         let inputs = PreparedInputs {
             kernel,
             profile: profile.clone(),
+            placement: BTreeMap::from([("workload".into(), "workload".into())]),
+            guests: BTreeMap::from([("workload".into(), guest)]),
             images: BTreeMap::from([(
                 "workload".into(),
                 PreparedImage {
                     manifest,
                     config,
-                    guest,
                     layers: vec![layer],
                     launch: Launch {
                         argv: vec!["/app".into()],
@@ -106,6 +119,8 @@ impl Fixture {
         };
         let backend = Backend {
             profile,
+            performance: BTreeMap::from([("SEEDBOX_UNDO".into(), "256".into())]),
+            extra_logs: BTreeMap::new(),
             report: ExecutionReport {
                 reason: StopReason::Completed,
                 workload_exit: Some(WorkloadExit {
@@ -211,7 +226,8 @@ fn witness_fault_history_and_full_state_comparisons_are_distinct() {
         ReplayStatus::Mismatch
     );
     fixture.backend.report.faults.push(FaultEvent {
-        at_ns: 1,
+        requested_at_ns: 1,
+        applied_at_ns: 2,
         service: "workload".into(),
         action: "restart".into(),
         detail: "test".into(),
@@ -242,7 +258,7 @@ fn limits_cancellation_and_missing_completion_cannot_pass() {
     let mut fixture = Fixture::new();
     for (reason, expected) in [
         (StopReason::SimulatedTimeLimit, Outcome::Timeout),
-        (StopReason::WallTimeLimit, Outcome::Timeout),
+        (StopReason::WallTimeLimit, Outcome::Incomplete),
         (StopReason::Cancelled, Outcome::Incomplete),
         (StopReason::Quiescent, Outcome::Incomplete),
         (StopReason::Error, Outcome::Error),
@@ -252,7 +268,11 @@ fn limits_cancellation_and_missing_completion_cannot_pass() {
         assert_eq!(run.record.outcome, expected);
         assert_eq!(
             fixture.replay(&run).record.replay.unwrap().status,
-            ReplayStatus::NotComparable
+            if expected == Outcome::Timeout {
+                ReplayStatus::Match
+            } else {
+                ReplayStatus::NotComparable
+            }
         );
     }
     fixture.backend.report.reason = StopReason::Completed;
@@ -312,7 +332,7 @@ fn unexpected_backend_failure_and_cancellation_retain_logs() {
 fn backend_cannot_report_success_after_wall_deadline() {
     let mut fixture = Fixture::new();
     fixture.simulation.limits.wall_time_ns = 1;
-    assert_eq!(fixture.run().record.outcome, Outcome::Timeout);
+    assert_eq!(fixture.run().record.outcome, Outcome::Incomplete);
 }
 
 #[test]
@@ -367,7 +387,7 @@ fn corruption_missing_artifacts_and_profile_drift_prevent_execution() {
     fixture
         .backend
         .profile
-        .parameters
+        .semantic_parameters
         .insert("witness".into(), "changed".into());
     assert_eq!(fixture.replay(&first).record.outcome, Outcome::Error);
     assert_eq!(fixture.backend.calls.load(Ordering::SeqCst), 1);
@@ -474,4 +494,236 @@ fn content_store_never_silently_repairs_corruption_or_accepts_path_digests() {
     fs::write(directory.path().join("sha256").join(hash.hex()), b"corrupt").unwrap();
     assert!(store.put(b"input").is_err());
     assert!(serde_json::from_str::<ContentDigest>("\"../../outside\"").is_err());
+}
+
+#[test]
+fn wall_limit_is_infrastructure_but_simulated_limit_can_reproduce() {
+    let mut fixture = Fixture::new();
+    let baseline = fixture.run();
+    fixture.backend.report.reason = StopReason::WallTimeLimit;
+    let replay = fixture.replay(&baseline);
+    assert_eq!(replay.record.outcome, Outcome::Incomplete);
+    assert_eq!(
+        replay.record.replay.unwrap().status,
+        ReplayStatus::NotComparable
+    );
+    fixture.backend.report.reason = StopReason::SimulatedTimeLimit;
+    fixture.backend.report.workload_exit = None;
+    let timed_out = fixture.run();
+    assert_eq!(timed_out.record.outcome, Outcome::Timeout);
+    assert_eq!(
+        fixture.replay(&timed_out).record.replay.unwrap().status,
+        ReplayStatus::Match
+    );
+    fixture.backend.report.witness = None;
+    assert_eq!(
+        fixture.replay(&timed_out).record.replay.unwrap().status,
+        ReplayStatus::NotComparable
+    );
+}
+
+#[test]
+fn co_located_services_use_one_machine_state_digest_and_complete_placement() {
+    let mut fixture = Fixture::new();
+    fixture.simulation.services.insert(
+        "redis".into(),
+        fixture.simulation.services["workload"].clone(),
+    );
+    fixture.preparer.inputs.images.insert(
+        "redis".into(),
+        fixture.preparer.inputs.images["workload"].clone(),
+    );
+    let guest = fixture.preparer.inputs.guests.remove("workload").unwrap();
+    fixture.preparer.inputs.guests.insert("vm0".into(), guest);
+    fixture.preparer.inputs.placement = BTreeMap::from([
+        ("workload".into(), "vm0".into()),
+        ("redis".into(), "vm0".into()),
+    ]);
+    fixture.backend.profile.witness_mode = WitnessMode::FullState;
+    fixture.preparer.inputs.profile = fixture.backend.profile.clone();
+    fixture.backend.report.full_state = Some(BTreeMap::from([(
+        "vm0".into(),
+        ContentDigest::of(b"vm state"),
+    )]));
+    let run = fixture.run();
+    assert_eq!(run.record.outcome, Outcome::Pass);
+    assert_eq!(
+        fixture.replay(&run).record.replay.unwrap().status,
+        ReplayStatus::Match
+    );
+    fixture.preparer.inputs.placement.remove("redis");
+    let calls = fixture.backend.calls.load(Ordering::SeqCst);
+    assert_eq!(fixture.run().record.outcome, Outcome::Error);
+    assert_eq!(fixture.backend.calls.load(Ordering::SeqCst), calls);
+}
+
+#[test]
+fn performance_changes_are_recorded_without_changing_identity_or_bypassing_comparison() {
+    let mut fixture = Fixture::new();
+    let first = fixture.run();
+    fixture
+        .backend
+        .performance
+        .insert("SEEDBOX_UNDO".into(), "16".into());
+    let replay = fixture.replay(&first);
+    assert_eq!(replay.record.run_id, first.record.run_id);
+    assert_ne!(
+        replay.record.performance_parameters,
+        first.record.performance_parameters
+    );
+    assert_eq!(replay.record.replay.unwrap().status, ReplayStatus::Match);
+    fixture.backend.report.witness = Some(ContentDigest::of(b"bad performance optimization"));
+    assert_eq!(
+        fixture.replay(&first).record.replay.unwrap().status,
+        ReplayStatus::Mismatch
+    );
+}
+
+#[test]
+fn cross_engine_replay_is_explicit_retained_and_still_checks_semantics_and_witness() {
+    let mut fixture = Fixture::new();
+    let first = fixture.run();
+    let engine = ContentStore::new(fixture.directory.path().join("store"))
+        .put(b"new engine")
+        .unwrap();
+    fixture.backend.profile.engine = engine.clone();
+    assert_eq!(fixture.replay(&first).record.outcome, Outcome::Error);
+    let options = ReplayOptions {
+        allow_engine_change: true,
+        ..Default::default()
+    };
+    let replay = fixture
+        .orchestrator
+        .replay_with_options(&first.directory, &fixture.backend, options.clone())
+        .unwrap();
+    assert!(replay.record.allow_engine_change);
+    assert_ne!(replay.record.run_id, first.record.run_id);
+    assert_eq!(replay.record.identity.inputs.profile.engine, engine);
+    assert_eq!(replay.record.replay.unwrap().status, ReplayStatus::Match);
+    fixture.backend.report.witness = Some(ContentDigest::of(b"regression"));
+    assert_eq!(
+        fixture
+            .orchestrator
+            .replay_with_options(&first.directory, &fixture.backend, options.clone())
+            .unwrap()
+            .record
+            .replay
+            .unwrap()
+            .status,
+        ReplayStatus::Mismatch
+    );
+    fixture
+        .backend
+        .profile
+        .semantic_parameters
+        .insert("kernel_abi".into(), "changed".into());
+    assert_eq!(
+        fixture
+            .orchestrator
+            .replay_with_options(&first.directory, &fixture.backend, options)
+            .unwrap()
+            .record
+            .outcome,
+        Outcome::Error
+    );
+}
+
+#[test]
+fn fault_comparison_uses_acknowledged_effect_time_and_rejects_invalid_acknowledgements() {
+    let mut fixture = Fixture::new();
+    fixture.backend.report.faults.push(FaultEvent {
+        requested_at_ns: 10,
+        applied_at_ns: 20,
+        service: "workload".into(),
+        action: "stop".into(),
+        detail: "guest acknowledged".into(),
+    });
+    let run = fixture.run();
+    fixture.backend.report.faults[0].applied_at_ns = 21;
+    assert_eq!(
+        fixture.replay(&run).record.replay.unwrap().status,
+        ReplayStatus::Mismatch
+    );
+    fixture.backend.report.faults[0].applied_at_ns = 9;
+    assert_eq!(fixture.run().record.outcome, Outcome::Error);
+}
+
+#[test]
+fn schedule_controls_reach_executor_and_change_identity() {
+    let mut fixture = Fixture::new();
+    let first = fixture.run();
+    fixture.simulation.schedule.timer_jitter_ns = 123;
+    fixture.simulation.schedule.stop_tolerance_ns = 456;
+    let second = fixture.run();
+    assert_ne!(first.record.run_id, second.record.run_id);
+    assert!(
+        fs::read_to_string(second.directory.join("output/workload.console"))
+            .unwrap()
+            .contains("timer_jitter=123 stop_tolerance=456")
+    );
+}
+
+#[test]
+fn oversized_logs_are_explicitly_omitted_from_store_and_preserved_in_attempt() {
+    let mut fixture = Fixture::new();
+    fixture.orchestrator = fixture.orchestrator.with_log_policy(LogPolicy {
+        max_file_bytes: 1,
+        max_total_bytes: 100,
+    });
+    let run = fixture.run();
+    assert_eq!(run.record.outcome, Outcome::Pass);
+    assert!(run.record.logs.is_empty());
+    assert!(run.record.omitted_logs.contains_key("workload.console"));
+    assert!(run.directory.join("output/workload.console").is_file());
+    fixture.orchestrator = fixture.orchestrator.with_log_policy(LogPolicy {
+        max_file_bytes: 100,
+        max_total_bytes: 1,
+    });
+    assert!(fixture.run().record.logs.is_empty());
+    fixture.backend.extra_logs = BTreeMap::from([
+        ("a.trace".into(), vec![0; 40]),
+        ("b.trace".into(), vec![0; 40]),
+    ]);
+    fixture.orchestrator = fixture.orchestrator.with_log_policy(LogPolicy {
+        max_file_bytes: 100,
+        max_total_bytes: 70,
+    });
+    let limited = fixture.run();
+    assert!(limited.record.logs.contains_key("a.trace"));
+    assert!(limited.record.omitted_logs.contains_key("b.trace"));
+}
+
+#[test]
+fn large_artifacts_stream_with_bounded_reads_and_corrupt_copies_are_not_published() {
+    use std::io::{self, Read};
+    struct BoundedSource(usize);
+    impl Read for BoundedSource {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            assert!(buffer.len() <= 64 * 1024);
+            let count = buffer.len().min(self.0);
+            buffer[..count].fill(7);
+            self.0 -= count;
+            Ok(count)
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(directory.path().join("store"));
+    let size = 12 * 1024 * 1024;
+    let digest = store.put_reader(BoundedSource(size)).unwrap();
+    assert!(store
+        .read(&digest)
+        .unwrap_err()
+        .to_string()
+        .contains("read limit"));
+    let output = directory.path().join("inputs");
+    let path = store.materialize(&digest, &output).unwrap();
+    assert_eq!(fs::metadata(path).unwrap().len(), size as u64);
+    fs::write(
+        directory.path().join("store/sha256").join(digest.hex()),
+        b"corrupt",
+    )
+    .unwrap();
+    let bad_output = directory.path().join("bad-inputs");
+    assert!(store.materialize(&digest, &bad_output).is_err());
+    assert_eq!(fs::read_dir(bad_output).unwrap().count(), 0);
 }

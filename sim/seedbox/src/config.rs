@@ -16,6 +16,7 @@ pub struct Simulation {
     pub services: BTreeMap<String, Service>,
     pub configs: BTreeMap<String, PathBuf>,
     pub network: Network,
+    pub schedule: Schedule,
     pub limits: Limits,
     pub check: Check,
     pub seed: Option<u64>,
@@ -69,6 +70,13 @@ pub struct Network {
 pub struct Limits {
     pub simulated_time_ns: u64,
     pub wall_time_ns: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Schedule {
+    pub timer_jitter_ns: u64,
+    pub stop_tolerance_ns: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,7 +298,9 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
     let ext = fields(
         get(top, "x-seedbox"),
         "$.x-seedbox",
-        &["version", "seed", "limits", "network", "faults", "check"],
+        &[
+            "version", "seed", "limits", "network", "schedule", "faults", "check",
+        ],
     )?;
     if get(ext, "version").as_u64() != Some(1) {
         return invalid("$.x-seedbox.version", "expected version 1");
@@ -324,6 +334,20 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
     }
     if network.jitter_ns >= network.latency_ns {
         return invalid("$.x-seedbox.network.jitter", "must be less than latency");
+    }
+    let mut schedule = Schedule::default();
+    if let Some(raw) = ext.get("schedule") {
+        let options = fields(
+            raw,
+            "$.x-seedbox.schedule",
+            &["timer_jitter", "stop_tolerance"],
+        )?;
+        if let Some(v) = options.get("timer_jitter") {
+            schedule.timer_jitter_ns = duration(v, "$.x-seedbox.schedule.timer_jitter", true)?;
+        }
+        if let Some(v) = options.get("stop_tolerance") {
+            schedule.stop_tolerance_ns = duration(v, "$.x-seedbox.schedule.stop_tolerance", true)?;
+        }
     }
     if let Some(faults) = ext.get("faults") {
         if !sequence(faults, "$.x-seedbox.faults")?.is_empty() {
@@ -368,6 +392,7 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
         services,
         configs,
         network,
+        schedule,
         limits,
         check: Check {
             service: check_service,

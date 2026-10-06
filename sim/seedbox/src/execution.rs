@@ -7,7 +7,7 @@
 //! preparer nor the orchestrator is permitted to perform these host mutations.
 
 use crate::{
-    config::{Check, Limits, Network, Simulation},
+    config::{Check, Limits, Network, Schedule, Simulation},
     image::Launch,
     store::{ContentDigest, ContentStore},
     Result,
@@ -29,8 +29,8 @@ pub struct ExecutionProfile {
     /// Actual runner/VMM binary bytes, not just a version string.
     pub engine: ContentDigest,
     pub witness_mode: WitnessMode,
-    /// Remaining execution-affecting settings must also be explicit.
-    pub parameters: BTreeMap<String, String>,
+    /// Semantic settings (e.g. kernel ABI). Schedule controls live in Simulation.
+    pub semantic_parameters: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,8 +47,6 @@ pub struct PreparedImage {
     pub manifest: ContentDigest,
     pub config: ContentDigest,
     pub layers: Vec<ContentDigest>,
-    /// Prepared guest filesystem/archive, including deterministic launch helper.
-    pub guest: ContentDigest,
     pub launch: Launch,
 }
 
@@ -57,6 +55,10 @@ pub struct PreparedImage {
 pub struct PreparedInputs {
     pub kernel: ContentDigest,
     pub images: BTreeMap<String, PreparedImage>,
+    /// Every service maps to one machine; services may share a machine.
+    pub placement: BTreeMap<String, String>,
+    /// Machine name to prepared boot filesystem/archive and launch helpers.
+    pub guests: BTreeMap<String, ContentDigest>,
     pub profile: ExecutionProfile,
     /// Config files, source/build snapshots, and other replay dependencies.
     pub auxiliary: BTreeMap<String, ContentDigest>,
@@ -69,8 +71,9 @@ impl PreparedInputs {
         [&self.kernel, &self.profile.engine]
             .into_iter()
             .chain(self.auxiliary.values())
+            .chain(self.guests.values())
             .chain(self.images.values().flat_map(|image| {
-                [&image.manifest, &image.config, &image.guest]
+                [&image.manifest, &image.config]
                     .into_iter()
                     .chain(image.layers.iter())
             }))
@@ -100,16 +103,23 @@ pub struct ExecutionRequest<'a> {
     pub seed: u64,
     pub limits: &'a Limits,
     pub network: &'a Network,
+    pub schedule: &'a Schedule,
     pub check: &'a Check,
     pub prepared: &'a PreparedInputs,
     pub artifacts: &'a BTreeMap<ContentDigest, PathBuf>,
     pub output: &'a Path,
     pub cancellation: &'a CancellationToken,
+    /// Recorded per attempt, excluded from semantic identity/profile comparison.
+    pub performance_parameters: &'a BTreeMap<String, String>,
 }
 
 pub trait ExecutionBackend: Send + Sync {
     /// Must exactly match the recorded profile before execution can begin.
     fn profile(&self) -> ExecutionProfile;
+    /// Only knobs whose witness invariance has been qualified belong here.
+    fn performance_parameters(&self) -> BTreeMap<String, String> {
+        BTreeMap::new()
+    }
     fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport>;
 }
 
@@ -134,7 +144,9 @@ pub struct WorkloadExit {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FaultEvent {
-    pub at_ns: u64,
+    pub requested_at_ns: u64,
+    /// Guest virtual time of the acknowledged effect, not request/receipt time.
+    pub applied_at_ns: u64,
     pub service: String,
     pub action: String,
     pub detail: String,

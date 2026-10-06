@@ -31,7 +31,10 @@ layer application, source/build snapshots, config file capture, deterministic gu
 archives, and launch-helper generation. It must put the bytes in `ContentStore`
 before returning references. Registry, Dockerfile, and Nix-produced OCI images
 must converge at this boundary. `PreparedImage.manifest` is the platform-specific
-manifest digest, not the registry tag or multi-platform index digest.
+manifest digest, not the registry tag or multi-platform index digest. `placement`
+maps every service to a machine, and `guests` supplies one prepared boot archive
+per machine. Service and image sets must match; the set of placement targets must
+exactly equal the guest set. A single guest can host several service namespaces.
 
 The preparer must validate descriptor/digest relationships, image platform, all
 launch metadata, and guest requirements. `image::resolve_launch` supplies the
@@ -54,7 +57,13 @@ The executor receives only resolved values and materialized content paths. It
 must use the requested seed, network and limits; it must not consult ambient
 environment for execution-affecting settings. Such settings belong in the
 recorded `ExecutionProfile`. Its `profile()` must match the recorded engine bytes,
-witness mode and parameters. It must execute the verified engine artifact or
+witness mode and semantic parameters. Performance-only settings are returned
+separately by `performance_parameters()`, recorded per attempt and supplied to
+`execute`; they are not identity inputs or replay compatibility gates. Timer jitter
+and stop tolerance are instead explicit semantic `Simulation.schedule` controls.
+Explicit cross-engine replay changes the recorded engine/identity but still
+requires matching semantic settings and compares execution evidence.
+The executor must execute the verified engine artifact or
 verify the executable it actually invokes against that digest. Merely returning
 the requested digest from `profile()` is not sufficient.
 
@@ -62,26 +71,37 @@ the requested digest from `profile()` is not sufficient.
 are closed. It owns CPU selection, process lifecycle, timeout enforcement, and
 cancellation. It writes only under the supplied output directory and returns a
 typed `ExecutionReport`. The orchestrator's elapsed-wall-time check prevents a
-late success but cannot interrupt a blocked backend. Therefore a backend must
+late success but cannot interrupt a blocked backend. Wall-time expiry and
+cancellation are infrastructure INCOMPLETE results, excluded from replay comparison;
+only the simulated-time limit yields semantic TIMEOUT. Therefore a backend must
 actively enforce the deadline and observe the cancellation token.
 
-For hardware, acquire the common host reservation **before any CPU/MSR changes**.
-The reservation must cover every selected core and SMT sibling, and must be shared
-by all hardware entrypoints, including batch/campaign/performance runs. Save the
-exact original state under the reservation and restore it before release on
-normal return, errors, and catchable interruption. Restoration must finish only
-after owned VMM processes have stopped. The existing scripts' shared
-`msr54-saved.json` file is not an appropriate per-run state store. No new runner
-should bypass those scripts with a separate lock that they do not also honor.
-Agree on that lock and lease ownership with #1 before enabling hardware execution.
+For hardware, reuse the lease protocol already implemented by `sim/batch.py`
+(`cpu_locks` and `run_batch`, merged on main). Acquire exclusive nonblocking `flock`
+locks on `/tmp/seedbox-msr-cpu-<N>.lock` for every selected core and its SMT siblings,
+in ascending CPU order, before any MSR mutation. Open without following symlinks,
+keep file descriptors open through cleanup, and do not unlink the lock files. A
+future Rust executor must use these same files and advisory locks; a separate
+`/run` namespace would not coordinate with the existing supervisor.
+
+The current supervisor owns/reaps its VMM process groups, creates a private snapshot
+directory while holding the lease, and uses `msr54.py` for exclusive snapshots,
+all-or-nothing setup and readback-verified restoration. Keep the lease held until
+owned processes have stopped and restoration has been attempted; preserve a failed
+restoration snapshot and report infrastructure failure. Honor normal errors and
+catchable signals. The Rust executor has not been implemented or hardware-qualified;
+all other hardware entrypoints must adopt this same protocol before sharing cores.
 
 The current VMM report is not yet this API. It needs an explicit distinction
 between workload exit, guest failure, limit, and quiescence, together with the
 designated workload's numeric exit code. Current `State::Exited` also carries
 sentinel values for failures, so parsing its debug string cannot establish a
 successful application exit. The adapter must preserve fault history, deterministic
-exit witness and optional per-machine full-state digests. It must preserve logs
-when a guest or runner fails, including on timeout, and never infer PASS from a
+exit witness and optional per-machine full-state digests. Fault history distinguishes
+request time from the guest-acknowledged effect time; never substitute the request
+or host receipt time for `applied_at_ns`. Full-state keys must match `guests`, not
+the set of services. It must preserve logs when a guest or runner fails,
+including on timeout, and never infer PASS from a
 zero host process status alone.
 
 ## Orchestration ownership

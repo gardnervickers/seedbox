@@ -22,6 +22,23 @@ fn validates_and_normalizes_the_authoring_subset() {
 }
 
 #[test]
+fn schedule_controls_are_explicit_semantic_durations() {
+    assert_eq!(parse(BASE).unwrap().schedule, config::Schedule::default());
+    let yaml = BASE.replace(
+        "  version: 1",
+        "  version: 1\n  schedule: {timer_jitter: 1ms, stop_tolerance: 200us}",
+    );
+    let schedule = parse(&yaml).unwrap().schedule;
+    assert_eq!(schedule.timer_jitter_ns, 1_000_000);
+    assert_eq!(schedule.stop_tolerance_ns, 200_000);
+    assert!(parse(&yaml.replace("timer_jitter: 1ms", "timer_jitter: -1ms")).is_err());
+    assert!(parse(&yaml.replace("stop_tolerance:", "unknown:"))
+        .unwrap_err()
+        .to_string()
+        .contains("$.x-seedbox.schedule.unknown"));
+}
+
+#[test]
 fn image_metadata_accepts_absent_or_null_optional_collections() {
     let defaults: ImageDefaults =
         serde_json::from_str(r#"{"Cmd":["app"],"Env":null,"Volumes":null}"#).unwrap();

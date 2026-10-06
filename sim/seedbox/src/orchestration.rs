@@ -15,7 +15,30 @@ use std::{
     time::Instant,
 };
 
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
+
+#[derive(Clone, Debug, Default)]
+pub struct ReplayOptions {
+    pub cancellation: CancellationToken,
+    /// Semantic settings must still match. A new engine gives a new identity.
+    pub allow_engine_change: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogPolicy {
+    pub max_file_bytes: u64,
+    pub max_total_bytes: u64,
+}
+
+impl Default for LogPolicy {
+    fn default() -> Self {
+        Self {
+            max_file_bytes: 256 * 1024 * 1024,
+            max_total_bytes: 1024 * 1024 * 1024,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct RunOptions {
@@ -68,6 +91,10 @@ pub struct RunRecord {
     /// Distinct executions of the same identity never share output paths.
     pub attempt: String,
     pub identity: RunIdentity,
+    pub performance_parameters: BTreeMap<String, String>,
+    pub allow_engine_change: bool,
+    pub log_policy: LogPolicy,
+    pub omitted_logs: BTreeMap<String, String>,
     pub outcome: Outcome,
     pub report: Option<ExecutionReport>,
     pub error: Option<String>,
@@ -95,6 +122,7 @@ pub struct Run {
 pub struct Orchestrator {
     store: ContentStore,
     runs: PathBuf,
+    log_policy: LogPolicy,
 }
 
 impl Orchestrator {
@@ -102,7 +130,13 @@ impl Orchestrator {
         Self {
             store,
             runs: runs.into(),
+            log_policy: LogPolicy::default(),
         }
+    }
+
+    pub fn with_log_policy(mut self, policy: LogPolicy) -> Self {
+        self.log_policy = policy;
+        self
     }
 
     /// Synchronous and runtime-independent: an async caller may use a blocking
@@ -129,7 +163,7 @@ impl Orchestrator {
             configuration: simulation.clone(),
             inputs,
         };
-        self.execute(identity, executor, &options.cancellation, None)
+        self.execute(identity, executor, &options.cancellation, None, false)
     }
 
     /// Fresh execution with the original seed and retained artifacts. There is
@@ -140,12 +174,33 @@ impl Orchestrator {
         executor: &dyn ExecutionBackend,
         cancellation: &CancellationToken,
     ) -> Result<Run> {
-        let baseline = inspect(directory)?;
-        self.execute(
-            baseline.identity.clone(),
+        self.replay_with_options(
+            directory,
             executor,
-            cancellation,
+            ReplayOptions {
+                cancellation: cancellation.clone(),
+                ..Default::default()
+            },
+        )
+    }
+
+    pub fn replay_with_options(
+        &self,
+        directory: &Path,
+        executor: &dyn ExecutionBackend,
+        options: ReplayOptions,
+    ) -> Result<Run> {
+        let baseline = inspect(directory)?;
+        let mut identity = baseline.identity.clone();
+        if options.allow_engine_change {
+            identity.inputs.profile.engine = executor.profile().engine;
+        }
+        self.execute(
+            identity,
+            executor,
+            &options.cancellation,
             Some(&baseline),
+            options.allow_engine_change,
         )
     }
 
@@ -155,6 +210,7 @@ impl Orchestrator {
         executor: &dyn ExecutionBackend,
         cancellation: &CancellationToken,
         baseline: Option<&RunRecord>,
+        allow_engine_change: bool,
     ) -> Result<Run> {
         let run_id = self.store.put(&serde_json::to_vec(&identity)?)?;
         fs::create_dir_all(&self.runs)?;
@@ -170,6 +226,10 @@ impl Orchestrator {
                 .to_string_lossy()
                 .into_owned(),
             identity,
+            performance_parameters: executor.performance_parameters(),
+            allow_engine_change,
+            log_policy: self.log_policy.clone(),
+            omitted_logs: BTreeMap::new(),
             outcome: Outcome::Incomplete,
             report: None,
             error: None,
@@ -207,11 +267,13 @@ impl Orchestrator {
                 seed: record.identity.seed,
                 limits: &record.identity.configuration.limits,
                 network: &record.identity.configuration.network,
+                schedule: &record.identity.configuration.schedule,
                 check: &record.identity.configuration.check,
                 prepared: &record.identity.inputs,
                 artifacts: &artifacts,
                 output: &output,
                 cancellation,
+                performance_parameters: &record.performance_parameters,
             })?;
             // A backend must enforce its own deadline so blocking calls terminate.
             // This additional guard prevents a late return from being a success.
@@ -242,7 +304,7 @@ impl Orchestrator {
         }
         // Preserve backend logs even when execute returned an error.
         if output.symlink_metadata().is_ok() {
-            if let Err(error) = retain_logs(&output, &output, &self.store, &mut record.logs) {
+            if let Err(error) = retain_logs(&output, &output, &self.store, &mut record, &mut 0) {
                 record.outcome = Outcome::Error;
                 record.error = Some(match record.error.take() {
                     Some(previous) => format!("{previous}; retaining logs: {error}"),
@@ -259,6 +321,19 @@ impl Orchestrator {
 }
 
 fn validate_inputs(identity: &RunIdentity, executor: &dyn ExecutionBackend) -> Result<()> {
+    let inputs = &identity.inputs;
+    let machines: BTreeSet<_> = inputs.placement.values().collect();
+    if inputs
+        .placement
+        .keys()
+        .ne(identity.configuration.services.keys())
+        || machines.iter().copied().ne(inputs.guests.keys())
+        || inputs.guests.keys().any(|name| name.is_empty())
+    {
+        return Err(Error::Integrity(
+            "placement must map every service to exactly the prepared machines".into(),
+        ));
+    }
     if identity.version != FORMAT_VERSION {
         return Err(Error::Integrity("unsupported run format".into()));
     }
@@ -293,8 +368,17 @@ fn validate_inputs(identity: &RunIdentity, executor: &dyn ExecutionBackend) -> R
 
 fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome> {
     let simulation = &identity.configuration;
+    for fault in &report.faults {
+        if fault.applied_at_ns < fault.requested_at_ns
+            || !simulation.services.contains_key(&fault.service)
+        {
+            return Err(Error::Execution(
+                "fault effect must acknowledge a known service at or after its request time".into(),
+            ));
+        }
+    }
     Ok(match report.reason {
-        StopReason::SimulatedTimeLimit | StopReason::WallTimeLimit => Outcome::Timeout,
+        StopReason::SimulatedTimeLimit => Outcome::Timeout,
         StopReason::Error => {
             return Err(Error::Execution(
                 report
@@ -303,7 +387,9 @@ fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome>
                     .unwrap_or("backend reported an error".into()),
             ))
         }
-        StopReason::Cancelled | StopReason::Quiescent => Outcome::Incomplete,
+        StopReason::WallTimeLimit | StopReason::Cancelled | StopReason::Quiescent => {
+            Outcome::Incomplete
+        }
         StopReason::Completed => {
             let Some(exit) = &report.workload_exit else {
                 return Ok(Outcome::Incomplete);
@@ -326,7 +412,7 @@ fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome>
                 ));
             }
             if let Some(state) = &report.full_state {
-                if state.keys().ne(simulation.services.keys()) {
+                if state.keys().ne(identity.inputs.guests.keys()) {
                     return Err(Error::Execution(
                         "full-state digests must cover exactly the configured machines".into(),
                     ));
@@ -343,8 +429,23 @@ fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome>
 
 fn compare(baseline: &RunRecord, fresh: &RunRecord) -> ReplayComparison {
     let outcome_matches = baseline.outcome == fresh.outcome;
-    let comparable = matches!(baseline.outcome, Outcome::Pass | Outcome::Fail)
-        && matches!(fresh.outcome, Outcome::Pass | Outcome::Fail);
+    let evidence = |record: &RunRecord| {
+        record.report.as_ref().is_some_and(|r| {
+            r.witness.is_some()
+                && (record.identity.inputs.profile.witness_mode != WitnessMode::FullState
+                    || r.full_state
+                        .as_ref()
+                        .is_some_and(|s| s.keys().eq(record.identity.inputs.guests.keys())))
+        })
+    };
+    let comparable = matches!(
+        baseline.outcome,
+        Outcome::Pass | Outcome::Fail | Outcome::Timeout
+    ) && matches!(
+        fresh.outcome,
+        Outcome::Pass | Outcome::Fail | Outcome::Timeout
+    ) && evidence(baseline)
+        && evidence(fresh);
     let (witness_matches, full_state_matches, fault_history_matches, result_matches) =
         match (&baseline.report, &fresh.report) {
             (Some(a), Some(b)) => (
@@ -414,7 +515,8 @@ fn retain_logs(
     base: &Path,
     directory: &Path,
     store: &ContentStore,
-    logs: &mut BTreeMap<String, ContentDigest>,
+    record: &mut RunRecord,
+    retained_bytes: &mut u64,
 ) -> Result<()> {
     if !fs::symlink_metadata(directory)?.file_type().is_dir() {
         return Err(Error::Integrity(
@@ -427,7 +529,7 @@ fn retain_logs(
     for path in entries {
         let kind = fs::symlink_metadata(&path)?.file_type();
         if kind.is_dir() {
-            retain_logs(base, &path, store, logs)?;
+            retain_logs(base, &path, store, record, retained_bytes)?;
         } else if kind.is_file() {
             let relative = path
                 .strip_prefix(base)
@@ -435,7 +537,24 @@ fn retain_logs(
                 .to_str()
                 .ok_or_else(|| Error::Integrity("non-UTF-8 log path".into()))?
                 .to_owned();
-            logs.insert(relative, store.put_file(&path)?);
+            let size = fs::metadata(&path)?.len();
+            if size > record.log_policy.max_file_bytes
+                || size
+                    > record
+                        .log_policy
+                        .max_total_bytes
+                        .saturating_sub(*retained_bytes)
+            {
+                record.omitted_logs.insert(
+                    relative,
+                    format!(
+                        "{size} bytes exceeds retention policy; file remains in attempt output"
+                    ),
+                );
+            } else {
+                record.logs.insert(relative, store.put_file(&path)?);
+                *retained_bytes += size;
+            }
         } else {
             return Err(Error::Integrity(format!(
                 "backend output is not a regular file/directory: {}",
