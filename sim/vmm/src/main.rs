@@ -154,7 +154,7 @@ fn run() -> Result<Value, String> {
     let digest = args.iter().any(|a| a == "--digest");
     // Undo-able precise stops (performance only): initial final margin, 0 = off.
     let undo_margin: u64 = match std::env::var("SEEDBOX_UNDO").as_deref() {
-        Err(_) => 1024,
+        Err(_) => 256,
         Ok(m) => m.parse().map_err(|e| format!("SEEDBOX_UNDO: {e}"))?,
     };
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;

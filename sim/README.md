@@ -83,11 +83,11 @@ directory for either runner.
 
 Stop placement settings affect speed only, never results:
 
-- `SEEDBOX_UNDO` (default 1024): undo-able precise stops. Before the final
+- `SEEDBOX_UNDO` (default 256): undo-able precise stops. Before the final
   approach to a stop, the VMM checkpoints the machine (vCPU state plus a shadow
   of guest RAM synced from the KVM dirty log). It then aims the overflow
   interrupt this many branches short of the stop. If the interrupt skids past,
-  the VMM rolls back and retries from further away. `0` disables this.
+  the VMM rolls back and retries from twice as far. `0` disables this.
 - `SEEDBOX_MARGIN` (`adaptive` or a branch count): how early before a soft stop
   the VMM asks for syscall exits, and the stepping distance when undo is off.
   An overshoot that cannot be undone aborts the run; `campaign.sh` reruns it

@@ -740,7 +740,8 @@ impl Machine {
                 }
                 drop(exit);
                 self.rollback()?;
-                self.fm = (self.fm * 4).min(UNDO_MAX);
+                // A rollback costs far less than stepping, so grow slowly.
+                self.fm = (self.fm * 2).min(UNDO_MAX);
                 if !overshoot {
                     self.stats.soft_undos += 1;
                 }
