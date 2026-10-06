@@ -3,6 +3,7 @@
 set -euo pipefail
 cli=$1; vmm=$2; kernel=$3; cpu=$4; output=$5
 state="$output/state"
+guest_init="$output/compose-init"
 layout=${7:-shared-kernel}
 machines=1
 if test "$layout" = machine-per-service; then machines=2; fi
@@ -29,7 +30,7 @@ run_case() {
   shift 4
   set +e
   "$cli" run "$compose" --seed 1009 --cpu "$cpu" --state "$state" \
-    --vmm "$vmm" --kernel "$kernel" --guest-init "$output/compose-init" \
+    --vmm "$vmm" --kernel "$kernel" --guest-init "$guest_init" \
     --layout "$layout" "$@" > "$output/$name.log" 2>&1
   status=$?
   set -e
@@ -55,6 +56,21 @@ run_case() {
 if test "${6:-}" = isolation; then
   run_case isolation "$output/isolation/compose.yaml" PASS 0 --disk-mb 8
   jq -e '.identity.inputs.profile.semantic_parameters.disk_mb == "8"' "$output/isolation.json" >/dev/null
+  for control in chroot bootstrap-stdin; do
+    guest_init="$output/compose-init-$control"
+    run_case "isolation-$control" "$output/isolation/compose.yaml" FAIL 1 --disk-mb 8
+    jq -e '.report.workload_exit.code == 134' "$output/isolation-$control.json" >/dev/null
+    # Require the intended assertion, rather than accepting an unrelated abort.
+    python3 - "$attempt" "$replay" "$control" <<'PY'
+from pathlib import Path
+import sys
+assertion = {"chroot": "detached root has no bootstrap ancestors",
+             "bootstrap-stdin": "stdin must use private /dev"}[sys.argv[3]]
+for attempt in sys.argv[1:3]:
+    logs = Path(attempt).joinpath("output/machines").glob("*.console")
+    assert any(assertion in path.read_text() for path in logs), (attempt, assertion)
+PY
+  done
   echo 'PASS: detached roots, private devices, restricted capabilities, independent ENOSPC; replay matched; MSRs restored'
   exit 0
 fi

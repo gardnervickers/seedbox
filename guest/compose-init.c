@@ -678,19 +678,29 @@ static void enter_root(struct service *s) {
         control = open(CONTROL_DIRECTORY, O_PATH|O_DIRECTORY|O_CLOEXEC);
         if (control < 0) die("control socket directory");
     }
-    char root[PATH_MAX], upper[PATH_MAX], work[PATH_MAX], options[3 * PATH_MAX];
+    char root[PATH_MAX], image[PATH_MAX], disk[PATH_MAX], source[PATH_MAX], upper[PATH_MAX], work[PATH_MAX];
     snprintf(root, sizeof(root), "/services/%s", s->name);
+    snprintf(image, sizeof(image), "/services/%s/images", s->name);
+    snprintf(disk, sizeof(disk), "/services/%s/disk", s->name);
     snprintf(upper, sizeof(upper), "/seedbox/services/%s/upper", s->name);
     snprintf(work, sizeof(work), "/seedbox/services/%s/work", s->name);
-    snprintf(options, sizeof(options), "lowerdir=/images/%s,upperdir=%s,workdir=%s", s->image, upper, work);
     if (mount(NULL, "/", NULL, MS_REC|MS_PRIVATE, NULL)) die("private service mounts");
-    /* rootfs (the initramfs) itself cannot be pivoted. A recursive self-bind
-     * provides a normal current-root mount which pivot_root can detach. */
-    if (mount("/", "/", NULL, MS_BIND|MS_REC, NULL)) die("bootstrap root bind");
     /* The writable layer persists across restarts; the image never changes. */
     directories(upper, 0755); directories(work, 0755);
-    if (mount("overlay", root, "overlay", 0, options)) die("service overlay");
-    if (chdir(root) || syscall(SYS_pivot_root, ".", ".") || umount2(".", MNT_DETACH) || chdir("/")) die("detach image root");
+    /* pivot_root cannot detach initramfs rootfs. Switch this child into a
+     * normal temporary root first, binding only its image and persistent
+     * disk. Moving that mount over / covers the original namespace root;
+     * merely chrooting at /services/NAME would leave bootstrap ancestors. */
+    if (mount("tmpfs", root, "tmpfs", MS_NOSUID|MS_NODEV, "size=1m,mode=0755")) die("service bootstrap root");
+    directories(image, 0755); directories(disk, 0755);
+    snprintf(source, sizeof(source), "/images/%s", s->image);
+    if (mount(source, image, NULL, MS_BIND, NULL) || mount(NULL, image, NULL, MS_BIND|MS_REMOUNT|MS_RDONLY|MS_NOSUID|MS_NODEV, NULL)) die("read-only service image");
+    snprintf(source, sizeof(source), "/seedbox/services/%s", s->name);
+    if (mount(source, disk, NULL, MS_BIND, NULL)) die("persistent service disk");
+    if (chdir(root) || mount(root, "/", NULL, MS_MOVE, NULL) || chroot(".") || chdir("/")) die("switch service bootstrap root");
+    directories("/root", 0755);
+    if (mount("overlay", "/root", "overlay", 0, "lowerdir=/images,upperdir=/disk/upper,workdir=/disk/work")) die("service overlay");
+    if (chdir("/root") || syscall(SYS_pivot_root, ".", ".") || umount2(".", MNT_DETACH) || chdir("/")) die("detach image root");
     directories("/dev", 0755); directories("/proc", 0755); directories("/sys", 0755); directories("/tmp", 01777);
     /* devtmpfs is global to the kernel and contains the management port.
      * Give applications only ordinary pseudo-devices in a private /dev. */
@@ -749,7 +759,15 @@ static int service_main(void *argument) {
     if (s->netns >= 0 && (setns(s->netns, CLONE_NEWNET) || close(s->netns))) die("join service network namespace");
     if (setpgid(0, 0)) die("service process group");
     enter_root(s);
+    /* The bootstrap /dev/null descriptor pins devtmpfs outside the detached
+     * root and could supply a mount to open_by_handle_at. Replace it with
+     * the service's private device before the application inherits stdin. */
+    int input = open("/dev/null", O_RDONLY|O_CLOEXEC);
+    if (input < 0 || dup2(input, STDIN_FILENO) < 0 || close(input)) die("private service stdin");
 #ifndef SEEDBOX_SUPERVISOR_TEST
+    /* Restarts clone after the supervisor grants its effect ports. Linux
+     * preserves that I/O bitmap across fork/exec even after RAWIO is dropped. */
+    if (ioperm(0, 65536, 0)) die("clear service I/O permissions");
     if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0)) die("protect service init");
 #endif
     pid_t application = fork();

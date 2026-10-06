@@ -62,13 +62,16 @@ incrementally, preserving completed evidence if a later case fails. The
 outcomes, replay witnesses and review results. Each engine revision needs its
 own live acceptance; older records remain archived separately.
 
-To invoke the harness directly after building the CLI, VMM, and guest supervisor:
+To invoke the harness directly after building the CLI, VMM, and guest supervisor,
+compile its static instruction probe in the Linux development shell:
 
 ```sh
+"$SEEDBOX_STATIC_CC" -O2 -static -Wall -Wextra -Werror guest/io-check.c -o /absolute/io-check
 python3 examples/faults/run.py \
   --seedbox "$PWD/target/release/seedbox" \
   --vmm "$PWD/crates/seedbox-vmm/target/release/seedbox-vmm" \
   --kernel /absolute/bzImage --guest-init /absolute/guest-init \
+  --io-check /absolute/io-check \
   --cpu 14 --state /absolute/fault-state --output /absolute/fault-evidence
 ```
 
@@ -127,8 +130,13 @@ After deliberately exiting with code 17, it is reported as `Exited(17)` and
 stop/restart return `target_unavailable` with independent machines. On the shared
 kernel, stop returns `invalid_state` and restart launches the exited service again. The controller completes another time
 query and classifies that workload exit as FAIL. The verifier checks both sessions,
-the layout-specific recoverable errors and the absence of an infrastructure ERROR. With all
-optional supervisors supplied, the complete matrix contains fifteen executions.
+the layout-specific recoverable errors and the absence of an infrastructure ERROR.
+Each target incarnation executes a real I/O instruction in a forked probe, which
+must receive SIGSEGV. A retained generation marker proves the check also runs
+after restart. The inherited-I/O negative supervisor omits permission revocation;
+its initial probe confirms denial, but the restarted probe exposes the inherited grant
+and fails. The wrapper builds this control and replays its failure. With all
+optional supervisors supplied, the complete matrix contains seventeen executions.
 Use `verify.py RUN --focused control-cases` to inspect this evidence separately.
 
 Portable tests require no KVM. Run `python3 examples/faults/portable.py` to

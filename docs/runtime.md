@@ -128,7 +128,9 @@ and tty. Only the controller receives `/run/seedbox/control.sock`; applications
 cannot access the raw management port. Applications lose SYS_ADMIN, MKNOD,
 SYS_RAWIO, SYS_BOOT, SYS_MODULE, SYS_TIME and SYS_PTRACE capabilities in all sets,
 including the bounding set, and run with no_new_privs. The service init is not
-dumpable. These limits protect the supervisor's authority; this simulator is not a
+dumpable. Application launches also revoke inherited I/O port permissions, which
+otherwise survive fork and exec after a supervisor has acknowledged faults.
+These limits protect the supervisor's authority; this simulator is not a
 security sandbox for hostile images. `/dev/shm`, `/dev/pts`, custom file-descriptor
 limits, cgroup memory limits and per-service reboot remain follow-up work.
 
@@ -176,7 +178,11 @@ Runtime suites default to `shared-kernel`; append `machine-per-service` after th
 mode (or an empty mode argument) to qualify the other layout in a fresh directory.
 The isolation suite boots root applications, checks detached roots and denied
 management-device/capability access, fills one 8 MiB disk to ENOSPC, then verifies
-that the other service can still write its own disk. Every semantic case is replayed.
+that the other service can still write its own disk. It also builds a chroot-only
+negative control: climbing ancestors must expose the bootstrap image directory
+and fail the check. A second negative control retains the bootstrap device mount
+through stdin; the fixture requires stdin to belong to the private `/dev` mount.
+The successful case and both intended assertion failures are replayed.
 
 The OCI suite builds/tests as the current user and invokes only its final import
 executable with `sudo -n`. It verifies the registry images and Dockerfile metadata,
@@ -188,6 +194,8 @@ The `faults` mode uses a Python controller and synthetic key/value services to v
 retention across process restarts, overlapping partition healing, and retained
 replay. Its deliberately forgetful variant must fail after restart and pass
 without it. Missing and rejected effect acknowledgments must produce ERROR.
+An actual I/O instruction must fault in initial and restarted applications; a
+supervisor without I/O revocation must expose the leak after restart and fail.
 All runtime modes start KVM guests, temporarily apply the scoped MSR workaround,
 and compare original MSR readbacks after every execution. Choose available CPU/SMT
 lanes; contention fails without taking over another run's lease.

@@ -238,10 +238,25 @@ def verify_control_cases(run):
     assert transcript[-1]["request"]["op"] == "now" and transcript[-1]["response"]["ok"]
     server = console(run, "server")
     assert server.count("TARGET_SOCKET absent") == (3 if shared_kernel(world) else 2), server
+    generations = [1, 2, 3] if shared_kernel(world) else [1, 2]
+    assert re.findall(r"^TARGET_IO_PORTS denied generation=(\d+)$", server, re.M) == list(map(str, generations)), server
     scenario = console(run, "scenario")
     results = re.findall(r"^CONTROL_CASES_RESULT (.+)$", scenario, re.M)
     assert len(results) == 1 and json.loads(results[0]) == {"errors":errors,"target_exit":17,"reconnected":True}, scenario
     return dict(case="control_cases", outcome="FAIL", errors=errors, target_exit=17,
+                witness=report["witness"], run=str(run))
+
+
+def verify_inherited_io(run):
+    run, record, report, world = focused_evidence(run, "FAIL", "COMPLETED")
+    assert report["workload_exit"] == {"service": "scenario", "code": 1}
+    assert [fault["action"] for fault in world["faults"]] == ["stop", "restart"]
+    assert all(fault["status"] == "applied" for fault in world["faults"])
+    server = console(run, "server")
+    assert re.findall(r"^TARGET_IO_PROBE generation=(\d+)$", server, re.M) == ["1", "2"], server
+    assert re.findall(r"^TARGET_IO_PORTS denied generation=(\d+)$", server, re.M) == ["1"], server
+    assert "application inherited supervisor I/O permissions" in server, server
+    return dict(case="inherited_io", outcome="FAIL", detected_generation=2,
                 witness=report["witness"], run=str(run))
 
 

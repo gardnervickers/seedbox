@@ -108,6 +108,8 @@ fn refusing_reused_evidence_output_keeps_the_previous_report_and_logs_unchanged(
             "unused",
             "--guest-init",
             "unused",
+            "--io-check",
+            "unused",
             "--cpu",
             "14",
             "--state",
@@ -127,11 +129,13 @@ fn refusing_reused_evidence_output_keeps_the_previous_report_and_logs_unchanged(
 }
 
 #[test]
-fn output_reservation_allows_supplied_init_binaries_and_retains_subsequent_failure() {
+fn output_reservation_allows_supplied_guest_binaries_and_retains_subsequent_failure() {
     let temp = tempfile::tempdir().unwrap();
     let init = temp.path().join("compose-init");
     let bytes = b"\x7fELFprecreated integration input";
     std::fs::write(&init, bytes).unwrap();
+    let probe = temp.path().join("io-check");
+    std::fs::write(&probe, bytes).unwrap();
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/faults/run.py");
     // Invalid generation seed fails before any host inspection or execution.
     let result = Command::new("python3")
@@ -152,6 +156,8 @@ fn output_reservation_allows_supplied_init_binaries_and_retains_subsequent_failu
             "--guest-init",
         ])
         .arg(&init)
+        .arg("--io-check")
+        .arg(&probe)
         .arg("--output")
         .arg(temp.path())
         .output()
@@ -163,4 +169,5 @@ fn output_reservation_allows_supplied_init_binaries_and_retains_subsequent_failu
     assert_eq!(report["status"], "failed");
     assert!(report["error"].as_str().unwrap().contains("unsigned64-bit"));
     assert_eq!(std::fs::read(init).unwrap(), bytes);
+    assert_eq!(std::fs::read(probe).unwrap(), bytes);
 }

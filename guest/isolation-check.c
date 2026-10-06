@@ -22,6 +22,9 @@ static void isolation(void) {
     assert(mkdir("/data", 0755) == 0);
     assert(access("/seedbox/launch.bin", F_OK) == -1 && errno == ENOENT);
     assert(access("/images", F_OK) == -1 && errno == ENOENT);
+    struct stat input, null;
+    assert(fstat(STDIN_FILENO, &input) == 0 && stat("/dev/null", &null) == 0);
+    assert((input.st_dev == null.st_dev && input.st_ino == null.st_ino) && "stdin must use private /dev");
     DIR *devices = opendir("/dev");
     assert(devices);
     struct dirent *entry;
@@ -44,9 +47,12 @@ static void isolation(void) {
      * detached root. There is no ancestor containing the supervisor/images. */
     int root = open("/", O_RDONLY|O_DIRECTORY);
     assert(root >= 0 && mkdir("/data/jail", 0755) == 0);
-    assert(chroot("/data/jail") == 0 && fchdir(root) == 0 && chroot(".") == 0 && chdir("/") == 0);
+    assert(chroot("/data/jail") == 0 && fchdir(root) == 0);
+    for (int ancestor = 0; ancestor < 256; ancestor++) assert(chdir("..") == 0);
+    assert(chroot(".") == 0 && chdir("/") == 0);
     close(root);
     assert(access("/seedbox/launch.bin", F_OK) == -1 && errno == ENOENT);
+    assert((access("/images", F_OK) == -1 && errno == ENOENT) && "detached root has no bootstrap ancestors");
     struct statvfs disk;
     assert(statvfs("/data", &disk) == 0 && disk.f_blocks * disk.f_frsize == 8 * 1024 * 1024);
 }

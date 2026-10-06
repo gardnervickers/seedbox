@@ -81,7 +81,7 @@ int main(int argc, char **argv) {
         if (argc > 2) { printf("%s\npartial", argv[2]); fflush(stdout); }
         for (;;) pause();
     }
-    program = argv[0];
+    program = realpath(argv[0], NULL); assert(program);
     assert(!prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0));
     watch_children();
     /* The recipe reader accepts the shared-kernel form and rejects a NIC

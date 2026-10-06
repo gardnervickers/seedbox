@@ -21,6 +21,24 @@ bash guest/build-compose.sh "$output/compose-init"
 if test "${4:-}" = isolation; then
   mkdir "$output/isolation"
   "$SEEDBOX_STATIC_CC" -O2 -static -Wall -Wextra -Werror guest/isolation-check.c -o "$output/isolation/check"
+  # Deliberately restore the former chroot implementation in an isolated
+  # negative-control binary. The fixture must detect escape to its ancestors.
+  python3 - "$output/compose-init-chroot.c" "$output/compose-init-bootstrap-stdin.c" <<'PY'
+from pathlib import Path
+import sys
+source = Path("guest/compose-init.c").read_text()
+pivot = 'syscall(SYS_pivot_root, ".", ".") || umount2(".", MNT_DETACH)'
+assert source.count(pivot) == 1
+Path(sys.argv[1]).write_text(source.replace(pivot, 'chroot(".")'))
+private_stdin = '''    int input = open("/dev/null", O_RDONLY|O_CLOEXEC);
+    if (input < 0 || dup2(input, STDIN_FILENO) < 0 || close(input)) die("private service stdin");'''
+assert source.count(private_stdin) == 1
+Path(sys.argv[2]).write_text(source.replace(private_stdin, '    /* Negative control: retain bootstrap stdin. */'))
+PY
+  "$SEEDBOX_STATIC_CC" -O2 -static -Wall -Wextra -Werror -Iguest \
+    "$output/compose-init-chroot.c" -o "$output/compose-init-chroot"
+  "$SEEDBOX_STATIC_CC" -O2 -static -Wall -Wextra -Werror -Iguest \
+    "$output/compose-init-bootstrap-stdin.c" -o "$output/compose-init-bootstrap-stdin"
   cat > "$output/isolation/Dockerfile" <<'DOCKERFILE'
 FROM scratch
 COPY check /check
@@ -48,6 +66,18 @@ if test -n "${CARGO_TARGET_DIR:-}"; then
   cli="$target/release/seedbox"
 fi
 if test "${4:-}" = faults; then
+  "$SEEDBOX_STATIC_CC" -O2 -static -Wall -Wextra -Werror guest/io-check.c -o "$output/io-check"
+  python3 - "$output/compose-init-inherited-io.c" <<'PY'
+from pathlib import Path
+import sys
+source = Path("guest/compose-init.c").read_text()
+clear = '    if (ioperm(0, 65536, 0)) die("clear service I/O permissions");'
+assert source.count(clear) == 1
+Path(sys.argv[1]).write_text(source.replace(clear, '    /* Negative control: inherit supervisor I/O permissions. */'))
+PY
+  "$SEEDBOX_STATIC_CC" -O2 -static -Wall -Wextra -Werror -Iguest \
+    "$output/compose-init-inherited-io.c" -o "$output/compose-init-inherited-io"
+  rm "$output/compose-init-inherited-io.c"
   "$SEEDBOX_STATIC_CC" -O2 -static -Wall -Wextra -Werror -DSEEDBOX_DROP_EFFECTS \
     guest/compose-init.c -o "$output/compose-init-missing"
   "$SEEDBOX_STATIC_CC" -O2 -static -Wall -Wextra -Werror -DSEEDBOX_REJECT_EFFECTS \
@@ -58,6 +88,7 @@ if test "${4:-}" = faults; then
     python3 examples/faults/run.py --seedbox "$cli" --vmm "$vmm" \
     --kernel "$kernel" --guest-init "$output/compose-init" --cpu "$cpu" \
     --state "$output/state" --output "$output" --layout "$layout" \
+    --io-check "$output/io-check" --inherited-io-guest-init "$output/compose-init-inherited-io" \
     --negative-guest-init "$output/compose-init-missing" \
     --rejecting-guest-init "$output/compose-init-rejecting" \
     --delayed-guest-init "$output/compose-init-delayed"

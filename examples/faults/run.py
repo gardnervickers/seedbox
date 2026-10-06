@@ -9,7 +9,7 @@ import signal
 import shutil
 import subprocess
 from generate import generate
-from verify import verify, verify_cutoff, verify_early_request, verify_control_cases
+from verify import verify, verify_cutoff, verify_early_request, verify_control_cases, verify_inherited_io
 
 MSR_EVIDENCE = []
 RUN_EVIDENCE = []
@@ -30,7 +30,7 @@ def reserve_output(directory, init_paths):
             raise FileExistsError(f"refusing output with existing evidence: {entry}")
         with entry.open("rb") as source:
             if source.read(4) != b"\x7fELF":
-                raise FileExistsError(f"output may only contain supplied ELF guest-init binaries: {entry}")
+                raise FileExistsError(f"output may only contain supplied ELF guest binaries: {entry}")
     # Exclusive creation also protects against two launchers racing after the
     # directory check. OUTPUT stays unset if an existing attempt owns this file.
     with (candidate / "acceptance.json").open("x") as report:
@@ -112,7 +112,7 @@ def focused_projects(projects):
         (destination / "workload" / "scenario.py").write_text(program)
 
 
-def control_project(projects):
+def control_project(projects, io_check):
     destination = Path(projects) / "control-cases"
     shutil.copytree(Path(projects) / "fixed", destination)
     compose = destination / "compose.yaml"
@@ -122,6 +122,10 @@ def control_project(projects):
     text = text.replace(server, server + '\n    entrypoint: [python3, /workload/control_target.py]')
     compose.write_text(text)
     shutil.copyfile(destination / "workload/control_scenario.py", destination / "workload/scenario.py")
+    shutil.copyfile(io_check, destination / "workload/io-check")
+    (destination / "workload/io-check").chmod(0o755)
+    shutil.copyfile(Path(__file__).resolve().parents[2] / "guest/io-check.c",
+                    destination / "workload/io-check.c")
 
 
 RUN = re.compile(r"^(?:PASS|FAIL|ERROR|TIMEOUT|INCOMPLETE): (.+)$", re.M)
@@ -194,19 +198,22 @@ def main():
         p.add_argument("--" + flag, required=True)
     p.add_argument("--cpu", type=int, required=True)
     p.add_argument("--layout", choices=["shared-kernel", "machine-per-service"], default="shared-kernel")
+    p.add_argument("--io-check", required=True, help="static guest instruction probe for initial/restarted applications")
+    p.add_argument("--inherited-io-guest-init", help="supervisor without application I/O revocation for the restart negative control")
     p.add_argument("--negative-guest-init", help="same supervisor compiled with -DSEEDBOX_DROP_EFFECTS for the missing-effect control")
     p.add_argument("--rejecting-guest-init", help="same supervisor compiled with -DSEEDBOX_REJECT_EFFECTS for the explicit rejection control")
     p.add_argument("--delayed-guest-init", help="supervisor compiled with -DSEEDBOX_TEST_READY_DELAY_NS=4000000000ULL for readiness and cutoff checks")
     p.add_argument("--seed", type=int, default=1009)
     p.add_argument("--margin", default="98304")
     a = p.parse_args()
-    OUTPUT = reserve_output(a.output,[a.guest_init,a.negative_guest_init,a.rejecting_guest_init,a.delayed_guest_init])
+    OUTPUT = reserve_output(a.output,[a.guest_init,a.negative_guest_init,a.rejecting_guest_init,a.delayed_guest_init,
+                                     a.inherited_io_guest_init,a.io_check])
     def interrupt(_signal, _frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM,interrupt)
     persist_evidence()
     projects = generate(Path(a.output) / "projects", a.seed)
-    control_project(projects)
+    control_project(projects, a.io_check)
     if a.delayed_guest_init:
         focused_projects(projects)
     common = ["--kernel", a.kernel, "--vmm", a.vmm, "--guest-init", a.guest_init,
@@ -255,6 +262,16 @@ def main():
                               "--state", a.state, "--undo", "0", "--margin", a.margin], 0)
     evidence.append(verify_control_cases(control_replay))
     persist_evidence()
+    if a.inherited_io_guest_init:
+        leaking = common.copy()
+        leaking[leaking.index("--guest-init") + 1] = a.inherited_io_guest_init
+        run = execute([a.seedbox, "run", str(projects / "control-cases/compose.yaml"), *leaking], 1)
+        evidence.append(verify_inherited_io(run))
+        persist_evidence()
+        replay = execute([a.seedbox, "replay", str(run), "--cpu", str(a.cpu),
+                          "--state", a.state, "--undo", "0", "--margin", a.margin], 0)
+        evidence.append(verify_inherited_io(replay))
+        persist_evidence()
     STATUS = "passed"
     persist_evidence()
 

@@ -1,10 +1,59 @@
 # Acceptance record
 
-Paths and commands below are as recorded, before the repository moved to a Cargo
+Historical paths and commands below are as recorded, before the repository moved to a Cargo
 workspace (`sim/seedbox` is now `crates/seedbox`, `sim/vmm` is `crates/seedbox-vmm`,
 and the runners are under `harness/`). The engine hashes below are for builds
 from that layout; a VMM built from `crates/seedbox-vmm` embeds different source
 paths and is a new engine, even though its source is unchanged.
+
+## 2026-10-06 — PR #32 paused checkpoint
+
+Work on [PR #32](https://github.com/gardnervickers/seedbox/pull/32) is paused
+following [the layout decision in #34](https://github.com/gardnervickers/seedbox/issues/34).
+One VM per service remains the default and reference behavior on main. This
+branch's shared-kernel default is an unmerged prototype, not a qualified replacement.
+
+Independent review found no remaining source issues after correcting device
+authority, a natural-exit/stop race, initramfs root detachment, bootstrap stdin
+mount inheritance and I/O permission inheritance on restart. The final source
+passed formatting, Clippy with warnings denied, workspace tests and portable
+acceptance on macOS and Linux, plus Linux VMM and native supervisor tests.
+Production and negative-control guest binaries compiled with strict warnings.
+
+The isolated NixOS checkout and retained evidence are under
+`/home/gvickers/seedbox-pr32/`. The `v3` isolation suites passed detached-root,
+private-device, capability, stdin and independent ENOSPC checks in both layouts;
+both intentional root/stdin assertion failures replayed exactly. Normal and
+lifecycle suites also passed both layouts. These predate the final I/O revocation
+change. The earlier `v2` fault suites passed all fifteen cases in both layouts.
+
+The final `v4` shared-kernel fault suite retained seven verified results before
+cancellation. The new instruction probe and inherited-I/O negative control had
+not completed, and the complete final-source matrix in both layouts remains
+outstanding. No final hardware signoff or coverage/performance equivalence is
+claimed. Both active suites recorded `status: interrupted`; every recorded MSR
+readback was restored. After shutdown no owned runner or restoration snapshot
+remained, and CPUs 14, 15, 30 and 31 read their original `0x4480000000000`.
+
+Final prototype artifact SHA-256 values:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Kernel | `06cd90e8f7aae6a21ed3bd5542a5094a26a9b5e9c405a000c6da5583104cfb64` |
+| VMM | `82f3a97d47eed6e266ae7311651bafd552ab5113303b434e3659b701fff097a6` |
+| Supervisor | `019ed93466ae1752507965e9dbe0d17f5580ac5f6385473cdc1ee08606d9d3cb` |
+| CLI | `88a45b1de1c56887316127e1886ed4de71a373204525b1671d15c37907009a68` |
+| I/O instruction probe | `c2ffad20a50210240bff2f413bb8e3683251551c8194dde3e3509b2bc7b3f43f` |
+
+The legacy engine full suite completed separately on CPUs 2–7 with
+`--semantics-change`, retaining `engine-full.json` and `engine-full.log`. Its
+verdict was **IDENTITY CHANGED** (754.4 seconds): historical failing seed 4063
+passed in all five fresh runs under the new kernel, with identical witness
+`1c9000c68d39d2aa31632d93e4d1c0f5d2c1e675bd8d97614b8cf84f2e02cdf4`.
+Replay/full-state, stop-placement invariance, race and checker controls, fault
+effects/recovery and all eleven fixed-version seeds passed. Cross-build
+equivalence was skipped for the declared semantic change. Pins were left intact;
+a fresh failing-seed hunt and the paired campaign remain unqualified follow-up work.
 
 ## 2026-10-06 — OCI import and Linux compilation
 
