@@ -1,101 +1,107 @@
-# Prior-engine runtime RPC acceptance — 2026-10-06
+# Shared-memory fault API acceptance — 2026-10-06
 
-The Python controller and public guest RPC passed the complete nine-execution
-Linux KVM sequence. These results qualify the runtime API and three-service
-Python example for the exact engine and supervisor hashes recorded below. They
-precede the root-layout merge and supervisor-readiness changes and do not qualify
-the current engine. The earlier static-schedule results are preserved
-in [their historical record](ACCEPTANCE-STATIC-20261006.md).
+All thirteen executions of the expanded synthetic acceptance sequence produced
+the expected outcomes, including every replay. The VMM implementation is from
+`fec6cef` and uses the `seedbox` virtio-console shared-memory channel. The prior
+[UART RPC record](ACCEPTANCE-RPC-20261006.md) and
+[static-schedule record](ACCEPTANCE-STATIC-20261006.md) retain their own artifact
+identities and do not qualify this engine.
 
-## Reproduction and inputs
+## Reproduction
 
-Host: `nixos.local`, isolated checkout
-`/home/gvickers/seedbox-scoped-faults-20261006`. From that checkout:
+Host: `nixos.local`; isolated checkout:
+`/home/gvickers/seedbox-scoped-faults-20261006`.
 
 ```sh
-CARGO_TARGET_DIR="$PWD/live-target" nix develop ./sim -c \
-  bash sim/seedbox/tests/accept-runtime.sh \
-  "$PWD/artifacts/bzImage" 14 "$PWD/acceptance-rpc-1" faults
+nix develop -c bash crates/seedbox/tests/accept-runtime.sh \
+  "$PWD/artifacts-shmem/bzImage" 14 "$PWD/acceptance-shmem-1" faults
 ```
 
-The command returned zero. The summary `acceptance-rpc-1/acceptance.json` has
-`status: passed`; full retained images, manifests, transcripts, console logs and
-command output remain under that directory. Use a fresh output for another run.
+The command exited zero. `acceptance-shmem-1/acceptance.json` has
+`status: passed`, thirteen retained results and thirteen successful CPU/SMT
+restoration checks. Both CPU 14 and sibling 30 returned to their exact original
+MSR value, `0x4480000000000`, after every execution. Use a fresh output directory
+for another run.
 
-Inputs: seed 1009; three Python guests with 512 MiB each; 1 ms network latency,
-200 us network jitter, 1 ms timer jitter, 2 ms ordinary stop tolerance; 30 s simulated
-limit; control latency 7 ms. The `scenario` service is both controller and check.
-Baseline margin is 98304. Ordinary replay disables undo; the additional healthy
-replay uses margin 131072 and undo 16. Replays execute the retained Python again.
-
-| Tested artifact | SHA-256 |
-| --- | --- |
-| Kernel | `42e25e658245fe265be422814878ea68ab766efac624bc0708cd32556b306626` |
-| CLI | `7533722dd43e64262facfabc6b1c0630bb52d323528c3c3ad237308fdfdf5a6d` |
-| VMM | `38224afc197db5a284c3f4b9b5ae1e5229bb98d54d0f318ab4265623d8f2237b` |
-| Normal supervisor | `ae6a793490602352d2f3234466c0e62205b04e64846d89b474b4b71735c265cb` |
-| Missing-effect supervisor | `26175bef153a5179184f3bc6c37005a6c54fc8818e67044e59f5441ba0cc6309` |
-| Rejected-effect supervisor | `289f8db5ef74abe5a03a558cb7541f23916ef03058265942636b7405b9fc6d12` |
+Seed 1009; three Python guests with 512 MiB each; 1 ms network latency, 200 us
+network jitter, 1 ms timer jitter, 2 ms stop tolerance; 7 ms control latency.
+The normal limit is 30 simulated seconds. Baseline margin is 98304; ordinary
+replays use undo 0, and the additional healthy replay uses margin 131072/undo 16.
+The readiness build delays the server supervisor's readiness by four simulated
+seconds. The cutoff case has a three-second world limit.
 
 ## Results
 
-| Case | Expected and observed result | Retained run suffix |
+| Case | Expected and observed | Retained attempt |
 | --- | --- | --- |
-| Healthy | PASS; 128 ACKs, 0 missing | `9ddaa1c31d69eefa-aPxWtR` |
-| Healthy replay, undo 0 | PASS / MATCH; 128 ACKs, 0 missing | `9ddaa1c31d69eefa-wEkL6g` |
-| Healthy replay, changed margin/undo | PASS / MATCH; 128 ACKs, 0 missing | `9ddaa1c31d69eefa-veTAQj` |
-| Memory-only server | FAIL; 128 ACKs, 96 missing | `7e13ed9a60988c9e-RRFmQs` |
-| Memory-only replay | FAIL / MATCH; 128 ACKs, 96 missing | `7e13ed9a60988c9e-YuJ5Be` |
-| Memory-only without restarts | PASS; 128 ACKs, 0 missing | `3c85b13bc4b5563d-ESuULO` |
-| No-restart replay | PASS / MATCH; 128 ACKs, 0 missing | `3c85b13bc4b5563d-hCNzYf` |
-| Missing effect | ERROR; correct cause detected | `41aacc402baab7e1-rzeTUD` |
-| Rejected effect | ERROR; correct cause detected | `2a1aa216ae4b17f7-fWoHj0` |
+| Healthy | PASS | `a8bdd9c1f66bba6d-CWIMtT` |
+| Healthy replay, undo 0 | PASS / MATCH | `a8bdd9c1f66bba6d-NpGzxY` |
+| Healthy replay, changed margin/undo | PASS / MATCH | `a8bdd9c1f66bba6d-prnGlR` |
+| Memory-only variant | FAIL | `29ca378042f582ef-Eip24F` |
+| Memory-only replay | FAIL / MATCH | `29ca378042f582ef-c9SIbI` |
+| Memory-only without faults | PASS | `4902c790f03bb204-95i6uy` |
+| No-fault replay | PASS / MATCH | `4902c790f03bb204-HsGh38` |
+| Missing effect | ERROR | `faa635a3cae8057f-jMmYIC` |
+| Rejected effect | ERROR | `6c1d70d335b0f000-tpOBXM` |
+| Early request | PASS | `b9bd045ee0ecc8fb-DYajV6` |
+| Early request replay | PASS / MATCH | `b9bd045ee0ecc8fb-lNA1It` |
+| Pending request cutoff | TIMEOUT | `0ab779285bad4d7d-Q1KTCc` |
+| Cutoff replay | TIMEOUT / MATCH | `0ab779285bad4d7d-VUEXbx` |
 
-The healthy server reloads 32 records on its second start and 96 on its third.
-The independent client verifies all 128 acknowledged values. The memory-only
-server loses the 96 values acknowledged before the final restart, and the same
-server/client pair passes all 128 checks without restarts. Scenario decisions
-follow actual client progress; the checker has no planted failure.
+Healthy recovery retained all 128 independently acknowledged writes. The
+memory-only variant lost 96 acknowledged writes after restarts, reproduced that
+FAIL on replay, and passed without faults. Both active overlapping partitions
+blocked probe traffic; releasing only the first handle kept the cut active.
 
-The healthy controller issued 16 RPCs: eight fault operations, three sleeps,
-three inspections and two time queries. Every response has correlated request,
-admission, effect and strict delivery times. Each admission is exactly 7 ms after
-its request, and each response is delivered exactly 7 ms after its effect. All
-eight fault operations completed. Request/effect/reply histories contribute to
-the witness and match under both replay performance settings.
+The early stop was admitted at 483370631 ns, before the server's readiness at
+4039284725 ns. Its confirmed effect occurred at 4046513522 ns, after readiness
+plus the control delivery interval. The workload then recovered and completed
+128 acknowledged writes; replay matched all timing and witness evidence.
 
-Client-to-server drops increased from 4 after the first heal to 8 at the
-last heal; NIC acceptances remained at 322 during that interval and reached
-1291 by completion. The client's probes recorded four failed writes while both
-handles were active and four after partial healing; a fresh batch of 32 real
-acknowledgments followed final healing. Controller traffic remained available.
+The cutoff stop was observed at 304571066 ns and admitted at 311571066 ns.
+The world ended at 3000000000 ns, before the unchanged 5311571066 ns effect
+deadline. The pending request remained in the transcript, no effect was claimed,
+and the result stayed TIMEOUT. Replay matched. Missing and explicitly rejected
+effects still produced the expected ERROR results.
 
-| Case | Matching witness |
+All retained runs were rechecked with assertions that every guest has the
+`virtio-console-v1` channel, controller requests carry transmitted bytes, and
+delivered responses produce shared-memory DMA bytes.
+
+## Artifact identities
+
+These hashes identify the binaries used by the thirteen-execution sequence.
+The final CLI report-validation follow-up is recorded separately below.
+
+| Artifact | SHA-256 |
 | --- | --- |
-| Healthy | `94cec929c1073616e0131229a07f33067dc836d3ffc85c5d3e9c4c8af1a99a22` |
-| Memory-only server | `af92276fe50a9644955d944649ef377e67d940ada81b05321abd85e257458639` |
-| Memory-only without restarts | `cd3717f9dc6d60e08834264b37aed023e3f277a58b9ee0eca1caaf6b8a608b69` |
+| `artifacts-shmem/bzImage` | `e8ece7cba2d5fc4924da83e39cc672ae2516c117f8f76ecfa04aeaa98e697847` |
+| `target/release/seedbox` | `da1738e4fa752f1034d21e080d21a8fa72f5ce57d645cb0bf2479b34228a0f4c` |
+| `crates/seedbox-vmm/target/release/seedbox-vmm` | `f40966b025f20555f8863dd1c8faee77e70ca431ef385bc38bc64b1431ef608a` |
+| `acceptance-shmem-1/compose-init` | `34017cd9b0c31125cab5b1b23bb02b1ea5c1ef4caeb3b20b55bedcf7e44c3244` |
+| `acceptance-shmem-1/compose-init-delayed` | `e4f1093c2ded2996d7a3a650e42d4bbbdd74e79d2e624903361f2cface3cef28` |
+| `acceptance-shmem-1/compose-init-missing` | `ce624949714ecdca8c45eadd282ac6f4a9b31581f4742bf1f5f376528d4bfc4b` |
+| `acceptance-shmem-1/compose-init-rejecting` | `f0fcd0c712f4f50485581518ab57bb341b01aedb2ca2e94d2c49953afa9defd1` |
 
-All nine invocations restored the original MSR values on CPUs 14 and 30:
-`0x4480000000000` before and after. No case needed a retry.
+## Portable checks and review
 
-## Review and other checks
+Workspace tests and portable suites passed on macOS and Linux, including the
+Linux supervisor/process tests and six virtio-console device tests. Seedbox
+Clippy with warnings denied and formatting checks passed. The independent
+Sol 6.1 reviewer found a rejected-row/cutoff correlation issue; a separate
+accepted-request counter and regression preserve the original error, structured
+report, and witness. The reviewer rechecked that fix and reported no outstanding
+findings. The Claude skill was unavailable in this session.
 
-Independent Sol 6.1 review completed with all findings resolved, including
-sequential request IDs, UTF-8 and timing validation, exact reply ordering,
-controller completion, UART divisor-byte filtering and transcript correlation.
-The final narrow review found no remaining actionable issues.
+## Final CLI confirmation
 
-Portable acceptance passed on Linux and macOS, including the Python binding
-and real native Python client/server tests; macOS explicitly skips Linux-only
-VMM compilation. Seedbox Clippy passed with warnings denied, and all guest
-supervisor variants compiled with `-Wall -Wextra -Werror`. The final UART framing
-change passed its focused Linux tests before the live sequence. Native tests
-also cover the actual supervisor socket relay, causal timing bounds, operation
-errors and evidence preservation. Seedbox formatting and diff whitespace pass.
+After rebuilding the final CLI, all thirteen retained runs passed the current
+transport assertions again. The final CLI then replayed the pending-cutoff case
+as `0ab779285bad4d7d-Rsw71t`: TIMEOUT / MATCH, with witness
+`5b4d72e2e5b8d2c4ab0cb51e1557b2ade6975f3b2dca08991da518bacb623e21`.
+Its scoped CPU/SMT restoration also passed. The extra execution is recorded in
+`acceptance-shmem-final-cli/acceptance.json` (`status: passed`).
 
-This qualifies one controller connection and sequential RPCs per run, using the
-public version 1 protocol. It covers process restarts with guest-local storage
-and overlapping network partitions. Whole-machine reboot and persistent block
-devices remain separate work. The VMM-wide formatting check reports only existing
-formatting differences in the unchanged `undo.rs`.
+Final CLI SHA-256:
+`8771a7df3393d3782da7e3abaa6f53ea68c1276ba770e9e08e60c052e3efdbb8`.
+The kernel, VMM, retained images and supervisors are unchanged from the matrix.

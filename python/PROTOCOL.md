@@ -31,7 +31,9 @@ Version 1 supports one controller connection for the run and one outstanding
 request at a time. Other language bindings need only a Unix socket and JSON.
 The guest supervisor relays these messages through a named virtio-console port,
 `seedbox`. Its transmit and receive queues use guest RAM shared with the simulator;
-a device notification commits the submitted bytes. This channel is independent
+a device notification commits the submitted bytes. Shared memory sits at the
+guest-driver/simulator boundary; user processes use socket reads and writes.
+This channel is independent
 of simulated Ethernet. No host socket, shared host filesystem, or host clock is
 involved. The transport is available on every prepared guest; runtime fault
 operations are authorized only for the configured controller. Further message
