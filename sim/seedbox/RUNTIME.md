@@ -114,6 +114,7 @@ From the repository root in `nix develop ./sim`:
 bash sim/seedbox/tests/accept-oci.sh
 bash sim/seedbox/tests/accept-runtime.sh KERNEL CPU FRESH_OUTPUT_DIRECTORY
 bash sim/seedbox/tests/accept-runtime.sh KERNEL CPU ANOTHER_FRESH_DIRECTORY lifecycle
+bash sim/seedbox/tests/accept-runtime.sh KERNEL CPU FAULT_OUTPUT_DIRECTORY faults
 ```
 
 The OCI suite builds/tests as the current user and invokes only its final import
@@ -122,9 +123,15 @@ whiteouts, symlinks and build-context filtering. It does not start guests.
 The default runtime suite runs both application examples and their intentional
 failure controls, then replays each. The lifecycle suite checks full-state and
 changed-margin/undo replay, simulated timeout, wall expiry and SIGTERM cancellation.
-Both runtime suites start KVM guests, temporarily apply the scoped MSR workaround,
+The `faults` mode uses a synthetic key/value service to verify acknowledged-write
+retention across process restarts, overlapping partition healing, and retained
+replay. Its deliberately forgetful variant must fail after restart and pass
+without it. Missing and rejected effect acknowledgments must produce ERROR.
+All runtime modes start KVM guests, temporarily apply the scoped MSR workaround,
 and compare original MSR readbacks after every execution. Choose available CPU/SMT
 lanes; contention fails without taking over another run's lease.
 
-Fault authoring remains disabled pending #3 integration and effect-time validation.
-The legacy fault campaigns are retained as described in [the migration map](../worlds/README.md).
+Structured fault schedules use the same preparation, execution and retained replay
+path. See [fault operations](README.md#structured-faults) and the
+[recovery harness](../examples/faults/README.md) for the effect and packet contracts.
+The legacy fixtures remain available through [the migration map](../worlds/README.md).

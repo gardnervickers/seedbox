@@ -7,7 +7,7 @@
 //! preparer nor the orchestrator is permitted to perform these host mutations.
 
 use crate::{
-    config::{Check, Limits, Network, Schedule, Simulation},
+    config::{Check, Fault, Limits, Network, Schedule, Simulation},
     image::Launch,
     store::{ContentDigest, ContentStore},
     Result,
@@ -104,6 +104,7 @@ pub struct ExecutionRequest<'a> {
     pub limits: &'a Limits,
     pub network: &'a Network,
     pub schedule: &'a Schedule,
+    pub faults: &'a [Fault],
     pub check: &'a Check,
     pub prepared: &'a PreparedInputs,
     pub artifacts: &'a BTreeMap<ContentDigest, PathBuf>,

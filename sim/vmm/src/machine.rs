@@ -7,7 +7,7 @@ use crate::counter::Counter;
 use crate::devices::{rtc_read, Pic, Pit, Uart};
 use crate::stepper::Planner;
 use crate::undo::Undo;
-use crate::virtio_net::VirtioNet;
+use crate::virtio_net::{ReceiveOutcome, VirtioNet};
 use kvm_bindings::*;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 use sha2::{Digest, Sha256};
@@ -118,6 +118,7 @@ pub struct Machine {
     rtc_index: u8,
     pub com1: Uart,
     pub com2: Uart,
+    pub fault_effects: Vec<(u32, u64, bool)>,
     pub net: Option<VirtioNet>,
     stepping: bool,
     planner: Option<Planner>,
@@ -337,6 +338,7 @@ impl Machine {
             rtc_index: 0,
             com1: Uart::default(),
             com2: Uart::default(),
+            fault_effects: Vec::new(),
             net,
             stepping: false,
             planner: None,
@@ -405,15 +407,19 @@ impl Machine {
         }
     }
 
-    pub fn deliver_frame(&mut self, frame: &[u8]) -> bool {
+    pub fn deliver_frame(&mut self, frame: &[u8]) -> ReceiveOutcome {
         let (mem, size) = (self.mem, self.mem_size);
         let m = unsafe { std::slice::from_raw_parts_mut(mem, size) };
-        let irq = self.net.as_mut().map(|n| n.receive(m, frame));
+        let outcome = self
+            .net
+            .as_mut()
+            .map(|n| n.receive(m, frame))
+            .unwrap_or_default();
         self.take_dma();
-        if irq == Some(true) {
+        if outcome.irq {
             self.raise_net();
         }
-        irq.is_some()
+        outcome
     }
 
     fn page_get(&self, i: usize) -> u64 {
@@ -871,6 +877,13 @@ impl Machine {
                             self.com1.write(port - 0x3f8, v)?
                         }
                         0x2f8..=0x2ff => self.com2.write(port - 0x2f8, v)?,
+                        0xf6 | 0xf7 => {
+                            let id = u32::from_le_bytes(
+                                data.try_into()
+                                    .map_err(|_| "fault effect must be a 32-bit I/O write")?,
+                            );
+                            self.fault_effects.push((id, self.time, port == 0xf6));
+                        }
                         0x20 | 0x21 | 0xa0 | 0xa1 => {
                             self.pic.write(port, v);
                             if self.pv {

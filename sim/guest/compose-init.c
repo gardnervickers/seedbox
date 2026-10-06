@@ -13,7 +13,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef SEEDBOX_SUPERVISOR_TEST
 #include <sys/io.h>
+#endif
+#include "control.h"
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -28,14 +31,18 @@ static char *user, *working_dir;
 
 static void finish(int status, int error) {
     fflush(NULL);
+#ifdef SEEDBOX_SUPERVISOR_TEST
+    _exit(error ? 125 : status);
+#else
     if (ioperm(0xf4, 2, 1)) { perror("seedbox ioperm"); for (;;) pause(); }
     outb(status, error ? 0xf5 : 0xf4);
+#endif
     for (;;) pause();
 }
 static void die(const char *what) {
     fprintf(stderr, "SEEDBOX_INIT_ERROR %s: %s\n", what, strerror(errno));
     if (getpid() != 1) {
-        if (launch_error_fd >= 0) { char error = 1; (void)write(launch_error_fd, &error, 1); }
+        if (launch_error_fd >= 0) { char error = 1; ssize_t sent; do { sent = write(launch_error_fd, &error, 1); } while (sent < 0 && errno == EINTR); if (sent != 1) _exit(125); }
         _exit(125);
     }
     finish(1, 1);
@@ -156,16 +163,49 @@ static pid_t start(void) {
     char error; ssize_t received;
     do { received = read(launch_error[0], &error, 1); } while (received < 0 && errno == EINTR);
     close(launch_error[0]);
-    if (received != 0) { errno = EIO; die("application launch failed"); }
+    if (received != 0) {
+        int status; while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+        errno = EIO; return -1;
+    }
     if (setpgid(pid, pid) && errno != EACCES && errno != ESRCH) die("parent process group");
     return pid;
 }
-static void acknowledge(const char *action) {
+static void acknowledge(const char *action, uint32_t id, int success) {
+#ifdef SEEDBOX_REJECT_EFFECTS
+    success = 0; /* Live negative control for the real 32-bit failure port. */
+#endif
     struct timespec t;
     if (clock_gettime(CLOCK_MONOTONIC, &t)) die("fault clock");
     unsigned long long ns = (unsigned long long)t.tv_sec*1000000000ULL + t.tv_nsec;
-    dprintf(management, "SEEDBOX_EFFECT %s guest_ns=%llu\n", action, ns);
+    dprintf(management, "SEEDBOX_%s id=%u action=%s guest_ns=%llu\n", success ? "EFFECT" : "FAILURE", id, action, ns);
+#if !defined(SEEDBOX_SUPERVISOR_TEST) && !defined(SEEDBOX_DROP_EFFECTS)
+    if (id) {
+        if (ioperm(SEEDBOX_EFFECT_PORT, SEEDBOX_EFFECT_PORT_COUNT, 1)) die("fault effect port");
+        outl(id, success ? SEEDBOX_EFFECT_PORT : SEEDBOX_FAILURE_PORT);
+    }
+#endif
 }
+static int stop(pid_t *child) {
+    if (*child <= 0) { errno = EINVAL; return -1; }
+    pid_t group = *child;
+    if (kill(-group, SIGKILL) && errno != ESRCH) return -1;
+    int status;
+    while (waitpid(group, &status, 0) < 0) { if (errno != EINTR) return -1; }
+    *child = -1;
+    /* Reap killed descendants adopted by PID 1 in the application group. */
+    while (waitpid(-group, &status, 0) >= 0 || errno == EINTR) {}
+    return errno == ECHILD ? 0 : -1;
+}
+static void control(char *command, pid_t *child) {
+    char *action; uint32_t id;
+    if (control_parse(command, &action, &id)) { errno = EINVAL; die("invalid management command"); }
+    int success = 0;
+    if (!strcmp(action, "stop")) success = stop(child) == 0;
+    else if (*child < 0) { *child = start(); success = *child > 0; }
+    if (!id && !success) { errno = EINVAL; die("invalid legacy management action/state"); }
+    acknowledge(action, id, success);
+}
+#ifndef SEEDBOX_SUPERVISOR_TEST
 int main(void) {
     directories("/dev", 0755);
     if (mount("devtmpfs", "/dev", "devtmpfs", 0, NULL)) die("mount bootstrap dev");
@@ -203,6 +243,7 @@ int main(void) {
     }
     close(recipe_fd);
     pid_t child = start();
+    if (child < 0) die("initial application launch failed");
     char command[64]; size_t used = 0;
     for (;;) {
         int status;
@@ -214,14 +255,11 @@ int main(void) {
         while (read(management, &byte, 1) == 1) {
             if (byte == '\n') {
                 command[used] = 0; used = 0;
-                if (!strcmp(command, "stop") && child > 0) {
-                    if (kill(-child, SIGKILL) && errno != ESRCH) die("stop application");
-                    while (waitpid(child, &status, 0) < 0) { if (errno != EINTR) die("wait stopped application"); }
-                    child = -1; acknowledge("stop");
-                } else if (!strcmp(command, "start") && child < 0) { child = start(); acknowledge("start"); }
-                else { errno = EINVAL; die("invalid management action/state"); }
+                control(command, &child);
             } else if (used + 1 < sizeof(command)) command[used++] = byte;
             else { errno = E2BIG; die("management command"); }
         }
     }
 }
+
+#endif

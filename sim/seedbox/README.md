@@ -12,7 +12,8 @@ intentional-failure replays on the supported workstation. Full-state replay,
 changed-margin replay, deterministic timeout, wall expiry, SIGTERM cancellation,
 lease contention and exact MSR restoration were also exercised. See the
 [acceptance record](ACCEPTANCE.md) and [runtime instructions](RUNTIME.md) for exact
-inputs and limits. Nonempty fault schedules remain rejected pending #3.
+inputs and limits. Structured process and network schedules are described in
+[the fault operations section](#structured-faults) and [recovery examples](../examples/faults/README.md).
 
 ## Build and validate
 
@@ -60,7 +61,7 @@ not establish image/kernel compatibility; preparation must check that separately
 | `x-seedbox.network` | Optional `latency` (default `1ms`) and `jitter` (default `0ns`). Jitter must be less than latency. |
 | `x-seedbox.schedule` | Optional `timer_jitter` and `stop_tolerance`, each defaulting to `0ns`. These are semantic schedule exploration settings. |
 | `x-seedbox.check` | Required known `service` and optional `exit_code` (default `0`, range 0–255). |
-| `x-seedbox.faults` | Only omitted or `[]` for now; nonempty faults explicitly fail pending #3 integration. |
+| `x-seedbox.faults` | Ordered simulated-time `stop`, `restart`, `partition`, and `heal` operations; omitted or `[]` preserves the no-fault path. |
 
 The current VMM may deliver scheduled events/frames up to `early = min(latency/2, stop_tolerance)` early, never late. Effective one-way delay lies in `[latency - early, latency + jitter]`. Timer jitter and stop tolerance are retained in the simulation identity and passed explicitly to the executor.
 
@@ -197,10 +198,51 @@ unknown services are rejected.
 The draft run-manifest format is now version 2; earlier version 1 records are not
 migrated. Compose authoring remains `x-seedbox.version: 1`.
 
+## Structured faults
+
+Fault requests are an ordered `x-seedbox.faults` list. Equal times preserve list
+order, and every request must precede the simulated limit:
+
+```yaml
+  faults:
+    - {at: 10s, stop: {service: n1}}
+    - {at: 12s, restart: {service: n1}}
+    - {at: 20s, partition: {id: cut, left: [n1], right: [n2, n3]}}
+    - {at: 25s, heal: {id: cut}}
+```
+
+Stop kills the application process group and reaps it; restart execs its retained
+launch recipe after a preceding stop, retaining writable files within the run.
+A service target resolves through retained placement. Library callers can also
+use machine targets; the VMM validates these against prepared machines. Partition
+sides accept service names or `{service: n1}` / `{machine: prepared-machine}`.
+Each partition owns an independent handle, so overlapping cuts remain until all
+owning handles are healed. Frames already routed remain in flight; new sends
+across an active cut are dropped. Healing affects subsequent sends.
+
+Fault boundaries use exact stops even when ordinary scheduling has a nonzero
+stop tolerance. Process commands carry a unique request ID. The supervisor
+acknowledges with a 32-bit request ID through dedicated I/O ports 0xf6/0xf7
+only after reap or successful exec. Its permission range covers all bytes of
+both writes (0xf6 through 0xfa); the VMM
+records the deterministic virtual time of that effect boundary. Guest monotonic
+time appears separately in management logs. Missing effects have a five-second
+simulated deadline, bounded by the run limit. Rejected, stale or duplicate effects,
+and schedules left unfinished when the workload exits, produce ERROR.
+
+The VMM report retains all requests and their states, applied times, failures,
+and per-directed-link receiver-acceptance/drop counters at partition/heal boundaries and
+termination. The `delivered` counter means acceptance by the NIC, including its
+bounded backlog; it is separate from IRQ notification. Unready receivers and
+full device backlogs count as `receiver_dropped`. Histories and counters enter the
+witness for faulted runs. An absent or empty fault schedule preserves previous
+configuration serialization and the
+no-fault witness calculation. See `sim/examples/faults` for timed recovery,
+overlapping partitions, and working/broken synthetic recovery controls.
+
 ## Follow-on scope
 
-The existing seeded fault hunts remain on the legacy runner until #3 provides
-scoped fault operations with qualified effect times. Multi-core campaign dispatch,
-whole-machine persistent storage, broad guest image qualification (#5), and the
-full acceptance matrix (#4) are separate work. The supported path runs one
-service per VM, with explicit host/runtime inputs and RAM-backed storage.
+The legacy fixtures retain their own pinned inputs and runner. Multi-core campaign
+dispatch, whole-machine persistent storage, and broad guest image qualification
+are separate work. The supported Compose path runs one service per VM with
+explicit host/runtime inputs and RAM-backed storage.

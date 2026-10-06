@@ -19,6 +19,14 @@ struct Queue {
     used_idx: u16,
 }
 
+/// Receiver acceptance and IRQ notification are independent. A frame queued
+/// in the bounded device backlog is accepted without an immediate interrupt.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReceiveOutcome {
+    pub accepted: bool,
+    pub irq: bool,
+}
+
 pub struct WriteOutcome {
     pub irq: bool,
     pub frames: Vec<Vec<u8>>,
@@ -283,21 +291,27 @@ impl VirtioNet {
         any
     }
 
-    /// Deliver an inbound frame now; returns true if an interrupt is due.
-    pub fn receive(&mut self, m: &mut [u8], frame: &[u8]) -> bool {
+    /// Deliver an inbound frame now, reporting acceptance separately from IRQ.
+    pub fn receive(&mut self, m: &mut [u8], frame: &[u8]) -> ReceiveOutcome {
         if !self.q[0].ready {
             self.rx_dropped += 1;
-            return false;
+            return ReceiveOutcome::default();
         }
         if !self.backlog.is_empty() || !self.put_frame(m, frame) {
             if self.backlog.len() >= BACKLOG {
                 self.rx_dropped += 1;
-            } else {
-                self.backlog.push_back(frame.to_vec());
+                return ReceiveOutcome::default();
             }
-            return false;
+            self.backlog.push_back(frame.to_vec());
+            return ReceiveOutcome {
+                accepted: true,
+                irq: false,
+            };
         }
         self.isr |= 1;
-        true
+        ReceiveOutcome {
+            accepted: true,
+            irq: true,
+        }
     }
 }

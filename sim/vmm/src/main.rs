@@ -4,6 +4,8 @@
 mod boundary;
 mod counter;
 mod devices;
+mod events;
+mod faults;
 mod machine;
 mod rng;
 mod stepper;
@@ -23,7 +25,7 @@ thread_local! {
 }
 
 enum Payload {
-    Frame(Vec<u8>),
+    Frame { from: usize, bytes: Vec<u8> },
     Serial(Vec<u8>),
     Partition { from: usize, to: usize, on: bool },
 }
@@ -43,12 +45,22 @@ struct World {
     link_rng: BTreeMap<(usize, usize), Rng>,
     link_last: BTreeMap<(usize, usize), u64>,
     partitioned: BTreeMap<(usize, usize), bool>,
+    faults: faults::Faults,
     macs: Vec<[u8; 6]>,
     dropped: u64,
     delivered: u64,
+    link_counts: BTreeMap<String, Value>,
 }
 
 impl World {
+    fn count_link(&mut self, from: usize, to: usize, outcome: &str) {
+        let key = format!("{}->{}", self.machines[from].name, self.machines[to].name);
+        let counts = self
+            .link_counts
+            .entry(key)
+            .or_insert_with(|| json!({"delivered":0,"partition_dropped":0,"receiver_dropped":0}));
+        counts[outcome] = json!(counts[outcome].as_u64().unwrap() + 1);
+    }
     fn schedule(&mut self, m: usize, t: u64, p: Payload) {
         self.seq += 1;
         self.events[m].insert((t, self.seq), p);
@@ -81,18 +93,16 @@ impl World {
     /// Deliver events due by the end of the machine's early window.
     fn deliver_due(&mut self, m: usize) {
         let now = self.machines[m].time + self.early;
-        while let Some((&k, _)) = self.events[m].iter().next() {
-            if k.0 > now {
-                break;
-            }
-            let p = self.events[m].remove(&k).unwrap();
+        while let Some(p) = events::pop_due(&mut self.events[m], now) {
             let mach = &mut self.machines[m];
             match p {
-                Payload::Frame(f) => {
-                    if !mach.deliver_frame(&f) {
+                Payload::Frame { from, bytes } => {
+                    if !mach.deliver_frame(&bytes).accepted {
                         self.dropped += 1;
+                        self.count_link(from, m, "receiver_dropped");
                     } else {
                         self.delivered += 1;
+                        self.count_link(from, m, "delivered");
                     }
                 }
                 Payload::Serial(b) => mach.deliver_serial(&b),
@@ -119,8 +129,10 @@ impl World {
                 .collect()
         };
         for dst in targets {
-            if *self.partitioned.get(&(src, dst)).unwrap_or(&false) {
+            if self.faults.blocked(src, dst) || *self.partitioned.get(&(src, dst)).unwrap_or(&false)
+            {
                 self.dropped += 1;
+                self.count_link(src, dst, "partition_dropped");
                 continue;
             }
             let jitter = self
@@ -131,7 +143,14 @@ impl World {
             let last = *self.link_last.get(&(src, dst)).unwrap_or(&0);
             let t = (send_time + self.latency + jitter).max(last + 1);
             self.link_last.insert((src, dst), t);
-            self.schedule(dst, t, Payload::Frame(frame.clone()));
+            self.schedule(
+                dst,
+                t,
+                Payload::Frame {
+                    from: src,
+                    bytes: frame.clone(),
+                },
+            );
         }
     }
 }
@@ -267,9 +286,14 @@ fn run() -> Result<Value, String> {
         link_rng: BTreeMap::new(),
         link_last: BTreeMap::new(),
         partitioned: BTreeMap::new(),
+        faults: faults::Faults::new(
+            cfg["faults"].as_array().cloned().unwrap_or_default(),
+            names.clone(),
+        )?,
         macs,
         dropped: 0,
         delivered: 0,
+        link_counts: BTreeMap::new(),
         machines,
     };
     for a in 0..n {
@@ -342,6 +366,29 @@ fn run() -> Result<Value, String> {
             .enumerate()
             .min_by_key(|(i, k)| (**k, *i))
             .unwrap();
+        let fault_boundary = world.faults.next_boundary();
+        if fault_boundary <= key && fault_boundary < duration {
+            let commands = world.faults.apply_due(fault_boundary);
+            for row in &mut world.faults.log {
+                if row["applied_at_ns"].as_u64() == Some(fault_boundary)
+                    && row.get("network_counters").is_none()
+                    && matches!(row["action"].as_str(), Some("partition" | "heal"))
+                {
+                    row["network_counters"] = json!(world.link_counts);
+                }
+            }
+            for (target, command) in commands {
+                if world.machines[target].state == State::Halted {
+                    world.machines[target].wake(fault_boundary);
+                }
+                world.schedule(target, fault_boundary, Payload::Serial(command));
+            }
+            if world.faults.error.is_some() {
+                outcome = "fault_failed";
+                break;
+            }
+            continue;
+        }
         if key == u64::MAX {
             outcome = "quiescent";
             break;
@@ -361,12 +408,26 @@ fn run() -> Result<Value, String> {
             .map(|(_, &k)| k.saturating_add(world.lookahead))
             .min()
             .unwrap_or(u64::MAX);
-        let limit = horizon.min(world.next_event(m)).min(duration);
+        let limit = horizon
+            .min(world.next_event(m))
+            .min(duration)
+            .min(fault_boundary);
         slices += 1;
         // A slice ending at the horizon or an event may stop a little early
         // (at a cheap deterministic point); the run's end is exact.
-        let early = if limit == duration { 0 } else { world.early };
+        let early = if limit == duration || limit == fault_boundary {
+            0
+        } else {
+            world.early
+        };
         let stop = world.machines[m].run_until(&mut world.counter, limit, early, &mut frames)?;
+        for (id, at, success) in world.machines[m].fault_effects.drain(..) {
+            world.faults.effect(m, id, at, success);
+        }
+        if world.faults.error.is_some() {
+            outcome = "fault_failed";
+            break;
+        }
         let t = world.machines[m].time;
         for f in frames.drain(..) {
             world.route(m, t, f);
@@ -378,7 +439,17 @@ fn run() -> Result<Value, String> {
     }
     let host_seconds = started.elapsed().as_secs_f64();
 
+    let fault_error = world.faults.error.clone().or_else(|| {
+        (!world.faults.complete())
+            .then(|| "fault schedule incomplete at world termination".to_string())
+    });
     let mut world_witness = Sha256::new();
+    if !world.faults.log.is_empty() {
+        world_witness.update(serde_json::to_vec(&world.faults.log).map_err(|e| e.to_string())?);
+        world_witness.update(world.delivered.to_le_bytes());
+        world_witness.update(world.dropped.to_le_bytes());
+        world_witness.update(serde_json::to_vec(&world.link_counts).map_err(|e| e.to_string())?);
+    }
     let mut report = Vec::new();
     for mach in world.machines.iter_mut() {
         if let Some(t) = mach.trace.as_mut() {
@@ -393,8 +464,10 @@ fn run() -> Result<Value, String> {
                 std::fs::write(format!("{out}/{}.pages", mach.name), mach.page_hashes())
                     .map_err(|e| e.to_string())?;
             }
-            let parts: serde_json::Map<String, Value> =
-                parts.into_iter().map(|(k, v)| (k.to_string(), json!(v))).collect();
+            let parts: serde_json::Map<String, Value> = parts
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), json!(v)))
+                .collect();
             (Some(d), Some(parts))
         } else {
             (None, None)
@@ -450,9 +523,12 @@ fn run() -> Result<Value, String> {
         "speed": (sim_ns as f64 / 1e9) / host_seconds,
         "slices": slices,
         "frames_delivered": world.delivered,
-        "frames_dropped": world.dropped,
+        "frames_dropped": world.dropped, "network_counters": world.link_counts,
         "world_witness": format!("{:x}", world_witness.finalize()),
         "kills": kills,
+        "faults": world.faults.log, "fault_error":fault_error,
+        "rejected_fault_effects":world.faults.rejected_effects,
+        "in_flight_policy":"retain_already_routed; drop_new_sends_while_any_handle_active",
         "machines": report,
     }))
 }

@@ -17,6 +17,8 @@ pub struct Simulation {
     pub configs: BTreeMap<String, PathBuf>,
     pub network: Network,
     pub schedule: Schedule,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub faults: Vec<Fault>,
     pub limits: Limits,
     pub check: Check,
     pub seed: Option<u64>,
@@ -77,6 +79,38 @@ pub struct Limits {
 pub struct Schedule {
     pub timer_jitter_ns: u64,
     pub stop_tolerance_ns: u64,
+}
+
+/// Ordered deterministic fault requests. Equal times retain author order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Fault {
+    pub at_ns: u64,
+    pub action: FaultAction,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FaultAction {
+    Stop {
+        target: FaultTarget,
+    },
+    Restart {
+        target: FaultTarget,
+    },
+    Partition {
+        id: String,
+        left: Vec<FaultTarget>,
+        right: Vec<FaultTarget>,
+    },
+    Heal {
+        id: String,
+    },
+}
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum FaultTarget {
+    Service(String),
+    Machine(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -349,14 +383,7 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
             schedule.stop_tolerance_ns = duration(v, "$.x-seedbox.schedule.stop_tolerance", true)?;
         }
     }
-    if let Some(faults) = ext.get("faults") {
-        if !sequence(faults, "$.x-seedbox.faults")?.is_empty() {
-            return invalid(
-                "$.x-seedbox.faults",
-                "fault execution is not wired yet (issue #3); omit or use []",
-            );
-        }
-    }
+    let faults = parse_faults(ext.get("faults"), &services, limits.simulated_time_ns)?;
     let raw_check = fields(
         get(ext, "check"),
         "$.x-seedbox.check",
@@ -393,6 +420,7 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
         configs,
         network,
         schedule,
+        faults,
         limits,
         check: Check {
             service: check_service,
@@ -400,6 +428,105 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
         },
         seed,
     })
+}
+
+fn parse_faults(
+    raw: Option<&Value>,
+    services: &BTreeMap<String, Service>,
+    end: u64,
+) -> Result<Vec<Fault>> {
+    let Some(raw) = raw else { return Ok(vec![]) };
+    let mut faults = Vec::new();
+    let mut handles = std::collections::BTreeSet::new();
+    let mut used_handles = std::collections::BTreeSet::new();
+    let mut stopped = std::collections::BTreeSet::new();
+    let target = |value: &Value, path: &str| -> Result<FaultTarget> {
+        if value.is_string() {
+            let name = text(value, path)?;
+            if !services.contains_key(&name) {
+                return invalid(path, "unknown service");
+            }
+            return Ok(FaultTarget::Service(name));
+        }
+        let m = fields(value, path, &["service", "machine"])?;
+        match (m.get("service"), m.get("machine")) {
+            (Some(v), None) => {
+                let name = text(v, path)?;
+                if !services.contains_key(&name) {
+                    return invalid(path, "unknown service");
+                }
+                Ok(FaultTarget::Service(name))
+            }
+            (None, Some(v)) => Ok(FaultTarget::Machine(text(v, path)?)),
+            _ => invalid(path, "specify exactly one service or machine target"),
+        }
+    };
+    for (i, item) in sequence(raw, "$.x-seedbox.faults")?.iter().enumerate() {
+        let path = format!("$.x-seedbox.faults[{i}]");
+        let f = fields(item, &path, &["at", "stop", "restart", "partition", "heal"])?;
+        let at_ns = duration(get(f, "at"), &format!("{path}.at"), true)?;
+        if at_ns >= end {
+            return invalid(&path, "fault must precede simulated time limit");
+        }
+        if faults.last().is_some_and(|f: &Fault| f.at_ns > at_ns) {
+            return invalid(&path, "fault times must be nondecreasing");
+        }
+        let actions: Vec<_> = ["stop", "restart", "partition", "heal"]
+            .into_iter()
+            .filter(|k| f.contains_key(*k))
+            .collect();
+        if actions.len() != 1 {
+            return invalid(&path, "specify exactly one fault action");
+        }
+        let action = match actions[0] {
+            "stop" | "restart" => {
+                let t = target(get(f, actions[0]), &path)?;
+                if actions[0] == "stop" {
+                    if !stopped.insert(t.clone()) {
+                        return invalid(&path, "target already scheduled stopped");
+                    }
+                    FaultAction::Stop { target: t }
+                } else {
+                    if !stopped.remove(&t) {
+                        return invalid(&path, "restart requires a preceding stop");
+                    }
+                    FaultAction::Restart { target: t }
+                }
+            }
+            "partition" => {
+                let p = fields(get(f, "partition"), &path, &["id", "left", "right"])?;
+                let id = text(get(p, "id"), &path)?;
+                if !identifier(&id) || !used_handles.insert(id.clone()) {
+                    return invalid(&path, "partition id must be unique identifier");
+                }
+                let side = |key| -> Result<Vec<FaultTarget>> {
+                    sequence(get(p, key), &path)?
+                        .iter()
+                        .map(|v| target(v, &path))
+                        .collect()
+                };
+                let left = side("left")?;
+                let right = side("right")?;
+                let unique: std::collections::BTreeSet<_> = left.iter().chain(&right).collect();
+                if left.is_empty() || right.is_empty() || unique.len() != left.len() + right.len() {
+                    return invalid(&path, "partition requires disjoint nonempty unique sides");
+                }
+                handles.insert(id.clone());
+                FaultAction::Partition { id, left, right }
+            }
+            "heal" => {
+                let p = fields(get(f, "heal"), &path, &["id"])?;
+                let id = text(get(p, "id"), &path)?;
+                if !handles.remove(&id) {
+                    return invalid(&path, "heal requires an active partition handle");
+                }
+                FaultAction::Heal { id }
+            }
+            _ => unreachable!(),
+        };
+        faults.push(Fault { at_ns, action });
+    }
+    Ok(faults)
 }
 
 fn validation(path: &str, message: &str) -> Error {

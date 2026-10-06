@@ -130,6 +130,7 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
             "oci-init-v1 requires one service per machine".into(),
         ));
     }
+    let faults = compile_faults(request)?;
     let machines = request
         .prepared
         .guests
@@ -141,8 +142,102 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
         "duration_ns":request.limits.simulated_time_ns,"end_on_exit":workload_machine,
         "timer_jitter_ns":request.schedule.timer_jitter_ns,"stop_tolerance_ns":request.schedule.stop_tolerance_ns,
         "network":{"latency_ns":request.network.latency_ns,"jitter_ns":request.network.jitter_ns},
-        "machines":machines,
+        "machines":machines,"faults":faults,
     }))
+}
+
+/// Compile service targets using retained placement, never name coincidence.
+fn compile_faults(request: &ExecutionRequest<'_>) -> Result<Vec<Value>> {
+    use crate::config::{FaultAction, FaultTarget};
+    let mut active = BTreeSet::new();
+    let mut used = BTreeSet::new();
+    let mut stopped = BTreeSet::new();
+    let mut previous = 0;
+    let resolve = |target: &FaultTarget| -> Result<String> {
+        let machine = match target {
+            FaultTarget::Service(service) => request
+                .prepared
+                .placement
+                .get(service)
+                .ok_or_else(|| Error::Execution(format!("unknown fault service {service}")))?,
+            FaultTarget::Machine(machine) => machine,
+        };
+        if !request.prepared.guests.contains_key(machine) {
+            return Err(Error::Execution(format!("unknown fault machine {machine}")));
+        }
+        Ok(machine.clone())
+    };
+    request
+        .faults
+        .iter()
+        .enumerate()
+        .map(|(i, fault)| {
+            if fault.at_ns < previous || fault.at_ns >= request.limits.simulated_time_ns {
+                return Err(Error::Execution(
+                    "fault times must be ordered and precede limit".into(),
+                ));
+            }
+            previous = fault.at_ns;
+            let mut value = match &fault.action {
+                FaultAction::Stop { target } | FaultAction::Restart { target } => {
+                    let machine = resolve(target)?;
+                    let stopping = matches!(fault.action, FaultAction::Stop { .. });
+                    if (stopping && !stopped.insert(machine.clone()))
+                        || (!stopping && !stopped.remove(&machine))
+                    {
+                        return Err(Error::Execution(
+                            "invalid stop/restart state after placement".into(),
+                        ));
+                    }
+                    json!({"action":if stopping {"stop"} else {"restart"}, "machine":machine})
+                }
+                FaultAction::Partition { id, left, right } => {
+                    if id.is_empty() || !used.insert(id.clone()) {
+                        return Err(Error::Execution("duplicate/empty partition id".into()));
+                    }
+                    let left = left.iter().map(&resolve).collect::<Result<Vec<_>>>()?;
+                    let right = right.iter().map(&resolve).collect::<Result<Vec<_>>>()?;
+                    let unique: BTreeSet<_> = left.iter().chain(&right).collect();
+                    if left.is_empty()
+                        || right.is_empty()
+                        || unique.len() != left.len() + right.len()
+                    {
+                        return Err(Error::Execution(
+                            "partition sides overlap after placement".into(),
+                        ));
+                    }
+                    active.insert(id.clone());
+                    json!({"action":"partition","handle":id,"left":left,"right":right})
+                }
+                FaultAction::Heal { id } => {
+                    if !active.remove(id) {
+                        return Err(Error::Execution("heal of inactive partition".into()));
+                    }
+                    json!({"action":"heal","handle":id})
+                }
+            };
+            value["id"] = json!(
+                u32::try_from(i + 1).map_err(|_| Error::Execution("too many faults".into()))?
+            );
+            value["at_ns"] = json!(fault.at_ns);
+            value["deadline_ns"] = json!(fault
+                .at_ns
+                .saturating_add(5_000_000_000)
+                .min(request.limits.simulated_time_ns));
+            Ok(value)
+        })
+        .collect()
+}
+#[derive(Deserialize)]
+struct RawFault {
+    request: Value,
+    id: u32,
+    requested_at_ns: u64,
+    applied_at_ns: Option<u64>,
+    action: String,
+    machine: Option<String>,
+    status: String,
+    detail: String,
 }
 
 #[derive(Deserialize)]
@@ -160,6 +255,10 @@ struct VmmReport {
     outcome: String,
     world_witness: ContentDigest,
     machines: Vec<MachineReport>,
+    #[serde(default)]
+    faults: Vec<RawFault>,
+    #[serde(default)]
+    fault_error: Option<String>,
 }
 
 /// Parse the engine's structured completion report. Never infer application
@@ -191,13 +290,14 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
         .machines
         .iter()
         .find(|machine| machine.guest_init_error.is_some() || machine.infrastructure_error);
-    let reason = if infrastructure_error.is_some() {
+    let mut reason = if infrastructure_error.is_some() {
         StopReason::Error
     } else {
         match raw.outcome.as_str() {
             "end_machine_exited" => StopReason::Completed,
             "duration" => StopReason::SimulatedTimeLimit,
             "quiescent" => StopReason::Quiescent,
+            "fault_failed" => StopReason::Error,
             other => return Err(Error::Integrity(format!("unknown VMM outcome {other}"))),
         }
     };
@@ -217,14 +317,72 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
                 .collect::<Result<BTreeMap<_, _>>>()?,
         ),
     };
+    let expected = compile_faults(request)?;
+    let mut faults = Vec::new();
+    let mut fault_failure = raw.fault_error;
+    if raw.faults.len() != expected.len() {
+        fault_failure = Some("fault request history is incomplete".to_string());
+    }
+    for (i, fault) in raw.faults.iter().enumerate() {
+        let Some(plan) = expected.get(i) else {
+            return Err(Error::Integrity("unexpected fault acknowledgement".into()));
+        };
+        if fault.request != *plan
+            || fault.id as usize != i + 1
+            || Some(fault.requested_at_ns) != plan["at_ns"].as_u64()
+            || Some(fault.action.as_str()) != plan["action"].as_str()
+            || fault.machine.as_deref() != plan["machine"].as_str()
+        {
+            return Err(Error::Integrity(
+                "fault acknowledgement correlation mismatch".into(),
+            ));
+        }
+        match (fault.status.as_str(), fault.applied_at_ns) {
+            ("applied", Some(at))
+                if at >= fault.requested_at_ns && at <= plan["deadline_ns"].as_u64().unwrap() =>
+            {
+                let service = fault
+                    .machine
+                    .as_ref()
+                    .and_then(|machine| {
+                        request
+                            .prepared
+                            .placement
+                            .iter()
+                            .find(|(_, m)| *m == machine)
+                            .map(|(s, _)| s.clone())
+                    })
+                    .unwrap_or_else(|| request.check.service.clone());
+                faults.push(crate::execution::FaultEvent {
+                    requested_at_ns: fault.requested_at_ns,
+                    applied_at_ns: at,
+                    service,
+                    action: fault.action.clone(),
+                    detail: format!("id={} {}", fault.id, fault.detail),
+                });
+            }
+            ("requested" | "failed" | "unrequested", None) => {
+                fault_failure = Some(format!(
+                    "fault {} {}: {}",
+                    fault.id, fault.status, fault.detail
+                ))
+            }
+            _ => return Err(Error::Integrity("invalid fault effect status/time".into())),
+        }
+    }
+    if fault_failure.is_some() {
+        reason = StopReason::Error;
+    }
     Ok(ExecutionReport {
         reason,
         workload_exit,
         witness: Some(raw.world_witness),
         full_state,
-        faults: vec![],
-        detail: infrastructure_error
-            .map(|machine| format!("machine {} failed in guest bootstrap or VMM", machine.name)),
+        faults,
+        detail: fault_failure.or_else(|| {
+            infrastructure_error
+                .map(|machine| format!("machine {} failed in guest bootstrap or VMM", machine.name))
+        }),
     })
 }
 

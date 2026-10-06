@@ -45,6 +45,7 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
             timer_jitter_ns: 50_000,
             stop_tolerance_ns: 40_000,
         },
+        faults: &[],
         check: &Check {
             service: "client".into(),
             exit_code: 0,
@@ -119,5 +120,70 @@ fn reports_reject_wrong_seed_missing_state_and_duplicate_machines() {
         let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), request).unwrap();
         assert_eq!(result.reason, StopReason::SimulatedTimeLimit);
         assert!(result.workload_exit.is_none());
+    });
+}
+
+#[test]
+fn faults_compile_through_placement_and_incomplete_or_forged_effects_cannot_pass() {
+    use seedbox::config::{Fault, FaultAction, FaultTarget};
+    fixture(|request| {
+        let planned = [
+            Fault {
+                at_ns: 100,
+                action: FaultAction::Stop {
+                    target: FaultTarget::Service("server".into()),
+                },
+            },
+            Fault {
+                at_ns: 200,
+                action: FaultAction::Restart {
+                    target: FaultTarget::Service("server".into()),
+                },
+            },
+        ];
+        let request = ExecutionRequest {
+            faults: &planned,
+            ..*request
+        };
+        let world = vmm::world(&request).unwrap();
+        assert_eq!(world["faults"][0]["machine"], "server-machine");
+        assert_eq!(world["faults"][1]["action"], "restart");
+        let mut raw = report();
+        assert_eq!(
+            vmm::report(&serde_json::to_vec(&raw).unwrap(), &request)
+                .unwrap()
+                .reason,
+            StopReason::Error
+        );
+        raw["faults"] = json!([
+            {"id":1,"requested_at_ns":100,"applied_at_ns":120,"action":"stop","machine":"server-machine","status":"applied","detail":"reaped"},
+            {"id":2,"requested_at_ns":200,"applied_at_ns":220,"action":"restart","machine":"server-machine","status":"applied","detail":"exec succeeded"}
+        ]);
+        raw["faults"][0]["request"] = world["faults"][0].clone();
+        raw["faults"][1]["request"] = world["faults"][1].clone();
+        let parsed = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
+        assert_eq!(parsed.reason, StopReason::Completed);
+        assert_eq!(parsed.faults[0].service, "server");
+        raw["faults"][1]["id"] = json!(1);
+        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
+        raw["faults"][1]["id"] = json!(2);
+        raw["fault_error"] = json!("duplicate effect");
+        assert_eq!(
+            vmm::report(&serde_json::to_vec(&raw).unwrap(), &request)
+                .unwrap()
+                .reason,
+            StopReason::Error
+        );
+        let unknown = [Fault {
+            at_ns: 100,
+            action: FaultAction::Stop {
+                target: FaultTarget::Machine("missing".into()),
+            },
+        }];
+        assert!(vmm::world(&ExecutionRequest {
+            faults: &unknown,
+            ..request
+        })
+        .is_err());
     });
 }

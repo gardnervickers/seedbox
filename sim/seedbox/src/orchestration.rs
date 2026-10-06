@@ -268,6 +268,7 @@ impl Orchestrator {
                 limits: &record.identity.configuration.limits,
                 network: &record.identity.configuration.network,
                 schedule: &record.identity.configuration.schedule,
+                faults: &record.identity.configuration.faults,
                 check: &record.identity.configuration.check,
                 prepared: &record.identity.inputs,
                 artifacts: &artifacts,
@@ -368,6 +369,27 @@ fn validate_inputs(identity: &RunIdentity, executor: &dyn ExecutionBackend) -> R
 
 fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome> {
     let simulation = &identity.configuration;
+    if !simulation.faults.is_empty() {
+        if report.faults.len() != simulation.faults.len() {
+            return Err(Error::Execution(
+                "scheduled fault effects are incomplete".into(),
+            ));
+        }
+        for (plan, effect) in simulation.faults.iter().zip(&report.faults) {
+            use crate::config::FaultAction;
+            let action = match plan.action {
+                FaultAction::Stop { .. } => "stop",
+                FaultAction::Restart { .. } => "restart",
+                FaultAction::Partition { .. } => "partition",
+                FaultAction::Heal { .. } => "heal",
+            };
+            if effect.requested_at_ns != plan.at_ns || effect.action != action {
+                return Err(Error::Execution(
+                    "scheduled fault effect order/action mismatch".into(),
+                ));
+            }
+        }
+    }
     for fault in &report.faults {
         if fault.applied_at_ns < fault.requested_at_ns
             || !simulation.services.contains_key(&fault.service)
