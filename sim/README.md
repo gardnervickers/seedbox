@@ -1,21 +1,24 @@
 # Seedbox simulator
 
 A deterministic world of real Linux machines on KVM, run by one host thread.
-A seed plus the pinned inputs (kernel, initramfs, world config) regenerate the
-same execution; seeds vary guest and simulator randomness, including timer and
+Applications are described in Compose-shaped YAML and packaged as OCI images.
+A seed plus the retained inputs (kernel, images, resolved configuration) regenerate
+the same execution; seeds vary guest and simulator randomness, including timer and
 interrupt timing.
 
 ## Layout
 
 | Path | Contents |
 | --- | --- |
+| `seedbox/` | Rust configuration, OCI preparation, orchestration and run/replay CLI ([API and scope](seedbox/README.md)) |
+| `examples/` | Runnable Compose applications: etcd cluster and Redis, each with a workload image |
 | `vmm/` | Rust VMM and world scheduler (`seedbox-vmm`) |
 | `kernel/` | Guest kernel patch, config and build script (Linux 6.12.112) |
-| `guest/` | Initramfs builder, init scripts, the etcd workload client, test programs |
-| `worlds/` | World configs: machines, network, scenario |
-| `batch.sh`, `campaign.sh` | Run seeds in parallel, one pinned core per world |
+| `guest/` | Generic OCI supervisor plus low-level guest fixtures and builders |
+| `worlds/` | Low-level engine fixtures and legacy fault campaigns; see [migration map](worlds/README.md) |
+| `batch.sh`, `campaign.sh` | Legacy world-file campaign runners and engine research fixtures |
 | `msr54.py` | Sets/clears the AMD Zen counter workaround (see below) |
-| `acceptance.sh`, `acceptance/` | Acceptance suite and its pinned seeds (see below) |
+| `acceptance.sh`, `acceptance/` | Engine acceptance suite and pinned seeds |
 
 ## How execution is controlled
 
@@ -49,46 +52,73 @@ interrupt timing.
 - x86-64 AMD Zen host with KVM, run as root (guest-only perf counting).
 - **The Zen SpeculativeLockMap workaround must be on** for the cores running
   simulations (MSR 0xC0011020 bit 54, rr's workaround). Without it, branch
-  counts drift on lock-heavy code (e.g. Go) and runs diverge. `batch.sh` sets
-  it on the pinned cores and their SMT siblings, then restores the originals.
+  counts drift on lock-heavy code (e.g. Go) and runs diverge. The Rust executor
+  acquires the shared CPU/SMT leases, sets
+  it with readback, then restores the exact originals after reaping its child.
+  The legacy `batch.sh` runner uses the same lease protocol.
 
-## Build and run
+## Build and run applications
 
-On the workstation, inside `nix develop`:
-
-```sh
-./kernel/build.sh                                  # -> ../artifacts/bzImage
-./guest/build-client.sh ../artifacts/client
-./guest/build-initramfs.sh ../artifacts/cluster-3.5.2.cpio guest/cluster.init \
-  ../src/etcd/v3.5.2/etcd:bin/etcd ../artifacts/client:bin/client
-(cd vmm && cargo build --release)
-```
-
-The acceptance suite also needs `cluster-3.5.3.cpio` (the same command with
-etcd v3.5.3) and the race demo:
+From the repository root on the qualified Linux host:
 
 ```sh
-"$SEEDBOX_STATIC_CC" -O2 -static -pthread -o ../artifacts/race guest/race.c
-./guest/build-initramfs.sh ../artifacts/race.cpio guest/race.init ../artifacts/race:bin/race
+nix develop ./sim
+bash sim/kernel/build.sh                            # or reuse a qualified kernel
+cargo build --release --manifest-path sim/vmm/Cargo.toml
+cargo build --release --manifest-path sim/seedbox/Cargo.toml --locked
+bash sim/guest/build-compose.sh /tmp/seedbox-compose-init
+
+seedbox=$PWD/sim/seedbox/target/release/seedbox
+vmm=$PWD/sim/vmm/target/release/seedbox-vmm
+"$seedbox" init etcd-demo --template etcd              # redis is also available
+"$seedbox" validate etcd-demo/compose.yaml
+sudo -n env PATH="$PATH" "$seedbox" run etcd-demo/compose.yaml \
+  --seed 1009 --cpu 2 --kernel /path/to/controlled/bzImage --vmm "$vmm" \
+  --guest-init /tmp/seedbox-compose-init --busybox "$SEEDBOX_BUSYBOX"
+
+sudo -n "$seedbox" inspect .seedbox/runs/ATTEMPT --json
+sudo -n "$seedbox" replay .seedbox/runs/ATTEMPT --cpu 2
 ```
 
-From `~/seedbox-sim`:
+Choose an available CPU; CPU 2 is illustrative. You can also run the checked-in
+[`examples/etcd/compose.yaml`](examples/etcd/compose.yaml) or
+[`examples/redis/compose.yaml`](examples/redis/compose.yaml) directly. Their
+Dockerfiles package the workload; image defaults and Compose overrides launch the
+services. No application-specific initramfs, boot arguments, or world JSON needs
+to be authored. The existing etcd acknowledgement-ledger checker is unchanged and
+now lives with its Compose example. Generated projects include their own source.
 
-```sh
-sim/batch.sh sim/worlds/kill-3.5.2.json demo "7 7"         # two fresh runs of one seed
-sim/campaign.sh sim/worlds/kill-3.5.2.json hunt 1000 8     # seeds until a failure, up to 8 h
-```
+Each attempt retains exact image manifests/layers, kernel, guest archives,
+configuration, engine, logs and result. Replay uses the retained content store
+without registry pulls or builds. PASS, FAIL, ERROR, TIMEOUT and INCOMPLETE are
+separate results; a reproduced FAIL is a successful MATCH. `--full-state` adds
+per-machine RAM/register comparisons. `--margin` and `--undo` change performance without
+changing semantic identity. Application storage is private RAM-backed state for
+each run; the default is 1024 MiB per service. See [runtime instructions](seedbox/RUNTIME.md)
+for compatibility, memory sizing, root access, cancellation and the supported subset.
 
-Each batch run writes `runs/<name>-s<seed>-r<i>.json` (outcome, witness,
-timing, per-machine stats), a `.status` file with its process exit status, and
-per-machine console/management logs. Campaign batches use fresh directories
-under `runs/<name>-batch.XXXXXX/`, preserving previous attempts. `batch.sh` pins
-runs to consecutive cores from `CPU0` (default 2), runs the binary named by
-`VMM`, and starts nothing unless the counter workaround is set and reads back.
-`campaign.sh` accepts a client RESULT only with a zero process status and valid
-terminal JSON for that seed. It logs incomplete attempts as `UNRESOLVED` and
-exits nonzero. `SEEDBOX_ROOT` overrides the default `~/seedbox-sim` working
-directory for either runner.
+The [acceptance record](seedbox/ACCEPTANCE.md) includes real etcd/Redis passes,
+intentional failures, exact replays, full-state comparisons, timeout/cancellation,
+lease contention and exact MSR restoration on the workstation.
+
+## Legacy fault campaigns and engine fixtures
+
+The no-fault application definition `worlds/cluster.json` has been replaced by the
+etcd Compose example. The old `kill-3.5.2`, `kill-3.5.3` and fault-bearing `sanity`
+worlds remain reproducible through `batch.sh`/`campaign.sh` until
+[issue #3](https://github.com/gardnervickers/seedbox/issues/3) supplies the shared
+fault implementation. Compose rejects nonempty faults instead of dropping them.
+The fixed-delay and single-VM worlds below remain engine comparison fixtures;
+they have different placement and scheduling semantics from the Compose examples.
+See [the migration map](worlds/README.md) before choosing a runner.
+
+Legacy batches pin runs to consecutive cores from `CPU0` (default 2), use `VMM`,
+and require shared core leases and verified counter workaround state. Campaigns
+retain separate attempt directories, accept a client result only alongside valid
+terminal JSON and zero process status, and classify incomplete attempts as
+UNRESOLVED. `SEEDBOX_ROOT` overrides their default `~/seedbox-sim` directory.
+A PMU overshoot aborts a run; these campaigns may retry with a larger
+`SEEDBOX_MARGIN`. A deterministic clock bound error is not fixed by changing it.
 
 Stop placement settings affect speed only, never results:
 
@@ -107,7 +137,11 @@ must also fit in the hard stop. Crossing it fails with `clock bound exceeded`;
 no device I/O cost is clamped away, and a larger PMU margin does not fix or
 retry this error.
 
-## Acceptance suite
+## Engine acceptance suite
+
+This suite currently uses legacy world fixtures and preserves their fault coverage.
+Build both versioned cluster archives as described in [the migration map](worlds/README.md),
+plus `race.cpio` from `guest/race.c` and `guest/race.init`, before hardware tiers.
 
 `sim/acceptance.sh TIER` runs the checks from
 [issue #4](https://github.com/gardnervickers/seedbox/issues/4) in one command,
@@ -204,11 +238,10 @@ runner-neutral jobs: a scenario, a seed, a witness mode (`exits` or
 `full_state`), performance-only settings, and an optional alternative engine.
 They judge normalized results. Only `acceptance/launcher.py` knows about
 `batch.sh`. The orchestration API from PR #17 is a Rust library, so Python
-cannot call it directly. Once its `seedbox run`/`replay` commands exist, a
-second launcher can run each job through them and read the results with
+cannot call it directly. Its `seedbox run`/`replay` commands now exist; the Compose runtime suite in
+`seedbox/tests/` exercises them. A second launcher can read results with
 `seedbox inspect --json`. It would map the same fields to a simulation config,
-`WitnessMode`, performance parameters and cross-engine execution. When the Rust
-path becomes the main way to run simulations, the plan is to port the checks to
+`WitnessMode`, performance parameters and cross-engine execution. Porting the fault jobs also depends on #3. The eventual migration target is
 Rust integration tests over `Orchestrator::run`/`replay`. They are pure
 comparisons over jobs and results, and `acceptance/pins.json` carries over.
 

@@ -13,6 +13,7 @@
               cpio gzip curl jq python3 gnumake bc bison flex perl
             ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               elfutils elfutils.dev openssl.dev pkgsStatic.stdenv.cc iproute2 go
+              skopeo umoci podman
             ];
           } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
             SEEDBOX_STATIC_CC = "${pkgs.pkgsStatic.stdenv.cc}/bin/x86_64-unknown-linux-musl-cc";

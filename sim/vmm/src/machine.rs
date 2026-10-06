@@ -109,6 +109,10 @@ pub struct Machine {
     pub branches: u64,
     tsc_latch: u64,
     pub state: State,
+    /// Only an explicit guest exit-port write is a workload exit. KVM errors
+    /// which also stop the machine must not be mistaken for application status.
+    pub guest_exit_code: Option<u8>,
+    pub guest_init_error: Option<u8>,
     pic: Pic,
     pit: Pit,
     rtc_index: u8,
@@ -326,6 +330,8 @@ impl Machine {
             branches: 0,
             tsc_latch: 0,
             state: State::Running,
+            guest_exit_code: None,
+            guest_init_error: None,
             pic: Pic::new(),
             pit: Pit::default(),
             rtc_index: 0,
@@ -862,9 +868,9 @@ impl Machine {
                                     String::from_utf8_lossy(&self.com1.out[line_start..])
                                 );
                             }
-                            self.com1.write(port - 0x3f8, v)
+                            self.com1.write(port - 0x3f8, v)?
                         }
-                        0x2f8..=0x2ff => self.com2.write(port - 0x2f8, v),
+                        0x2f8..=0x2ff => self.com2.write(port - 0x2f8, v)?,
                         0x20 | 0x21 | 0xa0 | 0xa1 => {
                             self.pic.write(port, v);
                             if self.pv {
@@ -904,10 +910,18 @@ impl Machine {
                             }
                         }
                         0x70 => self.rtc_index = v & 0x7f,
-                        0xe9 => self.com1.out.push(v),
+                        0xe9 => self.com1.transmit(v)?,
                         0xf4 => {
+                            self.guest_exit_code = Some(v);
                             self.state = State::Exited(v);
                             self.record(b'X', v as u64);
+                            self.set_stepping(false)?;
+                            return Ok(Stop::Exited);
+                        }
+                        0xf5 => {
+                            self.guest_init_error = Some(v);
+                            self.state = State::Exited(v);
+                            self.record(b'E', v as u64);
                             self.set_stepping(false)?;
                             return Ok(Stop::Exited);
                         }

@@ -1,6 +1,7 @@
 .DS_Store
 **/target/
 **/.direnv/
+**/.seedbox/
 **/__pycache__/
 research/runs/
 research/measurement.lock
