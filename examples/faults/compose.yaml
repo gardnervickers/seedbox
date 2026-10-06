@@ -1,0 +1,19 @@
+name: synthetic-fault-fixed
+services:
+  server:
+    build: ./workload
+    command: [server, --listen, "0.0.0.0:7000", --state, /data/kv.log]
+  client:
+    build: ./workload
+    command: [client, --listen, "0.0.0.0:7001", --address, "server:7000"]
+  scenario:
+    build: ./workload
+    command: [scenario, --control-address, "client:7001"]
+x-seedbox:
+  version: 1
+  seed: 1009
+  limits: {simulated_time: 30s, wall_time: 10m}
+  network: {latency: 1ms, jitter: 200us}
+  schedule: {timer_jitter: 1ms, stop_tolerance: 2ms}
+  control: {service: scenario}
+  check: {service: scenario, exit_code: 0}

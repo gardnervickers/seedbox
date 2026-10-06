@@ -31,12 +31,11 @@ binary; they are not needed for Compose runs. Both old and new
 executors share the CPU/SMT lease protocol. The old workload build helper reads
 the checker source now housed in `examples/etcd/workload`.
 
-Compose rejects nonempty `x-seedbox.faults` until #3 supplies qualified shared
-fault operations and effect-time acknowledgements. The legacy hunts remain
-available; their bug-finding performance is not established by the new examples.
+Compose controllers use the [runtime fault API](../../python/README.md)
+with correlated process acknowledgments and overlapping partition handles.
+The [recovery examples](../../examples/faults/README.md) retain their own inputs
+and results. These low-level fixtures remain available with separate identities.
 
+Acceptance workloads live under `harness/acceptance/workloads/`; their Python
+scenario drivers own faults, workload phases and verification.
 
-The acceptance suite now prepares its own OCI workloads from YAML under
-`harness/acceptance/workloads/`; it does not use these hand-built guest archives.
-The Python suite retains the fault schedules and assertions. These world files
-remain available for existing low-level campaigns and recorded research.

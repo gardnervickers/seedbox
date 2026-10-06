@@ -4,10 +4,11 @@
 
 use crate::boundary::{advance_time, hard_limit, missed_soft_stop};
 use crate::counter::Counter;
+use crate::virtio_console::VirtioConsole;
 use crate::devices::{rtc_read, Pic, Pit, Uart};
 use crate::stepper::Planner;
 use crate::undo::Undo;
-use crate::virtio_net::VirtioNet;
+use crate::virtio_net::{ReceiveOutcome, VirtioNet};
 use kvm_bindings::*;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 use sha2::{Digest, Sha256};
@@ -17,6 +18,8 @@ use std::time::Instant;
 pub const TIME_PAGE: u64 = 0xd000_0000;
 pub const NET_MMIO: u64 = 0xd000_1000;
 pub const NET_IRQ: u8 = 5;
+pub const CHANNEL_MMIO: u64 = 0xd1000000;
+pub const CHANNEL_IRQ: u8 = 6;
 const INITRD_ADDR: usize = 0x0800_0000;
 /// Default distance (in branches) before a stop target at which we stop
 /// trusting the overflow interrupt and advance by breakpoints. It must exceed
@@ -51,6 +54,7 @@ pub struct BootSpec<'a> {
     pub mem: usize,
     pub rng_seed: [u8; 32],
     pub mac: Option<[u8; 6]>,
+    pub control_channel: bool,
     /// Final overflow margin for undo-able precise stops; 0 disables them.
     pub undo_margin: u64,
 }
@@ -69,6 +73,8 @@ pub enum Stop {
     Exited,
     /// The guest produced frames; the world must re-plan before continuing.
     Sent,
+    /// A committed management request/effect requires global causal replanning.
+    Control,
 }
 
 #[derive(Default, Debug)]
@@ -118,7 +124,13 @@ pub struct Machine {
     rtc_index: u8,
     pub com1: Uart,
     pub com2: Uart,
+    pub fault_effects: Vec<(u32, u64, bool)>,
+    pub control_requests: Vec<(u64, Vec<u8>)>,
+    management_framer: crate::control::ManagementFramer,
     pub net: Option<VirtioNet>,
+    pub channel: Option<VirtioConsole>,
+    pub control_dma_bytes: u64,
+    pub control_tx_bytes: u64,
     stepping: bool,
     planner: Option<Planner>,
     exit_req: bool,
@@ -252,7 +264,11 @@ impl Machine {
         unsafe {
             vm.set_user_memory_region(kvm_userspace_memory_region {
                 slot: 0,
-                flags: if spec.undo_margin > 0 { KVM_MEM_LOG_DIRTY_PAGES } else { 0 },
+                flags: if spec.undo_margin > 0 {
+                    KVM_MEM_LOG_DIRTY_PAGES
+                } else {
+                    0
+                },
                 guest_phys_addr: 0,
                 memory_size: mem_size as u64,
                 userspace_addr: mem as u64,
@@ -337,7 +353,13 @@ impl Machine {
             rtc_index: 0,
             com1: Uart::default(),
             com2: Uart::default(),
+            fault_effects: Vec::new(),
+            control_requests: Vec::new(),
+            management_framer: crate::control::ManagementFramer::default(),
             net,
+            channel: spec.control_channel.then(VirtioConsole::new),
+            control_dma_bytes:0,
+            control_tx_bytes:0,
             stepping: false,
             planner: None,
             exit_req: false,
@@ -405,15 +427,37 @@ impl Machine {
         }
     }
 
-    pub fn deliver_frame(&mut self, frame: &[u8]) -> bool {
+    /// Strict runtime delivery requires all bytes DMA into posted guest buffers.
+    pub fn deliver_control(&mut self,bytes:&[u8])->Result<(),String> {
+        let memory=unsafe {std::slice::from_raw_parts_mut(self.mem,self.mem_size)};
+        let channel=self.channel.as_mut().ok_or("runtime control channel absent")?;
+        let received=channel.receive(memory,bytes)?;
+        let complete=received.accepted && channel.pending_rx_bytes()==0;
+        self.take_dma();if received.irq {self.pic.raise(CHANNEL_IRQ);}
+        if !complete {return Err("control transport receive capacity insufficient at exact delivery time".into())}
+        self.control_dma_bytes+=bytes.len() as u64;Ok(())
+    }
+    fn channel_output(&mut self,bytes:&[u8])->Result<bool,String> {
+        if self.com2.output_limit.is_some_and(|limit|self.com2.out.len().checked_add(bytes.len()).is_none_or(|n|n>limit)){return Err("guest control output limit exceeded".into())}
+        if let Some(file)=self.com2.output_file.as_mut() {use std::io::Write;file.write_all(bytes).map_err(|e|format!("control log: {e}"))?;}
+        self.com2.out.extend_from_slice(bytes);self.control_tx_bytes+=bytes.len() as u64;
+        let frames=self.management_framer.receive(bytes)?;let stop=!frames.is_empty();
+        self.control_requests.extend(frames.into_iter().map(|f|(self.time,f)));Ok(stop)
+    }
+
+    pub fn deliver_frame(&mut self, frame: &[u8]) -> ReceiveOutcome {
         let (mem, size) = (self.mem, self.mem_size);
         let m = unsafe { std::slice::from_raw_parts_mut(mem, size) };
-        let irq = self.net.as_mut().map(|n| n.receive(m, frame));
+        let outcome = self
+            .net
+            .as_mut()
+            .map(|n| n.receive(m, frame))
+            .unwrap_or_default();
         self.take_dma();
-        if irq == Some(true) {
+        if outcome.irq {
             self.raise_net();
         }
-        irq.is_some()
+        outcome
     }
 
     fn page_get(&self, i: usize) -> u64 {
@@ -450,6 +494,9 @@ impl Machine {
                 }
                 None => n.dirty.clear(),
             }
+        }
+        if let Some(channel)=self.channel.as_mut() {
+            match self.undo.as_mut() {Some(undo)=>{for (address,length) in channel.dirty.drain(..){undo.mark(address,length);}},None=>channel.dirty.clear()}
         }
     }
 
@@ -733,8 +780,14 @@ impl Machine {
                 delta > remaining || (interrupted && !self.stepping && delta == remaining);
             // With the yield window closed, a run must not pass `soft`: a
             // syscall there would have been the stop.
-            let soft_miss =
-                missed_soft_stop(windowed, window, delta, rem_soft, interrupted, self.stepping);
+            let soft_miss = missed_soft_stop(
+                windowed,
+                window,
+                delta,
+                rem_soft,
+                interrupted,
+                self.stepping,
+            );
             if (overshoot || soft_miss) && self.undo.as_ref().is_some_and(|u| u.valid) {
                 if overshoot && self.fm >= UNDO_MAX {
                     return Err(format!(
@@ -847,6 +900,7 @@ impl Machine {
                         0
                     };
                     let after_io = advance_time(self.time, charge, hard)?;
+                    let mut control_stop = false;
                     match port {
                         0x3f8..=0x3ff => {
                             if port == 0x3f8
@@ -870,7 +924,23 @@ impl Machine {
                             }
                             self.com1.write(port - 0x3f8, v)?
                         }
-                        0x2f8..=0x2ff => self.com2.write(port - 0x2f8, v)?,
+                        0x2f8..=0x2ff => {
+                            if self.channel.is_some() {self.com2.write(port-0x2f8,v)?;} else if let Some(line) =
+                                self.management_framer
+                                    .write(&mut self.com2, port - 0x2f8, v)?
+                            {
+                                self.control_requests.push((after_io, line));
+                                control_stop = true;
+                            }
+                        }
+                        0xf6 | 0xf7 => {
+                            let id = u32::from_le_bytes(
+                                data.try_into()
+                                    .map_err(|_| "fault effect must be a 32-bit I/O write")?,
+                            );
+                            self.fault_effects.push((id, after_io, port == 0xf6));
+                            control_stop = true;
+                        }
                         0x20 | 0x21 | 0xa0 | 0xa1 => {
                             self.pic.write(port, v);
                             if self.pv {
@@ -930,6 +1000,10 @@ impl Machine {
                     self.record(b'O', (port as u64) << 8 | v as u64);
                     self.serial_edges();
                     self.time = after_io;
+                    if control_stop {
+                        self.set_stepping(false)?;
+                        return Ok(Stop::Control);
+                    }
                 }
                 Ok(VcpuExit::IoIn(port, data)) => {
                     self.stats.pio += 1;
@@ -968,12 +1042,14 @@ impl Machine {
                 }
                 Ok(VcpuExit::MmioRead(addr, data)) => {
                     self.stats.mmio += 1;
-                    let v = match self.net.as_mut() {
+                    let v = if (CHANNEL_MMIO..CHANNEL_MMIO+0x1000).contains(&addr) {
+                        self.channel.as_mut().map(|channel|channel.read(addr-CHANNEL_MMIO)).unwrap_or(0)
+                    } else {match self.net.as_mut() {
                         Some(n) if (NET_MMIO..NET_MMIO + 0x1000).contains(&addr) => {
                             n.read(addr - NET_MMIO)
                         }
                         _ => 0,
-                    };
+                    }};
                     let bytes = v.to_le_bytes();
                     let len = data.len().min(4);
                     data[..len].copy_from_slice(&bytes[..len]);
@@ -986,6 +1062,14 @@ impl Machine {
                     v[..len].copy_from_slice(&data[..len]);
                     let v = u32::from_le_bytes(v);
                     self.record(b'w', addr << 32 | v as u64);
+                    if (CHANNEL_MMIO..CHANNEL_MMIO+0x1000).contains(&addr) {
+                        let memory=unsafe{std::slice::from_raw_parts_mut(self.mem,self.mem_size)};
+                        if let Some(channel)=self.channel.as_mut() {
+                            let output=channel.write(memory,addr-CHANNEL_MMIO,v)?;
+                            self.take_dma();if output.irq {self.pic.raise(CHANNEL_IRQ);}
+                            if self.channel_output(&output.bytes)? {self.set_stepping(false)?;return Ok(Stop::Control);}
+                        }
+                    }
                     if (NET_MMIO..NET_MMIO + 0x1000).contains(&addr) {
                         let (mem, size) = (self.mem, self.mem_size);
                         let m = unsafe { std::slice::from_raw_parts_mut(mem, size) };
@@ -1044,8 +1128,8 @@ impl Machine {
         let mut h = Sha256::new();
         for v in [
             r.rax, r.rbx, r.rcx, r.rdx, r.rsi, r.rdi, r.rsp, r.rbp, r.r8, r.r9, r.r10, r.r11,
-            r.r12, r.r13, r.r14, r.r15, r.rip, r.rflags, s.cr0, s.cr3, s.cr4, s.efer,
-            s.cr2, s.cr8, s.fs.base, s.gs.base, s.tr.base, s.gdt.base, s.idt.base,
+            r.r12, r.r13, r.r14, r.r15, r.rip, r.rflags, s.cr0, s.cr3, s.cr4, s.efer, s.cr2, s.cr8,
+            s.fs.base, s.gs.base, s.tr.base, s.gdt.base, s.idt.base,
         ] {
             h.update(v.to_le_bytes());
         }
@@ -1092,12 +1176,23 @@ impl Machine {
         ));
         // KERNEL_GS_BASE, STAR, LSTAR, CSTAR, SFMASK, TSC_AUX, PAT, SYSENTER_*.
         let index = [
-            0xc000_0102u32, 0xc000_0081, 0xc000_0082, 0xc000_0083, 0xc000_0084, 0xc000_0103,
-            0x277, 0x174, 0x175, 0x176,
+            0xc000_0102u32,
+            0xc000_0081,
+            0xc000_0082,
+            0xc000_0083,
+            0xc000_0084,
+            0xc000_0103,
+            0x277,
+            0x174,
+            0x175,
+            0x176,
         ];
         let entries: Vec<kvm_msr_entry> = index
             .iter()
-            .map(|&index| kvm_msr_entry { index, ..Default::default() })
+            .map(|&index| kvm_msr_entry {
+                index,
+                ..Default::default()
+            })
             .collect();
         let mut msrs = Msrs::from_entries(&entries).unwrap();
         let n = self.vcpu.get_msrs(&mut msrs).unwrap();

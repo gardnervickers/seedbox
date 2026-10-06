@@ -14,6 +14,10 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(seedbox_embedded_init)");
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest/compose-init.c");
     println!("cargo::rerun-if-changed={}", source.display());
+    println!(
+        "cargo::rerun-if-changed={}",
+        source.with_file_name("control.h").display()
+    );
     println!("cargo::rerun-if-env-changed=SEEDBOX_STATIC_CC");
     println!("cargo::rerun-if-env-changed=PATH");
 

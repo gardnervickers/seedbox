@@ -268,6 +268,7 @@ impl Orchestrator {
                 limits: &record.identity.configuration.limits,
                 network: &record.identity.configuration.network,
                 schedule: &record.identity.configuration.schedule,
+                control: record.identity.configuration.control.as_ref(),
                 check: &record.identity.configuration.check,
                 prepared: &record.identity.inputs,
                 artifacts: &artifacts,
@@ -368,17 +369,12 @@ fn validate_inputs(identity: &RunIdentity, executor: &dyn ExecutionBackend) -> R
 
 fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome> {
     let simulation = &identity.configuration;
-    for fault in &report.faults {
-        if fault.applied_at_ns < fault.requested_at_ns
-            || !simulation.services.contains_key(&fault.service)
-        {
-            return Err(Error::Execution(
-                "fault effect must acknowledge a known service at or after its request time".into(),
-            ));
+    // A backend stopping early may not have a complete effect transcript.
+    // Preserve its termination reason and its specific diagnostic first.
+    match report.reason {
+        StopReason::Cancelled | StopReason::WallTimeLimit | StopReason::Quiescent => {
+            return Ok(Outcome::Incomplete)
         }
-    }
-    Ok(match report.reason {
-        StopReason::SimulatedTimeLimit => Outcome::Timeout,
         StopReason::Error => {
             return Err(Error::Execution(
                 report
@@ -387,43 +383,50 @@ fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome>
                     .unwrap_or("backend reported an error".into()),
             ))
         }
-        StopReason::WallTimeLimit | StopReason::Cancelled | StopReason::Quiescent => {
-            Outcome::Incomplete
+        StopReason::SimulatedTimeLimit => return Ok(Outcome::Timeout),
+        StopReason::Completed => {}
+    }
+    for fault in &report.faults {
+        if fault.applied_at_ns < fault.requested_at_ns
+            || !(simulation.services.contains_key(&fault.service)
+                || (fault.service.is_empty()
+                    && matches!(fault.action.as_str(), "partition" | "heal")))
+        {
+            return Err(Error::Execution(
+                "fault effect must acknowledge a known service at or after its request time".into(),
+            ));
         }
-        StopReason::Completed => {
-            let Some(exit) = &report.workload_exit else {
-                return Ok(Outcome::Incomplete);
-            };
-            if exit.service != simulation.check.service {
-                return Err(Error::Execution(
-                    "result is for a different workload service".into(),
-                ));
-            }
-            if report.witness.is_none() {
-                return Err(Error::Execution(
-                    "completed workload is missing its execution witness".into(),
-                ));
-            }
-            if identity.inputs.profile.witness_mode == WitnessMode::FullState
-                && report.full_state.is_none()
-            {
-                return Err(Error::Execution(
-                    "requested full-state evidence is missing".into(),
-                ));
-            }
-            if let Some(state) = &report.full_state {
-                if state.keys().ne(identity.inputs.guests.keys()) {
-                    return Err(Error::Execution(
-                        "full-state digests must cover exactly the configured machines".into(),
-                    ));
-                }
-            }
-            if exit.code == simulation.check.exit_code {
-                Outcome::Pass
-            } else {
-                Outcome::Fail
-            }
+    }
+    let Some(exit) = &report.workload_exit else {
+        return Ok(Outcome::Incomplete);
+    };
+    if exit.service != simulation.check.service {
+        return Err(Error::Execution(
+            "result is for a different workload service".into(),
+        ));
+    }
+    if report.witness.is_none() {
+        return Err(Error::Execution(
+            "completed workload is missing its execution witness".into(),
+        ));
+    }
+    if identity.inputs.profile.witness_mode == WitnessMode::FullState && report.full_state.is_none()
+    {
+        return Err(Error::Execution(
+            "requested full-state evidence is missing".into(),
+        ));
+    }
+    if let Some(state) = &report.full_state {
+        if state.keys().ne(identity.inputs.guests.keys()) {
+            return Err(Error::Execution(
+                "full-state digests must cover exactly the configured machines".into(),
+            ));
         }
+    }
+    Ok(if exit.code == simulation.check.exit_code {
+        Outcome::Pass
+    } else {
+        Outcome::Fail
     })
 }
 

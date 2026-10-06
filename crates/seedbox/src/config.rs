@@ -10,6 +10,12 @@ use std::{
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct Control {
+    pub service: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Simulation {
     pub name: String,
     pub source: PathBuf,
@@ -17,6 +23,8 @@ pub struct Simulation {
     pub configs: BTreeMap<String, PathBuf>,
     pub network: Network,
     pub schedule: Schedule,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<Control>,
     pub limits: Limits,
     pub check: Check,
     pub seed: Option<u64>,
@@ -299,7 +307,7 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
         get(top, "x-seedbox"),
         "$.x-seedbox",
         &[
-            "version", "seed", "limits", "network", "schedule", "faults", "check",
+            "version", "seed", "limits", "network", "schedule", "faults", "control", "check",
         ],
     )?;
     if get(ext, "version").as_u64() != Some(1) {
@@ -349,14 +357,18 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
             schedule.stop_tolerance_ns = duration(v, "$.x-seedbox.schedule.stop_tolerance", true)?;
         }
     }
-    if let Some(faults) = ext.get("faults") {
-        if !sequence(faults, "$.x-seedbox.faults")?.is_empty() {
-            return invalid(
-                "$.x-seedbox.faults",
-                "fault execution is not wired yet (issue #3); omit or use []",
-            );
-        }
-    }
+    reject_static_faults(ext.get("faults"))?;
+    let control = ext
+        .get("control")
+        .map(|raw| {
+            let options = fields(raw, "$.x-seedbox.control", &["service"])?;
+            let service = text(get(options, "service"), "$.x-seedbox.control.service")?;
+            if !services.contains_key(&service) {
+                return invalid("$.x-seedbox.control.service", "unknown controller service");
+            }
+            Ok(Control { service })
+        })
+        .transpose()?;
     let raw_check = fields(
         get(ext, "check"),
         "$.x-seedbox.check",
@@ -367,6 +379,12 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
         return invalid(
             "$.x-seedbox.check.service",
             format!("unknown service {check_service:?}"),
+        );
+    }
+    if control.as_ref().is_some_and(|c| c.service != check_service) {
+        return invalid(
+            "$.x-seedbox.control.service",
+            "controller must also be the check service",
         );
     }
     let exit_code = match raw_check.get("exit_code") {
@@ -393,6 +411,7 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
         configs,
         network,
         schedule,
+        control,
         limits,
         check: Check {
             service: check_service,
@@ -400,6 +419,18 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
         },
         seed,
     })
+}
+
+fn reject_static_faults(raw: Option<&Value>) -> Result<()> {
+    if let Some(raw) = raw {
+        if !sequence(raw, "$.x-seedbox.faults")?.is_empty() {
+            return invalid(
+                "$.x-seedbox.faults",
+                "static schedules are unsupported; use the in-world control RPC API",
+            );
+        }
+    }
+    Ok(())
 }
 
 fn validation(path: &str, message: &str) -> Error {

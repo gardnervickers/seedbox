@@ -89,16 +89,17 @@ edit(
 )
 edit("drivers/clocksource/i8253.c", "#include <linux/i8253.h>\n", "#include <linux/i8253.h>\n#include <asm/seedbox.h>\n")
 
-# virtio-mmio interrupt status from the shared page instead of two MMIO exits.
+# Only the network device uses the shared-page ISR fast path. Other virtio
+# devices have independent interrupt status registers.
 edit(
     "drivers/virtio/virtio_mmio.c",
     "\tstatus = readl(vm_dev->base + VIRTIO_MMIO_INTERRUPT_STATUS);\n"
     "\twritel(status, vm_dev->base + VIRTIO_MMIO_INTERRUPT_ACK);\n",
-    "\tif (seedbox_page) {\n\t\tstatus = READ_ONCE(seedbox_page->net_isr);\n\t\tWRITE_ONCE(seedbox_page->net_isr, 0);\n\t} else {\n"
+    "\tif (seedbox_page && vm_dev->vdev.id.device == VIRTIO_ID_NET) {\n\t\tstatus = READ_ONCE(seedbox_page->net_isr);\n\t\tWRITE_ONCE(seedbox_page->net_isr, 0);\n\t} else {\n"
     "\t\tstatus = readl(vm_dev->base + VIRTIO_MMIO_INTERRUPT_STATUS);\n"
     "\t\twritel(status, vm_dev->base + VIRTIO_MMIO_INTERRUPT_ACK);\n\t}\n",
 )
-edit("drivers/virtio/virtio_mmio.c", "#include <linux/virtio_ring.h>\n", "#include <linux/virtio_ring.h>\n#include <asm/seedbox.h>\n")
+edit("drivers/virtio/virtio_mmio.c", "#include <linux/virtio_ring.h>\n", "#include <linux/virtio_ring.h>\n#include <linux/virtio_ids.h>\n#include <asm/seedbox.h>\n")
 
 # CR4.TSD must stay set for every task.
 edit(

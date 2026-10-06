@@ -12,7 +12,8 @@ intentional-failure replays on the supported workstation. Full-state replay,
 changed-margin replay, deterministic timeout, wall expiry, SIGTERM cancellation,
 lease contention and exact MSR restoration were also exercised. See the
 [acceptance record](../../docs/acceptance.md) and [runtime instructions](../../docs/runtime.md) for exact
-inputs and limits. Nonempty fault schedules remain rejected pending #3.
+inputs and limits. The runtime process and network API is described in
+[the fault operations section](#structured-faults) and [recovery examples](../../examples/faults/README.md).
 
 ## Build and validate
 
@@ -60,7 +61,8 @@ not establish image/kernel compatibility; preparation must check that separately
 | `x-seedbox.network` | Optional `latency` (default `1ms`) and `jitter` (default `0ns`). Jitter must be less than latency. |
 | `x-seedbox.schedule` | Optional `timer_jitter` and `stop_tolerance`, each defaulting to `0ns`. These are semantic schedule exploration settings. |
 | `x-seedbox.check` | Required known `service` and optional `exit_code` (default `0`, range 0–255). |
-| `x-seedbox.faults` | Only omitted or `[]` for now; nonempty faults explicitly fail pending #3 integration. |
+| `x-seedbox.control` | Optional `{service: scenario}` selects the guest controller for the runtime RPC API. |
+| `x-seedbox.faults` | Omitted or `[]` only. Fault operations are issued through the runtime API; declarative schedules are future work. |
 
 The current VMM may deliver scheduled events/frames up to `early = min(latency/2, stop_tolerance)` early, never late. Effective one-way delay lies in `[latency - early, latency + jitter]`. Timer jitter and stop tolerance are retained in the simulation identity and passed explicitly to the executor.
 
@@ -197,10 +199,55 @@ unknown services are rejected.
 The draft run-manifest format is now version 2; earlier version 1 records are not
 migrated. Compose authoring remains `x-seedbox.version: 1`.
 
+## Structured faults
+
+The fault API is a versioned RPC interface, with a Python binding for ordinary
+scenario programs running inside the simulated world. Select a controller with
+`x-seedbox.control: {service: scenario}`. Compose launches the services; Python
+issues operations after observing application progress:
+
+```python
+from seedbox import World
+
+with World.connect() as world:
+    wait_for_acknowledged_writes(32)  # Application-specific readiness/progress.
+    world.stop("server")
+    world.sleep(1)
+    world.restart("server")
+    wait_for_server_ready()
+    cut = world.partition(["client"], ["server"])
+    world.sleep(3)
+    world.heal(cut)
+    check_acknowledged_values()
+```
+
+These application helpers are illustrative; the [working Python example](../../examples/faults/README.md)
+implements them over real TCP. The controller is outside the fault model: faults
+cannot stop it or cut its links, and management messages do not use the faulted
+application network. Its normal completion determines the configured check outcome.
+
+Operations validate retained service/machine targets. Stop waits for process-group
+termination and reap; restart waits for successful exec. Partition returns an
+independent opaque handle. A link remains cut until all applicable handles are
+healed. Already routed packets stay queued; cuts drop subsequent sends.
+
+The RPC uses committed guest boundaries and fixed simulated delivery latency.
+Request admission and reply delivery use exact stops, even with ordinary packet
+early delivery enabled. Replies contain request, admission, effect and delivery
+timestamps. Missing/rejected supervisor effects are infrastructure errors.
+
+Replay runs the retained controller program again and compares the resulting
+history and witness. `inspect()` exposes topology, machine state, active handles
+and packet counters. `delivered` counts receiver NIC acceptance, including bounded
+backlog, independently of IRQ notification; full-backlog/unready drops are separate.
+
+See the [Python API](../../python/README.md) and [public wire protocol](../../python/PROTOCOL.md)
+for custom language bindings. Future declarative tools can call this same API.
+No control configuration preserves the prior no-control serialization/witness path.
+
 ## Follow-on scope
 
-The existing seeded fault hunts remain on the legacy runner until #3 provides
-scoped fault operations with qualified effect times. Multi-core campaign dispatch,
-whole-machine persistent storage, broad guest image qualification (#5), and the
-full acceptance matrix (#4) are separate work. The supported path runs one
-service per VM, with explicit host/runtime inputs and RAM-backed storage.
+The legacy fixtures retain their own pinned inputs and runner. Multi-core campaign
+dispatch, whole-machine persistent storage, and broad guest image qualification
+are separate work. The supported Compose path runs one service per VM with
+explicit host/runtime inputs and RAM-backed storage.

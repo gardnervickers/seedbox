@@ -104,6 +104,7 @@ pub struct ExecutionRequest<'a> {
     pub limits: &'a Limits,
     pub network: &'a Network,
     pub schedule: &'a Schedule,
+    pub control: Option<&'a crate::config::Control>,
     pub check: &'a Check,
     pub prepared: &'a PreparedInputs,
     pub artifacts: &'a BTreeMap<ContentDigest, PathBuf>,
@@ -147,6 +148,7 @@ pub struct FaultEvent {
     pub requested_at_ns: u64,
     /// Guest virtual time of the acknowledged effect, not request/receipt time.
     pub applied_at_ns: u64,
+    /// Empty for network effects, which have no single service target.
     pub service: String,
     pub action: String,
     pub detail: String,

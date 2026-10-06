@@ -57,9 +57,12 @@ seedbox=./target/release/seedbox
 ```
 
 Every input has a default; `seedbox help run` lists them with their overrides.
-The kernel is found in `$SEEDBOX_ARTIFACTS`, `./artifacts` or
-`~/seedbox-sim/artifacts` (also in the invoking user's home under sudo), the VMM
-next to `seedbox`, the guest supervisor inside `seedbox`, and BusyBox through
+The kernel is found in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`,
+`./artifacts` or `~/seedbox-sim/artifacts` (also in the invoking user's home
+under sudo). The VMM is found next to an installed `seedbox`, then in this
+checkout's `cargo build-vmm` output, then on `PATH`. A `seedbox` inside cargo's
+`target/` directories, like the one above, uses the `cargo build-vmm` output.
+The guest supervisor is built into `seedbox`, and BusyBox comes from
 `SEEDBOX_BUSYBOX`. A missing input fails before preparation starts and names
 every location searched.
 
@@ -126,6 +129,7 @@ From the repository root in `nix develop`:
 bash crates/seedbox/tests/accept-oci.sh
 bash crates/seedbox/tests/accept-runtime.sh KERNEL CPU FRESH_OUTPUT_DIRECTORY
 bash crates/seedbox/tests/accept-runtime.sh KERNEL CPU ANOTHER_FRESH_DIRECTORY lifecycle
+bash crates/seedbox/tests/accept-runtime.sh KERNEL CPU FAULT_OUTPUT_DIRECTORY faults
 ```
 
 The OCI suite builds/tests as the current user and invokes only its final import
@@ -134,9 +138,42 @@ whiteouts, symlinks and build-context filtering. It does not start guests.
 The default runtime suite runs both application examples and their intentional
 failure controls, then replays each. The lifecycle suite checks full-state and
 changed-margin/undo replay, simulated timeout, wall expiry and SIGTERM cancellation.
-Both runtime suites start KVM guests, temporarily apply the scoped MSR workaround,
+The `faults` mode uses a Python controller and synthetic key/value services to verify acknowledged-write
+retention across process restarts, overlapping partition healing, and retained
+replay. Its deliberately forgetful variant must fail after restart and pass
+without it. Missing and rejected effect acknowledgments must produce ERROR.
+All runtime modes start KVM guests, temporarily apply the scoped MSR workaround,
 and compare original MSR readbacks after every execution. Choose available CPU/SMT
 lanes; contention fails without taking over another run's lease.
 
-Fault authoring remains disabled pending #3 integration and effect-time validation.
-The legacy fault campaigns are retained as described in [the migration map](../harness/worlds/README.md).
+The guest fault RPC uses the same preparation, execution and retained replay
+path; replay executes the retained Python controller again. See [fault operations](../crates/seedbox/README.md#structured-faults) and the
+[recovery harness](../examples/faults/README.md) for the effect and packet contracts.
+The legacy fixtures remain available through [the migration map](../harness/worlds/README.md).
+
+### Guest coordination channel
+
+Prepared guests expose the `seedbox` virtio-console port to their supervisor.
+This uses shared-memory virtqueues and a dedicated device interrupt, independent
+of Ethernet partitions. Python and other bindings use the local Unix socket
+specified in [the RPC protocol](../python/PROTOCOL.md); they need no device access.
+The simulator records messages at committed guest-device boundaries. Replies
+become visible at their recorded simulated time, and device DMA participates in
+undo bookkeeping. The kernel must include `CONFIG_VIRTIO_CONSOLE`; rebuild it
+with `bash kernel/build.sh` when upgrading from the UART-based implementation.
+
+Directed network counters now distinguish NIC acceptance from drops caused by
+an unready queue or full receive backlog. This corrects the previous delivered
+counter even in runs without faults; compare counters only with that change in
+mind when allowing a different engine for replay.
+
+The fault socket exists only on the configured controller. Connections may be
+closed and reopened between completed calls; the transcript preserves both
+run-wide relay IDs and connection-local request IDs. Redundant lifecycle commands
+and commands targeting exited VMs return recoverable RPC errors. The controller
+can inspect the application exit and choose PASS or FAIL.
+
+Inspection and partition/heal counter snapshots count nominal send, drop and
+arrival times strictly before admission. A packet physically delivered in an
+early scheduler window is excluded until its nominal arrival precedes that
+boundary. Final report counters still record physical NIC acceptance totals.
