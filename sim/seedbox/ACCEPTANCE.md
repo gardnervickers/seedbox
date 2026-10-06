@@ -133,3 +133,58 @@ existing etcd checker's `go test ./...` passed in its new canonical directory.
 The two rootful OCI tests had passed separately earlier; they remain explicitly
 ignored in the ordinary portable test invocation. The legacy engine smoke/full
 fault matrix was not rerun as part of this Compose acceptance.
+
+## Rust runner migration (2026-10-06, follow-up to #17)
+
+The world-fixture suite, batch/campaign scheduler and Compose runtime assertions
+now call the shared Rust orchestration/execution interfaces. Historical
+failing-seed and witness pins were deleted; these results compare fresh runs or
+check deliberately planted failures and application invariants.
+
+Validation on Darwin and the qualified NixOS workstation:
+
+- Portable suite passed, including Rust contract/scheduler/acceptance tests,
+  shell syntax, MSR utility tests and Linux VMM unit tests. Final Rust formatting
+  and Clippy checks (`--all-targets -- -D warnings`) passed on both hosts.
+- Full fixture suite: all seven checks passed, including all 11 etcd 3.5.3
+  seeds 4000–4010 after acknowledged stop/restart effects.
+- Final smoke suite: exit/full-state replay, undo/margin invariance, race
+  exploration (three observed outcomes), atomic control, planted checker
+  failure, ordered stop/start recovery and explicit cross-engine replay passed.
+- Ignored Rust Compose integration test: Redis and etcd PASS and planted FAIL
+  runs replayed; full-state and changed-margin/undo replay, simulated timeout,
+  wall expiry and CLI SIGTERM cancellation passed. Each execution verified
+  exact MSR restoration on CPU 7 and sibling 23. An earlier CPU 8 attempt
+  correctly refused an existing lease; the successful suite used a free core.
+- Real batch seeds `1,1,2` retained three distinct attempts. A real campaign
+  ran exactly `1009,1010,1011`, with zero unresolved attempts, and stopped at
+  its three-seed cap.
+- The updated CLI successfully inspected an existing version-2 run manifest
+  retained by #17.
+
+Evidence remains under `/home/gvickers/seedbox-rust-acceptance` on NixOS:
+`acceptance-1/report.json` (full), `acceptance-final/report.json` (smoke and
+cross-engine), `runtime-3/` (16 runtime attempts), `batch-1/`, and `campaign-1/`.
+The full suite used the retained #17 VMM. The final smoke and runtime tests used
+a new build of the same VMM source, with the old binary as the explicit
+performance-only comparison. A final evidence-type relocation did not change
+execution behavior or serialized fields; portable checks passed after that edit.
+
+| Input / report | SHA-256 |
+| --- | --- |
+| Controlled kernel | `01f9c903a4754bfe9eca4c197cc3335ab8ff582944164982463518128639e0d8` |
+| Retained #17 VMM | `a55ecd4a2d3b98f9a575e461695aebabcfe22a5e36d1572bbb3ce59a558289b8` |
+| Rebuilt VMM | `c8a00e8624aa8a631acfd687631afe12764a424b197ae55f73b3fa0b3b177c06` |
+| Full report | `e3387b9ad652c9a937b7702bc1a461cb29821a84f6e3d394e85de7eb3188af1f` |
+| Final smoke report | `a66ec8194bec089861d3f7a5b9ed20c4f856d61fa5895132462125307df43ee8` |
+| Batch report | `b7e790cb225ab5a48236eb7e9687981fdaf4da3b8ee92336dd321df304236ab4` |
+| Campaign report | `b35190775914604d3ea53147337a595538f1db4523e4bb08bc2f2ed19b12d692` |
+
+The final smoke suite's before/after readbacks matched exactly on CPUs 2–6 and
+siblings 18–22 (`0x4480000000000`); the runtime readbacks matched on 7/23.
+No restoration snapshots remained in either successful suite's attempt tree.
+These report/input hashes identify this evidence; they are not acceptance pins.
+
+The migration preserves low-level world definitions and existing guest archives.
+It does not add Compose fault authoring, timestamp legacy acknowledgements, or
+migrate historical research scripts recorded against older raw output formats.

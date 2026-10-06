@@ -155,6 +155,8 @@ pub struct FaultEvent {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<ExecutionDiagnostics>,
     pub reason: StopReason,
     pub workload_exit: Option<WorkloadExit>,
     pub witness: Option<ContentDigest>,
@@ -163,4 +165,29 @@ pub struct ExecutionReport {
     pub full_state: Option<BTreeMap<String, ContentDigest>>,
     pub faults: Vec<FaultEvent>,
     pub detail: Option<String>,
+}
+
+/// Structured observations used by acceptance and campaign callers. Host timing
+/// and exit counters are diagnostic, never replay identity or equality inputs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionDiagnostics {
+    pub machine_witnesses: BTreeMap<String, ContentDigest>,
+    pub exits: BTreeMap<String, u64>,
+    pub simulated_time_ns: u64,
+    pub host_time_ns: u64,
+    pub legacy_faults: Vec<LegacyFaultObservation>,
+    pub checker_result: Option<String>,
+}
+
+/// Legacy guests acknowledge stop/start on COM2 without an effect timestamp.
+/// Keep that evidence explicit; it is never promoted to a timed FaultEvent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyFaultObservation {
+    pub member: String,
+    pub stop_ns: u64,
+    pub start_ns: u64,
+    pub stopped: bool,
+    pub restarted: bool,
 }

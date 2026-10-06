@@ -68,6 +68,8 @@ pub enum ReplayStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReplayComparison {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_witnesses_match: Option<bool>,
     pub status: ReplayStatus,
     pub outcome_matches: bool,
     pub witness_matches: Option<bool>,
@@ -87,6 +89,8 @@ pub struct RunIdentity {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<FailureKind>,
     pub run_id: ContentDigest,
     /// Distinct executions of the same identity never share output paths.
     pub attempt: String,
@@ -219,6 +223,7 @@ impl Orchestrator {
             .tempdir_in(&self.runs)?
             .keep();
         let mut record = RunRecord {
+            failure_kind: None,
             run_id,
             attempt: directory
                 .file_name()
@@ -259,6 +264,7 @@ impl Orchestrator {
                     witness: None,
                     full_state: None,
                     faults: vec![],
+                    diagnostics: None,
                     detail: Some("cancelled before execution".into()),
                 });
             }
@@ -298,6 +304,11 @@ impl Orchestrator {
                 record.report = Some(report);
             }
             Err(error) => {
+                record.failure_kind = match &error {
+                    Error::LeaseBusy(_) => Some(FailureKind::LeaseBusy),
+                    Error::Overshoot(_) => Some(FailureKind::Overshoot),
+                    _ => None,
+                };
                 record.outcome = Outcome::Error;
                 record.error = Some(error.to_string());
             }
@@ -342,14 +353,20 @@ fn validate_inputs(identity: &RunIdentity, executor: &dyn ExecutionBackend) -> R
             "execution profile does not match the recorded backend/engine/settings".into(),
         ));
     }
-    if identity
+    let image_services = identity
         .configuration
         .services
-        .keys()
-        .ne(identity.inputs.images.keys())
-    {
+        .iter()
+        .filter_map(|(name, service)| {
+            (!matches!(
+                service.source,
+                crate::config::ImageSource::BootArchive { .. }
+            ))
+            .then_some(name)
+        });
+    if image_services.ne(inputs.images.keys()) {
         return Err(Error::Integrity(
-            "prepared images must exactly match configured services".into(),
+            "prepared images must match the OCI services".into(),
         ));
     }
     if !identity
@@ -463,9 +480,33 @@ fn compare(baseline: &RunRecord, fresh: &RunRecord) -> ReplayComparison {
             ),
             _ => (None, None, false, false),
         };
+    let machine_witnesses_match = baseline
+        .report
+        .as_ref()
+        .and_then(|r| r.diagnostics.as_ref())
+        .map(|a| {
+            fresh
+                .report
+                .as_ref()
+                .and_then(|r| r.diagnostics.as_ref())
+                .is_some_and(|b| a.machine_witnesses == b.machine_witnesses)
+        });
+    let fault_history_matches = fault_history_matches
+        && baseline
+            .report
+            .as_ref()
+            .and_then(|r| r.diagnostics.as_ref())
+            .is_none_or(|a| {
+                fresh
+                    .report
+                    .as_ref()
+                    .and_then(|r| r.diagnostics.as_ref())
+                    .is_some_and(|b| a.legacy_faults == b.legacy_faults)
+            });
     let status = if !comparable {
         ReplayStatus::NotComparable
     } else if outcome_matches
+        && machine_witnesses_match != Some(false)
         && result_matches
         && witness_matches == Some(true)
         && full_state_matches != Some(false)
@@ -476,6 +517,7 @@ fn compare(baseline: &RunRecord, fresh: &RunRecord) -> ReplayComparison {
         ReplayStatus::Mismatch
     };
     ReplayComparison {
+        machine_witnesses_match,
         status,
         outcome_matches,
         witness_matches,
@@ -563,4 +605,11 @@ fn retain_logs(
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureKind {
+    LeaseBusy,
+    Overshoot,
 }

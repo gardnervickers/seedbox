@@ -72,12 +72,13 @@ fn locks(cpus: &BTreeSet<u32>, directory: &Path) -> Result<Vec<File>> {
         if !file.metadata()?.is_file() {
             return Err(Error::Execution("CPU lease is not a regular file".into()));
         }
-        // Same sorted, nonblocking flock protocol as sim/batch.py.
+        // Shared sorted, nonblocking flock protocol used by every Rust runner.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(Error::Execution(format!(
-                "CPU {cpu} lease unavailable: {}",
-                std::io::Error::last_os_error()
-            )));
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                return Err(Error::LeaseBusy(*cpu));
+            }
+            return Err(error.into());
         }
         files.push(file);
     }

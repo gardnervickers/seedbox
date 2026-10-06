@@ -51,6 +51,38 @@ impl VmmExecutor {
         })
     }
 
+    pub fn from_profile(profile: ExecutionProfile, cpu: u32) -> Result<Self> {
+        let memory = profile
+            .semantic_parameters
+            .get("memory_mb")
+            .and_then(|s| s.parse::<u32>().ok());
+        if profile.backend != "seedbox-kvm"
+            || !memory.is_some_and(|m| (64..=65536).contains(&m))
+            || !matches!(
+                profile
+                    .semantic_parameters
+                    .get("guest_abi")
+                    .map(String::as_str),
+                Some("oci-init-v1" | crate::fixture::ABI)
+            )
+        {
+            return Err(Error::Integrity("invalid KVM profile".into()));
+        }
+        Ok(Self {
+            cpu,
+            profile,
+            performance: BTreeMap::from([
+                ("SEEDBOX_MARGIN".into(), "adaptive".into()),
+                ("SEEDBOX_UNDO".into(), "256".into()),
+            ]),
+        })
+    }
+    pub fn with_fixture(mut self) -> Self {
+        self.profile
+            .semantic_parameters
+            .insert("guest_abi".into(), crate::fixture::ABI.into());
+        self
+    }
     pub fn with_margin(mut self, margin: &str) -> Result<Self> {
         if margin != "adaptive" && margin.parse::<u64>().ok().is_none_or(|value| value == 0) {
             return Err(Error::Execution(
@@ -98,6 +130,16 @@ impl ExecutionBackend for VmmExecutor {
 /// Translate an execution request without consulting registry tags or source
 /// paths. Exposed for preparation tools and report inspection without KVM.
 pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
+    if request
+        .prepared
+        .profile
+        .semantic_parameters
+        .get("guest_abi")
+        .map(String::as_str)
+        == Some(crate::fixture::ABI)
+    {
+        return crate::fixture::world(request);
+    }
     if request.prepared.guests.is_empty() || request.prepared.guests.len() > 254 {
         return Err(Error::Integrity("expected 1..254 prepared machines".into()));
     }
@@ -147,6 +189,8 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
 
 #[derive(Deserialize)]
 struct MachineReport {
+    witness: Option<ContentDigest>,
+    exits: Option<u64>,
     name: String,
     infrastructure_error: bool,
     guest_exit_code: Option<u8>,
@@ -155,11 +199,22 @@ struct MachineReport {
 }
 #[derive(Deserialize)]
 struct VmmReport {
+    sim_seconds: Option<f64>,
+    host_seconds: Option<f64>,
+    #[serde(default)]
+    kills: Vec<ScheduledKill>,
     report_version: u32,
     seed: u64,
     outcome: String,
     world_witness: ContentDigest,
     machines: Vec<MachineReport>,
+}
+
+#[derive(Deserialize)]
+struct ScheduledKill {
+    member: String,
+    stop_ns: u64,
+    start_ns: u64,
 }
 
 /// Parse the engine's structured completion report. Never infer application
@@ -217,12 +272,55 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
                 .collect::<Result<BTreeMap<_, _>>>()?,
         ),
     };
+    let diagnostics = if raw
+        .machines
+        .iter()
+        .all(|m| m.witness.is_some() && m.exits.is_some())
+    {
+        let ns = |seconds: Option<f64>| -> Result<u64> {
+            let seconds =
+                seconds.ok_or_else(|| Error::Integrity("missing execution timing".into()))?;
+            if !seconds.is_finite() || seconds < 0.0 || seconds * 1e9 >= u64::MAX as f64 {
+                return Err(Error::Integrity("invalid execution timing".into()));
+            }
+            Ok((seconds * 1e9).round() as u64)
+        };
+        Some(ExecutionDiagnostics {
+            machine_witnesses: raw
+                .machines
+                .iter()
+                .map(|m| (m.name.clone(), m.witness.clone().unwrap()))
+                .collect(),
+            exits: raw
+                .machines
+                .iter()
+                .map(|m| (m.name.clone(), m.exits.unwrap()))
+                .collect(),
+            simulated_time_ns: ns(raw.sim_seconds)?,
+            host_time_ns: ns(raw.host_seconds)?,
+            legacy_faults: raw
+                .kills
+                .into_iter()
+                .map(|k| LegacyFaultObservation {
+                    member: k.member,
+                    stop_ns: k.stop_ns,
+                    start_ns: k.start_ns,
+                    stopped: false,
+                    restarted: false,
+                })
+                .collect(),
+            checker_result: None,
+        })
+    } else {
+        None
+    };
     Ok(ExecutionReport {
         reason,
         workload_exit,
         witness: Some(raw.world_witness),
         full_state,
         faults: vec![],
+        diagnostics,
         detail: infrastructure_error
             .map(|machine| format!("machine {} failed in guest bootstrap or VMM", machine.name)),
     })
@@ -353,6 +451,7 @@ mod linux {
             witness: None,
             full_state: None,
             faults: vec![],
+            diagnostics: None,
             detail: None,
         };
         if request.cancellation.is_cancelled() {
@@ -367,9 +466,29 @@ mod linux {
             }
             if let Some(success) = child.exited()? {
                 break if success {
-                    report(&fs::read(&report_path)?, &request)
+                    report(&fs::read(&report_path)?, &request).and_then(|mut report| {
+                        if backend
+                            .profile
+                            .semantic_parameters
+                            .get("guest_abi")
+                            .map(String::as_str)
+                            == Some(crate::fixture::ABI)
+                        {
+                            crate::fixture::observe(&mut report, &request)?;
+                        }
+                        Ok(report)
+                    })
                 } else {
-                    Err(Error::Execution("VMM failed; see vmm.stderr".into()))
+                    {
+                        let stderr =
+                            crate::fixture::read_console(&request.output.join("vmm.stderr"))?;
+                        if stderr.contains("overshoot") && !stderr.contains("clock bound exceeded")
+                        {
+                            Err(Error::Overshoot(stderr))
+                        } else {
+                            Err(Error::Execution(format!("VMM failed: {stderr}")))
+                        }
+                    }
                 };
             }
             if started.elapsed() >= Duration::from_nanos(request.limits.wall_time_ns) {

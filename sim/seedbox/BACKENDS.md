@@ -78,7 +78,7 @@ cancellation are infrastructure INCOMPLETE results, excluded from replay compari
 only the simulated-time limit yields semantic TIMEOUT. Therefore a backend must
 actively enforce the deadline and observe the cancellation token.
 
-For hardware, reuse the lease protocol already implemented by `sim/batch.py`
+For hardware, reuse the lease protocol already implemented by `sim/seedbox/src/host.rs`
 (`cpu_locks` and `run_batch`, merged on main). Acquire exclusive nonblocking `flock`
 locks on `/tmp/seedbox-msr-cpu-<N>.lock` for every selected core and its SMT siblings,
 in ascending CPU order, before any MSR mutation. Open without following symlinks,
