@@ -130,6 +130,7 @@ impl Fixture {
                 witness: Some(ContentDigest::of(b"witness")),
                 full_state: None,
                 faults: vec![],
+                diagnostics: None,
                 detail: None,
             },
             calls: AtomicUsize::new(0),
@@ -726,4 +727,59 @@ fn large_artifacts_stream_with_bounded_reads_and_corrupt_copies_are_not_publishe
     let bad_output = directory.path().join("bad-inputs");
     assert!(store.materialize(&digest, &bad_output).is_err());
     assert_eq!(fs::read_dir(bad_output).unwrap().count(), 0);
+}
+
+#[test]
+fn machine_witnesses_and_fault_acknowledgements_are_replayed_but_host_metrics_are_not() {
+    let mut fixture = Fixture::new();
+    fixture.backend.report.diagnostics = Some(ExecutionDiagnostics {
+        machine_witnesses: BTreeMap::from([("workload".into(), ContentDigest::of(b"machine"))]),
+        exits: BTreeMap::from([("workload".into(), 10)]),
+        simulated_time_ns: 100,
+        host_time_ns: 200,
+        legacy_faults: vec![LegacyFaultObservation {
+            member: "workload".into(),
+            stop_ns: 1,
+            start_ns: 2,
+            stopped: true,
+            restarted: true,
+        }],
+        checker_result: None,
+    });
+    let first = fixture.run();
+    let d = fixture.backend.report.diagnostics.as_mut().unwrap();
+    d.host_time_ns = 999;
+    d.exits.insert("workload".into(), 999);
+    assert_eq!(
+        fixture.replay(&first).record.replay.unwrap().status,
+        ReplayStatus::Match
+    );
+    fixture
+        .backend
+        .report
+        .diagnostics
+        .as_mut()
+        .unwrap()
+        .machine_witnesses
+        .insert("workload".into(), ContentDigest::of(b"changed"));
+    let changed = fixture.replay(&first).record.replay.unwrap();
+    assert_eq!(changed.machine_witnesses_match, Some(false));
+    assert_eq!(changed.status, ReplayStatus::Mismatch);
+    fixture.backend.report.diagnostics = first.record.report.as_ref().unwrap().diagnostics.clone();
+    fixture
+        .backend
+        .report
+        .diagnostics
+        .as_mut()
+        .unwrap()
+        .legacy_faults[0]
+        .restarted = false;
+    let changed = fixture.replay(&first).record.replay.unwrap();
+    assert!(!changed.fault_history_matches);
+    assert_eq!(changed.status, ReplayStatus::Mismatch);
+    fixture.backend.report.diagnostics = None;
+    assert_eq!(
+        fixture.replay(&first).record.replay.unwrap().status,
+        ReplayStatus::Mismatch
+    );
 }

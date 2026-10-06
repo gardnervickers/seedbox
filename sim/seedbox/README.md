@@ -2,7 +2,8 @@
 
 This Rust crate implements [issue #2](https://github.com/gardnervickers/seedbox/issues/2)'s
 Compose-shaped application configuration and OCI run/replay path. The CLI exposes
-`init`, `validate`, `prepare`, `run`, `inspect`, and `replay`. `OciPreparer` and
+`init`, `validate`, `prepare`, `run`, `inspect`, `replay`, `fixture`,
+`batch`, `campaign`, and `acceptance`. `OciPreparer` and
 `VmmExecutor` implement separate programmatic preparation/execution interfaces;
 the orchestration API can be called directly by future simulation schedulers.
 
@@ -199,8 +200,11 @@ migrated. Compose authoring remains `x-seedbox.version: 1`.
 
 ## Follow-on scope
 
-The existing seeded fault hunts remain on the legacy runner until #3 provides
-scoped fault operations with qualified effect times. Multi-core campaign dispatch,
-whole-machine persistent storage, broad guest image qualification (#5), and the
-full acceptance matrix (#4) are separate work. The supported path runs one
-service per VM, with explicit host/runtime inputs and RAM-backed storage.
+Whole-machine persistent storage, broad guest image qualification (#5), and
+Compose fault authoring (#3) remain separate work. The supported Compose path
+runs one service per VM with explicit host/runtime inputs and RAM-backed storage.
+
+The existing world-fixture acceptance suite and seed campaigns also use this
+library. See [engine acceptance and campaigns](../README.md#engine-acceptance-suite)
+for the Rust `Launcher`/`JobRunner` interfaces and hardware commands. Historical
+failing seeds and witness pins are not acceptance requirements.
