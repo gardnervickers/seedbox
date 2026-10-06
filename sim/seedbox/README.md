@@ -12,7 +12,7 @@ intentional-failure replays on the supported workstation. Full-state replay,
 changed-margin replay, deterministic timeout, wall expiry, SIGTERM cancellation,
 lease contention and exact MSR restoration were also exercised. See the
 [acceptance record](ACCEPTANCE.md) and [runtime instructions](RUNTIME.md) for exact
-inputs and limits. Structured process and network schedules are described in
+inputs and limits. The runtime process and network API is described in
 [the fault operations section](#structured-faults) and [recovery examples](../examples/faults/README.md).
 
 ## Build and validate
@@ -61,7 +61,8 @@ not establish image/kernel compatibility; preparation must check that separately
 | `x-seedbox.network` | Optional `latency` (default `1ms`) and `jitter` (default `0ns`). Jitter must be less than latency. |
 | `x-seedbox.schedule` | Optional `timer_jitter` and `stop_tolerance`, each defaulting to `0ns`. These are semantic schedule exploration settings. |
 | `x-seedbox.check` | Required known `service` and optional `exit_code` (default `0`, range 0–255). |
-| `x-seedbox.faults` | Ordered simulated-time `stop`, `restart`, `partition`, and `heal` operations; omitted or `[]` preserves the no-fault path. |
+| `x-seedbox.control` | Optional `{service: scenario}` selects the guest controller for the runtime RPC API. |
+| `x-seedbox.faults` | Omitted or `[]` only. Fault operations are issued through the runtime API; declarative schedules are future work. |
 
 The current VMM may deliver scheduled events/frames up to `early = min(latency/2, stop_tolerance)` early, never late. Effective one-way delay lies in `[latency - early, latency + jitter]`. Timer jitter and stop tolerance are retained in the simulation identity and passed explicitly to the executor.
 
@@ -200,45 +201,49 @@ migrated. Compose authoring remains `x-seedbox.version: 1`.
 
 ## Structured faults
 
-Fault requests are an ordered `x-seedbox.faults` list. Equal times preserve list
-order, and every request must precede the simulated limit:
+The fault API is a versioned RPC interface, with a Python binding for ordinary
+scenario programs running inside the simulated world. Select a controller with
+`x-seedbox.control: {service: scenario}`. Compose launches the services; Python
+issues operations after observing application progress:
 
-```yaml
-  faults:
-    - {at: 10s, stop: {service: n1}}
-    - {at: 12s, restart: {service: n1}}
-    - {at: 20s, partition: {id: cut, left: [n1], right: [n2, n3]}}
-    - {at: 25s, heal: {id: cut}}
+```python
+from seedbox import World
+
+with World.connect() as world:
+    wait_for_acknowledged_writes(32)  # Application-specific readiness/progress.
+    world.stop("server")
+    world.sleep(1)
+    world.restart("server")
+    wait_for_server_ready()
+    cut = world.partition(["client"], ["server"])
+    world.sleep(3)
+    world.heal(cut)
+    check_acknowledged_values()
 ```
 
-Stop kills the application process group and reaps it; restart execs its retained
-launch recipe after a preceding stop, retaining writable files within the run.
-A service target resolves through retained placement. Library callers can also
-use machine targets; the VMM validates these against prepared machines. Partition
-sides accept service names or `{service: n1}` / `{machine: prepared-machine}`.
-Each partition owns an independent handle, so overlapping cuts remain until all
-owning handles are healed. Frames already routed remain in flight; new sends
-across an active cut are dropped. Healing affects subsequent sends.
+These application helpers are illustrative; the [working Python example](../examples/faults/README.md)
+implements them over real TCP. The controller is outside the fault model: faults
+cannot stop it or cut its links, and management messages do not use the faulted
+application network. Its normal completion determines the configured check outcome.
 
-Fault boundaries use exact stops even when ordinary scheduling has a nonzero
-stop tolerance. Process commands carry a unique request ID. The supervisor
-acknowledges with a 32-bit request ID through dedicated I/O ports 0xf6/0xf7
-only after reap or successful exec. Its permission range covers all bytes of
-both writes (0xf6 through 0xfa); the VMM
-records the deterministic virtual time of that effect boundary. Guest monotonic
-time appears separately in management logs. Missing effects have a five-second
-simulated deadline, bounded by the run limit. Rejected, stale or duplicate effects,
-and schedules left unfinished when the workload exits, produce ERROR.
+Operations validate retained service/machine targets. Stop waits for process-group
+termination and reap; restart waits for successful exec. Partition returns an
+independent opaque handle. A link remains cut until all applicable handles are
+healed. Already routed packets stay queued; cuts drop subsequent sends.
 
-The VMM report retains all requests and their states, applied times, failures,
-and per-directed-link receiver-acceptance/drop counters at partition/heal boundaries and
-termination. The `delivered` counter means acceptance by the NIC, including its
-bounded backlog; it is separate from IRQ notification. Unready receivers and
-full device backlogs count as `receiver_dropped`. Histories and counters enter the
-witness for faulted runs. An absent or empty fault schedule preserves previous
-configuration serialization and the
-no-fault witness calculation. See `sim/examples/faults` for timed recovery,
-overlapping partitions, and working/broken synthetic recovery controls.
+The RPC uses committed guest boundaries and fixed simulated delivery latency.
+Request admission and reply delivery use exact stops, even with ordinary packet
+early delivery enabled. Replies contain request, admission, effect and delivery
+timestamps. Missing/rejected supervisor effects are infrastructure errors.
+
+Replay runs the retained controller program again and compares the resulting
+history and witness. `inspect()` exposes topology, machine state, active handles
+and packet counters. `delivered` counts receiver NIC acceptance, including bounded
+backlog, independently of IRQ notification; full-backlog/unready drops are separate.
+
+See the [Python API](../python/README.md) and [public wire protocol](../python/PROTOCOL.md)
+for custom language bindings. Future declarative tools can call this same API.
+No control configuration preserves the prior no-control serialization/witness path.
 
 ## Follow-on scope
 

@@ -10,6 +10,12 @@ use std::{
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct Control {
+    pub service: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Simulation {
     pub name: String,
     pub source: PathBuf,
@@ -19,6 +25,8 @@ pub struct Simulation {
     pub schedule: Schedule,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub faults: Vec<Fault>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<Control>,
     pub limits: Limits,
     pub check: Check,
     pub seed: Option<u64>,
@@ -333,7 +341,7 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
         get(top, "x-seedbox"),
         "$.x-seedbox",
         &[
-            "version", "seed", "limits", "network", "schedule", "faults", "check",
+            "version", "seed", "limits", "network", "schedule", "faults", "control", "check",
         ],
     )?;
     if get(ext, "version").as_u64() != Some(1) {
@@ -384,6 +392,17 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
         }
     }
     let faults = parse_faults(ext.get("faults"), &services, limits.simulated_time_ns)?;
+    let control = ext
+        .get("control")
+        .map(|raw| {
+            let options = fields(raw, "$.x-seedbox.control", &["service"])?;
+            let service = text(get(options, "service"), "$.x-seedbox.control.service")?;
+            if !services.contains_key(&service) {
+                return invalid("$.x-seedbox.control.service", "unknown controller service");
+            }
+            Ok(Control { service })
+        })
+        .transpose()?;
     let raw_check = fields(
         get(ext, "check"),
         "$.x-seedbox.check",
@@ -394,6 +413,12 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
         return invalid(
             "$.x-seedbox.check.service",
             format!("unknown service {check_service:?}"),
+        );
+    }
+    if control.as_ref().is_some_and(|c| c.service != check_service) {
+        return invalid(
+            "$.x-seedbox.control.service",
+            "controller must also be the check service",
         );
     }
     let exit_code = match raw_check.get("exit_code") {
@@ -421,6 +446,7 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
         network,
         schedule,
         faults,
+        control,
         limits,
         check: Check {
             service: check_service,
@@ -430,103 +456,16 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
     })
 }
 
-fn parse_faults(
-    raw: Option<&Value>,
-    services: &BTreeMap<String, Service>,
-    end: u64,
-) -> Result<Vec<Fault>> {
-    let Some(raw) = raw else { return Ok(vec![]) };
-    let mut faults = Vec::new();
-    let mut handles = std::collections::BTreeSet::new();
-    let mut used_handles = std::collections::BTreeSet::new();
-    let mut stopped = std::collections::BTreeSet::new();
-    let target = |value: &Value, path: &str| -> Result<FaultTarget> {
-        if value.is_string() {
-            let name = text(value, path)?;
-            if !services.contains_key(&name) {
-                return invalid(path, "unknown service");
-            }
-            return Ok(FaultTarget::Service(name));
+fn parse_faults(raw: Option<&Value>, _: &BTreeMap<String, Service>, _: u64) -> Result<Vec<Fault>> {
+    if let Some(raw) = raw {
+        if !sequence(raw, "$.x-seedbox.faults")?.is_empty() {
+            return invalid(
+                "$.x-seedbox.faults",
+                "static schedules are unsupported; use the in-world control RPC API",
+            );
         }
-        let m = fields(value, path, &["service", "machine"])?;
-        match (m.get("service"), m.get("machine")) {
-            (Some(v), None) => {
-                let name = text(v, path)?;
-                if !services.contains_key(&name) {
-                    return invalid(path, "unknown service");
-                }
-                Ok(FaultTarget::Service(name))
-            }
-            (None, Some(v)) => Ok(FaultTarget::Machine(text(v, path)?)),
-            _ => invalid(path, "specify exactly one service or machine target"),
-        }
-    };
-    for (i, item) in sequence(raw, "$.x-seedbox.faults")?.iter().enumerate() {
-        let path = format!("$.x-seedbox.faults[{i}]");
-        let f = fields(item, &path, &["at", "stop", "restart", "partition", "heal"])?;
-        let at_ns = duration(get(f, "at"), &format!("{path}.at"), true)?;
-        if at_ns >= end {
-            return invalid(&path, "fault must precede simulated time limit");
-        }
-        if faults.last().is_some_and(|f: &Fault| f.at_ns > at_ns) {
-            return invalid(&path, "fault times must be nondecreasing");
-        }
-        let actions: Vec<_> = ["stop", "restart", "partition", "heal"]
-            .into_iter()
-            .filter(|k| f.contains_key(*k))
-            .collect();
-        if actions.len() != 1 {
-            return invalid(&path, "specify exactly one fault action");
-        }
-        let action = match actions[0] {
-            "stop" | "restart" => {
-                let t = target(get(f, actions[0]), &path)?;
-                if actions[0] == "stop" {
-                    if !stopped.insert(t.clone()) {
-                        return invalid(&path, "target already scheduled stopped");
-                    }
-                    FaultAction::Stop { target: t }
-                } else {
-                    if !stopped.remove(&t) {
-                        return invalid(&path, "restart requires a preceding stop");
-                    }
-                    FaultAction::Restart { target: t }
-                }
-            }
-            "partition" => {
-                let p = fields(get(f, "partition"), &path, &["id", "left", "right"])?;
-                let id = text(get(p, "id"), &path)?;
-                if !identifier(&id) || !used_handles.insert(id.clone()) {
-                    return invalid(&path, "partition id must be unique identifier");
-                }
-                let side = |key| -> Result<Vec<FaultTarget>> {
-                    sequence(get(p, key), &path)?
-                        .iter()
-                        .map(|v| target(v, &path))
-                        .collect()
-                };
-                let left = side("left")?;
-                let right = side("right")?;
-                let unique: std::collections::BTreeSet<_> = left.iter().chain(&right).collect();
-                if left.is_empty() || right.is_empty() || unique.len() != left.len() + right.len() {
-                    return invalid(&path, "partition requires disjoint nonempty unique sides");
-                }
-                handles.insert(id.clone());
-                FaultAction::Partition { id, left, right }
-            }
-            "heal" => {
-                let p = fields(get(f, "heal"), &path, &["id"])?;
-                let id = text(get(p, "id"), &path)?;
-                if !handles.remove(&id) {
-                    return invalid(&path, "heal requires an active partition handle");
-                }
-                FaultAction::Heal { id }
-            }
-            _ => unreachable!(),
-        };
-        faults.push(Fault { at_ns, action });
     }
-    Ok(faults)
+    Ok(vec![])
 }
 
 fn validation(path: &str, message: &str) -> Error {

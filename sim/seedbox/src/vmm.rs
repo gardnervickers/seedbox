@@ -98,6 +98,19 @@ impl ExecutionBackend for VmmExecutor {
 /// Translate an execution request without consulting registry tags or source
 /// paths. Exposed for preparation tools and report inspection without KVM.
 pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
+    if request
+        .control
+        .is_some_and(|c| c.service != request.check.service)
+    {
+        return Err(Error::Execution(
+            "controller must also be the check service".into(),
+        ));
+    }
+    if request.control.is_some() && !request.faults.is_empty() {
+        return Err(Error::Execution(
+            "runtime control cannot mix with static fault schedules".into(),
+        ));
+    }
     if request.prepared.guests.is_empty() || request.prepared.guests.len() > 254 {
         return Err(Error::Integrity("expected 1..254 prepared machines".into()));
     }
@@ -131,6 +144,11 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
         ));
     }
     let faults = compile_faults(request)?;
+    let control = request.control.map(|c| -> Result<Value> {
+        let machine = request.prepared.placement.get(&c.service).ok_or_else(|| Error::Execution("controller placement missing".into()))?;
+        let latency_ns = request.network.latency_ns.checked_mul(2).and_then(|n| n.checked_add(request.schedule.stop_tolerance_ns.checked_mul(2)?)).and_then(|n| n.checked_add(1_000_000)).ok_or_else(|| Error::Execution("control latency overflow".into()))?;
+        Ok(json!({"machine":machine,"latency_ns":latency_ns,"placement":request.prepared.placement}))
+    }).transpose()?;
     let machines = request
         .prepared
         .guests
@@ -142,7 +160,7 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
         "duration_ns":request.limits.simulated_time_ns,"end_on_exit":workload_machine,
         "timer_jitter_ns":request.schedule.timer_jitter_ns,"stop_tolerance_ns":request.schedule.stop_tolerance_ns,
         "network":{"latency_ns":request.network.latency_ns,"jitter_ns":request.network.jitter_ns},
-        "machines":machines,"faults":faults,
+        "machines":machines,"faults":faults,"control":control,
     }))
 }
 
@@ -259,6 +277,116 @@ struct VmmReport {
     faults: Vec<RawFault>,
     #[serde(default)]
     fault_error: Option<String>,
+    #[serde(default)]
+    control_history: Vec<Value>,
+    #[serde(default)]
+    control_latency_ns: Option<u64>,
+}
+
+/// Correlate guest-originated requests to responses and applied engine actions.
+fn validate_control_history(
+    history: &[Value],
+    latency: Option<u64>,
+    request: &ExecutionRequest<'_>,
+    failed: bool,
+) -> Result<Vec<Value>> {
+    let compiled = world(request)?;
+    let config = &compiled["control"];
+    let latency = latency
+        .filter(|n| Some(*n) == config["latency_ns"].as_u64())
+        .ok_or_else(|| Error::Integrity("control latency mismatch".into()))?;
+    let resolve = |target: &Value| -> Result<Value> {
+        let machine = if let Some(service) = target["service"].as_str() {
+            request.prepared.placement.get(service).map(String::as_str)
+        } else {
+            target["machine"].as_str()
+        }
+        .ok_or_else(|| Error::Integrity("invalid control target".into()))?;
+        if !request.prepared.guests.contains_key(machine)
+            || Some(machine) == config["machine"].as_str()
+        {
+            return Err(Error::Integrity(
+                "invalid fault machine/controller target".into(),
+            ));
+        }
+        Ok(json!(machine))
+    };
+    let mut expected = Vec::new();
+    let mut previous = 0;
+    for (i, row) in history.iter().enumerate() {
+        if row["status"] == "rejected" && failed {
+            continue;
+        }
+        let r = &row["request"];
+        let s = &row["response"];
+        let t = s["requested_at_ns"]
+            .as_u64()
+            .ok_or_else(|| Error::Integrity("missing control request time".into()))?;
+        let a = s["admitted_at_ns"]
+            .as_u64()
+            .ok_or_else(|| Error::Integrity("missing control admission".into()))?;
+        let e = s["effect_at_ns"]
+            .as_u64()
+            .ok_or_else(|| Error::Integrity("missing control effect".into()))?;
+        let reply = s["replied_at_ns"]
+            .as_u64()
+            .ok_or_else(|| Error::Integrity("missing control reply".into()))?;
+        if row["relay_id"].as_u64() != Some(i as u64 + 1)
+            || r["version"] != 1
+            || s["version"] != 1
+            || r["id"] != s["id"]
+            || r["id"].as_u64() != Some(i as u64 + 1)
+            || r["id"]
+                .as_u64()
+                .filter(|n| *n > 0 && *n <= u32::MAX as u64)
+                .is_none()
+            || t < previous
+            || t.checked_add(latency) != Some(a)
+            || e < a
+            || e.checked_add(latency) != Some(reply)
+            || reply >= request.limits.simulated_time_ns
+            || (row["delivered_at_ns"].as_u64() != Some(reply) && !failed)
+        {
+            return Err(Error::Integrity(
+                "control request/response/time correlation mismatch".into(),
+            ));
+        }
+        previous = reply;
+        if s["ok"] != true {
+            if s["ok"] != false || !s["error"].is_object() {
+                return Err(Error::Integrity("invalid control error reply".into()));
+            }
+            continue;
+        }
+        let op = r["op"]
+            .as_str()
+            .ok_or_else(|| Error::Integrity("control operation missing".into()))?;
+        if (matches!(op, "now" | "inspect" | "partition" | "heal") && e != a)
+            || (op == "sleep"
+                && r["duration_ns"].as_u64().and_then(|d| a.checked_add(d)) != Some(e))
+            || (op == "now" && s["result"]["now_ns"].as_u64() != Some(e))
+        {
+            return Err(Error::Integrity(
+                "control operation effect time mismatch".into(),
+            ));
+        }
+        let mut plan = match op {
+            "stop" | "restart" => json!({"action":op,"machine":resolve(&r["target"])?}),
+            "partition" => {
+                json!({"action":op,"handle":s["result"]["handle"],"left":r["left"].as_array().ok_or_else(||Error::Integrity("partition side missing".into()))?.iter().map(&resolve).collect::<Result<Vec<_>>>()?,"right":r["right"].as_array().ok_or_else(||Error::Integrity("partition side missing".into()))?.iter().map(&resolve).collect::<Result<Vec<_>>>()?})
+            }
+            "heal" => json!({"action":op,"handle":r["handle"]}),
+            "now" | "sleep" | "inspect" => continue,
+            _ => return Err(Error::Integrity("unknown control operation".into())),
+        };
+        plan["id"] = json!(expected.len() + 1);
+        plan["at_ns"] = json!(a);
+        plan["deadline_ns"] = json!(a
+            .saturating_add(5_000_000_000)
+            .min(request.limits.simulated_time_ns.saturating_sub(latency + 1)));
+        expected.push(plan);
+    }
+    Ok(expected)
 }
 
 /// Parse the engine's structured completion report. Never infer application
@@ -317,16 +445,46 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
                 .collect::<Result<BTreeMap<_, _>>>()?,
         ),
     };
-    let expected = compile_faults(request)?;
+    if request.control.is_none()
+        && (!raw.control_history.is_empty() || raw.control_latency_ns.is_some_and(|n| n != 0))
+    {
+        return Err(Error::Integrity("unexpected control transcript".into()));
+    }
+    let expected = if request.control.is_some() {
+        validate_control_history(
+            &raw.control_history,
+            raw.control_latency_ns,
+            request,
+            raw.fault_error.is_some(),
+        )?
+    } else {
+        compile_faults(request)?
+    };
+    let control_effects = raw
+        .control_history
+        .iter()
+        .filter(|r| {
+            r["response"]["ok"] == true
+                && matches!(
+                    r["request"]["op"].as_str(),
+                    Some("stop" | "restart" | "partition" | "heal")
+                )
+        })
+        .map(|r| r["response"]["effect_at_ns"].as_u64().unwrap())
+        .collect::<Vec<_>>();
     let mut faults = Vec::new();
     let mut fault_failure = raw.fault_error;
-    if raw.faults.len() != expected.len() {
+    if raw.faults.len() != expected.len() && !(request.control.is_some() && fault_failure.is_some())
+    {
         fault_failure = Some("fault request history is incomplete".to_string());
     }
     for (i, fault) in raw.faults.iter().enumerate() {
-        let Some(plan) = expected.get(i) else {
-            return Err(Error::Integrity("unexpected fault acknowledgement".into()));
-        };
+        let plan = expected
+            .get(i)
+            .or_else(|| {
+                (request.control.is_some() && fault_failure.is_some()).then_some(&fault.request)
+            })
+            .ok_or_else(|| Error::Integrity("unexpected fault acknowledgement".into()))?;
         if fault.request != *plan
             || fault.id as usize != i + 1
             || Some(fault.requested_at_ns) != plan["at_ns"].as_u64()
@@ -339,7 +497,10 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
         }
         match (fault.status.as_str(), fault.applied_at_ns) {
             ("applied", Some(at))
-                if at >= fault.requested_at_ns && at <= plan["deadline_ns"].as_u64().unwrap() =>
+                if at >= fault.requested_at_ns
+                    && at <= plan["deadline_ns"].as_u64().unwrap()
+                    && (request.control.is_none()
+                        || control_effects.get(i).is_none_or(|e| *e == at)) =>
             {
                 let service = fault
                     .machine

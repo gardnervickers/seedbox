@@ -123,7 +123,7 @@ whiteouts, symlinks and build-context filtering. It does not start guests.
 The default runtime suite runs both application examples and their intentional
 failure controls, then replays each. The lifecycle suite checks full-state and
 changed-margin/undo replay, simulated timeout, wall expiry and SIGTERM cancellation.
-The `faults` mode uses a synthetic key/value service to verify acknowledged-write
+The `faults` mode uses a Python controller and synthetic key/value services to verify acknowledged-write
 retention across process restarts, overlapping partition healing, and retained
 replay. Its deliberately forgetful variant must fail after restart and pass
 without it. Missing and rejected effect acknowledgments must produce ERROR.
@@ -131,7 +131,7 @@ All runtime modes start KVM guests, temporarily apply the scoped MSR workaround,
 and compare original MSR readbacks after every execution. Choose available CPU/SMT
 lanes; contention fails without taking over another run's lease.
 
-Structured fault schedules use the same preparation, execution and retained replay
-path. See [fault operations](README.md#structured-faults) and the
+The guest fault RPC uses the same preparation, execution and retained replay
+path; replay executes the retained Python controller again. See [fault operations](README.md#structured-faults) and the
 [recovery harness](../examples/faults/README.md) for the effect and packet contracts.
 The legacy fixtures remain available through [the migration map](../worlds/README.md).

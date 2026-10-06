@@ -344,35 +344,30 @@ fn network_options_and_unimplemented_config_permissions_are_not_ignored() {
 }
 
 #[test]
-fn deterministic_fault_schedule_is_typed_ordered_and_strict() {
-    let faults = "  faults:\n    - {at: 1s, stop: {service: workload}}\n    - {at: 2s, restart: {service: workload}}\n    - {at: 3s, partition: {id: p, left: [workload], right: [{machine: other-machine}]}}\n    - {at: 3s, heal: {id: p}}\n";
-    let yaml = BASE.replace("  version: 1\n", &format!("  version: 1\n{faults}"));
-    let sim = parse(&yaml).unwrap();
-    assert_eq!(sim.faults.len(), 4);
-    assert_eq!(sim.faults[0].at_ns, 1_000_000_000);
-    assert!(matches!(
-        sim.faults[1].action,
-        config::FaultAction::Restart { .. }
-    ));
-    for broken in [
-        yaml.replace("at: 2s", "at: 0s"),
-        yaml.replace("at: 3s", "at: 120s"),
-        yaml.replace("stop: {service: workload}", "stop: {service: missing}"),
-        yaml.replace("restart: {service: workload}", "stop: {service: workload}"),
-        yaml.replace("right: [{machine: other-machine}]", "right: [workload]"),
-        yaml.replace("right: [{machine: other-machine}]", "right: []"),
-        yaml.replace("heal: {id: p}", "heal: {id: missing}"),
-        yaml.replace(
-            "stop: {service: workload}",
-            "stop: {service: workload, signal: TERM}",
-        ),
-        yaml.replace(
-            "stop: {service: workload}",
-            "stop: {service: workload}, restart: {service: workload}",
-        ),
-    ] {
-        assert!(parse(&broken).is_err(), "accepted {broken}");
-    }
-    let sim = parse(BASE).unwrap();
-    assert!(serde_json::to_value(sim).unwrap().get("faults").is_none());
+fn runtime_control_selects_known_service_and_static_schedules_are_rejected() {
+    let yaml = BASE.replace(
+        "  version: 1",
+        "  version: 1\n  control: {service: workload}",
+    );
+    assert_eq!(parse(&yaml).unwrap().control.unwrap().service, "workload");
+    assert!(parse(&yaml.replace(
+        "control: {service: workload}",
+        "control: {service: missing}"
+    ))
+    .is_err());
+    assert!(parse(&BASE.replace(
+        "  version: 1",
+        "  version: 1\n  faults: [{at: 1s, stop: workload}] "
+    ))
+    .is_err());
+    assert!(
+        parse(&BASE.replace("  version: 1", "  version: 1\n  faults: []"))
+            .unwrap()
+            .faults
+            .is_empty()
+    );
+    assert!(serde_json::to_value(parse(BASE).unwrap())
+        .unwrap()
+        .get("control")
+        .is_none());
 }

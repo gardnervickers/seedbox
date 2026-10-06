@@ -2,6 +2,7 @@
 //! all executed by one host thread. A seed and the config fully determine the run.
 
 mod boundary;
+mod control;
 mod counter;
 mod devices;
 mod events;
@@ -46,6 +47,8 @@ struct World {
     link_last: BTreeMap<(usize, usize), u64>,
     partitioned: BTreeMap<(usize, usize), bool>,
     faults: faults::Faults,
+    control: control::Control,
+    strict_events: Vec<BTreeMap<(u64, u64), Vec<u8>>>,
     macs: Vec<[u8; 6]>,
     dropped: u64,
     delivered: u64,
@@ -72,6 +75,13 @@ impl World {
             .next()
             .map(|k| k.0)
             .unwrap_or(u64::MAX)
+            .min(
+                self.strict_events[m]
+                    .keys()
+                    .next()
+                    .map(|k| k.0)
+                    .unwrap_or(u64::MAX),
+            )
     }
 
     /// Earliest virtual time at which machine m can next act.
@@ -92,6 +102,14 @@ impl World {
 
     /// Deliver events due by the end of the machine's early window.
     fn deliver_due(&mut self, m: usize) {
+        while let Some(bytes) = events::pop_due(&mut self.strict_events[m], self.machines[m].time) {
+            self.machines[m].deliver_serial(&bytes);
+            if bytes.starts_with(b"SBX_REPLY1 ") {
+                if let Some(row) = self.control.log.last_mut() {
+                    row["delivered_at_ns"] = json!(self.machines[m].time);
+                }
+            }
+        }
         let now = self.machines[m].time + self.early;
         while let Some(p) = events::pop_due(&mut self.events[m], now) {
             let mach = &mut self.machines[m];
@@ -272,6 +290,16 @@ fn run() -> Result<Value, String> {
         }
         machines.push(mach);
     }
+    if !cfg["control"].is_null()
+        && (!cfg["faults"].as_array().is_none_or(Vec::is_empty)
+            || !cfg["scenario"].as_array().is_none_or(Vec::is_empty)
+            || cfg["kill_restart"].is_object())
+    {
+        return Err("runtime control cannot mix with static/legacy scenarios".into());
+    }
+    if !cfg["control"].is_null() && cfg["control"]["machine"] != cfg["end_on_exit"] {
+        return Err("controller must also be the end_on_exit machine".into());
+    }
     let n = machines.len();
     let net = &cfg["network"];
     let mut world = World {
@@ -290,6 +318,14 @@ fn run() -> Result<Value, String> {
             cfg["faults"].as_array().cloned().unwrap_or_default(),
             names.clone(),
         )?,
+        control: control::Control::new(
+            &cfg["control"],
+            names.clone(),
+            net["latency_ns"].as_u64().unwrap_or(1_000_000),
+            (net["latency_ns"].as_u64().unwrap_or(1_000_000) / 2)
+                .min(cfg["stop_tolerance_ns"].as_u64().unwrap_or(0)),
+        )?,
+        strict_events: (0..n).map(|_| BTreeMap::new()).collect(),
         macs,
         dropped: 0,
         delivered: 0,
@@ -366,6 +402,30 @@ fn run() -> Result<Value, String> {
             .enumerate()
             .min_by_key(|(i, k)| (**k, *i))
             .unwrap();
+        let control_boundary = world.control.boundary();
+        if control_boundary <= key && control_boundary < duration {
+            if world.machines.iter().any(|m| m.time > control_boundary) {
+                return Err("control boundary is in committed machine past".into());
+            }
+            if world
+                .control
+                .pending
+                .as_ref()
+                .is_some_and(|p| !p.admitted_done && p.request["op"] == "inspect")
+            {
+                world.control.pending.as_mut().unwrap().result = json!({"services":cfg["control"]["placement"],"machines":world.machines.iter().map(|m|json!({"name":m.name,"state":format!("{:?}",m.state)})).collect::<Vec<_>>(),"active_handles":world.faults.active_handles(),"network_counters":world.link_counts});
+            }
+            if let Some(bytes) =
+                world
+                    .control
+                    .apply_boundary(&mut world.faults, control_boundary, duration)?
+            {
+                let target = world.control.controller.unwrap();
+                world.seq += 1;
+                world.strict_events[target].insert((control_boundary, world.seq), bytes);
+            }
+            continue;
+        }
         let fault_boundary = world.faults.next_boundary();
         if fault_boundary <= key && fault_boundary < duration {
             let commands = world.faults.apply_due(fault_boundary);
@@ -381,9 +441,13 @@ fn run() -> Result<Value, String> {
                 if world.machines[target].state == State::Halted {
                     world.machines[target].wake(fault_boundary);
                 }
-                world.schedule(target, fault_boundary, Payload::Serial(command));
+                world.seq += 1;
+                world.strict_events[target].insert((fault_boundary, world.seq), command);
             }
-            if world.faults.error.is_some() {
+            world
+                .control
+                .observe_faults(&world.faults, fault_boundary, duration)?;
+            if world.faults.error.is_some() && world.control.pending.is_none() {
                 outcome = "fault_failed";
                 break;
             }
@@ -411,11 +475,19 @@ fn run() -> Result<Value, String> {
         let limit = horizon
             .min(world.next_event(m))
             .min(duration)
-            .min(fault_boundary);
+            .min(fault_boundary)
+            .min(control_boundary);
         slices += 1;
         // A slice ending at the horizon or an event may stop a little early
         // (at a cheap deterministic point); the run's end is exact.
-        let early = if limit == duration || limit == fault_boundary {
+        let early = if limit == duration
+            || limit == fault_boundary
+            || limit == control_boundary
+            || world.strict_events[m]
+                .keys()
+                .next()
+                .is_some_and(|k| k.0 == limit)
+        {
             0
         } else {
             world.early
@@ -424,7 +496,24 @@ fn run() -> Result<Value, String> {
         for (id, at, success) in world.machines[m].fault_effects.drain(..) {
             world.faults.effect(m, id, at, success);
         }
-        if world.faults.error.is_some() {
+        for (at, line) in world.machines[m]
+            .control_requests
+            .drain(..)
+            .collect::<Vec<_>>()
+        {
+            let max_time = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
+            if let Err(e) = world.control.request(m, at, &line, duration, max_time) {
+                world.control.log.push(json!({"status":"rejected","machine":world.machines[m].name,"at_ns":at,"frame":String::from_utf8_lossy(&line),"error":e}));
+                world.control.error = Some(e);
+            }
+        }
+        world
+            .control
+            .observe_faults(&world.faults, world.machines[m].time, duration)?;
+        if (world.control.error.is_some()
+            || (world.faults.error.is_some() && world.control.pending.is_none()))
+            && !world.control.has_undelivered_reply()
+        {
             outcome = "fault_failed";
             break;
         }
@@ -439,11 +528,19 @@ fn run() -> Result<Value, String> {
     }
     let host_seconds = started.elapsed().as_secs_f64();
 
-    let fault_error = world.faults.error.clone().or_else(|| {
-        (!world.faults.complete())
-            .then(|| "fault schedule incomplete at world termination".to_string())
-    });
+    let fault_error = world
+        .faults
+        .error
+        .clone()
+        .or(world.control.error.clone())
+        .or_else(|| {
+            (!world.faults.complete() || !world.control.complete())
+                .then(|| "fault schedule incomplete at world termination".to_string())
+        });
     let mut world_witness = Sha256::new();
+    if world.control.controller.is_some() {
+        world_witness.update(serde_json::to_vec(&world.control.log).map_err(|e| e.to_string())?);
+    }
     if !world.faults.log.is_empty() {
         world_witness.update(serde_json::to_vec(&world.faults.log).map_err(|e| e.to_string())?);
         world_witness.update(world.delivered.to_le_bytes());
@@ -527,6 +624,7 @@ fn run() -> Result<Value, String> {
         "world_witness": format!("{:x}", world_witness.finalize()),
         "kills": kills,
         "faults": world.faults.log, "fault_error":fault_error,
+        "control_history":world.control.log,"control_latency_ns":world.control.latency,
         "rejected_fault_effects":world.faults.rejected_effects,
         "in_flight_policy":"retain_already_routed; drop_new_sends_while_any_handle_active",
         "machines": report,

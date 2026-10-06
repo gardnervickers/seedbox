@@ -269,6 +269,7 @@ impl Orchestrator {
                 network: &record.identity.configuration.network,
                 schedule: &record.identity.configuration.schedule,
                 faults: &record.identity.configuration.faults,
+                control: record.identity.configuration.control.as_ref(),
                 check: &record.identity.configuration.check,
                 prepared: &record.identity.inputs,
                 artifacts: &artifacts,

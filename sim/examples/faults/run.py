@@ -129,7 +129,7 @@ def main():
     persist_evidence()
     projects = generate(Path(a.output) / "projects", a.seed)
     common = ["--kernel", a.kernel, "--vmm", a.vmm, "--guest-init", a.guest_init,
-              "--cpu", str(a.cpu), "--state", a.state, "--memory-mb", "256", "--margin", a.margin]
+              "--cpu", str(a.cpu), "--state", a.state, "--memory-mb", "512", "--margin", a.margin]
     if a.busybox:
         common += ["--busybox", a.busybox]
     evidence = RUN_EVIDENCE
@@ -140,6 +140,11 @@ def main():
         replay = execute([a.seedbox, "replay", str(run), "--cpu", str(a.cpu), "--state", a.state, "--undo", "0", "--margin", a.margin], 0)
         evidence.append(verify(replay, status, faulted))
         persist_evidence()
+        if variant == "fixed":
+            comparison_margin = "131072" if a.margin != "131072" else "98304"
+            varied = execute([a.seedbox, "replay", str(run), "--cpu", str(a.cpu), "--state", a.state, "--undo", "16", "--margin", comparison_margin], 0)
+            evidence.append(dict(verify(varied, status, faulted), performance_variant="changed margin and undo"))
+            persist_evidence()
     for control, init, expected_error in [("missing_effect",a.negative_guest_init,"deadline"),("rejected_effect",a.rejecting_guest_init,"guest rejected fault")]:
         if not init:
             continue

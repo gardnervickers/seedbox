@@ -105,9 +105,9 @@ lease contention and exact MSR restoration on the workstation.
 
 The no-fault application definition `worlds/cluster.json` has been replaced by the
 etcd Compose example. The old `kill-3.5.2`, `kill-3.5.3` and fault-bearing `sanity`
-worlds remain reproducible through `batch.sh`/`campaign.sh`. Compose now supports
-[structured process and network operations](seedbox/README.md#structured-faults),
-with [timed recovery examples](examples/faults/README.md).
+worlds remain reproducible through `batch.sh`/`campaign.sh`. Compose controllers use
+the [runtime fault RPC](seedbox/README.md#structured-faults), with a
+[Python recovery example](examples/faults/README.md).
 The fixed-delay and single-VM worlds below remain engine comparison fixtures;
 they have different placement and scheduling semantics from the Compose examples.
 See [the migration map](worlds/README.md) before choosing a runner.

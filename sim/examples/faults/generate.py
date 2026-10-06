@@ -15,17 +15,19 @@ def generate(destination, seed=1009):
     for variant in ("fixed", "broken", "broken-no-faults"):
         project = destination / variant
         project.mkdir()  # Never overwrite a prior project or its run inputs.
-        shutil.copytree(HERE / "workload", project / "workload")
+        shutil.copytree(HERE / "workload", project / "workload",
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        shutil.copytree(HERE.parents[1] / "python" / "seedbox", project / "workload" / "seedbox",
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         text = base.replace("synthetic-fault-fixed", "synthetic-fault-" + variant)
         if variant != "fixed":
             text = text.replace("--state, /data/kv.log]", "--state, /data/kv.log, --broken]")
         if variant == "broken-no-faults":
-            start, end = text.index("  faults:\n"), text.index("  check:")
-            text = text[:start] + "  faults: []\n" + text[end:]
-            text = text.replace('"15000"', '"3000"').replace('--required-generation, "3"', '--required-generation, "1"')
+            text = text.replace('[scenario, --control-address, "client:7001"]',
+                                '[scenario, --control-address, "client:7001", --no-faults]')
         (project / "compose.yaml").write_text(text)
         (project / ".gitignore").write_text(".seedbox/\n")
-        (project / "workload" / ".dockerignore").write_text("target\n.git\n.seedbox\n")
+        (project / "workload" / ".dockerignore").write_text("__pycache__\n*.pyc\n.git\n.seedbox\n")
     return destination
 
 if __name__ == "__main__":

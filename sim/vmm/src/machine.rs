@@ -69,6 +69,8 @@ pub enum Stop {
     Exited,
     /// The guest produced frames; the world must re-plan before continuing.
     Sent,
+    /// A committed management request/effect requires global causal replanning.
+    Control,
 }
 
 #[derive(Default, Debug)]
@@ -119,6 +121,8 @@ pub struct Machine {
     pub com1: Uart,
     pub com2: Uart,
     pub fault_effects: Vec<(u32, u64, bool)>,
+    pub control_requests: Vec<(u64, Vec<u8>)>,
+    management_framer: crate::control::ManagementFramer,
     pub net: Option<VirtioNet>,
     stepping: bool,
     planner: Option<Planner>,
@@ -253,7 +257,11 @@ impl Machine {
         unsafe {
             vm.set_user_memory_region(kvm_userspace_memory_region {
                 slot: 0,
-                flags: if spec.undo_margin > 0 { KVM_MEM_LOG_DIRTY_PAGES } else { 0 },
+                flags: if spec.undo_margin > 0 {
+                    KVM_MEM_LOG_DIRTY_PAGES
+                } else {
+                    0
+                },
                 guest_phys_addr: 0,
                 memory_size: mem_size as u64,
                 userspace_addr: mem as u64,
@@ -339,6 +347,8 @@ impl Machine {
             com1: Uart::default(),
             com2: Uart::default(),
             fault_effects: Vec::new(),
+            control_requests: Vec::new(),
+            management_framer: crate::control::ManagementFramer::default(),
             net,
             stepping: false,
             planner: None,
@@ -739,8 +749,14 @@ impl Machine {
                 delta > remaining || (interrupted && !self.stepping && delta == remaining);
             // With the yield window closed, a run must not pass `soft`: a
             // syscall there would have been the stop.
-            let soft_miss =
-                missed_soft_stop(windowed, window, delta, rem_soft, interrupted, self.stepping);
+            let soft_miss = missed_soft_stop(
+                windowed,
+                window,
+                delta,
+                rem_soft,
+                interrupted,
+                self.stepping,
+            );
             if (overshoot || soft_miss) && self.undo.as_ref().is_some_and(|u| u.valid) {
                 if overshoot && self.fm >= UNDO_MAX {
                     return Err(format!(
@@ -853,6 +869,7 @@ impl Machine {
                         0
                     };
                     let after_io = advance_time(self.time, charge, hard)?;
+                    let mut control_stop = false;
                     match port {
                         0x3f8..=0x3ff => {
                             if port == 0x3f8
@@ -876,13 +893,22 @@ impl Machine {
                             }
                             self.com1.write(port - 0x3f8, v)?
                         }
-                        0x2f8..=0x2ff => self.com2.write(port - 0x2f8, v)?,
+                        0x2f8..=0x2ff => {
+                            if let Some(line) =
+                                self.management_framer
+                                    .write(&mut self.com2, port - 0x2f8, v)?
+                            {
+                                self.control_requests.push((after_io, line));
+                                control_stop = true;
+                            }
+                        }
                         0xf6 | 0xf7 => {
                             let id = u32::from_le_bytes(
                                 data.try_into()
                                     .map_err(|_| "fault effect must be a 32-bit I/O write")?,
                             );
-                            self.fault_effects.push((id, self.time, port == 0xf6));
+                            self.fault_effects.push((id, after_io, port == 0xf6));
+                            control_stop = true;
                         }
                         0x20 | 0x21 | 0xa0 | 0xa1 => {
                             self.pic.write(port, v);
@@ -943,6 +969,10 @@ impl Machine {
                     self.record(b'O', (port as u64) << 8 | v as u64);
                     self.serial_edges();
                     self.time = after_io;
+                    if control_stop {
+                        self.set_stepping(false)?;
+                        return Ok(Stop::Control);
+                    }
                 }
                 Ok(VcpuExit::IoIn(port, data)) => {
                     self.stats.pio += 1;
@@ -1057,8 +1087,8 @@ impl Machine {
         let mut h = Sha256::new();
         for v in [
             r.rax, r.rbx, r.rcx, r.rdx, r.rsi, r.rdi, r.rsp, r.rbp, r.r8, r.r9, r.r10, r.r11,
-            r.r12, r.r13, r.r14, r.r15, r.rip, r.rflags, s.cr0, s.cr3, s.cr4, s.efer,
-            s.cr2, s.cr8, s.fs.base, s.gs.base, s.tr.base, s.gdt.base, s.idt.base,
+            r.r12, r.r13, r.r14, r.r15, r.rip, r.rflags, s.cr0, s.cr3, s.cr4, s.efer, s.cr2, s.cr8,
+            s.fs.base, s.gs.base, s.tr.base, s.gdt.base, s.idt.base,
         ] {
             h.update(v.to_le_bytes());
         }
@@ -1105,12 +1135,23 @@ impl Machine {
         ));
         // KERNEL_GS_BASE, STAR, LSTAR, CSTAR, SFMASK, TSC_AUX, PAT, SYSENTER_*.
         let index = [
-            0xc000_0102u32, 0xc000_0081, 0xc000_0082, 0xc000_0083, 0xc000_0084, 0xc000_0103,
-            0x277, 0x174, 0x175, 0x176,
+            0xc000_0102u32,
+            0xc000_0081,
+            0xc000_0082,
+            0xc000_0083,
+            0xc000_0084,
+            0xc000_0103,
+            0x277,
+            0x174,
+            0x175,
+            0x176,
         ];
         let entries: Vec<kvm_msr_entry> = index
             .iter()
-            .map(|&index| kvm_msr_entry { index, ..Default::default() })
+            .map(|&index| kvm_msr_entry {
+                index,
+                ..Default::default()
+            })
             .collect();
         let mut msrs = Msrs::from_entries(&entries).unwrap();
         let n = self.vcpu.get_msrs(&mut msrs).unwrap();

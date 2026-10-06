@@ -105,6 +105,7 @@ pub struct ExecutionRequest<'a> {
     pub network: &'a Network,
     pub schedule: &'a Schedule,
     pub faults: &'a [Fault],
+    pub control: Option<&'a crate::config::Control>,
     pub check: &'a Check,
     pub prepared: &'a PreparedInputs,
     pub artifacts: &'a BTreeMap<ContentDigest, PathBuf>,

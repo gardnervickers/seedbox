@@ -46,6 +46,7 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
             stop_tolerance_ns: 40_000,
         },
         faults: &[],
+        control: None,
         check: &Check {
             service: "client".into(),
             exit_code: 0,
@@ -143,6 +144,7 @@ fn faults_compile_through_placement_and_incomplete_or_forged_effects_cannot_pass
         ];
         let request = ExecutionRequest {
             faults: &planned,
+            control: None,
             ..*request
         };
         let world = vmm::world(&request).unwrap();
@@ -182,8 +184,95 @@ fn faults_compile_through_placement_and_incomplete_or_forged_effects_cannot_pass
         }];
         assert!(vmm::world(&ExecutionRequest {
             faults: &unknown,
+            control: None,
             ..request
         })
         .is_err());
+    });
+}
+
+#[test]
+fn runtime_requests_resolve_placement_and_reports_validate_rpc_causality() {
+    fixture(|base| {
+        let c = seedbox::config::Control {
+            service: "client".into(),
+        };
+        let request = ExecutionRequest {
+            control: Some(&c),
+            ..*base
+        };
+        let w = vmm::world(&request).unwrap();
+        assert_eq!(w["control"]["machine"], "client-machine");
+        let latency = w["control"]["latency_ns"].as_u64().unwrap();
+        let t = 10_000_000;
+        let a = t + latency;
+        let e = a + 1000;
+        let reply = e + latency;
+        let call = json!({"version":1,"id":1,"op":"stop","target":{"service":"server"}});
+        let plan = json!({"id":1,"at_ns":a,"deadline_ns":1_000_000_000-latency-1,"action":"stop","machine":"server-machine"});
+        let mut raw = report();
+        raw["control_latency_ns"] = json!(latency);
+        raw["control_history"] = json!([{"relay_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":{},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":e,"replied_at_ns":reply},"delivered_at_ns":reply}]);
+        raw["faults"] = json!([{"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":e,"action":"stop","machine":"server-machine","status":"applied","detail":"reaped"}]);
+        assert_eq!(
+            vmm::report(&serde_json::to_vec(&raw).unwrap(), &request)
+                .unwrap()
+                .faults
+                .len(),
+            1
+        );
+        for field in ["relay_id", "delivered_at_ns"] {
+            let mut bad = raw.clone();
+            bad["control_history"][0][field] = json!(0);
+            assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        }
+        let mut mismatch = raw.clone();
+        mismatch["faults"][0]["applied_at_ns"] = json!(e + 1);
+        assert!(vmm::report(&serde_json::to_vec(&mismatch).unwrap(), &request).is_err());
+        let mut bad = raw.clone();
+        bad["control_history"][0]["response"]["admitted_at_ns"] = json!(a + 1);
+        assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        let mut bad = raw.clone();
+        bad["faults"][0]["request"]["machine"] = json!("client-machine");
+        assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        let mut bad = raw.clone();
+        bad["control_history"][0]["request"]["id"] = json!(2);
+        bad["control_history"][0]["response"]["id"] = json!(2);
+        assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+    });
+}
+
+#[test]
+fn runtime_report_rejects_impossible_sleep_and_now_metadata() {
+    fixture(|base| {
+        let c = seedbox::config::Control {
+            service: "client".into(),
+        };
+        let request = ExecutionRequest {
+            control: Some(&c),
+            ..*base
+        };
+        let l = vmm::world(&request).unwrap()["control"]["latency_ns"]
+            .as_u64()
+            .unwrap();
+        for op in ["now", "sleep"] {
+            let t = 10_000_000;
+            let a = t + l;
+            let duration = 1000;
+            let e = if op == "sleep" { a + duration } else { a };
+            let reply = e + l;
+            let mut call = json!({"version":1,"id":1,"op":op});
+            if op == "sleep" {
+                call["duration_ns"] = json!(duration);
+            }
+            let mut raw = report();
+            raw["control_latency_ns"] = json!(l);
+            raw["control_history"] = json!([{"relay_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":if op=="now"{json!({"now_ns":e})}else{json!({})},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":e,"replied_at_ns":reply},"delivered_at_ns":reply}]);
+            assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
+            raw["control_history"][0]["response"]["effect_at_ns"] = json!(e + 1);
+            raw["control_history"][0]["response"]["replied_at_ns"] = json!(reply + 1);
+            raw["control_history"][0]["delivered_at_ns"] = json!(reply + 1);
+            assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
+        }
     });
 }

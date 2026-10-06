@@ -15,6 +15,7 @@ def steps(repo):
     tests = ["test_campaign", "test_msr54", "test_acceptance"] + (["test_batch"] if LINUX else [])
     yield "bash -n", [["bash", "-n", s] for s in scripts], repo, None
     yield "runner unit tests", [[sys.executable, "-m", "unittest", "-q", *tests]], sim / "tests", None
+    yield "Python control API", [[sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"]], sim / "python", None
     yield ("VMM cargo test", [["cargo", "test", "--release", "--manifest-path", "vmm/Cargo.toml"]],
            sim, None if LINUX else "kvm-ioctls builds only on Linux")
     crate = sim / "seedbox" / "Cargo.toml"

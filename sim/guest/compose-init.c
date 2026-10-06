@@ -19,12 +19,72 @@
 #include "control.h"
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <termios.h>
 #include <unistd.h>
 
 static int recipe_fd, management = -1;
+#define RPC_FRAME_MAX 16384
+static int control_listener = -1, control_client = -1;
+static uint32_t relay_id, waiting_relay;
+static int control_connected;
+static char request_frame[RPC_FRAME_MAX];
+static size_t request_used;
+static void die(const char *what);
+static void directories(const char *path, mode_t mode);
+static void send_all(int fd, const char *bytes, size_t size) {
+    while (size) {
+        ssize_t n = write(fd, bytes, size);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            struct pollfd ready = {.fd=fd,.events=POLLOUT};
+            if (poll(&ready,1,-1)<0 && errno!=EINTR) die("poll control relay");
+            continue;
+        }
+        if (n<=0) die("write control relay");
+        bytes+=n; size-=n;
+    }
+}
+static void relay_socket(void) {
+    directories("/run/seedbox",0755);
+    control_listener=socket(AF_UNIX,SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0);
+    if(control_listener<0) die("control socket");
+    struct sockaddr_un address={.sun_family=AF_UNIX};
+    strcpy(address.sun_path,"/run/seedbox/control.sock");
+    if(bind(control_listener,(struct sockaddr *)&address,sizeof(address)) || chmod(address.sun_path,0666) || listen(control_listener,1)) die("control socket bind");
+}
+static void relay_requests(void) {
+    if(control_client<0 && !control_connected) {
+        control_client=accept4(control_listener,NULL,NULL,SOCK_NONBLOCK|SOCK_CLOEXEC);
+        if(control_client<0 && errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR) die("accept control socket");
+    }
+    if(control_client<0) return;
+    if(!control_connected) {control_connected=1;close(control_listener);control_listener=-1;}
+    char byte; ssize_t n;
+    while((n=read(control_client,&byte,1))==1) {
+        if(waiting_relay) {errno=EBUSY;die("more than one outstanding RPC");}
+        if(byte=='\n') {
+            if(!request_used || relay_id==UINT32_MAX) {errno=EINVAL;die("control RPC frame/ID");}
+            request_frame[request_used]=0;
+            waiting_relay=++relay_id;
+            char prefix[64]; int size=snprintf(prefix,sizeof(prefix),"SBX_RPC1 %u ",waiting_relay);
+            send_all(management,prefix,(size_t)size);
+            send_all(management,request_frame,request_used);
+            send_all(management,"\n",1);request_used=0;
+        } else {
+            if(byte==0 || request_used+1>=sizeof(request_frame)){errno=E2BIG;die("control RPC frame size");}
+            request_frame[request_used++]=byte;
+        }
+    }
+    if(n==0) {
+        if(waiting_relay || request_used) {errno=EPIPE;die("controller disconnected during RPC");}
+        close(control_client);control_client=-1;
+    } else if(n<0 && errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR) die("read control socket");
+}
+
 static int launch_error_fd = -1;
 static char **arguments, **environment;
 static char *user, *working_dir;
@@ -197,6 +257,13 @@ static int stop(pid_t *child) {
     return errno == ECHILD ? 0 : -1;
 }
 static void control(char *command, pid_t *child) {
+    if (!strncmp(command,"SBX_REPLY1 ",11)) {
+        char *payload=command+11,*end;errno=0;
+        unsigned long id=strtoul(payload,&end,10);
+        if(errno || id==0 || id>UINT32_MAX || *end!=' ' || id!=waiting_relay || control_client<0) {errno=EINVAL;die("stale/malformed control reply");}
+        send_all(control_client,end+1,strlen(end+1));send_all(control_client,"\n",1);waiting_relay=0;
+        return;
+    }
     char *action; uint32_t id;
     if (control_parse(command, &action, &id)) { errno = EINVAL; die("invalid management command"); }
     int success = 0;
@@ -207,6 +274,7 @@ static void control(char *command, pid_t *child) {
 }
 #ifndef SEEDBOX_SUPERVISOR_TEST
 int main(void) {
+    if (signal(SIGPIPE,SIG_IGN)==SIG_ERR) die("ignore relay SIGPIPE");
     directories("/dev", 0755);
     if (mount("devtmpfs", "/dev", "devtmpfs", 0, NULL)) die("mount bootstrap dev");
     int console = open("/dev/console", O_RDWR);
@@ -242,15 +310,17 @@ int main(void) {
         free(path); free(content);
     }
     close(recipe_fd);
+    relay_socket();
     pid_t child = start();
     if (child < 0) die("initial application launch failed");
-    char command[64]; size_t used = 0;
+    char command[RPC_FRAME_MAX+64]; size_t used = 0;
     for (;;) {
         int status;
         pid_t done = waitpid(-1, &status, WNOHANG);
         if (done == child && child > 0) finish(WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status), 0);
-        struct pollfd pfd = { .fd = management, .events = POLLIN };
-        if (poll(&pfd, 1, 1) < 0 && errno != EINTR) die("poll management");
+        struct pollfd pfds[3] = {{.fd=management,.events=POLLIN},{.fd=control_listener,.events=POLLIN},{.fd=control_client,.events=POLLIN}};
+        if (poll(pfds, 3, 1) < 0 && errno != EINTR) die("poll management");
+        relay_requests();
         char byte;
         while (read(management, &byte, 1) == 1) {
             if (byte == '\n') {

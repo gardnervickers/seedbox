@@ -68,6 +68,26 @@ impl Faults {
             rejected_effects: Vec::new(),
         })
     }
+    pub fn append(&mut self, mut plan: Value) -> Result<u32, String> {
+        let id = u32::try_from(self.plans.len() + 1).map_err(|_| "fault ID exhausted")?;
+        if self
+            .plans
+            .last()
+            .is_some_and(|last| last["at_ns"].as_u64() > plan["at_ns"].as_u64())
+        {
+            return Err("fault time moved backwards".into());
+        }
+        plan["id"] = json!(1);
+        let mut checked = Self::new(vec![plan], self.names.clone())?;
+        let mut plan = checked.plans.pop().unwrap();
+        plan["id"] = json!(id);
+        let mut row = checked.log.pop().unwrap();
+        row["id"] = json!(id);
+        row["request"] = plan.clone();
+        self.plans.push(plan);
+        self.log.push(row);
+        Ok(id)
+    }
     pub fn next_boundary(&self) -> u64 {
         self.log
             .iter()
@@ -79,6 +99,9 @@ impl Faults {
             })
             .min()
             .unwrap_or(u64::MAX)
+    }
+    pub fn active_handles(&self) -> Vec<String> {
+        self.handles.keys().cloned().collect()
     }
     pub fn blocked(&self, from: usize, to: usize) -> bool {
         self.handles

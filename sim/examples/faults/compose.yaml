@@ -5,20 +5,15 @@ services:
     command: [server, --listen, "0.0.0.0:7000", --state, /data/kv.log]
   client:
     build: ./workload
-    command: [client, --address, "server:7000", --duration-ms, "15000", --required-generation, "3"]
+    command: [client, --listen, "0.0.0.0:7001", --address, "server:7000"]
+  scenario:
+    build: ./workload
+    command: [scenario, --control-address, "client:7001"]
 x-seedbox:
   version: 1
   seed: 1009
   limits: {simulated_time: 30s, wall_time: 10m}
   network: {latency: 1ms, jitter: 200us}
   schedule: {timer_jitter: 1ms, stop_tolerance: 2ms}
-  faults:
-    - {at: 5s, stop: {service: server}}
-    - {at: 6s, restart: {service: server}}
-    - {at: 8s, partition: {id: first, left: [client], right: [server]}}
-    - {at: 9s, partition: {id: overlap, left: [client], right: [server]}}
-    - {at: 10s, heal: {id: first}}
-    - {at: 11s, heal: {id: overlap}}
-    - {at: 12s, stop: {service: server}}
-    - {at: 13s, restart: {service: server}}
-  check: {service: client, exit_code: 0}
+  control: {service: scenario}
+  check: {service: scenario, exit_code: 0}

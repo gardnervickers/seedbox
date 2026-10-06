@@ -31,7 +31,7 @@ binary; they are not needed for Compose runs. Both old and new
 executors share the CPU/SMT lease protocol. The old workload build helper reads
 the checker source now housed in `sim/examples/etcd/workload`.
 
-Compose supports [structured fault operations](../seedbox/README.md#structured-faults)
+Compose controllers use the [runtime fault API](../seedbox/README.md#structured-faults)
 with correlated process acknowledgments and overlapping partition handles.
 The [recovery examples](../examples/faults/README.md) retain their own inputs and
 results. The legacy fixtures remain available with their separate run identities.
