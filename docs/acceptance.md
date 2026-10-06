@@ -139,3 +139,31 @@ existing etcd checker's `go test ./...` passed in its new canonical directory.
 The two rootful OCI tests had passed separately earlier; they remain explicitly
 ignored in the ordinary portable test invocation. The legacy engine smoke/full
 fault matrix was not rerun as part of this Compose acceptance.
+
+## 2026-10-06 — YAML workload setup with Python acceptance checks
+
+The full Python acceptance suite passed using the YAML workloads in
+`sim/acceptance/workloads/`, prepared by the test-only `acceptance_prepare` target.
+The production crate, CLI, VMM, generic guest supervisor and batch supervisor
+were unchanged. Source revision: `3406e1e`.
+
+The run used `nix develop ./sim` on `nixos.local`, CPUs 2–7 with SMT siblings
+18–23, the controlled kernel with SHA-256
+`01f9c903a4754bfe9eca4c197cc3335ab8ff582944164982463518128639e0d8`, and VMM
+`a55ecd4a2d3b98f9a575e461695aebabcfe22a5e36d1572bbb3ce59a558289b8`.
+Evidence is retained under `/home/gvickers/seedbox-yaml-acceptance/runs/acceptance-full-20261006T192231Z-2621786/`.
+
+- Portable checks passed on Darwin and Linux; all-target Clippy passed on both.
+- Fresh exit and full-state replay matched, including every machine digest.
+- Undo 0/16 and margin 32768 preserved the witness without retries.
+- Four race seeds produced distinct lost-update counts; the atomic control was
+  clean, and a fresh replay matched the sampled race failure.
+- The intentionally planted missing acknowledgement produced the expected failure.
+- Both scheduled short-workload kill/restarts were acknowledged; the workload recovered.
+- All 11 etcd 3.5.3 seeds (4000–4010) passed with acknowledged recovery.
+- Cross-build equivalence was skipped because this changes workload setup, not
+  engine performance. No historical failure seed or witness was required.
+
+The full tier completed in 768.6 seconds. All ten batches verified restoration;
+final MSR readbacks on every selected CPU and sibling matched the initial
+`0x4480000000000`. No restoration snapshots remained.
