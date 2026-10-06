@@ -44,7 +44,10 @@ impl VmmExecutor {
                     ("memory_mb".into(), memory_mb.to_string()),
                 ]),
             },
-            performance: BTreeMap::from([("SEEDBOX_MARGIN".into(), "adaptive".into())]),
+            performance: BTreeMap::from([
+                ("SEEDBOX_MARGIN".into(), "adaptive".into()),
+                ("SEEDBOX_UNDO".into(), "256".into()),
+            ]),
         })
     }
 
@@ -56,6 +59,16 @@ impl VmmExecutor {
         }
         self.performance
             .insert("SEEDBOX_MARGIN".into(), margin.into());
+        Ok(self)
+    }
+
+    /// Initial undo margin in branches; zero disables speculative stop recovery.
+    pub fn with_undo(mut self, branches: u64) -> Result<Self> {
+        if branches > (1 << 18) {
+            return Err(Error::Execution("undo margin must be 0..262144".into()));
+        }
+        self.performance
+            .insert("SEEDBOX_UNDO".into(), branches.to_string());
         Ok(self)
     }
 }

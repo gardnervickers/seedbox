@@ -65,7 +65,10 @@ path. SIGKILL and host loss cannot guarantee cleanup.
 `--memory-mb` defaults to 1024 MiB per service and is a semantic parameter; `--full-state` requests RAM/register
 digests. Preparation checks a conservative archive boot-memory floor before acquiring
 a CPU lease. Application memory can require a larger value; the etcd image failed
-to unpack at 512 MiB and passed at 1024 MiB. `--margin` is recorded per attempt and does not change identity.
+to unpack at 512 MiB and passed at 1024 MiB. `--margin` and `--undo` are recorded per attempt and do not change identity.
+`--undo` defaults to 256 branches; zero disables undo and 16 exercises a smaller
+margin. The accepted range is 0..262144. Both settings are passed explicitly to
+the retained engine, without inheriting VMM environment variables.
 Replay defaults to the retained engine. An explicit `--vmm NEW_BINARY
 --allow-engine-change` permits a fresh identity and witness comparison with it.
 Replay does not require registry access, a builder, or the original Compose files.
@@ -118,7 +121,7 @@ executable with `sudo -n`. It verifies the registry images and Dockerfile metada
 whiteouts, symlinks and build-context filtering. It does not start guests.
 The default runtime suite runs both application examples and their intentional
 failure controls, then replays each. The lifecycle suite checks full-state and
-changed-margin replay, simulated timeout, wall expiry and SIGTERM cancellation.
+changed-margin/undo replay, simulated timeout, wall expiry and SIGTERM cancellation.
 Both runtime suites start KVM guests, temporarily apply the scoped MSR workaround,
 and compare original MSR readbacks after every execution. Choose available CPU/SMT
 lanes; contention fails without taking over another run's lease.

@@ -107,6 +107,20 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[1]["prefix"], calls[0]["prefix"] + "-retry")
 
+    def test_overshoots_in_a_batch_retry_together(self):
+        env = dict(os.environ, SEEDBOX_ROOT=str(self.root), BATCH="3", STUB_MODE="overshoot")
+        result = subprocess.run(
+            ["bash", str(self.runner / "campaign.sh"), "world.json", "hunt", "7", "1", "3"],
+            env=env, text=True, capture_output=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = (self.root / "runs/hunt.campaign.log").read_text()
+        calls = [json.loads(line) for line in (self.root / "calls.jsonl").read_text().splitlines()]
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1]["seeds"], "7 8 9")
+        self.assertEqual(log.count("(retry) RESULT pass"), 3)
+        self.assertLess(log.index("seed=7 "), log.index("seed=8 "))
+
     def test_failed_retry_is_unresolved(self):
         result, log, calls = self.run_campaign("retry_failed")
         self.assertEqual(result.returncode, 1)

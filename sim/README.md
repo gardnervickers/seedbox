@@ -18,6 +18,7 @@ interrupt timing.
 | `worlds/` | Low-level engine fixtures and legacy fault campaigns; see [migration map](worlds/README.md) |
 | `batch.sh`, `campaign.sh` | Legacy world-file campaign runners and engine research fixtures |
 | `msr54.py` | Sets/clears the AMD Zen counter workaround (see below) |
+| `acceptance.sh`, `acceptance/` | Engine acceptance suite and pinned seeds |
 
 ## How execution is controlled
 
@@ -51,7 +52,8 @@ interrupt timing.
 - x86-64 AMD Zen host with KVM, run as root (guest-only perf counting).
 - **The Zen SpeculativeLockMap workaround must be on** for the cores running
   simulations (MSR 0xC0011020 bit 54, rr's workaround). Without it, branch
-  counts drift on lock-heavy code (e.g. Go) and runs diverge. The Rust executor acquires the shared CPU/SMT leases, sets
+  counts drift on lock-heavy code (e.g. Go) and runs diverge. The Rust executor
+  acquires the shared CPU/SMT leases, sets
   it with readback, then restores the exact originals after reaping its child.
   The legacy `batch.sh` runner uses the same lease protocol.
 
@@ -90,7 +92,7 @@ Each attempt retains exact image manifests/layers, kernel, guest archives,
 configuration, engine, logs and result. Replay uses the retained content store
 without registry pulls or builds. PASS, FAIL, ERROR, TIMEOUT and INCOMPLETE are
 separate results; a reproduced FAIL is a successful MATCH. `--full-state` adds
-per-machine RAM/register comparisons. `--margin` changes performance without
+per-machine RAM/register comparisons. `--margin` and `--undo` change performance without
 changing semantic identity. Application storage is private RAM-backed state for
 each run; the default is 1024 MiB per service. See [runtime instructions](seedbox/RUNTIME.md)
 for compatibility, memory sizing, root access, cancellation and the supported subset.
@@ -117,6 +119,131 @@ terminal JSON and zero process status, and classify incomplete attempts as
 UNRESOLVED. `SEEDBOX_ROOT` overrides their default `~/seedbox-sim` directory.
 A PMU overshoot aborts a run; these campaigns may retry with a larger
 `SEEDBOX_MARGIN`. A deterministic clock bound error is not fixed by changing it.
+
+Stop placement settings affect speed only, never results:
+
+- `SEEDBOX_UNDO` (default 256): undo-able precise stops. Before the final
+  approach to a stop, the VMM checkpoints the machine (vCPU state plus a shadow
+  of guest RAM synced from the KVM dirty log). It then aims the overflow
+  interrupt this many branches short of the stop. If the interrupt skids past,
+  the VMM rolls back and retries from twice as far. `0` disables this.
+- `SEEDBOX_MARGIN` (`adaptive` or a branch count): how early before a soft stop
+  the VMM asks for syscall exits, and the stepping distance when undo is off.
+  An overshoot that cannot be undone aborts the run; `campaign.sh` reruns it
+  with a larger margin for the identical result.
+
+Deterministic clock advances (timer-port I/O charges and guest time reads)
+must also fit in the hard stop. Crossing it fails with `clock bound exceeded`;
+no device I/O cost is clamped away, and a larger PMU margin does not fix or
+retry this error.
+
+## Engine acceptance suite
+
+This suite currently uses legacy world fixtures and preserves their fault coverage.
+Build both versioned cluster archives as described in [the migration map](worlds/README.md),
+plus `race.cpio` from `guest/race.c` and `guest/race.init`, before hardware tiers.
+
+`sim/acceptance.sh TIER` runs the checks from
+[issue #4](https://github.com/gardnervickers/seedbox/issues/4) in one command,
+inside `nix develop ./sim`. Tiers are cumulative: smoke runs portable first and
+stops if it fails, and full runs smoke.
+
+| Tier | When | Checks | Default cores |
+| --- | --- | --- | --- |
+| `portable` | Every change, any host | `bash -n` on scripts; runner and suite unit tests; VMM `cargo test` (Linux); `sim/seedbox` tests (if present) | none |
+| `smoke` | Every VMM/kernel change | 1 replay, 2 stop-placement invariance, 3 race demo, 4 checker negative control, 8 fault effects | `--cpus 2-7` |
+| `full` | Before merging changes to execution semantics, kernel or runner | smoke plus 5 known failing seed, 6 fixed-version control, 7 cross-build equivalence | `--cpus 2-12` |
+
+```sh
+sim/acceptance.sh smoke
+sim/acceptance.sh full --performance-only /path/to/old/seedbox-vmm   # also runs item 7
+sim/acceptance.sh full --semantics-change                            # kernel/ABI or semantics changed
+```
+
+- **1 Replay.** Runs `short-kill-3.5.2` (10 s load) twice as fresh processes,
+  then twice more with `--digest`. All witnesses must match: the world witness,
+  every per-machine witness and, in the digest pair, every RAM/register digest.
+  The report names both comparisons.
+- **2 Stop-placement invariance.** The same seed with `SEEDBOX_UNDO=0`,
+  `SEEDBOX_UNDO=16` and `SEEDBOX_MARGIN=32768` must give the default run's
+  witnesses. Any difference is reported as a determinism bug. If the pinned
+  margin completes only after an overshoot retry at a larger margin, the variant
+  was not exercised and the check is UNRESOLVED.
+- **3 Race demo.** Seeds of `race` must give at least two different lost-update
+  counts, and the atomic control must never lose an update. The first failing
+  seed is replayed in a fresh process and must match.
+- **4 Checker negative control.** `sanity` must end in `RESULT fail` with client
+  exit 1. Any other outcome fails the suite.
+- **5 Known failing seed.** `kill-3.5.2` seed 4063 must give `RESULT fail` with
+  the pinned world witness in 5 fresh processes. If the witness or outcome
+  changes, the suite reports `IDENTITY CHANGED` in two cases: the kernel,
+  initrd or world hashes differ from the pinned identity, or
+  `--semantics-change` was passed. Otherwise it reports a regression. After a
+  fresh hunt, record the new seed with
+  `sim/acceptance.sh pin --seed S --witness W --build "..."`. This also records
+  the current input identity. With no pinned identity, a moved witness is
+  UNRESOLVED rather than a regression.
+- **6 Fixed-version control.** `kill-3.5.3` seeds 4000–4010 must give zero
+  failures and zero UNRESOLVED, and every run must have at least one
+  acknowledged kill/restart.
+- **7 Cross-build equivalence.** This check runs only for a change declared
+  performance-only. The pinned seeds of items 1 and 5 must give identical
+  witnesses with the old VMM build and the new one. Without the declaration the
+  check is reported as skipped.
+- **8 Fault effects and recovery.** In the default `short-kill-3.5.2` run
+  (shared with items 1–2), at least one scheduled kill must be acknowledged by
+  the member's guest on COM2 (`nX stopped`, then `nX started` in `nX.mgmt`),
+  and the client must then report `RESULT pass`. The VMM's `kills` list is only
+  the seeded schedule, so it is not taken as evidence that a fault happened. Partition/heal checks will follow when
+  reusable partition faults exist outside the one-VM fixture.
+
+Seeds, scenarios, settings and the pinned witness are in
+`sim/acceptance/pins.json`, pinned for PR #18's build (ABI 2 kernel, corrected
+scheduler). The pinned input identity uses that ABI 2 kernel. If it is not
+`artifacts/bzImage`, pass its directory with `--artifacts`; otherwise item 5
+reports IDENTITY CHANGED.
+
+Runs go through `batch.sh`, so each one is a fresh process with fresh output
+under `runs/acceptance-<tier>-<time>-<pid>/`, and every batch holds the shared
+per-core lease. Runs with the same settings share one batch. Batches run
+concurrently on disjoint core ranges whose SMT siblings are also disjoint. If a
+core is leased elsewhere, the affected runs are UNRESOLVED (`--lease-wait S`
+waits instead). Result acceptance follows `campaign.sh`:
+
+- A run counts only with process status 0 and valid terminal JSON for its
+  seed. A `client` workload must also print exactly one `RESULT pass|fail` line
+  that agrees with its exit status 0/1. Other workloads, such as the race demo,
+  are judged by their exit status.
+- If `batch.sh` itself fails (for example an MSR restore failure), none of its
+  runs are accepted.
+- Overshoots and soft overshoots are retried once with margin 98304. A retry
+  that still fails is UNRESOLVED.
+- `clock bound exceeded` is never retried.
+- `SEEDBOX_UNDO`/`SEEDBOX_MARGIN` from the caller's environment are ignored, so
+  default runs really use the defaults.
+
+`--artifacts DIR` takes the kernel and initrds by file name from another
+directory, such as a newly built ABI kernel.
+
+The report (`report.json` in the run directory) records seeds, input hashes
+(kernel, initrds, world JSON, VMM builds), simulated and host seconds,
+per-machine exit counts, applied faults, retries, failed attempts with their
+evidence, evidence paths and per-check host time. No performance threshold is
+applied. The exit status is 0 for PASS, 1 for REGRESSION, 3 for UNRESOLVED
+(infrastructure, lease, missing inputs or an incomplete run) and 4 for IDENTITY
+CHANGED. 2 is left to usage errors.
+
+Checks never see world files, environment variables or cores. They yield
+runner-neutral jobs: a scenario, a seed, a witness mode (`exits` or
+`full_state`), performance-only settings, and an optional alternative engine.
+They judge normalized results. Only `acceptance/launcher.py` knows about
+`batch.sh`. The orchestration API from PR #17 is a Rust library, so Python
+cannot call it directly. Its `seedbox run`/`replay` commands now exist; the Compose runtime suite in
+`seedbox/tests/` exercises them. A second launcher can read results with
+`seedbox inspect --json`. It would map the same fields to a simulation config,
+`WitnessMode`, performance parameters and cross-engine execution. Porting the fault jobs also depends on #3. The eventual migration target is
+Rust integration tests over `Orchestrator::run`/`replay`. They are pure
+comparisons over jobs and results, and `acceptance/pins.json` carries over.
 
 ## One-VM network fixture
 

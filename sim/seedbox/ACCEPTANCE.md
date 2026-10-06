@@ -101,3 +101,35 @@ legacy seeded fault hunts, or a broad seed sweep. Nonempty Compose fault schedul
 remain explicitly unsupported pending #3. The etcd template uses a fixed write
 target rather than the legacy campaign's timed load; no throughput or bug-finding
 rate equivalence is claimed.
+
+## Final integration with main (`e344ce4`)
+
+After the canonical examples moved to `sim/examples/`, the PR integrated main's
+PV/undo VMM work and engine acceptance harness. Both Compose suites passed again
+with engine SHA-256
+`a55ecd4a2d3b98f9a575e461695aebabcfe22a5e36d1572bbb3ce59a558289b8`,
+the same controlled kernel, and CPUs 15/31:
+
+- `acceptance-20261006-6`: Redis and etcd PASS plus intentional FAIL controls;
+  all four fresh replays MATCH. Their execution witnesses match the corresponding
+  rows above as well.
+- `acceptance-20261006-7`: full-state baseline and replay; margin 10000; undo 0
+  and 16 against the explicit default 256; simulated timeout and replay; wall
+  expiry and replay; and CLI SIGTERM while its VMM child was live. All expected
+  outcome/comparison assertions passed. Every completed full-state variant had
+  the identical witness `e8c6fc52c440d40143e410ad09bfdcd11437a87463d045b24d5c43782fa0f27a`
+  and identical digests for both machines. This is a fresh prepared baseline,
+  not a full-state comparison across engine versions.
+- Both suites read `0x4480000000000` on CPUs 15 and 31 before and after each run.
+  No restoration snapshot remained.
+- `preflight-20261006-1`: preparing the checked-in etcd Compose definition at
+  512 MiB returned ERROR before execution, explaining the 655 MiB archive boot
+  floor. No prepared result was published.
+
+The merged branch passed `sim/acceptance.sh portable` on Linux and Darwin
+(the Linux-only VMM test step is explicitly skipped on Darwin), all 53 normal
+Rust tests plus the doctest, formatting and Clippy with warnings denied. The
+existing etcd checker's `go test ./...` passed in its new canonical directory.
+The two rootful OCI tests had passed separately earlier; they remain explicitly
+ignored in the ordinary portable test invocation. The legacy engine smoke/full
+fault matrix was not rerun as part of this Compose acceptance.

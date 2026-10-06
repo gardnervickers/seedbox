@@ -67,6 +67,14 @@ impl Pic {
         self.irr &= !(1 << irq);
         self.base as u32 + irq as u32
     }
+    /// Interrupt masks, master | slave << 8.
+    pub fn masks(&self) -> u16 {
+        self.imr as u16 | (self.slave_imr as u16) << 8
+    }
+    pub fn set_masks(&mut self, m: u16) {
+        self.imr = m as u8;
+        self.slave_imr = (m >> 8) as u8;
+    }
 }
 
 const PIT_HZ: u128 = 1_193_182;
@@ -121,6 +129,25 @@ fn ticks_to_ns(ticks: u64) -> u64 {
 }
 
 impl Pit {
+    /// Start channel 0 counting from its reload value.
+    fn arm0(&mut self, now: u64) {
+        let ch = &self.ch[0];
+        let ns = ticks_to_ns(ch.period() as u64);
+        self.deadline = Some(now + ns);
+        self.period_ns = matches!(ch.mode, 2 | 3).then_some(ns);
+        self.fresh = true;
+    }
+
+    /// Load channel 0 with `ticks` in one access (paravirtual timer port);
+    /// same effect as writing the low and high count bytes.
+    pub fn program(&mut self, ticks: u16, now: u64) {
+        let ch = &mut self.ch[0];
+        ch.reload = ticks as u32;
+        ch.low = None;
+        ch.start = now;
+        self.arm0(now);
+    }
+
     pub fn write(&mut self, port: u16, v: u8, now: u64) {
         match port {
             0x43 => {
@@ -174,10 +201,7 @@ impl Pit {
                 if complete {
                     ch.start = now;
                     if c == 0 {
-                        let ns = ticks_to_ns(ch.period() as u64);
-                        self.deadline = Some(now + ns);
-                        self.period_ns = matches!(ch.mode, 2 | 3).then_some(ns);
-                        self.fresh = true;
+                        self.arm0(now);
                     }
                 }
             }

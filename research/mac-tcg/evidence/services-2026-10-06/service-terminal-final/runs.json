@@ -1,0 +1,22 @@
+[
+  {
+    "console_sha256": "64492ca44fd924b2ca4ab9302559baa8b1f5538b660bf087bb47a0c40948b5f5",
+    "management_sha256": "cc6ac375528f0a3df55161758df42276feed11fab21b0c76383b3fdec100958a",
+    "reason": "missing or malformed requested witness",
+    "returncode": 1,
+    "seed": 1009,
+    "status": "ERROR",
+    "wall_seconds": 14.062840333004715,
+    "witness": {
+      "discontinuities": 109654,
+      "events": 12551069,
+      "instruction_events": 12441415,
+      "post_terminal_events": 0,
+      "schema": "seedbox.tcg.boundaries.v2",
+      "sha256": "dff8c380d645093093d7dfdee2198928a4b40fa3970f08a85a29df6122221b19",
+      "terminal": false,
+      "terminal_code": 0
+    },
+    "witness_diagnostics": null
+  }
+]

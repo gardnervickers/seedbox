@@ -62,6 +62,16 @@ if test "${6:-}" = lifecycle; then
   "$cli" inspect "$changed" --json > "$output/redis-margin-replay.json"
   jq -e '.replay.status == "MATCH" and .replay.full_state_matches == true' \
     "$output/redis-margin-replay.json" >/dev/null
+  for undo in 0 16; do
+    "$cli" replay "$attempt" --cpu "$cpu" --state "$state" --undo "$undo" \
+      > "$output/redis-undo-$undo.log" 2>&1
+    cat "$output/redis-undo-$undo.log"
+    verify_restore
+    changed=$(sed -n 's/^[A-Z]*: //p' "$output/redis-undo-$undo.log")
+    "$cli" inspect "$changed" --json > "$output/redis-undo-$undo.json"
+    jq -e '.replay.status == "MATCH" and .replay.full_state_matches == true' \
+      "$output/redis-undo-$undo.json" >/dev/null
+  done
 
   sed 's/simulated_time: 60s/simulated_time: 1ms/' \
     "$output/redis/compose.yaml" > "$output/redis/timeout.yaml"
@@ -124,7 +134,7 @@ PY
   cancelled=$(sed -n 's/^[A-Z]*: //p' "$output/cancel.log")
   "$cli" inspect "$cancelled" --json > "$output/cancel.json"
   jq -e '.outcome == "INCOMPLETE" and .report.reason == "CANCELLED" and .replay.status == "NOT_COMPARABLE"' "$output/cancel.json" >/dev/null
-  echo 'PASS: full-state, changed-margin replay, timeout, wall limit, cancellation; MSRs restored'
+  echo 'PASS: full-state, changed-margin/undo replay, timeout, wall limit, cancellation; MSRs restored'
   exit 0
 fi
 run_case redis "$output/redis/compose.yaml" PASS 0

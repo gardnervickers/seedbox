@@ -6,14 +6,18 @@ work="${SEEDBOX_WORK:-$HOME/seedbox-sim}"
 mkdir -p "$work/src"
 version=6.12.112
 tarball="$work/src/linux-$version.tar.xz"
+# Separate build and output directories let a new kernel be built while
+# runs use the current one.
+build="${SEEDBOX_KBUILD:-$work/build}"
+artifacts="${SEEDBOX_ARTIFACTS:-$work/artifacts}"
 want=164dc9d1f6c93c61a15e1f071c48379b467f2b17c469cce7223471968208ed03
 [ -f "$tarball" ] || curl -sSL "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$version.tar.xz" -o "$tarball"
 echo "$want  $tarball" | sha256sum -c --quiet
-src="$work/build/linux-$version"
-out="$work/build/kernel-out"
+src="$build/linux-$version"
+out="$build/kernel-out"
 rm -rf "$src"
-mkdir -p "$work/build" "$out"
-tar -xf "$tarball" -C "$work/build"
+mkdir -p "$build" "$out"
+tar -xf "$tarball" -C "$build"
 python3 "$here/apply.py" "$src"
 make -s -C "$src" O="$out" allnoconfig
 while read -r state option; do
@@ -32,7 +36,7 @@ while read -r state option; do
 done < "$here/config.options"
 export KBUILD_BUILD_USER=seedbox KBUILD_BUILD_HOST=seedbox KBUILD_BUILD_TIMESTAMP='Thu Jan 1 00:00:00 UTC 1970' SOURCE_DATE_EPOCH=0
 make -s -C "$src" O="$out" -j"${BUILD_JOBS:-16}" bzImage
-mkdir -p "$work/artifacts"
-cp "$out/arch/x86/boot/bzImage" "$work/artifacts/bzImage"
-cp "$out/.config" "$work/artifacts/kernel.config"
-sha256sum "$work/artifacts/bzImage" "$work/artifacts/kernel.config"
+mkdir -p "$artifacts"
+cp "$out/arch/x86/boot/bzImage" "$artifacts/bzImage"
+cp "$out/.config" "$artifacts/kernel.config"
+sha256sum "$artifacts/bzImage" "$artifacts/kernel.config"

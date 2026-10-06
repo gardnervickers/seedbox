@@ -37,6 +37,8 @@ pub struct VirtioNet {
     pub tx_frames: u64,
     pub rx_frames: u64,
     pub rx_dropped: u64,
+    /// Guest memory ranges (start, len) written by the device since last taken.
+    pub dirty: Vec<(usize, usize)>,
 }
 
 fn rd16(m: &[u8], a: u64) -> u16 {
@@ -88,12 +90,14 @@ impl Queue {
         self.last_avail = self.last_avail.wrapping_add(1);
         Some(head)
     }
-    fn push_used(&mut self, m: &mut [u8], head: u16, len: u32) {
+    fn push_used(&mut self, m: &mut [u8], dirty: &mut Vec<(usize, usize)>, head: u16, len: u32) {
         let e = self.used + 4 + 8 * (self.used_idx % self.num) as u64;
         wr32(m, e, head as u32);
         wr32(m, e + 4, len);
         self.used_idx = self.used_idx.wrapping_add(1);
         wr16(m, self.used + 2, self.used_idx);
+        dirty.push((e as usize, 8));
+        dirty.push((self.used as usize + 2, 2));
     }
 }
 
@@ -112,6 +116,7 @@ impl VirtioNet {
             tx_frames: 0,
             rx_frames: 0,
             rx_dropped: 0,
+            dirty: Vec::new(),
         }
     }
 
@@ -200,7 +205,7 @@ impl VirtioNet {
                             }
                             i = d.next;
                         }
-                        self.q[1].push_used(m, head, 0);
+                        self.q[1].push_used(m, &mut self.dirty, head, 0);
                         if bytes.len() > HDR {
                             out.frames.push(bytes[HDR..].to_vec());
                             self.tx_frames += 1;
@@ -215,7 +220,9 @@ impl VirtioNet {
             0x070 => {
                 self.status = v;
                 if v == 0 {
+                    let dirty = std::mem::take(&mut self.dirty);
                     *self = Self::new(self.mac);
+                    self.dirty = dirty;
                 }
             }
             0x080 => self.q[qs].desc = (self.q[qs].desc & !0xffff_ffff) | v as u64,
@@ -247,6 +254,7 @@ impl VirtioNet {
                 let n = (d.len as usize).min(data.len() - written);
                 let a = d.addr as usize;
                 m[a..a + n].copy_from_slice(&data[written..written + n]);
+                self.dirty.push((a, n));
                 written += n;
             }
             if d.flags & 1 == 0 || written == data.len() {
@@ -254,7 +262,7 @@ impl VirtioNet {
             }
             i = d.next;
         }
-        self.q[0].push_used(m, head, written as u32);
+        self.q[0].push_used(m, &mut self.dirty, head, written as u32);
         self.rx_frames += 1;
         true
     }

@@ -52,6 +52,9 @@ enum Command {
         state: PathBuf,
         #[arg(long, default_value = "adaptive")]
         margin: String,
+        /// Initial undo margin in branches; zero disables undo.
+        #[arg(long, default_value_t = 256)]
+        undo: u64,
     },
     /// Fresh execution using only retained inputs, without image preparation.
     Replay {
@@ -62,6 +65,8 @@ enum Command {
         state: PathBuf,
         #[arg(long, default_value = "adaptive")]
         margin: String,
+        #[arg(long, default_value_t = 256)]
+        undo: u64,
         /// Explicitly compare an alternate VMM binary against the recorded run.
         #[arg(long, requires = "allow_engine_change")]
         vmm: Option<PathBuf>,
@@ -246,6 +251,7 @@ fn run(cli: Cli) -> Result<u8> {
             cpu,
             state: directory,
             margin,
+            undo,
         } => {
             if !cfg!(target_os = "linux") {
                 return Err(Error::Execution(
@@ -254,7 +260,10 @@ fn run(cli: Cli) -> Result<u8> {
             }
             let simulation = config::load(&compose, &std::env::vars().collect())?;
             let (store, orchestrator) = state(directory)?;
-            let executor = inputs.executor(&store, cpu)?.with_margin(&margin)?;
+            let executor = inputs
+                .executor(&store, cpu)?
+                .with_margin(&margin)?
+                .with_undo(undo)?;
             let preparer = inputs.preparer(executor.profile())?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
@@ -271,6 +280,7 @@ fn run(cli: Cli) -> Result<u8> {
             cpu,
             state: directory,
             margin,
+            undo,
             vmm,
             allow_engine_change,
         } => {
@@ -296,7 +306,8 @@ fn run(cli: Cli) -> Result<u8> {
                 .ok_or_else(|| Error::Integrity("recorded profile missing memory_mb".into()))?;
             let executor =
                 VmmExecutor::new(&engine, &store, cpu, memory, profile.witness_mode.clone())?
-                    .with_margin(&margin)?;
+                    .with_margin(&margin)?
+                    .with_undo(undo)?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
             let result = orchestrator.replay_with_options(
