@@ -184,3 +184,99 @@ Linux all-target Clippy passed with warnings denied. Darwin's strict check
 encountered main's existing `HostLease::try_acquire_at` dead-code warning;
 all-target Clippy passed with only the `dead_code` lint allowed. Production
 source was left unchanged. Independent review passed after the path/API updates.
+
+## 2026-10-06 — YAML scenarios with guest Python fault drivers
+
+Source `584fca1` replaces the earlier preparation bridge and batch path with
+ordinary `seedbox run`, `replay` and `inspect` calls. YAML selects the application,
+Python driver, control/check service and limits. Guest Python owns the workload,
+fault sequence and verification; host Python owns the acceptance matrix and
+report. The diff against main `788fc43` contains only harness and documentation
+changes. Existing Rust, guest supervisor, Python binding and Go/C workload
+sources are unchanged.
+
+The final bounded run uses four workers on `nixos.local`, CPUs 2–5 with SMT
+siblings 18–21, in `/home/gvickers/seedbox-acceptance-drivers`. Its command is:
+
+```sh
+nix develop --command bash harness/acceptance.sh full \
+  --root /home/gvickers/seedbox-acceptance-drivers \
+  --kernel /home/gvickers/seedbox-scoped-faults-20261006/artifacts-shmem/bzImage \
+  --cpus 2-5 \
+  --report /home/gvickers/seedbox-acceptance-drivers/full-bounded-report.json
+```
+
+Evidence is retained under
+`runs/acceptance-full-20261006T212656Z-2783040/` in that checkout. The live
+acceptance, binding and runtime source files were compared with the local commit
+by SHA-256. Runtime identities:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| CLI | `14e3d03c33cd2bcd6fe196314b573f8fef4e457094be6c512aab9a8d4ced0cb6` |
+| VMM | `af0debdb6fe642543e771fe6e66efb56fecb7b29696d7508136b3cee37b082e3` |
+| Kernel | `e8ece7cba2d5fc4924da83e39cc672ae2516c117f8f76ecfa04aeaa98e697847` |
+
+Formatting, strict all-target Clippy, workspace tests and portable acceptance
+passed on Darwin. Linux strict Clippy, portable acceptance and VMM tests passed.
+All 23 acceptance unit tests passed, including error classification, bounded
+overshoot retries, CPU lease waiting, cancellation cleanup, retained-output
+integrity and required packet-drop evidence. Independent review passed.
+
+Two earlier overlapping six-worker attempts were invalidated by host memory
+exhaustion; they also encountered registry and temporary-image cleanup failures.
+Both were cancelled cooperatively, their processes exited, every selected CPU
+and SMT sibling matched its saved MSR value, and no restoration snapshots
+remained. They are not acceptance passes. Both suite tiers now default to four
+workers, and the final attempt runs alone.
+
+The bounded full tier finished in 1119.4 seconds with **UNRESOLVED** (exit 3),
+24 distinct executions and zero retries:
+
+- Exit witnesses and full-state digests matched fresh replays.
+- Undo 0/16 and margin 32768 preserved the reference witness.
+- Four race seeds produced four different lost-update counts; the atomic control
+  remained clean and seed 1 reproduced its sampled loss of 2,065,650 updates.
+- The planted missing acknowledgement produced the expected FAIL.
+- The short etcd workload passed after two stop/restart/partition/heal rounds,
+  with eight confirmed effects and 20 partition-dropped packets.
+- Ten of eleven etcd 3.5.3 seeds passed. Each completed all 20 fault rounds,
+  recording 80 effects and 224–261 partition-dropped packets.
+- Seed 4004 stopped with a VMM clock-bound error. It was neither retried nor
+  counted as a workload failure or pass. This keeps the full tier UNRESOLVED.
+- Cross-engine equivalence was skipped because this is not a performance-only
+  engine change.
+
+The unresolved execution is
+`state/runs/a0835e9a061571fb-PSg7WD/` under the evidence directory. Its retained
+`output/vmm.stderr` says:
+
+```text
+error: clock bound exceeded: time 3793645758 + 1000 exceeds hard stop 3793646723
+```
+
+Every used CPU and sibling matched the original MSR value `0x4480000000000`
+after the suite, and no restoration snapshots remained. The suite report and
+all staged projects, CLI commands, outputs and private run records are retained.
+The clock-bound result remains an engine-validation blocker; no production
+boundary rule or scenario seed was changed to make this run pass.
+
+A separate diagnostic replay with identical retained inputs and VMM produced the
+same clock-bound message at the exact same values. Its run is
+`state/runs/a0835e9a061571fb-hj0gt0/`. The CLI correctly reports
+`ERROR / NOT_COMPARABLE`: neither attempt produced a completed execution witness.
+MSRs again matched the saved values, no snapshots remained, and no suite-owned
+CLI or VMM processes were left running. This diagnostic does not replace the
+unresolved suite result.
+
+```sh
+sudo -n target/debug/seedbox replay \
+  /home/gvickers/seedbox-acceptance-drivers/runs/acceptance-full-20261006T212656Z-2783040/state/runs/a0835e9a061571fb-PSg7WD \
+  --cpu 2 \
+  --state /home/gvickers/seedbox-acceptance-drivers/runs/acceptance-full-20261006T212656Z-2783040/state \
+  --vmm /home/gvickers/seedbox-acceptance-drivers/crates/seedbox-vmm/target/release/seedbox-vmm \
+  --allow-engine-change --undo 256 --margin adaptive
+```
+
+The explicit `--vmm` requires `--allow-engine-change`; in this diagnostic the
+VMM hash is unchanged.
