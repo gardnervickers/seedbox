@@ -23,7 +23,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Create a self-contained Compose example (Linux acceptance is pending).
+    /// Create a self-contained Compose example.
     Init {
         directory: PathBuf,
         #[arg(long, value_parser = ["etcd", "redis"])]
@@ -94,7 +94,7 @@ struct RuntimeInputs {
     /// Static Linux amd64 BusyBox (defaults to SEEDBOX_BUSYBOX from the Nix shell).
     #[arg(long)]
     busybox: Option<PathBuf>,
-    #[arg(long, default_value_t = 512)]
+    #[arg(long, default_value_t = 1024)]
     memory_mb: u32,
     #[arg(long)]
     full_state: bool,
@@ -185,7 +185,11 @@ fn outcome(run: &orchestration::Run) -> u8 {
     if let Some(replay) = &run.record.replay {
         println!(
             "replay: {}",
-            format!("{:?}", replay.status).to_ascii_uppercase()
+            match replay.status {
+                ReplayStatus::Match => "MATCH",
+                ReplayStatus::Mismatch => "MISMATCH",
+                ReplayStatus::NotComparable => "NOT_COMPARABLE",
+            }
         );
         return match replay.status {
             ReplayStatus::Match => 0,
@@ -214,10 +218,7 @@ fn run(cli: Cli) -> Result<u8> {
                 _ => unreachable!("clap validates template names"),
             };
             seedbox::templates::init(&directory, template)?;
-            println!(
-                "CREATED: {} (Linux acceptance pending)",
-                directory.display()
-            );
+            println!("CREATED: {}", directory.display());
         }
         Command::Prepare {
             compose,

@@ -4,7 +4,7 @@
 use crate::{
     config::Simulation,
     execution::{ExecutionProfile, PreparationBackend, PreparedInputs},
-    guest::{build_initramfs, launch_recipe},
+    guest::{build_initramfs, launch_recipe, minimum_memory_mb},
     oci::OciTools,
     store::ContentStore,
     Error, Result,
@@ -102,6 +102,16 @@ impl PreparationBackend for OciPreparer {
             // Package only retained bootstrap bytes. The source paths may be
             // replaced by another build while an image is being downloaded.
             build_initramfs(&imported.rootfs, &init, &busybox, &recipe, &archive)?;
+            let memory_mb = self
+                .profile
+                .semantic_parameters
+                .get("memory_mb")
+                .and_then(|value| value.parse::<u32>().ok())
+                .ok_or_else(|| Error::Integrity("OCI profile missing memory_mb".into()))?;
+            let minimum = minimum_memory_mb(fs::metadata(&archive)?.len())?;
+            if memory_mb < minimum {
+                return Err(Error::Execution(format!("service {name}: {memory_mb} MiB guest RAM is below the archive boot floor of {minimum} MiB; increase --memory-mb (application memory may require more)")));
+            }
             guests.insert(name.clone(), store.put_file(&archive)?);
             images.insert(name.clone(), imported.image);
             auxiliary.extend(

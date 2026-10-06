@@ -1,8 +1,10 @@
-# Seedbox simulation example — acceptance pending
+# Seedbox simulation example
 
-This generated project is self-contained. Its Compose syntax is validated, but
-the current OCI/KVM backend and these images have not yet passed Linux acceptance.
-Do not treat generation or validation as evidence that the guest applications boot.
+This project is self-contained. The etcd and Redis templates passed real workloads,
+intentional failure controls, and exact replays on the supported Linux amd64 AMD Zen
+workstation with the controlled Seedbox kernel and 1024 MiB RAM per service.
+See the repository's `sim/seedbox/ACCEPTANCE.md` for the tested image/kernel hashes.
+This establishes those image versions, not compatibility with arbitrary OCI images.
 
 The etcd template packages Seedbox's existing Go acknowledgement-ledger workload
 in a Dockerfile and describes three registry-image members in Compose. The Redis

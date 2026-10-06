@@ -15,33 +15,43 @@ pub fn init(destination: &Path, template: Template) -> Result<()> {
         Template::Etcd => vec![
             (
                 "compose.yaml",
-                include_str!("../templates/etcd/compose.yaml"),
+                include_str!("../../examples/etcd/compose.yaml"),
             ),
             (
                 "workload/Dockerfile",
-                include_str!("../templates/etcd/Dockerfile"),
+                include_str!("../../examples/etcd/workload/Dockerfile"),
             ),
             // Package the existing consistency checker rather than inventing a
             // weaker replacement workload during the authoring migration.
             (
                 "workload/main.go",
-                include_str!("../../guest/client/main.go"),
+                include_str!("../../examples/etcd/workload/main.go"),
             ),
-            ("workload/go.mod", include_str!("../../guest/client/go.mod")),
-            ("workload/go.sum", include_str!("../../guest/client/go.sum")),
+            (
+                "workload/go.mod",
+                include_str!("../../examples/etcd/workload/go.mod"),
+            ),
+            (
+                "workload/go.sum",
+                include_str!("../../examples/etcd/workload/go.sum"),
+            ),
+            (
+                "workload/main_test.go",
+                include_str!("../../examples/etcd/workload/main_test.go"),
+            ),
         ],
         Template::Redis => vec![
             (
                 "compose.yaml",
-                include_str!("../templates/redis/compose.yaml"),
+                include_str!("../../examples/redis/compose.yaml"),
             ),
             (
                 "workload/Dockerfile",
-                include_str!("../templates/redis/Dockerfile"),
+                include_str!("../../examples/redis/workload/Dockerfile"),
             ),
             (
                 "workload/main.rs",
-                include_str!("../templates/redis/main.rs"),
+                include_str!("../../examples/redis/workload/main.rs"),
             ),
         ],
     };

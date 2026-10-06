@@ -1,9 +1,8 @@
-# OCI and KVM integration under development
+# OCI preparation and KVM execution
 
-Linux compilation and OCI acceptance have passed; guest execution acceptance is
-pending. These commands describe the runtime path and remaining checks before
-claiming it works. See [the acceptance record](ACCEPTANCE.md) for the evidence and
-its limits.
+The etcd and Redis Compose examples have passed real guest runs, failure controls
+and replay on the qualified Linux workstation. See [the acceptance record](ACCEPTANCE.md)
+for the tested engine, kernel, image digests and lifecycle checks.
 
 ## Build on the qualified Linux host
 
@@ -63,8 +62,10 @@ Library cancellation and CLI SIGINT/SIGTERM/SIGHUP cause cleanup through the sam
 path. SIGKILL and host loss cannot guarantee cleanup.
 
 `--state` chooses the content store and attempts root (default `.seedbox`).
-`--memory-mb` is a semantic parameter; `--full-state` requests RAM/register
-digests. `--margin` is recorded per attempt and does not change identity.
+`--memory-mb` defaults to 1024 MiB per service and is a semantic parameter; `--full-state` requests RAM/register
+digests. Preparation checks a conservative archive boot-memory floor before acquiring
+a CPU lease. Application memory can require a larger value; the etcd image failed
+to unpack at 512 MiB and passed at 1024 MiB. `--margin` is recorded per attempt and does not change identity.
 Replay defaults to the retained engine. An explicit `--vmm NEW_BINARY
 --allow-engine-change` permits a fresh identity and witness comparison with it.
 Replay does not require registry access, a builder, or the original Compose files.
@@ -102,24 +103,25 @@ and timeouts. Serial output is capped at 1 GiB total divided equally between the
 two ports of all machines; exceeding that cap fails execution. Trace recording
 is not enabled by this adapter.
 
-## Pending acceptance
+## Reproduce acceptance
 
-1. Completed: compile the static bootstrap and Linux VMM/executor; portable tests
-   pass on Linux and Darwin.
-2. Completed: run the two ignored `tests/oci.rs` tests as root with the Nix tools. They pull
-   Redis/etcd and build an image covering whiteouts, symlinks, `.dockerignore`,
-   command defaults and user/workdir/environment metadata. They do not boot guests
-   or modify CPU/MSR state.
-   `bash sim/seedbox/tests/accept-oci.sh` performs steps 1–2 from the repository
-   root in the Nix shell. It compiles/tests as the current user and invokes only
-   the final OCI test executable with `sudo -n`.
-3. Prepare and boot etcd/Redis with a custom workload; test PASS and intentional
-   FAIL, exact replay, changed performance settings, timeout and cancellation.
-   `bash sim/seedbox/tests/accept-runtime.sh KERNEL CPU FRESH_OUTPUT_DIRECTORY`
-   builds and runs the normal/intentional-failure templates and their replays,
-   checking original MSR values after each run. This separate stage starts KVM
-   guests and temporarily sets the scoped MSR workaround; OCI acceptance does not.
-4. Check shared lease contention and real MSR readback before/after each exit path.
-5. Publish validated templates and migrate the existing application world files.
+From the repository root in `nix develop ./sim`:
+
+```sh
+bash sim/seedbox/tests/accept-oci.sh
+bash sim/seedbox/tests/accept-runtime.sh KERNEL CPU FRESH_OUTPUT_DIRECTORY
+bash sim/seedbox/tests/accept-runtime.sh KERNEL CPU ANOTHER_FRESH_DIRECTORY lifecycle
+```
+
+The OCI suite builds/tests as the current user and invokes only its final import
+executable with `sudo -n`. It verifies the registry images and Dockerfile metadata,
+whiteouts, symlinks and build-context filtering. It does not start guests.
+The default runtime suite runs both application examples and their intentional
+failure controls, then replays each. The lifecycle suite checks full-state and
+changed-margin replay, simulated timeout, wall expiry and SIGTERM cancellation.
+Both runtime suites start KVM guests, temporarily apply the scoped MSR workaround,
+and compare original MSR readbacks after every execution. Choose available CPU/SMT
+lanes; contention fails without taking over another run's lease.
 
 Fault authoring remains disabled pending #3 integration and effect-time validation.
+The legacy fault campaigns are retained as described in [the migration map](../worlds/README.md).

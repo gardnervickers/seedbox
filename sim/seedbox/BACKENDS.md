@@ -42,7 +42,8 @@ shared command/environment override logic. Its `Launch` includes image-declared
 volume paths; silently discarding these would change image behavior. The OCI
 guest implementation provides per-run RAM-backed storage, read-only configs,
 UID/GID lookup, working directory and PATH resolution, and an explicit hosts file
-for service-name resolution. These paths still need Linux acceptance testing.
+for service-name resolution. The etcd and Redis application paths have passed
+Linux acceptance; see `ACCEPTANCE.md` for the tested profiles and limits.
 Process restart and whole-machine restart must not be
 conflated when storage behavior is defined in #3.
 
@@ -91,8 +92,8 @@ all-or-nothing setup and readback-verified restoration. Keep the lease held unti
 owned processes have stopped and restoration has been attempted; preserve a failed
 restoration snapshot and report infrastructure failure. Honor normal errors and
 catchable signals. `host.rs` implements the protocol for the Rust executor;
-fixture tests cover contention and exact register restoration, but hardware
-qualification is still pending. The current VMM is a single-process engine;
+fixture tests and hardware acceptance cover contention, catchable interruption,
+and exact register restoration. The current VMM is a single-process engine;
 all other hardware entrypoints must adopt this same protocol before sharing cores.
 
 The versioned VMM report provides `guest_exit_code`, `guest_init_error`, and

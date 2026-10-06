@@ -5,13 +5,18 @@ use seedbox::{
 use std::{collections::BTreeMap, fs, process::Command};
 
 #[allow(dead_code)]
-#[path = "../templates/redis/main.rs"]
+#[path = "../../examples/redis/workload/main.rs"]
 mod redis_workload;
 
 #[test]
 fn generated_templates_are_self_contained_and_preserve_the_existing_etcd_checker() {
     let directory = tempfile::tempdir().unwrap();
     for (name, template, services) in [("etcd", Template::Etcd, 4), ("redis", Template::Redis, 2)] {
+        let checked_in = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../examples")
+            .join(name)
+            .join("compose.yaml");
+        config::load(&checked_in, &BTreeMap::new()).unwrap();
         let destination = directory.path().join(name);
         templates::init(&destination, template).unwrap();
         let config = config::load(&destination.join("compose.yaml"), &BTreeMap::new()).unwrap();
@@ -34,11 +39,11 @@ fn generated_templates_are_self_contained_and_preserve_the_existing_etcd_checker
     }
     assert_eq!(
         fs::read(directory.path().join("etcd/workload/main.go")).unwrap(),
-        include_bytes!("../../guest/client/main.go")
+        include_bytes!("../../examples/etcd/workload/main.go")
     );
     assert_eq!(
         fs::read(directory.path().join("etcd/workload/go.sum")).unwrap(),
-        include_bytes!("../../guest/client/go.sum")
+        include_bytes!("../../examples/etcd/workload/go.sum")
     );
 }
 

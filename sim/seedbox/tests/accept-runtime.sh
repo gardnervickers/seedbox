@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Linux KVM acceptance. This DOES start guests and temporarily set the scoped
 # MSR workaround through the Rust executor. Run only after OCI acceptance.
-# Usage (Nix shell): bash sim/seedbox/tests/accept-runtime.sh KERNEL CPU OUTPUT
+# Usage (Nix shell): bash sim/seedbox/tests/accept-runtime.sh KERNEL CPU OUTPUT [lifecycle]
 set -euo pipefail
 test "$(uname -s)" = Linux
 test "$(uname -m)" = x86_64
@@ -24,4 +24,4 @@ vmm="$root/sim/vmm/target/release/seedbox-vmm"
 # Root owns the inputs it will execute and the writable artifact store. Build
 # outputs above remain user-owned and are copied by the content store before use.
 sudo -n env PATH="$PATH" SEEDBOX_BUSYBOX="$SEEDBOX_BUSYBOX" \
-  bash sim/seedbox/tests/runtime-cases.sh "$cli" "$vmm" "$kernel" "$cpu" "$output"
+  bash sim/seedbox/tests/runtime-cases.sh "$cli" "$vmm" "$kernel" "$cpu" "$output" "${4:-}"

@@ -1,18 +1,18 @@
 # Seedbox orchestration
 
-This Rust crate is the first implementation increment for [issue #2](https://github.com/gardnervickers/seedbox/issues/2).
-It provides strict Compose-shaped configuration validation, OCI image launch
-default resolution, a local content store, and a programmatic run/replay lifecycle.
-The CLI exposes `init`, `validate`, `prepare`, `run`, `inspect`, and `replay`. The Rust
-`OciPreparer` and `VmmExecutor` implement the separate library interfaces.
+This Rust crate implements [issue #2](https://github.com/gardnervickers/seedbox/issues/2)'s
+Compose-shaped application configuration and OCI run/replay path. The CLI exposes
+`init`, `validate`, `prepare`, `run`, `inspect`, and `replay`. `OciPreparer` and
+`VmmExecutor` implement separate programmatic preparation/execution interfaces;
+the orchestration API can be called directly by future simulation schedulers.
 
-**The KVM integration is under development and not yet qualified.** Linux builds
-and real OCI import tests pass for Redis, etcd, and a Dockerfile fixture. Portable
-tests cover guest archive round trips, report translation, and host-state cleanup
-using ordinary file fixtures. They do not demonstrate that the applications boot
-on the controlled guest kernel. This
-increment does not close issue #2. See [runtime preparation and acceptance](RUNTIME.md)
-for the concrete commands and remaining acceptance work.
+The checked-in [etcd](../examples/etcd/compose.yaml) and
+[Redis](../examples/redis/compose.yaml) examples passed real KVM workloads and
+intentional-failure replays on the supported workstation. Full-state replay,
+changed-margin replay, deterministic timeout, wall expiry, SIGTERM cancellation,
+lease contention and exact MSR restoration were also exercised. See the
+[acceptance record](ACCEPTANCE.md) and [runtime instructions](RUNTIME.md) for exact
+inputs and limits. Nonempty fault schedules remain rejected pending #3.
 
 ## Build and validate
 
@@ -22,8 +22,8 @@ Use the existing development environment from the repository root:
 nix develop ./sim
 cargo test --manifest-path sim/seedbox/Cargo.toml --locked
 cargo run --manifest-path sim/seedbox/Cargo.toml -- init etcd-demo --template etcd
-cargo run --manifest-path sim/seedbox/Cargo.toml -- validate compose.yaml
-cargo run --manifest-path sim/seedbox/Cargo.toml -- validate compose.yaml --json
+cargo run --manifest-path sim/seedbox/Cargo.toml -- validate etcd-demo/compose.yaml
+cargo run --manifest-path sim/seedbox/Cargo.toml -- validate etcd-demo/compose.yaml --json
 cargo run --manifest-path sim/seedbox/Cargo.toml -- inspect runs/<attempt> --json
 ```
 
@@ -197,14 +197,10 @@ unknown services are rejected.
 The draft run-manifest format is now version 2; earlier version 1 records are not
 migrated. Compose authoring remains `x-seedbox.version: 1`.
 
-## Remaining issue #2 work
+## Follow-on scope
 
-- Verify real guest execution, replay, failure,
-  interruption, lease contention, and MSR readback after cleanup.
-- Qualify the generated etcd/Redis/custom-workload templates, then migrate
-  existing application world definitions to that authoring format.
-- Connect the fault support from #3. The guest supervisor has a process-control
-  channel, but nonempty authoring faults remain rejected until effect timing is
-  integrated and verified.
-- Document tested guest requirements and compatibility boundaries after the
-  acceptance runs (#4/#5). No images are yet claimed to boot through this backend.
+The existing seeded fault hunts remain on the legacy runner until #3 provides
+scoped fault operations with qualified effect times. Multi-core campaign dispatch,
+whole-machine persistent storage, broad guest image qualification (#5), and the
+full acceptance matrix (#4) are separate work. The supported path runs one
+service per VM, with explicit host/runtime inputs and RAM-backed storage.

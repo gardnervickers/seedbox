@@ -12,6 +12,19 @@ use std::{
     path::Path,
 };
 
+/// Conservative boot floor for the controlled kernel: the input archive is
+/// resident while root tmpfs is populated, and tmpfs's default capacity is half
+/// the available RAM. Reserve additional space for the kernel and bootstrap.
+/// Application heap/storage requirements can require more than this floor.
+pub fn minimum_memory_mb(archive_bytes: u64) -> Result<u32> {
+    let bytes = archive_bytes
+        .checked_mul(3)
+        .and_then(|bytes| bytes.checked_add(128 * 1024 * 1024))
+        .ok_or_else(|| Error::Execution("guest memory estimate overflow".into()))?;
+    u32::try_from(bytes.div_ceil(1024 * 1024))
+        .map_err(|_| Error::Execution("guest memory estimate exceeds supported range".into()))
+}
+
 /// This binary recipe is consumed by the small static Linux guest init. Length
 /// prefixes avoid shell evaluation of command, environment or config contents.
 pub fn launch_recipe(
