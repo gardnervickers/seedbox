@@ -1,11 +1,12 @@
-# Shared-memory fault API acceptance — 2026-10-06
+# Shared-memory fault API review acceptance — 2026-10-06
 
-All thirteen executions of the expanded synthetic acceptance sequence produced
-the expected outcomes, including every replay. The VMM implementation is from
-`fec6cef` and uses the `seedbox` virtio-console shared-memory channel. The prior
-[UART RPC record](ACCEPTANCE-RPC-20261006.md) and
-[static-schedule record](ACCEPTANCE-STATIC-20261006.md) retain their own artifact
-identities and do not qualify this engine.
+All fifteen executions produced their expected outcomes, and every replay
+matched. The runtime implementation is from `f3d00e2`, including the review fixes
+for lifecycle errors, sessions, cutoff classification and nominal-time inspection.
+The [initial shared-memory record](ACCEPTANCE-SHMEM-INITIAL-20261006.md),
+[UART record](ACCEPTANCE-RPC-20261006.md) and
+[static-schedule record](ACCEPTANCE-STATIC-20261006.md) retain their own identities;
+they do not qualify this engine.
 
 ## Reproduction
 
@@ -14,13 +15,13 @@ Host: `nixos.local`; isolated checkout:
 
 ```sh
 nix develop -c bash crates/seedbox/tests/accept-runtime.sh \
-  "$PWD/artifacts-shmem/bzImage" 14 "$PWD/acceptance-shmem-1" faults
+  "$PWD/artifacts-shmem/bzImage" 14 "$PWD/acceptance-review-2" faults
 ```
 
-The command exited zero. `acceptance-shmem-1/acceptance.json` has
-`status: passed`, thirteen retained results and thirteen successful CPU/SMT
-restoration checks. Both CPU 14 and sibling 30 returned to their exact original
-MSR value, `0x4480000000000`, after every execution. Use a fresh output directory
+The command exited zero. `acceptance-review-2/acceptance.json` has
+`status: passed`, fifteen retained results and fifteen successful CPU/SMT
+restoration checks. CPU 14 and sibling 30 returned to their exact original MSR
+value, `0x4480000000000`, after every execution. Use a fresh output directory
 for another run.
 
 Seed 1009; three Python guests with 512 MiB each; 1 ms network latency, 200 us
@@ -34,74 +35,73 @@ seconds. The cutoff case has a three-second world limit.
 
 | Case | Expected and observed | Retained attempt |
 | --- | --- | --- |
-| Healthy | PASS | `a8bdd9c1f66bba6d-CWIMtT` |
-| Healthy replay, undo 0 | PASS / MATCH | `a8bdd9c1f66bba6d-NpGzxY` |
-| Healthy replay, changed margin/undo | PASS / MATCH | `a8bdd9c1f66bba6d-prnGlR` |
-| Memory-only variant | FAIL | `29ca378042f582ef-Eip24F` |
-| Memory-only replay | FAIL / MATCH | `29ca378042f582ef-c9SIbI` |
-| Memory-only without faults | PASS | `4902c790f03bb204-95i6uy` |
-| No-fault replay | PASS / MATCH | `4902c790f03bb204-HsGh38` |
-| Missing effect | ERROR | `faa635a3cae8057f-jMmYIC` |
-| Rejected effect | ERROR | `6c1d70d335b0f000-tpOBXM` |
-| Early request | PASS | `b9bd045ee0ecc8fb-DYajV6` |
-| Early request replay | PASS / MATCH | `b9bd045ee0ecc8fb-lNA1It` |
-| Pending request cutoff | TIMEOUT | `0ab779285bad4d7d-Q1KTCc` |
-| Cutoff replay | TIMEOUT / MATCH | `0ab779285bad4d7d-VUEXbx` |
+| Healthy | PASS | `3592c60bdee7247a-3gkTDU` |
+| Healthy replay, undo 0 | PASS / MATCH | `3592c60bdee7247a-iiPh11` |
+| Healthy replay, changed margin/undo | PASS / MATCH | `3592c60bdee7247a-rSWbNQ` |
+| Memory-only variant | FAIL | `4003c775ff654970-7t6jMM` |
+| Memory-only replay | FAIL / MATCH | `4003c775ff654970-2xM5yN` |
+| Memory-only without faults | PASS | `4aae6a744e57c352-3S8JiP` |
+| No-fault replay | PASS / MATCH | `4aae6a744e57c352-uUuo5F` |
+| Missing effect | ERROR | `98dd03c1cb2c4e08-ICkQQs` |
+| Rejected effect | ERROR | `97b4f09d983a90e1-Re4wLG` |
+| Early request | PASS | `0c74baa1af83764a-itrHAc` |
+| Early request replay | PASS / MATCH | `0c74baa1af83764a-yu6LCu` |
+| Pending request cutoff | TIMEOUT | `c0685bdc2c2dc237-1vPNwG` |
+| Cutoff replay | TIMEOUT / MATCH | `c0685bdc2c2dc237-9D8xSd` |
+| Lifecycle and reconnect | FAIL | `f531dcb0fb5c9b30-wmn8tv` |
+| Lifecycle and reconnect replay | FAIL / MATCH | `f531dcb0fb5c9b30-ltpQqy` |
 
 Healthy recovery retained all 128 independently acknowledged writes. The
 memory-only variant lost 96 acknowledged writes after restarts, reproduced that
-FAIL on replay, and passed without faults. Both active overlapping partitions
-blocked probe traffic; releasing only the first handle kept the cut active.
+FAIL on replay, and passed without faults. Overlapping partitions blocked probe
+traffic until both handles were released. The changed-margin/undo replay matched
+the control history, sampled counters and execution witness.
 
-The early stop was admitted at 483370631 ns, before the server's readiness at
-4039284725 ns. Its confirmed effect occurred at 4046513522 ns, after readiness
-plus the control delivery interval. The workload then recovered and completed
-128 acknowledged writes; replay matched all timing and witness evidence.
+The early stop was requested at 481786881 ns, before management
+readiness at 4038828025 ns, and applied at 4046056538 ns.
+The workload recovered all 128 acknowledged writes, and replay matched.
 
-The cutoff stop was observed at 304571066 ns and admitted at 311571066 ns.
-The world ended at 3000000000 ns, before the unchanged 5311571066 ns effect
-deadline. The pending request remained in the transcript, no effect was claimed,
-and the result stayed TIMEOUT. Replay matched. Missing and explicitly rejected
-effects still produced the expected ERROR results.
+The cutoff stop was requested at 305191722 ns and admitted at
+312191722 ns. World termination at 3000000000 ns
+preceded its unchanged 5312191722 ns effect deadline. The request
+remained pending, no effect was claimed, and TIMEOUT replayed identically.
+Missing and explicitly rejected effects still produced ERROR.
 
-All retained runs were rechecked with assertions that every guest has the
-`virtio-console-v1` channel, controller requests carry transmitted bytes, and
-delivered responses produce shared-memory DMA bytes.
+The lifecycle scenario received `invalid_state` for restart on a running target
+and for a second stop. It closed its first connection, reconnected, and restarted
+the stopped target. Both target launches confirmed that no fault socket existed
+there. After the target exited with code 17, inspection reported `Exited(17)` and
+both process commands returned `target_unavailable`. A subsequent time query
+succeeded. The scenario then chose FAIL, and replay matched witness
+`5244b67697daa5167e43ad88b8c8566ae7f1299debf3295093ced96420645de0`. Both sessions and all four
+recoverable errors are present in the retained transcript.
+
+Every guest used `virtio-console-v1`; requests carried transmitted bytes and
+responses produced shared-memory DMA bytes. Every live result was checked by
+the harness against its expected structured outcome and transcript.
 
 ## Artifact identities
-
-These hashes identify the binaries used by the thirteen-execution sequence.
-The final CLI report-validation follow-up is recorded separately below.
 
 | Artifact | SHA-256 |
 | --- | --- |
 | `artifacts-shmem/bzImage` | `e8ece7cba2d5fc4924da83e39cc672ae2516c117f8f76ecfa04aeaa98e697847` |
-| `target/release/seedbox` | `da1738e4fa752f1034d21e080d21a8fa72f5ce57d645cb0bf2479b34228a0f4c` |
-| `crates/seedbox-vmm/target/release/seedbox-vmm` | `f40966b025f20555f8863dd1c8faee77e70ca431ef385bc38bc64b1431ef608a` |
-| `acceptance-shmem-1/compose-init` | `34017cd9b0c31125cab5b1b23bb02b1ea5c1ef4caeb3b20b55bedcf7e44c3244` |
-| `acceptance-shmem-1/compose-init-delayed` | `e4f1093c2ded2996d7a3a650e42d4bbbdd74e79d2e624903361f2cface3cef28` |
-| `acceptance-shmem-1/compose-init-missing` | `ce624949714ecdca8c45eadd282ac6f4a9b31581f4742bf1f5f376528d4bfc4b` |
-| `acceptance-shmem-1/compose-init-rejecting` | `f0fcd0c712f4f50485581518ab57bb341b01aedb2ca2e94d2c49953afa9defd1` |
+| `target/release/seedbox` | `eaba56d9c5abfc4e83c3f7af52a78f9b679a47bcbf34e037d4f29c1ac32926bf` |
+| `crates/seedbox-vmm/target/release/seedbox-vmm` | `6de8124b762929be4038818a338c58ca8d2da7386971b08bb649d7b7b98fc443` |
+| `acceptance-review-2/compose-init` | `05d74f370ce5a09698be9b23e6f2ff2ffa97d224a71825262e2f6f3ee0f2dadf` |
+| `acceptance-review-2/compose-init-delayed` | `ce5f4f8d96d3cabf248d5ec058eb25db096a6fa13ec59950acd5e73bdfa746b9` |
+| `acceptance-review-2/compose-init-missing` | `cd2af61a95ff4069c735817d766c29ff32d079d29a05b5f30d11446ef0a1a04f` |
+| `acceptance-review-2/compose-init-rejecting` | `baa003806d24dbacc18c350a17a42aafe1cfdc999b707d5b8bf39c9d35692cdd` |
 
 ## Portable checks and review
 
-Workspace tests and portable suites passed on macOS and Linux, including the
-Linux supervisor/process tests and six virtio-console device tests. Seedbox
-Clippy with warnings denied and formatting checks passed. The independent
-Sol 6.1 reviewer found a rejected-row/cutoff correlation issue; a separate
-accepted-request counter and regression preserve the original error, structured
-report, and witness. The reviewer rechecked that fix and reported no outstanding
-findings. The Claude skill was unavailable in this session.
+Workspace tests and portable suites passed on macOS and Linux. Linux VMM tests,
+seven Python SDK tests, native supervisor/parser tests, and strict C builds for
+normal/missing/rejected effect supervisors passed. Formatting and workspace
+Clippy with warnings denied passed; the separate VMM retains its existing
+non-fatal dead-code warning.
 
-## Final CLI confirmation
-
-After rebuilding the final CLI, all thirteen retained runs passed the current
-transport assertions again. The final CLI then replayed the pending-cutoff case
-as `0ab779285bad4d7d-Rsw71t`: TIMEOUT / MATCH, with witness
-`5b4d72e2e5b8d2c4ab0cb51e1557b2ade6975f3b2dca08991da518bacb623e21`.
-Its scoped CPU/SMT restoration also passed. The extra execution is recorded in
-`acceptance-shmem-final-cli/acceptance.json` (`status: passed`).
-
-Final CLI SHA-256:
-`8771a7df3393d3782da7e3abaa6f53ea68c1276ba770e9e08e60c052e3efdbb8`.
-The kernel, VMM, retained images and supervisors are unchanged from the matrix.
+The independent Sol 6.1 reviewer found three report-integrity gaps: a claimed
+successful controller-target action, an empty partition handle, and an effect
+left pending after a successful response. All three now have regression checks.
+The reviewer rechecked the fixes and reported no outstanding findings. The
+Claude skill was unavailable in this session.
