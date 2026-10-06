@@ -1,3 +1,0 @@
-SEEDBOX_PHASE client_start uptime=1.52 1.49
-LOAD acked=128 failed=0 elapsed=1.17769124s
-RESULT pass acked=128 failed=0 rev=129 hash=ad1eb1ef

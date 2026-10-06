@@ -1,5 +1,0 @@
-    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
-a8e0cee78bb511cfb7f271b39079250cc2fe0604f21314f86e2cfaa8e22c39db  /tmp/nix-shell.zAz4sv/tmp.Sq4greHt8N/client
-62d6cc2bbf4ea1cfc3d6ba4fbae0d3ee1ff64ca9886944fb12e9bbba57d31f55  /home/gvickers/seedbox-single-vm-network/artifacts/single.cpio
-a8e0cee78bb511cfb7f271b39079250cc2fe0604f21314f86e2cfaa8e22c39db  /tmp/nix-shell.zAz4sv/tmp.SfOVkYS6fd/client
-5bb371e3c54cefa48f806328eed0af10346c240df4cbe79323f47517d6453283  /home/gvickers/seedbox-single-vm-network/artifacts/multi.cpio

@@ -125,3 +125,49 @@ the public API.
 These contracts and local fixture tests are not evidence of Linux hardware or
 guest qualification. The orchestration test backend lives only under `tests/`;
 it is never offered as a production execution option.
+
+## Qualification and capability limits
+
+The tested production profile is Linux/KVM on the AMD Ryzen 5950X workstation,
+with the Zen SpeculativeLockMap workaround verified for the leased cores and
+SMT siblings. Guest kernel, supervisor, engine and semantic settings are run
+identity inputs. Host kernel/microcode changes or a new CPU need fresh
+qualification; same-seed equality across hosts is not established. Full host
+inventory admission and drift rejection remain
+[issue #5](https://github.com/gardnervickers/seedbox/issues/5), beyond the current
+KVM/MSR access checks, leases and workaround readbacks.
+
+Clock and entropy evidence admits the tested workloads, not arbitrary Linux
+images or JVM/JIT programs. Broader instruction, CPU-feature, clock and entropy
+coverage belongs to #5; the Java workloads in issues #6 and #7 need admission
+before their historical litmuses can be claimed. Retired native-calibration,
+10x speedup and 100-microsecond stop targets are not acceptance requirements.
+
+Process restart retains guest tmpfs data. It does not model machine reboot,
+power loss, durable block devices or volatile versus flushed writes. Undo
+checkpoints are private precise-stop recovery state, not complete VM/world
+snapshots or a public reverse-execution interface. These capabilities require
+explicit device, storage, RNG, event, controller and incarnation coverage.
+The Kafka litmus in #6 needs a declared storage-loss model; a process kill
+alone does not lose the OS cache. Stale callbacks and commands must not affect
+a new machine incarnation when reboot support is added.
+
+The implemented network timing model permits bounded early ordinary packet
+delivery, as documented in [runtime.md](runtime.md); management barriers are
+exact. Historical prototype proposals are not additional runtime guarantees.
+The single-kernel namespace fixture has distinct scheduling, clocks, memory
+and storage from independent VMs. Before selecting that layout,
+[issue #10](https://github.com/gardnervickers/seedbox/issues/10) requires a
+matched PV/undo comparison, deterministic guest-local jitter, the full seeded
+kill/restart campaign and paired etcd 3.5.3 controls, including completed seeds
+and confirmed failures per allocated core-hour.
+
+The [Mac TCG tool](../tools/mac-tcg/README.md) retains a useful restricted local
+experiment. It is not a production execution backend and its scoped witness
+is not comparable to KVM witnesses or a full-state digest. Automated setup,
+run/replay integration and independent-machine local execution remain open.
+
+The retired research tree and its raw evidence are preserved at
+[commit 788fc43](https://github.com/gardnervickers/seedbox/tree/788fc4376b7e2cc96d1bc51ed2ae3d4635d16abd/research).
+Earlier standalone prototypes are at commit `bc07f35`. These are historical
+inputs, not additional supported backends.

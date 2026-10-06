@@ -1,4 +1,0 @@
-SEEDBOX_PHASE client_start uptime=1.55 1.39
-LOAD acked=128 failed=0 elapsed=1.369373035s
-RESULT fail acked=128 failed=0 cluster did not settle: 10.0.1.1:2379: context deadline exceeded | 10.0.1.1:2379: context deadline exceeded; 10.0.2.1:2379 rev=129 missing=0; 10.0.3.1:2379 rev=129 missing=0
-INIT exit=1
