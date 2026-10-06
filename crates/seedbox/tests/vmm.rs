@@ -263,6 +263,72 @@ fn pending_rpc_at_world_cutoff_preserves_timeout_and_workload_failure() {
 }
 
 #[test]
+fn process_target_exit_after_admission_is_a_recoverable_unavailable_fault() {
+    fixture(|base| {
+        let control = seedbox::config::Control {
+            service: "client".into(),
+        };
+        let request = ExecutionRequest {
+            control: Some(&control),
+            ..*base
+        };
+        let l = vmm::world(&request).unwrap()["control"]["latency_ns"]
+            .as_u64()
+            .unwrap();
+        let t = 10_000_000;
+        let a = t + l;
+        let e = a + 1000;
+        let reply = e + l;
+        let call = json!({"version":1,"id":1,"op":"stop","target":{"service":"server"}});
+        let plan = json!({"id":1,"at_ns":a,"deadline_ns":a+5_000_000_000u64,"action":"stop","machine":"server-machine"});
+        let error = json!({"code":"target_unavailable","message":"target VM exited before the process effect"});
+        let mut raw = report();
+        raw["control_latency_ns"] = json!(l);
+        raw["control_history"] = json!([{"relay_id":1,"session_id":1,"request":call,"response":{"version":1,"id":1,"ok":false,"error":error,"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":e,"replied_at_ns":reply},"fault_id":1,"delivered_at_ns":reply}]);
+        raw["faults"] = json!([{"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":null,"action":"stop","machine":"server-machine","status":"unavailable","detail":"target VM exited before the process effect"}]);
+        raw["machines"][0]["guest_exit_code"] = json!(1);
+        let parse =
+            |raw: &serde_json::Value| vmm::report(&serde_json::to_vec(raw).unwrap(), &request);
+        let accepted = parse(&raw).unwrap();
+        assert_eq!(accepted.reason, StopReason::Completed);
+        assert_eq!(accepted.workload_exit.unwrap().code, 1);
+        assert!(accepted.faults.is_empty() && accepted.detail.is_none());
+        // A reply cut off by the world limit retains the same unavailable fault.
+        let mut cut = raw.clone();
+        cut["outcome"] = json!("duration");
+        cut["control_history"] = json!([{"relay_id":1,"session_id":1,"request":call,"status":"cut_off","requested_at_ns":t,"admitted_at_ns":a,"admitted_done":true,"effect_at_ns":e,"replied_at_ns":reply,"cut_off_at_ns":reply-1,"fault_id":1,"plan":plan,"error":error["message"],"fatal":false}]);
+        assert_eq!(parse(&cut).unwrap().reason, StopReason::SimulatedTimeLimit);
+        let mut fatal = cut.clone();
+        fatal["control_history"][0]["fatal"] = json!(true);
+        assert!(parse(&fatal).is_err());
+        // Only a target_unavailable reply after admission permits the status.
+        let mut other = raw.clone();
+        other["control_history"][0]["response"]["error"]["code"] = json!("invalid_state");
+        assert!(parse(&other).is_err());
+        let mut applied = raw.clone();
+        applied["faults"][0]["status"] = json!("applied");
+        applied["faults"][0]["applied_at_ns"] = json!(e);
+        assert!(parse(&applied).is_err());
+        let mut failed = raw.clone();
+        failed["faults"][0]["status"] = json!("failed");
+        assert!(parse(&failed).is_err());
+        let mut late = raw.clone();
+        let late_effect = a + 5_000_000_001u64;
+        late["control_history"][0]["response"]["effect_at_ns"] = json!(late_effect);
+        late["control_history"][0]["response"]["replied_at_ns"] = json!(late_effect + l);
+        late["control_history"][0]["delivered_at_ns"] = json!(late_effect + l);
+        assert!(parse(&late).is_err());
+        let mut partition = raw.clone();
+        partition["control_history"][0]["request"] =
+            json!({"version":1,"id":1,"op":"heal","handle":"p1"});
+        partition["control_history"][0]["response"]["effect_at_ns"] = json!(a);
+        partition["control_history"][0]["response"]["replied_at_ns"] = json!(a + l);
+        partition["control_history"][0]["delivered_at_ns"] = json!(a + l);
+        assert!(parse(&partition).is_err());
+    });
+}
+
+#[test]
 fn in_flight_reply_at_world_cutoff_keeps_outcome_even_when_other_clock_is_later() {
     fixture(|base| {
         let control = seedbox::config::Control {

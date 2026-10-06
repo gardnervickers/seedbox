@@ -505,3 +505,89 @@ fn sessions_reset_public_ids_but_cannot_repeat_relays_or_old_sessions() {
         assert!(c.request(0, 300, line.as_bytes(), 315).is_err());
     }
 }
+#[test]
+fn target_exit_after_admission_is_recoverable_only_while_effect_is_outstanding() {
+    let names = || vec!["scenario".into(), "client".into(), "server".into()];
+    // A stop awaiting readiness, a dispatched stop, and a dispatched restart.
+    for (op, ready) in [("stop", false), ("stop", true), ("restart", true)] {
+        let mut c = control();
+        let mut f = faults::Faults::new(vec![], names()).unwrap();
+        let (mut id, mut t) = (1, 100);
+        if op == "restart" {
+            request(
+                &mut c,
+                1,
+                t,
+                json!({"version":1,"id":1,"op":"stop","target":{"service":"server"}}),
+            )
+            .unwrap();
+            c.apply_boundary(&mut f, 120).unwrap();
+            f.apply_due(120);
+            f.effect(2, 1, 125, true);
+            c.observe_faults(&f, 125).unwrap();
+            c.apply_boundary(&mut f, 145).unwrap();
+            c.mark_delivered(145).unwrap();
+            (id, t) = (2, 200);
+        }
+        if !ready {
+            f.require_readiness();
+        }
+        request(
+            &mut c,
+            id,
+            t,
+            json!({"version":1,"id":id,"op":op,"target":{"service":"server"}}),
+        )
+        .unwrap();
+        c.apply_boundary(&mut f, t + 20).unwrap();
+        assert_eq!(f.apply_due(t + 20).len(), usize::from(ready));
+        // Another machine's exit, or an unknown fault, changes nothing.
+        f.target_exited(id, 1, t + 30);
+        f.target_exited(id + 1, 2, t + 30);
+        assert_eq!(f.outcome(id).unwrap().0, faults::Status::Waiting);
+        f.target_exited(id, 2, t + 30);
+        assert_eq!(
+            f.outcome(id).unwrap().0,
+            faults::Status::Unavailable(t + 30)
+        );
+        assert_eq!(f.next_boundary(), u64::MAX); // The deadline cannot fail it later.
+        c.observe_faults(&f, t + 30).unwrap();
+        assert!(c.apply_boundary(&mut f, t + 50).unwrap().is_some());
+        c.mark_delivered(t + 50).unwrap();
+        let row = &c.log[id as usize - 1];
+        assert_eq!(row["fault_id"], id);
+        assert_eq!(row["response"]["error"]["code"], "target_unavailable");
+        assert_eq!(row["response"]["effect_at_ns"], t + 30);
+        assert_eq!(f.log[id as usize - 1]["status"], "unavailable");
+        assert!(complete(&c) && f.error.is_none());
+    }
+    // An exit after the acknowledgement, or after a guest failure, keeps its result.
+    for success in [true, false] {
+        let mut c = control();
+        let mut f = faults::Faults::new(vec![], names()).unwrap();
+        request(
+            &mut c,
+            1,
+            100,
+            json!({"version":1,"id":1,"op":"stop","target":{"service":"server"}}),
+        )
+        .unwrap();
+        c.apply_boundary(&mut f, 120).unwrap();
+        f.apply_due(120);
+        f.effect(2, 1, 125, success);
+        f.target_exited(1, 2, 125);
+        c.observe_faults(&f, 125).unwrap();
+        c.apply_boundary(&mut f, 145).unwrap();
+        let expected = if success {
+            faults::Status::Applied(125)
+        } else {
+            faults::Status::Failed
+        };
+        assert_eq!(f.outcome(1).unwrap().0, expected);
+        assert_eq!(c.log[0]["response"]["ok"], success);
+        assert_eq!(c.error.is_some(), !success);
+        if !success {
+            assert_eq!(c.log[0]["response"]["error"]["code"], "effect_failed");
+        }
+    }
+}
