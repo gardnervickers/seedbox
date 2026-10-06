@@ -16,7 +16,6 @@ fn python_projects_share_client_and_use_a_dedicated_runtime_controller() {
     let broken =
         seedbox::config::load(&destination.join("broken/compose.yaml"), &BTreeMap::new()).unwrap();
     assert_eq!(fixed.services.len(), 3);
-    assert!(fixed.faults.is_empty() && broken.faults.is_empty());
     assert_eq!(fixed.control.as_ref().unwrap().service, "scenario");
     assert_eq!(fixed.check.service, "scenario");
     assert_eq!(fixed.seed, broken.seed);
@@ -39,7 +38,6 @@ fn python_projects_share_client_and_use_a_dedicated_runtime_controller() {
         &BTreeMap::new(),
     )
     .unwrap();
-    assert!(no_faults.faults.is_empty());
     assert!(no_faults.services["scenario"]
         .command
         .as_ref()

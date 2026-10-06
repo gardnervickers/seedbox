@@ -45,7 +45,6 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
             timer_jitter_ns: 50_000,
             stop_tolerance_ns: 40_000,
         },
-        faults: &[],
         control: None,
         check: &Check {
             service: "client".into(),
@@ -121,73 +120,6 @@ fn reports_reject_wrong_seed_missing_state_and_duplicate_machines() {
         let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), request).unwrap();
         assert_eq!(result.reason, StopReason::SimulatedTimeLimit);
         assert!(result.workload_exit.is_none());
-    });
-}
-
-#[test]
-fn faults_compile_through_placement_and_incomplete_or_forged_effects_cannot_pass() {
-    use seedbox::config::{Fault, FaultAction, FaultTarget};
-    fixture(|request| {
-        let planned = [
-            Fault {
-                at_ns: 100,
-                action: FaultAction::Stop {
-                    target: FaultTarget::Service("server".into()),
-                },
-            },
-            Fault {
-                at_ns: 200,
-                action: FaultAction::Restart {
-                    target: FaultTarget::Service("server".into()),
-                },
-            },
-        ];
-        let request = ExecutionRequest {
-            faults: &planned,
-            control: None,
-            ..*request
-        };
-        let world = vmm::world(&request).unwrap();
-        assert_eq!(world["faults"][0]["machine"], "server-machine");
-        assert_eq!(world["faults"][1]["action"], "restart");
-        let mut raw = report();
-        assert_eq!(
-            vmm::report(&serde_json::to_vec(&raw).unwrap(), &request)
-                .unwrap()
-                .reason,
-            StopReason::Error
-        );
-        raw["faults"] = json!([
-            {"id":1,"requested_at_ns":100,"applied_at_ns":120,"action":"stop","machine":"server-machine","status":"applied","detail":"reaped"},
-            {"id":2,"requested_at_ns":200,"applied_at_ns":220,"action":"restart","machine":"server-machine","status":"applied","detail":"exec succeeded"}
-        ]);
-        raw["faults"][0]["request"] = world["faults"][0].clone();
-        raw["faults"][1]["request"] = world["faults"][1].clone();
-        let parsed = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
-        assert_eq!(parsed.reason, StopReason::Completed);
-        assert_eq!(parsed.faults[0].service, "server");
-        raw["faults"][1]["id"] = json!(1);
-        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
-        raw["faults"][1]["id"] = json!(2);
-        raw["fault_error"] = json!("duplicate effect");
-        assert_eq!(
-            vmm::report(&serde_json::to_vec(&raw).unwrap(), &request)
-                .unwrap()
-                .reason,
-            StopReason::Error
-        );
-        let unknown = [Fault {
-            at_ns: 100,
-            action: FaultAction::Stop {
-                target: FaultTarget::Machine("missing".into()),
-            },
-        }];
-        assert!(vmm::world(&ExecutionRequest {
-            faults: &unknown,
-            control: None,
-            ..request
-        })
-        .is_err());
     });
 }
 
@@ -278,30 +210,6 @@ fn runtime_report_rejects_impossible_sleep_and_now_metadata() {
 }
 
 #[test]
-fn network_effects_are_not_attributed_to_check_service() {
-    use seedbox::config::{Fault, FaultAction, FaultTarget};
-    fixture(|base| {
-        let faults = [Fault {
-            at_ns: 100,
-            action: FaultAction::Partition {
-                id: "p".into(),
-                left: vec![FaultTarget::Service("server".into())],
-                right: vec![FaultTarget::Service("client".into())],
-            },
-        }];
-        let request = ExecutionRequest {
-            faults: &faults,
-            ..*base
-        };
-        let plan = vmm::world(&request).unwrap()["faults"][0].clone();
-        let mut raw = report();
-        raw["faults"] = json!([{"id":1,"request":plan,"requested_at_ns":100,"applied_at_ns":100,"action":"partition","machine":null,"status":"applied","detail":"partition p"}]);
-        let parsed = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
-        assert!(parsed.faults[0].service.is_empty());
-    });
-}
-
-#[test]
 fn pending_rpc_at_world_cutoff_preserves_timeout_and_workload_failure() {
     fixture(|base| {
         let control = seedbox::config::Control {
@@ -350,6 +258,120 @@ fn pending_rpc_at_world_cutoff_preserves_timeout_and_workload_failure() {
         );
         assert!(retained.witness.is_some());
         raw["control_history"][0]["plan"]["machine"] = json!("client-machine");
+        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
+    });
+}
+
+#[test]
+fn in_flight_reply_at_world_cutoff_keeps_outcome_even_when_other_clock_is_later() {
+    fixture(|base| {
+        let control = seedbox::config::Control {
+            service: "client".into(),
+        };
+        let request = ExecutionRequest {
+            control: Some(&control),
+            ..*base
+        };
+        let l = vmm::world(&request).unwrap()["control"]["latency_ns"]
+            .as_u64()
+            .unwrap();
+        let t = 10_000_000;
+        let a = t + l;
+        let reply = a + l;
+        for (outcome, reason, detail) in [
+            ("end_machine_exited", StopReason::Completed, None),
+            (
+                "fault_failed",
+                StopReason::Error,
+                Some("transport delivery failed"),
+            ),
+        ] {
+            let mut raw = report();
+            raw["outcome"] = json!(outcome);
+            raw["fault_error"] = json!(detail);
+            raw["control_latency_ns"] = json!(l);
+            raw["control_history"] = json!([{"relay_id":1,"session_id":1,"request":{"version":1,"id":1,"op":"now"},"response":{"version":1,"id":1,"ok":true,"result":{"now_ns":a},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":a,"replied_at_ns":reply},"status":"cut_off","cut_off_at_ns":reply+1000}]);
+            let parsed = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
+            assert_eq!(parsed.reason, reason);
+            assert_eq!(parsed.detail.as_deref(), detail);
+            assert!(parsed.witness.is_some());
+        }
+    });
+}
+
+#[test]
+fn transcript_correlates_global_relay_and_connection_local_ids() {
+    fixture(|base| {
+        let control = seedbox::config::Control {
+            service: "client".into(),
+        };
+        let request = ExecutionRequest {
+            control: Some(&control),
+            ..*base
+        };
+        let l = vmm::world(&request).unwrap()["control"]["latency_ns"]
+            .as_u64()
+            .unwrap();
+        let mut raw = report();
+        raw["control_latency_ns"] = json!(l);
+        let rows: Vec<_> = [1,3].into_iter().enumerate().map(|(index,session)| {
+            let t = (index as u64 + 1)*10_000_000; let a=t+l; let reply=a+l;
+            json!({"relay_id":index+1,"session_id":session,"request":{"version":1,"id":1,"op":"now"},"response":{"version":1,"id":1,"ok":true,"result":{"now_ns":a},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":a,"replied_at_ns":reply},"delivered_at_ns":reply})
+        }).collect();
+        raw["control_history"] = json!(rows);
+        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
+        raw["control_history"][1]["session_id"] = json!(1);
+        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
+    });
+}
+
+#[test]
+fn typed_network_plan_preserves_targets_without_attributing_check_service() {
+    fixture(|base| {
+        let control = seedbox::config::Control {
+            service: "client".into(),
+        };
+        let mut prepared = base.prepared.clone();
+        prepared
+            .guests
+            .insert("peer-machine".into(), prepared.kernel.clone());
+        prepared
+            .placement
+            .insert("peer".into(), "peer-machine".into());
+        let request = ExecutionRequest {
+            control: Some(&control),
+            prepared: &prepared,
+            ..*base
+        };
+        let l = vmm::world(&request).unwrap()["control"]["latency_ns"]
+            .as_u64()
+            .unwrap();
+        let t = 10_000_000;
+        let a = t + l;
+        let reply = a + l;
+        let plan = json!({"id":1,"action":"partition","at_ns":a,"deadline_ns":a+5_000_000_000u64,"handle":"p1","left":["server-machine"],"right":["peer-machine"]});
+        let mut raw = report();
+        raw["control_latency_ns"] = json!(l);
+        let mut peer = raw["machines"][1].clone();
+        peer["name"] = json!("peer-machine");
+        raw["machines"].as_array_mut().unwrap().push(peer);
+        raw["control_history"] = json!([{"relay_id":1,"request":{"version":1,"id":1,"op":"partition","left":[{"service":"server"}],"right":[{"service":"peer"}]},"response":{"version":1,"id":1,"ok":true,"result":{"handle":"p1"},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":a,"replied_at_ns":reply},"delivered_at_ns":reply}]);
+        raw["faults"] = json!([{"request":plan,"id":1,"requested_at_ns":a,"applied_at_ns":a,"action":"partition","machine":null,"status":"applied","detail":"partition p1"}]);
+        let parsed = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
+        assert!(parsed.faults[0].service.is_empty());
+        let mut empty_handle = raw.clone();
+        empty_handle["control_history"][0]["response"]["result"]["handle"] = json!("");
+        empty_handle["faults"][0]["request"]["handle"] = json!("");
+        assert!(vmm::report(&serde_json::to_vec(&empty_handle).unwrap(), &request).is_err());
+        let mut pending = raw.clone();
+        pending["faults"][0]["status"] = json!("requested");
+        pending["faults"][0]["applied_at_ns"] = serde_json::Value::Null;
+        assert!(vmm::report(&serde_json::to_vec(&pending).unwrap(), &request).is_err());
+        let mut controller_target = raw.clone();
+        controller_target["control_history"][0]["request"]["left"][0]["service"] = json!("client");
+        controller_target["faults"][0]["request"]["left"][0] = json!("client-machine");
+        assert!(vmm::report(&serde_json::to_vec(&controller_target).unwrap(), &request).is_err());
+        raw["faults"][0]["request"]["deadline_ns"] = json!("bad");
         assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
     });
 }

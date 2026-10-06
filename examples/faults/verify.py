@@ -190,12 +190,39 @@ def verify_cutoff(run):
                 witness=report["witness"], run=str(run))
 
 
+def verify_control_cases(run):
+    run, record, report, world = focused_evidence(run, "FAIL", "COMPLETED")
+    assert report["workload_exit"] == {"service":"scenario", "code":1}
+    assert next(machine["guest_exit_code"] for machine in world["machines"] if machine["name"] == "server") == 17
+    assert [fault["action"] for fault in world["faults"]] == ["stop", "restart"]
+    assert all(fault["status"] == "applied" for fault in world["faults"])
+    transcript = world["control_history"]
+    assert {entry["session_id"] for entry in transcript} == {1, 2}
+    ids = {}
+    for relay, entry in enumerate(transcript, 1):
+        session = entry["session_id"]
+        ids[session] = ids.get(session, 0) + 1
+        assert entry["relay_id"] == relay and entry["request"]["id"] == ids[session]
+        assert entry["response"]["id"] == ids[session]
+        assert entry["delivered_at_ns"] == entry["response"]["replied_at_ns"]
+    errors = [entry["response"]["error"]["code"] for entry in transcript if not entry["response"]["ok"]]
+    assert errors == ["invalid_state", "invalid_state", "target_unavailable", "target_unavailable"], errors
+    assert transcript[-1]["request"]["op"] == "now" and transcript[-1]["response"]["ok"]
+    server = (run / "output/machines/server.console").read_text()
+    assert server.count("TARGET_SOCKET absent") == 2, server
+    scenario = (run / "output/machines/scenario.console").read_text()
+    results = re.findall(r"^CONTROL_CASES_RESULT (.+)$", scenario, re.M)
+    assert len(results) == 1 and json.loads(results[0]) == {"errors":errors,"target_exit":17,"reconnected":True}, scenario
+    return dict(case="control_cases", outcome="FAIL", errors=errors, target_exit=17,
+                witness=report["witness"], run=str(run))
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("run")
     p.add_argument("--expected", choices=["PASS", "FAIL"], default="PASS")
     p.add_argument("--no-faults", action="store_true")
-    p.add_argument("--focused", choices=["early-request", "readiness-cutoff"])
+    p.add_argument("--focused", choices=["early-request", "readiness-cutoff", "control-cases"])
     a = p.parse_args()
-    verifier = {"early-request": verify_early_request, "readiness-cutoff": verify_cutoff}.get(a.focused)
+    verifier = {"early-request": verify_early_request, "readiness-cutoff": verify_cutoff, "control-cases": verify_control_cases}.get(a.focused)
     print(json.dumps(verifier(a.run) if verifier else verify(a.run, a.expected, not a.no_faults), indent=2))

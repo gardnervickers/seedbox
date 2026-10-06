@@ -8,6 +8,7 @@ mod devices;
 mod events;
 mod faults;
 mod machine;
+mod network_counters;
 mod rng;
 mod stepper;
 mod undo;
@@ -54,14 +55,17 @@ struct World {
     dropped: u64,
     delivered: u64,
     link_counts: BTreeMap<(usize,usize), [u64;3]>,
+    semantic_counts:network_counters::NetworkCounters,
 }
 
 impl World {
-    fn count_link(&mut self,from:usize,to:usize,outcome:usize) {
+    fn count_link(&mut self,at:u64,from:usize,to:usize,outcome:usize) {
         self.link_counts.entry((from,to)).or_default()[outcome]+=1;
+        self.semantic_counts.record(at,from,to,outcome);
     }
-    fn network_snapshot(&self)->Value {
-        let snapshot:BTreeMap<_,_>=self.link_counts.iter().map(|(&(from,to),counts)|(
+    fn network_snapshot(&self)->Value {self.counter_snapshot(&self.link_counts)}
+    fn counter_snapshot(&self,counts:&BTreeMap<(usize,usize),[u64;3]>)->Value {
+        let snapshot:BTreeMap<_,_>=counts.iter().map(|(&(from,to),counts)|(
             format!("{}->{}",self.machines[from].name,self.machines[to].name),
             json!({"delivered":counts[0],"partition_dropped":counts[1],"receiver_dropped":counts[2]})
         )).collect();json!(snapshot)
@@ -111,16 +115,16 @@ impl World {
             }
         }
         let now = self.machines[m].time + self.early;
-        while let Some(p) = events::pop_due(&mut self.events[m], now) {
+        while let Some((at,p)) = events::pop_due_at(&mut self.events[m], now) {
             let mach = &mut self.machines[m];
             match p {
                 Payload::Frame { from, bytes } => {
                     if !mach.deliver_frame(&bytes).accepted {
                         self.dropped += 1;
-                        self.count_link(from, m, 2);
+                        self.count_link(at,from, m, 2);
                     } else {
                         self.delivered += 1;
-                        self.count_link(from, m, 0);
+                        self.count_link(at,from, m, 0);
                     }
                 }
                 Payload::Serial(b) => mach.deliver_serial(&b),
@@ -151,7 +155,7 @@ impl World {
             if self.faults.blocked(src, dst) || *self.partitioned.get(&(src, dst)).unwrap_or(&false)
             {
                 self.dropped += 1;
-                self.count_link(src, dst, 1);
+                self.count_link(send_time,src, dst, 1);
                 continue;
             }
             let jitter = self
@@ -249,6 +253,7 @@ fn run() -> Result<Value, String> {
             cmdline += &format!(" virtio_mmio.device=4K@{NET_MMIO:#x}:{NET_IRQ}");
         }
         if control_channel {cmdline+=&format!(" virtio_mmio.device=4K@{CHANNEL_MMIO:#x}:{CHANNEL_IRQ}");}
+        if names.get(i).is_some_and(|name|cfg["control"]["machine"].as_str()==Some(name.as_str())) {cmdline+=" seedbox.control=1";}
         if let Some(extra) = mc["cmdline"].as_str() {
             cmdline += " ";
             cmdline += extra;
@@ -336,6 +341,7 @@ fn run() -> Result<Value, String> {
         dropped: 0,
         delivered: 0,
         link_counts: BTreeMap::new(),
+        semantic_counts:network_counters::NetworkCounters::default(),
         machines,
     };
     world.faults.require_readiness();
@@ -410,22 +416,25 @@ fn run() -> Result<Value, String> {
             .min_by_key(|(i, k)| (**k, *i))
             .unwrap();
         let control_boundary = world.control.boundary();
+        world.semantic_counts.advance(key.min(control_boundary).min(world.faults.next_boundary()).min(duration));
         if control_boundary <= key && control_boundary < duration {
             if world.machines.iter().any(|m| m.time > control_boundary) {
                 return Err("control boundary is in committed machine past".into());
             }
+            let exited=world.machines.iter().filter(|m|matches!(m.state,State::Exited(_))).map(|m|m.name.clone()).collect::<Vec<_>>();
+            world.control.reject_unavailable(&exited);
             if world
                 .control
                 .pending
                 .as_ref()
                 .is_some_and(|p| !p.admitted_done && matches!(p.operation,Some(seedbox_control::Operation::Inspect{})))
             {
-                world.control.pending.as_mut().unwrap().result = json!({"services":cfg["control"]["placement"],"machines":world.machines.iter().map(|m|json!({"name":m.name,"state":format!("{:?}",m.state)})).collect::<Vec<_>>(),"active_handles":world.faults.active_handles(),"network_counters":world.network_snapshot()});
+                world.control.pending.as_mut().unwrap().result = json!({"services":cfg["control"]["placement"],"machines":world.machines.iter().enumerate().map(|(i,m)|json!({"name":m.name,"state":if matches!(m.state,State::Exited(_)) {format!("{:?}",m.state)} else {world.faults.process_state(i).to_owned()}})).collect::<Vec<_>>(),"active_handles":world.faults.active_handles(),"network_counters":world.counter_snapshot(world.semantic_counts.counts())});
             }
             if let Some(bytes) =
                 world
                     .control
-                    .apply_boundary(&mut world.faults, control_boundary, duration)?
+                    .apply_boundary(&mut world.faults, control_boundary)?
             {
                 let target = world.control.controller.unwrap();
                 world.seq += 1;
@@ -437,7 +446,7 @@ fn run() -> Result<Value, String> {
         if fault_boundary <= key && fault_boundary < duration {
             let commands = world.faults.apply_due(fault_boundary);
             for i in world.faults.take_changed_network() {
-                let snapshot=world.network_snapshot();world.faults.log[i]["network_counters"]=snapshot;
+                let snapshot=world.counter_snapshot(world.semantic_counts.counts());world.faults.log[i]["network_counters"]=snapshot;
             }
             for (target, command) in commands {
                 if world.machines[target].state == State::Halted {
@@ -448,7 +457,7 @@ fn run() -> Result<Value, String> {
             }
             world
                 .control
-                .observe_faults(&world.faults, fault_boundary, duration)?;
+                .observe_faults(&world.faults, fault_boundary)?;
             if world.faults.error.is_some() && world.control.pending.is_none() {
                 outcome = "fault_failed";
                 break;
@@ -506,14 +515,14 @@ fn run() -> Result<Value, String> {
             .collect::<Vec<_>>()
         {
             let max_time = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
-            if let Err(e) = world.control.request(m, at, &line, duration, max_time) {
+            if let Err(e) = world.control.request(m, at, &line, max_time) {
                 world.control.log.push(json!({"status":"rejected","machine":world.machines[m].name,"at_ns":at,"frame":String::from_utf8_lossy(&line),"error":e}));
                 world.control.error = Some(e);
             }
         }
         world
             .control
-            .observe_faults(&world.faults, world.machines[m].time, duration)?;
+            .observe_faults(&world.faults, world.machines[m].time)?;
         if (world.control.error.is_some()
             || (world.faults.error.is_some() && world.control.pending.is_none()))
             && !world.control.has_undelivered_reply()

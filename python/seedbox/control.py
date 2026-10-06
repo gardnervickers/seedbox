@@ -64,7 +64,9 @@ class World:
 
     Calls block this thread until a confirmed response arrives. Other guests
     continue running. Use connect() or a context manager; do not share one
-    connection across threads. There are no automatic retries or implicit heals.
+    connection across threads. Close between completed calls, then connect() a
+    new World to start a new session with IDs beginning at one. Fault handles
+    survive graceful disconnects. There are no automatic retries or implicit heals.
     """
 
     def __init__(self, channel):
@@ -76,6 +78,7 @@ class World:
 
     @classmethod
     def connect(cls, path=DEFAULT_SOCKET):
+        """Open a new controller session; never retry an uncertain prior call."""
         channel = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             channel.connect(path)

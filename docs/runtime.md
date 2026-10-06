@@ -163,3 +163,14 @@ Directed network counters now distinguish NIC acceptance from drops caused by
 an unready queue or full receive backlog. This corrects the previous delivered
 counter even in runs without faults; compare counters only with that change in
 mind when allowing a different engine for replay.
+
+The fault socket exists only on the configured controller. Connections may be
+closed and reopened between completed calls; the transcript preserves both
+run-wide relay IDs and connection-local request IDs. Redundant lifecycle commands
+and commands targeting exited VMs return recoverable RPC errors. The controller
+can inspect the application exit and choose PASS or FAIL.
+
+Inspection and partition/heal counter snapshots count nominal send, drop and
+arrival times strictly before admission. A packet physically delivered in an
+early scheduler window is excluded until its nominal arrival precedes that
+boundary. Final report counters still record physical NIC acceptance totals.

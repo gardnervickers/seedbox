@@ -31,6 +31,7 @@ pub struct Faults {
     boundaries: BTreeSet<(u64, u32, Event)>,
     waiting_ready: Vec<BTreeSet<u32>>,
     ready: Vec<bool>,
+    stopped: Vec<bool>,
     pub readiness: Vec<Value>,
     handles: BTreeMap<String, BTreeSet<(usize, usize)>>,
     cuts: BTreeMap<(usize, usize), usize>,
@@ -48,6 +49,7 @@ impl Faults {
             boundaries: BTreeSet::new(),
             waiting_ready: vec![BTreeSet::new(); count],
             ready: vec![true; count],
+            stopped: vec![false; count],
             readiness: vec![],
             handles: BTreeMap::new(),
             cuts: BTreeMap::new(),
@@ -172,6 +174,18 @@ impl Faults {
     }
     pub fn active_handles(&self) -> Vec<String> {
         self.handles.keys().cloned().collect()
+    }
+    pub fn process_state(&self, machine: usize) -> &'static str {
+        if self.stopped[machine] {"Stopped"} else {"Running"}
+    }
+    pub fn admission_error(&self, action: &Action) -> Option<&'static str> {
+        let machine = action.machine()?;
+        let index = self.names.iter().position(|name|name==machine)?;
+        match action {
+            Action::Stop{..} if self.stopped[index] => Some("target process is already stopped"),
+            Action::Restart{..} if !self.stopped[index] => Some("restart requires a stopped target process"),
+            _ => None,
+        }
     }
     pub fn blocked(&self, from: usize, to: usize) -> bool {
         self.cuts.contains_key(&(from, to))
@@ -349,6 +363,7 @@ impl Faults {
             return;
         }
         if success {
+            self.stopped[machine]=matches!(self.entries[i].plan.action,Action::Stop{..});
             self.applied(
                 i,
                 time,
@@ -357,8 +372,5 @@ impl Faults {
         } else {
             self.fail(i, format!("guest rejected fault {id}"));
         }
-    }
-    pub fn complete(&self) -> bool {
-        self.error.is_none() && self.boundaries.is_empty()
     }
 }

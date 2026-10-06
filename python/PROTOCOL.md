@@ -27,27 +27,43 @@ so the scenario must check application readiness separately. Normal controller
 completion supplies the configured check outcome.
 
 Connect to the Unix stream socket `/run/seedbox/control.sock` inside the guest.
-Version 1 supports one controller connection for the run and one outstanding
-request at a time. Other language bindings need only a Unix socket and JSON.
+The socket is created only in the configured controller guest, selected by the
+VMM's `seedbox.control=1` kernel boot argument. It is absent from other guests.
+Version 1 supports one active controller connection and one outstanding request
+at a time. After receiving a complete response, the client may close its
+connection and open a new session. Handles and simulator fault state survive
+these graceful disconnects. Other language bindings need only a Unix socket and JSON.
 The guest supervisor relays these messages through a named virtio-console port,
 `seedbox`. Its transmit and receive queues use guest RAM shared with the simulator;
 a device notification commits the submitted bytes. Shared memory sits at the
 guest-driver/simulator boundary; user processes use socket reads and writes.
 This channel is independent
 of simulated Ethernet. No host socket, shared host filesystem, or host clock is
-involved. The transport is available on every prepared guest; runtime fault
-operations are authorized only for the configured controller. Further message
+involved. The generic virtio channel is available on every prepared guest; the runtime
+fault socket and operation authority belong only to the configured controller. Further message
 families can use the same transport for application instrumentation.
 
 Each request and response is one UTF-8 JSON object followed by a newline, at most
 16384 bytes including the newline. Embedded newlines must be JSON-escaped.
-Do not pipeline calls or reconnect and retry an uncertain operation. Request
-IDs are positive unsigned 32-bit integers, starting at 1 and increasing by one.
+Do not pipeline calls or reconnect and retry an uncertain operation. A disconnect
+with a partial request or an outstanding RPC is an infrastructure error. There
+are no automatic retries. Request IDs are positive unsigned 32-bit integers,
+starting at 1 and increasing by one within each connection. A new connection
+starts again at ID 1. Python callers close the old `World` and create a new one
+with `World.connect()`; a closed `World` never reconnects itself.
 The response echoes the version and ID. The API has no implicit retry, automatic
 heal, or garbage-collection-based operation.
 
 The private supervisor-to-VMM relay framing is not part of the public socket
-protocol; custom bindings do not implement virtqueue or device I/O. The device
+protocol; custom bindings do not implement virtqueue or device I/O. Private frames
+carry a run-wide relay ID and a connection session ID before the public JSON:
+`SBX_RPC1 <relay> <session> <JSON>` and `SBX_REPLY1 <relay> <session> <JSON>`.
+Both IDs are positive unsigned 32-bit integers. Relay IDs increase by one for
+every submitted RPC across sessions. Session IDs increase for every accepted
+connection, so empty connections may leave gaps in the recorded session IDs.
+The VMM records `session_id` in the transcript, validates public IDs within that
+session, and echoes both private IDs; the supervisor rejects replies for another
+session even if their public ID matches. The device
 uses the [virtio console specification](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html#x1-2850003),
 with a named non-console port and shared-memory split queues. Its bounded buffers
 and notifications carry opaque byte streams; operation names belong to the RPC
@@ -73,9 +89,14 @@ Common fields are `version: 1`, `id`, and `op`. Targets are typed objects:
 Partitions cut both directions between their two groups. Each handle is
 independent: a link remains cut while any applicable handle exists. Already
 routed packets stay in flight; new sends crossing an active cut are dropped.
-Inspect returns the retained service-to-machine mapping, machine execution
-states, active partition handles and directed-link counters, all sampled at its
-admission boundary. It exposes simulator state, not application object memory.
+Inspect returns the retained service-to-machine mapping, application lifecycle
+states (`Running`, `Stopped`, or `Exited(code)`), active partition handles and
+directed-link counters. It exposes simulator state, not application object memory.
+Transient CPU halt state is not an application lifecycle state. Counters include
+sends, drops and arrivals whose nominal simulated timestamps are strictly before
+the admission boundary; equal-time packets follow admission. This excludes
+packets that the scheduler has delivered early but whose nominal arrival is
+still in the future. Partition/heal evidence uses the same counter boundary.
 
 For example:
 
@@ -101,8 +122,14 @@ An operation error uses `ok: false` and `error` instead of a result:
 {"version":1,"id":2,"ok":false,"error":{"code":"invalid_request","message":"inactive partition handle"},"requested_at_ns":1020000000,"admitted_at_ns":1027000000,"effect_at_ns":1027000000,"replied_at_ns":1034000000}
 ```
 
-A scenario can handle rejected arguments or an inactive partition handle. The error is
-retained in the transcript and no operation is reported as applied. Missing or
+A scenario can handle rejected arguments or an inactive partition handle.
+`restart` starts a stopped application using its retained launch recipe. Restarting
+a running application or stopping an already stopped application returns
+`invalid_state`. Commands targeting a VM that has exited return `target_unavailable`;
+the scenario can inspect that exit and decide its own outcome. An inspection
+whose response would exceed the frame limit returns `result_too_large`.
+These errors are recoverable: the connection stays usable, the error is retained
+in the transcript, and no operation is reported as applied. Missing or
 rejected supervisor effects and invalid protocol framing/correlation are
 infrastructure errors. A pending call cut off by normal world termination stays
 in the retained transcript and preserves the workload outcome or TIMEOUT. A

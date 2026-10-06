@@ -9,7 +9,7 @@ import signal
 import shutil
 import subprocess
 from generate import generate
-from verify import verify, verify_cutoff, verify_early_request
+from verify import verify, verify_cutoff, verify_early_request, verify_control_cases
 
 MSR_EVIDENCE = []
 RUN_EVIDENCE = []
@@ -112,6 +112,18 @@ def focused_projects(projects):
         (destination / "workload" / "scenario.py").write_text(program)
 
 
+def control_project(projects):
+    destination = Path(projects) / "control-cases"
+    shutil.copytree(Path(projects) / "fixed", destination)
+    compose = destination / "compose.yaml"
+    text = compose.read_text().replace("name: synthetic-fault-fixed", "name: synthetic-fault-control-cases")
+    server = '    command: [server, --listen, "0.0.0.0:7000", --state, /data/kv.log]'
+    assert text.count(server) == 1
+    text = text.replace(server, server + '\n    entrypoint: [python3, /workload/control_target.py]')
+    compose.write_text(text)
+    shutil.copyfile(destination / "workload/control_scenario.py", destination / "workload/scenario.py")
+
+
 RUN = re.compile(r"^(?:PASS|FAIL|ERROR|TIMEOUT|INCOMPLETE): (.+)$", re.M)
 
 def checked_run(command):
@@ -194,6 +206,7 @@ def main():
     signal.signal(signal.SIGTERM,interrupt)
     persist_evidence()
     projects = generate(Path(a.output) / "projects", a.seed)
+    control_project(projects)
     if a.delayed_guest_init:
         focused_projects(projects)
     common = ["--kernel", a.kernel, "--vmm", a.vmm, "--guest-init", a.guest_init,
@@ -237,6 +250,13 @@ def main():
                               "--state", a.state, "--undo", "0", "--margin", a.margin], 0)
             evidence.append(verifier(replay))
             persist_evidence()
+    control_run = execute([a.seedbox, "run", str(projects / "control-cases/compose.yaml"), *common], 1)
+    evidence.append(verify_control_cases(control_run))
+    persist_evidence()
+    control_replay = execute([a.seedbox, "replay", str(control_run), "--cpu", str(a.cpu),
+                              "--state", a.state, "--undo", "0", "--margin", a.margin], 0)
+    evidence.append(verify_control_cases(control_replay))
+    persist_evidence()
     STATUS = "passed"
     persist_evidence()
 

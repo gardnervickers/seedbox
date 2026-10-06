@@ -3,6 +3,9 @@ import io
 import json
 from pathlib import Path
 import sys
+import socket
+import tempfile
+import threading
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -55,6 +58,53 @@ class ControlTests(unittest.TestCase):
             {"version": 1, "id": 6, "op": "now"},
         ])
         self.assertTrue(peer.closed)
+
+    def test_graceful_reconnect_starts_new_ids_and_preserves_explicit_handles(self):
+        # Use actual Unix streams and independent literal peer messages. The
+        # public client never sees the broker's private session/relay counters.
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "control.sock")
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(path)
+            listener.listen(1)
+            requests, failures = [], []
+
+            def serve():
+                try:
+                    for result in ({"handle": "retained-p1"}, {}):
+                        channel, _ = listener.accept()
+                        with channel, channel.makefile("rb") as reader:
+                            request = json.loads(reader.readline())
+                            requests.append(request)
+                            channel.sendall(reply(result=result))
+                            self.assertEqual(reader.read(1), b"")
+                except BaseException as error:
+                    failures.append(error)
+                finally:
+                    listener.close()
+
+            server = threading.Thread(target=serve, daemon=True)
+            server.start()
+            with World.connect(path) as first:
+                handle = first.partition(["client"], ["server"])
+            with World.connect(path) as second:
+                second.heal(handle)
+            server.join(5)
+            self.assertFalse(server.is_alive())
+            self.assertEqual(failures, [])
+            self.assertEqual([request["id"] for request in requests], [1, 1])
+            self.assertEqual([request["op"] for request in requests], ["partition", "heal"])
+            self.assertEqual(requests[1]["handle"], "retained-p1")
+
+    def test_transport_loss_never_reconnects_or_retries_automatically(self):
+        peer = Peer(b"")
+        world = World(peer)
+        with self.assertRaises(ProtocolError):
+            world.stop("server")
+        self.assertTrue(peer.closed)
+        with self.assertRaisesRegex(ProtocolError, "closed"):
+            world.restart("server")
+        self.assertEqual(len(peer.requests), 1)
 
     def test_error_retains_code_and_raw_timing_without_implicit_retry(self):
         peer = Peer(reply(ok=False, error={"code": "inactive_handle", "message": "already healed"}))

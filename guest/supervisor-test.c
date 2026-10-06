@@ -30,6 +30,11 @@ static void readiness_outl(uint32_t id, unsigned short port) {
     assert(id == SEEDBOX_READY_ID && port == SEEDBOX_EFFECT_PORT);
     readiness_writes = 1;
 }
+static void test_cmdline(const char *path, const char *text) {
+    int fd = open(path, O_WRONLY|O_CREAT|O_TRUNC, 0600); assert(fd >= 0);
+    assert(write(fd, text, strlen(text)) == (ssize_t)strlen(text));
+    assert(!close(fd));
+}
 int main(int argc, char **argv) {
     if (argc > 1) { for (;;) pause(); }
     int sockets[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM,0,sockets));
@@ -87,26 +92,77 @@ int main(int argc, char **argv) {
     char failed[]="start 4"; control(failed,&child); assert(child<0);
     n=read(sockets[1],buffer,sizeof(buffer)-1); assert(n>0); buffer[n]=0; assert(strstr(buffer,"SEEDBOX_FAILURE id=4"));
     assert(waitpid(-1,&status,WNOHANG)==-1 && errno==ECHILD);
-    /* Real rootless Unix socket -> supervisor -> management framing and reply. */
-    char directory[]="/tmp/seedbox-relay-XXXXXX";assert(mkdtemp(directory));
-    struct sockaddr_un address={.sun_family=AF_UNIX};
-    assert(snprintf(address.sun_path,sizeof(address.sun_path),"%s/control.sock",directory)>0);
-    control_listener=socket(AF_UNIX,SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0);assert(control_listener>=0);
-    assert(!bind(control_listener,(struct sockaddr*)&address,sizeof(address)));assert(!listen(control_listener,1));
-    int peer=socket(AF_UNIX,SOCK_STREAM,0);assert(peer>=0);assert(!connect(peer,(struct sockaddr*)&address,sizeof(address)));
-    const char *request="{\"version\":1,\"id\":7,\"op\":\"now\"}";
-    assert(write(peer,request,strlen(request))==(ssize_t)strlen(request));relay_requests();assert(!waiting_relay);
-    assert(write(peer,"\n",1)==1);relay_requests();assert(waiting_relay==1);
-    n=read(sockets[1],buffer,sizeof(buffer)-1);assert(n>0);buffer[n]=0;
-    assert(!strcmp(buffer,"SBX_RPC1 1 {\"version\":1,\"id\":7,\"op\":\"now\"}\n"));
-    char reply[]="SBX_REPLY1 1 {\"version\":1,\"id\":7,\"ok\":true}";
-    assert(write(sockets[1], reply, 8) == 8); relay_management(&child); assert(waiting_relay);
+    /* The public RPC socket is created only from an exact authoritative boot
+     * token; image environment entries cannot enable it on other guests. */
+    char directory[] = "/tmp/seedbox-relay-XXXXXX"; assert(mkdtemp(directory));
+    char cmdline_path[PATH_MAX];
+    assert(snprintf(cmdline_path, sizeof(cmdline_path), "%s/cmdline", directory) > 0);
+    struct sockaddr_un address = {.sun_family = AF_UNIX};
+    assert(snprintf(address.sun_path, sizeof(address.sun_path), "%s/control.sock", directory) > 0);
+    const char *disabled[] = {"quiet\n", "seedbox.control=0\n", "seedbox.control=11\n", "xseedbox.control=1\n", "app=seedbox.control=1\n"};
+    environment = (char *[]){"seedbox.control=1", NULL};
+    for (unsigned i = 0; i < sizeof(disabled)/sizeof(*disabled); i++) {
+        test_cmdline(cmdline_path, disabled[i]);
+        relay_socket(cmdline_path, address.sun_path);
+        assert(control_listener == -1 && access(address.sun_path, F_OK) == -1 && errno == ENOENT);
+    }
+    const char *enabled = "quiet\tseedbox.control=1 root=/dev/ram0\n";
+    test_cmdline(cmdline_path, enabled);
+    relay_socket(cmdline_path, address.sun_path); assert(control_listener >= 0);
+    struct stat permissions; assert(!stat(address.sun_path, &permissions)); assert((permissions.st_mode & 0777) == 0666);
+    int peer = socket(AF_UNIX, SOCK_STREAM, 0); assert(peer >= 0);
+    assert(!connect(peer, (struct sockaddr *)&address, sizeof(address)));
+    service_channels(&child, 0); assert(control_client >= 0 && session_id == 1);
+    const char *request = "{\"version\":1,\"id\":1,\"op\":\"now\"}";
+    assert(write(peer, request, strlen(request)) == (ssize_t)strlen(request));
+    service_channels(&child, 0); assert(!waiting_relay);
+    assert(write(peer, "\n", 1) == 1); service_channels(&child, 0); assert(waiting_relay == 1);
+    n = read(sockets[1], buffer, sizeof(buffer)-1); assert(n > 0); buffer[n] = 0;
+    assert(!strcmp(buffer, "SBX_RPC1 1 1 {\"version\":1,\"id\":1,\"op\":\"now\"}\n"));
+    char reply[] = "SBX_REPLY1 1 1 {\"version\":1,\"id\":1,\"ok\":true}";
+    assert(write(sockets[1], reply, 8) == 8); service_channels(&child, 0); assert(waiting_relay);
     assert(write(sockets[1], reply + 8, strlen(reply) - 8) == (ssize_t)strlen(reply) - 8);
-    assert(write(sockets[1], "\n", 1) == 1); relay_management(&child); assert(!waiting_relay);
-    n=read(peer,buffer,sizeof(buffer)-1);assert(n>0);buffer[n]=0;assert(!strcmp(buffer,"{\"version\":1,\"id\":7,\"ok\":true}\n"));
-    /* A stale reply must not be delivered to a later call. */
-    pid_t check=fork();assert(check>=0);if(!check){control(reply,&child);_exit(0);}
-    assert(waitpid(check,&status,0)==check);assert(WIFEXITED(status)&&WEXITSTATUS(status)==125);
-    close(peer);relay_requests();assert(control_client==-1);assert(control_connected);
-    unlink(address.sun_path);rmdir(directory);
+    assert(write(sockets[1], "\n", 1) == 1); service_channels(&child, 0); assert(!waiting_relay);
+    n = read(peer, buffer, sizeof(buffer)-1); assert(n > 0); buffer[n] = 0;
+    assert(!strcmp(buffer, "{\"version\":1,\"id\":1,\"ok\":true}\n"));
+    /* An idle HUP releases only the client; the same listener accepts a new
+     * session. Empty sessions consume a session ID but no relay ID. */
+    int listener = control_listener;
+    close(peer); service_channels(&child, 0); assert(control_client == -1 && control_listener == listener);
+    peer = socket(AF_UNIX, SOCK_STREAM, 0); assert(peer >= 0);
+    assert(!connect(peer, (struct sockaddr *)&address, sizeof(address)));
+    service_channels(&child, 0); assert(session_id == 2);
+    close(peer); service_channels(&child, 0); assert(control_client == -1 && relay_id == 1);
+    peer = socket(AF_UNIX, SOCK_STREAM, 0); assert(peer >= 0);
+    assert(!connect(peer, (struct sockaddr *)&address, sizeof(address)));
+    service_channels(&child, 0); assert(session_id == 3);
+    assert(write(peer, request, strlen(request)) == (ssize_t)strlen(request)); assert(write(peer, "\n", 1) == 1);
+    service_channels(&child, 0); assert(waiting_relay == 2);
+    n = read(sockets[1], buffer, sizeof(buffer)-1); assert(n > 0); buffer[n] = 0;
+    assert(!strcmp(buffer, "SBX_RPC1 2 3 {\"version\":1,\"id\":1,\"op\":\"now\"}\n"));
+    /* A matching relay with the wrong session must never reach this client. */
+    pid_t check = fork(); assert(check >= 0);
+    if (!check) { char stale[] = "SBX_REPLY1 2 1 {}"; control(stale, &child); _exit(0); }
+    assert(waitpid(check, &status, 0) == check); assert(WIFEXITED(status) && WEXITSTATUS(status) == 125);
+    char second[] = "SBX_REPLY1 2 3 {\"version\":1,\"id\":1,\"ok\":true}";
+    control(second, &child); assert(!waiting_relay);
+    n = read(peer, buffer, sizeof(buffer)-1); assert(n > 0); buffer[n] = 0;
+    assert(!strcmp(buffer, "{\"version\":1,\"id\":1,\"ok\":true}\n"));
+    close(peer); service_channels(&child, 0); assert(control_client == -1);
+    /* Poll-driven handling fails closed on partial and outstanding disconnects
+     * as well as an invalid descriptor, rather than spinning on EOF/errors. */
+    for (int failure = 0; failure < 3; failure++) {
+        check = fork(); assert(check >= 0);
+        if (!check) {
+            int pair[2]; assert(!socketpair(AF_UNIX, SOCK_STREAM|SOCK_NONBLOCK, 0, pair));
+            control_client = pair[0]; request_used = 0; waiting_relay = failure == 1 ? 9 : 0;
+            if (failure == 0) { assert(write(pair[1], "{", 1) == 1); close(pair[1]); }
+            if (failure == 1) close(pair[1]);
+            if (failure == 2) close(pair[0]);
+            service_channels(&child, 0); _exit(0);
+        }
+        assert(waitpid(check, &status, 0) == check); assert(WIFEXITED(status) && WEXITSTATUS(status) == 125);
+    }
+    close(control_listener); control_listener = -1;
+    assert(!unlink(address.sun_path) && !unlink(cmdline_path) && !rmdir(directory));
 }

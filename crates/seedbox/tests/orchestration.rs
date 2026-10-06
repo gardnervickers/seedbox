@@ -729,41 +729,8 @@ fn large_artifacts_stream_with_bounded_reads_and_corrupt_copies_are_not_publishe
 }
 
 #[test]
-fn scheduled_faults_reach_the_library_executor_and_cannot_be_silently_skipped() {
-    use seedbox::config::{Fault, FaultAction, FaultTarget};
-    let mut fixture = Fixture::new();
-    let first = fixture.run();
-    fixture.simulation.faults.push(Fault {
-        at_ns: 10,
-        action: FaultAction::Stop {
-            target: FaultTarget::Service("workload".into()),
-        },
-    });
-    let missing = fixture.run();
-    assert_ne!(first.record.run_id, missing.record.run_id);
-    assert_eq!(missing.record.outcome, Outcome::Error);
-    fixture.backend.report.faults.push(FaultEvent {
-        requested_at_ns: 10,
-        applied_at_ns: 20,
-        service: "workload".into(),
-        action: "stop".into(),
-        detail: "reaped".into(),
-    });
-    assert_eq!(fixture.run().record.outcome, Outcome::Pass);
-    fixture.backend.report.faults[0].action = "restart".into();
-    assert_eq!(fixture.run().record.outcome, Outcome::Error);
-}
-
-#[test]
 fn early_termination_preserves_reason_and_specific_fault_error() {
-    use seedbox::config::{Fault, FaultAction, FaultTarget};
     let mut fixture = Fixture::new();
-    fixture.simulation.faults.push(Fault {
-        at_ns: 10,
-        action: FaultAction::Stop {
-            target: FaultTarget::Service("workload".into()),
-        },
-    });
     for (reason, outcome) in [
         (StopReason::Cancelled, Outcome::Incomplete),
         (StopReason::WallTimeLimit, Outcome::Incomplete),
@@ -792,18 +759,4 @@ fn network_effects_have_no_single_service_target() {
     assert_eq!(fixture.run().record.outcome, Outcome::Pass);
     fixture.backend.report.faults[0].action = "stop".into();
     assert_eq!(fixture.run().record.outcome, Outcome::Error);
-}
-
-#[test]
-fn workload_failure_before_future_legacy_fault_preserves_fail() {
-    use seedbox::config::{Fault, FaultAction, FaultTarget};
-    let mut fixture = Fixture::new();
-    fixture.simulation.faults.push(Fault {
-        at_ns: 100,
-        action: FaultAction::Stop {
-            target: FaultTarget::Service("workload".into()),
-        },
-    });
-    fixture.backend.report.workload_exit.as_mut().unwrap().code = 1;
-    assert_eq!(fixture.run().record.outcome, Outcome::Fail);
 }

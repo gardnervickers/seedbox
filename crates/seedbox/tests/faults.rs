@@ -28,11 +28,11 @@ fn overlapping_handles_only_heal_their_own_links_and_order_is_stable() {
     f.apply_due(13);
     assert!(!f.blocked(0, 1));
     assert_eq!(f.apply_due(14), vec![(0, b"stop 5\n".to_vec())]);
-    assert!(!f.complete());
+    assert!(!(f.error.is_none() && f.pending_boundaries() == 0));
     f.effect(0, 5, 14, true);
     assert_eq!(f.apply_due(15), vec![(0, b"start 6\n".to_vec())]);
     f.effect(0, 6, 16, true);
-    assert!(f.complete());
+    assert!((f.error.is_none() && f.pending_boundaries() == 0));
     assert_eq!(f.log[5]["applied_at_ns"], 16);
     assert_eq!(f.next_boundary(), u64::MAX);
 }
@@ -49,7 +49,7 @@ fn ack_identity_machine_effect_time_deadline_and_state_fail_closed() {
         f.apply_due(14);
         f.effect(machine, id, time, success);
         assert!(f.error.is_some());
-        assert!(!f.complete());
+        assert!(!(f.error.is_none() && f.pending_boundaries() == 0));
     }
     let mut f = fixture();
     f.apply_due(14);
@@ -106,7 +106,10 @@ fn already_routed_frames_survive_same_time_partition_and_events_keep_sequence() 
     assert!(events::pop_due(&mut pending, 10).is_none());
     f.apply_due(11);
     assert!(!f.blocked(0, 1));
-    assert_eq!(events::pop_due(&mut pending, 12), Some(b"after".as_slice()));
+    assert_eq!(
+        events::pop_due_at(&mut pending, 14),
+        Some((12, b"after".as_slice()))
+    );
     assert!(pending.is_empty());
 }
 #[test]
@@ -116,7 +119,7 @@ fn same_time_partition_then_heal_completes_in_author_order_before_new_sends() {
         json!({"id":2,"at_ns":10,"deadline_ns":20,"action":"heal","handle":"cut"}),
     ],vec!["n1".into(),"n2".into()]).unwrap();
     f.apply_due(10);
-    assert!(f.complete());
+    assert!((f.error.is_none() && f.pending_boundaries() == 0));
     assert!(!f.blocked(0, 1));
     assert_eq!(
         f.log
@@ -171,7 +174,7 @@ fn scheduling_cost_tracks_only_outstanding_work_not_completed_history() {
     f.apply_due(2000);
     assert_eq!(f.pending_boundaries(), 1);
     f.effect(0, 2001, 2001, true);
-    assert!(f.complete());
+    assert!((f.error.is_none() && f.pending_boundaries() == 0));
 }
 #[test]
 fn process_commands_wait_for_ready_and_undispatched_acks_cannot_fulfill_them() {
@@ -193,7 +196,7 @@ fn process_commands_wait_for_ready_and_undispatched_acks_cannot_fulfill_them() {
     assert!(f.apply_due(24).is_empty());
     assert_eq!(f.apply_due(25), vec![(0, b"stop 1\n".to_vec())]);
     f.effect(0, 1, 30, true);
-    assert!(f.complete());
+    assert!((f.error.is_none() && f.pending_boundaries() == 0));
     assert_eq!(f.pending_boundaries(), 0);
     let mut f = engine::Faults::new(vec![], vec!["n1".into()]).unwrap();
     f.require_readiness();

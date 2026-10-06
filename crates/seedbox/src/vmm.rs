@@ -97,6 +97,16 @@ impl ExecutionBackend for VmmExecutor {
     }
 }
 
+fn control_latency(request: &ExecutionRequest<'_>) -> Result<u64> {
+    request
+        .network
+        .latency_ns
+        .checked_mul(2)
+        .and_then(|n| n.checked_add(request.schedule.stop_tolerance_ns.checked_mul(2)?))
+        .and_then(|n| n.checked_add(1_000_000))
+        .ok_or_else(|| Error::Execution("control latency overflow".into()))
+}
+
 /// Translate an execution request without consulting registry tags or source
 /// paths. Exposed for preparation tools and report inspection without KVM.
 pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
@@ -106,11 +116,6 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
     {
         return Err(Error::Execution(
             "controller must also be the check service".into(),
-        ));
-    }
-    if request.control.is_some() && !request.faults.is_empty() {
-        return Err(Error::Execution(
-            "runtime control cannot mix with static fault schedules".into(),
         ));
     }
     if request.prepared.guests.is_empty() || request.prepared.guests.len() > 254 {
@@ -145,10 +150,9 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
             "oci-init-v1 requires one service per machine".into(),
         ));
     }
-    let faults = compile_faults(request)?;
     let control = request.control.map(|c| -> Result<Value> {
         let machine = request.prepared.placement.get(&c.service).ok_or_else(|| Error::Execution("controller placement missing".into()))?;
-        let latency_ns = request.network.latency_ns.checked_mul(2).and_then(|n| n.checked_add(request.schedule.stop_tolerance_ns.checked_mul(2)?)).and_then(|n| n.checked_add(1_000_000)).ok_or_else(|| Error::Execution("control latency overflow".into()))?;
+        let latency_ns = control_latency(request)?;
         Ok(json!({"machine":machine,"latency_ns":latency_ns,"placement":request.prepared.placement}))
     }).transpose()?;
     let machines = request
@@ -162,96 +166,14 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
         "duration_ns":request.limits.simulated_time_ns,"end_on_exit":workload_machine,
         "timer_jitter_ns":request.schedule.timer_jitter_ns,"stop_tolerance_ns":request.schedule.stop_tolerance_ns,
         "network":{"latency_ns":request.network.latency_ns,"jitter_ns":request.network.jitter_ns},
-        "machines":machines,"faults":faults,"control":control,
+        "machines":machines,"control":control,
         "control_channel":"virtio-console-v1",
     }))
 }
 
-/// Compile service targets using retained placement, never name coincidence.
-fn compile_faults(request: &ExecutionRequest<'_>) -> Result<Vec<Value>> {
-    use crate::config::{FaultAction, FaultTarget};
-    let mut active = BTreeSet::new();
-    let mut used = BTreeSet::new();
-    let mut stopped = BTreeSet::new();
-    let mut previous = 0;
-    let resolve = |target: &FaultTarget| -> Result<String> {
-        let machine = match target {
-            FaultTarget::Service(service) => request
-                .prepared
-                .placement
-                .get(service)
-                .ok_or_else(|| Error::Execution(format!("unknown fault service {service}")))?,
-            FaultTarget::Machine(machine) => machine,
-        };
-        if !request.prepared.guests.contains_key(machine) {
-            return Err(Error::Execution(format!("unknown fault machine {machine}")));
-        }
-        Ok(machine.clone())
-    };
-    request
-        .faults
-        .iter()
-        .enumerate()
-        .map(|(i, fault)| {
-            if fault.at_ns < previous || fault.at_ns >= request.limits.simulated_time_ns {
-                return Err(Error::Execution(
-                    "fault times must be ordered and precede limit".into(),
-                ));
-            }
-            previous = fault.at_ns;
-            let mut value = match &fault.action {
-                FaultAction::Stop { target } | FaultAction::Restart { target } => {
-                    let machine = resolve(target)?;
-                    let stopping = matches!(fault.action, FaultAction::Stop { .. });
-                    if (stopping && !stopped.insert(machine.clone()))
-                        || (!stopping && !stopped.remove(&machine))
-                    {
-                        return Err(Error::Execution(
-                            "invalid stop/restart state after placement".into(),
-                        ));
-                    }
-                    json!({"action":if stopping {"stop"} else {"restart"}, "machine":machine})
-                }
-                FaultAction::Partition { id, left, right } => {
-                    if id.is_empty() || !used.insert(id.clone()) {
-                        return Err(Error::Execution("duplicate/empty partition id".into()));
-                    }
-                    let left = left.iter().map(&resolve).collect::<Result<Vec<_>>>()?;
-                    let right = right.iter().map(&resolve).collect::<Result<Vec<_>>>()?;
-                    let unique: BTreeSet<_> = left.iter().chain(&right).collect();
-                    if left.is_empty()
-                        || right.is_empty()
-                        || unique.len() != left.len() + right.len()
-                    {
-                        return Err(Error::Execution(
-                            "partition sides overlap after placement".into(),
-                        ));
-                    }
-                    active.insert(id.clone());
-                    json!({"action":"partition","handle":id,"left":left,"right":right})
-                }
-                FaultAction::Heal { id } => {
-                    if !active.remove(id) {
-                        return Err(Error::Execution("heal of inactive partition".into()));
-                    }
-                    json!({"action":"heal","handle":id})
-                }
-            };
-            value["id"] = json!(
-                u32::try_from(i + 1).map_err(|_| Error::Execution("too many faults".into()))?
-            );
-            value["at_ns"] = json!(fault.at_ns);
-            value["deadline_ns"] = json!(fault
-                .at_ns
-                .saturating_add(5_000_000_000)
-                .min(request.limits.simulated_time_ns));
-            Ok(value)
-        })
-        .collect()
-}
 #[derive(Deserialize)]
 struct RawFault {
-    request: Value,
+    request: seedbox_control::Plan,
     id: u32,
     requested_at_ns: u64,
     applied_at_ns: Option<u64>,
@@ -286,19 +208,27 @@ struct VmmReport {
     control_latency_ns: Option<u64>,
 }
 
+#[derive(Default)]
+struct ValidatedControlHistory {
+    plans: Vec<seedbox_control::Plan>,
+    effects: BTreeMap<u32, u64>,
+}
+
 /// Correlate guest-originated requests to responses and applied engine actions.
 fn validate_control_history(
     history: &[Value],
     latency: Option<u64>,
     request: &ExecutionRequest<'_>,
     failed: bool,
-) -> Result<Vec<Value>> {
-    let compiled = world(request)?;
-    let config = &compiled["control"];
+) -> Result<ValidatedControlHistory> {
+    let expected_latency = control_latency(request)?;
     let latency = latency
-        .filter(|n| Some(*n) == config["latency_ns"].as_u64())
+        .filter(|n| *n == expected_latency)
         .ok_or_else(|| Error::Integrity("control latency mismatch".into()))?;
-    use seedbox_control::{Operation, Request, Target};
+    use seedbox_control::{Action, Operation, Plan, Request, Target, PROCESS_EFFECT_TIMEOUT_NS};
+    let controller = request
+        .control
+        .and_then(|control| request.prepared.placement.get(&control.service));
     let resolve = |target: &Target| -> Result<String> {
         let machine = match target {
             Target::Service(service) => request.prepared.placement.get(service).map(String::as_str),
@@ -306,7 +236,7 @@ fn validate_control_history(
         }
         .ok_or_else(|| Error::Integrity("invalid control target".into()))?;
         if !request.prepared.guests.contains_key(machine)
-            || Some(machine) == config["machine"].as_str()
+            || controller.is_some_and(|name| name == machine)
         {
             return Err(Error::Integrity(
                 "invalid fault machine/controller target".into(),
@@ -315,8 +245,10 @@ fn validate_control_history(
         Ok(machine.to_owned())
     };
     let bad = || Error::Integrity("control request/response/time correlation mismatch".into());
-    let mut expected = Vec::new();
+    let mut expected = ValidatedControlHistory::default();
     let mut previous = 0;
+    let mut session = 0;
+    let mut public_id = 0u64;
     let mut accepted = 0u64;
     for (i, row) in history.iter().enumerate() {
         if row["status"] == "rejected" && failed {
@@ -324,6 +256,19 @@ fn validate_control_history(
         }
         accepted += 1;
         let r = &row["request"];
+        let current_session = match row.get("session_id") {
+            Some(value) => value.as_u64().ok_or_else(bad)?,
+            None => 1,
+        };
+        if current_session == 0 || current_session > u32::MAX as u64 || current_session < session {
+            return Err(bad());
+        }
+        public_id = if current_session == session {
+            public_id + 1
+        } else {
+            1
+        };
+        session = current_session;
         let cutoff = row["status"] == "cut_off";
         let response = row["response"].is_object();
         let metadata = if response { &row["response"] } else { row };
@@ -336,7 +281,8 @@ fn validate_control_history(
         };
         if row["relay_id"].as_u64() != Some(accepted)
             || r["version"] != 1
-            || r["id"].as_u64() != Some(accepted)
+            || r["id"].as_u64() != Some(public_id)
+            || public_id > u32::MAX as u64
             || accepted > u32::MAX as u64
             || t < previous
             || t.checked_add(latency) != Some(a)
@@ -362,8 +308,8 @@ fn validate_control_history(
                 || metadata["id"] != r["id"]
                 || e.checked_add(latency) != Some(reply)
                 || (!cutoff && reply >= request.limits.simulated_time_ns)
-                || if let Some(c) = cut_at {
-                    !row["delivered_at_ns"].is_null() || c > reply
+                || if cut_at.is_some() {
+                    !row["delivered_at_ns"].is_null()
                 } else {
                     row["delivered_at_ns"].as_u64() != Some(reply) && !failed
                 }
@@ -389,32 +335,39 @@ fn validate_control_history(
                 }
                 continue;
             }
-            if !admitted || row["fault_id"].as_u64() != Some(expected.len() as u64 + 1) {
+            if !admitted || row["fault_id"].as_u64() != Some(expected.plans.len() as u64 + 1) {
                 return Err(bad());
             }
         }
         let call: Request = serde_json::from_value(r.clone()).map_err(|_| bad())?;
-        let mut plan = match call.operation {
-            Operation::Stop { target } => json!({"action":"stop","machine":resolve(&target)?}),
-            Operation::Restart { target } => {
-                json!({"action":"restart","machine":resolve(&target)?})
-            }
+        let action = match call.operation {
+            Operation::Stop { target } => Action::Stop {
+                machine: resolve(&target)?,
+            },
+            Operation::Restart { target } => Action::Restart {
+                machine: resolve(&target)?,
+            },
             Operation::Partition { left, right } => {
                 let handle = if response {
                     &metadata["result"]["handle"]
                 } else {
                     &row["plan"]["handle"]
                 };
-                if handle.as_str().is_none_or(str::is_empty) || (response && e != Some(a)) {
+                let handle = handle.as_str().ok_or_else(bad)?.to_owned();
+                if handle.is_empty() || (response && e != Some(a)) {
                     return Err(bad());
                 }
-                json!({"action":"partition","handle":handle,"left":left.iter().map(&resolve).collect::<Result<Vec<_>>>()?,"right":right.iter().map(&resolve).collect::<Result<Vec<_>>>()?})
+                Action::Partition {
+                    handle,
+                    left: left.iter().map(&resolve).collect::<Result<_>>()?,
+                    right: right.iter().map(&resolve).collect::<Result<_>>()?,
+                }
             }
             Operation::Heal { handle } => {
                 if response && e != Some(a) {
                     return Err(bad());
                 }
-                json!({"action":"heal","handle":handle})
+                Action::Heal { handle }
             }
             Operation::Now {} => {
                 if e != Some(a) || metadata["result"]["now_ns"].as_u64() != e {
@@ -435,13 +388,21 @@ fn validate_control_history(
                 continue;
             }
         };
-        plan["id"] = json!(expected.len() + 1);
-        plan["at_ns"] = json!(a);
-        plan["deadline_ns"] = json!(a.saturating_add(5_000_000_000));
-        if !response && row["plan"] != plan {
+        let plan = Plan {
+            id: u32::try_from(expected.plans.len() + 1).map_err(|_| bad())?,
+            at_ns: a,
+            deadline_ns: a.checked_add(PROCESS_EFFECT_TIMEOUT_NS).ok_or_else(bad)?,
+            action,
+        };
+        if !response
+            && serde_json::from_value::<Plan>(row["plan"].clone()).map_err(|_| bad())? != plan
+        {
             return Err(bad());
         }
-        expected.push(plan);
+        if response {
+            expected.effects.insert(plan.id, e.ok_or_else(bad)?);
+        }
+        expected.plans.push(plan);
     }
     Ok(expected)
 }
@@ -515,28 +476,18 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
             raw.fault_error.is_some(),
         )?
     } else {
-        compile_faults(request)?
+        ValidatedControlHistory::default()
     };
-    let control_effects = raw
-        .control_history
-        .iter()
-        .filter(|r| {
-            r["response"]["ok"] == true
-                && matches!(
-                    r["request"]["op"].as_str(),
-                    Some("stop" | "restart" | "partition" | "heal")
-                )
-        })
-        .map(|r| r["response"]["effect_at_ns"].as_u64().unwrap())
-        .collect::<Vec<_>>();
     let mut faults = Vec::new();
     let mut fault_failure = raw.fault_error;
-    if raw.faults.len() != expected.len() && !(request.control.is_some() && fault_failure.is_some())
+    if raw.faults.len() != expected.plans.len()
+        && !(request.control.is_some() && fault_failure.is_some())
     {
         fault_failure = Some("fault request history is incomplete".to_string());
     }
     for (i, fault) in raw.faults.iter().enumerate() {
         let plan = expected
+            .plans
             .get(i)
             .or_else(|| {
                 (request.control.is_some() && fault_failure.is_some()).then_some(&fault.request)
@@ -544,9 +495,9 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
             .ok_or_else(|| Error::Integrity("unexpected fault acknowledgement".into()))?;
         if fault.request != *plan
             || fault.id as usize != i + 1
-            || Some(fault.requested_at_ns) != plan["at_ns"].as_u64()
-            || Some(fault.action.as_str()) != plan["action"].as_str()
-            || fault.machine.as_deref() != plan["machine"].as_str()
+            || fault.requested_at_ns != plan.at_ns
+            || fault.action != plan.action.name()
+            || fault.machine.as_deref() != plan.action.machine()
         {
             return Err(Error::Integrity(
                 "fault acknowledgement correlation mismatch".into(),
@@ -555,9 +506,9 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
         match (fault.status.as_str(), fault.applied_at_ns) {
             ("applied", Some(at))
                 if at >= fault.requested_at_ns
-                    && at <= plan["deadline_ns"].as_u64().unwrap()
+                    && at <= plan.deadline_ns
                     && (request.control.is_none()
-                        || control_effects.get(i).is_none_or(|e| *e == at)) =>
+                        || expected.effects.get(&fault.id).is_none_or(|e| *e == at)) =>
             {
                 let service = fault
                     .machine
@@ -579,7 +530,7 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
                     detail: format!("id={} {}", fault.id, fault.detail),
                 });
             }
-            ("requested" | "unrequested", None) => {}
+            ("requested" | "unrequested", None) if !expected.effects.contains_key(&fault.id) => {}
             ("failed", None) => {
                 fault_failure = Some(format!(
                     "fault {} {}: {}",

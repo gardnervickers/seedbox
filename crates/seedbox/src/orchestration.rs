@@ -268,7 +268,6 @@ impl Orchestrator {
                 limits: &record.identity.configuration.limits,
                 network: &record.identity.configuration.network,
                 schedule: &record.identity.configuration.schedule,
-                faults: &record.identity.configuration.faults,
                 control: record.identity.configuration.control.as_ref(),
                 check: &record.identity.configuration.check,
                 prepared: &record.identity.inputs,
@@ -387,32 +386,6 @@ fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome>
         StopReason::SimulatedTimeLimit => return Ok(Outcome::Timeout),
         StopReason::Completed => {}
     }
-    if !simulation.faults.is_empty() {
-        let workload_failed = report.workload_exit.as_ref().is_some_and(|exit| {
-            exit.service == simulation.check.service && exit.code != simulation.check.exit_code
-        });
-        if report.faults.len() > simulation.faults.len()
-            || (report.faults.len() != simulation.faults.len() && !workload_failed)
-        {
-            return Err(Error::Execution(
-                "scheduled fault effects are incomplete".into(),
-            ));
-        }
-        for (plan, effect) in simulation.faults.iter().zip(&report.faults) {
-            use crate::config::FaultAction;
-            let action = match plan.action {
-                FaultAction::Stop { .. } => "stop",
-                FaultAction::Restart { .. } => "restart",
-                FaultAction::Partition { .. } => "partition",
-                FaultAction::Heal { .. } => "heal",
-            };
-            if effect.requested_at_ns != plan.at_ns || effect.action != action {
-                return Err(Error::Execution(
-                    "scheduled fault effect order/action mismatch".into(),
-                ));
-            }
-        }
-    }
     for fault in &report.faults {
         if fault.applied_at_ns < fault.requested_at_ns
             || !(simulation.services.contains_key(&fault.service)
@@ -424,53 +397,36 @@ fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome>
             ));
         }
     }
-    Ok(match report.reason {
-        StopReason::SimulatedTimeLimit => Outcome::Timeout,
-        StopReason::Error => {
+    let Some(exit) = &report.workload_exit else {
+        return Ok(Outcome::Incomplete);
+    };
+    if exit.service != simulation.check.service {
+        return Err(Error::Execution(
+            "result is for a different workload service".into(),
+        ));
+    }
+    if report.witness.is_none() {
+        return Err(Error::Execution(
+            "completed workload is missing its execution witness".into(),
+        ));
+    }
+    if identity.inputs.profile.witness_mode == WitnessMode::FullState && report.full_state.is_none()
+    {
+        return Err(Error::Execution(
+            "requested full-state evidence is missing".into(),
+        ));
+    }
+    if let Some(state) = &report.full_state {
+        if state.keys().ne(identity.inputs.guests.keys()) {
             return Err(Error::Execution(
-                report
-                    .detail
-                    .clone()
-                    .unwrap_or("backend reported an error".into()),
-            ))
+                "full-state digests must cover exactly the configured machines".into(),
+            ));
         }
-        StopReason::WallTimeLimit | StopReason::Cancelled | StopReason::Quiescent => {
-            Outcome::Incomplete
-        }
-        StopReason::Completed => {
-            let Some(exit) = &report.workload_exit else {
-                return Ok(Outcome::Incomplete);
-            };
-            if exit.service != simulation.check.service {
-                return Err(Error::Execution(
-                    "result is for a different workload service".into(),
-                ));
-            }
-            if report.witness.is_none() {
-                return Err(Error::Execution(
-                    "completed workload is missing its execution witness".into(),
-                ));
-            }
-            if identity.inputs.profile.witness_mode == WitnessMode::FullState
-                && report.full_state.is_none()
-            {
-                return Err(Error::Execution(
-                    "requested full-state evidence is missing".into(),
-                ));
-            }
-            if let Some(state) = &report.full_state {
-                if state.keys().ne(identity.inputs.guests.keys()) {
-                    return Err(Error::Execution(
-                        "full-state digests must cover exactly the configured machines".into(),
-                    ));
-                }
-            }
-            if exit.code == simulation.check.exit_code {
-                Outcome::Pass
-            } else {
-                Outcome::Fail
-            }
-        }
+    }
+    Ok(if exit.code == simulation.check.exit_code {
+        Outcome::Pass
+    } else {
+        Outcome::Fail
     })
 }
 

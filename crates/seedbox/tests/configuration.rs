@@ -360,12 +360,7 @@ fn runtime_control_selects_known_service_and_static_schedules_are_rejected() {
         "  version: 1\n  faults: [{at: 1s, stop: workload}] "
     ))
     .is_err());
-    assert!(
-        parse(&BASE.replace("  version: 1", "  version: 1\n  faults: []"))
-            .unwrap()
-            .faults
-            .is_empty()
-    );
+    assert!(parse(&BASE.replace("  version: 1", "  version: 1\n  faults: []")).is_ok());
     assert!(serde_json::to_value(parse(BASE).unwrap())
         .unwrap()
         .get("control")

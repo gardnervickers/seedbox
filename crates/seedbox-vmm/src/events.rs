@@ -7,3 +7,9 @@ pub fn pop_due<T>(queue: &mut BTreeMap<(u64, u64), T>, now: u64) -> Option<T> {
     let key = *queue.keys().next()?;
     (key.0 <= now).then(|| queue.remove(&key).unwrap())
 }
+
+/// Preserve nominal event time when recording counters for early delivery.
+pub fn pop_due_at<T>(queue:&mut BTreeMap<(u64,u64),T>,now:u64)->Option<(u64,T)> {
+    let key=*queue.keys().next()?;
+    (key.0<=now).then(||(key.0,queue.remove(&key).unwrap()))
+}

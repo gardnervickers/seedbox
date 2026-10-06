@@ -38,6 +38,7 @@ impl ManagementFramer {
 #[derive(Clone)]
 pub struct Call {
     pub relay: u32,
+    pub session: u32,
     pub request: Value,
     pub requested: u64,
     pub admitted: u64,
@@ -49,6 +50,7 @@ pub struct Call {
     pub operation: Option<Operation>,
     pub result: Value,
     pub error: Option<String>,
+    pub error_code: Option<&'static str>,
     pub fatal: bool,
 }
 pub struct Control {
@@ -60,6 +62,7 @@ pub struct Control {
     names: Vec<String>,
     placement: BTreeMap<String, String>,
     last_relay: u32,
+    last_session: u32,
     last_public: u32,
     handles: u32,
     undelivered_reply: bool,
@@ -108,6 +111,7 @@ impl Control {
             names,
             placement,
             last_relay: 0,
+            last_session: 0,
             last_public: 0,
             handles: 0,
             undelivered_reply: false,
@@ -195,7 +199,7 @@ impl Control {
                     id: 0,
                     at_ns: at,
                     deadline_ns: at
-                        .checked_add(5_000_000_000)
+                        .checked_add(seedbox_control::PROCESS_EFFECT_TIMEOUT_NS)
                         .ok_or("fault deadline overflow")?,
                     action,
                 })
@@ -208,13 +212,12 @@ impl Control {
         machine: usize,
         time: u64,
         line: &[u8],
-        _duration: u64,
         max_time: u64,
     ) -> Result<(), String> {
         if self.controller != Some(machine) {
             return Err("control request from unauthorized machine".into());
         }
-        if self.pending.is_some() {
+        if self.pending.is_some() || self.undelivered_reply {
             return Err("control request while another is outstanding".into());
         }
         if line.len() > MAX_TRANSPORT_FRAME {
@@ -222,7 +225,10 @@ impl Control {
         }
         let text = std::str::from_utf8(line).map_err(|_| "control frame UTF-8")?;
         let tail = text.strip_prefix("SBX_RPC1 ").ok_or("control prefix")?;
-        let (relay, payload) = tail.split_once(' ').ok_or("control frame envelope")?;
+        let (relay, tail) = tail.split_once(' ').ok_or("control frame envelope")?;
+        let (session, payload) = tail.split_once(' ').ok_or("control session envelope")?;
+        let session=session.parse::<u32>().map_err(|_|"control session ID")?;
+        if session==0 || session<self.last_session {return Err("stale control session ID".into())}
         if payload.len() + 1 > MAX_FRAME {
             return Err("public control JSON frame too large".into());
         }
@@ -236,7 +242,8 @@ impl Control {
             return Err("control version/id".into());
         }
         let public = header.id.get();
-        if Some(public) != self.last_public.checked_add(1) {
+        let expected=if session>self.last_session {Some(1)} else {self.last_public.checked_add(1)};
+        if Some(public) != expected {
             return Err("stale/nonsequential public control ID".into());
         }
         let admitted = time
@@ -245,6 +252,7 @@ impl Control {
         if max_time > admitted {
             return Err("control admission is in another machine's past".into());
         }
+        self.last_session = session;
         self.last_public = public;
         self.last_relay = relay;
         let request: Result<Request, _> = serde_json::from_str(payload);
@@ -267,6 +275,7 @@ impl Control {
         let r: Value = serde_json::from_str(payload).map_err(|_| "malformed control JSON")?;
         self.pending = Some(Call {
             relay,
+            session,
             request: r,
             requested: time,
             admitted,
@@ -278,9 +287,18 @@ impl Control {
             operation,
             result,
             error,
+            error_code: None,
             fatal: false,
         });
         Ok(())
+    }
+    /// Validate target VM existence at the admission barrier, never at request observation.
+    pub fn reject_unavailable(&mut self, exited: &[String]) {
+        if let Some(p)=self.pending.as_mut() {
+            if !p.admitted_done && p.plan.as_ref().and_then(|plan|plan.action.machine()).is_some_and(|name|exited.iter().any(|n|n==name)) {
+                p.plan=None;p.effect=Some(p.admitted);p.error=Some("target VM has exited; restart only starts a stopped process".into());p.error_code=Some("target_unavailable");
+            }
+        }
     }
     pub fn boundary(&self) -> u64 {
         self.pending
@@ -299,7 +317,6 @@ impl Control {
         &mut self,
         faults: &mut crate::faults::Faults,
         now: u64,
-        _duration: u64,
     ) -> Result<Option<Vec<u8>>, String> {
         if self.boundary() != now {
             return Err("wrong control barrier".into());
@@ -311,7 +328,9 @@ impl Control {
         if !p.admitted_done {
             p.admitted_done = true;
             if let Some(plan) = p.plan.take() {
-                if matches!(&plan.action,Action::Heal{handle} if !faults.active_handles().contains(handle))
+                if let Some(error)=faults.admission_error(&plan.action) {
+                    p.error=Some(error.into());p.error_code=Some("invalid_state");p.effect=Some(now);
+                } else if matches!(&plan.action,Action::Heal{handle} if !faults.active_handles().contains(handle))
                 {
                     p.error = Some("heal of inactive partition handle".into());
                     p.effect = Some(now);
@@ -334,7 +353,6 @@ impl Control {
         &mut self,
         faults: &crate::faults::Faults,
         time: u64,
-        _duration: u64,
     ) -> Result<(), String> {
         if let Some(p) = self.pending.as_mut() {
             if p.effect.is_none() {
@@ -363,7 +381,7 @@ impl Control {
     pub fn cut_off(&mut self, faults: &crate::faults::Faults, time: u64) {
         if let Some(p) = self.pending.take() {
             let plan = p.fault.and_then(|id| faults.plan(id)).cloned().or(p.plan);
-            self.log.push(json!({"relay_id":p.relay,"request":p.request,"status":"cut_off","requested_at_ns":p.requested,"admitted_at_ns":p.admitted,"admitted_done":p.admitted_done,"effect_at_ns":p.effect,"replied_at_ns":p.reply,"cut_off_at_ns":time,"fault_id":p.fault,"plan":plan,"error":p.error,"fatal":p.fatal}));
+            self.log.push(json!({"relay_id":p.relay,"session_id":p.session,"request":p.request,"status":"cut_off","requested_at_ns":p.requested,"admitted_at_ns":p.admitted,"admitted_done":p.admitted_done,"effect_at_ns":p.effect,"replied_at_ns":p.reply,"cut_off_at_ns":time,"fault_id":p.fault,"plan":plan,"error":p.error,"fatal":p.fatal}));
         }
         for row in self.log.iter_mut().rev().take(1) {
             if row["response"].is_object() && row["delivered_at_ns"].is_null() {
@@ -387,40 +405,25 @@ impl Control {
     pub fn has_undelivered_reply(&self) -> bool {
         self.undelivered_reply
     }
-    pub fn complete(&self) -> bool {
-        self.pending.is_none()
-            && self.error.is_none()
-            && self.log.iter().all(|r| {
-                r["status"] != "cut_off"
-                    && r["delivered_at_ns"].as_u64() == r["response"]["replied_at_ns"].as_u64()
-            })
-    }
     pub fn response(&mut self, time: u64) -> Result<Vec<u8>, String> {
         if self.pending.as_ref().is_none_or(|p| p.reply != Some(time)) {
             return Err("RPC response at wrong virtual time".into());
         }
         let mut p = self.pending.take().unwrap();
-        if serde_json::to_vec(&p.result)
-            .map_err(|e| e.to_string())?
-            .len()
-            + 512
-            > MAX_FRAME
-        {
-            p.error = Some("operation result exceeds response frame bound".into());
-            p.result = json!({});
-        }
         let mut reply = json!({"version":1,"id":p.request["id"],"ok":p.error.is_none(),"result":p.result,"requested_at_ns":p.requested,"admitted_at_ns":p.admitted,"effect_at_ns":p.effect,"replied_at_ns":time});
-        if let Some(error) = p.error {
-            reply.as_object_mut().unwrap().remove("result");
-            reply["error"] = json!({"code":if p.fatal {"effect_failed"} else {"invalid_request"},"message":error});
-            if p.fatal {
-                self.error = Some(error);
-            }
+        if p.error.is_none() && serde_json::to_vec(&reply).map_err(|e|e.to_string())?.len()+1>MAX_FRAME {
+            p.error=Some("operation result exceeds response frame bound".into());p.error_code=Some("result_too_large");
         }
+        if let Some(error) = p.error {
+            reply.as_object_mut().unwrap().remove("result");reply["ok"]=json!(false);
+            reply["error"] = json!({"code":if p.fatal {"effect_failed"} else {p.error_code.unwrap_or("invalid_request")},"message":error});
+            if p.fatal {self.error = Some(error);}
+        }
+        if serde_json::to_vec(&reply).map_err(|e|e.to_string())?.len()+1>MAX_FRAME {return Err("control error response exceeds frame bound".into())}
         self.undelivered_reply = true;
         self.log.push(
-            json!({"relay_id":p.relay,"request":p.request,"response":reply,"fault_id":p.fault}),
+            json!({"relay_id":p.relay,"session_id":p.session,"request":p.request,"response":reply,"fault_id":p.fault}),
         );
-        Ok(format!("SBX_REPLY1 {} {}\n", p.relay, reply).into_bytes())
+        Ok(format!("SBX_REPLY1 {} {} {}\n", p.relay, p.session, reply).into_bytes())
     }
 }

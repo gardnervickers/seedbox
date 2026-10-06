@@ -1,4 +1,6 @@
 //! Version-one language-neutral guest control schema. No transport or scheduler.
+pub const PROCESS_EFFECT_TIMEOUT_NS: u64 = 5_000_000_000;
+
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, num::NonZeroU32};
 

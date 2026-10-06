@@ -54,10 +54,9 @@ bash crates/seedbox/tests/accept-runtime.sh /absolute/bzImage 14 /absolute/fault
 
 The evidence output must be fresh. The harness writes its report and command logs
 incrementally, preserving completed evidence if a later case fails. The
-[prior-engine acceptance record](ACCEPTANCE.md) preserves the earlier runtime
-inputs, nine outcomes, matching replay witnesses, and review results. The layout
-merge and subsequent readiness changes produce a different engine; those records
-do not qualify the current engine.
+[acceptance record](ACCEPTANCE.md) identifies the qualified binaries, retained
+outcomes, replay witnesses and review results. Each engine revision needs its
+own live acceptance; older records remain archived separately.
 
 To invoke the harness directly after building the CLI, VMM, and guest supervisor:
 
@@ -111,6 +110,16 @@ a simulation cutoff does not manufacture an acknowledgement failure. The verifie
 rejects a run whose request was too late to exercise admission before the cutoff.
 Use `verify.py RUN --focused early-request` or
 `verify.py RUN --focused readiness-cutoff` to inspect these records separately.
+
+The control-cases scenario runs after the matrix and is replayed once. It rejects
+restart on a running server and a second stop, closes its first connection, then
+reconnects to restart the server. The target confirms that it has no fault socket.
+After deliberately exiting with code 17, it is reported as `Exited(17)` and
+stop/restart return `target_unavailable`. The controller completes another time
+query and classifies that workload exit as FAIL. The verifier checks both sessions,
+all four recoverable errors and the absence of an infrastructure ERROR. With all
+optional supervisors supplied, the complete matrix contains fifteen executions.
+Use `verify.py RUN --focused control-cases` to inspect this evidence separately.
 
 Portable tests require no KVM. Run `python3 examples/faults/portable.py` to
 launch the actual Python server and client processes, abruptly stop and restart

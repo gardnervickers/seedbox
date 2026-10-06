@@ -23,8 +23,6 @@ pub struct Simulation {
     pub configs: BTreeMap<String, PathBuf>,
     pub network: Network,
     pub schedule: Schedule,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub faults: Vec<Fault>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<Control>,
     pub limits: Limits,
@@ -87,38 +85,6 @@ pub struct Limits {
 pub struct Schedule {
     pub timer_jitter_ns: u64,
     pub stop_tolerance_ns: u64,
-}
-
-/// Ordered deterministic fault requests. Equal times retain author order.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Fault {
-    pub at_ns: u64,
-    pub action: FaultAction,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum FaultAction {
-    Stop {
-        target: FaultTarget,
-    },
-    Restart {
-        target: FaultTarget,
-    },
-    Partition {
-        id: String,
-        left: Vec<FaultTarget>,
-        right: Vec<FaultTarget>,
-    },
-    Heal {
-        id: String,
-    },
-}
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum FaultTarget {
-    Service(String),
-    Machine(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -391,7 +357,7 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
             schedule.stop_tolerance_ns = duration(v, "$.x-seedbox.schedule.stop_tolerance", true)?;
         }
     }
-    let faults = parse_faults(ext.get("faults"), &services, limits.simulated_time_ns)?;
+    reject_static_faults(ext.get("faults"))?;
     let control = ext
         .get("control")
         .map(|raw| {
@@ -445,7 +411,6 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
         configs,
         network,
         schedule,
-        faults,
         control,
         limits,
         check: Check {
@@ -456,7 +421,7 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
     })
 }
 
-fn parse_faults(raw: Option<&Value>, _: &BTreeMap<String, Service>, _: u64) -> Result<Vec<Fault>> {
+fn reject_static_faults(raw: Option<&Value>) -> Result<()> {
     if let Some(raw) = raw {
         if !sequence(raw, "$.x-seedbox.faults")?.is_empty() {
             return invalid(
@@ -465,7 +430,7 @@ fn parse_faults(raw: Option<&Value>, _: &BTreeMap<String, Service>, _: u64) -> R
             );
         }
     }
-    Ok(vec![])
+    Ok(())
 }
 
 fn validation(path: &str, message: &str) -> Error {

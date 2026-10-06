@@ -46,7 +46,11 @@ use `Machine("prepared-name")` when explicitly targeting a machine.
 
 `FaultError` carries a structured operation error. `ProtocolError` indicates an
 invalid or interrupted exchange. The client never retries uncertain operations.
-Use one connection in one thread for a run.
+Use one active connection in one thread at a time. After a completed call, close
+that `World` and use `World.connect()` for a new session; partition handles remain
+valid. Restarting a running application or stopping one twice raises a recoverable
+`FaultError` with code `invalid_state`; an exited VM returns `target_unavailable`.
+The scenario chooses how those errors affect its result.
 
 Other languages can implement the same [versioned RPC protocol](PROTOCOL.md).
 There are no Python-specific objects on the wire, and future declarative frontends
