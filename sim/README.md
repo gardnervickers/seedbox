@@ -9,6 +9,7 @@ interrupt timing.
 
 | Path | Contents |
 | --- | --- |
+| `seedbox/` | Rust configuration/orchestration library and validation/inspection CLI ([API and scope](seedbox/README.md)) |
 | `vmm/` | Rust VMM and world scheduler (`seedbox-vmm`) |
 | `kernel/` | Guest kernel patch, config and build script (Linux 6.12.112) |
 | `guest/` | Initramfs builder, init scripts, the etcd workload client, test programs |

@@ -1,0 +1,178 @@
+# Seedbox orchestration
+
+This Rust crate is the first implementation increment for [issue #2](https://github.com/gardnervickers/seedbox/issues/2).
+It provides strict Compose-shaped configuration validation, OCI image launch
+default resolution, a local content store, and a programmatic run/replay lifecycle.
+The CLI currently exposes `validate` and `inspect`. A caller can run and replay
+through the library by supplying preparation and execution backends.
+
+**There is no production image preparer or hardware execution backend here yet.**
+The contract tests use an explicitly test-only executor. They do not demonstrate
+that etcd, Redis, or Dockerfile images boot on the controlled guest kernel. This
+increment does not close issue #2. The existing VMM and hardware scripts remain
+unchanged while their interfaces are agreed with the performance work in #1.
+
+## Build and validate
+
+Use the existing development environment from the repository root:
+
+```sh
+nix develop ./sim
+cargo test --manifest-path sim/seedbox/Cargo.toml --locked
+cargo run --manifest-path sim/seedbox/Cargo.toml -- validate compose.yaml
+cargo run --manifest-path sim/seedbox/Cargo.toml -- validate compose.yaml --json
+cargo run --manifest-path sim/seedbox/Cargo.toml -- inspect runs/<attempt> --json
+```
+
+The crate is independent of the Linux-only VMM crate and builds on the flake's
+Darwin and Linux development hosts. Its Cargo lockfile is checked in. Validation
+does not start guests, access registries, build images, or acquire a host lease.
+It does check the existence of referenced local Dockerfiles and config files.
+`--json` prints the resolved environment, so its output may contain values the
+caller considers sensitive. Plain validation output does not print those values.
+
+## Supported authoring subset
+
+This is a deliberately small subset of the [Compose specification](https://compose-spec.github.io/compose-spec/05-services.html).
+Validation errors include the affected path, for example
+`$.services.workload.volumes: unsupported field`. Accepted authoring syntax does
+not establish image/kernel compatibility; preparation must check that separately.
+
+| Field | Accepted form and meaning |
+| --- | --- |
+| `name` | Lowercase Compose project name; defaults to the source directory name. |
+| `services` | 1–254 services with lowercase DNS-label names. One service maps to one guest. |
+| `image` | Nonempty registry reference, without a transport prefix. Exact reference grammar and platform compatibility are preparation checks. |
+| `build` | Local context string, or `{context, dockerfile}`. Context is relative to the Compose file; Dockerfile is relative to context. Remote contexts and build options are rejected. |
+| `platform` | `linux/amd64`, also the default. |
+| `entrypoint`, `command` | Null/missing, a string, or an argv list. String values are shell-word split but never implicitly run in a shell. |
+| `environment` | String/null mapping or `NAME=value`/`NAME` list. Empty values, passthrough, and removal are distinct. Numbers and booleans must be quoted. Duplicate list entries are rejected. |
+| `working_dir`, `user` | Explicit strings overriding image defaults. Working directories must be normalized absolute guest paths. User/group existence is a preparation check against the image filesystem. |
+| Top-level `configs` | Named `{file: local-path}` entries. |
+| Service `configs` | Names, or `{source, target}`. Default target is `/<name>`. Read-only file semantics are required of preparation/execution. Permission/ownership overrides are rejected. |
+| `networks` | One private network, with no driver/host options. Service lists or empty option maps are accepted. Default is `default`; a differently named network must be explicitly selected by each service. |
+| `x-seedbox.version` | Required integer `1`. |
+| `x-seedbox.seed` | Optional unsigned 64-bit fixed seed. The library run option overrides it; absence of both is an error. Zero is valid. |
+| `x-seedbox.limits` | Required positive `simulated_time` and `wall_time`. |
+| `x-seedbox.network` | Optional `latency` (default `1ms`) and `jitter` (default `0ns`). Jitter must be less than latency. |
+| `x-seedbox.check` | Required known `service` and optional `exit_code` (default `0`, range 0–255). |
+| `x-seedbox.faults` | Only omitted or `[]` for now; nonempty faults explicitly fail pending #3 integration. |
+
+Durations use `ns`, `us`, `ms`, `s`, `m`, or `h`, including exact decimals such as
+`1.25ms`. Fractional nanoseconds and overflow are rejected. `image` and `build`
+cannot be combined until pull/build precedence is implemented. Duplicate mapping
+keys, custom YAML tags and merges, unknown extension fields, Compose interpolation,
+`.env`, `env_file`, host integrations, ports, volumes, restart policies, healthchecks,
+and dependency ordering are unsupported. Unknown fields fail rather than disappear.
+`$$` escapes a literal dollar, including inside explicitly invoked shell commands.
+
+The library takes a `BTreeMap<String, String>` for environment passthrough. It never
+reads the ambient process environment; the CLI supplies that map at its boundary.
+A missing passthrough variable removes the corresponding image default. A literal
+empty string sets an empty value.
+
+`image::resolve_launch` combines the supported service overrides with launch
+metadata from the [OCI image configuration](https://github.com/opencontainers/image-spec/blob/main/config.md).
+Null/missing entrypoint or command inherits the corresponding image default;
+empty lists/strings clear it. A non-null entrypoint override also discards the
+image's default command unless the service supplies a command. Image `Env`, `User`,
+and `WorkingDir` are retained unless overridden. Image-declared anonymous volume
+paths are carried into `Launch`, so a preparer must implement their lifetime
+explicitly. No OCI layer fetching/unpacking is implemented in this module.
+
+## Programmatic interface
+
+The library has no global scheduler, process launch, KVM dependency, or CLI calls.
+`PreparationBackend` and `ExecutionBackend` are `Send + Sync` and object-safe.
+See [the backend contract](BACKENDS.md) before implementing them.
+
+```rust,no_run
+use seedbox::{
+    config,
+    execution::{CancellationToken, ExecutionBackend, PreparationBackend},
+    orchestration::{Orchestrator, Run, RunOptions},
+    store::ContentStore,
+    Result,
+};
+use std::{collections::BTreeMap, path::Path};
+
+fn run_and_replay(
+    preparer: &dyn PreparationBackend,
+    executor: &dyn ExecutionBackend,
+) -> Result<(Run, Run)> {
+    let simulation = config::load(Path::new("compose.yaml"), &BTreeMap::new())?;
+    let runner = Orchestrator::new(ContentStore::new("store"), "runs");
+    let first = runner.run(
+        &simulation,
+        RunOptions { seed: Some(1009), ..Default::default() },
+        preparer,
+        executor,
+    )?;
+    // Replay cannot call a preparer: it accepts only an executor and stored input.
+    let replay = runner.replay(&first.directory, executor, &CancellationToken::default())?;
+    Ok((first, replay))
+}
+```
+
+Calls are synchronous and runtime-independent. An async application can use its
+blocking-task facility; cancellation is a clonable token the backend must honor.
+Concurrent calls use private attempt directories and a shared content store.
+CPU selection, core scheduling and reservations belong in the execution backend,
+not the caller. Multi-core scheduling is not implemented by this crate yet.
+
+## Retained inputs and results
+
+A run identity hashes the format version, seed, resolved configuration/environment,
+prepared image manifests/configs/layers/guest archives, kernel, execution engine,
+execution profile, auxiliary input hashes, and source/build provenance. Changing
+any recorded input produces a new identity. Each execution receives a distinct
+attempt directory even when its identity is the same. Source paths remain as
+provenance in the manifest; the executor receives verified private artifact copies
+and cannot obtain original paths from its request.
+
+The content store verifies SHA-256 on reads and refuses missing or corrupted
+artifacts. It never repairs corruption implicitly. Replay verifies the entire
+declared input closure before calling the backend, and never resolves image tags
+or rebuilds. Engine/profile drift fails before guest execution. A preparer is
+responsible for declaring **all** dependencies; this crate cannot detect undeclared
+inputs hidden inside a backend implementation.
+
+`manifest.json` holds a checksummed record, starting as `INCOMPLETE` before execution.
+Updates use atomic replacement. Backend output files are retained in the attempt
+directory and content store, including on backend errors. The checksum detects
+corruption, not adversarial replacement by someone able to rewrite the store.
+
+| Outcome | Meaning |
+| --- | --- |
+| `PASS` | The designated workload completed with its expected exit code and the requested witness data. |
+| `FAIL` | It completed with a different exit code and the requested witness data. |
+| `ERROR` | Backend/preflight failure, invalid result, or missing required witness data. |
+| `TIMEOUT` | Either simulated or wall limit was reached, regardless of any exit code. |
+| `INCOMPLETE` | Cancellation, quiescence, missing workload completion, or an interrupted process with only its initial manifest. |
+
+Errors before preparation completes are returned as `Err`, because no resolved
+run identity exists yet. Once the attempt manifest exists, ordinary execution or
+input verification errors are persisted as `ERROR`; failures to write the manifest
+itself still return `Err`.
+
+Replay records its application outcome separately from `MATCH`, `MISMATCH`, or
+`NOT_COMPARABLE`. A reproduced `FAIL` can be `MATCH`. Comparison checks the exact
+workload exit, outcome, execution witness, and fault history. Optional full-state
+digests are compared separately; `null` explicitly means no full-state comparison
+was available. A profile requesting full-state evidence cannot pass without every
+machine's digest. Incomplete, timeout, and infrastructure-error attempts are not
+treated as successfully reproduced application runs.
+
+## Remaining issue #2 work
+
+- Implement registry resolution and Dockerfile builds through one OCI import path,
+  with platform-specific digests, layer/whiteout semantics, metadata validation,
+  retained build inputs, and guest filesystem construction.
+- Implement the VMM executor and shared host reservation/restore lifecycle described
+  in `BACKENDS.md`, coordinating with #1. Enforce wall deadlines and cancellation
+  in that executor, including catchable signals and cleanup.
+- Add production `init`, `run`, and `replay` CLI commands once those backends exist.
+- Connect the fault support from #3 and service-name resolution in the guest network.
+- Qualify etcd, Redis, and a custom workload on the supported host, documenting the
+  tested guest requirements and storage lifetime (#4/#5). No bootable examples are
+  shipped or claimed as tested by this increment.
