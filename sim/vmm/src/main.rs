@@ -214,6 +214,23 @@ fn run() -> Result<Value, String> {
             mac: networked.then_some(mac),
         };
         let mut mach = Machine::new(&kvm, &names[i], &spec)?;
+        if args.iter().any(|arg| arg == "--stream-console") {
+            mach.com1.output_file = Some(
+                std::fs::File::create(format!("{out}/{}.console", names[i]))
+                    .map_err(|error| error.to_string())?,
+            );
+            mach.com2.output_file = Some(
+                std::fs::File::create(format!("{out}/{}.mgmt", names[i]))
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+        if let Some(limit) = arg(&args, "--console-limit") {
+            let limit = limit
+                .parse::<usize>()
+                .map_err(|error| format!("console limit: {error}"))?;
+            mach.com1.output_limit = Some(limit);
+            mach.com2.output_limit = Some(limit);
+        }
         mach.tolerance = cfg["stop_tolerance_ns"].as_u64().unwrap_or(0);
         mach.timer_jitter = cfg["timer_jitter_ns"].as_u64().unwrap_or(0);
         mach.exact_timer_ppm = cfg["exact_timer_ppm"].as_u64().unwrap_or(0);
@@ -383,6 +400,9 @@ fn run() -> Result<Value, String> {
         report.push(json!({
             "name": mach.name,
             "state": format!("{:?}", mach.state),
+            "guest_exit_code": mach.guest_exit_code,
+            "guest_init_error": mach.guest_init_error,
+            "infrastructure_error": matches!(mach.state, State::Exited(_)) && mach.guest_exit_code.is_none(),
             "time_ns": mach.time,
             "branches": mach.branches,
             "witness": w,
@@ -400,6 +420,7 @@ fn run() -> Result<Value, String> {
     }
     let sim_ns = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
     Ok(json!({
+        "report_version": 1,
         "seed": seed,
         "outcome": outcome,
         "sim_seconds": sim_ns as f64 / 1e9,

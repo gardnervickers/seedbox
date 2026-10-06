@@ -3,14 +3,16 @@
 This Rust crate is the first implementation increment for [issue #2](https://github.com/gardnervickers/seedbox/issues/2).
 It provides strict Compose-shaped configuration validation, OCI image launch
 default resolution, a local content store, and a programmatic run/replay lifecycle.
-The CLI currently exposes `validate` and `inspect`. A caller can run and replay
-through the library by supplying preparation and execution backends.
+The CLI exposes `init`, `validate`, `prepare`, `run`, `inspect`, and `replay`. The Rust
+`OciPreparer` and `VmmExecutor` implement the separate library interfaces.
 
-**There is no production image preparer or hardware execution backend here yet.**
-The contract tests use an explicitly test-only executor. They do not demonstrate
-that etcd, Redis, or Dockerfile images boot on the controlled guest kernel. This
-increment does not close issue #2. The existing VMM and hardware scripts remain
-unchanged by this crate. The backend contract now follows main's shared CPU lease and single-VM fixture interfaces.
+**The KVM integration is under development and not yet qualified.** Linux builds
+and real OCI import tests pass for Redis, etcd, and a Dockerfile fixture. Portable
+tests cover guest archive round trips, report translation, and host-state cleanup
+using ordinary file fixtures. They do not demonstrate that the applications boot
+on the controlled guest kernel. This
+increment does not close issue #2. See [runtime preparation and acceptance](RUNTIME.md)
+for the concrete commands and remaining acceptance work.
 
 ## Build and validate
 
@@ -19,6 +21,7 @@ Use the existing development environment from the repository root:
 ```sh
 nix develop ./sim
 cargo test --manifest-path sim/seedbox/Cargo.toml --locked
+cargo run --manifest-path sim/seedbox/Cargo.toml -- init etcd-demo --template etcd
 cargo run --manifest-path sim/seedbox/Cargo.toml -- validate compose.yaml
 cargo run --manifest-path sim/seedbox/Cargo.toml -- validate compose.yaml --json
 cargo run --manifest-path sim/seedbox/Cargo.toml -- inspect runs/<attempt> --json
@@ -47,7 +50,7 @@ not establish image/kernel compatibility; preparation must check that separately
 | `platform` | `linux/amd64`, also the default. |
 | `entrypoint`, `command` | Null/missing, a string, or an argv list. String values are shell-word split but never implicitly run in a shell. |
 | `environment` | String/null mapping or `NAME=value`/`NAME` list. Empty values, passthrough, and removal are distinct. Numbers and booleans must be quoted. Duplicate list entries are rejected. |
-| `working_dir`, `user` | Explicit strings overriding image defaults. Working directories must be normalized absolute guest paths. User/group existence is a preparation check against the image filesystem. |
+| `working_dir`, `user` | Explicit strings overriding image defaults. Working directories must be normalized absolute guest paths. Unknown users/groups fail guest bootstrap as infrastructure errors. |
 | Top-level `configs` | Named `{file: local-path}` entries. |
 | Service `configs` | Names, or `{source, target}`. Default target is `/<name>`. Read-only file semantics are required of preparation/execution. Permission/ownership overrides are rejected. |
 | `networks` | One private network, with no driver/host options. Service lists or empty option maps are accepted. Default is `default`; a differently named network must be explicitly selected by each service. |
@@ -85,7 +88,7 @@ explicitly. No OCI layer fetching/unpacking is implemented in this module.
 
 ## Programmatic interface
 
-The library has no global scheduler, process launch, KVM dependency, or CLI calls.
+The orchestration layer has no global scheduler, process launch, KVM dependency, or CLI calls.
 `PreparationBackend` and `ExecutionBackend` are `Send + Sync` and object-safe.
 See [the backend contract](BACKENDS.md) before implementing them.
 
@@ -120,8 +123,10 @@ fn run_and_replay(
 Calls are synchronous and runtime-independent. An async application can use its
 blocking-task facility; cancellation is a clonable token the backend must honor.
 Concurrent calls use private attempt directories and a shared content store.
-CPU selection, core scheduling and reservations belong in the execution backend,
-not the caller. Multi-core scheduling is not implemented by this crate yet.
+The caller supplies the executor's CPU selection. Core reservations, process
+lifecycle and restoration belong to the executor. Multi-core scheduling is not
+implemented by this crate yet. Signal handlers exist only at the CLI boundary;
+programmatic callers control the cancellation token.
 
 ## Retained inputs and results
 
@@ -194,14 +199,12 @@ migrated. Compose authoring remains `x-seedbox.version: 1`.
 
 ## Remaining issue #2 work
 
-- Implement registry resolution and Dockerfile builds through one OCI import path,
-  with platform-specific digests, layer/whiteout semantics, metadata validation,
-  retained build inputs, and guest filesystem construction.
-- Implement the VMM executor using the existing per-core lease and restore lifecycle
-  described in `BACKENDS.md`. Enforce wall deadlines and cancellation in that executor,
-  including catchable signals and cleanup.
-- Add production `init`, `run`, and `replay` CLI commands once those backends exist.
-- Connect the fault support from #3 and service-name resolution in the guest network.
-- Qualify etcd, Redis, and a custom workload on the supported host, documenting the
-  tested guest requirements and storage lifetime (#4/#5). No bootable examples are
-  shipped or claimed as tested by this increment.
+- Verify real guest execution, replay, failure,
+  interruption, lease contention, and MSR readback after cleanup.
+- Qualify the generated etcd/Redis/custom-workload templates, then migrate
+  existing application world definitions to that authoring format.
+- Connect the fault support from #3. The guest supervisor has a process-control
+  channel, but nonempty authoring faults remain rejected until effect timing is
+  integrated and verified.
+- Document tested guest requirements and compatibility boundaries after the
+  acceptance runs (#4/#5). No images are yet claimed to boot through this backend.

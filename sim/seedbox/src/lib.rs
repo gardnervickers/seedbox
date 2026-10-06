@@ -8,9 +8,16 @@
 
 pub mod config;
 pub mod execution;
+pub mod guest;
+#[cfg(any(target_os = "linux", test))]
+mod host;
 pub mod image;
+pub mod oci;
 pub mod orchestration;
+pub mod preparation;
 pub mod store;
+pub mod templates;
+pub mod vmm;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

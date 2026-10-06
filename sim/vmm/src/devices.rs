@@ -246,6 +246,8 @@ pub struct Uart {
     thre: bool,
     level: bool,
     pub out: Vec<u8>,
+    pub output_file: Option<std::fs::File>,
+    pub output_limit: Option<usize>,
 }
 
 impl Uart {
@@ -282,11 +284,11 @@ impl Uart {
             _ => self.scr,
         }
     }
-    pub fn write(&mut self, off: u16, v: u8) {
+    pub fn write(&mut self, off: u16, v: u8) -> Result<(), String> {
         match off {
             0 if self.dlab() => self.dll = v,
             0 => {
-                self.out.push(v);
+                self.transmit(v)?;
                 self.thre = true;
             }
             1 if self.dlab() => self.dlm = v,
@@ -302,6 +304,22 @@ impl Uart {
             7 => self.scr = v,
             _ => {}
         }
+        Ok(())
+    }
+    pub fn transmit(&mut self, v: u8) -> Result<(), String> {
+        if self
+            .output_limit
+            .is_some_and(|limit| self.out.len() >= limit)
+        {
+            return Err("guest serial output limit exceeded".into());
+        }
+        if let Some(file) = &mut self.output_file {
+            use std::io::Write;
+            file.write_all(&[v])
+                .map_err(|error| format!("serial log: {error}"))?;
+        }
+        self.out.push(v);
+        Ok(())
     }
     /// Rising edge of the interrupt condition since the last call.
     pub fn edge(&mut self) -> bool {

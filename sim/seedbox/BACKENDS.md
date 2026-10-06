@@ -2,7 +2,7 @@
 
 The boundary is a Rust library API, defined in `src/execution.rs`. The CLI only
 parses arguments, supplies environment values, calls the library, and formats
-results. Both a future CLI command and another Rust application use the same API.
+results. CLI commands and other Rust applications use the same API.
 
 ```text
 CLI / Rust caller
@@ -39,10 +39,11 @@ exactly equal the guest set. A single guest can host several service namespaces.
 The preparer must validate descriptor/digest relationships, image platform, all
 launch metadata, and guest requirements. `image::resolve_launch` supplies the
 shared command/environment override logic. Its `Launch` includes image-declared
-volume paths; silently discarding these would change image behavior. The upcoming
-guest implementation needs an explicit per-run writable-storage lifetime,
-read-only configs, UID/GID lookup, working directory and PATH resolution, and
-service-name resolution. Process restart and whole-machine restart must not be
+volume paths; silently discarding these would change image behavior. The OCI
+guest implementation provides per-run RAM-backed storage, read-only configs,
+UID/GID lookup, working directory and PATH resolution, and an explicit hosts file
+for service-name resolution. These paths still need Linux acceptance testing.
+Process restart and whole-machine restart must not be
 conflated when storage behavior is defined in #3.
 
 Preparation never starts a guest or changes CPU/MSR state. It should complete all
@@ -81,7 +82,7 @@ For hardware, reuse the lease protocol already implemented by `sim/batch.py`
 locks on `/tmp/seedbox-msr-cpu-<N>.lock` for every selected core and its SMT siblings,
 in ascending CPU order, before any MSR mutation. Open without following symlinks,
 keep file descriptors open through cleanup, and do not unlink the lock files. A
-future Rust executor must use these same files and advisory locks; a separate
+Rust executor uses these same files and advisory locks; a separate
 `/run` namespace would not coordinate with the existing supervisor.
 
 The current supervisor owns/reaps its VMM process groups, creates a private snapshot
@@ -89,14 +90,16 @@ directory while holding the lease, and uses `msr54.py` for exclusive snapshots,
 all-or-nothing setup and readback-verified restoration. Keep the lease held until
 owned processes have stopped and restoration has been attempted; preserve a failed
 restoration snapshot and report infrastructure failure. Honor normal errors and
-catchable signals. The Rust executor has not been implemented or hardware-qualified;
+catchable signals. `host.rs` implements the protocol for the Rust executor;
+fixture tests cover contention and exact register restoration, but hardware
+qualification is still pending. The current VMM is a single-process engine;
 all other hardware entrypoints must adopt this same protocol before sharing cores.
 
-The current VMM report is not yet this API. It needs an explicit distinction
-between workload exit, guest failure, limit, and quiescence, together with the
-designated workload's numeric exit code. Current `State::Exited` also carries
-sentinel values for failures, so parsing its debug string cannot establish a
-successful application exit. The adapter must preserve fault history, deterministic
+The versioned VMM report provides `guest_exit_code`, `guest_init_error`, and
+`infrastructure_error`. The OCI supervisor reports application completion through
+port 0xf4 and bootstrap failure through 0xf5. `State::Exited` also carries sentinel
+values for failures, so the adapter never parses its debug string for completion.
+The adapter preserves the deterministic
 exit witness and optional per-machine full-state digests. Fault history distinguishes
 request time from the guest-acknowledged effect time; never substitute the request
 or host receipt time for `applied_at_ns`. Full-state keys must match `guests`, not
@@ -118,6 +121,6 @@ host state: its reservation implementation controls that. The separate cancellat
 token allows a caller to request shutdown without choosing an async runtime for
 the public API.
 
-These are integration contracts, not evidence that hardware reservation, OCI
-import, or kernel qualification is already implemented. The contract test backend
-lives only under `tests/`; it is never offered as a production execution option.
+These contracts and local fixture tests are not evidence of Linux hardware or
+guest qualification. The orchestration test backend lives only under `tests/`;
+it is never offered as a production execution option.
