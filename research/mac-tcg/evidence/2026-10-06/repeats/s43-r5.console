@@ -1,0 +1,13 @@
+SBX {"kind":"entropy","phase":"before_seed","count":-1,"errno":11,"bytes":"","at_random":"42ce52a199753c878f1a17c96901e1a3"}
+SBX {"kind":"entropy","phase":"payload","count":32,"errno":0,"bytes":"790c44765bd1ac07659a6926e0ba988a5bb5d12800de90f0c14142b088c0b30e","at_random":"c7c2ff2020fad00d268dd6dbf30ad6e0"}
+SBX {"kind":"cpu","rdrand":0,"rdseed":0}
+SBX {"kind":"start","monotonic_ns":9946969714,"realtime_ns":1577836817368774632}
+SBX {"kind":"cpu_work","round":0,"hash":"30353b8e472a1e83","before_ns":9947140099,"after_ns":10152561911,"tsc_before":17806808048,"tsc_after":18012229672}
+SBX {"kind":"sleep","round":0,"requested_ns":10000000,"before_ns":10152820439,"after_ns":10162925640}
+SBX {"kind":"cpu_work","round":1,"hash":"66bb3bffec6ddc23","before_ns":10163150713,"after_ns":10369398357,"tsc_before":18022818456,"tsc_after":18229065912}
+SBX {"kind":"sleep","round":1,"requested_ns":20000000,"before_ns":10369656902,"after_ns":10389755513}
+SBX {"kind":"cpu_work","round":2,"hash":"147e0ec01056aa9e","before_ns":10389959873,"after_ns":10595577677,"tsc_before":18249627400,"tsc_after":18455245016}
+SBX {"kind":"sleep","round":2,"requested_ns":30000000,"before_ns":10595836221,"after_ns":10625933034}
+SBX {"kind":"poll","count":1282,"before_ns":10626169786,"after_ns":10627170179}
+SBX {"kind":"result","status":"PASS","reason":"completed"}
+[   10.671446] reboot: Power down
