@@ -212,6 +212,8 @@ struct VmmReport {
 struct ValidatedControlHistory {
     plans: Vec<seedbox_control::Plan>,
     effects: BTreeMap<u32, u64>,
+    /// Process faults whose target VM exited after admission, before an effect.
+    unavailable: BTreeSet<u32>,
 }
 
 /// Correlate guest-originated requests to responses and applied engine actions.
@@ -321,7 +323,12 @@ fn validate_control_history(
                 if metadata["ok"] != false || !metadata["error"].is_object() {
                     return Err(Error::Integrity("invalid control error reply".into()));
                 }
-                continue;
+                if row["fault_id"].is_null() || metadata["error"]["code"] != "target_unavailable" {
+                    continue;
+                }
+                if row["fault_id"].as_u64() != Some(expected.plans.len() as u64 + 1) {
+                    return Err(bad());
+                }
             }
         } else {
             let c = cut_at.ok_or_else(bad)?;
@@ -339,6 +346,11 @@ fn validate_control_history(
                 return Err(bad());
             }
         }
+        let unavailable = if response {
+            metadata["ok"] == false
+        } else {
+            e.is_some() && row["error"].is_string() && row["fatal"] == false
+        };
         let call: Request = serde_json::from_value(r.clone()).map_err(|_| bad())?;
         let action = match call.operation {
             Operation::Stop { target } => Action::Stop {
@@ -399,7 +411,14 @@ fn validate_control_history(
         {
             return Err(bad());
         }
-        if response {
+        if unavailable {
+            if !matches!(plan.action, Action::Stop { .. } | Action::Restart { .. })
+                || e.is_none_or(|e| e > plan.deadline_ns)
+            {
+                return Err(bad());
+            }
+            expected.unavailable.insert(plan.id);
+        } else if response {
             expected.effects.insert(plan.id, e.ok_or_else(bad)?);
         }
         expected.plans.push(plan);
@@ -504,6 +523,11 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
             ));
         }
         match (fault.status.as_str(), fault.applied_at_ns) {
+            // A target VM exit after admission resolves the call with no effect.
+            ("unavailable", None) if expected.unavailable.contains(&fault.id) => {}
+            _ if expected.unavailable.contains(&fault.id) => {
+                return Err(Error::Integrity("invalid fault effect status/time".into()))
+            }
             ("applied", Some(at))
                 if at >= fault.requested_at_ns
                     && at <= plan.deadline_ns

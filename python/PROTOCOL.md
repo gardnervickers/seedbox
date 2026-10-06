@@ -125,16 +125,19 @@ An operation error uses `ok: false` and `error` instead of a result:
 A scenario can handle rejected arguments or an inactive partition handle.
 `restart` starts a stopped application using its retained launch recipe. Restarting
 a running application or stopping an already stopped application returns
-`invalid_state`. Commands targeting a VM that has exited return `target_unavailable`;
-the scenario can inspect that exit and decide its own outcome. An inspection
-whose response would exceed the frame limit returns `result_too_large`.
+`invalid_state`. Commands targeting a VM that has exited return `target_unavailable`,
+as does a stop or restart whose target VM exits after admission but before the
+effect is acknowledged; the scenario can inspect that exit and decide its own
+outcome. An inspection whose response would exceed the frame limit returns
+`result_too_large`.
 These errors are recoverable: the connection stays usable, the error is retained
 in the transcript, and no operation is reported as applied. Missing or
 rejected supervisor effects and invalid protocol framing/correlation are
 infrastructure errors. A pending call cut off by normal world termination stays
 in the retained transcript and preserves the workload outcome or TIMEOUT. A
 process command fails if its five-second simulated acknowledgement deadline is
-reached without an effect; this deadline is not shortened to the world limit.
+reached without an effect while its target VM is still running; this deadline is
+not shortened to the world limit.
 
 ## Time and ordering
 
