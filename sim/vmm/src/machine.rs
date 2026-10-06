@@ -1017,11 +1017,14 @@ impl Machine {
     }
 
     /// Hash of architectural registers and all guest RAM.
-    /// Hash of guest RAM and the vCPU state a checkpoint restores: general and
-    /// control registers, segment bases, FPU/XSAVE and XCRs, pending
-    /// exception/interrupt/NMI state, syscall/TLS MSRs, and the shared time
-    /// page. Not covered: other MSRs, debug registers, and VMM device models.
-    pub fn state_digest(&mut self) -> String {
+    /// Hashes of guest RAM and the vCPU state a checkpoint restores, by part:
+    /// general and control registers with segment bases, FPU/XSAVE, XCRs,
+    /// pending exception/interrupt/NMI state, syscall/TLS MSRs, the shared time
+    /// page and RAM. The digest is the hash of the parts. Not covered: other
+    /// MSRs, debug registers and VMM device models.
+    pub fn state_digest(&mut self) -> (String, Vec<(&'static str, String)>) {
+        let hex = |h: Sha256| format!("{:x}", h.finalize());
+        let mut parts = Vec::new();
         let r = self.vcpu.get_regs().unwrap();
         let s = self.vcpu.get_sregs().unwrap();
         let mut h = Sha256::new();
@@ -1032,30 +1035,47 @@ impl Machine {
         ] {
             h.update(v.to_le_bytes());
         }
-        let xsave = self.vcpu.get_xsave().unwrap();
-        for w in xsave.region {
+        parts.push(("regs", hex(h)));
+        let mut h = Sha256::new();
+        for w in self.vcpu.get_xsave().unwrap().region {
             h.update(w.to_le_bytes());
         }
+        parts.push(("xsave", hex(h)));
+        let mut h = Sha256::new();
         let xcrs = self.vcpu.get_xcrs().unwrap();
         for x in &xcrs.xcrs[..xcrs.nr_xcrs as usize] {
             h.update(x.xcr.to_le_bytes());
             h.update(x.value.to_le_bytes());
         }
+        parts.push(("xcrs", hex(h)));
+        // Event fields count only while live: KVM keeps the last exception's
+        // vector/error code and the last interrupt's vector after delivery, so
+        // they differ after a rollback without any guest-visible effect.
         let e = self.vcpu.get_vcpu_events().unwrap();
-        h.update([
-            e.exception.injected,
-            e.exception.nr,
-            e.exception.has_error_code,
-            e.exception.pending,
-            e.interrupt.injected,
-            e.interrupt.nr,
-            e.interrupt.soft,
-            e.interrupt.shadow,
-            e.nmi.injected,
-            e.nmi.pending,
-            e.nmi.masked,
-        ]);
-        h.update(e.exception.error_code.to_le_bytes());
+        let exception = if e.exception.injected != 0 || e.exception.pending != 0 {
+            format!(
+                "{}/{}/{}/{}/{}",
+                e.exception.injected,
+                e.exception.pending,
+                e.exception.nr,
+                e.exception.has_error_code,
+                e.exception.error_code
+            )
+        } else {
+            "none".into()
+        };
+        let interrupt = if e.interrupt.injected != 0 {
+            format!("{}/{}", e.interrupt.nr, e.interrupt.soft)
+        } else {
+            "none".into()
+        };
+        parts.push((
+            "events",
+            format!(
+                "exc:{exception} int:{interrupt} shadow:{} nmi:{}/{}/{}",
+                e.interrupt.shadow, e.nmi.injected, e.nmi.pending, e.nmi.masked,
+            ),
+        ));
         // KERNEL_GS_BASE, STAR, LSTAR, CSTAR, SFMASK, TSC_AUX, PAT, SYSENTER_*.
         let index = [
             0xc000_0102u32, 0xc000_0081, 0xc000_0082, 0xc000_0083, 0xc000_0084, 0xc000_0103,
@@ -1067,14 +1087,34 @@ impl Machine {
             .collect();
         let mut msrs = Msrs::from_entries(&entries).unwrap();
         let n = self.vcpu.get_msrs(&mut msrs).unwrap();
+        let mut h = Sha256::new();
         for m in &msrs.as_slice()[..n] {
             h.update(m.index.to_le_bytes());
             h.update(m.data.to_le_bytes());
         }
+        parts.push(("msrs", hex(h)));
+        let mut h = Sha256::new();
         for i in 0..PAGE_FIELDS {
             h.update(self.page_get(i).to_le_bytes());
         }
+        parts.push(("time_page", hex(h)));
+        let mut h = Sha256::new();
         h.update(self.memory());
-        format!("{:x}", h.finalize())
+        parts.push(("ram", hex(h)));
+        let mut all = Sha256::new();
+        for (_, d) in &parts {
+            all.update(d.as_bytes());
+        }
+        (hex(all), parts)
+    }
+
+    /// First 8 bytes of SHA-256 of each 4 KiB guest RAM page, for locating
+    /// differences between runs.
+    pub fn page_hashes(&mut self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for page in self.memory().chunks(4096) {
+            out.extend_from_slice(&Sha256::digest(page)[..8]);
+        }
+        out
     }
 }

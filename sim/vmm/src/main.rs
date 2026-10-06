@@ -370,10 +370,17 @@ fn run() -> Result<Value, String> {
         }
         let w = format!("{:x}", mach.witness.clone().finalize());
         world_witness.update(w.as_bytes());
-        let state_digest = if digest {
-            Some(mach.state_digest())
+        let (state_digest, state_parts) = if digest {
+            let (d, parts) = mach.state_digest();
+            if std::env::var("SEEDBOX_PAGE_HASHES").is_ok() {
+                std::fs::write(format!("{out}/{}.pages", mach.name), mach.page_hashes())
+                    .map_err(|e| e.to_string())?;
+            }
+            let parts: serde_json::Map<String, Value> =
+                parts.into_iter().map(|(k, v)| (k.to_string(), json!(v))).collect();
+            (Some(d), Some(parts))
         } else {
-            None
+            (None, None)
         };
         if let Some(d) = &state_digest {
             world_witness.update(d.as_bytes());
@@ -394,6 +401,7 @@ fn run() -> Result<Value, String> {
             "branches": mach.branches,
             "witness": w,
             "state_digest": state_digest,
+            "state_digest_parts": state_parts,
             "exits": s.exits, "pio": s.pio, "mmio": s.mmio, "halts": s.halts, "irqs": s.irqs,
             "window_exits": s.window_exits, "eintr": s.eintr,
             "precise_stops": s.precise_stops, "steps": s.steps,
