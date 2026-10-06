@@ -186,9 +186,14 @@ Checks never see world files, environment variables or cores. They yield
 runner-neutral jobs: a scenario, a seed, a witness mode (`exits` or
 `full_state`), performance-only settings, and an optional alternative engine.
 They judge normalized results. Only `acceptance/launcher.py` knows about
-`batch.sh`. A launcher over the Rust orchestration API would map the same fields
-to a simulation config, `WitnessMode`, performance parameters and cross-engine
-execution.
+`batch.sh`. The orchestration API from PR #17 is a Rust library, so Python
+cannot call it directly. Once its `seedbox run`/`replay` commands exist, a
+second launcher can run each job through them and read the results with
+`seedbox inspect --json`. It would map the same fields to a simulation config,
+`WitnessMode`, performance parameters and cross-engine execution. When the Rust
+path becomes the main way to run simulations, the plan is to port the checks to
+Rust integration tests over `Orchestrator::run`/`replay`. They are pure
+comparisons over jobs and results, and `acceptance/pins.json` carries over.
 
 ## One-VM network fixture
 

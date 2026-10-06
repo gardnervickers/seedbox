@@ -2,9 +2,10 @@
 
 Checks describe runs as `Job`s and judge `RunResult`s. They never see world
 files, environment variables, CPU numbers or output layouts; those belong to a
-`Launcher`. A launcher for the Rust orchestration API maps the same fields:
-scenario -> simulation config, witness -> WitnessMode, performance ->
-performance parameters, engine -> an explicit cross-engine execution.
+`Launcher`. A launcher over the Rust `seedbox run`/`replay`/`inspect --json`
+commands (once they exist) maps the same fields: scenario -> simulation config,
+witness -> WitnessMode, performance -> performance parameters, engine -> an
+explicit cross-engine execution.
 """
 from dataclasses import dataclass, field
 
