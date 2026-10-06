@@ -247,7 +247,8 @@ No control configuration preserves the prior no-control serialization/witness pa
 
 ## Follow-on scope
 
-The legacy fixtures retain their own pinned inputs and runner. Multi-core campaign
-dispatch, whole-machine persistent storage, and broad guest image qualification
-are separate work. The supported Compose path runs one service per VM with
+The low-level kernel/network and one-VM fixtures retain their own inputs and
+batch runner. Application acceptance uses direct YAML runs; the old application
+campaign runner has been removed. Multi-core dispatch, whole-machine persistent
+storage, and broad guest image qualification are separate work. The supported Compose path runs one service per VM with
 explicit host/runtime inputs and RAM-backed storage.

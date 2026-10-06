@@ -27,8 +27,10 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   removed. They, and scripts that still use `sim/` paths, are at commit
   `bc07f35`, the last commit with the old layout. The crates under
   `research/evidence/**/source` stay as the recorded source of measured results.
-- `harness/` holds the Python acceptance suite and legacy world-file runners;
-  `kernel/` and `guest/` hold guest build inputs.
+- `harness/` holds YAML acceptance scenarios with guest Python drivers, portable
+  checks, and the batch runner for low-level world fixtures. Application
+  acceptance uses `seedbox run` / `seedbox replay` directly; do not add a host
+  scenario runner. `kernel/` and `guest/` hold guest build inputs.
 
 ## Identity and determinism
 

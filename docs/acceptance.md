@@ -352,3 +352,13 @@ siblings 18/20 exactly matched their saved MSR values (`0x4480000000000`). No
 restoration snapshots or scenario-owned CLI/VMM processes remained. The earlier
 clock-bound and current default-margin errors remain retained; this migration
 does not claim they are fixed or that the full eleven-seed sweep is qualified.
+
+The follow-up cleanup removes the superseded campaign runner/result parser and
+their tests, five duplicate etcd/race world definitions, and `guest/race.init`.
+Independent review found no remaining active callers. Darwin and Linux portable
+checks passed after deletion, including the retained batch/MSR tests on Linux,
+workspace tests, Linux VMM tests and all four YAML validations. Darwin formatting
+and strict all-target Clippy passed. Scenario drivers and runtime source are
+unchanged; hardware execution was not repeated for this removal-only cleanup.
+The remaining raw kernel/NIC and one-VM comparison fixtures still need their
+batch/MSR helpers and shared guest builders. Frozen research is unchanged.
