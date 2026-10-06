@@ -207,8 +207,9 @@ harness/acceptance.sh full --semantics-change                            # kerne
   (shared with items 1–2), at least one scheduled kill must be acknowledged by
   the member's guest on COM2 (`nX stopped`, then `nX started` in `nX.mgmt`),
   and the client must then report `RESULT pass`. The VMM's `kills` list is only
-  the seeded schedule, so it is not taken as evidence that a fault happened. Partition/heal checks will follow when
-  reusable partition faults exist outside the one-VM fixture.
+  the seeded schedule, so it is not taken as evidence that a fault happened.
+  Partition/heal, overlapping handles and recovery are covered separately by
+  the [runtime fault example](examples/faults/README.md) and its acceptance suite.
 
 Seeds, scenarios, settings and the pinned witness are in
 `harness/acceptance/pins.json`, pinned for PR #18's build (ABI 2 kernel, corrected
