@@ -1,0 +1,33 @@
+{
+  "all_qemu_wall_seconds": 43.98229587501555,
+  "checks": {
+    "five_fresh_seed_42": true,
+    "nine_successful_repeats": true,
+    "no_entropy_control": true,
+    "plain_tcg_diverges": true,
+    "planted_failure_control": true,
+    "rebuilt_probe_matches": true,
+    "same_seed_console_and_observations": true,
+    "seed_changes_payload_entropy": true,
+    "timeout_control": true
+  },
+  "comparison_scope": "complete console and probe observations only; no execution or full-state witness",
+  "host": {
+    "build": "26A434",
+    "cpu": "Apple M4 Max",
+    "model": "Mac16,6",
+    "os": "macOS 27.0.1"
+  },
+  "payload_entropy_by_seed": {
+    "42": "c6ed5a3b8d66df141ae2e011f163681ed28759f96d462af2f6841b4c1384f512",
+    "43": "790c44765bd1ac07659a6926e0ba988a5bb5d12800de90f0c14142b088c0b30e",
+    "44": "5201ee0d323dda397bbf7c6e9d53ab5c0b50bc28b78cafd74cb93b85dcf45a67"
+  },
+  "repeat_wall_seconds": {
+    "max": 3.156181457990897,
+    "median": 2.992359000010765,
+    "min": 2.9769345829990925
+  },
+  "runs_including_controls": 16,
+  "schema": "seedbox.mac-tcg.evidence.v1"
+}

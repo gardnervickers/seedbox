@@ -1,0 +1,12 @@
+{
+  "schema": "seedbox.mac-tcg.guest-build.v1",
+  "compiler": "/nix/store/1yqcgzbny4k5p4b9irn5vw4vy8b5d5dh-zig-0.16.0/bin/zig",
+  "compiler_version": "0.16.0\n",
+  "sha256": {
+    "probe.c": "e7cc8cad31fedefbfb1d555a102c812e39c8664647b5fdbf139266cbd71ce7e5",
+    "build-guest.sh": "81a6a0d7b06dc779dae88b6d3d55fd76e470ae7ac3c2a1258f50d73588d79602",
+    "flake.nix": "7a4766f46abf4343b97e12ace401df4846737c4871211c755304da8d8f9b49b0",
+    "flake.lock": "0f873d0f67443dd2fab52d805bc9aa9dbe6ccbe61f0052384e84dd6fd3d1a1b0",
+    "build/probe": "110df117e1b97972a5ef75b62ffa153d218b36a2a52a88b860cbec481bcfeb5f"
+  }
+}

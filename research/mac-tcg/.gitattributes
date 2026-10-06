@@ -1,0 +1,2 @@
+# Serial captures are exact evidence bytes, including guest CRLF endings.
+*.console -text whitespace=cr-at-eol

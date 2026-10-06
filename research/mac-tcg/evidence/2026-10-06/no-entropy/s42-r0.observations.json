@@ -1,0 +1,23 @@
+[
+  {
+    "at_random": "42ce52a199753c878f1a17c96901e1a3",
+    "bytes": "",
+    "count": -1,
+    "errno": 11,
+    "kind": "entropy",
+    "phase": "before_seed"
+  },
+  {
+    "at_random": "b30823b622b8f2bc9a5ec308a92f3ad8",
+    "bytes": "",
+    "count": -1,
+    "errno": 11,
+    "kind": "entropy",
+    "phase": "payload"
+  },
+  {
+    "kind": "result",
+    "reason": "entropy_not_ready",
+    "status": "FAIL"
+  }
+]
