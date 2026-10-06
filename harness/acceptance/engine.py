@@ -2,7 +2,7 @@
 from dataclasses import dataclass, field
 import traceback
 
-from .checks import FAIL, IDENTITY_CHANGED, SKIPPED, UNRESOLVED, Verdict
+from .checks import FAIL, SKIPPED, UNRESOLVED, Verdict
 from .model import RunResult
 
 
@@ -65,7 +65,7 @@ def execute(checks, ctx, launcher):
 
 
 # 1 is a regression only; argparse uses 2 for usage errors.
-EXIT_CODES = {"PASS": 0, "REGRESSION": 1, "UNRESOLVED": 3, "IDENTITY CHANGED": 4}
+EXIT_CODES = {"PASS": 0, "REGRESSION": 1, "UNRESOLVED": 3}
 
 
 def overall(outcomes):
@@ -74,8 +74,6 @@ def overall(outcomes):
         return "REGRESSION"
     if UNRESOLVED in statuses:
         return "UNRESOLVED"
-    if IDENTITY_CHANGED in statuses:
-        return "IDENTITY CHANGED"
     return "PASS"
 
 

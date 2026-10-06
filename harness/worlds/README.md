@@ -34,3 +34,9 @@ the checker source now housed in `examples/etcd/workload`.
 Compose rejects nonempty `x-seedbox.faults` until #3 supplies qualified shared
 fault operations and effect-time acknowledgements. The legacy hunts remain
 available; their bug-finding performance is not established by the new examples.
+
+
+The acceptance suite now prepares its own OCI workloads from YAML under
+`harness/acceptance/workloads/`; it does not use these hand-built guest archives.
+The Python suite retains the fault schedules and assertions. These world files
+remain available for existing low-level campaigns and recorded research.

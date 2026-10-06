@@ -15,8 +15,7 @@ from acceptance.engine import execute, overall  # noqa: E402
 from acceptance.launcher import BatchLauncher  # noqa: E402
 from acceptance.model import FAIL, FULL_STATE, PASS, UNRESOLVED, Job, RunResult  # noqa: E402
 
-PINS = json.loads((SIM / "acceptance/pins.json").read_text())
-PINNED = PINS["known_failing"]["world_witness"]
+PINS = json.loads((SIM / "acceptance/cases.json").read_text())
 
 
 class FakeLauncher:
@@ -35,7 +34,7 @@ class FakeLauncher:
             if job.scenario in ("sanity", "kill-3.5.2"):
                 status, line = FAIL, "RESULT fail missing"
             result = RunResult(job, status, result_line=line, workload_exit=int(status == FAIL),
-                               world_witness=PINNED if job.scenario == "kill-3.5.2" else f"w:{base}",
+                               world_witness=f"w:{base}",
                                machine_witnesses={"n1": f"n1:{base}", "client": f"c:{base}"},
                                state_digests={"n1": f"d:{base}"} if job.witness == FULL_STATE else {},
                                host_seconds=1.0, sim_seconds=10.0,
@@ -52,7 +51,6 @@ class FakeLauncher:
 
 
 def verdicts(launcher, tier=checks.FULL, **ctx):
-    ctx.setdefault("identity", lambda scenario: {"kernel": "k"})
     outcomes = execute(tier, checks.Context(PINS, **ctx), launcher)
     return {o.name.split()[0]: o.verdict for o in outcomes}, outcomes
 
@@ -62,13 +60,12 @@ class CheckTests(unittest.TestCase):
         launcher = FakeLauncher()
         result, outcomes = verdicts(launcher)
         self.assertEqual({k: v.status for k, v in result.items()},
-                         {"1": PASS, "2": PASS, "3": PASS, "4": PASS, "8": PASS, "5": PASS, "6": PASS, "7": checks.SKIPPED})
+                         {"1": PASS, "2": PASS, "3": PASS, "4": PASS, "8": PASS, "6": PASS, "7": checks.SKIPPED})
         self.assertEqual(overall(outcomes), "PASS")
         short = [j for j in launcher.jobs if j.scenario == "short-kill-3.5.2"]
         # Items 1 (2 + 2 digest runs), 2 (3 variants) and 8 share one default run.
         self.assertEqual(len(short), 7)
         self.assertIn("RAM/register digests", result["1"].summary)
-        self.assertEqual(len([j for j in launcher.jobs if j.scenario == "kill-3.5.2"]), 5)
         self.assertEqual(len([j for j in launcher.jobs if j.scenario == "kill-3.5.3"]), 11)
 
     def test_replay_digest_mismatch(self):
@@ -164,33 +161,6 @@ class CheckTests(unittest.TestCase):
                 result.status, result.result_line, result.workload_exit = PASS, "RESULT pass", 0
         self.assertEqual(verdicts(FakeLauncher(passes), checks.SMOKE)[0]["4"].status, FAIL)
 
-    def test_known_failing_distinguishes_regression_from_identity_change(self):
-        def moved(job, result, n):
-            if job.scenario == "kill-3.5.2":
-                result.world_witness = "f" * 64
-        pins = dict(PINS, known_failing=dict(PINS["known_failing"], identity={"kernel": "k"}))
-        regression = execute(checks.FULL, checks.Context(pins, lambda s: {"kernel": "k"}), FakeLauncher(moved))
-        self.assertEqual(regression[5].verdict.status, FAIL)
-        self.assertIn("regression", regression[5].verdict.summary)
-        changed = execute(checks.FULL, checks.Context(pins, lambda s: {"kernel": "new"}), FakeLauncher(moved))
-        self.assertEqual(changed[5].verdict.status, checks.IDENTITY_CHANGED)
-        self.assertIn("changed inputs: kernel", changed[5].verdict.summary)
-        self.assertEqual(overall(changed), "IDENTITY CHANGED")
-        declared, _ = verdicts(FakeLauncher(moved), semantics_change=True)
-        self.assertEqual(declared["5"].status, checks.IDENTITY_CHANGED)
-        unknown = execute(checks.FULL, checks.Context(dict(PINS, known_failing=dict(PINS["known_failing"], identity=None)),
-                                                      lambda s: {"kernel": "k"}), FakeLauncher(moved))
-        self.assertEqual(unknown[5].verdict.status, UNRESOLVED)
-        self.assertIn("no input identity is pinned", unknown[5].verdict.summary)
-
-    def test_known_failing_replicas_must_agree(self):
-        def flaky(job, result, n):
-            if job.scenario == "kill-3.5.2" and n % 2:
-                result.world_witness = "e" * 64
-        result, _ = verdicts(FakeLauncher(flaky), semantics_change=True)
-        self.assertEqual(result["5"].status, FAIL)
-        self.assertIn("nondeterminism", result["5"].summary)
-
     def test_fixed_control_failures_and_unresolved(self):
         def stuck(job, result, n):
             if job.scenario == "kill-3.5.3" and job.seed == 4003:
@@ -209,14 +179,14 @@ class CheckTests(unittest.TestCase):
         result, _ = verdicts(launcher, performance_only=True)
         self.assertEqual(result["7"].status, PASS)
         baseline = [j for j in launcher.jobs if j.engine == checks.BASELINE]
-        self.assertEqual({(j.scenario, j.seed) for j in baseline}, {("short-kill-3.5.2", 4000), ("kill-3.5.2", 4063)})
+        self.assertEqual({(j.scenario, j.seed) for j in baseline}, {("short-kill-3.5.2", 4000)})
 
         def drift(job, result, n):
-            if job.engine == checks.BASELINE and job.scenario == "kill-3.5.2":
+            if job.engine == checks.BASELINE and job.scenario == "short-kill-3.5.2":
                 result.machine_witnesses["n1"] = "old"
         result, _ = verdicts(FakeLauncher(drift), performance_only=True)
         self.assertEqual(result["7"].status, FAIL)
-        self.assertIn("kill-3.5.2 seed 4063 differs in n1", result["7"].summary)
+        self.assertIn("short-kill-3.5.2 seed 4000 differs in n1", result["7"].summary)
 
 
 STUB = r'''#!/usr/bin/env python3
@@ -374,6 +344,45 @@ class BatchLauncherTests(unittest.TestCase):
         (self.base / "artifacts/race.cpio").symlink_to(self.base / "artifacts/cluster.cpio")
         world = json.loads(self.launcher(artifacts=other).world("race").read_text())
         self.assertEqual(world["machines"][0]["initrd"], str(other.resolve() / "race.cpio"))
+
+
+class YamlSetupTests(unittest.TestCase):
+    def test_fault_overlay_preserves_yaml_world_and_rejects_invalid_targets(self):
+        from acceptance.prepare import apply_faults
+        world = {"machines": [{"name": "n1", "initrd": "/prepared/image"}],
+                 "duration_ns": 100, "end_on_exit": "n1", "network": {"latency_ns": 7}}
+        schedule = {"members": ["n1"], "start_ns": 10, "end_ns": 80,
+                    "gap_ns": [1, 2], "down_ns": [1, 2]}
+        combined = apply_faults(world, schedule)
+        self.assertEqual({k: v for k, v in combined.items() if k != "kill_restart"}, world)
+        self.assertNotIn("kill_restart", world)
+        for invalid in [dict(schedule, members=["missing"]), dict(schedule, end_ns=101),
+                        dict(schedule, gap_ns=[0, 2])]:
+            with self.assertRaises(ValueError):
+                apply_faults(world, invalid)
+
+    def test_oci_fault_acknowledgements_must_be_ordered_and_consumed_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            (output / "n1.mgmt").write_text(
+                "SEEDBOX_EFFECT start guest_ns=1\n"
+                "SEEDBOX_EFFECT stop guest_ns=10\nSEEDBOX_EFFECT start guest_ns=20\n"
+                "SEEDBOX_EFFECT stop guest_ns=30\n")
+            faults = BatchLauncher.acknowledged(output, [
+                {"member": "n1", "stop_ns": 9, "start_ns": 19},
+                {"member": "n1", "stop_ns": 29, "start_ns": 39},
+            ])
+            self.assertEqual([(f["stopped"], f["restarted"]) for f in faults], [(True, True), (True, False)])
+            self.assertEqual(faults[0]["stopped_guest_ns"], 10)
+            self.assertEqual(faults[0]["restarted_guest_ns"], 20)
+
+    def test_replay_accepts_a_changed_fresh_outcome_without_historical_pins(self):
+        def changed(job, result, n):
+            if job.scenario == "short-kill-3.5.2":
+                result.status, result.workload_exit = FAIL, 1
+                result.world_witness = "new-witness"
+        result, _ = verdicts(FakeLauncher(changed), [("1 replay", checks.replay)])
+        self.assertEqual(result["1"].status, PASS)
 
 
 if __name__ == "__main__":

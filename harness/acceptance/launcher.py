@@ -229,13 +229,36 @@ class BatchLauncher:
     def acknowledged(out, schedule):
         """The VMM reports the kill schedule; a kill counts as applied only when
         the member's guest acknowledged it on COM2 ("<name> stopped/started")."""
-        faults, seen = [], {}
+        faults, offsets = [], {}
         for kill in sorted(schedule, key=lambda k: k["stop_ns"]):
             member = kill["member"]
-            n = seen[member] = seen.get(member, 0) + 1
             lines = read(out / f"{member}.mgmt").splitlines()
-            faults.append({**kill, "stopped": lines.count(f"{member} stopped") >= n,
-                           "restarted": lines.count(f"{member} started") >= n})
+            cursor = offsets.get(member, 0)
+            stopped = restarted = False
+            # The OCI supervisor reports effects with guest time. Preserve it
+            # as evidence and require stop before start, consuming each once.
+            effects = {}
+            for index in range(cursor, len(lines)):
+                line = lines[index]
+                effect = re.fullmatch(r"SEEDBOX_EFFECT (stop|start) guest_ns=(\d+)", line)
+                action = effect[1] if effect else {
+                    f"{member} stopped": "stop", f"{member} started": "start",
+                }.get(line)
+                if action == "stop":
+                    if stopped:
+                        break
+                    stopped = True
+                    if effect:
+                        effects["stopped_guest_ns"] = int(effect[2])
+                elif action == "start" and stopped:
+                    restarted = True
+                    if effect:
+                        effects["restarted_guest_ns"] = int(effect[2])
+                    cursor = index + 1
+                    break
+                cursor = index + 1
+            offsets[member] = cursor
+            faults.append({**kill, "stopped": stopped, "restarted": restarted, **effects})
         return faults
 
     def parse(self, job, out, batch_log):

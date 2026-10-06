@@ -11,7 +11,6 @@ import re
 from .model import EXITS, FAIL, FULL_STATE, PASS, UNRESOLVED, Job, performance, witness_differences
 
 SKIPPED = "skipped"
-IDENTITY_CHANGED = "identity_changed"
 BASELINE = "baseline"
 
 
@@ -25,15 +24,11 @@ class Verdict:
 @dataclass
 class Context:
     pins: dict
-    # Current hashes of each scenario's semantic inputs, from the launcher.
-    identity: object = None
-    # Declared by the person running the suite.
-    semantics_change: bool = False
     performance_only: bool = False
 
 
 def default_job(scenario, seed):
-    """The default-settings run of a pinned seed, shared between checks."""
+    """The default-settings run of a sampled seed, shared between checks."""
     return Job(scenario, seed, share=f"{scenario}/{seed}/default")
 
 
@@ -152,41 +147,6 @@ def checker_control(ctx):
                    f"exit={result.workload_exit} line={result.result_line!r}", details)
 
 
-def known_failing(ctx):
-    """Item 5: the pinned failing seed fails with the pinned witness in every fresh process."""
-    pin = ctx.pins["known_failing"]
-    scenario, seed, want = pin["scenario"], pin["seed"], pin["world_witness"]
-    results = yield [default_job(scenario, seed)] + [Job(scenario, seed) for _ in range(pin["replicas"] - 1)]
-    if (v := unresolved(results)):
-        return v
-    witnesses = {r.world_witness for r in results}
-    outcomes = {r.status for r in results}
-    details = {"witnesses": sorted(witnesses), "outcomes": sorted(outcomes), "pinned": want}
-    if len(witnesses) > 1 or len(outcomes) > 1:
-        return Verdict(FAIL, f"nondeterminism: {len(results)} fresh processes gave "
-                       f"{len(witnesses)} witnesses and outcomes {sorted(outcomes)}", details)
-    got = witnesses.pop()
-    if got == want and outcomes == {FAIL}:
-        return Verdict(PASS, f"{scenario} seed {seed}: RESULT fail, witness {want[:16]}… in {len(results)} fresh processes", details)
-    current = ctx.identity(scenario) if ctx.identity else None
-    pinned = pin.get("identity")
-    details.update(current_identity=current, pinned_identity=pinned)
-    changed = [k for k in sorted(set(pinned or {}) | set(current or {}))
-               if (pinned or {}).get(k) != (current or {}).get(k)] if pinned else []
-    if ctx.semantics_change or changed:
-        why = "declared semantic change" if ctx.semantics_change else "changed inputs: " + ", ".join(changed)
-        return Verdict(IDENTITY_CHANGED,
-                       f"run identity changed ({why}); seed {seed} now gives {sorted(outcomes)} with witness "
-                       f"{got[:16]}…. This is not a regression: run a fresh hunt and record its seed with "
-                       f"`harness/acceptance.sh pin`.", details)
-    if not pinned:
-        return Verdict(UNRESOLVED, f"seed {seed} gave {sorted(outcomes)} with witness {got[:16]}…, pinned "
-                       f"RESULT fail {want[:16]}…, and no input identity is pinned to tell a regression from "
-                       f"a new run identity. Pass --semantics-change if the kernel/ABI or semantics changed.", details)
-    return Verdict(FAIL, f"regression: same inputs, seed {seed} gave {sorted(outcomes)} with witness "
-                   f"{got[:16]}…, pinned RESULT fail {want[:16]}…", details)
-
-
 def fixed_control(ctx):
     """Item 6: the fixed version passes every seed in the declared range."""
     pin = ctx.pins["fixed_control"]
@@ -232,7 +192,7 @@ def fault_effects(ctx):
 
 
 def cross_build(ctx):
-    """Item 7: a declared performance-only change keeps every pinned witness."""
+    """Item 7: a declared performance-only change preserves fresh execution witnesses."""
     if not ctx.performance_only:
         return Verdict(SKIPPED, "change not declared performance-only (use --performance-only OLD_VMM)")
     pins = [(ctx.pins[p]["scenario"], ctx.pins[p]["seed"]) for p in ctx.pins["cross_build"]]
@@ -257,5 +217,5 @@ def cross_build(ctx):
 SMOKE = [("1 replay", replay), ("2 stop-placement invariance", stop_placement),
          ("3 race demo", race), ("4 checker negative control", checker_control),
          ("8 fault effects and recovery", fault_effects)]
-FULL = SMOKE + [("5 known failing seed", known_failing), ("6 fixed-version control", fixed_control),
+FULL = SMOKE + [("6 fixed-version control", fixed_control),
                 ("7 cross-build equivalence", cross_build)]

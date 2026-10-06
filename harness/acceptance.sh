@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: acceptance.sh portable|smoke|full|pin [options]   (see --help)
+# Usage: acceptance.sh portable|smoke|full [options]   (see --help)
 # Tiers and checks: issue #4 and the "Acceptance suite" section of README.md.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
