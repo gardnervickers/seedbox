@@ -43,7 +43,7 @@ pub struct Undo {
     events: kvm_vcpu_events,
     mp: kvm_mp_state,
     /// Machine-level state restored with the vCPU.
-    pub page: [u64; 3],
+    pub page: [u64; crate::machine::PAGE_FIELDS],
     pub time: u64,
     pub branches: u64,
     pub exit_req: bool,
@@ -91,7 +91,7 @@ impl Undo {
             debugregs: Default::default(),
             events: Default::default(),
             mp: Default::default(),
-            page: [0; 3],
+            page: [0; crate::machine::PAGE_FIELDS],
             time: 0,
             branches: 0,
             exit_req: false,
