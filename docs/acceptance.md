@@ -167,3 +167,17 @@ Evidence is retained under `/home/gvickers/seedbox-yaml-acceptance/runs/acceptan
 The full tier completed in 768.6 seconds. All ten batches verified restoration;
 final MSR readbacks on every selected CPU and sibling matched the initial
 `0x4480000000000`. No restoration snapshots remained.
+
+After rebasing onto the workspace restructure (`926060d`), source `184abf5`
+passed fresh YAML preparation and the full smoke tier in 334.9 seconds. Evidence
+is retained under `/home/gvickers/seedbox-yaml-workspace/runs/acceptance-smoke-20261006T193802Z-2640154/`.
+All eight batches restored their snapshots, and final MSR readbacks matched the
+same baseline on CPUs 2–7 and 18–23 with no snapshots remaining. The original
+full-tier record above predates the layout change; current workloads live under
+`harness/acceptance/workloads/` and the helper under `crates/seedbox/tests/`.
+
+Workspace tests and portable checks passed on both hosts after the rebase.
+Linux all-target Clippy passed with warnings denied. Darwin's strict check
+encountered main's existing `HostLease::try_acquire_at` dead-code warning;
+all-target Clippy passed with only the `dead_code` lint allowed. Production
+source was left unchanged. Independent review passed after the path/API updates.
