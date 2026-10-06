@@ -92,7 +92,8 @@ pub fn engine(explicit: Option<PathBuf>) -> Result<PathBuf> {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent();
     let vmm = crates.unwrap_or(Path::new(".")).join("seedbox-vmm");
     let built = vmm.join("target/release/seedbox-vmm");
-    let mut searched = engine_candidates(&env::current_exe()?, &built);
+    // Without a known executable path, only that one candidate is skipped.
+    let mut searched = engine_candidates(env::current_exe().ok().as_deref(), &built);
     if let Some(path) = first_file(&searched).or_else(|| on_path("seedbox-vmm")) {
         return Ok(path);
     }
@@ -113,9 +114,12 @@ pub fn engine(explicit: Option<PathBuf>) -> Result<PathBuf> {
 /// Where to look for the VMM, in order: next to `exe`, then `built`. A cargo
 /// profile directory (it holds `.cargo-lock`) never receives the VMM, which
 /// builds in its own workspace, so a `seedbox-vmm` found there is stale.
-fn engine_candidates(exe: &Path, built: &Path) -> Vec<PathBuf> {
+fn engine_candidates(exe: Option<&Path>, built: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(directory) = exe.parent().filter(|dir| !dir.join(".cargo-lock").exists()) {
+    if let Some(directory) = exe
+        .and_then(Path::parent)
+        .filter(|dir| !dir.join(".cargo-lock").exists())
+    {
         candidates.push(directory.join("seedbox-vmm"));
     }
     candidates.push(built.to_owned());
@@ -317,13 +321,18 @@ mod tests {
         let installed = directory.path().join("bin");
         std::fs::create_dir(&installed).unwrap();
         assert_eq!(
-            engine_candidates(&installed.join("seedbox"), &built),
+            engine_candidates(Some(&installed.join("seedbox")), &built),
             [installed.join("seedbox-vmm"), built.clone()]
         );
         let profile = directory.path().join("target/debug");
         std::fs::create_dir_all(&profile).unwrap();
         std::fs::write(profile.join(".cargo-lock"), "").unwrap();
-        assert_eq!(engine_candidates(&profile.join("seedbox"), &built), [built]);
+        let only_built = std::slice::from_ref(&built);
+        assert_eq!(
+            engine_candidates(Some(&profile.join("seedbox")), &built),
+            only_built
+        );
+        assert_eq!(engine_candidates(None, &built), only_built);
     }
 
     #[test]

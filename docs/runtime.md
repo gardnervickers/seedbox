@@ -57,9 +57,12 @@ seedbox=./target/release/seedbox
 ```
 
 Every input has a default; `seedbox help run` lists them with their overrides.
-The kernel is found in `$SEEDBOX_ARTIFACTS`, `./artifacts` or
-`~/seedbox-sim/artifacts` (also in the invoking user's home under sudo), the VMM
-next to `seedbox`, the guest supervisor inside `seedbox`, and BusyBox through
+The kernel is found in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`,
+`./artifacts` or `~/seedbox-sim/artifacts` (also in the invoking user's home
+under sudo). The VMM is found next to an installed `seedbox`, then in this
+checkout's `cargo build-vmm` output, then on `PATH`. A `seedbox` inside cargo's
+`target/` directories, like the one above, uses the `cargo build-vmm` output.
+The guest supervisor is built into `seedbox`, and BusyBox comes from
 `SEEDBOX_BUSYBOX`. A missing input fails before preparation starts and names
 every location searched.
 

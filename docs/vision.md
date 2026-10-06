@@ -7,11 +7,16 @@ fixed.**
 The full story is in [issue #25](https://github.com/gardnervickers/seedbox/issues/25),
 along with the gap from today to each capability and the hard problems. The
 story follows a developer changing an S3-backed, cross-region Paxos log. They
-choose how to handle the S3 dependency, find and shrink a lost-acknowledgement
-bug, trace it causally, fix it and prove the fix. This page keeps the parts that
-guide day-to-day decisions. The architecture stays as it is: real Linux
-machines on KVM, one host thread per world, virtual time from counted guest
-progress, and seeds that choose every scheduling, timing and fault decision.
+choose how to handle the S3 dependency, find and shrink a bug that changes an
+acknowledged append, trace it causally, fix it and prove the fix. This page
+keeps the parts that guide day-to-day decisions. What exists today is in
+[research/STATUS.md](../research/STATUS.md) and
+[research/NEXT_STEPS.md](../research/NEXT_STEPS.md). Only the first
+requirement is partly in place (Compose files and runtime defaults, without
+builder plugins); the rest are not implemented yet. The architecture stays as it is:
+real Linux machines on KVM, one host thread per world, virtual time from counted
+guest progress, and seeds that choose every scheduling, timing and fault
+decision.
 
 ## Requirements
 

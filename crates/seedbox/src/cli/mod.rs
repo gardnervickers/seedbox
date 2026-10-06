@@ -182,7 +182,8 @@ struct RuntimeInputs {
     /// ./artifacts, then ~/seedbox-sim/artifacts for the user and any sudo caller].
     #[arg(long, env = "SEEDBOX_KERNEL")]
     kernel: Option<PathBuf>,
-    /// VMM binary [default: next to this binary, then this checkout's `cargo build-vmm` output, then PATH].
+    /// VMM binary [default: next to an installed seedbox, then this checkout's `cargo build-vmm`
+    /// output (built by `cargo run` if missing), then PATH].
     #[arg(long, env = "SEEDBOX_VMM")]
     vmm: Option<PathBuf>,
     /// Static guest supervisor [default: the copy built into this binary].
