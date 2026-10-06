@@ -1,0 +1,22 @@
+[package]
+name = "seedbox-vmm"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The VMM's binary hash is part of every run's identity, so it builds in its
+# own workspace with its own lockfile: features unified from other crates in
+# a shared build would otherwise change the engine. Build it with
+# `cargo build-vmm` (an alias in .cargo/config.toml).
+[workspace]
+
+[dependencies]
+kvm-ioctls = "=0.25.0"
+kvm-bindings = { version = "=0.14.1", features = ["fam-wrappers"] }
+libc = "0.2"
+serde_json = "1"
+sha2 = "0.10"
+iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "instr_info"] }
+
+[profile.release]
+debug = 1

@@ -1,0 +1,6 @@
+# Run from the repository root. The VMM is its own workspace (see
+# crates/seedbox-vmm/Cargo.toml) and builds into crates/seedbox-vmm/target,
+# where `seedbox` looks for it first.
+[alias]
+build-vmm = "build --release --locked --manifest-path crates/seedbox-vmm/Cargo.toml --target-dir crates/seedbox-vmm/target"
+test-vmm = "test --release --locked --manifest-path crates/seedbox-vmm/Cargo.toml --target-dir crates/seedbox-vmm/target"

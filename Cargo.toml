@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+default-members = ["crates/seedbox"]
+# The VMM is its own workspace (see its Cargo.toml). research/ holds the
+# recorded source of past measurements, not workspace crates.
+exclude = ["crates/seedbox-vmm", "research"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace.dependencies]
+libc = "0.2"
+serde_json = "1"
+sha2 = "0.10"
