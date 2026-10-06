@@ -6,6 +6,7 @@ use crate::boundary::{advance_time, hard_limit, missed_soft_stop};
 use crate::counter::Counter;
 use crate::devices::{rtc_read, Pic, Pit, Uart};
 use crate::stepper::Planner;
+use crate::undo::Undo;
 use crate::virtio_net::VirtioNet;
 use kvm_bindings::*;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
@@ -30,6 +31,8 @@ const APPROACH: u64 = 65536;
 /// Floor of the adaptive margin. Skids of 5-14k branches occur in dense code,
 /// and the syscall-exit window before a soft stop must outlast them.
 const MARGIN_MIN: u64 = 16384;
+/// With undo-able stops, the largest final margin tried after rollbacks.
+const UNDO_MAX: u64 = 1 << 18;
 /// Pending interrupts are injected only when the next stop is further away
 /// than this. Part of the execution semantics: changing it changes runs.
 pub const INJECT_GUARD: u64 = 65536;
@@ -43,6 +46,8 @@ pub struct BootSpec<'a> {
     pub mem: usize,
     pub rng_seed: [u8; 32],
     pub mac: Option<[u8; 6]>,
+    /// Final overflow margin for undo-able precise stops; 0 disables them.
+    pub undo_margin: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -80,6 +85,10 @@ pub struct Stats {
     pub skids: Vec<u64>,
     pub kvm_ns: [u128; 8],
     pub kvm_n: [u64; 8],
+    /// Runs that passed a soft stop with the yield window closed and could
+    /// not be undone (a syscall there would have been a missed stop).
+    pub soft_misses: u64,
+    pub soft_undos: u64,
 }
 
 pub struct Machine {
@@ -115,6 +124,12 @@ pub struct Machine {
     /// Recompute `margin` from the recent guest branch rate.
     pub adaptive_margin: bool,
     step_started: Option<Instant>,
+    /// Undo-able precise stops: checkpoint before the final approach, roll
+    /// back on overshoot. `undo_margin` is the initial final margin, `fm` the
+    /// current one (grown after rollbacks, reset when a stop completes).
+    pub undo: Option<Box<Undo>>,
+    undo_margin: u64,
+    fm: u64,
     pub stats: Stats,
     pub witness: Sha256,
     pub trace: Option<std::io::BufWriter<std::fs::File>>,
@@ -124,7 +139,7 @@ fn put(m: &mut [u8], at: usize, v: u64, n: usize) {
     m[at..at + n].copy_from_slice(&v.to_le_bytes()[..n]);
 }
 
-fn map(size: usize) -> Result<*mut u8, String> {
+pub(crate) fn map(size: usize) -> Result<*mut u8, String> {
     let p = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
@@ -224,7 +239,7 @@ impl Machine {
         unsafe {
             vm.set_user_memory_region(kvm_userspace_memory_region {
                 slot: 0,
-                flags: 0,
+                flags: if spec.undo_margin > 0 { KVM_MEM_LOG_DIRTY_PAGES } else { 0 },
                 guest_phys_addr: 0,
                 memory_size: mem_size as u64,
                 userspace_addr: mem as u64,
@@ -281,6 +296,16 @@ impl Machine {
         })
         .map_err(|e| e.to_string())?;
         let net = spec.mac.map(VirtioNet::new);
+        let undo = if spec.undo_margin > 0 {
+            let mut u = Undo::new(kvm, &vcpu, mem_size)?;
+            // Everything loaded so far was written by the VMM.
+            u.mark(0, 0x100000);
+            u.mark(0x100000, k.len() - setup);
+            u.mark(INITRD_ADDR, spec.initrd.len());
+            Some(Box::new(u))
+        } else {
+            None
+        };
         Ok(Self {
             name: name.to_string(),
             _vm: vm,
@@ -311,6 +336,9 @@ impl Machine {
             margin: MARGIN,
             adaptive_margin: false,
             step_started: None,
+            undo,
+            undo_margin: spec.undo_margin,
+            fm: spec.undo_margin,
             stats: Stats::default(),
             witness: Sha256::new(),
             trace: None,
@@ -365,10 +393,71 @@ impl Machine {
         let (mem, size) = (self.mem, self.mem_size);
         let m = unsafe { std::slice::from_raw_parts_mut(mem, size) };
         let irq = self.net.as_mut().map(|n| n.receive(m, frame));
+        self.take_dma();
         if irq == Some(true) {
             self.pic.raise(NET_IRQ);
         }
         irq.is_some()
+    }
+
+    /// Account device writes to guest RAM for the undo shadow.
+    fn take_dma(&mut self) {
+        if let Some(n) = self.net.as_mut() {
+            match self.undo.as_mut() {
+                Some(u) => {
+                    for (a, l) in n.dirty.drain(..) {
+                        u.mark(a, l);
+                    }
+                }
+                None => n.dirty.clear(),
+            }
+        }
+    }
+
+    /// Complete an I/O instruction the guest exited on, without running it
+    /// further, so vCPU state can be saved or replaced.
+    fn complete_io(&mut self) -> Result<(), String> {
+        self.vcpu.set_kvm_immediate_exit(1);
+        let r = self.vcpu.run().map(|e| format!("{e:?}"));
+        self.vcpu.set_kvm_immediate_exit(0);
+        match r {
+            Err(e) if e.errno() == libc::EINTR => Ok(()),
+            Err(e) => Err(format!("{}: completing I/O: {e}", self.name)),
+            Ok(e) => Err(format!("{}: exit while completing I/O: {e}", self.name)),
+        }
+    }
+
+    fn checkpoint(&mut self) -> Result<(), String> {
+        let t = Instant::now();
+        self.complete_io()?;
+        let page = unsafe { [*self.page, *self.page.add(1), *self.page.add(2)] };
+        let u = self.undo.as_mut().unwrap();
+        u.save(&self._vm, &self.vcpu, self.mem)?;
+        u.page = page;
+        u.time = self.time;
+        u.branches = self.branches;
+        u.exit_req = self.exit_req;
+        u.stats.checkpoint_ns += t.elapsed().as_nanos();
+        Ok(())
+    }
+
+    fn rollback(&mut self) -> Result<(), String> {
+        let t = Instant::now();
+        self.complete_io()?;
+        let u = self.undo.as_mut().unwrap();
+        let (regs, sregs) = u.restore(&self._vm, &self.vcpu, self.mem)?;
+        for i in 0..3 {
+            unsafe { std::ptr::write_volatile(self.page.add(i), u.page[i]) };
+        }
+        self.time = u.time;
+        self.branches = u.branches;
+        self.exit_req = u.exit_req;
+        u.stats.rollback_ns += t.elapsed().as_nanos();
+        // The planner reads registers from the run structure.
+        let run = self.vcpu.get_kvm_run();
+        run.s.regs.regs = regs;
+        run.s.regs.sregs = sregs;
+        Ok(())
     }
 
     fn checked_page_time(&self, limit: u64) -> Result<u64, String> {
@@ -402,8 +491,11 @@ impl Machine {
         if on {
             self.stats.precise_stops += 1;
             self.step_started = Some(Instant::now());
-        } else if let Some(t) = self.step_started.take() {
-            self.stats.step_ns += t.elapsed().as_nanos();
+        } else {
+            self.fm = self.undo_margin;
+            if let Some(t) = self.step_started.take() {
+                self.stats.step_ns += t.elapsed().as_nanos();
+            }
         }
         Ok(())
     }
@@ -473,6 +565,11 @@ impl Machine {
         let mut legal = true;
         loop {
             if legal {
+                // Observable effects follow; a held checkpoint no longer
+                // describes the machine.
+                if let Some(u) = self.undo.as_mut() {
+                    u.valid = false;
+                }
                 // Guest clock reads can advance time independently of the PMU.
                 // Check before expiring timers or accepting the slice boundary.
                 self.sync_from_page(hard_limit(
@@ -519,18 +616,25 @@ impl Machine {
                 unsafe { std::ptr::write_volatile(self.page.add(2), window as u64) };
                 self.exit_req = window;
             }
-            if remaining > self.margin {
+            let undo = self.undo.is_some();
+            let threshold = if undo { self.fm } else { self.margin };
+            if remaining > threshold {
                 self.set_stepping(false)?;
-                let now = counter.last();
                 let wake = if rem_soft > self.margin {
                     rem_soft - self.margin
-                } else if self.adaptive_margin && remaining > APPROACH {
+                } else if (self.adaptive_margin || undo) && remaining > APPROACH {
                     // Approach a hard stop in two overflows: the first measures
                     // the branch rate of the code actually running near it.
                     remaining - APPROACH
                 } else {
-                    remaining - self.margin
+                    // Final approach. With a checkpoint, aim close and undo an
+                    // overshoot rather than step through a worst-case skid.
+                    if undo && !self.undo.as_ref().unwrap().valid {
+                        self.checkpoint()?;
+                    }
+                    remaining - threshold
                 };
+                let now = counter.last();
                 if wake >= crate::counter::NEVER {
                     counter.disarm();
                     self.armed_wake = 0;
@@ -581,7 +685,32 @@ impl Machine {
             let c1 = counter.read_fast();
             let delta = c1 - c0;
             let interrupted = matches!(&exit, Err(e) if e.errno() == libc::EINTR);
-            if delta > remaining || (interrupted && !self.stepping && delta == remaining) {
+            let overshoot =
+                delta > remaining || (interrupted && !self.stepping && delta == remaining);
+            // With the yield window closed, a run must not pass `soft`: a
+            // syscall there would have been the stop.
+            let soft_miss =
+                missed_soft_stop(windowed, window, delta, rem_soft, interrupted, self.stepping);
+            if (overshoot || soft_miss) && self.undo.as_ref().is_some_and(|u| u.valid) {
+                if overshoot && self.fm >= UNDO_MAX {
+                    return Err(format!(
+                        "overshoot on {}: {} branches past stop target at final margin {}",
+                        self.name,
+                        delta - remaining,
+                        self.fm
+                    ));
+                }
+                drop(exit);
+                self.rollback()?;
+                if overshoot {
+                    self.fm = (self.fm * 4).min(UNDO_MAX);
+                } else {
+                    self.stats.soft_undos += 1;
+                }
+                legal = false;
+                continue;
+            }
+            if overshoot {
                 let what = exit
                     .as_ref()
                     .map(|e| format!("{e:?}"))
@@ -598,17 +727,8 @@ impl Machine {
                     self.last_plan,
                 ));
             }
-            // With the window closed, a run must not pass `soft`: a syscall
-            // there would have been the stop. (Changing the margin must never
-            // change where a stop lands.)
-            if missed_soft_stop(
-                windowed,
-                window,
-                delta,
-                rem_soft,
-                interrupted,
-                self.stepping,
-            ) {
+            // Changing the margin must never change where a stop lands.
+            if soft_miss {
                 return Err(format!(
                     "soft overshoot on {}: {} branches past (or an ambiguous overflow at) a soft stop before its syscall window opened",
                     self.name,
@@ -794,6 +914,7 @@ impl Machine {
                         let m = unsafe { std::slice::from_raw_parts_mut(mem, size) };
                         if let Some(n) = self.net.as_mut() {
                             let out = n.write(m, addr - NET_MMIO, v);
+                            self.take_dma();
                             if out.irq {
                                 self.pic.raise(NET_IRQ);
                             }

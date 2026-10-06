@@ -7,6 +7,7 @@ mod devices;
 mod machine;
 mod rng;
 mod stepper;
+mod undo;
 mod virtio_net;
 
 use counter::Counter;
@@ -151,6 +152,11 @@ fn run() -> Result<Value, String> {
         .map_err(|e| format!("seed: {e}"))?;
     let out = arg(&args, "--out").ok_or("--out required")?;
     let digest = args.iter().any(|a| a == "--digest");
+    // Undo-able precise stops (performance only): initial final margin, 0 = off.
+    let undo_margin: u64 = match std::env::var("SEEDBOX_UNDO").as_deref() {
+        Err(_) => 1024,
+        Ok(m) => m.parse().map_err(|e| format!("SEEDBOX_UNDO: {e}"))?,
+    };
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let cfg: Value = serde_json::from_slice(
         &std::fs::read(&config_path).map_err(|e| format!("{config_path}: {e}"))?,
@@ -212,6 +218,7 @@ fn run() -> Result<Value, String> {
             mem,
             rng_seed,
             mac: networked.then_some(mac),
+            undo_margin,
         };
         let mut mach = Machine::new(&kvm, &names[i], &spec)?;
         mach.tolerance = cfg["stop_tolerance_ns"].as_u64().unwrap_or(0);
@@ -393,6 +400,13 @@ fn run() -> Result<Value, String> {
             "step_ms": s.step_ns as f64 / 1e6, "run_ms": s.run_ns as f64 / 1e6,
             "skid_max": s.skid_max, "skid_count": s.skids.len(), "final_margin": mach.margin,
             "skid_p50": skid_p50, "skid_p99": skid_p99, "yields": s.yields, "yield_stops": s.yield_stops,
+            "soft_misses": s.soft_misses, "soft_undos": s.soft_undos,
+            "undo": mach.undo.as_ref().map(|u| json!({
+                "checkpoints": u.stats.checkpoints, "rollbacks": u.stats.rollbacks,
+                "synced_pages": u.stats.synced_pages, "restored_pages": u.stats.restored_pages,
+                "checkpoint_ms": u.stats.checkpoint_ns as f64 / 1e6,
+                "rollback_ms": u.stats.rollback_ns as f64 / 1e6,
+            })),
             "kvm_ms_by_exit": {"eintr": s.kvm_ns[0] as f64/1e6, "debug": s.kvm_ns[1] as f64/1e6, "pio": s.kvm_ns[2] as f64/1e6, "mmio": s.kvm_ns[3] as f64/1e6, "hlt": s.kvm_ns[4] as f64/1e6, "window": s.kvm_ns[5] as f64/1e6, "other": s.kvm_ns[6] as f64/1e6},
             "kvm_n_by_exit": s.kvm_n,
             "net": mach.net.as_ref().map(|n| json!({"tx": n.tx_frames, "rx": n.rx_frames, "rx_dropped": n.rx_dropped})),
