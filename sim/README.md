@@ -70,15 +70,22 @@ sim/batch.sh sim/worlds/kill-3.5.2.json demo "7 7"         # two fresh runs of o
 sim/campaign.sh sim/worlds/kill-3.5.2.json hunt 1000 8     # seeds until a failure, up to 8 h
 ```
 
-Each run writes `runs/<name>-s<seed>-r<i>.json` (outcome, witness, timing,
-per-machine stats) and per-machine console/management logs. `batch.sh` pins
+Each batch run writes `runs/<name>-s<seed>-r<i>.json` (outcome, witness,
+timing, per-machine stats), a `.status` file with its process exit status, and
+per-machine console/management logs. Campaign batches use fresh directories
+under `runs/<name>-batch.XXXXXX/`, preserving previous attempts. `batch.sh` pins
 runs to consecutive cores from `CPU0` (default 2), runs the binary named by
 `VMM`, and starts nothing unless the counter workaround is set and reads back.
-`campaign.sh` logs every seed's result, marks seeds without one `UNRESOLVED`,
-and then exits nonzero.
+`campaign.sh` accepts a client RESULT only with a zero process status and valid
+terminal JSON for that seed. It logs incomplete attempts as `UNRESOLVED` and
+exits nonzero. `SEEDBOX_ROOT` overrides the default `~/seedbox-sim` working
+directory for either runner.
 
 `SEEDBOX_MARGIN` sets how many branches before a stop the VMM switches from the
 overflow interrupt to breakpoint stepping, and how early before a soft stop it
 asks for syscall exits. It affects speed only. An overshoot (interrupt skid
 larger than the margin) aborts the run; `campaign.sh` reruns it with a larger
-margin for the identical result.
+margin for the identical result. Deterministic clock advances (timer-port I/O
+charges and guest time reads) must also fit in the hard stop. Crossing it fails
+with `clock bound exceeded`; no device I/O cost is clamped away, and a larger
+PMU margin does not fix or retry this error.

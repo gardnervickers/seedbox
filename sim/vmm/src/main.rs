@@ -1,6 +1,7 @@
 //! Seedbox world: several Linux machines, a network fabric and a scenario,
 //! all executed by one host thread. A seed and the config fully determine the run.
 
+mod boundary;
 mod counter;
 mod devices;
 mod machine;

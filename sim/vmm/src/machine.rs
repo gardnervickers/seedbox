@@ -2,6 +2,7 @@
 //! thread. Guest progress is measured in retired conditional branches; the
 //! machine can be stopped at an exact branch count (precise preemption).
 
+use crate::boundary::{advance_time, hard_limit, missed_soft_stop};
 use crate::counter::Counter;
 use crate::devices::{rtc_read, Pic, Pit, Uart};
 use crate::stepper::Planner;
@@ -370,11 +371,14 @@ impl Machine {
         irq.is_some()
     }
 
-    fn sync_from_page(&mut self) {
+    fn checked_page_time(&self, limit: u64) -> Result<u64, String> {
         let last = unsafe { std::ptr::read_volatile(self.page.add(1)) };
-        if last > self.time {
-            self.time = last;
-        }
+        advance_time(self.time, last.saturating_sub(self.time), limit)
+    }
+
+    fn sync_from_page(&mut self, limit: u64) -> Result<(), String> {
+        self.time = self.checked_page_time(limit)?;
+        Ok(())
     }
 
     fn publish(&mut self) {
@@ -462,11 +466,21 @@ impl Machine {
         // page, interrupts, timer expiry) changes only at deterministic points:
         // natural exits, requested syscall exits and exact counted stops, never
         // at overflow landings or intermediate single steps.
-        let slice_end = limit.saturating_sub(early).max(self.time + 1).min(limit);
+        let slice_end = limit
+            .saturating_sub(early)
+            .max(self.time.saturating_add(1))
+            .min(limit);
         let mut legal = true;
         loop {
             if legal {
-                self.sync_from_page();
+                // Guest clock reads can advance time independently of the PMU.
+                // Check before expiring timers or accepting the slice boundary.
+                self.sync_from_page(hard_limit(
+                    limit,
+                    self.pit.deadline,
+                    self.pit_exact,
+                    self.tolerance,
+                ))?;
                 while self.pit.expire(self.time) {
                     self.pic.raise(0);
                 }
@@ -482,13 +496,8 @@ impl Machine {
             // in [pit, pit + tolerance] (exactly at `pit` if so drawn). Neither
             // passes `limit`, the world's causal boundary.
             let pit = self.pit.deadline.unwrap_or(u64::MAX);
-            let pit_late = if self.pit_exact {
-                pit
-            } else {
-                pit.saturating_add(self.tolerance)
-            };
             let soft = slice_end.min(pit);
-            let hard = limit.min(pit_late);
+            let hard = hard_limit(limit, self.pit.deadline, self.pit_exact, self.tolerance);
             let remaining = hard - self.time;
             // Interrupt injection depends only on the distance to the stop, never
             // on the stepping margin, so it is deterministic.
@@ -592,9 +601,16 @@ impl Machine {
             // With the window closed, a run must not pass `soft`: a syscall
             // there would have been the stop. (Changing the margin must never
             // change where a stop lands.)
-            if windowed && !window && delta > rem_soft {
+            if missed_soft_stop(
+                windowed,
+                window,
+                delta,
+                rem_soft,
+                interrupted,
+                self.stepping,
+            ) {
                 return Err(format!(
-                    "soft overshoot on {}: {} branches past a soft stop before its syscall window opened",
+                    "soft overshoot on {}: {} branches past (or an ambiguous overflow at) a soft stop before its syscall window opened",
                     self.name,
                     delta - rem_soft
                 ));
@@ -618,6 +634,15 @@ impl Machine {
             }
             self.branches += delta;
             self.time += delta;
+            if legal {
+                // Sent/Hlt/Exited can return before the next loop synchronizes
+                // the page. Validate guest clock progress before any exit
+                // effects, while preserving the existing publication timing.
+                // The exit still borrows vcpu; inspect only the disjoint page
+                // and clock fields until its payload has been consumed.
+                let last = unsafe { std::ptr::read_volatile(self.page.add(1)) };
+                advance_time(self.time, last.saturating_sub(self.time), hard)?;
+            }
             self.stats.exits += 1;
             if self.stepping {
                 self.stats.steps += 1;
@@ -642,7 +667,15 @@ impl Machine {
                 Ok(VcpuExit::IoOut(port, data)) => {
                     self.stats.pio += 1;
                     let v = data[0];
-                    let mut charge = 0;
+                    // Reserve the whole deterministic I/O cost before touching
+                    // the device or witness. A larger PMU margin cannot repair
+                    // an I/O cost that crosses a hard virtual-time boundary.
+                    let charge = if matches!(port, 0x40..=0x43 | 0x61) {
+                        ISA_IO_NS
+                    } else {
+                        0
+                    };
+                    let after_io = advance_time(self.time, charge, hard)?;
                     match port {
                         0x3f8..=0x3ff => {
                             if port == 0x3f8
@@ -670,7 +703,6 @@ impl Machine {
                         0x20 | 0x21 | 0xa0 | 0xa1 => self.pic.write(port, v),
                         0x40..=0x43 | 0x61 => {
                             self.pit.write(port, v, now);
-                            charge = ISA_IO_NS;
                             if self.pit.fresh {
                                 // Seeded timer latency: varies preemption points across seeds.
                                 self.pit.fresh = false;
@@ -700,14 +732,19 @@ impl Machine {
                     }
                     self.record(b'O', (port as u64) << 8 | v as u64);
                     self.serial_edges();
-                    self.time += charge;
+                    self.time = after_io;
                 }
                 Ok(VcpuExit::IoIn(port, data)) => {
                     self.stats.pio += 1;
-                    let mut charge = 0;
+                    let charge = if matches!(port, 0x40..=0x42 | 0x61) {
+                        ISA_IO_NS
+                    } else {
+                        0
+                    };
+                    let after_io = advance_time(self.time, charge, hard)?;
                     match port {
                         0x520 => {
-                            let t = self.time.max(self.tsc_latch + 1);
+                            let t = self.time.max(advance_time(self.tsc_latch, 1, hard)?);
                             self.tsc_latch = t;
                             self.time = t;
                             data.copy_from_slice(&(t as u32).to_le_bytes()[..data.len()]);
@@ -720,10 +757,7 @@ impl Machine {
                                 0x3f8..=0x3ff => self.com1.read(port - 0x3f8),
                                 0x2f8..=0x2ff => self.com2.read(port - 0x2f8),
                                 0x20 | 0x21 | 0xa0 | 0xa1 => self.pic.read(port),
-                                0x40..=0x42 | 0x61 => {
-                                    charge = ISA_IO_NS;
-                                    self.pit.read(port, now)
-                                }
+                                0x40..=0x42 | 0x61 => self.pit.read(port, now),
                                 0x71 => rtc_read(self.rtc_index),
                                 _ => 0xff,
                             };
@@ -732,7 +766,8 @@ impl Machine {
                     }
                     self.record(b'i', port as u64);
                     self.serial_edges();
-                    self.time += charge;
+                    // The time-port read may itself advance time by one tick.
+                    self.time = self.time.max(after_io);
                 }
                 Ok(VcpuExit::MmioRead(addr, data)) => {
                     self.stats.mmio += 1;
