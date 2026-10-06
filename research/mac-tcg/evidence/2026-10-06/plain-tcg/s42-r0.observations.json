@@ -1,0 +1,87 @@
+[
+  {
+    "at_random": "59bd86cb272c98ee7d5be3162d964ea2",
+    "bytes": "",
+    "count": -1,
+    "errno": 11,
+    "kind": "entropy",
+    "phase": "before_seed"
+  },
+  {
+    "at_random": "7b309186dc4552dda6b5f128c367f8d8",
+    "bytes": "a28ed30bf31c4f471483df80f4979e485867a470bd3c0810024344277e304d3a",
+    "count": 32,
+    "errno": 0,
+    "kind": "entropy",
+    "phase": "payload"
+  },
+  {
+    "kind": "cpu",
+    "rdrand": 0,
+    "rdseed": 0
+  },
+  {
+    "kind": "start",
+    "monotonic_ns": 1045627247,
+    "realtime_ns": 1577836801045669335
+  },
+  {
+    "after_ns": 1050393236,
+    "before_ns": 1045937898,
+    "hash": "5c342789e1670cac",
+    "kind": "cpu_work",
+    "round": 0,
+    "tsc_after": 2114165000,
+    "tsc_before": 2109717000
+  },
+  {
+    "after_ns": 1062866379,
+    "before_ns": 1050982471,
+    "kind": "sleep",
+    "requested_ns": 10000000,
+    "round": 0
+  },
+  {
+    "after_ns": 1067851828,
+    "before_ns": 1063297282,
+    "hash": "e50e6a87f5f8e6a2",
+    "kind": "cpu_work",
+    "round": 1,
+    "tsc_after": 2131584000,
+    "tsc_before": 2127038000
+  },
+  {
+    "after_ns": 1088766665,
+    "before_ns": 1068398975,
+    "kind": "sleep",
+    "requested_ns": 20000000,
+    "round": 1
+  },
+  {
+    "after_ns": 1093735078,
+    "before_ns": 1089164499,
+    "hash": "33f8689fe802d563",
+    "kind": "cpu_work",
+    "round": 2,
+    "tsc_after": 2157412000,
+    "tsc_before": 2152852000
+  },
+  {
+    "after_ns": 1125565794,
+    "before_ns": 1094244145,
+    "kind": "sleep",
+    "requested_ns": 30000000,
+    "round": 2
+  },
+  {
+    "after_ns": 1128707378,
+    "before_ns": 1126025758,
+    "count": 7609,
+    "kind": "poll"
+  },
+  {
+    "kind": "result",
+    "reason": "completed",
+    "status": "PASS"
+  }
+]

@@ -1,0 +1,4 @@
+SBX {"kind":"entropy","phase":"before_seed","count":-1,"errno":11,"bytes":"","at_random":"42ce52a199753c878f1a17c96901e1a3"}
+SBX {"kind":"entropy","phase":"payload","count":-1,"errno":11,"bytes":"","at_random":"b30823b622b8f2bc9a5ec308a92f3ad8"}
+SBX {"kind":"result","status":"FAIL","reason":"entropy_not_ready"}
+[    9.988433] reboot: Power down

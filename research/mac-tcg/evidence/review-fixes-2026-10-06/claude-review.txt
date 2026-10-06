@@ -1,0 +1,30 @@
+Claude Opus 5.5 follow-up review via the Claude Code skill. Read-only; Codex independently ran the tests and audits. Same persistent session was resumed for this pass.
+
+No actionable issues remain. Both P2 fixes and the timestamp fix hold up when I read the code; I did not run anything.
+
+**P2-1 (old plugin behind the historical witnesses): resolved.**
+- You were right not to use a post-terminal-events bound as proof. A false terminal close to real completion can leave a small suffix.
+- `verify_profiles` (`service_audit.py:72-82`) checks every compared batch's manifest against the fault reference. It requires the same profile, shift, QEMU, kernel, base image and plugin hash. It also rejects a reference with any of those missing.
+- The no-witness control is correctly excluded. `etcd_version` is correctly not compared, so the fixed-version batch can differ there.
+- `witness_qualification` (`service-report.py:50-52`) and `SERVICE_REPORT.md:43-44,136` mark the historical witness matrix as provisional. They say only the two new seed-1009 fault runs qualify the corrected decoder.
+
+**P2-2 (a rejected witness file blocking later audits): resolved.**
+- `read_witness` (`service.py:154-169`) returns either an accepted witness with its diagnostics, or nothing plus the SHA256 of the rejected bytes. Malformed JSON and bad UTF-8 raise `ValueError` and are caught; a missing `post_terminal_events` raises `KeyError` and is caught.
+- In `service.py:274-279`:
+  - **Process exited, witness rejected:** the run becomes ERROR and the rejected hash is recorded.
+  - **Process exited, witness file missing:** ERROR with no hash, which matches the audit's check at `service_audit.py:57-58`.
+  - **Timed out or interrupted, file present:** the hash is recorded and the status is kept.
+- In the audit (`service_audit.py:53-58`), a raw file must hash exactly to the recorded value and is only accepted for a non-success status. A successful run still needs a valid witness.
+
+**Timestamp check (P3): resolved.**
+- Monotonic time is now checked separately for the REQUEST and FAULT writers (`service.py:134-139`).
+- Each action must still satisfy target ≤ request ≤ acknowledgment (`:129`), and the queue still requires each request to be logged before its acknowledgment (`:140-145`).
+- Queued commands and cross-writer interleaving are allowed, and acknowledgments that come before their request are still rejected.
+
+**Already declared, not code defects:**
+- **Historical witness profiles:** the healthy, controls, negative, seed-1010/1011 and fixed-version witnesses still need a bounded rerun with the corrected plugin. The report states this.
+- **Interruptions outside the child process's lifetime:** a signal while the manifest is being built, or after the handlers are restored, leaves an orphan or a missing row. The audit fails closed and needs manual reconciliation; no budget time is silently lost.
+- **Budget overshoot:** cleanup time on the final timed-out slice could push the total slightly over 600 s, and the audit would then fail closed.
+- **Process-group kill after reaping:** in theory the group ID could be reused after the child is reaped; the risk is negligible.
+
+One cosmetic point: `service_audit.py:55` also accepts INCOMPLETE for a rejected witness, but `service.py` never produces that combination, so it's harmless.

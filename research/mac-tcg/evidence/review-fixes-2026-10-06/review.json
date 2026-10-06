@@ -1,0 +1,26 @@
+{
+  "first_persistent_pass_duration_ms": 153856,
+  "limitations": "Historical witnesses outside the two corrected seed-1009 fault runs remain provisional; production KVM unchanged.",
+  "model": "claude-opus-5-5",
+  "outcome": "no actionable issues remain",
+  "review_duration_ms": 38682,
+  "session_id": "657a47b5-6b6f-44e9-a9d1-97b2b53d20af",
+  "session_reused": true,
+  "skill": "claude-code",
+  "source_sha256": {
+    "service-report.py": "dca31c932bfa971ba0b0201c6ac1821e900788c78c8b9e95578f32283978b4af",
+    "service.py": "f1c48900d84fd759b01498a1ce23c31ed99427f48497409f84447512d98a62c6",
+    "service_audit.py": "99f5c78c5a51883473974f315b6285826649d23e418401c9bea9e0682f0c74c9",
+    "service_process.py": "9d043adb0d81b6340aa25b9b2d40e3b426fa75d5824b17b768b1cd2542cfbc23",
+    "test_service.py": "219e14a693f85509ba054d211a55972e6cbaf0145a42250d56c63b1670fdef2c",
+    "test_service_review.py": "0d51fd455edda663958dbb033efc55bc70773a7a9ff5f8d1b1be5482d45bb3a7",
+    "witness-decode.h": "19429d2347a4312d558de313c9a4f60dd75d86fbec74175989dfcdd8f86427fc",
+    "witness.c": "c459f256a92017c90bc45d28f11a1ec8c89ad613c22fb3d8302e14466779d9bd"
+  },
+  "verification": {
+    "aggregate_seconds": 573.5043583330116,
+    "corrected_decoder_fresh_runs": 2,
+    "portable_tests": 21,
+    "qemu_attempts": 39
+  }
+}

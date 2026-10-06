@@ -1,0 +1,18 @@
+{
+  "comparison_scope": "console, management log and optional selected guest-boundary SHA256; no full-state digest",
+  "groups": {
+    "1010": {
+      "console_variants": 1,
+      "management_variants": 1,
+      "runs": 1,
+      "witness_variants": 1
+    },
+    "1011": {
+      "console_variants": 1,
+      "management_variants": 1,
+      "runs": 1,
+      "witness_variants": 1
+    }
+  },
+  "same_seed_equal": true
+}

@@ -1,0 +1,87 @@
+[
+  {
+    "at_random": "42ce52a199753c878f1a17c96901e1a3",
+    "bytes": "",
+    "count": -1,
+    "errno": 11,
+    "kind": "entropy",
+    "phase": "before_seed"
+  },
+  {
+    "at_random": "103c71e6bfd65caf39f9be02eaf2c5aa",
+    "bytes": "c6ed5a3b8d66df141ae2e011f163681ed28759f96d462af2f6841b4c1384f512",
+    "count": 32,
+    "errno": 0,
+    "kind": "entropy",
+    "phase": "payload"
+  },
+  {
+    "kind": "cpu",
+    "rdrand": 0,
+    "rdseed": 0
+  },
+  {
+    "kind": "start",
+    "monotonic_ns": 9946915554,
+    "realtime_ns": 1577836817368720472
+  },
+  {
+    "after_ns": 10152507670,
+    "before_ns": 9947085859,
+    "hash": "085f5cea6d5eb0e2",
+    "kind": "cpu_work",
+    "round": 0,
+    "tsc_after": 18012175432,
+    "tsc_before": 17806753808
+  },
+  {
+    "after_ns": 10162872072,
+    "before_ns": 10152766839,
+    "kind": "sleep",
+    "requested_ns": 10000000,
+    "round": 0
+  },
+  {
+    "after_ns": 10369349285,
+    "before_ns": 10163097793,
+    "hash": "c9a24ab4e887bb38",
+    "kind": "cpu_work",
+    "round": 1,
+    "tsc_after": 18229016840,
+    "tsc_before": 18022765536
+  },
+  {
+    "after_ns": 10389706449,
+    "before_ns": 10369607830,
+    "kind": "sleep",
+    "requested_ns": 20000000,
+    "round": 1
+  },
+  {
+    "after_ns": 10595528613,
+    "before_ns": 10389910809,
+    "hash": "5d92918fff19c036",
+    "kind": "cpu_work",
+    "round": 2,
+    "tsc_after": 18455195952,
+    "tsc_before": 18249578336
+  },
+  {
+    "after_ns": 10625883970,
+    "before_ns": 10595787157,
+    "kind": "sleep",
+    "requested_ns": 30000000,
+    "round": 2
+  },
+  {
+    "after_ns": 10627121131,
+    "before_ns": 10626120738,
+    "count": 1282,
+    "kind": "poll"
+  },
+  {
+    "kind": "result",
+    "reason": "completed",
+    "status": "PASS"
+  }
+]
