@@ -71,6 +71,16 @@ pub struct AcceptanceArgs {
     #[command(flatten)]
     pub host: HostArgs,
 }
+fn reserve_output(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Existing reports must never be reused, even when their parent was created
+    // by another acceptance run or campaign.
+    std::fs::create_dir(path)?;
+    Ok(())
+}
+
 fn write_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -94,7 +104,7 @@ pub fn acceptance(args: AcceptanceArgs, cancellation: &CancellationToken) -> Res
         .map(|(name, path)| (name.clone(), args.sim.join(path)))
         .collect();
     let runner = args.host.prepare(sources)?;
-    std::fs::create_dir(&args.output)?;
+    reserve_output(&args.output)?;
     let mut launcher = Harness {
         runner: &runner,
         cpus: &cpus,
@@ -142,7 +152,7 @@ pub fn campaign(args: CampaignArgs, cancellation: &CancellationToken) -> Result<
     let runner = args
         .host
         .prepare(BTreeMap::from([("campaign".into(), args.world)]))?;
-    std::fs::create_dir(&args.output)?;
+    reserve_output(&args.output)?;
     let mut index = std::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -240,7 +250,7 @@ pub fn batch(args: BatchArgs, cancellation: &CancellationToken) -> Result<u8> {
     let runner = args
         .host
         .prepare(BTreeMap::from([("batch".into(), args.world)]))?;
-    std::fs::create_dir(&args.output)?;
+    reserve_output(&args.output)?;
     let jobs: Vec<_> = args
         .seeds
         .into_iter()
@@ -280,4 +290,23 @@ pub fn batch(args: BatchArgs, cancellation: &CancellationToken) -> Result<u8> {
     } else {
         3
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn report_outputs_work_in_a_fresh_tree_without_reusing_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("runs/acceptance-new");
+        reserve_output(&output).unwrap();
+        let evidence = output.join("report.json");
+        std::fs::write(&evidence, b"original evidence").unwrap();
+        assert!(reserve_output(&output).is_err());
+        assert_eq!(std::fs::read(&evidence).unwrap(), b"original evidence");
+        reserve_output(&root.path().join("runs/second-run")).unwrap();
+        std::fs::write(root.path().join("not-a-directory"), b"keep").unwrap();
+        assert!(reserve_output(&root.path().join("not-a-directory/run")).is_err());
+    }
 }
