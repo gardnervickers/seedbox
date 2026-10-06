@@ -36,7 +36,7 @@ fn prepare_acceptance_workloads() {
     fs::create_dir(&request.output).unwrap();
     let output = request.output.canonicalize().unwrap();
     let store = ContentStore::new(output.join("objects"));
-    let profile = VmmExecutor::new(&request.vmm, &store, 0, 1024, WitnessMode::Exits)
+    let profile = VmmExecutor::new(&request.vmm, &store, None, 1024, WitnessMode::Exits)
         .unwrap()
         .profile();
     let preparer = OciPreparer {
