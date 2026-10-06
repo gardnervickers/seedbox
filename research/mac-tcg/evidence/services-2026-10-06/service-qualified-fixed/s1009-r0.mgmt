@@ -1,0 +1,21 @@
+REQUEST partition n1 n2 target_ns=4319964352 guest_ns=4324315046
+FAULT partition n1 n2 guest_ns=4346522874
+DROP_COUNTER_BEGIN
+filter protocol ip pref 10 u32 chain 0 
+filter protocol ip pref 10 u32 chain 0 fh 800: ht divisor 1 
+filter protocol ip pref 10 u32 chain 0 fh 800::2 order 2 key ht 800 bkt 0 terminal flowid not_in_hw (rule hit 29 success 11)
+  match 0a000201/ffffffff at 16 (success 11 ) 
+	action order 1: gact action drop
+	 random type none pass val 0
+	 index 1 ref 1 bind 1 installed 0 sec used 0 sec firstused 0 sec
+	Action statistics:
+	Sent 1314 bytes 11 pkt (dropped 11, overlimits 0 requeues 0) 
+	backlog 0b 0p requeues 0
+
+DROP_COUNTER_END
+REQUEST heal n1 n2 target_ns=5019964352 guest_ns=5025742497
+FAULT heal n1 n2 guest_ns=5031607936
+REQUEST stop n2 target_ns=5419964352 guest_ns=5420645545
+FAULT stop n2 stopped guest_ns=5436948809
+REQUEST start n2 target_ns=6019964352 guest_ns=6022150048
+FAULT start n2 launched guest_ns=6030058687

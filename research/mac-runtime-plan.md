@@ -1,20 +1,20 @@
 # Mac runtime exploration: rough plan for issue #8
 
-Draft for discussion, 2026-10-06. Baseline: `origin/main` at
-`fa51542b192741aa71d21bac98f37f743172996c`. The production runtime is unchanged.
-Independent probe work is now recorded in [mac-tcg/README.md](mac-tcg/README.md):
-real Linux boots locally on the Mac with seeded entropy and repeatable clock
-observations. Nine positive runs and the entropy, timing, failure and timeout
-controls passed their declared checks. This remains an input-control probe,
-without service/fault execution or a full execution witness.
+Plan and progress, 2026-10-06. Originally based on `fa51542`; now rebased onto
+`origin/main` at `4c7ed71aefc86d214644cd997512204293bdd205` after PR #16 merged.
+The production runtime is unchanged. The initial input-control probe remains
+in [mac-tcg/README.md](mac-tcg/README.md). The
+[service integration report](mac-tcg/SERVICE_REPORT.md) records reuse of the
+merged fixture, real etcd faults/recovery, five matching fresh runs and a scoped
+execution witness. The merge watch has stopped.
 
 ## Recommendation
 
-Start with a small contract and a bounded local service probe, then extract only
-the interfaces that the probe actually needs. QEMU TCG with fixed instruction
-counting is the first local candidate. Keep the existing qualified KVM path
-working throughout. A remote KVM runner is a complementary developer option;
-it does not complete the local MacBook objective.
+Pursue an optional local, single-kernel QEMU TCG profile with fixed instruction
+counting, using the small whole-run contract demonstrated by the bounded probe.
+Extract production interfaces only alongside #2's run API. Keep the existing
+qualified KVM path working throughout. Independent-machine local TCG requires
+the separate two-machine probe below; remote KVM remains complementary.
 
 Separate three decisions: execution engine (KVM/TCG/etc.), deployment topology
 (independent machines or services sharing one kernel), and run location
@@ -24,6 +24,12 @@ Do not silently map #2's one-service-per-machine interface onto shared-kernel
 namespaces. That needs an explicit topology/profile choice and stated limits.
 
 ## Coordination with active issue #10
+
+**Current handoff:** PR #16 merged on 2026-10-06. Its final source and
+`research/single-vm-network/REPORT.md` were read before TCG integration. The
+Mac adapter reuses the reviewed network, member lifecycle and checker code.
+The historical coordination notes below explain the wait; their preliminary
+speed ratios are not current qualification of the final fixture or Mac TCG.
 
 Issue #10 owns the single-guest namespace/network/fault fixture and its KVM
 qualification. Reuse its pinned artifact/source handoff rather than building a

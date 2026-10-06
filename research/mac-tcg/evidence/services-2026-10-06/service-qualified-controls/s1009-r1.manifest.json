@@ -1,0 +1,93 @@
+{
+  "adapter_sha256": {
+    "service-bootstrap.c": "18ebf4b47acc698494dfc6e4b714c6236d778f64d32a7304abad3eebb9038720",
+    "service.py": "b7ffc17cc93d9f70380d553c45db8e18c632a27c9d2ba4a6192b856d13a87ff8",
+    "witness.c": "0a874e60e9165861b5b873fbcb60fff818293b8af5578a554c2b3e83ca189a22"
+  },
+  "argv": [
+    "/nix/store/lzm84ri4kbyx8gqxwk5sd21mqc5all73-qemu-11.1.1/bin/qemu-system-x86_64",
+    "-L",
+    "/nix/store/lzm84ri4kbyx8gqxwk5sd21mqc5all73-qemu-11.1.1/share/qemu",
+    "-machine",
+    "pc-i440fx-11.1,hpet=off",
+    "-accel",
+    "tcg,thread=single",
+    "-cpu",
+    "qemu64,-rdrand,-rdseed",
+    "-smp",
+    "1",
+    "-m",
+    "1024M",
+    "-nodefaults",
+    "-display",
+    "none",
+    "-monitor",
+    "none",
+    "-serial",
+    "stdio",
+    "-serial",
+    "file:/Users/gardnervickers/.codex/worktrees/mac-runtime-plan/seedbox/research/mac-tcg/runs/service-qualified-controls/s1009-r1.mgmt",
+    "-nic",
+    "none",
+    "-device",
+    "isa-debug-exit,iobase=0xf4,iosize=0x04",
+    "-no-reboot",
+    "-rtc",
+    "base=2020-01-01T00:00:00,clock=vm,driftfix=none",
+    "-seed",
+    "3915616625",
+    "-icount",
+    "shift=0,align=off,sleep=off",
+    "-kernel",
+    "/Users/gardnervickers/.codex/worktrees/mac-runtime-plan/seedbox/research/mac-tcg/build/bzImage",
+    "-initrd",
+    "/Users/gardnervickers/.codex/worktrees/mac-runtime-plan/seedbox/research/mac-tcg/runs/service-qualified-controls/s1009-r1.cpio",
+    "-append",
+    "console=ttyS0 nokaslr random.trust_cpu=off random.trust_bootloader=off panic=-1 rdinit=/init loglevel=4 seedbox.mode=controls",
+    "-plugin",
+    "/Users/gardnervickers/.codex/worktrees/mac-runtime-plan/seedbox/research/mac-tcg/build/witness.dylib,output=/Users/gardnervickers/.codex/worktrees/mac-runtime-plan/seedbox/research/mac-tcg/runs/service-qualified-controls/s1009-r1.witness.json"
+  ],
+  "base_sha256": "4a926d378fb651676a1c4f208fa0be0c13a098f5d94bffcbde1d6f55b1f61220",
+  "etcd_version": "3.5.2",
+  "initrd_sha256": "b095d5db40f73b2222c96aa085fa7a5be89a75e59ef8daf6400938c994a0a845",
+  "kernel_sha256": "66111c2888091bd64e96e71a6a9e831ab5496d6c6272add5d81490396bfa3cdc",
+  "mode": "controls",
+  "overlay_sha256": {
+    "bin/tcg-bootstrap": "3141f28906ae05c74d637af36c06a94a7c37a03c26247a04a768560deff76ca2",
+    "fixture.init": "c279626c5cfad7626f46883e2f6d2ef57c785cf00dcf294f13dfb8bbe44ed9d1",
+    "init": "3141f28906ae05c74d637af36c06a94a7c37a03c26247a04a768560deff76ca2",
+    "modules": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "modules/act_gact.ko": "df5b33c93efcfad2f17b5c169101c1a9cdc0ae718a06629fdb10adb9e04321bf",
+    "modules/cls_matchall.ko": "11b71101b5770eec5b4f67a4fb4a735bbd25cbb328f68c8152287b8a51269116",
+    "modules/cls_u32.ko": "61bf31c3d786207547268828d66252b0c8d170f25e3b3e08b73a055ea802db61",
+    "modules/sch_ingress.ko": "33aa4b13459af991d5aa6752c73f8860020b5a085f5138d9a5223229ab7e4206",
+    "modules/sch_netem.ko": "07e0fc9a34a236017773cbe67444b1fd7c70e353dc4c6f202186fbc9faafceb5",
+    "modules/veth.ko": "f7a86e6e4433ade4c4cc0f25543f40855e1f6207caabc822e3c76e270e15d707",
+    "scenario.sh": "a9df02cc80552dd28f3968615636a6d4110a55489cff620893fe26b07d2adf67",
+    "seed": "e15b171416122a11b4b471ff296251d0f0c2326d197a0c98b85121371c47a017"
+  },
+  "profile": "seedbox.mac-tcg.services.v1",
+  "qemu_sha256": "8a4240ae9c46ead03d81283d066fec2460817b2d7296c97bcda0cbecec538aba",
+  "scenario_offsets": [
+    [
+      750765185,
+      "partition n1 n2"
+    ],
+    [
+      1450765185,
+      "heal n1 n2"
+    ],
+    [
+      1850765185,
+      "stop n2"
+    ],
+    [
+      2450765185,
+      "start n2"
+    ]
+  ],
+  "seed": 1009,
+  "shift": 0,
+  "source": "f4c97bd02e7c64a710e23cc48beb7155748e14ce",
+  "witness_plugin_sha256": "da15d38677a32ec6ff6d3bc7d39546e1f5e108c4a4ef182040a06d2c94ea5ac3"
+}

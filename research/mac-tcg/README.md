@@ -3,7 +3,10 @@
 A bounded research fixture for [issue #8](https://github.com/gardnervickers/seedbox/issues/8).
 It boots real x86-64 Linux locally on an Apple Silicon Mac using QEMU software
 emulation. Guest compilation also runs locally using Zig's Linux/musl target.
-It does not change the production KVM runner or implement #10's service fixture.
+It does not change the production KVM runner. The subsequent
+[service integration report](SERVICE_REPORT.md) reuses #10's merged fixture
+and records fault/recovery qualification and a scoped execution witness.
+The measurements below remain the earlier standalone input-control probe.
 
 ## Measured result, 2026-10-06
 
@@ -112,7 +115,8 @@ identify what was executed.
 
 ## Minimal integration contract for the next slice
 
-Keep this as a research adapter until #2's run API and #10's fixture are ready.
+Keep this as a research adapter until #2's run API is ready. #10's merged
+fixture is now integrated in `service.py`; see the service report above.
 Do not publish another competing Compose or manifest schema.
 
 | Boundary | Required information / behavior |
