@@ -342,3 +342,27 @@ fn network_options_and_unimplemented_config_permissions_are_not_ignored() {
     .to_string()
     .contains("$.services.workload.networks.private.aliases"));
 }
+
+#[test]
+fn runtime_control_selects_known_service_and_static_schedules_are_rejected() {
+    let yaml = BASE.replace(
+        "  version: 1",
+        "  version: 1\n  control: {service: workload}",
+    );
+    assert_eq!(parse(&yaml).unwrap().control.unwrap().service, "workload");
+    assert!(parse(&yaml.replace(
+        "control: {service: workload}",
+        "control: {service: missing}"
+    ))
+    .is_err());
+    assert!(parse(&BASE.replace(
+        "  version: 1",
+        "  version: 1\n  faults: [{at: 1s, stop: workload}] "
+    ))
+    .is_err());
+    assert!(parse(&BASE.replace("  version: 1", "  version: 1\n  faults: []")).is_ok());
+    assert!(serde_json::to_value(parse(BASE).unwrap())
+        .unwrap()
+        .get("control")
+        .is_none());
+}

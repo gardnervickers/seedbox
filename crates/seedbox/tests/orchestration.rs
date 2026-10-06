@@ -727,3 +727,36 @@ fn large_artifacts_stream_with_bounded_reads_and_corrupt_copies_are_not_publishe
     assert!(store.materialize(&digest, &bad_output).is_err());
     assert_eq!(fs::read_dir(bad_output).unwrap().count(), 0);
 }
+
+#[test]
+fn early_termination_preserves_reason_and_specific_fault_error() {
+    let mut fixture = Fixture::new();
+    for (reason, outcome) in [
+        (StopReason::Cancelled, Outcome::Incomplete),
+        (StopReason::WallTimeLimit, Outcome::Incomplete),
+        (StopReason::SimulatedTimeLimit, Outcome::Timeout),
+    ] {
+        fixture.backend.report.reason = reason;
+        assert_eq!(fixture.run().record.outcome, outcome);
+    }
+    fixture.backend.report.reason = StopReason::Error;
+    fixture.backend.report.detail = Some("guest rejected fault 1".into());
+    let run = fixture.run();
+    assert_eq!(run.record.outcome, Outcome::Error);
+    assert!(run.record.error.unwrap().contains("guest rejected fault 1"));
+}
+
+#[test]
+fn network_effects_have_no_single_service_target() {
+    let mut fixture = Fixture::new();
+    fixture.backend.report.faults.push(FaultEvent {
+        requested_at_ns: 10,
+        applied_at_ns: 10,
+        service: String::new(),
+        action: "partition".into(),
+        detail: "partition applied".into(),
+    });
+    assert_eq!(fixture.run().record.outcome, Outcome::Pass);
+    fixture.backend.report.faults[0].action = "stop".into();
+    assert_eq!(fixture.run().record.outcome, Outcome::Error);
+}

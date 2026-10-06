@@ -42,6 +42,7 @@ impl VmmExecutor {
                 witness_mode,
                 semantic_parameters: BTreeMap::from([
                     ("guest_abi".into(), "oci-init-v1".into()),
+                    ("control_channel".into(), "virtio-console-v1".into()),
                     ("memory_mb".into(), memory_mb.to_string()),
                 ]),
             },
@@ -96,9 +97,27 @@ impl ExecutionBackend for VmmExecutor {
     }
 }
 
+fn control_latency(request: &ExecutionRequest<'_>) -> Result<u64> {
+    request
+        .network
+        .latency_ns
+        .checked_mul(2)
+        .and_then(|n| n.checked_add(request.schedule.stop_tolerance_ns.checked_mul(2)?))
+        .and_then(|n| n.checked_add(1_000_000))
+        .ok_or_else(|| Error::Execution("control latency overflow".into()))
+}
+
 /// Translate an execution request without consulting registry tags or source
 /// paths. Exposed for preparation tools and report inspection without KVM.
 pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
+    if request
+        .control
+        .is_some_and(|c| c.service != request.check.service)
+    {
+        return Err(Error::Execution(
+            "controller must also be the check service".into(),
+        ));
+    }
     if request.prepared.guests.is_empty() || request.prepared.guests.len() > 254 {
         return Err(Error::Integrity("expected 1..254 prepared machines".into()));
     }
@@ -131,6 +150,11 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
             "oci-init-v1 requires one service per machine".into(),
         ));
     }
+    let control = request.control.map(|c| -> Result<Value> {
+        let machine = request.prepared.placement.get(&c.service).ok_or_else(|| Error::Execution("controller placement missing".into()))?;
+        let latency_ns = control_latency(request)?;
+        Ok(json!({"machine":machine,"latency_ns":latency_ns,"placement":request.prepared.placement}))
+    }).transpose()?;
     let machines = request
         .prepared
         .guests
@@ -142,8 +166,21 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
         "duration_ns":request.limits.simulated_time_ns,"end_on_exit":workload_machine,
         "timer_jitter_ns":request.schedule.timer_jitter_ns,"stop_tolerance_ns":request.schedule.stop_tolerance_ns,
         "network":{"latency_ns":request.network.latency_ns,"jitter_ns":request.network.jitter_ns},
-        "machines":machines,
+        "machines":machines,"control":control,
+        "control_channel":"virtio-console-v1",
     }))
+}
+
+#[derive(Deserialize)]
+struct RawFault {
+    request: seedbox_control::Plan,
+    id: u32,
+    requested_at_ns: u64,
+    applied_at_ns: Option<u64>,
+    action: String,
+    machine: Option<String>,
+    status: String,
+    detail: String,
 }
 
 #[derive(Deserialize)]
@@ -161,6 +198,213 @@ struct VmmReport {
     outcome: String,
     world_witness: ContentDigest,
     machines: Vec<MachineReport>,
+    #[serde(default)]
+    faults: Vec<RawFault>,
+    #[serde(default)]
+    fault_error: Option<String>,
+    #[serde(default)]
+    control_history: Vec<Value>,
+    #[serde(default)]
+    control_latency_ns: Option<u64>,
+}
+
+#[derive(Default)]
+struct ValidatedControlHistory {
+    plans: Vec<seedbox_control::Plan>,
+    effects: BTreeMap<u32, u64>,
+}
+
+/// Correlate guest-originated requests to responses and applied engine actions.
+fn validate_control_history(
+    history: &[Value],
+    latency: Option<u64>,
+    request: &ExecutionRequest<'_>,
+    failed: bool,
+) -> Result<ValidatedControlHistory> {
+    let expected_latency = control_latency(request)?;
+    let latency = latency
+        .filter(|n| *n == expected_latency)
+        .ok_or_else(|| Error::Integrity("control latency mismatch".into()))?;
+    use seedbox_control::{Action, Operation, Plan, Request, Target, PROCESS_EFFECT_TIMEOUT_NS};
+    let controller = request
+        .control
+        .and_then(|control| request.prepared.placement.get(&control.service));
+    let resolve = |target: &Target| -> Result<String> {
+        let machine = match target {
+            Target::Service(service) => request.prepared.placement.get(service).map(String::as_str),
+            Target::Machine(machine) => Some(machine.as_str()),
+        }
+        .ok_or_else(|| Error::Integrity("invalid control target".into()))?;
+        if !request.prepared.guests.contains_key(machine)
+            || controller.is_some_and(|name| name == machine)
+        {
+            return Err(Error::Integrity(
+                "invalid fault machine/controller target".into(),
+            ));
+        }
+        Ok(machine.to_owned())
+    };
+    let bad = || Error::Integrity("control request/response/time correlation mismatch".into());
+    let mut expected = ValidatedControlHistory::default();
+    let mut previous = 0;
+    let mut session = 0;
+    let mut public_id = 0u64;
+    let mut accepted = 0u64;
+    for (i, row) in history.iter().enumerate() {
+        if row["status"] == "rejected" && failed {
+            continue;
+        }
+        accepted += 1;
+        let r = &row["request"];
+        let current_session = match row.get("session_id") {
+            Some(value) => value.as_u64().ok_or_else(bad)?,
+            None => 1,
+        };
+        if current_session == 0 || current_session > u32::MAX as u64 || current_session < session {
+            return Err(bad());
+        }
+        public_id = if current_session == session {
+            public_id + 1
+        } else {
+            1
+        };
+        session = current_session;
+        let cutoff = row["status"] == "cut_off";
+        let response = row["response"].is_object();
+        let metadata = if response { &row["response"] } else { row };
+        let t = metadata["requested_at_ns"].as_u64().ok_or_else(bad)?;
+        let a = metadata["admitted_at_ns"].as_u64().ok_or_else(bad)?;
+        let cut_at = if cutoff {
+            Some(row["cut_off_at_ns"].as_u64().ok_or_else(bad)?)
+        } else {
+            None
+        };
+        if row["relay_id"].as_u64() != Some(accepted)
+            || r["version"] != 1
+            || r["id"].as_u64() != Some(public_id)
+            || public_id > u32::MAX as u64
+            || accepted > u32::MAX as u64
+            || t < previous
+            || t.checked_add(latency) != Some(a)
+            || cut_at.is_some_and(|c| {
+                c < t || c > request.limits.simulated_time_ns || i + 1 != history.len()
+            })
+        {
+            return Err(bad());
+        }
+        let (e, reply) = (
+            metadata["effect_at_ns"].as_u64(),
+            metadata["replied_at_ns"].as_u64(),
+        );
+        if e.is_some_and(|e| e < a)
+            || reply.is_some_and(|r| e.and_then(|e| e.checked_add(latency)) != Some(r))
+        {
+            return Err(bad());
+        }
+        if response {
+            let e = e.ok_or_else(bad)?;
+            let reply = reply.ok_or_else(bad)?;
+            if metadata["version"] != 1
+                || metadata["id"] != r["id"]
+                || e.checked_add(latency) != Some(reply)
+                || (!cutoff && reply >= request.limits.simulated_time_ns)
+                || if cut_at.is_some() {
+                    !row["delivered_at_ns"].is_null()
+                } else {
+                    row["delivered_at_ns"].as_u64() != Some(reply) && !failed
+                }
+            {
+                return Err(bad());
+            }
+            previous = reply;
+            if metadata["ok"] != true {
+                if metadata["ok"] != false || !metadata["error"].is_object() {
+                    return Err(Error::Integrity("invalid control error reply".into()));
+                }
+                continue;
+            }
+        } else {
+            let c = cut_at.ok_or_else(bad)?;
+            let admitted = row["admitted_done"].as_bool().ok_or_else(bad)?;
+            if (admitted && a > c) || (!admitted && a < c) {
+                return Err(bad());
+            }
+            if row["fault_id"].is_null() {
+                if !row["plan"].is_null() && admitted {
+                    return Err(bad());
+                }
+                continue;
+            }
+            if !admitted || row["fault_id"].as_u64() != Some(expected.plans.len() as u64 + 1) {
+                return Err(bad());
+            }
+        }
+        let call: Request = serde_json::from_value(r.clone()).map_err(|_| bad())?;
+        let action = match call.operation {
+            Operation::Stop { target } => Action::Stop {
+                machine: resolve(&target)?,
+            },
+            Operation::Restart { target } => Action::Restart {
+                machine: resolve(&target)?,
+            },
+            Operation::Partition { left, right } => {
+                let handle = if response {
+                    &metadata["result"]["handle"]
+                } else {
+                    &row["plan"]["handle"]
+                };
+                let handle = handle.as_str().ok_or_else(bad)?.to_owned();
+                if handle.is_empty() || (response && e != Some(a)) {
+                    return Err(bad());
+                }
+                Action::Partition {
+                    handle,
+                    left: left.iter().map(&resolve).collect::<Result<_>>()?,
+                    right: right.iter().map(&resolve).collect::<Result<_>>()?,
+                }
+            }
+            Operation::Heal { handle } => {
+                if response && e != Some(a) {
+                    return Err(bad());
+                }
+                Action::Heal { handle }
+            }
+            Operation::Now {} => {
+                if e != Some(a) || metadata["result"]["now_ns"].as_u64() != e {
+                    return Err(bad());
+                }
+                continue;
+            }
+            Operation::Inspect {} => {
+                if e != Some(a) {
+                    return Err(bad());
+                }
+                continue;
+            }
+            Operation::Sleep { duration_ns } => {
+                if a.checked_add(duration_ns) != e {
+                    return Err(bad());
+                }
+                continue;
+            }
+        };
+        let plan = Plan {
+            id: u32::try_from(expected.plans.len() + 1).map_err(|_| bad())?,
+            at_ns: a,
+            deadline_ns: a.checked_add(PROCESS_EFFECT_TIMEOUT_NS).ok_or_else(bad)?,
+            action,
+        };
+        if !response
+            && serde_json::from_value::<Plan>(row["plan"].clone()).map_err(|_| bad())? != plan
+        {
+            return Err(bad());
+        }
+        if response {
+            expected.effects.insert(plan.id, e.ok_or_else(bad)?);
+        }
+        expected.plans.push(plan);
+    }
+    Ok(expected)
 }
 
 /// Parse the engine's structured completion report. Never infer application
@@ -192,13 +436,14 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
         .machines
         .iter()
         .find(|machine| machine.guest_init_error.is_some() || machine.infrastructure_error);
-    let reason = if infrastructure_error.is_some() {
+    let mut reason = if infrastructure_error.is_some() {
         StopReason::Error
     } else {
         match raw.outcome.as_str() {
             "end_machine_exited" => StopReason::Completed,
             "duration" => StopReason::SimulatedTimeLimit,
             "quiescent" => StopReason::Quiescent,
+            "fault_failed" => StopReason::Error,
             other => return Err(Error::Integrity(format!("unknown VMM outcome {other}"))),
         }
     };
@@ -218,14 +463,96 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
                 .collect::<Result<BTreeMap<_, _>>>()?,
         ),
     };
+    if request.control.is_none()
+        && (!raw.control_history.is_empty() || raw.control_latency_ns.is_some_and(|n| n != 0))
+    {
+        return Err(Error::Integrity("unexpected control transcript".into()));
+    }
+    let expected = if request.control.is_some() {
+        validate_control_history(
+            &raw.control_history,
+            raw.control_latency_ns,
+            request,
+            raw.fault_error.is_some(),
+        )?
+    } else {
+        ValidatedControlHistory::default()
+    };
+    let mut faults = Vec::new();
+    let mut fault_failure = raw.fault_error;
+    if raw.faults.len() != expected.plans.len()
+        && !(request.control.is_some() && fault_failure.is_some())
+    {
+        fault_failure = Some("fault request history is incomplete".to_string());
+    }
+    for (i, fault) in raw.faults.iter().enumerate() {
+        let plan = expected
+            .plans
+            .get(i)
+            .or_else(|| {
+                (request.control.is_some() && fault_failure.is_some()).then_some(&fault.request)
+            })
+            .ok_or_else(|| Error::Integrity("unexpected fault acknowledgement".into()))?;
+        if fault.request != *plan
+            || fault.id as usize != i + 1
+            || fault.requested_at_ns != plan.at_ns
+            || fault.action != plan.action.name()
+            || fault.machine.as_deref() != plan.action.machine()
+        {
+            return Err(Error::Integrity(
+                "fault acknowledgement correlation mismatch".into(),
+            ));
+        }
+        match (fault.status.as_str(), fault.applied_at_ns) {
+            ("applied", Some(at))
+                if at >= fault.requested_at_ns
+                    && at <= plan.deadline_ns
+                    && (request.control.is_none()
+                        || expected.effects.get(&fault.id).is_none_or(|e| *e == at)) =>
+            {
+                let service = fault
+                    .machine
+                    .as_ref()
+                    .and_then(|machine| {
+                        request
+                            .prepared
+                            .placement
+                            .iter()
+                            .find(|(_, m)| *m == machine)
+                            .map(|(s, _)| s.clone())
+                    })
+                    .unwrap_or_default();
+                faults.push(crate::execution::FaultEvent {
+                    requested_at_ns: fault.requested_at_ns,
+                    applied_at_ns: at,
+                    service,
+                    action: fault.action.clone(),
+                    detail: format!("id={} {}", fault.id, fault.detail),
+                });
+            }
+            ("requested" | "unrequested", None) if !expected.effects.contains_key(&fault.id) => {}
+            ("failed", None) => {
+                fault_failure = Some(format!(
+                    "fault {} {}: {}",
+                    fault.id, fault.status, fault.detail
+                ))
+            }
+            _ => return Err(Error::Integrity("invalid fault effect status/time".into())),
+        }
+    }
+    if fault_failure.is_some() {
+        reason = StopReason::Error;
+    }
     Ok(ExecutionReport {
         reason,
         workload_exit,
         witness: Some(raw.world_witness),
         full_state,
-        faults: vec![],
-        detail: infrastructure_error
-            .map(|machine| format!("machine {} failed in guest bootstrap or VMM", machine.name)),
+        faults,
+        detail: fault_failure.or_else(|| {
+            infrastructure_error
+                .map(|machine| format!("machine {} failed in guest bootstrap or VMM", machine.name))
+        }),
     })
 }
 

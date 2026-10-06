@@ -11,6 +11,7 @@ publish = false
 [workspace]
 
 [dependencies]
+seedbox-control = { path = "../seedbox-control" }
 kvm-ioctls = "=0.25.0"
 kvm-bindings = { version = "=0.14.1", features = ["fam-wrappers"] }
 libc = "0.2"

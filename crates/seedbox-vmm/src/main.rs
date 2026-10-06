@@ -2,16 +2,21 @@
 //! all executed by one host thread. A seed and the config fully determine the run.
 
 mod boundary;
+mod control;
 mod counter;
 mod devices;
+mod events;
+mod faults;
 mod machine;
+mod network_counters;
 mod rng;
 mod stepper;
 mod undo;
 mod virtio_net;
+mod virtio_console;
 
 use counter::Counter;
-use machine::{BootSpec, Machine, State, Stop, NET_IRQ, NET_MMIO};
+use machine::{BootSpec, Machine, State, Stop, NET_IRQ, NET_MMIO, CHANNEL_IRQ, CHANNEL_MMIO};
 use rng::Rng;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -23,7 +28,7 @@ thread_local! {
 }
 
 enum Payload {
-    Frame(Vec<u8>),
+    Frame { from: usize, bytes: Vec<u8> },
     Serial(Vec<u8>),
     Partition { from: usize, to: usize, on: bool },
 }
@@ -43,12 +48,28 @@ struct World {
     link_rng: BTreeMap<(usize, usize), Rng>,
     link_last: BTreeMap<(usize, usize), u64>,
     partitioned: BTreeMap<(usize, usize), bool>,
+    faults: faults::Faults,
+    control: control::Control,
+    strict_events: Vec<BTreeMap<(u64, u64), Vec<u8>>>,
     macs: Vec<[u8; 6]>,
     dropped: u64,
     delivered: u64,
+    link_counts: BTreeMap<(usize,usize), [u64;3]>,
+    semantic_counts:network_counters::NetworkCounters,
 }
 
 impl World {
+    fn count_link(&mut self,at:u64,from:usize,to:usize,outcome:usize) {
+        self.link_counts.entry((from,to)).or_default()[outcome]+=1;
+        self.semantic_counts.record(at,from,to,outcome);
+    }
+    fn network_snapshot(&self)->Value {self.counter_snapshot(&self.link_counts)}
+    fn counter_snapshot(&self,counts:&BTreeMap<(usize,usize),[u64;3]>)->Value {
+        let snapshot:BTreeMap<_,_>=counts.iter().map(|(&(from,to),counts)|(
+            format!("{}->{}",self.machines[from].name,self.machines[to].name),
+            json!({"delivered":counts[0],"partition_dropped":counts[1],"receiver_dropped":counts[2]})
+        )).collect();json!(snapshot)
+    }
     fn schedule(&mut self, m: usize, t: u64, p: Payload) {
         self.seq += 1;
         self.events[m].insert((t, self.seq), p);
@@ -60,6 +81,13 @@ impl World {
             .next()
             .map(|k| k.0)
             .unwrap_or(u64::MAX)
+            .min(
+                self.strict_events[m]
+                    .keys()
+                    .next()
+                    .map(|k| k.0)
+                    .unwrap_or(u64::MAX),
+            )
     }
 
     /// Earliest virtual time at which machine m can next act.
@@ -79,20 +107,24 @@ impl World {
     }
 
     /// Deliver events due by the end of the machine's early window.
-    fn deliver_due(&mut self, m: usize) {
-        let now = self.machines[m].time + self.early;
-        while let Some((&k, _)) = self.events[m].iter().next() {
-            if k.0 > now {
-                break;
+    fn deliver_due(&mut self, m: usize) -> Result<(),String> {
+        while let Some(bytes) = events::pop_due(&mut self.strict_events[m], self.machines[m].time) {
+            if self.machines[m].channel.is_some() {self.machines[m].deliver_control(&bytes)?;} else {self.machines[m].deliver_serial(&bytes);}
+            if bytes.starts_with(b"SBX_REPLY1 ") {
+                self.control.mark_delivered(self.machines[m].time)?;
             }
-            let p = self.events[m].remove(&k).unwrap();
+        }
+        let now = self.machines[m].time + self.early;
+        while let Some((at,p)) = events::pop_due_at(&mut self.events[m], now) {
             let mach = &mut self.machines[m];
             match p {
-                Payload::Frame(f) => {
-                    if !mach.deliver_frame(&f) {
+                Payload::Frame { from, bytes } => {
+                    if !mach.deliver_frame(&bytes).accepted {
                         self.dropped += 1;
+                        self.count_link(at,from, m, 2);
                     } else {
                         self.delivered += 1;
+                        self.count_link(at,from, m, 0);
                     }
                 }
                 Payload::Serial(b) => mach.deliver_serial(&b),
@@ -101,6 +133,7 @@ impl World {
                 }
             }
         }
+        Ok(())
     }
 
     fn route(&mut self, src: usize, send_time: u64, frame: Vec<u8>) {
@@ -119,8 +152,10 @@ impl World {
                 .collect()
         };
         for dst in targets {
-            if *self.partitioned.get(&(src, dst)).unwrap_or(&false) {
+            if self.faults.blocked(src, dst) || *self.partitioned.get(&(src, dst)).unwrap_or(&false)
+            {
                 self.dropped += 1;
+                self.count_link(send_time,src, dst, 1);
                 continue;
             }
             let jitter = self
@@ -131,7 +166,14 @@ impl World {
             let last = *self.link_last.get(&(src, dst)).unwrap_or(&0);
             let t = (send_time + self.latency + jitter).max(last + 1);
             self.link_last.insert((src, dst), t);
-            self.schedule(dst, t, Payload::Frame(frame.clone()));
+            self.schedule(
+                dst,
+                t,
+                Payload::Frame {
+                    from: src,
+                    bytes: frame.clone(),
+                },
+            );
         }
     }
 }
@@ -178,6 +220,9 @@ fn run() -> Result<Value, String> {
         .map(|m| m["name"].as_str().unwrap().to_string())
         .collect();
     let networked = cfg["network"].is_object();
+    let control_channel=cfg["control_channel"]=="virtio-console-v1";
+    if !cfg["control"].is_null() && !control_channel {return Err("runtime control requires virtio-console-v1 channel".into());}
+    if !cfg["control_channel"].is_null() && !control_channel {return Err("unknown runtime control channel".into());}
 
     let kvm = kvm_ioctls::Kvm::new().map_err(|e| format!("kvm: {e}"))?;
     let mut machines = Vec::new();
@@ -207,6 +252,8 @@ fn run() -> Result<Value, String> {
         if networked {
             cmdline += &format!(" virtio_mmio.device=4K@{NET_MMIO:#x}:{NET_IRQ}");
         }
+        if control_channel {cmdline+=&format!(" virtio_mmio.device=4K@{CHANNEL_MMIO:#x}:{CHANNEL_IRQ}");}
+        if names.get(i).is_some_and(|name|cfg["control"]["machine"].as_str()==Some(name.as_str())) {cmdline+=" seedbox.control=1";}
         if let Some(extra) = mc["cmdline"].as_str() {
             cmdline += " ";
             cmdline += extra;
@@ -218,6 +265,7 @@ fn run() -> Result<Value, String> {
             mem,
             rng_seed,
             mac: networked.then_some(mac),
+            control_channel,
             undo_margin,
         };
         let mut mach = Machine::new(&kvm, &names[i], &spec)?;
@@ -253,6 +301,16 @@ fn run() -> Result<Value, String> {
         }
         machines.push(mach);
     }
+    if !cfg["control"].is_null()
+        && (!cfg["faults"].as_array().is_none_or(Vec::is_empty)
+            || !cfg["scenario"].as_array().is_none_or(Vec::is_empty)
+            || cfg["kill_restart"].is_object())
+    {
+        return Err("runtime control cannot mix with static/legacy scenarios".into());
+    }
+    if !cfg["control"].is_null() && cfg["control"]["machine"] != cfg["end_on_exit"] {
+        return Err("controller must also be the end_on_exit machine".into());
+    }
     let n = machines.len();
     let net = &cfg["network"];
     let mut world = World {
@@ -267,11 +325,26 @@ fn run() -> Result<Value, String> {
         link_rng: BTreeMap::new(),
         link_last: BTreeMap::new(),
         partitioned: BTreeMap::new(),
+        faults: faults::Faults::new(
+            cfg["faults"].as_array().cloned().unwrap_or_default(),
+            names.clone(),
+        )?,
+        control: control::Control::new(
+            &cfg["control"],
+            names.clone(),
+            net["latency_ns"].as_u64().unwrap_or(1_000_000),
+            (net["latency_ns"].as_u64().unwrap_or(1_000_000) / 2)
+                .min(cfg["stop_tolerance_ns"].as_u64().unwrap_or(0)),
+        )?,
+        strict_events: (0..n).map(|_| BTreeMap::new()).collect(),
         macs,
         dropped: 0,
         delivered: 0,
+        link_counts: BTreeMap::new(),
+        semantic_counts:network_counters::NetworkCounters::default(),
         machines,
     };
+    world.faults.require_readiness();
     for a in 0..n {
         for b in 0..n {
             if a != b {
@@ -342,6 +415,55 @@ fn run() -> Result<Value, String> {
             .enumerate()
             .min_by_key(|(i, k)| (**k, *i))
             .unwrap();
+        let control_boundary = world.control.boundary();
+        world.semantic_counts.advance(key.min(control_boundary).min(world.faults.next_boundary()).min(duration));
+        if control_boundary <= key && control_boundary < duration {
+            if world.machines.iter().any(|m| m.time > control_boundary) {
+                return Err("control boundary is in committed machine past".into());
+            }
+            let exited=world.machines.iter().filter(|m|matches!(m.state,State::Exited(_))).map(|m|m.name.clone()).collect::<Vec<_>>();
+            world.control.reject_unavailable(&exited);
+            if world
+                .control
+                .pending
+                .as_ref()
+                .is_some_and(|p| !p.admitted_done && matches!(p.operation,Some(seedbox_control::Operation::Inspect{})))
+            {
+                world.control.pending.as_mut().unwrap().result = json!({"services":cfg["control"]["placement"],"machines":world.machines.iter().enumerate().map(|(i,m)|json!({"name":m.name,"state":if matches!(m.state,State::Exited(_)) {format!("{:?}",m.state)} else {world.faults.process_state(i).to_owned()}})).collect::<Vec<_>>(),"active_handles":world.faults.active_handles(),"network_counters":world.counter_snapshot(world.semantic_counts.counts())});
+            }
+            if let Some(bytes) =
+                world
+                    .control
+                    .apply_boundary(&mut world.faults, control_boundary)?
+            {
+                let target = world.control.controller.unwrap();
+                world.seq += 1;
+                world.strict_events[target].insert((control_boundary, world.seq), bytes);
+            }
+            continue;
+        }
+        let fault_boundary = world.faults.next_boundary();
+        if fault_boundary <= key && fault_boundary < duration {
+            let commands = world.faults.apply_due(fault_boundary);
+            for i in world.faults.take_changed_network() {
+                let snapshot=world.counter_snapshot(world.semantic_counts.counts());world.faults.log[i]["network_counters"]=snapshot;
+            }
+            for (target, command) in commands {
+                if world.machines[target].state == State::Halted {
+                    world.machines[target].wake(fault_boundary);
+                }
+                world.seq += 1;
+                world.strict_events[target].insert((fault_boundary, world.seq), command);
+            }
+            world
+                .control
+                .observe_faults(&world.faults, fault_boundary)?;
+            if world.faults.error.is_some() && world.control.pending.is_none() {
+                outcome = "fault_failed";
+                break;
+            }
+            continue;
+        }
         if key == u64::MAX {
             outcome = "quiescent";
             break;
@@ -353,7 +475,7 @@ fn run() -> Result<Value, String> {
         if world.machines[m].state == State::Halted {
             world.machines[m].wake(key);
         }
-        world.deliver_due(m);
+        if let Err(error)=world.deliver_due(m) {world.control.error=Some(error);outcome="fault_failed";break;}
         let horizon = keys
             .iter()
             .enumerate()
@@ -361,12 +483,53 @@ fn run() -> Result<Value, String> {
             .map(|(_, &k)| k.saturating_add(world.lookahead))
             .min()
             .unwrap_or(u64::MAX);
-        let limit = horizon.min(world.next_event(m)).min(duration);
+        let limit = horizon
+            .min(world.next_event(m))
+            .min(duration)
+            .min(fault_boundary)
+            .min(control_boundary);
         slices += 1;
         // A slice ending at the horizon or an event may stop a little early
         // (at a cheap deterministic point); the run's end is exact.
-        let early = if limit == duration { 0 } else { world.early };
+        let early = if limit == duration
+            || limit == fault_boundary
+            || limit == control_boundary
+            || world.strict_events[m]
+                .keys()
+                .next()
+                .is_some_and(|k| k.0 == limit)
+        {
+            0
+        } else {
+            world.early
+        };
         let stop = world.machines[m].run_until(&mut world.counter, limit, early, &mut frames)?;
+        for (id,at,success) in world.machines[m].fault_effects.drain(..) {
+            if id==0 && success {
+                if let Err(error)=world.faults.management_ready(m,at,world.control.latency) {world.faults.error=Some(error);}
+            } else {world.faults.effect(m,id,at,success);}
+        }
+        for (at, line) in world.machines[m]
+            .control_requests
+            .drain(..)
+            .collect::<Vec<_>>()
+        {
+            let max_time = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
+            if let Err(e) = world.control.request(m, at, &line, max_time) {
+                world.control.log.push(json!({"status":"rejected","machine":world.machines[m].name,"at_ns":at,"frame":String::from_utf8_lossy(&line),"error":e}));
+                world.control.error = Some(e);
+            }
+        }
+        world
+            .control
+            .observe_faults(&world.faults, world.machines[m].time)?;
+        if (world.control.error.is_some()
+            || (world.faults.error.is_some() && world.control.pending.is_none()))
+            && !world.control.has_undelivered_reply()
+        {
+            outcome = "fault_failed";
+            break;
+        }
         let t = world.machines[m].time;
         for f in frames.drain(..) {
             world.route(m, t, f);
@@ -378,7 +541,19 @@ fn run() -> Result<Value, String> {
     }
     let host_seconds = started.elapsed().as_secs_f64();
 
+    let cut_off_at=if outcome=="duration" {duration} else if outcome=="end_machine_exited" {end_on.as_ref().and_then(|name|world.machines.iter().find(|m|&m.name==name)).map(|m|m.time).unwrap_or(0)} else {world.machines.iter().map(|m|m.time).max().unwrap_or(0)};
+    world.control.cut_off(&world.faults,cut_off_at);
+    let fault_error=world.faults.error.clone().or(world.control.error.clone());
     let mut world_witness = Sha256::new();
+    if world.control.controller.is_some() {
+        world_witness.update(serde_json::to_vec(&world.control.log).map_err(|e| e.to_string())?);
+    }
+    if !world.faults.log.is_empty() {
+        world_witness.update(serde_json::to_vec(&world.faults.log).map_err(|e| e.to_string())?);
+        world_witness.update(world.delivered.to_le_bytes());
+        world_witness.update(world.dropped.to_le_bytes());
+        world_witness.update(serde_json::to_vec(&world.network_snapshot()).map_err(|e| e.to_string())?);
+    }
     let mut report = Vec::new();
     for mach in world.machines.iter_mut() {
         if let Some(t) = mach.trace.as_mut() {
@@ -393,8 +568,10 @@ fn run() -> Result<Value, String> {
                 std::fs::write(format!("{out}/{}.pages", mach.name), mach.page_hashes())
                     .map_err(|e| e.to_string())?;
             }
-            let parts: serde_json::Map<String, Value> =
-                parts.into_iter().map(|(k, v)| (k.to_string(), json!(v))).collect();
+            let parts: serde_json::Map<String, Value> = parts
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), json!(v)))
+                .collect();
             (Some(d), Some(parts))
         } else {
             (None, None)
@@ -437,6 +614,7 @@ fn run() -> Result<Value, String> {
             })),
             "kvm_ms_by_exit": {"eintr": s.kvm_ns[0] as f64/1e6, "debug": s.kvm_ns[1] as f64/1e6, "pio": s.kvm_ns[2] as f64/1e6, "mmio": s.kvm_ns[3] as f64/1e6, "hlt": s.kvm_ns[4] as f64/1e6, "window": s.kvm_ns[5] as f64/1e6, "other": s.kvm_ns[6] as f64/1e6},
             "kvm_n_by_exit": s.kvm_n,
+            "control_channel":mach.channel.as_ref().map(|_|json!({"transport":"virtio-console-v1","tx_bytes":mach.control_tx_bytes,"rx_dma_bytes":mach.control_dma_bytes})),
             "net": mach.net.as_ref().map(|n| json!({"tx": n.tx_frames, "rx": n.rx_frames, "rx_dropped": n.rx_dropped})),
         }));
     }
@@ -450,9 +628,13 @@ fn run() -> Result<Value, String> {
         "speed": (sim_ns as f64 / 1e9) / host_seconds,
         "slices": slices,
         "frames_delivered": world.delivered,
-        "frames_dropped": world.dropped,
+        "frames_dropped": world.dropped, "network_counters": world.network_snapshot(),
         "world_witness": format!("{:x}", world_witness.finalize()),
         "kills": kills,
+        "faults": world.faults.log, "fault_error":fault_error,
+        "control_history":world.control.log,"control_latency_ns":world.control.latency,
+        "rejected_fault_effects":world.faults.rejected_effects,"management_readiness":world.faults.readiness,
+        "in_flight_policy":"retain_already_routed; drop_new_sends_while_any_handle_active",
         "machines": report,
     }))
 }

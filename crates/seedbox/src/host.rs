@@ -188,6 +188,7 @@ impl HostLease {
         Self::with_locks(locks, cpus, devices, output)
     }
 
+    #[cfg(target_os = "linux")]
     fn try_acquire_at(
         cpus: &BTreeSet<u32>,
         lock_directory: &Path,

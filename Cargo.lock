@@ -323,6 +323,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "libc",
+ "seedbox-control",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -334,6 +335,14 @@ dependencies = [
  "thiserror",
  "walkdir",
  "xattr",
+]
+
+[[package]]
+name = "seedbox-control"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
