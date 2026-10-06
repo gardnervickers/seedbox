@@ -1,0 +1,43 @@
+1791246795.420207 [ 273] set_robust_list(0x7ffff72dc8e0, 24) = 0 <0.000035>
+1791246795.420306 [  14] rt_sigprocmask(SIG_SETMASK, ~[ILL TRAP ABRT BUS FPE KILL SEGV CONT STOP SYS RTMIN RT_1], NULL, 8) = 0 <0.000014>
+1791246795.420373 [  39] getpid()       = 908250 <0.000014>
+1791246795.420433 [   3] close(8<anon_inode:[eventpoll]>) = 0 <0.000018>
+1791246795.420494 [   3] close(5<pipe:[58351827]>) = 0 <0.000008>
+1791246795.420527 [   3] close(6<TCP:[127.0.0.1:19411]>) = 0 <0.000005>
+1791246795.420553 [   3] close(7<UNIX-STREAM:[58351835,"/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/pgsocket/.s.PGSQL.19411"]>) = 0 <0.000005>
+1791246795.420620 [  39] getpid()       = 908250 <0.000006>
+1791246795.420649 [  39] getpid()       = 908250 <0.000006>
+1791246795.420685 [ 318] getrandom("\x55\x95\xf2\x71\xcb\xeb\xfe\xd6\x79\x62\x2f\x0a\xe6\x4f\x5a\xbf\xf2\x5f\x31\x77\x70\x38\x34\x10\x71\x65\x7a\xd7\xd9\xce\x58\xc8", 32, 0) = 32 <0.000006>
+1791246795.420728 [   3] close(3<signalfd:[URG]>) = 0 <0.000007>
+1791246795.420777 [ 289] signalfd4(-1, [URG], 8, SFD_CLOEXEC|SFD_NONBLOCK) = 3<signalfd:[URG]> <0.000007>
+1791246795.420817 [ 291] epoll_create1(EPOLL_CLOEXEC) = 5<anon_inode:[eventpoll]> <0.000007>
+1791246795.420845 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 3<signalfd:[URG]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8980}) = 0 <0.000007>
+1791246795.420885 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 4<pipe:[58351827]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8998}) = 0 <0.000007>
+1791246795.420918 [ 112] setsid()       = 908250 <0.000022>
+1791246795.420957 [  13] rt_sigaction(SIGQUIT, {sa_handler=0x55555611cc30, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000006>
+1791246795.420983 [  14] rt_sigprocmask(SIG_SETMASK, ~[QUIT ILL TRAP ABRT BUS FPE SEGV CONT SYS RTMIN RT_1], NULL, 8) = 0 <0.000006>
+1791246795.421009 [  13] rt_sigaction(SIGPWR, {sa_handler=0x55555611cc30, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000006>
+1791246795.421033 [ 157] prctl(PR_SET_PDEATHSIG, SIGPWR) = 0 <0.000006>
+1791246795.421056 [  72] fcntl(4<pipe:[58351827]>, F_SETFD, FD_CLOEXEC) = 0 <0.000007>
+1791246795.421099 [  51] getsockname(9<TCP:[127.0.0.1:19411->127.0.0.1:48026]>, {sa_family=AF_INET, sin_port=htons(19411), sin_addr=inet_addr("127.0.0.1")}, [128 => 16]) = 0 <0.000006>
+1791246795.421134 [  54] setsockopt(9<TCP:[127.0.0.1:19411->127.0.0.1:48026]>, SOL_TCP, TCP_NODELAY, [1], 4) = 0 <0.000006>
+1791246795.421162 [  54] setsockopt(9<TCP:[127.0.0.1:19411->127.0.0.1:48026]>, SOL_SOCKET, SO_KEEPALIVE, [1], 4) = 0 <0.000006>
+1791246795.421198 [  72] fcntl(9<TCP:[127.0.0.1:19411->127.0.0.1:48026]>, F_GETFL) = 0x2 (flags O_RDWR) <0.000006>
+1791246795.421224 [  72] fcntl(9<TCP:[127.0.0.1:19411->127.0.0.1:48026]>, F_SETFL, O_RDWR|O_NONBLOCK) = 0 <0.000006>
+1791246795.421249 [  72] fcntl(9<TCP:[127.0.0.1:19411->127.0.0.1:48026]>, F_SETFD, FD_CLOEXEC) = 0 <0.000006>
+1791246795.421276 [ 291] epoll_create1(EPOLL_CLOEXEC) = 6<anon_inode:[eventpoll]> <0.000007>
+1791246795.421303 [ 233] epoll_ctl(6<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 9<TCP:[127.0.0.1:19411->127.0.0.1:48026]>, {events=EPOLLOUT|EPOLLERR|EPOLLHUP, data=0x555556288a20}) = 0 <0.000007>
+1791246795.421334 [ 233] epoll_ctl(6<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 3<signalfd:[URG]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x555556288a38}) = 0 <0.000007>
+1791246795.421375 [ 233] epoll_ctl(6<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 4<pipe:[58351827]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x555556288a50}) = 0 <0.000006>
+1791246795.421406 [  13] rt_sigaction(SIGTERM, {sa_handler=0x55555611cc30, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000006>
+1791246795.421431 [  13] rt_sigaction(SIGALRM, {sa_handler=0x55555611cc30, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000006>
+1791246795.421454 [  14] rt_sigprocmask(SIG_SETMASK, ~[QUIT ILL TRAP ABRT BUS FPE SEGV ALRM TERM CONT SYS RTMIN RT_1], NULL, 8) = 0 <0.000006>
+1791246795.421504 [  38] setitimer(ITIMER_REAL, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=60, tv_usec=0}}, NULL) = 0 <0.000006>
+1791246795.421531 [  45] recvfrom(9<TCP:[127.0.0.1:19411->127.0.0.1:48026]>, "\0\0\0\10\4\322\26/", 8192, 0, NULL, NULL) = 8 <0.000007>
+1791246795.421564 [  44] sendto(9<TCP:[127.0.0.1:19411->127.0.0.1:48026]>, "N", 1, 0, NULL, 0) = 1 <0.000024>
+1791246795.421614 [  45] recvfrom(9<TCP:[127.0.0.1:19411->127.0.0.1:48026]>, "\0\0\0?\0\3\0\0user\0gvickers\0database\0postgres\0application_name\0psql\0\0", 8192, 0, NULL, NULL) = 63 <0.000007>
+1791246795.421680 [   1] write(2</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica.stderr>, "2026-10-05 20:33:15.421 EDT [908250] FATAL:  the database system is starting up\n", 80) = 80 <0.000009>
+1791246795.421718 [  44] sendto(9<TCP:[127.0.0.1:19411->127.0.0.1:48026]>, "E\0\0\0iSFATAL\0VFATAL\0C57P03\0Mthe database system is starting up\0Fbackend_startup.c\0L309\0RBackendInitialize\0\0", 106, 0, NULL, 0) = 106 <0.000016>
+1791246795.421768 [  39] getpid()       = 908250 <0.000006>
+1791246795.422250 [ 231] exit_group(1)  = ?
+1791246795.422551 [ 231] +++ exited with 1 +++

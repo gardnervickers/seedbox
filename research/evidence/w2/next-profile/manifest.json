@@ -1,0 +1,31 @@
+{
+  "qualification": "off-host source preparation + synthetic/C ABI smoke only",
+  "smoke_status": "PASS",
+  "source_files": {
+    "research/kvm-runner/next-profile/check-config.py": "3955fd42dc49abd0c27cbe3708c6c795e395e774501757df90a0e97c4b6755e8",
+    "research/kvm-runner/next-profile/clock-page.h": "da0663a363f15169d155e43ba703c55536cefdc94869eb1a941833adf5dc067e",
+    "research/kvm-runner/next-profile/contract.json": "fe6212207488cb49b88ac119ce79c60676b76fa57719bbff4df486ae44605e6a",
+    "research/kvm-runner/next-profile/irq-kvm.rs": "76993e1bf4afb2e8005cd5f4d8606230280044ca7c64c1ce6952c3ffe09ac0e2",
+    "research/kvm-runner/next-profile/page-smoke.c": "c460832c3ca41d97c1c53ca81fdf3a78f848afd091532270b992c013a8ab3a37",
+    "research/kvm-runner/next-profile/progress.rs": "0d06193fd9d2518cebe15d4a8ee9bebb38a8052f3b53401857e977fa847a11a1",
+    "research/kvm-runner/next-profile/smoke.rs": "fc639c10c672f9eaf23d100c6bf257050e338f155fcf668685854eaaa7752f02",
+    "research/kvm-runner/next-profile/tickless.config": "f557937d9725ba0d2030935ca1dedc187619ce1128a06208f42d65aa24e227ec"
+  },
+  "existing_handoff_unchanged": {
+    "research/kvm-runner/src/main.rs": "ac82e3e111672c97fbe6a4603bd7d717ffe12dd009b0b7fd5caddd019e0dd7cd",
+    "research/kvm-runner/inputs/clean-net-config": "e9d9f30f5be0f6d5044ddf8b716af0fbe51ffeaf2037a0b03abea70a553fcd0d",
+    "research/kvm-runner/inputs/clean-net-kernel.gz": "2603cbc96b52ff8ab81065779674e6fe86601d5c75f8f147852f7a3349964315",
+    "research/kvm-runner/inputs/redis-initramfs.gz": "12460824eeba4a4d78a7b575757b1582c9ab464c106babb68551018785230d29",
+    "research/kvm-runner/inputs/busy-initramfs.gz": "e126e69527cd1ad0402be391a1193194409e70e9f7f3c59c9c4746f47c0463b9",
+    "research/env/flake.nix": "6807306b7647f9b9da81fc7ebe74023ac7e93690afaeae2989cdf7966765ae86"
+  },
+  "workstation_actions": false,
+  "no_env_dependency_change": true,
+  "limits": [
+    "No kernel config resolved/built",
+    "No guest clocksource/vPMC/preemption integration/snapshot executed",
+    "Linux ioctl adapter parsed by rustfmt only, not Linux typechecked",
+    "No native calibration selected",
+    "Host pin checker smoke only, not AMD validation"
+  ]
+}

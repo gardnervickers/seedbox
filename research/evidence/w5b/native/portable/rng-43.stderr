@@ -1,0 +1,6 @@
+metadata host_tid=961194 kvm_api=12 vendor=AuthenticAMD portable_rewrite=false synthetic_ud=true
+RAW_UNMEDIATED_OUTPUTS [18446744073709541826, 1195977093, 8675843879901777458]
+NEGATIVE_CONTROL_REJECTED hidden_cpuid_raw_rng_bypass: missing_rng_traps count=0 mediated=0
+RAW_UNMEDIATED_OUTPUTS [18446744073709514439, 2848880360, 13699100040008901131]
+NEGATIVE_CONTROL_REJECTED exposed_features_allow_raw_rng: missing_rng_traps count=0 mediated=0
+NEGATIVE_CONTROL_REJECTED ordinary_UD2: ordinary_ud2_rejected cpl=3

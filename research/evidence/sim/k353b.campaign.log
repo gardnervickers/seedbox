@@ -1,0 +1,24 @@
+seed=1000 host_s=794 RESULT pass acked=59016 failed=126 rev=59063 hash=25b3a9b8
+seed=1001 host_s=811 RESULT pass acked=62656 failed=109 rev=62696 hash=7959c7c1
+seed=1002 host_s=735 RESULT pass acked=51910 failed=135 rev=51951 hash=d61c716b
+seed=1003 host_s=758 RESULT pass acked=56269 failed=124 rev=56305 hash=f4bb5a1c
+seed=1004 host_s=717 RESULT pass acked=55938 failed=133 rev=55983 hash=9f4c3457
+seed=1005 host_s=680 RESULT pass acked=49855 failed=137 rev=49889 hash=f293f3f9
+seed=1006 host_s=699 RESULT pass acked=52235 failed=139 rev=52278 hash=7085aa36
+seed=1007 host_s=699 RESULT pass acked=52954 failed=133 rev=52992 hash=3b5d305c
+seed=1008 host_s=766 RESULT pass acked=49722 failed=141 rev=49757 hash=9a853734
+seed=1009 host_s= 
+seed=1010 host_s=791 RESULT pass acked=60131 failed=122 rev=60171 hash=fce50bb2
+seed=1011 host_s=710 RESULT pass acked=50632 failed=137 rev=50669 hash=7f7e69df
+seed=1012 host_s=881 RESULT pass acked=60915 failed=128 rev=60961 hash=45dac1e1
+seed=1013 host_s=756 RESULT pass acked=56736 failed=129 rev=56776 hash=97df6fcd
+seed=1014 host_s=920 RESULT pass acked=60551 failed=133 rev=60603 hash=c09a8570
+seed=1015 host_s=791 RESULT pass acked=57298 failed=129 rev=57341 hash=73cca7d
+seed=1016 host_s=783 RESULT pass acked=56015 failed=131 rev=56057 hash=8351ba64
+seed=1017 host_s=672 RESULT pass acked=46275 failed=153 rev=46304 hash=e89331dc
+seed=1018 host_s=911 RESULT pass acked=64328 failed=115 rev=64378 hash=f3f1efb0
+seed=1019 host_s=774 RESULT pass acked=54057 failed=130 rev=54097 hash=9a854c0d
+seed=1020 host_s=772 RESULT pass acked=57089 failed=129 rev=57130 hash=dcddf8cb
+seed=1021 host_s=1937 (retry) RESULT pass acked=59371 failed=126 rev=59418 hash=a531c489
+seed=1022 host_s= (retry) 
+seed=1023 host_s=979 RESULT pass acked=67707 failed=114 rev=67760 hash=34bdc5c6

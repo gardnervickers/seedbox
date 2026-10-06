@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "profile_id": "redis-jedis-v1-100ops",
+  "profile_id_rate_unit": "100ops means 100 offered workload operations per second; guest kernel baseline remains HZ250",
+  "qualification": "proposed fixed performance profile; no AMD or simulator execution yet",
+  "seed": 42,
+  "machines": [
+    {"id": 1, "role": "redis-primary", "vcpus": 1, "ram_mib": 512},
+    {"id": 2, "role": "redis-replica", "vcpus": 1, "ram_mib": 512},
+    {"id": 3, "role": "java-jedis-client", "vcpus": 1, "ram_mib": 1024}
+  ],
+  "linux": {
+    "architecture": "x86_64",
+    "logical_cpus_per_machine": 1,
+    "CONFIG_NO_HZ_IDLE": true,
+    "CONFIG_HZ": 250,
+    "kernel_config_pin": "W2 supplies exact Linux source/image/config; NO_HZ_IDLE mandatory; declared initial HZ250 cannot change silently",
+    "clock_policy": "qualified branch progress converted by measured native ns/branch; page/PMC mechanism declared byW2; no1us-per-clock-read charge",
+    "execution_profile": "precise-preemption primary subject toW5a; cooperative fallback would be a separately admitted profile",
+    "entropy_and_instruction_admission": "W2/W5b qualification required for Linux/JVM/JIT paths; fixture preparation admits none"
+  },
+  "workload": {
+    "duration_ns": 60000000000,
+    "rate_per_second": 100,
+    "concurrency": 1,
+    "operations": 6000,
+    "write_every_n": 5,
+    "key_count": 1024,
+    "payload_bytes": 256,
+    "key_selection": "unsigned remainder of SplitMix64 finalizer(seed XOR operation_index); no host RNG",
+    "offer_policy": "operation i offered at epoch + i*10000000ns; queued if previous operation still running; record lag, never silently drop offered work",
+    "timeout_ms": 1000,
+    "warmup_operations": 10000,
+    "warmup_policy": "same JVM and connections; exercise GET, SET, payload construction, SHA256 and timer waits; restore known dataset then WAIT before ready",
+    "reads": "GET from primary; exact bytes must equal the client model after acknowledged SETs",
+    "writes": "SET on primary; OK advances model; any ambiguous/unacknowledged operation fails this performance profile, no retry",
+    "admin_commands": "BGREWRITEAOF once at or after 40s; counted separately from 6000 GET/SET operations",
+    "replica_checks": "after 60s, SET marker and WAIT1 on same connection; compare all 1024 keys against acknowledged client model",
+    "recovery_drain_limit_ns": 5000000000,
+    "timing_violation": "any individual command running over timeout or total active phase over61s fails; lag and actual drain still reported"
+  },
+  "faults": [
+    {"at_ns": 25000000000, "kind": "partition", "selector": "all primary<->replica Ethernet frames in both directions", "existing_connections": "retain TCP state, drop frames; do not reset connections"},
+    {"at_ns": 35000000000, "kind": "heal", "selector": "same partition handle", "client_primary_link": "never selected by this fault"}
+  ],
+  "network": {
+    "minimum_one_way_latency_ns": 1000000,
+    "base_one_way_latency_ns": 1000000,
+    "jitter_ns": 0,
+    "bandwidth_bytes_per_second": 125000000,
+    "mtu": 1500,
+    "queue_capacity_bytes_per_link": 1048576,
+    "ordinary_loss": 0,
+    "schedule_policy": "exact scheduled device arrival under W1 safe horizon; <=1000000ns busy slices are necessary but not sufficient. End slices at or before earlier known affecting deadlines, every producer's proven earliest unpublished effect plus guaranteed minimum path latency, controller/shared-device zero-lookahead barriers, and equal-time closure. Record legal guest IRQ acceptance and handler delay separately; advancing past an unprocessed due world effect is a scheduling error.",
+    "safe_horizon_owner": "W1 computes and validates causal progress; this fixture supplies latency and workload assumptions only",
+    "qualification": "proposed fixture assumptions; not selected silently to meet10x; any change requires a new profile_id"
+  },
+  "disk": {
+    "capacity_mib_per_redis": 64,
+    "request_base_latency_ns": 200000,
+    "flush_latency_ns": 1000000,
+    "bandwidth_bytes_per_second": 104857600,
+    "volatile_cache": true,
+    "flush_contract": "prior completed writes durable when flush completes; world owns completion order",
+    "redis_appendonly": true,
+    "redis_appendfsync": "everysec",
+    "redis_auto_aof_rewrite_percentage": 0,
+    "redis_hz": 10,
+    "redis_dynamic_hz": false,
+    "power_failure": "not in this performance scenario; everysec acknowledgments are not individually durable promises"
+  },
+  "jvm": {
+    "jdk_major": 21,
+    "linux_measurement_jdk_pin": "OpenJDK21.0.12.1+1 from sharedlocked nixpkgs; final guest qualification required",
+    "darwin_preparation_jdk": "Zulu21.0.11+10-LTS; distinct local source/mock preparation runtime",
+    "jedis_version": "5.2.0",
+    "flags": ["-Xms128m", "-Xmx128m", "-XX:+UseG1GC", "-XX:ActiveProcessorCount=1", "-XX:CICompilerCount=2", "-XX:+TieredCompilation"],
+    "pinning": "exact JDK/Redis store closures from shared Nix lock, classpath artifact lock, compiled classes, guest kernel/config, host kernel/CPU/microcode and snapshot manifest required at measurement",
+    "admission": "JIT, GC and JVM instructions/entropy/clocks remain subject to the guest profile; do not claim admission from local smoke"
+  },
+  "snapshot": {
+    "point": "client ready, blocked waiting for START; both Redis datasets reconciled; no client workload outstanding",
+    "requires": ["all3VM CPU/KVM state+RAM including warmed JVM/JIT", "world events/timers/devices/RNG+fault state", "socket state and control continuation", "volatile and durable disk state+filesystem caches"],
+    "boot_and_warmup": "report cold boot, JVM warmup, dataset reconcile, capture and restore separately",
+    "qualification": "post-warmup manifest describes pinned input; no snapshot/restore correctness claimed by this fixture"
+  },
+  "measurement": {
+    "normal_witness": "coarse semantic checkpoints every1simulated second plus start/fault/heal/end; full causal-state capture at start/end; always run application checks",
+    "check_witness": "W3 boundary chain and dirty RAM+host DMA writes at every semantic boundary; full state at start/end and every1simulated second; capture coverage declared",
+    "speed_target": 10,
+    "busy_slowdown_max": 10,
+    "host_cost_per_wakeup_max_ns": 50000,
+    "natural_exit_median_max_ns": 10000,
+    "precise_stop_median_max_ns": 100000,
+    "denominator": "restore START release through client recovery/check completion, including workload/faults/checks/controller/witness and actual drain; excludes boot/warmup/capture",
+    "also_report": "60s-only ratio, fixed60s/end-to-end-host ratio, restore cost, drain seconds, phase and mode breakdown; never hide slow recovery with extra simulated duration",
+    "calibration": "native CPU execution ns per retired conditional branch for pinned workload/profile, all benchmark threads and CPL0+3; qualified PMU profile from W5a; never elapsed idle-wall ns per branch",
+    "deciding_qualification": "actual guest benchmark,5fresh host processes and independent review; off-host smoke uses no acceptance gate"
+  }
+}

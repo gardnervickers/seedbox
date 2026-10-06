@@ -1,0 +1,594 @@
+1791246790.765643 [  59] execve("/nix/store/qfi79ilhfrcccnciij09irbp5bh3skbc-etcd-3.6.14/bin/etcd", ["etcd", "--name", "w4", "--data-dir", "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data", "--listen-client-urls", "http://127.0.0.1:19390", "--advertise-client-urls", "http://127.0.0.1:19390", "--listen-peer-urls", "http://127.0.0.1:19391", "--initial-advertise-peer-urls", "http://127.0.0.1:19391", "--initial-cluster", "w4=http://127.0.0.1:19391", "--initial-cluster-token", "seedbox-w4-seed-42", "--snapshot-count", "20", "--log-level", "warn"], ["PATH=/nix/store/hr3npzrq9l029s5hf948by203m6qz3lw-rustc-wrapper-1.98.1/bin:/nix/store/gmgfpzc0w2pgby0lmq9r88m39albiyfw-cargo-1.98.1/bin:/nix/store/9a9y1zij83al5wqvdhx7lrs9b8cqv688-rustfmt-1.98.1/bin:/nix/store/6gm66glch86pxdpmbrn6qrg9m1jyj2vm-clippy-1.98.1/"..., "HOME=/home/gvickers", "LANG=en_US.UTF-8", "TMPDIR=/tmp/nix-shell.IehQor", "GOMAXPROCS=1"]) = 0 <0.000119>
+1791246790.765847 [ 158] arch_prctl(ARCH_SET_FS, 0x1dc95e8) = 0 <0.000007>
+1791246790.765906 [ 204] sched_getaffinity(0, 8192, [0]) = 8 <0.000006>
+1791246790.765936 [ 257] openat(AT_FDCWD</home/gvickers>, "/sys/kernel/mm/transparent_hugepage/hpage_pmd_size", O_RDONLY) = 3</sys/kernel/mm/transparent_hugepage/hpage_pmd_size> <0.000017>
+1791246790.766029 [   0] read(3</sys/kernel/mm/transparent_hugepage/hpage_pmd_size>, "2097152\n", 20) = 8 <0.000009>
+1791246790.766072 [   3] close(3</sys/kernel/mm/transparent_hugepage/hpage_pmd_size>) = 0 <0.000009>
+1791246790.766178 [   9] mmap(NULL, 262144, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7ffff7fb7000 <0.000009>
+1791246790.766208 [ 157] prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, 0x7ffff7fb7000, 262144, " Go: immortal metadata") = -1 EINVAL (Invalid argument) <0.000007>
+1791246790.766275 [   9] mmap(NULL, 131072, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7ffff7f97000 <0.000008>
+1791246790.766304 [   9] mmap(NULL, 1048576, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7ffff7e97000 <0.000007>
+1791246790.766329 [   9] mmap(NULL, 8388608, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7ffff7600000 <0.000007>
+1791246790.766354 [   9] mmap(NULL, 67108864, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7ffff3600000 <0.000007>
+1791246790.766378 [   9] mmap(NULL, 536870912, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7fffd3600000 <0.000007>
+1791246790.766404 [   9] mmap(NULL, 536870912, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7fffb3600000 <0.000007>
+1791246790.766443 [   9] mmap(0x221f8c000000, 67108864, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x221f8c000000 <0.000010>
+1791246790.766471 [   9] mmap(NULL, 33554432, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7fffb1600000 <0.000008>
+1791246790.766497 [  28] madvise(0x7fffb1600000, 33554432, MADV_NOHUGEPAGE) = 0 <0.000008>
+1791246790.766527 [   9] mmap(NULL, 69648, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7ffff7e85000 <0.000008>
+1791246790.766561 [   9] mmap(0x221f8c400000, 4194304, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x221f8c400000 <0.000010>
+1791246790.766593 [   9] mmap(0x7ffff7f97000, 131072, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x7ffff7f97000 <0.000010>
+1791246790.766621 [   9] mmap(0x7ffff7f39000, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x7ffff7f39000 <0.000010>
+1791246790.766649 [   9] mmap(0x7ffff7b10000, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x7ffff7b10000 <0.000009>
+1791246790.766676 [   9] mmap(0x7ffff5e87000, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x7ffff5e87000 <0.000009>
+1791246790.766703 [   9] mmap(0x7fffe7a3f000, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x7fffe7a3f000 <0.000016>
+1791246790.766737 [   9] mmap(0x7fffc7a3f000, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x7fffc7a3f000 <0.000010>
+1791246790.766767 [   9] mmap(NULL, 1048576, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7fffb1500000 <0.000008>
+1791246790.766798 [  28] madvise(0x7fffb1500000, 1048576, MADV_NOHUGEPAGE) = 0 <0.000008>
+1791246790.766855 [   9] mmap(NULL, 65536, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7ffff7e75000 <0.000008>
+1791246790.766891 [   9] mmap(NULL, 65536, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7ffff7e65000 <0.000008>
+1791246790.767274 [  14] rt_sigprocmask(SIG_SETMASK, NULL, [], 8) = 0 <0.000007>
+1791246790.767331 [  72] fcntl(0<pipe:[58310944]>, F_GETFD) = 0 <0.000007>
+1791246790.767364 [  72] fcntl(1</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-recovered.stdout>, F_GETFD) = 0 <0.000007>
+1791246790.767396 [  72] fcntl(2</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-recovered.stderr>, F_GETFD) = 0 <0.000007>
+1791246790.767439 [ 257] openat(AT_FDCWD</home/gvickers>, "/proc/self/cgroup", O_RDONLY|O_CLOEXEC) = 3</proc/907980/cgroup> <0.000013>
+1791246790.767483 [   0] read(3</proc/907980/cgroup>, "0::/user.slice/user-1000.slice/session-774.scope\n", 65536) = 49 <0.000013>
+1791246790.767524 [   0] read(3</proc/907980/cgroup>, "", 65536) = 0 <0.000007>
+1791246790.767554 [   3] close(3</proc/907980/cgroup>) = 0 <0.000008>
+1791246790.767583 [ 257] openat(AT_FDCWD</home/gvickers>, "/proc/self/mountinfo", O_RDONLY|O_CLOEXEC) = 3</proc/907980/mountinfo> <0.000012>
+1791246790.767622 [   0] read(3</proc/907980/mountinfo>, "36 1 259:6 / / rw,relatime shared:1 - ext4 /dev/nvme1n1p2 rw\n69 36 0:26 / /run rw,nosuid,nodev shared:2 - tmpfs tmpfs rw,size=16436868k,nr_inodes=819200,mode=755\n37 36 0:6 / /dev rw,nosuid shared:5 - devtmpfs devtmpfs rw,size=3287376k,nr_inodes=8199681,mod"..., 65536) = 2870 <0.000071>
+1791246790.767720 [   3] close(3</proc/907980/mountinfo>) = 0 <0.000008>
+1791246790.767751 [ 257] openat(AT_FDCWD</home/gvickers>, "/sys/fs/cgroup/user.slice/user-1000.slice/session-774.scope/cpu.max", O_RDONLY|O_CLOEXEC) = 3</sys/fs/cgroup/user.slice/user-1000.slice/session-774.scope/cpu.max> <0.000016>
+1791246790.767824 [ 131] sigaltstack(NULL, {ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0 <0.000007>
+1791246790.767856 [ 131] sigaltstack({ss_sp=0x221f8c4de000, ss_flags=0, ss_size=32768}, NULL) = 0 <0.000006>
+1791246790.767882 [  14] rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0 <0.000006>
+1791246790.767907 [ 186] gettid()       = 907980 <0.000006>
+1791246790.767931 [  13] rt_sigaction(SIGHUP, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.767957 [  13] rt_sigaction(SIGHUP, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000007>
+1791246790.767984 [  13] rt_sigaction(SIGINT, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.768009 [  13] rt_sigaction(SIGINT, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.768035 [  13] rt_sigaction(SIGQUIT, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.768060 [  13] rt_sigaction(SIGQUIT, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000008>
+1791246790.768100 [  13] rt_sigaction(SIGILL, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.768126 [  13] rt_sigaction(SIGILL, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.768152 [  13] rt_sigaction(SIGTRAP, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.768178 [  13] rt_sigaction(SIGTRAP, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.768203 [  13] rt_sigaction(SIGABRT, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.768228 [  13] rt_sigaction(SIGABRT, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.768257 [  13] rt_sigaction(SIGBUS, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.768283 [  13] rt_sigaction(SIGBUS, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.768308 [  13] rt_sigaction(SIGFPE, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.768333 [  13] rt_sigaction(SIGFPE, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.768359 [  13] rt_sigaction(SIGUSR1, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.768383 [  13] rt_sigaction(SIGUSR1, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000007>
+1791246790.768409 [  13] rt_sigaction(SIGSEGV, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.768434 [  13] rt_sigaction(SIGSEGV, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.768460 [  13] rt_sigaction(SIGUSR2, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.768484 [  13] rt_sigaction(SIGUSR2, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.768509 [  13] rt_sigaction(SIGPIPE, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.768535 [  13] rt_sigaction(SIGPIPE, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.768560 [  13] rt_sigaction(SIGALRM, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.768585 [  13] rt_sigaction(SIGALRM, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.768610 [  13] rt_sigaction(SIGTERM, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.768636 [  13] rt_sigaction(SIGTERM, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.768661 [  13] rt_sigaction(SIGSTKFLT, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.768686 [  13] rt_sigaction(SIGSTKFLT, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.768711 [  13] rt_sigaction(SIGCHLD, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.768736 [  13] rt_sigaction(SIGCHLD, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.768761 [  13] rt_sigaction(SIGURG, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.768787 [  13] rt_sigaction(SIGURG, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000007>
+1791246790.768816 [  13] rt_sigaction(SIGXCPU, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000007>
+1791246790.768843 [  13] rt_sigaction(SIGXCPU, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.768869 [  13] rt_sigaction(SIGXFSZ, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.768894 [  13] rt_sigaction(SIGXFSZ, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.768920 [  13] rt_sigaction(SIGVTALRM, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.768948 [  13] rt_sigaction(SIGVTALRM, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000007>
+1791246790.768974 [  13] rt_sigaction(SIGPROF, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.768999 [  13] rt_sigaction(SIGPROF, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.769024 [  13] rt_sigaction(SIGWINCH, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.769050 [  13] rt_sigaction(SIGWINCH, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000076>
+1791246790.769147 [  13] rt_sigaction(SIGIO, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.769174 [  13] rt_sigaction(SIGIO, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.769199 [  13] rt_sigaction(SIGPWR, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.769223 [  13] rt_sigaction(SIGPWR, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.769247 [  13] rt_sigaction(SIGSYS, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.769271 [  13] rt_sigaction(SIGSYS, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.769296 [  13] rt_sigaction(SIGRTMIN, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.769320 [  13] rt_sigaction(SIGRT_1, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.769344 [  13] rt_sigaction(SIGRT_1, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.769369 [  13] rt_sigaction(SIGRT_2, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.769393 [  13] rt_sigaction(SIGRT_3, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.769417 [  13] rt_sigaction(SIGRT_3, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.769442 [  13] rt_sigaction(SIGRT_4, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.769466 [  13] rt_sigaction(SIGRT_4, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.769490 [  13] rt_sigaction(SIGRT_5, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.769514 [  13] rt_sigaction(SIGRT_5, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.769539 [  13] rt_sigaction(SIGRT_6, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.769563 [  13] rt_sigaction(SIGRT_6, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000008>
+1791246790.769592 [  13] rt_sigaction(SIGRT_7, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.769617 [  13] rt_sigaction(SIGRT_7, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.769642 [  13] rt_sigaction(SIGRT_8, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.769667 [  13] rt_sigaction(SIGRT_8, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.769692 [  13] rt_sigaction(SIGRT_9, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.769719 [  13] rt_sigaction(SIGRT_9, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.769744 [  13] rt_sigaction(SIGRT_10, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.769768 [  13] rt_sigaction(SIGRT_10, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.769793 [  13] rt_sigaction(SIGRT_11, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.769817 [  13] rt_sigaction(SIGRT_11, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.769841 [  13] rt_sigaction(SIGRT_12, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.769865 [  13] rt_sigaction(SIGRT_12, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.769890 [  13] rt_sigaction(SIGRT_13, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.769914 [  13] rt_sigaction(SIGRT_13, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.769939 [  13] rt_sigaction(SIGRT_14, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000005>
+1791246790.769963 [  13] rt_sigaction(SIGRT_14, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.769987 [  13] rt_sigaction(SIGRT_15, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.770012 [  13] rt_sigaction(SIGRT_15, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.770036 [  13] rt_sigaction(SIGRT_16, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000005>
+1791246790.770060 [  13] rt_sigaction(SIGRT_16, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.770091 [  13] rt_sigaction(SIGRT_17, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.770116 [  13] rt_sigaction(SIGRT_17, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000007>
+1791246790.770145 [  13] rt_sigaction(SIGRT_18, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.770171 [  13] rt_sigaction(SIGRT_18, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.770195 [  13] rt_sigaction(SIGRT_19, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.770219 [  13] rt_sigaction(SIGRT_19, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.770244 [  13] rt_sigaction(SIGRT_20, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.770268 [  13] rt_sigaction(SIGRT_20, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.770292 [  13] rt_sigaction(SIGRT_21, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.770316 [  13] rt_sigaction(SIGRT_21, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.770341 [  13] rt_sigaction(SIGRT_22, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.770365 [  13] rt_sigaction(SIGRT_22, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.770393 [  13] rt_sigaction(SIGRT_23, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.770417 [  13] rt_sigaction(SIGRT_23, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.770442 [  13] rt_sigaction(SIGRT_24, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.770466 [  13] rt_sigaction(SIGRT_24, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.770491 [  13] rt_sigaction(SIGRT_25, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.770514 [  13] rt_sigaction(SIGRT_25, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.770539 [  13] rt_sigaction(SIGRT_26, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.770563 [  13] rt_sigaction(SIGRT_26, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.770588 [  13] rt_sigaction(SIGRT_27, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.770612 [  13] rt_sigaction(SIGRT_27, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.770636 [  13] rt_sigaction(SIGRT_28, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.770660 [  13] rt_sigaction(SIGRT_28, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.770685 [  13] rt_sigaction(SIGRT_29, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.770709 [  13] rt_sigaction(SIGRT_29, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.770734 [  13] rt_sigaction(SIGRT_30, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.770758 [  13] rt_sigaction(SIGRT_30, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.770782 [  13] rt_sigaction(SIGRT_31, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000006>
+1791246790.770806 [  13] rt_sigaction(SIGRT_31, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.770831 [  13] rt_sigaction(SIGRT_32, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0 <0.000008>
+1791246790.770859 [  13] rt_sigaction(SIGRT_32, {sa_handler=0x496d60, sa_mask=~[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x496ea0}, NULL, 8) = 0 <0.000006>
+1791246790.770893 [  14] rt_sigprocmask(SIG_SETMASK, ~[], [], 8) = 0 <0.000006>
+1791246790.770920 [  56] clone(child_stack=0x221f8c52a000, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS, tls=0x221f8c53a090) = 907981 <0.000054>
+1791246790.771014 [  14] rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0 <0.000018>
+1791246790.771106 [   9] mmap(NULL, 262144, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7ffff7e25000 <0.000037>
+1791246790.771174 [  14] rt_sigprocmask(SIG_SETMASK, ~[], [], 8) = 0 <0.000017>
+1791246790.771217 [  56] clone(child_stack=0x221f8c55c000, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS, tls=0x221f8c53a890) = 907982 <0.000053>
+1791246790.771300 [  14] rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0 <0.000041>
+1791246790.771365 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000150>
+1791246790.771537 [  14] rt_sigprocmask(SIG_SETMASK, ~[], [], 8) = 0 <0.000024>
+1791246790.771603 [  56] clone(child_stack=0x221f8c558000, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS, tls=0x221f8c53b090) = 907983 <0.000053>
+1791246790.771701 [  14] rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0 <0.000022>
+1791246790.771769 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000118>
+1791246790.772067 [ 302] prlimit64(0, RLIMIT_NOFILE, NULL, {rlim_cur=512*1024, rlim_max=512*1024}) = 0 <0.000050>
+1791246790.772190 [  72] fcntl(0<pipe:[58310944]>, F_GETFL) = 0 (flags O_RDONLY) <0.000029>
+1791246790.772249 [  72] fcntl(1</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-recovered.stdout>, F_GETFL) = 0x8001 (flags O_WRONLY|O_LARGEFILE) <0.000006>
+1791246790.772278 [  72] fcntl(2</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-recovered.stderr>, F_GETFL) = 0x8001 (flags O_WRONLY|O_LARGEFILE) <0.000006>
+1791246790.772552 [ 267] readlinkat(AT_FDCWD</home/gvickers>, "/proc/self/exe", "/nix/store/qp5zr8rr3qgf3i7lqkq8kyvfc6xba953-etcdserver-3.6.14/bin/etcd", 128) = 70 <0.000011>
+1791246790.772596 [ 257] openat(AT_FDCWD</home/gvickers>, "/nix/store/qp5zr8rr3qgf3i7lqkq8kyvfc6xba953-etcdserver-3.6.14/bin/etcd", O_RDONLY|O_CLOEXEC) = 4</nix/store/qp5zr8rr3qgf3i7lqkq8kyvfc6xba953-etcdserver-3.6.14/bin/etcd> <0.000029>
+1791246790.772655 [  72] fcntl(4</nix/store/qp5zr8rr3qgf3i7lqkq8kyvfc6xba953-etcdserver-3.6.14/bin/etcd>, F_GETFL) = 0x8000 (flags O_RDONLY|O_LARGEFILE) <0.000005>
+1791246790.772681 [  72] fcntl(4</nix/store/qp5zr8rr3qgf3i7lqkq8kyvfc6xba953-etcdserver-3.6.14/bin/etcd>, F_SETFL, O_RDONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000005>
+1791246790.772718 [ 291] epoll_create1(EPOLL_CLOEXEC) = 5<anon_inode:[eventpoll]> <0.000020>
+1791246790.772761 [ 290] eventfd2(0, EFD_CLOEXEC|EFD_NONBLOCK) = 6<{eventfd-count=0, eventfd-id=266, eventfd-semaphore=0}> <0.000007>
+1791246790.772807 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 6<{eventfd-count=0, eventfd-id=266, eventfd-semaphore=0}>, {events=EPOLLIN, data=0x1deab50}) = 0 <0.000014>
+1791246790.772880 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 4</nix/store/qp5zr8rr3qgf3i7lqkq8kyvfc6xba953-etcdserver-3.6.14/bin/etcd>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15e000001}) = -1 EPERM (Operation not permitted) <0.000006>
+1791246790.772913 [  72] fcntl(4</nix/store/qp5zr8rr3qgf3i7lqkq8kyvfc6xba953-etcdserver-3.6.14/bin/etcd>, F_GETFL) = 0x8800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE) <0.000006>
+1791246790.772940 [  72] fcntl(4</nix/store/qp5zr8rr3qgf3i7lqkq8kyvfc6xba953-etcdserver-3.6.14/bin/etcd>, F_SETFL, O_RDONLY|O_LARGEFILE) = 0 <0.000012>
+1791246790.772991 [   5] fstat(4</nix/store/qp5zr8rr3qgf3i7lqkq8kyvfc6xba953-etcdserver-3.6.14/bin/etcd>, {st_dev=makedev(0x103, 0x6), st_ino=59538668, st_mode=S_IFREG|0555, st_nlink=1, st_uid=0, st_gid=0, st_blksize=4096, st_blocks=59632, st_size=30529984, st_atime=1791246483 /* 2026-10-05T20:28:03-0400 */, st_atime_nsec=0, st_mtime=1 /* 1969-12-31T19:00:01-0500 */, st_mtime_nsec=0, st_ctime=1791246486 /* 2026-10-05T20:28:06.139565728-0400 */, st_ctime_nsec=139565728}) = 0 <0.000006>
+1791246790.773033 [  17] pread64(4</nix/store/qp5zr8rr3qgf3i7lqkq8kyvfc6xba953-etcdserver-3.6.14/bin/etcd>, "\177ELF\2\1\1\0\0\0\0\0\0\0\0\0\2\0>\0\1\0\0\0\240hI\0\0\0\0\0@\0\0\0\0\0\0\0\300\325\321\1\0\0\0\0\0\0\0\0@\08\0\5\0@\0\20\0\17\0", 64, 0) = 64 <0.000006>
+1791246790.773096 [  17] pread64(4</nix/store/qp5zr8rr3qgf3i7lqkq8kyvfc6xba953-etcdserver-3.6.14/bin/etcd>, "\17\37\204\0\0\0\0\0L9\311\17\206\325\r\0\0J\215\f\v<\4\17\224\1\270\1\0\0\0\351R\t\0\0I\213U\0H\2132C\213D\2\4\377\326H\213\264$\310\0\0\0L\213\204$\220\0", 64, 3816248) = 64 <0.000006>
+1791246790.773125 [  17] pread64(4</nix/store/qp5zr8rr3qgf3i7lqkq8kyvfc6xba953-etcdserver-3.6.14/bin/etcd>, "\213|$HH\211\310\35311\300H\203\3040]\303L)\321H\211\3101\3331\311H\203\3040]\303I\211\360A\203\340\177I\201\310\200\0\0\0D\210\4\17H\301\356\7H\377\301H\201\376\200\0\0", 64, 7632496) = 64 <0.000006>
+1791246790.773154 [  17] pread64(4</nix/store/qp5zr8rr3qgf3i7lqkq8kyvfc6xba953-etcdserver-3.6.14/bin/etcd>, "H\215\25\361\264\35\0H\211\224$0\23\0\0H\211\204$8\23\0\0H\215\224$H\f\0\0D\17\0201D\17\0212D\17\20q\20D\17\21r\20D\17\20q D\17\21r D\17\20q0", 64, 11448744) = 64 <0.000013>
+1791246790.773210 [  17] pread64(4</nix/store/qp5zr8rr3qgf3i7lqkq8kyvfc6xba953-etcdserver-3.6.14/bin/etcd>, "\273\360\374\0\0\0\0\0\0\305\6\1\0\0\0\0\310\0\0\0\0\0\0\0c\375\374\0\0\0\0\0\0\305\6\1\0\0\0\0\320\0\0\0\0\0\0\0\10H\374\0\0\0\0\0\0\305\6\1\0\0\0\0", 64, 15264992) = 64 <0.000006>
+1791246790.773239 [  17] pread64(4</nix/store/qp5zr8rr3qgf3i7lqkq8kyvfc6xba953-etcdserver-3.6.14/bin/etcd>, "?\2\26\27\fF\5C\5$&\20\22\17\5\2#\6\17R\29\n\33\5V\r8\0315\2Q\34\0060\2\16]\24\0\0\4\1\6\2\21\1B\2\301\2\1\36\2\204\2\1\34\2\16\1\n\2\n", 64, 19081240) = 64 <0.000007>
+1791246790.773268 [  17] pread64(4</nix/store/qp5zr8rr3qgf3i7lqkq8kyvfc6xba953-etcdserver-3.6.14/bin/etcd>, "mq\23\0\3\0\0\0\221\36\0\0\345\2\0\0\27\0\0\10\346 \4\0\361 \4\0nT\4\0,x\1\0,x\1\0\377\377\377\377,M\t\0\377\377\377\377\377\377\377\377\377\377\377\377\300\203\3\0", 64, 22897488) = 64 <0.000012>
+1791246790.773319 [  17] pread64(4</nix/store/qp5zr8rr3qgf3i7lqkq8kyvfc6xba953-etcdserver-3.6.14/bin/etcd>, "7\2267\254\317\323\22\22]:\340}\207gOa&\252+\200\374\2428u\25$%\235\2417<\23\207\265\264nP\220\263}\331\321ILW\327@]\272\304\1\250\231k\22\361\226\222\2249\20\201\343D", 64, 26713736) = 64 <0.000006>
+1791246790.773348 [   3] close(4</nix/store/qp5zr8rr3qgf3i7lqkq8kyvfc6xba953-etcdserver-3.6.14/bin/etcd>) = 0 <0.000006>
+1791246790.773881 [   9] mmap(NULL, 1439992, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7fffb13a0000 <0.000010>
+1791246790.775272 [   9] mmap(NULL, 262144, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7fffb1360000 <0.000010>
+1791246790.775838 [  39] getpid()       = 907980 <0.000006>
+1791246790.775889 [ 262] newfstatat(AT_FDCWD</home/gvickers>, "/proc", {st_dev=makedev(0, 0x22), st_ino=1, st_mode=S_IFDIR|0555, st_nlink=558, st_uid=0, st_gid=0, st_blksize=1024, st_blocks=0, st_size=0, st_atime=1790710792 /* 2026-09-29T15:39:52.794546321-0400 */, st_atime_nsec=794546321, st_mtime=1790710792 /* 2026-09-29T15:39:52.794546321-0400 */, st_mtime_nsec=794546321, st_ctime=1790710792 /* 2026-09-29T15:39:52.794546321-0400 */, st_ctime_nsec=794546321}, 0) = 0 <0.000007>
+1791246790.775934 [ 137] statfs("/proc", {f_type=PROC_SUPER_MAGIC, f_bsize=4096, f_blocks=0, f_bfree=0, f_bavail=0, f_files=0, f_ffree=0, f_fsid={val=[0x22, 0]}, f_namelen=255, f_frsize=4096, f_flags=ST_VALID|ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME}) = 0 <0.000007>
+1791246790.775997 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000007>
+1791246790.776232 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000009>
+1791246790.776333 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000006>
+1791246790.776429 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000006>
+1791246790.776548 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000007>
+1791246790.776646 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000006>
+1791246790.776746 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000006>
+1791246790.776802 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000030>
+1791246790.776850 [ 202] futex(0x221f8c53a960, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000006>
+1791246790.776876 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000061>
+1791246790.776962 [  14] rt_sigprocmask(SIG_SETMASK, ~[], [], 8) = 0 <0.000010>
+1791246790.777030 [  56] clone(child_stack=0x221f8c756000, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS, tls=0x221f8c7be090) = 907984 <0.000098>
+1791246790.777147 [  14] rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0 <0.000034>
+1791246790.777245 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000214>
+1791246790.777585 [  72] fcntl(0<pipe:[58310944]>, F_OFD_GETLK, {l_type=F_UNLCK, l_whence=SEEK_SET, l_start=0, l_len=0, l_pid=0}) = 0 <0.000007>
+1791246790.777656 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000009>
+1791246790.777723 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000022>
+1791246790.777783 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000016>
+1791246790.777821 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000011>
+1791246790.777874 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000024>
+1791246790.777943 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000026>
+1791246790.778012 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000017>
+1791246790.778055 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000028>
+1791246790.778133 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000015>
+1791246790.778192 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000026>
+1791246790.778260 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000019>
+1791246790.778308 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000032>
+1791246790.778379 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000039>
+1791246790.778443 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.778489 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000025>
+1791246790.778564 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000027>
+1791246790.778616 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000022>
+1791246790.778668 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000026>
+1791246790.778719 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.778760 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000017>
+1791246790.778812 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000031>
+1791246790.778866 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000017>
+1791246790.778914 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000022>
+1791246790.778975 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000028>
+1791246790.779036 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000016>
+1791246790.779091 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000024>
+1791246790.779153 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000016>
+1791246790.779194 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.779235 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000025>
+1791246790.779307 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000027>
+1791246790.779358 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000017>
+1791246790.779398 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000016>
+1791246790.779442 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000023>
+1791246790.779501 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000016>
+1791246790.779550 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.779607 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000014>
+1791246790.779661 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000016>
+1791246790.779703 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000019>
+1791246790.779754 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000030>
+1791246790.779832 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000016>
+1791246790.779874 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000010>
+1791246790.779917 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000014>
+1791246790.779964 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000016>
+1791246790.780005 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.780045 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000028>
+1791246790.780099 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000016>
+1791246790.780141 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000022>
+1791246790.780196 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000030>
+1791246790.780251 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000016>
+1791246790.780293 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.780335 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.780387 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000026>
+1791246790.780657 [   9] mmap(0x221f8c800000, 4194304, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x221f8c800000 <0.000026>
+1791246790.781282 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000008>
+1791246790.781538 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000007>
+1791246790.781615 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000006>
+1791246790.781685 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000006>
+1791246790.781765 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000008>
+1791246790.781812 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000011>
+1791246790.781859 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000028>
+1791246790.781919 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000026>
+1791246790.781970 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.782038 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000050>
+1791246790.782115 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.782163 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000029>
+1791246790.782221 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.782264 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000022>
+1791246790.782317 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000032>
+1791246790.782373 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000019>
+1791246790.782422 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000032>
+1791246790.782480 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000017>
+1791246790.782520 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000013>
+1791246790.782553 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000014>
+1791246790.782600 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000016>
+1791246790.782640 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000016>
+1791246790.782681 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000019>
+1791246790.782728 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000026>
+1791246790.782784 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000027>
+1791246790.782836 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.782877 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000019>
+1791246790.782929 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000026>
+1791246790.782986 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000028>
+1791246790.783041 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000026>
+1791246790.783094 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.783143 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000027>
+1791246790.783193 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000016>
+1791246790.783232 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000015>
+1791246790.783272 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000023>
+1791246790.783331 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000022>
+1791246790.783381 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000014>
+1791246790.783429 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000023>
+1791246790.783487 [ 202] futex(0x221f8c53a960, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000025>
+1791246790.783559 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000014>
+1791246790.783606 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000016>
+1791246790.783645 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000016>
+1791246790.783684 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000016>
+1791246790.783732 [ 202] futex(0x221f8c53a960, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.783786 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000014>
+1791246790.783833 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000015>
+1791246790.783873 [ 202] futex(0x221f8c53a960, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.783918 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.783964 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000025>
+1791246790.784016 [ 202] futex(0x221f8c53a960, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.784099 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000041>
+1791246790.784189 [ 202] futex(0x221f8c53a960, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000014>
+1791246790.784236 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000013>
+1791246790.784274 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000026>
+1791246790.784327 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000016>
+1791246790.784368 [ 202] futex(0x221f8c53a960, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000017>
+1791246790.784420 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000027>
+1791246790.784483 [ 202] futex(0x221f8c53a960, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000020>
+1791246790.784529 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000030>
+1791246790.784590 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000028>
+1791246790.784647 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000027>
+1791246790.784698 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.784739 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.784786 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000027>
+1791246790.784833 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000011>
+1791246790.784878 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000016>
+1791246790.784917 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000017>
+1791246790.784957 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000023>
+1791246790.785024 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.785069 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000015>
+1791246790.785110 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000013>
+1791246790.785158 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000024>
+1791246790.785218 [ 202] futex(0x221f8c53a960, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000024>
+1791246790.785276 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000024>
+1791246790.785336 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000023>
+1791246790.785393 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000016>
+1791246790.785433 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.785474 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000016>
+1791246790.785513 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.785554 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000013>
+1791246790.785599 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000027>
+1791246790.785651 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000016>
+1791246790.785691 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.785732 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000016>
+1791246790.785772 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.785812 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000013>
+1791246790.785845 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000013>
+1791246790.785890 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000016>
+1791246790.786034 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000017>
+1791246790.786109 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000014>
+1791246790.786190 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000016>
+1791246790.786230 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000017>
+1791246790.786270 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000016>
+1791246790.786309 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000016>
+1791246790.786353 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000019>
+1791246790.786407 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000014>
+1791246790.786455 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000016>
+1791246790.786495 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000017>
+1791246790.786535 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000017>
+1791246790.786582 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000028>
+1791246790.786638 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000018>
+1791246790.786715 [  41] socket(AF_NETLINK, SOCK_RAW|SOCK_CLOEXEC, NETLINK_ROUTE) = 4<NETLINK:[58328849]> <0.000044>
+1791246790.786851 [  49] bind(4<NETLINK:[58328849]>, {sa_family=AF_NETLINK, nl_pid=0, nl_groups=00000000}, 12) = 0 <0.000007>
+1791246790.786912 [  44] sendto(4<NETLINK:[ROUTE:907980]>, [{nlmsg_len=17, nlmsg_type=RTM_GETROUTE, nlmsg_flags=NLM_F_REQUEST|NLM_F_DUMP, nlmsg_seq=1, nlmsg_pid=0}, {rtm_family=AF_UNSPEC, ...}], 17, 0, {sa_family=AF_NETLINK, nl_pid=0, nl_groups=00000000}, 12) = 17 <0.000041>
+1791246790.787014 [  51] getsockname(4<NETLINK:[ROUTE:907980]>, {sa_family=AF_NETLINK, nl_pid=907980, nl_groups=00000000}, [112 => 12]) = 0 <0.000006>
+1791246790.787047 [  45] recvfrom(4<NETLINK:[ROUTE:907980]>, [[{nlmsg_len=52, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET, rtm_dst_len=32, rtm_src_len=0, rtm_tos=0, rtm_table=0x34, rtm_protocol=RTPROT_BOOT, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_UNICAST, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, 0x34], [{nla_len=8, nla_type=RTA_DST}, inet_addr("100.69.4.91")], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("tailscale0")]]], [{nlmsg_len=52, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET, rtm_dst_len=32, rtm_src_len=0, rtm_tos=0, rtm_table=0x34, rtm_protocol=RTPROT_BOOT, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_UNICAST, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, 0x34], [{nla_len=8, nla_type=RTA_DST}, inet_addr("100.69.220.99")], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("tailscale0")]]], [{nlmsg_len=52, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET, rtm_dst_len=32, rtm_src_len=0, rtm_tos=0, rtm_table=0x34, rtm_protocol=RTPROT_BOOT, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_UNICAST, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, 0x34], [{nla_len=8, nla_type=RTA_DST}, inet_addr("100.100.11.117")], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("tailscale0")]]], [{nlmsg_len=52, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET, rtm_dst_len=32, rtm_src_len=0, rtm_tos=0, rtm_table=0x34, rtm_protocol=RTPROT_BOOT, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_UNICAST, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, 0x34], [{nla_len=8, nla_type=RTA_DST}, inet_addr("100.100.100.100")], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("tailscale0")]]], [{nlmsg_len=52, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET, rtm_dst_len=32, rtm_src_len=0, rtm_tos=0, rtm_table=0x34, rtm_protocol=RTPROT_BOOT, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_UNICAST, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, 0x34], [{nla_len=8, nla_type=RTA_DST}, inet_addr("100.107.238.18")], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("tailscale0")]]], [{nlmsg_len=52, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET, rtm_dst_len=32, rtm_src_len=0, rtm_tos=0, rtm_table=0x34, rtm_protocol=RTPROT_BOOT, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_UNICAST, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, 0x34], [{nla_len=8, nla_type=RTA_DST}, inet_addr("100.127.177.0")], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("tailscale0")]]], [{nlmsg_len=68, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET, rtm_dst_len=0, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_MAIN, rtm_protocol=RTPROT_DHCP, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_UNICAST, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_MAIN], [{nla_len=8, nla_type=RTA_PRIORITY}, 600], [{nla_len=8, nla_type=RTA_PREFSRC}, inet_addr("192.168.0.223")], [{nla_len=8, nla_type=RTA_GATEWAY}, inet_addr("192.168.0.1")], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("wlp12s0f3u2")]]], [{nlmsg_len=68, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET, rtm_dst_len=24, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_MAIN, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_LINK, rtm_type=RTN_UNICAST, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_MAIN], [{nla_len=8, nla_type=RTA_DST}, inet_addr("192.168.0.0")], [{nla_len=8, nla_type=RTA_PRIORITY}, 600], [{nla_len=8, nla_type=RTA_PREFSRC}, inet_addr("192.168.0.223")], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("wlp12s0f3u2")]]], [{nlmsg_len=60, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET, rtm_dst_len=32, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_LOCAL, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_HOST, rtm_type=RTN_LOCAL, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_LOCAL], [{nla_len=8, nla_type=RTA_DST}, inet_addr("100.103.28.125")], [{nla_len=8, nla_type=RTA_PREFSRC}, inet_addr("100.103.28.125")], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("tailscale0")]]], [{nlmsg_len=60, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET, rtm_dst_len=8, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_LOCAL, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_HOST, rtm_type=RTN_LOCAL, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_LOCAL], [{nla_len=8, nla_type=RTA_DST}, inet_addr("127.0.0.0")], [{nla_len=8, nla_type=RTA_PREFSRC}, inet_addr("127.0.0.1")], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("lo")]]], [{nlmsg_len=60, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET, rtm_dst_len=32, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_LOCAL, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_HOST, rtm_type=RTN_LOCAL, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_LOCAL], [{nla_len=8, nla_type=RTA_DST}, inet_addr("127.0.0.1")], [{nla_len=8, nla_type=RTA_PREFSRC}, inet_addr("127.0.0.1")], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("lo")]]], [{nlmsg_len=60, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET, rtm_dst_len=32, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_LOCAL, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_LINK, rtm_type=RTN_BROADCAST, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_LOCAL], [{nla_len=8, nla_type=RTA_DST}, inet_addr("127.255.255.255")], [{nla_len=8, nla_type=RTA_PREFSRC}, inet_addr("127.0.0.1")], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("lo")]]], [{nlmsg_len=60, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET, rtm_dst_len=32, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_LOCAL, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_HOST, rtm_type=RTN_LOCAL, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_LOCAL], [{nla_len=8, nla_type=RTA_DST}, inet_addr("192.168.0.223")], [{nla_len=8, nla_type=RTA_PREFSRC}, inet_addr("192.168.0.223")], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("wlp12s0f3u2")]]], [{nlmsg_len=60, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET, rtm_dst_len=32, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_LOCAL, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_LINK, rtm_type=RTN_BROADCAST, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_LOCAL], [{nla_len=8, nla_type=RTA_DST}, inet_addr("192.168.0.255")], [{nla_len=8, nla_type=RTA_PREFSRC}, inet_addr("192.168.0.223")], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("wlp12s0f3u2")]]], [{nlmsg_len=116, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET6, rtm_dst_len=128, rtm_src_len=0, rtm_tos=0, rtm_table=0x34, rtm_protocol=RTPROT_BOOT, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_UNICAST, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, 0x34], [{nla_len=20, nla_type=RTA_DST}, inet_pton(AF_INET6, "fd7a:115c:a1e0::53")], [{nla_len=8, nla_type=RTA_PRIORITY}, 1024], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("tailscale0")], [{nla_len=36, nla_type=RTA_CACHEINFO}, {rta_clntref=0, rta_lastuse=0, rta_expires=0, rta_error=0, rta_used=0, rta_id=0, rta_ts=0, rta_tsage=0}], [{nla_len=5, nla_type=RTA_PREF}, 0]]], [{nlmsg_len=116, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET6, rtm_dst_len=48, rtm_src_len=0, rtm_tos=0, rtm_table=0x34, rtm_protocol=RTPROT_BOOT, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_UNICAST, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, 0x34], [{nla_len=20, nla_type=RTA_DST}, inet_pton(AF_INET6, "fd7a:115c:a1e0::")], [{nla_len=8, nla_type=RTA_PRIORITY}, 1024], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("tailscale0")], [{nla_len=36, nla_type=RTA_CACHEINFO}, {rta_clntref=0, rta_lastuse=0, rta_expires=0, rta_error=0, rta_used=0, rta_id=0, rta_ts=0, rta_tsage=0}], [{nla_len=5, nla_type=RTA_PREF}, 0]]], [{nlmsg_len=116, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET6, rtm_dst_len=128, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_MAIN, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_UNICAST, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_MAIN], [{nla_len=20, nla_type=RTA_DST}, inet_pton(AF_INET6, "fd7a:115c:a1e0::8532:1c7e")], [{nla_len=8, nla_type=RTA_PRIORITY}, 256], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("tailscale0")], [{nla_len=36, nla_type=RTA_CACHEINFO}, {rta_clntref=0, rta_lastuse=0, rta_expires=0, rta_error=0, rta_used=0, rta_id=0, rta_ts=0, rta_tsage=0}], [{nla_len=5, nla_type=RTA_PREF}, 0]]], [{nlmsg_len=280, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET6, rtm_dst_len=64, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_MAIN, rtm_protocol=RTPROT_RA, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_UNICAST, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_MAIN], [{nla_len=20, nla_type=RTA_DST}, inet_pton(AF_INET6, "fd80:7810:ad54::")], [{nla_len=8, nla_type=RTA_PRIORITY}, 605], [{nla_len=172, nla_type=RTA_MULTIPATH}, [[{rtnh_len=28, rtnh_flags=0, rtnh_hops=0, rtnh_ifindex=if_nametoindex("wlp12s0f3u2")}, [{nla_len=20, nla_type=RTA_GATEWAY}, inet_pton(AF_INET6, "fe80::18ba:a25b:d303:6b2d")]], [{rtnh_len=28, rtnh_flags=0, rtnh_hops=0, rtnh_ifindex=if_nametoindex("wlp12s0f3u2")}, [{nla_len=20, nla_type=RTA_GATEWAY}, inet_pton(AF_INET6, "fe80::c1f:c109:1a0e:33c6")]], [{rtnh_len=28, rtnh_flags=0, rtnh_hops=0, rtnh_ifindex=if_nametoindex("wlp12s0f3u2")}, [{nla_len=20, nla_type=RTA_GATEWAY}, inet_pton(AF_INET6, "fe80::1804:b778:200b:b11b")]], [{rtnh_len=28, rtnh_flags=0, rtnh_hops=0, rtnh_ifindex=if_nametoindex("wlp12s0f3u2")}, [{nla_len=20, nla_type=RTA_GATEWAY}, inet_pton(AF_INET6, "fe80::72:cd7e:a936:6a85")]], [{rtnh_len=28, rtnh_flags=0, rtnh_hops=0, rtnh_ifindex=if_nametoindex("wlp12s0f3u2")}, [{nla_len=20, nla_type=RTA_GATEWAY}, inet_pton(AF_INET6, "fe80::8d2:1112:76fc:4fe4")]], [{rtnh_len=28, rtnh_flags=0, rtnh_hops=0, rtnh_ifindex=if_nametoindex("wlp12s0f3u2")}, [{nla_len=20, nla_type=RTA_GATEWAY}, inet_pton(AF_INET6, "fe80::10ec:a9da:730e:e552")]]]], [{nla_len=36, nla_type=RTA_CACHEINFO}, {rta_clntref=0, rta_lastuse=0, rta_expires=0, rta_error=0, rta_used=0, rta_id=0, rta_ts=0, rta_tsage=0}], [{nla_len=5, nla_type=RTA_PREF}, 0]]], [{nlmsg_len=116, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET6, rtm_dst_len=64, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_MAIN, rtm_protocol=RTPROT_RA, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_UNICAST, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_MAIN], [{nla_len=20, nla_type=RTA_DST}, inet_pton(AF_INET6, "fdaf:19f7:79d8:489d::")], [{nla_len=8, nla_type=RTA_PRIORITY}, 600], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("wlp12s0f3u2")], [{nla_len=36, nla_type=RTA_CACHEINFO}, {rta_clntref=0, rta_lastuse=0, rta_expires=0, rta_error=0, rta_used=0, rta_id=0, rta_ts=0, rta_tsage=0}], [{nla_len=5, nla_type=RTA_PREF}, 0]]], [{nlmsg_len=116, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET6, rtm_dst_len=64, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_MAIN, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_UNICAST, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_MAIN], [{nla_len=20, nla_type=RTA_DST}, inet_pton(AF_INET6, "fe80::")], [{nla_len=8, nla_type=RTA_PRIORITY}, 256], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("tailscale0")], [{nla_len=36, nla_type=RTA_CACHEINFO}, {rta_clntref=0, rta_lastuse=0, rta_expires=0, rta_error=0, rta_used=0, rta_id=0, rta_ts=0, rta_tsage=0}], [{nla_len=5, nla_type=RTA_PREF}, 0]]], [{nlmsg_len=116, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET6, rtm_dst_len=64, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_MAIN, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_UNICAST, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_MAIN], [{nla_len=20, nla_type=RTA_DST}, inet_pton(AF_INET6, "fe80::")], [{nla_len=8, nla_type=RTA_PRIORITY}, 1024], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("wlp12s0f3u2")], [{nla_len=36, nla_type=RTA_CACHEINFO}, {rta_clntref=0, rta_lastuse=0, rta_expires=0, rta_error=0, rta_used=0, rta_id=0, rta_ts=0, rta_tsage=0}], [{nla_len=5, nla_type=RTA_PREF}, 0]]], [{nlmsg_len=116, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET6, rtm_dst_len=128, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_LOCAL, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_LOCAL, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_LOCAL], [{nla_len=20, nla_type=RTA_DST}, inet_pton(AF_INET6, "::1")], [{nla_len=8, nla_type=RTA_PRIORITY}, 0], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("lo")], [{nla_len=36, nla_type=RTA_CACHEINFO}, {rta_clntref=0, rta_lastuse=0, rta_expires=0, rta_error=0, rta_used=0, rta_id=0, rta_ts=0, rta_tsage=0}], [{nla_len=5, nla_type=RTA_PREF}, 0]]], [{nlmsg_len=116, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET6, rtm_dst_len=128, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_LOCAL, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_LOCAL, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_LOCAL], [{nla_len=20, nla_type=RTA_DST}, inet_pton(AF_INET6, "fd7a:115c:a1e0::8532:1c7e")], [{nla_len=8, nla_type=RTA_PRIORITY}, 0], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("tailscale0")], [{nla_len=36, nla_type=RTA_CACHEINFO}, {rta_clntref=0, rta_lastuse=0, rta_expires=0, rta_error=0, rta_used=0, rta_id=0, rta_ts=0, rta_tsage=0}], [{nla_len=5, nla_type=RTA_PREF}, 0]]], [{nlmsg_len=116, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET6, rtm_dst_len=128, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_LOCAL, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_LOCAL, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_LOCAL], [{nla_len=20, nla_type=RTA_DST}, inet_pton(AF_INET6, "fdaf:19f7:79d8:489d:354:a500:abbc:ac08")], [{nla_len=8, nla_type=RTA_PRIORITY}, 0], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("wlp12s0f3u2")], [{nla_len=36, nla_type=RTA_CACHEINFO}, {rta_clntref=0, rta_lastuse=0, rta_expires=0, rta_error=0, rta_used=0, rta_id=0, rta_ts=0, rta_tsage=0}], [{nla_len=5, nla_type=RTA_PREF}, 0]]], [{nlmsg_len=116, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET6, rtm_dst_len=128, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_LOCAL, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_LOCAL, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_LOCAL], [{nla_len=20, nla_type=RTA_DST}, inet_pton(AF_INET6, "fdaf:19f7:79d8:489d:5ace:128d:1892:7d02")], [{nla_len=8, nla_type=RTA_PRIORITY}, 0], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("wlp12s0f3u2")], [{nla_len=36, nla_type=RTA_CACHEINFO}, {rta_clntref=0, rta_lastuse=0, rta_expires=0, rta_error=0, rta_used=0, rta_id=0, rta_ts=0, rta_tsage=0}], [{nla_len=5, nla_type=RTA_PREF}, 0]]], [{nlmsg_len=116, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET6, rtm_dst_len=128, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_LOCAL, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_LOCAL, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_LOCAL], [{nla_len=20, nla_type=RTA_DST}, inet_pton(AF_INET6, "fdaf:19f7:79d8:489d:8383:cc67:47ae:9f9b")], [{nla_len=8, nla_type=RTA_PRIORITY}, 0], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("wlp12s0f3u2")], [{nla_len=36, nla_type=RTA_CACHEINFO}, {rta_clntref=0, rta_lastuse=0, rta_expires=0, rta_error=0, rta_used=0, rta_id=0, rta_ts=0, rta_tsage=0}], [{nla_len=5, nla_type=RTA_PREF}, 0]]], [{nlmsg_len=116, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET6, rtm_dst_len=128, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_LOCAL, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_LOCAL, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_LOCAL], [{nla_len=20, nla_type=RTA_DST}, inet_pton(AF_INET6, "fdaf:19f7:79d8:489d:951a:ac10:5a26:f302")], [{nla_len=8, nla_type=RTA_PRIORITY}, 0], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("wlp12s0f3u2")], [{nla_len=36, nla_type=RTA_CACHEINFO}, {rta_clntref=0, rta_lastuse=0, rta_expires=0, rta_error=0, rta_used=0, rta_id=0, rta_ts=0, rta_tsage=0}], [{nla_len=5, nla_type=RTA_PREF}, 0]]], [{nlmsg_len=116, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET6, rtm_dst_len=128, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_LOCAL, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_LOCAL, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_LOCAL], [{nla_len=20, nla_type=RTA_DST}, inet_pton(AF_INET6, "fdaf:19f7:79d8:489d:b1c2:cf13:a47c:ce6f")], [{nla_len=8, nla_type=RTA_PRIORITY}, 0], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("wlp12s0f3u2")], [{nla_len=36, nla_type=RTA_CACHEINFO}, {rta_clntref=0, rta_lastuse=0, rta_expires=0, rta_error=0, rta_used=0, rta_id=0, rta_ts=0, rta_tsage=0}], [{nla_len=5, nla_type=RTA_PREF}, 0]]], [{nlmsg_len=116, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET6, rtm_dst_len=128, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_LOCAL, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_LOCAL, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_LOCAL], [{nla_len=20, nla_type=RTA_DST}, inet_pton(AF_INET6, "fdaf:19f7:79d8:489d:c2ea:37d:f076:aa08")], [{nla_len=8, nla_type=RTA_PRIORITY}, 0], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("wlp12s0f3u2")], [{nla_len=36, nla_type=RTA_CACHEINFO}, {rta_clntref=0, rta_lastuse=0, rta_expires=0, rta_error=0, rta_used=0, rta_id=0, rta_ts=0, rta_tsage=0}], [{nla_len=5, nla_type=RTA_PREF}, 0]]], [{nlmsg_len=116, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET6, rtm_dst_len=128, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_LOCAL, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_LOCAL, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_LOCAL], [{nla_len=20, nla_type=RTA_DST}, inet_pton(AF_INET6, "fdaf:19f7:79d8:489d:f21c:7045:f761:7d61")], [{nla_len=8, nla_type=RTA_PRIORITY}, 0], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("wlp12s0f3u2")], [{nla_len=36, nla_type=RTA_CACHEINFO}, {rta_clntref=0, rta_lastuse=0, rta_expires=0, rta_error=0, rta_used=0, rta_id=0, rta_ts=0, rta_tsage=0}], [{nla_len=5, nla_type=RTA_PREF}, 0]]], [{nlmsg_len=116, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET6, rtm_dst_len=128, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_LOCAL, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_LOCAL, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_LOCAL], [{nla_len=20, nla_type=RTA_DST}, inet_pton(AF_INET6, "fdaf:19f7:79d8:489d:f2e1:7fbc:9d68:f455")], [{nla_len=8, nla_type=RTA_PRIORITY}, 0], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("wlp12s0f3u2")], [{nla_len=36, nla_type=RTA_CACHEINFO}, {rta_clntref=0, rta_lastuse=0, rta_expires=0, rta_error=0, rta_used=0, rta_id=0, rta_ts=0, rta_tsage=0}], [{nla_len=5, nla_type=RTA_PREF}, 0]]], [{nlmsg_len=116, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET6, rtm_dst_len=128, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_LOCAL, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_LOCAL, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_LOCAL], [{nla_len=20, nla_type=RTA_DST}, inet_pton(AF_INET6, "fe80::847b:7c38:1004:c06c")], [{nla_len=8, nla_type=RTA_PRIORITY}, 0], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("tailscale0")], [{nla_len=36, nla_type=RTA_CACHEINFO}, {rta_clntref=0, rta_lastuse=0, rta_expires=0, rta_error=0, rta_used=0, rta_id=0, rta_ts=0, rta_tsage=0}], [{nla_len=5, nla_type=RTA_PREF}, 0]]], [{nlmsg_len=116, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET6, rtm_dst_len=128, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_LOCAL, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_LOCAL, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_LOCAL], [{nla_len=20, nla_type=RTA_DST}, inet_pton(AF_INET6, "fe80::a5ba:8a89:5eb1:611a")], [{nla_len=8, nla_type=RTA_PRIORITY}, 0], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("wlp12s0f3u2")], [{nla_len=36, nla_type=RTA_CACHEINFO}, {rta_clntref=0, rta_lastuse=0, rta_expires=0, rta_error=0, rta_used=0, rta_id=0, rta_ts=0, rta_tsage=0}], [{nla_len=5, nla_type=RTA_PREF}, 0]]], [{nlmsg_len=116, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET6, rtm_dst_len=8, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_LOCAL, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_MULTICAST, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_LOCAL], [{nla_len=20, nla_type=RTA_DST}, inet_pton(AF_INET6, "ff00::")], [{nla_len=8, nla_type=RTA_PRIORITY}, 256], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("wlp12s0f3u2")], [{nla_len=36, nla_type=RTA_CACHEINFO}, {rta_clntref=0, rta_lastuse=0, rta_expires=0, rta_error=0, rta_used=0, rta_id=0, rta_ts=0, rta_tsage=0}], [{nla_len=5, nla_type=RTA_PREF}, 0]]], [{nlmsg_len=116, nlmsg_type=RTM_NEWROUTE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, {rtm_family=AF_INET6, rtm_dst_len=8, rtm_src_len=0, rtm_tos=0, rtm_table=RT_TABLE_LOCAL, rtm_protocol=RTPROT_KERNEL, rtm_scope=RT_SCOPE_UNIVERSE, rtm_type=RTN_MULTICAST, rtm_flags=0}, [[{nla_len=8, nla_type=RTA_TABLE}, RT_TABLE_LOCAL], [{nla_len=20, nla_type=RTA_DST}, inet_pton(AF_INET6, "ff00::")], [{nla_len=8, nla_type=RTA_PRIORITY}, 256], [{nla_len=8, nla_type=RTA_OIF}, if_nametoindex("tailscale0")], [{nla_len=36, nla_type=RTA_CACHEINFO}, {rta_clntref=0, rta_lastuse=0, rta_expires=0, rta_error=0, rta_used=0, rta_id=0, rta_ts=0, rta_tsage=0}], [{nla_len=5, nla_type=RTA_PREF}, 0]]]], 4096, 0, {sa_family=AF_NETLINK, nl_pid=0, nl_groups=00000000}, [112 => 12]) = 3408 <0.000019>
+1791246790.787433 [  45] recvfrom(4<NETLINK:[ROUTE:907980]>, [{nlmsg_len=20, nlmsg_type=NLMSG_DONE, nlmsg_flags=NLM_F_MULTI, nlmsg_seq=1, nlmsg_pid=907980}, 0], 4096, 0, {sa_family=AF_NETLINK, nl_pid=0, nl_groups=00000000}, [112 => 12]) = 20 <0.000007>
+1791246790.787475 [   3] close(4<NETLINK:[ROUTE:907980]>) = 0 <0.000008>
+1791246790.787627 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000007>
+1791246790.787757 [   9] mmap(NULL, 65536, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7ffff7e15000 <0.000009>
+1791246790.787946 [   9] mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7ffff7e13000 <0.000008>
+1791246790.788348 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000007>
+1791246790.788390 [   9] mmap(NULL, 262144, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7fffb1320000 <0.000008>
+1791246790.788530 [   9] mmap(NULL, 262144, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7fffb12e0000 <0.000007>
+1791246790.788667 [   9] mmap(NULL, 262144, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7fffb12a0000 <0.000007>
+1791246790.788923 [ 257] openat(AT_FDCWD</home/gvickers>, "/etc/localtime", O_RDONLY) = 4</nix/store/fh8svr4ds87z84iarfnxrlfpjlbmc816-tzdata-2026c/share/zoneinfo/America/New_York> <0.000011>
+1791246790.788967 [   0] read(4</nix/store/fh8svr4ds87z84iarfnxrlfpjlbmc816-tzdata-2026c/share/zoneinfo/America/New_York>, "TZif2\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\6\0\0\0\6\0\0\0\0\0\0\0\354\0\0\0\6\0\0\0\24\200\0\0\0\236\246\36p\237\272\353`\240\206\0p\241\232\315`\242e\342p\243\203\351\340\244j\256p\2455\247`\246S\312\360\247\25\211`\2503\254\360\250\376\245\340\252\23\216\360\252\336\207\340\253\363p\360\254\276i\340\255\323R\360\256\236K\340\257\2634\360\260~-\340\261\234Qp\262gJ`\263|3p\264G,`\265\\\25p\266'\16`\267;\367p\270\6\360`\271\33\331p\271\346\322`\273\4\365\360\273\306\264`\274\344\327\360\275\257\320\340\276\304\271\360\277\217\262\340\300\244\233\360\301o\224\340\302\204}\360\303Ov\340\304d_\360\305/X\340\306M|p\307\17:\340\310-^p\310\370W`\312\r@p\312\3309`\313\210\360p\322#\364p\322`\373\340\323u\344\360"..., 4096) = 3552 <0.000007>
+1791246790.789005 [   0] read(4</nix/store/fh8svr4ds87z84iarfnxrlfpjlbmc816-tzdata-2026c/share/zoneinfo/America/New_York>, "", 4096) = 0 <0.000006>
+1791246790.789033 [   3] close(4</nix/store/fh8svr4ds87z84iarfnxrlfpjlbmc816-tzdata-2026c/share/zoneinfo/America/New_York>) = 0 <0.000007>
+1791246790.789076 [   1] write(2</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-recovered.stderr>, "{\"level\":\"warn\",\"ts\":\"2026-10-05T20:33:10.788896-0400\",\"caller\":\"embed/config.go:1207\",\"msg\":\"Running http and grpc server on single port. This is not recommended for production.\"}\n", 181) = 181 <0.000014>
+1791246790.789129 [ 257] openat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data", O_RDONLY|O_CLOEXEC) = 4</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data> <0.000009>
+1791246790.789167 [  72] fcntl(4</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data>, F_GETFL) = 0x8000 (flags O_RDONLY|O_LARGEFILE) <0.000006>
+1791246790.789194 [  72] fcntl(4</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data>, F_SETFL, O_RDONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000006>
+1791246790.789221 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 4</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15e000002}) = -1 EPERM (Operation not permitted) <0.000006>
+1791246790.789254 [  72] fcntl(4</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data>, F_GETFL) = 0x8800 (flags O_RDONLY|O_NONBLOCK|O_LARGEFILE) <0.000005>
+1791246790.789281 [  72] fcntl(4</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data>, F_SETFL, O_RDONLY|O_LARGEFILE) = 0 <0.000006>
+1791246790.789309 [ 217] getdents64(4</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data>, [{d_ino=13935668, d_off=1778570965913172065, d_reclen=32, d_type=DT_DIR, d_name="member"}, {d_ino=13935667, d_off=6329155247818659080, d_reclen=24, d_type=DT_DIR, d_name="."}, {d_ino=13935615, d_off=9223372036854775807, d_reclen=24, d_type=DT_DIR, d_name=".."}], 8192) = 80 <0.000013>
+1791246790.789354 [ 217] getdents64(4</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data>, [], 8192) = 0 <0.000006>
+1791246790.789382 [   3] close(4</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data>) = 0 <0.000007>
+1791246790.789419 [   1] write(2</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-recovered.stderr>, "{\"level\":\"warn\",\"ts\":\"2026-10-05T20:33:10.789409-0400\",\"caller\":\"embed/config.go:1207\",\"msg\":\"Running http and grpc server on single port. This is not recommended for production.\"}\n", 181) = 181 <0.000008>
+1791246790.789467 [  41] socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, IPPROTO_TCP) = 4<TCP:[58328893]> <0.000011>
+1791246790.797823 [   3] close(4<TCP:[58328893]>) = 0 <0.000036>
+1791246790.806087 [  41] socket(AF_INET6, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, IPPROTO_TCP) = 4<TCPv6:[58328896]> <0.000024>
+1791246790.814384 [  54] setsockopt(4<TCPv6:[58328896]>, SOL_IPV6, IPV6_V6ONLY, [1], 4) = 0 <0.000009>
+1791246790.822574 [  49] bind(4<TCPv6:[58328896]>, {sa_family=AF_INET6, sin6_port=htons(0), sin6_flowinfo=htonl(0), inet_pton(AF_INET6, "::1", &sin6_addr), sin6_scope_id=0}, 28) = 0 <0.000035>
+1791246790.830900 [  41] socket(AF_INET6, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, IPPROTO_TCP) = 7<TCPv6:[58328900]> <0.000023>
+1791246790.839449 [  54] setsockopt(7<TCPv6:[58328900]>, SOL_IPV6, IPV6_V6ONLY, [0], 4) = 0 <0.000120>
+1791246790.848024 [  54] --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=907980, si_uid=1000} ---
+1791246790.848045 [  15] rt_sigreturn({mask=[]}) = 0 <0.000018>
+1791246790.848092 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000019>
+1791246790.848142 [  49] bind(7<TCPv6:[58328900]>, {sa_family=AF_INET6, sin6_port=htons(0), sin6_flowinfo=htonl(0), inet_pton(AF_INET6, "::ffff:127.0.0.1", &sin6_addr), sin6_scope_id=0}, 28) = 0 <0.000126>
+1791246790.856756 [   3] close(7<TCPv6:[[::ffff:127.0.0.1]:50779]>) = 0 <0.000017>
+1791246790.865140 [   3] close(4<TCPv6:[[::1]:51639]>) = 0 <0.000032>
+1791246790.873336 [  41] socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, IPPROTO_MPTCP) = 4<socket:[58328907]> <0.000024>
+1791246790.892241 [   3] close(4<socket:[58328907]>) = 0 <0.000035>
+1791246790.910762 [   3] --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=907980, si_uid=1000} ---
+1791246790.910799 [  15] rt_sigreturn({mask=[]}) = 0 <0.000034>
+1791246790.910855 [  63] uname({sysname="Linux", nodename="nixos", release="6.18.54", version="#1-NixOS SMP PREEMPT_DYNAMIC Fri Sep 25 14:35:54 UTC 2026", machine="x86_64", domainname="(none)"}) = 0 <0.000005>
+1791246790.910882 [  41] socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, IPPROTO_MPTCP) = 4<socket:[58328910]> <0.000010>
+1791246790.929328 [ 257] openat(AT_FDCWD</home/gvickers>, "/proc/sys/net/core/somaxconn", O_RDONLY|O_CLOEXEC) = 7</proc/sys/net/core/somaxconn> <0.000028>
+1791246790.929402 [  72] fcntl(7</proc/sys/net/core/somaxconn>, F_GETFL) = 0x8000 (flags O_RDONLY|O_LARGEFILE) <0.000019>
+1791246790.929445 [  72] fcntl(7</proc/sys/net/core/somaxconn>, F_SETFL, O_RDONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000005>
+1791246790.929472 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 7</proc/sys/net/core/somaxconn>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15e000003}) = 0 <0.000009>
+1791246790.929539 [   0] read(7</proc/sys/net/core/somaxconn>, "4096\n", 65536) = 5 <0.000040>
+1791246790.929607 [   0] read(7</proc/sys/net/core/somaxconn>, "", 65531) = 0 <0.000011>
+1791246790.929644 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 7</proc/sys/net/core/somaxconn>, 0x221f8c4f0d24) = 0 <0.000029>
+1791246790.929703 [   3] close(7</proc/sys/net/core/somaxconn>) = 0 <0.000006>
+1791246790.929731 [  54] setsockopt(4<socket:[58328910]>, SOL_SOCKET, SO_REUSEADDR, [1], 4) = 0 <0.000016>
+1791246790.948121 [  49] bind(4<socket:[58328910]>, {sa_family=AF_INET, sin_port=htons(19391), sin_addr=inet_addr("127.0.0.1")}, 16) = 0 <0.000037>
+1791246790.966711 [  50] listen(4<TCP:[127.0.0.1:19391]>, 4096) = 0 <0.000031>
+1791246790.969037 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.069373>
+1791246791.038474 [ 257] openat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0.tmp", O_WRONLY|O_CREAT|O_CLOEXEC, 0600) = 11</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0.tmp> <0.000048>
+1791246791.038567 [  72] fcntl(11</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0.tmp>, F_GETFL) = 0x8001 (flags O_WRONLY|O_LARGEFILE) <0.000011>
+1791246791.038641 [  72] fcntl(11</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0.tmp>, F_SETFL, O_WRONLY|O_NONBLOCK|O_LARGEFILE) = 0 <0.000006>
+1791246791.038670 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 11</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0.tmp>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15c000011}) = -1 EPERM (Operation not permitted) <0.000007>
+1791246791.038710 [  72] fcntl(11</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0.tmp>, F_GETFL) = 0x8801 (flags O_WRONLY|O_NONBLOCK|O_LARGEFILE) <0.000030>
+1791246791.038762 [  72] fcntl(11</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0.tmp>, F_SETFL, O_WRONLY|O_LARGEFILE) = 0 <0.000006>
+1791246791.038791 [  72] fcntl(11</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0.tmp>, F_OFD_SETLKW, {l_type=F_WRLCK, l_whence=SEEK_SET, l_start=0, l_len=0}) = 0 <0.000008>
+1791246791.038854 [ 285] fallocate(11</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0.tmp>, 0, 0, 64000000) = 0 <0.000025>
+1791246791.039069 [   9] mmap(NULL, 262144, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7fffb1220000 <0.000010>
+1791246791.039268 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [{events=EPOLLIN, data=0x1deab50}], 128, 99, NULL, 0) = 1 <0.026741>
+1791246791.066058 [   0] read(6<{eventfd-count=0x1, eventfd-id=266, eventfd-semaphore=0}>, "\1\0\0\0\0\0\0\0", 8) = 8 <0.000051>
+1791246791.066186 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.171084>
+1791246791.237297 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000007>
+1791246791.237327 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 2, NULL, 0) = 0 <0.002062>
+1791246791.239416 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000008>
+1791246791.239453 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 1, NULL, 0) = 0 <0.001062>
+1791246791.240569 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000008>
+1791246791.240599 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 8, NULL, 0) = 0 <0.008075>
+1791246791.248721 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000240>
+1791246791.248978 [  24] sched_yield()  = 0 <0.000025>
+1791246791.249021 [  28] madvise(0x221f8c9d0000, 65536, MADV_DONTNEED) = 0 <0.000009>
+1791246791.249048 [  28] madvise(0x221f8c9c0000, 65536, MADV_DONTNEED) = 0 <0.000017>
+1791246791.249108 [  28] madvise(0x221f8c9b0000, 65536, MADV_DONTNEED) = 0 <0.000007>
+1791246791.249132 [  28] madvise(0x221f8c9a0000, 65536, MADV_DONTNEED) = 0 <0.000007>
+1791246791.249156 [  28] madvise(0x221f8c990000, 65536, MADV_DONTNEED) = 0 <0.000011>
+1791246791.249206 [  28] madvise(0x221f8c980000, 65536, MADV_DONTNEED) = 0 <0.000007>
+1791246791.249230 [  28] madvise(0x221f8c978000, 32768, MADV_DONTNEED) = 0 <0.000006>
+1791246791.249253 [  28] madvise(0x221f8c95c000, 32768, MADV_DONTNEED) = 0 <0.000017>
+1791246791.249310 [  28] madvise(0x221f8c94c000, 65536, MADV_DONTNEED) = 0 <0.000015>
+1791246791.249343 [  28] madvise(0x221f8c93c000, 65536, MADV_DONTNEED) = 0 <0.000014>
+1791246791.249378 [  28] madvise(0x221f8c92c000, 65536, MADV_DONTNEED) = 0 <0.000037>
+1791246791.249434 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.001749>
+1791246791.251296 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000029>
+1791246791.251367 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.000043>
+1791246791.251702 [   9] mmap(NULL, 262144, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7ffd311c0000 <0.000033>
+1791246791.252522 [ 288] accept4(7<TCP:[127.0.0.1:19390]>, 0x221f8c68702c, [112], SOCK_CLOEXEC|SOCK_NONBLOCK) = -1 EAGAIN (Resource temporarily unavailable) <0.000013>
+1791246791.252596 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000030>
+1791246791.261224 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.031288>
+1791246791.292556 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [{events=EPOLLOUT, data=0x3ffffbf15c000016}], 128, 0, NULL, 0) = 1 <0.000033>
+1791246791.292615 [  55] getsockopt(12<TCP:[127.0.0.1:50038->127.0.0.1:19390]>, SOL_SOCKET, SO_ERROR, [0], [4]) = 0 <0.000006>
+1791246791.292646 [  52] getpeername(12<TCP:[127.0.0.1:50038->127.0.0.1:19390]>, {sa_family=AF_INET, sin_port=htons(19390), sin_addr=inet_addr("127.0.0.1")}, [112 => 16]) = 0 <0.000006>
+1791246791.292681 [  51] getsockname(12<TCP:[127.0.0.1:50038->127.0.0.1:19390]>, {sa_family=AF_INET, sin_port=htons(50038), sin_addr=inet_addr("127.0.0.1")}, [112 => 16]) = 0 <0.000014>
+1791246791.292735 [  54] setsockopt(12<TCP:[127.0.0.1:50038->127.0.0.1:19390]>, SOL_TCP, TCP_NODELAY, [1], 4) = 0 <0.000006>
+1791246791.292792 [  55] getsockopt(12<TCP:[127.0.0.1:50038->127.0.0.1:19390]>, SOL_SOCKET, SO_LINGER, {l_onoff=0, l_linger=0}, [8]) = 0 <0.000006>
+1791246791.292838 [  55] getsockopt(12<TCP:[127.0.0.1:50038->127.0.0.1:19390]>, SOL_SOCKET, SO_RCVTIMEO_OLD, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", [16]) = 0 <0.000019>
+1791246791.292881 [  55] getsockopt(12<TCP:[127.0.0.1:50038->127.0.0.1:19390]>, SOL_SOCKET, SO_SNDTIMEO_OLD, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", [16]) = 0 <0.000006>
+1791246791.292917 [  55] getsockopt(12<TCP:[127.0.0.1:50038->127.0.0.1:19390]>, SOL_TCP, TCP_INFO, "\1\0\0\0\0\7\252\1\370\30\3\0\0\0\0\0\345\177\0\0\30\2\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\17\0\0\0\0\0\0\0\17\0\0\0\17\0\0\0\377\377\0\0\327\377\0\0!\0\0\0\20\0\0\0\377\377\377\177\n\0\0\0\313\377\0\0\30\0\0\0\0\0\0\0\327\377\0\0\0\0\0\0\37\235\274\236\4\0\0\0\377\377\377\377\377\377\377\377\1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\2\0\0\0\1\0\0\0\0\0\0\0!\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\313\377\0\0\0\0\1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., [280]) = 0 <0.000006>
+1791246791.292961 [   1] write(12<TCP:[127.0.0.1:50038->127.0.0.1:19390]>, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", 24) = 24 <0.000034>
+1791246791.293055 [   1] write(12<TCP:[127.0.0.1:50038->127.0.0.1:19390]>, "\0\0\0\4\0\0\0\0\0", 9) = 9 <0.000018>
+1791246791.293129 [   0] read(12<TCP:[127.0.0.1:50038->127.0.0.1:19390]>, 0x221f8c876000, 32768) = -1 EAGAIN (Resource temporarily unavailable) <0.000015>
+1791246791.293187 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 13<TCP:[127.0.0.1:19390->127.0.0.1:50038]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15b000001}) = 0 <0.000007>
+1791246791.293222 [  51] getsockname(13<TCP:[127.0.0.1:19390->127.0.0.1:50038]>, {sa_family=AF_INET, sin_port=htons(19390), sin_addr=inet_addr("127.0.0.1")}, [112 => 16]) = 0 <0.000005>
+1791246791.293252 [  54] setsockopt(13<TCP:[127.0.0.1:19390->127.0.0.1:50038]>, SOL_TCP, TCP_NODELAY, [1], 4) = 0 <0.000006>
+1791246791.293293 [  54] setsockopt(13<TCP:[127.0.0.1:19390->127.0.0.1:50038]>, SOL_SOCKET, SO_KEEPALIVE, [1], 4) = 0 <0.000019>
+1791246791.293333 [  54] setsockopt(13<TCP:[127.0.0.1:19390->127.0.0.1:50038]>, SOL_TCP, TCP_KEEPIDLE, [15], 4) = 0 <0.000006>
+1791246791.293359 [  54] setsockopt(13<TCP:[127.0.0.1:19390->127.0.0.1:50038]>, SOL_TCP, TCP_KEEPINTVL, [15], 4) = 0 <0.000005>
+1791246791.293384 [  54] setsockopt(13<TCP:[127.0.0.1:19390->127.0.0.1:50038]>, SOL_TCP, TCP_KEEPCNT, [9], 4) = 0 <0.000005>
+1791246791.293423 [  54] setsockopt(13<TCP:[127.0.0.1:19390->127.0.0.1:50038]>, SOL_SOCKET, SO_KEEPALIVE, [1], 4) = 0 <0.000019>
+1791246791.293462 [  54] setsockopt(13<TCP:[127.0.0.1:19390->127.0.0.1:50038]>, SOL_TCP, TCP_KEEPIDLE, [30], 4) = 0 <0.000005>
+1791246791.293491 [ 288] accept4(7<TCP:[127.0.0.1:19390]>, 0x221f8c68702c, [112], SOCK_CLOEXEC|SOCK_NONBLOCK) = -1 EAGAIN (Resource temporarily unavailable) <0.000011>
+1791246791.293544 [   0] read(13<TCP:[127.0.0.1:19390->127.0.0.1:50038]>, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\4\0\0\0\0\0", 4096) = 33 <0.000015>
+1791246791.293633 [   1] write(13<TCP:[127.0.0.1:19390->127.0.0.1:50038]>, "\0\0\6\4\0\0\0\0\0\0\5\0\0@\0", 15) = 15 <0.000020>
+1791246791.293692 [   0] read(13<TCP:[127.0.0.1:19390->127.0.0.1:50038]>, 0x221f8c892000, 32768) = -1 EAGAIN (Resource temporarily unavailable) <0.000006>
+1791246791.293750 [   1] write(13<TCP:[127.0.0.1:19390->127.0.0.1:50038]>, "\0\0\0\4\1\0\0\0\0", 9) = 9 <0.000034>
+1791246791.293809 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [{events=EPOLLOUT, data=0x3ffffbf15b000001}, {events=EPOLLIN|EPOLLOUT, data=0x3ffffbf15c000016}], 128, 0, NULL, 0) = 2 <0.000006>
+1791246791.293839 [   0] read(12<TCP:[127.0.0.1:50038->127.0.0.1:19390]>, "\0\0\6\4\0\0\0\0\0\0\5\0\0@\0\0\0\0\4\1\0\0\0\0", 32768) = 24 <0.000006>
+1791246791.293880 [   0] read(12<TCP:[127.0.0.1:50038->127.0.0.1:19390]>, 0x221f8c876000, 32768) = -1 EAGAIN (Resource temporarily unavailable) <0.000013>
+1791246791.293969 [   1] write(12<TCP:[127.0.0.1:50038->127.0.0.1:19390]>, "\0\0\0\4\1\0\0\0\0", 9) = 9 <0.000015>
+1791246791.294008 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [{events=EPOLLIN|EPOLLOUT, data=0x3ffffbf15b000001}], 128, 0, NULL, 0) = 1 <0.000006>
+1791246791.294043 [   0] read(13<TCP:[127.0.0.1:19390->127.0.0.1:50038]>, "\0\0\0\4\1\0\0\0\0", 32768) = 9 <0.000020>
+1791246791.294105 [   0] read(13<TCP:[127.0.0.1:19390->127.0.0.1:50038]>, 0x221f8c892000, 32768) = -1 EAGAIN (Resource temporarily unavailable) <0.000006>
+1791246791.294136 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000005>
+1791246791.294162 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 41, NULL, 0) = 0 <0.041071>
+1791246791.335271 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000008>
+1791246791.335313 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 1, NULL, 0) = 0 <0.001070>
+1791246791.336430 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000008>
+1791246791.336459 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 4, NULL, 0) = 0 <0.005609>
+1791246791.342143 [  18] pwrite64(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, "\2\0\0\0\0\0\0\0\2\0\n\0\0\0\0\0\1\0\0\0\240\0\0\0\5\0\0\0 \0\0\0\1\0\0\0\265\0\0\0\4\0\0\0D\0\0\0\1\0\0\0\355\0\0\0\t\0\0\0 \0\0\0\1\0\0\0\6\1\0\0\t\0\0\0 \0\0\0\1\0\0\0\37\1\0\0\7\0\0\0C\0\0\0\1\0\0\0Y\1\0\0\3\0\0\0\20\0\0\0\1\0\0\0\\\1\0\0\5\0\0\0 \0\0\0\1\0\0\0q\1\0\0\7\0\0\0\264\0\0\0\1\0\0\0\34\2\0\0\17\0\0\0 \0\0\0\1\0\0\0;\2\0\0\4\0\0\0:\1\0\0alarm\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\2\0\0\0\0\0\0\0auth\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\2\0\1\0\0\0\0\0\0\0\0\0\20\0\0"..., 4096, 8192) = 4096 <0.000024>
+1791246791.342202 [  75] fdatasync(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>) = 0 <0.002860>
+1791246791.345091 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000009>
+1791246791.346081 [  18] pwrite64(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, "\0\0\0\0\0\0\0\0\4\0\0\0\0\0\0\0\355\332\f\355\2\0\0\0\0\20\0\0\0\0\0\0\2\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\377\377\377\377\377\377\377\377\6\0\0\0\0\0\0\0\n\0\0\0\0\0\0\0\2151\223\273\320V5f\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 4096, 0) = 4096 <0.000010>
+1791246791.346124 [  75] fdatasync(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>) = 0 <0.002747>
+1791246791.348921 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.422859>
+1791246791.771812 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000020>
+1791246791.771855 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [{events=EPOLLIN|EPOLLOUT, data=0x3ffffbf15a000001}], 128, 63, NULL, 0) = 1 <0.000046>
+1791246791.771933 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = 0 <0.002596>
+1791246791.774558 [   1] write(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, "\0\0\10\6\1\0\0\0\0\2\4\20\20\t\16\7\7\0\0\4\10\0\0\0\0\0\0\0\0\5\0\0\10\6\0\0\0\0\0\2\4\20\20\t\16\7\7", 47) = 47 <0.000020>
+1791246791.774608 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [{events=EPOLLIN|EPOLLOUT, data=0x3ffffbf15a000001}], 128, 0, NULL, 0) = 1 <0.000007>
+1791246791.774643 [   0] read(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, "\0\0\10\6\1\0\0\0\0\2\4\20\20\t\16\7\7", 32768) = 17 <0.000008>
+1791246791.774676 [   0] read(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, 0x221f8c8e2000, 32768) = -1 EAGAIN (Resource temporarily unavailable) <0.000007>
+1791246791.774706 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000007>
+1791246791.774735 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [{events=EPOLLIN|EPOLLOUT|EPOLLRDHUP, data=0x3ffffbf15a000001}], 128, 60, NULL, 0) = 1 <0.004061>
+1791246791.778832 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000011>
+1791246791.778885 [   0] read(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, "", 32768) = 0 <0.000040>
+1791246791.778964 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>, 0x221f8c635b44) = 0 <0.000013>
+1791246791.779019 [   3] close(14<TCP:[127.0.0.1:19390->127.0.0.1:50050]>) = 0 <0.000098>
+1791246791.779248 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000012>
+1791246791.779337 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [{events=EPOLLIN, data=0x3ffffbf15d000001}], 128, 56, NULL, 0) = 1 <0.004156>
+1791246791.783530 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000010>
+1791246791.783579 [ 288] accept4(7<TCP:[127.0.0.1:19390]>, {sa_family=AF_INET, sin_port=htons(50054), sin_addr=inet_addr("127.0.0.1")}, [112 => 16], SOCK_CLOEXEC|SOCK_NONBLOCK) = 14<TCP:[127.0.0.1:19390->127.0.0.1:50054]> <0.000040>
+1791246791.792300 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 14<TCP:[127.0.0.1:19390->127.0.0.1:50054]>, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data=0x3ffffbf15a000002}) = 0 <0.000012>
+1791246791.792361 [  51] getsockname(14<TCP:[127.0.0.1:19390->127.0.0.1:50054]>, {sa_family=AF_INET, sin_port=htons(19390), sin_addr=inet_addr("127.0.0.1")}, [112 => 16]) = 0 <0.000030>
+1791246791.792421 [  54] setsockopt(14<TCP:[127.0.0.1:19390->127.0.0.1:50054]>, SOL_TCP, TCP_NODELAY, [1], 4) = 0 <0.000007>
+1791246791.792452 [  54] setsockopt(14<TCP:[127.0.0.1:19390->127.0.0.1:50054]>, SOL_SOCKET, SO_KEEPALIVE, [1], 4) = 0 <0.000012>
+1791246791.792507 [  54] setsockopt(14<TCP:[127.0.0.1:19390->127.0.0.1:50054]>, SOL_TCP, TCP_KEEPIDLE, [15], 4) = 0 <0.000007>
+1791246791.792536 [  54] setsockopt(14<TCP:[127.0.0.1:19390->127.0.0.1:50054]>, SOL_TCP, TCP_KEEPINTVL, [15], 4) = 0 <0.000007>
+1791246791.792564 [  54] setsockopt(14<TCP:[127.0.0.1:19390->127.0.0.1:50054]>, SOL_TCP, TCP_KEEPCNT, [9], 4) = 0 <0.000029>
+1791246791.792620 [  54] setsockopt(14<TCP:[127.0.0.1:19390->127.0.0.1:50054]>, SOL_SOCKET, SO_KEEPALIVE, [1], 4) = 0 <0.000007>
+1791246791.792648 [  54] setsockopt(14<TCP:[127.0.0.1:19390->127.0.0.1:50054]>, SOL_TCP, TCP_KEEPIDLE, [30], 4) = 0 <0.000007>
+1791246791.792709 [ 288] accept4(7<TCP:[127.0.0.1:19390]>, 0x221f8c68702c, [112], SOCK_CLOEXEC|SOCK_NONBLOCK) = -1 EAGAIN (Resource temporarily unavailable) <0.000011>
+1791246791.792757 [   0] read(14<TCP:[127.0.0.1:19390->127.0.0.1:50054]>, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\4\0\0\0\0\0", 4096) = 33 <0.000037>
+1791246791.792836 [   1] write(14<TCP:[127.0.0.1:19390->127.0.0.1:50054]>, "\0\0\6\4\0\0\0\0\0\0\5\0\0@\0", 15) = 15 <0.000036>
+1791246791.792953 [   0] read(14<TCP:[127.0.0.1:19390->127.0.0.1:50054]>, 0x221f8c932000, 32768) = -1 EAGAIN (Resource temporarily unavailable) <0.000010>
+1791246791.793053 [   1] write(14<TCP:[127.0.0.1:19390->127.0.0.1:50054]>, "\0\0\0\4\1\0\0\0\0", 9) = 9 <0.000063>
+1791246791.793168 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000016>
+1791246791.793250 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [{events=EPOLLIN|EPOLLOUT, data=0x3ffffbf15a000002}], 128, 42, NULL, 0) = 1 <0.000183>
+1791246791.793467 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000008>
+1791246791.793504 [   0] read(14<TCP:[127.0.0.1:19390->127.0.0.1:50054]>, "\0\0\0\4\1\0\0\0\0\0\0j\1\4\0\0\0\1\203\206E\220`\251$\210-\235\313eq\257\233\213\33GT\305A\213\10\235\\\v\201p\334\v\354\276\17_\213\35u\320b\r&=LMedz\212\232\312\310\264\307`+\274%\303@\2te\206M\2035\5\261\37@\211\232\312\310\262MIOj\177\206i\367\237u\366m@\215%\6-IXu\231n\345\261\6=_\0033.6\0\0\21\0\1\0\0\0\1\0\0\0\0\f\n\4/w4/\22\4/w40", 32768) = 150 <0.000025>
+1791246791.793573 [   0] read(14<TCP:[127.0.0.1:19390->127.0.0.1:50054]>, 0x221f8c932000, 32768) = -1 EAGAIN (Resource temporarily unavailable) <0.000007>
+1791246791.793786 [   1] write(14<TCP:[127.0.0.1:19390->127.0.0.1:50054]>, "\0\0\4\10\0\0\0\0\0\0\0\0\21\0\0\10\6\0\0\0\0\0\2\4\20\20\t\16\7\7\0\0\16\1\4\0\0\0\1\210_\213\35u\320b\r&=LMed\0\4F\0\0\0\0\0\1\0\0\0\4A\n\31\10\245\213\355\201\221\217\260\200\215\1\20\206\227\302\341\341\224\321\275D\30) \3\22\27\n\5/w4/0\20\2\30\2 \1*\10seed42-0\22\27\n\5/w4/1\20\3\30\3 \1*\10seed42-1\22\31\n\6/w4/10\20\f\30\f \1*\tseed42-10\22\31\n\6/w4/11\20\r\30\r \1*\tseed42-11\22\31\n\6/w4/12\20\16\30\16 \1*\tseed42-12\22\31\n\6/w4/13\20\17\30\17 \1*\tseed42-13\22\31\n\6"..., 1189) = 1189 <0.000024>
+1791246791.793852 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000010>
+1791246791.793938 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [{events=EPOLLIN|EPOLLOUT|EPOLLRDHUP, data=0x3ffffbf15a000002}], 128, 41, NULL, 0) = 1 <0.001054>
+1791246791.795028 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000008>
+1791246791.795071 [   0] read(14<TCP:[127.0.0.1:19390->127.0.0.1:50054]>, "", 32768) = 0 <0.000027>
+1791246791.795123 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 14<TCP:[127.0.0.1:19390->127.0.0.1:50054]>, 0x221f8c695b44) = 0 <0.000006>
+1791246791.795153 [   3] close(14<TCP:[127.0.0.1:19390->127.0.0.1:50054]>) = 0 <0.000035>
+1791246791.795244 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000007>
+1791246791.795274 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, 0x7fffffffd024, 128, 40, NULL, 0) = -1 EINTR (Interrupted system call) <0.000081>
+1791246791.795377 [ 281] --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=907646, si_uid=1000} ---
+1791246791.795396 [ 202] futex(0x1debae0, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000011>
+1791246791.795873 [  15] rt_sigreturn({mask=[]}) = -1 EINTR (Interrupted system call) <0.000007>
+1791246791.795903 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [{events=EPOLLIN|EPOLLOUT, data=0x3ffffbf15c000016}], 128, 0, NULL, 0) = 1 <0.000007>
+1791246791.795936 [   0] read(12<TCP:[127.0.0.1:50038->127.0.0.1:19390]>, "\0\0\25\7\0\0\0\0\0\177\377\377\377\0\0\0\0graceful_stop\0\0\10\6\0\0\0\0\0\1\6\1\10\0\3\3\t", 32768) = 47 <0.000031>
+1791246791.796027 [   0] read(12<TCP:[127.0.0.1:50038->127.0.0.1:19390]>, 0x221f8c876000, 32768) = -1 EAGAIN (Resource temporarily unavailable) <0.000007>
+1791246791.796103 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 12<TCP:[127.0.0.1:50038->127.0.0.1:19390]>, 0x221f8c4edb2c) = 0 <0.000008>
+1791246791.796137 [   3] close(12<TCP:[127.0.0.1:50038->127.0.0.1:19390]>) = 0 <0.000025>
+1791246791.796235 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [{events=EPOLLIN|EPOLLOUT|EPOLLRDHUP, data=0x3ffffbf15b000001}], 128, 0, NULL, 0) = 1 <0.000007>
+1791246791.796278 [   0] read(13<TCP:[127.0.0.1:19390->127.0.0.1:50038]>, "", 32768) = 0 <0.000030>
+1791246791.796332 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 13<TCP:[127.0.0.1:19390->127.0.0.1:50038]>, 0x221f8c699b44) = 0 <0.000008>
+1791246791.796363 [   3] close(13<TCP:[127.0.0.1:19390->127.0.0.1:50038]>) = 0 <0.000030>
+1791246791.796497 [ 263] unlinkat(AT_FDCWD</home/gvickers>, "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0.tmp", 0) = 0 <0.000042>
+1791246791.796572 [   3] close(11</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0.tmp>(deleted)) = 0 <0.000034>
+1791246791.796685 [   1] write(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>, "\30\0\0\0\0\0\0\0\10\3\20\327\372\265\245\10\32\16\10\3\20\206\227\302\341\341\224\321\275D\0301", 32) = 32 <0.000011>
+1791246791.796731 [  75] fdatasync(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>) = 0 <0.002759>
+1791246791.799526 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000010>
+1791246791.799578 [   3] close(9</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal/0000000000000000-0000000000000000.wal>) = 0 <0.000038>
+1791246791.799649 [   3] close(10</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/wal>) = 0 <0.000011>
+1791246791.799731 [  18] pwrite64(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, "\3\0\0\0\0\0\0\0\2\0\n\0\0\0\0\0\1\0\0\0\240\0\0\0\5\0\0\0 \0\0\0\1\0\0\0\265\0\0\0\4\0\0\0D\0\0\0\1\0\0\0\355\0\0\0\t\0\0\0 \0\0\0\1\0\0\0\6\1\0\0\t\0\0\0 \0\0\0\1\0\0\0\37\1\0\0\7\0\0\0C\0\0\0\1\0\0\0Y\1\0\0\3\0\0\0\20\0\0\0\1\0\0\0\\\1\0\0\5\0\0\0 \0\0\0\1\0\0\0q\1\0\0\7\0\0\0\264\0\0\0\1\0\0\0\34\2\0\0\17\0\0\0 \0\0\0\1\0\0\0;\2\0\0\4\0\0\0:\1\0\0alarm\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\2\0\0\0\0\0\0\0auth\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\2\0\1\0\0\0\0\0\0\0\0\0\20\0\0"..., 4096, 12288) = 4096 <0.000053>
+1791246791.799827 [  75] fdatasync(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>) = 0 <0.002824>
+1791246791.802687 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000010>
+1791246791.802744 [  18] pwrite64(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, "\1\0\0\0\0\0\0\0\4\0\0\0\0\0\0\0\355\332\f\355\2\0\0\0\0\20\0\0\0\0\0\0\3\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\377\377\377\377\377\377\377\377\6\0\0\0\0\0\0\0\v\0\0\0\0\0\0\0\r!^|\332\216;\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 4096, 4096) = 4096 <0.000039>
+1791246791.802821 [  75] fdatasync(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>) = 0 <0.002757>
+1791246791.805611 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000009>
+1791246791.805666 [  11] munmap(0x7ffd31200000, 10737418240) = 0 <0.000049>
+1791246791.805739 [  73] flock(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>, LOCK_UN) = 0 <0.000009>
+1791246791.805782 [   3] close(8</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data/member/snap/db>) = 0 <0.000042>
+1791246791.805865 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_DEL, 4<TCP:[127.0.0.1:19391]>, 0x221f8c5c4a84) = 0 <0.000011>
+1791246791.805912 [   3] close(4<TCP:[127.0.0.1:19391]>) = 0 <0.000051>
+1791246791.806006 [   1] write(2</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-recovered.stderr>, "{\"level\":\"error\",\"ts\":\"2026-10-05T20:33:11.805990-0400\",\"caller\":\"embed/etcd.go:912\",\"msg\":\"setting up serving from embedded etcd failed.\",\"error\":\"accept tcp 127.0.0.1:19391: use of closed network connection\",\"stacktrace\":\"go.etcd.io/etcd/server/v3/embed."..., 431) = 431 <0.000017>
+1791246791.806117 [  74] fsync(2</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-recovered.stderr>) = 0 <0.008100>
+1791246791.814251 [ 202] futex(0x1dcc320, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000010>
+1791246791.814302 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000035>
+1791246791.814513 [ 202] futex(0x1dc96b8, FUTEX_WAIT_PRIVATE, 0, NULL) = ? ERESTARTSYS (To be restarted if SA_RESTART is set) <0.000294>
+1791246791.814845 [ 202] --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=907980, si_uid=1000} ---
+1791246791.816608 [ 202] +++ killed by SIGTERM +++

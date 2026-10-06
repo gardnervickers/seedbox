@@ -1,0 +1,111 @@
+{
+  "execution_policy": "real Linux/KVM selected; preemption primary, cooperation fallback; this fixture executes neither backend mode",
+  "caller_ownership": "one caller OS thread for world, machines, devices and scenario actions",
+  "wire_version": 1,
+  "wire_schema": "control-message.schema.json",
+  "framing": "little-endian u32 payload byte length followed by UTF-8 JSON; maximum payload 16777216 bytes",
+  "transport": "reserved reliable control device, distinct from opaque Ethernet application frames; observations retained until ordered Ack; duplicate identical commands are idempotent",
+  "typed_ids": [
+    "MachineId(u32)",
+    "RequestId(u64)",
+    "ControllerId(u64)",
+    "CommandId(u64)",
+    "ObservationSequence(u64)",
+    "FaultHandle(u64)"
+  ],
+  "control_ownership": "controller stable ID + controller incarnation + monotonically ordered command ID; workload ownership: machine stable ID + boot incarnation + request ID",
+  "state_api": [
+    "World::encode_state/decode_state/validate_state",
+    "World::snapshot",
+    "NativeController: Serialize/Deserialize; issue/observe/validate"
+  ],
+  "state_coverage": [
+    "World command ingress and complete payloads",
+    "pending queued/waiting requests",
+    "reliable response/observation outbox and ack sequences",
+    "event deadlines and registration sequence",
+    "volatile/durable block state and pending physical effects",
+    "frame bytes, inboxes, drop/delivery records",
+    "fault handles and rules",
+    "seed streams and counters",
+    "machine incarnations and DMA memory",
+    "workload and immune scenario-VM stopped-guest counter declarations",
+    "native controller program, pc, locals and pending command",
+    "scripted service pending flush replies"
+  ],
+  "observer_history": "World trace is excluded from state; restored future regenerates without a prior execution log",
+  "ordering": "one registered event; finish backend I/O/actions; publish observations; resume controller before next event at same tick",
+  "clock": "integer branch-count-domain Tick; executed guest delta imported once at a stopped semantic boundary; all-blocked idle event jump is explicit model policy; rational integer ClockPolicy converts ticks into Linux ns and is not measured physical time",
+  "stopped_guest_boundary": {
+    "kinds": [
+      "CooperativeHook",
+      "DeviceExit",
+      "PrecisePreemption",
+      "Blocked",
+      "Halted",
+      "Shutdown",
+      "Fault",
+      "CompletionOnly"
+    ],
+    "fields": [
+      "owner = Machine(Owner) | ScenarioVm{controller,incarnation}",
+      "boundary_sequence",
+      "rip",
+      "rep{rcx,rsi,rdi}",
+      "counter_origin",
+      "raw_counter",
+      "accumulated_guest_branches",
+      "delta_guest_branches",
+      "requested_target",
+      "actual_target",
+      "overshoot",
+      "pending_io_completed",
+      "tick_before",
+      "tick_after"
+    ],
+    "policy": "debugger administration is outside semantic numbering; natural PIO/MMIO exits during correction are DeviceExit boundaries; completion-only delta is zero and imports change no canonical world state or numbering; scripted models cannot declare PrecisePreemption"
+  },
+  "not_executed": [
+    "guest scenario VM/control device",
+    "hardware preemption",
+    "actual Linux/virtio/TCP/filesystem behavior",
+    "snapshot of KVM hidden state"
+  ],
+  "examples": [
+    {
+      "Command": {
+        "version": 1,
+        "controller": 1,
+        "incarnation": 1,
+        "id": 1,
+        "command": {
+          "Sleep": {
+            "after_ticks": 5
+          }
+        }
+      }
+    },
+    {
+      "Observation": {
+        "version": 1,
+        "controller": 1,
+        "incarnation": 1,
+        "sequence": 1,
+        "command": 1,
+        "observation": {
+          "Slept": {
+            "at_tick": 5
+          }
+        }
+      }
+    },
+    {
+      "Ack": {
+        "version": 1,
+        "controller": 1,
+        "incarnation": 1,
+        "sequence": 1
+      }
+    }
+  ]
+}

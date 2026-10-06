@@ -1,0 +1,68 @@
+{
+  "batch_id": "m1-linux-count-only-fresh5-v1",
+  "scope": "M1: five fresh processes, count-only Linux stop, unchanged reviewed binary and pinned start",
+  "identities": {
+    "src/bin/preempt.rs": "0c67008eee8fae63df4d2d4ae6f7eae494acb6c9a18288379b673e530563a238",
+    "src/linux_restore_cost.rs": "ef678bb1cb1d6d937867ed1aa04c60719191bd2015a79fd856e28a3c91c6fa82",
+    "msr_guard.py": "6599da4ce7535ba93ba3672270db6d4e64c46999fc28a53b09971e045010ce40",
+    "target/release/preempt": "c5de046617c7b539d5737dd317f956b77dbbba4fa603ade74166cc002d6f1bcb"
+  },
+  "attempts": [
+    {
+      "id": "m1-linux-count-only-fresh5-v1-r1",
+      "args": [
+        "linux",
+        1100000,
+        4000,
+        "count_only"
+      ]
+    },
+    {
+      "id": "m1-linux-count-only-fresh5-v1-r2",
+      "args": [
+        "linux",
+        1100000,
+        4000,
+        "count_only"
+      ]
+    },
+    {
+      "id": "m1-linux-count-only-fresh5-v1-r3",
+      "args": [
+        "linux",
+        1100000,
+        4000,
+        "count_only"
+      ]
+    },
+    {
+      "id": "m1-linux-count-only-fresh5-v1-r4",
+      "args": [
+        "linux",
+        1100000,
+        4000,
+        "count_only"
+      ]
+    },
+    {
+      "id": "m1-linux-count-only-fresh5-v1-r5",
+      "args": [
+        "linux",
+        1100000,
+        4000,
+        "count_only"
+      ]
+    }
+  ],
+  "status": "approved by user goal M1",
+  "input_manifest_sha256": "571b39767430b5ecaba9bbcbabfdb1b1ea89600bb13003cb4b8444706f065f8c",
+  "decision_value": "Measures generic count-directed correction on the real Linux pinned busy fixture after bare cost and overshoot tradeoff are known; target is100000branches after inter-loopPIO, so correction tail does not cross device I/O. Margin4000 exceeds previously observed original Linux skids2612-3440 but is not a proven universal bound. Expected millisecond cost would close further margin-tuning as a credible100us route for this primitive, without repeating a five-process gate matrix.",
+  "conditions": [
+    "unchanged reviewed source/binary/guard/shared lock",
+    "pinned complete host brackets and original/read-onlyMSR profile",
+    "retain failure and raw receipt",
+    "compare analytic landing and continued terminal to existing frozenLinuxV6reference",
+    "no new load/workaround/fresh-five matrix",
+    "normal-stop bracket excludes overflow return latency and witnesses"
+  ]
+}

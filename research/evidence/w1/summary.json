@@ -1,0 +1,177 @@
+{
+  "schema": 1,
+  "seed": 42,
+  "scope": "scripted services, Ethernet bytes, writeback block model; no Linux/TCP/filesystem conformance",
+  "time_policy": "integer fixture nanoseconds; callbacks instantaneous; all participants blocked between events",
+  "order": "(deadline,registration); resume ready controller after ONE callback and backend boundary",
+  "witness_coverage": {
+    "coherent_boundary": "completed_boundary follows one event and completed service adapter actions",
+    "omissions": [
+      "opaque Rust Future storage/compiler internals",
+      "any guest/backend state not supplied by checkpoint_backend",
+      "CPU/Linux/virtio hidden state"
+    ],
+    "world": "all fields affecting this world model, pending event payloads and ownership, seed stream counters, explicit controller logical phases and service pending flushes"
+  },
+  "sources": {
+    "fixture_sha256": "539f348091ce25a4332cf468612e9f706d6c764c3ddbee0aa69188a2e93566df",
+    "lib_sha256": "5a386535d2f62e724e3b951faffd4a005756c91c27b3da14a6d59391bafead38"
+  },
+  "positive_cases": [
+    {
+      "case": "AZ_partition_partial_loss_heal",
+      "result": {
+        "Ok": null
+      },
+      "time_ns": 103,
+      "stale": 0,
+      "trace_entries": 522,
+      "quorum_reads": [],
+      "rolling_phases": []
+    },
+    {
+      "case": "crash_pending_io_durability_ownership",
+      "result": {
+        "Ok": null
+      },
+      "time_ns": 69,
+      "stale": 4,
+      "trace_entries": 167,
+      "quorum_reads": [],
+      "rolling_phases": []
+    },
+    {
+      "case": "rolling_three_replica_service",
+      "result": {
+        "Ok": null
+      },
+      "time_ns": 362,
+      "stale": 0,
+      "trace_entries": 1550,
+      "quorum_reads": [
+        {
+          "down": null,
+          "matching_replicas": 3,
+          "value": 100
+        },
+        {
+          "down": 1,
+          "matching_replicas": 2,
+          "value": 100
+        },
+        {
+          "down": 1,
+          "matching_replicas": 2,
+          "value": 101
+        },
+        {
+          "down": null,
+          "matching_replicas": 3,
+          "value": 101
+        },
+        {
+          "down": 2,
+          "matching_replicas": 2,
+          "value": 101
+        },
+        {
+          "down": 2,
+          "matching_replicas": 2,
+          "value": 102
+        },
+        {
+          "down": null,
+          "matching_replicas": 3,
+          "value": 102
+        },
+        {
+          "down": 3,
+          "matching_replicas": 2,
+          "value": 102
+        },
+        {
+          "down": 3,
+          "matching_replicas": 2,
+          "value": 103
+        },
+        {
+          "down": null,
+          "matching_replicas": 3,
+          "value": 103
+        }
+      ],
+      "rolling_phases": [
+        {
+          "expected": 100,
+          "machine": 1,
+          "stage": "crash"
+        },
+        {
+          "expected": 101,
+          "machine": 2,
+          "stage": "crash"
+        },
+        {
+          "expected": 102,
+          "machine": 3,
+          "stage": "crash"
+        }
+      ]
+    },
+    {
+      "case": "equal_time_continuation",
+      "result": {
+        "Ok": null
+      },
+      "time_ns": 21,
+      "stale": 0,
+      "trace_entries": 27,
+      "quorum_reads": [],
+      "rolling_phases": []
+    }
+  ],
+  "negative_controls": [
+    {
+      "case": "AZ_partition_partial_loss_heal",
+      "result": {
+        "Err": "healing_one_handle_preserves_overlapping_machine_fault"
+      }
+    },
+    {
+      "case": "crash_pending_io_durability_ownership",
+      "result": {
+        "Err": "reboot_reads_flushed_data_and_loses_unflushed_ack"
+      }
+    },
+    {
+      "case": "crash_pending_io_durability_ownership",
+      "result": {
+        "Err": "obsolete_disk_completion_cannot_mutate_new_cache"
+      }
+    },
+    {
+      "case": "crash_pending_io_durability_ownership",
+      "result": {
+        "Err": "wire_survives_sender_and_receiver_reboot"
+      }
+    },
+    {
+      "case": "rolling_three_replica_service",
+      "result": {
+        "Err": "rejoined_replica_recovers_current_data_before_next_reboot"
+      }
+    },
+    {
+      "case": "equal_time_continuation",
+      "result": {
+        "Err": "equal_time_controller_continuation_precedes_later_wire"
+      }
+    },
+    {
+      "case": "crash_pending_io_durability_ownership",
+      "result": {
+        "Err": "physical_media_write_survives_reboot_without_old_guest_callback"
+      }
+    }
+  ]
+}

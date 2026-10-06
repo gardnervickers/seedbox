@@ -1,0 +1,73 @@
+{
+  "slice": "W5A",
+  "objectives": [
+    "O1"
+  ],
+  "decision": "D",
+  "recommendation": "Retain guest RCB as a bounded experimental metric for further validation; retain an explicit cooperative/software cost policy for initial production. Whole-Linux charging is not accepted.",
+  "host": {
+    "model": "AMD Ryzen 9 5950X",
+    "family": 25,
+    "model_id": 33,
+    "stepping": 0,
+    "microcode": "0xa20102e",
+    "kernel": "Linux 6.18.54",
+    "probe_cpu": 2,
+    "smt_sibling": 18,
+    "perf_event_paranoid": 2,
+    "effective_capabilities": "0",
+    "kvm_enable_pmu": true,
+    "nmi_watchdog": 1
+  },
+  "inputs": {
+    "rr_commit": "858a9fbcc5ac71cc578c2e1966f573d7c4ff8257",
+    "seed": 42,
+    "seed_usage": "fixed fixtures; no randomness or execution-log input",
+    "rust": "1.98.1",
+    "nasm": "3.02",
+    "caller_thread": "one Rust owner ThreadId and Linux tid, PhantomData<Rc<()>>",
+    "guest": "bare long-mode x86-64, CPL0/CPL3; no Linux",
+    "pmu": "AMD legacy virtual PMC0, eventsel MSR0xc0010000, counter MSR0xc0010004; 48-bit; virtual eventsel0x4300d1 for USR+OS+Enable"
+  },
+  "executed": {
+    "fresh_final_guest_runs": 560,
+    "rcb_runs": 520,
+    "speclockmap_runs": 40,
+    "matrix_idle": "evidence/w5a/run.IqJoLb",
+    "matrix_loaded": "evidence/w5a/run.SvZhsV",
+    "analysis_idle": "evidence/w5a/run.EE7sT8",
+    "analysis_loaded": "evidence/w5a/run.r0oXkZ",
+    "host_inventory": "evidence/w5a/run.icgEN3",
+    "source_binary_hashes": "evidence/w5a/run.c9xc30",
+    "outside_load": "four scoped taskset yes processes on CPUs2,18,3,19; trap cleanup; advisory lock held; no service/config change"
+  },
+  "findings": [
+    "All 520 RCB runs agree with assembly-predicted counts in the final idle+loaded matrix; source/binary version2.",
+    "10,000 loop conditional branches count10,000; adding an untaken conditional branch per iteration counts20,000; results remain70,000.",
+    "50,000 unrolled additions produce result350,000 and zero conditional-branch ticks.",
+    "CPL0 filtered by USR counts0; OS counts10,000. CPL3 filtered by OS counts0; USR counts10,000.",
+    "40 fresh 10-million-branch runs count10,000,000; 40 fresh million-lock-add loops count1,000,000 conditional branches.",
+    "For 40 final activated-counter administration cases, one million host loop iterations plus100 immediate_exit KVM_RUN reentries leave counter unchanged; preliminary pre-activation admin check alone was insufficient.",
+    "40 seeded-near-wrap cases start2^48-500, end9500 and modular delta10,000; no PMI interrupt bit enabled and no precise preemption/abort claim.",
+    "Native SpecLockMap one-lock self-check sometimes counts1; guest event0x825 idle0..1024 and loaded1278..1390 in final20+20 runs. Optimization is active. These are not conditional-branch divergence.",
+    "Host perf_event_open raw0xd1 exclude_host all-CPL denied EACCES13; exclude_host user-only accessible. KVM virtual guest PMC successfully covers both guest privilege levels.",
+    "rr specifies Zen3 retired conditional branches raw config0x5100d1, practical skid10000 and PMU_SKID_UNBOUNDED; workaround script writes host MSR0xc0011020 bit54. Script not executed."
+  ],
+  "limits": [
+    "No rr workaround-enabled comparison: disallowed host MSR/config changes; /dev/cpu/0/msr root-only.",
+    "No whole Linux boot/workload, instruction-history determinism, fault/restart/page-fault/interrupt/REP/multitask corpus or cross-host equivalence.",
+    "KVM source audit is upstream v6.18 baseline, not exact downstream6.18.54; empirical filtering checks independently pass.",
+    "No physical-time fidelity or ns conversion. Conditional branches are not all computational work.",
+    "Branch-free infinite unconditional-jump paths are unsupported non-yielding paths; counter overflow cannot detect them.",
+    "Modulo deltas require fewer than2^48 events per segment; multiple-wrap detection and precise overflow delivery are unproved.",
+    "VM CPU/PMC administration and raw native diagnostics are not canonical whole-world witness hashes."
+  ],
+  "next_decision": "Use explicit positive cooperative costs now. If hardware work charging remains desirable, require an approved pinned SpecLockMap-disabled host profile and representative patched-Linux counter tests before choosing a charge conversion.",
+  "primary_sources": [
+    "https://github.com/rr-debugger/rr/blob/858a9fbcc5ac71cc578c2e1966f573d7c4ff8257/src/PerfCounters.cc",
+    "https://github.com/rr-debugger/rr/blob/858a9fbcc5ac71cc578c2e1966f573d7c4ff8257/src/PerfCounters_x86.h",
+    "https://github.com/rr-debugger/rr/blob/858a9fbcc5ac71cc578c2e1966f573d7c4ff8257/scripts/zen_workaround.py",
+    "https://github.com/torvalds/linux/blob/v6.18/arch/x86/kvm/pmu.c",
+    "https://github.com/torvalds/linux/blob/v6.18/arch/x86/kvm/svm/pmu.c"
+  ]
+}

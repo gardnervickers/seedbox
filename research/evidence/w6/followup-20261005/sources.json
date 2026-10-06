@@ -1,0 +1,357 @@
+{
+  "retrieved_utc": "2026-10-06T01:58:40.899609+00:00",
+  "sources": [
+    {
+      "url": "https://api.github.com/repos/etcd-io/etcd/commits/v3.5.2",
+      "path": "etcd/v3.5.2/commit.json",
+      "sha256": "cc30aa592a61e31c228c820edf8af4aa29325d6b43e0a3d2b052458e6f5254e1",
+      "bytes": 13791,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/99018a77bea9a9d29962e5169876c64e02739c52/server/etcdserver/server.go",
+      "path": "etcd/v3.5.2/server/etcdserver/server.go",
+      "sha256": "e31f24f2d7a21fe4636ef3f883e509c42194c1b2d598d55a36829e2c19a12af5",
+      "bytes": 80413,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/99018a77bea9a9d29962e5169876c64e02739c52/server/etcdserver/cindex/cindex.go",
+      "path": "etcd/v3.5.2/server/etcdserver/cindex/cindex.go",
+      "sha256": "fef32c5973ab4f6c909222e8686db98dac24f1bd248294bd289749081f7253e8",
+      "bytes": 5731,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/99018a77bea9a9d29962e5169876c64e02739c52/server/mvcc/backend/batch_tx.go",
+      "path": "etcd/v3.5.2/server/mvcc/backend/batch_tx.go",
+      "sha256": "127c94cb1581c569a3c10fbaf2cf5e984a9ed164046d17d74450d7dc4c26b1d5",
+      "bytes": 8567,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/99018a77bea9a9d29962e5169876c64e02739c52/server/etcdserver/backend.go",
+      "path": "etcd/v3.5.2/server/etcdserver/backend.go",
+      "sha256": "cd297240ced42f4aa3886fa0f8660c572def1b42ceb9f4c3e21763d0a1fcc024",
+      "bytes": 3836,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/99018a77bea9a9d29962e5169876c64e02739c52/server/mvcc/kvstore_hash.go",
+      "path": "etcd/v3.5.2/server/mvcc/kvstore_hash.go",
+      "error": "HTTP Error 404: Not Found",
+      "retention": "failed retrieval recorded only; no artifact"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/99018a77bea9a9d29962e5169876c64e02739c52/server/etcdserver/api/v3rpc/maintenance.go",
+      "path": "etcd/v3.5.2/server/etcdserver/api/v3rpc/maintenance.go",
+      "sha256": "d9d53321a1c8b50120b90ec6b724f4f4259869cf420cf1e02107fa1686c6aefe",
+      "bytes": 9183,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/99018a77bea9a9d29962e5169876c64e02739c52/api/etcdserverpb/rpc.proto",
+      "path": "etcd/v3.5.2/api/etcdserverpb/rpc.proto",
+      "sha256": "55fecd9d9e98bf8d7c88d3a951914356cebf4265abb054e1649caa749c692072",
+      "bytes": 37103,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://api.github.com/repos/etcd-io/etcd/commits/v3.5.3",
+      "path": "etcd/v3.5.3/commit.json",
+      "sha256": "c9664dfd3de1586408beb00250db8eaf55ecab1b9d39ee7c403e59d826a5d93d",
+      "bytes": 13791,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/0452feec719fa8ad88ae343e66e9bb222965d75d/server/etcdserver/server.go",
+      "path": "etcd/v3.5.3/server/etcdserver/server.go",
+      "sha256": "55ea05fc2a4c29295d7ad7265b7920676064f1169a2590d90dac9e671873d5d4",
+      "bytes": 82002,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/0452feec719fa8ad88ae343e66e9bb222965d75d/server/etcdserver/cindex/cindex.go",
+      "path": "etcd/v3.5.3/server/etcdserver/cindex/cindex.go",
+      "sha256": "a5c4dcaa01172ef51b067bf8d7f233698ed1950dfe8e34daeb1eb6f33dcf54d0",
+      "bytes": 7270,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/0452feec719fa8ad88ae343e66e9bb222965d75d/server/mvcc/backend/batch_tx.go",
+      "path": "etcd/v3.5.3/server/mvcc/backend/batch_tx.go",
+      "sha256": "26c1b3bbb1663d9f74f3129448a729925eda482394920e2b551ef6330bd0082b",
+      "bytes": 9324,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/0452feec719fa8ad88ae343e66e9bb222965d75d/server/etcdserver/backend.go",
+      "path": "etcd/v3.5.3/server/etcdserver/backend.go",
+      "sha256": "f3329a18e5fc5a1d22c49df0fc7de5b5fe6664bf13654534f3247651365dab11",
+      "bytes": 3835,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/0452feec719fa8ad88ae343e66e9bb222965d75d/server/mvcc/kvstore_hash.go",
+      "path": "etcd/v3.5.3/server/mvcc/kvstore_hash.go",
+      "error": "HTTP Error 404: Not Found",
+      "retention": "failed retrieval recorded only; no artifact"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/0452feec719fa8ad88ae343e66e9bb222965d75d/server/etcdserver/api/v3rpc/maintenance.go",
+      "path": "etcd/v3.5.3/server/etcdserver/api/v3rpc/maintenance.go",
+      "sha256": "d9d53321a1c8b50120b90ec6b724f4f4259869cf420cf1e02107fa1686c6aefe",
+      "bytes": 9183,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/0452feec719fa8ad88ae343e66e9bb222965d75d/api/etcdserverpb/rpc.proto",
+      "path": "etcd/v3.5.3/api/etcdserverpb/rpc.proto",
+      "sha256": "55fecd9d9e98bf8d7c88d3a951914356cebf4265abb054e1649caa749c692072",
+      "bytes": 37103,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://api.github.com/repos/etcd-io/etcd/commits/main",
+      "path": "etcd/main/commit.json",
+      "sha256": "03146b7d2a7fa2b37e7eb382d0843b53ad26246c234d44138ff2d801aa06fcf6",
+      "bytes": 7641,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/76d58e32b30d57a540821c9c5bbcb651fd89994c/Documentation/postmortems/v3.5-data-inconsistency.md",
+      "path": "etcd/main/Documentation/postmortems/v3.5-data-inconsistency.txt",
+      "sha256": "c984f85f84f554e9d1bc558769c2f415334d74cd33a8bae5909e21f46d8396f4",
+      "bytes": 12156,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://api.github.com/repos/etcd-io/etcd/pulls/13854",
+      "path": "etcd/pr13854.json",
+      "sha256": "51bef14d555c52ecb740c34a37dc0b68d32c5fb6de7843bbbb0da1f0d5f1b71d",
+      "bytes": 18165,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://api.github.com/repos/etcd-io/etcd/pulls/13854/files",
+      "path": "etcd/pr13854-files.json",
+      "sha256": "ca6d8ac150c6c6f61592ce2db4a864d6cd4fd28ba874b0d09c2e840c70d0d0a3",
+      "bytes": 54335,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://api.github.com/repos/etcd-io/etcd/releases/tags/v3.5.3",
+      "path": "etcd/release-v3.5.3.json",
+      "sha256": "a5ce9e1ca2102cc28ffb8ad36b406451135465ebc9fcfb8de09bbfb8b141d97e",
+      "bytes": 16414,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://api.github.com/repos/etcd-io/etcd/releases/tags/v3.5.2",
+      "path": "etcd/release-v3.5.2.json",
+      "sha256": "418a66f4103d1d2145c1727089eed8625181d896a5986a79cb75eca68fd59a2e",
+      "bytes": 16110,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://api.github.com/repos/gregkh/linux/commits/v6.18.54",
+      "path": "linux/commit.json",
+      "sha256": "af525db288bc948f960507c633e0bdf3a1643dba19ac1cdcf199c6e75702f0f4",
+      "bytes": 4347,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/gregkh/linux/1b357ecb321392158d507b04672ffee57bfa071d/arch/x86/kernel/cpu/amd.c",
+      "path": "linux/arch/x86/kernel/cpu/amd.c",
+      "sha256": "0213f36ba9f29b0e9984f0cf03105b988414f5a54c213b79b28b58cd2b73457a",
+      "bytes": 38178,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/gregkh/linux/1b357ecb321392158d507b04672ffee57bfa071d/arch/x86/kernel/cpu/bugs.c",
+      "path": "linux/arch/x86/kernel/cpu/bugs.c",
+      "sha256": "1f3174e309bd8b599183a6d56dff391d36a0d7ab6cda98cb056af9af632b890a",
+      "bytes": 112209,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/gregkh/linux/1b357ecb321392158d507b04672ffee57bfa071d/arch/x86/kernel/process.c",
+      "path": "linux/arch/x86/kernel/process.c",
+      "sha256": "7374fadbc5c1f2801f62146044e84fd47cbeadda062817f8b749c06ec26e3b83",
+      "bytes": 27057,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/gregkh/linux/1b357ecb321392158d507b04672ffee57bfa071d/arch/x86/include/asm/spec-ctrl.h",
+      "path": "linux/arch/x86/include/asm/spec-ctrl.h",
+      "sha256": "1a3b57444668e737fc5e50bdddfefe2b57c2cf4c05a8465236c09a992eb9a0e1",
+      "bytes": 3089,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/gregkh/linux/1b357ecb321392158d507b04672ffee57bfa071d/arch/x86/include/asm/msr-index.h",
+      "path": "linux/arch/x86/include/asm/msr-index.h",
+      "sha256": "5f27e1cdd333f7385d74680209fdc6706f30ef15bc8e9a320385715d15f451f0",
+      "bytes": 49911,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/gregkh/linux/1b357ecb321392158d507b04672ffee57bfa071d/arch/x86/kvm/svm/svm.c",
+      "path": "linux/arch/x86/kvm/svm/svm.c",
+      "sha256": "302362a7be48f0393f0010bf47ec51f9a161ad57c826bde766df94666be10694",
+      "bytes": 160772,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/rr-debugger/rr/858a9fbcc5ac71cc578c2e1966f573d7c4ff8257/scripts/zen_workaround.py",
+      "path": "rr/zen_workaround.py",
+      "sha256": "99e062372a7aa00237495a6c8b53c1c5ac2badd5bb31ad9aca1a12e13b0c2727",
+      "bytes": 5547,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/wiki/rr-debugger/rr/Zen.md",
+      "path": "rr/Zen.txt",
+      "sha256": "435eded270aaaf604a107701cbe89790ccecf4447032bb6b3e9e9a17a974de8e",
+      "bytes": 4870,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://api.github.com/gists/01d54cefdb70561b5f6675e08f2990f2",
+      "path": "rr/zen-module-gist.json",
+      "sha256": "712926e7c9e387e1bb78e3b755e2a2e968d856fd892565f3661b41b8224ef614",
+      "bytes": 18177,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://api.github.com/repos/etcd-io/etcd/commits/c83b1ad9bad637fd02c6e17010755c9b35860bd7",
+      "path": "etcd/pr13854-merge.json",
+      "sha256": "c8e4dc0fe0e8fc81d00d189b2308590ae1334948603ea1417ec7d6057e28c58b",
+      "bytes": 60802,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://api.github.com/repos/etcd-io/etcd/commits?sha=v3.5.3&path=server/etcdserver/server.go&per_page=15",
+      "path": "etcd/v3.5.3-server-history.json",
+      "sha256": "57f5fa367c3978c08137c376a7aa5e27e4ffadac20c500481b65cbd4a20a1486",
+      "bytes": 50433,
+      "retention": "omitted acquisition cache; not retained evidence"
+    },
+    {
+      "url": "https://api.github.com/repos/etcd-io/etcd/git/trees/0452feec719fa8ad88ae343e66e9bb222965d75d?recursive=1",
+      "path": "etcd/v3.5.3-tree.json",
+      "sha256": "5190e9a38afe5a98a1ee4e8bebb2b93b48c10ffe1c81be8023a85de8fe59c3c8",
+      "bytes": 384340,
+      "retention": "omitted acquisition cache; not retained evidence"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/99018a77bea9a9d29962e5169876c64e02739c52/server/mvcc/kvstore.go",
+      "path": "etcd/v3.5.2/server/mvcc/kvstore.go",
+      "sha256": "a78de4dcd9a3e76c6760514c0f042370692e8f877914703ab3b4137ef06562bb",
+      "bytes": 14237,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/99018a77bea9a9d29962e5169876c64e02739c52/server/mvcc/hash.go",
+      "path": "etcd/v3.5.2/server/mvcc/hash.go",
+      "error": "HTTP Error 404: Not Found",
+      "retention": "failed retrieval recorded only; no artifact"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/99018a77bea9a9d29962e5169876c64e02739c52/etcdctl/ctlv3/command/ep_command.go",
+      "path": "etcd/v3.5.2/etcdctl/ctlv3/command/ep_command.go",
+      "sha256": "1eac3e8bc3f7d80bfc38e22d549e1d07f4218acf4c350da4e935bbd53104ca77",
+      "bytes": 7455,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/99018a77bea9a9d29962e5169876c64e02739c52/server/mvcc/kvstore_txn.go",
+      "path": "etcd/v3.5.2/server/mvcc/kvstore_txn.go",
+      "sha256": "e2c7d868d2ef7b4a44243f571f22cb6ff58ef987c5be1d709c7e75d55794929e",
+      "bytes": 8143,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://github.com/etcd-io/etcd/releases/download/v3.5.2/SHA256SUMS",
+      "path": "etcd/v3.5.2/SHA256SUMS",
+      "sha256": "e55c781ef4f4944ea897838a00bbac91a1e6ace7e1702bcb58913dae014bdb53",
+      "bytes": 581,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/0452feec719fa8ad88ae343e66e9bb222965d75d/server/mvcc/kvstore.go",
+      "path": "etcd/v3.5.3/server/mvcc/kvstore.go",
+      "sha256": "1c5eee4ab2fcf7dbdf0a89287a94869f90247ab2be9cfa4e8cce176b3b3fa517",
+      "bytes": 14259,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/0452feec719fa8ad88ae343e66e9bb222965d75d/server/mvcc/hash.go",
+      "path": "etcd/v3.5.3/server/mvcc/hash.go",
+      "error": "HTTP Error 404: Not Found",
+      "retention": "failed retrieval recorded only; no artifact"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/0452feec719fa8ad88ae343e66e9bb222965d75d/etcdctl/ctlv3/command/ep_command.go",
+      "path": "etcd/v3.5.3/etcdctl/ctlv3/command/ep_command.go",
+      "sha256": "6ea5da0125f976ccd99b4d3e1ceb76337a9ab79871104df119cc811b1c1cd1e6",
+      "bytes": 7522,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/0452feec719fa8ad88ae343e66e9bb222965d75d/server/mvcc/kvstore_txn.go",
+      "path": "etcd/v3.5.3/server/mvcc/kvstore_txn.go",
+      "sha256": "96f1927de5b632a34274ddf17f57346513e93e11b4203c578c16559d2042346e",
+      "bytes": 8154,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://github.com/etcd-io/etcd/releases/download/v3.5.3/SHA256SUMS",
+      "path": "etcd/v3.5.3/SHA256SUMS",
+      "sha256": "fb4d583a88bf5eb825b82996a5c10e165db7ca35428c13ed254382d4def30e3d",
+      "bytes": 581,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://api.github.com/repos/rr-debugger/rr/issues/3690/comments",
+      "path": "rr/issue3690-comments.json",
+      "sha256": "c115ba833f03c1cfa739b8ecc434250e4007b3ffa2a8802289eafa108cd64ecb",
+      "bytes": 1670,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/gregkh/linux/1b357ecb321392158d507b04672ffee57bfa071d/arch/x86/power/cpu.c",
+      "path": "linux/arch/x86/power/cpu.c",
+      "sha256": "6f901c06cb79f284d2026f50981e45711f88289ef59739b6e77c14af177c3891",
+      "bytes": 13777,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://api.github.com/repos/etcd-io/etcd/commits/66c7aab4d3ac065468a10bb368aa363ca5fce57a",
+      "path": "etcd/v3.5-backport.json",
+      "sha256": "b44e40d9a5167c911262e11409ad4783ccb1ec6517c17a130c4a47429ba06367",
+      "bytes": 48143,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/etcd-io/etcd/0452feec719fa8ad88ae343e66e9bb222965d75d/CHANGELOG-3.5.md",
+      "path": "etcd/v3.5.3/CHANGELOG-3.5.txt",
+      "error": "HTTP Error 404: Not Found",
+      "retention": "failed retrieval recorded only; no artifact"
+    },
+    {
+      "url": "https://etcd.io/blog/2025/announcing-etcd-3.6/",
+      "path": "etcd/announcing-etcd-3.6.html",
+      "sha256": "d3cbbbef6b7ff8846ba6884955338bfd01e37a6fdd16ffb6e6ff9c871ff01fd6",
+      "bytes": 56731,
+      "retention": "retained version-pinned source or relevant API metadata"
+    },
+    {
+      "url": "https://www.amd.com/system/files/TechDocs/56214-B0-PUB.zip",
+      "path": "amd/56214-B0-PUB.zip",
+      "sha256": "66530cb4550d82623852f1fc6e6f31f4c718af7352f967146e836db22e6d1bdf",
+      "bytes": 209953,
+      "retention": "omitted acquisition cache; not retained evidence"
+    }
+  ]
+}

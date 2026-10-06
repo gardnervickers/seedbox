@@ -1,0 +1,39 @@
+{
+  "scope": "one exploratory original-profile bare known-RIP breakpoint smoke; no fresh-process or performance gate qualification",
+  "attempt_id": "cost-smoke-breakpoint-v1-plain-100000-10000",
+  "raw_accepted": true,
+  "analytic_and_prior_state_match": true,
+  "landing_reference": "../preemption-v4/run.usKaoQ/stdout.txt",
+  "terminal_reference": "../preemption-v4/run.cjHvpK/stdout.txt",
+  "overflow_count": 91405,
+  "requested_period": 90000,
+  "observed_skid": 1405,
+  "correction_branches": 8595,
+  "actual_debug_traps": 8595,
+  "first_20_traps": "DR6.B0 set, DR6.BS clear, one conditional branch per hardware breakpoint trap at recurring loop RIP",
+  "timing_ns": {
+    "setup_ns": 16402523,
+    "initial_witness_ns": 288056,
+    "overflow_elapsed_ns": 70494,
+    "correction_ns": 63138269,
+    "normal_stop_overhead_ns": 63146234,
+    "landing_witness_ns": 229715,
+    "continuation_total_ns": 316410
+  },
+  "timing_definitions": {
+    "normal_stop_overhead_ns": "return from overflow through correction, debug-off/RF cleanup, post-counter and scalar getters/validation; excludes overflow signal/KVM-return latency and witnesses",
+    "overflow_elapsed_ns": "guest execution to overflow plus signal/KVM-return administration, inseparable in this bracket",
+    "landing_witness_ns": "register JSON serialization plus RAM hash; final register SHA computed outside bracket",
+    "continuation_total_ns": "remaining guest execution plus terminal PIO and terminal full-state witness",
+    "setup_ns": "VM/counter setup, separate from initial witness"
+  },
+  "descriptive_ns_per_debug_trap": 7346.856777196044,
+  "ratio_of_observed_correction_bracket_to_100us_budget": 631.46234,
+  "performance_gate": "open; this one correction bracket alone exceeds budget by 631x; median not measured",
+  "limits": [
+    "future target RIP and original guest RF=0 are fixture assumptions",
+    "first 20 trap details logged, total trap count logged",
+    "all witnesses still executed; split timings do not implement a normal witness mode",
+    "no Linux breakpoint/guest debug-IRQ transparency qualification"
+  ]
+}

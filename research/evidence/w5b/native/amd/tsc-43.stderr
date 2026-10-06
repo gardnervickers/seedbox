@@ -1,0 +1,3 @@
+metadata host_tid=960167 kvm_api=12 profile=bare_long_mode_cpl3_tsd
+NEGATIVE_CONTROL_REJECTED TSD_off: missing_tsc_traps count=0 mediated=0
+NEGATIVE_CONTROL_REJECTED unrelated_CLI_GP: unrelated_gp_cli_rejected error=0 cpl=3

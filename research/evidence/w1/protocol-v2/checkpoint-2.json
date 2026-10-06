@@ -1,0 +1,635 @@
+{
+  "controller": {
+    "controller": 1,
+    "incarnation": 1,
+    "last_observation": 2,
+    "last_received": {
+      "command": 2,
+      "controller": 1,
+      "incarnation": 1,
+      "observation": {
+        "FaultApplied": 4
+      },
+      "sequence": 2,
+      "version": 1
+    },
+    "locals": {
+      "fault": {
+        "FaultApplied": 4
+      },
+      "sleep": {
+        "Slept": {
+          "at_tick": 5
+        }
+      }
+    },
+    "next_command": 4,
+    "pc": 2,
+    "pending": {
+      "command": 3,
+      "pc": 2,
+      "save": "faulted"
+    },
+    "program": [
+      {
+        "command": {
+          "Literal": {
+            "Sleep": {
+              "after_ticks": 5
+            }
+          }
+        },
+        "save": "sleep"
+      },
+      {
+        "command": {
+          "Literal": {
+            "Fault": {
+              "rule": {
+                "bidirectional": false,
+                "denominator": 1,
+                "from": {
+                  "Az": 0
+                },
+                "numerator": 1,
+                "to": {
+                  "Az": 1
+                }
+              }
+            }
+          }
+        },
+        "save": "fault"
+      },
+      {
+        "command": {
+          "Literal": {
+            "Query": {
+              "correlation_u64_offset": 15,
+              "destination": 1,
+              "frame": [
+                2,
+                0,
+                0,
+                0,
+                0,
+                1,
+                2,
+                0,
+                0,
+                0,
+                0,
+                2,
+                136,
+                181,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "timeout_ticks": 12
+            }
+          }
+        },
+        "save": "faulted"
+      },
+      {
+        "command": {
+          "Assert": {
+            "label": "restored_query_observes_correlated_fault",
+            "predicate": {
+              "Completion": {
+                "kind": "Timeout",
+                "local": "faulted"
+              }
+            }
+          }
+        },
+        "save": "assertion"
+      },
+      {
+        "command": {
+          "Heal": "fault"
+        },
+        "save": "heal"
+      },
+      {
+        "command": {
+          "Literal": {
+            "Query": {
+              "correlation_u64_offset": 15,
+              "destination": 1,
+              "frame": [
+                2,
+                0,
+                0,
+                0,
+                0,
+                1,
+                2,
+                0,
+                0,
+                0,
+                0,
+                2,
+                136,
+                181,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "timeout_ticks": 12
+            }
+          }
+        },
+        "save": "healed"
+      },
+      {
+        "command": {
+          "Assert": {
+            "label": "restored_query_recovers_after_heal",
+            "predicate": {
+              "Health": {
+                "generation": 1,
+                "local": "healed",
+                "value": 0
+              }
+            }
+          }
+        },
+        "save": "assertion"
+      }
+    ],
+    "result": null
+  },
+  "service": {
+    "pending": {}
+  },
+  "world": {
+    "backend_state": {
+      "scripted_service": {
+        "pending": {}
+      }
+    },
+    "boundaries": {},
+    "channels": {
+      "1": {
+        "accepted": {
+          "1": {
+            "command": {
+              "Sleep": {
+                "after_ticks": 5
+              }
+            },
+            "controller": 1,
+            "id": 1,
+            "incarnation": 1,
+            "version": 1
+          },
+          "2": {
+            "command": {
+              "Fault": {
+                "rule": {
+                  "bidirectional": false,
+                  "denominator": 1,
+                  "from": {
+                    "Az": 0
+                  },
+                  "numerator": 1,
+                  "to": {
+                    "Az": 1
+                  }
+                }
+              }
+            },
+            "controller": 1,
+            "id": 2,
+            "incarnation": 1,
+            "version": 1
+          },
+          "3": {
+            "command": {
+              "Query": {
+                "correlation_u64_offset": 15,
+                "destination": 1,
+                "frame": [
+                  2,
+                  0,
+                  0,
+                  0,
+                  0,
+                  1,
+                  2,
+                  0,
+                  0,
+                  0,
+                  0,
+                  2,
+                  136,
+                  181,
+                  1,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "timeout_ticks": 12
+              }
+            },
+            "controller": 1,
+            "id": 3,
+            "incarnation": 1,
+            "version": 1
+          }
+        },
+        "incarnation": 1,
+        "last_acked": 2,
+        "next_command": 4,
+        "next_observation": 3,
+        "observations": []
+      }
+    },
+    "clock_policy": {
+      "branch_tick_denominator": 1,
+      "linux_ns_numerator": 1
+    },
+    "completions": {},
+    "control_ingress": [],
+    "controller_boundaries": {},
+    "controller_inbox": [],
+    "defects": {
+      "batch_events": false,
+      "cancel_media": false,
+      "cancel_wire": false,
+      "early_flush": false,
+      "erase_overlap": false,
+      "ignore_owner": false
+    },
+    "delivered": {},
+    "drops": {},
+    "faults": {
+      "4": {
+        "bidirectional": false,
+        "denominator": 1,
+        "from": {
+          "Az": 0
+        },
+        "numerator": 1,
+        "to": {
+          "Az": 1
+        }
+      }
+    },
+    "machines": {
+      "1": {
+        "alive": true,
+        "az": 1,
+        "durable": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "inbox": [],
+        "incarnation": 1,
+        "memory": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "next_submission": 0,
+        "pending_writes": {},
+        "volatile": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "2": {
+        "alive": true,
+        "az": 1,
+        "durable": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "inbox": [],
+        "incarnation": 1,
+        "memory": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "next_submission": 0,
+        "pending_writes": {},
+        "volatile": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "3": {
+        "alive": true,
+        "az": 2,
+        "durable": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "inbox": [],
+        "incarnation": 1,
+        "memory": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "next_submission": 0,
+        "pending_writes": {},
+        "volatile": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "4": {
+        "alive": true,
+        "az": 2,
+        "durable": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "inbox": [],
+        "incarnation": 1,
+        "memory": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "next_submission": 0,
+        "pending_writes": {},
+        "volatile": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "5": {
+        "alive": true,
+        "az": 3,
+        "durable": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "inbox": [],
+        "incarnation": 1,
+        "memory": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "next_submission": 0,
+        "pending_writes": {},
+        "volatile": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "6": {
+        "alive": true,
+        "az": 3,
+        "durable": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "inbox": [],
+        "incarnation": 1,
+        "memory": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "next_submission": 0,
+        "pending_writes": {},
+        "volatile": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    "next_id": 7,
+    "now": 5,
+    "pending_commands": {
+      "5": {
+        "envelope": {
+          "command": {
+            "Query": {
+              "correlation_u64_offset": 15,
+              "destination": 1,
+              "frame": [
+                2,
+                0,
+                0,
+                0,
+                0,
+                1,
+                2,
+                0,
+                0,
+                0,
+                0,
+                2,
+                136,
+                181,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              "timeout_ticks": 12
+            }
+          },
+          "controller": 1,
+          "id": 3,
+          "incarnation": 1,
+          "version": 1
+        },
+        "status": {
+          "Waiting": {
+            "world_request": 6
+          }
+        }
+      }
+    },
+    "pending_queries": [
+      6
+    ],
+    "queue": [
+      [
+        8,
+        3,
+        {
+          "Wire": {
+            "bytes": [
+              2,
+              0,
+              0,
+              0,
+              0,
+              1,
+              2,
+              0,
+              0,
+              0,
+              0,
+              2,
+              136,
+              181,
+              1,
+              6,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "from": "Controller",
+            "id": 7,
+            "to": {
+              "Machine": 1
+            }
+          }
+        }
+      ],
+      [
+        17,
+        2,
+        {
+          "Timeout": 6
+        }
+      ]
+    ],
+    "schema_version": 1,
+    "seed": 42,
+    "sequence": 3,
+    "stale": 0,
+    "streams": {
+      "latency": 1
+    }
+  }
+}

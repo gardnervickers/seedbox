@@ -1,0 +1,2135 @@
+[
+  {
+    "argv": [
+      "which",
+      "redis-server"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "which",
+      "etcd"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "which",
+      "postgres"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "which",
+      "strace"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "which",
+      "rustc"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "which",
+      "cargo"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "which",
+      "python3"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "readelf",
+      "-l",
+      "-d",
+      "/nix/store/19hzzx7c1ryvbpxs5wf0y6bkvxvj9057-redis-8.10.2/bin/redis-server"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "readelf",
+      "-l",
+      "-d",
+      "/nix/store/qp5zr8rr3qgf3i7lqkq8kyvfc6xba953-etcdserver-3.6.14/bin/etcd"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "readelf",
+      "-l",
+      "-d",
+      "/nix/store/4nz2y9q8kdn78axpm4jd7c1phmiygg58-postgresql-18.6/bin/postgres"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "readelf",
+      "-l",
+      "-d",
+      "/nix/store/jp6mvfsvh6ywhq0adx5w1l13piq5k3bh-strace-7.2/bin/strace"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "readelf",
+      "-l",
+      "-d",
+      "/nix/store/hr3npzrq9l029s5hf948by203m6qz3lw-rustc-wrapper-1.98.1/bin/rustc"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "readelf",
+      "-l",
+      "-d",
+      "/nix/store/gmgfpzc0w2pgby0lmq9r88m39albiyfw-cargo-1.98.1/bin/cargo"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "readelf",
+      "-l",
+      "-d",
+      "/nix/store/lb41b0anx1f98y9y5s9mdv97gjgsq740-python3-3.14.7/bin/python3.14"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "readelf",
+      "-l",
+      "-d",
+      "/tmp/seedbox-round-1.S74xJ4/workloads/tokio-service/target/release/seedbox-w4-tokio-service"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "uname",
+      "-a"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-server",
+      "--version"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "etcd",
+      "--version"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "postgres",
+      "--version"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "strace",
+      "--version"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "rustc",
+      "--version"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "cargo",
+      "--version"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "python3",
+      "--version"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "go",
+      "version"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "taskset",
+      "-c",
+      "0",
+      "strace",
+      "-ff",
+      "-n",
+      "-ttt",
+      "-T",
+      "-yy",
+      "-v",
+      "-s",
+      "256",
+      "-o",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/redis-primary",
+      "redis-server",
+      "--port",
+      "19379",
+      "--bind",
+      "127.0.0.1",
+      "--protected-mode",
+      "yes",
+      "--dir",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/redis-data",
+      "--save",
+      "",
+      "--appendonly",
+      "yes",
+      "--appendfsync",
+      "always",
+      "--auto-aof-rewrite-percentage",
+      "0",
+      "--repl-diskless-sync-delay",
+      "0"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19379",
+      "PING"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19379",
+      "PING"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19379",
+      "--pipe"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "taskset",
+      "-c",
+      "0",
+      "strace",
+      "-ff",
+      "-n",
+      "-ttt",
+      "-T",
+      "-yy",
+      "-v",
+      "-s",
+      "256",
+      "-o",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/redis-replica",
+      "redis-server",
+      "--port",
+      "19380",
+      "--bind",
+      "127.0.0.1",
+      "--protected-mode",
+      "yes",
+      "--dir",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/redis-replica-data",
+      "--save",
+      "",
+      "--appendonly",
+      "yes",
+      "--appendfsync",
+      "always",
+      "--auto-aof-rewrite-percentage",
+      "0",
+      "--repl-diskless-sync-delay",
+      "0",
+      "--replicaof",
+      "127.0.0.1",
+      "19379"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19380",
+      "PING"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19380",
+      "PING"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19380",
+      "DBSIZE"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19380",
+      "DBSIZE"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19379",
+      "BGREWRITEAOF"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19379",
+      "INFO",
+      "persistence"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19379",
+      "INFO",
+      "persistence"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19379",
+      "INFO",
+      "persistence"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19379",
+      "BGSAVE"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19379",
+      "INFO",
+      "persistence"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19379",
+      "INFO",
+      "persistence"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19379",
+      "CLIENT",
+      "KILL",
+      "TYPE",
+      "replica"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19379",
+      "SET",
+      "after-reconnect",
+      "ok"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19380",
+      "GET",
+      "after-reconnect"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19380",
+      "GET",
+      "after-reconnect"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19379",
+      "WAIT",
+      "1",
+      "5000"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19379",
+      "DBSIZE"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19379",
+      "INFO",
+      "all"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19380",
+      "SHUTDOWN",
+      "NOSAVE"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19379",
+      "SHUTDOWN",
+      "NOSAVE"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "taskset",
+      "-c",
+      "0",
+      "strace",
+      "-ff",
+      "-n",
+      "-ttt",
+      "-T",
+      "-yy",
+      "-v",
+      "-s",
+      "256",
+      "-o",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/redis-recovered",
+      "redis-server",
+      "--port",
+      "19379",
+      "--bind",
+      "127.0.0.1",
+      "--protected-mode",
+      "yes",
+      "--dir",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/redis-data",
+      "--save",
+      "",
+      "--appendonly",
+      "yes",
+      "--appendfsync",
+      "always",
+      "--auto-aof-rewrite-percentage",
+      "0",
+      "--repl-diskless-sync-delay",
+      "0"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19379",
+      "PING"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19379",
+      "PING"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19379",
+      "DBSIZE"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19379",
+      "GET",
+      "after-reconnect"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "redis-cli",
+      "-p",
+      "19379",
+      "SHUTDOWN",
+      "NOSAVE"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "taskset",
+      "-c",
+      "0",
+      "strace",
+      "-ff",
+      "-n",
+      "-ttt",
+      "-T",
+      "-yy",
+      "-v",
+      "-s",
+      "256",
+      "-o",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-server",
+      "etcd",
+      "--name",
+      "w4",
+      "--data-dir",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data",
+      "--listen-client-urls",
+      "http://127.0.0.1:19390",
+      "--advertise-client-urls",
+      "http://127.0.0.1:19390",
+      "--listen-peer-urls",
+      "http://127.0.0.1:19391",
+      "--initial-advertise-peer-urls",
+      "http://127.0.0.1:19391",
+      "--initial-cluster",
+      "w4=http://127.0.0.1:19391",
+      "--initial-cluster-token",
+      "seedbox-w4-seed-42",
+      "--snapshot-count",
+      "20",
+      "--log-level",
+      "warn"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "endpoint",
+      "health"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/0",
+      "seed42-0"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/1",
+      "seed42-1"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/2",
+      "seed42-2"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/3",
+      "seed42-3"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/4",
+      "seed42-4"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/5",
+      "seed42-5"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/6",
+      "seed42-6"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/7",
+      "seed42-7"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/8",
+      "seed42-8"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/9",
+      "seed42-9"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/10",
+      "seed42-10"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/11",
+      "seed42-11"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/12",
+      "seed42-12"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/13",
+      "seed42-13"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/14",
+      "seed42-14"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/15",
+      "seed42-15"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/16",
+      "seed42-16"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/17",
+      "seed42-17"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/18",
+      "seed42-18"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/19",
+      "seed42-19"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/20",
+      "seed42-20"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/21",
+      "seed42-21"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/22",
+      "seed42-22"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/23",
+      "seed42-23"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/24",
+      "seed42-24"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/25",
+      "seed42-25"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/26",
+      "seed42-26"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/27",
+      "seed42-27"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/28",
+      "seed42-28"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/29",
+      "seed42-29"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/30",
+      "seed42-30"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/31",
+      "seed42-31"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/32",
+      "seed42-32"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/33",
+      "seed42-33"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/34",
+      "seed42-34"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/35",
+      "seed42-35"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/36",
+      "seed42-36"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/37",
+      "seed42-37"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/38",
+      "seed42-38"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "put",
+      "/w4/39",
+      "seed42-39"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "get",
+      "/w4/",
+      "--prefix",
+      "-w",
+      "json"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "endpoint",
+      "status",
+      "-w",
+      "json"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "compact",
+      "41"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "defrag"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "snapshot",
+      "save",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd.snapshot"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "taskset",
+      "-c",
+      "0",
+      "strace",
+      "-ff",
+      "-n",
+      "-ttt",
+      "-T",
+      "-yy",
+      "-v",
+      "-s",
+      "256",
+      "-o",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-recovered",
+      "etcd",
+      "--name",
+      "w4",
+      "--data-dir",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/etcd-data",
+      "--listen-client-urls",
+      "http://127.0.0.1:19390",
+      "--advertise-client-urls",
+      "http://127.0.0.1:19390",
+      "--listen-peer-urls",
+      "http://127.0.0.1:19391",
+      "--initial-advertise-peer-urls",
+      "http://127.0.0.1:19391",
+      "--initial-cluster",
+      "w4=http://127.0.0.1:19391",
+      "--initial-cluster-token",
+      "seedbox-w4-seed-42",
+      "--snapshot-count",
+      "20",
+      "--log-level",
+      "warn"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "endpoint",
+      "health"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "etcdctl",
+      "--endpoints=http://127.0.0.1:19390",
+      "get",
+      "/w4/",
+      "--prefix",
+      "-w",
+      "json"
+    ],
+    "env_overrides": {
+      "GOMAXPROCS": "1"
+    }
+  },
+  {
+    "argv": [
+      "initdb",
+      "-D",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-data",
+      "--no-locale",
+      "--encoding=UTF8",
+      "--auth=trust"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "taskset",
+      "-c",
+      "0",
+      "strace",
+      "-ff",
+      "-n",
+      "-ttt",
+      "-T",
+      "-yy",
+      "-v",
+      "-s",
+      "256",
+      "-o",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-primary",
+      "postgres",
+      "-D",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-data"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19410",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select 1"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19410",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select 1"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19410",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select 1"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19410",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select 1"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19410",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select 1"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19410",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "create table w4(k bigint primary key,v text); insert into w4 select n, repeat('x',100) from generate_series(1,1000)n; checkpoint"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "taskset",
+      "-c",
+      "0",
+      "strace",
+      "-ff",
+      "-n",
+      "-ttt",
+      "-T",
+      "-yy",
+      "-v",
+      "-s",
+      "256",
+      "-o",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-basebackup",
+      "pg_basebackup",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19410",
+      "-D",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data",
+      "-R",
+      "-X",
+      "stream"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "taskset",
+      "-c",
+      "0",
+      "strace",
+      "-ff",
+      "-n",
+      "-ttt",
+      "-T",
+      "-yy",
+      "-v",
+      "-s",
+      "256",
+      "-o",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica",
+      "postgres",
+      "-D",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19410",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "insert into w4 values(1001,'after-reconnect')"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19410",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select pg_terminate_backend(pid) from pg_stat_replication"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19410",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "insert into w4 values(1002,'recovered')"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19411",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select pg_is_in_recovery()"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19410",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "checkpoint"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "pg_ctl",
+      "-D",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data",
+      "stop",
+      "-m",
+      "fast"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "pg_ctl",
+      "-D",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-data",
+      "stop",
+      "-m",
+      "fast"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "taskset",
+      "-c",
+      "0",
+      "strace",
+      "-ff",
+      "-n",
+      "-ttt",
+      "-T",
+      "-yy",
+      "-v",
+      "-s",
+      "256",
+      "-o",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-recovered",
+      "postgres",
+      "-D",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-data"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19410",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19410",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19410",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19410",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "psql",
+      "-X",
+      "-h",
+      "127.0.0.1",
+      "-p",
+      "19410",
+      "-d",
+      "postgres",
+      "-At",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      "select count(*) from w4"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "pg_ctl",
+      "-D",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-data",
+      "stop",
+      "-m",
+      "fast"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "taskset",
+      "-c",
+      "0",
+      "strace",
+      "-ff",
+      "-n",
+      "-ttt",
+      "-T",
+      "-yy",
+      "-v",
+      "-s",
+      "256",
+      "-o",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/tokio-current",
+      "/tmp/seedbox-round-1.S74xJ4/workloads/tokio-service/target/release/seedbox-w4-tokio-service",
+      "current"
+    ],
+    "env_overrides": {}
+  },
+  {
+    "argv": [
+      "taskset",
+      "-c",
+      "0",
+      "strace",
+      "-ff",
+      "-n",
+      "-ttt",
+      "-T",
+      "-yy",
+      "-v",
+      "-s",
+      "256",
+      "-o",
+      "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/tokio-multi",
+      "/tmp/seedbox-round-1.S74xJ4/workloads/tokio-service/target/release/seedbox-w4-tokio-service",
+      "multi"
+    ],
+    "env_overrides": {}
+  }
+]

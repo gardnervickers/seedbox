@@ -1,0 +1,47 @@
+{
+  "recommendation": "Use guest Linux for persistent/replicating Redis, etcd/Go and Postgres; current historical ABI is a narrow static-ELF fixture platform, not an admission profile for these applications.",
+  "v1_workload_order": [
+    "Redis replication + AOF rewrite/restart first: smallest exercised persistence/fork/reconnect oracle",
+    "single-member etcd put/compact/defrag/restart next: Go signals/shared database mapping/readiness",
+    "Postgres primary/replica as later O2/O3 stress target: process/shared-memory/signal/WAL complexity",
+    "Tokio current-thread TCP/timer service as a small scheduler/readiness fixture, not historical modeled-ABI acceptance"
+  ],
+  "useful_modeled_envelope": [
+    "existing unmodified static fixed-address musl Redis 7.2.7 with persistence disabled: TTL/expiry/cache protocol tests",
+    "static fixed-address custom Rust/C clients on the documented blocking socket/poll/futex subset, finite compute between yields",
+    "bounded stream/reset network and byte-copy fsync semantics must be explicit; excludes retransmitting TCP/persistence acceptance",
+    "no fork/active signals/dynamic linker/file-backed mappings/OCI/edge-triggered epoll/eventfd/io_uring; no unmodified Tokio admission"
+  ],
+  "abi_cost_inference": "At least separate process/COW lifecycle, signals/restarts/alternate stacks, mmap/file coherence, fd namespace/durability, readiness and TCP recovery semantics need conformance work. Trace names count dispatch surface, not implementation effort or conformance. No engineer-week estimate was measured.",
+  "clock_control": {
+    "successful_calls_per_mode": 10000,
+    "strace_clock_gettime_calls": {
+      "libc": 0,
+      "syscall": 10000
+    },
+    "vdso_present_both": true,
+    "inference": "libc served clock reads without Linux syscalls on this host; strace absence cannot certify workload clock control"
+  },
+  "scope_limits": [
+    "native host entropy/time uncontrolled, workload seed42 only fixes key/response values",
+    "no simulator run, seed repeatability, cooperative guest kernel or performance acceptance",
+    "strace overhead and native scheduler alter interleavings; aggregate invocation counts are observations",
+    "no packet loss/retransmission, Raft multi-member recovery, PostgreSQL promotion, or power/torn-write failure",
+    "io_uring/SQPOLL not observed in these paths; no unsupported claim",
+    "direct workload TSC/RNG use and syscall-free spinning unknown; vDSO clock fixture does not attribute target sites",
+    "native Postgres initdb and most clients untraced; startup/server descendants and pg_basebackup traced",
+    "10 ms /proc sampling maxima are lower bounds; trace clone/signal records retain stronger evidence"
+  ],
+  "accepted_run": "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307",
+  "rejected_runs": [
+    "native.20261005T203215: etcdctl harness count option wrong; superseded by accepted corrected run",
+    "run.huSA7s: nonblocking measurement lock busy; no workload executed"
+  ],
+  "commands": {
+    "build": "run.sh w4 nix develop path:/tmp/seedbox-round-1.S74xJ4/env#workloads --max-jobs 8 --command bash -c \"cd /tmp/seedbox-round-1.S74xJ4/workloads/tokio-service && cargo build --release -j 8\"",
+    "survey": "run.sh w4 nix develop path:/tmp/seedbox-round-1.S74xJ4/env#workloads --max-jobs 8 --command bash -c \"flock -n /tmp/seedbox-round-1.S74xJ4/measurement.lock python3 /tmp/seedbox-round-1.S74xJ4/workloads/survey.py\"",
+    "raw_workload_argv": "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/launch-commands.json",
+    "results_per_command": "/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/commands.jsonl"
+  },
+  "next_decision": "Admit the native Redis persistence/replication oracle to W2/W1 integration only after devices and completed-I/O boundaries exist; use W3 fresh equality checks, then expand to Go/Postgres."
+}

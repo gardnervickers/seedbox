@@ -1,0 +1,4 @@
+seedbox: etcd single member, entropy 6d8223ce5874b762
+LOAD acked=65329 failed=0 elapsed=5.00298127s
+RESULT pass acked=65329 failed=0 rev=65330 hash=3255a91e
+uptime 9.06 0.99

@@ -1,0 +1,54 @@
+1791246795.283492 [ 273] set_robust_list(0x7ffff72dc8e0, 24) = 0 <0.000090>
+1791246795.283669 [  14] rt_sigprocmask(SIG_SETMASK, ~[ILL TRAP ABRT BUS FPE KILL SEGV CONT STOP SYS RTMIN RT_1], NULL, 8) = 0 <0.000086>
+1791246795.283853 [  39] getpid()       = 908243 <0.000066>
+1791246795.284011 [   3] close(5<pipe:[58351827]>) = 0 <0.000075>
+1791246795.284168 [   3] close(6<TCP:[127.0.0.1:19411]>) = 0 <0.000249>
+1791246795.284526 [   3] close(7<UNIX-STREAM:[58351835,"/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/pgsocket/.s.PGSQL.19411"]>) = 0 <0.000038>
+1791246795.284722 [  39] getpid()       = 908243 <0.000156>
+1791246795.284957 [  39] getpid()       = 908243 <0.000040>
+1791246795.285095 [ 318] getrandom("\x91\xfa\xb2\x63\xf9\x27\x9b\xa2\x13\xdd\x44\xae\xf4\x2a\xe3\xb9\x10\xeb\x8c\xf6\x55\x78\x65\xd6\xe8\x18\x5f\x04\xf9\xc3\x46\xf4", 32, 0) = 32 <0.000055>
+1791246795.285250 [   3] close(3<signalfd:[URG]>) = 0 <0.000041>
+1791246795.285405 [ 289] signalfd4(-1, [URG], 8, SFD_CLOEXEC|SFD_NONBLOCK) = 3<signalfd:[URG]> <0.000039>
+1791246795.285548 [ 291] epoll_create1(EPOLL_CLOEXEC) = 5<anon_inode:[eventpoll]> <0.000075>
+1791246795.285694 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 3<signalfd:[URG]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8878}) = 0 <0.000046>
+1791246795.285823 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 4<pipe:[58351827]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8890}) = 0 <0.000177>
+1791246795.286070 [ 112] setsid()       = 908243 <0.003467>
+1791246795.289628 [  13] rt_sigaction(SIGQUIT, {sa_handler=0x55555611cc30, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000058>
+1791246795.289747 [  14] rt_sigprocmask(SIG_SETMASK, ~[QUIT ILL TRAP ABRT BUS FPE SEGV CONT SYS RTMIN RT_1], NULL, 8) = 0 <0.000283>
+1791246795.290087 [  13] rt_sigaction(SIGPWR, {sa_handler=0x55555611cc30, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000032>
+1791246795.290186 [ 157] prctl(PR_SET_PDEATHSIG, SIGPWR) = 0 <0.000062>
+1791246795.290355 [  72] fcntl(4<pipe:[58351827]>, F_SETFD, FD_CLOEXEC) = 0 <0.000057>
+1791246795.290605 [  13] rt_sigaction(SIGHUP, {sa_handler=0x55555611cc30, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000064>
+1791246795.290730 [  13] rt_sigaction(SIGINT, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000060>
+1791246795.290870 [  13] rt_sigaction(SIGTERM, {sa_handler=0x55555611cc30, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000057>
+1791246795.290988 [  13] rt_sigaction(SIGALRM, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000035>
+1791246795.291105 [  13] rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000035>
+1791246795.291192 [  13] rt_sigaction(SIGUSR1, {sa_handler=0x55555611cc30, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000165>
+1791246795.291401 [  13] rt_sigaction(SIGUSR2, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000012>
+1791246795.291446 [  13] rt_sigaction(SIGCHLD, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART|SA_NOCLDSTOP, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000027>
+1791246795.291519 [  14] rt_sigprocmask(SIG_BLOCK, NULL, ~[QUIT ILL TRAP ABRT BUS FPE KILL SEGV CONT STOP SYS RTMIN RT_1], 8) = 0 <0.000034>
+1791246795.291597 [  14] rt_sigprocmask(SIG_SETMASK, [URG], NULL, 8) = 0 <0.000038>
+1791246795.291712 [ 232] epoll_wait(5<anon_inode:[eventpoll]>, [], 1, 200) = 0 <0.200213>
+1791246795.491960 [ 232] epoll_wait(5<anon_inode:[eventpoll]>, [], 1, 200) = 0 <0.200096>
+1791246795.692093 [ 232] epoll_wait(5<anon_inode:[eventpoll]>, [], 1, 200) = 0 <0.200212>
+1791246795.892343 [ 232] epoll_wait(5<anon_inode:[eventpoll]>, [], 1, 200) = 0 <0.200213>
+1791246796.092593 [ 232] epoll_wait(5<anon_inode:[eventpoll]>, [], 1, 200) = 0 <0.201744>
+1791246796.294374 [ 232] epoll_wait(5<anon_inode:[eventpoll]>, [], 1, 200) = 0 <0.200547>
+1791246796.494961 [ 232] epoll_wait(5<anon_inode:[eventpoll]>, [], 1, 200) = 0 <0.200104>
+1791246796.695111 [ 232] epoll_wait(5<anon_inode:[eventpoll]>, 0x5555561f88a8, 1, 200) = -1 EINTR (Interrupted system call) <0.113702>
+1791246796.808891 [ 232] --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=908187, si_uid=1000} ---
+1791246796.808957 [  39] getpid()       = 908243 <0.000134>
+1791246796.809158 [  62] kill(908243, SIGURG) = 0 <0.000038>
+1791246796.809258 [  15] rt_sigreturn({mask=[URG]}) = -1 EINTR (Interrupted system call) <0.000058>
+1791246796.809371 [  15] --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=908187, si_uid=1000} ---
+1791246796.809423 [  39] getpid()       = 908243 <0.000091>
+1791246796.809667 [  15] rt_sigreturn({mask=[URG]}) = -1 EINTR (Interrupted system call) <0.000059>
+1791246796.810309 [  39] getpid()       = 908243 <0.000044>
+1791246796.810403 [ 257] openat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/dev/shm/PostgreSQL.3335166832", O_RDWR|O_NOFOLLOW|O_CLOEXEC) = 6</dev/shm/PostgreSQL.3335166832> <0.000878>
+1791246796.811319 [   5] fstat(6</dev/shm/PostgreSQL.3335166832>, {st_dev=makedev(0, 0x21), st_ino=301963, st_mode=S_IFREG|0600, st_nlink=1, st_uid=1000, st_gid=100, st_blksize=4096, st_blocks=2048, st_size=1048576, st_atime=1791246796 /* 2026-10-05T20:33:16.808802794-0400 */, st_atime_nsec=808802794, st_mtime=1791246796 /* 2026-10-05T20:33:16.396795732-0400 */, st_mtime_nsec=396795732, st_ctime=1791246796 /* 2026-10-05T20:33:16.396795732-0400 */, st_ctime_nsec=396795732}) = 0 <0.000007>
+1791246796.811383 [   9] mmap(NULL, 1048576, PROT_READ|PROT_WRITE, MAP_SHARED, 6</dev/shm/PostgreSQL.3335166832>, 0) = 0x7ffff6700000 <0.000013>
+1791246796.811419 [   3] close(6</dev/shm/PostgreSQL.3335166832>) = 0 <0.000007>
+1791246796.811451 [  11] munmap(0x7ffff6700000, 1048576) = 0 <0.000011>
+1791246796.811482 [  39] getpid()       = 908243 <0.000006>
+1791246796.811931 [ 231] exit_group(0)  = ?
+1791246796.814200 [ 231] +++ exited with 0 +++

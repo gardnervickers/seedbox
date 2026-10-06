@@ -1,0 +1,542 @@
+{
+  "scope": "curated primary-source excerpts supporting the existing off-host audit; not full upstream tree, patched runtime or admission proof",
+  "line_numbering": "1-based inclusive, exact bytes including original line endings; excerpt hashes are UTF-8 text bytes",
+  "source_manifest": "source-manifest.json",
+  "sources": [
+    {
+      "project": "openjdk/jdk21u",
+      "tag": "jdk-21.0.12.1+1",
+      "path": "src/hotspot/cpu/x86/rdtsc_x86.cpp",
+      "url": "https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12.1%2B1/src/hotspot/cpu/x86/rdtsc_x86.cpp",
+      "upstream_file_sha256": "94a170522858705c01241ff3b67c38748a486bf8acf9ba5173846760cefec8f7",
+      "upstream_file_bytes": 6725,
+      "upstream_line_count": 210,
+      "finding_ids": [
+        "timestamp-flag-insufficient"
+      ],
+      "excerpts": [
+        {
+          "start_line": 37,
+          "end_line": 42,
+          "excerpt_sha256": "755aa68d2ef4be666ca0d72b58792766f71938b189a9d6a0b5da7f00155d6a7f",
+          "text": "static jlong set_epoch() {\n  assert(0 == _epoch, \"invariant\");\n  _epoch = os::rdtsc();\n  return _epoch;\n}\n\n"
+        },
+        {
+          "start_line": 45,
+          "end_line": 77,
+          "excerpt_sha256": "c4bd8006ec788702c0d4d91b5289ff5b8653bd770b9f40e133f831eeac805624",
+          "text": "static void do_time_measurements(volatile jlong& time_base,\n                                 volatile jlong& time_fast,\n                                 volatile jlong& time_base_elapsed,\n                                 volatile jlong& time_fast_elapsed) {\n  static const unsigned int FT_SLEEP_MILLISECS = 1;\n  const unsigned int loopcount = 3;\n\n  volatile jlong start = 0;\n  volatile jlong fstart = 0;\n  volatile jlong end = 0;\n  volatile jlong fend = 0;\n\n  // Figure out the difference between rdtsc and os provided timer.\n  // base algorithm adopted from JRockit.\n  for (unsigned int times = 0; times < loopcount; times++) {\n    start = os::elapsed_counter();\n    OrderAccess::fence();\n    fstart = os::rdtsc();\n\n    // use sleep to prevent compiler from optimizing\n    JavaThread::current()->sleep(FT_SLEEP_MILLISECS);\n\n    end = os::elapsed_counter();\n    OrderAccess::fence();\n    fend = os::rdtsc();\n\n    time_base += end - start;\n    time_fast += fend - fstart;\n\n    // basis for calculating the os tick start\n    // to fast time tick start offset\n    time_base_elapsed += end;\n    time_fast_elapsed += (fend - _epoch);\n"
+        },
+        {
+          "start_line": 86,
+          "end_line": 143,
+          "excerpt_sha256": "d77727b81074c1f4df03094e2723c810bceb032f2e75c3bcdf6ab3698636660a",
+          "text": "static jlong initialize_frequency() {\n  assert(0 == tsc_frequency, \"invariant\");\n  assert(0 == _epoch, \"invariant\");\n  const jlong initial_counter = set_epoch();\n  if (initial_counter == 0) {\n    return 0;\n  }\n  // os time frequency\n  static double os_freq = (double)os::elapsed_frequency();\n  assert(os_freq > 0, \"os_elapsed frequency corruption!\");\n\n  double tsc_freq = .0;\n  double os_to_tsc_conv_factor = 1.0;\n\n  // if platform supports invariant tsc,\n  // apply higher resolution and granularity for conversion calculations\n  if (VM_Version::supports_tscinv_ext()) {\n    // for invariant tsc platforms, take the maximum qualified cpu frequency\n    tsc_freq = (double)VM_Version::maximum_qualified_cpu_frequency();\n    os_to_tsc_conv_factor = tsc_freq / os_freq;\n  } else {\n    // use measurements to estimate\n    // a conversion factor and the tsc frequency\n\n    volatile jlong time_base = 0;\n    volatile jlong time_fast = 0;\n    volatile jlong time_base_elapsed = 0;\n    volatile jlong time_fast_elapsed = 0;\n\n    // do measurements to get base data\n    // on os timer and fast ticks tsc time relation.\n    do_time_measurements(time_base, time_fast, time_base_elapsed, time_fast_elapsed);\n\n    // if invalid measurements, cannot proceed\n    if (time_fast == 0 || time_base == 0) {\n      return 0;\n    }\n\n    os_to_tsc_conv_factor = (double)time_fast / (double)time_base;\n    if (os_to_tsc_conv_factor > 1) {\n      // estimate on tsc counter frequency\n      tsc_freq = os_to_tsc_conv_factor * os_freq;\n    }\n  }\n\n  if ((tsc_freq < 0) || (tsc_freq > 0 && tsc_freq <= os_freq) || (os_to_tsc_conv_factor <= 1)) {\n    // safer to run with normal os time\n    tsc_freq = .0;\n  }\n\n  // frequency of the tsc_counter\n  return (jlong)tsc_freq;\n}\n\nstatic bool initialize_elapsed_counter() {\n  tsc_frequency = initialize_frequency();\n  return tsc_frequency != 0 && _epoch != 0;\n}\n"
+        },
+        {
+          "start_line": 145,
+          "end_line": 168,
+          "excerpt_sha256": "62192f149e57d8637563bf495938bc43ac21b1f1bf6fb8b091c1474f7c3465bf",
+          "text": "static bool ergonomics() {\n  const bool invtsc_support = Rdtsc::is_supported();\n  if (FLAG_IS_DEFAULT(UseFastUnorderedTimeStamps) && invtsc_support) {\n    FLAG_SET_ERGO(UseFastUnorderedTimeStamps, true);\n  }\n\n  bool ft_enabled = UseFastUnorderedTimeStamps && invtsc_support;\n\n  if (!ft_enabled) {\n    if (UseFastUnorderedTimeStamps && VM_Version::supports_tsc()) {\n      warning(\"\\nThe hardware does not support invariant tsc (INVTSC) register and/or cannot guarantee tsc synchronization between sockets at startup.\\n\"\\\n        \"Values returned via rdtsc() are not guaranteed to be accurate, esp. when comparing values from cross sockets reads. Enabling UseFastUnorderedTimeStamps on non-invariant tsc hardware should be considered experimental.\\n\");\n      ft_enabled = true;\n    }\n  }\n\n  if (!ft_enabled) {\n    // Warn if unable to support command-line flag\n    if (UseFastUnorderedTimeStamps && !VM_Version::supports_tsc()) {\n      warning(\"Ignoring UseFastUnorderedTimeStamps, hardware does not support normal tsc\");\n    }\n  }\n\n  return ft_enabled;\n"
+        },
+        {
+          "start_line": 195,
+          "end_line": 209,
+          "excerpt_sha256": "e8435e518f8cab2f824416fab72e2bf36d47ea570b1f3c5222429360756b4dfd",
+          "text": "bool Rdtsc::initialize() {\n  static bool initialized = false;\n  if (!initialized) {\n    assert(!rdtsc_elapsed_counter_enabled, \"invariant\");\n    VM_Version::initialize_tsc();\n    assert(0 == tsc_frequency, \"invariant\");\n    assert(0 == _epoch, \"invariant\");\n    bool result = initialize_elapsed_counter(); // init hw\n    if (result) {\n      result = ergonomics(); // check logical state\n    }\n    rdtsc_elapsed_counter_enabled = result;\n    initialized = true;\n  }\n  return rdtsc_elapsed_counter_enabled;\n"
+        }
+      ]
+    },
+    {
+      "project": "openjdk/jdk21u",
+      "tag": "jdk-21.0.12.1+1",
+      "path": "src/hotspot/cpu/x86/vm_version_x86.cpp",
+      "url": "https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12.1%2B1/src/hotspot/cpu/x86/vm_version_x86.cpp",
+      "upstream_file_sha256": "83558d40c94576e597ac8828e440ab86bd419673ff5233e5d79a9d585092032a",
+      "upstream_file_bytes": 108238,
+      "upstream_line_count": 3240,
+      "finding_ids": [
+        "cpu-profile-and-jit"
+      ],
+      "excerpts": [
+        {
+          "start_line": 104,
+          "end_line": 375,
+          "excerpt_sha256": "770f4bf356633ab0f1a8a3407fdb27443258badf7862759c254b82381800a38e",
+          "text": "  address generate_get_cpu_info() {\n    // Flags to test CPU type.\n    const uint32_t HS_EFL_AC = 0x40000;\n    const uint32_t HS_EFL_ID = 0x200000;\n    // Values for when we don't have a CPUID instruction.\n    const int      CPU_FAMILY_SHIFT = 8;\n    const uint32_t CPU_FAMILY_386 = (3 << CPU_FAMILY_SHIFT);\n    const uint32_t CPU_FAMILY_486 = (4 << CPU_FAMILY_SHIFT);\n    bool use_evex = FLAG_IS_DEFAULT(UseAVX) || (UseAVX > 2);\n\n    Label detect_486, cpu486, detect_586, std_cpuid1, std_cpuid4;\n    Label sef_cpuid, ext_cpuid, ext_cpuid1, ext_cpuid5, ext_cpuid7, ext_cpuid8, done, wrapup;\n    Label legacy_setup, save_restore_except, legacy_save_restore, start_simd_check;\n\n    StubCodeMark mark(this, \"VM_Version\", \"get_cpu_info_stub\");\n#   define __ _masm->\n\n    address start = __ pc();\n\n    //\n    // void get_cpu_info(VM_Version::CpuidInfo* cpuid_info);\n    //\n    // LP64: rcx and rdx are first and second argument registers on windows\n\n    __ push(rbp);\n#ifdef _LP64\n    __ mov(rbp, c_rarg0); // cpuid_info address\n#else\n    __ movptr(rbp, Address(rsp, 8)); // cpuid_info address\n#endif\n    __ push(rbx);\n    __ push(rsi);\n    __ pushf();          // preserve rbx, and flags\n    __ pop(rax);\n    __ push(rax);\n    __ mov(rcx, rax);\n    //\n    // if we are unable to change the AC flag, we have a 386\n    //\n    __ xorl(rax, HS_EFL_AC);\n    __ push(rax);\n    __ popf();\n    __ pushf();\n    __ pop(rax);\n    __ cmpptr(rax, rcx);\n    __ jccb(Assembler::notEqual, detect_486);\n\n    __ movl(rax, CPU_FAMILY_386);\n    __ movl(Address(rbp, in_bytes(VM_Version::std_cpuid1_offset())), rax);\n    __ jmp(done);\n\n    //\n    // If we are unable to change the ID flag, we have a 486 which does\n    // not support the \"cpuid\" instruction.\n    //\n    __ bind(detect_486);\n    __ mov(rax, rcx);\n    __ xorl(rax, HS_EFL_ID);\n    __ push(rax);\n    __ popf();\n    __ pushf();\n    __ pop(rax);\n    __ cmpptr(rcx, rax);\n    __ jccb(Assembler::notEqual, detect_586);\n\n    __ bind(cpu486);\n    __ movl(rax, CPU_FAMILY_486);\n    __ movl(Address(rbp, in_bytes(VM_Version::std_cpuid1_offset())), rax);\n    __ jmp(done);\n\n    //\n    // At this point, we have a chip which supports the \"cpuid\" instruction\n    //\n    __ bind(detect_586);\n    __ xorl(rax, rax);\n    __ cpuid();\n    __ orl(rax, rax);\n    __ jcc(Assembler::equal, cpu486);   // if cpuid doesn't support an input\n                                        // value of at least 1, we give up and\n                                        // assume a 486\n    __ lea(rsi, Address(rbp, in_bytes(VM_Version::std_cpuid0_offset())));\n    __ movl(Address(rsi, 0), rax);\n    __ movl(Address(rsi, 4), rbx);\n    __ movl(Address(rsi, 8), rcx);\n    __ movl(Address(rsi,12), rdx);\n\n    __ cmpl(rax, 0xa);                  // Is cpuid(0xB) supported?\n    __ jccb(Assembler::belowEqual, std_cpuid4);\n\n    //\n    // cpuid(0xB) Processor Topology\n    //\n    __ movl(rax, 0xb);\n    __ xorl(rcx, rcx);   // Threads level\n    __ cpuid();\n\n    __ lea(rsi, Address(rbp, in_bytes(VM_Version::tpl_cpuidB0_offset())));\n    __ movl(Address(rsi, 0), rax);\n    __ movl(Address(rsi, 4), rbx);\n    __ movl(Address(rsi, 8), rcx);\n    __ movl(Address(rsi,12), rdx);\n\n    __ movl(rax, 0xb);\n    __ movl(rcx, 1);     // Cores level\n    __ cpuid();\n    __ push(rax);\n    __ andl(rax, 0x1f);  // Determine if valid topology level\n    __ orl(rax, rbx);    // eax[4:0] | ebx[0:15] == 0 indicates invalid level\n    __ andl(rax, 0xffff);\n    __ pop(rax);\n    __ jccb(Assembler::equal, std_cpuid4);\n\n    __ lea(rsi, Address(rbp, in_bytes(VM_Version::tpl_cpuidB1_offset())));\n    __ movl(Address(rsi, 0), rax);\n    __ movl(Address(rsi, 4), rbx);\n    __ movl(Address(rsi, 8), rcx);\n    __ movl(Address(rsi,12), rdx);\n\n    __ movl(rax, 0xb);\n    __ movl(rcx, 2);     // Packages level\n    __ cpuid();\n    __ push(rax);\n    __ andl(rax, 0x1f);  // Determine if valid topology level\n    __ orl(rax, rbx);    // eax[4:0] | ebx[0:15] == 0 indicates invalid level\n    __ andl(rax, 0xffff);\n    __ pop(rax);\n    __ jccb(Assembler::equal, std_cpuid4);\n\n    __ lea(rsi, Address(rbp, in_bytes(VM_Version::tpl_cpuidB2_offset())));\n    __ movl(Address(rsi, 0), rax);\n    __ movl(Address(rsi, 4), rbx);\n    __ movl(Address(rsi, 8), rcx);\n    __ movl(Address(rsi,12), rdx);\n\n    //\n    // cpuid(0x4) Deterministic cache params\n    //\n    __ bind(std_cpuid4);\n    __ movl(rax, 4);\n    __ cmpl(rax, Address(rbp, in_bytes(VM_Version::std_cpuid0_offset()))); // Is cpuid(0x4) supported?\n    __ jccb(Assembler::greater, std_cpuid1);\n\n    __ xorl(rcx, rcx);   // L1 cache\n    __ cpuid();\n    __ push(rax);\n    __ andl(rax, 0x1f);  // Determine if valid cache parameters used\n    __ orl(rax, rax);    // eax[4:0] == 0 indicates invalid cache\n    __ pop(rax);\n    __ jccb(Assembler::equal, std_cpuid1);\n\n    __ lea(rsi, Address(rbp, in_bytes(VM_Version::dcp_cpuid4_offset())));\n    __ movl(Address(rsi, 0), rax);\n    __ movl(Address(rsi, 4), rbx);\n    __ movl(Address(rsi, 8), rcx);\n    __ movl(Address(rsi,12), rdx);\n\n    //\n    // Standard cpuid(0x1)\n    //\n    __ bind(std_cpuid1);\n    __ movl(rax, 1);\n    __ cpuid();\n    __ lea(rsi, Address(rbp, in_bytes(VM_Version::std_cpuid1_offset())));\n    __ movl(Address(rsi, 0), rax);\n    __ movl(Address(rsi, 4), rbx);\n    __ movl(Address(rsi, 8), rcx);\n    __ movl(Address(rsi,12), rdx);\n\n    //\n    // Check if OS has enabled XGETBV instruction to access XCR0\n    // (OSXSAVE feature flag) and CPU supports AVX\n    //\n    __ andl(rcx, 0x18000000); // cpuid1 bits osxsave | avx\n    __ cmpl(rcx, 0x18000000);\n    __ jccb(Assembler::notEqual, sef_cpuid); // jump if AVX is not supported\n\n    //\n    // XCR0, XFEATURE_ENABLED_MASK register\n    //\n    __ xorl(rcx, rcx);   // zero for XCR0 register\n    __ xgetbv();\n    __ lea(rsi, Address(rbp, in_bytes(VM_Version::xem_xcr0_offset())));\n    __ movl(Address(rsi, 0), rax);\n    __ movl(Address(rsi, 4), rdx);\n\n    //\n    // cpuid(0x7) Structured Extended Features\n    //\n    __ bind(sef_cpuid);\n    __ movl(rax, 7);\n    __ cmpl(rax, Address(rbp, in_bytes(VM_Version::std_cpuid0_offset()))); // Is cpuid(0x7) supported?\n    __ jccb(Assembler::greater, ext_cpuid);\n\n    __ xorl(rcx, rcx);\n    __ cpuid();\n    __ lea(rsi, Address(rbp, in_bytes(VM_Version::sef_cpuid7_offset())));\n    __ movl(Address(rsi, 0), rax);\n    __ movl(Address(rsi, 4), rbx);\n    __ movl(Address(rsi, 8), rcx);\n    __ movl(Address(rsi, 12), rdx);\n\n    //\n    // Extended cpuid(0x80000000)\n    //\n    __ bind(ext_cpuid);\n    __ movl(rax, 0x80000000);\n    __ cpuid();\n    __ cmpl(rax, 0x80000000);     // Is cpuid(0x80000001) supported?\n    __ jcc(Assembler::belowEqual, done);\n    __ cmpl(rax, 0x80000004);     // Is cpuid(0x80000005) supported?\n    __ jcc(Assembler::belowEqual, ext_cpuid1);\n    __ cmpl(rax, 0x80000006);     // Is cpuid(0x80000007) supported?\n    __ jccb(Assembler::belowEqual, ext_cpuid5);\n    __ cmpl(rax, 0x80000007);     // Is cpuid(0x80000008) supported?\n    __ jccb(Assembler::belowEqual, ext_cpuid7);\n    __ cmpl(rax, 0x80000008);     // Is cpuid(0x80000009 and above) supported?\n    __ jccb(Assembler::belowEqual, ext_cpuid8);\n    __ cmpl(rax, 0x8000001E);     // Is cpuid(0x8000001E) supported?\n    __ jccb(Assembler::below, ext_cpuid8);\n    //\n    // Extended cpuid(0x8000001E)\n    //\n    __ movl(rax, 0x8000001E);\n    __ cpuid();\n    __ lea(rsi, Address(rbp, in_bytes(VM_Version::ext_cpuid1E_offset())));\n    __ movl(Address(rsi, 0), rax);\n    __ movl(Address(rsi, 4), rbx);\n    __ movl(Address(rsi, 8), rcx);\n    __ movl(Address(rsi,12), rdx);\n\n    //\n    // Extended cpuid(0x80000008)\n    //\n    __ bind(ext_cpuid8);\n    __ movl(rax, 0x80000008);\n    __ cpuid();\n    __ lea(rsi, Address(rbp, in_bytes(VM_Version::ext_cpuid8_offset())));\n    __ movl(Address(rsi, 0), rax);\n    __ movl(Address(rsi, 4), rbx);\n    __ movl(Address(rsi, 8), rcx);\n    __ movl(Address(rsi,12), rdx);\n\n    //\n    // Extended cpuid(0x80000007)\n    //\n    __ bind(ext_cpuid7);\n    __ movl(rax, 0x80000007);\n    __ cpuid();\n    __ lea(rsi, Address(rbp, in_bytes(VM_Version::ext_cpuid7_offset())));\n    __ movl(Address(rsi, 0), rax);\n    __ movl(Address(rsi, 4), rbx);\n    __ movl(Address(rsi, 8), rcx);\n    __ movl(Address(rsi,12), rdx);\n\n    //\n    // Extended cpuid(0x80000005)\n    //\n    __ bind(ext_cpuid5);\n    __ movl(rax, 0x80000005);\n    __ cpuid();\n    __ lea(rsi, Address(rbp, in_bytes(VM_Version::ext_cpuid5_offset())));\n    __ movl(Address(rsi, 0), rax);\n    __ movl(Address(rsi, 4), rbx);\n    __ movl(Address(rsi, 8), rcx);\n    __ movl(Address(rsi,12), rdx);\n\n    //\n    // Extended cpuid(0x80000001)\n    //\n    __ bind(ext_cpuid1);\n    __ movl(rax, 0x80000001);\n    __ cpuid();\n"
+        },
+        {
+          "start_line": 791,
+          "end_line": 1003,
+          "excerpt_sha256": "a74da3d73c89dc13026096d9e31bbe6780e4dddd018bcb150b2a01af064fa4f6",
+          "text": "void VM_Version::get_processor_features() {\n\n  _cpu = 4; // 486 by default\n  _model = 0;\n  _stepping = 0;\n  _features = 0;\n  _logical_processors_per_package = 1;\n  // i486 internal cache is both I&D and has a 16-byte line size\n  _L1_data_cache_line_size = 16;\n\n  // Get raw processor info\n\n  get_cpu_info_stub(&_cpuid_info);\n\n  assert_is_initialized();\n  _cpu = extended_cpu_family();\n  _model = extended_cpu_model();\n  _stepping = cpu_stepping();\n\n  if (cpu_family() > 4) { // it supports CPUID\n    _features = feature_flags();\n    // Logical processors are only available on P4s and above,\n    // and only if hyperthreading is available.\n    _logical_processors_per_package = logical_processor_count();\n    _L1_data_cache_line_size = L1_line_size();\n  }\n\n  _supports_cx8 = supports_cmpxchg8();\n  // xchg and xadd instructions\n  _supports_atomic_getset4 = true;\n  _supports_atomic_getadd4 = true;\n  LP64_ONLY(_supports_atomic_getset8 = true);\n  LP64_ONLY(_supports_atomic_getadd8 = true);\n\n#ifdef _LP64\n  // OS should support SSE for x64 and hardware should support at least SSE2.\n  if (!VM_Version::supports_sse2()) {\n    vm_exit_during_initialization(\"Unknown x64 processor: SSE2 not supported\");\n  }\n  // in 64 bit the use of SSE2 is the minimum\n  if (UseSSE < 2) UseSSE = 2;\n#endif\n\n#ifdef AMD64\n  // flush_icache_stub have to be generated first.\n  // That is why Icache line size is hard coded in ICache class,\n  // see icache_x86.hpp. It is also the reason why we can't use\n  // clflush instruction in 32-bit VM since it could be running\n  // on CPU which does not support it.\n  //\n  // The only thing we can do is to verify that flushed\n  // ICache::line_size has correct value.\n  guarantee(_cpuid_info.std_cpuid1_edx.bits.clflush != 0, \"clflush is not supported\");\n  // clflush_size is size in quadwords (8 bytes).\n  guarantee(_cpuid_info.std_cpuid1_ebx.bits.clflush_size == 8, \"such clflush size is not supported\");\n#endif\n\n#ifdef _LP64\n  // assigning this field effectively enables Unsafe.writebackMemory()\n  // by initing UnsafeConstant.DATA_CACHE_LINE_FLUSH_SIZE to non-zero\n  // that is only implemented on x86_64 and only if the OS plays ball\n  if (os::supports_map_sync()) {\n    // publish data cache line flush size to generic field, otherwise\n    // let if default to zero thereby disabling writeback\n    _data_cache_line_flush_size = _cpuid_info.std_cpuid1_ebx.bits.clflush_size * 8;\n  }\n#endif\n\n  if (UseSSE < 4) {\n    _features &= ~CPU_SSE4_1;\n    _features &= ~CPU_SSE4_2;\n  }\n\n  if (UseSSE < 3) {\n    _features &= ~CPU_SSE3;\n    _features &= ~CPU_SSSE3;\n    _features &= ~CPU_SSE4A;\n  }\n\n  if (UseSSE < 2)\n    _features &= ~CPU_SSE2;\n\n  if (UseSSE < 1)\n    _features &= ~CPU_SSE;\n\n  //since AVX instructions is slower than SSE in some ZX cpus, force USEAVX=0.\n  if (is_zx() && ((cpu_family() == 6) || (cpu_family() == 7))) {\n    UseAVX = 0;\n  }\n\n  // UseSSE is set to the smaller of what hardware supports and what\n  // the command line requires.  I.e., you cannot set UseSSE to 2 on\n  // older Pentiums which do not support it.\n  int use_sse_limit = 0;\n  if (UseSSE > 0) {\n    if (UseSSE > 3 && supports_sse4_1()) {\n      use_sse_limit = 4;\n    } else if (UseSSE > 2 && supports_sse3()) {\n      use_sse_limit = 3;\n    } else if (UseSSE > 1 && supports_sse2()) {\n      use_sse_limit = 2;\n    } else if (UseSSE > 0 && supports_sse()) {\n      use_sse_limit = 1;\n    } else {\n      use_sse_limit = 0;\n    }\n  }\n  if (FLAG_IS_DEFAULT(UseSSE)) {\n    FLAG_SET_DEFAULT(UseSSE, use_sse_limit);\n  } else if (UseSSE > use_sse_limit) {\n    warning(\"UseSSE=%d is not supported on this CPU, setting it to UseSSE=%d\", UseSSE, use_sse_limit);\n    FLAG_SET_DEFAULT(UseSSE, use_sse_limit);\n  }\n\n  // first try initial setting and detect what we can support\n  int use_avx_limit = 0;\n  if (UseAVX > 0) {\n    if (UseSSE < 4) {\n      // Don't use AVX if SSE is unavailable or has been disabled.\n      use_avx_limit = 0;\n    } else if (UseAVX > 2 && supports_evex()) {\n      use_avx_limit = 3;\n    } else if (UseAVX > 1 && supports_avx2()) {\n      use_avx_limit = 2;\n    } else if (UseAVX > 0 && supports_avx()) {\n      use_avx_limit = 1;\n    } else {\n      use_avx_limit = 0;\n    }\n  }\n  if (FLAG_IS_DEFAULT(UseAVX)) {\n    // Don't use AVX-512 on older Skylakes unless explicitly requested.\n    if (use_avx_limit > 2 && is_intel_skylake() && _stepping < 5) {\n      FLAG_SET_DEFAULT(UseAVX, 2);\n    } else {\n      FLAG_SET_DEFAULT(UseAVX, use_avx_limit);\n    }\n  }\n  if (UseAVX > use_avx_limit) {\n    if (UseSSE < 4) {\n      warning(\"UseAVX=%d requires UseSSE=4, setting it to UseAVX=0\", UseAVX);\n    } else {\n      warning(\"UseAVX=%d is not supported on this CPU, setting it to UseAVX=%d\", UseAVX, use_avx_limit);\n    }\n    FLAG_SET_DEFAULT(UseAVX, use_avx_limit);\n  }\n\n  if (UseAVX < 3) {\n    _features &= ~CPU_AVX512F;\n    _features &= ~CPU_AVX512DQ;\n    _features &= ~CPU_AVX512CD;\n    _features &= ~CPU_AVX512BW;\n    _features &= ~CPU_AVX512VL;\n    _features &= ~CPU_AVX512_VPOPCNTDQ;\n    _features &= ~CPU_AVX512_VPCLMULQDQ;\n    _features &= ~CPU_AVX512_VAES;\n    _features &= ~CPU_AVX512_VNNI;\n    _features &= ~CPU_AVX512_VBMI;\n    _features &= ~CPU_AVX512_VBMI2;\n    _features &= ~CPU_AVX512_BITALG;\n    _features &= ~CPU_AVX512_IFMA;\n  }\n\n  if (UseAVX < 2)\n    _features &= ~CPU_AVX2;\n\n  if (UseAVX < 1) {\n    _features &= ~CPU_AVX;\n    _features &= ~CPU_VZEROUPPER;\n    _features &= ~CPU_F16C;\n  }\n\n  if (logical_processors_per_package() == 1) {\n    // HT processor could be installed on a system which doesn't support HT.\n    _features &= ~CPU_HT;\n  }\n\n  if (is_intel()) { // Intel cpus specific settings\n    if (is_knights_family()) {\n      _features &= ~CPU_VZEROUPPER;\n      _features &= ~CPU_AVX512BW;\n      _features &= ~CPU_AVX512VL;\n      _features &= ~CPU_AVX512DQ;\n      _features &= ~CPU_AVX512_VNNI;\n      _features &= ~CPU_AVX512_VAES;\n      _features &= ~CPU_AVX512_VPOPCNTDQ;\n      _features &= ~CPU_AVX512_VPCLMULQDQ;\n      _features &= ~CPU_AVX512_VBMI;\n      _features &= ~CPU_AVX512_VBMI2;\n      _features &= ~CPU_CLWB;\n      _features &= ~CPU_FLUSHOPT;\n      _features &= ~CPU_GFNI;\n      _features &= ~CPU_AVX512_BITALG;\n      _features &= ~CPU_AVX512_IFMA;\n    }\n  }\n\n  if (FLAG_IS_DEFAULT(IntelJccErratumMitigation)) {\n    _has_intel_jcc_erratum = compute_has_intel_jcc_erratum();\n  } else {\n    _has_intel_jcc_erratum = IntelJccErratumMitigation;\n  }\n\n  char buf[1024];\n  int res = jio_snprintf(\n              buf, sizeof(buf),\n              \"(%u cores per cpu, %u threads per core) family %d model %d stepping %d microcode 0x%x\",\n              cores_per_cpu(), threads_per_core(),\n              cpu_family(), _model, _stepping, os::cpu_microcode_revision());\n  assert(res > 0, \"not enough temporary space allocated\");\n  insert_features_names(buf + res, sizeof(buf) - res, _features_names);\n\n  _features_string = os::strdup(buf);\n"
+        },
+        {
+          "start_line": 2110,
+          "end_line": 2126,
+          "excerpt_sha256": "60d5b5cd92c79ad92a2026719eff367f72445d547901593d491704a4ef2ce84e",
+          "text": "\nvoid VM_Version::initialize() {\n  ResourceMark rm;\n  // Making this stub must be FIRST use of assembler\n  stub_blob = BufferBlob::create(\"VM_Version stub\", stub_size);\n  if (stub_blob == nullptr) {\n    vm_exit_during_initialization(\"Unable to allocate stub for VM_Version\");\n  }\n  CodeBuffer c(stub_blob);\n  VM_Version_StubGenerator g(&c);\n\n  get_cpu_info_stub = CAST_TO_FN_PTR(get_cpu_info_stub_t,\n                                     g.generate_get_cpu_info());\n  detect_virt_stub = CAST_TO_FN_PTR(detect_virt_stub_t,\n                                     g.generate_detect_virt());\n\n  get_processor_features();\n"
+        },
+        {
+          "start_line": 2483,
+          "end_line": 2495,
+          "excerpt_sha256": "b3ffd65a80f4005428b67010860ae1f914e8f5f74f7dc3eed82dd89782ab4df3",
+          "text": "void VM_Version::initialize_tsc(void) {\n  ResourceMark rm;\n\n  cpuid_brand_string_stub_blob = BufferBlob::create(\"getCPUIDBrandString_stub\", cpuid_brand_string_stub_size);\n  if (cpuid_brand_string_stub_blob == nullptr) {\n    vm_exit_during_initialization(\"Unable to allocate getCPUIDBrandString_stub\");\n  }\n  CodeBuffer c(cpuid_brand_string_stub_blob);\n  VM_Version_StubGenerator g(&c);\n  getCPUIDBrandString_stub = CAST_TO_FN_PTR(getCPUIDBrandString_stub_t,\n                                   g.generate_getCPUIDBrandString());\n}\n\n"
+        }
+      ]
+    },
+    {
+      "project": "openjdk/jdk21u",
+      "tag": "jdk-21.0.12.1+1",
+      "path": "src/hotspot/os/linux/os_linux.cpp",
+      "url": "https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12.1%2B1/src/hotspot/os/linux/os_linux.cpp",
+      "upstream_file_sha256": "192a1b5acee9b3ba1bea2b68bef26d31f4d5b6b5d3f5aa05c904a799258f9fca",
+      "upstream_file_bytes": 210050,
+      "upstream_line_count": 5710,
+      "finding_ids": [
+        "java-clocks"
+      ],
+      "excerpts": [
+        {
+          "start_line": 4447,
+          "end_line": 4455,
+          "excerpt_sha256": "4d39dd87454bcc4fa41ac12f9b714d4179f01f59f4738d8f809c280bc6da0813",
+          "text": "\njlong os::Linux::fast_thread_cpu_time(clockid_t clockid) {\n  struct timespec tp;\n  int status = clock_gettime(clockid, &tp);\n  assert(status == 0, \"clock_gettime error: %s\", os::strerror(errno));\n  return (tp.tv_sec * NANOSECS_PER_SEC) + tp.tv_nsec;\n}\n\n// Determine if the vmid is the parent pid for a child in a PID namespace.\n"
+        },
+        {
+          "start_line": 5240,
+          "end_line": 5285,
+          "excerpt_sha256": "55bea8b44f4f2a23e9439d474dd57ec2b4766e8675c4fa61f788dc229d29c06a",
+          "text": "    int rc = os::Linux::pthread_getcpuclockid(thread->osthread()->pthread_id(),\n                                              &clockid);\n    if (rc == 0) {\n      return os::Linux::fast_thread_cpu_time(clockid);\n    } else {\n      // It's possible to encounter a terminated native thread that failed\n      // to detach itself from the VM - which should result in ESRCH.\n      assert_status(rc == ESRCH, rc, \"pthread_getcpuclockid failed\");\n      return -1;\n    }\n}\n\n// current_thread_cpu_time(bool) and thread_cpu_time(Thread*, bool)\n// are used by JVM M&M and JVMTI to get user+sys or user CPU time\n// of a thread.\n//\n// current_thread_cpu_time() and thread_cpu_time(Thread*) returns\n// the fast estimate available on the platform.\n\njlong os::current_thread_cpu_time() {\n  if (os::Linux::supports_fast_thread_cpu_time()) {\n    return os::Linux::fast_thread_cpu_time(CLOCK_THREAD_CPUTIME_ID);\n  } else {\n    // return user + sys since the cost is the same\n    return slow_thread_cpu_time(Thread::current(), true /* user + sys */);\n  }\n}\n\njlong os::thread_cpu_time(Thread* thread) {\n  // consistent with what current_thread_cpu_time() returns\n  if (os::Linux::supports_fast_thread_cpu_time()) {\n    return fast_cpu_time(thread);\n  } else {\n    return slow_thread_cpu_time(thread, true /* user + sys */);\n  }\n}\n\njlong os::current_thread_cpu_time(bool user_sys_cpu_time) {\n  if (user_sys_cpu_time && os::Linux::supports_fast_thread_cpu_time()) {\n    return os::Linux::fast_thread_cpu_time(CLOCK_THREAD_CPUTIME_ID);\n  } else {\n    return slow_thread_cpu_time(Thread::current(), user_sys_cpu_time);\n  }\n}\n\njlong os::thread_cpu_time(Thread *thread, bool user_sys_cpu_time) {\n"
+        }
+      ]
+    },
+    {
+      "project": "openjdk/jdk21u",
+      "tag": "jdk-21.0.12.1+1",
+      "path": "src/hotspot/os/posix/os_posix.cpp",
+      "url": "https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12.1%2B1/src/hotspot/os/posix/os_posix.cpp",
+      "upstream_file_sha256": "6af710a2dadbe79b9128efa21815e3a0375a7fbd0a72edb9a210080e7d22bdb9",
+      "upstream_file_bytes": 68584,
+      "upstream_line_count": 2066,
+      "finding_ids": [
+        "java-clocks"
+      ],
+      "excerpts": [
+        {
+          "start_line": 1412,
+          "end_line": 1443,
+          "excerpt_sha256": "2f1b70cafc234be336839d2ac550256b8a443f18ea866d4eee6eb53350504a3c",
+          "text": "jlong os::javaTimeMillis() {\n  struct timespec ts;\n  int status = clock_gettime(CLOCK_REALTIME, &ts);\n  assert(status == 0, \"clock_gettime error: %s\", os::strerror(errno));\n  return jlong(ts.tv_sec) * MILLIUNITS +\n    jlong(ts.tv_nsec) / NANOUNITS_PER_MILLIUNIT;\n}\n\nvoid os::javaTimeSystemUTC(jlong &seconds, jlong &nanos) {\n  struct timespec ts;\n  int status = clock_gettime(CLOCK_REALTIME, &ts);\n  assert(status == 0, \"clock_gettime error: %s\", os::strerror(errno));\n  seconds = jlong(ts.tv_sec);\n  nanos = jlong(ts.tv_nsec);\n}\n\n// macOS and AIX have platform specific implementations for javaTimeNanos()\n// using native clock/timer access APIs. These have historically worked well\n// for those platforms, but it may be possible for them to switch to the\n// generic clock_gettime mechanism in the future.\n#if !defined(__APPLE__) && !defined(AIX)\n\njlong os::javaTimeNanos() {\n  struct timespec tp;\n  int status = clock_gettime(CLOCK_MONOTONIC, &tp);\n  assert(status == 0, \"clock_gettime error: %s\", os::strerror(errno));\n  jlong result = jlong(tp.tv_sec) * NANOSECS_PER_SEC + jlong(tp.tv_nsec);\n  return result;\n}\n\n// for timer info max values which include all bits\n#define ALL_64_BITS CONST64(0xFFFFFFFFFFFFFFFF)\n"
+        }
+      ]
+    },
+    {
+      "project": "openjdk/jdk21u",
+      "tag": "jdk-21.0.12.1+1",
+      "path": "src/hotspot/os_cpu/linux_x86/os_linux_x86.inline.hpp",
+      "url": "https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12.1%2B1/src/hotspot/os_cpu/linux_x86/os_linux_x86.inline.hpp",
+      "upstream_file_sha256": "eec874e5a8e9669076a0520134adf3205988cdd7da2360977cb6ef574fd7ec0b",
+      "upstream_file_bytes": 1653,
+      "upstream_line_count": 46,
+      "finding_ids": [
+        "timestamp-flag-insufficient"
+      ],
+      "excerpts": [
+        {
+          "start_line": 31,
+          "end_line": 43,
+          "excerpt_sha256": "0ae4564f2e8a2c7076028014d3ebc658b7c478e64f259e13bac76e4147d6d520",
+          "text": "inline jlong os::rdtsc() {\n#ifndef AMD64\n  // 64 bit result in edx:eax\n  uint64_t res;\n  __asm__ __volatile__ (\"rdtsc\" : \"=A\" (res));\n  return (jlong)res;\n#else\n  uint64_t res;\n  uint32_t ts1, ts2;\n  __asm__ __volatile__ (\"rdtsc\" : \"=a\" (ts1), \"=d\" (ts2));\n  res = ((uint64_t)ts1 | (uint64_t)ts2 << 32);\n  return (jlong)res;\n#endif // AMD64\n"
+        }
+      ]
+    },
+    {
+      "project": "openjdk/jdk21u",
+      "tag": "jdk-21.0.12.1+1",
+      "path": "src/hotspot/share/compiler/compilationPolicy.cpp",
+      "url": "https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12.1%2B1/src/hotspot/share/compiler/compilationPolicy.cpp",
+      "upstream_file_sha256": "fcb87eb88130c612d95dae68c807ed50da10b0706068e665c787d884038ea485",
+      "upstream_file_bytes": 47056,
+      "upstream_line_count": 1224,
+      "finding_ids": [
+        "cpu-profile-and-jit",
+        "gc-safepoint-state"
+      ],
+      "excerpts": [
+        {
+          "start_line": 501,
+          "end_line": 501,
+          "excerpt_sha256": "735aaa42059b0bb8503a510068aad08ee0d6d397c5a17fbfe7dfa39188318fa1",
+          "text": "  set_start_time(nanos_to_millis(os::javaTimeNanos()));\n"
+        },
+        {
+          "start_line": 626,
+          "end_line": 626,
+          "excerpt_sha256": "3ba98ca673d9295696b7bcf6738605928ebce606516af4a23cb7b9ea485c6038",
+          "text": "  jlong t = nanos_to_millis(os::javaTimeNanos());\n"
+        },
+        {
+          "start_line": 810,
+          "end_line": 810,
+          "excerpt_sha256": "693d45f0dabaf0d289c5edc297ac6eae52b3a8bd3d26b7c1ba0f9a9407d652d7",
+          "text": "    update_rate(nanos_to_millis(os::javaTimeNanos()), mh);\n"
+        }
+      ]
+    },
+    {
+      "project": "openjdk/jdk21u",
+      "tag": "jdk-21.0.12.1+1",
+      "path": "src/hotspot/share/opto/library_call.cpp",
+      "url": "https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12.1%2B1/src/hotspot/share/opto/library_call.cpp",
+      "upstream_file_sha256": "a7e4c1a6248a1ffc06ddce3bd7615ee603aedf8698bb4e153c753e9dc4f781b4",
+      "upstream_file_bytes": 350717,
+      "upstream_line_count": 8183,
+      "finding_ids": [
+        "java-clocks"
+      ],
+      "excerpts": [
+        {
+          "start_line": 499,
+          "end_line": 500,
+          "excerpt_sha256": "b4a450e1f8398eefcb474b22e074abc172727ab82e40645468ee3367a4b6ecf0",
+          "text": "  case vmIntrinsics::_currentTimeMillis:        return inline_native_time_funcs(CAST_FROM_FN_PTR(address, os::javaTimeMillis), \"currentTimeMillis\");\n  case vmIntrinsics::_nanoTime:                 return inline_native_time_funcs(CAST_FROM_FN_PTR(address, os::javaTimeNanos), \"nanoTime\");\n"
+        }
+      ]
+    },
+    {
+      "project": "openjdk/jdk21u",
+      "tag": "jdk-21.0.12.1+1",
+      "path": "src/hotspot/share/runtime/globals.hpp",
+      "url": "https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12.1%2B1/src/hotspot/share/runtime/globals.hpp",
+      "upstream_file_sha256": "577e2e85b8e400828b412e2f6f9cc8ec4445bb05fff3f2ac63df499c8d950427",
+      "upstream_file_bytes": 152935,
+      "upstream_line_count": 2019,
+      "finding_ids": [
+        "timestamp-flag-insufficient"
+      ],
+      "excerpts": [
+        {
+          "start_line": 1967,
+          "end_line": 1967,
+          "excerpt_sha256": "e6b575e8c93c53dfdef440a39a1d4a1bf01a3383b7311cc43403a1426896e51e",
+          "text": "  product(bool, UseFastUnorderedTimeStamps, false, EXPERIMENTAL,            \\\n"
+        }
+      ]
+    },
+    {
+      "project": "openjdk/jdk21u",
+      "tag": "jdk-21.0.12.1+1",
+      "path": "src/hotspot/share/runtime/safepointMechanism.inline.hpp",
+      "url": "https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12.1%2B1/src/hotspot/share/runtime/safepointMechanism.inline.hpp",
+      "upstream_file_sha256": "5fc5d5530a927ac3f74e2527045e7931dc00f0e636054d2e05bcead89ac6d0a2",
+      "upstream_file_bytes": 4308,
+      "upstream_line_count": 110,
+      "finding_ids": [
+        "gc-safepoint-state"
+      ],
+      "excerpts": [
+        {
+          "start_line": 36,
+          "end_line": 107,
+          "excerpt_sha256": "fa2325b2f4264ec050b0c754f9bca735b82d91a67ebd4606b418e70515f002d6",
+          "text": "inline void SafepointMechanism::ThreadData::set_polling_page(uintptr_t poll_value) {\n  Atomic::store(&_polling_page, poll_value);\n}\n\n// Caller is responsible for using a memory barrier if needed.\ninline void SafepointMechanism::ThreadData::set_polling_word(uintptr_t poll_value) {\n  Atomic::store(&_polling_word, poll_value);\n}\n\n// The acquire makes sure reading of polling page is done before\n// the reading the handshake operation or the global state\ninline uintptr_t SafepointMechanism::ThreadData::get_polling_word() {\n  return Atomic::load_acquire(&_polling_word);\n}\n\nbool SafepointMechanism::local_poll_armed(JavaThread* thread) {\n  return thread->poll_data()->get_polling_word() & poll_bit();\n}\n\nbool SafepointMechanism::global_poll() {\n  return (SafepointSynchronize::_state != SafepointSynchronize::_not_synchronized);\n}\n\nbool SafepointMechanism::should_process(JavaThread* thread, bool allow_suspend) {\n  if (!local_poll_armed(thread)) {\n    return false;\n  }\n\n  if (global_poll() || // Safepoint\n      thread->handshake_state()->has_operation(allow_suspend, false /* check_async_exception */) || // Handshake\n      !StackWatermarkSet::processing_started(thread)) { // StackWatermark processing is not started\n    return true;\n  }\n\n  // It has boiled down to two possibilities:\n  // 1: We have nothing to process, this just a disarm poll.\n  // 2: We have a suspend or async exception handshake, which cannot be processed.\n  // We update the poll value in case of a disarm, to reduce false positives.\n  update_poll_values(thread);\n  return false;\n}\n\nvoid SafepointMechanism::process_if_requested(JavaThread* thread, bool allow_suspend, bool check_async_exception) {\n  // Check NoSafepointVerifier. This also clears unhandled oops if CheckUnhandledOops is used.\n  thread->check_possible_safepoint();\n\n  if (local_poll_armed(thread)) {\n    process(thread, allow_suspend, check_async_exception);\n  }\n}\n\nvoid SafepointMechanism::process_if_requested_with_exit_check(JavaThread* thread, bool check_async_exception) {\n  process_if_requested(thread, true /* allow_suspend */, check_async_exception);\n  if (thread->has_special_runtime_exit_condition()) {\n    thread->handle_special_runtime_exit_condition();\n  }\n}\n\nvoid SafepointMechanism::arm_local_poll(JavaThread* thread) {\n  thread->poll_data()->set_polling_word(_poll_word_armed_value);\n  thread->poll_data()->set_polling_page(_poll_page_armed_value);\n}\n\nvoid SafepointMechanism::disarm_local_poll(JavaThread* thread) {\n  thread->poll_data()->set_polling_word(_poll_word_disarmed_value);\n  thread->poll_data()->set_polling_page(_poll_page_disarmed_value);\n}\n\nvoid SafepointMechanism::arm_local_poll_release(JavaThread* thread) {\n  OrderAccess::release();\n  thread->poll_data()->set_polling_word(_poll_word_armed_value);\n  thread->poll_data()->set_polling_page(_poll_page_armed_value);\n"
+        }
+      ]
+    },
+    {
+      "project": "openjdk/jdk21u",
+      "tag": "jdk-21.0.12.1+1",
+      "path": "src/hotspot/share/runtime/synchronizer.cpp",
+      "url": "https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12.1%2B1/src/hotspot/share/runtime/synchronizer.cpp",
+      "upstream_file_sha256": "84c2d01317554599a0d39d28e6b8046891a5da4894db3ab808770ad0695667c4",
+      "upstream_file_bytes": 82783,
+      "upstream_line_count": 2001,
+      "finding_ids": [
+        "gc-safepoint-state"
+      ],
+      "excerpts": [
+        {
+          "start_line": 270,
+          "end_line": 270,
+          "excerpt_sha256": "87dacc131d92066a10cefa0c4874a7a52a142434b050527a35de4d288a78e909",
+          "text": "  _last_async_deflation_time_ns = os::javaTimeNanos();\n"
+        },
+        {
+          "start_line": 1292,
+          "end_line": 1292,
+          "excerpt_sha256": "688a047689b9b4dd0856bb1db0f22c0f29a74d51c9c69bb115a0eb244f06668f",
+          "text": "  return (os::javaTimeNanos() - last_async_deflation_time_ns()) / (NANOUNITS / MILLIUNITS);\n"
+        },
+        {
+          "start_line": 1660,
+          "end_line": 1660,
+          "excerpt_sha256": "6e10cbdd9912887f8987fec9290fdd3e5406ece40d9c47593b3018befe1135d5",
+          "text": "    _last_async_deflation_time_ns = os::javaTimeNanos();\n"
+        }
+      ]
+    },
+    {
+      "project": "openjdk/jdk21u",
+      "tag": "jdk-21.0.12.1+1",
+      "path": "src/hotspot/share/utilities/ticks.cpp",
+      "url": "https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12.1%2B1/src/hotspot/share/utilities/ticks.cpp",
+      "upstream_file_sha256": "bde41aaddb5c062934a8551088b1fdb469490a5a05479cb16810094cc3803a52",
+      "upstream_file_bytes": 4420,
+      "upstream_line_count": 136,
+      "finding_ids": [
+        "timestamp-flag-insufficient"
+      ],
+      "excerpts": [
+        {
+          "start_line": 63,
+          "end_line": 82,
+          "excerpt_sha256": "8f2ca92ee94b73ecb4c725c6b574bad3a9be5a0e782db5311af8b96508b6d753",
+          "text": "uint64_t FastUnorderedElapsedCounterSource::frequency() {\n#if defined(X86) && !defined(ZERO)\n  static bool valid_rdtsc = Rdtsc::initialize();\n  if (valid_rdtsc) {\n    static const uint64_t freq = (uint64_t)Rdtsc::frequency();\n    return freq;\n  }\n#endif\n  static const uint64_t freq = (uint64_t)os::elapsed_frequency();\n  return freq;\n}\n\nFastUnorderedElapsedCounterSource::Type FastUnorderedElapsedCounterSource::now() {\n#if defined(X86) && !defined(ZERO)\n  static bool valid_rdtsc = Rdtsc::initialize();\n  if (valid_rdtsc) {\n    return Rdtsc::elapsed_counter();\n  }\n#endif\n  return os::elapsed_counter();\n"
+        },
+        {
+          "start_line": 105,
+          "end_line": 118,
+          "excerpt_sha256": "51b2812a0c58899fa7dfe0f5a1034539b42e31ab1d92eecc10e6e402f7f88499",
+          "text": "CompositeElapsedCounterSource::Type CompositeElapsedCounterSource::now() {\n  CompositeTime ct;\n  ct.val1 = ElapsedCounterSource::now();\n#if defined(X86) && !defined(ZERO)\n  static bool initialized = false;\n  static bool valid_rdtsc = false;\n  if (!initialized) {\n    valid_rdtsc = Rdtsc::initialize();\n    initialized = true;\n  }\n  if (valid_rdtsc) {\n    ct.val2 = Rdtsc::elapsed_counter();\n  }\n#endif\n"
+        }
+      ]
+    },
+    {
+      "project": "openjdk/jdk21u",
+      "tag": "jdk-21.0.12.1+1",
+      "path": "src/java.base/share/classes/java/security/SecureRandom.java",
+      "url": "https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12.1%2B1/src/java.base/share/classes/java/security/SecureRandom.java",
+      "upstream_file_sha256": "150ab0eb814f71696c3bce63add83795deec506fe407dd170c0f0d7b5c860d6f",
+      "upstream_file_bytes": 41021,
+      "upstream_line_count": 1062,
+      "finding_ids": [
+        "warm-snapshot-seed-boundary"
+      ],
+      "excerpts": [
+        {
+          "start_line": 700,
+          "end_line": 725,
+          "excerpt_sha256": "6c66b2af881f8e2ad74a37ca616200bb1f62fbb12271be1a885de41f61899b6e",
+          "text": "    /**\n     * Reseeds this random object with the given seed. The seed supplements,\n     * rather than replaces, the existing seed. Thus, repeated calls are\n     * guaranteed never to reduce randomness.\n     * <p>\n     * A PRNG {@code SecureRandom} will not seed itself automatically if\n     * {@code setSeed} is called before any {@code nextBytes} or {@code reseed}\n     * calls. The caller should make sure that the {@code seed} argument\n     * contains enough entropy for the security of this {@code SecureRandom}.\n     *\n     * @param seed the seed.\n     * @throws NullPointerException if {@code seed} is {@code null}\n     *\n     * @see #getSeed\n     */\n    public void setSeed(byte[] seed) {\n        Objects.requireNonNull(seed);\n        if (threadSafe) {\n            secureRandomSpi.engineSetSeed(seed);\n        } else {\n            synchronized (this) {\n                secureRandomSpi.engineSetSeed(seed);\n            }\n        }\n    }\n\n"
+        }
+      ]
+    },
+    {
+      "project": "openjdk/jdk21u",
+      "tag": "jdk-21.0.12.1+1",
+      "path": "src/java.base/share/classes/java/util/Collections.java",
+      "url": "https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12.1%2B1/src/java.base/share/classes/java/util/Collections.java",
+      "upstream_file_sha256": "35c83972091b2c4f12910d0e7c04f20a69ef39f1f03c5cec9dde5a61fa36fa56",
+      "upstream_file_bytes": 240700,
+      "upstream_line_count": 6128,
+      "finding_ids": [
+        "jedis-address-shuffle"
+      ],
+      "excerpts": [
+        {
+          "start_line": 430,
+          "end_line": 437,
+          "excerpt_sha256": "008b7c2794b2f4612193b4a21c8eef12e08914a253483bdf84e7b6520bd8a09a",
+          "text": "    public static void shuffle(List<?> list) {\n        Random rnd = r;\n        if (rnd == null)\n            r = rnd = new Random(); // harmless race.\n        shuffle(list, rnd);\n    }\n\n    private static Random r;\n"
+        }
+      ]
+    },
+    {
+      "project": "openjdk/jdk21u",
+      "tag": "jdk-21.0.12.1+1",
+      "path": "src/java.base/share/classes/java/util/Random.java",
+      "url": "https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12.1%2B1/src/java.base/share/classes/java/util/Random.java",
+      "upstream_file_sha256": "cc476abf6c1935983d36a55fba301c526db1debd2b9221f9e65cc1bda54d60be",
+      "upstream_file_bytes": 44737,
+      "upstream_line_count": 1156,
+      "finding_ids": [
+        "warm-snapshot-seed-boundary"
+      ],
+      "excerpts": [
+        {
+          "start_line": 315,
+          "end_line": 332,
+          "excerpt_sha256": "49aaf0593b7d9efd0934f732a9fde740d1ede32318c0212bdd8f2e2df3583cae",
+          "text": "     * to be distinct from any other invocation of this constructor.\n     */\n    public Random() {\n        this(seedUniquifier() ^ System.nanoTime());\n    }\n\n    private Random(Void unused) {\n        this.seed = null;\n    }\n\n    private static long seedUniquifier() {\n        // L'Ecuyer, \"Tables of Linear Congruential Generators of\n        // Different Sizes and Good Lattice Structure\", 1999\n        for (;;) {\n            long current = seedUniquifier.get();\n            long next = current * 1181783497276652981L;\n            if (seedUniquifier.compareAndSet(current, next))\n                return next;\n"
+        },
+        {
+          "start_line": 397,
+          "end_line": 415,
+          "excerpt_sha256": "c3bb11fc875ad7b69811728076b4b23d80f8a42b115271bb4adcf51d39e0948e",
+          "text": "     * Note that this uses only 48 bits of the given seed value.\n     *\n     * @param seed the seed value\n     * @throws UnsupportedOperationException if the {@code setSeed}\n     *         operation is not supported by this random number generator\n     */\n    public synchronized void setSeed(long seed) {\n        this.seed.set(initialScramble(seed));\n        haveNextNextGaussian = false;\n    }\n\n    /**\n     * Generates the next pseudorandom number. This method returns an\n     * {@code int} value such that, if the argument {@code bits} is between\n     * {@code 1} and {@code 32} (inclusive), then that many low-order\n     * bits of the returned value will be (approximately) independently\n     * chosen bit values, each of which is (approximately) equally\n     * likely to be {@code 0} or {@code 1}.\n     *\n"
+        },
+        {
+          "start_line": 771,
+          "end_line": 811,
+          "excerpt_sha256": "18816b8851897fe4846e48c957eb1906fbf721519da6bd0706dd745d0ddce685",
+          "text": "     * Serializable fields for Random.\n     *\n     * @serialField    seed long\n     *              seed for random computations\n     * @serialField    nextNextGaussian double\n     *              next Gaussian to be returned\n     * @serialField      haveNextNextGaussian boolean\n     *              nextNextGaussian is valid\n     */\n    @java.io.Serial\n    private static final ObjectStreamField[] serialPersistentFields = {\n            new ObjectStreamField(\"seed\", Long.TYPE),\n            new ObjectStreamField(\"nextNextGaussian\", Double.TYPE),\n            new ObjectStreamField(\"haveNextNextGaussian\", Boolean.TYPE)\n    };\n\n    /**\n     * Reconstitute the {@code Random} instance from a stream (that is,\n     * deserialize it).\n     *\n     * @param  s the {@code ObjectInputStream} from which data is read\n     *\n     * @throws IOException if an I/O error occurs\n     * @throws ClassNotFoundException if a serialized class cannot be loaded\n     */\n    @java.io.Serial\n    private void readObject(java.io.ObjectInputStream s)\n            throws java.io.IOException, ClassNotFoundException {\n\n        ObjectInputStream.GetField fields = s.readFields();\n\n        // The seed is read in as {@code long} for\n        // historical reasons, but it is converted to an AtomicLong.\n        long seedVal = fields.get(\"seed\", -1L);\n        if (seedVal < 0)\n            throw new java.io.StreamCorruptedException(\n                    \"Random: invalid seed\");\n        resetSeed(seedVal);\n        nextNextGaussian = fields.get(\"nextNextGaussian\", 0.0);\n        haveNextNextGaussian = fields.get(\"haveNextNextGaussian\", false);\n    }\n"
+        }
+      ]
+    },
+    {
+      "project": "openjdk/jdk21u",
+      "tag": "jdk-21.0.12.1+1",
+      "path": "src/java.base/share/classes/java/util/concurrent/ThreadLocalRandom.java",
+      "url": "https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12.1%2B1/src/java.base/share/classes/java/util/concurrent/ThreadLocalRandom.java",
+      "upstream_file_sha256": "232d8cb9ee49c71b072e40e70d3610a22b8cedb00e7bc2864ad3d473e8fb9699",
+      "upstream_file_bytes": 24357,
+      "upstream_line_count": 690,
+      "finding_ids": [
+        "warm-snapshot-seed-boundary"
+      ],
+      "excerpts": [
+        {
+          "start_line": 171,
+          "end_line": 201,
+          "excerpt_sha256": "53506cf17f0ecda385e275c098b54d0226e0965b75ca5c79315e341a2dc69b13",
+          "text": "    static final void localInit() {\n        int p = probeGenerator.addAndGet(PROBE_INCREMENT);\n        int probe = (p == 0) ? 1 : p; // skip 0\n        long seed = RandomSupport.mixMurmur64(seeder.getAndAdd(SEEDER_INCREMENT));\n        Thread t = Thread.currentThread();\n        U.putLong(t, SEED, seed);\n        U.putInt(t, PROBE, probe);\n    }\n\n    /**\n     * Returns the current thread's {@code ThreadLocalRandom} object.\n     * Methods of this object should be called only by the current thread,\n     * not by other threads.\n     *\n     * @return the current thread's {@code ThreadLocalRandom}\n     */\n    public static ThreadLocalRandom current() {\n        if (U.getInt(Thread.currentThread(), PROBE) == 0)\n            localInit();\n        return instance;\n    }\n\n    /**\n     * Throws {@code UnsupportedOperationException}.  Setting seeds in\n     * this generator is not supported.\n     *\n     * @throws UnsupportedOperationException always\n     */\n    public void setSeed(long seed) {\n        // only allow call from super() constructor\n        if (initialized)\n"
+        },
+        {
+          "start_line": 400,
+          "end_line": 430,
+          "excerpt_sha256": "e67d82cc9d1714b9d27ba18c9f43a5b040bdea7ca10a765b2a7e471b7464e186",
+          "text": "    private static final AtomicLong seeder\n        = new AtomicLong(RandomSupport.mixMurmur64(System.currentTimeMillis()) ^\n                         RandomSupport.mixMurmur64(System.nanoTime()));\n\n    // used by ScopedValue\n    private static class Access {\n        static {\n            SharedSecrets.setJavaUtilConcurrentTLRAccess(\n                new JavaUtilConcurrentTLRAccess() {\n                    public int nextSecondaryThreadLocalRandomSeed() {\n                        return nextSecondarySeed();\n                    }\n                }\n            );\n        }\n    }\n\n    // at end of <clinit> to survive static initialization circularity\n    static {\n        String sec = VM.getSavedProperty(\"java.util.secureRandomSeed\");\n        if (Boolean.parseBoolean(sec)) {\n            byte[] seedBytes = java.security.SecureRandom.getSeed(8);\n            long s = (long)seedBytes[0] & 0xffL;\n            for (int i = 1; i < 8; ++i)\n                s = (s << 8) | ((long)seedBytes[i] & 0xffL);\n            seeder.set(s);\n        }\n    }\n\n    @SuppressWarnings(\"serial\")\n    private static final class ThreadLocalRandomProxy extends Random {\n"
+        }
+      ]
+    },
+    {
+      "project": "openjdk/jdk21u",
+      "tag": "jdk-21.0.12.1+1",
+      "path": "src/java.base/share/classes/jdk/internal/util/random/RandomSupport.java",
+      "url": "https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12.1%2B1/src/java.base/share/classes/jdk/internal/util/random/RandomSupport.java",
+      "upstream_file_sha256": "6093cdff2b6af57d8c01b74d7e93b5932611696351a0ec5732ab282a5418043b",
+      "upstream_file_bytes": 166094,
+      "upstream_line_count": 3035,
+      "finding_ids": [
+        "warm-snapshot-seed-boundary"
+      ],
+      "excerpts": [
+        {
+          "start_line": 794,
+          "end_line": 812,
+          "excerpt_sha256": "73c39af9a2cb15072729e673b82c9ab26555e643bda951624fd8214bfafc8a0c",
+          "text": "    public static long initialSeed() {\n        if (useSecureRandomSeed) {\n            byte[] seedBytes = java.security.SecureRandom.getSeed(8);\n            long s = (long)(seedBytes[0]) & 0xffL;\n            for (int i = 1; i < 8; ++i)\n                s = (s << 8) | ((long)(seedBytes[i]) & 0xffL);\n            return s;\n        }\n        return (mixStafford13(System.currentTimeMillis()) ^\n                mixStafford13(System.nanoTime()));\n    }\n\n    /**\n     * The first 32 bits of the golden ratio (1+sqrt(5))/2, forced to be odd.\n     * Useful for producing good Weyl sequences or as an arbitrary nonzero odd\n     * value.\n     */\n    public static final int  GOLDEN_RATIO_32 = 0x9e3779b9;\n\n"
+        }
+      ]
+    },
+    {
+      "project": "openjdk/jdk21u",
+      "tag": "jdk-21.0.12.1+1",
+      "path": "src/java.base/share/classes/sun/security/provider/SeedGenerator.java",
+      "url": "https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12.1%2B1/src/java.base/share/classes/sun/security/provider/SeedGenerator.java",
+      "upstream_file_sha256": "8f3e9bb81b2ff38084e1018539e774440cb32c1e22e5ff5c9caeb9ecb25d8907",
+      "upstream_file_bytes": 21695,
+      "upstream_line_count": 560,
+      "finding_ids": [
+        "provider-entropy"
+      ],
+      "excerpts": [
+        {
+          "start_line": 89,
+          "end_line": 139,
+          "excerpt_sha256": "44d141d1d7d81de04e9aa272a75ba1e9f16ff774e02cef8b388f834a1b4ff94f",
+          "text": "        String egdSource = SunEntries.getSeedSource();\n\n        /*\n         * Try the URL specifying the source (e.g. file:/dev/random)\n         *\n         * The URLs \"file:/dev/random\" or \"file:/dev/urandom\" are used to\n         * indicate the SeedGenerator should use OS support, if available.\n         *\n         * On Windows, this causes the MS CryptoAPI seeder to be used.\n         *\n         * On Solaris/Linux/MacOS, this is identical to using\n         * URLSeedGenerator to read from /dev/[u]random\n         */\n        if (egdSource.equals(SunEntries.URL_DEV_RANDOM) ||\n                egdSource.equals(SunEntries.URL_DEV_URANDOM)) {\n            try {\n                instance = new NativeSeedGenerator(egdSource);\n                if (debug != null) {\n                    debug.println(\n                        \"Using operating system seed generator\" + egdSource);\n                }\n            } catch (IOException e) {\n                if (debug != null) {\n                    debug.println(\"Failed to use operating system seed \"\n                                  + \"generator: \" + e.toString());\n                }\n            }\n        } else if (!egdSource.isEmpty()) {\n            try {\n                instance = new URLSeedGenerator(egdSource);\n                if (debug != null) {\n                    debug.println(\"Using URL seed generator reading from \"\n                                  + egdSource);\n                }\n            } catch (IOException e) {\n                if (debug != null) {\n                    debug.println(\"Failed to create seed generator with \"\n                                  + egdSource + \": \" + e.toString());\n                }\n            }\n        }\n\n        // Fall back to ThreadedSeedGenerator\n        if (instance == null) {\n            if (debug != null) {\n                debug.println(\"Using default threaded seed generator\");\n            }\n            instance = new ThreadedSeedGenerator();\n        }\n    }\n\n"
+        },
+        {
+          "start_line": 324,
+          "end_line": 365,
+          "excerpt_sha256": "6e1f07cbc7837b663309e20975ea5513b79ed4caa1ddfea5c48ea1c52f2ad207",
+          "text": "         * This method does the actual work. It collects random bytes and\n         * pushes them into the queue.\n         */\n        @Override\n        public final void run() {\n            try {\n                while (true) {\n                    // Queue full? Wait till there's room.\n                    synchronized(this) {\n                        while (count >= pool.length) {\n                            wait();\n                        }\n                    }\n\n                    int counter, quanta;\n                    byte v = 0;\n\n                    // Spin count must not be under 64000\n                    for (counter = quanta = 0;\n                            (counter < 64000) && (quanta < 6); quanta++) {\n\n                        // Start some noisy threads\n                        try {\n                            BogusThread bt = new BogusThread();\n                            Thread t = new Thread\n                                (seedGroup, bt, \"SeedGenerator Thread\", 0,\n                                        false);\n                            t.start();\n                        } catch (Exception e) {\n                            throw new InternalError(\"internal error: \" +\n                                \"SeedGenerator thread creation error.\", e);\n                        }\n\n                        // We wait 250milli quanta, so the minimum wait time\n                        // cannot be under 250milli.\n                        int latch = 0;\n                        long startTime = System.nanoTime();\n                        while (System.nanoTime() - startTime < 250000000) {\n                            synchronized(this){}\n                            // Mask the sign bit and keep latch non-negative\n                            latch = (latch + 1) & 0x1FFFFFFF;\n                        }\n"
+        }
+      ]
+    },
+    {
+      "project": "openjdk/jdk21u",
+      "tag": "jdk-21.0.12.1+1",
+      "path": "src/java.base/share/classes/sun/security/provider/SunEntries.java",
+      "url": "https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12.1%2B1/src/java.base/share/classes/sun/security/provider/SunEntries.java",
+      "upstream_file_sha256": "c8845b790158a7a429133334bb1a1593500b3646d08b83d092fcbce5688bf1fe",
+      "upstream_file_bytes": 15930,
+      "upstream_line_count": 404,
+      "finding_ids": [
+        "provider-entropy"
+      ],
+      "excerpts": [
+        {
+          "start_line": 332,
+          "end_line": 378,
+          "excerpt_sha256": "c728c54c6172cffff47655f8db1eb8d94daa17a37665867c2b34fbb4cdbf6035",
+          "text": "    private static final String PROP_EGD = \"java.security.egd\";\n    // name of the *Security* property\n    private static final String PROP_RNDSOURCE = \"securerandom.source\";\n\n    private static final boolean useLegacyDSA =\n        GetBooleanAction.privilegedGetProperty\n            (\"jdk.security.legacyDSAKeyPairGenerator\");\n\n    static final String URL_DEV_RANDOM = \"file:/dev/random\";\n    static final String URL_DEV_URANDOM = \"file:/dev/urandom\";\n\n    @SuppressWarnings(\"removal\")\n    private static final String seedSource = AccessController.doPrivileged(\n                new PrivilegedAction<String>() {\n\n            @Override\n            public String run() {\n                String egdSource = System.getProperty(PROP_EGD, \"\");\n                if (egdSource.length() != 0) {\n                    return egdSource;\n                }\n                egdSource = Security.getProperty(PROP_RNDSOURCE);\n                if (egdSource == null) {\n                    return \"\";\n                }\n                return egdSource;\n            }\n        });\n\n    static {\n        DEF_SECURE_RANDOM_ALGO  = (NativePRNG.isAvailable() &&\n            (seedSource.equals(URL_DEV_URANDOM) ||\n             seedSource.equals(URL_DEV_RANDOM)) ?\n            \"NativePRNG\" : \"DRBG\");\n    }\n\n    static String getSeedSource() {\n        return seedSource;\n    }\n\n    /*\n     * Use a URI to access this File. Previous code used a URL\n     * which is less strict on syntax. If we encounter a\n     * URISyntaxException we make a best effort for backwards\n     * compatibility. e.g. space character in deviceName string.\n     *\n     * Method called within PrivilegedExceptionAction block.\n"
+        }
+      ]
+    },
+    {
+      "project": "openjdk/jdk21u",
+      "tag": "jdk-21.0.12.1+1",
+      "path": "src/java.base/share/conf/security/java.security",
+      "url": "https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12.1%2B1/src/java.base/share/conf/security/java.security",
+      "upstream_file_sha256": "a8a0e0079b2d33e81ed3f65566e8faa32083dce8ece1b39dcc2da274b958408d",
+      "upstream_file_bytes": 71632,
+      "upstream_line_count": 1660,
+      "finding_ids": [
+        "provider-entropy"
+      ],
+      "excerpts": [
+        {
+          "start_line": 128,
+          "end_line": 178,
+          "excerpt_sha256": "79696867c46a58089283828a3bb8d727bfd090f5e2d6dadf93eefa01c709a6a2",
+          "text": "# (Other SecureRandom implementations might also use this property.)\n#\n# On Unix-like systems (for example, Linux/MacOS), the\n# \"NativePRNG\", \"SHA1PRNG\" and \"DRBG\" implementations obtains seed data from\n# special device files such as file:/dev/random.\n#\n# On Windows systems, specifying the URLs \"file:/dev/random\" or\n# \"file:/dev/urandom\" will enable the native Microsoft CryptoAPI seeding\n# mechanism for SHA1PRNG and DRBG.\n#\n# By default, an attempt is made to use the entropy gathering device\n# specified by the \"securerandom.source\" Security property.  If an\n# exception occurs while accessing the specified URL:\n#\n#     NativePRNG:\n#         a default value of /dev/random will be used.  If neither\n#         are available, the implementation will be disabled.\n#         \"file\" is the only currently supported protocol type.\n#\n#     SHA1PRNG and DRBG:\n#         the traditional system/thread activity algorithm will be used.\n#\n# The entropy gathering device can also be specified with the System\n# property \"java.security.egd\". For example:\n#\n#   % java -Djava.security.egd=file:/dev/random MainClass\n#\n# Specifying this System property will override the\n# \"securerandom.source\" Security property.\n#\n# In addition, if \"file:/dev/random\" or \"file:/dev/urandom\" is\n# specified, the \"NativePRNG\" implementation will be more preferred than\n# DRBG and SHA1PRNG in the Sun provider.\n#\nsecurerandom.source=file:/dev/random\n\n#\n# A list of known strong SecureRandom implementations.\n#\n# To help guide applications in selecting a suitable strong\n# java.security.SecureRandom implementation, Java distributions should\n# indicate a list of known strong implementations using the property.\n#\n# This is a comma-separated list of algorithm and/or algorithm:provider\n# entries.\n#\n#ifdef windows\nsecurerandom.strongAlgorithms=Windows-PRNG:SunMSCAPI,DRBG:SUN\n#endif\n#ifndef windows\nsecurerandom.strongAlgorithms=NativePRNGBlocking:SUN,DRBG:SUN\n"
+        }
+      ]
+    },
+    {
+      "project": "openjdk/jdk21u",
+      "tag": "jdk-21.0.12.1+1",
+      "path": "src/java.base/unix/classes/sun/security/provider/NativePRNG.java",
+      "url": "https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.12.1%2B1/src/java.base/unix/classes/sun/security/provider/NativePRNG.java",
+      "upstream_file_sha256": "1bf88b1c4097b38e45768cb18d8923c8f8feab8364f79dffe9a68bc0a65707a6",
+      "upstream_file_bytes": 21158,
+      "upstream_line_count": 579,
+      "finding_ids": [
+        "provider-entropy"
+      ],
+      "excerpts": [
+        {
+          "start_line": 93,
+          "end_line": 175,
+          "excerpt_sha256": "82573f3c4e59c1cd28204efb238b7f002344f91415f94e9ad09ee80ff2168bfb",
+          "text": "    private static final RandomIO INSTANCE = initIO(Variant.MIXED);\n\n    /**\n     * Get the System egd source (if defined).  We only allow \"file:\"\n     * URLs for now. If there is a egd value, parse it.\n     *\n     * @return the URL or null if not available.\n     */\n    private static URL getEgdUrl() {\n        // This will return \"\" if nothing was set.\n        String egdSource = SunEntries.getSeedSource();\n        URL egdUrl;\n\n        if (egdSource.length() != 0) {\n            if (debug != null) {\n                debug.println(\"NativePRNG egdUrl: \" + egdSource);\n            }\n            try {\n                @SuppressWarnings(\"deprecation\")\n                var _unused = egdUrl = new URL(egdSource);\n                if (!egdUrl.getProtocol().equalsIgnoreCase(\"file\")) {\n                    return null;\n                }\n            } catch (MalformedURLException e) {\n                return null;\n            }\n        } else {\n            egdUrl = null;\n        }\n\n        return egdUrl;\n    }\n\n    /**\n     * Create a RandomIO object for all I/O of this Variant type.\n     */\n    @SuppressWarnings(\"removal\")\n    private static RandomIO initIO(final Variant v) {\n        return AccessController.doPrivileged(\n            new PrivilegedAction<>() {\n                @Override\n                public RandomIO run() {\n\n                    File seedFile;\n                    File nextFile;\n\n                    switch(v) {\n                    case MIXED:\n                        URL egdUrl;\n                        File egdFile = null;\n\n                        if ((egdUrl = getEgdUrl()) != null) {\n                            try {\n                                egdFile = SunEntries.getDeviceFile(egdUrl);\n                            } catch (IOException e) {\n                                // Swallow, seedFile is still null\n                            }\n                        }\n\n                        // Try egd first.\n                        if ((egdFile != null) && egdFile.canRead()) {\n                            seedFile = egdFile;\n                        } else {\n                            // fall back to /dev/random.\n                            seedFile = new File(NAME_RANDOM);\n                        }\n                        nextFile = new File(NAME_URANDOM);\n                        break;\n\n                    case BLOCKING:\n                        seedFile = new File(NAME_RANDOM);\n                        nextFile = new File(NAME_RANDOM);\n                        break;\n\n                    case NONBLOCKING:\n                        seedFile = new File(NAME_URANDOM);\n                        nextFile = new File(NAME_URANDOM);\n                        break;\n\n                    default:\n                        // Shouldn't happen!\n                        return null;\n                    }\n"
+        },
+        {
+          "start_line": 340,
+          "end_line": 344,
+          "excerpt_sha256": "8e4420a7007c837165eec6dc619b14b18cb17ce6a310ba94db4c0d59ad3283a5",
+          "text": "\n        // we buffer data we read from the \"next\" file for efficiency,\n        // but we limit the lifetime to avoid using stale bits\n        // lifetime in ms, currently 100 ms (0.1 s)\n        private static final long MAX_BUFFER_TIME = 100;\n"
+        },
+        {
+          "start_line": 491,
+          "end_line": 540,
+          "excerpt_sha256": "911941b6469b2e8019da9ca986398cea5caa4ce7022370f5984f386649ad9e39",
+          "text": "        private void ensureBufferValid() throws IOException {\n            long time = System.currentTimeMillis();\n            int new_buffer_size = 0;\n\n            // Check if buffer has bytes available that are not too old\n            if (buffered > 0) {\n                if (time - lastRead < MAX_BUFFER_TIME) {\n                    return;\n                } else {\n                    // byte is old, so subtract from counter to shrink buffer\n                    change_buffer--;\n                }\n            } else {\n                // No bytes available, so add to count to increase buffer\n                change_buffer++;\n            }\n\n            // If counter has it a limit, increase or decrease size\n            if (change_buffer > REQ_LIMIT_INC) {\n                new_buffer_size = nextBuffer.length * 2;\n            } else if (change_buffer < REQ_LIMIT_DEC) {\n                new_buffer_size = nextBuffer.length / 2;\n            }\n\n            // If buffer size is to be changed, replace nextBuffer.\n            if (new_buffer_size > 0) {\n                if (new_buffer_size <= MAX_BUFFER_SIZE &&\n                        new_buffer_size >= MIN_BUFFER_SIZE) {\n                    nextBuffer = new byte[new_buffer_size];\n                    if (debug != null) {\n                        debug.println(\"Buffer size changed to \" +\n                                new_buffer_size);\n                    }\n                } else {\n                    if (debug != null) {\n                        debug.println(\"Buffer reached limit: \" +\n                                nextBuffer.length);\n                    }\n                }\n                change_buffer = 0;\n            }\n\n            // Load fresh random bytes into nextBuffer\n            lastRead = time;\n            readFully(nextIn, nextBuffer);\n            buffered = nextBuffer.length;\n        }\n\n        // get pseudo random bytes\n        // read from \"next\" and XOR with bytes generated by the\n"
+        }
+      ]
+    },
+    {
+      "project": "redis/jedis",
+      "tag": "v5.2.0",
+      "path": "src/main/java/redis/clients/jedis/DefaultJedisSocketFactory.java",
+      "url": "https://raw.githubusercontent.com/redis/jedis/v5.2.0/src/main/java/redis/clients/jedis/DefaultJedisSocketFactory.java",
+      "upstream_file_sha256": "d798503c5f6febd8ac4c709913572c97e301130f66ff7e052ce528d2762ff120",
+      "upstream_file_bytes": 5211,
+      "upstream_line_count": 149,
+      "finding_ids": [
+        "jedis-address-shuffle"
+      ],
+      "excerpts": [
+        {
+          "start_line": 57,
+          "end_line": 105,
+          "excerpt_sha256": "db287630e5183d6563e747ffbd85bcca95fe57528e316adb6f604718d092d901",
+          "text": "  private Socket connectToFirstSuccessfulHost(HostAndPort hostAndPort) throws Exception {\n    List<InetAddress> hosts = Arrays.asList(InetAddress.getAllByName(hostAndPort.getHost()));\n    if (hosts.size() > 1) {\n      Collections.shuffle(hosts);\n    }\n\n    JedisConnectionException jce = new JedisConnectionException(\"Failed to connect to \" + hostAndPort + \".\");\n    for (InetAddress host : hosts) {\n      try {\n        Socket socket = new Socket();\n\n        socket.setReuseAddress(true);\n        socket.setKeepAlive(true); // Will monitor the TCP connection is valid\n        socket.setTcpNoDelay(true); // Socket buffer Whetherclosed, to ensure timely delivery of data\n        socket.setSoLinger(true, 0); // Control calls close () method, the underlying socket is closed immediately\n\n        // Passing 'host' directly will avoid another call to InetAddress.getByName() inside the InetSocketAddress constructor.\n        // For machines with ipv4 and ipv6, but the startNode uses ipv4 to connect, the ipv6 connection may fail.\n        socket.connect(new InetSocketAddress(host, hostAndPort.getPort()), connectionTimeout);\n        return socket;\n      } catch (Exception e) {\n        jce.addSuppressed(e);\n      }\n    }\n    throw jce;\n  }\n\n  @Override\n  public Socket createSocket() throws JedisConnectionException {\n    Socket socket = null;\n    try {\n      HostAndPort _hostAndPort = getSocketHostAndPort();\n      socket = connectToFirstSuccessfulHost(_hostAndPort);\n      socket.setSoTimeout(socketTimeout);\n\n      if (ssl) {\n        SSLSocketFactory _sslSocketFactory = this.sslSocketFactory;\n        if (null == _sslSocketFactory) {\n          _sslSocketFactory = (SSLSocketFactory) SSLSocketFactory.getDefault();\n        }\n        Socket plainSocket = socket;\n        socket = _sslSocketFactory.createSocket(socket, _hostAndPort.getHost(), _hostAndPort.getPort(), true);\n\n        if (null != sslParameters) {\n          ((SSLSocket) socket).setSSLParameters(sslParameters);\n        }\n        socket = new SSLSocketWrapper((SSLSocket) socket, plainSocket);\n\n        if (null != hostnameVerifier\n"
+        }
+      ]
+    }
+  ]
+}

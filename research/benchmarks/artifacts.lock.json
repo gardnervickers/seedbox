@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "repository": "https://repo.maven.apache.org/maven2",
+  "qualification": "release jars verified against published Maven checksums and frozen bySHA256; complete direct compile/runtime graph",
+  "artifacts": [
+    {
+      "group": "redis.clients",
+      "artifact": "jedis",
+      "version": "5.2.0",
+      "sha256": "dd4fbda2c103f319ab495adb2bc1906139840746cfd4c66b27710d1af98382d4",
+      "hash": "sha256-3U+9osED8xmrSVrbK8GQYTmEB0bP1MZrJ3ENGvmDgtQ=",
+      "url": "https://repo.maven.apache.org/maven2/redis/clients/jedis/5.2.0/jedis-5.2.0.jar",
+      "published_sha1": "a3e3905dcc06a48738783883d13f43873df22e31",
+      "bytes": 980084,
+      "pom_sha256": "7e621dd391b4d282ee0480c2eea2f520963ed77fba94fe802817bb6b1b8f1043"
+    },
+    {
+      "group": "org.slf4j",
+      "artifact": "slf4j-api",
+      "version": "1.7.36",
+      "sha256": "d3ef575e3e4979678dc01bf1dcce51021493b4d11fb7f1be8ad982877c16a1c0",
+      "hash": "sha256-0+9XXj5JeWeNwBvx3M5RAhSTtNEft/G+itmCh3wWocA=",
+      "url": "https://repo.maven.apache.org/maven2/org/slf4j/slf4j-api/1.7.36/slf4j-api-1.7.36.jar",
+      "published_sha1": "6c62681a2f655b49963a5983b8b0950a6120ae14",
+      "bytes": 41125,
+      "pom_sha256": "fb046a9c229437928bb11c2d27c8b5d773eb8a25e60cbd253d985210dedc2684"
+    },
+    {
+      "group": "org.apache.commons",
+      "artifact": "commons-pool2",
+      "version": "2.12.0",
+      "sha256": "6d3bd18df8410f3e31b031aca582cc109342358a62a2759ebd0c4cdf30d06f8b",
+      "hash": "sha256-bTvRjfhBDz4xsDGspYLMEJNCNYpionWevQxM3zDQb4s=",
+      "url": "https://repo.maven.apache.org/maven2/org/apache/commons/commons-pool2/2.12.0/commons-pool2-2.12.0.jar",
+      "published_sha1": "458563f69fbdaebf7daadfe10dc3a22e42a7de50",
+      "bytes": 150048,
+      "pom_sha256": "370d3c951e71b40e3c5ca75af972b5e1f0f89acdb8530b14627718ab4a442300"
+    },
+    {
+      "group": "org.json",
+      "artifact": "json",
+      "version": "20240303",
+      "sha256": "3cf6cd6892e32e2b4c1c39e0f52f5248a2f5b37646fdfbb79a66b46b618414ed",
+      "hash": "sha256-PPbNaJLjLitMHDng9S9SSKL1s3ZG/fu3mma0a2GEFO0=",
+      "url": "https://repo.maven.apache.org/maven2/org/json/json/20240303/json-20240303.jar",
+      "published_sha1": "0ebb88e8fb5122b7506d5cf1d69f1ccdb790d22a",
+      "bytes": 78332,
+      "pom_sha256": "994baf5d89bf4caa5ce968e4c4eab135c8f9783ecf4d2b7b0e9d1c8a4ddf1e4f"
+    },
+    {
+      "group": "com.google.code.gson",
+      "artifact": "gson",
+      "version": "2.11.0",
+      "sha256": "57928d6e5a6edeb2abd3770a8f95ba44dce45f3b23b7a9dc2b309c581552a78b",
+      "hash": "sha256-V5KNblpu3rKr03cKj5W6RNzkXzsjt6ncKzCcWBVSp4s=",
+      "url": "https://repo.maven.apache.org/maven2/com/google/code/gson/gson/2.11.0/gson-2.11.0.jar",
+      "published_sha1": "527175ca6d81050b53bdd4c457a6d6e017626b0e",
+      "bytes": 298435,
+      "pom_sha256": "c0e547bea998888e6e25c5886a90e762272bc88b5275343dd2c05ded6ca2e360"
+    },
+    {
+      "group": "com.google.errorprone",
+      "artifact": "error_prone_annotations",
+      "version": "2.27.0",
+      "sha256": "24c923372c58e35d0b9f16a028929bb9aedc77521867c274f2bd0735df5ba1f5",
+      "hash": "sha256-JMkjNyxY410LnxagKJKbua7cd1IYZ8J08r0HNd9bofU=",
+      "url": "https://repo.maven.apache.org/maven2/com/google/errorprone/error_prone_annotations/2.27.0/error_prone_annotations-2.27.0.jar",
+      "published_sha1": "91b2c29d8a6148b5e2e4930f070d4840e2e48e34",
+      "bytes": 19370,
+      "pom_sha256": "4ca5a35d61235e16549ac346d1e34551cdf0fe27e84aa57e03cbeb255ea4e5da"
+    }
+  ],
+  "excluded": "upstream test and optional resilience4j dependencies; ordinary direct Jedis TCP client only",
+  "provenance": [
+    "published jedis5.2.0 POM, not Git tag's SNAPSHOT version",
+    "Gson2.11.0 POM includes error_prone_annotations2.27.0"
+  ]
+}

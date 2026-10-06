@@ -1,0 +1,95 @@
+{
+  "scope": "W6 off-host source-only follow-up; no hardware, workload execution, host configuration or managed authentication changes.",
+  "etcd": {
+    "recommendation": "Use etcd v3.5.2 as the vulnerable target and v3.5.3 as the historical fixed-version control for the consistent-index/apply atomicity bug only.",
+    "versions": [
+      {
+        "version": "v3.5.2",
+        "commit": "99018a77bea9a9d29962e5169876c64e02739c52",
+        "linux_amd64_release_sha256": "256cad725542d6fd463e81b8a19b86ead4cdfe113f7fb8a1eabc6c32c25d068b",
+        "qualification": "Archive checksum comes from upstream SHA256SUMS; archive/binary not downloaded or executed in this follow-up."
+      },
+      {
+        "version": "v3.5.3",
+        "commit": "0452feec719fa8ad88ae343e66e9bb222965d75d",
+        "linux_amd64_release_sha256": "e13e119ff9b28234561738cd261c2a031eb1c8688079dcf96d8035b3ad19ca58",
+        "qualification": "Archive checksum comes from upstream SHA256SUMS; archive/binary not downloaded or executed in this follow-up."
+      }
+    ],
+    "fix": {
+      "pr": 13854,
+      "main_merge": "c83b1ad9bad637fd02c6e17010755c9b35860bd7",
+      "release_3_5_backport": "66c7aab4d3ac065468a10bb368aa363ca5fce57a",
+      "facts": "In v3.5.2 applyEntryNormal calls SetConsistentIndex before applying the entry; periodic backend commits can persist that advanced CI without the associated MVCC update. SIGKILL in that window leaves the database claiming an entry was already applied; restart skips it. v3.5.3 stages SetConsistentApplyingIndex and promotes it in getTxPostLockInsideApplyHook, called after the transaction mutex is held. LockOutsideApply excludes the hook for unrelated transactions. Main PR metadata and the release branch backport are both preserved; version-pinned source is the authority for the campaign.",
+      "source_refs": [
+        "etcd/v3.5.2/server/etcdserver/server.go:2156",
+        "etcd/v3.5.2/server/etcdserver/server.go:310",
+        "etcd/v3.5.3/server/etcdserver/server.go:2178",
+        "etcd/v3.5.3/server/etcdserver/server.go:2713",
+        "etcd/v3.5.3/server/mvcc/backend/batch_tx.go:78"
+      ]
+    },
+    "fault_semantics": "Process SIGKILL only. Restart the same member with its unchanged data directory, WAL, backend and member identity. Keep its Linux kernel and block device running, including page/device caches; never restore a data snapshot, reset the VM, drop unflushed writes, enable unsafe-no-fsync, or inject a power-loss fault in this first campaign. This reproduces the upstream failure class. Machine/power loss and volatile-cache loss are different campaigns with different durability premises.",
+    "historical_trigger": "Upstream postmortem reports high write load plus random member SIGKILL. Reproduction depended on disk-backed /tmp rather than tmpfs on the maintainer workstation; preserve real disk/block-backed backend semantics instead of assuming in-memory filesystem is representative.",
+    "oracle": [
+      "Start a fresh 3-member cluster per seed/version, fixed topology and pinned initial storage. Disable automatic/manual compaction, leases/TTL, deletes, membership changes and SRV discovery for the initial target. Use a seeded workload with several client continuations, unique immutable key per attempted Put, deterministic value, and no overwrites.",
+      "The immune client ledger records attempted operation ID/key/value, response-success status and returned MVCC revision. A timeout is an unknown operation that may have committed; it is not a failed write. Require inclusion of every acknowledged write, not equality between the ledger and all committed keys.",
+      "Repeatedly SIGKILL one seeded victim during active writes; leave two survivors live, then restart that member in place. Record actual fault delivery and evidence that write/application activity overlapped the crash. Include leader and follower victims. Automatic corruption-check flags may be supplementary evidence; they cannot replace the external oracle.",
+      "Stop clients and faults; restore/restart every member; drain bounded recovery and outstanding requests. Write a unique final barrier key and obtain revision R from its successful response. Require each member's own serializable local Range at revision R to succeed and show the barrier before evaluating its local data; a leader-forwarded read alone is insufficient.",
+      "Choose one explicit nonzero revision R available on every member and above every compact revision. Request HashKV at that SAME R on all three explicit endpoints, with stable member/cluster IDs, full response rows and successful RPC status. CLI entrypoint in these releases: etcdctl --endpoints=E1,E2,E3 --write-out=json endpoint hashkv --rev=R.",
+      "In this API the response header revision is currentRev, not a dedicated hash_revision field. A member can legitimately return currentRev greater than requested R; record requested R separately, require currentRev>=R and successful request, and do not infer that hashes were requested at the same revision from matching headers or from rev=0.",
+      "HashByRev returns ErrFutureRev if R exceeds local currentRev and ErrCompacted if 0<R<=compactRev. Future revision is pending catch-up until bounded recovery expires; persistent inability after heal/restart is a classified revision/catch-up failure, never a hash pass. Compacted revision makes that comparison unavailable: choose a newer genuinely common available R, re-run ledger coverage at it, or classify the oracle as inconclusive. Never drop a failed endpoint row and compare only survivors.",
+      "Require compatible compaction horizons before comparing HashKV, which includes history and uses CRC32C (32 bits). With initial compaction disabled, compactRev should remain at the same initial value. Compare every acknowledged immutable key whose ack revision<=R against local serializable Range responses at R on EACH member. Also compare sorted full workload key/value+MVCC metadata across members with a strong digest so a CRC32 collision or unanimous loss cannot hide missing acknowledged data.",
+      "Separate outcomes: reproduced target (CI/backend divergence and missing applied writes attributable to PR13854 window), other correctness failure, bounded recovery failure, unavailable oracle/infrastructure failure, and completed no-observed-failure run. Preserve first bad state/logs and do not overwrite it via restore or automatic rebootstrap."
+    ],
+    "campaign_proposal": {
+      "total_execution_host_hours": 4,
+      "seed_set": "0..15, paired across v3.5.2 and v3.5.3",
+      "max_runs": 32,
+      "max_host_minutes_per_run": 7.5,
+      "stress_host_minutes": 6,
+      "recovery_oracle_host_minutes": 1.5,
+      "fault_choices_per_seed_target": 32,
+      "proposal_not_execution": true,
+      "policy": "Same seeded virtual workload/fault choices and resources per version; host timeout is an administrative abort, not virtual time or a successful semantic result. Stop/minimize on first target failure and spend remaining budget on same-seed repetitions and paired fixed control. Report actually completed seeds, achieved kills, incomplete runs and classification separately. Builds/source pin verification are outside execution budget. Four host-hours is a bounded initial campaign, not a power calculation or universal coverage claim.",
+      "success": "Sensitive oracle self-control, observed crash-under-write disturbance, at least one attributed v3.5.2 counterexample and fixed-version same-schedule passes are useful evidence that the platform can find this bug. No vulnerable failure means campaign coverage was insufficient or bug absent under these exercised paths; zero observed v3.5.3 failures is bounded evidence, never proof of universal never."
+    },
+    "unrelated_bugs": "v3.5.3 is a control for this specific fix, not a universally correct release. Its release notes separately flag an SRV regression (avoid discovery here). The official v3.6 announcement distinguishes the historical single-node acknowledged-write durability issue #14370 and other correctness fixes. Unexpected v3.5.3 failures require separate attribution; do not count all such failures as PR13854 returning.",
+    "no_execution": "No etcd cluster/binary run or bug reproduction in this follow-up."
+  },
+  "zen": {
+    "reported_observation": "Coordinator asks why CPU18 can lose bit54 while ownerCPU2 retains it. This follow-up did not independently read live MSRs or local failure receipts.",
+    "pins": {
+      "linux_tag": "v6.18.54",
+      "linux_commit": "1b357ecb321392158d507b04672ffee57bfa071d",
+      "rr_commit": "858a9fbcc5ac71cc578c2e1966f573d7c4ff8257"
+    },
+    "source_facts": [
+      "rr script reads/writes MSRC001_1020 bit54 on each logical CPU. Its comments narrow the cached-LS_CFG/per-process-SSB reset explanation to Zen and Zen+, stating Zen2 no longer requires that MSR write for SSB.",
+      "Linux v6.18.54 amd.c init_amd checks absence of AMD_SSBD/VIRT_SSBD AND family 0x15..0x17 before enabling LS_CFG_SSBD/caching the base. Family0x19/model0x21 (5950X) is outside that condition.",
+      "Where LS_CFG_SSBD is active, process.c amd_set_core_ssb_state writes a cached base plus only the selected SSBD mask, so an out-of-band later-added bit could be lost. The sibling-shared SSBD state controls mitigation arbitration; it does not prove that every LS_CFG bit has that physical sharing scope.",
+      "process.c routes native AMD_SSBD through SPEC_CTRL; KVM SVM supplies VIRT_SSBD and uses x86_virt_spec_ctrl. The audited SVM source does not directly mention LS_CFG as a register it saves/restores wholesale.",
+      "rr's module gist reasserts bit54 via the write_msr tracepoint only when neither AMD_SSBD nor VIRT_SSBD is present; it also reapplies after suspend/hibernation/restore. This is proposed tooling behavior, not attribution of the current observation.",
+      "Linux power/cpu.c lists LS_CFG among suspend-save MSRs conditional on LS_CFG_SSBD. That source and rr's suspend warning do not establish an ordinary-idle reset on this Zen3 host.",
+      "The attempted AMD Family19h Model21h PPR download redirected to a documentation HTML page, not a register specification. No retrieved primary AMD text qualifies bit54's SMT sharing/retention on this model."
+    ],
+    "conclusion": "The generic old SSB cached-write explanation is a real mechanism on its supported families but is not established for this Zen3 observation. No source-only cause can be assigned to CPU18 from these facts. Retain unknown attribution and treat affected workaround runs as inadmissible if their existing receipts show the required bit was not retained.",
+    "hypotheses": [
+      {
+        "hypothesis": "A per-logical-CPU writer/restorer outside audited paths uses an old LS_CFG image on CPU18.",
+        "status": "Plausible compatible mechanism, unidentified writer; not proof of Linux SSB on this host.",
+        "why": "Asymmetric readback is compatible with CPU-local activity while the measured task is pinned only to CPU2."
+      },
+      {
+        "hypothesis": "Firmware or CPU power-state/reset/hotplug transition affects the idle sibling.",
+        "status": "Unverified; rr documents system suspend loss only. Ordinary sibling idle, retention and physical sharing need model-specific documentation or separate approved evidence."
+      },
+      {
+        "hypothesis": "Sampling or guard restoration ordering makes sequential CPU2/CPU18 reads observe different phases.",
+        "status": "Unverified; need existing receipt chronology before assuming the change occurred during measured guest execution. No new probes proposed or performed here."
+      }
+    ],
+    "practical_boundary": "Keep owner and sibling bit-retention receipts as admission checks; do not add kernel-module reassertion or mitigation settings from this source-only research. A readback mismatch can invalidate the workaround-qualified run without proving any original-mode branch-count divergence."
+  },
+  "artifacts": "All new work is contained in research/evidence/w6/followup-20261005; prior W6 findings and coordinator-owned docs/index are unchanged."
+}

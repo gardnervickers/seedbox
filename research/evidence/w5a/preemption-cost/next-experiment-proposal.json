@@ -1,0 +1,53 @@
+{
+  "batch_id": "cost-exploratory-margin-v1",
+  "scope": "proposed, not authorized or executed: three one-process original idle attempts using unchanged reviewed candidate",
+  "identities": {
+    "src/bin/preempt.rs": "0c67008eee8fae63df4d2d4ae6f7eae494acb6c9a18288379b673e530563a238",
+    "src/linux_restore_cost.rs": "ef678bb1cb1d6d937867ed1aa04c60719191bd2015a79fd856e28a3c91c6fa82",
+    "msr_guard.py": "6599da4ce7535ba93ba3672270db6d4e64c46999fc28a53b09971e045010ce40",
+    "target/release/preempt": "c5de046617c7b539d5737dd317f956b77dbbba4fa603ade74166cc002d6f1bcb"
+  },
+  "attempts": [
+    {
+      "id": "cost-exploratory-margin-v1-plain-100000-2000-breakpoint",
+      "args": [
+        "plain",
+        100000,
+        2000,
+        "breakpoint"
+      ]
+    },
+    {
+      "id": "cost-exploratory-margin-v1-plain-100000-1500-breakpoint",
+      "args": [
+        "plain",
+        100000,
+        1500,
+        "breakpoint"
+      ]
+    },
+    {
+      "id": "cost-exploratory-margin-v1-plain-100000-2000-count_only",
+      "args": [
+        "plain",
+        100000,
+        2000,
+        "count_only"
+      ]
+    }
+  ],
+  "status": "proposed only",
+  "decision_value": [
+    "margin2000 breakpoint compares correction tail cost after shrinking margin fivefold, while exceeding prior observed bare idle skid range1431-1730",
+    "margin1500 breakpoint tests the cost-versus-overshoot edge; prior skids exceed1500, so rejection is an expected useful result, not a missing measurement",
+    "margin2000 count_only compares the generic count-directed correction primitive against optimistic known-future-RIP hardware correction on the same target/margin"
+  ],
+  "conditions": [
+    "root approval before execution",
+    "original profile only; same shared lock and before/after complete host pins",
+    "one process per exploratory case; no five-process gate matrix",
+    "retain overshoot/exit2 and receipts; missing results/receipts remain incomplete",
+    "no candidate changes or Linux/hardware-load variants in this batch"
+  ],
+  "next_if_informative": "Select any viable method/margin only after this batch; then propose one Linux busy target1100000 smoke (no natural PIO inside correction tail) to assess Linux transfer. Do not qualify median unless a configuration approaches the budget."
+}

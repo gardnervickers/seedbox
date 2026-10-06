@@ -1,5 +1,0 @@
-{
-  "schema": 1,
-  "scheduler": {"quantum_min": 1, "quantum_max": 7},
-  "nodes": [{"name": "race", "ip": "10.0.0.1", "executable": "../build/guests/atomic"}]
-}

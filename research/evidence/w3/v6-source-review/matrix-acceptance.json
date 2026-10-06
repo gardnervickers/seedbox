@@ -1,0 +1,374 @@
+{
+  "schema": 1,
+  "reviewer": "W3",
+  "scope": "bounded original-profile Linux correctness from the previously reviewed pinned starting input",
+  "accepted": true,
+  "method": "read-only independent reconciliation of all raw rows/receipts/commands/ledgers and host brackets; retained validator and five existing corruption controls replayed locally on copies; no hardware or new cases",
+  "evidence_root": "research/evidence/w5a/preemption-v6",
+  "input_file_count": 304,
+  "input_inventory_sha256": "e3665bb9bc284a507a457e4d44f30ed328fadb617c31fa7cf72825b6c85aefa9",
+  "input_files": {
+    "expected-matrix.json": "0f4243b7a66537f2606323112bb07e62b32a1759e550c3c7e50bed253286da8e",
+    "preempt_linux_validate.py": "11b9a28c684c90d9201845724d1afbee9dc827a526aacf4ea9b42dc08c8ad6b5",
+    "qualification.json": "c35b77e9ee1ebde5dce8760febd5cc0acb69b874889018a42aa7e727260ac548",
+    "validator-negative-controls.json": "0bca82aee513472171a7cf762e75be2d26dd26e659c8aaeb08ef2424c4fd0b98",
+    "preempt_linux_batch.py": "05338c15643be81cc77f95f7c1e011cf5c7f95bbac2679f2ff765e83391557e0",
+    "source/host_profile.py": "bac4eb8a71c6c2766a8569945e0970c7284290ce471fcfc11e4d9bd130a1d7ac"
+  },
+  "unchanged_reviewed_sources": [
+    {
+      "path": "research/evidence/w5a/preemption-v6/source/src/bin/preempt.rs",
+      "sha256": "51767d49779bb6ffae6494e90f68d6bc0142914e67f6afa5c38280eba02416a9",
+      "equals_reviewed_snapshot": true
+    },
+    {
+      "path": "research/evidence/w5a/preemption-v6/source/src/linux_restore.rs",
+      "sha256": "70f390ac9f0cc8a0eeb278fc7a42eaa46969d7746ff11410e44d366a9b572b8e",
+      "equals_reviewed_snapshot": true
+    },
+    {
+      "path": "research/evidence/w5a/preemption-v6/source/msr_guard.py",
+      "sha256": "fed00db515067bc04a8995890c97270d599a2f394931c0c340dc1b3eededa559",
+      "equals_reviewed_snapshot": true
+    }
+  ],
+  "gap_closure": {
+    "missing_receipts": "Closed: all 44 unique planned IDs join exactly one started/finished ledger pair, receipt and raw row. Every wrapper/raw/receipt/marker exit is zero with no guard errors or timeout.",
+    "incomplete_matrix": "Closed: two declared batches, each with both targets, five positive/five correction-off fresh processes and one separate uninterrupted reference per target. No missing planned attempts.",
+    "profile": "Closed for this batch: exact before/after kernel image/build/boot, microcode and KVM/perf/mitigation profile agree. Every receipt pins CPU2/18 original/restored MSR 0x4480000000000, SpecLockMap bit54 clear, with no applied workaround.",
+    "code_locations": {
+      "validator": "preempt_linux_validate.py:13-28,43-64,69-94",
+      "ledger": "preempt_linux_batch.py:10-29",
+      "host": "source/host_profile.py:2-6"
+    }
+  },
+  "reconciliation": {
+    "attempts": 44,
+    "distinct_fresh_tids": 44,
+    "initial_witness_variants": 1,
+    "positive_groups": 4,
+    "positive_attempts": 20,
+    "negative_groups": 4,
+    "negative_attempts": 20,
+    "reference_attempts": 4,
+    "terminal_witnesses_compared": 24,
+    "terminal_variants": 1,
+    "correction_midpoint_pio_attempts": 10,
+    "register_hashes_recomputed": 64,
+    "groups": [
+      {
+        "batch": "v6-linux-r1-original-idle",
+        "target": 100000,
+        "kind": "positive",
+        "runs": [
+          "run.1kJ5gS",
+          "run.0uwkeS",
+          "run.9ZXFhC",
+          "run.LuXwsX",
+          "run.X8JPdq"
+        ],
+        "fresh_tids": [
+          1145476,
+          1145646,
+          1145814,
+          1146030,
+          1146194
+        ],
+        "counts": [
+          100000,
+          100000,
+          100000,
+          100000,
+          100000
+        ],
+        "landing_variants": 1,
+        "landing_registers_sha256": "a2bad575c1b316d9739e81a77951166de375098a34a086bdd011951c71a206e7"
+      },
+      {
+        "batch": "v6-linux-r1-original-idle",
+        "target": 100000,
+        "kind": "negative",
+        "runs": [
+          "run.7Mtfbw",
+          "run.G7VT1S",
+          "run.LYfYv2",
+          "run.yrPvKr",
+          "run.M5C2if"
+        ],
+        "fresh_tids": [
+          1145544,
+          1145713,
+          1145879,
+          1146048,
+          1146215
+        ],
+        "counts": [
+          93394,
+          93385,
+          93409,
+          93415,
+          93370
+        ],
+        "landing_variants": 5,
+        "landing_registers_sha256": null
+      },
+      {
+        "batch": "v6-linux-r1-original-idle",
+        "target": 1000100,
+        "kind": "positive",
+        "runs": [
+          "run.4TxdO4",
+          "run.RBN8Zw",
+          "run.t51PVG",
+          "run.wQJlmQ",
+          "run.slkA42"
+        ],
+        "fresh_tids": [
+          1145562,
+          1145730,
+          1145944,
+          1146110,
+          1146281
+        ],
+        "counts": [
+          1000100,
+          1000100,
+          1000100,
+          1000100,
+          1000100
+        ],
+        "landing_variants": 1,
+        "landing_registers_sha256": "266e906ce68c22f9509a29742fa72df65dda9da3c840e06554c58071b11f6bae"
+      },
+      {
+        "batch": "v6-linux-r1-original-idle",
+        "target": 1000100,
+        "kind": "negative",
+        "runs": [
+          "run.Oa6RA5",
+          "run.5DRZ00",
+          "run.LJMNg5",
+          "run.4EPRqA",
+          "run.4gg8CJ"
+        ],
+        "fresh_tids": [
+          1145629,
+          1145798,
+          1145965,
+          1146128,
+          1146348
+        ],
+        "counts": [
+          993516,
+          993501,
+          993552,
+          993538,
+          993484
+        ],
+        "landing_variants": 5,
+        "landing_registers_sha256": null
+      },
+      {
+        "batch": "v6-linux-r1-original-loaded",
+        "target": 100000,
+        "kind": "positive",
+        "runs": [
+          "run.535hWp",
+          "run.fLaBAr",
+          "run.Bgd1m6",
+          "run.bRYoQj",
+          "run.Ov1aRw"
+        ],
+        "fresh_tids": [
+          1151672,
+          1152030,
+          1152381,
+          1152729,
+          1153082
+        ],
+        "counts": [
+          100000,
+          100000,
+          100000,
+          100000,
+          100000
+        ],
+        "landing_variants": 1,
+        "landing_registers_sha256": "a2bad575c1b316d9739e81a77951166de375098a34a086bdd011951c71a206e7"
+      },
+      {
+        "batch": "v6-linux-r1-original-loaded",
+        "target": 100000,
+        "kind": "negative",
+        "runs": [
+          "run.C8it7F",
+          "run.zcU614",
+          "run.hyTZkq",
+          "run.eNPL62",
+          "run.TihVJM"
+        ],
+        "fresh_tids": [
+          1151750,
+          1152109,
+          1152461,
+          1152808,
+          1153162
+        ],
+        "counts": [
+          91636,
+          91495,
+          91496,
+          91512,
+          91481
+        ],
+        "landing_variants": 5,
+        "landing_registers_sha256": null
+      },
+      {
+        "batch": "v6-linux-r1-original-loaded",
+        "target": 1000100,
+        "kind": "positive",
+        "runs": [
+          "run.4ay2eW",
+          "run.hdwiKi",
+          "run.2ostcN",
+          "run.2EKDL2",
+          "run.wYP8hG"
+        ],
+        "fresh_tids": [
+          1151830,
+          1152187,
+          1152532,
+          1152880,
+          1153281
+        ],
+        "counts": [
+          1000100,
+          1000100,
+          1000100,
+          1000100,
+          1000100
+        ],
+        "landing_variants": 1,
+        "landing_registers_sha256": "266e906ce68c22f9509a29742fa72df65dda9da3c840e06554c58071b11f6bae"
+      },
+      {
+        "batch": "v6-linux-r1-original-loaded",
+        "target": 1000100,
+        "kind": "negative",
+        "runs": [
+          "run.uRdL5r",
+          "run.RYsTqZ",
+          "run.rUl9n7",
+          "run.CYOsyT",
+          "run.U3srZy"
+        ],
+        "fresh_tids": [
+          1151957,
+          1152309,
+          1152652,
+          1153004,
+          1153359
+        ],
+        "counts": [
+          991637,
+          991594,
+          991595,
+          991585,
+          991647
+        ],
+        "landing_variants": 5,
+        "landing_registers_sha256": null
+      }
+    ],
+    "references": [
+      {
+        "batch": "v6-linux-r1-original-idle",
+        "target": 100000,
+        "raw": "run.TPNHX9",
+        "tid": 1146364
+      },
+      {
+        "batch": "v6-linux-r1-original-idle",
+        "target": 1000100,
+        "raw": "run.JwXVHr",
+        "tid": 1146429
+      },
+      {
+        "batch": "v6-linux-r1-original-loaded",
+        "target": 100000,
+        "raw": "run.jVaoUt",
+        "tid": 1153431
+      },
+      {
+        "batch": "v6-linux-r1-original-loaded",
+        "target": 1000100,
+        "raw": "run.xYI5pP",
+        "tid": 1153503
+      }
+    ]
+  },
+  "host_brackets": [
+    {
+      "batch": "v6-linux-r1-original-idle",
+      "load": "idle",
+      "before_ns": 1791253042940046194,
+      "after_ns": 1791253068270455443,
+      "profile_equal": true
+    },
+    {
+      "batch": "v6-linux-r1-original-loaded",
+      "load": "loaded",
+      "before_ns": 1791253256860304963,
+      "after_ns": 1791253316434344595,
+      "profile_equal": true
+    }
+  ],
+  "validator_replay": {
+    "exitcode": 0,
+    "qualification_equal": true,
+    "planned": 44,
+    "measured": 44
+  },
+  "existing_control_replay": {
+    "missing_one_receipt": {
+      "exitcode": 1,
+      "accepted": false,
+      "measured": 43,
+      "not_executed": 0
+    },
+    "missing_one_result": {
+      "exitcode": 1,
+      "accepted": false,
+      "measured": 43,
+      "not_executed": 0
+    },
+    "host_drift_despite_true_boolean": {
+      "exitcode": 1,
+      "accepted": false,
+      "measured": 44,
+      "not_executed": 0
+    },
+    "incomplete_declared_matrix": {
+      "exitcode": 1,
+      "accepted": false,
+      "measured": 22,
+      "not_executed": 0
+    },
+    "whole_loaded_batch_not_executed": {
+      "exitcode": 1,
+      "accepted": false,
+      "measured": 22,
+      "not_executed": 22
+    }
+  },
+  "limits": [
+    "RAM/state equality is the retained witness claim; no live RAM recapture was performed.",
+    "Linux correction PIO has null per-completion RAM hashes; it proves unchanged count, events and other GPRs with only OUT RIP advance, followed by analytic continuation.",
+    "Load comes from the retained batch launcher using yes on CPUs2/18/3/19; quantitative load sampling is absent.",
+    "Before/after host profile brackets do not constitute continuous host attestation.",
+    "One userspace owner plus the previously permitted observed sleeping kernel auxiliary; no general scheduler isolation qualification.",
+    "No fresh-boot determinism, complete snapshot/restore fidelity, general TF/debug/IRQ transparency, entropy/clock/cross-host closure or useful-performance gate."
+  ],
+  "failures": []
+}

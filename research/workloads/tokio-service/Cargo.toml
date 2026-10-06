@@ -1,0 +1,7 @@
+[package]
+name = "seedbox-w4-tokio-service"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "=1.48.0", features = ["rt", "rt-multi-thread", "net", "io-util", "time"] }

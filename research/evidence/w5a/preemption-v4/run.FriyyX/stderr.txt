@@ -1,0 +1,1 @@
+{"guard_receipt": "/tmp/seedbox-round-1.S74xJ4/evidence/w5a/preempt-enabled-loaded-reference-plain-100000-1-correct-1791250539089485037.json", "guard_errors": ["enabled MSR changed before restoration CPU18: 0x4480000000000"], "child_exit": 2, "timed_out": false}

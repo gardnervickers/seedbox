@@ -1,0 +1,39 @@
+{
+  "recommendation": "Use W3 as the bounded observation/localization oracle for W2. Synthetic sensitivity passes; no Linux/KVM determinism or saved-state completeness acceptance.",
+  "seed": 42,
+  "fixture": {"boundaries": 12, "virtual_ns_per_boundary": 10, "machines_observed": 1, "synthetic_pages": 2, "bytes_per_page": 64, "checkpoint_every": 3, "detailed_rerun_interval": [3, 6]},
+  "versions": {"rustc": "1.98.1 (48a229cea 2026-09-01)", "cargo": "1.98.0 (797e8a9bc 2026-08-05)", "LLVM": "21.1.8", "host": "aarch64-apple-darwin", "sha2": "0.10.9", "serde": "1.0.229", "serde_json": "1.0.151"},
+  "artifacts_sha256": {
+    "source.tar.gz": "96908562cb127cf9bcabed686a19d8f73aeab390620d3e5ec382ab192826e09e",
+    "final-synthetic/results.json": "90a9f7381c918839c38da372a7a4d6f309980292ced86450c2624c9b43c3f09a",
+    "integration-contract.json": "045a03ab1bf0d9955ab16d281b8eedcb4b8318db993282fcae482bd98eb0a7da"
+  },
+  "source_sha256": {
+    "determinism/src/lib.rs": "7f5782d732561f1103ff665d08ad7bd10fb284e4ed054c6dadd8924a595a5602",
+    "determinism/src/main.rs": "c25233cc3bf3ed541de7aa15fa32967d77c5d6bda10144c9254e05c7f8b6d260",
+    "determinism/Cargo.toml": "8cc82fb896008f6af1e029d620e66d72f19e1c1827f45ac896c08d479e98d037",
+    "determinism/Cargo.lock": "839b92e3abe1e5a0a00354abc9d96e5b7ffcc90a223c9cc4552b3d8b44feefa0",
+    "env/flake.nix": "6a4fd068f6b52c0dcc713153900b23a87e57b3cd9fd632663ed06520258b5264",
+    "env/flake.lock": "0f873d0f67443dd2fab52d805bc9aa9dbe6ccbe61f0052384e84dd6fd3d1a1b0"
+  },
+  "final_run_evidence": {
+    "controls": "run.1aZgNT",
+    "adapter_tests_5_passed": "run.wl6iqS",
+    "strict_clippy": "run.dOPOIn",
+    "format_check": "run.kL6uFo",
+    "versions_source_hashes": "run.MWCdhS"
+  },
+  "validation": "11 suite checks and 5 adapter/lifecycle/structure unit tests passed. Initial compile/format attempts and older source runs remain as raw evidence, are superseded and are not the final source acceptance.",
+  "external_perturbations": "Separate fresh processes have SEEDBOX_OUTSIDE=north versus south. Baseline ignores this real environment change and matches; deliberate environment leak detects it at boundary 5. Actual SystemTime and randomized std::HashMap iteration controls differ across fresh processes.",
+  "not_closed": [
+    "Complete CPU/KVM state, actual dirty-log and DMA coverage, guest Linux and device integration",
+    "Instruction/inter-boundary execution history; state can differ and reconverge between observed boundaries",
+    "Kernel/task/vDSO/direct TSC and entropy controls, dynamic RNG admission",
+    "Cooperative worker/kernel return coverage, spinning/SQPOLL/no-yield paths",
+    "Physical timer/IRQ semantics, snapshot restore completeness and pinned snapshot policy",
+    "Cross-host/portable CPU-profile equivalence; same-host constant leaks",
+    "Large RAM/VM/scenario throughput, memory overhead and diagnostic streaming",
+    "Opaque Rust Future/controller continuation and backend hidden state"
+  ],
+  "next_decision": "Integrate W2 completed boundaries with W1 snapshot plus explicit backend/scenario state. Enlarge the declared oracle before making any full-state equality claim; preserve remaining input/yield/admission/device risk categories."
+}
