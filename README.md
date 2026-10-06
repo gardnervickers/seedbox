@@ -32,7 +32,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
 | CPU | first free core other than CPU 0's, under the shared lease | `--cpu`, `SEEDBOX_CPU` |
 | Guest kernel | `bzImage` in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`, `./artifacts`, then `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
-| VMM | this checkout's `cargo build-vmm` output, then `seedbox-vmm` next to `seedbox`, then on `PATH`; `cargo run` builds it if missing | `--vmm`, `SEEDBOX_VMM` |
+| VMM | `seedbox-vmm` next to an installed `seedbox`, then this checkout's `cargo build-vmm` output, then on `PATH`; `cargo run` builds it if missing | `--vmm`, `SEEDBOX_VMM` |
 | Guest supervisor | built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | BusyBox | `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
@@ -50,7 +50,7 @@ INCOMPLETE and 124 TIMEOUT.
 | `examples/` | Runnable Compose applications: etcd cluster and Redis, each with a workload image |
 | `kernel/` | Guest kernel patch, config and build script (Linux 6.12.112) |
 | `guest/` | Generic OCI guest supervisor plus low-level guest fixtures and builders |
-| `docs/` | [Runtime instructions](docs/runtime.md), [backends](docs/backends.md), [acceptance record](docs/acceptance.md) |
+| `docs/` | [Vision](docs/vision.md), [runtime instructions](docs/runtime.md), [backends](docs/backends.md), [acceptance record](docs/acceptance.md) |
 | `harness/` | Engine acceptance suite, legacy world-file campaign runners and fixtures ([migration map](harness/worlds/README.md)), `msr54.py` |
 | `research/` | Design conclusions and evidence records ([status](research/STATUS.md)); research crates removed, see commit `bc07f35` |
 

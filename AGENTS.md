@@ -2,6 +2,7 @@
 
 Seedbox runs Compose applications as a deterministic world of real Linux
 machines on KVM. Read [README.md](README.md) first; it has the layout table.
+[docs/vision.md](docs/vision.md) says where the project is going.
 
 ## Workspace
 
@@ -11,8 +12,9 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   dependency features across one build: building it alongside other crates
   would change its binary, and so the engine hash of every run. Build and test
   it from the repository root with the aliases in `.cargo/config.toml`:
-  `cargo build-vmm` and `cargo test-vmm`. It builds into
-  `crates/seedbox-vmm/target`, where `seedbox` looks first. Don't set a global
+  `cargo build-vmm` and `cargo test-vmm`. Both already pass `--locked`; adding
+  it again is an error. It builds into `crates/seedbox-vmm/target`, where a
+  `seedbox` run from the checkout finds it. Don't set a global
   `target-dir` in `.cargo/config.toml`: cargo applies it by current directory,
   so it would also move the research crates' builds and break their scripts.
 - New crates go in `crates/<name>/` and inherit `version`, `edition` and

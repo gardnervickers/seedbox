@@ -2,7 +2,8 @@
 
 The standalone research crates (`kvm-runner`, `world`, `determinism`, the
 `intel-probe` crates and `workloads/tokio-service`) have been removed from the
-tree. Links to them point to commit `bc07f35`.
+tree. Links to them point to commit `bc07f35`, and so do the paths of those
+files listed in [ARTIFACTS.json](ARTIFACTS.json).
 
 Updated 2026-10-05. Design and objectives: [CONCLUSIONS.md](CONCLUSIONS.md).
 Current work and runtime observations: [STATUS.md](STATUS.md).
