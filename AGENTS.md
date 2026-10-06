@@ -6,14 +6,20 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 ## Workspace
 
 - `crates/seedbox` is the default package: `cargo run -- <command>` runs the CLI.
-- `crates/seedbox-vmm` is Linux-only; build it with `cargo build -p seedbox-vmm`
-  or `cargo build --workspace`.
+- `crates/seedbox-vmm` is Linux-only and deliberately **not** a workspace member.
+  It is its own workspace with its own `Cargo.lock`, because cargo unifies
+  dependency features across one build: building it alongside other crates
+  would change its binary, and so the engine hash of every run. Build and test
+  it with the aliases in `.cargo/config.toml`: `cargo build-vmm` and
+  `cargo test-vmm`. Both workspaces share the root `target/`.
 - New crates go in `crates/<name>/` and inherit `version`, `edition` and
   `publish` from `[workspace.package]`. Put a dependency used by two or more
-  crates in `[workspace.dependencies]`. There is one `Cargo.lock`; commit it.
+  workspace crates in `[workspace.dependencies]`. Commit both lockfiles.
 - `research/` is frozen evidence: standalone, version-pinned crates and records
   of past runs, excluded from the workspace. Don't edit it to fit code changes
-  elsewhere, and don't add it to the workspace.
+  elsewhere, and don't add it to the workspace. Its scripts predate the
+  workspace layout and some still use `sim/` paths; run those from commit
+  `bc07f35`, the last commit with the old layout.
 - `harness/` holds the Python acceptance suite and legacy world-file runners;
   `kernel/` and `guest/` hold guest build inputs.
 
@@ -22,9 +28,11 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 - The VMM binary's hash, the guest kernel, the guest supervisor
   (`guest/compose-init.c`, embedded by `crates/seedbox/build.rs`) and the
   semantic parameters together make up a run's identity. Any change to
-  `crates/seedbox-vmm`, including reformatting (it moves panic line numbers),
-  or to `[profile.release]` produces a new engine. Don't reformat or tidy the
-  VMM as a side effect of other work.
+  `crates/seedbox-vmm` produces a new engine: its source, its `Cargo.toml` or
+  lockfile, its `[profile.release]`, or even reformatting (which moves panic
+  line numbers; `crates/seedbox-vmm/rustfmt.toml` disables formatting). Build
+  it only with `cargo build-vmm`. Don't tidy the VMM as a side effect of other
+  work.
 - Performance settings (`--margin`, `--undo`) must never change results.
 
 ## Checks
@@ -35,6 +43,7 @@ Run these before committing:
 cargo fmt -p seedbox --check
 cargo clippy -p seedbox --all-targets --locked -- -D warnings
 cargo test --workspace --locked
+cargo test-vmm --locked              # Linux only
 bash harness/acceptance.sh portable
 ```
 
@@ -50,8 +59,8 @@ The CLI lives in `crates/seedbox/src/cli/`:
 - `signals.rs`: cancellation.
 
 `src/main.rs` only calls `cli::main()`. The library (everything else in `src/`)
-never parses arguments, reads environment variables or prints. The CLI is
-that boundary.
+never parses arguments or reads environment variables, and prints only cleanup
+failures from `Drop` that it cannot return. The CLI is that boundary.
 
 Follow these rules when you change the CLI, and update this section if you
 deliberately change one.
@@ -87,7 +96,8 @@ deliberately change one.
 3. On failure, return `missing(what, &searched, fix)`, which lists every
    location tried and one way to fix it.
 4. Resolve it in `RuntimeInputs::backends` or earlier, before any slow work
-   (image pulls, builds, CPU leases). Fail fast.
+   (image pulls, builds, CPU leases). Fail fast. `run` and `replay` then check
+   the host (`require_kvm_host`: KVM and MSR access) before preparing anything.
 5. Add it to the defaults table in README.md's quick start.
 
 ### Help text
@@ -135,14 +145,16 @@ deliberately change one.
 - Exit codes are a fixed contract (`EXIT_CODES`, README.md, docs/runtime.md,
   and the acceptance scripts): 0 PASS/MATCH, 1 FAIL/MISMATCH, 2
   ERROR/NOT_COMPARABLE/usage/setup, 3 INCOMPLETE, 124 TIMEOUT. Don't change
-  what a code means. A new code must be added to all three places.
+  what a code means. A new code must be added to all four places.
 
 ### Tests and docs
 
-- Every new flag, default and error path gets a case in
-  `crates/seedbox/tests/cli.rs`. Those tests run `CARGO_BIN_EXE_seedbox` with
-  the `SEEDBOX_*`/`HOME`/`SUDO_USER` environment scrubbed. Check exact stderr
-  for errors.
+- Every new flag, default and error path that the test build can reach gets a
+  case in `crates/seedbox/tests/cli.rs`. Those tests run `CARGO_BIN_EXE_seedbox`
+  through `seedbox_with`, which clears the environment (so no `SEEDBOX_*`,
+  `CARGO*` or `SUDO_USER` leaks in) and sets `HOME` and `PATH` explicitly.
+  Check exact stderr for setup errors. Usage errors come from clap, so checking
+  for the key phrase is enough.
 - Pure resolution logic gets unit tests in `defaults.rs`.
 - When behaviour changes, update `seedbox help`, README.md (quick start and
   defaults table), docs/runtime.md, and `crates/seedbox/templates/README.md`.

@@ -2,7 +2,9 @@
 
 Paths and commands below are as recorded, before the repository moved to a Cargo
 workspace (`sim/seedbox` is now `crates/seedbox`, `sim/vmm` is `crates/seedbox-vmm`,
-and the runners are under `harness/`).
+and the runners are under `harness/`). The engine hashes below are for builds
+from that layout; a VMM built from `crates/seedbox-vmm` embeds different source
+paths and is a new engine, even though its source is unchanged.
 
 ## 2026-10-06 — OCI import and Linux compilation
 

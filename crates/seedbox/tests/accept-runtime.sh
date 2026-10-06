@@ -15,7 +15,7 @@ test -f "$kernel"
 test ! -e "$output"
 mkdir "$output"
 cargo build --release -p seedbox --locked
-cargo build --release -p seedbox-vmm
+cargo build-vmm --locked
 bash guest/build-compose.sh "$output/compose-init"
 cli="$root/target/release/seedbox"
 vmm="$root/target/release/seedbox-vmm"

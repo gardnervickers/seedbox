@@ -11,8 +11,12 @@ From the repository root:
 ```sh
 nix develop
 bash kernel/build.sh
-cargo build --release --workspace --locked
+cargo build --release --locked
+cargo build-vmm --locked
 ```
+
+`cargo build-vmm` builds the VMM in its own workspace, so the engine binary, and
+the engine hash recorded in every run, is the same however it is built.
 
 The `seedbox` build embeds the static guest supervisor from `guest/compose-init.c`,
 compiled with the shell's musl compiler (`SEEDBOX_STATIC_CC`, or `musl-gcc`).

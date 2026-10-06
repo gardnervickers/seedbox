@@ -95,8 +95,13 @@ fn try_locks(cpus: &BTreeSet<u32>, directory: &Path) -> Result<Option<Vec<File>>
 }
 
 #[cfg(target_os = "linux")]
+fn sysfs(path: &str) -> Result<String> {
+    fs::read_to_string(path).map_err(|error| Error::Setup(format!("{path}: {error}")))
+}
+
+#[cfg(target_os = "linux")]
 fn siblings(cpu: u32) -> Result<BTreeSet<u32>> {
-    let siblings = cpu_list(&fs::read_to_string(format!(
+    let siblings = cpu_list(&sysfs(&format!(
         "/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list"
     ))?)?;
     if !siblings.contains(&cpu) {
@@ -152,9 +157,16 @@ impl HostLease {
     /// Lease the first free candidate CPU and return it with the lease.
     #[cfg(target_os = "linux")]
     pub(crate) fn acquire_any(output: &Path) -> Result<(u32, Self)> {
-        let online = cpu_list(&fs::read_to_string("/sys/devices/system/cpu/online")?)?;
+        let online = cpu_list(&sysfs("/sys/devices/system/cpu/online")?)?;
         let allowed = &online & &allowed_cpus()?;
-        for (cpu, core) in candidates(&allowed, siblings)? {
+        let candidates = candidates(&allowed, siblings)?;
+        if candidates.is_empty() {
+            return Err(Error::Setup(format!(
+                "no eligible CPU: the allowed CPUs {allowed:?} are all on CPU 0's core; \
+                 pass --cpu to use one anyway"
+            )));
+        }
+        for (cpu, core) in candidates {
             if let Some(lease) =
                 Self::try_acquire_at(&core, Path::new("/tmp"), Path::new("/dev/cpu"), output)?
             {

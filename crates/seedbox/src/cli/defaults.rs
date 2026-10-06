@@ -28,11 +28,8 @@ pub fn compose_file(path: &Path) -> Result<PathBuf> {
         .map(|name| path.join(name))
         .find(|candidate| candidate.is_file())
         .ok_or_else(|| {
-            missing(
-                "Compose file",
-                &[path.join(COMPOSE_FILES[0])],
-                "pass the file path directly",
-            )
+            let searched: Vec<_> = COMPOSE_FILES.iter().map(|name| path.join(name)).collect();
+            missing("Compose file", &searched, "pass the file path directly")
         })
 }
 
@@ -85,58 +82,62 @@ fn sudo_home() -> Option<PathBuf> {
     Some(PathBuf::from(std::ffi::OsStr::from_bytes(home.to_bytes())))
 }
 
-/// The VMM: `seedbox-vmm` next to this executable, then on `PATH`. Under
-/// `cargo run`, a missing VMM is built with the same cargo and profile.
+/// The VMM: `seedbox-vmm` next to this executable, then in the release
+/// directory of the same Cargo target directory, then on `PATH`. Under
+/// `cargo run` in this checkout, a missing VMM is built in release mode.
 pub fn engine(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = explicit {
         return existing("--vmm", path);
     }
     let exe = env::current_exe()?;
     let sibling = exe.with_file_name("seedbox-vmm");
-    if sibling.is_file() {
-        return Ok(sibling);
-    }
-    if let Some(path) = on_path("seedbox-vmm") {
+    // target/<profile>/seedbox -> target/
+    let target = exe.parent().and_then(Path::parent);
+    let release = target.map(|target| target.join("release/seedbox-vmm"));
+    let mut searched = vec![sibling.clone()];
+    searched.extend(release.clone().filter(|path| *path != sibling));
+    if let Some(path) = first_file(&searched).or_else(|| on_path("seedbox-vmm")) {
         return Ok(path);
     }
-    if let (Some(cargo), Some(manifest)) = (env::var_os("CARGO"), env::var_os("CARGO_MANIFEST_DIR"))
-    {
-        build_engine(&cargo, Path::new(&manifest), &exe)?;
-        if sibling.is_file() {
-            return Ok(sibling);
+    if let (Some(cargo), Some(target), Some(release)) = (cargo_run_here(), target, release) {
+        build_engine(&cargo, target)?;
+        if release.is_file() {
+            return Ok(release);
         }
     }
+    searched.push(PathBuf::from("$PATH/seedbox-vmm"));
     Err(missing(
         "VMM",
-        &[sibling, PathBuf::from("$PATH/seedbox-vmm")],
-        "build it with `cargo build -p seedbox-vmm`, or pass --vmm or set SEEDBOX_VMM",
+        &searched,
+        "build it with `cargo build-vmm`, or pass --vmm or set SEEDBOX_VMM",
     ))
 }
 
-fn build_engine(cargo: &std::ffi::OsStr, manifest: &Path, exe: &Path) -> Result<()> {
-    let mut command = Command::new(cargo);
-    command
-        .arg("build")
-        .arg("--manifest-path")
-        .arg(manifest.join("Cargo.toml"))
-        .args(["--package", "seedbox-vmm"]);
-    // Match the profile of the running binary: target/<profile>/seedbox.
-    match exe
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|n| n.to_str())
-    {
-        Some("debug") | None => {}
-        Some("release") => {
-            command.arg("--release");
-        }
-        Some(profile) => {
-            command.args(["--profile", profile]);
-        }
-    }
-    eprintln!("seedbox-vmm not built; building it with cargo");
-    if !command.status()?.success() {
-        return Err(Error::Setup("building seedbox-vmm failed".into()));
+/// The cargo running this binary, when it was started by `cargo run` (or a
+/// test) in this checkout rather than by an unrelated cargo project.
+fn cargo_run_here() -> Option<std::ffi::OsString> {
+    let manifest = env::var_os("CARGO_MANIFEST_DIR")?;
+    (Path::new(&manifest) == Path::new(env!("CARGO_MANIFEST_DIR")))
+        .then(|| env::var_os("CARGO"))
+        .flatten()
+}
+
+/// Build the VMM exactly as `cargo build-vmm` does: release mode, from its own
+/// workspace, so the engine (and its hash) does not depend on how it was built.
+fn build_engine(cargo: &std::ffi::OsStr, target: &Path) -> Result<()> {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../seedbox-vmm/Cargo.toml");
+    eprintln!("seedbox-vmm not built; building it with `cargo build-vmm`");
+    let status = Command::new(cargo)
+        .args(["build", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .arg("--target-dir")
+        .arg(target)
+        .status()
+        .map_err(|error| Error::Setup(format!("running cargo to build seedbox-vmm: {error}")))?;
+    if !status.success() {
+        return Err(Error::Setup(
+            "building seedbox-vmm failed (see cargo output above)".into(),
+        ));
     }
     Ok(())
 }
@@ -187,6 +188,19 @@ pub fn busybox(explicit: Option<PathBuf>) -> Result<PathBuf> {
             &[PathBuf::from("$PATH/busybox")],
             "enter `nix develop`, or pass --busybox or set SEEDBOX_BUSYBOX",
         )),
+    }
+}
+
+/// A recorded run: a directory holding `manifest.json`.
+pub fn run_directory(path: PathBuf) -> Result<PathBuf> {
+    let path = existing("run directory", path)?;
+    if path.join("manifest.json").is_file() {
+        Ok(path)
+    } else {
+        Err(Error::Setup(format!(
+            "{}: not a run directory (no manifest.json)",
+            path.display()
+        )))
     }
 }
 

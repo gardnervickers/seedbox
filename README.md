@@ -14,7 +14,8 @@ qualified host (see [host requirements](#host-requirements)) and root.
 ```sh
 nix develop                          # Rust, OCI tools, static BusyBox, musl
 bash kernel/build.sh                 # guest kernel -> ~/seedbox-sim/artifacts/bzImage
-cargo build --release --workspace    # target/release/{seedbox,seedbox-vmm}
+cargo build --release                # target/release/seedbox
+cargo build-vmm                      # target/release/seedbox-vmm (alias in .cargo/config.toml)
 
 cargo run -- validate examples/etcd
 sudo -E env PATH="$PATH" target/release/seedbox run examples/etcd
@@ -30,8 +31,8 @@ directory. Every runtime input has a default, so no flags are required:
 | Compose file | `compose.yaml` in the given directory (default `.`) | positional path |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
 | CPU | first free core other than CPU 0's, under the shared lease | `--cpu`, `SEEDBOX_CPU` |
-| Guest kernel | `$SEEDBOX_ARTIFACTS/bzImage`, `./artifacts/bzImage`, `~/seedbox-sim/artifacts/bzImage` | `--kernel`, `SEEDBOX_KERNEL` |
-| VMM | `seedbox-vmm` next to `seedbox`, then on `PATH`; `cargo run` builds it if missing | `--vmm`, `SEEDBOX_VMM` |
+| Guest kernel | `bzImage` in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`, `./artifacts`, then `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
+| VMM | `seedbox-vmm` next to `seedbox` or in `target/release`, then on `PATH`; `cargo run` builds it if missing | `--vmm`, `SEEDBOX_VMM` |
 | Guest supervisor | built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | BusyBox | `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
@@ -45,7 +46,7 @@ INCOMPLETE and 124 TIMEOUT.
 | Path | Contents |
 | --- | --- |
 | [`crates/seedbox/`](crates/seedbox/README.md) | Configuration, OCI preparation, orchestration and the `seedbox` CLI |
-| `crates/seedbox-vmm/` | KVM VMM and world scheduler (`seedbox-vmm`) |
+| `crates/seedbox-vmm/` | KVM VMM and world scheduler (`seedbox-vmm`); its own workspace and lockfile, because its binary hash is the run's engine identity |
 | `examples/` | Runnable Compose applications: etcd cluster and Redis, each with a workload image |
 | `kernel/` | Guest kernel patch, config and build script (Linux 6.12.112) |
 | `guest/` | Generic OCI guest supervisor plus low-level guest fixtures and builders |
@@ -275,7 +276,7 @@ export SEEDBOX_WORK="$PWD" SEEDBOX_ROOT="$PWD"
 export CARGO_BUILD_JOBS=1 GOFLAGS=-p=1 GOMAXPROCS=1
 mkdir -p src artifacts runs
 BUILD_JOBS=1 taskset -c 14 kernel/build.sh
-(taskset -c 14 cargo build --release -p seedbox-vmm)
+(taskset -c 14 cargo build-vmm)
 taskset -c 14 guest/build-netns.sh artifacts/single.cpio src/etcd/v3.5.2/etcd single
 taskset -c 14 guest/build-netns.sh artifacts/multi.cpio src/etcd/v3.5.2/etcd multi
 CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/single-vm.json netns-one "1009" --digest

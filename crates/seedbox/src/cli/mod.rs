@@ -1,4 +1,4 @@
-//! The `seedbox` command line. Style rules for changes: `CLAUDE.md`, "CLI".
+//! The `seedbox` command line. Style rules for changes: `AGENTS.md`, "CLI".
 
 mod defaults;
 mod signals;
@@ -50,6 +50,7 @@ enum Command {
     Init {
         /// Directory to create.
         directory: PathBuf,
+        /// Example application to start from.
         #[arg(long, value_enum, default_value_t = TemplateArg::Etcd)]
         template: TemplateArg,
     },
@@ -99,14 +100,15 @@ enum Command {
         cpu: CpuArg,
         #[command(flatten)]
         state: StateArg,
-        #[command(flatten)]
-        performance: Performance,
         /// Replay with this VMM instead of the recorded one.
         #[arg(long, requires = "allow_engine_change")]
         vmm: Option<PathBuf>,
         /// Allow --vmm to differ from the recorded VMM.
         #[arg(long)]
         allow_engine_change: bool,
+        // Last: its help heading applies to every flag declared after it.
+        #[command(flatten)]
+        performance: Performance,
     },
     /// Show a recorded run after verifying its manifest.
     Inspect {
@@ -152,7 +154,7 @@ impl ComposeArg {
 #[derive(Args)]
 struct CpuArg {
     /// Host CPU to pin the VMM to [default: first free core other than CPU 0's].
-    #[arg(long, env = "SEEDBOX_CPU")]
+    #[arg(long, env = "SEEDBOX_CPU", value_parser = clap::value_parser!(u32).range(0..1024))]
     cpu: Option<u32>,
 }
 
@@ -165,8 +167,9 @@ struct StateArg {
 
 impl StateArg {
     fn open(&self) -> Result<(ContentStore, Orchestrator)> {
-        std::fs::create_dir_all(&self.state)?;
-        let path = self.state.canonicalize()?;
+        let unusable = |error| Error::Setup(format!("--state {}: {error}", self.state.display()));
+        std::fs::create_dir_all(&self.state).map_err(unusable)?;
+        let path = self.state.canonicalize().map_err(unusable)?;
         let store = ContentStore::new(path.join("objects"));
         Ok((store.clone(), Orchestrator::new(store, path.join("runs"))))
     }
@@ -175,11 +178,11 @@ impl StateArg {
 #[derive(Args)]
 #[command(next_help_heading = "Runtime inputs")]
 struct RuntimeInputs {
-    /// Guest kernel bzImage [default: $SEEDBOX_ARTIFACTS/bzImage, ./artifacts/bzImage,
-    /// ~/seedbox-sim/artifacts/bzImage].
+    /// Guest kernel bzImage [default: bzImage in $SEEDBOX_ARTIFACTS, $SEEDBOX_WORK/artifacts,
+    /// ./artifacts, then ~/seedbox-sim/artifacts for the user and any sudo caller].
     #[arg(long, env = "SEEDBOX_KERNEL")]
     kernel: Option<PathBuf>,
-    /// VMM binary [default: seedbox-vmm next to this binary, then on PATH].
+    /// VMM binary [default: seedbox-vmm next to this binary or in target/release, then on PATH].
     #[arg(long, env = "SEEDBOX_VMM")]
     vmm: Option<PathBuf>,
     /// Static guest supervisor [default: the copy built into this binary].
@@ -310,6 +313,12 @@ fn run(cli: Cli) -> Result<u8> {
             state,
             inputs,
         } => {
+            if output.exists() {
+                return Err(Error::Setup(format!(
+                    "--output {}: already exists",
+                    output.display()
+                )));
+            }
             let simulation = compose.load()?;
             let (store, _) = state.open()?;
             let scratch = tempfile::tempdir()?;
@@ -331,12 +340,13 @@ fn run(cli: Cli) -> Result<u8> {
             inputs,
             performance,
         } => {
-            require_kvm_host()?;
             let simulation = compose.load()?;
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
             let (preparer, executor) = inputs.backends(&store, cpu.cpu, scratch.path())?;
             let executor = performance.apply(executor)?;
+            // After the fast input checks, before slow image preparation.
+            require_kvm_host()?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
             let result = orchestrator.run(
@@ -355,9 +365,9 @@ fn run(cli: Cli) -> Result<u8> {
             vmm,
             allow_engine_change,
         } => {
-            require_kvm_host()?;
-            let run = defaults::existing("run directory", run)?;
+            let run = defaults::run_directory(run)?;
             let previous = orchestration::inspect(&run)?;
+            require_kvm_host()?;
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
             let profile = &previous.identity.inputs.profile;
@@ -390,7 +400,7 @@ fn run(cli: Cli) -> Result<u8> {
             Ok(report(&result))
         }
         Command::Inspect { run, json } => {
-            let run = defaults::existing("run directory", run)?;
+            let run = defaults::run_directory(run)?;
             let record = orchestration::inspect(&run)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&record)?);
@@ -413,14 +423,30 @@ fn run(cli: Cli) -> Result<u8> {
     }
 }
 
+/// Fail fast when this host cannot execute: no KVM, or no MSR access.
 fn require_kvm_host() -> Result<()> {
-    if cfg!(target_os = "linux") {
-        Ok(())
-    } else {
-        Err(Error::Execution(
+    if !cfg!(target_os = "linux") {
+        return Err(Error::Setup(
             "run and replay require the qualified Linux KVM host".into(),
-        ))
+        ));
     }
+    for (path, fix) in [
+        (
+            "/dev/kvm",
+            "enable KVM and run as root (e.g. sudo -E env PATH=\"$PATH\" seedbox ...)",
+        ),
+        (
+            "/dev/cpu/0/msr",
+            "run as root (e.g. sudo -E env PATH=\"$PATH\" seedbox ...) with the msr module loaded",
+        ),
+    ] {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| Error::Setup(format!("{path}: {error}; {fix}")))?;
+    }
+    Ok(())
 }
 
 /// Print a finished run and return its exit status (see `EXIT_CODES`).

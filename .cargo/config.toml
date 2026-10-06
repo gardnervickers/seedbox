@@ -1,0 +1,8 @@
+[build]
+# Shared by the root workspace and the separately built VMM, so `seedbox`
+# finds `seedbox-vmm` in the same target directory.
+target-dir = "target"
+
+[alias]
+build-vmm = "build --release --manifest-path crates/seedbox-vmm/Cargo.toml"
+test-vmm = "test --release --manifest-path crates/seedbox-vmm/Cargo.toml"
