@@ -89,3 +89,68 @@ margin for the identical result. Deterministic clock advances (timer-port I/O
 charges and guest time reads) must also fit in the hard stop. Crossing it fails
 with `clock bound exceeded`; no device I/O cost is clamped away, and a larger
 PMU margin does not fix or retry this error.
+
+## One-VM network fixture
+
+The experimental one-VM layout runs three real etcd members and their client
+in separate network namespaces. It shares a kernel, clock, memory and tmpfs;
+it does not provide independent machine reboot or kernel failure coverage.
+`kernel/config.options` includes the required veth, netem and ingress filter
+features, so one guest kernel can serve both layouts. Adding these features
+changes the kernel hash and replay identity for every layout.
+
+From a Linux checkout root in the project shell, with an available assigned
+core and an existing etcd binary:
+
+```sh
+nix develop ./sim
+export SEEDBOX_WORK="$PWD" SEEDBOX_ROOT="$PWD"
+export CARGO_BUILD_JOBS=1 GOFLAGS=-p=1 GOMAXPROCS=1
+mkdir -p src artifacts runs
+BUILD_JOBS=1 taskset -c 14 sim/kernel/build.sh
+(taskset -c 14 cargo build --release --manifest-path sim/vmm/Cargo.toml)
+taskset -c 14 sim/guest/build-netns.sh artifacts/single.cpio src/etcd/v3.5.2/etcd single
+taskset -c 14 sim/guest/build-netns.sh artifacts/multi.cpio src/etcd/v3.5.2/etcd multi
+CPU0=14 SEEDBOX_TIMEOUT=120 sim/batch.sh sim/worlds/single-vm.json netns-one "1009" --digest
+CPU0=14 SEEDBOX_TIMEOUT=120 sim/batch.sh sim/worlds/cluster-fixed.json netns-four "1009" --digest
+```
+
+Use a fresh output prefix for every invocation. The example CPU is the lane
+used for this investigation, not a requirement of the shared tooling. Check
+host topology and other jobs before choosing cores; keep SMT siblings unused
+by other workloads during measurements. `batch.sh` uses `sim/msr54.py`, keeps
+an invocation-specific snapshot, and restores the assigned cores after its
+children have finished. Do not reuse the historical fixed-CPU research runner
+for new campaigns.
+
+`single-vm-controls.json` exercises packet isolation and directionality;
+`single-vm-sanity.json` plants a missing acknowledgement to check the checker;
+`single-vm-fault.json` applies a directed partition/heal and a process
+stop/restart. These use ordinary world files and the same shared runner.
+The whole guest is named `client` so its checker output is consumed by
+`campaign.sh` / `campaign-result.py`. A planted checker failure is a control,
+not a discovered etcd bug.
+
+COM2 accepts `partition n1` / `heal n1` for a whole-node cut and
+`partition n1 n2` / `heal n1 n2` for a directed source-to-destination cut.
+`stop n2` waits for the owned child to exit before acknowledgement and before
+a later `start n2` can reuse its data directory. A start acknowledgement means
+**launched**, not service-ready. `FAULT` acknowledgements include guest
+monotonic nanoseconds after the action completes, on the same guest clock as
+the client phase marker. Scenario `at_ns` uses the VMM time domain; their
+epoch offset is not calibrated here, so subtracting the two values does not
+measure delivery latency. Retain both the requested schedule and the guest
+acknowledgements when examining faults relative to client activity.
+The shared client accepts `--writes N` for N successful writes per worker,
+with the load duration remaining a deadline; zero retains timed-load mode.
+Both layouts read `seedbox.concurrency`.
+
+These worlds deliberately retain a small fixed-delay, zero-jitter fixture.
+They are compatible with the campaign runner but do not port the full
+`kill-3.5.2` hunt or establish its bug-finding rate. Before backend selection,
+[issue #10](https://github.com/gardnervickers/seedbox/issues/10) requires a
+matched optimized PV/undo comparison, qualified guest-local jitter, the full
+seeded kill/restart schedule, eight writers for 60 seconds, and etcd 3.5.3
+controls over the same seeds. The historical ABI1 timings are in
+[`research/single-vm-network/REPORT.md`](../research/single-vm-network/REPORT.md)
+and must not be attributed to these revised sources.

@@ -3,6 +3,7 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 work="${SEEDBOX_WORK:-$HOME/seedbox-sim}"
+mkdir -p "$work/src"
 version=6.12.112
 tarball="$work/src/linux-$version.tar.xz"
 want=164dc9d1f6c93c61a15e1f071c48379b467f2b17c469cce7223471968208ed03
@@ -30,7 +31,7 @@ while read -r state option; do
   fi
 done < "$here/config.options"
 export KBUILD_BUILD_USER=seedbox KBUILD_BUILD_HOST=seedbox KBUILD_BUILD_TIMESTAMP='Thu Jan 1 00:00:00 UTC 1970' SOURCE_DATE_EPOCH=0
-make -s -C "$src" O="$out" -j16 bzImage
+make -s -C "$src" O="$out" -j"${BUILD_JOBS:-16}" bzImage
 mkdir -p "$work/artifacts"
 cp "$out/arch/x86/boot/bzImage" "$work/artifacts/bzImage"
 cp "$out/.config" "$work/artifacts/kernel.config"

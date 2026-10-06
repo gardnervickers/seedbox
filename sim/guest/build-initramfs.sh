@@ -4,14 +4,14 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 out="$1"; init="$2"; shift 2
 root="$(mktemp -d)"
-trap 'rm -rf "$root"' EXIT
+trap 'chmod -R u+w "$root"; rm -rf "$root"' EXIT
 mkdir -p "$root"/{bin,sbin,usr/bin,usr/sbin,dev,proc,sys,tmp,etc,data}
 cp "$SEEDBOX_BUSYBOX" "$root/bin/busybox"
 "$SEEDBOX_STATIC_CC" -O2 -static -o "$root/bin/sbx" "$here/sbx.c"
 for extra in "$@"; do
   src="${extra%%:*}"; dest="${extra#*:}"
   mkdir -p "$root/$(dirname "$dest")"
-  cp "$src" "$root/$dest"
+  cp -a "$src" "$root/$dest"
 done
 cp "$init" "$root/init"
 chmod 755 "$root/init" "$root/bin/sbx"

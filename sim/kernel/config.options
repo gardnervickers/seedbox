@@ -73,3 +73,16 @@ n ETHERNET
 n SOFTLOCKUP_DETECTOR
 n DETECT_HUNG_TASK
 n IO_URING
+
+# One-VM service network isolation and fixed-delay/fault controls.
+y NAMESPACES
+y NET_NS
+y VETH
+y NET_SCHED
+y NET_SCH_NETEM
+y NET_SCH_INGRESS
+y NET_CLS
+y NET_CLS_MATCHALL
+y NET_CLS_U32
+y NET_CLS_ACT
+y NET_ACT_GACT

@@ -1,0 +1,31 @@
+{
+  "kernel": "/home/gvickers/seedbox-single-vm-network/artifacts/bzImage",
+  "mem_mb": 512,
+  "duration_ns": 20000000000,
+  "stop_tolerance_ns": 2000000,
+  "timer_jitter_ns": 0,
+  "end_on_exit": "client",
+  "network": {
+    "latency_ns": 1000000,
+    "jitter_ns": 0
+  },
+  "machines": [
+    {
+      "name": "n1",
+      "initrd": "/home/gvickers/seedbox-single-vm-network/artifacts/multi.cpio"
+    },
+    {
+      "name": "n2",
+      "initrd": "/home/gvickers/seedbox-single-vm-network/artifacts/multi.cpio"
+    },
+    {
+      "name": "n3",
+      "initrd": "/home/gvickers/seedbox-single-vm-network/artifacts/multi.cpio"
+    },
+    {
+      "name": "client",
+      "initrd": "/home/gvickers/seedbox-single-vm-network/artifacts/multi.cpio",
+      "cmdline": "seedbox.delay=1.5 seedbox.load=10s seedbox.concurrency=2 seedbox.writes=64"
+    }
+  ]
+}

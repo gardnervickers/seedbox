@@ -1,0 +1,4 @@
+FAULT partition n1 2 guest_ns=2166418399
+FAULT heal n1 n2 guest_ns=2866853980
+FAULT stop n2 stopped guest_ns=3266945967
+FAULT start n2 launched guest_ns=3866460066

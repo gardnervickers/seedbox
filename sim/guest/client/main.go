@@ -34,9 +34,19 @@ func dial(eps []string) *clientv3.Client {
 	return c
 }
 
-func load(eps []string, dur time.Duration, conc int) ([]ack, int) {
+func load(eps []string, dur time.Duration, conc int, writes int) ([]ack, int) {
 	cli := dial(eps)
 	defer cli.Close()
+	return runWrites(dur, conc, writes, func(ctx context.Context, key, val string) (int64, error) {
+		r, err := cli.Put(ctx, key, val)
+		if err != nil {
+			return 0, err
+		}
+		return r.Header.Revision, nil
+	})
+}
+
+func runWrites(dur time.Duration, conc, writes int, put func(context.Context, string, string) (int64, error)) ([]ack, int) {
 	deadline := time.Now().Add(dur)
 	var mu sync.Mutex
 	var acks []ack
@@ -46,21 +56,24 @@ func load(eps []string, dur time.Duration, conc int) ([]ack, int) {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
-			for i := 0; time.Now().Before(deadline); i++ {
+			for i := 0; time.Now().Before(deadline) && (writes == 0 || i < writes); i++ {
 				k := fmt.Sprintf("k/%02d/%06d", w, i)
 				v := fmt.Sprintf("v%d", i)
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				r, err := cli.Put(ctx, k, v)
+				rev, err := put(ctx, k, v)
 				cancel()
 				mu.Lock()
 				if err == nil {
-					acks = append(acks, ack{k, v, r.Header.Revision})
+					acks = append(acks, ack{k, v, rev})
 				} else {
 					failed++
 				}
 				mu.Unlock()
 				if err != nil {
 					time.Sleep(50 * time.Millisecond)
+					if writes > 0 {
+						i--
+					}
 				}
 			}
 		}(w)
@@ -196,14 +209,23 @@ func check(eps []string, acks []ack) (bool, string) {
 func main() {
 	endpoints := flag.String("endpoints", "127.0.0.1:2379", "comma-separated endpoints")
 	duration := flag.Duration("duration", 5*time.Second, "write phase length")
+	writes := flag.Int("writes", 0, "successful writes per worker; zero uses duration")
 	concurrency := flag.Int("concurrency", 8, "concurrent writers")
 	plant := flag.String("plant", "", "checker sanity control: \"missing\" adds a never-written acknowledgment")
 	flag.Parse()
+	if *writes < 0 || *concurrency < 1 || *duration <= 0 {
+		fmt.Println("RESULT error invalid workload parameters")
+		os.Exit(2)
+	}
 	eps := strings.Split(*endpoints, ",")
 	sort.Strings(eps)
 	start := time.Now()
-	acks, failed := load(eps, *duration, *concurrency)
+	acks, failed := load(eps, *duration, *concurrency, *writes)
 	fmt.Printf("LOAD acked=%d failed=%d elapsed=%v\n", len(acks), failed, time.Since(start))
+	if *writes > 0 && len(acks) != *writes**concurrency {
+		fmt.Printf("RESULT incomplete acked=%d target=%d\n", len(acks), *writes**concurrency)
+		os.Exit(4)
+	}
 	if *plant == "missing" {
 		acks = append(acks, ack{"k/99/000000", "v0", 0})
 		fmt.Println("PLANT missing acknowledgment k/99/000000")
