@@ -1,0 +1,58 @@
+{
+  "qualification": "off-host source/RESP-mock and arithmetic smoke only; no Redis/Linux guest, VM, faulted fabric, persistence, snapshot or benchmark performance qualification",
+  "compile": {
+    "jdk": "openjdk version \"21.0.11\" 2026-04-21 LTS\nOpenJDK Runtime Environment Zulu21.50+19-CA (build 21.0.11+10-LTS)\nOpenJDK 64-Bit Server VM Zulu21.50+19-CA (build 21.0.11+10-LTS, mixed mode, sharing)",
+    "source": "src/main/java/seedbox/benchmark/RedisJedisBenchmark.java",
+    "release": 21,
+    "pinned_jars_verified": 6,
+    "success": true
+  },
+  "mock_smoke": {
+    "positive": {
+      "status": "passed",
+      "canonical": {
+        "profile_id": "redis-jedis-local-resp-mock-smoke",
+        "seed": 42,
+        "operations": 200,
+        "reads": 160,
+        "acknowledged_writes": 40,
+        "acknowledged_writes_during_partition_window": 10,
+        "replica_keys_verified": 32,
+        "aof_rewrite_completed": true,
+        "outcome_sha256": "0bf82412e4d9eae9048a53e61f218f42cd01da27d4dcc1e33d36226f3554fcea"
+      },
+      "mock_paused_writes": 11
+    },
+    "negative": {
+      "status": "sensitive oraclecontrol rejected corruptedexpectedvalue",
+      "exit": 1
+    },
+    "qualification": "local JVM/RESPmock smoke; no Redis, VM, packetfault, AOFdurability, snapshots or performance acceptance"
+  },
+  "cost_smoke": {
+    "unmeasured_is_not_run": true,
+    "synthetic_cannot_qualify": true,
+    "doublecount_rejected": true,
+    "uncalibrated_factor_rejected": true,
+    "profile_change_rejected": true,
+    "unreached_fault_rejected": true
+  },
+  "schema_and_package": {
+    "all_json_parsed": true,
+    "package_nix_syntax_parsed": true,
+    "pure_package_build": "not attempted; coordinator wires shared Nix dependencies"
+  },
+  "runtime_distinction": {
+    "darwin_prep": "Zulu21.0.11+10-LTS",
+    "linux_measurement": "OpenJDK21.0.12.1+1 per coordinator; final guest qualification pending"
+  },
+  "deferred": [
+    "AMD benchmark until W5a handoff",
+    "native utilization/wakeup proxies and calibrated PMU factor",
+    "W1/W2 control/fault integration and actual snapshot input",
+    "normal/check guest benchmark cost breakdown",
+    "five fresh deciding processes and independent review"
+  ],
+  "hardware_actions": 0,
+  "scope": "onlyresearch/benchmarks sources and ignoredresearch/runs/w4 outputs; no shared docs/env edits byW4"
+}

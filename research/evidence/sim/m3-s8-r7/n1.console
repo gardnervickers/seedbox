@@ -1,0 +1,2 @@
+RACE mode=racy counter=4721495 expected=6000000 lost=1278505
+RACE mode=atomic counter=6000000 expected=6000000 lost=0

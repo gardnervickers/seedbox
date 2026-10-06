@@ -1,0 +1,13 @@
+{
+  "kernel": "../../artifacts/bzImage",
+  "mem_mb": 512,
+  "duration_ns": 120000000000,
+  "end_on_exit": "n1",
+  "machines": [
+    {
+      "name": "n1",
+      "initrd": "../../artifacts/etcd1-3.5.2.cpio"
+    }
+  ],
+  "stop_tolerance_ns": 2000000
+}

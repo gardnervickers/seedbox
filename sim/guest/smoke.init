@@ -1,0 +1,14 @@
+#!/bin/busybox sh
+/bin/busybox --install -s
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mount -t tmpfs tmpfs /tmp
+echo "seedbox: boot ok uptime=$(cat /proc/uptime)"
+echo "entropy: $(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+date
+sleep 1
+echo "after sleep: uptime=$(cat /proc/uptime)"
+i=0; while [ $i -lt 100000 ]; do i=$((i+1)); done
+echo "busy done: uptime=$(cat /proc/uptime)"
+sbx exit 0

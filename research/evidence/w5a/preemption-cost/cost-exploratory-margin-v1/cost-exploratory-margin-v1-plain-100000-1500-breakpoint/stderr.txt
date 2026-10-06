@@ -1,0 +1,1 @@
+{"guard_receipt": "/home/gvickers/seedbox-research/w5a-round-1/evidence/w5a/cost-exploratory-margin-v1-plain-100000-1500-breakpoint.json", "guard_errors": [], "child_exit": 2, "timed_out": false}

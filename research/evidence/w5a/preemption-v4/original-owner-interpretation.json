@@ -1,0 +1,542 @@
+{
+  "owner_interpretation": {
+    "literal_one_total_task_rejection_preserved": "preempt-v4-strict-rejected.json",
+    "basis": "V4 code creates no userspace threads, holds same-thread Owner checks and non-Send vCPU world; reviewed V5 run.UMmnLy observes one owner plus sleeping kvm-nx-lpage-re auxiliary",
+    "limit": "does not assert auxiliary helper never runs or causes no guest-visible interference",
+    "guard_helper_profile_by_load": {
+      "idle": "reviewed V1 1931426ba7979d13256b281fe573e364d566498e589ac75668cf54ea55e0b74a",
+      "loaded": "reviewed V2 4921314439b45fa00fec747aefab89c2479017908edf3438fc878ae85e7a5895"
+    }
+  },
+  "probe_sha256": "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+  "guest_sha256": "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+  "records": 62,
+  "groups": [
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "idle",
+        5308625,
+        524293
+      ],
+      "mode": "rep",
+      "target": 20000,
+      "margin": 10000,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        20000
+      ],
+      "step_range": [
+        17220,
+        18808
+      ],
+      "elapsed_ns_range": [
+        124460254,
+        134907336
+      ],
+      "evidence": [
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.dvBPYp",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.WnS6sC",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.6yTWUf",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.AwdNHz",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.AjkY7Q"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "loaded",
+        5308625,
+        524293
+      ],
+      "mode": "plain",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "correction_off_variation_control",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 5,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        91512,
+        91527,
+        91545,
+        91550,
+        91562
+      ],
+      "step_range": [
+        0,
+        0
+      ],
+      "elapsed_ns_range": [
+        30784631,
+        34446882
+      ],
+      "evidence": [
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.IQTGnv",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.7Lkbqm",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.SjqLl4",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.jOFcdv",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.BgZ3Wl"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "loaded",
+        5308625,
+        524293
+      ],
+      "mode": "rep",
+      "target": 20000,
+      "margin": 10000,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        20000
+      ],
+      "step_range": [
+        21032,
+        21068
+      ],
+      "elapsed_ns_range": [
+        367713824,
+        371284043
+      ],
+      "evidence": [
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.J8lQb7",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.lGg3sc",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.ZcFOWx",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.AyMxIP",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.hdrEDG"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "loaded",
+        5308625,
+        524293
+      ],
+      "mode": "user",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        100000
+      ],
+      "step_range": [
+        25319,
+        25462
+      ],
+      "elapsed_ns_range": [
+        433288786,
+        437173178
+      ],
+      "evidence": [
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.VjijXo",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.KrgfXw",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.t5U0Aq",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.3XIyLP",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.Ebl8hF"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "loaded",
+        5308625,
+        524293
+      ],
+      "mode": "plain",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        100000
+      ],
+      "step_range": [
+        25338,
+        25418
+      ],
+      "elapsed_ns_range": [
+        434510145,
+        437642237
+      ],
+      "evidence": [
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.Udy7Ml",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.MeOMnL",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.m80Xtx",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.0lB333",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.w5gI1U"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "loaded",
+        5308625,
+        524293
+      ],
+      "mode": "exits",
+      "target": 2000,
+      "margin": 500,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        2000
+      ],
+      "step_range": [
+        3489,
+        3496
+      ],
+      "elapsed_ns_range": [
+        1385732216,
+        1393719589
+      ],
+      "evidence": [
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.VebHju",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.NcyZy0",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.8hO7Pr",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.taC0xu",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.1AGsdN"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "idle",
+        5308625,
+        524293
+      ],
+      "mode": "exits",
+      "target": 2000,
+      "margin": 500,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        2000
+      ],
+      "step_range": [
+        3489,
+        3496
+      ],
+      "elapsed_ns_range": [
+        444162109,
+        450299046
+      ],
+      "evidence": [
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.ZxRDVj",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.vq4TSq",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.KNaNk8",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.7jeXF6",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.XGRouD"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "loaded",
+        5308625,
+        524293
+      ],
+      "mode": "uncond",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "unsupported_branchfree_control",
+      "runs": 1,
+      "distinct_tids": 1,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        0
+      ],
+      "step_range": [
+        0,
+        0
+      ],
+      "elapsed_ns_range": [
+        1031245082,
+        1031245082
+      ],
+      "evidence": [
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.D2vpSf"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "idle",
+        5308625,
+        524293
+      ],
+      "mode": "plain",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        100000
+      ],
+      "step_range": [
+        24809,
+        25706
+      ],
+      "elapsed_ns_range": [
+        174493973,
+        180098975
+      ],
+      "evidence": [
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.usKaoQ",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.UqpTmV",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.NZzpMG",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.UdkhAZ",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.iSVSqR"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "idle",
+        5308625,
+        524293
+      ],
+      "mode": "uncond",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "unsupported_branchfree_control",
+      "runs": 1,
+      "distinct_tids": 1,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        0
+      ],
+      "step_range": [
+        0,
+        0
+      ],
+      "elapsed_ns_range": [
+        1011049439,
+        1011049439
+      ],
+      "evidence": [
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.ZdPLXO"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "idle",
+        5308625,
+        524293
+      ],
+      "mode": "user",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "positive",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        100000
+      ],
+      "step_range": [
+        24913,
+        24976
+      ],
+      "elapsed_ns_range": [
+        174649288,
+        175191481
+      ],
+      "evidence": [
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.mo3dqi",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.ID0rr4",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.HR17Y0",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.VmwANs",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.EjSZyf"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "idle",
+        5308625,
+        524293
+      ],
+      "mode": "plain",
+      "target": 100000,
+      "margin": 1,
+      "kind": "detected_overshoot_control",
+      "runs": 1,
+      "distinct_tids": 1,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        101751
+      ],
+      "step_range": [
+        0,
+        0
+      ],
+      "elapsed_ns_range": [
+        10860203,
+        10860203
+      ],
+      "evidence": [
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.RpQSYU"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "idle",
+        5308625,
+        524293
+      ],
+      "mode": "plain",
+      "target": 100000,
+      "margin": 10000,
+      "kind": "correction_off_variation_control",
+      "runs": 5,
+      "distinct_tids": 5,
+      "initial_variants": 1,
+      "landing_variants": 5,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        91681,
+        91687,
+        91703,
+        91710,
+        91721
+      ],
+      "step_range": [
+        0,
+        0
+      ],
+      "elapsed_ns_range": [
+        10684130,
+        11587016
+      ],
+      "evidence": [
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.jHYwmi",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.wJvny5",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.KUEZgC",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.WP2d8P",
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.gbpTf2"
+      ]
+    },
+    {
+      "profile": [
+        "1f2876f62bfd91804b6c20fb03cad141c665ecba8ad8ef96fcdfa2848a1f36f4",
+        "d276166e822b2de6eb9eb4c7658f63d72300e1c08882dab5104ccd0cef9b9eae",
+        "original",
+        "loaded",
+        5308625,
+        524293
+      ],
+      "mode": "plain",
+      "target": 100000,
+      "margin": 1,
+      "kind": "detected_overshoot_control",
+      "runs": 1,
+      "distinct_tids": 1,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "accepted": true,
+      "issues": [],
+      "counts": [
+        101500
+      ],
+      "step_range": [
+        0,
+        0
+      ],
+      "elapsed_ns_range": [
+        34358939,
+        34358939
+      ],
+      "evidence": [
+        "/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/evidence/w5a/preemption-v4/run.p9Y6uq"
+      ]
+    }
+  ],
+  "failures": [],
+  "accepted": true
+}

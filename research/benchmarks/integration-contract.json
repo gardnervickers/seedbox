@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "ownership": "benchmark fixture only; W1 owns world/faults and W2 owns VMM; no competing scheduler/device implementation",
+  "client_control": {
+    "transport": "stdin/stdoutUTF8 lines through reliable owned guest control device; independent of faultable Redis TCP",
+    "ready": "oneJSON line phase=ready after warmup/dataset reconcile/replica WAIT; client then blocks readingSTART",
+    "start": "START <guest monotonic epoch_ns> newline; epoch0 selects controlled current guest monotonic time",
+    "started": "oneJSON line phase=started supplies epoch_guest_monotonic_ns",
+    "complete": "oneJSON line phase=complete with canonical outcome+timing; failure phase=failed exit1",
+    "clock": "guest System.nanoTime/Thread.sleep through pinned Linux/JVM clock profile; native clock permitted only in explicitly nondeciding native/local cases",
+    "W1_binding": "coordinator maps reliable ingress/egress to ordered control messages; line framing is an application payload, not a replacement for W1 command framing"
+  },
+  "scenario": [
+    {"step": "restore pinned whole-world post-warmup input; record restore cost", "time": "before measurement"},
+    {"step": "releaseSTART and collect epoch; ensure world mapping to epoch fixed by time policy", "time_ns": 0},
+    {"step": "fault handle drops all primary<->replica frames; preserveTCP state; require drop counters/nonzero active partition traffic", "time_ns": 25000000000},
+    {"step": "release same fault handle; verify healed frame delivery and replica recovery", "time_ns": 35000000000},
+    {"step": "client issues BGREWRITEAOF as a separate admin command", "time_ns": 40000000000},
+    {"step": "client finishes fixed offered schedule, then WAIT/key verification/AOF completion", "time_ns": 60000000000},
+    {"step": "report actual drain; include it inend-to-end cost and fixed60s/host ratio; fail drain>5s", "time_ns": "<=65000000000"}
+  ],
+  "canonical_client_result": "profile_id,seed,counts,replica-key checks,AOF completion and outcome_sha256; diagnostic host timing excluded from O1 witness",
+  "witness_normal": "declared full future-relevant state at start/end and coarse checkpoints; coarse checkpoints are diagnostic coverage, not full boundary equality",
+  "witness_check": "W3 boundary hash chain with declared CPU/KVM/RAM/world/device/control coverage; missing hidden state remains explicit",
+  "required_fault_evidence": ["fault handle/time/selector", "frames dropped during partition>0", "heal handle/time", "frames delivered afterheal", "acknowledged writes during partition>0", "replica catches up with all final model bytes"],
+  "time_policy_inputs": ["qualified PMU profile/width/epoch", "native calibrated rational ns/conditional branch per workload profile", "zero-count/REP/unconditional-work policy", "minimum 1ms link plus W1 safe horizon, zero-lookahead barriers and equal-time closure", "scheduled device arrival, world-effect processing, legal IRQ acceptance and handler entry recorded separately"],
+  "causal_progress": {
+    "owner": "W1 world scheduler; this benchmark does not implement an alternative scheduler",
+    "safe_horizon": "minimum of known affecting deadlines and all producers' proven earliest unpublished effects plus guaranteed minimum path latency, with controller/shared-device zero-lookahead barriers and equal-time closure",
+    "frontiers": "per-machine local frontiers and calibration remainders plus a world commit frontier; two machines reaching local 1ms advance the world to 1ms, not 2ms",
+    "known_deadlines": "include pending frames, block completions, timers, faults, controller continuations and other effects that can affect the selected machine",
+    "producer_coverage": "account for every active producer, including runnable guests, autonomous kernel/device work and controller actions, plus blocked-producer wake lower bounds, zero-latency paths and latency-reducing faults; an empty event queue alone is not a progress proof",
+    "slice_bound": "end at or before the safe horizon and the declared 1ms maximum, possibly earlier; <=1ms alone does not prove exact causality",
+    "equal_time": "process equal-time effects in W1's explicit stable order and close zero-lookahead effects/continuations before advancing beyond that time",
+    "arrival_vs_irq": "scheduled device arrival and due world-effect processing remain exact. Linux IF/shadow restrictions may defer interrupt injection, acceptance or handler execution; that is guest semantics, not permission to defer due world work",
+    "error": "advancing a guest past an unprocessed due world effect is a scheduling error, even if a later IRQ would be architecturally legal"
+  },
+  "device_timing_records": {
+    "identity": ["stable machine ID", "boot incarnation", "device/request or frame ID", "registration sequence"],
+    "timestamps_ns": ["scheduled_device_arrival_ns", "processed_world_effect_ns", "irq_ready_window_ns", "irq_injected_ns", "irq_accepted_ns", "handler_entry_ns"],
+    "unobserved": "null with explicit capture coverage; never infer guest IRQ acceptance or handler entry from the injection call alone",
+    "interpretation": "world processing past the due horizon is a scheduling error; IRQ acceptance/handler delay is reported separately with IF/shadow or other guest-semantic cause when observed"
+  },
+  "snapshot_pin": "kernel/rootfs/JDK/jars/Redis/configs+whole-world state; shared env lock alone is not a runnable warmed snapshot",
+  "AMD_priority": "no execution until coordinator hands benchmark breakdown the common hardware lock after W5a"
+}

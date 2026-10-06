@@ -1,0 +1,15 @@
+{
+  "kernel": "../../artifacts/bzImage",
+  "mem_mb": 512,
+  "duration_ns": 120000000000,
+  "stop_tolerance_ns": 2000000,
+  "timer_jitter_ns": 1000000,
+  "end_on_exit": "client",
+  "network": {"latency_ns": 1000000, "jitter_ns": 200000},
+  "machines": [
+    {"name": "n1", "initrd": "../../artifacts/cluster-3.5.2.cpio"},
+    {"name": "n2", "initrd": "../../artifacts/cluster-3.5.2.cpio"},
+    {"name": "n3", "initrd": "../../artifacts/cluster-3.5.2.cpio"},
+    {"name": "client", "initrd": "../../artifacts/cluster-3.5.2.cpio", "cmdline": "seedbox.load=10s seedbox.concurrency=8"}
+  ]
+}

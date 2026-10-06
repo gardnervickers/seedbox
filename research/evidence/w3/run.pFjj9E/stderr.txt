@@ -1,0 +1,9 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+   Compiling seedbox-witness v0.2.0 (/private/tmp/seedbox-round-1.S74xJ4/determinism)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.19s
+     Running unittests src/lib.rs (/private/tmp/seedbox-round-1.S74xJ4/determinism/target/debug/deps/seedbox_witness-3ee4c554913a7ce0)
+     Running unittests src/main.rs (/private/tmp/seedbox-round-1.S74xJ4/determinism/target/debug/deps/seedbox_witness-9cb290384bb78b0f)
+   Doc-tests seedbox_witness

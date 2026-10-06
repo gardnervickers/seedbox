@@ -1,0 +1,282 @@
+workload,number,name,calls,flags,errors,historical_abi
+redis,0,read,975,{},"{""EAGAIN"": 4}",modeled-dispatch-present; exercised flags/semantics not certified
+redis,1,write,225,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,2,open,6,"{""O_CLOEXEC"": 3, ""O_RDONLY"": 6}",{},partial: restricted flags/options/clocks; consult archived implementation
+redis,3,close,177,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,5,fstat,83,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,8,lseek,13,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,9,mmap,210,"{""MAP_ANONYMOUS"": 72, ""MAP_DENYWRITE"": 135, ""MAP_FIXED"": 117, ""MAP_NORESERVE"": 21, ""MAP_PRIVATE"": 210, ""MAP_STACK"": 15, ""PROT_EXEC"": 33, ""PROT_READ"": 210, ""PROT_WRITE"": 108}",{},partial: anonymous only; file-backed/shared-file mappings absent
+redis,10,mprotect,42,"{""PROT_NONE"": 3, ""PROT_READ"": 39}",{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,11,munmap,6,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,12,brk,6,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,13,rt_sigaction,40,"{""SA_NODEFER"": 15, ""SA_ONSTACK"": 3, ""SA_RESTART"": 9, ""SA_RESTORER"": 40, ""SA_SIGINFO"": 21, ""SIGABRT"": 3, ""SIGALRM"": 3, ""SIGBUS"": 3, ""SIGFPE"": 3, ""SIGHUP"": 3, ""SIGILL"": 3, ""SIGINT"": 3, ""SIGPIPE"": 3, ""SIGRT_1"": 3, ""SIGSEGV"": 3, ""SIGTERM"": 3, ""SIGUSR1"": 4, ""SIGUSR2"": 3}",{},partial: signal metadata/disabled interval timers; active delivery absent
+redis,14,rt_sigprocmask,87,{},{},partial: signal metadata/disabled interval timers; active delivery absent
+redis,16,ioctl,6,{},"{""EINVAL"": 3, ""ENOTTY"": 3}",modeled-dispatch-present; exercised flags/semantics not certified
+redis,21,access,3,{},"{""ENOENT"": 3}",modeled-dispatch-present; exercised flags/semantics not certified
+redis,28,madvise,33,"{""MADV_DONTNEED"": 15, ""MADV_FREE"": 3, ""MADV_GUARD_INSTALL"": 15}",{},not modeled by historical ABI; native failure may be an optional fallback probe
+redis,32,dup,2,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+redis,38,setitimer,3,{},{},partial: signal metadata/disabled interval timers; active delivery absent
+redis,39,getpid,283,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,41,socket,6,"{""AF_INET"": 6, ""SOCK_STREAM"": 6}",{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,42,connect,3,"{""AF_INET"": 3}","{""EINPROGRESS"": 3}",modeled-dispatch-present; exercised flags/semantics not certified
+redis,48,shutdown,5,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+redis,49,bind,3,"{""AF_INET"": 3}",{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,50,listen,3,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,52,getpeername,44,"{""AF_INET"": 44}",{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,54,setsockopt,152,"{""SOL_SOCKET"": 36, ""SOL_TCP"": 116, ""SO_KEEPALIVE"": 29, ""SO_REUSEADDR"": 6, ""SO_SNDTIMEO_OLD"": 1, ""TCP_KEEPCNT"": 29, ""TCP_KEEPIDLE"": 29, ""TCP_KEEPINTVL"": 29, ""TCP_NODELAY"": 29}",{},partial: restricted flags/options/clocks; consult archived implementation
+redis,55,getsockopt,3,"{""SOL_SOCKET"": 3, ""SO_ERROR"": 3}",{},partial: restricted flags/options/clocks; consult archived implementation
+redis,56,clone,4,"{""CLONE_CHILD_CLEARTID"": 4, ""CLONE_CHILD_SETTID"": 4, ""SIGCHLD"": 4}",{},partial: limited shared-address-space thread flags; fork semantics absent
+redis,59,execve,3,{},{},"native-launch-or-process-exec; prototype host loads static ELF, no general exec syscall"
+redis,61,wait4,5,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+redis,63,uname,1,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,72,fcntl,30,"{""F_GETFD"": 6, ""F_GETFL"": 7, ""F_SETFD"": 6, ""F_SETFL"": 11, ""O_NONBLOCK"": 11, ""O_RDONLY"": 4, ""O_RDWR"": 14}",{},partial: restricted flags/options/clocks; consult archived implementation
+redis,74,fsync,6,{},{},partial: volatile-byte copy to durable image; crash/torn-write fidelity absent
+redis,75,fdatasync,40,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+redis,77,ftruncate,1,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+redis,79,getcwd,3,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,80,chdir,3,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,82,rename,21,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+redis,83,mkdir,5,{},"{""EEXIST"": 3}",not modeled by historical ABI; native failure may be an optional fallback probe
+redis,87,unlink,8,{},"{""ENOENT"": 4}",not modeled by historical ABI; native failure may be an optional fallback probe
+redis,89,readlink,3,{},"{""ENOENT"": 3}",not modeled by historical ABI; native failure may be an optional fallback probe
+redis,95,umask,6,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,98,getrusage,3,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,99,sysinfo,3,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,157,prctl,15,"{""PR_SET_NAME"": 15}",{},partial: restricted flags/options/clocks; consult archived implementation
+redis,158,arch_prctl,3,"{""ARCH_SET_FS"": 3}",{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,202,futex,129,"{""FUTEX_BITSET_MATCH_ANY"": 26, ""FUTEX_CLOCK_REALTIME"": 26, ""FUTEX_WAIT_BITSET_PRIVATE"": 26, ""FUTEX_WAIT_PRIVATE"": 10, ""FUTEX_WAKE_PRIVATE"": 93}","{""EAGAIN"": 5}",partial: restricted flags/options/clocks; consult archived implementation
+redis,204,sched_getaffinity,3,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,213,epoll_create,3,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,218,set_tid_address,3,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,221,fadvise64,9,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+redis,231,exit_group,7,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,232,epoll_wait,117,"{""EPOLLIN"": 104, ""EPOLLOUT"": 3}","{""EINTR"": 4}",partial: restricted flags/options/clocks; consult archived implementation
+redis,233,epoll_ctl,81,"{""EPOLLIN"": 46, ""EPOLLOUT"": 3, ""EPOLL_CTL_ADD"": 45, ""EPOLL_CTL_DEL"": 32, ""EPOLL_CTL_MOD"": 4}",{},partial: restricted flags/options/clocks; consult archived implementation
+redis,257,openat,224,"{""AT_FDCWD"": 224, ""O_APPEND"": 3, ""O_CLOEXEC"": 132, ""O_CREAT"": 23, ""O_EXCL"": 1, ""O_NONBLOCK"": 9, ""O_RDONLY"": 201, ""O_TRUNC"": 19, ""O_WRONLY"": 23}","{""ENOENT"": 98}",partial: restricted flags/options/clocks; consult archived implementation
+redis,262,newfstatat,57,"{""AT_FDCWD"": 57}","{""ENOENT"": 38}",modeled-dispatch-present; exercised flags/semantics not certified
+redis,273,set_robust_list,22,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+redis,288,accept4,56,"{""AF_INET"": 28, ""SOCK_CLOEXEC"": 56, ""SOCK_NONBLOCK"": 56}","{""EAGAIN"": 28}",modeled-dispatch-present; exercised flags/semantics not certified
+redis,293,pipe2,13,"{""O_CLOEXEC"": 13, ""O_NONBLOCK"": 9}",{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,302,prlimit64,6,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,318,getrandom,12,"{""GRND_NONBLOCK"": 6}",{},modeled-dispatch-present; exercised flags/semantics not certified
+redis,334,rseq,18,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+redis,435,clone3,15,"{""CLONE_CHILD_CLEARTID"": 15, ""CLONE_FILES"": 15, ""CLONE_FS"": 15, ""CLONE_PARENT_SETTID"": 15, ""CLONE_SETTLS"": 15, ""CLONE_SIGHAND"": 15, ""CLONE_SYSVSEM"": 15, ""CLONE_THREAD"": 15, ""CLONE_VM"": 15}",{},not modeled by historical ABI; native failure may be an optional fallback probe
+etcd,0,read,396,{},"{""EAGAIN"": 158}",modeled-dispatch-present; exercised flags/semantics not certified
+etcd,1,write,295,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+etcd,3,close,123,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+etcd,5,fstat,16,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+etcd,8,lseek,104,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+etcd,9,mmap,75,"{""MAP_ANONYMOUS"": 71, ""MAP_DROPPABLE"": 2, ""MAP_FIXED"": 18, ""MAP_POPULATE"": 4, ""MAP_PRIVATE"": 69, ""MAP_SHARED"": 4, ""PROT_NONE"": 14, ""PROT_READ"": 61, ""PROT_WRITE"": 57}",{},partial: anonymous only; file-backed/shared-file mappings absent
+etcd,11,munmap,4,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+etcd,13,rt_sigaction,230,"{""SA_ONSTACK"": 112, ""SA_RESTART"": 112, ""SA_RESTORER"": 112, ""SA_SIGINFO"": 112, ""SIGABRT"": 4, ""SIGALRM"": 4, ""SIGBUS"": 4, ""SIGCHLD"": 4, ""SIGFPE"": 4, ""SIGHUP"": 4, ""SIGILL"": 4, ""SIGINT"": 4, ""SIGIO"": 4, ""SIGPIPE"": 4, ""SIGPROF"": 4, ""SIGPWR"": 4, ""SIGQUIT"": 4, ""SIGRTMIN"": 2, ""SIGRT_1"": 4, ""SIGRT_10"": 4, ""SIGRT_11"": 4, ""SIGRT_12"": 4, ""SIGRT_13"": 4, ""SIGRT_14"": 4, ""SIGRT_15"": 4, ""SIGRT_16"": 4, ""SIGRT_17"": 4, ""SIGRT_18"": 4, ""SIGRT_19"": 4, ""SIGRT_2"": 2, ""SIGRT_20"": 4, ""SIGRT_21"": 4, ""SIGRT_22"": 4, ""SIGRT_23"": 4, ""SIGRT_24"": 4, ""SIGRT_25"": 4, ""SIGRT_26"": 4, ""SIGRT_27"": 4, ""SIGRT_28"": 4, ""SIGRT_29"": 4, ""SIGRT_3"": 4, ""SIGRT_30"": 4, ""SIGRT_31"": 4, ""SIGRT_32"": 4, ""SIGRT_4"": 4, ""SIGRT_5"": 4, ""SIGRT_6"": 4, ""SIGRT_7"": 4, ""SIGRT_8"": 4, ""SIGRT_9"": 4, ""SIGSEGV"": 4, ""SIGSTKFLT"": 4, ""SIGSYS"": 4, ""SIGTERM"": 6, ""SIGTRAP"": 4, ""SIGURG"": 4, ""SIGUSR1"": 4, ""SIGUSR2"": 4, ""SIGVTALRM"": 4, ""SIGWINCH"": 4, ""SIGXCPU"": 4, ""SIGXFSZ"": 4}",{},partial: signal metadata/disabled interval timers; active delivery absent
+etcd,14,rt_sigprocmask,53,{},{},partial: signal metadata/disabled interval timers; active delivery absent
+etcd,15,rt_sigreturn,13,{},"{""EINTR"": 1}",not modeled by historical ABI; native failure may be an optional fallback probe
+etcd,17,pread64,19,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+etcd,18,pwrite64,60,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+etcd,24,sched_yield,48,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+etcd,28,madvise,28,"{""MADV_DONTNEED"": 20, ""MADV_NOHUGEPAGE"": 4, ""MADV_RANDOM"": 4}",{},not modeled by historical ABI; native failure may be an optional fallback probe
+etcd,35,nanosleep,1657,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+etcd,39,getpid,15,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+etcd,41,socket,16,"{""AF_INET"": 10, ""AF_INET6"": 4, ""AF_NETLINK"": 2, ""SOCK_CLOEXEC"": 16, ""SOCK_NONBLOCK"": 14, ""SOCK_RAW"": 2, ""SOCK_STREAM"": 14}",{},modeled-dispatch-present; exercised flags/semantics not certified
+etcd,42,connect,2,"{""AF_INET"": 2}","{""EINPROGRESS"": 2}",modeled-dispatch-present; exercised flags/semantics not certified
+etcd,44,sendto,2,"{""AF_NETLINK"": 2, ""AF_UNSPEC"": 2}",{},modeled-dispatch-present; exercised flags/semantics not certified
+etcd,45,recvfrom,4,"{""AF_INET"": 2, ""AF_INET6"": 2, ""AF_NETLINK"": 4}",{},modeled-dispatch-present; exercised flags/semantics not certified
+etcd,49,bind,10,"{""AF_INET"": 4, ""AF_INET6"": 4, ""AF_NETLINK"": 2}",{},modeled-dispatch-present; exercised flags/semantics not certified
+etcd,50,listen,4,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+etcd,51,getsockname,60,"{""AF_INET"": 58, ""AF_NETLINK"": 2}",{},modeled-dispatch-present; exercised flags/semantics not certified
+etcd,52,getpeername,2,"{""AF_INET"": 2}",{},modeled-dispatch-present; exercised flags/semantics not certified
+etcd,54,setsockopt,376,"{""SOL_IPV6"": 4, ""SOL_SOCKET"": 110, ""SOL_TCP"": 262, ""SO_KEEPALIVE"": 106, ""SO_REUSEADDR"": 4, ""TCP_KEEPCNT"": 52, ""TCP_KEEPIDLE"": 104, ""TCP_KEEPINTVL"": 52, ""TCP_NODELAY"": 54}",{},partial: restricted flags/options/clocks; consult archived implementation
+etcd,55,getsockopt,10,"{""SOL_SOCKET"": 8, ""SOL_TCP"": 2, ""SO_ERROR"": 2, ""SO_LINGER"": 2, ""SO_RCVTIMEO_OLD"": 2, ""SO_SNDTIMEO_OLD"": 2, ""TCP_INFO"": 2}",{},partial: restricted flags/options/clocks; consult archived implementation
+etcd,56,clone,13,"{""CLONE_FILES"": 13, ""CLONE_FS"": 13, ""CLONE_SETTLS"": 13, ""CLONE_SIGHAND"": 13, ""CLONE_SYSVSEM"": 13, ""CLONE_THREAD"": 13, ""CLONE_VM"": 13}",{},partial: limited shared-address-space thread flags; fork semantics absent
+etcd,59,execve,2,{},{},"native-launch-or-process-exec; prototype host loads static ELF, no general exec syscall"
+etcd,62,kill,2,"{""SIGTERM"": 2}",{},not modeled by historical ABI; native failure may be an optional fallback probe
+etcd,63,uname,2,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+etcd,72,fcntl,202,"{""F_GETFD"": 6, ""F_GETFL"": 98, ""F_OFD_GETLK"": 2, ""F_OFD_SETLK"": 1, ""F_OFD_SETLKW"": 3, ""F_SETFL"": 92, ""F_UNLCK"": 2, ""F_WRLCK"": 4, ""O_LARGEFILE"": 188, ""O_NONBLOCK"": 92, ""O_RDONLY"": 110, ""O_RDWR"": 20, ""O_WRONLY"": 60}",{},partial: restricted flags/options/clocks; consult archived implementation
+etcd,73,flock,8,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+etcd,74,fsync,7,{},{},partial: volatile-byte copy to durable image; crash/torn-write fidelity absent
+etcd,75,fdatasync,110,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+etcd,77,ftruncate,3,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+etcd,131,sigaltstack,30,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+etcd,137,statfs,2,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+etcd,157,prctl,2,"{""PR_SET_VMA"": 2, ""PR_SET_VMA_ANON_NAME"": 2}","{""EINVAL"": 2}",partial: restricted flags/options/clocks; consult archived implementation
+etcd,158,arch_prctl,2,"{""ARCH_SET_FS"": 2}",{},modeled-dispatch-present; exercised flags/semantics not certified
+etcd,186,gettid,28,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+etcd,202,futex,1703,"{""FUTEX_WAIT_PRIVATE"": 822, ""FUTEX_WAKE_PRIVATE"": 881, ""SA_RESTART"": 2}","{""EAGAIN"": 131, ""ERESTARTSYS"": 2, ""ETIMEDOUT"": 51}",partial: restricted flags/options/clocks; consult archived implementation
+etcd,204,sched_getaffinity,2,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+etcd,217,getdents64,38,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+etcd,233,epoll_ctl,167,"{""EPOLLET"": 105, ""EPOLLIN"": 107, ""EPOLLOUT"": 105, ""EPOLLRDHUP"": 105, ""EPOLL_CTL_ADD"": 107, ""EPOLL_CTL_DEL"": 60}","{""EPERM"": 45}",partial: restricted flags/options/clocks; consult archived implementation
+etcd,234,tgkill,11,"{""SIGURG"": 11}",{},not modeled by historical ABI; native failure may be an optional fallback probe
+etcd,257,openat,61,"{""AT_FDCWD"": 61, ""O_CLOEXEC"": 57, ""O_CREAT"": 18, ""O_EXCL"": 1, ""O_RDONLY"": 42, ""O_RDWR"": 5, ""O_TRUNC"": 11, ""O_WRONLY"": 14}","{""ENOENT"": 4}",partial: restricted flags/options/clocks; consult archived implementation
+etcd,258,mkdirat,4,"{""AT_FDCWD"": 4}",{},not modeled by historical ABI; native failure may be an optional fallback probe
+etcd,262,newfstatat,30,"{""AT_FDCWD"": 30, ""AT_SYMLINK_NOFOLLOW"": 2}","{""ENOENT"": 11}",modeled-dispatch-present; exercised flags/semantics not certified
+etcd,263,unlinkat,15,"{""AT_FDCWD"": 15, ""AT_REMOVEDIR"": 2}","{""ENOENT"": 4}",not modeled by historical ABI; native failure may be an optional fallback probe
+etcd,264,renameat,2,"{""AT_FDCWD"": 2}",{},not modeled by historical ABI; native failure may be an optional fallback probe
+etcd,267,readlinkat,2,"{""AT_FDCWD"": 2}",{},not modeled by historical ABI; native failure may be an optional fallback probe
+etcd,281,epoll_pwait,697,"{""EPOLLIN"": 234, ""EPOLLOUT"": 204, ""EPOLLRDHUP"": 49}","{""EINTR"": 1}",partial: restricted flags/options/clocks; consult archived implementation
+etcd,285,fallocate,4,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+etcd,288,accept4,105,"{""AF_INET"": 52, ""SOCK_CLOEXEC"": 105, ""SOCK_NONBLOCK"": 105}","{""EAGAIN"": 53}",modeled-dispatch-present; exercised flags/semantics not certified
+etcd,290,eventfd2,2,"{""EFD_CLOEXEC"": 2, ""EFD_NONBLOCK"": 2}",{},not modeled by historical ABI; native failure may be an optional fallback probe
+etcd,291,epoll_create1,2,"{""EPOLL_CLOEXEC"": 2}",{},modeled-dispatch-present; exercised flags/semantics not certified
+etcd,302,prlimit64,6,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+etcd,318,getrandom,2,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,0,read,1135,"{""SIGHUP"": 3}","{""EAGAIN"": 1}",modeled-dispatch-present; exercised flags/semantics not certified
+postgres,1,write,1971,"{""SIGHUP"": 1}",{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,3,close,10045,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,5,fstat,1261,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,7,poll,598,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,8,lseek,272,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,9,mmap,574,"{""MAP_ANONYMOUS"": 124, ""MAP_DENYWRITE"": 410, ""MAP_FIXED"": 336, ""MAP_HUGETLB"": 3, ""MAP_PRIVATE"": 532, ""MAP_SHARED"": 42, ""PROT_EXEC"": 101, ""PROT_READ"": 574, ""PROT_WRITE"": 269}","{""ENOMEM"": 3}",partial: anonymous only; file-backed/shared-file mappings absent
+postgres,10,mprotect,115,"{""PROT_NONE"": 3, ""PROT_READ"": 112}",{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,11,munmap,45,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,12,brk,173,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,13,rt_sigaction,598,"{""SA_NOCLDSTOP"": 38, ""SA_RESTART"": 598, ""SA_RESTORER"": 598, ""SIGALRM"": 81, ""SIGCHLD"": 38, ""SIGFPE"": 17, ""SIGHUP"": 48, ""SIGINT"": 46, ""SIGPIPE"": 46, ""SIGPWR"": 61, ""SIGQUIT"": 77, ""SIGTERM"": 83, ""SIGTTIN"": 3, ""SIGTTOU"": 3, ""SIGUSR1"": 46, ""SIGUSR2"": 46, ""SIGXFSZ"": 3}",{},partial: signal metadata/disabled interval timers; active delivery absent
+postgres,14,rt_sigprocmask,523,{},{},partial: signal metadata/disabled interval timers; active delivery absent
+postgres,15,rt_sigreturn,115,{},"{""EINTR"": 99}",not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,16,ioctl,1,{},"{""ENOTTY"": 1}",modeled-dispatch-present; exercised flags/semantics not certified
+postgres,17,pread64,1685,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,18,pwrite64,2250,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,21,access,35,"{""F_OK"": 17}","{""ENOENT"": 8}",modeled-dispatch-present; exercised flags/semantics not certified
+postgres,25,mremap,2,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,29,shmget,3,"{""IPC_CREAT"": 3, ""IPC_EXCL"": 3}",{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,30,shmat,3,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,31,shmctl,3,"{""IPC_RMID"": 3}",{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,32,dup,3000,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,38,setitimer,49,{},{},partial: signal metadata/disabled interval timers; active delivery absent
+postgres,39,getpid,450,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,41,socket,14,"{""AF_INET"": 7, ""AF_UNIX"": 7, ""SOCK_CLOEXEC"": 8, ""SOCK_NONBLOCK"": 8, ""SOCK_STREAM"": 14}",{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,42,connect,8,"{""AF_INET"": 4, ""AF_UNIX"": 4}","{""EINPROGRESS"": 4}",modeled-dispatch-present; exercised flags/semantics not certified
+postgres,43,accept,35,"{""AF_INET"": 35}",{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,44,sendto,2174,"{""MSG_NOSIGNAL"": 44}","{""EAGAIN"": 1}",modeled-dispatch-present; exercised flags/semantics not certified
+postgres,45,recvfrom,1034,{},"{""EAGAIN"": 168}",modeled-dispatch-present; exercised flags/semantics not certified
+postgres,47,recvmsg,1,"{""MSG_CMSG_CLOEXEC"": 1}",{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,49,bind,6,"{""AF_INET"": 3, ""AF_UNIX"": 3}",{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,50,listen,6,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,51,getsockname,39,"{""AF_INET"": 39}",{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,54,setsockopt,81,"{""SOL_SOCKET"": 42, ""SOL_TCP"": 39, ""SO_KEEPALIVE"": 39, ""SO_REUSEADDR"": 3, ""TCP_NODELAY"": 39}",{},partial: restricted flags/options/clocks; consult archived implementation
+postgres,55,getsockopt,4,"{""SOL_SOCKET"": 4, ""SO_ERROR"": 4}",{},partial: restricted flags/options/clocks; consult archived implementation
+postgres,56,clone,62,"{""CLONE_CHILD_CLEARTID"": 62, ""CLONE_CHILD_SETTID"": 62, ""SIGCHLD"": 62}",{},partial: limited shared-address-space thread flags; fork semantics absent
+postgres,59,execve,4,{},{},"native-launch-or-process-exec; prototype host loads static ELF, no general exec syscall"
+postgres,61,wait4,113,{},"{""ECHILD"": 3}",not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,62,kill,311,"{""SIGINT"": 6, ""SIGTERM"": 25, ""SIGURG"": 256, ""SIGUSR1"": 12, ""SIGUSR2"": 12}",{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,67,shmdt,3,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,72,fcntl,175,"{""F_GETFL"": 35, ""F_SETFD"": 102, ""F_SETFL"": 38, ""O_NONBLOCK"": 38, ""O_RDONLY"": 3, ""O_RDWR"": 70}",{},partial: restricted flags/options/clocks; consult archived implementation
+postgres,74,fsync,2202,{},{},partial: volatile-byte copy to durable image; crash/torn-write fidelity absent
+postgres,75,fdatasync,17,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,80,chdir,3,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,82,rename,25,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,83,mkdir,50,{},"{""EEXIST"": 21}",not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,84,rmdir,1,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,87,unlink,71,{},"{""ENOENT"": 49}",not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,90,chmod,1003,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,95,umask,19,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,98,getrusage,1,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,102,getuid,11,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,107,geteuid,21,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,108,getegid,1,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,110,getppid,6,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,112,setsid,61,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,138,fstatfs,3,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,157,prctl,67,"{""PR_CAPBSET_READ"": 3, ""PR_CAP_AMBIENT"": 3, ""PR_CAP_AMBIENT_IS_SET"": 3, ""PR_SET_PDEATHSIG"": 61, ""SIGPWR"": 61}",{},partial: restricted flags/options/clocks; consult archived implementation
+postgres,158,arch_prctl,4,"{""ARCH_SET_FS"": 4}",{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,202,futex,84,"{""FUTEX_BITSET_MATCH_ANY"": 3, ""FUTEX_CLOCK_REALTIME"": 3, ""FUTEX_WAIT_BITSET"": 3, ""FUTEX_WAKE"": 3, ""FUTEX_WAKE_PRIVATE"": 78}","{""EAGAIN"": 1}",partial: restricted flags/options/clocks; consult archived implementation
+postgres,204,sched_getaffinity,3,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,217,getdents64,446,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,218,set_tid_address,4,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,231,exit_group,66,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,232,epoll_wait,461,"{""EPOLLIN"": 316, ""EPOLLOUT"": 7}","{""EINTR"": 87}",partial: restricted flags/options/clocks; consult archived implementation
+postgres,233,epoll_ctl,330,"{""EPOLLERR"": 330, ""EPOLLHUP"": 330, ""EPOLLIN"": 286, ""EPOLLOUT"": 44, ""EPOLL_CTL_ADD"": 311, ""EPOLL_CTL_MOD"": 19}",{},partial: restricted flags/options/clocks; consult archived implementation
+postgres,257,openat,7444,"{""AT_FDCWD"": 7444, ""O_CLOEXEC"": 1148, ""O_CREAT"": 1033, ""O_DIRECTORY"": 235, ""O_EXCL"": 32, ""O_NOFOLLOW"": 36, ""O_NONBLOCK"": 235, ""O_RDONLY"": 4031, ""O_RDWR"": 2417, ""O_TRUNC"": 990, ""O_WRONLY"": 996}","{""EEXIST"": 6, ""ENOENT"": 513}",partial: restricted flags/options/clocks; consult archived implementation
+postgres,262,newfstatat,4511,"{""AT_FDCWD"": 4511, ""AT_SYMLINK_NOFOLLOW"": 3906}","{""ENOENT"": 2421}",modeled-dispatch-present; exercised flags/semantics not certified
+postgres,270,pselect6,186,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,273,set_robust_list,66,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,277,sync_file_range,2038,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,285,fallocate,6,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,289,signalfd4,64,"{""SFD_CLOEXEC"": 64, ""SFD_NONBLOCK"": 64}",{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,291,epoll_create1,126,"{""EPOLL_CLOEXEC"": 126}",{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,293,pipe2,4,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,296,pwritev,49,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+postgres,302,prlimit64,10,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,318,getrandom,72,"{""GRND_NONBLOCK"": 8}",{},modeled-dispatch-present; exercised flags/semantics not certified
+postgres,334,rseq,4,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+tokio-current,0,read,8,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,1,write,200,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,3,close,72,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,5,fstat,4,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,7,poll,1,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,8,lseek,2,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,9,mmap,18,"{""MAP_ANONYMOUS"": 6, ""MAP_DENYWRITE"": 12, ""MAP_DROPPABLE"": 1, ""MAP_FIXED"": 10, ""MAP_PRIVATE"": 17, ""MAP_STACK"": 1, ""PROT_EXEC"": 3, ""PROT_READ"": 18, ""PROT_WRITE"": 9}",{},partial: anonymous only; file-backed/shared-file mappings absent
+tokio-current,10,mprotect,6,"{""PROT_NONE"": 1, ""PROT_READ"": 5}",{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,11,munmap,1,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,12,brk,3,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,13,rt_sigaction,5,"{""SA_ONSTACK"": 2, ""SA_RESTART"": 1, ""SA_RESTORER"": 3, ""SA_SIGINFO"": 2, ""SIGBUS"": 2, ""SIGPIPE"": 1, ""SIGSEGV"": 2}",{},partial: signal metadata/disabled interval timers; active delivery absent
+tokio-current,14,rt_sigprocmask,2,{},{},partial: signal metadata/disabled interval timers; active delivery absent
+tokio-current,21,access,1,{},"{""ENOENT"": 1}",modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,41,socket,1,"{""AF_INET"": 1, ""SOCK_CLOEXEC"": 1, ""SOCK_NONBLOCK"": 1, ""SOCK_STREAM"": 1}",{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,44,sendto,64,"{""MSG_NOSIGNAL"": 64}",{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,45,recvfrom,64,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,49,bind,1,"{""AF_INET"": 1}",{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,50,listen,1,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,54,setsockopt,1,"{""SOL_SOCKET"": 1, ""SO_REUSEADDR"": 1}",{},partial: restricted flags/options/clocks; consult archived implementation
+tokio-current,59,execve,1,{},{},"native-launch-or-process-exec; prototype host loads static ELF, no general exec syscall"
+tokio-current,72,fcntl,1,"{""F_DUPFD_CLOEXEC"": 1}",{},partial: restricted flags/options/clocks; consult archived implementation
+tokio-current,131,sigaltstack,3,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+tokio-current,158,arch_prctl,1,"{""ARCH_SET_FS"": 1}",{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,186,gettid,1,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,202,futex,1,"{""FUTEX_WAKE_PRIVATE"": 1}",{},partial: restricted flags/options/clocks; consult archived implementation
+tokio-current,204,sched_getaffinity,1,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,218,set_tid_address,1,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,231,exit_group,1,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,232,epoll_wait,202,"{""EPOLLIN"": 138, ""EPOLLOUT"": 64}",{},partial: restricted flags/options/clocks; consult archived implementation
+tokio-current,233,epoll_ctl,131,"{""EPOLLET"": 66, ""EPOLLIN"": 66, ""EPOLLOUT"": 65, ""EPOLLRDHUP"": 66, ""EPOLL_CTL_ADD"": 66, ""EPOLL_CTL_DEL"": 65}",{},partial: restricted flags/options/clocks; consult archived implementation
+tokio-current,257,openat,12,"{""AT_FDCWD"": 12, ""O_CLOEXEC"": 12, ""O_RDONLY"": 12}","{""ENOENT"": 8}",partial: restricted flags/options/clocks; consult archived implementation
+tokio-current,262,newfstatat,9,"{""AT_FDCWD"": 9}","{""ENOENT"": 8}",modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,273,set_robust_list,1,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+tokio-current,288,accept4,71,"{""AF_INET"": 64, ""SOCK_CLOEXEC"": 71, ""SOCK_NONBLOCK"": 71}","{""EAGAIN"": 7}",modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,290,eventfd2,1,"{""EFD_CLOEXEC"": 1, ""EFD_NONBLOCK"": 1}",{},not modeled by historical ABI; native failure may be an optional fallback probe
+tokio-current,291,epoll_create1,1,"{""EPOLL_CLOEXEC"": 1}",{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,302,prlimit64,2,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,318,getrandom,3,"{""GRND_NONBLOCK"": 2}",{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-current,334,rseq,1,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+tokio-multi,0,read,8,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,1,write,65,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,3,close,72,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,5,fstat,4,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,7,poll,1,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,8,lseek,2,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,9,mmap,24,"{""MAP_ANONYMOUS"": 12, ""MAP_DENYWRITE"": 12, ""MAP_DROPPABLE"": 1, ""MAP_FIXED"": 10, ""MAP_PRIVATE"": 23, ""MAP_STACK"": 5, ""PROT_EXEC"": 3, ""PROT_NONE"": 2, ""PROT_READ"": 22, ""PROT_WRITE"": 13}",{},partial: anonymous only; file-backed/shared-file mappings absent
+tokio-multi,10,mprotect,10,"{""PROT_NONE"": 3, ""PROT_READ"": 7, ""PROT_WRITE"": 2}",{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,11,munmap,6,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,12,brk,3,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,13,rt_sigaction,6,"{""SA_ONSTACK"": 3, ""SA_RESTART"": 2, ""SA_RESTORER"": 4, ""SA_SIGINFO"": 3, ""SIGBUS"": 2, ""SIGPIPE"": 1, ""SIGRT_1"": 1, ""SIGSEGV"": 2}",{},partial: signal metadata/disabled interval timers; active delivery absent
+tokio-multi,14,rt_sigprocmask,15,{},{},partial: signal metadata/disabled interval timers; active delivery absent
+tokio-multi,21,access,1,{},"{""ENOENT"": 1}",modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,28,madvise,4,"{""MADV_DONTNEED"": 2, ""MADV_GUARD_INSTALL"": 2}",{},not modeled by historical ABI; native failure may be an optional fallback probe
+tokio-multi,41,socket,1,"{""AF_INET"": 1, ""SOCK_CLOEXEC"": 1, ""SOCK_NONBLOCK"": 1, ""SOCK_STREAM"": 1}",{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,44,sendto,64,"{""MSG_NOSIGNAL"": 64}",{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,45,recvfrom,64,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,49,bind,1,"{""AF_INET"": 1}",{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,50,listen,1,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,54,setsockopt,1,"{""SOL_SOCKET"": 1, ""SO_REUSEADDR"": 1}",{},partial: restricted flags/options/clocks; consult archived implementation
+tokio-multi,59,execve,1,{},{},"native-launch-or-process-exec; prototype host loads static ELF, no general exec syscall"
+tokio-multi,60,exit,2,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,72,fcntl,1,"{""F_DUPFD_CLOEXEC"": 1}",{},partial: restricted flags/options/clocks; consult archived implementation
+tokio-multi,131,sigaltstack,9,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+tokio-multi,157,prctl,2,"{""PR_SET_NAME"": 2}",{},partial: restricted flags/options/clocks; consult archived implementation
+tokio-multi,158,arch_prctl,1,"{""ARCH_SET_FS"": 1}",{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,186,gettid,3,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,202,futex,275,"{""FUTEX_BITSET_MATCH_ANY"": 120, ""FUTEX_CLOCK_REALTIME"": 2, ""FUTEX_WAIT_BITSET"": 2, ""FUTEX_WAIT_BITSET_PRIVATE"": 118, ""FUTEX_WAKE_PRIVATE"": 155}","{""EAGAIN"": 38}",partial: restricted flags/options/clocks; consult archived implementation
+tokio-multi,204,sched_getaffinity,3,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,218,set_tid_address,1,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,231,exit_group,1,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,232,epoll_wait,314,"{""EPOLLIN"": 248, ""EPOLLOUT"": 121, ""EPOLLRDHUP"": 57}",{},partial: restricted flags/options/clocks; consult archived implementation
+tokio-multi,233,epoll_ctl,131,"{""EPOLLET"": 66, ""EPOLLIN"": 66, ""EPOLLOUT"": 65, ""EPOLLRDHUP"": 66, ""EPOLL_CTL_ADD"": 66, ""EPOLL_CTL_DEL"": 65}",{},partial: restricted flags/options/clocks; consult archived implementation
+tokio-multi,257,openat,12,"{""AT_FDCWD"": 12, ""O_CLOEXEC"": 12, ""O_RDONLY"": 12}","{""ENOENT"": 8}",partial: restricted flags/options/clocks; consult archived implementation
+tokio-multi,262,newfstatat,9,"{""AT_FDCWD"": 9}","{""ENOENT"": 8}",modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,273,set_robust_list,3,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+tokio-multi,288,accept4,67,"{""AF_INET"": 64, ""SOCK_CLOEXEC"": 67, ""SOCK_NONBLOCK"": 67}","{""EAGAIN"": 3}",modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,290,eventfd2,1,"{""EFD_CLOEXEC"": 1, ""EFD_NONBLOCK"": 1}",{},not modeled by historical ABI; native failure may be an optional fallback probe
+tokio-multi,291,epoll_create1,1,"{""EPOLL_CLOEXEC"": 1}",{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,302,prlimit64,2,{},{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,318,getrandom,5,"{""GRND_NONBLOCK"": 2}",{},modeled-dispatch-present; exercised flags/semantics not certified
+tokio-multi,334,rseq,3,{},{},not modeled by historical ABI; native failure may be an optional fallback probe
+tokio-multi,435,clone3,2,"{""CLONE_CHILD_CLEARTID"": 2, ""CLONE_FILES"": 2, ""CLONE_FS"": 2, ""CLONE_PARENT_SETTID"": 2, ""CLONE_SETTLS"": 2, ""CLONE_SIGHAND"": 2, ""CLONE_SYSVSEM"": 2, ""CLONE_THREAD"": 2, ""CLONE_VM"": 2}",{},not modeled by historical ABI; native failure may be an optional fallback probe

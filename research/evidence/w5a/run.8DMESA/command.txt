@@ -1,0 +1,1 @@
+nix develop path:/tmp/seedbox-round-1.S74xJ4/env --command ./preempt_matrix.sh e0d52753246173d39ea62bffa79a87608d9b0dbea2a590aa0b06a63cb34f7026 enabled idle 

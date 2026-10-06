@@ -1,0 +1,40 @@
+   Compiling version_check v0.9.5
+   Compiling typenum v1.20.1
+   Compiling libc v0.2.190
+   Compiling zmij v1.0.23
+   Compiling generic-array v0.14.7
+   Compiling serde_core v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling cpufeatures v0.2.17
+   Compiling digest v0.10.7
+   Compiling memchr v2.8.3
+   Compiling cfg-if v1.0.5
+   Compiling seedbox-rng-rewrite-kvm-probe v0.1.0 (/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/intel-probe/rng)
+   Compiling itoa v1.0.18
+   Compiling sha2 v0.10.9
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.92s
+     Running unittests src/main.rs (research/intel-probe/rng/target/debug/deps/seedbox_rng_rewrite_kvm_probe-e1e03fd308b3430e)
+   Compiling seedbox-rng-rewrite-kvm-probe v0.1.0 (/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/intel-probe/rng)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.24s
+   Compiling version_check v0.9.5
+   Compiling typenum v1.20.1
+   Compiling libc v0.2.190
+   Compiling zmij v1.0.23
+   Compiling generic-array v0.14.7
+   Compiling serde_core v1.0.229
+   Compiling serde_json v1.0.151
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling digest v0.10.7
+   Compiling cpufeatures v0.2.17
+   Compiling seedbox-tsc-kvm-probe v0.1.0 (/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/intel-probe/tsc)
+   Compiling cfg-if v1.0.5
+   Compiling memchr v2.8.3
+   Compiling itoa v1.0.18
+   Compiling sha2 v0.10.9
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.83s
+     Running unittests src/main.rs (research/intel-probe/tsc/target/debug/deps/seedbox_tsc_kvm_probe-531096e337dd8796)
+   Compiling seedbox-tsc-kvm-probe v0.1.0 (/Users/gardnervickers/src/github.com/gardnervickers/seedbox/research/intel-probe/tsc)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.20s

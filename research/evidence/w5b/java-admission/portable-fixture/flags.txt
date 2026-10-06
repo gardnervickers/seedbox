@@ -1,0 +1,8 @@
+-Xms32m
+-Xmx32m
+-XX:+UseG1GC
+-XX:ActiveProcessorCount=1
+-XX:CICompilerCount=2
+-XX:+TieredCompilation
+-XX:+UnlockExperimentalVMOptions
+-XX:-UseFastUnorderedTimeStamps

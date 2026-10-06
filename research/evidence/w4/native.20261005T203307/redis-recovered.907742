@@ -1,0 +1,16 @@
+1791246788.426929 [ 334] rseq({cpu_id_start=0, cpu_id=RSEQ_CPU_ID_UNINITIALIZED, rseq_cs=NULL, flags=0, node_id=0, mm_cid=0, slice_ctrl={request=0, granted=0, __reserved=0}, __reserved=0}, 32, 0, 0x53053053) = 0 <0.000022>
+1791246788.426987 [ 273] set_robust_list(0x7ffff537f9a0, 24) = 0 <0.000019>
+1791246788.427029 [  14] rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0 <0.000019>
+1791246788.427082 [ 157] prctl(PR_SET_NAME, "bio_close_file") = 0 <0.000020>
+1791246788.427130 [  14] rt_sigprocmask(SIG_BLOCK, [ALRM], NULL, 8) = 0 <0.000051>
+1791246788.427246 [ 202] futex(0x5555559ad060, FUTEX_WAIT_BITSET_PRIVATE|FUTEX_CLOCK_REALTIME, 0, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.003545>
+1791246788.430811 [ 202] futex(0x5555559acd00, FUTEX_WAIT_PRIVATE, 2, NULL) = 0 <0.000029>
+1791246788.430857 [ 202] futex(0x5555559acd00, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000021>
+1791246788.430894 [ 221] fadvise64(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/redis-data/appendonlydir/appendonly.aof.2.base.rdb>, 0, 0, POSIX_FADV_DONTNEED) = 0 <0.000035>
+1791246788.430996 [   3] close(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/redis-data/appendonlydir/appendonly.aof.2.base.rdb>) = 0 <0.000025>
+1791246788.431069 [ 202] futex(0x5555559ad064, FUTEX_WAIT_BITSET_PRIVATE|FUTEX_CLOCK_REALTIME, 0, NULL, FUTEX_BITSET_MATCH_ANY) = 0 <0.000360>
+1791246788.431460 [ 202] futex(0x5555559acd00, FUTEX_WAKE_PRIVATE, 1) = 0 <0.000015>
+1791246788.431501 [ 221] fadvise64(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/redis-data/appendonlydir/appendonly.aof.2.incr.aof>, 0, 0, POSIX_FADV_DONTNEED) = 0 <0.000033>
+1791246788.431579 [   3] close(12</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/redis-data/appendonlydir/appendonly.aof.2.incr.aof>) = 0 <0.000016>
+1791246788.431628 [ 202] futex(0x5555559ad060, FUTEX_WAIT_BITSET_PRIVATE|FUTEX_CLOCK_REALTIME, 0, NULL, FUTEX_BITSET_MATCH_ANY) = ?
+1791246788.510488 [ 202] +++ exited with 0 +++

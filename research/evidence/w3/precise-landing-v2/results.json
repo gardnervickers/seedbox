@@ -1,0 +1,350 @@
+[
+  {
+    "match": true,
+    "test": "fresh baseline + actual environment perturbation"
+  },
+  {
+    "match": true,
+    "test": "checkpoint cadence does not alter canonical chain"
+  },
+  {
+    "committed_boundaries": 12,
+    "diagnostic_corrections": 36,
+    "match": true,
+    "test": "36 intermediate debug correction exits add zero committed boundaries/world charges"
+  },
+  {
+    "compact_difference": {
+      "boundary": 5,
+      "category": "world",
+      "field": "event/11/completion/incarnation",
+      "left_bytes": null,
+      "left_hash": "35be322d094f9d154a8aba4733b8497f180353bd7ae7b0a15f90b586b549f28b",
+      "right_bytes": null,
+      "right_hash": "f0a0278e4372459cca6159cd5e71cfee638302a7b9ca9b05c34181ac0a65ac5d"
+    },
+    "cpu_ram_equal_at_divergence": true,
+    "detail_difference": {
+      "boundary": 5,
+      "category": "world",
+      "field": "event/11/completion/incarnation",
+      "left_bytes": "0300000000000000",
+      "left_hash": "35be322d094f9d154a8aba4733b8497f180353bd7ae7b0a15f90b586b549f28b",
+      "right_bytes": "0400000000000000",
+      "right_hash": "f0a0278e4372459cca6159cd5e71cfee638302a7b9ca9b05c34181ac0a65ac5d"
+    },
+    "rerun_from_zero": true,
+    "test": "pending"
+  },
+  {
+    "compact_difference": {
+      "boundary": 5,
+      "category": "world",
+      "field": "seed/stream/network/state",
+      "left_bytes": null,
+      "left_hash": "42e715986d3695a1acb9b234c94903942e4d049b3f01b1cdc05488fae6140e43",
+      "right_bytes": null,
+      "right_hash": "b4c2f3c46371bfd95fe69b01988f3cad5c99ffbee1afffb16cb9dc20423a967e"
+    },
+    "cpu_ram_equal_at_divergence": true,
+    "detail_difference": {
+      "boundary": 5,
+      "category": "world",
+      "field": "seed/stream/network/state",
+      "left_bytes": "23187033b4f2178c",
+      "left_hash": "42e715986d3695a1acb9b234c94903942e4d049b3f01b1cdc05488fae6140e43",
+      "right_bytes": "22187033b4f2178c",
+      "right_hash": "b4c2f3c46371bfd95fe69b01988f3cad5c99ffbee1afffb16cb9dc20423a967e"
+    },
+    "rerun_from_zero": true,
+    "test": "rng"
+  },
+  {
+    "compact_difference": {
+      "boundary": 5,
+      "category": "page",
+      "field": "machine/7/boot/3/slot/0/gpa/0000000000001000",
+      "left_bytes": null,
+      "left_hash": "f5a5fd42d16a20302798ef6ed309979b43003d2320d9f0e8ea9831a92759fb4b",
+      "right_bytes": null,
+      "right_hash": "6a6135011906b95dc5d8e9688d810aa2ef3277915b50cc02e93721cb45418644"
+    },
+    "cpu_ram_equal_at_divergence": false,
+    "detail_difference": {
+      "boundary": 5,
+      "category": "page",
+      "field": "machine/7/boot/3/slot/0/gpa/0000000000001000",
+      "left_bytes": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "left_hash": "f5a5fd42d16a20302798ef6ed309979b43003d2320d9f0e8ea9831a92759fb4b",
+      "right_bytes": "00000000000000000000000000000000006300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "right_hash": "6a6135011906b95dc5d8e9688d810aa2ef3277915b50cc02e93721cb45418644"
+    },
+    "rerun_from_zero": true,
+    "test": "page"
+  },
+  {
+    "compact_difference": {
+      "boundary": 5,
+      "category": "register/CPU",
+      "field": "machine/7/boot/3/cpu/0/rax",
+      "left_bytes": null,
+      "left_hash": "dc365e79d41cfae1c3c0d969319ae62165b81b1815a86c32bbc6c64cbdf2311b",
+      "right_bytes": null,
+      "right_hash": "2daa8d4a05dfc643abb44c5d5966430ca30c976e437e0f786de55ffc864b9a98"
+    },
+    "cpu_ram_equal_at_divergence": false,
+    "detail_difference": {
+      "boundary": 5,
+      "category": "register/CPU",
+      "field": "machine/7/boot/3/cpu/0/rax",
+      "left_bytes": "6e6f727468",
+      "left_hash": "dc365e79d41cfae1c3c0d969319ae62165b81b1815a86c32bbc6c64cbdf2311b",
+      "right_bytes": "736f757468",
+      "right_hash": "2daa8d4a05dfc643abb44c5d5966430ca30c976e437e0f786de55ffc864b9a98"
+    },
+    "rerun_from_zero": true,
+    "test": "environment"
+  },
+  {
+    "compact_difference": {
+      "boundary": 5,
+      "category": "branch-count",
+      "field": "landing/count/value",
+      "left_bytes": "3335",
+      "left_hash": "9f14025af0065b30e47e23ebb3b491d39ae8ed17d33739e5ff3827ffb3634953",
+      "right_bytes": "3336",
+      "right_hash": "76a50887d8f1c2e9301755428990ad81479ee21c25b43215cf524541e0503269"
+    },
+    "cpu_ram_equal_at_divergence": false,
+    "detail_difference": {
+      "boundary": 5,
+      "category": "branch-count",
+      "field": "landing/count/value",
+      "left_bytes": "3335",
+      "left_hash": "9f14025af0065b30e47e23ebb3b491d39ae8ed17d33739e5ff3827ffb3634953",
+      "right_bytes": "3336",
+      "right_hash": "76a50887d8f1c2e9301755428990ad81479ee21c25b43215cf524541e0503269"
+    },
+    "rerun_from_zero": true,
+    "test": "wrong-count"
+  },
+  {
+    "compact_difference": {
+      "boundary": 5,
+      "category": "landing/RIP",
+      "field": "landing/rip",
+      "left_bytes": "1410000000000000",
+      "left_hash": "1a2a8ef50d943858eb62cf7f860203bd6b7796a7bd1c68c24f202d1ad73aee3b",
+      "right_bytes": "1510000000000000",
+      "right_hash": "3ecafecab52e3f37a28d4b833f0dd171335830cf370f8ee65cae9ea6fc0e265d"
+    },
+    "cpu_ram_equal_at_divergence": false,
+    "detail_difference": {
+      "boundary": 5,
+      "category": "landing/RIP",
+      "field": "landing/rip",
+      "left_bytes": "1410000000000000",
+      "left_hash": "1a2a8ef50d943858eb62cf7f860203bd6b7796a7bd1c68c24f202d1ad73aee3b",
+      "right_bytes": "1510000000000000",
+      "right_hash": "3ecafecab52e3f37a28d4b833f0dd171335830cf370f8ee65cae9ea6fc0e265d"
+    },
+    "rerun_from_zero": true,
+    "test": "wrong-rip"
+  },
+  {
+    "compact_difference": {
+      "boundary": 5,
+      "category": "landing/register",
+      "field": "landing/registers/rcx",
+      "left_bytes": "0000000000000000",
+      "left_hash": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "right_bytes": "0100000000000000",
+      "right_hash": "7c9fa136d4413fa6173637e883b6998d32e1d675f88cddff9dcbcf331820f4b8"
+    },
+    "cpu_ram_equal_at_divergence": false,
+    "detail_difference": {
+      "boundary": 5,
+      "category": "landing/register",
+      "field": "landing/registers/rcx",
+      "left_bytes": "0000000000000000",
+      "left_hash": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "right_bytes": "0100000000000000",
+      "right_hash": "7c9fa136d4413fa6173637e883b6998d32e1d675f88cddff9dcbcf331820f4b8"
+    },
+    "rerun_from_zero": true,
+    "test": "wrong-rep"
+  },
+  {
+    "compact_difference": {
+      "boundary": 5,
+      "category": "landing/register",
+      "field": "landing/registers/rsi",
+      "left_bytes": "0000000000000000",
+      "left_hash": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "right_bytes": "0100000000000000",
+      "right_hash": "7c9fa136d4413fa6173637e883b6998d32e1d675f88cddff9dcbcf331820f4b8"
+    },
+    "cpu_ram_equal_at_divergence": false,
+    "detail_difference": {
+      "boundary": 5,
+      "category": "landing/register",
+      "field": "landing/registers/rsi",
+      "left_bytes": "0000000000000000",
+      "left_hash": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "right_bytes": "0100000000000000",
+      "right_hash": "7c9fa136d4413fa6173637e883b6998d32e1d675f88cddff9dcbcf331820f4b8"
+    },
+    "rerun_from_zero": true,
+    "test": "wrong-rep-rsi"
+  },
+  {
+    "compact_difference": {
+      "boundary": 5,
+      "category": "landing/register",
+      "field": "landing/registers/rdi",
+      "left_bytes": "0000000000000000",
+      "left_hash": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "right_bytes": "0100000000000000",
+      "right_hash": "7c9fa136d4413fa6173637e883b6998d32e1d675f88cddff9dcbcf331820f4b8"
+    },
+    "cpu_ram_equal_at_divergence": false,
+    "detail_difference": {
+      "boundary": 5,
+      "category": "landing/register",
+      "field": "landing/registers/rdi",
+      "left_bytes": "0000000000000000",
+      "left_hash": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "right_bytes": "0100000000000000",
+      "right_hash": "7c9fa136d4413fa6173637e883b6998d32e1d675f88cddff9dcbcf331820f4b8"
+    },
+    "rerun_from_zero": true,
+    "test": "wrong-rep-rdi"
+  },
+  {
+    "compact_difference": {
+      "boundary": 5,
+      "category": "boundary-kind",
+      "field": "boundary/kind",
+      "left_bytes": "2250726563697365507265656d7074696f6e22",
+      "left_hash": "868910be065e9b75590ae083afdfff2d27ddc8cb157ef4baffb4469d5ba343dc",
+      "right_bytes": "7b224e61747572616c566d45786974223a7b22726561736f6e223a322c2273656d616e7469635f746167223a2250494f2d636f6d706c65746564227d7d",
+      "right_hash": "64f64ee4ecd5912e288a89a9d059665100a2aa27dffc9d49403666a3ad71e90b"
+    },
+    "cpu_ram_equal_at_divergence": false,
+    "detail_difference": {
+      "boundary": 5,
+      "category": "boundary-kind",
+      "field": "boundary/kind",
+      "left_bytes": "2250726563697365507265656d7074696f6e22",
+      "left_hash": "868910be065e9b75590ae083afdfff2d27ddc8cb157ef4baffb4469d5ba343dc",
+      "right_bytes": "7b224e61747572616c566d45786974223a7b22726561736f6e223a322c2273656d616e7469635f746167223a2250494f2d636f6d706c65746564227d7d",
+      "right_hash": "64f64ee4ecd5912e288a89a9d059665100a2aa27dffc9d49403666a3ad71e90b"
+    },
+    "rerun_from_zero": true,
+    "test": "wrong-kind"
+  },
+  {
+    "compact_difference": {
+      "boundary": 5,
+      "category": "register/CPU",
+      "field": "machine/8/boot/1/cpu/0/rax",
+      "left_bytes": null,
+      "left_hash": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "right_bytes": null,
+      "right_hash": "7c9fa136d4413fa6173637e883b6998d32e1d675f88cddff9dcbcf331820f4b8"
+    },
+    "cpu_ram_equal_at_divergence": false,
+    "detail_difference": {
+      "boundary": 5,
+      "category": "register/CPU",
+      "field": "machine/8/boot/1/cpu/0/rax",
+      "left_bytes": "0000000000000000",
+      "left_hash": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "right_bytes": "0100000000000000",
+      "right_hash": "7c9fa136d4413fa6173637e883b6998d32e1d675f88cddff9dcbcf331820f4b8"
+    },
+    "rerun_from_zero": true,
+    "test": "inactive-cpu"
+  },
+  {
+    "compact_difference": {
+      "boundary": 5,
+      "category": "world",
+      "field": "control/response/101/payload",
+      "left_bytes": null,
+      "left_hash": "b24d6d33736ecd5604a4b17bc9c6481039fac362bb7df044ef1c10a2bfd21db6",
+      "right_bytes": null,
+      "right_hash": "8810ad581e59f2bc3928b261707a71308f7e139eb04820366dc4d5c18d980225"
+    },
+    "cpu_ram_equal_at_divergence": false,
+    "detail_difference": {
+      "boundary": 5,
+      "category": "world",
+      "field": "control/response/101/payload",
+      "left_bytes": "7265616479",
+      "left_hash": "b24d6d33736ecd5604a4b17bc9c6481039fac362bb7df044ef1c10a2bfd21db6",
+      "right_bytes": "77726f6e67",
+      "right_hash": "8810ad581e59f2bc3928b261707a71308f7e139eb04820366dc4d5c18d980225"
+    },
+    "rerun_from_zero": true,
+    "test": "control-protocol"
+  },
+  {
+    "difference": {
+      "boundary": 5,
+      "category": "register/CPU",
+      "field": "machine/7/boot/3/cpu/0/rax",
+      "left_bytes": null,
+      "left_hash": "3da400073cbc4757ab7fd5350cdd1ae537d801fcf8835a4553d2eaf5a029f689",
+      "right_bytes": null,
+      "right_hash": "36ebdbbbefc95a63098162a6cd3fcaae39615856ef99e0aef309515df6d93b83"
+    },
+    "test": "actual SystemTime clock leak across fresh processes"
+  },
+  {
+    "difference": {
+      "boundary": 6,
+      "category": "world",
+      "field": "event/ties/delivery_order",
+      "left_bytes": "5b372c392c31342c322c31302c352c302c31332c382c342c312c362c31322c31312c31352c335d",
+      "left_hash": "8f782a9bdea103634330dcfc6e41377eaad22e5fad743d955d037e37e8ae5acb",
+      "right_bytes": "5b31302c322c382c392c31312c362c332c352c31332c31322c302c31352c31342c312c342c375d",
+      "right_hash": "0567edb47f8a13d150ac5181a28cebacebbf7473d620671f391dd32cdf293b4b"
+    },
+    "test": "actual randomized HashMap iteration"
+  },
+  {
+    "detected_boundary": 6,
+    "error": "dirty-log omission at checkpoint 6: machine/7/boot/3/slot/0/gpa/0000000000001000",
+    "localization_limit": "first audited checkpoint; must rerun full RAM each boundary to localize",
+    "test": "dirty-log omission audit",
+    "true_mutation_boundary": 5
+  },
+  {
+    "detected_boundary": 5,
+    "error": "dirty-log omission at checkpoint 5: machine/7/boot/3/slot/0/gpa/0000000000001000",
+    "test": "dirty-log omission full-every-boundary"
+  },
+  {
+    "detailed_difference": {
+      "boundary": 5,
+      "category": "world",
+      "field": "event/11/completion/incarnation",
+      "left_bytes": "0300000000000000",
+      "left_hash": "35be322d094f9d154a8aba4733b8497f180353bd7ae7b0a15f90b586b549f28b",
+      "right_bytes": "0400000000000000",
+      "right_hash": "f0a0278e4372459cca6159cd5e71cfee638302a7b9ca9b05c34181ac0a65ac5d"
+    },
+    "first_difference": {
+      "boundary": 5,
+      "category": "world",
+      "field": "event/11/completion/incarnation",
+      "left_bytes": null,
+      "left_hash": "35be322d094f9d154a8aba4733b8497f180353bd7ae7b0a15f90b586b549f28b",
+      "right_bytes": null,
+      "right_hash": "f0a0278e4372459cca6159cd5e71cfee638302a7b9ca9b05c34181ac0a65ac5d"
+    },
+    "rerun_reproduced_original_chains": true,
+    "test": "public automatic investigate API with fresh subprocesses"
+  }
+]

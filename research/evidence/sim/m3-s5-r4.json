@@ -1,0 +1,60 @@
+{
+  "frames_delivered": 0,
+  "frames_dropped": 0,
+  "host_seconds": 1.756552259,
+  "machines": [
+    {
+      "branches": 98467675,
+      "eintr": 15,
+      "exits": 262627,
+      "final_margin": 16000,
+      "halts": 0,
+      "irqs": 19,
+      "kvm_ms_by_exit": {
+        "debug": 436.799941,
+        "eintr": 48.094627,
+        "hlt": 0.0,
+        "mmio": 0.0,
+        "other": 0.0,
+        "pio": 651.228072,
+        "window": 0.049024
+      },
+      "kvm_n_by_exit": [
+        15,
+        112359,
+        150242,
+        0,
+        0,
+        11,
+        0,
+        0
+      ],
+      "landing_remaining": 104253,
+      "mmio": 0,
+      "name": "n1",
+      "net": null,
+      "pio": 150241,
+      "precise_stops": 7,
+      "run_ms": 1756.551639,
+      "skid_count": 15,
+      "skid_max": 18446744073707552807,
+      "skid_p50": 18446744073707552496,
+      "skid_p99": 18446744073707552807,
+      "state": "Exited(0)",
+      "state_digest": null,
+      "step_ms": 966.989486,
+      "steps": 112359,
+      "time_ns": 115206675,
+      "window_exits": 11,
+      "witness": "cc88091694bdb50ff7e22146052d8525a276cfdb77b0f7b1bb2bb83576e3766a",
+      "yield_stops": 1,
+      "yields": 1
+    }
+  ],
+  "outcome": "end_machine_exited",
+  "seed": 5,
+  "sim_seconds": 0.115206675,
+  "slices": 1,
+  "speed": 0.06558681895726053,
+  "world_witness": "12b0d5fef6b7b6c83074602941a2caf3c69d67cc9d26e9056c21089abe194711"
+}

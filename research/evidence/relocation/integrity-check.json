@@ -1,0 +1,11 @@
+{
+  "stored_files_checked": 2513,
+  "lossless_gzip_checked": 90,
+  "linux_package_payload_members_checked": 20,
+  "embedded_member_index_checked": true,
+  "python_syntax_checked": 29,
+  "shell_syntax_checked": 9,
+  "doc_links_checked": true,
+  "errors": [],
+  "scope": "Local preservation/relocation checks; no new hardware or simulation-performance qualification"
+}

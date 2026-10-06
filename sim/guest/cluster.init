@@ -1,0 +1,39 @@
+#!/bin/busybox sh
+/bin/busybox --install -s
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mount -t tmpfs tmpfs /tmp
+mount -t tmpfs tmpfs /data
+arg() { sed -n "s/.*seedbox\.$1=\([^ ]*\).*/\1/p" /proc/cmdline; }
+name=$(arg name); idx=$(arg index); ip=10.0.0.$((idx+1))
+ip link set lo up
+ip addr add $ip/24 dev eth0
+ip link set eth0 up
+export GOMAXPROCS=4
+peers="n1=http://10.0.0.1:2380,n2=http://10.0.0.2:2380,n3=http://10.0.0.3:2380"
+start_etcd() {
+  /bin/etcd --name $name --data-dir /data/$name \
+    --listen-client-urls http://$ip:2379 --advertise-client-urls http://$ip:2379 \
+    --listen-peer-urls http://$ip:2380 --initial-advertise-peer-urls http://$ip:2380 \
+    --initial-cluster $peers --initial-cluster-state new --logger zap --log-level error >> /tmp/etcd.log 2>&1 &
+  echo $! > /tmp/etcd.pid
+}
+case $name in
+client)
+  /bin/client --endpoints 10.0.0.1:2379,10.0.0.2:2379,10.0.0.3:2379 --duration "$(arg load)" --concurrency "$(arg concurrency)" --plant "$(arg plant)"
+  sbx exit $?
+  ;;
+*)
+  start_etcd
+  # Test helper on COM2: unclean stop (SIGKILL) and restart on request.
+  stty -F /dev/ttyS1 raw -echo 2>/dev/null
+  while read -r cmd < /dev/ttyS1; do
+    case "$cmd" in
+      stop) kill -9 "$(cat /tmp/etcd.pid)"; wait "$(cat /tmp/etcd.pid)" 2>/dev/null; echo "$name stopped" > /dev/ttyS1 ;;
+      start) start_etcd; echo "$name started" > /dev/ttyS1 ;;
+      log) tail -5 /tmp/etcd.log > /dev/ttyS1 ;;
+    esac
+  done
+  ;;
+esac

@@ -1,0 +1,303 @@
+{
+  "scope": "entire declared 44-attempt matrix",
+  "accepted": true,
+  "planned": 44,
+  "measured": 44,
+  "attempt_status": [
+    {
+      "attempt_id": "v6-linux-r1-original-idle-1-linux-100000-10000-correct",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.1kJ5gS"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-idle-1-linux-100000-10000-negative",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.7Mtfbw"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-idle-1-linux-1000100-10000-correct",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.4TxdO4"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-idle-1-linux-1000100-10000-negative",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.Oa6RA5"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-idle-2-linux-100000-10000-correct",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.0uwkeS"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-idle-2-linux-100000-10000-negative",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.G7VT1S"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-idle-2-linux-1000100-10000-correct",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.RBN8Zw"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-idle-2-linux-1000100-10000-negative",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.5DRZ00"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-idle-3-linux-100000-10000-correct",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.9ZXFhC"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-idle-3-linux-100000-10000-negative",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.LYfYv2"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-idle-3-linux-1000100-10000-correct",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.t51PVG"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-idle-3-linux-1000100-10000-negative",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.LJMNg5"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-idle-4-linux-100000-10000-correct",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.LuXwsX"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-idle-4-linux-100000-10000-negative",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.yrPvKr"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-idle-4-linux-1000100-10000-correct",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.wQJlmQ"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-idle-4-linux-1000100-10000-negative",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.4EPRqA"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-idle-5-linux-100000-10000-correct",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.X8JPdq"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-idle-5-linux-100000-10000-negative",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.M5C2if"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-idle-5-linux-1000100-10000-correct",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.slkA42"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-idle-5-linux-1000100-10000-negative",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.4gg8CJ"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-idle-reference-linux-100000-10000-reference",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.TPNHX9"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-idle-reference-linux-1000100-10000-reference",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.JwXVHr"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-1-linux-100000-10000-correct",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.535hWp"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-1-linux-100000-10000-negative",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.C8it7F"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-1-linux-1000100-10000-correct",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.4ay2eW"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-1-linux-1000100-10000-negative",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.uRdL5r"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-2-linux-100000-10000-correct",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.fLaBAr"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-2-linux-100000-10000-negative",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.zcU614"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-2-linux-1000100-10000-correct",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.hdwiKi"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-2-linux-1000100-10000-negative",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.RYsTqZ"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-3-linux-100000-10000-correct",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.Bgd1m6"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-3-linux-100000-10000-negative",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.hyTZkq"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-3-linux-1000100-10000-correct",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.2ostcN"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-3-linux-1000100-10000-negative",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.rUl9n7"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-4-linux-100000-10000-correct",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.bRYoQj"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-4-linux-100000-10000-negative",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.eNPL62"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-4-linux-1000100-10000-correct",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.2EKDL2"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-4-linux-1000100-10000-negative",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.CYOsyT"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-5-linux-100000-10000-correct",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.Ov1aRw"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-5-linux-100000-10000-negative",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.TihVJM"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-5-linux-1000100-10000-correct",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.wYP8hG"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-5-linux-1000100-10000-negative",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.U3srZy"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-reference-linux-100000-10000-reference",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.jVaoUt"
+    },
+    {
+      "attempt_id": "v6-linux-r1-original-loaded-reference-linux-1000100-10000-reference",
+      "state": "measured",
+      "evidence": "research/evidence/w5a/preemption-v6/run.xYI5pP"
+    }
+  ],
+  "groups": [
+    {
+      "batch": "v6-linux-r1-original-idle",
+      "target": 100000,
+      "kind": "positive",
+      "measured": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "fresh_tids": 5
+    },
+    {
+      "batch": "v6-linux-r1-original-idle",
+      "target": 100000,
+      "kind": "negative",
+      "measured": 5,
+      "initial_variants": 1,
+      "landing_variants": 5,
+      "fresh_tids": 5
+    },
+    {
+      "batch": "v6-linux-r1-original-idle",
+      "target": 1000100,
+      "kind": "positive",
+      "measured": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "fresh_tids": 5
+    },
+    {
+      "batch": "v6-linux-r1-original-idle",
+      "target": 1000100,
+      "kind": "negative",
+      "measured": 5,
+      "initial_variants": 1,
+      "landing_variants": 5,
+      "fresh_tids": 5
+    },
+    {
+      "batch": "v6-linux-r1-original-loaded",
+      "target": 100000,
+      "kind": "positive",
+      "measured": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "fresh_tids": 5
+    },
+    {
+      "batch": "v6-linux-r1-original-loaded",
+      "target": 100000,
+      "kind": "negative",
+      "measured": 5,
+      "initial_variants": 1,
+      "landing_variants": 5,
+      "fresh_tids": 5
+    },
+    {
+      "batch": "v6-linux-r1-original-loaded",
+      "target": 1000100,
+      "kind": "positive",
+      "measured": 5,
+      "initial_variants": 1,
+      "landing_variants": 1,
+      "fresh_tids": 5
+    },
+    {
+      "batch": "v6-linux-r1-original-loaded",
+      "target": 1000100,
+      "kind": "negative",
+      "measured": 5,
+      "initial_variants": 1,
+      "landing_variants": 5,
+      "fresh_tids": 5
+    }
+  ],
+  "failures": []
+}

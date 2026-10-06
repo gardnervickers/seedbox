@@ -1,0 +1,2 @@
+LOAD acked=59371 failed=126 elapsed=1m0.005987565s
+RESULT pass acked=59371 failed=126 rev=59418 hash=a531c489

@@ -1,0 +1,1 @@
+nix develop path:/tmp/seedbox-round-1.S74xJ4/env --command bash /tmp/seedbox-round-1.S74xJ4/intel-probe/validate.sh amd 

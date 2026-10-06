@@ -1,0 +1,32 @@
+{
+  "scope": "artifact curation only; no new runtime tests or Linux/AMD execution",
+  "curated_at_utc": "2026-10-06T02:21:53.549163+00:00",
+  "audit_change": "Only benchmark_profile label redis-jedis-v1-100hz -> redis-jedis-v1-100ops; 100 offered operations/s, not kernel HZ",
+  "audit_previous_sha256": "93bd25946b12975375dc1ba37868196eb1eb2f05903aae86caff2e30e6b31f07",
+  "audit_current_sha256": "1bfab7ee299c6e1a6d2bb233885cf2a6988260114e2bd9e6ca6fab096ba0201f",
+  "primary_source_excerpts": {
+    "path": "primary-source-excerpts.json",
+    "sha256": "2947c3e477d4dbda4c5a601277bae0bd5f302a17e2e96505d2d5ac5e62cef1a6",
+    "source_files": 21,
+    "bytes": 72185,
+    "coverage": "all exact source_refs from the existing audit; full-file hashes matched retained source-manifest before extraction"
+  },
+  "historical_receipt": {
+    "path": "receipt-before-curation.json",
+    "sha256": "1ec963ad6a5cabca2b1fe3dea1cfb36e1edc64b21ddaaf7d0f981dff18fc5e17"
+  },
+  "historical_smoke_manifest": {
+    "path": "portable-fixture/fixture-manifest.json",
+    "sha256": "6af230c2010ce7efe5b45f6f6ab6eec0d054bdfe04fa25b0fc5accdb97bf7b01",
+    "qualification": "Unchanged original-run provenance, including historical compiled-class hash; not the current retained-file inventory"
+  },
+  "removed_from_durable_evidence": [
+    {
+      "path": "portable-fixture/classes/AdmissionProbe.class",
+      "sha256": "3455638341feee20becd5aef9f56f80949224e0e4e4bf2091d2d004856b1ba2f",
+      "retained_ignored_run_path": "research/runs/w5b/java-fixture.0svG6f/classes/AdmissionProbe.class",
+      "reason": "Rebuildable from retained Java source, pinned JDK and check.sh; exact bytes do not establish an additional admission result"
+    }
+  ],
+  "preserved": "All Java source, runtime observations, logs, runtime/flag metadata and source manifest remain unchanged; historical smoke hashes continue to describe the original run"
+}

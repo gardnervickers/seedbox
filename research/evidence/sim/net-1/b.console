@@ -1,0 +1,1 @@
+net up: 2: eth0    inet 10.0.0.2/24 scope global eth0\       valid_lft forever preferred_lft forever

@@ -1,0 +1,4 @@
+error:
+       … while fetching the input 'git+file:///tmp'
+
+       error: opening Git repository "/tmp": could not find repository at '/tmp' (libgit2 error code = 6)

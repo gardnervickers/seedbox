@@ -1,0 +1,206 @@
+1791246796.502068 [ 273] set_robust_list(0x7ffff72dc8e0, 24) = 0 <0.000007>
+1791246796.502109 [  14] rt_sigprocmask(SIG_SETMASK, ~[ILL TRAP ABRT BUS FPE KILL SEGV CONT STOP SYS RTMIN RT_1], NULL, 8) = 0 <0.000007>
+1791246796.502153 [  39] getpid()       = 908295 <0.000006>
+1791246796.502188 [   3] close(8<anon_inode:[eventpoll]>) = 0 <0.000007>
+1791246796.502227 [   3] close(5<pipe:[58351827]>) = 0 <0.000007>
+1791246796.502260 [   3] close(6<TCP:[127.0.0.1:19411]>) = 0 <0.000007>
+1791246796.502289 [   3] close(7<UNIX-STREAM:[58351835,"/tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/pgsocket/.s.PGSQL.19411"]>) = 0 <0.000006>
+1791246796.502362 [  39] getpid()       = 908295 <0.000006>
+1791246796.502394 [  39] getpid()       = 908295 <0.000006>
+1791246796.502431 [ 318] getrandom("\x95\x18\x08\xa9\x03\x35\x74\xd7\x7f\xbb\xd9\x83\x09\xa5\x40\xd2\x6d\x25\xed\x90\x82\x2c\xbe\xf6\x4c\x07\x5a\xf9\x39\x94\xab\x77", 32, 0) = 32 <0.000007>
+1791246796.502476 [   3] close(3<signalfd:[URG]>) = 0 <0.000008>
+1791246796.502525 [ 289] signalfd4(-1, [URG], 8, SFD_CLOEXEC|SFD_NONBLOCK) = 3<signalfd:[URG]> <0.000008>
+1791246796.502567 [ 291] epoll_create1(EPOLL_CLOEXEC) = 5<anon_inode:[eventpoll]> <0.000007>
+1791246796.502596 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 3<signalfd:[URG]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8980}) = 0 <0.000008>
+1791246796.502637 [ 233] epoll_ctl(5<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 4<pipe:[58351827]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8998}) = 0 <0.004372>
+1791246796.507042 [ 112] setsid()       = 908295 <0.000033>
+1791246796.507098 [  13] rt_sigaction(SIGQUIT, {sa_handler=0x55555611cc30, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000007>
+1791246796.507127 [  14] rt_sigprocmask(SIG_SETMASK, ~[QUIT ILL TRAP ABRT BUS FPE SEGV CONT SYS RTMIN RT_1], NULL, 8) = 0 <0.000006>
+1791246796.507156 [  13] rt_sigaction(SIGPWR, {sa_handler=0x55555611cc30, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000006>
+1791246796.507182 [ 157] prctl(PR_SET_PDEATHSIG, SIGPWR) = 0 <0.000007>
+1791246796.507207 [  72] fcntl(4<pipe:[58351827]>, F_SETFD, FD_CLOEXEC) = 0 <0.000007>
+1791246796.507372 [ 257] openat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/dev/shm/PostgreSQL.3335166832", O_RDWR|O_NOFOLLOW|O_CLOEXEC) = 6</dev/shm/PostgreSQL.3335166832> <0.000010>
+1791246796.507416 [   5] fstat(6</dev/shm/PostgreSQL.3335166832>, {st_dev=makedev(0, 0x21), st_ino=301963, st_mode=S_IFREG|0600, st_nlink=1, st_uid=1000, st_gid=100, st_blksize=4096, st_blocks=2048, st_size=1048576, st_atime=1791246796 /* 2026-10-05T20:33:16.492797377-0400 */, st_atime_nsec=492797377, st_mtime=1791246796 /* 2026-10-05T20:33:16.396795732-0400 */, st_mtime_nsec=396795732, st_ctime=1791246796 /* 2026-10-05T20:33:16.396795732-0400 */, st_ctime_nsec=396795732}) = 0 <0.000007>
+1791246796.507459 [   9] mmap(NULL, 1048576, PROT_READ|PROT_WRITE, MAP_SHARED, 6</dev/shm/PostgreSQL.3335166832>, 0) = 0x7ffff6700000 <0.000013>
+1791246796.507494 [   3] close(6</dev/shm/PostgreSQL.3335166832>) = 0 <0.000006>
+1791246796.507536 [  13] rt_sigaction(SIGHUP, {sa_handler=0x55555611cc30, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000007>
+1791246796.507564 [  13] rt_sigaction(SIGINT, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000006>
+1791246796.507589 [  13] rt_sigaction(SIGTERM, {sa_handler=0x55555611cc30, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000006>
+1791246796.507614 [  13] rt_sigaction(SIGALRM, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000008>
+1791246796.507645 [  13] rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000007>
+1791246796.507676 [  13] rt_sigaction(SIGUSR1, {sa_handler=0x55555611cc30, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000007>
+1791246796.507707 [  13] rt_sigaction(SIGUSR2, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000006>
+1791246796.507733 [  13] rt_sigaction(SIGCHLD, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART|SA_NOCLDSTOP, sa_restorer=0x7ffff64429f0}, NULL, 8) = 0 <0.000006>
+1791246796.507763 [ 262] newfstatat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/nix/store/4nz2y9q8kdn78axpm4jd7c1phmiygg58-postgresql-18.6/lib/libpqwalreceiver", 0x7fffffffc250, 0) = -1 ENOENT (No such file or directory) <0.000009>
+1791246796.507801 [ 262] newfstatat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/nix/store/4nz2y9q8kdn78axpm4jd7c1phmiygg58-postgresql-18.6/lib/libpqwalreceiver.so", {st_dev=makedev(0x103, 0x6), st_ino=6174087, st_mode=S_IFREG|0555, st_nlink=1, st_uid=0, st_gid=0, st_blksize=4096, st_blocks=72, st_size=32864, st_atime=1791246486 /* 2026-10-05T20:28:06-0400 */, st_atime_nsec=0, st_mtime=1 /* 1969-12-31T19:00:01-0500 */, st_mtime_nsec=0, st_ctime=1791246486 /* 2026-10-05T20:28:06.895294093-0400 */, st_ctime_nsec=895294093}, 0) = 0 <0.000008>
+1791246796.507847 [ 262] newfstatat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/nix/store/4nz2y9q8kdn78axpm4jd7c1phmiygg58-postgresql-18.6/lib/libpqwalreceiver.so", {st_dev=makedev(0x103, 0x6), st_ino=6174087, st_mode=S_IFREG|0555, st_nlink=1, st_uid=0, st_gid=0, st_blksize=4096, st_blocks=72, st_size=32864, st_atime=1791246486 /* 2026-10-05T20:28:06-0400 */, st_atime_nsec=0, st_mtime=1 /* 1969-12-31T19:00:01-0500 */, st_mtime_nsec=0, st_ctime=1791246486 /* 2026-10-05T20:28:06.895294093-0400 */, st_ctime_nsec=895294093}, 0) = 0 <0.000007>
+1791246796.507957 [ 257] openat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/nix/store/4nz2y9q8kdn78axpm4jd7c1phmiygg58-postgresql-18.6/lib/libpqwalreceiver.so", O_RDONLY|O_CLOEXEC) = 6</nix/store/4nz2y9q8kdn78axpm4jd7c1phmiygg58-postgresql-18.6/lib/libpqwalreceiver.so> <0.000009>
+1791246796.507997 [   0] read(6</nix/store/4nz2y9q8kdn78axpm4jd7c1phmiygg58-postgresql-18.6/lib/libpqwalreceiver.so>, "\177ELF\2\1\1\0\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0\0\0\0\0\0\0\0\0@\0\0\0\0\0\0\0\340x\0\0\0\0\0\0\0\0\0\0@\08\0\n\0@\0\36\0\34\0\6\0\0\0\4\0\0\0@\0\0\0\0\0\0\0@\0\0\0\0\0\0\0@\0\0\0\0\0\0\0000\2\0\0\0\0\0\0000\2\0\0\0\0\0\0\10\0\0\0\0\0\0\0\1\0\0\0\4\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\334.\0\0\0\0\0\0\334.\0\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\5\0\0\0\340.\0\0\0\0\0\0\340>\0\0\0\0\0\0\340>\0\0\0\0\0\0 .\0\0\0\0\0\0 .\0\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\6\0\0\0\0]\0\0\0\0\0\0\0}\0\0\0\0\0\0"..., 1024) = 1024 <0.000007>
+1791246796.508029 [   5] fstat(6</nix/store/4nz2y9q8kdn78axpm4jd7c1phmiygg58-postgresql-18.6/lib/libpqwalreceiver.so>, {st_dev=makedev(0x103, 0x6), st_ino=6174087, st_mode=S_IFREG|0555, st_nlink=1, st_uid=0, st_gid=0, st_blksize=4096, st_blocks=72, st_size=32864, st_atime=1791246486 /* 2026-10-05T20:28:06-0400 */, st_atime_nsec=0, st_mtime=1 /* 1969-12-31T19:00:01-0500 */, st_mtime_nsec=0, st_ctime=1791246486 /* 2026-10-05T20:28:06.895294093-0400 */, st_ctime_nsec=895294093}) = 0 <0.000007>
+1791246796.508115 [   9] mmap(NULL, 37553, PROT_READ, MAP_PRIVATE|MAP_DENYWRITE, 6</nix/store/4nz2y9q8kdn78axpm4jd7c1phmiygg58-postgresql-18.6/lib/libpqwalreceiver.so>, 0) = 0x7ffff72c6000 <0.000010>
+1791246796.508150 [   9] mmap(0x7ffff72c9000, 16384, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 6</nix/store/4nz2y9q8kdn78axpm4jd7c1phmiygg58-postgresql-18.6/lib/libpqwalreceiver.so>, 0x2000) = 0x7ffff72c9000 <0.000020>
+1791246796.508192 [   9] mmap(0x7ffff72cd000, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 6</nix/store/4nz2y9q8kdn78axpm4jd7c1phmiygg58-postgresql-18.6/lib/libpqwalreceiver.so>, 0x5000) = 0x7ffff72cd000 <0.000010>
+1791246796.508232 [   9] mmap(0x7ffff72cf000, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 6</nix/store/4nz2y9q8kdn78axpm4jd7c1phmiygg58-postgresql-18.6/lib/libpqwalreceiver.so>, 0x6000) = 0x7ffff72cf000 <0.000009>
+1791246796.508276 [   3] close(6</nix/store/4nz2y9q8kdn78axpm4jd7c1phmiygg58-postgresql-18.6/lib/libpqwalreceiver.so>) = 0 <0.000007>
+1791246796.508317 [ 257] openat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/nix/store/yi1sv4ygaaf0h02imxlh4061ccigjp2w-postgresql-18.6-lib/lib/glibc-hwcaps/x86-64-v3/libpq.so.5", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory) <0.000009>
+1791246796.508351 [ 262] newfstatat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/nix/store/yi1sv4ygaaf0h02imxlh4061ccigjp2w-postgresql-18.6-lib/lib/glibc-hwcaps/x86-64-v3/", 0x7fffffffac30, 0) = -1 ENOENT (No such file or directory) <0.000007>
+1791246796.508381 [ 257] openat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/nix/store/yi1sv4ygaaf0h02imxlh4061ccigjp2w-postgresql-18.6-lib/lib/glibc-hwcaps/x86-64-v2/libpq.so.5", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory) <0.000008>
+1791246796.508411 [ 262] newfstatat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/nix/store/yi1sv4ygaaf0h02imxlh4061ccigjp2w-postgresql-18.6-lib/lib/glibc-hwcaps/x86-64-v2/", 0x7fffffffac30, 0) = -1 ENOENT (No such file or directory) <0.000007>
+1791246796.508440 [ 257] openat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/nix/store/yi1sv4ygaaf0h02imxlh4061ccigjp2w-postgresql-18.6-lib/lib/libpq.so.5", O_RDONLY|O_CLOEXEC) = 6</nix/store/yi1sv4ygaaf0h02imxlh4061ccigjp2w-postgresql-18.6-lib/lib/libpq.so.5.18> <0.000010>
+1791246796.508476 [   0] read(6</nix/store/yi1sv4ygaaf0h02imxlh4061ccigjp2w-postgresql-18.6-lib/lib/libpq.so.5.18>, "\177ELF\2\1\1\0\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0\0\0\0\0\0\0\0\0@\0\0\0\0\0\0\0pZ\6\0\0\0\0\0\0\0\0\0@\08\0\n\0@\0\36\0\34\0\6\0\0\0\4\0\0\0@\0\0\0\0\0\0\0@\0\0\0\0\0\0\0@\0\0\0\0\0\0\0000\2\0\0\0\0\0\0000\2\0\0\0\0\0\0\10\0\0\0\0\0\0\0\1\0\0\0\4\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\364\317\2\0\0\0\0\0\364\317\2\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\5\0\0\0\0\320\2\0\0\0\0\0\0\340\2\0\0\0\0\0\0\340\2\0\0\0\0\0\220\343\2\0\0\0\0\0\220\343\2\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\6\0\0\0\220\263\5\0\0\0\0\0\220\323\5\0\0\0\0\0"..., 1024) = 1024 <0.000007>
+1791246796.508510 [   5] fstat(6</nix/store/yi1sv4ygaaf0h02imxlh4061ccigjp2w-postgresql-18.6-lib/lib/libpq.so.5.18>, {st_dev=makedev(0x103, 0x6), st_ino=3292817, st_mode=S_IFREG|0555, st_nlink=1, st_uid=0, st_gid=0, st_blksize=4096, st_blocks=824, st_size=418288, st_atime=1791246485 /* 2026-10-05T20:28:05-0400 */, st_atime_nsec=0, st_mtime=1 /* 1969-12-31T19:00:01-0500 */, st_mtime_nsec=0, st_ctime=1791246485 /* 2026-10-05T20:28:05.247646524-0400 */, st_ctime_nsec=247646524}) = 0 <0.000007>
+1791246796.508552 [   9] mmap(NULL, 399012, PROT_READ, MAP_PRIVATE|MAP_DENYWRITE, 6</nix/store/yi1sv4ygaaf0h02imxlh4061ccigjp2w-postgresql-18.6-lib/lib/libpq.so.5.18>, 0) = 0x7ffff7264000 <0.000010>
+1791246796.508584 [  10] mprotect(0x7ffff7291000, 212992, PROT_NONE) = 0 <0.000011>
+1791246796.508613 [   9] mmap(0x7ffff7292000, 192512, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 6</nix/store/yi1sv4ygaaf0h02imxlh4061ccigjp2w-postgresql-18.6-lib/lib/libpq.so.5.18>, 0x2d000) = 0x7ffff7292000 <0.000011>
+1791246796.508647 [   9] mmap(0x7ffff72c1000, 16384, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 6</nix/store/yi1sv4ygaaf0h02imxlh4061ccigjp2w-postgresql-18.6-lib/lib/libpq.so.5.18>, 0x5b000) = 0x7ffff72c1000 <0.000009>
+1791246796.508682 [   9] mmap(0x7ffff72c5000, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 6</nix/store/yi1sv4ygaaf0h02imxlh4061ccigjp2w-postgresql-18.6-lib/lib/libpq.so.5.18>, 0x5e000) = 0x7ffff72c5000 <0.000010>
+1791246796.508726 [   3] close(6</nix/store/yi1sv4ygaaf0h02imxlh4061ccigjp2w-postgresql-18.6-lib/lib/libpq.so.5.18>) = 0 <0.000006>
+1791246796.508948 [  10] mprotect(0x7ffff72c1000, 16384, PROT_READ) = 0 <0.000009>
+1791246796.509027 [  10] mprotect(0x7ffff72cd000, 8192, PROT_READ) = 0 <0.000008>
+1791246796.509067 [  14] rt_sigprocmask(SIG_SETMASK, [URG], NULL, 8) = 0 <0.000007>
+1791246796.509111 [  12] brk(0x5555562be000) = 0x5555562be000 <0.000008>
+1791246796.509161 [ 257] openat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/home/gvickers/.pgpass", O_RDONLY) = -1 ENOENT (No such file or directory) <0.000008>
+1791246796.509213 [ 202] futex(0x7ffff7acf170, FUTEX_WAKE_PRIVATE, 2147483647) = 0 <0.000006>
+1791246796.509242 [ 202] futex(0x7ffff7acf010, FUTEX_WAKE_PRIVATE, 2147483647) = 0 <0.000005>
+1791246796.509263 [ 202] futex(0x7ffff7ad5010, FUTEX_WAKE_PRIVATE, 2147483647) = 0 <0.000005>
+1791246796.509290 [ 202] futex(0x7ffff7c0f1e0, FUTEX_WAKE_PRIVATE, 2147483647) = 0 <0.000005>
+1791246796.509312 [ 262] newfstatat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/nix/store/80z9njiswl9xm6qk93zsjr5bj8v0z2lm-krb5-1.22.2-lib/etc/gss/mech", 0x7fffffffb1e0, AT_SYMLINK_NOFOLLOW) = -1 ENOENT (No such file or directory) <0.000006>
+1791246796.509340 [ 257] openat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/nix/store/80z9njiswl9xm6qk93zsjr5bj8v0z2lm-krb5-1.22.2-lib/etc/gss/mech.d", O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY) = -1 ENOENT (No such file or directory) <0.000006>
+1791246796.509395 [ 202] futex(0x7ffff6bfe010, FUTEX_WAKE_PRIVATE, 2147483647) = 0 <0.000005>
+1791246796.509426 [ 202] futex(0x7ffff6bff0a0, FUTEX_WAKE_PRIVATE, 2147483647) = 0 <0.000005>
+1791246796.509449 [ 262] newfstatat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/etc/krb5.conf", 0x7fffffff8f90, 0) = -1 ENOENT (No such file or directory) <0.000006>
+1791246796.509477 [ 262] newfstatat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/nix/store/80z9njiswl9xm6qk93zsjr5bj8v0z2lm-krb5-1.22.2-lib/etc/krb5.conf", 0x7fffffff8f90, 0) = -1 ENOENT (No such file or directory) <0.000006>
+1791246796.509508 [ 107] geteuid()      = 1000 <0.000005>
+1791246796.509539 [ 257] openat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/var/lib/krb5/user/1000/client.keytab", O_RDONLY) = -1 ENOENT (No such file or directory) <0.000007>
+1791246796.509571 [ 102] getuid()       = 1000 <0.000005>
+1791246796.509594 [ 262] newfstatat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/tmp/krb5cc_1000", 0x7fffffffb070, 0) = -1 ENOENT (No such file or directory) <0.000006>
+1791246796.509634 [ 262] newfstatat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/etc/krb5.conf", 0x7fffffff8bc0, 0) = -1 ENOENT (No such file or directory) <0.000006>
+1791246796.509662 [ 262] newfstatat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/nix/store/80z9njiswl9xm6qk93zsjr5bj8v0z2lm-krb5-1.22.2-lib/etc/krb5.conf", 0x7fffffff8bc0, 0) = -1 ENOENT (No such file or directory) <0.000006>
+1791246796.509691 [ 107] geteuid()      = 1000 <0.000005>
+1791246796.509717 [ 257] openat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/var/lib/krb5/user/1000/client.keytab", O_RDONLY) = -1 ENOENT (No such file or directory) <0.000007>
+1791246796.509748 [ 102] getuid()       = 1000 <0.000006>
+1791246796.509775 [ 262] newfstatat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "/tmp/krb5cc_1000", 0x7fffffffaca0, 0) = -1 ENOENT (No such file or directory) <0.000009>
+1791246796.509825 [  41] socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, IPPROTO_IP) = 6<TCP:[58352315]> <0.000011>
+1791246796.525126 [  54] setsockopt(6<TCP:[58352315]>, SOL_TCP, TCP_NODELAY, [1], 4) = 0 <0.000026>
+1791246796.535288 [  54] setsockopt(6<TCP:[58352315]>, SOL_SOCKET, SO_KEEPALIVE, [1], 4) = 0 <0.004008>
+1791246796.547684 [  42] connect(6<TCP:[58352315]>, {sa_family=AF_INET, sin_port=htons(19410), sin_addr=inet_addr("127.0.0.1")}, 16) = -1 EINPROGRESS (Operation now in progress) <0.003291>
+1791246796.559232 [ 291] epoll_create1(EPOLL_CLOEXEC) = 7<anon_inode:[eventpoll]> <0.000019>
+1791246796.559287 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 3<signalfd:[URG]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8878}) = 0 <0.000288>
+1791246796.559619 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 4<pipe:[58351827]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8890}) = 0 <0.000029>
+1791246796.559683 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, {events=EPOLLOUT|EPOLLERR|EPOLLHUP, data=0x5555561f88a8}) = 0 <0.000070>
+1791246796.573403 [   3] close(7<anon_inode:[eventpoll]>) = 0 <0.000041>
+1791246796.573509 [ 291] epoll_create1(EPOLL_CLOEXEC) = 7<anon_inode:[eventpoll]> <0.000045>
+1791246796.573603 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 3<signalfd:[URG]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8878}) = 0 <0.000030>
+1791246796.573692 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 4<pipe:[58351827]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8890}) = 0 <0.000025>
+1791246796.573752 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, {events=EPOLLOUT|EPOLLERR|EPOLLHUP, data=0x5555561f88a8}) = 0 <0.000024>
+1791246796.573808 [ 232] epoll_wait(7<anon_inode:[eventpoll]>, [{events=EPOLLOUT, data=0x5555561f88a8}], 1, -1) = 1 <0.000022>
+1791246796.573905 [   3] close(7<anon_inode:[eventpoll]>) = 0 <0.000021>
+1791246796.573965 [  55] getsockopt(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, SOL_SOCKET, SO_ERROR, [0], [4]) = 0 <0.000017>
+1791246796.574030 [  51] getsockname(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, {sa_family=AF_INET, sin_port=htons(59966), sin_addr=inet_addr("127.0.0.1")}, [128 => 16]) = 0 <0.000024>
+1791246796.574116 [ 291] epoll_create1(EPOLL_CLOEXEC) = 7<anon_inode:[eventpoll]> <0.000046>
+1791246796.574201 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 3<signalfd:[URG]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8878}) = 0 <0.000023>
+1791246796.574278 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 4<pipe:[58351827]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8890}) = 0 <0.000019>
+1791246796.574332 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, {events=EPOLLOUT|EPOLLERR|EPOLLHUP, data=0x5555561f88a8}) = 0 <0.000035>
+1791246796.574398 [ 232] epoll_wait(7<anon_inode:[eventpoll]>, [{events=EPOLLOUT, data=0x5555561f88a8}], 1, -1) = 1 <0.000028>
+1791246796.574455 [   3] close(7<anon_inode:[eventpoll]>) = 0 <0.000038>
+1791246796.574525 [  44] sendto(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, "\0\0\0\10\4\322\26/", 8, MSG_NOSIGNAL, NULL, 0) = 8 <0.000201>
+1791246796.574760 [ 291] epoll_create1(EPOLL_CLOEXEC) = 7<anon_inode:[eventpoll]> <0.000021>
+1791246796.574810 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 3<signalfd:[URG]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8878}) = 0 <0.000022>
+1791246796.574873 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 4<pipe:[58351827]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8890}) = 0 <0.000018>
+1791246796.574927 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f88a8}) = 0 <0.000027>
+1791246796.575002 [ 232] epoll_wait(7<anon_inode:[eventpoll]>, [{events=EPOLLIN, data=0x5555561f88a8}], 1, -1) = 1 <0.000026>
+1791246796.575060 [   3] close(7<anon_inode:[eventpoll]>) = 0 <0.000038>
+1791246796.575138 [  45] recvfrom(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, "N", 16384, 0, NULL, NULL) = 1 <0.000024>
+1791246796.575212 [ 291] epoll_create1(EPOLL_CLOEXEC) = 7<anon_inode:[eventpoll]> <0.000022>
+1791246796.575261 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 3<signalfd:[URG]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8878}) = 0 <0.000023>
+1791246796.575324 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 4<pipe:[58351827]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8890}) = 0 <0.000021>
+1791246796.575378 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, {events=EPOLLOUT|EPOLLERR|EPOLLHUP, data=0x5555561f88a8}) = 0 <0.000019>
+1791246796.575431 [ 232] epoll_wait(7<anon_inode:[eventpoll]>, [{events=EPOLLOUT, data=0x5555561f88a8}], 1, -1) = 1 <0.000025>
+1791246796.575484 [   3] close(7<anon_inode:[eventpoll]>) = 0 <0.000036>
+1791246796.575548 [  44] sendto(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, "\0\0\0Z\0\3\0\0user\0gvickers\0database\0replication\0replication\0true\0application_name\0walreceiver\0\0", 90, MSG_NOSIGNAL, NULL, 0) = 90 <0.002160>
+1791246796.577742 [ 291] epoll_create1(EPOLL_CLOEXEC) = 7<anon_inode:[eventpoll]> <0.000020>
+1791246796.577789 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 3<signalfd:[URG]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8878}) = 0 <0.000021>
+1791246796.577850 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 4<pipe:[58351827]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8890}) = 0 <0.000023>
+1791246796.577921 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f88a8}) = 0 <0.000021>
+1791246796.577974 [ 232] epoll_wait(7<anon_inode:[eventpoll]>, [{events=EPOLLIN, data=0x5555561f88a8}], 1, -1) = 1 <0.000021>
+1791246796.578029 [   3] close(7<anon_inode:[eventpoll]>) = 0 <0.000054>
+1791246796.578113 [  45] recvfrom(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, "R\0\0\0\10\0\0\0\0S\0\0\0\27in_hot_standby\0off\0S\0\0\0\31integer_datetimes\0on\0S\0\0\0\36TimeZone\0America/New_York\0S\0\0\0\33IntervalStyle\0postgres\0S\0\0\0 search_path\0\"$user\", public\0S\0\0\0\24is_superuser\0on\0S\0\0\0!application_name\0walreceiver\0S\0\0\0&default_transaction_read_only\0off\0S\0\0\0\32scram_"..., 16384, 0, NULL, NULL) = 474 <0.000021>
+1791246796.578205 [  44] sendto(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, "Q\0\0\0\24IDENTIFY_SYSTEM\0", 21, MSG_NOSIGNAL, NULL, 0) = 21 <0.000208>
+1791246796.578481 [ 291] epoll_create1(EPOLL_CLOEXEC) = 7<anon_inode:[eventpoll]> <0.000021>
+1791246796.578530 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 3<signalfd:[URG]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8878}) = 0 <0.000021>
+1791246796.578592 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 4<pipe:[58351827]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8890}) = 0 <0.000019>
+1791246796.578641 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f88a8}) = 0 <0.000019>
+1791246796.578691 [ 232] epoll_wait(7<anon_inode:[eventpoll]>, [{events=EPOLLIN, data=0x5555561f88a8}], 1, -1) = 1 <0.000019>
+1791246796.578737 [   3] close(7<anon_inode:[eventpoll]>) = 0 <0.000021>
+1791246796.578784 [  45] recvfrom(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, "T\0\0\0o\0\4systemid\0\0\0\0\0\0\0\0\0\0\31\377\377\377\377\377\377\0\0timeline\0\0\0\0\0\0\0\0\0\0\24\0\10\377\377\377\377\0\0xlogpos\0\0\0\0\0\0\0\0\0\0\31\377\377\377\377\377\377\0\0dbname\0\0\0\0\0\0\0\0\0\0\31\377\377\377\377\377\377\0\0D\0\0\0003\0\4\0\0\0\0237693346390112918308\0\0\0\0011\0\0\0\t0/3008E58\377\377\377\377C\0\0\0\24IDENTIFY_SYSTEM\0Z\0\0\0\5I", 16384, 0, NULL, NULL) = 191 <0.000020>
+1791246796.578849 [  44] sendto(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, "Q\0\0\0+START_REPLICATION 0/3000000 TIMELINE 1\0", 44, MSG_NOSIGNAL, NULL, 0) = 44 <0.000377>
+1791246796.579260 [ 291] epoll_create1(EPOLL_CLOEXEC) = 7<anon_inode:[eventpoll]> <0.000020>
+1791246796.579306 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 3<signalfd:[URG]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8878}) = 0 <0.000022>
+1791246796.579424 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 4<pipe:[58351827]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8890}) = 0 <0.000021>
+1791246796.579505 [ 233] epoll_ctl(7<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f88a8}) = 0 <0.000020>
+1791246796.579559 [ 232] epoll_wait(7<anon_inode:[eventpoll]>, [{events=EPOLLIN, data=0x5555561f88a8}], 1, -1) = 1 <0.000017>
+1791246796.579661 [   3] close(7<anon_inode:[eventpoll]>) = 0 <0.000021>
+1791246796.579752 [  45] recvfrom(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, "W\0\0\0\7\0\0\0d\0\0\216uw\0\0\0\0\3\0\0\0\0\0\0\0\3\0\216X\0\3\0\37\351\314\1$\30\321\6\0\1\0\0\0\0\0\0\3\0\0\0\0\0\0\0\0\0\0\0\0$\333\266\334\307A\304j\0\0\0\1\0 \0\0005\6\0\0\0\0\0\0 \1\0\2\0\0\0\0\240\0\0\0\355S\256\20\0\20\0\0\4\6\324\0\3\177\6\0\0\5\0\0\0\353\4\0\0\0\0\0\0\0\0\0\0\230\223y\1\302C\1\0\324\0\320\32\0 \4 \360\2\0\0/\0\1\0\220\235`\1\340\234`\0010\234`\1\200\233`\1\320\232`\1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0.\0\1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 16384, 0, NULL, NULL) = 16384 <0.000036>
+1791246796.579853 [   1] write(2</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica.stderr>, "2026-10-05 20:33:16.579 EDT [908295] LOG:  started streaming WAL from primary at 0/3000000 on timeline 1\n", 105) = 105 <0.000026>
+1791246796.579926 [  44] sendto(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, "d\0\0\0&r\0\0\0\0\3\0\215\240\0\0\0\0\3\0\215\240\0\0\0\0\3\0\215\240\0\3\0\37\351\314\4?\0", 39, MSG_NOSIGNAL, NULL, 0) = 39 <0.000182>
+1791246796.580187 [  44] sendto(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, "d\0\0\0\35h\0\3\0\37\351\314\5I\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 30, MSG_NOSIGNAL, NULL, 0) = 30 <0.000192>
+1791246796.580874 [  45] recvfrom(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, "\0\0\0\0\0\0\0\275\7\0\0\272\7\0\0p\0\0\0\1\0\0\0\0\0\0\0\25\0\0\0\2\0\0\0\0\0\0\30\321\5\0\1\0\0\0\0@\0\3\0\0\0\0005\21\0\0\0\0\0\0\0\0\0\0\0\1\0\0\0\0\0\0\0001\0\0\0\0\0\0\0\31\0\25\0\3\t \377\377\7\0\0\0\0\0\0:\20\0\09\20\0\0\2\0\2\0\1\0\1\0\1\0\1\0\1\1\0\0p\0\0\0\1\0\0\0\0\0\0\0\25\0\0\0\2\0\0\0\0\0\0\0\1\0\2\0\200\0\0\0\1\0\0\0\0\0\0\0\32\0\0\0\2\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\200\0\0\0\1\0\0\0\0\0\0\0\32\0\0\0\2\0\0\0\0\0\0\0\275\7\0\0\272\7\0\0p\0\0\0\1\0\0\0\0\0\0\0\25\0\0\0\2\0\0\0\0\0\0\0\0\0\0\0\1\0\0\0\0\0\0\0/\0\0\0\0"..., 49160, 0, NULL, NULL) = 20094 <0.000043>
+1791246796.580990 [  45] recvfrom(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, 0x5555562ae326, 29066, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000013>
+1791246796.581041 [  12] brk(0x5555562df000) = 0x5555562df000 <0.000166>
+1791246796.581264 [ 257] openat(AT_FDCWD</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data>, "pg_wal/000000010000000000000003", O_RDWR|O_CLOEXEC) = 7</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data/pg_wal/000000010000000000000003> <0.000054>
+1791246796.581361 [  18] pwrite64(7</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data/pg_wal/000000010000000000000003>, "\30\321\6\0\1\0\0\0\0\0\0\3\0\0\0\0\0\0\0\0\0\0\0\0$\333\266\334\307A\304j\0\0\0\1\0 \0\0005\6\0\0\0\0\0\0 \1\0\2\0\0\0\0\240\0\0\0\355S\256\20\0\20\0\0\4\6\324\0\3\177\6\0\0\5\0\0\0\353\4\0\0\0\0\0\0\0\0\0\0\230\223y\1\302C\1\0\324\0\320\32\0 \4 \360\2\0\0/\0\1\0\220\235`\1\340\234`\0010\234`\1\200\233`\1\320\232`\1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0.\0\1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"..., 36440, 0) = 36440 <0.000034>
+1791246796.581446 [  12] brk(0x5555562d6000) = 0x5555562d6000 <0.000037>
+1791246796.581523 [  45] recvfrom(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, 0x5555562a54b0, 65536, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000013>
+1791246796.581577 [  44] sendto(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, "d\0\0\0&r\0\0\0\0\3\0\216X\0\0\0\0\3\0\215\240\0\0\0\0\3\0\215\240\0\3\0\37\351\314\n\263\0", 39, MSG_NOSIGNAL, NULL, 0) = 39 <0.000175>
+1791246796.582006 [  75] fdatasync(7</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data/pg_wal/000000010000000000000003>) = 0 <0.002673>
+1791246796.584775 [  62] kill(908244, SIGURG) = 0 <0.000029>
+1791246796.584851 [  44] sendto(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, "d\0\0\0&r\0\0\0\0\3\0\216X\0\0\0\0\3\0\216X\0\0\0\0\3\0\215\240\0\3\0\37\351\314\27u\0", 39, MSG_NOSIGNAL, NULL, 0) = 39 <0.000230>
+1791246796.585133 [ 291] epoll_create1(EPOLL_CLOEXEC) = 8<anon_inode:[eventpoll]> <0.000044>
+1791246796.585236 [ 233] epoll_ctl(8<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 3<signalfd:[URG]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8878}) = 0 <0.000035>
+1791246796.585326 [ 233] epoll_ctl(8<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 4<pipe:[58351827]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8890}) = 0 <0.000024>
+1791246796.585383 [ 233] epoll_ctl(8<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f88a8}) = 0 <0.000018>
+1791246796.585973 [   3] close(8<anon_inode:[eventpoll]>) = 0 <0.000022>
+1791246796.586633 [  44] sendto(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, "d\0\0\0&r\0\0\0\0\3\0\216X\0\0\0\0\3\0\216X\0\0\0\0\3\0\216X\0\3\0\37\351\314\34!\0", 39, MSG_NOSIGNAL, NULL, 0) = 39 <0.000184>
+1791246796.586868 [  45] recvfrom(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, 0x5555562a54b0, 65536, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000018>
+1791246796.586916 [ 291] epoll_create1(EPOLL_CLOEXEC) = 8<anon_inode:[eventpoll]> <0.000020>
+1791246796.586962 [ 233] epoll_ctl(8<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 3<signalfd:[URG]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8878}) = 0 <0.000022>
+1791246796.587028 [ 233] epoll_ctl(8<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 4<pipe:[58351827]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8890}) = 0 <0.000027>
+1791246796.587093 [ 233] epoll_ctl(8<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f88a8}) = 0 <0.000032>
+1791246796.587161 [ 232] epoll_wait(8<anon_inode:[eventpoll]>, [{events=EPOLLIN, data=0x5555561f88a8}], 1, 10000) = 1 <0.183474>
+1791246796.770670 [   3] close(8<anon_inode:[eventpoll]>) = 0 <0.000014>
+1791246796.770716 [  45] recvfrom(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, "d\0\0\0\355w\0\0\0\0\3\0\216X\0\0\0\0\3\0\217(\0\3\0\37\351\316\354\360\36\0\0\0\0\0\0\0000\216\0\3\0\0\0\0\340\0\0\0\n;\211\217\377\4\1\0\0\0\0\0002\0\0\0\0\0\0\0X\216\0\3\0\0\0\0\20\10\0\0\375\fC&\377\30\0\0\0\0\0\0\0\0\0\2\0\0\363\2\0\0\363\2\0\0\362\2\0\0\0\0\0\0\0\0r\0\0\0\0\0\0\0x\216\0\3\0\0\0\0\20\0\0\0\216x\375\3\377XX\216\0\3\0\0\0\0\1\0\0\0\1\0\0\0\1\0\0\0\1\0\0\0\363\2\0\0\0\0\0\0\0`\0\0\1\0\0\0\0\0\0\0\350\2\0\0\1\0\0\0\1\0\0\0\1\0\0\0\0\0\0\0\314A\304j\0\0\0\0\0\0\0\0\0\0\0\0\363\2\0\0\0\0\0\0\0\0\0\0\0\0", 65536, 0, NULL, NULL) = 238 <0.000009>
+1791246796.770762 [  18] pwrite64(7</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data/pg_wal/000000010000000000000003>, "\36\0\0\0\0\0\0\0000\216\0\3\0\0\0\0\340\0\0\0\n;\211\217\377\4\1\0\0\0\0\0002\0\0\0\0\0\0\0X\216\0\3\0\0\0\0\20\10\0\0\375\fC&\377\30\0\0\0\0\0\0\0\0\0\2\0\0\363\2\0\0\363\2\0\0\362\2\0\0\0\0\0\0\0\0r\0\0\0\0\0\0\0x\216\0\3\0\0\0\0\20\0\0\0\216x\375\3\377XX\216\0\3\0\0\0\0\1\0\0\0\1\0\0\0\1\0\0\0\1\0\0\0\363\2\0\0\0\0\0\0\0`\0\0\1\0\0\0\0\0\0\0\350\2\0\0\1\0\0\0\1\0\0\0\1\0\0\0\0\0\0\0\314A\304j\0\0\0\0\0\0\0\0\0\0\0\0\363\2\0\0\0\0\0\0\0\0\0\0\0\0", 208, 36440) = 208 <0.000012>
+1791246796.770805 [  45] recvfrom(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, 0x5555562a54b0, 65536, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000007>
+1791246796.770845 [  44] sendto(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, "d\0\0\0&r\0\0\0\0\3\0\217(\0\0\0\0\3\0\216X\0\0\0\0\3\0\216X\0\3\0\37\351\316\356\26\0", 39, MSG_NOSIGNAL, NULL, 0) = 39 <0.000208>
+1791246796.771136 [  75] fdatasync(7</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica-data/pg_wal/000000010000000000000003>) = 0 <0.003924>
+1791246796.775095 [  62] kill(908244, SIGURG) = 0 <0.000016>
+1791246796.775466 [  44] sendto(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, "d\0\0\0&r\0\0\0\0\3\0\217(\0\0\0\0\3\0\217(\0\0\0\0\3\0\216\260\0\3\0\37\351\317\0$\0", 39, MSG_NOSIGNAL, NULL, 0) = 39 <0.000115>
+1791246796.775684 [ 291] epoll_create1(EPOLL_CLOEXEC) = 8<anon_inode:[eventpoll]> <0.000011>
+1791246796.775715 [ 233] epoll_ctl(8<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 3<signalfd:[URG]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8878}) = 0 <0.000008>
+1791246796.775760 [ 233] epoll_ctl(8<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 4<pipe:[58351827]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8890}) = 0 <0.000007>
+1791246796.775792 [ 233] epoll_ctl(8<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f88a8}) = 0 <0.000007>
+1791246796.775823 [   3] close(8<anon_inode:[eventpoll]>) = 0 <0.000009>
+1791246796.775851 [  44] sendto(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, "d\0\0\0&r\0\0\0\0\3\0\217(\0\0\0\0\3\0\217(\0\0\0\0\3\0\217(\0\3\0\37\351\317\1\247\0", 39, MSG_NOSIGNAL, NULL, 0) = 39 <0.000069>
+1791246796.775993 [  45] recvfrom(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, 0x5555562a54b0, 65536, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable) <0.000017>
+1791246796.776031 [ 291] epoll_create1(EPOLL_CLOEXEC) = 8<anon_inode:[eventpoll]> <0.000029>
+1791246796.776084 [ 233] epoll_ctl(8<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 3<signalfd:[URG]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8878}) = 0 <0.000007>
+1791246796.776125 [ 233] epoll_ctl(8<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 4<pipe:[58351827]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f8890}) = 0 <0.000006>
+1791246796.776154 [ 233] epoll_ctl(8<anon_inode:[eventpoll]>, EPOLL_CTL_ADD, 6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, {events=EPOLLIN|EPOLLERR|EPOLLHUP, data=0x5555561f88a8}) = 0 <0.000007>
+1791246796.776185 [ 232] epoll_wait(8<anon_inode:[eventpoll]>, 0x5555561f88c0, 1, 10000) = -1 EINTR (Interrupted system call) <0.032123>
+1791246796.808351 [ 232] --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=908187, si_uid=1000} ---
+1791246796.808386 [  39] getpid()       = 908295 <0.000028>
+1791246796.808446 [  62] kill(908295, SIGURG) = 0 <0.000135>
+1791246796.808619 [  15] rt_sigreturn({mask=[URG]}) = -1 EINTR (Interrupted system call) <0.000044>
+1791246796.808721 [  15] --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=908187, si_uid=1000} ---
+1791246796.808770 [  39] getpid()       = 908295 <0.000032>
+1791246796.808865 [  15] rt_sigreturn({mask=[URG]}) = -1 EINTR (Interrupted system call) <0.000051>
+1791246796.808985 [   3] close(8<anon_inode:[eventpoll]>) = 0 <0.000043>
+1791246796.809115 [   1] write(2</tmp/seedbox-round-1.S74xJ4/evidence/w4/native.20261005T203307/postgres-replica.stderr>, "2026-10-05 20:33:16.809 EDT [908295] FATAL:  terminating walreceiver process due to administrator command\n", 106) = 106 <0.000041>
+1791246796.809217 [  39] getpid()       = 908295 <0.000052>
+1791246796.809341 [  11] munmap(0x7ffff6700000, 1048576) = 0 <0.000040>
+1791246796.809439 [  44] sendto(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>, "X\0\0\0\4", 5, MSG_NOSIGNAL, NULL, 0) = 5 <0.000070>
+1791246796.809605 [   3] close(6<TCP:[127.0.0.1:59966->127.0.0.1:19410]>) = 0 <0.000082>
+1791246796.809762 [  12] brk(0x5555562c6000) = 0x5555562c6000 <0.000551>
+1791246796.810354 [  39] getpid()       = 908295 <0.000038>
+1791246796.811285 [ 231] exit_group(1)  = ?
+1791246796.813806 [ 231] +++ exited with 1 +++

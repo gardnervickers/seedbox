@@ -1,0 +1,494 @@
+1791246790.770987 [ 186] gettid()       = 907981 <0.000026>
+1791246790.771094 [ 131] sigaltstack(NULL, {ss_sp=NULL, ss_flags=SS_DISABLE, ss_size=0}) = 0 <0.000018>
+1791246790.771132 [ 131] sigaltstack({ss_sp=0x221f8c53c000, ss_flags=0, ss_size=32768}, NULL) = 0 <0.000024>
+1791246790.771185 [  14] rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0 <0.000015>
+1791246790.771239 [ 186] gettid()       = 907981 <0.000045>
+1791246790.771336 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000094>
+1791246790.771459 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000101>
+1791246790.771589 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000126>
+1791246790.771754 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246790.771865 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000229>
+1791246790.772114 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000087>
+1791246790.772220 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000078>
+1791246790.772316 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000078>
+1791246790.772414 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000078>
+1791246790.772511 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000092>
+1791246790.772621 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000077>
+1791246790.772732 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000099>
+1791246790.772864 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000084>
+1791246790.772977 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246790.773078 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000088>
+1791246790.773196 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246790.773305 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246790.773403 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000540>
+1791246790.773964 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.001368>
+1791246790.775356 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246790.775459 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246790.775562 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246790.775666 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246790.775770 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000079>
+1791246790.775871 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000084>
+1791246790.775973 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000099>
+1791246790.776092 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246790.776194 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246790.776295 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246790.776393 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246790.776490 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246790.776587 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246790.776684 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246790.776784 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000091>
+1791246790.776894 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000084>
+1791246790.776997 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000099>
+1791246790.777118 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000089>
+1791246790.777226 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000084>
+1791246790.777330 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000078>
+1791246790.777425 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000079>
+1791246790.777523 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246790.777626 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000104>
+1791246790.777768 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000119>
+1791246790.777912 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000040>
+1791246790.777993 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246790.778118 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000091>
+1791246790.778238 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000122>
+1791246790.778411 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000093>
+1791246790.778548 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000101>
+1791246790.778685 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000110>
+1791246790.778837 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000105>
+1791246790.778996 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000103>
+1791246790.779138 [  35] nanosleep({tv_sec=0, tv_nsec=40000}, NULL) = 0 <0.000110>
+1791246790.779292 [  35] nanosleep({tv_sec=0, tv_nsec=80000}, NULL) = 0 <0.000158>
+1791246790.779486 [  35] nanosleep({tv_sec=0, tv_nsec=160000}, NULL) = 0 <0.000245>
+1791246790.779777 [  35] nanosleep({tv_sec=0, tv_nsec=320000}, NULL) = 0 <0.000399>
+1791246790.780213 [  35] nanosleep({tv_sec=0, tv_nsec=640000}, NULL) = 0 <0.000700>
+1791246790.780935 [  35] nanosleep({tv_sec=0, tv_nsec=1280000}, NULL) = 0 <0.001352>
+1791246790.782342 [  35] nanosleep({tv_sec=0, tv_nsec=2560000}, NULL) = 0 <0.002627>
+1791246790.785008 [  35] nanosleep({tv_sec=0, tv_nsec=5120000}, NULL) = 0 <0.012790>
+1791246790.806033 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000028>
+1791246790.806106 [  35] nanosleep({tv_sec=0, tv_nsec=10000000}, NULL) = 0 <0.016443>
+1791246790.830849 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000023>
+1791246790.830919 [  39] getpid()       = 907980 <0.008506>
+1791246790.847900 [ 234] tgkill(907980, 907980, SIGURG) = 0 <0.000011>
+1791246790.847938 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000024>
+1791246790.847995 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000072>
+1791246790.848103 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=60, tv_nsec=0}) = -1 EAGAIN (Resource temporarily unavailable) <0.000018>
+1791246790.856688 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000013>
+1791246790.856734 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.008380>
+1791246790.873287 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000024>
+1791246790.873358 [  39] getpid()       = 907980 <0.018855>
+1791246790.910703 [ 234] tgkill(907980, 907980, SIGURG) = 0 <0.000013>
+1791246790.910740 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000041>
+1791246790.910831 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.018469>
+1791246790.929351 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000029>
+1791246790.929421 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000124>
+1791246790.929565 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000093>
+1791246790.929677 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.018419>
+1791246790.966658 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000024>
+1791246790.968987 [ 202] futex(0x221f8c53b160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000029>
+1791246790.969090 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.018449>
+1791246791.005983 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000018>
+1791246791.024507 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.001862>
+1791246791.026423 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000013>
+1791246791.026474 [  39] getpid()       = 907980 <0.000022>
+1791246791.026525 [ 234] tgkill(907980, 907983, SIGURG) = 0 <0.000016>
+1791246791.026575 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000114>
+1791246791.026716 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000095>
+1791246791.026846 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000105>
+1791246791.027008 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.027132 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000100>
+1791246791.027268 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000095>
+1791246791.027392 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000086>
+1791246791.027525 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000098>
+1791246791.027660 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000097>
+1791246791.027784 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000091>
+1791246791.027913 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000107>
+1791246791.028059 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000109>
+1791246791.028223 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000106>
+1791246791.028365 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000095>
+1791246791.028504 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000096>
+1791246791.028637 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000098>
+1791246791.028770 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000099>
+1791246791.028917 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000100>
+1791246791.029059 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000109>
+1791246791.029212 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000165>
+1791246791.029408 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000091>
+1791246791.029534 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000131>
+1791246791.029704 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000109>
+1791246791.029847 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000109>
+1791246791.029992 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000084>
+1791246791.030115 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000096>
+1791246791.030237 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000093>
+1791246791.030349 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000086>
+1791246791.030454 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000095>
+1791246791.030568 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000079>
+1791246791.030667 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000089>
+1791246791.030777 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.030879 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000090>
+1791246791.030987 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000094>
+1791246791.031101 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000099>
+1791246791.031221 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.031323 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000091>
+1791246791.031431 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000087>
+1791246791.031537 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.031636 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246791.031736 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246791.031838 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246791.031940 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.032043 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000094>
+1791246791.032158 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000079>
+1791246791.032255 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000078>
+1791246791.032353 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000086>
+1791246791.032457 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000091>
+1791246791.032569 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000085>
+1791246791.032673 [  35] nanosleep({tv_sec=0, tv_nsec=40000}, NULL) = 0 <0.000107>
+1791246791.032800 [  35] nanosleep({tv_sec=0, tv_nsec=80000}, NULL) = 0 <0.000142>
+1791246791.032961 [  35] nanosleep({tv_sec=0, tv_nsec=160000}, NULL) = 0 <0.000218>
+1791246791.033198 [  35] nanosleep({tv_sec=0, tv_nsec=320000}, NULL) = 0 <0.000383>
+1791246791.033599 [  35] nanosleep({tv_sec=0, tv_nsec=640000}, NULL) = 0 <0.000711>
+1791246791.034330 [  35] nanosleep({tv_sec=0, tv_nsec=1280000}, NULL) = 0 <0.001341>
+1791246791.035700 [  35] nanosleep({tv_sec=0, tv_nsec=2560000}, NULL) = 0 <0.002623>
+1791246791.038351 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000008>
+1791246791.038388 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000010>
+1791246791.038504 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000091>
+1791246791.038619 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000093>
+1791246791.038734 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.038835 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.038937 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.039041 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.039143 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.039245 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246791.039346 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=99090880}) = 0 <0.001548>
+1791246791.040988 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.041098 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000100>
+1791246791.041226 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000084>
+1791246791.041340 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000010>
+1791246791.041416 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.041523 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=96914321}) = 0 <0.002525>
+1791246791.044122 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000088>
+1791246791.044237 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.044345 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000009>
+1791246791.044390 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000102>
+1791246791.044516 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=93921527}) = 0 <0.002371>
+1791246791.046959 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000085>
+1791246791.047077 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000393>
+1791246791.047503 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000084>
+1791246791.047615 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000010>
+1791246791.047664 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000114>
+1791246791.047801 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=90635108}) = 0 <0.002363>
+1791246791.050220 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000087>
+1791246791.050332 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.050441 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000009>
+1791246791.050485 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000102>
+1791246791.050611 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=87826693}) = 0 <0.002334>
+1791246791.053025 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000059>
+1791246791.053110 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.053219 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000013>
+1791246791.053297 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.053406 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=85031874}) = 0 <0.002404>
+1791246791.055865 [  24] sched_yield()  = 0 <0.000062>
+1791246791.055972 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000088>
+1791246791.056090 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000010>
+1791246791.056135 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000105>
+1791246791.056267 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=82170470}) = 0 <0.002294>
+1791246791.058662 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000091>
+1791246791.058779 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.058888 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000010>
+1791246791.058936 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000104>
+1791246791.059069 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=79372344}) = 0 <0.002420>
+1791246791.061550 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000009>
+1791246791.061606 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000128>
+1791246791.061761 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000010>
+1791246791.061825 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000084>
+1791246791.061933 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=76504277}) = 0 <0.002470>
+1791246791.064709 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000104>
+1791246791.064838 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000093>
+1791246791.064954 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.065059 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000098>
+1791246791.065190 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000093>
+1791246791.065308 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.065412 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000087>
+1791246791.065523 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000114>
+1791246791.065660 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.065764 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000088>
+1791246791.065872 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000100>
+1791246791.065991 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000103>
+1791246791.066115 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.066217 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000093>
+1791246791.066329 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.066430 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000094>
+1791246791.066544 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000087>
+1791246791.066651 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000090>
+1791246791.066760 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.066860 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000088>
+1791246791.066966 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=68342320}) = -1 ETIMEDOUT (Connection timed out) <0.068404>
+1791246791.135396 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000091>
+1791246791.135515 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.135622 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.135727 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.135830 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000079>
+1791246791.135928 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000079>
+1791246791.136026 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000036>
+1791246791.136082 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.136193 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000105>
+1791246791.136318 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=2118447}) = -1 ETIMEDOUT (Connection timed out) <0.002180>
+1791246791.138523 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.138630 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.138736 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.138841 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.138946 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.139051 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.139163 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.139269 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.139375 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000066>
+1791246791.139470 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000115>
+1791246791.139609 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=8081201}) = -1 ETIMEDOUT (Connection timed out) <0.008144>
+1791246791.147783 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.147893 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.148001 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000060>
+1791246791.148088 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.148197 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.148304 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.148412 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.148519 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.148627 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.148749 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000112>
+1791246791.148888 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=86422333}) = -1 ETIMEDOUT (Connection timed out) <0.086485>
+1791246791.235403 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.235513 [  35] nanosleep({tv_sec=0, tv_nsec=40000}, NULL) = 0 <0.000102>
+1791246791.235640 [  35] nanosleep({tv_sec=0, tv_nsec=80000}, NULL) = 0 <0.000142>
+1791246791.235806 [  35] nanosleep({tv_sec=0, tv_nsec=160000}, NULL) = 0 <0.000222>
+1791246791.236102 [  35] nanosleep({tv_sec=0, tv_nsec=320000}, NULL) = 0 <0.000400>
+1791246791.236529 [  35] nanosleep({tv_sec=0, tv_nsec=640000}, NULL) = 0 <0.000701>
+1791246791.237257 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000025>
+1791246791.237348 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246791.237447 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=2045800}) = -1 ETIMEDOUT (Connection timed out) <0.002107>
+1791246791.239580 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.239687 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.239792 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.239897 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.240002 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000057>
+1791246791.240080 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000079>
+1791246791.240179 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000258>
+1791246791.240457 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000069>
+1791246791.240548 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000103>
+1791246791.240671 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=8102451}) = 0 <0.003676>
+1791246791.244421 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000090>
+1791246791.244535 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.244644 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000010>
+1791246791.244717 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.244824 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=3950323}) = 0 <0.002422>
+1791246791.247312 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000089>
+1791246791.247425 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.247533 [ 202] futex(0x221f8c7be160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000009>
+1791246791.247578 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000156>
+1791246791.247759 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.247867 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.247971 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000052>
+1791246791.248045 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000079>
+1791246791.248146 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000079>
+1791246791.248245 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000079>
+1791246791.248346 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000334>
+1791246791.248700 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=73266}) = 0 <0.000093>
+1791246791.248813 [  24] sched_yield()  = 0 <0.000114>
+1791246791.248945 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000007>
+1791246791.248994 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000075>
+1791246791.249087 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.249186 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000086>
+1791246791.249291 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000088>
+1791246791.249398 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.249498 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=91070021}) = 0 <0.000754>
+1791246791.250313 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000094>
+1791246791.250427 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246791.250528 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000094>
+1791246791.250645 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000101>
+1791246791.250767 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.250874 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.250986 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000099>
+1791246791.251112 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000205>
+1791246791.251351 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000378>
+1791246791.252500 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000093>
+1791246791.252617 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.252719 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.008520>
+1791246791.269474 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [], 128, 0, NULL, 0) = 0 <0.000016>
+1791246791.277794 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.008332>
+1791246791.286157 [ 281] epoll_pwait(5<anon_inode:[eventpoll]>, [{events=EPOLLIN, data=0x3ffffbf15d000001}], 128, 0, NULL, 0) = 1 <0.000016>
+1791246791.286250 [  39] getpid()       = 907980 <0.000006>
+1791246791.292437 [ 234] tgkill(907980, 907982, SIGURG) = 0 <0.000032>
+1791246791.292503 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000035>
+1791246791.292587 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000102>
+1791246791.292721 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000099>
+1791246791.292855 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000134>
+1791246791.293038 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000097>
+1791246791.293170 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000102>
+1791246791.293310 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000094>
+1791246791.293440 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000114>
+1791246791.293615 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000113>
+1791246791.293781 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000104>
+1791246791.293951 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000097>
+1791246791.294088 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.294190 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=41118568}) = -1 ETIMEDOUT (Connection timed out) <0.041180>
+1791246791.335396 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.335505 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.335609 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.335712 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.335816 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.335919 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.336022 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000039>
+1791246791.336086 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.336197 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000079>
+1791246791.336297 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246791.336417 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000093>
+1791246791.336530 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=4036948}) = -1 ETIMEDOUT (Connection timed out) <0.005548>
+1791246791.342171 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000089>
+1791246791.342282 [ 202] futex(0x221f8c53a960, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000007>
+1791246791.342308 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246791.342408 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=6425348}) = 0 <0.002696>
+1791246791.345125 [  24] sched_yield()  = 0 <0.003759>
+1791246791.348935 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246791.349036 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=86273097}) = -1 ETIMEDOUT (Connection timed out) <0.086335>
+1791246791.435400 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.435512 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.435619 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.435726 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.435831 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.435937 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.436042 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.436151 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000084>
+1791246791.436274 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000119>
+1791246791.436419 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=12494713}) = -1 ETIMEDOUT (Connection timed out) <0.012648>
+1791246791.449092 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.449197 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=86111239}) = -1 ETIMEDOUT (Connection timed out) <0.086173>
+1791246791.535398 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246791.535500 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000079>
+1791246791.535600 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.535705 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000079>
+1791246791.535803 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000079>
+1791246791.535901 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000079>
+1791246791.535998 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000064>
+1791246791.536082 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000079>
+1791246791.536180 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000143>
+1791246791.536342 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=5047763}) = -1 ETIMEDOUT (Connection timed out) <0.005116>
+1791246791.541488 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.541601 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=7412626}) = -1 ETIMEDOUT (Connection timed out) <0.010490>
+1791246791.552124 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.552230 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=83078989}) = -1 ETIMEDOUT (Connection timed out) <0.083140>
+1791246791.635401 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000084>
+1791246791.635513 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.635619 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.635725 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246791.635826 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246791.635925 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000079>
+1791246791.636024 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000032>
+1791246791.636083 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246791.636183 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000079>
+1791246791.636282 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.636393 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000108>
+1791246791.636521 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=15554153}) = -1 ETIMEDOUT (Connection timed out) <0.015616>
+1791246791.652164 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.652273 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000086>
+1791246791.652389 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000087>
+1791246791.652510 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000086>
+1791246791.652626 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.652736 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.652840 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=82469223}) = -1 ETIMEDOUT (Connection timed out) <0.082531>
+1791246791.735400 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.735516 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.735625 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.735731 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.735837 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.735942 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000092>
+1791246791.736054 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000113>
+1791246791.736194 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=16487970}) = -1 ETIMEDOUT (Connection timed out) <0.016551>
+1791246791.752773 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.752884 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.752993 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000066>
+1791246791.753086 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000082>
+1791246791.753192 [  35] nanosleep({tv_sec=0, tv_nsec=40000}, NULL) = 0 <0.000107>
+1791246791.753339 [  35] nanosleep({tv_sec=0, tv_nsec=80000}, NULL) = 0 <0.000192>
+1791246791.753562 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=81747625}) = 0 <0.013918>
+1791246791.767537 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.004211>
+1791246791.771771 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000021>
+1791246791.771830 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000102>
+1791246791.771953 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246791.772051 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000097>
+1791246791.772169 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246791.772269 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000079>
+1791246791.772367 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000079>
+1791246791.772466 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000113>
+1791246791.772599 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000088>
+1791246791.772707 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000090>
+1791246791.772815 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=62493208}) = 0 <0.000257>
+1791246791.773093 [  24] sched_yield()  = 0 <0.000578>
+1791246791.773691 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.773794 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=61514977}) = 0 <0.000268>
+1791246791.774084 [  24] sched_yield()  = 0 <0.000276>
+1791246791.774407 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.774512 [ 202] futex(0x1dc96b8, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000008>
+1791246791.774755 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.774856 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=60453127}) = 0 <0.002320>
+1791246791.777251 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000124>
+1791246791.777404 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000084>
+1791246791.777515 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=57795568}) = 0 <0.001341>
+1791246791.778917 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000115>
+1791246791.779070 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000087>
+1791246791.779195 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000084>
+1791246791.779311 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.779421 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=55889641}) = 0 <0.004132>
+1791246791.783607 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.008517>
+1791246791.792150 [ 202] futex(0x221f8c53a960, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000008>
+1791246791.792180 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246791.792281 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000089>
+1791246791.792389 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.792488 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000086>
+1791246791.792591 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000078>
+1791246791.792688 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000079>
+1791246791.792786 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000097>
+1791246791.792907 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.793021 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000053>
+1791246791.793106 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000089>
+1791246791.793223 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000085>
+1791246791.793336 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=41974317}) = 0 <0.000143>
+1791246791.793524 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000093>
+1791246791.793637 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000245>
+1791246791.793906 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000085>
+1791246791.794022 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=41288700}) = 0 <0.001017>
+1791246791.795092 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000100>
+1791246791.795213 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000093>
+1791246791.795328 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=39980625}) = 0 <0.000503>
+1791246791.795854 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000091>
+1791246791.795965 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.796074 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000092>
+1791246791.796187 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000093>
+1791246791.796301 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000103>
+1791246791.796423 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000087>
+1791246791.796533 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000092>
+1791246791.796651 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000085>
+1791246791.796762 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000081>
+1791246791.796864 [ 202] futex(0x221f8c53a960, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000008>
+1791246791.797131 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246791.797232 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=38076601}) = 0 <0.002319>
+1791246791.799608 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000150>
+1791246791.799784 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000086>
+1791246791.799899 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000084>
+1791246791.800028 [  14] rt_sigprocmask(SIG_SETMASK, ~[], [], 8) = 0 <0.000009>
+1791246791.800077 [  56] clone(child_stack=0x221f8c688000, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS, tls=0x221f8c94c090) = 908061 <0.000072>
+1791246791.800185 [  14] rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0 <0.000039>
+1791246791.800252 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000110>
+1791246791.800383 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246791.800482 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=448951124}) = 0 <0.002230>
+1791246791.802780 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000084>
+1791246791.802892 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000098>
+1791246791.803019 [ 202] futex(0x221f8c94c160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000010>
+1791246791.803075 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000110>
+1791246791.803214 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=446220908}) = 0 <0.002417>
+1791246791.805686 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000106>
+1791246791.805817 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000106>
+1791246791.805948 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000088>
+1791246791.806060 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000083>
+1791246791.806187 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000080>
+1791246791.806289 [ 202] futex(0x221f8c94c160, FUTEX_WAKE_PRIVATE, 1) = 1 <0.000010>
+1791246791.806329 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000098>
+1791246791.806446 [ 202] futex(0x1dcc320, FUTEX_WAIT_PRIVATE, 0, {tv_sec=0, tv_nsec=442986757}) = 0 <0.007829>
+1791246791.814321 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000167>
+1791246791.814561 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000127>
+1791246791.814725 [  35] nanosleep({tv_sec=0, tv_nsec=20000}, NULL) = 0 <0.000164>
+1791246791.814981 [  35] +++ killed by SIGTERM +++

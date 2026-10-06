@@ -1,0 +1,82 @@
+{
+  "linux-start-input-v2/debug_regs.bin": {
+    "bytes": 128,
+    "sha256": "712464d1e771edca4b09c10ff644717c9c88e105f82fc34e2d9c5940250d2efc"
+  },
+  "linux-start-input-v2/fpu.bin": {
+    "bytes": 416,
+    "sha256": "6c13e8f8da93f28612a928b48d9f8d738cac9a2cee9135e4bd02eee6eb471cf6"
+  },
+  "linux-start-input-v2/guest-cpuid.json": {
+    "bytes": 7971,
+    "sha256": "d52cf486a4b0426717ec0d58e3f3a923dc602e2575526abbd202a8a6e8efe595"
+  },
+  "linux-start-input-v2/input-manifest.json": {
+    "bytes": 1105,
+    "sha256": "571b39767430b5ecaba9bbcbabfdb1b1ea89600bb13003cb4b8444706f065f8c"
+  },
+  "linux-start-input-v2/live-serial.txt": {
+    "bytes": 7074,
+    "sha256": "7487884b0b8b46c2d90d75de9805d8b8f4030d892759e598c2b1901ac5e5eddb"
+  },
+  "linux-start-input-v2/mp_state.bin": {
+    "bytes": 4,
+    "sha256": "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119"
+  },
+  "linux-start-input-v2/msrs.json": {
+    "bytes": 4759,
+    "sha256": "7d55311541fa64959f473e58803f2c51d8baf0fdda4b923c6a0576ea56c4a377"
+  },
+  "linux-start-input-v2/profile.json": {
+    "bytes": 840,
+    "sha256": "ecbb35820370309f5c4df4a125748a5913295368af8ed46bffb0cb834aef1150"
+  },
+  "linux-start-input-v2/ram.bin": {
+    "bytes": 268435456,
+    "sha256": "9ded1aa5c698ad65a607aa177af25191332e87326d99858f58d9da9fcc6b6e93"
+  },
+  "linux-start-input-v2/regs.bin": {
+    "bytes": 144,
+    "sha256": "bc050002ef0867830509c3bb9362407d1cda47f7c11edfe7710fb01b0d55314b"
+  },
+  "linux-start-input-v2/sregs.bin": {
+    "bytes": 312,
+    "sha256": "15b4f199be4f93de02f584853c70235b2bc96b8ad36d7b31336e7e1ff128e30f"
+  },
+  "linux-start-input-v2/vcpu_events.bin": {
+    "bytes": 64,
+    "sha256": "627c36199cad3d2b82d043548e6bee89d6312ad3778b0c51ddda71bd2b99be05"
+  },
+  "linux-start-input-v2/xcrs.bin": {
+    "bytes": 392,
+    "sha256": "b40a089e97f750a80f51dd69dafa61d3af33922ab8d338e6d8580c1dced4a80c"
+  },
+  "linux-start-input-v2/xsave.bin": {
+    "bytes": 4096,
+    "sha256": "70f8dc688871685bdb46f15dc043c85997f90092db3423a22824eee0429ff82c"
+  },
+  "linux-start-source-v2/src/bin/linux_start.rs": {
+    "bytes": 10562,
+    "sha256": "b778e2a72e4f244fc8a3a70c9f3c408fe2348fd9da0cdede72af47057941060b"
+  },
+  "linux-start-source-v2/linux-inputs/busy-two-phase.c": {
+    "bytes": 592,
+    "sha256": "aafd1756b48d086dc7c9c7fc5efce53e67efd343673fe9db9dd91529191cf6f3"
+  },
+  "linux-start-source-v2/linux-inputs/build-two-phase.sh": {
+    "bytes": 475,
+    "sha256": "8bb140290ed60bbeb994adc2711c174dc9d9d6ab2fb1fe89cbc307df5dc25d39"
+  },
+  "linux-start-source-v2/linux-inputs/clean-net-kernel": {
+    "bytes": 2425856,
+    "sha256": "3f19f1a7d28e892c4cecb018f1602075990bde9abc29ac8cc8757c90841514cf"
+  },
+  "linux-start-source-v2/linux-inputs/busy-two-phase-initramfs": {
+    "bytes": 16896,
+    "sha256": "51df3c52c8d797e97898c90d6995a1673da0fa631d36ff9cc85d1d11a49e4fa7"
+  },
+  "linux-start-source-v2/linux-inputs/two-phase-root/init": {
+    "bytes": 16192,
+    "sha256": "7fb86a15ce8cd966a2eb6c2e97db4bca90cd55dde05572a001a74eda664a3e07"
+  }
+}

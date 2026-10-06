@@ -1,0 +1,1 @@
+NASM version 3.02 compiled on Jun 29 2026
