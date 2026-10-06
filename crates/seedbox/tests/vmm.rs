@@ -287,6 +287,10 @@ fn process_target_exit_after_admission_is_a_recoverable_unavailable_fault() {
         raw["control_history"] = json!([{"relay_id":1,"session_id":1,"request":call,"response":{"version":1,"id":1,"ok":false,"error":error,"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":e,"replied_at_ns":reply},"fault_id":1,"delivered_at_ns":reply}]);
         raw["faults"] = json!([{"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":null,"action":"stop","machine":"server-machine","status":"unavailable","detail":"target VM exited before the process effect"}]);
         raw["machines"][0]["guest_exit_code"] = json!(1);
+        // The target's reported exit is the evidence for the unavailable status.
+        raw["machines"][1]["guest_exit_code"] = json!(0);
+        raw["machines"][1]["state"] = json!("Exited(0)");
+        raw["machines"][1]["time_ns"] = json!(e);
         let parse =
             |raw: &serde_json::Value| vmm::report(&serde_json::to_vec(raw).unwrap(), &request);
         let accepted = parse(&raw).unwrap();
@@ -301,6 +305,23 @@ fn process_target_exit_after_admission_is_a_recoverable_unavailable_fault() {
         let mut fatal = cut.clone();
         fatal["control_history"][0]["fatal"] = json!(true);
         assert!(parse(&fatal).is_err());
+        // A target that did not exit, or exited at another time, cannot be unavailable.
+        for state in [json!("Running"), json!("Halted"), json!(null)] {
+            let mut live = raw.clone();
+            live["machines"][1]["guest_exit_code"] = json!(null);
+            live["machines"][1]["state"] = state;
+            assert!(parse(&live).is_err());
+        }
+        let mut other_exited = raw.clone();
+        other_exited["machines"][1]["state"] = json!("Running");
+        other_exited["machines"][0]["state"] = json!("Exited(1)");
+        other_exited["machines"][0]["time_ns"] = json!(e);
+        assert!(parse(&other_exited).is_err());
+        for time in [json!(e - 1), json!(e + 1), json!(null)] {
+            let mut mismatch = raw.clone();
+            mismatch["machines"][1]["time_ns"] = time;
+            assert!(parse(&mismatch).is_err());
+        }
         // Only a target_unavailable reply after admission permits the status.
         let mut other = raw.clone();
         other["control_history"][0]["response"]["error"]["code"] = json!("invalid_state");

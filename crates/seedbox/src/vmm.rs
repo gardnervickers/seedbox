@@ -190,6 +190,12 @@ struct MachineReport {
     guest_exit_code: Option<u8>,
     guest_init_error: Option<u8>,
     state_digest: Option<ContentDigest>,
+    /// Final machine state, `Exited(code)` once the VM has exited.
+    #[serde(default)]
+    state: Option<String>,
+    /// Final simulated time; an exited VM's clock stops at its exit.
+    #[serde(default)]
+    time_ns: Option<u64>,
 }
 #[derive(Deserialize)]
 struct VmmReport {
@@ -212,8 +218,9 @@ struct VmmReport {
 struct ValidatedControlHistory {
     plans: Vec<seedbox_control::Plan>,
     effects: BTreeMap<u32, u64>,
-    /// Process faults whose target VM exited after admission, before an effect.
-    unavailable: BTreeSet<u32>,
+    /// Process faults whose target VM exited after admission, before an effect,
+    /// with the exit time the call resolved at.
+    unavailable: BTreeMap<u32, u64>,
 }
 
 /// Correlate guest-originated requests to responses and applied engine actions.
@@ -417,7 +424,7 @@ fn validate_control_history(
             {
                 return Err(bad());
             }
-            expected.unavailable.insert(plan.id);
+            expected.unavailable.insert(plan.id, e.ok_or_else(bad)?);
         } else if response {
             expected.effects.insert(plan.id, e.ok_or_else(bad)?);
         }
@@ -523,9 +530,20 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
             ));
         }
         match (fault.status.as_str(), fault.applied_at_ns) {
-            // A target VM exit after admission resolves the call with no effect.
-            ("unavailable", None) if expected.unavailable.contains(&fault.id) => {}
-            _ if expected.unavailable.contains(&fault.id) => {
+            // A target VM exit after admission resolves the call with no effect,
+            // at the time the target's reported clock stopped.
+            ("unavailable", None)
+                if expected.unavailable.get(&fault.id).is_some_and(|exit| {
+                    raw.machines.iter().any(|machine| {
+                        Some(&machine.name) == fault.machine.as_ref()
+                            && machine
+                                .state
+                                .as_deref()
+                                .is_some_and(|s| s.starts_with("Exited("))
+                            && machine.time_ns == Some(*exit)
+                    })
+                }) => {}
+            _ if expected.unavailable.contains_key(&fault.id) => {
                 return Err(Error::Integrity("invalid fault effect status/time".into()))
             }
             ("applied", Some(at))
