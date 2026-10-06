@@ -8,6 +8,7 @@ from pathlib import Path
 import platform
 import sys
 import time
+import traceback
 
 from . import checks
 from .engine import EXIT_CODES, Outcome, execute, overall, render
@@ -17,7 +18,7 @@ from .portable import portable
 SIM = Path(__file__).resolve().parents[1]
 PINS = Path(__file__).with_name("pins.json")
 DEFAULT_CPUS = {"smoke": "2-7", "full": "2-12"}
-PIN_KEYS = {"smoke": ["replay", "stop_placement", "race", "checker_control"]}
+PIN_KEYS = {"smoke": ["replay", "stop_placement", "race", "checker_control", "fault_effects"]}
 PIN_KEYS["full"] = PIN_KEYS["smoke"] + ["known_failing", "fixed_control"]
 
 
@@ -50,7 +51,8 @@ def suite(args):
         scenarios = sorted({pins[key]["scenario"] for key in PIN_KEYS[args.tier]})
         missing = launcher.missing_inputs(scenarios)
         if missing:
-            sys.exit("missing inputs (build them first; see sim/README.md):\n  " + "\n  ".join(missing))
+            print("missing inputs (build them first; see sim/README.md):\n  " + "\n  ".join(missing), file=sys.stderr)
+            return EXIT_CODES["UNRESOLVED"]
         out.mkdir(parents=True, exist_ok=True)
         log(f"hashing inputs; evidence in {out}")
         report["inputs"] = {s: launcher.identity(s) for s in scenarios}
@@ -80,8 +82,9 @@ def pin(args):
     out = Path(args.root).resolve() / "runs"
     launcher = BatchLauncher(SIM, args.root, pins["scenarios"], [0], out, {None: Path(args.vmm)},
                              args.artifacts, siblings=lambda cpu: {cpu})
-    entry["seed"] = args.seed if args.seed is not None else entry["seed"]
-    entry["world_witness"] = args.witness or entry["world_witness"]
+    if args.seed is None or not args.witness:
+        sys.exit("pin: --seed and --witness are both required")
+    entry["seed"], entry["world_witness"] = args.seed, args.witness
     entry["identity"] = launcher.identity(entry["scenario"])
     if args.build:
         pins["build"] = args.build
@@ -113,7 +116,13 @@ def main(argv=None):
     parser.add_argument("--witness", help="pin: its world witness")
     parser.add_argument("--build", help="pin: description of the build the pins belong to")
     args = parser.parse_args(argv)
-    return pin(args) if args.tier == "pin" else suite(args)
+    if args.tier == "pin":
+        return pin(args)
+    try:
+        return suite(args)
+    except Exception:
+        traceback.print_exc()
+        return EXIT_CODES["UNRESOLVED"]
 
 
 if __name__ == "__main__":

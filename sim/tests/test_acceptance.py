@@ -38,7 +38,8 @@ class FakeLauncher:
                                world_witness=PINNED if job.scenario == "kill-3.5.2" else f"w:{base}",
                                machine_witnesses={"n1": f"n1:{base}", "client": f"c:{base}"},
                                state_digests={"n1": f"d:{base}"} if job.witness == FULL_STATE else {},
-                               host_seconds=1.0, sim_seconds=10.0)
+                               host_seconds=1.0, sim_seconds=10.0,
+                               faults=[{"member": "n1", "stop_ns": 1, "start_ns": 2}] if "kill" in job.scenario else [])
             if job.scenario == "race":
                 lost = job.seed % 3
                 result.logs = {"n1": f"RACE mode=racy counter=9 expected=9 lost={lost}\n"
@@ -60,10 +61,10 @@ class CheckTests(unittest.TestCase):
         launcher = FakeLauncher()
         result, outcomes = verdicts(launcher)
         self.assertEqual({k: v.status for k, v in result.items()},
-                         {"1": PASS, "2": PASS, "3": PASS, "4": PASS, "5": PASS, "6": PASS, "7": checks.SKIPPED})
+                         {"1": PASS, "2": PASS, "3": PASS, "4": PASS, "8": PASS, "5": PASS, "6": PASS, "7": checks.SKIPPED})
         self.assertEqual(overall(outcomes), "PASS")
         short = [j for j in launcher.jobs if j.scenario == "short-kill-3.5.2"]
-        # Item 1 (2 + 2 digest runs) and item 2 (3 variants) share one default run.
+        # Items 1 (2 + 2 digest runs), 2 (3 variants) and 8 share one default run.
         self.assertEqual(len(short), 7)
         self.assertIn("RAM/register digests", result["1"].summary)
         self.assertEqual(len([j for j in launcher.jobs if j.scenario == "kill-3.5.2"]), 5)
@@ -107,6 +108,39 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(result.status, FAIL)
         self.assertIn("did not replay", result.summary)
 
+    def test_pinned_margin_completed_only_by_retry_was_not_exercised(self):
+        def retried(job, result, n):
+            if ("margin", "32768") in job.performance:
+                result.retries, result.attempts = 1, [{"evidence": "x", "detail": "exit status 1: overshoot on n1"}]
+        result = verdicts(FakeLauncher(retried), checks.SMOKE)[0]["2"]
+        self.assertEqual(result.status, UNRESOLVED)
+        self.assertIn("margin=32768 was not exercised", result.summary)
+
+    def test_fault_effects_need_applied_faults_and_recovery(self):
+        def none(job, result, n):
+            if job.scenario == "short-kill-3.5.2":
+                result.faults = []
+        self.assertIn("no kill/restart", verdicts(FakeLauncher(none), checks.SMOKE)[0]["8"].summary)
+
+        def broken(job, result, n):
+            if job.scenario == "short-kill-3.5.2":
+                result.status, result.detail = FAIL, "RESULT fail missing"
+        self.assertIn("did not recover", verdicts(FakeLauncher(broken), checks.SMOKE)[0]["8"].summary)
+
+        def unfaulted(job, result, n):
+            if job.scenario == "kill-3.5.3" and job.seed == 4002:
+                result.faults = []
+        self.assertIn("seeds [4002]", verdicts(FakeLauncher(unfaulted))[0]["6"].summary)
+
+    def test_launcher_error_is_unresolved_not_a_crash(self):
+        class Broken:
+            def run(self, jobs):
+                raise OSError("batch.sh: permission denied")
+        result, outcomes = verdicts(Broken(), checks.SMOKE)
+        self.assertEqual({v.status for v in result.values()}, {UNRESOLVED})
+        self.assertIn("permission denied", result["1"].summary)
+        self.assertEqual(overall(outcomes), "UNRESOLVED")
+
     def test_checker_control_must_fail_with_exit_one(self):
         def passes(job, result, n):
             if job.scenario == "sanity":
@@ -119,14 +153,18 @@ class CheckTests(unittest.TestCase):
                 result.world_witness = "f" * 64
         pins = dict(PINS, known_failing=dict(PINS["known_failing"], identity={"kernel": "k"}))
         regression = execute(checks.FULL, checks.Context(pins, lambda s: {"kernel": "k"}), FakeLauncher(moved))
-        self.assertEqual(regression[4].verdict.status, FAIL)
-        self.assertIn("regression", regression[4].verdict.summary)
+        self.assertEqual(regression[5].verdict.status, FAIL)
+        self.assertIn("regression", regression[5].verdict.summary)
         changed = execute(checks.FULL, checks.Context(pins, lambda s: {"kernel": "new"}), FakeLauncher(moved))
-        self.assertEqual(changed[4].verdict.status, checks.IDENTITY_CHANGED)
-        self.assertIn("changed inputs: kernel", changed[4].verdict.summary)
+        self.assertEqual(changed[5].verdict.status, checks.IDENTITY_CHANGED)
+        self.assertIn("changed inputs: kernel", changed[5].verdict.summary)
         self.assertEqual(overall(changed), "IDENTITY CHANGED")
         declared, _ = verdicts(FakeLauncher(moved), semantics_change=True)
         self.assertEqual(declared["5"].status, checks.IDENTITY_CHANGED)
+        unknown = execute(checks.FULL, checks.Context(dict(PINS, known_failing=dict(PINS["known_failing"], identity=None)),
+                                                      lambda s: {"kernel": "k"}), FakeLauncher(moved))
+        self.assertEqual(unknown[5].verdict.status, UNRESOLVED)
+        self.assertIn("no input identity is pinned", unknown[5].verdict.summary)
 
     def test_known_failing_replicas_must_agree(self):
         def flaky(job, result, n):
@@ -182,17 +220,23 @@ for i, seed in enumerate(seeds.split()):
     out.mkdir(parents=True)
     report = {"seed": int(seed), "outcome": "end_machine_exited", "host_seconds": 2.0, "sim_seconds": 10.0,
               "world_witness": f"w{seed}", "machines": [{"name": workload, "state": "Exited(0)", "witness": f"m{seed}",
-              "exits": 5, "state_digest": "d" if "--digest" in extra else None}]}
+              "exits": 5, "state_digest": "d" if "--digest" in extra else None}],
+              "kills": [{"member": "n1", "stop_ns": 1, "start_ns": 2}]}
     console, status, err = "RESULT pass ok\n" if workload == "client" else "RACE mode=racy counter=1 expected=2 lost=1\n", 0, ""
     if mode == "clock" or mode == "overshoot_again" or (mode == "overshoot" and not retry):
         report, status = None, 1
         err = "clock bound exceeded: time 1 + 2 exceeds hard stop 2" if mode == "clock" else "soft overshoot on n1: 9 branches past"
     if mode == "contradiction":
         console = "RESULT fail planted\n"
+    if mode == "dial_error":
+        console = "RESULT error dial 10.0.0.1:2379\n"
+        report["machines"][0]["state"] = "Exited(3)"
     pathlib.Path(f"{out}.json").write_text(json.dumps(report) if report else "")
     pathlib.Path(f"{out}.err").write_text(err)
     pathlib.Path(f"{out}.status").write_text(f"{status}\n")
     (out / f"{workload}.console").write_text(console)
+if mode == "restore_failed":
+    sys.exit("batch: restoration failed; retained /tmp/seedbox-msr-x/saved.json")
 '''
 
 
@@ -245,6 +289,10 @@ class BatchLauncherTests(unittest.TestCase):
     def test_overshoot_is_retried_with_larger_margin(self):
         (result,) = self.run_jobs([Job("kill", 7)], "overshoot")
         self.assertEqual((result.status, result.retries), (PASS, 1))
+        (failed,) = result.attempts
+        self.assertIn("overshoot", failed["detail"])
+        self.assertTrue(Path(f"{failed['evidence']}.err").exists())
+        self.assertEqual(result.summary()["failed_attempts"], [failed])
         self.assertEqual([c["margin"] for c in self.calls()], [None, "98304"])
 
     def test_retry_failure_is_unresolved_and_clock_bound_is_not_retried(self):
@@ -264,6 +312,16 @@ class BatchLauncherTests(unittest.TestCase):
         self.assertEqual(result.status, UNRESOLVED)
         self.assertIn("already owned", result.detail)
 
+    def test_checker_workload_without_a_result_is_unresolved(self):
+        (result,) = self.run_jobs([Job("kill", 7)], "dial_error")
+        self.assertEqual(result.status, UNRESOLVED)
+        self.assertIn("RESULT error dial", result.detail)
+
+    def test_failed_batch_is_never_accepted(self):
+        (result,) = self.run_jobs([Job("kill", 7)], "restore_failed")
+        self.assertEqual(result.status, UNRESOLVED)
+        self.assertIn("restoration failed", result.detail)
+
     def test_batches_take_disjoint_core_ranges_and_smt_siblings(self):
         pairs = {2: {2, 3}, 3: {2, 3}, 4: {4, 5}, 5: {4, 5}}
         launcher = self.launcher(siblings=pairs.get)
@@ -280,11 +338,18 @@ class BatchLauncherTests(unittest.TestCase):
         other.mkdir()
         for name in ("bzImage", "race.cpio"):
             (other / name).write_text("pv " + name)
-        launcher = self.launcher(artifacts=other)
+        os.chdir(self.base)
+        self.addCleanup(os.chdir, SIM)
+        launcher = self.launcher(artifacts="artifacts-pv")
         world = json.loads(launcher.world("race").read_text())
-        self.assertEqual(world["kernel"], str(other / "bzImage"))
+        self.assertEqual(world["kernel"], str(other.resolve() / "bzImage"))
         self.assertEqual(sorted(launcher.identity("race")), ["initrd:race.cpio", "kernel", "world"])
-        self.assertEqual(launcher.missing_inputs(["kill"]), [str(other / "cluster.cpio")])
+        self.assertEqual(launcher.missing_inputs(["kill"]), [str(other.resolve() / "cluster.cpio")])
+        # A symlinked artifact is matched by the world's file name, not its target's.
+        (self.base / "artifacts/race.cpio").unlink()
+        (self.base / "artifacts/race.cpio").symlink_to(self.base / "artifacts/cluster.cpio")
+        world = json.loads(self.launcher(artifacts=other).world("race").read_text())
+        self.assertEqual(world["machines"][0]["initrd"], str(other.resolve() / "race.cpio"))
 
 
 if __name__ == "__main__":

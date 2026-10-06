@@ -24,6 +24,9 @@ SETTINGS = {"undo": "SEEDBOX_UNDO", "margin": "SEEDBOX_MARGIN"}
 # Same margin as campaign.sh's overshoot retry.
 RETRY_MARGIN = "98304"
 LEASE_BUSY = "already owned"
+# A workload with this name runs a checker and must print one RESULT line
+# (the campaign.sh / campaign-result.py convention).
+CHECKER = "client"
 
 
 def sha256(path):
@@ -63,7 +66,7 @@ class BatchLauncher:
                  timeout=1800, lease_wait=0, siblings=sysfs_siblings, log=print):
         self.sim, self.root, self.out = Path(sim), Path(root).resolve(), Path(out).resolve()
         self.scenarios, self.cpus, self.engines = scenarios, sorted(cpus), engines
-        self.artifacts = Path(artifacts) if artifacts else None
+        self.artifacts = Path(artifacts).resolve() if artifacts else None
         self.timeout, self.lease_wait, self.log = timeout, lease_wait, log
         self.siblings = {cpu: siblings(cpu) for cpu in self.cpus}
         self.prefix = self.out.relative_to(self.root / "runs")
@@ -80,8 +83,8 @@ class BatchLauncher:
         source = self._source(scenario)
         world = json.loads(source.read_text())
         def place(rel):
-            path = (source.parent / rel).resolve()
-            return str(self.artifacts / path.name if self.artifacts else path)
+            path = source.parent / rel
+            return str(self.artifacts / path.name if self.artifacts else path.resolve())
         world["kernel"] = place(world["kernel"])
         for machine in world["machines"]:
             machine["initrd"] = place(machine["initrd"])
@@ -128,6 +131,7 @@ class BatchLauncher:
             # clock bound error. A retry that still fails stays UNRESOLVED.
             for i, result in self._round(overshoots, retry=True).items():
                 result.retries = 1
+                result.attempts = results[i].attempts + [{"evidence": results[i].evidence, "detail": results[i].detail}]
                 if result.status == UNRESOLVED:
                     result.detail = f"after overshoot retry: {result.detail}"
                 results[i] = result
@@ -189,7 +193,7 @@ class BatchLauncher:
         extra = ["--digest"] if first.witness == FULL_STATE else []
         label = f"{name} {first.describe().split(' seed=')[0]} seeds [{seeds}] cpus {cpu0}-{cpu0 + len(chunk) - 1}"
         deadline = time.monotonic() + self.lease_wait
-        attempt = 0
+        attempt, waited = 0, []
         while True:
             prefix = f"{self.prefix}/{name}" + (f"-w{attempt}" if attempt else "")
             log = self.root / "runs" / f"{prefix}.batch.log"
@@ -201,6 +205,7 @@ class BatchLauncher:
                                       env=env, stdout=stream, stderr=subprocess.STDOUT).returncode
             if code and LEASE_BUSY in log.read_text() and time.monotonic() < deadline:
                 self.log(f"lease busy for {label}; waiting")
+                waited.append({"evidence": str(log), "detail": tail(log)})
                 time.sleep(30)
                 attempt += 1
                 continue
@@ -208,7 +213,13 @@ class BatchLauncher:
         results = {}
         for n, (i, job) in enumerate(chunk):
             out = self.root / "runs" / f"{prefix}-s{job.seed}-r{n}"
-            results[i] = self.parse(job, out, log)
+            result = self.parse(job, out, log)
+            result.attempts = list(waited)
+            if code and result.completed:
+                # batch.py reports MSR readback/restore failures after its
+                # runs finish; like campaign.sh, never accept such a batch.
+                result.status, result.detail = UNRESOLVED, f"batch.sh exited {code}: {tail(log)}"
+            results[i] = result
         self.log(f"done  {label} in {time.monotonic() - started:.0f}s: "
                  + " ".join(r.status for r in results.values()))
         return results
@@ -249,10 +260,12 @@ class BatchLauncher:
         lines = [l for l in text.splitlines() if l.split()[:2] in (["RESULT", "pass"], ["RESULT", "fail"])]
         code = int(exited[1])
         result.workload_exit = code
-        if len(lines) > 1:
-            result.detail = "expected one client RESULT"
-            return result
-        if lines:
+        if workload == CHECKER:
+            if len(lines) != 1:
+                other = [l for l in text.splitlines() if l.startswith("RESULT")]
+                result.detail = (f"expected one client RESULT pass|fail, client exited {code}"
+                                 + (f": {other[-1][:200]}" if other else ""))
+                return result
             verdict = lines[0].split()[1]
             if code != (0 if verdict == "pass" else 1):
                 result.detail = "client RESULT contradicts checker exit status"
@@ -266,4 +279,5 @@ class BatchLauncher:
         result.exits = {n: m.get("exits") for n, m in machines.items()}
         result.sim_seconds, result.host_seconds = report.get("sim_seconds"), host
         result.logs = {workload: text}
+        result.faults = report.get("kills", [])
         return result

@@ -81,6 +81,9 @@ def stop_placement(ctx):
     base, details, failures = results[0], {}, []
     for result in results[1:]:
         label = " ".join(f"{k}={v}" for k, v in result.job.performance)
+        if result.retries and dict(result.job.performance).get("margin"):
+            return Verdict(UNRESOLVED, f"{label} was not exercised: it completed only after an "
+                           f"overshoot retry at a larger margin ({result.attempts[-1]['detail']})")
         diffs = witness_differences(base, result)
         details[label] = {"differs": diffs, "retries": result.retries}
         if diffs:
@@ -174,9 +177,12 @@ def known_failing(ctx):
                        f"run identity changed ({why}); seed {seed} now gives {sorted(outcomes)} with witness "
                        f"{got[:16]}…. This is not a regression: run a fresh hunt and record its seed with "
                        f"`sim/acceptance.sh pin`.", details)
-    hint = "" if pinned else " (no input identity pinned; if the kernel/ABI or semantics changed, pass --semantics-change)"
+    if not pinned:
+        return Verdict(UNRESOLVED, f"seed {seed} gave {sorted(outcomes)} with witness {got[:16]}…, pinned "
+                       f"RESULT fail {want[:16]}…, and no input identity is pinned to tell a regression from "
+                       f"a new run identity. Pass --semantics-change if the kernel/ABI or semantics changed.", details)
     return Verdict(FAIL, f"regression: same inputs, seed {seed} gave {sorted(outcomes)} with witness "
-                   f"{got[:16]}…, pinned RESULT fail {want[:16]}…{hint}", details)
+                   f"{got[:16]}…, pinned RESULT fail {want[:16]}…", details)
 
 
 def fixed_control(ctx):
@@ -186,12 +192,36 @@ def fixed_control(ctx):
     results = yield [Job(pin["scenario"], seed) for seed in range(first, last + 1)]
     failed = [r.job.seed for r in results if r.status == FAIL]
     stuck = [r.job.seed for r in results if r.status == UNRESOLVED]
-    details = {"failed": failed, "unresolved": stuck, "seeds": [first, last]}
+    unfaulted = [r.job.seed for r in results if r.completed and not r.faults]
+    details = {"failed": failed, "unresolved": stuck, "unfaulted": unfaulted, "seeds": [first, last]}
+    if unfaulted:
+        return Verdict(FAIL, f"no kill/restart was applied for seeds {unfaulted}", details)
     if failed:
         return Verdict(FAIL, f"{len(failed)} failure(s) in fixed version: seeds {failed}", details)
     if stuck:
         return Verdict(UNRESOLVED, f"{len(stuck)} UNRESOLVED: seeds {stuck}", details)
     return Verdict(PASS, f"{pin['scenario']} seeds {first}-{last}: 0 failures, 0 UNRESOLVED", details)
+
+
+def fault_effects(ctx):
+    """Kill/restart faults were actually applied, and the application recovered."""
+    pin = ctx.pins["fault_effects"]
+    scenario, seed = pin["scenario"], pin["seed"]
+    (result,) = yield [default_job(scenario, seed)]
+    if (v := unresolved([result])):
+        return v
+    members = sorted({f.get("member") for f in result.faults})
+    unrestarted = [f for f in result.faults if not f.get("start_ns", 0) > f.get("stop_ns", 0)]
+    details = {"faults": result.faults, "result": result.result_line}
+    if not result.faults:
+        return Verdict(FAIL, f"{scenario} seed {seed}: no kill/restart was applied", details)
+    if unrestarted:
+        return Verdict(FAIL, f"{len(unrestarted)} killed member(s) were never restarted: {unrestarted}", details)
+    if result.status != PASS:
+        return Verdict(FAIL, f"application did not recover after {len(result.faults)} kill/restarts: "
+                       f"{result.detail}", details)
+    return Verdict(PASS, f"{scenario} seed {seed}: {len(result.faults)} kill/restarts of {', '.join(members)}, "
+                   f"then {result.result_line[:80]}", details)
 
 
 def cross_build(ctx):
@@ -218,6 +248,7 @@ def cross_build(ctx):
 
 
 SMOKE = [("1 replay", replay), ("2 stop-placement invariance", stop_placement),
-         ("3 race demo", race), ("4 checker negative control", checker_control)]
+         ("3 race demo", race), ("4 checker negative control", checker_control),
+         ("8 fault effects and recovery", fault_effects)]
 FULL = SMOKE + [("5 known failing seed", known_failing), ("6 fixed-version control", fixed_control),
                 ("7 cross-build equivalence", cross_build)]

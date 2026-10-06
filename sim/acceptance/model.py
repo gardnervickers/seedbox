@@ -60,6 +60,10 @@ class RunResult:
     retries: int = 0
     evidence: str = ""
     logs: dict = field(default_factory=dict)  # machine -> console text
+    # Injected faults the engine reports as applied (kill/restart history).
+    faults: list = field(default_factory=list)
+    # Earlier attempts of this job that did not count: [{evidence, detail}].
+    attempts: list = field(default_factory=list)
 
     @property
     def completed(self):
@@ -82,7 +86,9 @@ class RunResult:
             "host_seconds": self.host_seconds,
             "exits": self.exits,
             "retries": self.retries,
+            "faults": len(self.faults),
             "evidence": self.evidence,
+            "failed_attempts": self.attempts,
         }
 
 

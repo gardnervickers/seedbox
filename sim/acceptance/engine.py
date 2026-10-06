@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 import traceback
 
 from .checks import FAIL, IDENTITY_CHANGED, SKIPPED, UNRESOLVED, Verdict
+from .model import RunResult
 
 
 @dataclass
@@ -48,7 +49,11 @@ def execute(checks, ctx, launcher):
                 row.append(len(unique))
                 unique.append(job)
             refs.append(row)
-        results = launcher.run(unique) if unique else []
+        try:
+            results = launcher.run(unique) if unique else []
+        except Exception:
+            error = traceback.format_exc(limit=3)
+            results = [RunResult(job, UNRESOLVED, detail=f"launcher error: {error}") for job in unique]
         for job, result in zip(unique, results):
             if job.share and isinstance(cache.get(job.share), int):
                 cache[job.share] = result
@@ -59,7 +64,8 @@ def execute(checks, ctx, launcher):
     return outcomes
 
 
-EXIT_CODES = {"PASS": 0, "REGRESSION": 1, "UNRESOLVED": 2, "IDENTITY CHANGED": 3}
+# 1 is a regression only; argparse uses 2 for usage errors.
+EXIT_CODES = {"PASS": 0, "REGRESSION": 1, "UNRESOLVED": 3, "IDENTITY CHANGED": 4}
 
 
 def overall(outcomes):
