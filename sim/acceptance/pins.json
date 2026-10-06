@@ -1,5 +1,5 @@
 {
-  "build": "PR #18 (sim-speedups): ABI 2 kernel, corrected scheduler",
+  "build": "PR #18 (sim-speedups): ABI 2 kernel (artifacts-pv on the workstation), corrected scheduler",
   "scenarios": {
     "short-kill-3.5.2": "worlds/short-kill-3.5.2.json",
     "race": "worlds/race.json",

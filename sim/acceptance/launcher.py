@@ -131,7 +131,8 @@ class BatchLauncher:
             # clock bound error. A retry that still fails stays UNRESOLVED.
             for i, result in self._round(overshoots, retry=True).items():
                 result.retries = 1
-                result.attempts = results[i].attempts + [{"evidence": results[i].evidence, "detail": results[i].detail}]
+                first = {"evidence": results[i].evidence, "detail": results[i].detail}
+                result.attempts = results[i].attempts + [first] + result.attempts
                 if result.status == UNRESOLVED:
                     result.detail = f"after overshoot retry: {result.detail}"
                 results[i] = result
@@ -224,6 +225,19 @@ class BatchLauncher:
                  + " ".join(r.status for r in results.values()))
         return results
 
+    @staticmethod
+    def acknowledged(out, schedule):
+        """The VMM reports the kill schedule; a kill counts as applied only when
+        the member's guest acknowledged it on COM2 ("<name> stopped/started")."""
+        faults, seen = [], {}
+        for kill in sorted(schedule, key=lambda k: k["stop_ns"]):
+            member = kill["member"]
+            n = seen[member] = seen.get(member, 0) + 1
+            lines = read(out / f"{member}.mgmt").splitlines()
+            faults.append({**kill, "stopped": lines.count(f"{member} stopped") >= n,
+                           "restarted": lines.count(f"{member} started") >= n})
+        return faults
+
     def parse(self, job, out, batch_log):
         """Accept one completed attempt, mirroring campaign-result.py for any workload."""
         result = RunResult(job, UNRESOLVED, evidence=str(out))
@@ -279,5 +293,5 @@ class BatchLauncher:
         result.exits = {n: m.get("exits") for n, m in machines.items()}
         result.sim_seconds, result.host_seconds = report.get("sim_seconds"), host
         result.logs = {workload: text}
-        result.faults = report.get("kills", [])
+        result.faults = self.acknowledged(out, report.get("kills", []))
         return result

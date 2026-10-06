@@ -150,19 +150,24 @@ sim/acceptance.sh full --semantics-change                            # kernel/AB
   the current input identity. With no pinned identity, a moved witness is
   UNRESOLVED rather than a regression.
 - **6 Fixed-version control.** `kill-3.5.3` seeds 4000–4010 must give zero
-  failures and zero UNRESOLVED, and every run must have applied kill/restarts.
+  failures and zero UNRESOLVED, and every run must have at least one
+  acknowledged kill/restart.
 - **7 Cross-build equivalence.** This check runs only for a change declared
   performance-only. The pinned seeds of items 1 and 5 must give identical
   witnesses with the old VMM build and the new one. Without the declaration the
   check is reported as skipped.
-- **8 Fault effects and recovery.** The default `short-kill-3.5.2` run (shared
-  with items 1–2) must report applied kill/restarts, with every killed member
-  restarted, and then `RESULT pass`. Partition/heal checks will follow when
+- **8 Fault effects and recovery.** In the default `short-kill-3.5.2` run
+  (shared with items 1–2), at least one scheduled kill must be acknowledged by
+  the member's guest on COM2 (`nX stopped`, then `nX started` in `nX.mgmt`),
+  and the client must then report `RESULT pass`. The VMM's `kills` list is only
+  the seeded schedule, so it is not taken as evidence that a fault happened. Partition/heal checks will follow when
   reusable partition faults exist outside the one-VM fixture.
 
 Seeds, scenarios, settings and the pinned witness are in
 `sim/acceptance/pins.json`, pinned for PR #18's build (ABI 2 kernel, corrected
-scheduler).
+scheduler). The pinned input identity uses that ABI 2 kernel. If it is not
+`artifacts/bzImage`, pass its directory with `--artifacts`; otherwise item 5
+reports IDENTITY CHANGED.
 
 Runs go through `batch.sh`, so each one is a fresh process with fresh output
 under `runs/acceptance-<tier>-<time>-<pid>/`, and every batch holds the shared

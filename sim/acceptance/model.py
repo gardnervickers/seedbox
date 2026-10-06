@@ -60,7 +60,7 @@ class RunResult:
     retries: int = 0
     evidence: str = ""
     logs: dict = field(default_factory=dict)  # machine -> console text
-    # Injected faults the engine reports as applied (kill/restart history).
+    # Scheduled faults with whether the guest acknowledged each stop/restart.
     faults: list = field(default_factory=list)
     # Earlier attempts of this job that did not count: [{evidence, detail}].
     attempts: list = field(default_factory=list)
@@ -86,7 +86,9 @@ class RunResult:
             "host_seconds": self.host_seconds,
             "exits": self.exits,
             "retries": self.retries,
-            "faults": len(self.faults),
+            "faults": {"scheduled": len(self.faults),
+                       "stopped": sum(f["stopped"] for f in self.faults),
+                       "restarted": sum(f["restarted"] for f in self.faults)},
             "evidence": self.evidence,
             "failed_attempts": self.attempts,
         }

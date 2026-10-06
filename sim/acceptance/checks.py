@@ -78,18 +78,20 @@ def stop_placement(ctx):
     results = yield [default_job(scenario, seed)] + [Job(scenario, seed, performance=v) for v in variants]
     if (v := unresolved(results)):
         return v
-    base, details, failures = results[0], {}, []
+    base, details, failures, unexercised = results[0], {}, [], []
     for result in results[1:]:
         label = " ".join(f"{k}={v}" for k, v in result.job.performance)
-        if result.retries and dict(result.job.performance).get("margin"):
-            return Verdict(UNRESOLVED, f"{label} was not exercised: it completed only after an "
-                           f"overshoot retry at a larger margin ({result.attempts[-1]['detail']})")
         diffs = witness_differences(base, result)
         details[label] = {"differs": diffs, "retries": result.retries}
         if diffs:
             failures.append(f"{label} differs in {', '.join(diffs)}")
+        if result.retries and dict(result.job.performance).get("margin"):
+            unexercised.append(label)
     if failures:
         return Verdict(FAIL, "determinism bug: " + "; ".join(failures), details)
+    if unexercised:
+        return Verdict(UNRESOLVED, f"{', '.join(unexercised)} not exercised: completed only after an "
+                       "overshoot retry at a larger margin", details)
     return Verdict(PASS, f"{scenario} seed {seed}: identical witness under " + ", ".join(details), details)
 
 
@@ -192,15 +194,20 @@ def fixed_control(ctx):
     results = yield [Job(pin["scenario"], seed) for seed in range(first, last + 1)]
     failed = [r.job.seed for r in results if r.status == FAIL]
     stuck = [r.job.seed for r in results if r.status == UNRESOLVED]
-    unfaulted = [r.job.seed for r in results if r.completed and not r.faults]
+    unfaulted = [r.job.seed for r in results if r.completed and not restarted(r)]
     details = {"failed": failed, "unresolved": stuck, "unfaulted": unfaulted, "seeds": [first, last]}
     if unfaulted:
-        return Verdict(FAIL, f"no kill/restart was applied for seeds {unfaulted}", details)
+        return Verdict(FAIL, f"no acknowledged kill/restart for seeds {unfaulted}", details)
     if failed:
         return Verdict(FAIL, f"{len(failed)} failure(s) in fixed version: seeds {failed}", details)
     if stuck:
         return Verdict(UNRESOLVED, f"{len(stuck)} UNRESOLVED: seeds {stuck}", details)
     return Verdict(PASS, f"{pin['scenario']} seeds {first}-{last}: 0 failures, 0 UNRESOLVED", details)
+
+
+def restarted(result):
+    """Faults whose stop and restart the guest acknowledged."""
+    return [f for f in result.faults if f["stopped"] and f["restarted"]]
 
 
 def fault_effects(ctx):
@@ -210,18 +217,18 @@ def fault_effects(ctx):
     (result,) = yield [default_job(scenario, seed)]
     if (v := unresolved([result])):
         return v
-    members = sorted({f.get("member") for f in result.faults})
-    unrestarted = [f for f in result.faults if not f.get("start_ns", 0) > f.get("stop_ns", 0)]
+    done = restarted(result)
+    stopped = sum(f["stopped"] for f in result.faults)
+    members = sorted({f["member"] for f in done})
     details = {"faults": result.faults, "result": result.result_line}
-    if not result.faults:
-        return Verdict(FAIL, f"{scenario} seed {seed}: no kill/restart was applied", details)
-    if unrestarted:
-        return Verdict(FAIL, f"{len(unrestarted)} killed member(s) were never restarted: {unrestarted}", details)
+    if not done:
+        return Verdict(FAIL, f"{scenario} seed {seed}: no guest acknowledged a kill and restart "
+                       f"({len(result.faults)} scheduled, {stopped} stopped)", details)
     if result.status != PASS:
-        return Verdict(FAIL, f"application did not recover after {len(result.faults)} kill/restarts: "
+        return Verdict(FAIL, f"application did not recover after {len(done)} kill/restarts: "
                        f"{result.detail}", details)
-    return Verdict(PASS, f"{scenario} seed {seed}: {len(result.faults)} kill/restarts of {', '.join(members)}, "
-                   f"then {result.result_line[:80]}", details)
+    return Verdict(PASS, f"{scenario} seed {seed}: {len(done)} of {len(result.faults)} scheduled kill/restarts "
+                   f"acknowledged ({', '.join(members)}), then {result.result_line[:80]}", details)
 
 
 def cross_build(ctx):

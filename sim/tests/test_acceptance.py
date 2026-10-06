@@ -39,7 +39,8 @@ class FakeLauncher:
                                machine_witnesses={"n1": f"n1:{base}", "client": f"c:{base}"},
                                state_digests={"n1": f"d:{base}"} if job.witness == FULL_STATE else {},
                                host_seconds=1.0, sim_seconds=10.0,
-                               faults=[{"member": "n1", "stop_ns": 1, "start_ns": 2}] if "kill" in job.scenario else [])
+                               faults=[{"member": "n1", "stop_ns": 1, "start_ns": 2, "stopped": True, "restarted": True}]
+                               if "kill" in job.scenario else [])
             if job.scenario == "race":
                 lost = job.seed % 3
                 result.logs = {"n1": f"RACE mode=racy counter=9 expected=9 lost={lost}\n"
@@ -114,13 +115,29 @@ class CheckTests(unittest.TestCase):
                 result.retries, result.attempts = 1, [{"evidence": "x", "detail": "exit status 1: overshoot on n1"}]
         result = verdicts(FakeLauncher(retried), checks.SMOKE)[0]["2"]
         self.assertEqual(result.status, UNRESOLVED)
-        self.assertIn("margin=32768 was not exercised", result.summary)
+        self.assertIn("margin=32768 not exercised", result.summary)
+
+        def also_diverges(job, result, n):
+            retried(job, result, n)
+            if ("undo", "0") in job.performance:
+                result.world_witness = "skewed"
+        # A real determinism failure is never hidden behind an unexercised margin.
+        result = verdicts(FakeLauncher(also_diverges), checks.SMOKE)[0]["2"]
+        self.assertEqual(result.status, FAIL)
+        self.assertIn("undo=0 differs", result.summary)
 
     def test_fault_effects_need_applied_faults_and_recovery(self):
         def none(job, result, n):
             if job.scenario == "short-kill-3.5.2":
                 result.faults = []
-        self.assertIn("no kill/restart", verdicts(FakeLauncher(none), checks.SMOKE)[0]["8"].summary)
+        self.assertIn("no guest acknowledged", verdicts(FakeLauncher(none), checks.SMOKE)[0]["8"].summary)
+
+        def scheduled_only(job, result, n):
+            for fault in result.faults:
+                fault["restarted"] = False
+        result = verdicts(FakeLauncher(scheduled_only), checks.SMOKE)[0]["8"]
+        self.assertEqual(result.status, FAIL)
+        self.assertIn("1 scheduled, 1 stopped", result.summary)
 
         def broken(job, result, n):
             if job.scenario == "short-kill-3.5.2":
@@ -221,7 +238,7 @@ for i, seed in enumerate(seeds.split()):
     report = {"seed": int(seed), "outcome": "end_machine_exited", "host_seconds": 2.0, "sim_seconds": 10.0,
               "world_witness": f"w{seed}", "machines": [{"name": workload, "state": "Exited(0)", "witness": f"m{seed}",
               "exits": 5, "state_digest": "d" if "--digest" in extra else None}],
-              "kills": [{"member": "n1", "stop_ns": 1, "start_ns": 2}]}
+              "kills": [{"member": "n1", "stop_ns": 1, "start_ns": 2}, {"member": "n1", "stop_ns": 3, "start_ns": 4}]}
     console, status, err = "RESULT pass ok\n" if workload == "client" else "RACE mode=racy counter=1 expected=2 lost=1\n", 0, ""
     if mode == "clock" or mode == "overshoot_again" or (mode == "overshoot" and not retry):
         report, status = None, 1
@@ -235,6 +252,8 @@ for i, seed in enumerate(seeds.split()):
     pathlib.Path(f"{out}.err").write_text(err)
     pathlib.Path(f"{out}.status").write_text(f"{status}\n")
     (out / f"{workload}.console").write_text(console)
+    # Only the first scheduled kill lands before the run ends.
+    (out / "n1.mgmt").write_text("n1 stopped\nn1 started\n" + "n1 stopped\n")
 if mode == "restore_failed":
     sys.exit("batch: restoration failed; retained /tmp/seedbox-msr-x/saved.json")
 '''
@@ -311,6 +330,11 @@ class BatchLauncherTests(unittest.TestCase):
         (result,) = self.run_jobs([Job("kill", 8)], "lease")
         self.assertEqual(result.status, UNRESOLVED)
         self.assertIn("already owned", result.detail)
+
+    def test_faults_count_only_guest_acknowledgements(self):
+        (result,) = self.run_jobs([Job("kill", 7)])
+        self.assertEqual([(f["stopped"], f["restarted"]) for f in result.faults], [(True, True), (True, False)])
+        self.assertEqual(result.summary()["faults"], {"scheduled": 2, "stopped": 2, "restarted": 1})
 
     def test_checker_workload_without_a_result_is_unresolved(self):
         (result,) = self.run_jobs([Job("kill", 7)], "dial_error")
