@@ -1,0 +1,80 @@
+DIAG n1
+Filesystem                Size      Used Available Use% Mounted on
+tmpfs                   247.0M    244.3M      2.7M  99% /data
+tmpfs                   247.0M     16.0K    246.9M   0% /tmp
+MemTotal:         505780 kB
+MemFree:           88620 kB
+MemAvailable:      84584 kB
+Buffers:               0 kB
+Cached:           376504 kB
+SwapCached:            0 kB
+Active:            24436 kB
+Inactive:         379660 kB
+Active(anon):      24436 kB
+Inactive(anon):   379660 kB
+{"level":"panic","ts":"2026-01-01T00:00:01.098Z","caller":"etcdserver/raft.go:433","msg":"failed to create WAL","error":"no space left on device","stacktrace":"go.etcd.io/etcd/server/v3/etcdserver.startNode\n\t/tmp/etcd-release-3.5.2/etcd/release/etcd/server/etcdserver/raft.go:433\ngo.etcd.io/etcd/server/v3/etcdserver.NewServer\n\t/tmp/etcd-release-3.5.2/etcd/release/etcd/server/etcdserver/server.go:467\ngo.etcd.io/etcd/server/v3/embed.StartEtcd\n\t/tmp/etcd-release-3.5.2/etcd/release/etcd/server/embed/etcd.go:245\ngo.etcd.io/etcd/server/v3/etcdmain.startEtcd\n\t/tmp/etcd-release-3.5.2/etcd/release/etcd/server/etcdmain/etcd.go:227\ngo.etcd.io/etcd/server/v3/etcdmain.startEtcdOrProxyV2\n\t/tmp/etcd-release-3.5.2/etcd/release/etcd/server/etcdmain/etcd.go:134\ngo.etcd.io/etcd/server/v3/etcdmain.Main\n\t/tmp/etcd-release-3.5.2/etcd/release/etcd/server/etcdmain/main.go:40\nmain.main\n\t/tmp/etcd-release-3.5.2/etcd/release/etcd/server/main.go:32\nruntime.main\n\t/usr/local/google/home/siarkowicz/.gvm/gos/go1.16.3/src/runtime/proc.go:225"}
+panic: failed to create WAL
+
+goroutine 1 [running]:
+go.uber.org/zap/zapcore.(*CheckedEntry).Write(0xc00019e840, 0xc000426700, 0x1, 0x1)
+	/usr/local/google/home/siarkowicz/.gvm/pkgsets/go1.16.3/global/pkg/mod/go.uber.org/zap@v1.17.0/zapcore/entry.go:234 +0x58d
+go.uber.org/zap.(*Logger).Panic(0xc0003eae60, 0x1212d98, 0x14, 0xc000426700, 0x1, 0x1)
+	/usr/local/google/home/siarkowicz/.gvm/pkgsets/go1.16.3/global/pkg/mod/go.uber.org/zap@v1.17.0/logger.go:227 +0x85
+go.etcd.io/etcd/server/v3/etcdserver.startNode(0x7fff36f66e37, 0x2, 0x0, 0x0, 0x0, 0x0, 0xc000622630, 0x1, 0x1, 0xc000622ab0, ...)
+	/tmp/etcd-release-3.5.2/etcd/release/etcd/server/etcdserver/raft.go:433 +0x2c7
+
+goroutine 1 [running]:
+go.uber.org/zap/zapcore.(*CheckedEntry).Write(0xc00019e840, 0xc000426700, 0x1, 0x1)
+	/usr/local/google/home/siarkowicz/.gvm/pkgsets/go1.16.3/global/pkg/mod/go.uber.org/zap@v1.17.0/zapcore/entry.go:234 +0x58d
+go.uber.org/zap.(*Logger).Panic(0xc0003eae60, 0x1212d98, 0x14, 0xc000426700, 0x1, 0x1)
+	/usr/local/google/home/siarkowicz/.gvm/pkgsets/go1.16.3/global/pkg/mod/go.uber.org/zap@v1.17.0/logger.go:227 +0x85
+go.etcd.io/etcd/server/v3/etcdserver.startNode(0x7fff36f66e37, 0x2, 0x0, 0x0, 0x0, 0x0, 0xc000622630, 0x1, 0x1, 0xc000622ab0, ...)
+	/tmp/etcd-release-3.5.2/etcd/release/etcd/server/etcdserver/raft.go:433 +0x2c7
+go.etcd.io/etcd/server/v3/etcdserver.NewServer(0x7fff36f66e37, 0x2, 0x0, 0x0, 0x0, 0x0, 0xc000622630, 0x1, 0x1, 0xc000622ab0, ...)
+	/tmp/etcd-release-3.5.2/etcd/release/etcd/server/etcdserver/server.go:467 +0x46a8
+go.etcd.io/etcd/server/v3/embed.StartEtcd(0xc0003b0600, 0xc0003b0000, 0x0, 0x0)
+	/tmp/etcd-release-3.5.2/etcd/release/etcd/server/embed/etcd.go:245 +0xef8
+go.etcd.io/etcd/server/v3/etcdmain.startEtcd(0xc0003b0600, 0x12029aa, 0x3, 0x1203a01, 0x5)
+	/tmp/etcd-release-3.5.2/etcd/release/etcd/server/etcdmain/etcd.go:227 +0x32
+go.etcd.io/etcd/server/v3/etcdmain.startEtcdOrProxyV2(0xc0000b2000, 0x15, 0x16)
+	/tmp/etcd-release-3.5.2/etcd/release/etcd/server/etcdmain/etcd.go:134 +0x26ed
+go.etcd.io/etcd/server/v3/etcdmain.Main(0xc0000b2000, 0x15, 0x16)
+	/tmp/etcd-release-3.5.2/etcd/release/etcd/server/etcdmain/main.go:40 +0x11f
+main.main()
+	/tmp/etcd-release-3.5.2/etcd/release/etcd/server/main.go:32 +0x45
+PID   USER     TIME  COMMAND
+    1 0         0:00 {init} /bin/busybox sh /init
+    2 0         0:00 [kthreadd]
+    3 0         0:00 [pool_workqueue_]
+    4 0         0:00 [kworker/R-slub_]
+    5 0         0:00 [kworker/R-netns]
+    6 0         0:00 [kworker/0:0-eve]
+    7 0         0:00 [kworker/0:0H]
+    8 0         0:00 [kworker/0:1-eve]
+    9 0         0:00 [kworker/u4:0+ev]
+   10 0         0:00 [kworker/R-mm_pe]
+   11 0         0:00 [ksoftirqd/0]
+   12 0         0:00 [kdevtmpfs]
+   13 0         0:00 [kworker/R-inet_]
+   14 0         0:00 [oom_reaper]
+   15 0         0:00 [kworker/R-write]
+   16 0         0:00 [kworker/R-kbloc]
+   17 0         0:00 [kswapd0]
+   18 0         0:00 [kworker/u4:1-ev]
+   19 0         0:00 [kworker/u4:2-ev]
+   75 0         0:00 /bin/etcd --name n2 --data-dir /data/n2 --listen-client-ur
+   76 0         0:00 /bin/etcd --name n3 --data-dir /data/n3 --listen-client-ur
+   77 0         0:00 {init} /bin/busybox sh /init
+  104 0         0:00 /bin/client --endpoints 10.0.1.1:2379,10.0.2.1:2379,10.0.3
+  114 0         0:00 {init} /bin/busybox sh /init
+  119 0         0:00 ps
+  with environment:
+    HOME=/
+    TERM=linux
+    acpi=off
+eth0: renamed from svc1
+eth0: renamed from svc2
+eth0: renamed from svc3
+eth0: renamed from svc4
+clocksource: tsc: mask: 0xffffffffffffffff max_cycles: 0x1cd42e4dffb, max_idle_ns: 881590591483 ns
+clocksource: Switched to clocksource tsc

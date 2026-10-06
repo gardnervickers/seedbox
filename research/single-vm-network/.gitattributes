@@ -1,0 +1,2 @@
+# Preserve raw UART bytes and tool output, including CRLF and padded fields.
+raw/** -text -whitespace

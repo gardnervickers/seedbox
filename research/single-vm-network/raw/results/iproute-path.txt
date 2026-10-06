@@ -1,0 +1,2 @@
+/nix/store/8pl6axc15sn1b7gjk7i9a9fzrz3xhnay-iproute2-7.1.0-man
+/nix/store/y9qysn0swmsr7mcknww5f40vch93i4cv-iproute2-7.1.0
