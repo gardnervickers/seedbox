@@ -21,7 +21,7 @@ if mode == "setup_failure":
 for i, seed in enumerate(seeds.split()):
     out = root / f"runs/{prefix}-s{seed}-r{i}"
     out.mkdir(parents=True)
-    report = {"seed": int(seed), "outcome": "end_machine_exited", "host_seconds": 1.5}
+    report = {"seed": int(seed), "outcome": "end_machine_exited", "host_seconds": 1.5, "machines": [{"name":"client", "state":"Exited(0)"}]}
     console = "RESULT pass completed\n"
     status, error = 0, ""
     if mode in ("failed", "overshoot", "retry_failed") and not retry:
@@ -39,6 +39,15 @@ for i, seed in enumerate(seeds.split()):
         status = None
     if mode == "consistency_fail":
         console = "RESULT fail contradiction\n"
+        report["machines"][0]["state"] = "Exited(1)"
+    if mode == "fail_exit_zero":
+        console = "RESULT fail contradiction\n"
+    if mode == "pass_exit_one":
+        report["machines"][0]["state"] = "Exited(1)"
+    if mode == "result_prefix":
+        console = "RESULT passing incorrectly\n"
+    if mode == "nonterminal":
+        report["outcome"] = "duration_reached"
     pathlib.Path(str(out) + ".json").write_text(json.dumps(report) if report else "")
     pathlib.Path(str(out) + ".err").write_text(error)
     if status is not None:
@@ -105,7 +114,7 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
 
     def test_incomplete_or_failed_attempt_cannot_accept_its_result(self):
-        for mode in ("incomplete_json", "failed_status", "wrong_seed", "missing_status"):
+        for mode in ("incomplete_json", "failed_status", "wrong_seed", "missing_status", "fail_exit_zero", "pass_exit_one", "result_prefix", "nonterminal"):
             with self.subTest(mode=mode):
                 result, log, _ = self.run_campaign(mode)
                 self.assertEqual(result.returncode, 1)

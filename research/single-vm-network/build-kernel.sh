@@ -16,13 +16,19 @@ for f in pathlib.Path(root).rglob('*.cmd'):
  if s!=t:f.write_text(t)
 p=pathlib.Path(root)/'Makefile'; s=p.read_text(); p.write_text(s.replace(old,new))
 PY
-for option in NET_NS VETH NET_SCHED NET_SCH_NETEM NET_SCH_INGRESS NET_CLS NET_CLS_MATCHALL NET_CLS_ACT NET_ACT_GACT; do
- "$src/scripts/config" --file "$out/.config" --enable "$option"
-done
+# The cached research build uses the ordinary guest feature contract.
+while read -r state option; do
+ case "$state" in
+  y) "$src/scripts/config" --file "$out/.config" --enable "$option" ;;
+  n) "$src/scripts/config" --file "$out/.config" --disable "$option" ;;
+ esac
+done < sim/kernel/config.options
 make -s -C "$src" O="$out" olddefconfig
-for option in NET_NS VETH NET_SCHED NET_SCH_NETEM NET_SCH_INGRESS NET_CLS_MATCHALL NET_CLS_ACT NET_ACT_GACT; do
- rg -q "^CONFIG_$option=y" "$out/.config" || { echo "$option not enabled" >&2; exit 1; }
-done
+while read -r state option; do
+ if [ "$state" = y ]; then
+  rg -q "^CONFIG_$option=y" "$out/.config" || { echo "$option not enabled" >&2; exit 1; }
+ fi
+done < sim/kernel/config.options
 export KBUILD_BUILD_USER=seedbox KBUILD_BUILD_HOST=seedbox KBUILD_BUILD_TIMESTAMP='Thu Jan 1 00:00:00 UTC 1970' SOURCE_DATE_EPOCH=0
 make -s -C "$src" O="$out" -j1 bzImage
 cp "$out/arch/x86/boot/bzImage" artifacts/bzImage

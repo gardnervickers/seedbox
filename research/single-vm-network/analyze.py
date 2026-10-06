@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Acceptance is guest semantic output, independently of VMM process status."""
+"""Historical 010d0e6 raw acceptance only; current fixtures use sim/campaign-result.py."""
 import argparse,hashlib,json,re,statistics
 from pathlib import Path
 ap=argparse.ArgumentParser();ap.add_argument('results',type=Path);a=ap.parse_args()

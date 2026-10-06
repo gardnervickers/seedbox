@@ -1,0 +1,25 @@
+test_cpu_ranges (test_batch.BatchTests.test_cpu_ranges) ... ok
+test_interruption_reaps_every_concurrent_child_before_restore (test_batch.BatchTests.test_interruption_reaps_every_concurrent_child_before_restore) ... ok
+test_invalid_timeout_is_rejected_before_mutation (test_batch.BatchTests.test_invalid_timeout_is_rejected_before_mutation) ... ok
+test_orphan_descendant_is_reaped_before_return (test_batch.BatchTests.test_orphan_descendant_is_reaped_before_return) ... ok
+test_overlap_lock_fails_and_releases_acquired_locks (test_batch.BatchTests.test_overlap_lock_fails_and_releases_acquired_locks) ... ok
+test_timeout_reaps_before_restore_and_preserves_cpu_locks (test_batch.BatchTests.test_timeout_reaps_before_restore_and_preserves_cpu_locks) ... ok
+test_consistency_failure_remains_a_completed_campaign_result (test_campaign.CampaignTests.test_consistency_failure_remains_a_completed_campaign_result) ... ok
+test_failed_retry_is_unresolved (test_campaign.CampaignTests.test_failed_retry_is_unresolved) ... ok
+test_incomplete_or_failed_attempt_cannot_accept_its_result (test_campaign.CampaignTests.test_incomplete_or_failed_attempt_cannot_accept_its_result) ... ok
+test_overshoot_retries_with_separate_fresh_output (test_campaign.CampaignTests.test_overshoot_retries_with_separate_fresh_output) ... ok
+test_reused_failed_outputs_cannot_accept_old_console (test_campaign.CampaignTests.test_reused_failed_outputs_cannot_accept_old_console) ... ok
+test_setup_failure_aborts (test_campaign.CampaignTests.test_setup_failure_aborts) ... ok
+test_success_uses_a_fresh_attempt (test_campaign.CampaignTests.test_success_uses_a_fresh_attempt) ... ok
+test_exclusive_snapshot_prevents_any_write (test_msr54.MsrTests.test_exclusive_snapshot_prevents_any_write) ... ok
+test_partial_set_failure_rolls_back_every_cpu (test_msr54.MsrTests.test_partial_set_failure_rolls_back_every_cpu) ... ok
+test_restore_attempts_both_cpus_retains_snapshot_on_error (test_msr54.MsrTests.test_restore_attempts_both_cpus_retains_snapshot_on_error) ... ok
+test_restore_removes_only_verified_snapshot (test_msr54.MsrTests.test_restore_removes_only_verified_snapshot) ... ok
+test_restore_requires_exact_readback (test_msr54.MsrTests.test_restore_requires_exact_readback) ... ok
+
+----------------------------------------------------------------------
+Ran 18 tests in 1.034s
+
+OK
+restored {14: '0x7', 30: '0x9'}
+restored {14: '0x7', 30: '0x7'}

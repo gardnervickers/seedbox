@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject misleading pass markers on process, world or guest exit failures."""
+"""Historical 010d0e6 raw analyzer controls; current acceptance tests live in sim/tests."""
 import json,subprocess,sys,tempfile,unittest
 from pathlib import Path
 here=Path(__file__).resolve().parent
