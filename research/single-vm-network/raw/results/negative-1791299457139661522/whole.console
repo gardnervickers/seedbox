@@ -1,5 +1,0 @@
-SEEDBOX_PHASE client_start uptime=1.55 1.49
-LOAD acked=128 failed=0 elapsed=1.073277819s
-PLANT missing acknowledgment k/99/000000
-RESULT fail acked=129 failed=0 member 10.0.1.1:2379 missing 1 acknowledged writes (first k/99/000000@0) rev=129 hashes=map[10.0.1.1:2379:826872655]
-INIT exit=1

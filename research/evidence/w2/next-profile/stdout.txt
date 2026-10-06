@@ -1,6 +1,0 @@
-{"status":"PASS","scope":"off-host synthetic clock/IRQ contract smoke","hardware_or_guest_qualification":false,"native_factor_selected":false,"clock_page_bytes":128,"retired_policy":"1000ns per clock read","host_kernel_pin":"6.18.54","microcode_pin":"0xa20102e"}
-{"status":"PASS","scope":"C clock-page ABI/read smoke","hardware_or_guest_qualification":false}
-TICKLESS_PROFILE_MATCH (not proof of one-shot device/idle operation)
-LEGACY_HZ250_PROFILE_REJECTED
-rustc 1.98.1 (48a229cea 2026-09-01) (built from a source tarball)
-clang version 21.1.8

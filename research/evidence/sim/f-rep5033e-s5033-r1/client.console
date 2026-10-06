@@ -1,3 +1,0 @@
-SEEDBOX_PHASE client_start guest_ns=12818552
-LOAD acked=66081 failed=133 elapsed=1m0.004186615s
-RESULT fail acked=66081 failed=133 cluster did not settle: revisions differ: map[10.0.0.1:2379:66118 10.0.0.2:2379:66119 10.0.0.3:2379:66119] | 10.0.0.1:2379 rev=66118 missing=1 first=k/02/004431@rev34275; 10.0.0.2:2379 rev=66119 missing=0; 10.0.0.3:2379 rev=66119 missing=0

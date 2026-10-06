@@ -1,3 +1,0 @@
-   Compiling seedbox-witness v0.2.0 (/private/tmp/seedbox-round-1.S74xJ4/determinism)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.37s
-     Running `/private/tmp/seedbox-round-1.S74xJ4/determinism/target/debug/seedbox-witness suite /private/tmp/seedbox-round-1.S74xJ4/evidence/w3/precise-landing-v2`

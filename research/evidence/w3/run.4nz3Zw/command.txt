@@ -1,1 +1,0 @@
-nix develop /private/tmp/seedbox-round-1.S74xJ4/env --command cargo clippy --offline --manifest-path /private/tmp/seedbox-round-1.S74xJ4/determinism/Cargo.toml -j 8 --all-targets -- -D warnings 

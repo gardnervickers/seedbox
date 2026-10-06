@@ -1,1 +1,0 @@
-{"guard_receipt": "/home/gvickers/seedbox-research/w5a-round-1/evidence/w5a/cost-exploratory-margin-v1-plain-100000-2000-count_only.json", "guard_errors": [], "child_exit": 0, "timed_out": false}

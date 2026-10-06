@@ -1,1 +1,0 @@
-nix develop /private/tmp/seedbox-round-1.S74xJ4/env --command cargo run --offline --manifest-path /private/tmp/seedbox-round-1.S74xJ4/determinism/Cargo.toml -j 8 -- suite /private/tmp/seedbox-round-1.S74xJ4/evidence/w3/precise-landing-v2 

@@ -1,7 +1,0 @@
-TCG_ENTROPY 60c8a8001a801fb00a4d4fcd5ea45c1bfa192c74f4925863c91153d165d0964a
-SEEDBOX_PHASE client_start guest_ns=3514922231
-NETWORK pair-partition n1 n2
-NETWORK pair-heal n1 n2
-LOAD acked=339 failed=1 elapsed=3.007570882s
-RESULT pass acked=339 failed=1 rev=340 hash=55b972a2
-INIT exit=0

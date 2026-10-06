@@ -1,1 +1,0 @@
-bash research/intel-probe/validate.sh prepare 

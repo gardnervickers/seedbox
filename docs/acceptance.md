@@ -139,3 +139,39 @@ existing etcd checker's `go test ./...` passed in its new canonical directory.
 The two rootful OCI tests had passed separately earlier; they remain explicitly
 ignored in the ordinary portable test invocation. The legacy engine smoke/full
 fault matrix was not rerun as part of this Compose acceptance.
+
+## Local Mac TCG feasibility
+
+The retained [experimental tool](../tools/mac-tcg/README.md) was measured on
+Apple M4 Max / Mac16,6, macOS 27.0.1 / 26A434, QEMU 11.1.1 and stock Linux
+6.18.54. The input-control probe had nine successful fresh processes over
+three seeds, matching console and ordered observations within each seed;
+median boot-to-exit time was 2.992 seconds. Omitted entropy, omitted icount,
+planted failure and wall-time controls exposed their intended failures.
+These are observation hashes, not an execution witness or full-state check.
+
+The single-kernel etcd service fixture demonstrated namespace packet controls,
+live directed partition/heal, process stop/restart, real recovery checks and
+a planted missing-write failure. Five fresh seed-1009 fault runs matched
+console, management logs and the historical scoped witness; median wall time
+was 14.643 seconds. Their decoder records remain provisional. Two fresh runs
+with the corrected decoder subsequently matched the original observations
+and canonical witness; the rest of the historical matrix was not requalified.
+The 39 service-phase attempts, including failures, used 573.504 QEMU seconds
+under the original 600-second budget. This is feasibility evidence, not a
+bug-discovery-rate comparison or qualification of a production Mac backend.
+
+The corrected plugin hashes selected instruction dispatches and architectural
+discontinuities up to explicit guest completion (`seedbox.tcg.boundaries.v2`).
+It does not cover all instructions, registers, RAM or device state and is not
+comparable to KVM witnesses. Shared-kernel clock/storage/failure limitations,
+manual cached-input preparation and untested cross-host binary reproducibility
+remain explicit. Exact executed sources, receipts, failed attempts and review
+fixes are in the
+[historical service report](https://github.com/gardnervickers/seedbox/blob/788fc4376b7e2cc96d1bc51ed2ae3d4635d16abd/research/mac-tcg/SERVICE_REPORT.md).
+
+Historical single-VM networking measurements are likewise preserved in
+[their report](https://github.com/gardnervickers/seedbox/blob/788fc4376b7e2cc96d1bc51ed2ae3d4635d16abd/research/single-vm-network/REPORT.md).
+The 4.830-second versus 27.310-second medians (5.65x, 128 successful writes,
+two repeats per layout) used the older ABI1 backend. They do not establish
+the current PV/undo advantage or equal bug-finding coverage; #10 remains open.

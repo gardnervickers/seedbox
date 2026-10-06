@@ -1,2 +1,0 @@
-{"error":"PIO completion-only reentry"}
-{"guard_receipt": "/tmp/seedbox-round-1.S74xJ4/evidence/w5a/preempt-enabled-idle-5-exits-2000-500-correct-1791248642663278581.json", "guard_errors": [], "child_exit": 1, "timed_out": false}

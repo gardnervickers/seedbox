@@ -1,9 +1,0 @@
-    Checking seedbox-world v0.1.0 (/private/tmp/seedbox-round-1.S74xJ4/world)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.76s
-   Compiling seedbox-world v0.1.0 (/private/tmp/seedbox-round-1.S74xJ4/world)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.07s
-     Running unittests src/lib.rs (/private/tmp/seedbox-round-1.S74xJ4/world/target/debug/deps/seedbox_world-69462316a0e68e90)
-     Running unittests src/main.rs (/private/tmp/seedbox-round-1.S74xJ4/world/target/debug/deps/seedbox_world-83972478f3227f06)
-   Doc-tests seedbox_world
-   Compiling seedbox-world v0.1.0 (/private/tmp/seedbox-round-1.S74xJ4/world)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.32s
