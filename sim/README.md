@@ -15,6 +15,7 @@ interrupt timing.
 | `worlds/` | World configs: machines, network, scenario |
 | `batch.sh`, `campaign.sh` | Run seeds in parallel, one pinned core per world |
 | `msr54.py` | Sets/clears the AMD Zen counter workaround (see below) |
+| `acceptance.sh`, `acceptance/` | Acceptance suite and its pinned seeds (see below) |
 
 ## How execution is controlled
 
@@ -63,6 +64,14 @@ On the workstation, inside `nix develop`:
 (cd vmm && cargo build --release)
 ```
 
+The acceptance suite also needs `cluster-3.5.3.cpio` (the same command with
+etcd v3.5.3) and the race demo:
+
+```sh
+"$SEEDBOX_STATIC_CC" -O2 -static -pthread -o ../artifacts/race guest/race.c
+./guest/build-initramfs.sh ../artifacts/race.cpio guest/race.init ../artifacts/race:bin/race
+```
+
 From `~/seedbox-sim`:
 
 ```sh
@@ -97,6 +106,111 @@ Deterministic clock advances (timer-port I/O charges and guest time reads)
 must also fit in the hard stop. Crossing it fails with `clock bound exceeded`;
 no device I/O cost is clamped away, and a larger PMU margin does not fix or
 retry this error.
+
+## Acceptance suite
+
+`sim/acceptance.sh TIER` runs the checks from
+[issue #4](https://github.com/gardnervickers/seedbox/issues/4) in one command,
+inside `nix develop ./sim`. Tiers are cumulative: smoke runs portable first and
+stops if it fails, and full runs smoke.
+
+| Tier | When | Checks | Default cores |
+| --- | --- | --- | --- |
+| `portable` | Every change, any host | `bash -n` on scripts; runner and suite unit tests; VMM `cargo test` (Linux); `sim/seedbox` tests (if present) | none |
+| `smoke` | Every VMM/kernel change | 1 replay, 2 stop-placement invariance, 3 race demo, 4 checker negative control, 8 fault effects | `--cpus 2-7` |
+| `full` | Before merging changes to execution semantics, kernel or runner | smoke plus 5 known failing seed, 6 fixed-version control, 7 cross-build equivalence | `--cpus 2-12` |
+
+```sh
+sim/acceptance.sh smoke
+sim/acceptance.sh full --performance-only /path/to/old/seedbox-vmm   # also runs item 7
+sim/acceptance.sh full --semantics-change                            # kernel/ABI or semantics changed
+```
+
+- **1 Replay.** Runs `short-kill-3.5.2` (10 s load) twice as fresh processes,
+  then twice more with `--digest`. All witnesses must match: the world witness,
+  every per-machine witness and, in the digest pair, every RAM/register digest.
+  The report names both comparisons.
+- **2 Stop-placement invariance.** The same seed with `SEEDBOX_UNDO=0`,
+  `SEEDBOX_UNDO=16` and `SEEDBOX_MARGIN=32768` must give the default run's
+  witnesses. Any difference is reported as a determinism bug. If the pinned
+  margin completes only after an overshoot retry at a larger margin, the variant
+  was not exercised and the check is UNRESOLVED.
+- **3 Race demo.** Seeds of `race` must give at least two different lost-update
+  counts, and the atomic control must never lose an update. The first failing
+  seed is replayed in a fresh process and must match.
+- **4 Checker negative control.** `sanity` must end in `RESULT fail` with client
+  exit 1. Any other outcome fails the suite.
+- **5 Known failing seed.** `kill-3.5.2` seed 4063 must give `RESULT fail` with
+  the pinned world witness in 5 fresh processes. If the witness or outcome
+  changes, the suite reports `IDENTITY CHANGED` in two cases: the kernel,
+  initrd or world hashes differ from the pinned identity, or
+  `--semantics-change` was passed. Otherwise it reports a regression. After a
+  fresh hunt, record the new seed with
+  `sim/acceptance.sh pin --seed S --witness W --build "..."`. This also records
+  the current input identity. With no pinned identity, a moved witness is
+  UNRESOLVED rather than a regression.
+- **6 Fixed-version control.** `kill-3.5.3` seeds 4000–4010 must give zero
+  failures and zero UNRESOLVED, and every run must have at least one
+  acknowledged kill/restart.
+- **7 Cross-build equivalence.** This check runs only for a change declared
+  performance-only. The pinned seeds of items 1 and 5 must give identical
+  witnesses with the old VMM build and the new one. Without the declaration the
+  check is reported as skipped.
+- **8 Fault effects and recovery.** In the default `short-kill-3.5.2` run
+  (shared with items 1–2), at least one scheduled kill must be acknowledged by
+  the member's guest on COM2 (`nX stopped`, then `nX started` in `nX.mgmt`),
+  and the client must then report `RESULT pass`. The VMM's `kills` list is only
+  the seeded schedule, so it is not taken as evidence that a fault happened. Partition/heal checks will follow when
+  reusable partition faults exist outside the one-VM fixture.
+
+Seeds, scenarios, settings and the pinned witness are in
+`sim/acceptance/pins.json`, pinned for PR #18's build (ABI 2 kernel, corrected
+scheduler). The pinned input identity uses that ABI 2 kernel. If it is not
+`artifacts/bzImage`, pass its directory with `--artifacts`; otherwise item 5
+reports IDENTITY CHANGED.
+
+Runs go through `batch.sh`, so each one is a fresh process with fresh output
+under `runs/acceptance-<tier>-<time>-<pid>/`, and every batch holds the shared
+per-core lease. Runs with the same settings share one batch. Batches run
+concurrently on disjoint core ranges whose SMT siblings are also disjoint. If a
+core is leased elsewhere, the affected runs are UNRESOLVED (`--lease-wait S`
+waits instead). Result acceptance follows `campaign.sh`:
+
+- A run counts only with process status 0 and valid terminal JSON for its
+  seed. A `client` workload must also print exactly one `RESULT pass|fail` line
+  that agrees with its exit status 0/1. Other workloads, such as the race demo,
+  are judged by their exit status.
+- If `batch.sh` itself fails (for example an MSR restore failure), none of its
+  runs are accepted.
+- Overshoots and soft overshoots are retried once with margin 98304. A retry
+  that still fails is UNRESOLVED.
+- `clock bound exceeded` is never retried.
+- `SEEDBOX_UNDO`/`SEEDBOX_MARGIN` from the caller's environment are ignored, so
+  default runs really use the defaults.
+
+`--artifacts DIR` takes the kernel and initrds by file name from another
+directory, such as a newly built ABI kernel.
+
+The report (`report.json` in the run directory) records seeds, input hashes
+(kernel, initrds, world JSON, VMM builds), simulated and host seconds,
+per-machine exit counts, applied faults, retries, failed attempts with their
+evidence, evidence paths and per-check host time. No performance threshold is
+applied. The exit status is 0 for PASS, 1 for REGRESSION, 3 for UNRESOLVED
+(infrastructure, lease, missing inputs or an incomplete run) and 4 for IDENTITY
+CHANGED. 2 is left to usage errors.
+
+Checks never see world files, environment variables or cores. They yield
+runner-neutral jobs: a scenario, a seed, a witness mode (`exits` or
+`full_state`), performance-only settings, and an optional alternative engine.
+They judge normalized results. Only `acceptance/launcher.py` knows about
+`batch.sh`. The orchestration API from PR #17 is a Rust library, so Python
+cannot call it directly. Once its `seedbox run`/`replay` commands exist, a
+second launcher can run each job through them and read the results with
+`seedbox inspect --json`. It would map the same fields to a simulation config,
+`WitnessMode`, performance parameters and cross-engine execution. When the Rust
+path becomes the main way to run simulations, the plan is to port the checks to
+Rust integration tests over `Orchestrator::run`/`replay`. They are pure
+comparisons over jobs and results, and `acceptance/pins.json` carries over.
 
 ## One-VM network fixture
 
