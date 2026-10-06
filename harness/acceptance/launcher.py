@@ -1,40 +1,23 @@
-"""Runs acceptance jobs through harness/batch.sh, with campaign.sh's result rules.
-
-Each job is one fresh VMM process with fresh output under
-runs/<suite>/. Jobs that share a scenario, witness mode, performance settings
-and engine go into one batch.sh invocation; batches run concurrently on
-disjoint core ranges (and disjoint SMT siblings) taken from `cpus`. batch.sh
-holds the shared per-core lease for every batch, so the suite cannot collide
-with campaigns or other agents.
-"""
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+"""Host acceptance adapter over the public seedbox run/replay/inspect commands."""
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
+import queue
 import re
 import subprocess
+import threading
 import time
 
-from .model import EXITS, FAIL, FULL_STATE, PASS, UNRESOLVED, RunResult
+from .model import FAIL, FULL_STATE, PASS, UNRESOLVED, RunResult
 
-# Performance-only job settings and the variables batch.sh forwards for them.
-SETTINGS = {"undo": "SEEDBOX_UNDO", "margin": "SEEDBOX_MARGIN"}
-# Same margin as campaign.sh's overshoot retry.
-RETRY_MARGIN = "98304"
-LEASE_BUSY = "already owned"
-# A workload with this name runs a checker and must print one RESULT line
-# (the campaign.sh / campaign-result.py convention).
-CHECKER = "client"
+RUN = re.compile(r"^(?:PASS|FAIL|ERROR|TIMEOUT|INCOMPLETE): (.+)$", re.M)
 
 
 def sha256(path):
-    digest = hashlib.sha256()
     with open(path, "rb") as stream:
-        for block in iter(lambda: stream.read(1 << 20), b""):
-            digest.update(block)
-    return digest.hexdigest()
+        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def cpu_list(value):
@@ -42,6 +25,8 @@ def cpu_list(value):
     for item in value.split(","):
         low, _, high = item.partition("-")
         cpus += range(int(low), int(high or low) + 1)
+    if not cpus or min(cpus) < 0:
+        raise ValueError("select at least one nonnegative CPU")
     return sorted(set(cpus))
 
 
@@ -50,271 +35,206 @@ def sysfs_siblings(cpu):
     return set(cpu_list(path.read_text().strip())) if path.exists() else {cpu}
 
 
-def read(path):
-    try:
-        return Path(path).read_text(errors="replace")
-    except OSError:
-        return ""
+class CliLauncher:
+    def __init__(self, seedbox, scenarios, cpus, out, engines, kernel, busybox,
+                 lease_wait=0, log=print, prefix=("sudo", "-n"), siblings=sysfs_siblings):
+        self.seedbox, self.scenarios = str(Path(seedbox).resolve()), scenarios
+        self.out, self.engines = Path(out), engines
+        self.kernel, self.busybox = str(kernel), str(busybox)
+        self.lease_wait, self.log, self.prefix = lease_wait, log, list(prefix)
+        self.state = self.out / "state"
+        self.commands = self.out / "commands"
+        self.commands.mkdir(parents=True)
+        self.cpus = queue.Queue()
+        protected = set()
+        for cpu in cpus:
+            family = siblings(cpu)
+            if not family & protected:
+                self.cpus.put(cpu)
+                protected.update(family)
+        self.width = self.cpus.qsize()
+        if not self.width:
+            raise ValueError("no disjoint CPU cores selected")
+        self.references = {}
+        self.lock = threading.Lock()
+        self.sequence = 0
+        self.children = set()
+        self.cancelled = False
 
-
-def tail(path, lines=3):
-    return " | ".join(read(path).strip().splitlines()[-lines:])[:300]
-
-
-class BatchLauncher:
-    def __init__(self, sim, root, scenarios, cpus, out, engines, artifacts=None,
-                 timeout=1800, lease_wait=0, siblings=sysfs_siblings, log=print):
-        self.sim, self.root, self.out = Path(sim), Path(root).resolve(), Path(out).resolve()
-        self.scenarios, self.cpus, self.engines = scenarios, sorted(cpus), engines
-        self.artifacts = Path(artifacts).resolve() if artifacts else None
-        self.timeout, self.lease_wait, self.log = timeout, lease_wait, log
-        self.siblings = {cpu: siblings(cpu) for cpu in self.cpus}
-        self.prefix = self.out.relative_to(self.root / "runs")
-        self.batches = 0
-        self._worlds = {}
-
-    # Inputs -----------------------------------------------------------------
-
-    def _source(self, scenario):
-        return self.sim / self.scenarios[scenario]
-
-    def _resolve(self, scenario):
-        """World config plus absolute kernel/initrd paths (optionally from --artifacts)."""
-        source = self._source(scenario)
-        world = json.loads(source.read_text())
-        def place(rel):
-            path = source.parent / rel
-            return str(self.artifacts / path.name if self.artifacts else path.resolve())
-        world["kernel"] = place(world["kernel"])
-        for machine in world["machines"]:
-            machine["initrd"] = place(machine["initrd"])
-        return world
-
-    def world(self, scenario):
-        if scenario not in self._worlds:
-            path = self.out / "worlds" / f"{scenario}.json"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(self._resolve(scenario), indent=2))
-            self._worlds[scenario] = path
-        return self._worlds[scenario]
-
-    def identity(self, scenario):
-        """Hashes of the inputs that define run identity (the VMM is recorded separately)."""
-        world = self._resolve(scenario)
-        ids = {"world": sha256(self._source(scenario)), "kernel": sha256(world["kernel"])}
-        for path in sorted({m["initrd"] for m in world["machines"]}):
-            ids[f"initrd:{Path(path).name}"] = sha256(path)
-        return ids
-
-    def engine_hashes(self):
-        return {name or "candidate": sha256(path) for name, path in self.engines.items()}
-
-    def missing_inputs(self, scenarios):
-        missing = [str(path) for path in self.engines.values() if not Path(path).is_file()]
-        for scenario in scenarios:
-            if not self._source(scenario).is_file():
-                missing.append(str(self._source(scenario)))
-                continue
-            world = self._resolve(scenario)
-            missing += [p for p in [world["kernel"], *(m["initrd"] for m in world["machines"])]
-                        if not Path(p).is_file()]
-        return sorted(set(missing))
-
-    # Execution ----------------------------------------------------------------
+    def _command(self, arguments):
+        # Only paths are inherited; ambient execution settings must not affect a job.
+        env = {k: v for k, v in os.environ.items() if not k.startswith("SEEDBOX_")}
+        with self.lock:
+            if self.cancelled:
+                raise RuntimeError("acceptance cancelled")
+            self.sequence += 1
+            stem = self.commands / f"{self.sequence:03}"
+            command = self.prefix + [self.seedbox, *arguments]
+            stem.with_suffix(".command.json").write_text(json.dumps(command) + "\n")
+            stdout = stem.with_suffix(".stdout").open("w")
+            stderr = stem.with_suffix(".stderr").open("w")
+            try:
+                child = subprocess.Popen(command, stdout=stdout, stderr=stderr, env=env)
+            except BaseException:
+                stdout.close()
+                stderr.close()
+                raise
+            self.children.add(child)
+        try:
+            code = child.wait()
+        finally:
+            stdout.close()
+            stderr.close()
+            with self.lock:
+                self.children.remove(child)
+        return code, stem.with_suffix(".stdout").read_text(), stem.with_suffix(".stderr").read_text()
 
     def run(self, jobs):
-        results = self._round(list(enumerate(jobs)), retry=False)
-        overshoots = [(i, job) for i, job in enumerate(jobs)
-                      if results[i].status == UNRESOLVED and "overshoot" in read(f"{results[i].evidence}.err")]
-        if overshoots:
-            # campaign.sh: retry overshoots once with a larger margin; never a
-            # clock bound error. A retry that still fails stays UNRESOLVED.
-            for i, result in self._round(overshoots, retry=True).items():
-                result.retries = 1
-                first = {"evidence": results[i].evidence, "detail": results[i].detail}
-                result.attempts = results[i].attempts + [first] + result.attempts
-                if result.status == UNRESOLVED:
-                    result.detail = f"after overshoot retry: {result.detail}"
-                results[i] = result
+        groups = {}
+        for index, job in enumerate(jobs):
+            groups.setdefault((job.scenario, job.seed, job.witness), []).append((index, job))
+        results = {}
+        pool = ThreadPoolExecutor(max_workers=self.width)
+        try:
+            for group in pool.map(self._group, groups.items()):
+                results.update(group)
+        except BaseException:
+            with self.lock:
+                self.cancelled = True
+                for child in self.children:
+                    if child.poll() is None:
+                        child.terminate()  # sudo forwards TERM; CLI reaps its VMM and restores its lease.
+            raise
+        finally:
+            pool.shutdown(wait=True)
         return [results[i] for i in range(len(jobs))]
 
-    def _round(self, indexed, retry):
-        groups = {}
-        for i, job in indexed:
-            groups.setdefault((job.scenario, job.witness, job.performance, job.engine), []).append((i, job))
-        width = self._widest()
-        chunks = [items[n:n + width] for items in groups.values() for n in range(0, len(items), width)]
-        chunks.sort(key=len, reverse=True)
-        for _, job in indexed:
-            self.world(job.scenario)
-        results, running = {}, {}
-        with ThreadPoolExecutor(max_workers=len(self.cpus)) as pool:
-            while chunks or running:
-                for chunk in list(chunks):
-                    cpus = self._allocate(len(chunk), [c for cs in running.values() for c in cs])
-                    if cpus is not None:
-                        chunks.remove(chunk)
-                        self.batches += 1
-                        name = f"b{self.batches:03d}" + ("-retry" if retry else "")
-                        running[pool.submit(self._batch, name, chunk, cpus[0], retry)] = cpus
-                if not running:
-                    raise RuntimeError("no core range can hold the next batch")
-                done, _ = wait(running, return_when=FIRST_COMPLETED)
-                for future in done:
-                    del running[future]
-                    results.update(future.result())
-        return results
-
-    def _widest(self):
-        best = run = 0
-        for n, cpu in enumerate(self.cpus):
-            run = run + 1 if n and cpu == self.cpus[n - 1] + 1 else 1
-            best = max(best, run)
-        return best
-
-    def _allocate(self, count, busy):
-        """First run of `count` consecutive free cores whose SMT siblings are all idle."""
-        taken = set().union(*(self.siblings[c] for c in busy)) if busy else set()
-        for start in self.cpus:
-            span = list(range(start, start + count))
-            if all(c in self.siblings for c in span) and not taken & set().union(*(self.siblings[c] for c in span)):
-                return span
-        return None
-
-    def _batch(self, name, chunk, cpu0, retry):
-        _, first = chunk[0]
-        env = {k: v for k, v in os.environ.items() if k not in SETTINGS.values()}
-        env.update(SEEDBOX_ROOT=str(self.root), CPU0=str(cpu0), SEEDBOX_TIMEOUT=str(self.timeout),
-                   VMM=str(self.engines[first.engine]))
-        for key, value in first.performance:
-            env[SETTINGS[key]] = value
-        if retry:
-            env["SEEDBOX_MARGIN"] = RETRY_MARGIN
-        seeds = " ".join(str(job.seed) for _, job in chunk)
-        extra = ["--digest"] if first.witness == FULL_STATE else []
-        label = f"{name} {first.describe().split(' seed=')[0]} seeds [{seeds}] cpus {cpu0}-{cpu0 + len(chunk) - 1}"
-        deadline = time.monotonic() + self.lease_wait
-        attempt, waited = 0, []
-        while True:
-            prefix = f"{self.prefix}/{name}" + (f"-w{attempt}" if attempt else "")
-            log = self.root / "runs" / f"{prefix}.batch.log"
-            log.parent.mkdir(parents=True, exist_ok=True)
-            self.log(f"start {label}")
-            started = time.monotonic()
-            with log.open("w") as stream:
-                code = subprocess.run([str(self.sim / "batch.sh"), str(self.world(first.scenario)), prefix, seeds, *extra],
-                                      env=env, stdout=stream, stderr=subprocess.STDOUT).returncode
-            if code and LEASE_BUSY in log.read_text() and time.monotonic() < deadline:
-                self.log(f"lease busy for {label}; waiting")
-                waited.append({"evidence": str(log), "detail": tail(log)})
-                time.sleep(30)
-                attempt += 1
-                continue
-            break
+    def _group(self, entry):
+        key, jobs = entry
+        cpu = self.cpus.get()
         results = {}
-        for n, (i, job) in enumerate(chunk):
-            out = self.root / "runs" / f"{prefix}-s{job.seed}-r{n}"
-            result = self.parse(job, out, log)
-            result.attempts = list(waited)
-            if code and result.completed:
-                # batch.py reports MSR readback/restore failures after its
-                # runs finish; like campaign.sh, never accept such a batch.
-                result.status, result.detail = UNRESOLVED, f"batch.sh exited {code}: {tail(log)}"
-            results[i] = result
-        self.log(f"done  {label} in {time.monotonic() - started:.0f}s: "
-                 + " ".join(r.status for r in results.values()))
-        return results
-
-    @staticmethod
-    def acknowledged(out, schedule):
-        """The VMM reports the kill schedule; a kill counts as applied only when
-        the member's guest acknowledged it on COM2 ("<name> stopped/started")."""
-        faults, offsets = [], {}
-        for kill in sorted(schedule, key=lambda k: k["stop_ns"]):
-            member = kill["member"]
-            lines = read(out / f"{member}.mgmt").splitlines()
-            cursor = offsets.get(member, 0)
-            stopped = restarted = False
-            # The OCI supervisor reports effects with guest time. Preserve it
-            # as evidence and require stop before start, consuming each once.
-            effects = {}
-            for index in range(cursor, len(lines)):
-                line = lines[index]
-                effect = re.fullmatch(r"SEEDBOX_EFFECT (stop|start) guest_ns=(\d+)", line)
-                action = effect[1] if effect else {
-                    f"{member} stopped": "stop", f"{member} started": "start",
-                }.get(line)
-                if action == "stop":
-                    if stopped:
-                        break
-                    stopped = True
-                    if effect:
-                        effects["stopped_guest_ns"] = int(effect[2])
-                elif action == "start" and stopped:
-                    restarted = True
-                    if effect:
-                        effects["restarted_guest_ns"] = int(effect[2])
-                    cursor = index + 1
-                    break
-                cursor = index + 1
-            offsets[member] = cursor
-            faults.append({**kill, "stopped": stopped, "restarted": restarted, **effects})
-        return faults
-
-    def parse(self, job, out, batch_log):
-        """Accept one completed attempt, mirroring campaign-result.py for any workload."""
-        result = RunResult(job, UNRESOLVED, evidence=str(out))
-        err = Path(f"{out}.err")
         try:
-            status = Path(f"{out}.status").read_text().strip()
-        except OSError:
-            result.detail = f"batch did not run: {tail(batch_log)}"
-            return result
-        try:
-            report = json.loads(Path(f"{out}.json").read_text())
-        except (OSError, ValueError):
-            report = None
-        if status != "0" or not isinstance(report, dict):
-            result.detail = f"exit status {status}: {tail(err) or 'no terminal JSON'}"
-            return result
-        machines = {m.get("name"): m for m in report.get("machines", [])}
-        workload = json.loads(self._source(job.scenario).read_text()).get("end_on_exit")
-        host = report.get("host_seconds")
-        state = machines.get(workload, {}).get("state", "")
-        exited = re.fullmatch(r"Exited\((\d+)\)", state)
-        if report.get("seed") != job.seed or type(report.get("seed")) is not int:
-            result.detail = "result belongs to a different seed"
-        elif report.get("outcome") != "end_machine_exited":
-            result.detail = f"missing terminal outcome ({report.get('outcome')})"
-        elif type(host) not in (int, float) or not math.isfinite(host) or host < 0:
-            result.detail = "missing valid completion timing"
-        elif not exited:
-            result.detail = f"workload {workload} did not exit ({state or 'missing'})"
-        if result.detail:
-            return result
-        console = (out / f"{workload}.console")
-        text = console.read_text(errors="replace") if console.exists() else ""
-        lines = [l for l in text.splitlines() if l.split()[:2] in (["RESULT", "pass"], ["RESULT", "fail"])]
-        code = int(exited[1])
-        result.workload_exit = code
-        if workload == CHECKER:
-            if len(lines) != 1:
-                other = [l for l in text.splitlines() if l.startswith("RESULT")]
-                result.detail = (f"expected one client RESULT pass|fail, client exited {code}"
-                                 + (f": {other[-1][:200]}" if other else ""))
-                return result
-            verdict = lines[0].split()[1]
-            if code != (0 if verdict == "pass" else 1):
-                result.detail = "client RESULT contradicts checker exit status"
-                return result
-            result.status, result.result_line, result.detail = (PASS if verdict == "pass" else FAIL), lines[0], lines[0]
+            reference = self.references.get(key)
+            for index, job in jobs:
+                self.log(f"start {job.describe()} cpu {cpu} ({'replay' if reference else 'run'})")
+                try:
+                    result = self._attempt(job, cpu, reference)
+                    if result.status == UNRESOLVED and "overshoot" in result.detail and "clock bound" not in result.detail:
+                        first = {"evidence": result.evidence, "detail": result.detail}
+                        attempts = result.attempts + [first]
+                        result = self._attempt(job, cpu, reference, margin="98304")
+                        result.retries, result.attempts = 1, attempts + result.attempts
+                    if reference is None and result.completed:
+                        reference = result.evidence
+                        self.references[key] = reference
+                except Exception as error:
+                    result = RunResult(job, UNRESOLVED, detail=str(error))
+                self.log(f"done  {job.describe()}: {result.status} {result.detail[:160]}")
+                results[index] = result
+            return results
+        finally:
+            self.cpus.put(cpu)
+
+    def _attempt(self, job, cpu, reference, margin=None):
+        settings = dict(job.performance)
+        common = ["--cpu", str(cpu), "--state", str(self.state), "--undo", settings.get("undo", "256"),
+                  "--margin", margin or settings.get("margin", "adaptive")]
+        engine = str(self.engines[job.engine])
+        if reference:
+            command = ["replay", reference, *common, "--vmm", engine, "--allow-engine-change"]
         else:
-            result.status, result.detail = (PASS if code == 0 else FAIL), f"{workload} exited {code}"
-        result.world_witness = report.get("world_witness")
-        result.machine_witnesses = {n: m.get("witness") for n, m in machines.items()}
-        result.state_digests = {n: m["state_digest"] for n, m in machines.items() if m.get("state_digest")}
-        result.exits = {n: m.get("exits") for n, m in machines.items()}
-        result.sim_seconds, result.host_seconds = report.get("sim_seconds"), host
-        result.logs = {workload: text}
-        result.faults = self.acknowledged(out, report.get("kills", []))
+            command = ["run", self.scenarios[job.scenario], "--seed", str(job.seed), *common,
+                       "--vmm", engine, "--kernel", self.kernel, "--busybox", self.busybox]
+            if job.witness == FULL_STATE:
+                command += ["--full-state"]
+        started = time.monotonic()
+        deadline = None
+        attempts = []
+        while True:
+            code, stdout, stderr = self._command(command)
+            result = RunResult(job, UNRESOLVED, detail=stderr.strip()[-1000:] or stdout.strip()[-1000:])
+            result.host_seconds = time.monotonic() - started
+            matches = RUN.findall(stdout)
+            if len(matches) == 1:
+                path = Path(matches[0])
+                result.evidence = str(path)
+                inspected, record, error = self._command(["inspect", str(path), "--json"])
+                if inspected:
+                    result.detail = "inspect failed: " + error
+                else:
+                    result = parse_record(result, json.loads(record), path, code,
+                                          replay=bool(reference), read_bytes=self._read_output)
+            busy = "CPU lease unavailable" in result.detail and "another run holds it" in result.detail
+            if result.status != UNRESOLVED or not busy:
+                break
+            if deadline is None:
+                deadline = time.monotonic() + self.lease_wait
+            if time.monotonic() >= deadline:
+                break
+            attempts.append({"evidence": result.evidence, "detail": result.detail})
+            time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+        result.attempts = attempts
         return result
+
+    def _read_output(self, path):
+        try:
+            return path.read_bytes()
+        except PermissionError:
+            # CLI run directories are private to the privileged executor.
+            return subprocess.run(self.prefix + ["cat", "--", str(path)], capture_output=True, check=True).stdout
+
+
+def parse_record(result, record, path, code, replay=False, read_bytes=Path.read_bytes):
+    """Read verified public records; never infer a fault from an intended schedule."""
+    def retained(name):
+        file = path / "output" / name
+        data = read_bytes(file)
+        if record["logs"].get(name) != hashlib.sha256(data).hexdigest():
+            raise ValueError(f"retained output hash mismatch: {name}")
+        return data.decode(errors="replace")
+
+    report = record.get("report") or {}
+    result.detail = record.get("error") or report.get("detail") or result.detail
+    if record.get("error") == "execution: VMM failed; see vmm.stderr" and "vmm.stderr" in record.get("logs", {}):
+        result.detail += ": " + retained("vmm.stderr")[-1000:]
+    if (record.get("identity", {}).get("seed") != result.job.seed or report.get("reason") != "COMPLETED"
+            or record.get("outcome") not in ("PASS", "FAIL")):
+        return result
+    expected = (0 if record["outcome"] == "PASS" else 1)
+    comparison = record.get("replay") or {}
+    expected_cli = (0 if comparison.get("status") == "MATCH" else 1) if replay else expected
+    if code != expected_cli:
+        result.detail = "CLI exit contradicts completed record"
+        return result
+    if replay and comparison.get("status") not in ("MATCH", "MISMATCH"):
+        result.detail = "replay is not comparable"
+        return result
+    workload = report.get("workload_exit") or {}
+    if workload.get("code") not in (0, 1):
+        result.detail = f"scenario did not produce a verdict: {workload}"
+        return result
+    if workload["code"] != expected:
+        result.detail = "scenario exit contradicts recorded outcome"
+        return result
+
+    world = json.loads(retained("vmm.json"))
+    text = retained(f"machines/{workload['service']}.console")
+    if workload["service"] == "client":
+        lines = re.findall(r"^RESULT (?:pass|fail) .+$", text, re.M)
+        if len(lines) != 1 or lines[0].split()[1] != record["outcome"].lower():
+            result.detail = "missing or contradictory workload RESULT"
+            return result
+        result.result_line = lines[0]
+    result.status = PASS if expected == 0 else FAIL
+    result.detail = result.result_line or f"{workload['service']} exited {expected}"
+    result.workload_exit = workload["code"]
+    result.world_witness = report["witness"]
+    result.state_digests = report.get("full_state") or {}
+    result.machine_witnesses = {m["name"]: m["witness"] for m in world["machines"]}
+    result.exits = {m["name"]: m["exits"] for m in world["machines"]}
+    result.sim_seconds = world["sim_seconds"]
+    result.logs = {workload["service"]: text}
+    result.faults = report["faults"]
+    result.network_counters = world.get("network_counters", {})
+    result.replay_matches = comparison.get("status") != "MISMATCH"
+    return result

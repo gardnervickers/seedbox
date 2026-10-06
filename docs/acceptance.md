@@ -140,7 +140,10 @@ The two rootful OCI tests had passed separately earlier; they remain explicitly
 ignored in the ordinary portable test invocation. The legacy engine smoke/full
 fault matrix was not rerun as part of this Compose acceptance.
 
-## 2026-10-06 — YAML workload setup with Python acceptance checks
+## 2026-10-06 — initial YAML preparation migration (superseded)
+
+This records the earlier PR #27 implementation. The guest-driver migration
+below replaces its test-only preparation bridge and batch execution path.
 
 The full Python acceptance suite passed using the YAML workloads in
 `sim/acceptance/workloads/`, prepared by the test-only `acceptance_prepare` target.
@@ -173,7 +176,7 @@ passed fresh YAML preparation and the full smoke tier in 334.9 seconds. Evidence
 is retained under `/home/gvickers/seedbox-yaml-workspace/runs/acceptance-smoke-20261006T193802Z-2640154/`.
 All eight batches restored their snapshots, and final MSR readbacks matched the
 same baseline on CPUs 2–7 and 18–23 with no snapshots remaining. The original
-full-tier record above predates the layout change; current workloads live under
+full-tier record above predates the layout change; at that revision workloads lived under
 `harness/acceptance/workloads/` and the helper under `crates/seedbox/tests/`.
 
 Workspace tests and portable checks passed on both hosts after the rebase.

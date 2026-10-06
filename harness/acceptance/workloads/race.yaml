@@ -2,10 +2,8 @@ name: race
 services:
   n1:
     build:
-      context: ../../../guest
+      context: ../driver
       dockerfile: race.Dockerfile
-    entrypoint: [/bin/sh, -ec]
-    command: ["/race 3000000; exec /race 3000000 atomic"]
 x-seedbox:
   version: 1
   limits: {simulated_time: 60s, wall_time: 30m}

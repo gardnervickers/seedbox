@@ -1,11 +1,7 @@
 """Runner-neutral vocabulary shared by checks and launchers.
 
-Checks describe runs as `Job`s and judge `RunResult`s. They never see world
-files, environment variables, CPU numbers or output layouts; those belong to a
-`Launcher`. A launcher over the Rust `seedbox run`/`replay`/`inspect --json`
-commands (once they exist) maps the same fields: scenario -> simulation config,
-witness -> WitnessMode, performance -> performance parameters, engine -> an
-explicit cross-engine execution.
+Checks describe runs as Jobs and judge RunResults. The CLI launcher maps them
+to YAML scenarios and fresh executions or replays of retained inputs.
 """
 from dataclasses import dataclass, field
 
@@ -60,8 +56,10 @@ class RunResult:
     retries: int = 0
     evidence: str = ""
     logs: dict = field(default_factory=dict)  # machine -> console text
-    # Scheduled faults with whether the guest acknowledged each stop/restart.
+    # Confirmed effects from the public execution report.
     faults: list = field(default_factory=list)
+    replay_matches: bool = True
+    network_counters: dict = field(default_factory=dict)
     # Earlier attempts of this job that did not count: [{evidence, detail}].
     attempts: list = field(default_factory=list)
 
@@ -86,9 +84,9 @@ class RunResult:
             "host_seconds": self.host_seconds,
             "exits": self.exits,
             "retries": self.retries,
-            "faults": {"scheduled": len(self.faults),
-                       "stopped": sum(f["stopped"] for f in self.faults),
-                       "restarted": sum(f["restarted"] for f in self.faults)},
+            "faults": self.faults,
+            "replay_matches": self.replay_matches,
+            "network_counters": self.network_counters,
             "evidence": self.evidence,
             "failed_attempts": self.attempts,
         }
@@ -105,4 +103,8 @@ def witness_differences(a, b):
     for name in sorted(set(a.state_digests) | set(b.state_digests)):
         if a.state_digests.get(name) != b.state_digests.get(name):
             diffs.append(f"{name}:digest")
+    if a.faults != b.faults:
+        diffs.append("fault effects")
+    if not a.replay_matches or not b.replay_matches:
+        diffs.append("CLI replay comparison")
     return diffs

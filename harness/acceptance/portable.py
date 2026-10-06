@@ -20,6 +20,9 @@ def steps(repo):
            repo, None if LINUX else "kvm-ioctls builds only on Linux")
     yield "seedbox crate tests", [["cargo", "test", "--locked", "-p", "seedbox"]], repo, None
 
+    yield "acceptance YAML", [["cargo", "run", "--quiet", "--locked", "-p", "seedbox", "--", "validate", str(path)]
+                              for path in sorted((repo / "harness/acceptance/workloads").glob("*.yaml"))], repo, None
+
 
 def portable(repo, log=print):
     outcomes = []

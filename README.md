@@ -152,68 +152,62 @@ retry this error.
 
 ## Engine acceptance suite
 
-`harness/acceptance.sh portable|smoke|full` runs the Python acceptance suite from
-[issue #4](https://github.com/gardnervickers/seedbox/issues/4). Workloads are
-ordinary Compose/YAML files in `harness/acceptance/workloads/`: etcd 3.5.2 for fresh
-replay and the planted checker failure, etcd 3.5.3 for the fixed-version control,
-and an OCI image containing the existing C race demo. Image versions, workload
-arguments, environment, network and execution limits come from those YAML files.
-There is no separate acceptance command or test policy in the production CLI.
+Acceptance scenarios are ordinary YAML applications in
+`harness/acceptance/workloads/`, with Python drivers in
+`harness/acceptance/driver/`. The etcd YAML selects its Python driver as both
+`x-seedbox.control.service` and `x-seedbox.check.service`. Inside the guest, the
+driver waits for etcd readiness, starts the existing Go workload/checker, injects
+confirmed process restarts and peer partitions through `seedbox.World`, heals the
+partitions, and checks the workload's acknowledgement-ledger result. The race
+driver runs the existing C example and verifies its atomic control.
 
-Run inside `nix develop`:
+The host Python suite stages self-contained projects with the Python binding and
+existing workload sources. It invokes ordinary `seedbox run`, `replay`, and
+`inspect --json` commands. The first execution of each seed/witness mode prepares
+images; repeats and performance variants replay its retained inputs. The CLI owns
+execution, CPU/SMT leases and restoration. No test-only Rust bridge or raw-world
+fault overlays are involved. Scenario policy stays outside the production binary.
+
+From the repository root on the qualified Linux host:
 
 ```sh
-harness/acceptance.sh portable
-harness/acceptance.sh smoke --root "$PWD" --kernel /path/to/bzImage \
-  --vmm crates/seedbox-vmm/target/release/seedbox-vmm --cpus 2-7
-harness/acceptance.sh full --root "$PWD" --kernel /path/to/bzImage \
-  --vmm crates/seedbox-vmm/target/release/seedbox-vmm --cpus 2-7
+nix develop
+cargo build-vmm
+bash harness/acceptance.sh portable
+bash harness/acceptance.sh smoke --root "$PWD" --kernel /path/to/bzImage --cpus 2-5
+bash harness/acceptance.sh full --root "$PWD" --kernel /path/to/bzImage --cpus 2-5
 ```
 
-Hardware tiers first run the portable checks (unless `--skip-portable`), then
-build a test-only preparation target and the existing generic guest supervisor.
-That target calls `config::load`, `OciPreparer` and `vmm::world`; Python supplies
-its explicit input paths. Only the OCI import helper runs under `sudo -n` during
-setup. It does not acquire CPU leases, modify MSRs or start guests. Existing
-`batch.sh` execution, scheduling, retries and Python checks remain in place.
-Registry/build access and the Linux Nix shell's OCI tools are required. Hand-built
-`cluster-*.cpio` and `race.cpio` archives are no longer acceptance prerequisites.
-
-The Python suite applies its existing seeded kill/restart schedules to the
-prepared worlds. These schedules live alongside seed samples and performance
-variants in `acceptance/cases.json`; they are test policy, not new Compose fault
-syntax. Nonempty production `x-seedbox.faults` remains unsupported pending #3.
-The generic supervisor handles process stop/start while retaining guest storage.
-The checker counts ordered `SEEDBOX_EFFECT stop/start` acknowledgements from
-COM2, retaining their reported guest times; a schedule alone never proves a
-fault took effect.
+The suite builds this checkout's CLI by default; `--seedbox PATH` chooses another
+build. `--vmm PATH` chooses the engine (default: `cargo build-vmm` output).
+Use the fault-capable kernel described in `kernel/config.options`, including
+virtio-console. OCI preparation requires the Nix shell's tools, registry access
+and passwordless sudo, as does CLI execution. YAML controls the simulated and
+wall-time limits; `--lease-wait SECONDS` waits briefly for busy cores. Both tiers
+default to four workers on CPUs 2–5, excluding overlapping SMT siblings. Size
+`--cpus` for available host memory as well as CPU capacity; an etcd scenario
+runs four guests per worker.
 
 | Tier | Checks |
 | --- | --- |
-| `portable` | Shell syntax, Python runner/check tests, YAML validation through the real parser, Rust crate tests, and VMM tests on Linux |
-| `smoke` | Fresh exit and full-state replay; undo 0/16 and margin 32768 invariance; varied race outcomes and a clean atomic control; planted checker failure; acknowledged fault recovery |
-| `full` | Smoke plus etcd 3.5.3 seeds 4000–4010 with recovery; optional explicit cross-build comparison |
+| `portable` | Shell/Python tests, public YAML validation, Rust tests and Linux VMM tests |
+| `smoke` | Fresh exit/full-state replay; undo 0/16 and margin invariance; varied race outcomes and atomic control; planted checker failure; confirmed process/network fault recovery |
+| `full` | Smoke plus etcd 3.5.3 seeds 4000–4010; optional cross-engine equivalence |
 
-Add `--performance-only /path/to/other/seedbox-vmm` to compare fresh results
-across engines. There is no historical failing-seed/witness pin, pin-refresh
-command or semantic-change bypass. Changing inputs may change which seeds find
-bugs; fresh same-input replay and deliberately planted controls remain checks.
+`acceptance/cases.json` selects scenarios and seed samples. There are no historical
+failing-seed or witness pins. `--performance-only OLD_VMM` explicitly enables
+cross-engine comparison. Scenario faults and checks rerun inside the guest during
+replay; confirmed fault histories must also match. PMU overshoots retry once with
+margin 98304; clock-bound errors do not. A fixed-margin variant requiring retry
+is UNRESOLVED.
 
-Each suite retains generated worlds, a content store, verified guest archives,
-resolved YAML configurations and OCI preparation records under
-`runs/acceptance-<tier>-<time>-<pid>/`. `setup/prepare.log` preserves setup failures;
-`prepared/<scenario>/prepared.json` identifies retained inputs and YAML bytes.
-The final `report.json` records per-check results and execution evidence. Output
-hashes identify those artifacts; they are not historical acceptance requirements.
-`--artifacts DIR` now selects only `DIR/bzImage`; YAML determines the guest images.
-`--kernel` overrides it directly. The default kernel is `ROOT/artifacts/bzImage`.
-
-Batch runs use shared CPU/SMT leases and verify exact MSR restoration before
-accepting results. `--lease-wait SECONDS` waits for contention; unresolved runs
-cannot pass. PMU overshoots retry once with margin 98304; clock-bound failures
-are not retried. A fixed-margin variant requiring retry is UNRESOLVED. The suite
-returns 0 for PASS, 1 for a failed property, 3 for UNRESOLVED, and 2 for usage
-errors. Historical campaign/research world files retain their original purpose.
+Evidence under `runs/acceptance-<tier>-<time>-<pid>/` includes staged projects,
+CLI command/output logs, the CLI content store and private retained runs, plus a
+Python `report.json`. The suite verifies output hashes against `inspect` records.
+An infrastructure error or failed CLI cleanup cannot count as a completed run.
+Exit status is 0 for PASS, 1 for a failed property, 3 for UNRESOLVED and 2 for
+usage errors. The legacy batch/campaign runners and research fixtures remain
+available separately.
 
 ## One-VM network fixture
 

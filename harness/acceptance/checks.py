@@ -23,7 +23,7 @@ class Verdict:
 
 @dataclass
 class Context:
-    pins: dict
+    cases: dict
     performance_only: bool = False
 
 
@@ -42,8 +42,8 @@ def unresolved(results):
 
 def replay(ctx):
     """Item 1: two fresh processes match on every witness, with and without digests."""
-    pin = ctx.pins["replay"]
-    scenario, seed = pin["scenario"], pin["seed"]
+    case = ctx.cases["replay"]
+    scenario, seed = case["scenario"], case["seed"]
     results = yield [default_job(scenario, seed), Job(scenario, seed),
                      Job(scenario, seed, FULL_STATE), Job(scenario, seed, FULL_STATE)]
     if (v := unresolved(results)):
@@ -67,9 +67,9 @@ def replay(ctx):
 
 def stop_placement(ctx):
     """Item 2: performance-only stop settings never change the witness."""
-    pin = ctx.pins["stop_placement"]
-    scenario, seed = pin["scenario"], pin["seed"]
-    variants = [performance(**v) for v in pin["variants"]]
+    case = ctx.cases["stop_placement"]
+    scenario, seed = case["scenario"], case["seed"]
+    variants = [performance(**v) for v in case["variants"]]
     results = yield [default_job(scenario, seed)] + [Job(scenario, seed, performance=v) for v in variants]
     if (v := unresolved(results)):
         return v
@@ -100,9 +100,9 @@ def race_outcomes(result, machine):
 
 def race(ctx):
     """Item 3: seeds vary a lost-update race; the atomic control never loses; a failure replays."""
-    pin = ctx.pins["race"]
-    scenario, machine = pin["scenario"], pin["machine"]
-    results = yield [Job(scenario, seed) for seed in pin["seeds"]]
+    case = ctx.cases["race"]
+    scenario, machine = case["scenario"], case["machine"]
+    results = yield [Job(scenario, seed) for seed in case["seeds"]]
     if (v := unresolved(results)):
         return v
     lost, problems = {}, []
@@ -122,7 +122,7 @@ def race(ctx):
     if not failing:
         return Verdict(FAIL, "no seed lost an update", details)
     seed = failing[0]
-    original = results[pin["seeds"].index(seed)]
+    original = results[case["seeds"].index(seed)]
     (again,) = yield [Job(scenario, seed)]
     if (v := unresolved([again])):
         return v
@@ -136,8 +136,8 @@ def race(ctx):
 
 def checker_control(ctx):
     """Item 4: a planted missing acknowledgement must be reported as RESULT fail, exit 1."""
-    pin = ctx.pins["checker_control"]
-    (result,) = yield [Job(pin["scenario"], pin["seed"])]
+    case = ctx.cases["checker_control"]
+    (result,) = yield [Job(case["scenario"], case["seed"])]
     if (v := unresolved([result])):
         return v
     details = {"result": result.result_line, "exit": result.workload_exit}
@@ -149,55 +149,50 @@ def checker_control(ctx):
 
 def fixed_control(ctx):
     """Item 6: the fixed version passes every seed in the declared range."""
-    pin = ctx.pins["fixed_control"]
-    first, last = pin["seeds"]
-    results = yield [Job(pin["scenario"], seed) for seed in range(first, last + 1)]
+    case = ctx.cases["fixed_control"]
+    first, last = case["seeds"]
+    results = yield [Job(case["scenario"], seed) for seed in range(first, last + 1)]
     failed = [r.job.seed for r in results if r.status == FAIL]
     stuck = [r.job.seed for r in results if r.status == UNRESOLVED]
     unfaulted = [r.job.seed for r in results if r.completed and not restarted(r)]
     details = {"failed": failed, "unresolved": stuck, "unfaulted": unfaulted, "seeds": [first, last]}
     if unfaulted:
-        return Verdict(FAIL, f"no acknowledged kill/restart for seeds {unfaulted}", details)
+        return Verdict(FAIL, f"missing confirmed process/network recovery for seeds {unfaulted}", details)
     if failed:
         return Verdict(FAIL, f"{len(failed)} failure(s) in fixed version: seeds {failed}", details)
     if stuck:
         return Verdict(UNRESOLVED, f"{len(stuck)} UNRESOLVED: seeds {stuck}", details)
-    return Verdict(PASS, f"{pin['scenario']} seeds {first}-{last}: 0 failures, 0 UNRESOLVED", details)
+    return Verdict(PASS, f"{case['scenario']} seeds {first}-{last}: 0 failures, 0 UNRESOLVED", details)
 
 
 def restarted(result):
-    """Faults whose stop and restart the guest acknowledged."""
-    return [f for f in result.faults if f["stopped"] and f["restarted"]]
+    """Require real process and network effects from the public execution record."""
+    actions = [event["action"] for event in result.faults]
+    dropped = sum(link.get("partition_dropped", 0) for link in result.network_counters.values())
+    return (dropped > 0 and bool(actions) and len(actions) % 4 == 0
+            and actions == ["stop", "restart", "partition", "heal"] * (len(actions) // 4))
 
 
 def fault_effects(ctx):
-    """Kill/restart faults were actually applied, and the application recovered."""
-    pin = ctx.pins["fault_effects"]
-    scenario, seed = pin["scenario"], pin["seed"]
-    (result,) = yield [default_job(scenario, seed)]
+    case = ctx.cases["fault_effects"]
+    (result,) = yield [default_job(case["scenario"], case["seed"])]
     if (v := unresolved([result])):
         return v
-    done = restarted(result)
-    stopped = sum(f["stopped"] for f in result.faults)
-    members = sorted({f["member"] for f in done})
-    details = {"faults": result.faults, "result": result.result_line}
-    if not done:
-        return Verdict(FAIL, f"{scenario} seed {seed}: no guest acknowledged a kill and restart "
-                       f"({len(result.faults)} scheduled, {stopped} stopped)", details)
+    details = {"faults": result.faults, "network": result.network_counters, "result": result.result_line}
+    if not restarted(result):
+        return Verdict(FAIL, "missing confirmed stop/restart/partition/heal rounds or partition drops", details)
     if result.status != PASS:
-        return Verdict(FAIL, f"application did not recover after {len(done)} kill/restarts: "
-                       f"{result.detail}", details)
-    return Verdict(PASS, f"{scenario} seed {seed}: {len(done)} of {len(result.faults)} scheduled kill/restarts "
-                   f"acknowledged ({', '.join(members)}), then {result.result_line[:80]}", details)
+        return Verdict(FAIL, f"application did not recover: {result.detail}", details)
+    return Verdict(PASS, f"{len(result.faults) // 4} confirmed process/network fault rounds, then {result.result_line}", details)
 
 
 def cross_build(ctx):
     """Item 7: a declared performance-only change preserves fresh execution witnesses."""
     if not ctx.performance_only:
         return Verdict(SKIPPED, "change not declared performance-only (use --performance-only OLD_VMM)")
-    pins = [(ctx.pins[p]["scenario"], ctx.pins[p]["seed"]) for p in ctx.pins["cross_build"]]
+    cases = [(ctx.cases[p]["scenario"], ctx.cases[p]["seed"]) for p in ctx.cases["cross_build"]]
     jobs = []
-    for scenario, seed in pins:
+    for scenario, seed in cases:
         jobs += [default_job(scenario, seed), Job(scenario, seed, engine=BASELINE)]
     results = yield jobs
     if (v := unresolved(results)):
@@ -211,7 +206,7 @@ def cross_build(ctx):
     if failures:
         return Verdict(FAIL, "performance-only change altered results: " + "; ".join(failures), details)
     return Verdict(PASS, "baseline and candidate builds match on " +
-                   ", ".join(f"{s}/{n}" for s, n in pins), details)
+                   ", ".join(f"{s}/{n}" for s, n in cases), details)
 
 
 SMOKE = [("1 replay", replay), ("2 stop-placement invariance", stop_placement),
