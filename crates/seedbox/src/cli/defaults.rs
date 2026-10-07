@@ -86,6 +86,15 @@ fn sudo_home() -> Option<PathBuf> {
 /// this checkout's `cargo build-vmm` output, then on `PATH`. Under `cargo run`
 /// in this checkout, a missing VMM is built exactly as `cargo build-vmm` does.
 pub fn engine(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    resolve_engine(explicit, true)
+}
+
+/// Resolve the ordinary VMM candidates without invoking cargo or installing it.
+pub fn engine_lookup(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    resolve_engine(explicit, false)
+}
+
+fn resolve_engine(explicit: Option<PathBuf>, allow_build: bool) -> Result<PathBuf> {
     if let Some(path) = explicit {
         return existing("--vmm", path);
     }
@@ -97,11 +106,16 @@ pub fn engine(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = first_file(&searched).or_else(|| on_path("seedbox-vmm")) {
         return Ok(path);
     }
-    if let Some(cargo) = cargo_run_here() {
-        build_engine(&cargo, &vmm)?;
-        if built.is_file() {
-            return Ok(built);
+    if let Some(path) = build_if_allowed(allow_build, || {
+        if let Some(cargo) = cargo_run_here() {
+            build_engine(&cargo, &vmm)?;
+            if built.is_file() {
+                return Ok(Some(built));
+            }
         }
+        Ok(None)
+    })? {
+        return Ok(path);
     }
     searched.push(PathBuf::from("$PATH/seedbox-vmm"));
     Err(missing(
@@ -109,6 +123,17 @@ pub fn engine(explicit: Option<PathBuf>) -> Result<PathBuf> {
         &searched,
         "build it with `cargo build-vmm`, or pass --vmm or set SEEDBOX_VMM",
     ))
+}
+
+fn build_if_allowed(
+    allow_build: bool,
+    build: impl FnOnce() -> Result<Option<PathBuf>>,
+) -> Result<Option<PathBuf>> {
+    if allow_build {
+        build()
+    } else {
+        Ok(None)
+    }
 }
 
 /// Where to look for the VMM, in order: next to `exe`, then `built`. A cargo
@@ -276,8 +301,41 @@ fn is_static_elf(path: &Path) -> bool {
     })
 }
 
+/// Resolve a preparation executable at the CLI environment boundary.
+pub fn preparation_tool(path: &Path) -> Result<PathBuf> {
+    let candidate = if path.components().count() == 1 {
+        path.to_str().and_then(on_path)
+    } else {
+        Some(path.to_owned())
+    };
+    candidate.filter(|p| p.is_file()).ok_or_else(|| {
+        Error::Setup(format!(
+            "{} not found; install it or enter `nix develop`",
+            path.display()
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lookup_only_never_invokes_the_missing_engine_builder() {
+        let invoked = std::cell::Cell::new(false);
+        let result = super::build_if_allowed(false, || {
+            invoked.set(true);
+            Err(seedbox::Error::Setup("builder must not run".into()))
+        })
+        .unwrap();
+        assert!(result.is_none());
+        assert!(!invoked.get());
+        assert!(super::build_if_allowed(true, || {
+            invoked.set(true);
+            Err(seedbox::Error::Setup("existing build path".into()))
+        })
+        .is_err());
+        assert!(invoked.get());
+    }
+
     use super::*;
 
     #[test]

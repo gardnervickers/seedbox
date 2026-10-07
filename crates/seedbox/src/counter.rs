@@ -109,6 +109,16 @@ impl CounterProfile {
         matches!(self, Self::Zen)
     }
 
+    /// Raw event mirrored from the frozen VMM counter profile.
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
+    pub(crate) const fn branch_event(self) -> u64 {
+        match self {
+            Self::Zen => 0x5100d1,
+            Self::IntelSkylake => 0x5101c4,
+            Self::IntelIceLake => 0x5111c4,
+        }
+    }
+
     /// Host change the counter needs to be exact on this CPU.
     pub const fn workaround(self) -> Option<MsrWorkaround> {
         match self {
