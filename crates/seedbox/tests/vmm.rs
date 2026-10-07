@@ -68,6 +68,26 @@ fn report() -> serde_json::Value {
 }
 
 #[test]
+fn current_parts_accept_text_events_and_validate_digests() {
+    fixture(|request| {
+        let mut raw = report();
+        for machine in raw["machines"].as_array_mut().unwrap() {
+            machine["state_digest_parts"] = json!({
+                "ram": ContentDigest::of(b"ram"), "disk": ContentDigest::of(b"disk"),
+                "events": "exc:none int:none shadow:0 nmi:0/0/0"
+            });
+        }
+        let parsed = vmm::report(&serde_json::to_vec(&raw).unwrap(), request).unwrap();
+        assert_eq!(parsed.full_state.as_ref().unwrap().len(), 2);
+        raw["machines"][1]["state_digest_parts"]["disk"] = json!("invalid");
+        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), request)
+            .unwrap_err()
+            .to_string()
+            .contains("expected a lowercase SHA-256 digest"));
+    });
+}
+
+#[test]
 fn world_uses_verified_artifacts_and_explicit_placement() {
     fixture(|request| {
         let world = vmm::world(request).unwrap();
