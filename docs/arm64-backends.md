@@ -5,21 +5,19 @@ main `4a89dce`. It does not change the production x86 engine or its guest inputs
 The crate has its own workspace, lockfile and target directory. The only changes
 to existing build files are the root workspace exclusion and the two aliases.
 
-**Status: native HVF reaches init success and PSCI SYSTEM_OFF with the
-counter-fixed Image, but full acceptance FAILS on interrupt-delivery drift.**
-The first two seed-1 witnesses match and seed 2 differs. Host noise changes
-RAM despite identical exposed exits and console bytes. IRQ-PC diagnostics
-identify delivery skid after IRQ unmasking; an additional diagnostic repeat
-also diverges without deliberate noise. The shared machine now rejects masked
-IRQ admission. The next guest rebuild must include the unmasked idle rendezvous
-described in the latest acceptance record below. No hardware determinism or
-cross-backend equality is claimed. Linux/KVM execution remains untested.
+**Status: native HVF acceptance PASSES with the idle-rendezvous Image built
+from `180705e`.** Seed 1 matches across two ordinary boots and a boot with host
+noise, including all guest RAM; seed 2 differs. Init succeeds and PSCI SYSTEM_OFF
+completes in about 0.25 wall seconds despite a verified one-second guest sleep.
+The rebuilt guest fixes the observed IRQ delivery skid by reaching idle MMIO
+with IRQs already unmasked. This qualifies the controlled native HVF fixture
+below; Linux/KVM execution and cross-backend equality remain untested.
 
 Current Mac checks: `cargo test-arm64` passes 15 portable tests; the hardware
 test remains ignored by default. Crate formatting and clippy with warnings
 denied pass, as do seven Python input tests and the root portable acceptance
-checks. The explicitly signed `hvf_determinism` test fails with the supplied
-counter-fixed Image: first on RAM mismatch, then on the new IRQ admission guard.
+checks. The explicitly signed `hvf_determinism` test passes with the supplied
+idle-rendezvous Image. Earlier failures remain recorded below.
 
 ## Abstraction boundaries
 
@@ -111,8 +109,8 @@ clock bound; 32 performs the ABI-1 handshake. Idle with an armed deadline jumps
 to it and raises SPI 40 while stopped. New IRQ assertions require PSTATE.I to
 be clear; masked admission fails without changing the guest mask. The updated
 guest idle helper unmasks IRQs and executes ISB before the MMIO rendezvous, then
-restores its incoming mask. This change awaits a guest rebuild and hardware
-validation; unmasked admission alone is not yet qualified as deterministic.
+restores its incoming mask. The rebuilt guest passes the native HVF repeat/noise
+acceptance below; other workloads and KVM still need hardware validation.
 Idle without a deadline or a pending interrupt is an error. Crossing a polling bound yields, expires the timer and
 republishes, so a clock poll cannot run past a deadline without an exit.
 UART accesses and firmware calls have no extra time charge. PL011 transmission
@@ -177,8 +175,9 @@ the 2026-10-07 continuation. Do not rebuild the guest on the Mac.
 
 ### 1. Build guest inputs in the Ubuntu 24.04 arm64 VM
 
-These commands target the **next**, not-yet-built idle-rendezvous Image. Preserve
-the verified `artifacts/arm64-counter-fix/` inputs and their failing evidence.
+These commands reproduce the now-verified idle-rendezvous Image. Preserve
+`artifacts/arm64-irq-rendezvous/` and `artifacts/arm64-counter-fix/`, including
+their evidence; use a fresh output directory for any future rebuild.
 
 Use the operator's `vz`, nestedVirtualization-enabled VM with 4 CPUs and 8 GiB.
 If creating one, put `LIMA_HOME` under a fresh short `/tmp/lima.XXXX` directory
@@ -211,17 +210,18 @@ Inside the existing project Nix shell:
 ```sh
 cargo test-arm64
 cargo build-arm64
-bash crates/seedbox-arm64/codesign.sh
 cargo test-arm64 --test hardware --no-run --message-format=json > /tmp/seedbox-arm64-tests.jsonl
 arm64_test_binary="$(python3 -c 'import json; print(next(x["executable"] for x in map(json.loads, open("/tmp/seedbox-arm64-tests.jsonl")) if x.get("reason") == "compiler-artifact" and x["target"]["name"] == "hardware" and x.get("executable")))')"
+bash crates/seedbox-arm64/codesign.sh
 bash crates/seedbox-arm64/codesign.sh "$arm64_test_binary"
 ```
 
 The script uses `codesign --force --sign -` with the shipped
 `com.apple.security.hypervisor` entitlement, then verifies the signature.
 Sign the test executable itself; signing just the CLI does not entitle tests.
-Rebuilding either executable invalidates its entitlement signature. Run the
-already-signed test executable directly after signing, avoiding a rebuild.
+Cargo can relink the CLI while building a test target, invalidating its
+entitlement signature. Finish all Cargo builds before signing both executables.
+Run the already-signed test executable directly, avoiding a rebuild.
 
 ### 3. Native HVF test and CLI runs
 
@@ -541,6 +541,111 @@ config sources are unchanged; the builder regenerates and audits the complete
 input set. Resume signed native acceptance with those inputs and new report
 paths. KVM/cross-backend acceptance remains untested. No frozen production path
 was modified, and no push or PR was performed.
+
+## Idle-rendezvous HVF acceptance (2026-10-07)
+
+**Full native HVF acceptance: PASS.** Tested engine and guest source: `180705e`,
+on macOS 27.0.1 (26A434), arm64, with Nix rustc 1.98.1 / cargo 1.98.0.
+The operator rebuilt the guest with GCC 13.3.0 / GNU ld 2.42 in the Ubuntu arm64
+VM. All three entries in `artifacts/arm64-irq-rendezvous/SHA256SUMS` were verified:
+
+- Image: `7ea8fa2858ef33d05da559e9de5e5a9329c6d397e5b03fd7f4fcd3ebb75d9ff1`.
+- init.cpio: `9b952991625d7603e2db03e5ccdb87f78f1f7a16e6c664062505b7ddc75d8649`.
+- kernel.config: `facb82e4dbad040a19a553304413975b72e6c8eeb8b511414729a7c21a71a822`.
+
+The complete config and passing vmlinux/vDSO audit remain beside the inputs.
+The independently signed `hvf_determinism` executable passed on its first suite
+with this Image. Reports are in `hvf-acceptance/` beside the inputs and the full
+log is `hvf-acceptance.log`. Durations include final RAM hashing; host noise
+includes the unchanged CPU burner and random 0–5 ms sleeps before vCPU runs.
+
+| Boot | Witness | Wall seconds | Exits |
+| --- | --- | ---: | ---: |
+| Seed 1 first | `f1fdc70f77465ad30c6d8e1e7a93b7fe56cbb1da2362299ec16f296154b8b44a` | 0.246172625 | 2,293 |
+| Seed 1 repeat | `f1fdc70f77465ad30c6d8e1e7a93b7fe56cbb1da2362299ec16f296154b8b44a` | 0.244623917 | 2,293 |
+| Seed 1 with host noise | `f1fdc70f77465ad30c6d8e1e7a93b7fe56cbb1da2362299ec16f296154b8b44a` | 7.641374917 | 2,293 |
+| Seed 2 | `88aaedb029adaee65886a1cb0dc71a99d8881b2515d944631a0ea998586cb03b` | 0.274207250 | 2,293 |
+
+All four boots reached init PASS and PSCI SYSTEM_OFF at virtual time
+1,010,051,041 ns. `compare.py` independently returned MATCH for first/repeat,
+first/noise and first/CLI. All seed-1 runs have trace hash
+`333b9566af89bdf98484b0a093eadcb8c5a3dcfeef52110df6c9506c4b1600a3`, console hash
+`d3d4fd4c99f72a30c636039b23b756acaa2a21bc9df1b2c55b8630820690b570`, and RAM hash
+`4ded95524ffbd8e5616b91ca8b3219653883956f5611e452e195c97e01418b77`.
+The signed CLI took 0.255688167 wall seconds and 2,293 exits;
+its witness is the same as seed 1 above. Its complete output is retained in
+`hvf-cli-signed-1a.log`, with its report in `hvf-cli-signed-1a.json`:
+
+```text
+Booting Linux on physical CPU 0x0000000000 [0x610f0000]
+Linux version 6.12.112-seedbox-arm64-pv1 (seedbox@seedbox) (gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, GNU ld (GNU Binutils for Ubuntu) 2.42) #1 SMP Thu Jan 1 00:00:00 UTC 1970
+random: crng init done
+Machine model: Seedbox arm64 PV ABI 1
+earlycon: pl11 at MMIO 0x0000000009000000 (options '')
+printk: legacy bootconsole [pl11] enabled
+clock mono=485 real=486
+clock mono=487 real=488
+clock mono=489 real=490
+sleep requested=10000000 elapsed=10000124
+sleep requested=1000000000 elapsed=1000050007
+cntvct first=1010051036 second=1010051037
+getrandom d2626d690cce59bd6c7efc9146cc2973429249c4a64ba13b251b1913aef10e6f
+SEEDBOX_INIT_PASS
+reboot: Power down
+```
+
+Thus the one-second nanosleep advanced guest MONOTONIC by 1,000,050,007 ns
+while the entire undisturbed boot completed in about a quarter wall second.
+The 10 ms sleep advanced it by 10,000,124 ns. Seed 2 also passed both sleep
+checks and produced a different witness.
+
+### First divergence and root cause
+
+Re-running the existing compare tooling on the original
+`arm64-counter-fix/hvf-acceptance/hvf-seed1-a.json` and
+`hvf-seed1-jitter.json` reports **all recorded exits match**: there is no first
+diverging exit record among the 2,293 entries. Their console hashes also match.
+The first differing witness component is RAM, with hashes `b84ee58a…` and
+`54a17850…`; the complete hashes remain in the historical record above.
+The exit trace does not record asynchronous IRQ entry or ELR_EL1, so matching
+exposed MMIO exits did not imply matching guest execution between exits.
+
+The retained IRQ diagnostic run supplies the first differing interrupted PC:
+at virtual time 890,000,413 ns, ELR_EL1 is `0xffff800080319b84` under noise
+versus `0xffff80008005d964` without noise. This diagnostic pair is distinct from
+the original `d404557f…` / `34c3a6ae…` pair; the original reports alone cannot
+identify its exact first internal divergence. The saved RAM comparison locates
+drift in the initial kernel stack and four-word interrupt entropy pool.
+The timer was being asserted while DAIF.I was masked, so delivery after the
+subsequent guest unmask could interrupt different instructions. Linux mixes
+that interrupted PC into interrupt randomness, preserving host-dependent IRQ
+placement in guest-visible RAM even when console and exposed exits agree.
+
+The fix was already in `180705e`: `seedbox_idle()` unmasks IRQs and executes
+ISB before the idle MMIO, then restores the caller's mask. The machine admits
+new SPI assertions only at an unmasked exit. This continuation used the
+operator's rebuilt Image to validate that fix; no further engine or kernel
+change or guest rebuild was needed. No witness fields, RAM bytes, entropy,
+trace records or noise checks were removed. Counter leaks and
+VTIMER_ACTIVATED remain hard errors.
+
+### Checks and remaining scope
+
+`cargo test-arm64` passes all 15 portable tests, and the explicitly signed
+hardware suite passes. arm64 fmt and clippy (`--all-targets --locked -- -D warnings`)
+pass, as do seven Python input tests and shell syntax checks. Root seedbox fmt,
+clippy, workspace tests and `bash harness/acceptance.sh portable` also pass;
+the latter log is retained as `portable-acceptance.log`. Linux-only
+`cargo test-vmm` was not run on this Mac.
+
+One preliminary CLI invocation failed before boot with HV_DENIED after Cargo's
+test build invalidated the CLI signature (`hvf-cli-1a.log`). Signing the CLI
+again resolved it; the operator sequence above now builds all targets before
+signing. This failed launch produced no guest witness and was not a determinism
+retry. No HVF acceptance gate remains failing. KVM, cross-backend equality and
+broader workloads remain untested. Frozen production paths are unchanged.
+This continuation changes only this acceptance document; artifacts remain
+ignored, and no push or PR is performed.
 
 ## Cleanup and portable checks
 
