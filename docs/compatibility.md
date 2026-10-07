@@ -40,11 +40,16 @@ This implementation has source-only checks: Linux collection and the new profile
 are not yet qualified. A readable historical v2 record is distinct from a
 rejected v1 record. Draft formats and release compatibility remain undecided.
 
+`diff --json` emits a library `DiffReport` for two retained directories. It does
+not change manifest or bundle formats. See [retained comparison](runtime.md#compare-retained-runs)
+for evidence scope and missing-data semantics.
+
 ## Exit meanings and user data
 
 `run` exits: 0 PASS, 1 FAIL, 2 ERROR/usage/setup, 3 INCOMPLETE and 124 simulated
 TIMEOUT. `replay` exits: 0 MATCH (including reproduced FAIL), 1 MISMATCH and
-2 NOT_COMPARABLE. Application outcome and replay equality are separate. Wall-time
+2 NOT_COMPARABLE. Offline `diff` exits 0 MATCH, 1 DIFFERENT, and 2 for
+usage/setup or invalid evidence. Application outcome and replay equality are separate. Wall-time
 expiry/cancellation are INCOMPLETE, not simulated TIMEOUT. Successful inspect,
 export and import return 0 even for a recorded FAIL; success means the command
 completed, not that execution is admitted. Their validation/setup errors return 2.
