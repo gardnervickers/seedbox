@@ -184,6 +184,17 @@ fn arg(args: &[String], name: &str) -> Option<String> {
         .and_then(|i| args.get(i + 1).cloned())
 }
 
+// The same machine may legitimately return at an equal-time delivery. Fail
+// only if due processing/replanning produces the identical stalled plan twice.
+type SlicePlan = (usize, u64, u64, u64, u64, u64, u64, u64, u64, u64);
+fn stop_progress(previous: &mut Option<SlicePlan>, plan: SlicePlan, advanced: bool) -> Result<(), String> {
+    if advanced { *previous=None; }
+    else if previous.as_ref()==Some(&plan) {
+        return Err(format!("scheduler made no progress after equal-time replanning: machine={} time={} limit={}",plan.0,plan.1,plan.2));
+    } else { *previous=Some(plan); }
+    Ok(())
+}
+
 fn run() -> Result<Value, String> {
     START.with(|_| ());
     let args: Vec<String> = std::env::args().collect();
@@ -406,6 +417,7 @@ fn run() -> Result<Value, String> {
 
     let started = Instant::now();
     let mut slices = 0u64;
+    let mut stalled_plan = None;
     let mut frames = Vec::new();
     let outcome;
     loop {
@@ -503,7 +515,9 @@ fn run() -> Result<Value, String> {
         } else {
             world.early
         };
+        let plan=(m,world.machines[m].time,limit,horizon,world.next_event(m),fault_boundary,control_boundary,world.machines[m].next_deadline(),world.machines[m].pending_io.as_ref().map_or(0,|p|p.remaining_ns),world.seq);
         let stop = world.machines[m].run_until(&mut world.counter, limit, early, &mut frames)?;
+        stop_progress(&mut stalled_plan,plan,world.machines[m].time!=plan.1 || stop!=Stop::Reached)?;
         for (id,at,success) in world.machines[m].fault_effects.drain(..) {
             if id==0 && success {
                 if let Err(error)=world.faults.management_ready(m,at,world.control.latency) {world.faults.error=Some(error);}
@@ -561,7 +575,7 @@ fn run() -> Result<Value, String> {
             use std::io::Write;
             let _ = t.flush();
         }
-        let w = format!("{:x}", mach.witness.clone().finalize());
+        let w = mach.exit_witness();
         world_witness.update(w.as_bytes());
         let (state_digest, state_parts) = if digest {
             let (d, parts) = mach.state_digest();
@@ -597,6 +611,7 @@ fn run() -> Result<Value, String> {
             "infrastructure_error": matches!(mach.state, State::Exited(_)) && mach.guest_exit_code.is_none(),
             "time_ns": mach.time,
             "branches": mach.branches,
+            "pending_io": mach.pending_io.as_ref().map(|p| json!({"remaining_ns":p.remaining_ns,"direction":if p.write {"out"} else {"in"},"port":p.port,"width":p.width,"count":p.count,"bytes":p.bytes})),
             "witness": w,
             "state_digest": state_digest,
             "state_digest_parts": state_parts,
@@ -647,5 +662,23 @@ fn main() {
             eprintln!("error: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    #[test]
+    fn equal_time_delivery_can_replan_but_an_unchanged_plan_cannot_loop() {
+        let mut previous=None;
+        let plan=(0,1000,1000,1000,1000,1000,1000,2000,500,1);
+        assert!(stop_progress(&mut previous,plan,false).is_ok());
+        let delivered=(0,1000,1000,1000,2000,2000,2000,2000,500,2);
+        assert!(stop_progress(&mut previous,delivered,false).is_ok());
+        assert!(stop_progress(&mut previous,delivered,false).is_err());
+        assert!(stop_progress(&mut previous,delivered,true).is_ok());
+        assert_eq!(previous,None);
+        assert!(stop_progress(&mut previous,delivered,false).is_ok());
     }
 }

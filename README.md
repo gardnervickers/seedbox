@@ -127,15 +127,21 @@ Those fixtures still need the shared guest builders, CPU/SMT lease handling and
 MSR restoration. See [the fixture map](harness/worlds/README.md).
 
 Stop placement settings affect speed only, never results. `--undo` controls the
-precise-stop rollback window (default 256; 0 disables it). `--margin` selects how
-early the VMM requests syscall exits and its stepping distance when undo is off
-(default `adaptive`). The low-level batch runner uses `SEEDBOX_UNDO` and
-`SEEDBOX_MARGIN` for the same settings.
+precise-stop rollback window (default 256; 0 disables it). `--margin` selects the
+PMU approach and stepping distance when undo is off (default `adaptive`). Syscall
+exits remain available throughout a soft stop interval independently of that
+setting; earlier yields do not publish a stop or inject an interrupt. The
+low-level batch runner uses `SEEDBOX_UNDO` and `SEEDBOX_MARGIN` for the same settings.
 
 A PMU overshoot aborts an execution. A separate invocation can use a larger
-margin; the failed evidence remains. Deterministic clock advances must also fit
-in the hard stop. Crossing it fails with `clock bound exceeded`; a larger PMU
-margin does not fix that error.
+margin; the failed evidence remains. Charged timer-port accesses apply their
+device effect or sample their read response once and conserve their full 1000 ns
+cost across world and timer boundaries. The guest resumes only after that cost
+is paid and KVM completes the pending instruction. Terminal witnesses retain a
+pending operation, including its remaining cost and transferred bytes. Other
+clock advances, including guest time reads, retain the strict hard-stop check;
+crossing it fails with `clock bound exceeded`. A larger PMU margin does not fix
+that error.
 
 ## Acceptance scenarios
 

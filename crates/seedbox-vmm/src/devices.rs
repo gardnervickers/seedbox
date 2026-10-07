@@ -246,13 +246,17 @@ impl Pit {
         }
     }
     /// Called when virtual time reaches the deadline: returns true if IRQ0 fires.
-    pub fn expire(&mut self, now: u64) -> bool {
+    pub fn expire(&mut self, now: u64) -> Result<bool, String> {
         match self.deadline {
             Some(d) if d <= now => {
-                self.deadline = self.period_ns.map(|p| d + p);
-                true
+                self.deadline = match self.period_ns {
+                    Some(p) if p > 0 => Some(d.checked_add(p).ok_or("timer deadline overflow")?),
+                    Some(_) => return Err("zero timer period".into()),
+                    None => None,
+                };
+                Ok(true)
             }
-            _ => false,
+            _ => Ok(false),
         }
     }
 }
@@ -364,5 +368,74 @@ pub fn rtc_read(reg: u8) -> u8 {
         0x09 => 0x26,
         0x32 => 0x20,
         _ => 0,
+    }
+}
+
+
+#[cfg(test)]
+#[path = "boundary.rs"]
+mod delay_boundary;
+
+#[cfg(test)]
+mod delay_tests {
+    use super::*;
+    use super::delay_boundary::PendingIo;
+
+    #[test]
+    fn delay_samples_latched_read_once_and_asserts_each_periodic_expiry() {
+        let mut pit=Pit::default();
+        pit.write(0x43,0x34,0);
+        pit.program(1,0);
+        let first=pit.deadline.unwrap();
+        let mut pic=Pic::new();
+        pic.set_masks(0);
+        let mut delay=PendingIo::new(0,0x40,false,1,1,vec![pit.read(0x40,0)]).unwrap();
+        let sampled=delay.bytes.clone();
+        let mut now=0;
+        let mut expired=0;
+        while delay.remaining_ns>0 {
+            now=delay.advance(now,1000,pit.deadline).unwrap();
+            while pit.expire(now).unwrap() {pic.raise(0);expired+=1;}
+        }
+        assert_eq!(first,839);
+        assert_eq!(expired,1);
+        assert_eq!(pit.deadline,Some(1678));
+        assert_eq!(pic.pending(),Some(0));
+        assert_eq!(delay.bytes,sampled);
+        // Periodic assertion coalesces in the PIC without guest service.
+        pit.period_ns=Some(100);
+        pit.deadline=Some(1000);
+        let mut periodic=PendingIo::new(1000,0x530,true,2,1,vec![1,0]).unwrap();
+        while pit.expire(now).unwrap() {pic.raise(0);expired+=1;}
+        while periodic.remaining_ns>0 {
+            now=periodic.advance(now,2000,pit.deadline).unwrap();
+            while pit.expire(now).unwrap() {pic.raise(0);expired+=1;}
+        }
+        assert_eq!(expired,12);
+        assert_eq!(pic.pending(),Some(0));
+        assert_eq!(pic.take(0),0x30);
+        assert_eq!(pic.pending(),None);
+    }
+
+    #[test]
+    fn read_phase_and_timer_world_equality_survive_partial_debt() {
+        let mut pit=Pit::default();
+        pit.write(0x43,0x34,0);
+        pit.program(0x1234,0);
+        pit.write(0x43,0,0);
+        let sample=pit.read(0x40,0);
+        let mut delay=PendingIo::new(0,0x40,false,1,1,vec![sample]).unwrap();
+        assert_eq!(delay.advance(0,500,None).unwrap(),500);
+        assert_eq!(delay.advance(500,1000,None).unwrap(),1000);
+        assert_eq!(delay.bytes,vec![0x34]);
+        assert_eq!(pit.read(0x40,1000),0x12);
+        assert_eq!(pit.ch[0].latch,None);
+        pit.deadline=Some(1000);pit.period_ns=None;
+        assert!(pit.expire(1000).unwrap());
+        assert_eq!(pit.deadline,None);
+        pit.deadline=Some(u64::MAX);pit.period_ns=Some(1);
+        assert!(pit.expire(u64::MAX).is_err());
+        pit.deadline=Some(0);pit.period_ns=Some(0);
+        assert!(pit.expire(0).is_err());
     }
 }
