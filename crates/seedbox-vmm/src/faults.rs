@@ -237,16 +237,13 @@ impl Faults {
         self.connections.list(from,to,after,&self.names)
     }
     pub fn route(&mut self, src: usize, dst: usize, send: u64, frame: &[u8], legacy_cut: bool) -> crate::links::Outcome {
-        let c=self.connections.observe(src,dst,frame,&self.names);
+        let c=self.connections.observe(src,dst,frame);
         let cut=legacy_cut || self.blocked(src,dst);
-        let drop=self.connections.drops(c.as_ref(),cut);
         // Only selector rows grow selection evidence; legacy logs stay identical.
-        if c.is_some() {
-            for s in self.connections.selections.values() {
-                self.log[s.fault_id as usize-1]["selection_counts"]=json!({"matched":s.matched,"dropped":s.dropped});
-            }
-        }
-        if drop {crate::links::Outcome::Lost} else {self.links.decide(src,dst,send,cut)}
+        let drop=self.connections.drops(c,cut,|s| {
+            self.log[s.fault_id as usize-1]["selection_counts"]=json!({"matched":s.matched,"dropped":s.dropped});
+        });
+        if drop {self.links.selected_drop(src,dst);crate::links::Outcome::Lost} else {self.links.decide(src,dst,send,cut)}
     }
     pub fn blocked(&self, from: usize, to: usize) -> bool {
         self.cuts.contains_key(&(from, to))

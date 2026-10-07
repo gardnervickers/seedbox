@@ -266,7 +266,7 @@ fn passive_tracking_preserves_legacy_bytes_and_partition_rng_and_snapshot_state(
         },
         10,
     );
-    let snapshot = f.connections.clone();
+    let snapshot = (f.connections.clone(), f.links.clone());
     let before = hash(&f);
     let mut link_hash = Sha256::new();
     f.links.witness(&mut link_hash);
@@ -275,15 +275,22 @@ fn passive_tracking_preserves_legacy_bytes_and_partition_rng_and_snapshot_state(
         Outcome::Cut
     );
     assert_eq!(f.connections.selections["s"].dropped, 0);
+    let mut after_cut = Sha256::new();
+    f.links.witness(&mut after_cut);
+    assert_eq!(link_hash.finalize(), after_cut.finalize());
+    let mut expected_links = f.links.clone();
+    expected_links.selected_drop(0, 1);
     assert_eq!(
         f.route(0, 1, 12, &frame(4000, false, 2, 0, 0x18), false),
         Outcome::Lost
     );
     let mut after = Sha256::new();
     f.links.witness(&mut after);
-    assert_eq!(link_hash.finalize(), after.finalize());
+    let mut expected = Sha256::new();
+    expected_links.witness(&mut expected);
+    assert_eq!(expected.finalize(), after.finalize());
     assert_ne!(before, hash(&f));
-    f.connections = snapshot;
+    (f.connections, f.links) = snapshot;
     assert_eq!(before, hash(&f));
     assert_eq!(f.connections("client", "server", 0), vec![c]);
     apply(&mut f, Action::Heal { handle: "s".into() }, 13);
@@ -310,9 +317,14 @@ fn bounded_eviction_pages_and_stale_selection_never_reattach() {
     assert!(f
         .admission_error(&Action::DropConnection {
             handle: "new".into(),
-            connection: c
+            connection: c.clone()
         })
-        .is_some());
+        .is_none());
+    // The oldest unselected open session is evicted instead of the selected one.
+    assert!(!f
+        .connections("client", "server", 0)
+        .iter()
+        .any(|c| c.src_port == 4001));
     let mut cursor = 0;
     let mut count = 0;
     loop {
@@ -325,12 +337,26 @@ fn bounded_eviction_pages_and_stale_selection_never_reattach() {
         count += page.len();
     }
     assert_eq!(count, connections::CAPACITY);
-    assert!(matches!(
+    assert_eq!(
         f.route(0, 1, 2, &frame(4000, false, 2, 0, 0x18), false),
+        Outcome::Lost
+    );
+    // A new ISN replaces the incarnation; the old selection cannot reattach.
+    assert!(matches!(
+        f.route(0, 1, 3, &frame(4000, false, 100, 0, 2), false),
         Outcome::Deliver(_)
     ));
-    f.route(0, 1, 3, &frame(4000, false, 1, 0, 2), false);
-    assert_eq!(f.connections.selections["s"].dropped, 0);
+    assert!(f
+        .admission_error(&Action::DropConnection {
+            handle: "stale".into(),
+            connection: c
+        })
+        .is_some());
+    assert!(matches!(
+        f.route(0, 1, 4, &frame(4000, false, 101, 0, 0x18), false),
+        Outcome::Deliver(_)
+    ));
+    assert_eq!(f.connections.selections["s"].dropped, 1);
 }
 
 #[test]
@@ -411,6 +437,153 @@ fn no_selectors_preserve_bytes_with_link_shapes_cuts_and_random_loss() {
         assert_eq!(
             serde_json::to_vec(&f.log).unwrap(),
             serde_json::to_vec(&reference.log).unwrap()
+        );
+    }
+}
+
+#[test]
+fn selected_open_connection_survives_1024_short_connections() {
+    let mut f = fixture();
+    f.route(0, 1, 0, &frame(4000, false, 1, 0, 2), false);
+    let c = f.connections("client", "server", 0)[0].clone();
+    apply(
+        &mut f,
+        Action::DropConnection {
+            handle: "s".into(),
+            connection: c.clone(),
+        },
+        0,
+    );
+    // Also retain an older, unselected open connection: closed sessions go first.
+    f.route(0, 1, 0, &frame(3999, false, 1, 0, 2), false);
+    for port in 4001..=4000 + connections::CAPACITY as u16 {
+        f.route(0, 1, 1, &frame(port, false, 1, 0, 2), false);
+        f.route(0, 1, 2, &frame(port, false, 2, 0, 4), false);
+    }
+    assert_eq!(
+        f.route(0, 1, 3, &frame(4000, false, 2, 0, 0x18), false),
+        Outcome::Lost
+    );
+    let live = f.connections("client", "server", 0);
+    assert_eq!(live.len(), 2);
+    assert_eq!(live[0], c);
+    assert_eq!(live[1].src_port, 3999);
+    // The two oldest closed sessions were evicted, in incarnation order.
+    for port in [4001, 4002] {
+        assert!(f
+            .connections
+            .observe(0, 1, &frame(port, false, 3, 0, 0x18))
+            .is_none());
+    }
+    assert!(f
+        .connections
+        .observe(0, 1, &frame(4003, false, 3, 0, 0x18))
+        .is_some());
+}
+
+#[test]
+fn full_selected_table_skips_new_tuples_and_protects_closed_selections() {
+    let mut f = fixture();
+    let mut cursor = 0;
+    for port in 4000..4000 + connections::CAPACITY as u16 {
+        f.route(0, 1, 0, &frame(port, false, 1, 0, 2), false);
+        let c = f.connections("client", "server", cursor)[0].clone();
+        cursor = c.incarnation;
+        apply(
+            &mut f,
+            Action::DropConnection {
+                handle: port.to_string(),
+                connection: c,
+            },
+            0,
+        );
+    }
+    let next_syn = frame(6000, false, 1, 0, 2);
+    assert!(f.connections.observe(0, 1, &next_syn).is_none());
+    assert_eq!(
+        f.route(0, 1, 1, &frame(4000, false, 2, 0, 4), false),
+        Outcome::Lost
+    );
+    // Even a closed incarnation remains protected until its handle is healed.
+    assert!(f.connections.observe(0, 1, &next_syn).is_none());
+    assert_eq!(
+        f.route(0, 1, 2, &frame(4000, false, 2, 0, 0x18), false),
+        Outcome::Lost
+    );
+    apply(
+        &mut f,
+        Action::Heal {
+            handle: "4000".into(),
+        },
+        3,
+    );
+    assert!(f.connections.observe(0, 1, &next_syn).is_some());
+    let c = f.connections("client", "server", cursor)[0].clone();
+    assert_eq!(c.src_port, 6000);
+    assert_eq!(c.incarnation, cursor + 1);
+    assert_eq!(
+        f.route(0, 1, 4, &frame(4001, false, 2, 0, 0x18), false),
+        Outcome::Lost
+    );
+}
+
+#[test]
+fn selected_drop_preserves_other_flow_jitter_and_does_not_advance_fifo() {
+    let mut plain = fixture();
+    let mut selected = fixture();
+    for state in [&mut plain, &mut selected] {
+        apply(
+            state,
+            Action::Shape {
+                handle: "jitter".into(),
+                from: vec!["server".into()],
+                to: vec!["client".into()],
+                latency_ns: 1000,
+                jitter_ns: 999,
+                loss_ppm: 0,
+            },
+            0,
+        );
+        for port in [4000, 4001] {
+            state.route(0, 1, 0, &frame(port, false, 7, 0, 2), false);
+            state.route(1, 0, 1, &frame(port, true, 50, 8, 0x12), false);
+        }
+    }
+    let c = selected.connections("server", "client", 0)[0].clone();
+    // Overlapping selectors must still consume only one draw from each stream.
+    for handle in ["one", "two"] {
+        apply(
+            &mut selected,
+            Action::DropConnection {
+                handle: handle.into(),
+                connection: c.clone(),
+            },
+            2,
+        );
+    }
+    let last = selected.links.last.clone();
+    let packet = frame(4000, true, 51, 8, 0x18);
+    assert!(matches!(
+        plain.route(1, 0, 3000, &packet, false),
+        Outcome::Deliver(_)
+    ));
+    assert_eq!(selected.route(1, 0, 3000, &packet, false), Outcome::Lost);
+    assert_eq!(selected.links.last, last);
+    let other = frame(4001, true, 51, 8, 0x18);
+    // Spaced sends keep FIFO from masking a different jitter sample.
+    let arrival = plain.route(1, 0, 6000, &other, false);
+    assert!(matches!(arrival, Outcome::Deliver(_)));
+    assert_eq!(selected.route(1, 0, 6000, &other, false), arrival);
+    // With FIFO equal again, the full link witness also checks loss stream position.
+    let mut a = Sha256::new();
+    let mut b = Sha256::new();
+    plain.links.witness(&mut a);
+    selected.links.witness(&mut b);
+    assert_eq!(a.finalize(), b.finalize());
+    for row in &selected.log[1..] {
+        assert_eq!(
+            row["selection_counts"],
+            serde_json::json!({"matched": 1, "dropped": 1})
         );
     }
 }

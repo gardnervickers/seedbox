@@ -27,63 +27,34 @@ with a new incarnation while the old selector stays armed. Stale admission must
 fail, heal must report `dropped > 0`, and no active handles may remain. These are
 guest-owned checks. This fixture makes no HTTP accepted-write claim.
 
-Run exactly seeds 61 and 62, each once with full state, then the four replays
-below for each retained run. Set `RUN61`/`RUN62` to the literal run-directory
-printed by the corresponding `PASS:` line. Every run must exit 0 with PASS;
-every replay must exit 0 with MATCH, including full machine state comparisons.
+Run seed 61 once with full state, then replay the retained run normally and
+with undo disabled. Set `RUN61` to the literal run directory printed by `PASS:`.
+The run must exit 0 with PASS; both replays must exit 0 with MATCH, including
+full machine state comparisons.
 
 ```sh
 sudo -E env PATH="$PATH" target/release/seedbox run harness/acceptance/workloads/connections.yaml --seed 61 --full-state
-sudo -E env PATH="$PATH" target/release/seedbox run harness/acceptance/workloads/connections.yaml --seed 62 --full-state
-RUN61=/absolute/path/from/first/PASS
-RUN62=/absolute/path/from/second/PASS
-for run in "$RUN61" "$RUN62"; do
-  sudo -E env PATH="$PATH" target/release/seedbox replay "$run"
-  sudo -E env PATH="$PATH" target/release/seedbox replay "$run" --undo 0
-  sudo -E env PATH="$PATH" target/release/seedbox replay "$run" --undo 16
-  sudo -E env PATH="$PATH" target/release/seedbox replay "$run" --undo 0 --margin 32768
-done
+RUN61=/absolute/path/from/PASS
+sudo -E env PATH="$PATH" target/release/seedbox replay "$RUN61"
+sudo -E env PATH="$PATH" target/release/seedbox replay "$RUN61" --undo 0
 ```
 
-Observation control: run seed 61 once without full-state observation, using the
-same checkout and cached registry image closure. Set `PLAIN61` to its PASS path.
-The comparison below must print `observation: MATCH`: it checks exact network,
-selection/control history, per-machine exit witnesses, guest output bytes and
-retained runtime inputs. World witnesses differ by definition when full-state
-RAM hashes are included, so compare the underlying exit/network witnesses.
-Host runtime, PMU recovery statistics and capture metadata are not semantic.
+No-selector control: use the #60 plain world on main and this branch, with the
+same retained guest/kernel inputs, seed and runtime parameters. Record both
+commit IDs and engine hashes. Require matching world and per-machine execution
+witnesses and guest output; compare network witnesses when both engines report
+them. Compare separate executions: a cross-engine
+replay is not this control. This checks that passive connection tracking leaves
+ordinary execution unchanged.
 
-```sh
-sudo -E env PATH="$PATH" target/release/seedbox run harness/acceptance/workloads/connections.yaml --seed 61
-PLAIN61=/absolute/path/from/plain/PASS
-sudo -E env PATH="$PATH" python3 - "$RUN61" "$PLAIN61" <<'PY'
-import json
-import pathlib
-import sys
-left, right = [pathlib.Path(p) / 'output' for p in sys.argv[1:]]
-a, b = [json.loads((p / 'vmm.json').read_text()) for p in (left, right)]
-for key in ('seed', 'outcome', 'network_witness', 'network_counters',
-            'frames_delivered', 'frames_dropped', 'faults', 'fault_error',
-            'control_history', 'control_latency_ns', 'management_readiness'):
-    assert a[key] == b[key], key
-for x, y in zip(a['machines'], b['machines'], strict=True):
-    for key in ('name', 'state', 'guest_exit_code', 'guest_init_error',
-                'time_ns', 'branches', 'witness', 'pending_io', 'net'):
-        assert x[key] == y[key], (x['name'], key)
-    for suffix in ('console', 'mgmt'):
-        filename = x['name'] + '.' + suffix
-        assert (left / 'machines' / filename).read_bytes() == (right / 'machines' / filename).read_bytes(), filename
-wa, wb = [json.loads((p / 'world.json').read_text()) for p in (left, right)]
-assert wa == wb, 'runtime input closure differs; observation comparison invalid'
-assert any(f.get('selection_counts', {}).get('dropped', 0) > 0 for f in a['faults'])
-print('observation: MATCH')
-PY
-```
+Seed 62, undo 16, margin 32768 and the observation comparison are outside this
+focused selector check; broader engine qualification remains with the smoke tier.
 
 The portable packet tests separately cover SYN/data retransmission, simultaneous
 open, FIN half-close, RST, changed ISN, options, malformed/truncated/fragmented and
-non-TCP traffic, missing/evicted incarnations, bounded pages, overlapping handles,
-partition precedence, RNG positions, snapshot restoration and send-time retention.
+non-TCP traffic, missing/evicted incarnations, bounded pages, protected selections
+under connection churn and capacity exhaustion, overlapping handles, partition
+precedence, RNG positions, snapshot restoration and send-time retention.
 They also compare passive classification against legacy link decisions, logs and
 network witness bytes. The finite guest runs above do not establish support for
 IPv6, fragments, HTTP-object selection or every TCP lifecycle on real guests.

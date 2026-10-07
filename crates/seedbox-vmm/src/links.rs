@@ -201,6 +201,11 @@ impl Links {
             .map(|(&id, _)| id);
         id.is_some_and(|id| self.layers.remove(&id).is_some())
     }
+    /// A selected non-cut candidate consumes both draws without advancing FIFO.
+    pub fn selected_drop(&mut self, src: usize, dst: usize) {
+        self.loss.get_mut(&(src, dst)).unwrap().next();
+        self.jitter.get_mut(&(src, dst)).unwrap().next();
+    }
     pub fn decide(&mut self, src: usize, dst: usize, send: u64, cut: bool) -> Outcome {
         if cut {
             return Outcome::Cut;

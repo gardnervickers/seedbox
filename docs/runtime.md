@@ -242,7 +242,8 @@ a delay decrease preserves FIFO and head-of-line waiting. The scheduler's global
 early-delivery window remains unchanged.
 
 Counters distinguish `delivered`, `partition_dropped`, `receiver_dropped`, and
-`loss_dropped`; `loss_dropped` is omitted for a link that has lost nothing.
+`loss_dropped`; `loss_dropped` includes selector drops and is omitted for a link
+that has lost nothing.
 The report's `network_witness` hashes in-flight frames, per-link last
 arrivals, stream positions, live layers, cuts and baselines. It is folded into
 `world_witness` only when the run has baseline overrides, applied a shape or used a connection selector, so
@@ -306,17 +307,22 @@ and broadcast bypass connection selection and retain ordinary link policies.
 There is no reassembly or application-protocol decoding.
 
 At most 1024 bidirectional tuples and 1024 active selector handles are retained.
-A new tuple at capacity evicts the oldest admitted incarnation, including an
-actively selected one; stale handles keep their counts but cannot attach to a
-replacement. Evicted midstream traffic is unclassified until a fresh opening SYN.
+A new tuple at capacity evicts the oldest unselected closed incarnation first,
+then the oldest unselected open incarnation. An incarnation named by a live
+selector is never evicted, even after closure; if all retained incarnations are
+selected, the new tuple is not tracked. Stale handles keep their counts but cannot
+attach to a replacement. Evicted or untracked midstream traffic is unclassified
+until a fresh opening SYN can be admitted.
 Selector capacity exhaustion is an explicit admission error. Counters and IDs do
 not reset on discovery, process restart or healing. Fork snapshots preserve the
 classifier and selector state, and reseeding does not reset their identities.
 
 Partitions dominate selected loss, which dominates directed link shapes.
-Selected loss drops every matching candidate before link RNG and FIFO updates;
+Selected loss drops every matching candidate after consuming exactly one loss
+draw and one jitter draw for its pair, without updating the pair's last arrival;
 unselected traffic uses the existing link policy and global causal floor. No
-selector draws RNG. Broadcast candidate ordering remains ascending machine index.
+additional selector RNG is used, and cuts remain draw-free. Broadcast candidate
+ordering remains ascending machine index.
 Overlapping handles each retain their matched/dropped counts, and healing only
 releases its own handle. Arming is not evidence of injection: require a positive
 `dropped` count from heal or retained `selection_counts`. Pending frames are never
