@@ -27,7 +27,24 @@ pub struct OciPreparer {
 }
 
 impl PreparationBackend for OciPreparer {
+    fn validate_runtime_inputs(&self) -> Result<()> {
+        if self.profile.backend == "seedbox-kvm" {
+            crate::admission::validate_profile(&self.profile)?;
+            crate::admission::validate_kernel(&crate::admission::file_digest(&self.kernel)?)?;
+            if crate::admission::file_digest(&self.engine)? != self.profile.engine {
+                return Err(Error::Integrity(
+                    "VMM changed after profile construction".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
     fn prepare(&self, simulation: &Simulation, store: &ContentStore) -> Result<PreparedInputs> {
+        self.validate_runtime_inputs()?;
+        let kernel = store.put_file(&self.kernel)?;
+        if self.profile.backend == "seedbox-kvm" {
+            crate::admission::validate_kernel(&kernel)?;
+        }
         let engine = store.put_file(&self.engine)?;
         if engine != self.profile.engine {
             return Err(Error::Integrity(
@@ -128,7 +145,7 @@ impl PreparationBackend for OciPreparer {
             );
         }
         Ok(PreparedInputs {
-            kernel: store.put_file(&self.kernel)?,
+            kernel,
             images,
             guests,
             placement: simulation

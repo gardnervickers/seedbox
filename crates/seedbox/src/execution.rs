@@ -83,6 +83,10 @@ impl PreparedInputs {
 /// Resolves/builds images and retains their entire input closure in `store`.
 /// No guest execution, CPU pinning, or host-state mutation is allowed here.
 pub trait PreparationBackend: Send + Sync {
+    /// Fast immutable runtime input checks, before any OCI work.
+    fn validate_runtime_inputs(&self) -> Result<()> {
+        Ok(())
+    }
     fn prepare(&self, simulation: &Simulation, store: &ContentStore) -> Result<PreparedInputs>;
 }
 
@@ -115,6 +119,14 @@ pub struct ExecutionRequest<'a> {
 }
 
 pub trait ExecutionBackend: Send + Sync {
+    /// Readiness check; all transient host resources must close before return.
+    fn preflight(&self, _output: Option<&Path>) -> Result<()> {
+        Ok(())
+    }
+    /// Admission proof and inputs must be checked even for old retained records.
+    fn validate_retained(&self, _inputs: &PreparedInputs) -> Result<()> {
+        Ok(())
+    }
     /// Must exactly match the recorded profile before execution can begin.
     fn profile(&self) -> ExecutionProfile;
     /// Only knobs whose witness invariance has been qualified belong here.
