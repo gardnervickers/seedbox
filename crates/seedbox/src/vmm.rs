@@ -14,6 +14,9 @@ use std::{
     path::Path,
 };
 
+/// Execution failure whose VMM stderr may be excerpted by the CLI.
+pub const VMM_FAILURE_MESSAGE: &str = "VMM failed; see vmm.stderr";
+
 #[derive(Clone, Debug)]
 pub struct VmmExecutor {
     /// Host CPU to pin the VMM to; `None` leases the first free eligible core.
@@ -1355,7 +1358,7 @@ mod linux {
                 break if success {
                     report(&fs::read(&report_path)?, &request)
                 } else {
-                    Err(Error::Execution("VMM failed; see vmm.stderr".into()))
+                    Err(Error::Execution(VMM_FAILURE_MESSAGE.into()))
                 };
             }
             if started.elapsed() >= Duration::from_nanos(request.limits.wall_time_ns) {
