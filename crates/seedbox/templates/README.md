@@ -42,7 +42,9 @@ or append `--plant, missing` to the etcd client's command list. The expected res
 is FAIL; a fresh replay must reproduce that FAIL with MATCH. Nonempty fault
 schedules remain unsupported until their guest effect timing is verified.
 
-`explore` prepares once and executes a finite consecutive seed sequence sequentially.
+`explore` validates runtime inputs and host admission before its one preparation,
+then executes a finite consecutive seed sequence sequentially. Admission refusal
+retains batch ERROR without preparation or seed dispatch; each seed rechecks its host.
 Each run retains its ordinary manifest and replay inputs under the printed batch
 path. FAIL and witnessed simulated TIMEOUT continue; infrastructure errors and
 cancellation stop. Count defaults to 1 and seed to the Compose seed. `--json` prints

@@ -175,6 +175,8 @@ impl Orchestrator {
                 options.cancellation.clone(),
             )?;
             context.check()?;
+            preparer.validate_runtime_inputs()?;
+            executor.preflight(None)?;
             preparer.prepare_cancellable(simulation, &self.store, &context)
         })();
         batch.preparation_seconds = Some(prepared_at.elapsed().as_secs_f64());

@@ -49,8 +49,11 @@ INCOMPLETE and 124 TIMEOUT.
 `seedbox explore [COMPOSE] --seed FIRST --count COUNT` runs consecutive seeds
 sequentially, preparing the complete input closure once. Compose defaults to `.`,
 the first seed to the Compose seed, and count to 1. Empty/overflowing ranges fail
-before state creation or preparation. Application FAIL and witnessed simulated
-TIMEOUT continue; ERROR, INCOMPLETE and cancellation stop dispatch. No seed is retried.
+before state creation or preparation. Immutable runtime inputs and host admission are
+checked before the sole preparation; refusal retains batch ERROR without dispatch.
+Each seed uses the ordinary retained-input and leased host rechecks. Application FAIL
+and witnessed simulated TIMEOUT continue; ERROR, INCOMPLETE and cancellation stop
+dispatch. No seed is retried.
 
 Each exploration retains `exploration.json`, preparation diagnostics and ordinary
 per-seed run directories under `attempts/SEED/`. Inspect and replay those run paths

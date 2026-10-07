@@ -176,3 +176,36 @@ fn cancelled_copy_retains_command_and_cleanup_receipts_after_drop() {
     assert_eq!(receipt["cancelled"], true);
     assert_eq!(receipt["reaped"], true);
 }
+
+#[test]
+fn direct_oci_preparation_refuses_invalid_profile_before_builder_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let sentinel = root.path().join("tool-invoked");
+    let tool = script(
+        root.path(),
+        "sentinel",
+        &format!("touch '{}'; exit 9", sentinel.display()),
+    );
+    let (mut preparer, mut simulation, store) = fixture(root.path(), tool.clone(), tool.clone());
+    preparer.tools.docker = tool;
+    preparer.profile.backend = "seedbox-kvm".into();
+    simulation.services.get_mut("app").unwrap().source = seedbox::config::ImageSource::Build {
+        context: root.path().to_path_buf(),
+        dockerfile: root.path().join("Dockerfile"),
+    };
+    let context =
+        PreparationContext::new(root.path().join("evidence"), CancellationToken::default())
+            .unwrap();
+    for result in [
+        preparer.prepare(&simulation, &store),
+        preparer.prepare_cancellable(&simulation, &store, &context),
+    ] {
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("host admission proof missing"));
+    }
+    assert!(!sentinel.exists());
+    assert!(!root.path().join("evidence/builder.json").exists());
+    assert!(!root.path().join("evidence/setup.json").exists());
+}

@@ -441,7 +441,7 @@ fn run(cli: Cli) -> Result<u8> {
                 preparer.tools.docker = defaults::preparation_tool(&preparer.tools.docker)?;
             }
             let executor = performance.apply(executor)?;
-            require_kvm_host()?;
+            // Exploration retains any backend admission refusal in its batch checkpoint.
             let _signals = Signals::register(&cancellation)?;
             let mut result = orchestrator.explore(&simulation, options, &preparer, &executor)?;
             result.record_resources(resources.finish())?;

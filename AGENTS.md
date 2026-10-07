@@ -103,7 +103,7 @@ deliberately change one.
 3. On failure, return `missing(what, &searched, fix)`, which lists every
    location tried and one way to fix it.
 4. Resolve it in `RuntimeInputs::backends` or earlier, before any slow work
-   (image pulls, builds, CPU leases). Fail fast. `run` checks immutable runtime
+   (image pulls, builds, CPU leases). Fail fast. `run` and `explore` check immutable runtime
    inputs and backend host admission before
    preparation; no transient perf descriptor, affinity or CPU reservation survives
    that check. Replay validates retained host-policy proof before live admission,

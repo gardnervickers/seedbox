@@ -213,7 +213,11 @@ boundary. Final report counters still record physical NIC acceptance totals.
 
 `seedbox explore [COMPOSE] --seed FIRST --count COUNT` has one sequential worker.
 Count defaults to 1; seed defaults to the resolved Compose seed. Bounds are finite,
-positive and checked for inclusive u64 overflow before slow work. The complete
+positive and checked for inclusive u64 overflow before slow work. Runtime inputs and
+backend host admission are checked before the sole preparation; refusal retains
+batch ERROR with no prepared inputs or seed attempts. Transient admission resources
+are released before preparation, and each seed retains the ordinary leased recheck.
+The complete
 configuration, PreparedInputs and performance parameters are frozen once. Every
 attempt verifies the full retained closure through the ordinary run lifecycle;
 missing/corrupt bytes cause ERROR without re-preparation or repair.
