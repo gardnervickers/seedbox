@@ -390,7 +390,7 @@ fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome>
         if fault.applied_at_ns < fault.requested_at_ns
             || !(simulation.services.contains_key(&fault.service)
                 || (fault.service.is_empty()
-                    && matches!(fault.action.as_str(), "partition" | "heal")))
+                    && matches!(fault.action.as_str(), "partition" | "shape" | "heal")))
         {
             return Err(Error::Execution(
                 "fault effect must acknowledge a known service at or after its request time".into(),

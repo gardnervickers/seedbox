@@ -91,6 +91,7 @@ Common fields are `version: 1`, `id`, and `op`. Targets are typed objects:
 | `stop` | `target`: a typed target | `{}` after process-group termination and reap |
 | `restart` | `target`: a typed target | `{}` after successful exec of its retained launch recipe |
 | `partition` | `left`, `right`: nonempty, disjoint arrays of typed targets | `{"handle":"opaque value"}` |
+| `shape` | `from`, `to`: nonempty disjoint typed-target arrays; `latency_ns`, `jitter_ns`, `loss_ppm`: integers | `{"handle":"opaque value"}` |
 | `heal` | `handle`: a previously returned handle | `{}` after releasing that handle |
 | `inspect` | None | `services`, `machines`, `active_handles`, `network_counters` |
 
@@ -98,13 +99,13 @@ Partitions cut both directions between their two groups. Each handle is
 independent: a link remains cut while any applicable handle exists. Already
 routed packets stay in flight; new sends crossing an active cut are dropped.
 Inspect returns the retained service-to-machine mapping, application lifecycle
-states (`Running`, `Stopped`, or `Exited(code)`), active partition handles and
+states (`Running`, `Stopped`, or `Exited(code)`), active partition and shape handles and
 directed-link counters. It exposes simulator state, not application object memory.
 Transient CPU halt state is not an application lifecycle state. Counters include
 sends, drops and arrivals whose nominal simulated timestamps are strictly before
 the admission boundary; equal-time packets follow admission. This excludes
 packets that the scheduler has delivered early but whose nominal arrival is
-still in the future. Partition/heal evidence uses the same counter boundary.
+still in the future. Partition/shape/heal evidence uses the same counter boundary.
 
 For example:
 
@@ -124,13 +125,30 @@ The next request can release exactly that handle:
 {"version":1,"id":2,"op":"heal","handle":"p1"}
 ```
 
+A directed shape uses a complete, absolute policy:
+
+```json
+{"version":1,"id":3,"op":"shape","from":[{"service":"client"}],"to":[{"service":"server"}],"latency_ns":20000000,"jitter_ns":2000000,"loss_ppm":50000}
+```
+
+Shapes use the same handle counter as partitions. The highest live fault ID
+covering a directed pair wins; healing reveals the previous layer or baseline.
+A cut always dominates. Latency must be at least the global network latency,
+jitter must be less than latency, their sum must not exceed one hour, and
+`loss_ppm` must be in `[0, 1000000]`. Invalid values receive `invalid_request`.
+The Python API is `world.shape(from_, to, latency=..., jitter=0, loss_ppm=0)`
+with nanosecond integers (`Controller` is an alias for `World`); `world.heal()` accepts either returned handle type.
+Shapes take effect at admission, and each frame retains its send-time decision.
+Counters include `delivered`, `partition_dropped`, `receiver_dropped`, and
+`loss_dropped`; even a lost candidate consumes one loss and one jitter sample.
+
 An operation error uses `ok: false` and `error` instead of a result:
 
 ```json
-{"version":1,"id":2,"ok":false,"error":{"code":"invalid_request","message":"inactive partition handle"},"requested_at_ns":1020000000,"admitted_at_ns":1027000000,"effect_at_ns":1027000000,"replied_at_ns":1034000000}
+{"version":1,"id":2,"ok":false,"error":{"code":"invalid_request","message":"inactive fault handle"},"requested_at_ns":1020000000,"admitted_at_ns":1027000000,"effect_at_ns":1027000000,"replied_at_ns":1034000000}
 ```
 
-A scenario can handle rejected arguments or an inactive partition handle.
+A scenario can handle rejected arguments or an inactive fault handle.
 `restart` starts a stopped application using its retained launch recipe. Restarting
 a running application or stopping an already stopped application returns
 `invalid_state`. Commands targeting a VM that has exited return `target_unavailable`,

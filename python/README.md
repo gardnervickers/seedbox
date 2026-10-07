@@ -36,18 +36,22 @@ Methods are blocking: the calling thread waits for the confirmed operation while
 the simulated world continues. This keeps normal Python control flow useful,
 including loops, conditionals and calls to application clients. A controller is
 outside the fault model; keep it separate from the services being stopped or
-partitioned. Closing the connection does not silently heal outstanding cuts.
+partitioned or shaped. Closing the connection does not silently heal outstanding handles.
 
 `stop`, `restart`, `heal`, and `sleep` return an `Effect` containing request,
 admission, effect and reply timestamps. `partition` returns a `Partition` with
-its opaque handle and effect. `now_ns()` reads simulated time; `inspect()` returns
+its opaque handle and effect. `shape(from_, to, latency=..., jitter=0, loss_ppm=0)`
+returns a `Shape` accepted by `heal`; latency and jitter are nanosecond integers.
+It changes only the directed pairs, with the highest live fault ID taking precedence.
+A partition dominates a shape, and in-flight decisions remain fixed. `Controller`
+is also exported as an alias for `World`. `now_ns()` reads simulated time; `inspect()` returns
 topology, machine state, active handles and packet counters. Strings name services;
 use `Machine("prepared-name")` when explicitly targeting a machine.
 
 `FaultError` carries a structured operation error. `ProtocolError` indicates an
 invalid or interrupted exchange. The client never retries uncertain operations.
 Use one active connection in one thread at a time. After a completed call, close
-that `World` and use `World.connect()` for a new session; partition handles remain
+that `World` and use `World.connect()` for a new session; partition and shape handles remain
 valid. Restarting a running application or stopping one twice raises a recoverable
 `FaultError` with code `invalid_state`; an exited VM returns `target_unavailable`.
 The scenario chooses how those errors affect its result.

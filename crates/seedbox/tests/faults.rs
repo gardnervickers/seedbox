@@ -1,5 +1,13 @@
 #[allow(dead_code)]
 #[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/links.rs"]
+mod links;
+#[allow(dead_code)]
+#[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/rng.rs"]
+mod rng;
+#[allow(dead_code)]
+#[rustfmt::skip]
 #[path = "../../seedbox-vmm/src/faults.rs"]
 mod engine;
 use serde_json::json;

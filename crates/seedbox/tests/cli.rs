@@ -277,3 +277,42 @@ fn bundle_cli_validates_paths_limits_and_positional_inputs() {
     let output = seedbox(&["import", "missing"], directory.path());
     assert_eq!(stderr(&output), "error: bundle missing: not found\n");
 }
+
+#[test]
+fn validate_cli_resolves_directed_baselines_and_reports_each_policy_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("compose.yaml");
+    let yaml = "name: cli-links\nservices:\n  server: {image: example/server:v1}\n  client: {image: example/client:v1}\nx-seedbox:\n  version: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  network: {latency: 1ms, links: [LINKS]}\n  check: {service: client}\n";
+    let good = "{from: server, to: client, latency: 1ms}";
+    fs::write(&source, yaml.replace("LINKS", good)).unwrap();
+    let output = seedbox(&["validate", "--json"], directory.path());
+    assert!(output.status.success(), "{}", stderr(&output));
+    let resolved: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        resolved["network"]["links"][0],
+        serde_json::json!({"from":"server","to":"client","latency_ns":1_000_000,"jitter_ns":0,"loss_ppm":0})
+    );
+    for (entry, path) in [
+        (format!("{good},{good}"), "links[1]"),
+        (
+            good.replace("from: server", "from: unknown"),
+            "links[0].from",
+        ),
+        (good.replace("1ms", "999us"), "links[0].latency"),
+        (good.replace("1ms}", "1ms, jitter: 1ms}"), "links[0].jitter"),
+        (
+            good.replace("1ms}", "1ms, loss_ppm: 1000001}"),
+            "links[0].loss_ppm",
+        ),
+    ] {
+        fs::write(&source, yaml.replace("LINKS", &entry)).unwrap();
+        let output = seedbox(&["validate"], directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(
+            stderr(&output).contains(&format!("$.x-seedbox.network.{path}")),
+            "{}",
+            stderr(&output)
+        );
+    }
+}
