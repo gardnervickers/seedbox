@@ -208,7 +208,8 @@ Compose guest drivers can call `World.pause(target)`, `resume(target)`,
 `crash(target)` and `reboot(target)` through the [runtime control API](../python/README.md).
 Each acts on the target's whole machine at admission and returns an `Effect`;
 the transcript and service-attributed fault events are validated during run and
-replay. Illegal transitions return recoverable `invalid_state`; pause/resume
+replay. Illegal transitions, and stop or restart of a paused machine, return
+recoverable `invalid_state`; pause/resume
 of an exited VM and process faults whose machine exits or crashes return
 `target_unavailable`. Inspection shows `Paused` and `Down`. After reboot, the
 scenario checks application readiness itself. See

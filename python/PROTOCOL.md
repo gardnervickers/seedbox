@@ -149,7 +149,9 @@ A scenario can handle rejected arguments or an inactive partition handle.
 a running application or stopping an already stopped application returns
 `invalid_state`. Illegal machine lifecycle transitions also return `invalid_state`
 without creating a fault plan: pause requires a running machine, resume a paused
-machine, crash a machine that is not down, and reboot a down machine. Stop/restart
+machine, crash a machine that is not down, and reboot a down machine. Stop and
+restart of a paused machine also return `invalid_state`, since its supervisor
+cannot act until it resumes. Stop/restart
 and pause/resume targeting a VM that has exited return `target_unavailable`;
 crash and reboot are allowed for an exited machine, subject to those transitions.
 Stop/restart targeting a down machine resolve as `target_unavailable` at admission,
