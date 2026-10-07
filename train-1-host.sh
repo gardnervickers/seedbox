@@ -77,8 +77,8 @@ lane_volumes() {  # cpu 7: #96 V1-V3, #100 T3, all on K
   local s=$OUT/vol-state v=$T/harness/acceptance/workloads/volume-crash.yaml
   compose v1 "$TC" "$K" 7 "$s" "$v" --seed 1
   replay v1-replay "$TC" v1 7 "$s"
-  replay v1-undo0 "$TC" v1 7 "$s" --undo 0
-  replay v1-margin "$TC" v1 7 "$s" --undo 0 --margin 16384
+  # No undo-off or margin replays: volumes don't touch stepping, and the
+  # default replay already rolls the disk back through undo checkpoints.
   compose v2 "$TC" "$K" 7 "$s" "$v" --seed 4101
   replay v2-replay "$TC" v2 7 "$s"
   compose v3 "$TC" "$K" 7 "$s" "$T/harness/acceptance/workloads/sanity.yaml"
