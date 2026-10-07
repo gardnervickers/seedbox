@@ -187,11 +187,17 @@ entry through `_addRpathPrefix`; real library and Nix store paths remain intact.
 Other Cargo builds and their target directories are unaffected.
 The wrapper's content hash is included in Cargo's compiler fingerprint, so
 enabling or editing it invalidates cached VMM artifacts and dependencies.
+The shared `seedbox-control` source is reached through
+`crates/seedbox-vmm/seedbox-control`, a symlink inside the VMM workspace. Cargo
+then hashes its path relative to that workspace instead of the checkout's
+absolute path when computing crate metadata. The VMM's inherited workspace
+package and dependency keys match the root workspace.
 
 On Linux in the project dev shell, run
 `bash harness/check-vmm-reproducible.sh [REV]` (default `HEAD`). It builds two
 fresh archives of the same commit at different temporary paths, compares SHA-256,
-rejects embedded checkout paths, prints differing embedded paths on mismatch,
+rejects embedded checkout, HOME, CARGO_HOME and rustc sysroot paths, prints
+per-crate `-C metadata` and differing embedded paths on mismatch,
 and removes both checkouts on success or failure. It needs neither KVM nor root.
 Equality assumes the same pinned toolchain, libraries and build options; this
 does not establish reproducibility across different toolchains.

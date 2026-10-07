@@ -72,11 +72,12 @@ def main():
         # rustc-wrapper itself. Include our contents so old unremapped artifacts
         # and later wrapper revisions cannot be silently reused. No local paths
         # enter this fingerprint, and the real compiler version stays visible.
-        version = subprocess.check_output([*prefix, '-vV'], env=env, text=True)
+        version = subprocess.check_output([*prefix, '-vV'], env=env, text=True, close_fds=False)
         digest = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
         sys.stdout.write(version + f'seedbox-vmm-wrapper: {digest}\n')
         return
-    sysroot = subprocess.check_output([*prefix, '--print', 'sysroot'], env=env, text=True).strip()
+    sysroot = subprocess.check_output([*prefix, '--print', 'sysroot'], env=env,
+                                      text=True, close_fds=False).strip()
     command.extend(remaps(root, env, sysroot))
     os.execvpe(command[0], command, env)
 

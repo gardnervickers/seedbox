@@ -18,12 +18,13 @@ trap 'rm -rf -- "$scratch"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 echo "revision: $revision"
+sysroot=$(rustc --print sysroot)
 first="$scratch/first"
 second="$scratch/a longer checkout with spaces/second"
 for checkout in "$first" "$second"; do
   mkdir -p "$checkout"
   git archive "$revision" | tar -x -C "$checkout"
-  (cd "$checkout" && cargo build-vmm)
+  (cd "$checkout" && cargo build-vmm -v 2>&1 | tee "$checkout/build.log" >&2)
 done
 binary=crates/seedbox-vmm/target/release/seedbox-vmm
 first_hash=$(sha256sum "$first/$binary")
@@ -34,6 +35,11 @@ strings "$first/$binary" > "$scratch/first.strings"
 strings "$second/$binary" > "$scratch/second.strings"
 status=0
 if [[ ${first_hash%% *} != "${second_hash%% *}" ]]; then
+  echo 'error: VMM binaries differ; per-crate -C metadata follows' >&2
+  for checkout in "$first" "$second"; do
+    echo "checkout: $checkout" >&2
+    sed -nE 's/.*--crate-name ([^ ]+).* -C metadata=([[:xdigit:]]+).*/\1 metadata=\2/p' "$checkout/build.log" >&2
+  done
   echo 'error: VMM binaries differ; differing embedded paths follow' >&2
   # Include paths within RPATH lists and debug strings, not just leading '/'.
   for name in first second; do
@@ -42,12 +48,23 @@ if [[ ${first_hash%% *} != "${second_hash%% *}" ]]; then
   diff -u "$scratch/first.paths" "$scratch/second.paths" >&2 || true
   status=1
 fi
-# Equality alone could hide a shared inherited Nix shell checkout path.
+# Equality alone could hide shared checkout, registry or toolchain paths.
+leak_patterns=(-e "$scratch" -e "$source_root" -e "$sysroot")
+for path in "${HOME:-}" "${CARGO_HOME:-${HOME:-}/.cargo}"; do
+  # HOME=/ would match every absolute path, including retained Nix libraries.
+  if [[ -n "$path" && "$path" != / ]]; then
+    leak_patterns+=(-e "$path")
+    if [[ -d "$path" ]]; then
+      leak_patterns+=(-e "$(cd "$path" && pwd -P)")
+    fi
+  fi
+done
+if [[ -d "$sysroot" ]]; then leak_patterns+=(-e "$(cd "$sysroot" && pwd -P)"); fi
 for name in first second; do
-  if grep -F -e "$scratch" -e "$source_root" "$scratch/$name.strings" >&2; then
-    echo "error: $name binary retains an absolute checkout path" >&2
+  if grep -F "${leak_patterns[@]}" "$scratch/$name.strings" >&2; then
+    echo "error: $name binary retains an absolute build path" >&2
     status=1
   fi
 done
-if [[ $status == 0 ]]; then echo 'reproducible: byte-identical VMM binaries, no checkout paths'; fi
+if [[ $status == 0 ]]; then echo 'reproducible: byte-identical VMM binaries, no local build paths'; fi
 exit "$status"

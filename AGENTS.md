@@ -45,7 +45,11 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   lockfile, its `[profile.release]`, or even reformatting (which moves panic
   line numbers; `crates/seedbox-vmm/rustfmt.toml` disables formatting). Build
   it only with `cargo build-vmm`. Don't tidy the VMM as a side effect of other
-  work.
+  work. `crates/seedbox-control/**`, `harness/vmm-rustc.py` and the VMM alias
+  flags in `.cargo/config.toml` also determine engine bytes and identity. The
+  VMM reaches the shared control crate through its in-workspace symlink so
+  Cargo's crate metadata does not hash an absolute checkout path; its inherited
+  workspace package and dependency keys must match the root workspace.
 - Performance settings (`--margin`, `--undo`) must never change results.
 
 ## Checks
