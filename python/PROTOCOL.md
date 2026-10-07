@@ -99,7 +99,7 @@ Common fields are `version: 1`, `id`, and `op`. Targets are typed objects:
 | `shape` | `from`, `to`: nonempty disjoint typed-target arrays; `latency_ns`, `jitter_ns`, `loss_ppm`: integers | `{"handle":"opaque value"}` |
 | `connections` | `from`, `to`: distinct typed targets; `after`: optional unsigned incarnation cursor (default 0) | `connections`: up to 32 directional records; `next_after`: last returned incarnation (or input cursor) |
 | `drop_connection` | `connection`: one exact discovery record | `{"handle":"opaque value"}` after arming selected loss |
-| `heal` | `handle`: a previously returned handle | `{}` after releasing a link or partition handle; `{"matched": N, "dropped": N}` for connection handles |
+| `heal` | `handle`: a previously returned handle | `{}` for links; `{"matched": N, "dropped": N}` for connection handles |
 | `inspect` | None | `services`, `machines`, `active_handles`, `network_counters`; `triggers` only after an arm |
 | `arm_trigger` | `source`: typed target; `marker`: 1..=256 byte integers; `match_timeout_ns`: positive u64; `fault`: typed trigger fault below | `{"trigger_id": N}`; also `handle` for a partition |
 | `cancel_trigger` | `trigger_id`: previously returned positive ID | `{}` after cancellation at admission |

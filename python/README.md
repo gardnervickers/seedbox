@@ -81,14 +81,6 @@ Other languages can implement the same [versioned RPC protocol](PROTOCOL.md).
 There are no Python-specific objects on the wire, and future declarative frontends
 can be clients of this API.
 
-`connections(from_, to, after=0)` returns a live page of up to 32 directional TCP
-incarnations plus a `next_after` cursor. Pass one exact record to
-`drop_connection(record)` to arm loss. `heal()` on this `ConnectionDrop` returns
-`matched` and `dropped` counts; `last_effect` retains its timing. Require a positive
-`dropped` count to verify injection. Tuple reuse never transfers an old handle.
-See [the transport contract](../docs/runtime.md#connection-selectors) for SYN,
-FIN/RST, bounded eviction and traffic that bypasses selection.
-
 Committed console triggers are available in the development engine:
 
 ```python
@@ -100,3 +92,11 @@ world.heal(trigger.partition)  # After its effect; inactive handles are rejected
 Use `arm_console_stop()` for a future process stop and `cancel_trigger()` for
 an unmatched arm. These consume only future committed plain console bytes;
 confirmation means armed. See [the contract and AMD handoff](../docs/triggers.md).
+
+`connections(from_, to, after=0)` returns a live page of up to 32 directional TCP
+incarnations plus a `next_after` cursor. Pass one exact record to
+`drop_connection(record)` to arm loss. `heal()` on this `ConnectionDrop` returns
+`matched` and `dropped` counts; `last_effect` retains its timing. Require a positive
+`dropped` count to verify injection. Tuple reuse never transfers an old handle.
+See [the transport contract](../docs/runtime.md#connection-selectors) for SYN,
+FIN/RST, bounded eviction and traffic that bypasses selection.

@@ -20,8 +20,8 @@ python3 harness/smoke/amd.py --cli /absolute/seedbox \
 
 The wrapper does not build Seedbox CLI, VMM, kernel, supervisor or toolchain
 artifacts; those frozen artifacts are prerequisites. The baseline public `run`
-generates the fixed `examples/faults` project with four writes per batch into the
-evidence directory with `examples/faults/generate.py`, prepares it, and may build its workload images
+generates the fixed `examples/faults` project into the evidence directory with
+`examples/faults/generate.py`, prepares it, and may build its workload images
 or pull missing base images. All of that preparation is charged within the
 baseline command's wall-time budget and the five-minute campaign allocation.
 The baseline timer includes preparation and execution; there is no separate
@@ -34,10 +34,9 @@ operations, requires fixed full-state PASS, then retained default MATCH.
 For stepping, counter or undo changes, add
 `--perf-replay` for changed-performance MATCH. That replay changes both settings
 (`--undo 0 --margin 16384`): with undo on, the counter's final approach uses the
-undo margin and never reads `--margin`. In the PR #99 receipt, undo-off stepping
-cost about 9x a default replay at 16384 (about 17x at 32768), so the margin remains
-the profile's smallest
-adaptive one. Replays use the retained engine/kernel without overrides. `result.json`,
+undo margin and never reads `--margin`. Undo-off stepping costs about 17x a
+default replay on this fixture, so the margin is the profile's smallest adaptive
+one. Replays use the retained engine/kernel without overrides. `result.json`,
 `failure.json` and stdout list each phase's wall time.
 It verifies the complete declared object closure, every retained log object's
 hash, semantic identity, full-state/witness/fault comparison and all opaque guest
@@ -93,14 +92,6 @@ same plan as JSON. Repeatable `--extra CHECK` adds reviewer checks; selection
 unions all matching rows and additions. Engine comparison selects `cluster-fixed`
 when engine inputs change; fixture-input rows and explicit reviewer additions
 always keep it.
-
-After `bash harness/mac-check.sh REV` passes on Linux in the project Nix shell,
-use `harness/host-check.sh --skip-portable REV CPU` to skip fmt, clippy and the
-portable suite's workspace/Python checks and YAML validation. VMM tests still
-run explicitly, and the CLI build, conditional VMM build and smoke tier remain.
-Both scripts print the full checked SHA so the pre-check and host results can be
-matched. The pre-check retains failed worktrees and deletes passing ones.
-
 The [checked-in map](../host-check-map.json) defines these rows:
 
 | Changed paths | Host checks |
@@ -267,4 +258,4 @@ Smoke now uses `batch=4`: 16 acknowledgements, healthy recovery of 4 then 12
 records, and 12 lost values in the broken restart control. All faults, probes
 and per-acknowledgement checks remain; the full example stays at `batch=32`.
 [PR #110](https://github.com/gardnervickers/seedbox/pull/110) records the portable
-evidence and tracks the pending host timing and replay evidence against PR #99.
+evidence.
