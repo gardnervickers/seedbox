@@ -2167,6 +2167,9 @@ mod fork_tests {
             witness.update(m.branches.to_le_bytes());
             witness.update(m.time.to_le_bytes());
             witness.update(m.time.to_le_bytes());
+            // Pre-K2 exit_witness also covers pending I/O: none after park().
+            witness.update(b"pending_io");
+            witness.update([0]);
             assert_eq!(m.release(m.time,[7;ENTROPY_WORDS]).unwrap(),Reseed::Unsupported);
             assert!((6..14).all(|i|m.page_get(i)==100+i as u64),"ABI {abi}");
             assert_eq!(m.exit_witness(),format!("{:x}",witness.finalize()),"ABI {abi}");
