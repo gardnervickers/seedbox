@@ -7,7 +7,7 @@ use crate::counter::Counter;
 use crate::virtio_console::VirtioConsole;
 use crate::devices::{rtc_read, Pic, Pit, Uart};
 use crate::stepper::Planner;
-use crate::undo::{Undo, VcpuState};
+use crate::undo::{Undo, UndoStats, VcpuState};
 use crate::virtio_net::{ReceiveOutcome, VirtioNet};
 use kvm_bindings::*;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
@@ -94,6 +94,7 @@ pub struct MachineSnapshot {
     parked: bool,
     stats: Stats,
     witness: Sha256,
+    undo_stats: Option<UndoStats>,
 }
 
 /// An anonymous private mapping, unmapped on drop.
@@ -495,7 +496,11 @@ impl Machine {
             return Err(format!("{}: released without reaching the launch barrier", self.name));
         }
         self.parked = false;
+        // The parked interval passes like idle time: a timer that fell due
+        // meanwhile fires now, late, so the armed deadline is ahead of the
+        // clock again before the next slice computes its hard stop.
         self.time = self.time.max(at);
+        self.expire_timers()?;
         self.entropy = entropy;
         self.entropy_read = 0;
         self.record(b'R', self.time);
@@ -525,6 +530,7 @@ impl Machine {
         self.complete_io()?;
         let mut cpu = VcpuState::new(self.msrs.clone());
         cpu.save(&self.vcpu, "fork")?;
+        let undo_stats = self.undo.as_ref().map(|u| u.stats.clone());
         let ram = Mapping { ptr: map(self.mem_size)?, size: self.mem_size };
         unsafe { std::ptr::copy_nonoverlapping(self.mem, ram.ptr, self.mem_size) };
         if let Some(u) = self.undo.as_mut() {
@@ -543,7 +549,7 @@ impl Machine {
             control_dma_bytes: self.control_dma_bytes, control_tx_bytes: self.control_tx_bytes,
             pv: self.pv, armed_wake: self.armed_wake, pit_exact: self.pit_exact, exit_req: self.exit_req,
             margin: self.margin, fm: self.fm, parked: self.parked,
-            stats: self.stats.clone(), witness: self.witness.clone(),
+            stats: self.stats.clone(), witness: self.witness.clone(), undo_stats,
         })
     }
 
@@ -557,7 +563,12 @@ impl Machine {
         let _ = self.complete_io();
         self.set_stepping(false)?;
         let pages = match self.undo.as_mut() {
-            Some(u) => u.return_to_fork(&self._vm, self.mem, s.ram.ptr)?,
+            Some(u) => {
+                let pages = u.return_to_fork(&self._vm, self.mem, s.ram.ptr)?;
+                // Each seed reports its own undo work on top of the boot's.
+                u.stats = s.undo_stats.clone().unwrap_or_default();
+                pages
+            }
             None => {
                 unsafe { std::ptr::copy_nonoverlapping(s.ram.ptr, self.mem, self.mem_size) };
                 (self.mem_size / 4096) as u64
@@ -720,7 +731,7 @@ impl Machine {
     }
 
     fn expire_timers(&mut self) -> Result<(), String> {
-        while self.pit.expire(self.time)? {
+        if self.pit.expire_through(self.time)? > 0 {
             self.pic.raise(0);
         }
         Ok(())
@@ -1735,6 +1746,33 @@ mod fork_tests {
             assert_eq!(other.4,9u32.to_le_bytes());
             m.restore(&snapshot).unwrap();
             assert_eq!(released(&mut m,&mut counter,7),want,"seed restored from the fork, undo={undo}");
+        }
+    }
+
+    /// A machine released later than it parked (another machine parked
+    /// later, or a release skew), with its timer due in between: the timer
+    /// fires late at the release instead of leaving the next slice a hard
+    /// stop behind its clock.
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn a_release_past_an_armed_timer_fires_it_and_runs_on() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        for undo in [0,256] {
+            let mut m=barrier_machine(&kvm,undo);
+            to_barrier(&mut m,&mut counter);
+            let parked=m.time;
+            // Periodic channel 0 armed at the barrier, as a guest's tick is.
+            m.pit.write(0x43,0x34,parked);
+            m.pit.program(12,parked);
+            let period=m.pit.deadline.unwrap()-parked;
+            m.release(parked+4*period+period/2,[7;ENTROPY_WORDS]).unwrap();
+            // Four ticks fell due while parked; they fire as one late IRQ0
+            // (masked in this probe) and the next is armed past the release.
+            assert_eq!(m.pit.deadline,Some(parked+5*period),"undo={undo}");
+            let mut frames=Vec::new();
+            while !matches!(m.run_until(&mut counter,parked+10_000_000,0,&mut frames).unwrap(),Stop::Exited|Stop::Halted) {}
+            assert_eq!(&m.memory()[0x81000..0x81004],&[0xad,0xde,0,0]);
         }
     }
 

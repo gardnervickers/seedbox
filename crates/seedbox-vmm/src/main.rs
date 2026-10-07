@@ -261,6 +261,11 @@ fn run() -> Result<Value, String> {
     if fork_at.is_some_and(|t| t >= duration) {
         return Err("boot.fork_at_ns must be before duration_ns".into());
     }
+    if let Some(t) = fork_at {
+        // A barrier fork's release time is known only after boot; checked
+        // again at the release.
+        check_plan_after(&cfg, t.saturating_add(release_skew))?;
+    }
     if seeds.len() > 1 && !forked {
         return Err("--fork-seeds requires boot.seed in the config".into());
     }
@@ -375,7 +380,7 @@ fn run() -> Result<Value, String> {
         partitioned: BTreeMap::new(),
         // Faults, control and scenarios belong to the run seed: armed below,
         // or at the release of a booted world.
-        faults: faults::Faults::new(Vec::new(), names.clone())?,
+        faults: boot_faults(&names, &[], latency)?,
         control: control::Control::new(&Value::Null, names.clone(), latency, early)?,
         strict_events: (0..n).map(|_| BTreeMap::new()).collect(),
         macs,
@@ -387,7 +392,7 @@ fn run() -> Result<Value, String> {
         machines,
     };
     if !forked {
-        let kills = arm_seed(&mut world, &cfg, &names, seed)?;
+        let kills = arm_seed(&mut world, &cfg, &names, seed, 0)?;
         let started = Instant::now();
         let outcome = simulate(&mut world, &cfg, duration, &end_on, None)?;
         let host_seconds = started.elapsed().as_secs_f64();
@@ -460,16 +465,62 @@ fn link_rngs(seed: u64, names: &[String]) -> BTreeMap<(usize, usize), Rng> {
     rngs
 }
 
+/// Faults while the world boots towards its fork point: no plan yet, but
+/// management readiness is recorded, so a plan armed at the release finds the
+/// services that became ready before it.
+fn boot_faults(names: &[String], readiness: &[Value], latency: u64) -> Result<faults::Faults, String> {
+    let mut faults = faults::Faults::new(Vec::new(), names.to_vec())?;
+    faults.require_readiness();
+    replay_readiness(&mut faults, names, readiness, latency)?;
+    Ok(faults)
+}
+
+fn replay_readiness(faults: &mut faults::Faults, names: &[String], readiness: &[Value], latency: u64) -> Result<(), String> {
+    for r in readiness {
+        let m = names.iter().position(|n| r["machine"] == n.as_str()).ok_or("unknown ready machine")?;
+        faults.management_ready(m, r["at_ns"].as_u64().ok_or("readiness at_ns")?, latency)?;
+    }
+    Ok(())
+}
+
+/// Every timed part of the run seed's plan (faults, scenario events and the
+/// kill schedule) must start at or after `from`, when every machine of a
+/// forked world has been released. Earlier times have already passed.
+fn check_plan_after(cfg: &Value, from: u64) -> Result<(), String> {
+    let mut times = Vec::new();
+    for (key, field) in [("faults", "at_ns"), ("scenario", "at_ns")] {
+        for (i, ev) in cfg[key].as_array().into_iter().flatten().enumerate() {
+            times.push((format!("{key}[{i}].{field}"), ev[field].as_u64()));
+        }
+    }
+    if cfg["kill_restart"].is_object() {
+        times.push(("kill_restart.start_ns".into(), cfg["kill_restart"]["start_ns"].as_u64()));
+    }
+    for (what, t) in times {
+        let t = t.ok_or(format!("{what} required"))?;
+        if t < from {
+            return Err(format!(
+                "{what} {t} is before the fork point {from}; in a forked world it must be at or after the release (boot.fork_at_ns or the launch barrier, plus boot.release_skew_ns)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Install everything the run seed decides apart from the machines: link
 /// jitter, faults, runtime control, scenario events and the kill schedule.
-/// Returns the kill schedule for the report.
-fn arm_seed(world: &mut World, cfg: &Value, names: &[String], seed: u64) -> Result<Vec<Value>, String> {
+/// Every timed item must fall at or after `from`. Returns the kill schedule
+/// for the report.
+fn arm_seed(world: &mut World, cfg: &Value, names: &[String], seed: u64, from: u64) -> Result<Vec<Value>, String> {
+    check_plan_after(cfg, from)?;
+    let booted = std::mem::take(&mut world.faults.readiness);
     world.faults = faults::Faults::new(
         cfg["faults"].as_array().cloned().unwrap_or_default(),
         names.to_vec(),
     )?;
     world.control = control::Control::new(&cfg["control"], names.to_vec(), world.latency, world.early)?;
     world.faults.require_readiness();
+    replay_readiness(&mut world.faults, names, &booted, world.latency)?;
     world.link_rng = link_rngs(seed, names);
     let index = |name: &str| {
         names
@@ -528,6 +579,7 @@ fn arm_seed(world: &mut World, cfg: &Value, names: &[String], seed: u64) -> Resu
 /// reseeds its kernel CRNG; timer jitter and the seed's world plan start here.
 fn release(world: &mut World, cfg: &Value, names: &[String], seed: u64, skew: u64) -> Result<Vec<Value>, String> {
     let at = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
+    check_plan_after(cfg, at.saturating_add(skew))?;
     for (i, mach) in world.machines.iter_mut().enumerate() {
         let mut rng = Rng::new(seed, &format!("fork-entropy/{}", names[i]));
         let entropy = std::array::from_fn(|_| rng.next() as u32);
@@ -535,12 +587,13 @@ fn release(world: &mut World, cfg: &Value, names: &[String], seed: u64, skew: u6
         mach.release(at.saturating_add(delay), entropy)?;
         mach.timer_rng = Some(Rng::new(seed, &format!("timer-jitter/{}", names[i])));
     }
-    arm_seed(world, cfg, names, seed)
+    arm_seed(world, cfg, names, seed, at.saturating_add(skew))
 }
 
 /// A world parked at its launch barrier, kept so that later seeds start from
 /// it without booting. Faults, control and scenarios are not captured: they
-/// are empty until the release, which builds them from the run seed.
+/// are empty until the release, which builds them from the run seed. Only
+/// the management readiness recorded during boot carries over.
 struct WorldSnapshot {
     machines: Vec<MachineSnapshot>,
     events: Vec<BTreeMap<(u64, u64), Payload>>,
@@ -553,6 +606,7 @@ struct WorldSnapshot {
     link_counts: BTreeMap<(usize, usize), [u64; 3]>,
     semantic_counts: network_counters::NetworkCounters,
     slices: u64,
+    readiness: Vec<Value>,
 }
 
 impl WorldSnapshot {
@@ -572,6 +626,7 @@ impl WorldSnapshot {
             link_counts: world.link_counts.clone(),
             semantic_counts: world.semantic_counts.clone(),
             slices: world.slices,
+            readiness: world.faults.readiness.clone(),
         })
     }
 
@@ -591,6 +646,9 @@ impl WorldSnapshot {
         world.link_counts = self.link_counts.clone();
         world.semantic_counts = self.semantic_counts.clone();
         world.slices = self.slices;
+        let names: Vec<String> = world.machines.iter().map(|m| m.name.clone()).collect();
+        world.faults = boot_faults(&names, &self.readiness, world.latency)?;
+        world.control = control::Control::new(&Value::Null, names, world.latency, world.early)?;
         Ok(pages)
     }
 }
@@ -741,6 +799,12 @@ fn simulate(
             .drain(..)
             .collect::<Vec<_>>()
         {
+            if until_barrier {
+                return Err(format!(
+                    "{}: runtime control request at {at} ns, before the fork point; fork earlier (boot.fork_at_ns)",
+                    world.machines[m].name
+                ));
+            }
             let max_time = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
             if let Err(e) = world.control.request(m, at, &line, max_time) {
                 world.control.log.push(json!({"status":"rejected","machine":world.machines[m].name,"at_ns":at,"frame":String::from_utf8_lossy(&line),"error":e}));
@@ -899,6 +963,41 @@ fn main() {
 #[cfg(test)]
 mod progress_tests {
     use super::*;
+
+    #[test]
+    fn a_forked_world_rejects_plan_times_before_the_release() {
+        let cfg=json!({
+            "faults":[{"id":1,"at_ns":1_000_000_000}],
+            "scenario":[{"at_ns":1_500_000_000,"serial":"x\n","machine":"a"}],
+            "kill_restart":{"start_ns":2_000_000_000},
+        });
+        assert_eq!(check_plan_after(&cfg,1_400_000_000).unwrap_err(),
+            "faults[0].at_ns 1000000000 is before the fork point 1400000000; in a forked world it must be at or after the release (boot.fork_at_ns or the launch barrier, plus boot.release_skew_ns)");
+        assert!(check_plan_after(&cfg,1_000_000_000).is_ok());
+        let later=|key:&str| {let mut c=cfg.clone();c.as_object_mut().unwrap().remove(key);c};
+        assert!(check_plan_after(&later("faults"),1_600_000_000).unwrap_err().starts_with("scenario[0].at_ns 1500000000 "));
+        let kills=json!({"kill_restart":cfg["kill_restart"]});
+        assert!(check_plan_after(&kills,2_000_000_001).unwrap_err().starts_with("kill_restart.start_ns 2000000000 "));
+        assert!(check_plan_after(&json!({}),u64::MAX).is_ok());
+    }
+
+    /// A Compose guest reports management readiness while it boots; with a
+    /// time fork that is before the release. The boot world accepts it, and
+    /// the seed's plan starts with that machine already ready.
+    #[test]
+    fn readiness_signalled_before_the_fork_carries_over_to_the_seed() {
+        let names=vec!["a".to_string(),"b".to_string()];
+        let mut boot=boot_faults(&names,&[],1000).unwrap();
+        boot.management_ready(1,700,1000).unwrap();
+        let restored=boot_faults(&names,&boot.readiness,1000).unwrap();
+        assert_eq!(restored.readiness,boot.readiness);
+        let mut seed=faults::Faults::new(Vec::new(),names.clone()).unwrap();
+        seed.require_readiness();
+        replay_readiness(&mut seed,&names,&restored.readiness,1000).unwrap();
+        assert_eq!(seed.readiness,vec![json!({"machine":"b","at_ns":700})]);
+        assert!(seed.management_ready(1,2000,1000).is_err(),"b is already ready");
+        assert!(seed.management_ready(0,2000,1000).is_ok());
+    }
     #[test]
     fn equal_time_delivery_can_replan_but_an_unchanged_plan_cannot_loop() {
         let mut previous=None;

@@ -14,7 +14,7 @@ use std::os::fd::AsRawFd;
 const KVM_GET_DIRTY_LOG: libc::c_ulong = 0x4010_ae42;
 const PAGE: usize = 4096;
 
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct UndoStats {
     pub checkpoints: u64,
     pub rollbacks: u64,

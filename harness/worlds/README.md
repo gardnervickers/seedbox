@@ -29,6 +29,7 @@ and identities.
 | `cluster-fixed.json`, `single-vm*.json` | Matched multi-VM versus one-VM network-namespace experiments; Compose uses one service per VM |
 | `cluster-fork.json` | `cluster-fixed.json` booted once and forked per seed (see below) |
 | `cluster-fork-late.json` | The same cluster forked at 1.4 simulated seconds, after etcd has started, with timer and link jitter (see below) |
+| `cluster-fork-skew.json` | `cluster-fork.json` released with up to 50 ms of seeded skew, jitter, and a timed partition after the release (see below) |
 
 `batch.sh`, `batch.py` and `msr54.py` still run these fixtures with shared CPU/SMT
 leases and verified MSR restoration. Runtime lifecycle tests also use their CPU
@@ -77,6 +78,21 @@ link jitter, release skew, faults, control and scenario events). A world with
 no jitter and no faults therefore runs identically for every seed after a
 time fork, which is why `cluster-fork-late.json` adds jitter. Run it the same
 way, with `fork-late-cold` and `fork-late-loop` prefixes.
+
+Times in a forked world's plan (`faults[].at_ns`, `scenario[].at_ns`,
+`kill_restart.start_ns`) must be at or after the release, the fork point plus
+`boot.release_skew_ns`; an earlier time is an error, checked before boot for a
+time fork and at the release for a barrier fork. A machine released later than
+it parked takes the timer interrupts that fell due meanwhile as one late tick.
+Management readiness signalled before a time fork carries over to every seed.
+`cluster-fork-skew.json` exercises the skew and a partition after the release;
+run its seeds alone and in both orders and compare the witnesses:
+
+```sh
+for s in 1010 1011; do CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/cluster-fork-skew.json fork-skew-cold "$s" --digest; done
+CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/cluster-fork-skew.json fork-skew-ab "1009" --digest --fork-seeds 1010,1011
+CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/cluster-fork-skew.json fork-skew-ba "1009" --digest --fork-seeds 1011,1010
+```
 
 The second command's `seed-1010` report must carry the first command's world
 witness. Each seed report's `boot` object records the barrier time, the boot's

@@ -54,6 +54,9 @@ static inline int seedbox_launch_barrier(const char *cmdline_path, const char *u
         .entropy_count = 8 * (int)sizeof(pool.buf), .buf_size = (int)sizeof(pool.buf)
     };
     for (int i = 0; i < SEEDBOX_BARRIER_WORDS; i++) pool.buf[i] = inl(SEEDBOX_BARRIER_PORT);
+    /* The permission survives fork and execve; the workload must not reach
+     * the port. */
+    if (ioperm(SEEDBOX_BARRIER_PORT, sizeof(uint32_t), 0)) return -1;
     int fd = open(urandom_path, O_WRONLY|O_CLOEXEC);
     if (fd < 0) return -1;
     if (ioctl(fd, RNDADDENTROPY, &pool) || ioctl(fd, RNDRESEEDCRNG)) { int e = errno; close(fd); errno = e; return -1; }

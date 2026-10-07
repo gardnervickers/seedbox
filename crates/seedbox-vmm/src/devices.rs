@@ -259,6 +259,16 @@ impl Pit {
             _ => Ok(false),
         }
     }
+    /// Fire every deadline due by `now`, as when a clock jumps past several
+    /// (a parked machine released later). Returns how many fired; the PIC
+    /// coalesces them into one IRQ0.
+    pub fn expire_through(&mut self, now: u64) -> Result<u64, String> {
+        let mut fired = 0;
+        while self.expire(now)? {
+            fired += 1;
+        }
+        Ok(fired)
+    }
 }
 
 /// 16550A UART with immediate transmit and an input queue.
@@ -452,5 +462,27 @@ mod delay_tests {
         assert!(pit.expire(u64::MAX).is_err());
         pit.deadline=Some(0);pit.period_ns=Some(0);
         assert!(pit.expire(0).is_err());
+    }
+
+    /// A machine parked at 0.80 s with its tick due at 0.81 s, released at
+    /// 0.82 s because another machine parked later: the clock jump must not
+    /// leave the deadline behind the clock, or the next slice's hard stop
+    /// precedes its start.
+    #[test]
+    fn a_clock_jump_past_timer_deadlines_fires_them_before_the_next_slice() {
+        use super::delay_boundary::{advance_time,hard_limit};
+        let tolerance=2_000_151;
+        let mut pit=Pit {deadline:Some(810_000_000),period_ns:Some(10_000_000),..Default::default()};
+        let released=820_000_000;
+        assert_eq!(advance_time(released,0,hard_limit(u64::MAX,pit.deadline,false,tolerance)).unwrap_err(),
+            "clock bound exceeded: time 820000000 + 0 exceeds hard stop 812000151");
+        assert_eq!(pit.expire_through(released).unwrap(),2);
+        assert_eq!(pit.deadline,Some(830_000_000));
+        assert_eq!(advance_time(released,0,hard_limit(u64::MAX,pit.deadline,true,tolerance)),Ok(released));
+        assert_eq!(pit.expire_through(released).unwrap(),0);
+        // A one-shot timer fires once and disarms.
+        pit.deadline=Some(810_000_000);pit.period_ns=None;
+        assert_eq!(pit.expire_through(released).unwrap(),1);
+        assert_eq!(pit.deadline,None);
     }
 }
