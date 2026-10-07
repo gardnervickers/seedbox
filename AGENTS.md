@@ -17,6 +17,12 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   `seedbox` run from the checkout finds it. Don't set a global
   `target-dir` in `.cargo/config.toml`: cargo applies it by current directory,
   so it would also move standalone crate builds and break their scripts.
+  These two aliases select `harness/vmm-rustc.py` for path remapping and removal
+  of the Nix dev shell's synthetic checkout RPATH; keep that wrapper isolated
+  from other builds. Keep release debug info enabled. On Linux, verify committed
+  inputs with `bash harness/check-vmm-reproducible.sh [REV]` in the dev shell.
+  The wrapper includes its content hash in Cargo's compiler fingerprint to
+  invalidate older unremapped builds and later wrapper revisions.
 - New crates go in `crates/<name>/` and inherit `version`, `edition` and
   `publish` from `[workspace.package]`. Put a dependency used by two or more
   workspace crates in `[workspace.dependencies]`. Commit both lockfiles.
