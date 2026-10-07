@@ -27,7 +27,15 @@ train: one branch, one host job, then ordinary merges with no further host time.
    be witness-neutral must show witnesses equal to the train before it. A PR
    that changes witnesses on purpose has its reviewer name the fixtures that
    move, and every other fixture must still be equal. Compose runs must PASS
-   and replay MATCH.
+   and replay MATCH. Two checks belong on every list, because reviews have
+   shown these are where PRs fail on the host:
+   - **The host fact behind the PR's claims.** A PR that assumes something
+     about the environment (a kernel option, a tool inside the guest image,
+     a hash that has to match across hosts) runs a check that exercises that
+     assumption on the host. Unit tests on another machine can't show it.
+   - **Feature-off witness equality.** An engine change gated behind a flag
+     or config shows that, with its feature off, the world fixtures it could
+     touch give the same witnesses as the train before it.
 4. **On a pass.** Post the train evidence on each PR, linking the train.
    Each reviewer then merges its PRs in train order: merge main into the PR
    the same way, check that its tree equals the train's prefix for that PR,
