@@ -120,8 +120,25 @@ impl Disk {
     /// The disk the next incarnation boots with after a crash: the stable
     /// layer only. Returns it with the number of volatile sectors lost.
     pub fn crashed(&self) -> (Disk, u64) {
-        let lost = self.volatile.len() as u64;
-        (Disk { volatile: BTreeMap::new(), ..self.clone() }, lost)
+        self.crashed_keeping(|_, _| false)
+    }
+
+    /// A crash that keeps the volatile sectors `survives` picks, in sector
+    /// order, as if the device had written them back before power was lost.
+    /// The current model keeps none. A later loss policy (seeded partial
+    /// persistence, post-V0) decides here, from its own RNG domain. Returns the
+    /// next incarnation's disk and the number of volatile sectors lost.
+    pub fn crashed_keeping(&self, mut survives: impl FnMut(u64, &[u8]) -> bool) -> (Disk, u64) {
+        let mut next = Disk { volatile: BTreeMap::new(), ..self.clone() };
+        let mut lost = 0;
+        for (&s, data) in &self.volatile {
+            if survives(s, &data[..]) {
+                next.stable.insert(s, data.clone());
+            } else {
+                lost += 1;
+            }
+        }
+        (next, lost)
     }
 
     pub fn stable_sectors(&self) -> u64 {
@@ -191,6 +208,20 @@ mod tests {
         let (after, lost) = d.crashed();
         assert_eq!(lost, 2);
         assert_eq!([1, 2, 5, 9].map(|s| at(&after, s)), [b'3', b'1', b'2', 0]);
+    }
+
+    #[test]
+    fn a_crash_may_keep_chosen_volatile_sectors_over_stable_ones() {
+        let mut d = Disk::new(None, Some(8)).unwrap();
+        d.write(0, &fill(b'A', 2)).unwrap();
+        d.flush();
+        d.write(0, &fill(b'B', 2)).unwrap();
+        d.write(5, &fill(b'C', 1)).unwrap();
+        let (after, lost) = d.crashed_keeping(|s, data| s == 1 && data[0] == b'B');
+        assert_eq!(lost, 2);
+        assert_eq!([0, 1, 5].map(|s| at(&after, s)), [b'A', b'B', 0], "sector 1 kept, 0 and 5 lost");
+        assert_eq!(after.volatile_sectors(), 0);
+        assert_eq!(d.crashed_keeping(|_, _| false).0.digest(), d.crashed().0.digest());
     }
 
     #[test]
