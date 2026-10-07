@@ -219,3 +219,11 @@ mapping row, mixed changes, reviewer additions, Git planning, lane selection,
 lease contention, dispatch, exact replay flags, comparison and cleanup. Linux
 parallel dispatch, guest behavior and cancellation/restoration remain hardware
 acceptance work; portable tests do not qualify an engine or host.
+
+## Work per host check
+
+Smoke now uses `batch=4`: 16 acknowledgements, healthy recovery of 4 then 12
+records, and 12 lost values in the broken restart control. All faults, probes
+and per-acknowledgement checks remain; the full example stays at `batch=32`.
+[PR #110](https://github.com/gardnervickers/seedbox/pull/110) records the portable
+evidence and tracks the pending host timing and replay evidence against PR #99.
