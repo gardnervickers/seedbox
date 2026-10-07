@@ -16,7 +16,7 @@ mod virtio_net;
 mod virtio_console;
 
 use counter::Counter;
-use machine::{BootSpec, Machine, State, Stop, NET_IRQ, NET_MMIO, CHANNEL_IRQ, CHANNEL_MMIO};
+use machine::{BootSpec, Machine, MachineSnapshot, State, Stop, NET_IRQ, NET_MMIO, CHANNEL_IRQ, CHANNEL_MMIO};
 use rng::Rng;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -27,6 +27,7 @@ thread_local! {
     pub static START: Instant = Instant::now();
 }
 
+#[derive(Clone)]
 enum Payload {
     Frame { from: usize, bytes: Vec<u8> },
     Serial(Vec<u8>),
@@ -56,6 +57,7 @@ struct World {
     delivered: u64,
     link_counts: BTreeMap<(usize,usize), [u64;3]>,
     semantic_counts:network_counters::NetworkCounters,
+    slices: u64,
 }
 
 impl World {
@@ -93,6 +95,9 @@ impl World {
     /// Earliest virtual time at which machine m can next act.
     fn key(&self, m: usize) -> u64 {
         let mach = &self.machines[m];
+        if mach.parked {
+            return u64::MAX;
+        }
         match mach.state {
             State::Exited(_) => u64::MAX,
             State::Running => mach.time,
@@ -203,6 +208,14 @@ fn run() -> Result<Value, String> {
         .ok_or("--seed required")?
         .parse()
         .map_err(|e| format!("seed: {e}"))?;
+    // Further seeds released from the same booted world, one after another
+    // in this process (requires a boot snapshot in the config).
+    let mut seeds = vec![seed];
+    if let Some(list) = arg(&args, "--fork-seeds") {
+        for s in list.split(',') {
+            seeds.push(s.parse().map_err(|e| format!("--fork-seeds: {e}"))?);
+        }
+    }
     let out = arg(&args, "--out").ok_or("--out required")?;
     let digest = args.iter().any(|a| a == "--digest");
     // Undo-able precise stops (performance only): initial final margin, 0 = off.
@@ -235,6 +248,19 @@ fn run() -> Result<Value, String> {
     if !cfg["control"].is_null() && !control_channel {return Err("runtime control requires virtio-console-v1 channel".into());}
     if !cfg["control_channel"].is_null() && !control_channel {return Err("unknown runtime control channel".into());}
 
+    // Boot once under a fixed boot seed and park every machine at its launch
+    // barrier; the run seed applies from the release onwards. The world at
+    // the barrier is the same for every run seed, so it can be forked.
+    let boot = &cfg["boot"];
+    let forked = boot.is_object();
+    let boot_seed = if forked { boot["seed"].as_u64().ok_or("boot.seed required")? } else { seed };
+    let release_skew = boot["release_skew_ns"].as_u64().unwrap_or(0);
+    if seeds.len() > 1 && !forked {
+        return Err("--fork-seeds requires boot.seed in the config".into());
+    }
+    if seeds.len() > 1 && args.iter().any(|a| a == "--trace") {
+        return Err("--trace cannot be combined with --fork-seeds".into());
+    }
     let kvm = kvm_ioctls::Kvm::new().map_err(|e| format!("kvm: {e}"))?;
     let mut machines = Vec::new();
     let mut macs = Vec::new();
@@ -249,7 +275,7 @@ fn run() -> Result<Value, String> {
         }
         let mac = [0x52, 0x54, 0x00, 0x00, 0x00, i as u8 + 1];
         macs.push(mac);
-        let mut rng = Rng::new(seed, &format!("boot-entropy/{}", names[i]));
+        let mut rng = Rng::new(boot_seed, &format!("boot-entropy/{}", names[i]));
         let mut rng_seed = [0u8; 32];
         for c in rng_seed.chunks_mut(8) {
             c.copy_from_slice(&rng.next().to_le_bytes());
@@ -264,6 +290,9 @@ fn run() -> Result<Value, String> {
             cmdline += &format!(" virtio_mmio.device=4K@{NET_MMIO:#x}:{NET_IRQ}");
         }
         if control_channel {cmdline+=&format!(" virtio_mmio.device=4K@{CHANNEL_MMIO:#x}:{CHANNEL_IRQ}");}
+        if forked {
+            cmdline += " seedbox.barrier=1";
+        }
         if names.get(i).is_some_and(|name|cfg["control"]["machine"].as_str()==Some(name.as_str())) {cmdline+=" seedbox.control=1";}
         if let Some(extra) = mc["cmdline"].as_str() {
             cmdline += " ";
@@ -278,6 +307,7 @@ fn run() -> Result<Value, String> {
             mac: networked.then_some(mac),
             control_channel,
             undo_margin,
+            barrier: forked,
         };
         let mut mach = Machine::new(&kvm, &names[i], &spec)?;
         if args.iter().any(|arg| arg == "--stream-console") {
@@ -300,7 +330,7 @@ fn run() -> Result<Value, String> {
         mach.tolerance = cfg["stop_tolerance_ns"].as_u64().unwrap_or(0);
         mach.timer_jitter = cfg["timer_jitter_ns"].as_u64().unwrap_or(0);
         mach.exact_timer_ppm = cfg["exact_timer_ppm"].as_u64().unwrap_or(0);
-        mach.timer_rng = Some(Rng::new(seed, &format!("timer-jitter/{}", names[i])));
+        mach.timer_rng = Some(Rng::new(boot_seed, &format!("timer-jitter/{}", names[i])));
         if args.iter().any(|a| a == "--trace") {
             let f = std::fs::File::create(format!("{out}/{}.trace", names[i]))
                 .map_err(|e| e.to_string())?;
@@ -324,48 +354,117 @@ fn run() -> Result<Value, String> {
     }
     let n = machines.len();
     let net = &cfg["network"];
+    let latency = net["latency_ns"].as_u64().unwrap_or(1_000_000);
+    let early = (latency / 2).min(cfg["stop_tolerance_ns"].as_u64().unwrap_or(0));
     let mut world = World {
         counter: Counter::new()?,
         events: (0..n).map(|_| BTreeMap::new()).collect(),
         seq: 0,
-        lookahead: net["latency_ns"].as_u64().unwrap_or(1_000_000),
-        early: (net["latency_ns"].as_u64().unwrap_or(1_000_000) / 2)
-            .min(cfg["stop_tolerance_ns"].as_u64().unwrap_or(0)),
-        latency: net["latency_ns"].as_u64().unwrap_or(1_000_000),
+        lookahead: latency,
+        early,
+        latency,
         jitter: net["jitter_ns"].as_u64().unwrap_or(0),
-        link_rng: BTreeMap::new(),
+        link_rng: link_rngs(boot_seed, &names),
         link_last: BTreeMap::new(),
         partitioned: BTreeMap::new(),
-        faults: faults::Faults::new(
-            cfg["faults"].as_array().cloned().unwrap_or_default(),
-            names.clone(),
-        )?,
-        control: control::Control::new(
-            &cfg["control"],
-            names.clone(),
-            net["latency_ns"].as_u64().unwrap_or(1_000_000),
-            (net["latency_ns"].as_u64().unwrap_or(1_000_000) / 2)
-                .min(cfg["stop_tolerance_ns"].as_u64().unwrap_or(0)),
-        )?,
+        // Faults, control and scenarios belong to the run seed: armed below,
+        // or at the release of a booted world.
+        faults: faults::Faults::new(Vec::new(), names.clone())?,
+        control: control::Control::new(&Value::Null, names.clone(), latency, early)?,
         strict_events: (0..n).map(|_| BTreeMap::new()).collect(),
         macs,
         dropped: 0,
         delivered: 0,
         link_counts: BTreeMap::new(),
         semantic_counts:network_counters::NetworkCounters::default(),
+        slices: 0,
         machines,
     };
-    world.faults.require_readiness();
-    for a in 0..n {
-        for b in 0..n {
+    if !forked {
+        let kills = arm_seed(&mut world, &cfg, &names, seed)?;
+        let started = Instant::now();
+        let outcome = simulate(&mut world, &cfg, duration, &end_on, false)?;
+        let host_seconds = started.elapsed().as_secs_f64();
+        return report(&mut world, outcome, seed, &kills, host_seconds, digest, &out, duration, &end_on);
+    }
+
+    let started = Instant::now();
+    simulate(&mut world, &cfg, duration, &end_on, true)?;
+    let barrier_ns = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
+    let boot_host_seconds = started.elapsed().as_secs_f64();
+    let started = Instant::now();
+    let snapshot = if seeds.len() > 1 { Some(WorldSnapshot::take(&mut world)?) } else { None };
+    let snapshot_host_seconds = started.elapsed().as_secs_f64();
+    let stream = args.iter().any(|a| a == "--stream-console");
+    let mut reports = Vec::new();
+    for (i, &seed) in seeds.iter().enumerate() {
+        let started = Instant::now();
+        let restored_pages = match (i, snapshot.as_ref()) {
+            (0, _) | (_, None) => 0,
+            (_, Some(snapshot)) => snapshot.restore(&mut world)?,
+        };
+        let restore_host_seconds = started.elapsed().as_secs_f64();
+        let dir = if seeds.len() > 1 { format!("{out}/seed-{seed}") } else { out.clone() };
+        if seeds.len() > 1 {
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            if stream {
+                for mach in world.machines.iter_mut() {
+                    for (uart, ext) in [(&mut mach.com1, "console"), (&mut mach.com2, "mgmt")] {
+                        use std::io::Write;
+                        let mut file = std::fs::File::create(format!("{dir}/{}.{ext}", mach.name))
+                            .map_err(|e| e.to_string())?;
+                        file.write_all(&uart.out).map_err(|e| e.to_string())?;
+                        uart.output_file = Some(file);
+                    }
+                }
+            }
+        }
+        let started = Instant::now();
+        let kills = release(&mut world, &cfg, &names, seed, release_skew)?;
+        let outcome = simulate(&mut world, &cfg, duration, &end_on, false)?;
+        let host_seconds = started.elapsed().as_secs_f64();
+        let mut r = report(&mut world, outcome, seed, &kills, host_seconds, digest, &dir, duration, &end_on)?;
+        r["boot"] = json!({
+            "seed": boot_seed, "barrier_ns": barrier_ns, "release_skew_ns": release_skew,
+            "boot_host_seconds": boot_host_seconds, "forked": i > 0,
+            "restored_pages": restored_pages, "restore_host_seconds": restore_host_seconds,
+        });
+        reports.push(r);
+    }
+    if reports.len() == 1 {
+        return Ok(reports.pop().unwrap());
+    }
+    Ok(json!({
+        "report_version": 1,
+        "boot": {"seed": boot_seed, "barrier_ns": barrier_ns, "boot_host_seconds": boot_host_seconds,
+                 "snapshot_host_seconds": snapshot_host_seconds},
+        "seeds": reports,
+    }))
+}
+
+fn link_rngs(seed: u64, names: &[String]) -> BTreeMap<(usize, usize), Rng> {
+    let mut rngs = BTreeMap::new();
+    for a in 0..names.len() {
+        for b in 0..names.len() {
             if a != b {
-                world.link_rng.insert(
-                    (a, b),
-                    Rng::new(seed, &format!("link/{}/{}", names[a], names[b])),
-                );
+                rngs.insert((a, b), Rng::new(seed, &format!("link/{}/{}", names[a], names[b])));
             }
         }
     }
+    rngs
+}
+
+/// Install everything the run seed decides apart from the machines: link
+/// jitter, faults, runtime control, scenario events and the kill schedule.
+/// Returns the kill schedule for the report.
+fn arm_seed(world: &mut World, cfg: &Value, names: &[String], seed: u64) -> Result<Vec<Value>, String> {
+    world.faults = faults::Faults::new(
+        cfg["faults"].as_array().cloned().unwrap_or_default(),
+        names.to_vec(),
+    )?;
+    world.control = control::Control::new(&cfg["control"], names.to_vec(), world.latency, world.early)?;
+    world.faults.require_readiness();
+    world.link_rng = link_rngs(seed, names);
     let index = |name: &str| {
         names
             .iter()
@@ -414,9 +513,92 @@ fn run() -> Result<Value, String> {
             t += d + gap.0 + rng.below(gap.1 - gap.0 + 1);
         }
     }
+    Ok(kills)
+}
 
-    let started = Instant::now();
-    let mut slices = 0u64;
+/// Release a world parked at its launch barrier under `seed`. Every machine
+/// resumes at the latest barrier time plus a seeded skew, so which service
+/// starts first still varies by seed. Each guest reads its seeded entropy and
+/// reseeds its kernel CRNG; timer jitter and the seed's world plan start here.
+fn release(world: &mut World, cfg: &Value, names: &[String], seed: u64, skew: u64) -> Result<Vec<Value>, String> {
+    let at = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
+    for (i, mach) in world.machines.iter_mut().enumerate() {
+        let mut rng = Rng::new(seed, &format!("fork-entropy/{}", names[i]));
+        let entropy = std::array::from_fn(|_| rng.next() as u32);
+        let delay = Rng::new(seed, &format!("release/{}", names[i])).below(skew.saturating_add(1));
+        mach.release(at.saturating_add(delay), entropy)?;
+        mach.timer_rng = Some(Rng::new(seed, &format!("timer-jitter/{}", names[i])));
+    }
+    arm_seed(world, cfg, names, seed)
+}
+
+/// A world parked at its launch barrier, kept so that later seeds start from
+/// it without booting. Faults, control and scenarios are not captured: they
+/// are empty until the release, which builds them from the run seed.
+struct WorldSnapshot {
+    machines: Vec<MachineSnapshot>,
+    events: Vec<BTreeMap<(u64, u64), Payload>>,
+    strict_events: Vec<BTreeMap<(u64, u64), Vec<u8>>>,
+    seq: u64,
+    link_last: BTreeMap<(usize, usize), u64>,
+    partitioned: BTreeMap<(usize, usize), bool>,
+    dropped: u64,
+    delivered: u64,
+    link_counts: BTreeMap<(usize, usize), [u64; 3]>,
+    semantic_counts: network_counters::NetworkCounters,
+    slices: u64,
+}
+
+impl WorldSnapshot {
+    fn take(world: &mut World) -> Result<Self, String> {
+        if !world.machines.iter().all(|m| m.parked) {
+            return Err("world fork requires every machine at its launch barrier".into());
+        }
+        Ok(Self {
+            machines: world.machines.iter_mut().map(Machine::snapshot).collect::<Result<_, _>>()?,
+            events: world.events.clone(),
+            strict_events: world.strict_events.clone(),
+            seq: world.seq,
+            link_last: world.link_last.clone(),
+            partitioned: world.partitioned.clone(),
+            dropped: world.dropped,
+            delivered: world.delivered,
+            link_counts: world.link_counts.clone(),
+            semantic_counts: world.semantic_counts.clone(),
+            slices: world.slices,
+        })
+    }
+
+    /// Put the world back to the fork point. Returns RAM pages copied back.
+    fn restore(&self, world: &mut World) -> Result<u64, String> {
+        let mut pages = 0;
+        for (mach, snapshot) in world.machines.iter_mut().zip(&self.machines) {
+            pages += mach.restore(snapshot)?;
+        }
+        world.events = self.events.clone();
+        world.strict_events = self.strict_events.clone();
+        world.seq = self.seq;
+        world.link_last = self.link_last.clone();
+        world.partitioned = self.partitioned.clone();
+        world.dropped = self.dropped;
+        world.delivered = self.delivered;
+        world.link_counts = self.link_counts.clone();
+        world.semantic_counts = self.semantic_counts.clone();
+        world.slices = self.slices;
+        Ok(pages)
+    }
+}
+
+/// Run the world until it ends, or with `until_barrier` until every machine
+/// is parked at its launch barrier. Returns the outcome.
+fn simulate(
+    world: &mut World,
+    cfg: &Value,
+    duration: u64,
+    end_on: &Option<String>,
+    until_barrier: bool,
+) -> Result<&'static str, String> {
+    let n = world.machines.len();
     let mut stalled_plan = None;
     let mut frames = Vec::new();
     let outcome;
@@ -427,6 +609,15 @@ fn run() -> Result<Value, String> {
             .enumerate()
             .min_by_key(|(i, k)| (**k, *i))
             .unwrap();
+        if until_barrier
+            && world.machines.iter().all(|m| m.parked || matches!(m.state, State::Exited(_)))
+        {
+            if let Some(m) = world.machines.iter().find(|m| !m.parked) {
+                return Err(format!("{} exited before its launch barrier", m.name));
+            }
+            outcome = "barrier";
+            break;
+        }
         let control_boundary = world.control.boundary();
         world.semantic_counts.advance(key.min(control_boundary).min(world.faults.next_boundary()).min(duration));
         if control_boundary <= key && control_boundary < duration {
@@ -500,7 +691,7 @@ fn run() -> Result<Value, String> {
             .min(duration)
             .min(fault_boundary)
             .min(control_boundary);
-        slices += 1;
+        world.slices += 1;
         // A slice ending at the horizon or an event may stop a little early
         // (at a cheap deterministic point); the run's end is exact.
         let early = if limit == duration
@@ -554,8 +745,26 @@ fn run() -> Result<Value, String> {
             break;
         }
     }
-    let host_seconds = started.elapsed().as_secs_f64();
+    if until_barrier && outcome != "barrier" {
+        return Err(format!("launch barrier not reached: {outcome}"));
+    }
+    Ok(outcome)
+}
 
+/// Finish a run: write consoles and build the engine report.
+#[allow(clippy::too_many_arguments)]
+fn report(
+    world: &mut World,
+    outcome: &str,
+    seed: u64,
+    kills: &[Value],
+    host_seconds: f64,
+    digest: bool,
+    out: &str,
+    duration: u64,
+    end_on: &Option<String>,
+) -> Result<Value, String> {
+    let slices = world.slices;
     let cut_off_at=if outcome=="duration" {duration} else if outcome=="end_machine_exited" {end_on.as_ref().and_then(|name|world.machines.iter().find(|m|&m.name==name)).map(|m|m.time).unwrap_or(0)} else {world.machines.iter().map(|m|m.time).max().unwrap_or(0)};
     world.control.cut_off(&world.faults,cut_off_at);
     let fault_error=world.faults.error.clone().or(world.control.error.clone());

@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 
 /// Master 8259A. The slave is accepted but never raises interrupts.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Pic {
     imr: u8,
     irr: u8,
@@ -113,7 +113,7 @@ impl PitChannel {
 }
 
 /// 8254 timer: channel 0 drives IRQ0, channel 2 serves boot calibration.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Pit {
     ch: [PitChannel; 3],
     gate2: bool,
@@ -279,6 +279,21 @@ pub struct Uart {
 }
 
 impl Uart {
+    /// Device state without the host-side output sink, for a world fork.
+    pub fn snapshot(&self) -> Uart {
+        Uart {
+            ier: self.ier, lcr: self.lcr, mcr: self.mcr, scr: self.scr, dll: self.dll, dlm: self.dlm,
+            rx: self.rx.clone(), thre: self.thre, level: self.level, out: self.out.clone(),
+            output_file: None, output_limit: None,
+        }
+    }
+    /// Put device state back from a snapshot, keeping this run's output sink.
+    pub fn restore(&mut self, s: &Uart) {
+        let (file, limit) = (self.output_file.take(), self.output_limit);
+        *self = s.snapshot();
+        self.output_file = file;
+        self.output_limit = limit;
+    }
     fn dlab(&self) -> bool {
         self.lcr & 0x80 != 0
     }
