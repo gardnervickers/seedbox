@@ -224,6 +224,18 @@ func main() {
 	acks, failed := load(eps, *duration, *concurrency, *writes)
 	fmt.Printf("LOAD acked=%d failed=%d elapsed=%v\n", len(acks), failed, time.Since(start))
 	if *writes > 0 && len(acks) != *writes**concurrency {
+		for _, ep := range eps {
+			c := dial([]string{ep})
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			st, err := c.Status(ctx, ep)
+			cancel()
+			c.Close()
+			if err != nil {
+				fmt.Printf("DEBUG status %s err=%v\n", ep, err)
+				continue
+			}
+			fmt.Printf("DEBUG status %s id=%x leader=%x term=%d index=%d applied=%d errors=%v\n", ep, st.Header.MemberId, st.Leader, st.RaftTerm, st.RaftIndex, st.RaftAppliedIndex, st.Errors)
+		}
 		fmt.Printf("RESULT incomplete acked=%d target=%d\n", len(acks), *writes**concurrency)
 		os.Exit(4)
 	}
