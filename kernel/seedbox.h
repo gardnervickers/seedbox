@@ -36,6 +36,8 @@ extern struct seedbox_time_page *seedbox_page;
 unsigned long long seedbox_rdtsc(void);
 bool seedbox_emulate_user_tsc(struct pt_regs *regs);
 unsigned long seedbox_tsc_khz(void);
+/* Mix in fork entropy and reseed if the VMM published new (drivers/char/random.c). */
+void seedbox_take_entropy(void);
 
 /*
  * Offer the VMM a deterministic stopping point. The executed conditional

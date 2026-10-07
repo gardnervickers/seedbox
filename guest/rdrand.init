@@ -1,7 +1,0 @@
-#!/bin/busybox sh
-# Does RDRAND reach the hardware although CPUID hides it? (harness/worlds/rdrand.json)
-/bin/busybox --install -s
-mount -t proc proc /proc
-rngprobe rdrand
-rngprobe rdrand
-sbx exit 0

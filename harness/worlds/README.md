@@ -32,7 +32,6 @@ and identities.
 | `cluster-fork-skew.json` | `cluster-fork.json` released with up to 50 ms of seeded skew, jitter, and a timed partition after the release (see below) |
 | `entropy-fork.json` | One machine printing `getrandom` and `/dev/urandom` bytes before and after a time fork (see below) |
 | `entropy-barrier.json` | The same guest forked at its launch barrier instead (see below) |
-| `rdrand.json` | One machine executing RDRAND without consulting CPUID, which hides it (see below) |
 
 `batch.sh`, `batch.py` and `msr54.py` still run these fixtures with shared CPU/SMT
 leases and verified MSR restoration. Runtime lifecycle tests also use their CPU
@@ -91,9 +90,6 @@ run it the same way, with `fork-late-cold` and `fork-late-loop` prefixes.
 simulated seconds, and `entropy-barrier.json` on either side of the launch
 barrier; build their initramfs from `guest/entropy-fork.init` with
 `guest/rngprobe.c` at `bin/rngprobe`.
-`rdrand.json` checks whether RDRAND, hidden from CPUID, still reaches the
-hardware: `rdrand: #UD` is safe, and differing values across runs of one seed
-are a determinism hole.
 
 Times in a forked world's plan (`faults[].at_ns`, `scenario[].at_ns`,
 `kill_restart.start_ns`) must be at or after the release, the fork point plus

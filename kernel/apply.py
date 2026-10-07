@@ -125,7 +125,10 @@ edit(
 # without their cooperation, so the VMM writes the seed's entropy into the time
 # page and bumps a generation. The next random output mixes it into the input
 # pool and reseeds, so each seed draws its own stream from the fork on. Batched
-# get_random_u*() values check too, before they compare generations.
+# get_random_u*() values check too, before they compare generations, and so
+# does the timer interrupt: a released machine takes its late tick at once,
+# and the reseed bumps the vDSO getrandom generation (glibc 2.41+, Go 1.24+),
+# which never enters the kernel CRNG on its own.
 edit(
     "drivers/char/random.c",
     "#include <linux/random.h>\n",
@@ -134,7 +137,6 @@ edit(
 edit(
     "drivers/char/random.c",
     "static void crng_make_state(u32 chacha_state[CHACHA_STATE_WORDS],\n",
-    "static void seedbox_take_entropy(void);\n"
     "static void __crng_make_state(u32 chacha_state[CHACHA_STATE_WORDS],\n"
     "\t\t\t      u8 *random_data, size_t random_data_len);\n\n"
     "static void crng_make_state(u32 chacha_state[CHACHA_STATE_WORDS],\n"
@@ -148,9 +150,15 @@ edit_re(
     r"\n(\tnext_gen = READ_ONCE\(base_crng\.generation\);[ \t]*\\\n)",
     lambda m: "\n\tseedbox_take_entropy();\t\t\t\t\t\t\t\\\n" + m.group(1),
 )
+edit(
+    "arch/x86/kernel/time.c",
+    "static irqreturn_t timer_interrupt(int irq, void *dev_id)\n{\n",
+    "extern void seedbox_take_entropy(void);\n\n"
+    "static irqreturn_t timer_interrupt(int irq, void *dev_id)\n{\n\tseedbox_take_entropy();\n",
+)
 append(
     "drivers/char/random.c",
-    "\nstatic void seedbox_take_entropy(void)\n{\n"
+    "\nvoid seedbox_take_entropy(void)\n{\n"
     "\tstruct seedbox_time_page *p = READ_ONCE(seedbox_page);\n"
     "\tstatic u64 seen;\n\tunsigned long flags;\n\tu64 gen;\n\n"
     "\tif (!p || likely(READ_ONCE(p->entropy_gen) == seen))\n\t\treturn;\n"
