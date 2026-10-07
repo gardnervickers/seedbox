@@ -90,6 +90,21 @@ impl VcpuState {
         Ok(())
     }
 
+    /// Whether two saved states are equal in every part a checkpoint restores
+    /// that the guest can change by running: registers, FPU/XSAVE, XCRs,
+    /// MSRs and pending events.
+    pub fn same(&self, o: &Self) -> bool {
+        fn bytes<T>(v: &T) -> &[u8] {
+            unsafe { std::slice::from_raw_parts((v as *const T).cast(), std::mem::size_of::<T>()) }
+        }
+        bytes(&self.regs) == bytes(&o.regs)
+            && bytes(&self.sregs) == bytes(&o.sregs)
+            && self.xsave.region == o.xsave.region
+            && bytes(&self.xcrs) == bytes(&o.xcrs)
+            && bytes(&self.events) == bytes(&o.events)
+            && self.msrs.as_slice().iter().zip(o.msrs.as_slice()).all(|(a, b)| a.index == b.index && a.data == b.data)
+    }
+
     /// Write the state back. The vCPU must have no I/O pending completion.
     /// Returns the restored registers.
     pub fn restore(&self, vcpu: &VcpuFd, what: &str) -> Result<(kvm_regs, kvm_sregs), String> {
@@ -249,6 +264,41 @@ impl Undo {
         let restored = self.cpu.restore(vcpu, "rollback")?;
         self.stats.rollbacks += 1;
         Ok(restored)
+    }
+
+    /// Bring the shadow up to RAM. A held checkpoint no longer describes RAM.
+    pub fn sync(&mut self, vm: &VmFd, mem: *mut u8) -> Result<(), String> {
+        self.valid = false;
+        self.fetch(vm)?;
+        self.stats.synced_pages += self.copy_logged(mem, self.shadow);
+        Ok(())
+    }
+
+    /// Whether every page written since the last sync still holds what it
+    /// held then; then bring the shadow up to RAM. Meaningful only when
+    /// nothing was restored or checkpointed since that sync.
+    pub fn unchanged_since_sync(&mut self, vm: &VmFd, mem: *mut u8) -> Result<bool, String> {
+        self.valid = false;
+        self.fetch(vm)?;
+        let mut same = true;
+        for (w, &bits) in self.log.iter().enumerate() {
+            let mut b = bits;
+            while b != 0 && same {
+                let off = (w * 64 + b.trailing_zeros() as usize) * PAGE;
+                b &= b - 1;
+                if off + PAGE <= self.size {
+                    let (now, then) = unsafe {
+                        (
+                            std::slice::from_raw_parts(mem.add(off), PAGE),
+                            std::slice::from_raw_parts(self.shadow.add(off), PAGE),
+                        )
+                    };
+                    same = now == then;
+                }
+            }
+        }
+        self.stats.synced_pages += self.copy_logged(mem, self.shadow);
+        Ok(same)
     }
 
     /// Bring the shadow up to RAM and start tracking every page written from

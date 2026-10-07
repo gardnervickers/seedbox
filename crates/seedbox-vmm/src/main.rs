@@ -18,6 +18,7 @@ mod virtio_net;
 mod virtio_console;
 
 use counter::Counter;
+use machine::pv::PvClock;
 use machine::{BootSpec, Machine, MachineSnapshot, State, Stop, NET_IRQ, NET_MMIO, CHANNEL_IRQ, CHANNEL_MMIO};
 use rng::Rng;
 use serde_json::{json, Value};
@@ -36,9 +37,24 @@ enum Payload {
     Partition { from: usize, to: usize, on: bool },
 }
 
+/// The world's timebase (see `timebase.rs`), one for all its machines.
+enum Clock {
+    Counter(Counter),
+    Pv(PvClock),
+}
+
+impl Clock {
+    fn name(&self) -> &'static str {
+        match self {
+            Clock::Counter(_) => "counter",
+            Clock::Pv(_) => "pv",
+        }
+    }
+}
+
 struct World {
     machines: Vec<Machine>,
-    counter: Counter,
+    clock: Clock,
     events: Vec<BTreeMap<(u64, u64), Payload>>,
     seq: u64,
     /// No frame can arrive sooner than this after it is sent: the horizon.
@@ -220,6 +236,12 @@ fn run() -> Result<Value, String> {
     }
     let out = arg(&args, "--out").ok_or("--out required")?;
     let digest = args.iter().any(|a| a == "--digest");
+    // Part of the run's identity: a seed gives a different run under each.
+    let pv_clock = match arg(&args, "--timebase").as_deref() {
+        None | Some("counter") => false,
+        Some("pv") => true,
+        Some(other) => return Err(format!("--timebase {other}: expected counter or pv")),
+    };
     // Undo-able precise stops (performance only): initial final margin, 0 = off.
     let undo_margin: u64 = match std::env::var("SEEDBOX_UNDO").as_deref() {
         Err(_) => 256,
@@ -321,6 +343,7 @@ fn run() -> Result<Value, String> {
             control_channel,
             undo_margin,
             barrier: forked && fork_at.is_none(),
+            pv_clock,
         };
         let mut mach = Machine::new(&kvm, &names[i], &spec)?;
         if args.iter().any(|arg| arg == "--stream-console") {
@@ -369,8 +392,19 @@ fn run() -> Result<Value, String> {
     let net = &cfg["network"];
     let latency = net["latency_ns"].as_u64().unwrap_or(1_000_000);
     let early = (latency / 2).min(cfg["stop_tolerance_ns"].as_u64().unwrap_or(0));
+    let clock = if pv_clock {
+        // Host CPU time a run may go without an exit before it is checked
+        // for a spin (performance only).
+        let ms: u64 = match std::env::var("SEEDBOX_PV_WATCHDOG_MS").as_deref() {
+            Err(_) => 20,
+            Ok(m) => m.parse().map_err(|e| format!("SEEDBOX_PV_WATCHDOG_MS: {e}"))?,
+        };
+        Clock::Pv(PvClock::new(std::time::Duration::from_millis(ms.max(1)))?)
+    } else {
+        Clock::Counter(Counter::new()?)
+    };
     let mut world = World {
-        counter: Counter::new()?,
+        clock,
         events: (0..n).map(|_| BTreeMap::new()).collect(),
         seq: 0,
         lookahead: latency,
@@ -788,7 +822,10 @@ fn simulate(
             world.early
         };
         let plan=(m,world.machines[m].time,limit,horizon,world.next_event(m),fault_boundary,control_boundary,world.machines[m].next_deadline(),world.machines[m].pending_io.as_ref().map_or(0,|p|p.remaining_ns),world.seq);
-        let stop = world.machines[m].run_until(&mut world.counter, limit, early, &mut frames)?;
+        let stop = match &mut world.clock {
+            Clock::Counter(c) => world.machines[m].run_until(c, limit, early, &mut frames)?,
+            Clock::Pv(p) => world.machines[m].run_until(p, limit, early, &mut frames)?,
+        };
         stop_progress(&mut stalled_plan,plan,world.machines[m].time!=plan.1 || stop!=Stop::Reached)?;
         for (id,at,success) in world.machines[m].fault_effects.drain(..) {
             if id==0 && success {
@@ -929,12 +966,16 @@ fn report(
             "control_channel":mach.channel.as_ref().map(|_|json!({"transport":"virtio-console-v1","tx_bytes":mach.control_tx_bytes,"rx_dma_bytes":mach.control_dma_bytes})),
             "net": mach.net.as_ref().map(|n| json!({"tx": n.tx_frames, "rx": n.rx_frames, "rx_dropped": n.rx_dropped})),
         }));
+        if let Clock::Pv(_) = world.clock {
+            report.last_mut().unwrap()["spin"] = json!({"probes": s.spin_probes, "idles": s.spin_idles, "false_alarms": s.spin_false});
+        }
     }
     let sim_ns = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
     Ok(json!({
         "report_version": 1,
         "seed": seed,
-        "counter_profile": profile::host()?.name,
+        "timebase": world.clock.name(),
+        "counter_profile": match world.clock { Clock::Counter(_) => Some(profile::host()?.name), Clock::Pv(_) => None },
         "outcome": outcome,
         "sim_seconds": sim_ns as f64 / 1e9,
         "host_seconds": host_seconds,

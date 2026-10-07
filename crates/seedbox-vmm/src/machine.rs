@@ -1,9 +1,10 @@
 //! One x86-64 Linux machine: a KVM VM with one vCPU, run only by the world
-//! thread. Guest progress is measured in retired conditional branches; the
-//! machine can be stopped at an exact branch count (precise preemption).
+//! thread. Its timebase (see `timebase.rs`) says how guest progress becomes
+//! virtual time: retired conditional branches with exact counted stops
+//! (precise preemption), or the PV clock, where time moves only at exits.
 
 use crate::boundary::{advance_time, hard_limit, io_charge, PendingIo};
-use crate::timebase::{Judge, Run, Timebase, Verdict};
+use crate::timebase::{Judge, Prepared, Run, Timebase, Verdict};
 #[cfg(test)]
 use crate::counter::Counter;
 use crate::profile::CounterProfile;
@@ -19,6 +20,7 @@ use std::os::fd::AsRawFd;
 use std::time::Instant;
 
 mod counted;
+pub mod pv;
 
 pub const TIME_PAGE: u64 = 0xd000_0000;
 pub const NET_MMIO: u64 = 0xd000_1000;
@@ -34,6 +36,11 @@ const PAGE_SYSCALLS: usize = 3;
 const PAGE_PIC_IMR: usize = 4;
 const PAGE_NET_ISR: usize = 5;
 pub const PAGE_FIELDS: usize = 6;
+/// PV clock fields, written by the VMM and outside `PAGE_FIELDS` (they are
+/// zero in the counter timebase, whose checkpoints and digests skip them).
+const PAGE_PV_CLOCK: usize = 6;
+const PAGE_BOUND: usize = 7;
+const PAGE_SYSCALL_TARGET: usize = 8;
 
 pub struct BootSpec<'a> {
     pub kernel: &'a [u8],
@@ -47,6 +54,8 @@ pub struct BootSpec<'a> {
     pub undo_margin: u64,
     /// The guest parks at its launch barrier until the world releases it.
     pub barrier: bool,
+    /// The machine runs under the PV clock timebase (no host perf counter).
+    pub pv_clock: bool,
 }
 
 /// Port of the launch barrier, see guest/barrier.h.
@@ -143,6 +152,11 @@ pub struct Stats {
     pub soft_undos: u64,
     /// Of the soft misses, those with no syscall in the run (provably harmless).
     pub soft_misses_clean: u64,
+    /// PV clock: watchdog checks of a run with no exit, those that proved a
+    /// spin (a state cycle, then treated as idle), and the rest.
+    pub spin_probes: u64,
+    pub spin_idles: u64,
+    pub spin_false: u64,
 }
 
 pub struct Machine {
@@ -208,6 +222,7 @@ pub struct Machine {
     /// Per-seed words the guest reads after its release.
     entropy: [u32; ENTROPY_WORDS],
     entropy_read: usize,
+    pv_clock: bool,
     /// The MSR list a fork snapshot saves.
     msrs: Msrs,
     pub stats: Stats,
@@ -280,13 +295,18 @@ fn guest_cpuid(kvm: &Kvm) -> Result<CpuId, String> {
 
 impl Machine {
     pub fn new(kvm: &Kvm, name: &str, spec: &BootSpec) -> Result<Self, String> {
-        let profile = crate::profile::host()?;
+        // The PV clock needs no counter, so no qualified host CPU; the
+        // profile is then never consulted.
+        let profile = if spec.pv_clock { &crate::profile::ZEN } else { crate::profile::host()? };
         if !kvm.check_extension(kvm_ioctls::Cap::ImmediateExit) {
             return Err("KVM immediate-exit capability required for I/O completion".into());
         }
         let mem_size = spec.mem;
         let mem = map(mem_size)?;
         let page = map(4096)?;
+        if spec.pv_clock {
+            unsafe { std::ptr::write_volatile(page.cast::<u64>().add(PAGE_PV_CLOCK), 1) };
+        }
         let m = unsafe { std::slice::from_raw_parts_mut(mem, mem_size) };
         let k = spec.kernel;
         let setup = (k[0x1f1] as usize + 1) * 512;
@@ -446,9 +466,11 @@ impl Machine {
             barrier: spec.barrier,
             entropy: [0; ENTROPY_WORDS],
             entropy_read: 0,
+            pv_clock: spec.pv_clock,
             msrs,
             stats: Stats::default(),
-            witness: Sha256::new(),
+            // A PV clock run can never share a witness with a counter run.
+            witness: if spec.pv_clock { Sha256::new_with_prefix(b"timebase=pv") } else { Sha256::new() },
             trace: None,
         })
     }
@@ -833,6 +855,50 @@ impl Machine {
         Ok(())
     }
 
+    /// Arm breakpoints for one step: the next landing point the planner
+    /// finds from the current registers.
+    fn arm_step(&mut self) -> Result<(), String> {
+        self.set_stepping(true)?;
+        let (r, sr) = {
+            let run = self.vcpu.get_kvm_run();
+            unsafe { (run.s.regs.regs, run.s.regs.sregs) }
+        };
+        let mem = unsafe { std::slice::from_raw_parts(self.mem, self.mem_size) };
+        let planner = self.planner.as_mut().unwrap();
+        planner.refresh_from(&sr);
+        let targets = planner
+            .plan(mem, &r)
+            .map_err(|e| format!("{}: step plan: {e}", self.name))?;
+        Planner::arm(&self.vcpu, &targets)?;
+        self.last_plan = (r.rip, targets.clone());
+        if targets.contains(&r.rip) {
+            let mut resumed = r;
+            resumed.rflags |= 1 << 16; // RF: do not re-trigger at the current instruction
+            self.vcpu.set_regs(&resumed).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// The guest is in a state cycle (see `pv.rs`), at its canonical point:
+    /// idle, like HLT, until an interrupt.
+    fn spin_idle(&mut self) -> Result<Stop, String> {
+        let (rip, if_flag) = {
+            let run = self.vcpu.get_kvm_run();
+            (unsafe { run.s.regs.regs.rip }, run.if_flag)
+        };
+        self.set_stepping(false)?;
+        self.stats.spin_idles += 1;
+        self.record(b'S', rip);
+        if if_flag == 0 {
+            return Err(format!(
+                "{}: the guest spins with interrupts off at rip {rip:#x}; nothing can end the loop",
+                self.name
+            ));
+        }
+        self.state = State::Halted;
+        Ok(Stop::Halted)
+    }
+
     fn inject(&mut self) {
         let run = self.vcpu.get_kvm_run();
         match self.pic.pending() {
@@ -939,7 +1005,7 @@ impl Machine {
             // Interrupt injection depends only on the distance to the stop, never
             // on the stepping margin, so it is deterministic.
             if legal {
-                if remaining > INJECT_GUARD {
+                if remaining > tb.inject_guard() {
                     self.inject();
                 } else {
                     self.vcpu.get_kvm_run().request_interrupt_window = 0;
@@ -952,11 +1018,13 @@ impl Machine {
                 unsafe { std::ptr::write_volatile(self.page.add(2), window as u64) };
                 self.exit_req = window;
             }
-            tb.prepare(self, remaining)?;
+            let syscalls0 = self.page_get(PAGE_SYSCALLS);
+            if let Prepared::Idle = tb.prepare(self, remaining, soft)? {
+                return self.spin_idle();
+            }
             self.vcpu.get_kvm_run().kvm_valid_regs =
                 (KVM_SYNC_X86_REGS | KVM_SYNC_X86_SREGS) as u64;
-            let syscalls0 = self.page_get(PAGE_SYSCALLS);
-            let c0 = tb.start();
+            let c0 = tb.start(syscalls0);
             let t_run = Instant::now();
             let run_ptr = self.vcpu.get_kvm_run() as *mut kvm_run;
             let exit = self.vcpu.run();
@@ -975,11 +1043,11 @@ impl Machine {
             };
             self.stats.kvm_ns[kind] += run_ns;
             self.stats.kvm_n[kind] += 1;
-            let c1 = tb.read();
+            let syscalls1 = unsafe { std::ptr::read_volatile(self.page.add(PAGE_SYSCALLS)) };
+            let c1 = tb.read(syscalls1);
             let delta = c1 - c0;
             let interrupted = matches!(&exit, Err(e) if e.errno() == libc::EINTR);
-            let syscalled =
-                unsafe { std::ptr::read_volatile(self.page.add(PAGE_SYSCALLS)) } != syscalls0;
+            let syscalled = syscalls1 != syscalls0;
             let run = Run {
                 delta,
                 remaining,
@@ -1029,7 +1097,9 @@ impl Machine {
                     ));
                 }
             }
-            self.branches += delta;
+            if T::BRANCHES {
+                self.branches += delta;
+            }
             self.time += delta;
             if legal {
                 // Sent/Hlt/Exited can return before the next loop synchronizes
@@ -1050,13 +1120,20 @@ impl Machine {
                     self.stats.eintr += 1;
                 }
                 Ok(VcpuExit::Debug(_)) => {}
-                Ok(VcpuExit::IoOut(0x52c, _)) => {
+                Ok(VcpuExit::IoOut(0x52c, data)) => {
                     // Requested yield: a stop if we reached the soft target,
                     // otherwise transparent (nothing observable happens).
+                    // PV clock only: 1 means the guest's clock would pass
+                    // the bound we published (`soft`); it waits for time to
+                    // move, so move it there.
+                    let v = data[0];
+                    if v == 1 && self.pv_clock {
+                        self.time = self.time.max(soft);
+                    }
                     self.stats.yields += 1;
                     if self.time >= soft {
                         self.stats.yield_stops += 1;
-                        self.record(b'Y', 0);
+                        self.record(b'Y', v as u64);
                     } else {
                         legal = false;
                     }
@@ -1126,6 +1203,12 @@ impl Machine {
                             }
                         }
                         0x528 => {
+                            if self.pv_clock && self.page_get(PAGE_PV_CLOCK) != 2 {
+                                return Err(format!(
+                                    "{}: the guest kernel lacks PV clock support; rebuild it from kernel/ for the pv timebase",
+                                    self.name
+                                ));
+                            }
                             self.pv = v >= 2;
                             if self.pv {
                                 self.sync_pic();
@@ -1446,7 +1529,7 @@ mod io_boundary_tests {
         else {code.push(if write {0xee} else {0xec});}
         code.extend_from_slice(&[0x85,0xc0,0x74,0x00,0xc7,0x05,0x00,0x00,0x08,0x00,0x78,0x56,0x34,0x12,0xf4]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo,barrier:false};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo,barrier:false,pv_clock:false};
         let mut machine=Machine::new(kvm,"io-probe",&spec).unwrap();
         let mut r=machine.vcpu.get_regs().unwrap();r.rflags=0x202;machine.vcpu.set_regs(&r).unwrap();
         machine.pit.write(0x43,0x34,0);
@@ -1564,7 +1647,7 @@ mod io_boundary_tests {
         let back=-(code.len() as i8+2);
         code.extend_from_slice(&[0xeb,back as u8]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo,barrier:false};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo,barrier:false,pv_clock:false};
         let mut machine=Machine::new(kvm,"stop-probe",&spec).unwrap();
         let mut r=machine.vcpu.get_regs().unwrap();r.rflags=0x2;machine.vcpu.set_regs(&r).unwrap();
         machine.pic.set_masks(0xffff);
@@ -1659,7 +1742,7 @@ mod fork_tests {
         code.extend_from_slice(&[0xb9,0xe8,0x03,0,0, 0x49, 0x75,0xfd]);
         code.extend_from_slice(&[0xc7,0x05,0x00,0x10,0x08,0x00,0xad,0xde,0,0, 0xf4]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo,barrier};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo,barrier,pv_clock:false};
         Machine::new(kvm,"fork-probe",&spec).unwrap()
     }
 
