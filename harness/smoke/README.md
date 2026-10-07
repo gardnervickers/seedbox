@@ -89,8 +89,9 @@ The development tier is unqualified evidence and does not change release policy.
 `harness/host-plan.py BASE HEAD` reads `git diff --name-only BASE...HEAD` and
 prints every selected check with the path that selected it. `--json` emits the
 same plan as JSON. Repeatable `--extra CHECK` adds reviewer checks; selection
-unions all matching rows and additions. Automatic `cluster-fixed` selection is
-conditional on changed engine inputs; explicit reviewer additions are always kept.
+unions all matching rows and additions. Engine comparison selects `cluster-fixed`
+when engine inputs change; fixture-input rows and explicit reviewer additions
+always keep it.
 The [checked-in map](../host-check-map.json) defines these rows:
 
 | Changed paths | Host checks |
@@ -104,18 +105,22 @@ The [checked-in map](../host-check-map.json) defines these rows:
 | guest/compose-init.c, preparation, images, volumes | core + sanity (+ volume-crash if volumes changed) |
 | examples/faults/**, harness/smoke/**, harness/host*, python/seedbox/** | core (control.py also keeps control-cases) |
 | harness/worlds/<name>.json | the named fixture's check when mapped, otherwise core; other matching rows can add checks |
-| harness/batch.* | core |
+| harness/batch.*, harness/worlds/cluster-fixed.json, examples/etcd/workload/** | core + cluster-fixed, even with identical engine inputs |
 | examples/<other>/** | core + "example <name>: its reviewer's run list is required" |
 | flake.nix, flake.lock, rust-toolchain*, Cargo.lock, .cargo/** | core |
 | kernel/ | core + "kernel campaign needed"; execution refuses incomplete coverage |
 | anything else unmatched | core (fail closed) |
 
 The plan names `core` (public CLI smoke) and `cluster-fixed` separately so their
-execution and comparison times are visible. Automatic `cluster-fixed` runs only
-when VMM, guest or toolchain/build inputs differ from local `origin/main`. The
-planner compares exact trees even when `--base` uses another ref, so merged or
-reverted engine changes with equal inputs skip the second build and both cluster
-runs. Reviewer `--extra cluster-fixed` still forces the comparison. `perf-replay`
+execution and comparison times are visible. For engine comparison, `cluster-fixed`
+runs when VMM, guest or toolchain/build inputs differ from local `origin/main`. The
+planner compares exact trees even when `--base` uses another ref, so engine-only
+changes with merged or reverted inputs equal to main skip the second build and
+both cluster runs. The batch runner, fixed world and cluster workload rows set
+`"always": true` in the map: their checks are explicit, so `cluster-fixed` exercises those inputs
+even when the engine trees match. Cluster workload changes also retain the etcd
+example's reviewer-run-list requirement. Reviewer `--extra cluster-fixed` still
+forces the comparison. `perf-replay`
 is the single opt-in undo-off/margin replay. A reviewer adding `core` or `perf-replay` also selects
 its core dependencies. Other additions select exactly the named check.
 Shared machine code adds disk, network or undo checks when changed lines touch

@@ -38,7 +38,7 @@ def portable(path):
 
 
 def select_checks(changes, mapping=None, extra=(), diffs=None, engine_changed=None):
-    """Union matched rows; automatic cluster comparison needs changed engine inputs."""
+    """Union matched rows; cluster needs changed engine inputs or an explicit check."""
     mapping = mapping or load_map()
     diffs = diffs or {}
     if engine_changed is None:
@@ -80,7 +80,8 @@ def select_checks(changes, mapping=None, extra=(), diffs=None, engine_changed=No
                         continue
                     matched = True
                     for check in rule['checks']:
-                        add(check, dict(reason, category=rule['category']))
+                        add(check, dict(reason, category=rule['category']),
+                            explicit=rule.get('always', False))
             if not matched:
                 for check in mapping['core']:
                     add(check, dict(reason, category='unmatched path (fail closed)'))

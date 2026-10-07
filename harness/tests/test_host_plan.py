@@ -75,7 +75,23 @@ class MapTests(unittest.TestCase):
         self.assert_paths(['harness/worlds/new-fixture.json'])
         for path in ('harness/batch.sh', 'harness/batch.py'):
             plan = host_plan.select_checks({'rev': [path]})
-            self.assertEqual(set(plan['checks']), {'core'})
+            self.assertEqual(set(plan['checks']), CORE)
+
+    def test_batch_and_fixture_rows_keep_cluster_fixed(self):
+        for path in ('harness/batch.sh', 'harness/worlds/cluster-fixed.json'):
+            plan = host_plan.select_checks({'r': [path]})
+            self.assertIn('cluster-fixed', plan['checks'], path)
+
+    def test_cluster_workload_keeps_fixture_and_reviewer_note(self):
+        for path in ('examples/etcd/workload/main.go', 'examples/etcd/workload/go.mod',
+                     'examples/etcd/workload/go.sum'):
+            with self.subTest(path=path):
+                plan = host_plan.select_checks({'r': [path]}, engine_changed=False)
+                self.assertEqual(set(plan['checks']), CORE)
+                self.assertIn(dict(revision='r', path=path, category='cluster workload'),
+                              plan['checks']['cluster-fixed'])
+                self.assertEqual(plan['reviewer_notes'],
+                                 ["example etcd: its reviewer's run list is required"])
 
     def test_other_example_requires_its_reviewer_run_list(self):
         plan = host_plan.select_checks({'rev': ['examples/minio/client/cas.py',
@@ -285,6 +301,16 @@ class GitPlannerTests(unittest.TestCase):
         self.assertNotIn('cluster-fixed', host_plan.plan_revision(self.repo, 'base', 'HEAD')['checks'])
         self.assertIn('cluster-fixed', host_plan.plan_revision(self.repo, 'base', 'HEAD',
                                                              extra=['cluster-fixed'])['checks'])
+
+    def test_fixture_inputs_select_cluster_with_identical_engine_trees(self):
+        for path in ('harness/batch.sh', 'harness/batch.py',
+                     'harness/worlds/cluster-fixed.json', 'examples/etcd/workload/main.go'):
+            with self.subTest(path=path):
+                self.git('branch', '-f', 'base')
+                self.commit(path)
+                plan = host_plan.plan_revision(self.repo, 'base', 'HEAD')
+                self.assertFalse(plan['engine_changed'])
+                self.assertEqual(set(plan['checks']), CORE)
 
     def test_renames_keep_old_runtime_path_coverage(self):
         source = 'crates/seedbox-vmm/src/disk.rs'

@@ -272,6 +272,7 @@
     },
     {
       "category": "batch runner",
+      "always": true,
       "paths": [
         "harness/batch.*"
       ],
@@ -282,8 +283,20 @@
     },
     {
       "category": "world fixture",
+      "always": true,
       "paths": [
         "harness/worlds/cluster-fixed.json"
+      ],
+      "checks": [
+        "core",
+        "cluster-fixed"
+      ]
+    },
+    {
+      "category": "cluster workload",
+      "always": true,
+      "paths": [
+        "examples/etcd/workload/**"
       ],
       "checks": [
         "core",
