@@ -1,0 +1,16 @@
+#!/bin/busybox sh
+/bin/busybox --install -s
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+idx=$(sed -n 's/.*seedbox.index=\([0-9]*\).*/\1/p' /proc/cmdline)
+name=$(sed -n 's/.*seedbox.name=\([a-z0-9]*\).*/\1/p' /proc/cmdline)
+mode=$(sed -n 's/.*order.mode=\([a-z]*\).*/\1/p' /proc/cmdline)
+gap=$(sed -n 's/.*order.gap=\([0-9]*\).*/\1/p' /proc/cmdline)
+ip link set lo up
+ip addr add 10.0.0.$((idx+1))/24 brd 10.0.0.255 dev eth0
+ip link set eth0 up
+echo "order: $name up at index $idx"
+order-probe "$name" "$mode" "$gap" 4200000000
+[ "$name" = a ] && sbx exit 0
+while true; do sleep 10; done

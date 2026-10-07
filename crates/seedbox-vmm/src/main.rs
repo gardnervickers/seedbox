@@ -9,6 +9,7 @@ mod events;
 mod faults;
 mod machine;
 mod network_counters;
+mod order_trace;
 mod profile;
 mod rng;
 mod stepper;
@@ -60,6 +61,7 @@ struct World {
     link_counts: BTreeMap<(usize,usize), [u64;3]>,
     semantic_counts:network_counters::NetworkCounters,
     slices: u64,
+    order: order_trace::OrderTrace,
 }
 
 impl World {
@@ -158,11 +160,13 @@ impl World {
                 .filter(|&k| k != src)
                 .collect()
         };
+        let mut decisions = Vec::new();
         for dst in targets {
             if self.faults.blocked(src, dst) || *self.partitioned.get(&(src, dst)).unwrap_or(&false)
             {
                 self.dropped += 1;
                 self.count_link(send_time,src, dst, 1);
+                if self.order.on() { decisions.push(json!({"to":self.machines[dst].name,"decision":"cut","fault_cut":self.faults.blocked(src,dst)})); }
                 continue;
             }
             let jitter = self
@@ -173,6 +177,7 @@ impl World {
             let last = *self.link_last.get(&(src, dst)).unwrap_or(&0);
             let t = (send_time + self.latency + jitter).max(last + 1);
             self.link_last.insert((src, dst), t);
+            if self.order.on() { decisions.push(json!({"to":self.machines[dst].name,"decision":"delivered","arrival":t,"jitter":jitter})); }
             self.schedule(
                 dst,
                 t,
@@ -181,6 +186,17 @@ impl World {
                     bytes: frame.clone(),
                 },
             );
+        }
+        if self.order.on() {
+            let next = self.faults.next_boundary().min(self.control.boundary());
+            let max_time = self.machines.iter().map(|m| m.time).max().unwrap_or(0);
+            let clock = self.machines[src].guest_clock();
+            let times: Vec<u64> = self.machines.iter().map(|m| m.time).collect();
+            let name = self.machines[src].name.clone();
+            let payload = String::from_utf8_lossy(frame.get(42..frame.len().min(90)).unwrap_or(&[])).into_owned();
+            let handles = self.faults.active_handles();
+            self.order.route(send_time, next, max_time, clock, || json!({"route":{"from":name,"send":send_time,"guest_clock":clock,
+                "next_boundary":if next==u64::MAX {Value::Null} else {json!(next)},"times":times,"handles":handles,"to":decisions,"payload":payload}}));
         }
     }
 }
@@ -391,6 +407,7 @@ fn run() -> Result<Value, String> {
         link_counts: BTreeMap::new(),
         semantic_counts:network_counters::NetworkCounters::default(),
         slices: 0,
+        order: order_trace::OrderTrace::new(&cfg, &out)?,
         machines,
     };
     if !forked {
@@ -708,6 +725,10 @@ fn simulate(
             {
                 world.control.pending.as_mut().unwrap().result = json!({"services":cfg["control"]["placement"],"machines":world.machines.iter().enumerate().map(|(i,m)|json!({"name":m.name,"state":if matches!(m.state,State::Exited(_)) {format!("{:?}",m.state)} else {world.faults.process_state(i).to_owned()}})).collect::<Vec<_>>(),"active_handles":world.faults.active_handles(),"network_counters":world.counter_snapshot(world.semantic_counts.counts())});
             }
+            if world.order.on() {
+                let times: Vec<u64> = world.machines.iter().map(|m| m.time).collect();
+                world.order.boundary(json!({"boundary":{"kind":"control","at":control_boundary,"keys":keys,"times":times}}));
+            }
             if let Some(bytes) =
                 world
                     .control
@@ -722,6 +743,11 @@ fn simulate(
         let fault_boundary = world.faults.next_boundary();
         if fault_boundary <= key && fault_boundary < duration {
             let commands = world.faults.apply_due(fault_boundary);
+            if world.order.on() {
+                let times: Vec<u64> = world.machines.iter().map(|m| m.time).collect();
+                let applied: Vec<Value> = world.faults.log.iter().filter(|e| e["applied_at_ns"]==json!(fault_boundary) || e["requested_at_ns"]==json!(fault_boundary)).map(|e| json!({"id":e["id"],"action":e["action"],"status":e["status"],"detail":e["detail"]})).collect();
+                world.order.boundary(json!({"boundary":{"kind":"fault","at":fault_boundary,"keys":keys,"times":times,"faults":applied,"handles":world.faults.active_handles()}}));
+            }
             for i in world.faults.take_changed_network() {
                 let snapshot=world.counter_snapshot(world.semantic_counts.counts());world.faults.log[i]["network_counters"]=snapshot;
             }
@@ -790,6 +816,11 @@ fn simulate(
         let plan=(m,world.machines[m].time,limit,horizon,world.next_event(m),fault_boundary,control_boundary,world.machines[m].next_deadline(),world.machines[m].pending_io.as_ref().map_or(0,|p|p.remaining_ns),world.seq);
         let stop = world.machines[m].run_until(&mut world.counter, limit, early, &mut frames)?;
         stop_progress(&mut stalled_plan,plan,world.machines[m].time!=plan.1 || stop!=Stop::Reached)?;
+        if world.order.on() {
+            let at_boundary = limit == fault_boundary || limit == control_boundary;
+            let v = json!({"slice":{"machine":world.machines[m].name,"start":plan.1,"limit":limit,"early":early,"stop":format!("{stop:?}"),"end":world.machines[m].time,"guest_clock":world.machines[m].guest_clock(),"frames":frames.len()}});
+            world.order.slice(at_boundary, order_trace::stop_index(&stop), v);
+        }
         for (id,at,success) in world.machines[m].fault_effects.drain(..) {
             if id==0 && success {
                 if let Err(error)=world.faults.management_ready(m,at,world.control.latency) {world.faults.error=Some(error);}
@@ -851,6 +882,7 @@ fn report(
     duration: u64,
     end_on: &Option<String>,
 ) -> Result<Value, String> {
+    world.order.finish();
     let slices = world.slices;
     let cut_off_at=if outcome=="duration" {duration} else if outcome=="end_machine_exited" {end_on.as_ref().and_then(|name|world.machines.iter().find(|m|&m.name==name)).map(|m|m.time).unwrap_or(0)} else {world.machines.iter().map(|m|m.time).max().unwrap_or(0)};
     world.control.cut_off(&world.faults,cut_off_at);

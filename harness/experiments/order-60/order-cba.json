@@ -1,0 +1,91 @@
+{
+ "_comment": "EXPERIMENT ONLY (#60 ordering spike). kernel/initrd are replaced by run-order.sh.",
+ "kernel": "KERNEL",
+ "mem_mb": 256,
+ "duration_ns": 8000000000,
+ "stop_tolerance_ns": 2000000,
+ "end_on_exit": "a",
+ "order_trace": true,
+ "order_trace_window_ns": 2000000,
+ "network": {
+  "latency_ns": 1000000,
+  "jitter_ns": 100000
+ },
+ "machines": [
+  {
+   "name": "c",
+   "initrd": "INITRD",
+   "cmdline": "order.mode=sleep order.gap=100000"
+  },
+  {
+   "name": "b",
+   "initrd": "INITRD",
+   "cmdline": "order.mode=busy order.gap=20000"
+  },
+  {
+   "name": "a",
+   "initrd": "INITRD",
+   "cmdline": "order.mode=busy order.gap=20000"
+  }
+ ],
+ "faults": [
+  {
+   "id": 1,
+   "at_ns": 2500000000,
+   "deadline_ns": 2500000000,
+   "action": "partition",
+   "handle": "h1",
+   "left": [
+    "a"
+   ],
+   "right": [
+    "b"
+   ]
+  },
+  {
+   "id": 2,
+   "at_ns": 3000000000,
+   "deadline_ns": 3000000000,
+   "action": "partition",
+   "handle": "h2",
+   "left": [
+    "a"
+   ],
+   "right": [
+    "c"
+   ]
+  },
+  {
+   "id": 3,
+   "at_ns": 3000000000,
+   "deadline_ns": 3000000000,
+   "action": "heal",
+   "handle": "h1"
+  },
+  {
+   "id": 4,
+   "at_ns": 3500000000,
+   "deadline_ns": 3500000000,
+   "action": "heal",
+   "handle": "h2"
+  }
+ ],
+ "scenario": [
+  {
+   "at_ns": 2750000000,
+   "partition": [
+    "b",
+    "c"
+   ],
+   "on": true
+  },
+  {
+   "at_ns": 3250000000,
+   "partition": [
+    "b",
+    "c"
+   ],
+   "on": false
+  }
+ ]
+}

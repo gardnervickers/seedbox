@@ -659,6 +659,11 @@ impl Machine {
         outcome
     }
 
+    /// EXPERIMENT ONLY (#60): the latest time the guest's clock has shown.
+    pub fn guest_clock(&self) -> u64 {
+        self.page_get(1)
+    }
+
     fn page_get(&self, i: usize) -> u64 {
         unsafe { std::ptr::read_volatile(self.page.add(i)) }
     }
