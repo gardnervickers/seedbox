@@ -72,6 +72,21 @@ class Inputs(unittest.TestCase):
         with self.assertRaises(ValueError): apply.body("int f(void);", "f", "")
         with self.assertRaises(ValueError): apply.replace("xx", "x", "y")
 
+    def test_exec_cannot_reenable_hardware_counter(self):
+        source = """static void update_cntkctl_el1(struct task_struct *next)
+{
+\tif (test_ti_thread_flag(task_thread_info(next), TIF_TSC_SIGSEGV))
+\t\tsysreg_clear_set(cntkctl_el1, ARCH_TIMER_USR_VCT_ACCESS_EN, 0);
+\telse
+\t\tsysreg_clear_set(cntkctl_el1, 0, ARCH_TIMER_USR_VCT_ACCESS_EN);
+}
+"""
+        patched = apply.counter_access(source)
+        self.assertNotIn("cntkctl_el1, 0, ARCH_TIMER_USR_VCT_ACCESS_EN", patched)
+        self.assertEqual(patched.count("cntkctl_el1, ARCH_TIMER_USR_VCT_ACCESS_EN, 0"), 2)
+        self.assertIn("TIF_TSC_SIGSEGV", patched)
+        with self.assertRaises(ValueError): apply.counter_access(patched)
+
     def test_counter_audit_rejects_real_and_encoded_leaks(self):
         for instruction in ["mrs x0, cntvct_el0", "mrs x4, cntpctss_el0", "mrs x0, s3_3_c14_c0_6", "mrs x0, RNDR", "wfit x3", "mrs x0, CNTFRQ_EL0"]:
             self.assertTrue(audit.violations(instruction), instruction)

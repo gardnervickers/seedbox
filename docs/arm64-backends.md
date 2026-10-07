@@ -5,20 +5,16 @@ main `4a89dce`. It does not change the production x86 engine or its guest inputs
 The crate has its own workspace, lockfile and target directory. The only changes
 to existing build files are the root workspace exclusion and the two aliases.
 
-**Status: implementation and portable checks only.** Native HVF execution,
-Linux unit-test execution, kernel compilation, nested KVM execution, timing and
-cross-backend witness equality await the operator's hardware runs. No guest
-Image hash or successful hardware witness is claimed yet. Do not treat a build,
-a cross-target type check or a mock-machine test as hardware qualification.
+**Status: native HVF boots to init, but acceptance is blocked on a guest
+kernel rebuild.** The 2026-10-07 native run exposed an EL0 counter-access leak
+at exec. The shared machine now rejects it. No successful hardware witness,
+noise invariance, or cross-backend equality is claimed. See the retained
+failure and rebuild instructions below. Linux/KVM execution is still untested.
 
-Implementation-phase checks on the Mac: `cargo build-arm64` links
-Hypervisor.framework; `cargo test-arm64` passes 12 tests with the HVF hardware
-test ignored; crate clippy passes with warnings denied; three portable Python
-input tests pass. The KVM adapter and all test targets cross-check for
-`aarch64-unknown-linux-gnu` with an already-installed toolchain, without running
-Linux binaries. Existing root formatting, clippy and portable acceptance
-(including `cargo test --workspace --locked`) pass. The four frozen paths have
-an empty diff against origin/main. No Lima VM or kernel tree was created here.
+Current Mac checks: `cargo test-arm64` passes 14 portable tests; the hardware
+test remains ignored by default. Crate formatting and clippy with warnings
+denied pass, as do six Python input tests. The explicitly signed and executed
+`hvf_determinism` test fails on the counter-access guard with the old Image.
 
 ## Abstraction boundaries
 
@@ -49,7 +45,14 @@ and do not advance it again on completion. HVF decodes ESR and applies load
 sign/zero extension and advances MMIO PC itself. KVM owns MMIO completion on its
 next `KVM_RUN`; the adapter writes the response into the held `kvm_run` buffer.
 KVM doesn't expose MMIO's register number, so `reg` is optional and is not hashed.
-Unknown exits, unexpected traps and missing capabilities fail the run.
+The shared machine accepts zero writes to OSDLR_EL1 (`S2_0_C1_C3_4`,
+`0x809c` = 32924) and OSLAR_EL1 (`S2_0_C1_C0_4`, `0x8084`). These preserve
+the unlocked debug state; locking and other debug accesses remain errors.
+The encodings follow the [ARM ARM debug-register tables](https://www.bitsavers.org/components/arm/ARM_Architecture_Reference_Manual_ARMv8_Rev_A.k_201609.pdf).
+HVF completes a sysreg instruction by advancing PC by four and, for supported
+reads, supplying the shared machine's response. Sysreg read witnesses include
+that response. Unknown exits, unexpected traps and missing capabilities fail
+the run.
 
 Native arm64 WFI is consumed inside KVM and can block on host time. The patched
 guest therefore writes the **same PV idle MMIO register on both backends**.
@@ -130,7 +133,9 @@ or source drift. The patch:
   through `seedbox_read`; pre-mapping reads use a deterministic early counter.
 - Replaces counter-based WFxT/event-stream delay loops and native idle WFI with
   PV reads and MMIO idle. A polling read yields before crossing its clock bound.
-- Clears CNTKCTL_EL1, including EL0VCTEN/EL0PCTEN and event-stream access; disables
+- Clears CNTKCTL_EL1, including EL0VCTEN/EL0PCTEN and event-stream access; keeps
+  EL0VCTEN cleared in `update_cntkctl_el1()` across exec, prctl and context
+  switches, so PR_TSC_ENABLE permits PV emulation rather than hardware reads; disables
   both architectural timer controls. EL0 CNTVCT/CNTPCT and their SS forms are
   handled through the kernel's synchronous trap path using PV time; CNTFRQ is
   the fixed 1 GHz virtual frequency.
@@ -144,7 +149,10 @@ counter/frequency/RNG reads or WFIT/WFET instructions. It deliberately excludes
 init's CNTVCT test instruction. This audit is a gate, not proof that every
 future guest program or CPU feature is deterministic. HVF VTIMER_ACTIVATED is a
 hard error; both backends also check CNTV_CTL at exposed exits. Do not mask a timer
-leak to make a run pass.
+leak to make a run pass. After the PV handshake, Machine also requires
+CNTKCTL_EL1 to remain zero at every exposed exit; a nonzero value fails without
+rewriting it or resuming the guest. An instruction audit alone cannot detect
+kernel writes which enable hardware counter reads by userspace.
 
 The static musl `/init` prints MONOTONIC/REALTIME, verifies 10 ms and 1 s
 nanosleeps, reads CNTVCT from EL0 twice, prints 32 getrandom bytes and an explicit
@@ -154,8 +162,9 @@ and PSCI SYSTEM_OFF. A panic or early shutdown cannot print PASS.
 ## Operator commands
 
 Run all commands from the checkout root unless explicitly inside the VM. The
-operator owns Lima, kernel compilation, signing and hypervisor execution. Do
-not run Lima/HVF/KVM from the workspace-write implementation sandbox.
+operator owns Lima and guest kernel compilation. Native HVF execution and
+signing from the workspace sandbox were explicitly authorized and worked in
+the 2026-10-07 continuation. Do not rebuild the guest on the Mac.
 
 ### 1. Build guest inputs in the Ubuntu 24.04 arm64 VM
 
@@ -298,6 +307,79 @@ repeat/jitter results, cross-backend equality or first divergence, Image/initrd
 SHA-256s, full kernel config, compiler versions, macOS/VM kernel versions, exit
 counts and run times. Draft PR creation is deferred by the operator's current
 instruction; no push or PR is part of this implementation phase.
+
+## Native HVF failure and required rebuild (2026-10-07)
+
+Host: macOS 27.0.1 (26A434), arm64; Nix rustc 1.98.1, cargo 1.98.0.
+Retained inputs under ignored `artifacts/arm64/`:
+
+- Image: `955fba78d17da9aa140690a3e29dc87dba9a41b36aa6cc9041562d60c59dcca7`.
+- init.cpio: `9b952991625d7603e2db03e5ccdb87f78f1f7a16e6c664062505b7ddc75d8649`.
+- Operator verified 72 Kconfig symbols and the vmlinux/vDSO instruction audit.
+
+Handling the debug unlocks got two seed-1 diagnostic boots through init and
+PSCI SYSTEM_OFF (2,179 completed exits each). Both failed init's CNTVCT check;
+wall duration was not retained for those two boots. Their identical sleep
+measurements were 10,000,124 ns and 1,000,050,007 ns. The second console was:
+
+```text
+Booting Linux on physical CPU 0x0000000000 [0x610f0000]
+Linux version 6.12.112-seedbox-arm64-pv1 (seedbox@seedbox) (gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, GNU ld (GNU Binutils for Ubuntu) 2.42) #1 SMP Thu Jan 1 00:00:00 UTC 1970
+random: crng init done
+Machine model: Seedbox arm64 PV ABI 1
+earlycon: pl11 at MMIO 0x0000000009000000 (options '')
+printk: legacy bootconsole [pl11] enabled
+clock mono=485 real=486
+clock mono=487 real=488
+clock mono=489 real=490
+sleep requested=10000000 elapsed=10000124
+sleep requested=1000000000 elapsed=1000050007
+cntvct first=4253969551655 second=4253969551655
+SEEDBOX_INIT_FAIL: EL0 CNTVCT emulation: Result not representable
+reboot: Power down
+```
+
+Live readback was `CNTKCTL_EL1=0x2`: EL0VCTEN enabled. Linux's
+[`arch/arm64/kernel/process.c`](https://github.com/gregkh/linux/blob/v6.12.112/arch/arm64/kernel/process.c)
+calls `do_set_tsc_mode(PR_TSC_ENABLE)` during exec; its
+`update_cntkctl_el1()` helper re-enabled hardware reads after PV initialization.
+The existing instruction audit correctly found no counter reads in the kernel
+or vDSO, but that did not prevent init's deliberate counter instruction from
+bypassing the kernel trap handler.
+
+With the new guard, the CLI stops after 1,241 completed exits in 0.006664 s;
+the signed `hvf_determinism` test stops on the same error after 1,241 completed
+exits in 0.005754 s. These times end at failure, without final RAM hashing or a
+1 s guest sleep. Logs: `artifacts/arm64/hvf-counter-guard.stderr` and
+`artifacts/arm64/hvf-acceptance-counter-guard.log`. A separate launch after Cargo
+had invalidated the CLI signature failed at VM creation with HV_DENIED (no
+boot); signing again fixed that setup failure.
+
+**Witnesses:** seed 1 first/repeat: none (failed); seed 2 and seed 1 with host
+noise: not run after identifying the required rebuild. The integration suite
+fails at its first boot. No getrandom output or PASS marker was reached. The
+speed bound, repeat/noise comparisons and seed sensitivity remain unqualified.
+VTIMER_ACTIVATED remains an error.
+
+The fix is in `kernel-arm64/apply.py`: replace the enabling write in
+`update_cntkctl_el1()` with a write clearing ARCH_TIMER_USR_VCT_ACCESS_EN.
+The task's PR_TSC_SIGSEGV behavior is preserved. Its exact replacement anchor
+was checked against pristine Linux 6.12.112 process.c and portable regression
+tests pass; the revised Image has **not** been compiled or booted here.
+
+The operator must rerun the normal builder **inside the Ubuntu arm64 VM**, from
+this updated checkout, using a fresh output directory to retain the old input:
+
+```sh
+export SEEDBOX_ARM64_BUILD=/var/tmp/seedbox-arm64-build
+BUILD_JOBS=4 bash kernel-arm64/build.sh "$PWD/artifacts/arm64-counter-fix"
+```
+
+Return the new Image, kernel.config, init.cpio, SHA256SUMS and counter-audit.txt.
+Only the kernel source patch changed; the normal builder also regenerates the
+unchanged init fixture. Resume native acceptance with those inputs and fresh
+report paths. No artifacts were committed, and no changes were made to the
+four frozen production paths.
 
 ## Cleanup and portable checks
 

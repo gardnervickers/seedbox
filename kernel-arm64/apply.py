@@ -26,6 +26,15 @@ def body(text, name, replacement):
         end += 1
     return text[:start] + "\n" + replacement + "\n" + text[end-1:]
 
+def counter_access(text):
+    # Exec calls do_set_tsc_mode(PR_TSC_ENABLE); context switches and prctl
+    # also reach this helper. Preserve the task's SIGSEGV policy in traps.c,
+    # but never let PR_TSC_ENABLE bypass the PV trap handler to host time.
+    return replace(text,
+        "\t\tsysreg_clear_set(cntkctl_el1, 0, ARCH_TIMER_USR_VCT_ACCESS_EN);",
+        "\t\t/* Seedbox: PR_TSC_ENABLE means PV emulation, not hardware access. */\n"
+        "\t\tsysreg_clear_set(cntkctl_el1, ARCH_TIMER_USR_VCT_ACCESS_EN, 0);")
+
 def changes(root):
     edits = {}
     def edit(path, fn):
@@ -36,6 +45,7 @@ def changes(root):
         s = replace(s, "#include <asm/paravirt.h>", "#include <asm/paravirt.h>\n#include <asm/seedbox.h>")
         return body(s, "time_init", "\tof_clk_init(NULL);\n\tseedbox_time_init();\n\ttick_setup_hrtimer_broadcast();\n\tlpj_fine = 1000000000UL / HZ;")
     edit("arch/arm64/kernel/time.c", time)
+    edit("arch/arm64/kernel/process.c", counter_access)
     def generic_timer(s):
         # The driver is off; still route all generic helpers to PV (traps etc.).
         start = s.index("#else", s.index("#ifdef CONFIG_ARM_ARCH_TIMER"))
