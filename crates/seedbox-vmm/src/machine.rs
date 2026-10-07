@@ -856,8 +856,9 @@ impl Machine {
     }
 
     /// Arm breakpoints for one step: the next landing point the planner
-    /// finds from the current registers.
-    fn arm_step(&mut self) -> Result<(), String> {
+    /// finds from the current registers. Returns whether that landing is
+    /// only a cap on straight-line code, so depends on where stepping began.
+    fn arm_step(&mut self) -> Result<bool, String> {
         self.set_stepping(true)?;
         let (r, sr) = {
             let run = self.vcpu.get_kvm_run();
@@ -866,8 +867,8 @@ impl Machine {
         let mem = unsafe { std::slice::from_raw_parts(self.mem, self.mem_size) };
         let planner = self.planner.as_mut().unwrap();
         planner.refresh_from(&sr);
-        let targets = planner
-            .plan(mem, &r)
+        let (targets, capped) = planner
+            .plan_capped(mem, &r)
             .map_err(|e| format!("{}: step plan: {e}", self.name))?;
         Planner::arm(&self.vcpu, &targets)?;
         self.last_plan = (r.rip, targets.clone());
@@ -876,7 +877,7 @@ impl Machine {
             resumed.rflags |= 1 << 16; // RF: do not re-trigger at the current instruction
             self.vcpu.set_regs(&resumed).map_err(|e| e.to_string())?;
         }
-        Ok(())
+        Ok(capped)
     }
 
     /// The guest is in a state cycle (see `pv.rs`), at its canonical point:

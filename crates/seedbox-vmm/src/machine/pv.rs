@@ -17,7 +17,12 @@
 //! canonical point of the cycle and is idle there, like HLT, until an
 //! interrupt. Any other long run resumes untouched (stepping changes no guest
 //! state), so the watchdog changes how fast a spin is noticed, never where it
-//! lands. See /mnt/project-files/seedbox-perf/spin-fixed-point.md.
+//! lands. Not every endless loop is caught: one whose state changes on every
+//! pass (`while (!flag) n++;`), a cycle longer than `PROBE_STEPS` landings,
+//! or one with a run of straight-line code longer than the planner's cap
+//! never goes idle, so virtual time stops and the world stalls until its
+//! wall-time limit. That follows from the model: such a loop waits on
+//! something only virtual time could bring.
 
 use super::{map, Machine, Mapping, PAGE_BOUND, PAGE_SYSCALLS, PAGE_SYSCALL_TARGET};
 use crate::timebase::{Judge, Prepared, Run, Timebase, Verdict};
@@ -151,8 +156,13 @@ impl PvClock {
                 Probe::Canon { target, left: left - 1 }
             }
         };
+        if m.arm_step()? {
+            // The next landing is a cap on straight-line code, so where it
+            // falls depends on where stepping began: no canonical point.
+            m.stats.spin_false += 1;
+            return Ok(None);
+        }
         self.probe = Some(next);
-        m.arm_step()?;
         Ok(Some(Prepared::Run))
     }
 }
@@ -174,12 +184,19 @@ impl Timebase for PvClock {
     fn prepare(&mut self, m: &mut Machine, remaining: u64, soft: u64) -> Result<Prepared, String> {
         self.remaining = remaining;
         if self.probe.is_some() {
-            if !std::mem::take(&mut self.landed) {
-                // A watchdog tick interrupted the step: plan it again from here.
-                m.arm_step()?;
+            let step = if std::mem::take(&mut self.landed) {
+                self.probe_step(m)?
+            } else if m.arm_step()? {
+                // A watchdog tick interrupted the step, and planning it again
+                // from here ends at a cap (see `probe_step`).
+                self.probe = None;
+                m.stats.spin_false += 1;
+                None
+            } else {
+                // A watchdog tick interrupted the step: planned again from here.
                 return Ok(Prepared::Run);
-            }
-            match self.probe_step(m)? {
+            };
+            match step {
                 Some(Prepared::Idle) => {
                     self.probe = None;
                     return Ok(Prepared::Idle);
