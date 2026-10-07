@@ -38,12 +38,22 @@ static void sleep_check(uint64_t ns)
     printf("sleep requested=%llu elapsed=%llu\n", (unsigned long long)ns, (unsigned long long)elapsed);
     if (elapsed < ns || elapsed > ns + 20000000) { errno = ERANGE; fail("PV sleep duration"); }
 }
+static void require_high_resolution(void)
+{
+    struct timespec resolution;
+    if (clock_getres(CLOCK_MONOTONIC, &resolution)) fail("clock_getres");
+    printf("clock resolution=%lld.%09ld\n", (long long)resolution.tv_sec, resolution.tv_nsec);
+    if (resolution.tv_sec != 0 || resolution.tv_nsec != 1) {
+        errno = ERANGE; fail("PV high-resolution timer mode not active");
+    }
+}
 static void busy_wait_check(void)
 {
     /* Cross a short hrtimer deadline without idling. Each clock read enters
      * seedbox_read(); a deferred tick must reach this spinning task.
      * ITIMER_REAL is jiffy-granular on this guest; timerfd uses an hrtimer.
      */
+    require_high_resolution();
     int fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
     if (fd < 0) fail("timerfd_create");
     struct itimerspec timer = { .it_value = { .tv_nsec = 200000 } };
@@ -78,8 +88,13 @@ int main(void)
         uint64_t mono = clock_ns(CLOCK_MONOTONIC), real = clock_ns(CLOCK_REALTIME);
         printf("clock mono=%llu real=%llu\n", (unsigned long long)mono, (unsigned long long)real);
     }
-    busy_wait_check();
+    /* Linux switches hrtimers to high-resolution mode from the tick path.
+     * PV boot can reach init before the first 10ms tick. Let that tick run
+     * before testing a sub-tick expiry; busy_wait_check verifies the switch.
+     * No sleep or idle is allowed inside the measured timerfd spin itself.
+     */
     sleep_check(10000000);
+    busy_wait_check();
     sleep_check(1000000000);
     uint64_t first, second;
     __asm__ volatile("mrs %0, cntvct_el0" : "=r"(first));

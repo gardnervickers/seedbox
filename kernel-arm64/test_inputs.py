@@ -24,6 +24,57 @@ config = load("config", "check-config.py")
 hashes = load("hashes", "check-hashes.py")
 
 class Inputs(unittest.TestCase):
+    def test_hrtimer_spin_rejects_low_resolution_mode(self):
+        # Exercise the actual guest prerequisite with Linux's boot-time (one
+        # jiffy) and active high-resolution (1ns) clock_getres results.
+        source = (HERE / "init.c").read_text()
+        helper = source[source.index("static void require_high_resolution(void)"):
+                        source.index("static void busy_wait_check(void)")]
+        fixture = r"""
+#include <assert.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+static long resolution_ns;
+static int getres(clockid_t id, struct timespec *res) {
+    assert(id == CLOCK_MONOTONIC);
+    if (resolution_ns < 0) { errno = EIO; return -1; }
+    res->tv_sec = 0;
+    res->tv_nsec = resolution_ns;
+    return 0;
+}
+static void fail(const char *what) {
+    fprintf(stderr, "%s: errno=%d\n", what, errno);
+    exit(2);
+}
+#define clock_getres getres
+""" + helper + r"""
+int main(int argc, char **argv) {
+    assert(argc == 2);
+    resolution_ns = strtol(argv[1], NULL, 10);
+    require_high_resolution();
+    return 0;
+}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            c = Path(directory) / "resolution.c"
+            exe = Path(directory) / "resolution"
+            c.write_text(fixture)
+            subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
+                "-Wall", "-Wextra", "-Werror", str(c), "-o", str(exe)
+            ], check=True, capture_output=True)
+            for resolution, status, diagnostic in [
+                (1, 0, ""),
+                (10000000, 2, "PV high-resolution timer mode not active"),
+                (0, 2, "PV high-resolution timer mode not active"),
+                (-1, 2, "clock_getres"),
+            ]:
+                result = subprocess.run([str(exe), str(resolution)],
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertIn(diagnostic, result.stderr)
+
     def test_fixture_requires_timerfd_even_if_fragment_omits_it(self):
         self.assertEqual(config.fixture_errors({'CONFIG_TIMERFD': 'y'}), [])
         for actual in [{}, {'CONFIG_TIMERFD': 'n'}, {'CONFIG_TIMERFD': 'm'}]:

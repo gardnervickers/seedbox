@@ -10,11 +10,12 @@ not Compose application support.
 The isolated `seedbox-arm64` crate runs a single-CPU PV fixture on native Mac
 HVF or Linux arm64 KVM. It is separate from the Compose/x86 CLI.
 
-The checked-in `kernel-arm64/expected-hashes.sha256` identifies the operator's
-`aa73b83` timerfd guest inputs, independently verified on the Mac. **These inputs
-currently fail hardware acceptance:** the spin ends at 300,002 ns without an
-observed timerfd expiry. There is no accepted timerfd witness yet. See the
-[timerfd acceptance record](#timerfd-guest-acceptance-2026-10-07).
+The checked-in `kernel-arm64/expected-hashes.sha256` retains the reviewed kernel
+hash and marks `init.cpio` **rebuild required** for the high-resolution-mode
+prerequisite. The operator's previous `aa73b83` initramfs fails at 300,002 ns
+without an observed timerfd expiry. There is no accepted timerfd witness yet.
+See the [diagnosis and initramfs-only rebuild](#timerfd-startup-diagnosis-and-rebuild-2026-10-07)
+and the retained [failure record](#timerfd-guest-acceptance-2026-10-07).
 Do not derive expected hashes from the files being checked. Build-generated
 `SHA256SUMS` only checks transfer integrity.
 
@@ -226,8 +227,9 @@ RAM and the shared page; no backend-specific bytes are filtered out.
 ### Timerfd guest acceptance (2026-10-07)
 
 The operator rebuilt the guest from `aa73b83`. The Mac independently verified
-these supplied hashes before execution; the expected-input manifest now pins
-them. Hash verification establishes input identity, not hardware acceptance.
+these supplied hashes before execution; the expected-input manifest at
+`cc7e413` pinned them. Hash verification establishes input identity, not hardware
+acceptance.
 
 | Input | SHA-256 |
 | --- | --- |
@@ -288,31 +290,98 @@ A separate signed backend-forwarding probe records only the initial nonzero
 clockevent deadline, 10,000,011 ns, with no timer SPI assertion and no event+24
 polling yield before shutdown. Its source and log are retained in
 `artifacts/arm64-hrtimer/startup-probe.rs` and `startup-probe.stderr`.
-The likely cause is that the spin starts before high-resolution mode becomes
-active: Linux's `hrtimer_run_queues()` switches to high-resolution mode from
-the periodic tick path. `CONFIG_HIGH_RES_TIMERS=y` alone does not establish
-that the switch has already happened. See the
-[upstream hrtimer implementation](https://github.com/torvalds/linux/blob/v6.12/kernel/time/hrtimer.c#L1755-L1775).
-A candidate next fix is moving the existing 10 ms sleep check before the spin
-so the initial tick can run. That change and a new guest rebuild have **not**
-been made or accepted here; the supplied guest inputs remain unchanged.
+The follow-up below reproduces this failure, verifies the published page bound,
+and fixes the fixture's missing high-resolution-mode prerequisite. These original
+failure artifacts remain unchanged.
 
 Both review suites pass (three tests each), as do arm64 tests, input/comparison
 Python tests, arm64 and seedbox fmt/clippy, and root portable acceptance
 including workspace tests. Linux-only VMM tests and new-input KVM acceptance
 remain operator work.
 
-For a subsequent audited rebuild, copy the updated `kernel-arm64/` directory
-to the Linux arm64 build VM and run from its checkout root:
+### Timerfd startup diagnosis and rebuild (2026-10-07)
+
+Rebuilt and ad-hoc-signed the unchanged VMM at `cc7e413`, verified the supplied
+input hashes, and ran seed 1 twice and seed 2 once. Each run exits 2 with empty
+stdout, 1633 semantic exits, `busy-wait elapsed=300002`, and both deferral counts
+zero. Wall times are 0.066337, 0.057413 and 0.055093 seconds. These are failed
+boots, not performance acceptance. Logs are in
+`artifacts/arm64-timer-diagnosis/seed{1-a,1-b,2-a}.{stdout,stderr}`.
+
+An independently signed forwarding backend logs every raw exit, PSTATE and
+shared-page words without changing them (`probe.rs` / `probe.stderr` in the
+same directory). The relevant sequence is:
+
+- Raw exit 1203 writes event+0 = 10,000,011 with PSTATE 0xc5.
+- Before raw exit 1204, publication is `now=11 last=11 bound=10000011 deferred=0`.
+- No later deadline write, event+24 yield, or SPI 40 assertion occurs.
+- Raw exit 1635 is SYSTEM_OFF, with `now=300909 last=300909 bound=10000011 deferred=0`.
+  Two transparent debug exits explain the raw/semantic count difference.
+
+The bound is published correctly and never crossed. There is consequently no
+expired timer for the VMM to assert or defer. Clock reads advance `last`; the
+patched vDSO falls back to syscalls and the PV clocksource calls `seedbox_read`.
+The init loop reads timerfd on every iteration, before testing the spin bound.
+Neither vDSO bypass nor a readiness check postponed until after spinning
+explains this run.
+
+The root cause is starting the sub-tick acceptance before Linux activates
+high-resolution mode. In the exact
+[Linux 6.12.112 hrtimer source](https://github.com/gregkh/linux/blob/v6.12.112/kernel/time/hrtimer.c),
+resolution starts at `LOW_RES_NSEC`; `__hrtimer_reprogram` returns while high
+resolution is inactive. `hrtimer_run_queues`, called each tick, performs the
+switch and sets resolution to 1 ns. The first 10 ms tick has not occurred in
+this 0.301 ms boot. `CONFIG_HIGH_RES_TIMERS=y` makes the mode available but does
+not activate it before that tick.
+
+The fix moves the existing 10 ms sleep check before `busy_wait_check`, then
+requires `clock_getres(CLOCK_MONOTONIC)` to report 1 ns before timerfd is armed.
+[Linux's clock_getres implementation](https://github.com/gregkh/linux/blob/v6.12.112/kernel/time/posix-timers.c)
+returns `hrtimer_resolution` for this clock. A failed transition now produces
+`PV high-resolution timer mode not active`. The measured spin still contains
+no sleep, checks timerfd every iteration and requires exactly one expiration
+in **200,000–300,000 ns**. The 100 us allowance covers deterministic syscall/IRQ
+clock reads after arming; accepting a 10 ms expiry would fail to exercise a
+sub-tick high-resolution timer. The one-second HVF wall gate is unchanged.
+No VMM or kernel driver change is needed; SPI assertions remain forbidden
+while PSTATE.I is set.
+
+Validation passes: `cargo test-arm64` (including all three tests in each of
+`review_yield_masked` and `review_deferred_bound`), 11 guest-input tests
+(including rejection of low-resolution mode and clock_getres errors), report
+comparison tests, arm64/seedbox fmt and clippy, workspace tests and root
+portable acceptance. Linux-only VMM tests do not run on this Mac.
+
+**STOP: rebuild only `init.cpio`; revised hardware acceptance is pending.**
+Keep the supplied Image (`141289b842d3a42ca13a634598372a7e66605da70d36c2f2c1cd5a2806bfb01f`),
+`kernel.config` and counter audit. In the existing Linux arm64 build VM, copy
+the updated `kernel-arm64/` directory and run from the checkout root using the
+same musl toolchain as `build.sh`:
 
 ```sh
-BUILD_JOBS=4 bash kernel-arm64/build.sh /tmp/seedbox-arm64-hrtimer
+set -eu
+init_rebuild_dir="$(mktemp -d /tmp/seedbox-arm64-init.XXXXXX)"
+init_source_dir="$(pwd)/kernel-arm64"
+musl-gcc -static -Os -fno-ident \
+  -ffile-prefix-map="$init_source_dir"=/seedbox/kernel-arm64 \
+  -Wl,--build-id=none -Wall -Wextra -Werror \
+  "$init_source_dir/init.c" -o "$init_rebuild_dir/init"
+python3 kernel-arm64/build-initramfs.py \
+  "$init_rebuild_dir/init" "$init_rebuild_dir/init.cpio"
+sha256sum "$init_rebuild_dir/init.cpio"
+printf 'rebuilt initramfs: %s/init.cpio\n' "$init_rebuild_dir"
 ```
 
-Retain `Image`, `init.cpio`, `kernel.config`, `counter-audit.txt`, `SHA256SUMS`
-and `build-directory.txt`. Copy into a fresh artifact directory and independently
-review changed hashes before updating expected inputs. Preserve the failure
-evidence above and rerun the complete signed acceptance with the revised inputs.
+Copy the new initramfs alongside the retained Image in a fresh Mac artifact
+directory. Independently review its hash before replacing the manifest's
+`REBUILD_REQUIRED_INITRD_SHA256` placeholder. The old hash remains in the
+failure record above. A full `BUILD_JOBS=4 bash kernel-arm64/build.sh OUTPUT`
+is also supported but rebuilding Image is unnecessary for this change.
+Then run the signed CLI for seed 1 twice, seed 1 with host noise and seed 2
+twice, plus `hvf_determinism`. Require same-seed complete witness equality,
+`clock resolution=0.000000001`, observed expiry in the unchanged window,
+seed-1 trace/console hashes, and the unchanged wall-time gate. There are no
+new successful witnesses until that rebuild and hardware run occur.
 
 ### Historical ABI-2 guest acceptance (2026-10-07)
 
