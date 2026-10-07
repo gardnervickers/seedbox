@@ -74,8 +74,10 @@ may change execution. Release compatibility remains a V0 qualification gate.
   stop is rolled back and retried closer, or fails the run, rather than moving
   the stop.
 - **Guest kernel changes** (`kernel/`): kernel TSC reads return VMM-published
-  virtual time; user RDTSC/RDTSCP trap via CR4.TSD and are emulated. The
-  kernel's syscall yield hook remains, but the engine never requests it.
+  virtual time; the vDSO reads the same clock through a shared writable page,
+  so `clock_gettime` never traps; raw user RDTSC/RDTSCP trap via CR4.TSD and
+  are emulated. The kernel's syscall yield hook remains, but the engine never
+  requests it.
 - **Network and scheduling.** virtio-net over virtio-mmio into an in-memory
   fabric with seeded latency/jitter and directed partitions. The world runs the
   machine furthest behind in slices that never pass its causal horizon (the

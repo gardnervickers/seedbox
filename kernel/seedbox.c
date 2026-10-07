@@ -5,8 +5,10 @@
  * Every kernel TSC read (rdtsc/rdtsc_ordered) returns virtual time published
  * by the VMM, never the hardware counter. Before the shared page is mapped,
  * reads use two port reads. Repeated reads with no new publication advance
- * by one tick, so polling loops make progress deterministically. User-mode
- * RDTSC/RDTSCP trap through CR4.TSD and are emulated here.
+ * by one tick, so polling loops make progress deterministically. The vDSO
+ * reads the same clock fields through a writable user mapping of the page
+ * ([seedbox_clock]), so clock_gettime() needs no trap. Raw user-mode
+ * RDTSC/RDTSCP still trap through CR4.TSD and are emulated here.
  *
  * Once the page is active, interrupt masking (8259) and virtio-mmio interrupt
  * status go through the page instead of trapping port and MMIO accesses, and
@@ -29,16 +31,10 @@ static unsigned long long seedbox_early_last;
 noinstr unsigned long long seedbox_rdtsc(void)
 {
 	struct seedbox_time_page *p = READ_ONCE(seedbox_page);
-	unsigned long long v, last;
+	unsigned long long v;
 
-	if (likely(p)) {
-		v = READ_ONCE(p->tsc);
-		last = READ_ONCE(p->last);
-		if (v <= last)
-			v = last + 1;
-		WRITE_ONCE(p->last, v);
-		return v;
-	}
+	if (likely(p))
+		return seedbox_clock_read(&p->clock);
 	v = inl(SEEDBOX_PORT_TIME_LO);
 	v |= (unsigned long long)inl(SEEDBOX_PORT_TIME_HI) << 32;
 	if (v <= seedbox_early_last)
@@ -87,7 +83,7 @@ static int __init seedbox_time_init(void)
 	p = memremap(SEEDBOX_TIME_PAGE_PHYS, PAGE_SIZE, MEMREMAP_WB);
 	if (!p)
 		panic("seedbox: cannot map time page");
-	WRITE_ONCE(p->last, seedbox_early_last);
+	WRITE_ONCE(p->clock.last, seedbox_early_last);
 	WRITE_ONCE(p->pic_imr, cached_irq_mask);
 	outl(SEEDBOX_ABI, SEEDBOX_PORT_TIME_READY);
 	WRITE_ONCE(seedbox_page, p);

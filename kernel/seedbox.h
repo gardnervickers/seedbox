@@ -15,14 +15,15 @@
 #ifndef __ASSEMBLY__
 #include <linux/types.h>
 #include <asm/io.h>
+#include <asm/seedbox_clock.h>
 
 /*
  * The VMM reads guest-written fields only while the guest is stopped at a
- * deterministic point, so plain stores need no exit.
+ * deterministic point, so plain stores need no exit. The first two fields
+ * are a struct seedbox_clock, which the vDSO maps into user space.
  */
 struct seedbox_time_page {
-	u64 tsc;	/* virtual TSC published by the VMM (1 GHz) */
-	u64 last;	/* last value returned to the guest */
+	struct seedbox_clock clock;
 	u64 exit_req;	/* VMM asks for an exit at the next syscall */
 	u64 syscalls;	/* syscalls entered */
 	u64 pic_imr;	/* 8259 masks, master | slave << 8 */

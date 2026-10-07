@@ -18,6 +18,7 @@ def edit(rel, old, new, count=1):
 
 shutil.copy(here / "seedbox.c", src / "arch/x86/kernel/seedbox.c")
 shutil.copy(here / "seedbox.h", src / "arch/x86/include/asm/seedbox.h")
+shutil.copy(here / "seedbox_clock.h", src / "arch/x86/include/asm/seedbox_clock.h")
 edit("arch/x86/kernel/Makefile", "obj-y\t\t\t+= ebda.o\n", "obj-y\t\t\t+= ebda.o\nobj-y\t\t\t+= seedbox.o\n")
 
 # Kernel TSC reads return VMM-published virtual time. The vDSO and the boot
@@ -100,6 +101,68 @@ edit(
     "\t\twritel(status, vm_dev->base + VIRTIO_MMIO_INTERRUPT_ACK);\n\t}\n",
 )
 edit("drivers/virtio/virtio_mmio.c", "#include <linux/virtio_ring.h>\n", "#include <linux/virtio_ring.h>\n#include <linux/virtio_ids.h>\n#include <asm/seedbox.h>\n")
+
+# User clock reads without a trap. The vDSO's TSC read uses the clock fields
+# of the time page, mapped writable and shared into every process as one more
+# page at the top of the vvar area. Raw user RDTSC still traps (CR4.TSD).
+edit(
+    "arch/x86/entry/vdso/vdso-layout.lds.S",
+    "\tvvar_start = . - 4 * PAGE_SIZE;\n",
+    "\tvvar_start = . - 5 * PAGE_SIZE;\n",
+)
+edit(
+    "arch/x86/entry/vdso/vdso-layout.lds.S",
+    "\ttimens_page  = vvar_start + 3 * PAGE_SIZE;\n",
+    "\ttimens_page  = vvar_start + 3 * PAGE_SIZE;\n\tseedbox_clock_page = vvar_start + 4 * PAGE_SIZE;\n",
+)
+edit(
+    "arch/x86/include/asm/vdso/gettimeofday.h",
+    "#include <clocksource/hyperv_timer.h>\n",
+    "#include <clocksource/hyperv_timer.h>\n#include <asm/seedbox_clock.h>\n\n"
+    "/* Last page of the vvar area: the time page's clock fields, writable. */\n"
+    "extern struct seedbox_clock seedbox_clock_page\n\t__attribute__((visibility(\"hidden\")));\n",
+)
+edit(
+    "arch/x86/include/asm/vdso/gettimeofday.h",
+    "\t\treturn (u64)rdtsc_ordered() & S64_MAX;\n",
+    "\t\treturn seedbox_clock_read(&seedbox_clock_page) & S64_MAX;\n",
+)
+edit(
+    "arch/x86/entry/vdso/vma.c",
+    "static const struct vm_special_mapping vvar_mapping = {\n\t.name = \"[vvar]\",\n\t.fault = vvar_fault,\n};\n",
+    "static const struct vm_special_mapping vvar_mapping = {\n\t.name = \"[vvar]\",\n\t.fault = vvar_fault,\n};\n\n"
+    "static vm_fault_t seedbox_clock_fault(const struct vm_special_mapping *sm,\n"
+    "\t\t\t\t       struct vm_area_struct *vma, struct vm_fault *vmf)\n{\n"
+    "\treturn vmf_insert_pfn(vma, vmf->address, SEEDBOX_TIME_PAGE_PHYS >> PAGE_SHIFT);\n}\n\n"
+    "static const struct vm_special_mapping seedbox_clock_mapping = {\n"
+    "\t.name = \"[seedbox_clock]\",\n\t.fault = seedbox_clock_fault,\n};\n",
+)
+# The vvar mapping keeps its four pages; the clock page above it is its own
+# shared, writable mapping.
+edit(
+    "arch/x86/entry/vdso/vma.c",
+    "\tvma = _install_special_mapping(mm,\n\t\t\t\t       addr,\n\t\t\t\t       -image->sym_vvar_start,\n",
+    "\tvma = _install_special_mapping(mm,\n\t\t\t\t       addr,\n\t\t\t\t       -image->sym_vvar_start - PAGE_SIZE,\n",
+)
+edit(
+    "arch/x86/entry/vdso/vma.c",
+    "\tif (IS_ERR(vma)) {\n\t\tret = PTR_ERR(vma);\n\t\tdo_munmap(mm, text_start, image->size, NULL);\n\t} else {\n",
+    "\tif (IS_ERR(vma)) {\n\t\tret = PTR_ERR(vma);\n\t\tdo_munmap(mm, text_start, image->size, NULL);\n\t\tgoto up_fail;\n\t}\n\n"
+    "\tvma = _install_special_mapping(mm,\n\t\t\t\t       text_start - PAGE_SIZE,\n\t\t\t\t       PAGE_SIZE,\n"
+    "\t\t\t\t       VM_READ|VM_WRITE|VM_SHARED|VM_MAYREAD|\n"
+    "\t\t\t\t       VM_MAYWRITE|VM_MAYSHARE|VM_IO|VM_DONTDUMP|\n"
+    "\t\t\t\t       VM_PFNMAP,\n\t\t\t\t       &seedbox_clock_mapping);\n\n"
+    "\tif (IS_ERR(vma)) {\n\t\tret = PTR_ERR(vma);\n"
+    "\t\tdo_munmap(mm, addr, -image->sym_vvar_start - PAGE_SIZE, NULL);\n"
+    "\t\tdo_munmap(mm, text_start, image->size, NULL);\n\t} else {\n",
+)
+edit(
+    "arch/x86/entry/vdso/vma.c",
+    "\t\t\t\tvma_is_special_mapping(vma, &vvar_mapping)) {\n",
+    "\t\t\t\tvma_is_special_mapping(vma, &vvar_mapping) ||\n"
+    "\t\t\t\tvma_is_special_mapping(vma, &seedbox_clock_mapping)) {\n",
+)
+edit("arch/x86/entry/vdso/vma.c", "#include <clocksource/hyperv_timer.h>\n", "#include <clocksource/hyperv_timer.h>\n#include <asm/seedbox.h>\n")
 
 # CR4.TSD must stay set for every task.
 edit(
