@@ -25,7 +25,8 @@ pub struct Disk {
     /// None: an all-zero base of `capacity` sectors.
     base: Option<Rc<[u8]>>,
     capacity: u64,
-    base_sha256: String,
+    /// SHA-256 of the image; None for an all-zero base.
+    base_sha256: Option<String>,
     stable: BTreeMap<u64, Sector>,
     volatile: BTreeMap<u64, Sector>,
 }
@@ -56,17 +57,7 @@ impl Disk {
             (None, Some(sectors)) if sectors > 0 => (None, sectors),
             (None, _) => return Err("disk needs an image or a size".into()),
         };
-        let base_sha256 = match &base {
-            Some(bytes) => format!("{:x}", Sha256::digest(bytes)),
-            None => {
-                let mut h = Sha256::new();
-                let zero = [0u8; SECTOR];
-                for _ in 0..capacity {
-                    h.update(zero);
-                }
-                format!("{:x}", h.finalize())
-            }
-        };
+        let base_sha256 = base.as_ref().map(|bytes| format!("{:x}", Sha256::digest(bytes)));
         Ok(Self { base, capacity, base_sha256, stable: BTreeMap::new(), volatile: BTreeMap::new() })
     }
 
@@ -74,8 +65,8 @@ impl Disk {
         self.capacity
     }
 
-    pub fn base_sha256(&self) -> &str {
-        &self.base_sha256
+    pub fn base_sha256(&self) -> Option<&str> {
+        self.base_sha256.as_deref()
     }
 
     fn check(&self, sector: u64, len: usize) -> Result<u64, DiskError> {
@@ -147,7 +138,7 @@ impl Disk {
         let mut h = Sha256::new();
         h.update(MODEL.as_bytes());
         h.update(self.capacity.to_le_bytes());
-        h.update(self.base_sha256.as_bytes());
+        h.update(self.base_sha256.as_deref().unwrap_or("zeros").as_bytes());
         for (tag, layer) in [(b's', &self.stable), (b'v', &self.volatile)] {
             h.update([tag]);
             h.update((layer.len() as u64).to_le_bytes());
@@ -298,6 +289,7 @@ mod tests {
         assert_ne!(run(1).digest(), run(2).digest(), "same bytes, different durability");
         assert_eq!(run(1).crashed().0.digest(), run(1).crashed().0.digest());
         let zeros = Disk::new(None, Some(8)).unwrap();
-        assert_eq!(zeros.base_sha256(), Disk::new(Some(vec![0; 8 * SECTOR]), None).unwrap().base_sha256());
+        assert_eq!(zeros.base_sha256(), None);
+        assert_ne!(zeros.digest(), Disk::new(Some(vec![0; 8 * SECTOR]), None).unwrap().digest(), "an image is not the zero base");
     }
 }

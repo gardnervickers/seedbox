@@ -187,7 +187,7 @@ semantics (`disk.rs`, model `flush-stable/drop-all-unflushed/v1`):
 - A fork restore puts the whole disk back, both layers.
 
 Each machine's report has a `disk` object: the model, capacity, the base
-image's SHA-256, a `digest` of both layers, their sizes and request counts.
+image's SHA-256 (null for a zeroed disk), a `digest` of both layers, their sizes and request counts.
 The disk's digest feeds the world witness, and with `--digest` it is the
 `disk` part of the machine's state digest. Each crashed incarnation reports
 `disk_lost_sectors`. With `--trace`, each completed request is a `d` line
