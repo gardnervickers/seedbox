@@ -97,6 +97,12 @@ pub struct Stats {
     /// not be undone (a syscall there would have been a missed stop).
     pub soft_misses: u64,
     pub soft_undos: u64,
+    /// Checkpoint-free overflows that close in on a stop before the
+    /// checkpointed final approach.
+    pub mid_approaches: u64,
+    /// Final-approach overflows and their summed skid, for the learned margin.
+    pub final_overflows: u64,
+    pub final_skid_sum: u64,
     /// Of the soft misses, those with no syscall in the run (provably harmless).
     pub soft_misses_clean: u64,
 }
@@ -157,6 +163,14 @@ pub struct Machine {
     pub undo: Option<Box<Undo>>,
     undo_margin: u64,
     fm: u64,
+    /// Take the undo checkpoint only this close to a stop (0: at `APPROACH`).
+    /// Performance only.
+    pub checkpoint_at: u64,
+    /// Size the final margin from the skid of recent final approaches.
+    /// Performance only.
+    pub fm_learn: bool,
+    skid_est: u64,
+    final_armed: bool,
     pub stats: Stats,
     pub witness: Sha256,
     pub trace: Option<std::io::BufWriter<std::fs::File>>,
@@ -386,6 +400,10 @@ impl Machine {
             undo,
             undo_margin: spec.undo_margin,
             fm: spec.undo_margin,
+            checkpoint_at: 0,
+            fm_learn: false,
+            skid_est: 0,
+            final_armed: false,
             stats: Stats::default(),
             witness: Sha256::new(),
             trace: None,
@@ -720,6 +738,11 @@ impl Machine {
                     u.valid = false;
                 }
                 self.fm = self.undo_margin;
+                if self.fm_learn {
+                    // Expected skid plus a quarter: most final approaches land
+                    // short of the stop with little left to step.
+                    self.fm = self.fm.max(self.skid_est + self.skid_est / 4).min(UNDO_MAX);
+                }
                 // Guest clock reads can advance time independently of the PMU.
                 // Check before expiring timers or accepting the slice boundary.
                 self.sync_from_page(hard_limit(
@@ -766,16 +789,28 @@ impl Machine {
             let threshold = if undo { self.fm } else { self.margin };
             if remaining > threshold {
                 self.set_stepping(false)?;
+                self.final_armed = false;
                 let wake = if (self.adaptive_margin || undo) && remaining > APPROACH {
                     // Approach a hard stop in two overflows: the first measures
                     // the branch rate of the code actually running near it.
                     remaining - APPROACH
+                } else if undo
+                    && !self.undo.as_ref().unwrap().valid
+                    && self.checkpoint_at > threshold
+                    && remaining > self.checkpoint_at
+                {
+                    // Close in without a checkpoint while the stop is still
+                    // further than any skid: a natural exit on the way (often
+                    // the stop itself) then costs no checkpoint.
+                    self.stats.mid_approaches += 1;
+                    remaining - self.checkpoint_at
                 } else {
                     // Final approach. With a checkpoint, aim close and undo an
                     // overshoot rather than step through a worst-case skid.
                     if undo && !self.undo.as_ref().unwrap().valid {
                         self.checkpoint()?;
                     }
+                    self.final_armed = undo;
                     remaining - threshold
                 };
                 let now = counter.last();
@@ -848,6 +883,15 @@ impl Machine {
                 interrupted,
                 self.stepping,
             );
+            if self.final_armed && interrupted && !self.stepping {
+                // Skid of a final approach, whether it landed short or past.
+                let skid = delta.saturating_sub(self.armed_wake);
+                self.stats.final_overflows += 1;
+                self.stats.final_skid_sum += skid;
+                if self.fm_learn {
+                    self.skid_est = if self.skid_est == 0 { skid } else { self.skid_est - self.skid_est / 8 + skid / 8 };
+                }
+            }
             if (overshoot || soft_miss) && self.undo.as_ref().is_some_and(|u| u.valid) {
                 if overshoot && self.fm >= UNDO_MAX {
                     return Err(format!(
@@ -861,6 +905,11 @@ impl Machine {
                 self.rollback()?;
                 // A rollback costs far less than stepping, so grow slowly.
                 self.fm = (self.fm * 2).min(UNDO_MAX);
+                if self.fm_learn && overshoot {
+                    // The retry replays the same code: expect the same skid.
+                    let skid = delta.saturating_sub(self.armed_wake);
+                    self.fm = self.fm.max(skid + skid / 4).min(UNDO_MAX);
+                }
                 if !overshoot {
                     self.stats.soft_undos += 1;
                 }

@@ -298,6 +298,11 @@ fn run() -> Result<Value, String> {
             mach.com2.output_limit = Some(limit);
         }
         mach.tolerance = cfg["stop_tolerance_ns"].as_u64().unwrap_or(0);
+        // Performance-only experiment knobs for the stop approach.
+        if let Ok(v) = std::env::var("SEEDBOX_CHECKPOINT_AT") {
+            mach.checkpoint_at = v.parse().map_err(|e| format!("SEEDBOX_CHECKPOINT_AT: {e}"))?;
+        }
+        mach.fm_learn = std::env::var("SEEDBOX_FM_LEARN").is_ok_and(|v| v == "1");
         mach.timer_jitter = cfg["timer_jitter_ns"].as_u64().unwrap_or(0);
         mach.exact_timer_ppm = cfg["exact_timer_ppm"].as_u64().unwrap_or(0);
         mach.timer_rng = Some(Rng::new(seed, &format!("timer-jitter/{}", names[i])));
@@ -603,7 +608,12 @@ fn run() -> Result<Value, String> {
         sk.sort();
         let skid_p50 = sk.get(sk.len() / 2).copied();
         let skid_p99 = sk.get(sk.len() * 99 / 100).copied();
-        report.push(json!({
+        let approach = json!({
+            "mid_approaches": s.mid_approaches, "final_overflows": s.final_overflows,
+            "final_skid_mean": if s.final_overflows > 0 { s.final_skid_sum / s.final_overflows } else { 0 },
+            "checkpoint_at": mach.checkpoint_at, "fm_learn": mach.fm_learn,
+        });
+        let mut entry = json!({
             "name": mach.name,
             "state": format!("{:?}", mach.state),
             "guest_exit_code": mach.guest_exit_code,
@@ -632,7 +642,9 @@ fn run() -> Result<Value, String> {
             "kvm_n_by_exit": s.kvm_n,
             "control_channel":mach.channel.as_ref().map(|_|json!({"transport":"virtio-console-v1","tx_bytes":mach.control_tx_bytes,"rx_dma_bytes":mach.control_dma_bytes})),
             "net": mach.net.as_ref().map(|n| json!({"tx": n.tx_frames, "rx": n.rx_frames, "rx_dropped": n.rx_dropped})),
-        }));
+        });
+        entry["approach"] = approach;
+        report.push(entry);
     }
     let sim_ns = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
     Ok(json!({
