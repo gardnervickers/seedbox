@@ -153,6 +153,42 @@ fn bad_values_are_usage_errors() {
     }
 }
 
+#[test]
+fn build_epoch_is_bounded_and_only_available_for_preparation_commands() {
+    let directory = tempfile::tempdir().unwrap();
+    for value in ["-1", "4294967296", "not-a-number"] {
+        let output = seedbox(
+            &["prepare", "--output", "out.json", "--build-epoch", value],
+            directory.path(),
+        );
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            stderr(&output).contains("--build-epoch"),
+            "{}",
+            stderr(&output)
+        );
+        assert!(!directory.path().join("out.json").exists());
+    }
+    for command in ["prepare", "run", "explore"] {
+        let output = seedbox(&[command, "--help"], directory.path());
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("--build-epoch"));
+    }
+    for command in ["replay", "validate", "inspect", "init"] {
+        let output = seedbox(&[command, "--help"], directory.path());
+        assert!(output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("--build-epoch"));
+    }
+    for value in ["0", "4294967295"] {
+        let output = seedbox(
+            &["prepare", "--output", "out.json", "--build-epoch", value],
+            directory.path(),
+        );
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).starts_with("error: no Compose file found"));
+    }
+}
+
 /// A project plus empty stand-ins for every runtime input but BusyBox.
 #[cfg(target_os = "linux")]
 fn runtime_project() -> (tempfile::TempDir, Vec<String>) {
@@ -339,4 +375,28 @@ fn bundle_cli_validates_paths_limits_and_positional_inputs() {
     assert_eq!(stderr(&output), "error: run directory missing: not found\n");
     let output = seedbox(&["import", "missing"], directory.path());
     assert_eq!(stderr(&output), "error: bundle missing: not found\n");
+}
+
+#[test]
+fn build_epoch_custom_builder_fails_before_runtime_resolution_or_state_creation() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("Dockerfile"), "FROM scratch\n").unwrap();
+    fs::write(root.path().join("compose.yaml"), "name: epoch\nservices:\n  app: {build: .}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n").unwrap();
+    fs::write(
+        root.path().join("builder"),
+        "custom builder must not execute",
+    )
+    .unwrap();
+    for command in ["run", "explore", "prepare"] {
+        let mut args = vec![command, "--build-epoch", "0", "--builder", "./builder"];
+        if command == "prepare" {
+            args.extend(["--output", "prepared.json"]);
+        }
+        let output = seedbox(&args, root.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(stderr(&output), "error: --build-epoch: builder ./builder is unsupported; use the qualified project-Nix local Podman or omit --build-epoch\n");
+        assert!(output.stdout.is_empty());
+        assert!(!root.path().join(".seedbox").exists());
+        assert!(!root.path().join("prepared.json").exists());
+    }
 }

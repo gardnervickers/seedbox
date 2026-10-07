@@ -37,6 +37,7 @@ directory. Every runtime input has a default, so no flags are required:
 | VMM | `seedbox-vmm` next to an installed `seedbox`, then this checkout's `cargo build-vmm` output, then on `PATH`; `cargo run` builds it if missing | `--vmm`, `SEEDBOX_VMM` |
 | Guest supervisor | built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | BusyBox | `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
+| Build epoch | absent; preserve the builder's ordinary timestamp policy | `--build-epoch` (prepare/run/explore; no environment backing) |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
 
@@ -64,8 +65,17 @@ Exploration `build:` admission currently accepts only the inspected immutable
 project-Nix Linux Podman launcher/native closure in explicit local mode. Unknown
 wrappers and daemon/remote delegation are rejected. Cancelled builds produce
 ERROR / cleanup-unverified and retain their unique private tag; process-group
-cleanup alone does not prove builder cessation. Ordinary run/prepare builder
-behavior is unchanged. See [preparation evidence and cancellation](docs/runtime.md#exploration-preparation).
+cleanup alone does not prove builder cessation. Ordinary run/prepare continue
+supporting custom builders; the optional native timestamp policy below has a
+narrower admission requirement. See [preparation evidence and cancellation](docs/runtime.md#exploration-preparation).
+
+For owned reproducible build inputs, `--build-epoch 0` selects the qualified
+project-Nix native Podman's creation-time and new-layer timestamp policy.
+It changes guest-visible new-layer file and directory timestamps, so it is
+optional and never applied to registry or base layers. The range is
+0..=4294967295 Unix seconds; custom builders are unsupported with this option.
+Moving base tags, network downloads and arbitrary build programs can still
+change inputs. Replay uses the complete retained closure without this option.
 
 ## Layout
 

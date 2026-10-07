@@ -5,8 +5,8 @@ use crate::{
     config::Simulation,
     execution::{ExecutionProfile, PreparationBackend, PreparedInputs},
     guest::{build_initramfs, launch_recipe, minimum_memory_mb},
-    oci::OciTools,
-    store::ContentStore,
+    oci::{FrozenContext, OciTools},
+    store::{ContentDigest, ContentStore},
     Error, Result,
 };
 use std::{
@@ -44,6 +44,7 @@ impl PreparationBackend for OciPreparer {
             .values()
             .any(|s| matches!(s.source, crate::config::ImageSource::Build { .. }))
         {
+            self.tools.validate_build_epoch()?;
             context.admit_builder(&self.tools.docker)?;
         }
         self.prepare_inner(simulation, store, Some(context))
@@ -59,6 +60,18 @@ impl OciPreparer {
         if let Some(context) = context {
             context.check()?;
         }
+        let has_builds = simulation
+            .services
+            .values()
+            .any(|service| matches!(service.source, crate::config::ImageSource::Build { .. }));
+        if has_builds {
+            self.tools.validate_build_epoch()?;
+        }
+        let closure = if has_builds {
+            reuse_closure(&self.tools)?
+        } else {
+            None
+        };
         let engine = store.put_file(&self.engine)?;
         if engine != self.profile.engine {
             return Err(Error::Integrity(
@@ -112,6 +125,8 @@ impl OciPreparer {
         let mut images = BTreeMap::new();
         let mut guests = BTreeMap::new();
         let mut provenance = BTreeMap::new();
+        let mut frozen_contexts = BTreeMap::<PathBuf, FrozenContext>::new();
+        let mut imported_sources = BTreeMap::new();
         for (name, service) in &simulation.services {
             if let Some(context) = context {
                 context.check()?;
@@ -130,12 +145,83 @@ impl OciPreparer {
                     ))
                 })
                 .collect::<Result<BTreeMap<_, _>>>()?;
-            let imported = self.tools.import_with_context(
-                service,
-                &temporary.path().join(name),
-                store,
-                context.map(|c| (c, name.as_str())),
-            )?;
+            let key = if let (
+                Some(closure),
+                crate::config::ImageSource::Build {
+                    context: source,
+                    dockerfile,
+                },
+            ) = (&closure, &service.source)
+            {
+                if reuse_closure(&self.tools)?.as_ref() != Some(closure) {
+                    return Err(Error::Integrity(
+                        "preparation tools changed after freezing the build closure".into(),
+                    ));
+                }
+                let canonical = fs::canonicalize(source).map_err(|error| {
+                    Error::Setup(format!(
+                        "build context {}: {error}; restore the declared context",
+                        source.display()
+                    ))
+                })?;
+                let frozen = frozen_source(
+                    &mut frozen_contexts,
+                    &canonical,
+                    source,
+                    temporary.path(),
+                    store,
+                )?;
+                let relative = dockerfile
+                    .strip_prefix(source)
+                    .map_err(|_| Error::Validation {
+                        path: "build.dockerfile".into(),
+                        message: "Dockerfile must be inside the build context".into(),
+                    })?
+                    .to_path_buf();
+                Some(BuildKey {
+                    context: canonical,
+                    context_digest: frozen.digest.clone(),
+                    dockerfile_digest: store.put_file(&frozen.root.join(&relative))?,
+                    dockerfile: relative,
+                    closure: closure.clone(),
+                    platform: "linux/amd64",
+                    epoch: self.tools.build_epoch,
+                })
+            } else {
+                None
+            };
+            let imported = if let Some(key) = key {
+                // A failed import (including cleanup-unverified) never enters this map.
+                let (owner, source) =
+                    successful_source(&mut imported_sources, key.clone(), || {
+                        let imported = self.tools.import_frozen(
+                            service,
+                            &temporary.path().join(name),
+                            store,
+                            context.map(|c| (c, name.as_str())),
+                            Some(&frozen_contexts[&key.context]),
+                        )?;
+                        Ok((name.clone(), imported))
+                    })?;
+                if let Some(context) = context {
+                    context.source_group(
+                        name,
+                        &owner,
+                        &key.context_digest,
+                        &key.dockerfile_digest,
+                        &source.image.manifest,
+                        key.epoch,
+                    )?;
+                }
+                source.for_service(service, store)?
+            } else {
+                self.tools.import_with_context(
+                    service,
+                    &temporary.path().join(name),
+                    store,
+                    context.map(|c| (c, name.as_str())),
+                )?
+            };
             if let Some(context) = context {
                 context.check()?;
             }
@@ -196,6 +282,66 @@ impl OciPreparer {
     }
 }
 
+/// A per-call key: no entry or frozen context survives this preparation.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct BuildKey {
+    context: PathBuf,
+    context_digest: ContentDigest,
+    dockerfile: PathBuf,
+    dockerfile_digest: ContentDigest,
+    closure: ContentDigest,
+    platform: &'static str,
+    epoch: Option<u32>,
+}
+fn frozen_source<'a>(
+    contexts: &'a mut BTreeMap<PathBuf, FrozenContext>,
+    canonical: &Path,
+    source: &Path,
+    temporary: &Path,
+    store: &ContentStore,
+) -> Result<&'a FrozenContext> {
+    if !contexts.contains_key(canonical) {
+        let directory = temporary.join(format!("source-{}", contexts.len()));
+        contexts.insert(
+            canonical.to_owned(),
+            FrozenContext::capture(source, &directory, store)?,
+        );
+    }
+    Ok(&contexts[canonical])
+}
+fn successful_source<K: Ord + Clone, V: Clone>(
+    sources: &mut BTreeMap<K, V>,
+    key: K,
+    import: impl FnOnce() -> Result<V>,
+) -> Result<V> {
+    if let Some(value) = sources.get(&key) {
+        return Ok(value.clone());
+    }
+    let value = import()?;
+    sources.insert(key, value.clone());
+    Ok(value)
+}
+fn reuse_closure(tools: &OciTools) -> Result<Option<ContentDigest>> {
+    let Ok(proof) = crate::preparation_command::inspect_native_builder(&tools.docker) else {
+        return Ok(None);
+    };
+    if !proof.admitted {
+        return Ok(None);
+    }
+    // These explicit tool paths are resolved by the CLI, never by library env reads.
+    let mut transports = Vec::new();
+    for path in [&tools.skopeo, &tools.umoci] {
+        let Ok(resolved) = fs::canonicalize(path) else {
+            return Ok(None);
+        };
+        let digest = ContentDigest::of(&fs::read(&resolved)?);
+        transports.push((resolved, digest));
+    }
+    Ok(Some(ContentDigest::of(&serde_json::to_vec(&(
+        proof, transports,
+    ))?)))
+}
+
 fn amd64_elf(path: &Path) -> Result<()> {
     let mut header = [0; 20];
     fs::File::open(path)?.read_exact(&mut header)?;
@@ -223,4 +369,118 @@ fn validate_config_target(path: &str) -> Result<()> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+    #[test]
+    fn shared_context_is_frozen_once_and_next_preparation_observes_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let context = root.path().join("context");
+        fs::create_dir(&context).unwrap();
+        fs::write(context.join("Dockerfile"), "FROM scratch").unwrap();
+        fs::write(context.join("app"), "first").unwrap();
+        let store = ContentStore::new(root.path().join("store"));
+        let mut contexts = BTreeMap::new();
+        let canonical = fs::canonicalize(&context).unwrap();
+        let first = frozen_source(
+            &mut contexts,
+            &canonical,
+            &context,
+            &root.path().join("first-call"),
+            &store,
+        )
+        .unwrap()
+        .digest
+        .clone();
+        fs::write(context.join("app"), "changed after freeze").unwrap();
+        let shared = frozen_source(
+            &mut contexts,
+            &canonical,
+            &context,
+            &root.path().join("first-call"),
+            &store,
+        )
+        .unwrap();
+        assert_eq!(shared.digest, first);
+        assert_eq!(fs::read(shared.root.join("app")).unwrap(), b"first");
+        assert_eq!(contexts.len(), 1);
+        let mut next = BTreeMap::new();
+        assert_ne!(
+            frozen_source(
+                &mut next,
+                &canonical,
+                &context,
+                &root.path().join("next-call"),
+                &store
+            )
+            .unwrap()
+            .digest,
+            first
+        );
+    }
+    #[test]
+    fn source_keys_invalidate_complete_inputs_and_never_memoize_failure() {
+        let key = BuildKey {
+            context: "declared-context".into(),
+            context_digest: ContentDigest::of(b"full context"),
+            dockerfile: "Dockerfile".into(),
+            dockerfile_digest: ContentDigest::of(b"dockerfile"),
+            closure: ContentDigest::of(b"tools"),
+            platform: "linux/amd64",
+            epoch: None,
+        };
+        let mut sources = BTreeMap::new();
+        let mut calls = 0;
+        for _ in 0..3 {
+            let image = successful_source(&mut sources, key.clone(), || {
+                calls += 1;
+                Ok(17)
+            })
+            .unwrap();
+            assert_eq!(image, 17);
+        }
+        assert_eq!(calls, 1);
+        let mut variants = Vec::new();
+        let mut changed = key.clone();
+        changed.context = "different-declared-context".into();
+        variants.push(changed);
+        let mut changed = key.clone();
+        changed.context_digest = ContentDigest::of(b"changed full context including metadata");
+        variants.push(changed);
+        let mut changed = key.clone();
+        changed.dockerfile = "Dockerfile.other".into();
+        variants.push(changed);
+        let mut changed = key.clone();
+        changed.dockerfile_digest = ContentDigest::of(b"changed Dockerfile");
+        variants.push(changed);
+        let mut changed = key.clone();
+        changed.closure = ContentDigest::of(b"changed tool closure");
+        variants.push(changed);
+        let mut changed = key.clone();
+        changed.platform = "other-platform";
+        variants.push(changed);
+        let mut changed = key.clone();
+        changed.epoch = Some(0);
+        variants.push(changed);
+        for variant in variants {
+            successful_source(&mut sources, variant, || {
+                calls += 1;
+                Ok(23)
+            })
+            .unwrap();
+        }
+        assert_eq!(calls, 8);
+        for error in [
+            Error::Execution("import failed".into()),
+            Error::PreparationCleanupUnverified("cancelled builder; tag retained".into()),
+        ] {
+            let mut fresh = BTreeMap::<BuildKey, i32>::new();
+            let result = successful_source(&mut fresh, key.clone(), || Err(error));
+            assert!(result.is_err());
+            assert!(fresh.is_empty());
+        }
+        assert!(reuse_closure(&OciTools::default()).unwrap().is_none());
+    }
 }

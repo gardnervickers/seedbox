@@ -74,6 +74,8 @@ enum Command {
         state: StateArg,
         #[command(flatten)]
         inputs: RuntimeInputs,
+        #[command(flatten)]
+        build: BuildOptions,
     },
     /// Prepare images and run a simulation (Linux KVM host, root).
     #[command(after_help = EXIT_CODES)]
@@ -89,6 +91,8 @@ enum Command {
         state: StateArg,
         #[command(flatten)]
         inputs: RuntimeInputs,
+        #[command(flatten)]
+        build: BuildOptions,
         #[command(flatten)]
         performance: Performance,
     },
@@ -112,6 +116,8 @@ enum Command {
         state: StateArg,
         #[command(flatten)]
         inputs: RuntimeInputs,
+        #[command(flatten)]
+        build: BuildOptions,
         #[command(flatten)]
         performance: Performance,
     },
@@ -281,17 +287,54 @@ impl RuntimeInputs {
         scratch: &Path,
         profile: ExecutionProfile,
     ) -> Result<OciPreparer> {
+        let mut tools = OciTools {
+            docker: self.builder.clone(),
+            ..OciTools::default()
+        };
+        for tool in [&mut tools.skopeo, &mut tools.umoci] {
+            if let Ok(resolved) = defaults::preparation_tool(tool) {
+                *tool = resolved;
+            }
+        }
         Ok(OciPreparer {
-            tools: OciTools {
-                docker: self.builder.clone(),
-                ..OciTools::default()
-            },
+            tools,
             kernel: defaults::kernel(self.kernel.clone())?,
             engine,
             init: defaults::guest_init(self.guest_init.clone(), store, scratch)?,
             busybox: defaults::busybox(self.busybox.clone())?,
             profile,
         })
+    }
+}
+
+#[derive(Args)]
+#[command(next_help_heading = "Preparation")]
+struct BuildOptions {
+    /// Clamp new build-layer timestamps to this Unix epoch (qualified native Podman only) [default: absent].
+    #[arg(long, allow_hyphen_values = true, value_parser = clap::value_parser!(u32))]
+    build_epoch: Option<u32>,
+}
+
+impl BuildOptions {
+    fn configure(&self, simulation: &config::Simulation, inputs: &mut RuntimeInputs) -> Result<()> {
+        if simulation
+            .services
+            .values()
+            .any(|service| matches!(service.source, config::ImageSource::Build { .. }))
+        {
+            match defaults::preparation_tool(&inputs.builder) {
+                Ok(builder) => inputs.builder = builder,
+                Err(error) if self.build_epoch.is_some() => return Err(Error::Setup(format!("--build-epoch: {error}; use the qualified project-Nix local Podman or omit --build-epoch"))),
+                Err(_) => (), // Preserve ordinary custom-builder discovery at execution.
+            }
+            OciTools {
+                docker: inputs.builder.clone(),
+                build_epoch: self.build_epoch,
+                ..OciTools::default()
+            }
+            .validate_build_epoch()?;
+        }
+        Ok(())
     }
 }
 
@@ -364,7 +407,8 @@ fn run(cli: Cli) -> Result<u8> {
             compose,
             output,
             state,
-            inputs,
+            mut inputs,
+            build,
         } => {
             if output.exists() {
                 return Err(Error::Setup(format!(
@@ -373,9 +417,11 @@ fn run(cli: Cli) -> Result<u8> {
                 )));
             }
             let simulation = compose.load()?;
+            build.configure(&simulation, &mut inputs)?;
             let (store, _) = state.open()?;
             let scratch = tempfile::tempdir()?;
-            let (preparer, _) = inputs.backends(&store, None, scratch.path())?;
+            let (mut preparer, _) = inputs.backends(&store, None, scratch.path())?;
+            preparer.tools.build_epoch = build.build_epoch;
             let prepared = preparer.prepare(&simulation, &store)?;
             let file = std::fs::OpenOptions::new()
                 .write(true)
@@ -390,13 +436,16 @@ fn run(cli: Cli) -> Result<u8> {
             seed,
             cpu,
             state,
-            inputs,
+            mut inputs,
+            build,
             performance,
         } => {
             let simulation = compose.load()?;
+            build.configure(&simulation, &mut inputs)?;
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
-            let (preparer, executor) = inputs.backends(&store, cpu.cpu, scratch.path())?;
+            let (mut preparer, executor) = inputs.backends(&store, cpu.cpu, scratch.path())?;
+            preparer.tools.build_epoch = build.build_epoch;
             let executor = performance.apply(executor)?;
             // After the fast input checks, before slow image preparation.
             require_kvm_host()?;
@@ -417,11 +466,13 @@ fn run(cli: Cli) -> Result<u8> {
             json,
             cpu,
             state,
-            inputs,
+            mut inputs,
+            build,
             performance,
         } => {
             let resources = Resources::start();
             let simulation = compose.load()?;
+            build.configure(&simulation, &mut inputs)?;
             let cancellation = CancellationToken::default();
             let options = ExploreOptions {
                 seed,
@@ -432,6 +483,7 @@ fn run(cli: Cli) -> Result<u8> {
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
             let (mut preparer, executor) = inputs.backends(&store, cpu.cpu, scratch.path())?;
+            preparer.tools.build_epoch = build.build_epoch;
             preparer.tools.skopeo = defaults::preparation_tool(&preparer.tools.skopeo)?;
             preparer.tools.umoci = defaults::preparation_tool(&preparer.tools.umoci)?;
             if simulation

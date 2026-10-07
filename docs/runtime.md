@@ -42,6 +42,31 @@ Use fully qualified Dockerfile `FROM` references such as
 unqualified registry search list. `--builder docker` selects a Docker client
 instead when the host provides one.
 
+`prepare`, `run` and `explore` accept optional `--build-epoch SECONDS`
+(0..=4294967295; no environment backing). It requires the inspected project-Nix
+local Podman executable; custom wrappers, Docker and remote clients fail before
+image preparation when the option affects a build service. Seedbox passes
+`--source-date-epoch=SECONDS --rewrite-timestamp` to that native executable.
+The selected epoch and policy are retained in built-image provenance. Without
+the option, the builder's existing timestamp behavior remains unchanged.
+Inherited `SOURCE_DATE_EPOCH` alone controls image creation/history metadata;
+it does not make generated layer directories reproducible.
+
+This explicit policy clamps all newly committed file and directory timestamps
+later than the epoch, including otherwise stable copied-file timestamps. It
+preserves base and registry image metadata. It does not guarantee reproducible
+arbitrary builds: pin base resolution and control external build inputs yourself.
+Every original manifest, config and layer remains retained; changing a merged
+rootfs in a later layer cannot remove earlier varying input bytes.
+
+Within one preparation call, services declaring the same frozen build source
+on the admitted native Podman path share build/import/unpack work. Each service
+still resolves its own launch overrides and packages its own guest recipe.
+Contexts include retained bytes, modes, symlinks, Dockerfile selection and ignore
+rules. There is no cross-call cache; custom builders and registry imports keep
+their existing preparation behavior. Failed, cancelled or cleanup-unverified
+sources are never reused as successful preparation.
+
 ## Preparation, execution, and replay
 
 After building the binaries above, as root with the Nix tools on PATH

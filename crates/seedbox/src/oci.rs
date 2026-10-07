@@ -25,6 +25,8 @@ pub struct OciTools {
     pub skopeo: PathBuf,
     pub umoci: PathBuf,
     pub docker: PathBuf,
+    /// Explicit timestamp policy for new layers from the admitted native Podman.
+    pub build_epoch: Option<u32>,
 }
 
 impl Default for OciTools {
@@ -33,15 +35,47 @@ impl Default for OciTools {
             skopeo: "skopeo".into(),
             umoci: "umoci".into(),
             docker: "podman".into(),
+            build_epoch: None,
         }
     }
 }
 
+#[derive(Clone)]
 pub struct ImportedImage {
     pub image: PreparedImage,
     pub rootfs: PathBuf,
     pub auxiliary: BTreeMap<String, ContentDigest>,
     pub provenance: BTreeMap<String, String>,
+}
+
+impl ImportedImage {
+    /// Reuse verified image bytes, resolving this service's launch independently.
+    pub(crate) fn for_service(&self, service: &Service, store: &ContentStore) -> Result<Self> {
+        let config: ImageConfig = serde_json::from_slice(&store.read(&self.image.config)?)?;
+        let defaults: ImageDefaults = serde_json::from_value(config.config)?;
+        let mut imported = self.clone();
+        imported.image.launch = resolve_launch(service, &defaults)?;
+        Ok(imported)
+    }
+}
+
+/// One retained context, frozen before any service-specific build or launch.
+pub(crate) struct FrozenContext {
+    pub root: PathBuf,
+    pub digest: ContentDigest,
+}
+
+impl FrozenContext {
+    pub fn capture(context: &Path, directory: &Path, store: &ContentStore) -> Result<Self> {
+        fs::create_dir_all(directory)?;
+        let snapshot = directory.join("context.tar");
+        snapshot_context(context, &snapshot)?;
+        let digest = store.put_file(&snapshot)?;
+        let root = directory.join("build-context");
+        fs::create_dir(&root)?;
+        tar::Archive::new(fs::File::open(&snapshot)?).unpack(&root)?;
+        Ok(Self { root, digest })
+    }
 }
 
 #[derive(Deserialize)]
@@ -68,6 +102,17 @@ struct ImageConfig {
 }
 
 impl OciTools {
+    /// Reject unsupported timestamp policies before any image work.
+    pub fn validate_build_epoch(&self) -> Result<()> {
+        if self.build_epoch.is_some() {
+            let admitted = crate::preparation_command::inspect_native_builder(&self.docker)
+                .is_ok_and(|proof| proof.admitted);
+            if !admitted {
+                return Err(Error::Setup(format!("--build-epoch: builder {} is unsupported; use the qualified project-Nix local Podman or omit --build-epoch", self.docker.display())));
+            }
+        }
+        Ok(())
+    }
     /// `directory` must be a fresh per-image directory; the caller owns its
     /// lifetime until guest packaging finishes. No simulation or MSR work occurs.
     pub fn import(
@@ -85,6 +130,21 @@ impl OciTools {
         store: &ContentStore,
         context_options: Option<(&crate::preparation::PreparationContext, &str)>,
     ) -> Result<ImportedImage> {
+        self.import_frozen(service, directory, store, context_options, None)
+    }
+    pub(crate) fn import_frozen(
+        &self,
+        service: &Service,
+        directory: &Path,
+        store: &ContentStore,
+        context_options: Option<(&crate::preparation::PreparationContext, &str)>,
+        frozen: Option<&FrozenContext>,
+    ) -> Result<ImportedImage> {
+        if matches!(service.source, ImageSource::Build { .. }) {
+            self.validate_build_epoch()?;
+        }
+        let local_builder =
+            context_options.is_some() || self.build_epoch.is_some() || frozen.is_some();
         fs::create_dir_all(directory)?;
         let run = |command: &mut Command,
                    phase: &str,
@@ -134,12 +194,16 @@ impl OciTools {
                         path: "build.dockerfile".into(),
                         message: "Dockerfile must be inside the build context".into(),
                     })?;
-                let snapshot = directory.join("context.tar");
-                snapshot_context(context, &snapshot)?;
-                auxiliary.insert("build-context".into(), store.put_file(&snapshot)?);
-                let frozen_context = directory.join("build-context");
-                fs::create_dir(&frozen_context)?;
-                tar::Archive::new(fs::File::open(&snapshot)?).unpack(&frozen_context)?;
+                let owned;
+                let frozen = match frozen {
+                    Some(frozen) => frozen,
+                    None => {
+                        owned = FrozenContext::capture(context, directory, store)?;
+                        &owned
+                    }
+                };
+                auxiliary.insert("build-context".into(), frozen.digest.clone());
+                let frozen_context = &frozen.root;
                 auxiliary.insert(
                     "dockerfile".into(),
                     store.put_file(&frozen_context.join(relative))?,
@@ -148,6 +212,14 @@ impl OciTools {
                     "docker".into(),
                     tool_version(&self.docker, "builder-version")?,
                 );
+                if let Some(epoch) = self.build_epoch {
+                    provenance.insert("build-epoch".into(), epoch.to_string());
+                    provenance.insert(
+                        "build-timestamp-policy".into(),
+                        "podman --source-date-epoch --rewrite-timestamp; new-layer mtimes clamped"
+                            .into(),
+                    );
+                }
                 let archive = directory.join("build.tar");
                 // A unique tag avoids deleting any pre-existing user image. The
                 // Docker cache is preserved; only this private tag is removed.
@@ -173,7 +245,7 @@ impl OciTools {
                 }
                 let build = (|| -> Result<()> {
                     let mut cmd = Command::new(&self.docker);
-                    if context_options.is_some() {
+                    if local_builder {
                         cmd.arg("--remote=false");
                     }
                     cmd.args([
@@ -184,11 +256,15 @@ impl OciTools {
                         &tag,
                         "--file",
                     ])
-                    .arg(frozen_context.join(relative))
-                    .arg(&frozen_context);
+                    .arg(frozen_context.join(relative));
+                    if let Some(epoch) = self.build_epoch {
+                        cmd.arg(format!("--source-date-epoch={epoch}"))
+                            .arg("--rewrite-timestamp");
+                    }
+                    cmd.arg(frozen_context);
                     run(&mut cmd, "build", Some(&tag), true, false)?;
                     let mut save = Command::new(&self.docker);
-                    if context_options.is_some() {
+                    if local_builder {
                         save.arg("--remote=false");
                     }
                     save.args(["save", "--output"]).arg(&archive).arg(&tag);
@@ -208,7 +284,11 @@ impl OciTools {
                     build?;
                     evidence.check()?;
                 } else {
-                    let cleanup = Command::new(&self.docker)
+                    let mut cleanup = Command::new(&self.docker);
+                    if local_builder {
+                        cleanup.arg("--remote=false");
+                    }
+                    let cleanup = cleanup
                         .args(["image", "rm", &tag])
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
@@ -454,4 +534,128 @@ pub(crate) fn checked(command: &mut Command, log: &Path) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[test]
+    fn explicit_epoch_rejects_custom_builder_before_creating_import_directory() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("Dockerfile"), "FROM scratch\n").unwrap();
+        let simulation = crate::config::parse("name: epoch\nservices:\n  app: {build: .}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n", &root.path().join("compose.yaml"), &BTreeMap::new()).unwrap();
+        let builder = root.path().join("custom-builder");
+        fs::write(&builder, "custom bytes").unwrap();
+        let tools = OciTools {
+            docker: builder,
+            build_epoch: Some(0),
+            ..OciTools::default()
+        };
+        let directory = root.path().join("must-not-exist");
+        let error = tools
+            .import(
+                &simulation.services["app"],
+                &directory,
+                &ContentStore::new(root.path().join("store")),
+            )
+            .err()
+            .unwrap();
+        assert!(matches!(error, Error::Setup(_)));
+        assert!(error.to_string().contains("--build-epoch"));
+        assert!(!directory.exists());
+        let off = OciTools {
+            build_epoch: None,
+            ..tools
+        };
+        assert!(off.validate_build_epoch().is_ok());
+    }
+
+    #[test]
+    fn frozen_context_retains_bytes_and_metadata_and_invalidates_changed_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("Dockerfile"), "FROM scratch\nCOPY . /app\n").unwrap();
+        fs::write(source.join("app"), b"first").unwrap();
+        fs::write(source.join(".dockerignore"), "ignored\n").unwrap();
+        fs::write(
+            source.join("ignored"),
+            b"retained for the builder to filter",
+        )
+        .unwrap();
+        symlink("app", source.join("link")).unwrap();
+        let store = ContentStore::new(temp.path().join("store"));
+        let capture =
+            |name: &str| FrozenContext::capture(&source, &temp.path().join(name), &store).unwrap();
+        let initial = capture("initial");
+        assert_eq!(initial.digest, capture("same").digest);
+        fs::write(source.join("app"), b"second").unwrap();
+        assert_eq!(fs::read(initial.root.join("app")).unwrap(), b"first");
+        let changed_bytes = capture("bytes");
+        assert_ne!(initial.digest, changed_bytes.digest);
+        fs::set_permissions(source.join("app"), fs::Permissions::from_mode(0o751)).unwrap();
+        let changed_mode = capture("mode");
+        assert_ne!(changed_bytes.digest, changed_mode.digest);
+        assert_eq!(
+            fs::metadata(changed_mode.root.join("app"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o751
+        );
+        fs::remove_file(source.join("link")).unwrap();
+        symlink("Dockerfile", source.join("link")).unwrap();
+        let changed_link = capture("link");
+        assert_ne!(changed_mode.digest, changed_link.digest);
+        fs::write(source.join(".dockerignore"), "other\n").unwrap();
+        let changed_ignore = capture("ignore");
+        assert_ne!(changed_link.digest, changed_ignore.digest);
+        fs::write(source.join("Dockerfile"), "FROM scratch\nCOPY app /other\n").unwrap();
+        assert_ne!(changed_ignore.digest, capture("dockerfile").digest);
+        store.verify(&initial.digest).unwrap();
+    }
+
+    #[test]
+    fn shared_image_resolves_each_services_launch_without_changing_retained_image_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(temp.path().join("store"));
+        let config = store.put(br#"{"os":"linux","architecture":"amd64","config":{"Entrypoint":["/app"],"Cmd":["default"],"Env":["KEEP=1","REMOVE=1"],"WorkingDir":"/work","User":"10:20","Volumes":{"/data":{}}}}"#).unwrap();
+        let simulation = crate::config::parse("name: rebind\nservices:\n  a:\n    image: example:v1\n    command: [first]\n  b:\n    image: example:v1\n    entrypoint: [/other]\n    command: [second]\n    environment: {KEEP: different, REMOVE: null}\n    working_dir: /other-work\n    user: '30:40'\nx-seedbox:\n  version: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: b}\n",Path::new("/compose.yaml"), &BTreeMap::new()).unwrap();
+        let defaults: ImageDefaults = serde_json::from_value(
+            serde_json::from_slice::<ImageConfig>(&store.read(&config).unwrap())
+                .unwrap()
+                .config,
+        )
+        .unwrap();
+        let imported = ImportedImage {
+            image: PreparedImage {
+                manifest: store.put(b"manifest").unwrap(),
+                config,
+                layers: vec![store.put(b"layer").unwrap()],
+                launch: resolve_launch(&simulation.services["a"], &defaults).unwrap(),
+            },
+            rootfs: temp.path().join("rootfs"),
+            auxiliary: BTreeMap::new(),
+            provenance: BTreeMap::new(),
+        };
+        let rebound = imported
+            .for_service(&simulation.services["b"], &store)
+            .unwrap();
+        assert_eq!(imported.image.launch.argv, ["/app", "first"]);
+        assert_eq!(rebound.image.launch.argv, ["/other", "second"]);
+        assert_eq!(
+            rebound.image.launch.environment,
+            BTreeMap::from([("KEEP".into(), "different".into())])
+        );
+        assert_eq!(rebound.image.launch.working_dir, "/other-work");
+        assert_eq!(rebound.image.launch.user, "30:40");
+        assert_eq!(rebound.image.launch.volumes, ["/data"]);
+        assert_eq!(rebound.image.manifest, imported.image.manifest);
+        assert_eq!(rebound.image.config, imported.image.config);
+        assert_eq!(rebound.image.layers, imported.image.layers);
+        assert_eq!(rebound.rootfs, imported.rootfs);
+    }
 }

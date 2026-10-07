@@ -51,6 +51,7 @@ fn fixture(
             skopeo,
             umoci,
             docker: root.join("must-not-run"),
+            build_epoch: None,
         },
         kernel,
         engine,

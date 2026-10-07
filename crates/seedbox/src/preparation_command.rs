@@ -25,6 +25,46 @@ const METADATA_LIMIT: u64 = 4 * 1024 * 1024;
 const VERSION_LIMIT: u64 = 8192;
 const VERSION_TOTAL_LIMIT: u64 = 4 * 1024 * 1024;
 
+/// Pure inspection shared with opt-in timestamp policy and per-call reuse.
+/// Admission receipts and cancellable local-mode checks remain context-owned.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct NativeBuilder {
+    pub launcher: PathBuf,
+    pub native: PathBuf,
+    pub launch_hash: ContentDigest,
+    pub native_hash: Option<ContentDigest>,
+    pub admitted: bool,
+}
+pub(crate) fn inspect_native_builder(requested: &Path) -> Result<NativeBuilder> {
+    let launcher = fs::canonicalize(requested).map_err(|e| {
+        Error::Setup(format!(
+            "builder {}: {e}; enter the qualified project Nix shell",
+            requested.display()
+        ))
+    })?;
+    let native = launcher.with_file_name(".podman-wrapped");
+    let launch_hash = ContentDigest::of(&fs::read(&launcher).map_err(|e| {
+        Error::Setup(format!(
+            "builder {}: {e}; enter the qualified project Nix shell",
+            requested.display()
+        ))
+    })?);
+    let native_hash = fs::read(&native).map(|b| ContentDigest::of(&b)).ok();
+    let admitted = cfg!(target_os = "linux")
+        && launcher.starts_with("/nix/store")
+        && launch_hash.hex() == "e08e27ef8cbb231dd85f8f343d7af0428c7b996ace2f17ee78bd6c4391a3aa06"
+        && native_hash.as_ref().is_some_and(|h| {
+            h.hex() == "94a99b74250736f3f89426be43870d499aa6a03a53c02fe9ca6753e324255344"
+        });
+    Ok(NativeBuilder {
+        launcher,
+        native,
+        launch_hash,
+        native_hash,
+        admitted,
+    })
+}
+
 /// Caller-owned preparation evidence and the shared cancellation token.
 #[derive(Debug)]
 pub struct PreparationContext {
@@ -106,22 +146,13 @@ impl PreparationContext {
     }
     /// Admit only the inspected immutable project-Nix launcher/native closure.
     pub(crate) fn admit_builder(&self, requested: &Path) -> Result<()> {
-        let launcher = fs::canonicalize(requested).map_err(|e| {
-            Error::Setup(format!(
-                "builder {}: {e}; enter the qualified project Nix shell",
-                requested.display()
-            ))
-        })?;
-        let native = launcher.with_file_name(".podman-wrapped");
-        let launch_hash = ContentDigest::of(&fs::read(&launcher)?);
-        let native_hash = fs::read(&native).map(|b| ContentDigest::of(&b)).ok();
-        let admitted = cfg!(target_os = "linux")
-            && launcher.starts_with("/nix/store")
-            && launch_hash.hex()
-                == "e08e27ef8cbb231dd85f8f343d7af0428c7b996ace2f17ee78bd6c4391a3aa06"
-            && native_hash.as_ref().is_some_and(|h| {
-                h.hex() == "94a99b74250736f3f89426be43870d499aa6a03a53c02fe9ca6753e324255344"
-            });
+        let NativeBuilder {
+            launcher,
+            native,
+            launch_hash,
+            native_hash,
+            admitted,
+        } = inspect_native_builder(requested)?;
         self.metadata("builder.json", &serde_json::json!({"requested": requested, "launcher": launcher, "launcher_sha256": launch_hash, "native": native, "native_sha256": native_hash, "local_mode": true, "admitted": admitted, "cancellation_cleanup_qualified": false}))?;
         if !admitted {
             return Err(Error::Setup(format!("builder {}: exploration requires the inspected project-Nix local Podman launch closure; unknown wrappers, remote clients and daemon delegation are unsupported", requested.display())));
@@ -142,6 +173,25 @@ impl PreparationContext {
             false,
         )?;
         Ok(())
+    }
+    /// Retain the successful source-group owner for every service, including reuse.
+    pub(crate) fn source_group(
+        &self,
+        service: &str,
+        owner: &str,
+        context: &ContentDigest,
+        dockerfile: &ContentDigest,
+        manifest: &ContentDigest,
+        epoch: Option<u32>,
+    ) -> Result<()> {
+        self.check()?;
+        self.metadata(
+            &format!("{service}-source-group.json"),
+            &serde_json::json!({
+                "service":service,"owner":owner,"context":context,"dockerfile":dockerfile,
+                "manifest":manifest,"build_epoch":epoch,"reused":service != owner
+            }),
+        )
     }
     pub(crate) fn setup_inputs(
         &self,
@@ -893,6 +943,7 @@ mod tests {
                 skopeo: transport.clone(),
                 umoci: transport,
                 docker: builder,
+                build_epoch: None,
             };
             let evidence =
                 PreparationContext::new(root.join("evidence"), CancellationToken::default())
