@@ -13,7 +13,12 @@ reloads complete records after process restart. The deliberately broken server
 keeps values only in memory. Both save a startup generation counter for diagnostics.
 The client records only actual PUT acknowledgements and checks every recorded
 value with GET after the scenario. Each missing acknowledged value is printed and
-causes FAIL; the checker does not plant a failure.
+causes FAIL; the checker does not plant a failure. A timed-out PUT retains its
+key/value until a complete reply with the expected generation is received. Only
+then does the client advance its sequence and record one acknowledgement. LOAD
+has one ten-second deadline covering successful progress, retries and blocking
+I/O; its control response has a shared twelve-second transport bound. Neither
+the scenario nor the portable test retries an entire LOAD after a lost reply.
 
 The scenario asks the client's small TCP control API to complete batches of 32
 acknowledged writes. Once a batch completes, it decides the next operation from
@@ -124,5 +129,9 @@ Use `verify.py RUN --focused control-cases` to inspect this evidence separately.
 Portable tests require no KVM. Run `python3 examples/faults/portable.py` to
 launch the actual Python server and client processes, abruptly stop and restart
 the server twice, and verify healthy recovery, broken loss, and the no-restart
-control through independent TCP requests. These checks establish workload
+control through independent TCP requests. It also persists a write before losing
+its reply, rejects invalid acknowledgements without changing the ledger, and
+checks successful-progress, unanswered-response and byte-trickle expiry. Recovery
+counts remain exactly 32 and 96; the broken restart case must lose exactly 96 of
+128 acknowledged records. These checks establish workload
 behavior; runtime fault delivery and deterministic replay need the Linux suite.
