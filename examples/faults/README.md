@@ -122,9 +122,21 @@ reconnects to restart the server. The target confirms that it has no fault socke
 After deliberately exiting with code 17, it is reported as `Exited(17)` and
 stop/restart return `target_unavailable`. The controller completes another time
 query and classifies that workload exit as FAIL. The verifier checks both sessions,
-all four recoverable errors and the absence of an infrastructure ERROR. With all
-optional supervisors supplied, the complete matrix contains fifteen executions.
+all four recoverable errors and the absence of an infrastructure ERROR.
 Use `verify.py RUN --focused control-cases` to inspect this evidence separately.
+
+The lifecycle-cases scenario runs next and is also replayed once. It pauses the
+whole server machine while an established connection sends a request: nothing
+answers until resume, and then the held request is answered on the same
+connection. It crashes the server with another connection open: the peer sees
+neither FIN nor RST, only silence. After reboot the server reports a new kernel
+`boot_id` and has lost a marker file it wrote to RAM before the crash. The
+scenario also checks six `invalid_state` transitions, stop of a down machine
+returning `target_unavailable`, and `inspect()` reporting `Paused` and `Down`.
+The verifier checks the applied effect times, the crashed incarnation record and
+the second boot in the server console. With all optional supervisors supplied,
+the complete matrix contains seventeen executions. Use
+`verify.py RUN --focused lifecycle-cases` to inspect this evidence separately.
 
 Portable tests require no KVM. Run `python3 examples/faults/portable.py` to
 launch the actual Python server and client processes, abruptly stop and restart

@@ -9,7 +9,7 @@ import signal
 import shutil
 import subprocess
 from generate import generate
-from verify import verify, verify_cutoff, verify_early_request, verify_control_cases
+from verify import verify, verify_cutoff, verify_early_request, verify_control_cases, verify_lifecycle_cases
 
 MSR_EVIDENCE = []
 RUN_EVIDENCE = []
@@ -112,16 +112,16 @@ def focused_projects(projects):
         (destination / "workload" / "scenario.py").write_text(program)
 
 
-def control_project(projects):
-    destination = Path(projects) / "control-cases"
+def control_project(projects, name="control-cases", scenario="control_scenario.py"):
+    destination = Path(projects) / name
     shutil.copytree(Path(projects) / "fixed", destination)
     compose = destination / "compose.yaml"
-    text = compose.read_text().replace("name: synthetic-fault-fixed", "name: synthetic-fault-control-cases")
+    text = compose.read_text().replace("name: synthetic-fault-fixed", "name: synthetic-fault-" + name)
     server = '    command: [server, --listen, "0.0.0.0:7000", --state, /data/kv.log]'
     assert text.count(server) == 1
     text = text.replace(server, server + '\n    entrypoint: [python3, /workload/control_target.py]')
     compose.write_text(text)
-    shutil.copyfile(destination / "workload/control_scenario.py", destination / "workload/scenario.py")
+    shutil.copyfile(destination / "workload" / scenario, destination / "workload/scenario.py")
 
 
 RUN = re.compile(r"^(?:PASS|FAIL|ERROR|TIMEOUT|INCOMPLETE): (.+)$", re.M)
@@ -207,6 +207,7 @@ def main():
     persist_evidence()
     projects = generate(Path(a.output) / "projects", a.seed)
     control_project(projects)
+    control_project(projects, "lifecycle-cases", "lifecycle_scenario.py")
     if a.delayed_guest_init:
         focused_projects(projects)
     common = ["--kernel", a.kernel, "--vmm", a.vmm, "--guest-init", a.guest_init,
@@ -256,6 +257,13 @@ def main():
     control_replay = execute([a.seedbox, "replay", str(control_run), "--cpu", str(a.cpu),
                               "--state", a.state, "--undo", "0", "--margin", a.margin], 0)
     evidence.append(verify_control_cases(control_replay))
+    persist_evidence()
+    lifecycle_run = execute([a.seedbox, "run", str(projects / "lifecycle-cases/compose.yaml"), *common], 0)
+    evidence.append(verify_lifecycle_cases(lifecycle_run))
+    persist_evidence()
+    lifecycle_replay = execute([a.seedbox, "replay", str(lifecycle_run), "--cpu", str(a.cpu),
+                                "--state", a.state, "--undo", "0", "--margin", a.margin], 0)
+    evidence.append(verify_lifecycle_cases(lifecycle_replay))
     persist_evidence()
     STATUS = "passed"
     persist_evidence()
