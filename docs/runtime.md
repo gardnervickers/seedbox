@@ -141,10 +141,11 @@ The guest supervisor is built into `seedbox`, and BusyBox comes from
 `SEEDBOX_BUSYBOX`. A missing input fails before preparation starts and names
 every location searched.
 
-Qualified Zen execution requires the versioned `amd-zen3-engine52eb-v1` host policy in
+Qualified Zen execution requires the versioned `amd-zen3-engine52eb-v2` host policy in
 [host requirements](../README.md#host-requirements). Run validates immutable
-engine/kernel inputs and performs host admission before OCI work. Temporary
-core reservations, affinity and disabled exact-event perf descriptors are released
+engine/guest-kernel inputs and performs host admission before OCI work; host-kernel
+bytes are not checked. Temporary core reservations, affinity and disabled
+exact-event perf descriptors are released
 before preparation on success/error; cleanup failure refuses admission. The actual
 leased core/siblings are rechecked before any workaround MSR write or VMM spawn.
 Complete raw static/leased CPUID observations and workaround/restore diagnostics
@@ -277,7 +278,8 @@ Replay does not require registry access, a builder, or the original Compose file
 
 Run exits are 0 for PASS, 1 for FAIL, 2 for ERROR, 3 for INCOMPLETE, and 124 for
 simulated TIMEOUT. Replay exits are 0 for MATCH (including a reproduced FAIL),
-1 for MISMATCH, and 2 for NOT_COMPARABLE. Results print the attempt path.
+1 for MISMATCH, and 2 for NOT_COMPARABLE, including a cancelled or incomplete
+replay. Results print the attempt path.
 Offline diff exits 0 for MATCH, 1 for DIFFERENT, and 2 for usage/setup or invalid evidence.
 
 ## Compare retained runs
@@ -463,10 +465,68 @@ run-wide relay IDs and connection-local request IDs. Redundant lifecycle command
 and commands targeting exited VMs return recoverable RPC errors. The controller
 can inspect the application exit and choose PASS or FAIL.
 
-Inspection and partition/heal counter snapshots count nominal send, drop and
+Inspection and partition/shape/heal counter snapshots count nominal send, drop and
 arrival times strictly before admission. A packet physically delivered in an
 early scheduler window is excluded until its nominal arrival precedes that
 boundary. Final report counters still record physical NIC acceptance totals.
+
+### Directed-link policy
+
+`x-seedbox.network.links` accepts a list of directed service pairs:
+
+```yaml
+network:
+  latency: 1ms
+  jitter: 100us
+  links:
+    - {from: server, to: client, latency: 20ms, jitter: 2ms, loss_ppm: 50000}
+```
+
+Within `x-seedbox`, each pair must be unique and name existing services. An entry
+requires `latency`; `jitter` and `loss_ppm` default to zero. Policies are absolute:
+a missing jitter or loss does not inherit the global value. Every baseline and
+runtime shape requires latency at least the global latency, jitter less than its
+latency, latency plus jitter at most one hour, and integer loss in `[0, 1000000]`.
+The global latency remains the whole-run lookahead; it cannot be lowered by a shape.
+
+`world.shape(from_, to, latency=..., jitter=0, loss_ppm=0)` uses nanosecond integers
+and returns a healable handle. Its nonempty sides must name distinct machines.
+It shapes only `from_ × to`; partitions still cut both directions. Among live
+shape layers the highest fault ID wins. Healing removes exactly one handle and
+reveals the previous layer, then the baseline, then global latency/jitter with zero
+loss where no baseline exists. Any active partition covering a pair dominates
+all shapes. Inspect includes both kinds in `active_handles`.
+
+At a boundary T every machine reaches T before control admission and faults in
+ID order, followed by sends at T or later. Routing fixes each candidate's loss
+and arrival at send time; later shaping or healing retains in-flight decisions.
+Broadcast expands to other machines in ascending index order. Cuts consume no
+randomness; every other candidate consumes one independent per-pair loss draw
+then one jitter draw, including zero and total loss. Exact scaled multiplication
+maps jitter inclusively into `[0, jitter_ns]` and loss onto its ppm threshold.
+A lost frame increments `loss_dropped` and does not move the pair's last arrival.
+A delivered frame arrives at `max(send + latency + jitter, last_arrival + 1)`;
+a delay decrease preserves FIFO and head-of-line waiting. The scheduler's global
+early-delivery window remains unchanged.
+
+Counters distinguish `delivered`, `partition_dropped`, `receiver_dropped`, and
+`loss_dropped`; `loss_dropped` is omitted for a link that has lost nothing.
+The report's `network_witness` hashes in-flight frames, per-link last
+arrivals, stream positions, live layers, cuts and baselines. It is folded into
+`world_witness` only when the run has baseline overrides or applied a shape, so
+a run without link policy keeps its previous world witness. Shape/heal evidence follows the same strict-before-admission
+counter boundary as partitions. Fork snapshots retain baselines, last arrivals,
+and both RNG streams; arming a run seed reseeds those streams as before.
+
+Every final report includes `network_witness`; runs using link policy fold it into
+`world_witness` as described above. Its
+versioned, little-endian, length-prefixed encoding hashes pending frame arrival,
+sequence, directed indices and SHA-256 of frame bytes; last arrivals; loss/jitter
+stream counters; layers ordered by fault ID with handle, pairs and policy; active
+cuts; and baselines. Counts delimit collections and strings. It retains bounded
+infrastructure state without packet contents or application schemas. This VMM
+change creates a new engine identity; hardware/replay qualification is separate
+from portable policy tests.
 
 Faults and control requests that take effect at the same simulated time T are
 ordered against sends as follows. The world applies a boundary at T only once
@@ -620,10 +680,10 @@ Inspect needs no original checkout or registry. Ordinary replay from the importe
 state uses the retained engine/guest/kernel inputs and preserves existing
 PASS/FAIL, ERROR, INCOMPLETE, TIMEOUT and MATCH/MISMATCH meanings. It requires the
 compatible installed Seedbox release and qualified host runtime/profile. Exporting
-engine bytes does not establish cross-host or cross-backend compatibility; full
-host drift is refused by the versioned admission policy; focused guest/profile
-acceptance remains a separate gate. Portable fixture replay verifies the bundle
-mechanism; offline application replay requires separate hardware acceptance.
+engine bytes does not establish cross-host or cross-backend compatibility;
+CPU/microcode, CPUID and capability drift is refused by the versioned admission
+policy; focused guest/profile acceptance remains a separate gate. Portable fixture
+replay verifies the bundle mechanism; offline application replay requires separate hardware acceptance.
 
 ### Explicit unqualified counters
 

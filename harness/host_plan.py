@@ -7,7 +7,8 @@ import subprocess
 import sys
 
 MAP = Path(__file__).with_name('host-check-map.json')
-ENGINE_INPUTS = ('crates/seedbox-vmm/**', 'guest/**', 'flake.nix', 'flake.lock',
+ENGINE_INPUTS = ('crates/seedbox-vmm/**', 'crates/seedbox-control/**', 'guest/**',
+                 'harness/vmm-rustc.py', 'flake.nix', 'flake.lock',
                  'rust-toolchain*', 'Cargo.lock', '.cargo/**')
 
 
@@ -20,6 +21,8 @@ def load_map(path=MAP):
         if not set(checks) <= known:
             raise ValueError('map references an unknown check')
     for rule in mapping['rules']:
+        if not set(rule.get('runs', [])) <= set(mapping.get('runs', {})):
+            raise ValueError('map references an unknown run')
         if 'diff_regex' in rule:
             re.compile(rule['diff_regex'])
     return mapping
@@ -38,13 +41,13 @@ def portable(path):
 
 
 def select_checks(changes, mapping=None, extra=(), diffs=None, engine_changed=None):
-    """Union matched rows; automatic cluster comparison needs changed engine inputs."""
+    """Union checks and reviewer runs; cluster needs changed inputs or an explicit check."""
     mapping = mapping or load_map()
     diffs = diffs or {}
     if engine_changed is None:
         engine_changed = any(not portable(path) and any(matches(path, glob) for glob in ENGINE_INPUTS)
                              for paths in changes.values() for path in paths)
-    reasons, skipped, warnings, reviewer_notes = {}, [], [], []
+    reasons, run_reasons, skipped, warnings, reviewer_notes = {}, {}, [], [], []
     def add(check, reason, explicit=False):
         if check == 'cluster-fixed' and not engine_changed and not explicit:
             return
@@ -80,7 +83,12 @@ def select_checks(changes, mapping=None, extra=(), diffs=None, engine_changed=No
                         continue
                     matched = True
                     for check in rule['checks']:
-                        add(check, dict(reason, category=rule['category']))
+                        add(check, dict(reason, category=rule['category']),
+                            explicit=rule.get('always', False))
+                    for run in rule.get('runs', []):
+                        why = dict(reason, category=rule['category'])
+                        if why not in run_reasons.setdefault(run, []):
+                            run_reasons[run].append(why)
             if not matched:
                 for check in mapping['core']:
                     add(check, dict(reason, category='unmatched path (fail closed)'))
@@ -92,7 +100,12 @@ def select_checks(changes, mapping=None, extra=(), diffs=None, engine_changed=No
         if check in ('core', 'perf-replay'):
             for required in mapping['core']:
                 add(required, dict(reason, category='core dependency'))
+    runs = {name: dict(spec, reasons=run_reasons[name])
+            for name, spec in mapping.get('runs', {}).items() if name in run_reasons}
+    for name, spec in runs.items():
+        reviewer_notes.append(f"{name}: reviewer host run required; {spec['comparison']}")
     return dict(checks={check: reasons[check] for check in mapping['checks'] if check in reasons},
+                runs=runs,
                 skipped=skipped, warnings=warnings, reviewer_notes=reviewer_notes)
 
 
@@ -119,7 +132,8 @@ def plan_revision(repo, base, head, extra=()):
     # A merged/reverted engine change can have identical inputs despite changed paths.
     main_sha = git(repo, 'rev-parse', '--verify', 'origin/main^{commit}').decode().strip()
     engine_paths = git(repo, 'diff', '--name-only', '--no-renames', '-z', main_sha, tip, '--',
-                       'crates/seedbox-vmm', 'guest', 'flake.nix', 'flake.lock',
+                       'crates/seedbox-vmm', 'crates/seedbox-control', 'guest',
+                       'harness/vmm-rustc.py', 'flake.nix', 'flake.lock',
                        'rust-toolchain*', 'Cargo.lock', '.cargo').split(b'\0')
     engine_changed = any(path and not portable(path.decode('utf-8', 'surrogateescape'))
                          for path in engine_paths)
@@ -150,8 +164,14 @@ def format_plan(plan, mapping=None):
         for reason in reasons:
             lines.append(f"  reason: {reason['path']} ({reason['category']})")
     lines.extend(plan.get('reviewer_notes', []))
+    for name, spec in plan.get('runs', {}).items():
+        performance = ''.join(f' {key}={spec[key]}' for key in ('undo', 'margin') if key in spec)
+        lines.append(f"run {name}: {spec['world']} engine={spec['engine']} "
+                     f"seed={spec['seed']} timeout={spec['timeout_seconds']}s{performance}")
+        for reason in spec['reasons']:
+            lines.append(f"  reason: {reason['path']} ({reason['category']})")
     lines.extend(plan['warnings'])
-    if not plan['checks']:
+    if not plan['checks'] and not plan.get('runs'):
         lines.append('host: none')
     return '\n'.join(lines)
 

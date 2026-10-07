@@ -117,7 +117,12 @@ def execute(plan, args):
     if stored:
         stored = existing(stored, 'SEEDBOX_VMM')
     cluster = 'cluster-fixed' in plan['checks']
-    etcd = existing(os.environ['SEEDBOX_ETCD'], 'SEEDBOX_ETCD') if cluster else None
+    etcd = None
+    if cluster:
+        value = os.environ.get('SEEDBOX_ETCD')
+        if not value:
+            raise ValueError('cluster-fixed planned; set SEEDBOX_ETCD to a static etcd binary')
+        etcd = existing(value, 'SEEDBOX_ETCD')
     main_sha = (plan.get('main') or git(args.repo, 'rev-parse', '--verify', 'origin/main^{commit}').decode().strip()) if cluster else None
     # Import the existing smoke readiness/lock wrapper only after host admission.
     sys.path.insert(0, str(HERE / 'smoke'))

@@ -78,7 +78,7 @@ The table below describes the current CLI authoring mode.
 | `x-seedbox.version` | Required integer `1`. |
 | `x-seedbox.seed` | Optional unsigned 64-bit fixed seed. The library run option overrides it; absence of both is an error. Zero is valid. |
 | `x-seedbox.limits` | Required positive `simulated_time` and `wall_time`. |
-| `x-seedbox.network` | Optional `latency` (default `1ms`) and `jitter` (default `0ns`). Jitter must be less than latency. |
+| `x-seedbox.network` | Optional `latency` (default `1ms`), `jitter` (default `0ns`) and directed `links` baselines (default `[]`). Jitter must be less than latency. See [directed policy](../../docs/runtime.md#directed-link-policy). |
 | `x-seedbox.schedule` | Optional `timer_jitter` and `stop_tolerance`, each defaulting to `0ns`. These are semantic schedule exploration settings. |
 | `x-seedbox.check` | Required known `service` and optional `exit_code` (default `0`, range 0–255). |
 | `x-seedbox.control` | Optional `{service: scenario}` selects the guest controller for the runtime RPC API. |

@@ -83,6 +83,18 @@ pub struct Network {
     pub name: String,
     pub latency_ns: u64,
     pub jitter_ns: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Link>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Link {
+    pub from: String,
+    pub to: String,
+    pub latency_ns: u64,
+    pub jitter_ns: u64,
+    pub loss_ppm: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -459,9 +471,10 @@ fn parse_inner(
         name: network_name,
         latency_ns: 1_000_000,
         jitter_ns: 0,
+        links: Vec::new(),
     };
     if let Some(raw) = ext.get("network") {
-        let net = fields(raw, "$.x-seedbox.network", &["latency", "jitter"])?;
+        let net = fields(raw, "$.x-seedbox.network", &["latency", "jitter", "links"])?;
         if let Some(v) = net.get("latency") {
             network.latency_ns = duration(v, "$.x-seedbox.network.latency", false)?;
         }
@@ -471,6 +484,63 @@ fn parse_inner(
     }
     if network.jitter_ns >= network.latency_ns {
         return invalid("$.x-seedbox.network.jitter", "must be less than latency");
+    }
+    if let Some(raw) = ext.get("network").and_then(|v| v.get("links")) {
+        let mut pairs = std::collections::BTreeSet::new();
+        for (i, raw) in sequence(raw, "$.x-seedbox.network.links")?
+            .iter()
+            .enumerate()
+        {
+            let p = format!("$.x-seedbox.network.links[{i}]");
+            let entry = fields(raw, &p, &["from", "to", "latency", "jitter", "loss_ppm"])?;
+            let from = text(get(entry, "from"), &format!("{p}.from"))?;
+            let to = text(get(entry, "to"), &format!("{p}.to"))?;
+            for (key, name) in [("from", &from), ("to", &to)] {
+                if !services.contains_key(name) {
+                    return invalid(&format!("{p}.{key}"), "unknown service");
+                }
+            }
+            if !pairs.insert((from.clone(), to.clone())) {
+                return invalid(&p, "duplicate directed pair");
+            }
+            let latency_ns = duration(get(entry, "latency"), &format!("{p}.latency"), false)?;
+            let jitter_ns = entry
+                .get("jitter")
+                .map(|v| duration(v, &format!("{p}.jitter"), true))
+                .transpose()?
+                .unwrap_or(0);
+            let loss_ppm = entry
+                .get("loss_ppm")
+                .map(|v| {
+                    v.as_u64().filter(|n| *n <= 1_000_000).ok_or_else(|| {
+                        validation(
+                            &format!("{p}.loss_ppm"),
+                            "expected an integer in [0, 1000000]",
+                        )
+                    })
+                })
+                .transpose()?
+                .unwrap_or(0);
+            if latency_ns < network.latency_ns {
+                return invalid(&format!("{p}.latency"), "must be at least global latency");
+            }
+            if jitter_ns >= latency_ns {
+                return invalid(&format!("{p}.jitter"), "must be less than latency");
+            }
+            if latency_ns
+                .checked_add(jitter_ns)
+                .is_none_or(|n| n > 3_600_000_000_000)
+            {
+                return invalid(&p, "latency + jitter must not exceed one hour");
+            }
+            network.links.push(Link {
+                from,
+                to,
+                latency_ns,
+                jitter_ns,
+                loss_ppm,
+            });
+        }
     }
     let mut schedule = Schedule::default();
     if let Some(raw) = ext.get("schedule") {

@@ -1,5 +1,13 @@
 #[allow(dead_code)]
 #[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/links.rs"]
+mod links;
+#[allow(dead_code)]
+#[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/rng.rs"]
+mod rng;
+#[allow(dead_code)]
+#[rustfmt::skip]
 #[path = "../../seedbox-vmm/src/faults.rs"]
 mod engine;
 use serde_json::json;
@@ -464,4 +472,50 @@ fn a_reboot_takes_only_what_arrived_before_it() {
         queue.into_values().collect::<Vec<_>>(),
         vec!["in transit at the reboot", "later"]
     );
+}
+
+#[test]
+fn link_layers_and_cuts_survive_machine_lifecycle_and_heal_independently() {
+    use engine::{Life, Lifecycle};
+    let names = vec!["a".into(), "b".into()];
+    let links = links::Links::new(
+        1009,
+        &names,
+        links::Policy {
+            latency_ns: 10,
+            jitter_ns: 0,
+            loss_ppm: 0,
+        },
+        std::collections::BTreeMap::new(),
+    )
+    .unwrap();
+    let mut f = engine::Faults::with_links(vec![
+        json!({"id":1,"at_ns":10,"deadline_ns":10,"action":"shape","handle":"shape","from":["a"],"to":["b"],"latency_ns":30,"jitter_ns":0,"loss_ppm":0}),
+        json!({"id":2,"at_ns":10,"deadline_ns":10,"action":"partition","handle":"cut","left":["a"],"right":["b"]}),
+        json!({"id":3,"at_ns":10,"deadline_ns":10,"action":"pause","machine":"b"}),
+        json!({"id":4,"at_ns":20,"deadline_ns":20,"action":"crash","machine":"b"}),
+        json!({"id":5,"at_ns":30,"deadline_ns":30,"action":"reboot","machine":"b"}),
+        json!({"id":6,"at_ns":40,"deadline_ns":40,"action":"heal","handle":"cut"}),
+        json!({"id":7,"at_ns":50,"deadline_ns":50,"action":"heal","handle":"shape"}),
+    ], names, links).unwrap();
+    for (at, op, life) in [
+        (10, Lifecycle::Pause, Life::Paused),
+        (20, Lifecycle::Crash, Life::Down),
+        (30, Lifecycle::Reboot, Life::Up),
+    ] {
+        f.apply_due(at);
+        assert_eq!(f.take_lifecycle(), vec![(1, op)]);
+        assert_eq!(f.life(1), life);
+        assert_eq!(f.active_handles(), vec!["cut", "shape"]);
+        assert!(f.blocked(0, 1));
+        assert_eq!(f.links.policy((0, 1)).latency_ns, 30);
+    }
+    f.apply_due(40);
+    assert!(!f.blocked(0, 1));
+    assert_eq!(f.links.decide(0, 1, 40, false), links::Outcome::Deliver(70));
+    assert_eq!(f.links.policy((1, 0)).latency_ns, 10);
+    f.apply_due(50);
+    assert!(f.active_handles().is_empty());
+    assert_eq!(f.links.policy((0, 1)).latency_ns, 10);
+    assert!(f.error.is_none());
 }

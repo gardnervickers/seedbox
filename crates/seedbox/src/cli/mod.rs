@@ -33,6 +33,7 @@ Exit status:
   1    FAIL, replay MISMATCH, or diff DIFFERENT
   2    ERROR, a replay that is NOT_COMPARABLE, or a usage or setup error
   3    INCOMPLETE (wall-time limit or cancelled)
+       A cancelled or incomplete replay reports 2 (NOT_COMPARABLE)
   124  TIMEOUT (simulated-time limit)";
 
 const HOST_CONTROL_HELP: &str = "\
@@ -66,7 +67,7 @@ enum Command {
         #[arg(long, value_enum, default_value_t = TemplateArg::Etcd)]
         template: TemplateArg,
     },
-    /// Check a Compose file against the supported subset, without images or guests.
+    /// Check Compose services and directed network policies, without images or guests.
     Validate {
         #[command(flatten)]
         compose: ComposeArg,

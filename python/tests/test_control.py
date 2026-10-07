@@ -9,7 +9,7 @@ import threading
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from seedbox import FaultError, Machine, Partition, ProtocolError, World
+from seedbox import Controller, FaultError, Machine, Partition, ProtocolError, Shape, World
 
 
 def reply(request_id=1, result=None, **changes):
@@ -109,6 +109,27 @@ class ControlTests(unittest.TestCase):
             {"version": 1, "id": 6, "op": "now"},
         ])
         self.assertTrue(peer.closed)
+
+    def test_shape_sends_absolute_nanosecond_policy_and_returns_healable_handle(self):
+        self.assertIs(Controller, World)
+        peer = Peer(reply(result={"handle": "p1"}) + reply(2))
+        with World(peer) as world:
+            shaped = world.shape(["client"], [Machine("server-vm")], latency=20_000_000, jitter=1_000_000, loss_ppm=500_000)
+            self.assertIsInstance(shaped, Shape)
+            world.heal(shaped)
+        self.assertEqual(peer.requests[0], {"version": 1, "id": 1, "op": "shape", "from": [{"service": "client"}], "to": [{"machine": "server-vm"}], "latency_ns": 20_000_000, "jitter_ns": 1_000_000, "loss_ppm": 500_000})
+        self.assertEqual(peer.requests[1]["handle"], "p1")
+
+    def test_shape_defaults_and_invalid_local_values(self):
+        peer = Peer(reply(result={"handle": "p1"}))
+        with World(peer) as world:
+            for kwargs in [{"latency": True}, {"latency": 1.5}, {"latency": -1}, {"latency": 10, "jitter": 10}, {"latency": 10, "loss_ppm": 1_000_001}, {"latency": 3_600_000_000_000, "jitter": 1}]:
+                with self.assertRaises(ValueError):
+                    world.shape(["client"], ["server"], **kwargs)
+            self.assertEqual(peer.requests, [])
+            world.shape(["client"], ["server"], latency=10)
+        self.assertEqual(peer.requests[0]["jitter_ns"], 0)
+        self.assertEqual(peer.requests[0]["loss_ppm"], 0)
 
     def test_graceful_reconnect_starts_new_ids_and_preserves_explicit_handles(self):
         # Use actual Unix streams and independent literal peer messages. The

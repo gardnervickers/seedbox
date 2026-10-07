@@ -112,8 +112,23 @@ output omitted by the original capture policy is not transferred. Export/import
 never replace existing data; the default transfer cap is 32 GiB for unique objects
 and separately for materialized log bytes (`--max-bytes` overrides it).
 
-Run/replay enforce the versioned admitted host/engine/kernel policy. Matching a
-second machine is compatibility admission, not cross-host qualification. Old
+Directed network baselines belong in `x-seedbox.network.links`, for example
+`[{from: server, to: client, latency: 20ms, jitter: 2ms, loss_ppm: 50000}]`
+using this project's service names. Each pair is unique; latency is required,
+jitter and loss default to zero. Latency cannot be below global network latency,
+jitter must be less than latency, their sum is at most one hour, and loss is an
+integer from 0 to 1000000. `seedbox validate` checks these bounds.
+
+Guest controllers can call `world.shape(["server"], ["client"], latency=20_000_000,
+jitter=2_000_000, loss_ppm=50000)` and `world.heal(handle)`. Shapes apply only in
+the requested direction. The latest live layer wins; healing reveals the prior
+policy. Partitions dominate shapes, and already routed frames retain their
+send-time decisions. Inspection includes shape handles and `loss_dropped` counters.
+Network state contributes a `network_witness` to the final world witness.
+
+Run/replay enforce the versioned admitted host/engine/guest-kernel policy;
+host-kernel bytes are not checked. Matching a second machine is compatibility
+admission, not cross-host qualification. Old
 records stay inspectable/exportable/importable, but absent or drifted host proof
 is NOT_COMPARABLE (exit 2) in this CLI and cannot be bypassed with
 `--allow-engine-change`. A retained previous CLI is only historical evidence.

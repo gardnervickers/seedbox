@@ -31,6 +31,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Input | Default | Override |
 | --- | --- | --- |
 | Compose file | `compose.yaml` in the given directory (default `.`) | positional path |
+| Directed link baselines | no overrides; global latency/jitter and zero loss | `x-seedbox.network.links` |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
 | Exploration count | `1` | `--count` |
 | Exploration workers | `1`, sequential execution | `--workers` (1..32; automatic CPU selection for parallel execution) |
@@ -47,6 +48,25 @@ directory. Every runtime input has a default, so no flags are required:
 | Diff inputs | Two required retained run directories; no runtime inputs or state lookup | positional `RUN_A RUN_B` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
 
+Directed baselines are optional Compose settings. For example, with `server` and
+`client` services:
+
+```yaml
+x-seedbox:
+  network:
+    latency: 1ms
+    links:
+      - {from: server, to: client, latency: 20ms, jitter: 2ms, loss_ppm: 50000}
+```
+
+Each entry affects one direction. Latency is required; jitter and loss default to
+zero. Global latency remains the fixed scheduling lower bound for every link.
+`seedbox validate` checks the services, duplicate pairs, and policy bounds before
+preparation. Guest controllers can temporarily override links with
+`world.shape(["server"], ["client"], latency=20_000_000, jitter=2_000_000, loss_ppm=50000)`
+and release the returned handle with `world.heal(handle)`; see
+[network policy](docs/runtime.md#directed-link-policy).
+
 For development artifacts, pass `--allow-dev-engine` to `run`, `explore`, `replay`
 or `doctor`. Unpinned engine or guest-kernel bytes record the semantic parameter
 `engine_qualification = "dev-unpinned"` and are reported as an unqualified dev
@@ -60,7 +80,8 @@ automatically. It applies to retained disks, including Compose named volumes. Se
 
 `seedbox help run` lists every option. A run prints `OUTCOME: run-directory`;
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
-INCOMPLETE and 124 TIMEOUT. Offline `diff` exits 0 for MATCH, 1 for DIFFERENT,
+INCOMPLETE and 124 TIMEOUT. A cancelled or incomplete replay exits 2
+(NOT_COMPARABLE). Offline `diff` exits 0 for MATCH, 1 for DIFFERENT,
 and 2 for usage/setup or invalid retained evidence.
 
 Pause a running world from another terminal with `sudo seedbox pause RUN`, then
@@ -158,6 +179,34 @@ rebuilt OCI images to have identical bytes.
 
 ## Contributor checks
 
+`cargo build-vmm` and `cargo test-vmm` select `harness/vmm-rustc.py` only for
+the standalone VMM build and its dependencies. It remaps checkout, home/Cargo
+registry and rustc sysroot source paths, keeps release `debug = 1`, and removes
+the Nix dev shell's synthetic `outputs/out/lib` RPATH. Nix stdenv adds that
+entry through `_addRpathPrefix`; real library and Nix store paths remain intact.
+Other Cargo builds and their target directories are unaffected.
+The wrapper's content hash is included in Cargo's compiler fingerprint, so
+enabling or editing it invalidates cached VMM artifacts and dependencies.
+The shared `seedbox-control` source is reached through
+`crates/seedbox-vmm/seedbox-control`, a symlink inside the VMM workspace. Cargo
+then hashes its path relative to that workspace instead of the checkout's
+absolute path when computing crate metadata. The VMM's inherited workspace
+package and dependency keys match the root workspace.
+
+On Linux in the project dev shell, run
+`bash harness/check-vmm-reproducible.sh [REV]` (default `HEAD`). It builds two
+fresh archives of the same commit at different temporary paths, compares SHA-256,
+rejects embedded checkout, HOME, CARGO_HOME and rustc sysroot paths, prints
+per-crate `-C metadata` and differing embedded paths on mismatch,
+and removes both checkouts on success or failure. It needs neither KVM nor root.
+Equality assumes the same pinned toolchain, libraries and build options; this
+does not establish reproducibility across different toolchains.
+
+These flags change every engine hash. Existing pinned/accepted engine hashes
+cannot be reproduced from source with the new flags; the next engine re-pin
+must use the new build and complete host qualification. Retained old engine
+bytes remain the inputs for their existing runs. This change updates no pins.
+
 Portable checks must pass at the PR or merge-train head before spending AMD
 host time. Use the fast pre-check on a Mac or any other non-KVM machine:
 
@@ -227,14 +276,15 @@ bytes and does not establish a pass for the committed SHA.
   virtual time; user RDTSC/RDTSCP trap via CR4.TSD and are emulated. The
   kernel's syscall yield hook remains, but the engine never requests it.
 - **Network and scheduling.** virtio-net over virtio-mmio into an in-memory
-  fabric with seeded latency/jitter and directed partitions. The world runs the
+  fabric with per-direction latency, jitter, loss and partitions. The world runs the
   machine furthest behind in slices that never pass its causal horizon (the
   other machines' times plus link latency) or its next event. A slice may end
   at the first deterministic point in the last half-latency before that
   boundary (capped by `stop_tolerance_ns`), and events are delivered at the
   first stop up to that long before they are due: early by a bounded amount,
   never late, and never before they were sent.
-- **Witness.** Each machine hashes every deterministic exit; `--digest` adds
+- **Witness.** A network hash covers pending frames, link streams and active policies.
+  Each machine hashes every deterministic exit; `--digest` adds
   a hash of registers and all guest RAM; `--trace` writes every exit.
 
 ## Host requirements
@@ -265,10 +315,10 @@ runtime acceptance before use. Disabled selected-event readiness is checked
 before preparation and again under held leases; no guest counter is enabled by
 admission. Intel determinism is not established.
 
-The versioned `amd-zen3-engine52eb-v1` admission policy checks AMD family 25,
-model 33, stepping 0 and microcode 0xa20102e, exact booted/current host kernel and
-controlled guest-kernel bytes, accepted engine bytes, KVM capabilities and the
-engine's complete existing CPUID policy. Before image preparation, it temporarily
+The versioned `amd-zen3-engine52eb-v2` admission policy checks AMD family 25,
+model 33, stepping 0 and microcode 0xa20102e, controlled guest-kernel bytes,
+accepted engine bytes, KVM capabilities and the engine's complete existing CPUID
+policy. Host-kernel bytes are not checked. Before image preparation, it temporarily
 reserves an eligible core, checks each online/allowed SMT sibling and opens the
 exact perf event disabled. Descriptors close and affinity/reservations restore
 before preparation. The leased execution core is checked again before MSR writes.
