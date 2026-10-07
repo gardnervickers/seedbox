@@ -44,6 +44,8 @@ pub struct Links {
     pub baselines: BTreeMap<Pair, Policy>,
     pub layers: BTreeMap<u32, Layer>,
     pub last: BTreeMap<Pair, u64>,
+    /// A shape layer has been applied at some point in this run.
+    pub shaped: bool,
     loss: BTreeMap<Pair, Rng>,
     jitter: BTreeMap<Pair, Rng>,
 }
@@ -76,6 +78,7 @@ impl Links {
             baselines,
             layers: BTreeMap::new(),
             last: BTreeMap::new(),
+            shaped: false,
             loss: BTreeMap::new(),
             jitter: BTreeMap::new(),
         };
@@ -155,6 +158,10 @@ impl Links {
             }
         }
     }
+    /// The run has baseline overrides or has applied a shape layer.
+    pub fn in_use(&self) -> bool {
+        self.shaped || !self.baselines.is_empty()
+    }
     pub fn policy(&self, pair: Pair) -> Policy {
         self.layers
             .values()
@@ -175,6 +182,7 @@ impl Links {
         if self.layers.contains_key(&id) || self.layers.values().any(|l| l.handle == handle) {
             return Err("duplicate active shape".into());
         }
+        self.shaped = true;
         self.layers.insert(
             id,
             Layer {
@@ -413,5 +421,18 @@ mod tests {
             .unwrap();
         assert_ne!(hash(&changed), original);
         assert_eq!(hash(&l.clone()), original);
+    }
+    #[test]
+    fn only_baselines_or_an_applied_shape_put_links_in_use() {
+        let mut l = links(policy(10, 0, 0));
+        assert!(!l.in_use());
+        l.decide(0, 1, 1, false);
+        assert!(!l.in_use());
+        l.shape(1, "s".into(), BTreeSet::from([(0, 1)]), policy(20, 0, 0))
+            .unwrap();
+        l.heal("s");
+        assert!(l.in_use(), "a healed shape still shaped the run");
+        let based = Links::new(1, &names(), policy(10, 0, 0), BTreeMap::from([((0, 1), policy(20, 0, 0))])).unwrap();
+        assert!(based.in_use());
     }
 }

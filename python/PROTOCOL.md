@@ -140,7 +140,8 @@ The Python API is `world.shape(from_, to, latency=..., jitter=0, loss_ppm=0)`
 with nanosecond integers (`Controller` is an alias for `World`); `world.heal()` accepts either returned handle type.
 Shapes take effect at admission, and each frame retains its send-time decision.
 Counters include `delivered`, `partition_dropped`, `receiver_dropped`, and
-`loss_dropped`; even a lost candidate consumes one loss and one jitter sample.
+`loss_dropped` (omitted while zero); even a lost candidate consumes one loss
+and one jitter sample.
 
 An operation error uses `ok: false` and `error` instead of a result:
 

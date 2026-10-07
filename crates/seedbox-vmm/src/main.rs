@@ -69,7 +69,12 @@ impl World {
     fn counter_snapshot(&self,counts:&BTreeMap<(usize,usize),[u64;4]>)->Value {
         let snapshot:BTreeMap<_,_>=counts.iter().map(|(&(from,to),counts)|(
             format!("{}->{}",self.machines[from].name,self.machines[to].name),
-            json!({"delivered":counts[0],"partition_dropped":counts[1],"receiver_dropped":counts[2],"loss_dropped":counts[3]})
+            {
+                // Omitted while zero, so a run that loses nothing keeps main's counters.
+                let mut c=json!({"delivered":counts[0],"partition_dropped":counts[1],"receiver_dropped":counts[2]});
+                if counts[3]>0 {c["loss_dropped"]=json!(counts[3]);}
+                c
+            }
         )).collect();json!(snapshot)
     }
     fn schedule(&mut self, m: usize, t: u64, p: Payload) {
@@ -841,7 +846,11 @@ fn report(
     for (&pair,_) in legacy_cuts { links::pair_hash(&mut network_hash,pair); }
     let network_witness = network_hash.finalize();
     let mut world_witness = Sha256::new();
-    world_witness.update(network_witness);
+    // Only a run that uses link policy carries the network witness, so a run
+    // without it keeps the world witness it had before link policy existed.
+    if world.faults.links.in_use() {
+        world_witness.update(network_witness);
+    }
     if world.control.controller.is_some() {
         world_witness.update(serde_json::to_vec(&world.control.log).map_err(|e| e.to_string())?);
     }

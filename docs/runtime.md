@@ -242,7 +242,11 @@ a delay decrease preserves FIFO and head-of-line waiting. The scheduler's global
 early-delivery window remains unchanged.
 
 Counters distinguish `delivered`, `partition_dropped`, `receiver_dropped`, and
-`loss_dropped`. Shape/heal evidence follows the same strict-before-admission
+`loss_dropped`; `loss_dropped` is omitted for a link that has lost nothing.
+The report's `network_witness` hashes in-flight frames, per-link last
+arrivals, stream positions, live layers, cuts and baselines. It is folded into
+`world_witness` only when the run has baseline overrides or applied a shape, so
+a run without link policy keeps its previous world witness. Shape/heal evidence follows the same strict-before-admission
 counter boundary as partitions. Fork snapshots retain baselines, last arrivals,
 and both RNG streams; arming a run seed reseeds those streams as before.
 

@@ -493,6 +493,7 @@ fn typed_network_plan_preserves_targets_without_attributing_check_service() {
 #[test]
 fn baseline_links_resolve_service_names_to_prepared_machines() {
     fixture(|base| {
+        assert!(vmm::world(base).unwrap()["network"].get("links").is_none());
         let mut network = base.network.clone();
         network.links.push(seedbox::config::Link {
             from: "server".into(),
