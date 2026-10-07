@@ -67,7 +67,7 @@ enum Command {
         #[arg(long, value_enum, default_value_t = TemplateArg::Etcd)]
         template: TemplateArg,
     },
-    /// Check a Compose file against the supported subset, without images or guests.
+    /// Check Compose services and directed network policies, without images or guests.
     Validate {
         #[command(flatten)]
         compose: ComposeArg,

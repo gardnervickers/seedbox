@@ -551,11 +551,21 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
             Ok(machine)
         })
         .collect::<Result<Vec<_>>>()?;
+    let links = request.network.links.iter().map(|link| {
+        let machine = |service: &str| request.prepared.placement.get(service).ok_or_else(||Error::Integrity(format!("missing link placement for {service}")));
+        Ok(json!({"from":machine(&link.from)?,"to":machine(&link.to)?,"latency_ns":link.latency_ns,"jitter_ns":link.jitter_ns,"loss_ppm":link.loss_ppm}))
+    }).collect::<Result<Vec<_>>>()?;
+    let mut network =
+        json!({"latency_ns":request.network.latency_ns,"jitter_ns":request.network.jitter_ns});
+    // Absent unless used, so a world without link overrides is unchanged.
+    if !links.is_empty() {
+        network["links"] = json!(links);
+    }
     let mut world = json!({
         "kernel":artifact(&request.prepared.kernel)?, "mem_mb":memory,
         "duration_ns":request.limits.simulated_time_ns,"end_on_exit":workload_machine,
         "timer_jitter_ns":request.schedule.timer_jitter_ns,"stop_tolerance_ns":request.schedule.stop_tolerance_ns,
-        "network":{"latency_ns":request.network.latency_ns,"jitter_ns":request.network.jitter_ns},
+        "network":network,
         "machines":machines,"control":control,
         "control_channel":"virtio-console-v1",
     });
@@ -801,6 +811,48 @@ fn validate_control_history(
                     handle,
                     left: left.iter().map(&resolve).collect::<Result<_>>()?,
                     right: right.iter().map(&resolve).collect::<Result<_>>()?,
+                }
+            }
+            Operation::Shape {
+                from,
+                to,
+                latency_ns,
+                jitter_ns,
+                loss_ppm,
+            } => {
+                let handle = if response {
+                    &metadata["result"]["handle"]
+                } else {
+                    &row["plan"]["handle"]
+                };
+                let handle = handle.as_str().ok_or_else(bad)?.to_owned();
+                if handle.is_empty()
+                    || (response && e != Some(a))
+                    || latency_ns < request.network.latency_ns
+                    || jitter_ns >= latency_ns
+                    || latency_ns
+                        .checked_add(jitter_ns)
+                        .is_none_or(|n| n > 3_600_000_000_000)
+                    || loss_ppm > 1_000_000
+                {
+                    return Err(bad());
+                }
+                let from: Vec<_> = from.iter().map(&resolve).collect::<Result<_>>()?;
+                let to: Vec<_> = to.iter().map(&resolve).collect::<Result<_>>()?;
+                if from.is_empty()
+                    || to.is_empty()
+                    || from.iter().chain(&to).collect::<BTreeSet<_>>().len()
+                        != from.len() + to.len()
+                {
+                    return Err(bad());
+                }
+                Action::Shape {
+                    handle,
+                    from,
+                    to,
+                    latency_ns,
+                    jitter_ns,
+                    loss_ppm,
                 }
             }
             Operation::Heal { handle } => {

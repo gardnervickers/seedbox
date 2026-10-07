@@ -1,5 +1,7 @@
 //! Typed portable fault state. Only outstanding boundaries enter the scheduler;
 //! completed history is retained as evidence but never searched to find work.
+use crate::links::{Links, Policy};
+use sha2::{Digest, Sha256};
 use seedbox_control::{Action, Plan};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -47,6 +49,7 @@ enum Event {
 #[derive(Clone)]
 pub struct Faults {
     pub log: Vec<Value>,
+    pub links: Links,
     entries: Vec<Entry>,
     boundaries: BTreeSet<(u64, u32, Event)>,
     waiting_ready: Vec<BTreeSet<u32>>,
@@ -67,9 +70,14 @@ pub struct Faults {
 }
 impl Faults {
     pub fn new(plans: Vec<Value>, names: Vec<String>) -> Result<Self, String> {
+        let links = Links::new(0, &names, Policy { latency_ns: 1, jitter_ns: 0, loss_ppm: 0 }, BTreeMap::new())?;
+        Self::with_links(plans, names, links)
+    }
+    pub fn with_links(plans: Vec<Value>, names: Vec<String>, links: Links) -> Result<Self, String> {
         let count = names.len();
         let mut f = Self {
             log: vec![],
+            links,
             entries: vec![],
             boundaries: BTreeSet::new(),
             waiting_ready: vec![BTreeSet::new(); count],
@@ -151,6 +159,22 @@ impl Faults {
                     }
                 }
             }
+            Action::Shape {handle, from, to, latency_ns, jitter_ns, loss_ppm} => {
+                Policy {latency_ns:*latency_ns, jitter_ns:*jitter_ns, loss_ppm:*loss_ppm}.validate(self.links.global.latency_ns)?;
+                if handle.is_empty() || from.is_empty() || to.is_empty() { return Err("empty fault handle/shape side".into()); }
+                let mut members = BTreeSet::new();
+                let mut sides = Vec::new();
+                for side in [from,to] {
+                    let mut indices = Vec::new();
+                    for name in side {
+                        let m = self.names.iter().position(|n|n==name).ok_or("unknown shape machine")?;
+                        if !members.insert(m) { return Err("shape sides must be disjoint with unique machines".into()); }
+                        indices.push(m);
+                    }
+                    sides.push(indices);
+                }
+                for &a in &sides[0] { for &b in &sides[1] { pairs.insert((a,b)); } }
+            }
             Action::Heal { handle } => {
                 if handle.is_empty() {
                     return Err("empty fault handle".into());
@@ -221,7 +245,8 @@ impl Faults {
             })
     }
     pub fn active_handles(&self) -> Vec<String> {
-        self.handles.keys().cloned().collect()
+        let mut handles: Vec<_> = self.handles.keys().cloned().chain(self.links.layers.values().map(|l|l.handle.clone())).collect();
+        handles.sort(); handles
     }
     pub fn process_state(&self, machine: usize) -> &'static str {
         match self.life[machine] {
@@ -246,6 +271,15 @@ impl Faults {
             Action::Crash{..} if self.life[index]==Life::Down => Some("target machine is already down"),
             Action::Reboot{..} if self.life[index]!=Life::Down => Some("target machine is not down"),
             _ => None,
+        }
+    }
+    pub fn network_witness(&self, h: &mut Sha256) {
+        self.links.witness(h);
+        h.update((self.handles.len() as u64).to_le_bytes());
+        for (handle,pairs) in &self.handles {
+            crate::links::string_hash(h,handle);
+            h.update((pairs.len() as u64).to_le_bytes());
+            for &pair in pairs { crate::links::pair_hash(h,pair); }
         }
     }
     pub fn blocked(&self, from: usize, to: usize) -> bool {
@@ -393,7 +427,7 @@ impl Faults {
                             }
                         }
                         Action::Partition { handle, .. } => {
-                            if self.handles.contains_key(&handle) {
+                            if self.active_handles().contains(&handle) {
                                 self.fail(i, "duplicate active partition".into());
                                 continue;
                             }
@@ -409,9 +443,20 @@ impl Faults {
                             );
                             self.changed_network.push(i);
                         }
+                        Action::Shape {handle, latency_ns, jitter_ns, loss_ppm, ..} => {
+                            if self.active_handles().contains(&handle) { self.fail(i,"duplicate active handle".into()); continue; }
+                            if let Err(error) = self.links.shape(id, handle.clone(), self.entries[i].pairs.clone(), Policy {latency_ns,jitter_ns,loss_ppm}) { self.fail(i,error); continue; }
+                            self.applied(i,now,format!("handle={handle}; in-flight frames retained"));
+                            self.changed_network.push(i);
+                        }
                         Action::Heal { handle } => {
+                            if self.links.heal(&handle) {
+                                self.applied(i,now,format!("handle={handle}; prior policy revealed"));
+                                self.changed_network.push(i);
+                                continue;
+                            }
                             let Some(pairs) = self.handles.remove(&handle) else {
-                                self.fail(i, "heal of inactive partition".into());
+                                self.fail(i, "heal of inactive handle".into());
                                 continue;
                             };
                             for pair in pairs {
@@ -511,5 +556,54 @@ fn life_name(life: Life) -> &'static str {
         Life::Up => "running",
         Life::Paused => "paused",
         Life::Down => "down",
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+    fn shape(id:u32, handle:&str, latency:u64) -> Value {
+        json!({"id":id,"at_ns":id as u64*10,"deadline_ns":id as u64*10+1,"action":"shape","handle":handle,"from":["a"],"to":["b"],"latency_ns":latency,"jitter_ns":0,"loss_ppm":0})
+    }
+    fn heal(id:u32,handle:&str)->Value { json!({"id":id,"at_ns":id as u64*10,"deadline_ns":id as u64*10+1,"action":"heal","handle":handle}) }
+    fn fixture(plans:Vec<Value>) -> Faults {
+        let names = vec!["a".into(),"b".into(),"c".into()];
+        let links = Links::new(1009,&names,Policy {latency_ns:10,jitter_ns:0,loss_ppm:0},BTreeMap::from([((0,1),Policy {latency_ns:20,jitter_ns:0,loss_ppm:0})])).unwrap();
+        Faults::with_links(plans,names,links).unwrap()
+    }
+    #[test]
+    fn overlapping_layers_heal_in_either_order_and_reveal_baseline_and_global() {
+        for order in [["old","new"],["new","old"]] {
+            let mut f=fixture(vec![shape(1,"old",30),shape(2,"new",40),heal(3,order[0]),heal(4,order[1])]);
+            f.apply_due(9); assert_eq!(f.links.policy((0,1)).latency_ns,20);
+            f.apply_due(10); assert_eq!(f.links.policy((0,1)).latency_ns,30);
+            f.apply_due(20); assert_eq!(f.links.policy((0,1)).latency_ns,40);
+            assert_eq!(f.active_handles(),vec!["new","old"]);
+            f.apply_due(30); assert_eq!(f.links.policy((0,1)).latency_ns,if order[0]=="old" {40} else {30});
+            f.apply_due(40); assert_eq!(f.links.policy((0,1)).latency_ns,20);
+            assert_eq!(f.links.policy((1,0)).latency_ns,10);
+            assert!(f.active_handles().is_empty()); assert!(f.error.is_none());
+            assert_eq!(f.log[0]["status"],"applied"); assert!(f.log[0]["detail"].as_str().unwrap().contains("handle=old"));
+        }
+    }
+    #[test]
+    fn cut_dominates_live_shape_then_heal_resumes_identical_stream_position() {
+        let mut f=fixture(vec![shape(1,"s",30),json!({"id":2,"at_ns":20,"deadline_ns":21,"action":"partition","handle":"p","left":["a"],"right":["b"]}),heal(3,"p"),heal(4,"s")]);
+        f.apply_due(10); let mut reference = f.links.clone();
+        f.apply_due(20);
+        assert_eq!(f.links.decide(0,1,20,f.blocked(0,1)),crate::links::Outcome::Cut);
+        assert_eq!(f.links.last,reference.last);
+        f.apply_due(30);
+        assert_eq!(f.links.decide(0,1,30,f.blocked(0,1)),reference.decide(0,1,30,false));
+        let mut h=Sha256::new(); f.links.witness(&mut h); let mut r=Sha256::new(); reference.witness(&mut r);
+        assert_eq!(h.finalize(),r.finalize());
+        f.apply_due(40); assert_eq!(f.links.policy((0,1)).latency_ns,20);
+    }
+    #[test]
+    fn invalid_shape_plans_and_inactive_heal_fail() {
+        for invalid in [shape(1,"s",9), json!({"id":1,"at_ns":10,"deadline_ns":11,"action":"shape","handle":"s","from":["a"],"to":["a"],"latency_ns":10,"jitter_ns":0,"loss_ppm":0})] {
+            let mut f=fixture(vec![]); assert!(f.append(serde_json::from_value(invalid).unwrap()).is_err());
+        }
+        let mut f=fixture(vec![heal(1,"missing")]); f.apply_due(10); assert!(f.error.is_some());
     }
 }

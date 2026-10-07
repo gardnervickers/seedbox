@@ -41,6 +41,13 @@ pub enum Operation {
         left: Vec<Target>,
         right: Vec<Target>,
     },
+    Shape {
+        from: Vec<Target>,
+        to: Vec<Target>,
+        latency_ns: u64,
+        jitter_ns: u64,
+        loss_ppm: u64,
+    },
     Heal {
         handle: String,
     },
@@ -75,6 +82,14 @@ pub enum Action {
         left: Vec<String>,
         right: Vec<String>,
     },
+    Shape {
+        handle: String,
+        from: Vec<String>,
+        to: Vec<String>,
+        latency_ns: u64,
+        jitter_ns: u64,
+        loss_ppm: u64,
+    },
     Heal {
         handle: String,
     },
@@ -101,6 +116,7 @@ impl Action {
             Self::Stop { .. } => "stop",
             Self::Restart { .. } => "restart",
             Self::Partition { .. } => "partition",
+            Self::Shape { .. } => "shape",
             Self::Heal { .. } => "heal",
             Self::Pause { .. } => "pause",
             Self::Resume { .. } => "resume",

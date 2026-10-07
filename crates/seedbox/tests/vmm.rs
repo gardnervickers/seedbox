@@ -37,6 +37,7 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
             wall_time_ns: 5_000_000_000,
         },
         network: &Network {
+            links: Vec::new(),
             name: "private".into(),
             latency_ns: 100_000,
             jitter_ns: 20_000,
@@ -534,6 +535,110 @@ fn typed_network_plan_preserves_targets_without_attributing_check_service() {
         assert!(vmm::report(&serde_json::to_vec(&controller_target).unwrap(), &request).is_err());
         raw["faults"][0]["request"]["deadline_ns"] = json!("bad");
         assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
+    });
+}
+
+#[test]
+fn baseline_links_resolve_service_names_to_prepared_machines() {
+    fixture(|base| {
+        assert!(vmm::world(base).unwrap()["network"].get("links").is_none());
+        let mut network = base.network.clone();
+        network.links.push(seedbox::config::Link {
+            from: "server".into(),
+            to: "client".into(),
+            latency_ns: 200_000,
+            jitter_ns: 10_000,
+            loss_ppm: 500_000,
+        });
+        let request = ExecutionRequest {
+            network: &network,
+            ..*base
+        };
+        assert_eq!(
+            vmm::world(&request).unwrap()["network"]["links"],
+            json!([{"from":"server-machine","to":"client-machine","latency_ns":200_000,"jitter_ns":10_000,"loss_ppm":500_000}])
+        );
+        network.links[0].from = "missing".into();
+        assert!(vmm::world(&ExecutionRequest {
+            network: &network,
+            ..*base
+        })
+        .is_err());
+    });
+}
+
+#[test]
+fn shape_transcripts_validate_handle_timing_absolute_policy_and_directed_sides() {
+    fixture(|base| {
+        // Use a third machine as controller so both sides are in the failure model.
+        let mut prepared = base.prepared.clone();
+        let hash = prepared.kernel.clone();
+        prepared
+            .placement
+            .insert("scenario".into(), "scenario-machine".into());
+        prepared
+            .guests
+            .insert("scenario-machine".into(), hash.clone());
+        let check = Check {
+            service: "scenario".into(),
+            exit_code: 0,
+        };
+        let control = seedbox::config::Control {
+            service: "scenario".into(),
+        };
+        let request = ExecutionRequest {
+            prepared: &prepared,
+            check: &check,
+            control: Some(&control),
+            ..*base
+        };
+        let latency = vmm::world(&request).unwrap()["control"]["latency_ns"]
+            .as_u64()
+            .unwrap();
+        let t = 10_000_000;
+        let a = t + latency;
+        let reply = a + latency;
+        let mut raw = report();
+        raw["machines"].as_array_mut().unwrap().push(json!({"name":"scenario-machine","guest_exit_code":0,"guest_init_error":null,"infrastructure_error":false,"state_digest":hash}));
+        raw["control_latency_ns"] = json!(latency);
+        let call = json!({"version":1,"id":1,"op":"shape","from":[{"service":"server"}],"to":[{"service":"client"}],"latency_ns":200_000,"jitter_ns":10_000,"loss_ppm":500_000});
+        let plan = json!({"id":1,"at_ns":a,"deadline_ns":a+5_000_000_000,"action":"shape","handle":"p1","from":["server-machine"],"to":["client-machine"],"latency_ns":200_000,"jitter_ns":10_000,"loss_ppm":500_000});
+        raw["control_history"] = json!([{"relay_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":{"handle":"p1"},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":a,"replied_at_ns":reply},"delivered_at_ns":reply}]);
+        raw["faults"] = json!([{"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":a,"action":"shape","machine":null,"status":"applied","detail":"handle=p1"}]);
+        let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
+        assert_eq!(result.faults[0].action, "shape");
+        assert!(result.faults[0].service.is_empty());
+        for (key, value) in [
+            ("latency_ns", json!(99_999)),
+            ("jitter_ns", json!(200_000)),
+            ("loss_ppm", json!(1_000_001)),
+            ("from", json!([])),
+            ("to", json!([{"service":"server"}])),
+        ] {
+            let mut bad = raw.clone();
+            bad["control_history"][0]["request"][key] = value;
+            assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        }
+        for handle in [json!(""), json!(null), json!("p2")] {
+            let mut bad = raw.clone();
+            bad["control_history"][0]["response"]["result"]["handle"] = handle;
+            assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        }
+        let mut bad = raw.clone();
+        bad["control_history"][0]["response"]["effect_at_ns"] = json!(a + 1);
+        assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        // Admission followed by world cutoff retains the planned handle and policy.
+        raw["outcome"] = json!("duration");
+        raw["control_history"][0]["plan"] = raw["faults"][0]["request"].clone();
+        raw["control_history"][0]["fault_id"] = json!(1);
+        raw["control_history"][0]["response"] = json!(null);
+        raw["control_history"][0]["cut_off_at_ns"] = json!(a);
+        raw["control_history"][0]["status"] = json!("cut_off");
+        raw["control_history"][0]["requested_at_ns"] = json!(t);
+        raw["control_history"][0]["admitted_at_ns"] = json!(a);
+        raw["control_history"][0]["admitted_done"] = json!(true);
+        raw["control_history"][0]["delivered_at_ns"] = json!(null);
+        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
     });
 }
 
