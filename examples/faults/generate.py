@@ -6,7 +6,9 @@ import shutil
 
 HERE = Path(__file__).resolve().parent
 
-def generate(destination, seed=1009):
+def generate(destination, seed=1009, *, batch=32):
+    if type(batch) is not int or not 1 <= batch <= 32:
+        raise ValueError("batch must be between 1 and 32")
     if not 0 <= seed <= 2**64 - 1:
         raise ValueError("seed must be an unsigned64-bit integer")
     destination = Path(destination)
@@ -25,6 +27,11 @@ def generate(destination, seed=1009):
         if variant == "broken-no-faults":
             text = text.replace('[scenario, --control-address, "client:7001"]',
                                 '[scenario, --control-address, "client:7001", --no-faults]')
+        if batch != 32:
+            # Both peers use the same explicit workload size; source defaults and
+            # the full acceptance matrix remain unchanged.
+            text = text.replace('"server:7000"]', f'"server:7000", --batch, "{batch}"]')
+            text = text.replace('"client:7001"', f'"client:7001", --batch, "{batch}"')
         (project / "compose.yaml").write_text(text)
         (project / ".gitignore").write_text(".seedbox/\n")
         (project / "workload" / ".dockerignore").write_text("__pycache__\n*.pyc\n.git\n.seedbox\n")

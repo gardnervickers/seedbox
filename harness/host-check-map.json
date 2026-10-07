@@ -1,0 +1,437 @@
+{
+  "version": 1,
+  "core": [
+    "core",
+    "cluster-fixed"
+  ],
+  "checks": {
+    "core": {
+      "kind": "smoke",
+      "description": "wrong-kernel refusal, doctor, fixed --full-state run, default replay MATCH"
+    },
+    "cluster-fixed": {
+      "kind": "fixture",
+      "world": "cluster-fixed",
+      "description": "cluster-fixed seed 1009 on this engine and main; report differences"
+    },
+    "perf-replay": {
+      "kind": "smoke",
+      "description": "one replay --undo 0 --margin 16384",
+      "world": "examples/faults/compose.yaml",
+      "timeout_seconds": 300,
+      "undo": 0,
+      "margin": 16384
+    },
+    "disk-crash": {
+      "kind": "fixture",
+      "world": "disk-crash",
+      "kernel": "disk"
+    },
+    "disk-ext4-crash": {
+      "kind": "fixture",
+      "world": "disk-ext4-crash",
+      "kernel": "disk"
+    },
+    "net": {
+      "kind": "fixture",
+      "world": "net"
+    },
+    "net-pause": {
+      "kind": "fixture",
+      "world": "net-pause"
+    },
+    "net-crash": {
+      "kind": "fixture",
+      "world": "net-crash"
+    },
+    "volume-crash": {
+      "kind": "compose",
+      "project": "harness/acceptance/workloads/volume-crash.yaml",
+      "expected": "PASS",
+      "kernel": "disk"
+    },
+    "control-cases": {
+      "kind": "compose",
+      "project": "control-cases",
+      "expected": "FAIL"
+    },
+    "sanity": {
+      "kind": "compose",
+      "project": "harness/acceptance/workloads/sanity.yaml",
+      "expected": "PASS"
+    }
+  },
+  "rules": [
+    {
+      "category": "execution",
+      "paths": [
+        "crates/seedbox-vmm/**",
+        "guest/**",
+        "crates/seedbox/src/vmm.rs",
+        "crates/seedbox/src/host.rs",
+        "crates/seedbox/src/admission.rs",
+        "crates/seedbox/src/admission/**",
+        "crates/seedbox/src/counter.rs",
+        "crates/seedbox/src/orchestration.rs"
+      ],
+      "checks": [
+        "core",
+        "cluster-fixed"
+      ]
+    },
+    {
+      "category": "stepping-counter-undo",
+      "paths": [
+        "**/stepper.rs",
+        "**/machine/counted.rs",
+        "**/timebase.rs",
+        "**/boundary.rs",
+        "**/counter.rs",
+        "**/undo*",
+        "**/undo/**",
+        "**/checkpoint*",
+        "**/checkpoint/**"
+      ],
+      "checks": [
+        "core",
+        "cluster-fixed",
+        "perf-replay"
+      ]
+    },
+    {
+      "category": "disk",
+      "paths": [
+        "**/disk.rs",
+        "**/virtio_blk*",
+        "**/virtio-blk*",
+        "guest/disk*",
+        "guest/build-disk.sh",
+        "guest/blkprobe.c",
+        "guest/fsledger.c"
+      ],
+      "checks": [
+        "core",
+        "cluster-fixed",
+        "disk-crash",
+        "disk-ext4-crash"
+      ]
+    },
+    {
+      "category": "network",
+      "paths": [
+        "**/network*",
+        "**/network/**",
+        "**/virtio_net*",
+        "**/link*",
+        "**/link/**",
+        "**/faults*",
+        "guest/net*",
+        "guest/build-netns.sh",
+        "guest/build-client.sh",
+        "guest/cluster.init",
+        "guest/single.init",
+        "guest/members.sh"
+      ],
+      "checks": [
+        "core",
+        "cluster-fixed",
+        "net",
+        "net-pause",
+        "net-crash"
+      ]
+    },
+    {
+      "category": "links",
+      "paths": [
+        "crates/seedbox-vmm/src/links.rs",
+        "crates/seedbox-vmm/src/connections.rs"
+      ],
+      "checks": [],
+      "runs": [
+        "L1",
+        "L2",
+        "P1",
+        "M1"
+      ]
+    },
+    {
+      "category": "control",
+      "paths": [
+        "**/control.rs",
+        "crates/seedbox-control/**",
+        "**/host_control*",
+        "python/seedbox/control.py",
+        "guest/control*"
+      ],
+      "checks": [
+        "core",
+        "cluster-fixed",
+        "control-cases"
+      ]
+    },
+    {
+      "category": "preparation-images",
+      "paths": [
+        "guest/compose-init.c",
+        "guest/build-compose.sh",
+        "crates/seedbox/build.rs",
+        "crates/seedbox/src/guest.rs",
+        "**/preparation*",
+        "**/image*",
+        "**/oci.rs"
+      ],
+      "checks": [
+        "core",
+        "cluster-fixed",
+        "sanity"
+      ]
+    },
+    {
+      "category": "volumes",
+      "paths": [
+        "**/volume*",
+        "**/volumes/**"
+      ],
+      "checks": [
+        "core",
+        "cluster-fixed",
+        "sanity",
+        "volume-crash"
+      ]
+    },
+    {
+      "category": "undo-checkpoint-shared",
+      "paths": [
+        "crates/seedbox-vmm/src/machine.rs",
+        "crates/seedbox-vmm/src/main.rs",
+        "crates/seedbox-vmm/src/devices.rs"
+      ],
+      "diff_regex": "\\b(?:undo|checkpoint|rollback|margin|stepper|stepping|counter)\\b",
+      "checks": [
+        "core",
+        "cluster-fixed",
+        "perf-replay"
+      ],
+      "runs": [
+        "U1",
+        "U2"
+      ]
+    },
+    {
+      "category": "disk-shared",
+      "paths": [
+        "crates/seedbox-vmm/src/machine.rs",
+        "crates/seedbox-vmm/src/main.rs",
+        "crates/seedbox-vmm/src/devices.rs"
+      ],
+      "diff_regex": "\\b(?:disk|blk|virtio_blk|Disk|VirtioBlk)\\b",
+      "checks": [
+        "core",
+        "cluster-fixed",
+        "disk-crash",
+        "disk-ext4-crash"
+      ]
+    },
+    {
+      "category": "network-shared",
+      "paths": [
+        "crates/seedbox-vmm/src/machine.rs",
+        "crates/seedbox-vmm/src/main.rs",
+        "crates/seedbox-vmm/src/devices.rs"
+      ],
+      "diff_regex": "\\b(?:net|network|link|routing|virtio_net|NetworkCounters|VirtioNet)\\b",
+      "checks": [
+        "core",
+        "cluster-fixed",
+        "net",
+        "net-pause",
+        "net-crash"
+      ]
+    },
+    {
+      "category": "volumes-shared",
+      "paths": [
+        "guest/compose-init.c",
+        "crates/seedbox/src/guest.rs",
+        "crates/seedbox/src/image.rs",
+        "crates/seedbox/src/config.rs",
+        "crates/seedbox/src/preparation.rs"
+      ],
+      "diff_regex": "\\b(?:volume|volumes|mount|mounts)\\b",
+      "checks": [
+        "core",
+        "cluster-fixed",
+        "sanity",
+        "volume-crash"
+      ]
+    },
+    {
+      "category": "core inputs",
+      "paths": [
+        "examples/faults/**",
+        "harness/smoke/**",
+        "harness/host*",
+        "python/seedbox/**"
+      ],
+      "checks": [
+        "core",
+        "cluster-fixed"
+      ]
+    },
+    {
+      "category": "toolchain",
+      "paths": [
+        "flake.nix",
+        "flake.lock",
+        "rust-toolchain*",
+        "Cargo.lock",
+        ".cargo/**"
+      ],
+      "checks": [
+        "core",
+        "cluster-fixed"
+      ]
+    },
+    {
+      "category": "batch runner",
+      "always": true,
+      "paths": [
+        "harness/batch.*"
+      ],
+      "checks": [
+        "core",
+        "cluster-fixed"
+      ]
+    },
+    {
+      "category": "world fixture",
+      "always": true,
+      "paths": [
+        "harness/worlds/cluster-fixed.json"
+      ],
+      "checks": [
+        "core",
+        "cluster-fixed"
+      ]
+    },
+    {
+      "category": "cluster workload",
+      "always": true,
+      "paths": [
+        "examples/etcd/workload/**"
+      ],
+      "checks": [
+        "core",
+        "cluster-fixed"
+      ]
+    },
+    {
+      "category": "world fixture",
+      "paths": [
+        "harness/worlds/disk-crash.json"
+      ],
+      "checks": [
+        "disk-crash"
+      ]
+    },
+    {
+      "category": "world fixture",
+      "paths": [
+        "harness/worlds/disk-ext4-crash.json"
+      ],
+      "checks": [
+        "disk-ext4-crash"
+      ]
+    },
+    {
+      "category": "world fixture",
+      "paths": [
+        "harness/worlds/net.json"
+      ],
+      "checks": [
+        "net"
+      ]
+    },
+    {
+      "category": "world fixture",
+      "paths": [
+        "harness/worlds/net-pause.json"
+      ],
+      "checks": [
+        "net-pause"
+      ]
+    },
+    {
+      "category": "world fixture",
+      "paths": [
+        "harness/worlds/net-crash.json"
+      ],
+      "checks": [
+        "net-crash"
+      ]
+    },
+    {
+      "category": "Compose volume workload",
+      "paths": [
+        "harness/acceptance/workloads/volume-crash.yaml"
+      ],
+      "checks": [
+        "volume-crash"
+      ]
+    }
+  ],
+  "runs": {
+    "L1": {
+      "world": "harness/worlds/shaped.json",
+      "engine": "target",
+      "seed": 1,
+      "timeout_seconds": 1800,
+      "comparison": "L1 == L2 (shaped replay witnesses)",
+      "fixture_pr": 97
+    },
+    "L2": {
+      "world": "harness/worlds/shaped.json",
+      "engine": "target",
+      "seed": 1,
+      "timeout_seconds": 1800,
+      "comparison": "L1 == L2 (shaped replay witnesses)",
+      "fixture_pr": 97
+    },
+    "P1": {
+      "world": "harness/worlds/plain.json",
+      "engine": "target",
+      "seed": 1,
+      "timeout_seconds": 1800,
+      "comparison": "P1 == M1 (feature-off witnesses)",
+      "fixture_pr": 97
+    },
+    "M1": {
+      "world": "harness/worlds/plain.json",
+      "engine": "main",
+      "seed": 1,
+      "timeout_seconds": 1800,
+      "comparison": "P1 == M1 (feature-off witnesses)",
+      "fixture_pr": 97
+    },
+    "U1": {
+      "world": "harness/worlds/shaped-tol-short.json",
+      "engine": "target",
+      "seed": 1,
+      "timeout_seconds": 600,
+      "comparison": "U1 == U2 (short undo invariance)",
+      "fixture_pr": 97,
+      "undo": 256,
+      "margin": "adaptive"
+    },
+    "U2": {
+      "world": "harness/worlds/shaped-tol-short.json",
+      "engine": "target",
+      "seed": 1,
+      "timeout_seconds": 600,
+      "comparison": "U1 == U2 (short undo invariance)",
+      "fixture_pr": 97,
+      "undo": 0,
+      "margin": "adaptive"
+    }
+  }
+}

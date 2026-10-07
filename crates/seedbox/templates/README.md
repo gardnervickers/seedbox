@@ -48,6 +48,15 @@ currently uses RAM-backed storage. See `docs/runtime.md` for the disk contract.
 Charged timer I/O retains its full cost across scheduler boundaries; pending
 operations are included in terminal witnesses.
 
+From another terminal, `seedbox pause RUN` pauses the host's entire world at a
+slice boundary and `seedbox resume RUN` continues it. Use the executing attempt
+directory, identifiable by `RUN/output/host-control`, with the same privileges as
+execution. Replay has a new attempt directory. Both commands wait for an engine
+acknowledgement; guest time, state and witnesses remain fixed while paused.
+Wall-time limits and cancellation remain active, and pause time counts against
+the wall limit. CPU leases remain held until execution ends. This requires a
+host-control-capable engine; see the repository's `docs/runtime.md` for details.
+
 For optional build timestamp control, `prepare`, `run` and `explore` accept
 `--build-epoch SECONDS` (0..=4294967295; default absent, no environment backing).
 This explicitly changes new build-layer file and directory timestamps and
@@ -154,8 +163,9 @@ still applies, and release qualification still requires its own acceptance.
 
 Compare two retained run directories on Linux or macOS with `seedbox diff RUN_A
 RUN_B [--json]`. Import bundles first. Diff reports world and machine witnesses,
-changed identity/semantic fields, and the first differing retained trace or terminal
-record. Ordinary runs do not retain exit traces; terminal times cannot locate an
+changed identity/semantic fields, full-state parts such as RAM and disk, and the
+first differing retained trace or terminal record (including state parts).
+Ordinary runs do not retain exit traces; terminal times cannot locate an
 earlier divergence. Missing evidence and omissions stay explicit. Exit 0 MATCH
 means equality of compared evidence, not replay qualification; DIFFERENT exits 1,
 and usage/setup or invalid evidence exits 2. No guests execute and no state is created.

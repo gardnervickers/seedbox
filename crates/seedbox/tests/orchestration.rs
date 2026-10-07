@@ -1436,6 +1436,17 @@ fn exploration_checks_inputs_first_and_releases_preflight_scope_before_preparing
 
 // Controlled completions exercise the real coordinator and retained lifecycle.
 // Channels, rather than host sleep ordering, determine which attempt finishes.
+// Allow loaded portable hosts time to schedule threads and retain artifacts.
+const WORKER_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn worker_fixture() -> Fixture {
+    let mut fixture = Fixture::new();
+    // A worker may wait through several control exchanges. The fixture's
+    // execution limit must not turn a slow test handshake into INCOMPLETE.
+    fixture.simulation.limits.wall_time_ns = 600_000_000_000;
+    fixture
+}
+
 #[derive(Clone, Copy)]
 enum WorkerControl {
     Complete,
@@ -1487,14 +1498,14 @@ impl ExecutionBackend for ControlledWorkers<'_> {
         let command = self.controls[&request.seed]
             .lock()
             .unwrap()
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(WORKER_WAIT)
             .expect("test control deadline");
         match command {
             WorkerControl::CleanupUnverified => {
                 return Err(Error::Execution("owned cleanup-unverified".into()))
             }
             WorkerControl::WaitForCancellation => {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                let deadline = std::time::Instant::now() + WORKER_WAIT;
                 while !request.cancellation.is_cancelled() {
                     assert!(
                         std::time::Instant::now() < deadline,
@@ -1562,7 +1573,7 @@ fn worker_ready(
     receiver: &std::sync::mpsc::Receiver<(u64, std::path::PathBuf)>,
 ) -> (u64, std::path::PathBuf) {
     receiver
-        .recv_timeout(std::time::Duration::from_secs(5))
+        .recv_timeout(WORKER_WAIT)
         .expect("worker did not start")
 }
 fn batch_of(run: &std::path::Path) -> &std::path::Path {
@@ -1572,7 +1583,7 @@ fn batch_of(run: &std::path::Path) -> &std::path::Path {
 #[test]
 fn parallel_completion_keeps_seed_indexes_and_one_full_closure_with_serial_equivalence() {
     use seedbox::exploration::ExploreOptions;
-    let fixture = Fixture::new();
+    let fixture = worker_fixture();
     let (backend, ready, senders) = controlled_workers(&fixture, 10, 6, 3);
     let batch = std::thread::scope(|scope| {
         let task = scope.spawn(|| {
@@ -1677,7 +1688,7 @@ fn parallel_completion_keeps_seed_indexes_and_one_full_closure_with_serial_equiv
 #[test]
 fn parallel_cleanup_uncertainty_cancels_owned_sibling_without_dispatching_pending_seeds() {
     use seedbox::exploration::ExploreOptions;
-    let fixture = Fixture::new();
+    let fixture = worker_fixture();
     let caller = CancellationToken::default();
     let (backend, ready, senders) = controlled_workers(&fixture, 10, 5, 2);
     let batch = std::thread::scope(|scope| {
@@ -1734,7 +1745,7 @@ fn parallel_cleanup_uncertainty_cancels_owned_sibling_without_dispatching_pendin
 #[test]
 fn parallel_staggered_external_cancellation_keeps_completed_running_and_pending_attribution() {
     use seedbox::exploration::ExploreOptions;
-    let fixture = Fixture::new();
+    let fixture = worker_fixture();
     let caller = CancellationToken::default();
     let (backend, ready, senders) = controlled_workers(&fixture, 10, 6, 2);
     let batch = std::thread::scope(|scope| {
@@ -1792,7 +1803,7 @@ fn parallel_staggered_external_cancellation_keeps_completed_running_and_pending_
 #[test]
 fn parallel_checkpoint_failure_unwinds_owned_work_and_preserves_independent_manifests() {
     use seedbox::exploration::ExploreOptions;
-    let fixture = Fixture::new();
+    let fixture = worker_fixture();
     let (backend, ready, senders) = controlled_workers(&fixture, 10, 5, 2);
     let paths = std::thread::scope(|scope| {
         let task = scope.spawn(|| {
