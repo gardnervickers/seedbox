@@ -91,7 +91,8 @@ class LinkTests(unittest.TestCase):
             for argument, gap in [('', '4000000'), ('seedbox.link_gap_ns=1000000', '1000000')]:
                 cmdline.write_text(f'console=ttyS0 seedbox.name=a {argument} panic=-1\n')
                 result = subprocess.run(
-                    ['sh', '-eu', '-c',
+                    # bash, not sh: dash rejects the hyphenated function name.
+                    ['bash', '-eu', '-c',
                      'link-probe() { printf "%s\\n" "$*"; }; name=a\n' + commands],
                     env={**os.environ, 'LINK_TEST_CMDLINE': str(cmdline)},
                     text=True, capture_output=True, timeout=10)
