@@ -1,6 +1,6 @@
-# Image is the independently supplied f9d7e6a ABI-2 kernel (unchanged).
-# The timerfd fixture requires a new init.cpio and independent hash review.
-# Historical HVF acceptance is recorded in docs/arm64-backends.md.
+# Independently supplied aa73b83 timerfd guest inputs (2026-10-07).
+# Image is the unchanged f9d7e6a ABI-2 kernel.
+# HVF acceptance is recorded in docs/arm64-backends.md.
 # build.sh must never generate or update this file.
 141289b842d3a42ca13a634598372a7e66605da70d36c2f2c1cd5a2806bfb01f  Image
-REBUILD_REQUIRED_INITRD_SHA256  init.cpio
+ea7c7c5cc16ad72cd5b85e260edaf89cf329a43fc6677b185345f37c1c7bca2e  init.cpio

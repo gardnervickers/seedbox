@@ -24,6 +24,12 @@ config = load("config", "check-config.py")
 hashes = load("hashes", "check-hashes.py")
 
 class Inputs(unittest.TestCase):
+    def test_fixture_requires_timerfd_even_if_fragment_omits_it(self):
+        self.assertEqual(config.fixture_errors({'CONFIG_TIMERFD': 'y'}), [])
+        for actual in [{}, {'CONFIG_TIMERFD': 'n'}, {'CONFIG_TIMERFD': 'm'}]:
+            self.assertEqual(config.fixture_errors(actual), [
+                'CONFIG_TIMERFD: timerfd spin fixture requires y'])
+
     def test_hashes_require_independent_expected_values(self):
         import hashlib
         with tempfile.TemporaryDirectory() as directory:

@@ -97,9 +97,11 @@ impl<B: Backend> Machine<B> {
         let start = Instant::now();
         let report = self.run_inner(before_run).map_err(|error| {
             format!(
-                "{error}\nexits: {}\nwall_seconds: {:.6}\nlast exit: {:?}\nconsole:\n{}",
+                "{error}\nexits: {}\nwall_seconds: {:.6}\ndeferred_spi_events: {}\ndeferred_clock_read_spis: {}\nlast exit: {:?}\nconsole:\n{}",
                 self.trace.len(),
                 start.elapsed().as_secs_f64(),
+                self.deferred_spi_events,
+                self.deferred_clock_read_spis,
                 self.trace.last(),
                 String::from_utf8_lossy(&self.uart.console)
             )

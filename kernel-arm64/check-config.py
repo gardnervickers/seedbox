@@ -50,6 +50,13 @@ def errors(requested, actual, defined):
     return failures
 
 
+def fixture_errors(actual):
+    # The spin fixture must observe an hrtimer expiry through timerfd.
+    if actual.get("CONFIG_TIMERFD") != "y":
+        return ["CONFIG_TIMERFD: timerfd spin fixture requires y"]
+    return []
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
@@ -57,8 +64,9 @@ def main():
     parser.add_argument("config", type=Path)
     args = parser.parse_args()
     requested = settings(args.fragment.read_text())
-    failures = errors(requested, settings(args.config.read_text()),
-                      defined_symbols(args.source))
+    actual = settings(args.config.read_text())
+    failures = errors(requested, actual, defined_symbols(args.source))
+    failures.extend(fixture_errors(actual))
     if failures:
         raise SystemExit("configuration check failed:\n" + "\n".join(failures))
     print(f"verified {len(requested)} arm64 Kconfig symbols and resolved values")
