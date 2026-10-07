@@ -26,27 +26,28 @@ pub enum CounterProfile {
     IntelIceLake,
 }
 
-/// Intel family-6 models per event, following rr's PerfCounters_x86 table.
-/// Hybrid parts (Alder Lake and later clients) are refused: their E-cores
-/// have their own PMU and events.
+/// Intel family-6 display models per event, from rr's model switch
+/// (src/PerfCounters_x86.h) and event table (src/PerfCounters.cc) at
+/// rr-debugger/rr@858a9fb. Hybrid parts (Alder Lake and later clients) are
+/// refused: their E-cores have their own PMU and events.
 const INTEL_SKYLAKE: &[u32] = &[
-    0x1a, 0x1e, 0x1f, 0x2e, // Nehalem
+    0x1a, 0x1e, 0x2e, // Nehalem
     0x25, 0x2c, 0x2f, // Westmere
-    0x2a, 0x2d, // Sandy Bridge
-    0x3a, 0x3e, // Ivy Bridge
+    0x2a, 0x2d, 0x3e, // Sandy Bridge (rr files Ivy Bridge-E 0x3e here)
+    0x3a, // Ivy Bridge
     0x3c, 0x3f, 0x45, 0x46, // Haswell
     0x3d, 0x47, 0x4f, 0x56, // Broadwell
-    0x4e, 0x55, 0x5e, // Skylake, Cascade Lake, Cooper Lake
-    0x8e, 0x9e, // Kaby, Coffee, Whiskey Lake
+    0x4e, 0x55, 0x5e, // Skylake
+    0x8e, 0x9e, // Kaby Lake
     0xa5, 0xa6, // Comet Lake
 ];
 const INTEL_ICE_LAKE: &[u32] = &[
-    0x6a, 0x6c, 0x7d, 0x7e, // Ice Lake
+    0x6a, 0x7e, 0x86, // Ice Lake
     0x8c, 0x8d, // Tiger Lake
     0xa7, // Rocket Lake
     0x8f, // Sapphire Rapids
     0xcf, // Emerald Rapids
-    0xad, 0xae, // Granite Rapids
+    0xad, // Granite Rapids
 ];
 
 /// The host CPU as CPUID identifies it.
