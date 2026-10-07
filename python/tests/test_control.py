@@ -37,6 +37,18 @@ class Peer:
 
 
 class ControlTests(unittest.TestCase):
+    def test_optional_response_details_do_not_relax_required_version(self):
+        peer = Peer(reply(result={"now_ns": 30, "extra_result_detail": "opaque"},
+                          extra_response_detail={"arbitrary": [1, None]}))
+        with World(peer) as world:
+            self.assertEqual(world.now_ns(), 30)
+        for version in (0, 2):
+            peer = Peer(reply(result={"now_ns": 30}, version=version,
+                              extra_response_detail="still invalid"))
+            with World(peer) as world:
+                with self.assertRaises(ProtocolError):
+                    world.now_ns()
+
     def test_sequential_calls_use_public_rpc_and_confirmed_effects(self):
         peer = Peer(reply(result={"handle": "opaque-7"}) + reply(2) + reply(3) + reply(4) + reply(5) + reply(6, {"now_ns": 30}))
         with World(peer) as world:

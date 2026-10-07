@@ -34,7 +34,9 @@ must converge at this boundary. `PreparedImage.manifest` is the platform-specifi
 manifest digest, not the registry tag or multi-platform index digest. `placement`
 maps every service to a machine, and `guests` supplies one prepared boot archive
 per machine. Service and image sets must match; the set of placement targets must
-exactly equal the guest set. A single guest can host several service namespaces.
+exactly equal the guest set. Custom backends can represent several services in
+one guest; production OCI preparation currently creates one service per VM.
+This library expressiveness is not another supported Compose placement mode.
 
 The preparer must validate descriptor/digest relationships, image platform, all
 launch metadata, and guest requirements. `image::resolve_launch` supplies the
@@ -128,6 +130,10 @@ it is never offered as a production execution option.
 
 ## Qualification and capability limits
 
+[Draft format and runtime scope](compatibility.md) separates readable artifacts
+from execution admission and lists version-bound evidence. V0 reader/writer and
+release compatibility promises remain undecided pending qualification.
+
 The tested production profile is Linux/KVM on the AMD Ryzen 5950X workstation,
 with the Zen SpeculativeLockMap workaround verified for the leased cores and
 SMT siblings. Guest kernel, supervisor, engine and semantic settings are run
@@ -155,12 +161,11 @@ a new machine incarnation when reboot support is added.
 The implemented network timing model permits bounded early ordinary packet
 delivery, as documented in [runtime.md](runtime.md); management barriers are
 exact. Historical prototype proposals are not additional runtime guarantees.
-The single-kernel namespace fixture has distinct scheduling, clocks, memory
-and storage from independent VMs. Before selecting that layout,
-[issue #10](https://github.com/gardnervickers/seedbox/issues/10) requires a
-matched PV/undo comparison, deterministic guest-local jitter, the full seeded
-kill/restart campaign and paired etcd 3.5.3 controls, including completed seeds
-and confirmed failures per allocated core-hour.
+The historical single-kernel namespace fixture has distinct scheduling, clocks,
+memory and storage from independent VMs. Its version-bound
+[issue #10 evidence](https://github.com/gardnervickers/seedbox/issues/10) does not
+qualify production OCI co-location. The production default remains one service
+per VM; broader layout decisions remain [issue #34](https://github.com/gardnervickers/seedbox/issues/34).
 
 The [Mac TCG tool](../tools/mac-tcg/README.md) retains a useful restricted local
 experiment. It is not a production execution backend and its scoped witness
