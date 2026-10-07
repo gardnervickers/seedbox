@@ -8,6 +8,7 @@ mod devices;
 mod disk;
 mod events;
 mod faults;
+mod host_control;
 mod machine;
 mod network_counters;
 mod profile;
@@ -408,6 +409,9 @@ fn run() -> Result<Value, String> {
         Ok(m) => m.parse().map_err(|e| format!("SEEDBOX_UNDO: {e}"))?,
     };
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+    let mut host_control=arg(&args,"--host-control")
+        .map(|path|host_control::HostControl::bind(std::path::Path::new(&path)))
+        .transpose().map_err(|e|format!("host control: {e}"))?;
     let cfg: Value = serde_json::from_slice(
         &std::fs::read(&config_path).map_err(|e| format!("{config_path}: {e}"))?,
     )
@@ -590,13 +594,13 @@ fn run() -> Result<Value, String> {
     if !forked {
         let kills = arm_seed(&mut world, &cfg, &names, seed, 0)?;
         let started = Instant::now();
-        let outcome = simulate(&mut world, &cfg, duration, &end_on, None)?;
+        let outcome = simulate(&mut world, &cfg, duration, &end_on, None, &mut host_control)?;
         let host_seconds = started.elapsed().as_secs_f64();
         return report(&mut world, outcome, seed, &kills, host_seconds, digest, &out, duration, &end_on);
     }
 
     let started = Instant::now();
-    simulate(&mut world, &cfg, duration, &end_on, Some(fork_at))?;
+    simulate(&mut world, &cfg, duration, &end_on, Some(fork_at), &mut host_control)?;
     let barrier_ns = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
     let boot_host_seconds = started.elapsed().as_secs_f64();
     let started = Instant::now();
@@ -628,7 +632,7 @@ fn run() -> Result<Value, String> {
         }
         let started = Instant::now();
         let kills = release(&mut world, &cfg, &names, seed, release_skew)?;
-        let outcome = simulate(&mut world, &cfg, duration, &end_on, None)?;
+        let outcome = simulate(&mut world, &cfg, duration, &end_on, None, &mut host_control)?;
         let host_seconds = started.elapsed().as_secs_f64();
         let mut r = report(&mut world, outcome, seed, &kills, host_seconds, digest, &dir, duration, &end_on)?;
         r["boot"] = json!({
@@ -869,6 +873,7 @@ fn simulate(
     duration: u64,
     end_on: &Option<String>,
     fork: Option<Option<u64>>,
+    host_control: &mut Option<host_control::HostControl>,
 ) -> Result<&'static str, String> {
     let until_barrier = fork.is_some();
     let fork_at = fork.flatten();
@@ -877,6 +882,7 @@ fn simulate(
     let mut frames = Vec::new();
     let outcome;
     loop {
+        if let Some(control)=host_control {control.boundary().map_err(|e|format!("host control: {e}"))?;}
         let keys: Vec<u64> = (0..n).map(|m| world.key(m)).collect();
         let (m, &key) = keys
             .iter()
