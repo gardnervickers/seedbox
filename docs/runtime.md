@@ -277,7 +277,8 @@ Replay does not require registry access, a builder, or the original Compose file
 
 Run exits are 0 for PASS, 1 for FAIL, 2 for ERROR, 3 for INCOMPLETE, and 124 for
 simulated TIMEOUT. Replay exits are 0 for MATCH (including a reproduced FAIL),
-1 for MISMATCH, and 2 for NOT_COMPARABLE. Results print the attempt path.
+1 for MISMATCH, and 2 for NOT_COMPARABLE, including a cancelled or incomplete
+replay. Results print the attempt path.
 Offline diff exits 0 for MATCH, 1 for DIFFERENT, and 2 for usage/setup or invalid evidence.
 
 ## Compare retained runs

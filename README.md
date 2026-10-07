@@ -60,7 +60,8 @@ automatically. It applies to retained disks, including Compose named volumes. Se
 
 `seedbox help run` lists every option. A run prints `OUTCOME: run-directory`;
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
-INCOMPLETE and 124 TIMEOUT. Offline `diff` exits 0 for MATCH, 1 for DIFFERENT,
+INCOMPLETE and 124 TIMEOUT. A cancelled or incomplete replay exits 2
+(NOT_COMPARABLE). Offline `diff` exits 0 for MATCH, 1 for DIFFERENT,
 and 2 for usage/setup or invalid retained evidence.
 
 Pause a running world from another terminal with `sudo seedbox pause RUN`, then
