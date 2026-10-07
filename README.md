@@ -194,6 +194,21 @@ YAML without starting guests. It has no hardware tiers. The low-level batch
 runner remains available for the distinct fixtures below. Hardware results and known runtime failures
 are recorded in [docs/acceptance.md](docs/acceptance.md).
 
+The focused race comparison records a fixed `SOURCE_DATE_EPOCH=0` for Podman image
+build metadata and requires two public preparations to have identical complete
+inputs before execution. Every run must retain that same input closure. It runs four seeds, requires distinct lost-update counts
+and a positive loss, checks the atomic control, and replays a selected loss with
+complete world/machine witnesses and full state. From the project Nix shell on
+the qualified host, use `bash crates/seedbox/tests/accept-race.sh KERNEL CPU OUTPUT`
+with a reserved core and a fresh output directory. It freezes source/base inputs
+and rejects re-preparation drift; failed attempts remain in that directory.
+No retries or broader seed search are performed.
+
+The genuine historical etcd 3.5.2 failure remains separate from the planted
+checker control. Its exact engine/profile and bounded invocation without retry
+qualification remain unresolved in [issue #36](https://github.com/gardnervickers/seedbox/issues/36).
+This race check does not qualify that historical bug or the engine.
+
 ## One-VM network fixture
 
 The experimental one-VM layout runs three real etcd members and their client
