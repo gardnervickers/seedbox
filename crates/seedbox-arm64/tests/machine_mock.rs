@@ -14,6 +14,9 @@ struct Fake<
     mapped: BTreeMap<u32, Rc<Memory>>,
     held: bool,
     irq: bool,
+    mmfr0: u64,
+    ignore_feature_write: bool,
+    reject_feature_write: bool,
 }
 impl<
         const D: u64,
@@ -32,6 +35,9 @@ impl<
             mapped: BTreeMap::new(),
             held: false,
             irq: false,
+            mmfr0: 0x0100_1000_0000_0023,
+            ignore_feature_write: false,
+            reject_feature_write: false,
         })
     }
     fn map_memory(&mut self, slot: u32, _: u64, m: Rc<Memory>) -> Result<()> {
@@ -67,14 +73,26 @@ impl<
             C
         } else if reg == SysReg::CNTV_CTL {
             T
+        } else if reg == SysReg::ID_AA64MMFR0 {
+            self.mmfr0
         } else {
             0
         })
     }
-    fn set_sys_reg(&mut self, _: SysReg, _: u64) -> Result<()> {
+    fn set_sys_reg(&mut self, reg: SysReg, value: u64) -> Result<()> {
+        if reg == SysReg::ID_AA64MMFR0 {
+            assert_eq!(self.step, 0, "feature policy must precede guest execution");
+            if self.reject_feature_write {
+                return Err("feature register write rejected".into());
+            }
+            if !self.ignore_feature_write {
+                self.mmfr0 = value;
+            }
+        }
         Ok(())
     }
     fn run(&mut self) -> Result<Stop> {
+        assert_eq!(self.mmfr0, 0x0000_1000_0000_0023);
         assert!(!self.held);
         self.held = true;
         let mmio = |addr, data| Exit::Mmio {
@@ -247,4 +265,30 @@ fn rejects_masked_interrupt_admission() {
         error.contains("SPI 40 asserted with PSTATE.I masked"),
         "{error}"
     );
+}
+
+#[test]
+fn cpu_feature_policy_preserves_other_fields_and_rejects_failed_readback() {
+    use seedbox_arm64::machine::configure_cpu_features;
+    // All FGT revisions become absent; every other nibble is preserved.
+    for fgt in 0..16 {
+        let mut backend = Fake::<0>::create().unwrap();
+        backend.mmfr0 = 0xa0bc_def0_1234_5678 | (fgt << 56);
+        configure_cpu_features(&mut backend).unwrap();
+        assert_eq!(backend.mmfr0, 0xa0bc_def0_1234_5678);
+    }
+    let mut backend = Fake::<0>::create().unwrap();
+    backend.ignore_feature_write = true;
+    assert!(configure_cpu_features(&mut backend)
+        .unwrap_err()
+        .contains("feature policy readback"));
+    backend.ignore_feature_write = false;
+    backend.reject_feature_write = true;
+    assert_eq!(
+        configure_cpu_features(&mut backend).unwrap_err(),
+        "feature register write rejected"
+    );
+    // An already absent feature must work even with a read-only register.
+    backend.mmfr0 &= !(0xf << 56);
+    configure_cpu_features(&mut backend).unwrap();
 }

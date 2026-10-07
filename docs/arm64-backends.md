@@ -6,19 +6,19 @@ The crate has its own workspace, lockfile and target directory. The only changes
 to existing build files are the root workspace exclusion and the two aliases.
 
 **Status: native HVF and operator-run nested KVM determinism acceptance PASS;
-cross-backend equality still FAILS.** The same idle-rendezvous Image from
-`180705e` boots reproducibly on both. This continuation makes the two debug
-unlock writes transparent to scheduling and the witness. Signed HVF acceptance
-still passes, including noise and all RAM. Comparing the new HVF report with
-retained KVM evidence exposes a separate 1 ns guest-progress difference and
-RAM mismatch; it does not establish cross-backend equality. See the
-[continuation record](#transparent-debug-completion-and-cross-backend-analysis-2026-10-07).
+exit traces and console now MATCH across backends, but full RAM/witness equality
+still FAILS.** The same idle-rendezvous Image from `180705e` boots reproducibly
+on both. The shared CPU policy now hides Fine Grained Traps before boot,
+removing the extra guest printk clock read responsible for HVF's 1 ns drift.
+Both seeds' new HVF traces and consoles exactly match the operator's retained
+`48e25a1` KVM reports. Full CPU/GIC normalization remains open; see the
+[FGT continuation](#fgt-feature-policy-and-the-extra-pv-read-2026-10-07).
 
-Current Mac checks: `cargo test-arm64` passes 15 portable tests; the hardware
-test remains ignored by default. Crate formatting and clippy with warnings
-denied pass, as do seven Python input tests and the root portable acceptance
-checks. The explicitly signed `hvf_determinism` test passes with the supplied
-idle-rendezvous Image. Earlier failures remain recorded below.
+Current Mac checks: `cargo test-arm64` passes 16 portable tests; the two
+hardware tests remain ignored by default. Crate formatting and clippy with
+warnings denied pass, as do seven Python input tests and the root portable
+acceptance checks. The explicitly signed `hvf_determinism` and `hvf_cpu_features`
+tests pass. Earlier failures remain recorded below.
 
 ## Abstraction boundaries
 
@@ -260,34 +260,33 @@ report directory for each attempt: evidence files are never overwritten.
 
 ### 4. Build and run KVM inside the VM
 
-The root dev shell currently has no aarch64-linux output. Use the **same nixpkgs
-revision from the project's lockfile** for an ephemeral arm64 Rust toolchain;
-do not alter the root flake or install host packages. Nix must already be
-available in the VM. From the mounted checkout, inside the VM:
-
-```sh
-arm64_nixpkgs_rev="$(python3 -c 'import json; print(json.load(open("flake.lock"))["nodes"]["nixpkgs"]["locked"]["rev"])')"
-nix shell "github:NixOS/nixpkgs/$arm64_nixpkgs_rev#rustc" \
-  "github:NixOS/nixpkgs/$arm64_nixpkgs_rev#cargo" \
-  "github:NixOS/nixpkgs/$arm64_nixpkgs_rev#stdenv.cc" --command bash
-```
-
-Then, in that shell, use an explicit target to keep Linux and macOS build
-artifacts separate. If `/dev/kvm` is not writable by the VM user, run with its
+Use the VM's existing `$HOME/.cargo/bin/cargo`; **Nix is not installed there**.
+The explicit Linux target keeps Linux and macOS build artifacts separate. Run
+from this mounted checkout after the operator has made the new commit available.
+No kernel/initrd rebuild is needed. If `/dev/kvm` is not writable, use the
 operator-provided KVM access rather than changing permissions on the Mac.
 
 ```sh
 set -euo pipefail
+cd /Users/gardnervickers/.claude/worktrees/seedbox-astra-arm64
+export PATH="$HOME/.cargo/bin:$PATH"
 test -r /dev/kvm && test -w /dev/kvm
 (cd artifacts/arm64-irq-rendezvous && sha256sum -c SHA256SUMS)
-cargo test-arm64 --target aarch64-unknown-linux-gnu
-cargo build-arm64 --target aarch64-unknown-linux-gnu
+"$HOME/.cargo/bin/cargo" test-arm64 --target aarch64-unknown-linux-gnu
+"$HOME/.cargo/bin/cargo" build-arm64 --target aarch64-unknown-linux-gnu
 export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-irq-rendezvous/Image"
 export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-irq-rendezvous/init.cpio"
-export SEEDBOX_ARM64_REPORT_DIR="$PWD/artifacts/arm64-irq-rendezvous/kvm-transparent-debug"
+export SEEDBOX_ARM64_REPORT_DIR="$PWD/artifacts/arm64-irq-rendezvous/kvm-fgt-policy"
 test ! -e "$SEEDBOX_ARM64_REPORT_DIR"
-cargo test-arm64 --target aarch64-unknown-linux-gnu --test hardware \
-  -- --ignored --exact kvm_determinism --nocapture --test-threads=1
+mkdir "$SEEDBOX_ARM64_REPORT_DIR"
+"$HOME/.cargo/bin/cargo" test-arm64 --target aarch64-unknown-linux-gnu --test hardware \
+  -- --ignored --exact kvm_cpu_features --nocapture --test-threads=1 \
+  > "$SEEDBOX_ARM64_REPORT_DIR/cpu-features.log" 2>&1
+cat "$SEEDBOX_ARM64_REPORT_DIR/cpu-features.log"
+"$HOME/.cargo/bin/cargo" test-arm64 --target aarch64-unknown-linux-gnu --test hardware \
+  -- --ignored --exact kvm_determinism --nocapture --test-threads=1 \
+  > "$SEEDBOX_ARM64_REPORT_DIR/determinism.log" 2>&1
+cat "$SEEDBOX_ARM64_REPORT_DIR/determinism.log"
 for case in 1a 1b 2; do
   seed="${case%[ab]}"
   crates/seedbox-arm64/target/aarch64-unknown-linux-gnu/release/seedbox-arm64 run \
@@ -296,13 +295,35 @@ for case in 1a 1b 2; do
 done
 python3 crates/seedbox-arm64/compare.py "$SEEDBOX_ARM64_REPORT_DIR/cli-1a.json" "$SEEDBOX_ARM64_REPORT_DIR/cli-1b.json"
 python3 crates/seedbox-arm64/compare.py "$SEEDBOX_ARM64_REPORT_DIR/kvm-seed1-a.json" "$SEEDBOX_ARM64_REPORT_DIR/cli-1a.json"
-python3 crates/seedbox-arm64/compare.py artifacts/arm64-irq-rendezvous/hvf-transparent-debug/hvf-seed1-a.json "$SEEDBOX_ARM64_REPORT_DIR/cli-1a.json"
+python3 crates/seedbox-arm64/compare.py "$SEEDBOX_ARM64_REPORT_DIR/kvm-seed1-a.json" "$SEEDBOX_ARM64_REPORT_DIR/kvm-seed1-jitter.json"
+python3 crates/seedbox-arm64/compare.py "$SEEDBOX_ARM64_REPORT_DIR/kvm-seed2.json" "$SEEDBOX_ARM64_REPORT_DIR/cli-2.json"
 ```
 
-The final cross-backend compare is expected to exit 1 with the retained
-progress mismatch described below; preserve that output. The KVM suite performs
-the same four determinism runs but does not impose the native-HVF wall-time bound. Retain failures, including setup errors, rather than
-switching to a host timer or retrying until witnesses happen to match.
+Then retain the **full** cross-backend comparisons. They are expected to report
+all recorded exits matching and equal console hashes, but exit 1 for RAM/witness
+mismatch. The explicit exit check preserves that failing gate; it does not turn
+trace-only equality into full acceptance.
+
+```sh
+for case in 1a 2; do
+  rc=0
+  python3 crates/seedbox-arm64/compare.py \
+    "artifacts/arm64-irq-rendezvous/hvf-fgt-final/cli-$case.json" \
+    "$SEEDBOX_ARM64_REPORT_DIR/cli-$case.json" \
+    > "$SEEDBOX_ARM64_REPORT_DIR/cross-$case.log" 2>&1 || rc=$?
+  cat "$SEEDBOX_ARM64_REPORT_DIR/cross-$case.log"
+  test "$rc" -eq 1
+done
+```
+
+Expected KVM witnesses remain seed 1 `ed30d3bb…` and seed 2 `f024317d…` if its
+FGT field is already absent. The inventory records its actual MMFR0 (`0xc038`)
+before/after policy plus other feature/cache registers, which the old reports
+lack. HVF's MMFR0 changes `0x010010000f100023` to `0x000010000f100023`.
+The new KVM result is still operator-pending; the matching comparisons so far
+use the retained `48e25a1` reports. The KVM suite has the same four boots but
+no native-HVF wall-time bound. Preserve failures; never substitute a host timer
+or retry until a witness happens to match.
 
 ## Witness interpretation and remaining gates
 
@@ -778,6 +799,8 @@ Frozen production paths are unchanged; no guest rebuild, push or PR is needed.
 
 ### Expected next VM result
 
+Historical expectation at `48e25a1`, superseded by the FGT continuation below.
+
 Run section 4 on the updated commit, keeping the same inputs and using the new
 `kvm-transparent-debug` report directory. No guest rebuild is required. Because
 KVM exposes neither debug write, its semantic execution is unchanged; its new
@@ -786,6 +809,141 @@ The hardware suite should still pass. The final cross-backend comparison is
 expected to exit 1 at the PL011 read described above. Retain that result and
 any new divergence; equality remains an open gate. Native HVF and nested KVM
 repeatability are separate demonstrated properties.
+
+## FGT feature policy and the extra PV read (2026-10-07)
+
+### Root cause of the 1 ns shift
+
+The operator's `48e25a1` reports are now present in
+`artifacts/arm64-irq-rendezvous/kvm-td/`: seed 1, host-noise seed 1 and CLI
+witnesses are `ed30d3bb…`; seed 2 is `f024317d…`. This confirms that making
+debug unlocks transparent did not change KVM execution. Both backends have
+2,291 semantic exits and finish at 1,010,051,041 ns.
+
+The time difference comes from **guest CPU feature discovery**, not a counter
+emulation charge. Before the fix, native HVF exposes
+`ID_AA64MMFR0_EL1=0x010010000f100023`, including FGT=1 in bits 59:56.
+The stopped guest RAM at exit 1203 contains an extra boot-ring message:
+`CPU features: detected: Fine Grained Traps` at RAM offset `0x559018`.
+This message is suppressed from the PL011 console by `loglevel=4`, but it is
+still formatted and timestamped in the printk ring.
+
+Linux's FGT entry in `arm64_features` matches that field; system feature setup
+calls `update_cpu_capabilities(SCOPE_SYSTEM)`, which logs a newly detected
+capability. See [Linux cpufeature.c](https://raw.githubusercontent.com/torvalds/linux/v6.12/arch/arm64/kernel/cpufeature.c).
+`vprintk_store()` samples `local_clock()` before console filtering; that reaches
+`sched_clock()` and the registered `seedbox_read()`. See
+[Linux printk.c](https://raw.githubusercontent.com/torvalds/linux/v6.12/kernel/printk/printk.c).
+This is the additional PV page read. The feature bit also remains in the
+kernel's saved feature/capability state, explaining why fixing timestamps
+alone would be wrong.
+
+A controlled HVF experiment changed only MMFR0.FGT before guest execution:
+
+- Exit 1202 still has page `(now,last,bound,abi) = (10,11,U64_MAX,1)` before
+  handling the timer-arm write. Machine then publishes `(11,11,10000011,1)`.
+- At exit 1203, before reconciliation, page `last` is 332 with FGT exposed and
+  331 with FGT absent. No deadline is due anywhere in this interval.
+- Extracting the stopped RAM's boot-ring text shows exactly one message
+  removed, the FGT detection above. The following RCpc detection message now
+  occupies offset `0x559018`. No log-level or printk code was changed.
+- With FGT absent, **every exit record and every console byte matches retained
+  KVM for both seeds**, including timer-arm values and the 10 ms sleep result.
+  The seed-1 first PL011 ID read is now 331 ns, and the 10 ms sleep prints
+  10,000,125 ns. Final time and exit count are unchanged.
+
+Temporary RAM/register dump instrumentation was removed before acceptance.
+Its evidence is retained as `diagnostic-baseline.log`, `diagnostic-no-fgt.log`,
+`diagnostic-no-fgt.json`, `diagnostic-{1202,1203}.ram`,
+`diagnostic-no-fgt-{1202,1203}.ram`, and the two `*-1203-printk.txt` files beside
+the inputs. The text extraction includes leftover bytes after record lengths;
+it is a diagnostic view, not a replacement for witness data. The unmodified
+baseline diagnostic still produces `f2394e95…`; disabling FGT produces
+`b3de4bbd…`. This isolates the feature setting, not host timing or a guest rebuild.
+
+The code paths exclude the other proposed charging mechanisms. Both adapters
+only decode/complete exits; neither owns a PV clock. Machine has no accepted
+counter/frequency SysReg read path: exposed reads fail. EL0 CNTVCT traps into
+the patched guest kernel's PV emulation. The sole accepted exposed sysregs are
+the two zero debug writes, completed without publication. Initial X registers,
+SP_EL1, PC, PSTATE=0x3c5, SCTLR, CNTKCTL=0 and CNTV_CTL=0 are already initialized
+by shared code. Initial publication and all later reconciliation use the same
+Machine implementation. No charge has been added, removed or moved there.
+
+The old KVM JSON contains no feature inventory, so its absent FGT field is an
+inference from the controlled experiment, not a claimed live KVM register
+readback. The new `kvm_cpu_features` test in section 4 will retain that readback.
+
+### Shared policy and validation
+
+`Machine::new` now calls `configure_cpu_features` immediately after vCPU
+creation, before any guest instruction. This EL1-only machine clears the whole
+FGT field and verifies the **entire** MMFR0 readback, preserving every other
+field. HVF changes to `0x000010000f100023`; an already-zero KVM field requires
+no write. Unsupported access, rejected writes or mismatching readback fail
+setup. There is no silent fallback or per-backend clock adjustment.
+
+Portable regression coverage exercises all FGT field values, preservation of
+every other nibble, rejection of silently ignored/rejected writes, and an
+already-absent feature on a read-only backend. The mock boot checks the feature
+policy is in place before its first run. The ignored `hvf_cpu_features` and
+`kvm_cpu_features` tests print host-default and configured CPU feature registers
+without booting a guest. The signed native inventory is retained in
+`hvf-cpu-features.log`; inaccessible cache registers are explicitly reported
+as unavailable, not fabricated as zero.
+
+Native HVF acceptance passed with the final code and the same verified inputs.
+Reports are under `hvf-fgt-final/`, and the suite log is `hvf-fgt-final.log`:
+
+| Boot | Witness | Wall seconds | Exits |
+| --- | --- | ---: | ---: |
+| Seed 1 first | `b3de4bbdaa7a747b54d3a940f02c4281bd3f26fe8574454c6cb7f06a3658a2a7` | 0.248581958 | 2,291 |
+| Seed 1 repeat | `b3de4bbdaa7a747b54d3a940f02c4281bd3f26fe8574454c6cb7f06a3658a2a7` | 0.252555000 | 2,291 |
+| Seed 1 with host noise | `b3de4bbdaa7a747b54d3a940f02c4281bd3f26fe8574454c6cb7f06a3658a2a7` | 7.305678041 | 2,291 |
+| Seed 2 | `3477c8e474cbe111646f5a6aa03acadffefc5bb2995212bcd2aafec648e6dabe` | 0.249710083 | 2,291 |
+
+All reach init PASS and PSCI SYSTEM_OFF at 1,010,051,041 ns. CLI seeds 1, 1
+and 2 match the corresponding test witnesses. The first suite, before adding
+the inventory test, also passed; its evidence remains in `hvf-fgt-policy/`.
+Neither suite was a retry of a determinism failure.
+
+### Remaining RAM mismatch and expected KVM result
+
+The precise remaining witness differences are:
+
+| Component | New HVF | Retained KVM at `48e25a1` |
+| --- | --- | --- |
+| Seed-1 trace | `e91d56cedf3c759bebba911a8300f89e4b1b80dfd337e996f37e6c0d8879994a` | Same |
+| Seed-1 console | `ce862ae5fa2d8bd06489a02fafb04fabea1cef32a57a76f2ab57f80f57139323` | Same |
+| Seed-1 RAM | `b74b96c6af79d93ab84fb34d3737944ed44393a1229ff285a273687b4cd98dc0` | `325b0ad204e5e8b60f55afb8bac1f07d36a8ee72f372a4365817c6952420472d` |
+| Seed-2 trace | `3df66d85acd202aa54e129cd7c46cc8f6978d5653ecb7ea0a51fcef8a1c5e5fa` | Same |
+| Seed-2 console | `944b94bd80a944953989004b1b7b72292bccb3086f9e18c4d90517da4c1f5c38` | Same |
+| Seed-2 RAM | `8bebd1e539e8a02a5f4315320009aeb15bd842d7347cd4a1860de21596481844` | `43b929b1342fa7e74264e258332ed660ca06e7715d0f6b7b74e206e7a466ffdd` |
+
+Thus `compare.py` still correctly exits 1. The FGT policy is a principled fix
+for the identified extra read, **not a complete common architectural profile**.
+The remaining RAM byte locations and causes cannot be determined from KVM's
+hash-only report. Both adapters still inherit other CPU/cache feature defaults
+and use distinct in-hypervisor GIC implementations. Native HVF's retained boot
+ring, for example, advertises 988 SPIs and RSS. The KVM adapter never configures
+`KVM_DEV_ARM_VGIC_GRP_NR_IRQS`. These are concrete remaining configuration gaps,
+not proof of which bytes account for this RAM hash mismatch. Closing this gate
+requires matching KVM initial-register and stopped-RAM captures, including the
+printk ring, then an explicit common CPU/GIC model. Blindly clearing more feature
+bits or changing an IRQ model without that evidence is not justified.
+
+Section 4 uses the VM's existing Cargo and retains a new CPU inventory plus
+determinism reports. Expected KVM witnesses are unchanged (`ed30d3bb…` for seed
+1, `f024317d…` for seed 2), with exactly matching HVF traces and console and a
+remaining RAM mismatch. This expectation is pending the operator's run of the
+new commit; no new KVM execution is claimed here. No guest rebuild is needed.
+
+arm64 fmt/clippy and all 16 portable Rust tests pass; seven Python input tests,
+shell syntax, root seedbox fmt/clippy/workspace tests, and portable acceptance
+also pass (`portable-fgt-policy.log`). Linux-only `cargo test-vmm` was not run
+on the Mac. No witness normalization, RAM masks, trace filtering, clock charge
+adjustments, relaxed leak checks or changed noise gates were introduced.
+Frozen production paths are unchanged; no push or PR is performed.
 
 ## Cleanup and portable checks
 

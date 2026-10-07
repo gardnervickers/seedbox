@@ -136,3 +136,43 @@ fn hvf_determinism() {
 fn kvm_determinism() {
     suite::<seedbox_arm64::backend::kvm::Kvm>("kvm", false);
 }
+
+// Read-only inventory around the shared feature policy. Keep host model drift
+// visible when investigating matching exit traces with differing guest RAM.
+fn cpu_features<B: Backend>() {
+    use seedbox_arm64::{backend::SysReg, machine::configure_cpu_features};
+    let mut backend = B::create().unwrap();
+    backend.create_vcpu().unwrap();
+    for phase in ["host-default", "configured"] {
+        if phase == "configured" {
+            configure_cpu_features(&mut backend).unwrap();
+        }
+        for reg in [
+            0xc000, 0xc005, // MIDR, MPIDR
+            0xc020, 0xc021, // ID_AA64PFR0/1
+            0xc028, 0xc029, // ID_AA64DFR0/1
+            0xc030, 0xc031, 0xc032, // ID_AA64ISAR0/1/2
+            0xc038, 0xc039, 0xc03a, // ID_AA64MMFR0/1/2
+            0xc800, 0xd801, 0xd807, // CLIDR, CTR, DCZID
+        ] {
+            match backend.get_sys_reg(SysReg(reg)) {
+                Ok(value) => eprintln!("{phase} {reg:#06x}: {value:#018x}"),
+                Err(error) => eprintln!("{phase} {reg:#06x}: unavailable: {error}"),
+            }
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+#[ignore = "requires signed test executable and macOS 15+ HVF"]
+fn hvf_cpu_features() {
+    cpu_features::<seedbox_arm64::backend::hvf::Hvf>();
+}
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[test]
+#[ignore = "requires arm64 KVM/vGICv3"]
+fn kvm_cpu_features() {
+    cpu_features::<seedbox_arm64::backend::kvm::Kvm>();
+}

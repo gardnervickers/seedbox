@@ -50,6 +50,7 @@ impl<B: Backend> Machine<B> {
         backend.map_memory(0, RAM_BASE, Rc::clone(&ram))?;
         backend.map_memory(1, TIME_ADDR, Rc::clone(&page))?;
         backend.create_vcpu()?;
+        configure_cpu_features(&mut backend)?;
         for n in 0..31 {
             backend.set_reg(CoreReg::X(n), 0)?;
         }
@@ -271,6 +272,28 @@ impl<B: Backend> Machine<B> {
         Ok(())
     }
 }
+/// This EL1-only machine does not expose EL2 Fine Grained Traps. Host defaults
+/// disagree here: feature detection itself calls printk -> sched_clock -> PV
+/// read, even when loglevel suppresses console output. Define the architectural
+/// input before boot, never compensate for the resulting read in the clock.
+/// This is a partial feature policy, not yet a complete portable CPU model.
+pub fn configure_cpu_features(backend: &mut impl Backend) -> Result<()> {
+    const FGT: u64 = 0xf << 56; // ID_AA64MMFR0_EL1[59:56]
+    let initial = backend.get_sys_reg(SysReg::ID_AA64MMFR0)?;
+    let expected = initial & !FGT;
+    // Avoid unnecessary writes on KVM versions which already hide this feature.
+    if initial != expected {
+        backend.set_sys_reg(SysReg::ID_AA64MMFR0, expected)?;
+    }
+    let actual = backend.get_sys_reg(SysReg::ID_AA64MMFR0)?;
+    if actual != expected {
+        return Err(format!(
+            "ID_AA64MMFR0_EL1 feature policy readback: expected {expected:#018x}, got {actual:#018x}; backend must hide FGT and preserve all other fields"
+        ));
+    }
+    Ok(())
+}
+
 pub fn image_layout(kernel: &[u8]) -> Result<(u64, u64)> {
     if kernel.len() < 64 || &kernel[56..60] != b"ARM\x64" {
         return Err("--kernel: expected an uncompressed arm64 Linux Image".into());
