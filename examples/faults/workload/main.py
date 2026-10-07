@@ -12,9 +12,60 @@ import time
 TOKEN = re.compile(r"[A-Za-z0-9/_-]+\Z")
 BATCH = 32
 PROBES = 4
+LOAD_TIMEOUT = 10
+CONTROL_TIMEOUT = LOAD_TIMEOUT + 2
+PUT_TIMEOUT = 0.2
+RETRY_DELAY = 0.02
 
 
-def exchange(address, message, timeout=0.2):
+def remaining(deadline):
+    budget = deadline - time.monotonic()
+    if budget <= 0:
+        raise TimeoutError("operation deadline expired")
+    return budget
+
+
+def resolve(address):
+    host, port = address.rsplit(":", 1)
+    return socket.getaddrinfo(host, int(port), type=socket.SOCK_STREAM)
+
+
+def bounded_exchange(endpoints, message, timeout, deadline):
+    # One attempt budget covers connect, send and every receive, including trickle.
+    end = min(deadline, time.monotonic() + timeout)
+    last_error = None
+    for family, kind, protocol, _, endpoint in endpoints:
+        with socket.socket(family, kind, protocol) as channel:
+            try:
+                channel.settimeout(remaining(end))
+                channel.connect(endpoint)
+            except OSError as error:
+                last_error = error
+                continue
+            channel.settimeout(remaining(end))
+            channel.sendall(message.encode() + b"\n")
+            line = bytearray()
+            while b"\n" not in line:
+                channel.settimeout(remaining(end))
+                data = channel.recv(8193 - len(line))
+                if not data:
+                    raise ConnectionError("peer disconnected before its response")
+                line.extend(data)
+                if b"\n" not in line and len(line) >= 8193:
+                    raise ValueError("missing or oversized protocol line")
+            line = line[:line.index(b"\n") + 1]
+            if len(line) > 8192:
+                raise ValueError("missing or oversized protocol line")
+            remaining(end)
+            return line.decode().strip()
+    if last_error is not None:
+        raise last_error
+    raise ConnectionError("no service endpoints")
+
+
+def exchange(address, message, timeout=PUT_TIMEOUT, *, deadline=None, endpoints=None):
+    if deadline is not None:
+        return bounded_exchange(endpoints, message, timeout, deadline)
     host, port = address.rsplit(":", 1)
     with socket.create_connection((host, int(port)), timeout) as channel:
         channel.settimeout(timeout)
@@ -97,21 +148,31 @@ class Client:
     """The ledger contains only PUT replies actually received from the server."""
     def __init__(self, address):
         self.address = address
+        # Resolve before admitting commands; LOAD never performs name resolution.
+        self.endpoints = resolve(address)
         self.acks = []
         self.sequence = 0
         self.failed = 0
         self.result = None
 
-    def put(self):
+    def put(self, expected=None, deadline=None):
         sequence = self.sequence
-        self.sequence += 1
         key, value = f"k/{sequence:06}", f"v{sequence:06}"
-        response = exchange(self.address, f"PUT {key} {value}")
+        if deadline is not None:
+            remaining(deadline)
+        response = exchange(self.address, f"PUT {key} {value}",
+                            deadline=deadline, endpoints=self.endpoints)
         prefix, generation = response.split(" ")
         if prefix != "OK":
             raise ValueError(f"unexpected PUT reply {response}")
-        ack = (key, value, int(generation))
+        generation = int(generation)
+        if expected is not None and generation != expected:
+            raise ValueError(f"expected generation {expected}, received {generation}")
+        if deadline is not None:
+            remaining(deadline)
+        ack = (key, value, generation)
         self.acks.append(ack)
+        self.sequence += 1
         return ack
 
     def retry(self, command, deadline):
@@ -133,17 +194,15 @@ class Client:
         if command.startswith("LOAD "):
             expected = int(command.split()[1])
             before = len(self.acks)
-            deadline = time.monotonic() + 10
+            deadline = time.monotonic() + LOAD_TIMEOUT
             while len(self.acks) - before < BATCH:
+                remaining(deadline)
                 try:
-                    ack = self.put()
-                    if ack[2] != expected:
-                        raise ValueError(f"expected generation {expected}, received {ack[2]}")
+                    self.put(expected, deadline)
                 except OSError:
                     self.failed += 1
-                    if time.monotonic() >= deadline:
-                        raise
-                    time.sleep(0.02)
+                    time.sleep(min(RETRY_DELAY, remaining(deadline)))
+                remaining(deadline)
             print(f"ACK_PHASE generation={expected} acked={BATCH} total={len(self.acks)}", flush=True)
             return json.dumps({"generation": expected, "acked": BATCH, "total": len(self.acks)})
         if command == "PROBE":
