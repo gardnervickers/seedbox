@@ -66,6 +66,22 @@ pub enum Action {
     Heal {
         handle: String,
     },
+    /// Freeze the machine's CPU and devices; the world goes on.
+    Pause {
+        machine: String,
+    },
+    /// Continue a paused machine, catching up its timers and held ingress.
+    Resume {
+        machine: String,
+    },
+    /// Destroy the machine's VM: RAM, devices, queued I/O and sockets.
+    Crash {
+        machine: String,
+    },
+    /// Boot a crashed machine again as a new incarnation.
+    Reboot {
+        machine: String,
+    },
 }
 impl Action {
     pub fn name(&self) -> &'static str {
@@ -74,11 +90,20 @@ impl Action {
             Self::Restart { .. } => "restart",
             Self::Partition { .. } => "partition",
             Self::Heal { .. } => "heal",
+            Self::Pause { .. } => "pause",
+            Self::Resume { .. } => "resume",
+            Self::Crash { .. } => "crash",
+            Self::Reboot { .. } => "reboot",
         }
     }
     pub fn machine(&self) -> Option<&str> {
         match self {
-            Self::Stop { machine } | Self::Restart { machine } => Some(machine),
+            Self::Stop { machine }
+            | Self::Restart { machine }
+            | Self::Pause { machine }
+            | Self::Resume { machine }
+            | Self::Crash { machine }
+            | Self::Reboot { machine } => Some(machine),
             _ => None,
         }
     }
