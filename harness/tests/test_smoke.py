@@ -1,5 +1,7 @@
 """Portable smoke-oracle controls; no device access, OCI preparation or guests."""
 import copy
+import contextlib
+import io
 import hashlib
 import importlib.util
 import json
@@ -50,6 +52,15 @@ class SmokeTests(unittest.TestCase):
     def verify(self):
         return smoke.verify_record(self.record, self.run, self.state)
 
+    def test_host_reserved_pair_refuses_before_other_probes(self):
+        for cpu in (0, 16):
+            with patch.object(Path, 'read_text', return_value='0,16') as read, \
+                 patch.object(smoke.os, 'sched_getaffinity', create=True) as affinity:
+                with self.assertRaisesRegex(RuntimeError, 'reserved for the host'):
+                    smoke.pair(cpu)
+                self.assertEqual(read.call_count, 1)
+                affinity.assert_not_called()
+
     def test_qualification_marker_and_report_must_match_mode(self):
         smoke.verify_qualification(self.record, False)
         with self.assertRaisesRegex(RuntimeError, 'qualification marker'):
@@ -76,10 +87,10 @@ class SmokeTests(unittest.TestCase):
         self.assertEqual(command[command.index('--vmm') + 1], 'pinned-engine')
         self.assertNotEqual(command[command.index('--kernel') + 1], 'dev-kernel')
 
-    def test_dev_success_forwards_flag_and_checks_all_replay_markers(self):
+    def exercise_dev_success(self, performance):
         args = type('Args', (), dict(kernel='kernel', engine='engine', guest_init='init',
             busybox='busybox', cpu=8, cli='cli', tool_path='', allow_dev_engine=True,
-            pinned_engine='pinned-engine'))()
+            pinned_engine='pinned-engine', perf_replay=performance))()
         campaign = smoke.Campaign(args, self.root, 1e100)
         self.record['identity']['inputs']['profile']['semantic_parameters'] = {'engine_qualification': 'dev-unpinned'}
         self.record['report']['engine_qualification'] = 'dev-unpinned'
@@ -117,8 +128,79 @@ class SmokeTests(unittest.TestCase):
              patch.object(smoke, 'snapshot', return_value={}), \
              patch.object(smoke, 'pinned_workloads'):
             campaign.run()
-        self.assertEqual(inspected, ['fixed-inspect', 'default-inspect', 'undo-margin-inspect'])
-        self.assertEqual(commands['undo-margin'][-4:], ['--undo', '0', '--margin', '16384'])
+        self.assertEqual(list(commands), ['wrong-kernel', 'doctor', 'doctor-json', 'fixed', 'default'] +
+                         (['undo-margin'] if performance else []))
+        self.assertEqual(inspected, ['fixed-inspect', 'default-inspect'] +
+                         (['undo-margin-inspect'] if performance else []))
+        self.assertIn('--full-state', commands['fixed'])
+        self.assertNotIn('--undo', commands['default'])
+        self.assertNotIn('--margin', commands['default'])
+        if performance:
+            self.assertEqual(commands['undo-margin'][-4:], ['--undo', '0', '--margin', '16384'])
+        else:
+            self.assertNotIn('undo-margin', commands)
+            self.assertNotIn('--undo', commands['default'])
+            self.assertNotIn('--margin', commands['default'])
+
+    def test_wrong_kernel_refusal_stops_before_direct_admission_and_guest(self):
+        args = type('Args', (), dict(kernel='kernel', engine='engine', guest_init='init',
+            busybox='busybox', cpu=1, cli='cli', tool_path='', project='/project'))()
+        campaign = smoke.Campaign(args, self.root, 1e100)
+        with patch.object(campaign, 'invoke', return_value=(0, 'PASS: unexpected', '')) as invoke, \
+             patch.object(smoke, 'pair', side_effect=AssertionError('admission after bad refusal')):
+            with self.assertRaisesRegex(RuntimeError, 'required policy refusal'):
+                campaign.run()
+        self.assertEqual(invoke.call_count, 1)
+        self.assertEqual(invoke.call_args.args[0], 'wrong-kernel')
+
+    def test_default_replay_checks_witness_without_performance_feature(self):
+        self.exercise_dev_success(False)
+        changed = copy.deepcopy(self.record)
+        changed['report']['witness'] = 'drifted'
+        streams = self.verify()
+        with self.assertRaisesRegex(RuntimeError, 'deterministic report'):
+            smoke.compare(self.record, changed, streams, streams)
+
+    def test_dev_success_forwards_flag_and_checks_all_replay_markers(self):
+        self.exercise_dev_success(True)
+
+    def test_core_success_omits_unrelated_performance_combination(self):
+        self.exercise_dev_success(False)
+
+    def test_perf_replay_argument_is_off_by_default(self):
+        required = [part for name in ('cli', 'engine', 'kernel', 'guest-init', 'busybox', 'output')
+                    for part in ('--' + name, '/unused/' + name)]
+        required += ['--cpu', '1', '--tool-path', '/explicit']
+        parser = smoke.argument_parser()
+        self.assertFalse(parser.parse_args(required).perf_replay)
+        self.assertTrue(parser.parse_args(required + ['--perf-replay']).perf_replay)
+
+    def test_main_removes_state_on_pass_and_prints_cleanup_on_failure(self):
+        inputs = []
+        for name in ('cli', 'engine', 'kernel', 'guest-init', 'busybox'):
+            path = self.root / name
+            path.write_bytes(b'input')
+            inputs += ['--' + name, str(path)]
+        for fails in (False, True):
+            output = self.root / ('bad' if fails else 'good')
+            def campaign_run(campaign):
+                (campaign.state / 'runs').mkdir(parents=True)
+                if fails:
+                    raise RuntimeError('injected failure')
+            out, err = io.StringIO(), io.StringIO()
+            argv = ['amd.py', *inputs, '--output', str(output), '--cpu', '1', '--tool-path', '/explicit']
+            with patch.object(sys, 'argv', argv), patch.object(smoke.sys, 'platform', 'linux'), \
+                 patch.object(smoke.os, 'geteuid', return_value=0), \
+                 patch.object(smoke.Campaign, 'run', campaign_run), \
+                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                if fails:
+                    with self.assertRaisesRegex(RuntimeError, 'injected'):
+                        smoke.main()
+                else:
+                    self.assertEqual(smoke.main(), 0)
+            self.assertEqual((output / 'state').exists(), fails)
+            self.assertEqual('cleanup: sudo rm -rf --' in err.getvalue(), fails)
+            self.assertTrue((output / ('failure.json' if fails else 'result.json')).exists())
 
     def test_dev_doctor_cannot_claim_qualified_readiness(self):
         args = type('Args', (), dict(kernel='kernel', engine='engine', guest_init='init',

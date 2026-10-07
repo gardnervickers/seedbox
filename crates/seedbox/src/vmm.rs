@@ -1212,6 +1212,7 @@ mod linux {
             .ok_or_else(|| Error::Integrity("missing retained VMM".into()))?;
         fs::set_permissions(engine, fs::Permissions::from_mode(0o500))?;
         let report_path = request.output.join("vmm.json");
+        let endpoint = crate::host_control::Endpoint::new(request.output)?;
         let mut command = Command::new(engine);
         command
             .arg("--config")
@@ -1220,6 +1221,7 @@ mod linux {
             .arg(request.seed.to_string())
             .arg("--out")
             .arg(request.output.join(MACHINE_OUTPUT_DIR));
+        command.arg("--host-control").arg(endpoint.socket());
         command
             .arg("--stream-console")
             .arg("--console-limit")
