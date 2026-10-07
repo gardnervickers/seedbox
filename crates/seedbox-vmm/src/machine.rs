@@ -1423,6 +1423,54 @@ mod io_boundary_tests {
         }
     }
 
+    /// A 32-bit loop of 1000 conditional branches, optionally followed by an
+    /// uncharged OUT to port 0x80 (a natural exit), with interrupts masked.
+    fn loop_probe(kvm: &Kvm, natural_exit: bool, undo: u64) -> Machine {
+        // outer: mov ebx,1000; inner: dec ebx; jnz inner; [out 0x80,al]; jmp outer
+        let mut code=vec![0xbb,0xe8,0x03,0x00,0x00,0x4b,0x75,0xfd];
+        if natural_exit {code.extend_from_slice(&[0xe6,0x80]);}
+        let back=-(code.len() as i8+2);
+        code.extend_from_slice(&[0xeb,back as u8]);
+        let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo};
+        let mut machine=Machine::new(kvm,"stop-probe",&spec).unwrap();
+        let mut r=machine.vcpu.get_regs().unwrap();r.rflags=0x2;machine.vcpu.set_regs(&r).unwrap();
+        machine.pic.set_masks(0xffff);
+        machine
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn stops_at_natural_exits_or_exact_hard_counts_without_yields() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        for undo in [0,16,256] {
+            // No natural exit in the interval: an exact counted stop at the
+            // hard target (the slice limit), never earlier.
+            let mut m=loop_probe(&kvm,false,undo);
+            let mut frames=Vec::new();
+            assert_eq!(m.run_until(&mut counter,300_000,150_000,&mut frames).unwrap(),Stop::Reached);
+            assert_eq!(m.time,300_000,"undo={undo}");
+            assert_eq!(m.branches,300_000);
+            assert_eq!(m.page_get(2),0,"a yield window was requested");
+            assert_eq!(m.stats.yields,0);
+            // A natural exit every 1000 branches: the stop is the first one at
+            // or after the soft target (limit - early), with no counted stop.
+            let mut m=loop_probe(&kvm,true,undo);
+            let before=m.stats.precise_stops;
+            assert_eq!(m.run_until(&mut counter,300_000,150_000,&mut frames).unwrap(),Stop::Reached);
+            assert!(m.time>=150_000 && m.time<151_001,"undo={undo} time={}",m.time);
+            assert_eq!(m.stats.precise_stops,before,"undo={undo}: counted stop despite a natural exit");
+            assert_eq!(m.page_get(2),0);
+            assert_eq!(m.stats.yields,0);
+            // The same inputs land on the same count whatever the undo setting.
+            let first=m.time;
+            let mut again=loop_probe(&kvm,true,0);
+            assert_eq!(again.run_until(&mut counter,300_000,150_000,&mut frames).unwrap(),Stop::Reached);
+            assert_eq!(again.time,first);
+        }
+    }
+
     fn halt_snapshot(m: &mut Machine, stage: &str) {
         let regs=m.vcpu.get_regs().unwrap();
         let sregs=m.vcpu.get_sregs().unwrap();
