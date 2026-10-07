@@ -43,14 +43,29 @@ pub const ZEN: CounterProfile = CounterProfile {
     undo_max: 1 << 18,
 };
 
-/// Intel family 6. UNTESTED: event from rr (BR_INST_RETIRED.CONDITIONAL) and
-/// margins copied from Zen; needs an exact-count check and skid tuning on real
-/// hardware before any qualification.
-pub const INTEL: CounterProfile = CounterProfile {
-    name: "intel",
+/// Intel Nehalem through Comet Lake: BR_INST_RETIRED.CONDITIONAL. Unqualified:
+/// margins copied from Zen, no exact-count check on hardware yet.
+pub const INTEL_SKYLAKE: CounterProfile = CounterProfile {
+    name: "intel-0x5101c4",
     branch_event: 0x5101c4,
     ..ZEN
 };
+
+/// Intel Ice Lake and later non-hybrid cores, where umask 0x01 became
+/// COND_TAKEN and all conditional branches are umask 0x11. Unqualified, as above.
+pub const INTEL_ICE_LAKE: CounterProfile = CounterProfile {
+    name: "intel-0x5111c4",
+    branch_event: 0x5111c4,
+    ..ZEN
+};
+
+/// Intel family-6 models per event, following rr's PerfCounters_x86 table.
+/// Hybrid parts are refused: their E-cores have their own PMU and events.
+const SKYLAKE_MODELS: &[u32] = &[
+    0x1a, 0x1e, 0x1f, 0x2e, 0x25, 0x2c, 0x2f, 0x2a, 0x2d, 0x3a, 0x3e, 0x3c, 0x3f, 0x45,
+    0x46, 0x3d, 0x47, 0x4f, 0x56, 0x4e, 0x55, 0x5e, 0x8e, 0x9e, 0xa5, 0xa6,
+];
+const ICE_LAKE_MODELS: &[u32] = &[0x6a, 0x6c, 0x7d, 0x7e, 0x8c, 0x8d, 0xa7, 0x8f, 0xcf, 0xad, 0xae];
 
 /// The profile for this host's CPU, detected once.
 pub fn host() -> Result<&'static CounterProfile, String> {
@@ -59,19 +74,22 @@ pub fn host() -> Result<&'static CounterProfile, String> {
 }
 
 fn detect() -> Result<&'static CounterProfile, String> {
-    let (vendor, family) = cpu();
+    let (vendor, family, model, hybrid) = cpu();
     match (vendor.as_str(), family) {
         ("AuthenticAMD", 0x17..=0x1a) => Ok(&ZEN),
-        ("GenuineIntel", 6) => Ok(&INTEL),
-        _ => Err(format!("no branch counter profile for {vendor} family {family:#x}")),
+        ("GenuineIntel", 6) if !hybrid && SKYLAKE_MODELS.contains(&model) => Ok(&INTEL_SKYLAKE),
+        ("GenuineIntel", 6) if !hybrid && ICE_LAKE_MODELS.contains(&model) => Ok(&INTEL_ICE_LAKE),
+        _ => Err(format!(
+            "no branch counter profile for {vendor} family {family:#x} model {model:#x} hybrid {hybrid}"
+        )),
     }
 }
 
-/// CPUID vendor string and display family.
+/// CPUID vendor string, display family and model, and hybrid flag.
 // `__cpuid` is unsafe on older toolchains.
 #[allow(unused_unsafe)]
-fn cpu() -> (String, u32) {
-    use std::arch::x86_64::__cpuid;
+fn cpu() -> (String, u32, u32, bool) {
+    use std::arch::x86_64::{__cpuid, __cpuid_count};
     let leaf0 = unsafe { __cpuid(0) };
     let mut vendor = Vec::with_capacity(12);
     for reg in [leaf0.ebx, leaf0.edx, leaf0.ecx] {
@@ -80,5 +98,11 @@ fn cpu() -> (String, u32) {
     let eax = unsafe { __cpuid(1) }.eax;
     let base = (eax >> 8) & 0xf;
     let family = if base == 0xf { base + ((eax >> 20) & 0xff) } else { base };
-    (String::from_utf8_lossy(&vendor).into_owned(), family)
+    let model = if base == 0x6 || base == 0xf {
+        ((eax >> 4) & 0xf) | ((eax >> 12) & 0xf0)
+    } else {
+        (eax >> 4) & 0xf
+    };
+    let hybrid = leaf0.eax >= 7 && unsafe { __cpuid_count(7, 0) }.edx & (1 << 15) != 0;
+    (String::from_utf8_lossy(&vendor).into_owned(), family, model, hybrid)
 }

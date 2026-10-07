@@ -13,13 +13,16 @@ BIT = 1 << 54
 
 
 def required(cpuinfo="/proc/cpuinfo"):
-    """True when this host's counter profile is Zen, the one needing the workaround."""
+    """False only for a host positively identified as not AMD. Unidentifiable
+    hosts raise rather than silently skip the workaround."""
     fields = {}
     for line in Path(cpuinfo).read_text().splitlines():
         key, _, value = line.partition(":")
         fields.setdefault(key.strip(), value.strip())
-    # Zen is AMD families 17h-1Ah; /proc/cpuinfo prints the family in decimal.
-    return fields.get("vendor_id") == "AuthenticAMD" and fields.get("cpu family") in {"23", "24", "25", "26"}
+    vendor = fields.get("vendor_id")
+    if not vendor:
+        raise OSError(f"{cpuinfo}: no vendor_id; cannot tell whether the Zen workaround is needed")
+    return vendor == "AuthenticAMD"
 
 
 def rd(cpu):

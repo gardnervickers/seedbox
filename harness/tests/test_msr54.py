@@ -8,12 +8,14 @@ spec=importlib.util.spec_from_file_location('msr54',Path(__file__).resolve().par
 msr=importlib.util.module_from_spec(spec);spec.loader.exec_module(msr)
 
 class MsrTests(unittest.TestCase):
- def test_only_zen_requires_the_workaround(self):
+ def test_workaround_is_skipped_only_for_identified_non_amd_hosts(self):
   with tempfile.TemporaryDirectory() as directory:
    cpuinfo=Path(directory)/'cpuinfo'
-   for vendor,family,expected in [('AuthenticAMD',25,True),('AuthenticAMD',23,True),('AuthenticAMD',21,False),('GenuineIntel',6,False)]:
-    cpuinfo.write_text(f'processor\t: 0\nvendor_id\t: {vendor}\ncpu family\t: {family}\n\nprocessor\t: 1\nvendor_id\t: {vendor}\n')
+   for vendor,expected in [('AuthenticAMD',True),('GenuineIntel',False)]:
+    cpuinfo.write_text(f'processor\t: 0\nvendor_id\t: {vendor}\ncpu family\t: 25\n')
     self.assertEqual(msr.required(cpuinfo),expected)
+   cpuinfo.write_text('processor\t: 0\n')
+   with self.assertRaises(OSError):msr.required(cpuinfo)
  def test_restore_attempts_both_cpus_retains_snapshot_on_error(self):
   with tempfile.TemporaryDirectory() as directory:
    snapshot=Path(directory)/'saved.json';snapshot.write_text('{}')

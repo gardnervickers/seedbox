@@ -81,7 +81,8 @@ the chosen core and all SMT siblings with the same `/tmp/seedbox-msr-cpu-N.lock`
 protocol as `harness/batch.py`, before reading or changing MSRs. It snapshots exact
 values, sets bit 54 with readback, pins the VMM, and restores with readback only
 after reaping it. Only the Zen counter profile needs this workaround; on a host
-with another profile the executor leases the cores and leaves MSRs alone. An unsuccessful restore retains `output/msr-original.json`.
+with another profile the executor leases the cores and leaves MSRs alone. Other
+profiles are unqualified and run only with `--allow-unqualified-cpu`. An unsuccessful restore retains `output/msr-original.json`.
 Library cancellation and CLI SIGINT/SIGTERM/SIGHUP cause cleanup through the same
 path. SIGKILL and host loss cannot guarantee cleanup.
 

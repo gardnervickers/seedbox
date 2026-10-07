@@ -63,10 +63,6 @@ impl VmmExecutor {
         })
     }
 
-    pub fn counter(&self) -> CounterProfile {
-        self.counter
-    }
-
     pub fn with_margin(mut self, margin: &str) -> Result<Self> {
         if margin != "adaptive" && margin.parse::<u64>().ok().is_none_or(|value| value == 0) {
             return Err(Error::Execution(
