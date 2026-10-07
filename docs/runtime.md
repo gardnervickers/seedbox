@@ -185,6 +185,56 @@ Replay does not require registry access, a builder, or the original Compose file
 Run exits are 0 for PASS, 1 for FAIL, 2 for ERROR, 3 for INCOMPLETE, and 124 for
 simulated TIMEOUT. Replay exits are 0 for MATCH (including a reproduced FAIL),
 1 for MISMATCH, and 2 for NOT_COMPARABLE. Results print the attempt path.
+Offline diff exits 0 for MATCH, 1 for DIFFERENT, and 2 for usage/setup or invalid evidence.
+
+## Compare retained runs
+
+```sh
+seedbox diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
+seedbox diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY --json
+```
+
+Both positional inputs are retained run directories, including directories printed
+by `seedbox import`. Import exported bundles first. Diff runs on macOS or Linux,
+requires no root, runtime inputs, content store, host admission or registry access,
+and creates no state. Manifests are verified with the existing v2 reader. Selected
+materialized evidence under `output/` must match the manifest's recorded digest;
+missing declared files, corrupt bytes and unsupported reports produce setup exit 2.
+Unregistered and policy-omitted files are never interpreted, even if left on disk.
+
+Plain output starts with exactly one `MATCH: RUN_A <> RUN_B` or `DIFFERENT: ...`
+line, followed by lowercase fields. `--json` prints exactly one pretty library
+`DiffReport`. MATCH exits 0; DIFFERENT exits 1. This is evidence comparison, not
+replay admission: equal incomplete records can MATCH while witness equality is
+unknown (`matches: null`). Differing evidence availability is DIFFERENT. Omissions
+and unavailable detail are listed in `limitations`.
+
+The report presents the world witness first, then machines by name with exit
+witnesses, optional full-state digests/parts and selected terminal fields. The
+manifest's full-state digests remain usable when the raw engine report was omitted.
+All changed identity fields are listed as JSON pointers with both values, including
+configuration, seed, engine, kernel, images/layers, guest archives, provenance and
+semantic parameters. Missing values are null. Arrays are compared as whole values.
+Execution outcome, report, errors and omission metadata are also compared.
+Attempt names, replay ancestry, performance parameters, engine performance counters,
+host timings and arbitrary console/log contents do not determine MATCH.
+
+When both runs retain `machines/NAME.trace`, diff compares the existing engine
+records (`kind branches time_ns extra(hex) rip(hex)`) in order for each machine.
+An inserted/deleted record is reported at the first positional mismatch, including
+EOF on either side; there is no guessed realignment. Of those first mismatches,
+the lowest available simulated time on either side wins, with machine name as a
+stable tie-breaker. Each side retains its own time, kind and values; `record` is
+one-based. Traces are streamed and fully checked, including after the first mismatch.
+Trace lines are limited to 64 KiB and engine report metadata to 256 MiB.
+
+The production adapter does not enable tracing. Without a differing trace record,
+`first_record` reports the earliest differing terminal observation available in
+`vmm.json`, with source/kind `terminal`, machine and each side's time. Final hashes
+alone give no exit/time localization, so `first_record` can be null even when
+witnesses differ. Terminal time is only when the differing final state was observed;
+it is not a claim about the first divergent instruction or exit. Full-state digests
+are hashes, not snapshots. No new execution evidence is collected by diff.
 
 ## Check the execution profile
 
