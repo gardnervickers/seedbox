@@ -545,6 +545,34 @@ fn committed_trigger_reports_correlate_arms_effects_cancellation_and_cutoff() {
         let parse =
             |raw: &serde_json::Value| vmm::report(&serde_json::to_vec(raw).unwrap(), &request);
         assert_eq!(parse(&raw).unwrap().faults.len(), 1);
+        // A matched trigger rejected at admission creates no second fault.
+        let mut rejected = raw.clone();
+        let stop_at = arm + 2 * latency;
+        let stopped = stop_at + 1;
+        rejected["control_history"].as_array_mut().unwrap().push(json!({"relay_id":2,"session_id":1,"fault_id":1,"request":{"version":1,"id":2,"op":"stop","target":{"service":"server"}},"response":{"version":1,"id":2,"ok":true,"result":{},"requested_at_ns":arm+latency,"admitted_at_ns":stop_at,"effect_at_ns":stopped,"replied_at_ns":stopped+latency},"delivered_at_ns":stopped+latency}));
+        rejected["faults"][0]["request"]["at_ns"] = json!(stop_at);
+        rejected["faults"][0]["request"]["deadline_ns"] = json!(stop_at + 5_000_000_000u64);
+        rejected["faults"][0]["requested_at_ns"] = json!(stop_at);
+        rejected["faults"][0]["applied_at_ns"] = json!(stopped);
+        rejected["triggers"][0]["matched_at_ns"] = json!(arm + 4 * latency);
+        rejected["triggers"][0]["effect_at_ns"] = json!(arm + 5 * latency);
+        rejected["triggers"][0]["status"] = json!("rejected");
+        rejected["triggers"][0]["fault_id"] = json!(null);
+        rejected["triggers"][0]["rejection_reason"] = json!("target process is already stopped");
+        assert_eq!(parse(&rejected).unwrap().faults.len(), 1);
+        for (field, value) in [
+            ("rejection_reason", json!(null)),
+            ("rejection_reason", json!("")),
+            ("fault_id", json!(2)),
+            ("matched_at_ns", json!(null)),
+            ("effect_at_ns", json!(request.limits.simulated_time_ns)),
+            ("cancelled_at_ns", json!(arm)),
+            ("cut_off_at_ns", json!(arm + 5 * latency)),
+        ] {
+            let mut bad = rejected.clone();
+            bad["triggers"][0][field] = value;
+            assert!(parse(&bad).is_err(), "accepted rejected trigger {field}");
+        }
         let mut unavailable = raw.clone();
         unavailable["faults"][0]["status"] = json!("unavailable");
         unavailable["faults"][0]["applied_at_ns"] = json!(null);
@@ -562,6 +590,7 @@ fn committed_trigger_reports_correlate_arms_effects_cancellation_and_cutoff() {
             ("prefix", json!(1)),
             ("status", json!("armed")),
             ("marker", json!([65])),
+            ("rejection_reason", json!("unexpected rejection")),
         ] {
             let mut bad = raw.clone();
             bad["triggers"][0][field] = value;

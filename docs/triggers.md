@@ -20,6 +20,10 @@ There are no implicit retries or heals. The existing `inspect()` includes a
 `triggers` array only after a successful arm. `fired` means the effect was
 submitted to the fault engine; process termination still requires its ordinary
 reap acknowledgement. Inspect the machine state for confirmation.
+At effect time, the action goes through the ordinary fault admission check.
+If it fails, the trigger becomes `rejected`, retains `rejection_reason`, and
+submits no fault or fault ID. For example, a stop trigger is rejected if control
+has already stopped its target before the trigger's effect time.
 
 ## Time and commitment contract
 
@@ -30,8 +34,12 @@ reap acknowledgement. Inspect the machine state for confirmation.
 2. Console observation happens after the VMM exit judge accepts a deterministic
    exit, and after the real UART sink transmits. A discarded/rolled-back exit
    never enters that sink or the matcher. DLAB register writes do not transmit.
-   Console ports have zero charged-I/O cost. A committed byte stops the armed
-   source's slice immediately, before another candidate can be observed. The
+   Console ports have zero charged-I/O cost. Every committed console byte stops
+   the armed source's slice immediately, even when it does not match the marker,
+   before another candidate can be observed. With a stop tolerance, these extra
+   slice boundaries change scheduling even if the trigger never fires. Arming
+   and the resulting trigger state are recorded in the transcript, so replay
+   reproduces the same scheduling and is unaffected. The
    accepted device effect and pending KVM response are irrevocable; undo cannot
    cross this exit. Completing KVM's held I/O later does not emit the byte again.
    Timer-port I/O is not an observation surface: a peer's already-sampled
@@ -58,9 +66,10 @@ reap acknowledgement. Inspect the machine state for confirmation.
 6. A partition affects new routing decisions only. Already-routed response
    frames remain in flight. A process stop has the existing five simulated
    second effect/acknowledgement deadline after submission. Missing/rejected
-   effects fail through the ordinary fault machinery. At run cutoff, unmatched
-   and matched-but-not-submitted triggers retain `cut_off_at_ns` and their
-   partial or scheduled state. A source can be ahead of an exiting controller;
+   acknowledgements for submitted effects fail through the ordinary fault
+   machinery. Admission rejection creates only a rejected trigger record. At run
+   cutoff, unmatched and matched-but-not-submitted triggers retain `cut_off_at_ns`
+   and their partial or scheduled state. A source can be ahead of an exiting controller;
    a committed match later than that terminal clock is retained as cut off,
    without submitting an effect. Submitted effects remain in the fault transcript,
    including an outstanding process effect when execution ends.
@@ -202,7 +211,7 @@ sudo -n env PATH="$PATH" SEEDBOX_BUSYBOX="$SEEDBOX_BUSYBOX" target/release/seedb
 NO_TRIGGER_RUN=$(sed -n 's/^[A-Z]*: //p' "$OUT/unused.log")
 NO_TRIGGER_WORLD="$NO_TRIGGER_RUN/output/world.json"
 PARENT_CHECKOUT=$(mktemp -d /tmp/seedbox62-parent.XXXXXX)
-git archive HEAD^ | tar -x -C "$PARENT_CHECKOUT"
+git archive 3af90bb^ | tar -x -C "$PARENT_CHECKOUT"
 (cd "$PARENT_CHECKOUT" && cargo build-vmm)
 SEEDBOX_ROOT="$PWD" CPU0="$CPU" VMM="$PARENT_CHECKOUT/crates/seedbox-vmm/target/release/seedbox-vmm" bash harness/batch.sh "$NO_TRIGGER_WORLD" trigger62-parent-unused "1009" --digest
 SEEDBOX_ROOT="$PWD" CPU0="$CPU" VMM="$PWD/crates/seedbox-vmm/target/release/seedbox-vmm" bash harness/batch.sh "$NO_TRIGGER_WORLD" trigger62-new-unused "1009" --digest

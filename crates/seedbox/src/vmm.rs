@@ -866,6 +866,7 @@ fn validate_triggers(
             || (matched && r.prefix != r.marker.len())
             || (!matched && r.prefix == r.marker.len())
             || r.cancelled_at_ns != cancellations.get(&r.id).copied()
+            || (r.status != "rejected" && r.rejection_reason.is_some())
         {
             return Err(bad());
         }
@@ -886,6 +887,16 @@ fn validate_triggers(
             return Err(bad());
         }
         match r.status.as_str() {
+            "rejected"
+                if matched
+                    && r.cancelled_at_ns.is_none()
+                    && r.cut_off_at_ns.is_none()
+                    && r.fault_id.is_none()
+                    && r.effect_at_ns
+                        .is_some_and(|e| e < request.limits.simulated_time_ns)
+                    && r.rejection_reason
+                        .as_ref()
+                        .is_some_and(|reason| !reason.is_empty()) => {}
             "fired" if matched && r.cancelled_at_ns.is_none() && r.cut_off_at_ns.is_none() => {
                 let at_ns = r.effect_at_ns.ok_or_else(bad)?;
                 if at_ns >= request.limits.simulated_time_ns {

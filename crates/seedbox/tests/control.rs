@@ -416,6 +416,69 @@ fn process_lifecycle_rejections_are_admission_errors_without_new_faults() {
     assert!(f.error.is_none());
 }
 #[test]
+fn matched_stop_trigger_rejects_target_already_stopped_through_control() {
+    let mut c = control();
+    let mut f = faults::Faults::new(
+        vec![],
+        vec!["scenario".into(), "client".into(), "server".into()],
+    )
+    .unwrap();
+    request(
+        &mut c,
+        1,
+        100,
+        json!({"version":1,"id":1,"op":"arm_trigger","source":{"service":"server"},"marker":[65],"match_timeout_ns":1000,"fault":{"action":"stop","target":{"service":"server"}}}),
+    )
+    .unwrap();
+    c.apply_boundary(&mut f, 120).unwrap();
+    c.apply_boundary(&mut f, 140).unwrap();
+    c.mark_delivered(140).unwrap();
+    assert_eq!(c.triggers.records[0].status, "armed");
+    request(
+        &mut c,
+        2,
+        200,
+        json!({"version":1,"id":2,"op":"stop","target":{"service":"server"}}),
+    )
+    .unwrap();
+    c.apply_boundary(&mut f, 220).unwrap();
+    assert_eq!(f.apply_due(220), vec![(2, b"stop 1\n".to_vec())]);
+    f.effect(2, 1, 225, true);
+    c.observe_faults(&f, 225).unwrap();
+    c.apply_boundary(&mut f, 245).unwrap();
+    c.mark_delivered(245).unwrap();
+    assert_eq!(f.process_state(2), "Stopped");
+    let stopped_log = f.log.clone();
+
+    c.triggers.committed("server", 260, b'A', 20, 275).unwrap();
+    assert_eq!(c.triggers.records[0].status, "matched");
+    c.triggers.apply_boundary(&mut f, 280).unwrap();
+    let record = &c.triggers.records[0];
+    assert_eq!(record.status, "rejected");
+    assert_eq!(
+        record.rejection_reason.as_deref(),
+        Some("target process is already stopped")
+    );
+    assert_eq!(record.matched_at_ns, Some(260));
+    assert_eq!(record.effect_at_ns, Some(280));
+    assert_eq!(record.fault_id, None);
+    let evidence = c.triggers.evidence().unwrap().unwrap();
+    assert_eq!(
+        evidence[0]["rejection_reason"],
+        "target process is already stopped"
+    );
+    assert_eq!(c.triggers.boundary(), u64::MAX);
+    c.triggers.apply_boundary(&mut f, 280).unwrap();
+    c.triggers.committed("server", 281, b'A', 20, 296).unwrap();
+    assert!(f.apply_due(280).is_empty());
+    assert_eq!(f.log, stopped_log);
+    assert_eq!(f.next_boundary(), u64::MAX);
+    assert_eq!(f.process_state(2), "Stopped");
+    assert!(f.error.is_none());
+    assert!(complete(&c));
+}
+
+#[test]
 fn target_exit_between_request_and_admission_is_recoverable() {
     for op in ["stop", "restart"] {
         let mut c = control();

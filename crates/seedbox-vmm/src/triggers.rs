@@ -19,7 +19,7 @@ impl Triggers {
         let mut failure=vec![0;marker.len()];
         for i in 1..marker.len() {let mut j=failure[i-1];while j>0 && marker[i]!=marker[j] {j=failure[j-1];}if marker[i]==marker[j] {j+=1;}failure[i]=j;}
         let id=self.records.len() as u32+1;
-        self.records.push(TriggerRecord {id,source,marker,armed_at_ns:now,match_deadline_ns:deadline,action,prefix:0,seen:0,resets:0,matched_at_ns:None,effect_at_ns:None,fault_id:None,cancelled_at_ns:None,cut_off_at_ns:None,status:"armed".into()});
+        self.records.push(TriggerRecord {id,source,marker,armed_at_ns:now,match_deadline_ns:deadline,action,prefix:0,seen:0,resets:0,matched_at_ns:None,effect_at_ns:None,fault_id:None,cancelled_at_ns:None,cut_off_at_ns:None,status:"armed".into(),rejection_reason:None});
         self.failure.push(failure);Ok(id)
     }
     pub fn observes(&self,source:&str)->bool {self.records.iter().any(|r|r.status=="armed" && r.source==source)}
@@ -50,6 +50,7 @@ impl Triggers {
         for r in &mut self.records {
             if r.status=="armed" && r.match_deadline_ns==now {r.status="expired".into();}
             if r.status=="matched" && r.effect_at_ns==Some(now) {
+                if let Some(reason)=faults.admission_error(&r.action) {r.status="rejected".into();r.rejection_reason=Some(reason.into());continue}
                 r.fault_id=Some(faults.append(Plan {id:0,at_ns:now,deadline_ns:now.checked_add(PROCESS_EFFECT_TIMEOUT_NS).ok_or("trigger effect deadline overflow")?,action:r.action.clone()})?);
                 r.status="fired".into();
             }
