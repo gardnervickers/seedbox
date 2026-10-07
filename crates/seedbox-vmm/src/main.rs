@@ -969,6 +969,12 @@ fn report(
         if let Clock::Pv(_) = world.clock {
             report.last_mut().unwrap()["spin"] = json!({"probes": s.spin_probes, "idles": s.spin_idles, "false_alarms": s.spin_false, "mismatch": s.spin_mismatch});
             report.last_mut().unwrap()["syscalls"] = json!(mach.syscalls());
+            let by: serde_json::Map<String, Value> = machine::Cause::NAMES
+                .iter()
+                .zip(s.time_by)
+                .map(|(k, v)| (k.to_string(), json!(v)))
+                .collect();
+            report.last_mut().unwrap()["time_ns_by_cause"] = Value::Object(by);
         }
     }
     let sim_ns = world.machines.iter().map(|m| m.time).max().unwrap_or(0);

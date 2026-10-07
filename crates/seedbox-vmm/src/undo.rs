@@ -182,9 +182,14 @@ pub struct Undo {
 }
 
 /// Counters that move while the guest runs whatever it does: APERF/MPERF,
-/// AMD's read-only copies and IRPERF, and the legacy and core perf counters.
+/// AMD's read-only copies and IRPERF, the legacy and core perf counters, and
+/// the Hyper-V reference counter.
 fn is_free_running(i: u32) -> bool {
-    matches!(i, 0xe7 | 0xe8 | 0xc000_00e7..=0xc000_00e9 | 0xc001_0004..=0xc001_0007 | 0xc001_0200..=0xc001_020b)
+    matches!(
+        i,
+        0xe7 | 0xe8 | 0xc000_00e7..=0xc000_00e9 | 0xc001_0004..=0xc001_0007 | 0xc001_0200..=0xc001_020b
+            | 0x4000_0020 // Hyper-V reference time count (no Hyper-V CPUID is exposed)
+    )
 }
 
 fn is_tsc_or_pv(i: u32) -> bool {

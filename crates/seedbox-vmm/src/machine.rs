@@ -159,6 +159,27 @@ pub struct Stats {
     pub spin_false: u64,
     /// Per state part, cycle checks that failed first on it.
     pub spin_mismatch: std::collections::BTreeMap<String, u64>,
+    /// Virtual time advanced, by cause (see `Cause`).
+    pub time_by: [u64; 5],
+}
+
+/// Why virtual time moved, for `Stats::time_by`.
+#[derive(Clone, Copy)]
+pub enum Cause {
+    /// The timebase's progress: branches, or charged syscalls (PV).
+    Progress,
+    /// Guest clock reads (time page or port).
+    ClockReads,
+    /// The guest waited at a PV clock bound.
+    ClockBound,
+    /// I/O cost paid.
+    Io,
+    /// Halted, parked or waiting for the world.
+    Idle,
+}
+
+impl Cause {
+    pub const NAMES: [&'static str; 5] = ["progress", "clock_reads", "clock_bound", "io", "idle"];
 }
 
 pub struct Machine {
@@ -516,7 +537,7 @@ impl Machine {
         // The parked interval passes like idle time: a timer that fell due
         // meanwhile fires now, late, so the armed deadline is ahead of the
         // clock again before the next slice computes its hard stop.
-        self.time = self.time.max(at);
+        self.advance_to(at, Cause::Idle);
         self.expire_timers()?;
         self.entropy = entropy;
         self.entropy_read = 0;
@@ -637,7 +658,7 @@ impl Machine {
 
     /// Resume a halted machine at virtual time `t`.
     pub fn wake(&mut self, t: u64) {
-        self.time = self.time.max(t);
+        self.advance_to(t, Cause::Idle);
         if self.state == State::Halted {
             self.state = State::Running;
         }
@@ -684,6 +705,14 @@ impl Machine {
     }
 
     /// Syscalls the guest has entered (counted in the time page).
+    /// Move virtual time forward to `t` (never back) for `cause`.
+    fn advance_to(&mut self, t: u64, cause: Cause) {
+        if t > self.time {
+            self.stats.time_by[cause as usize] += t - self.time;
+            self.time = t;
+        }
+    }
+
     pub fn syscalls(&self) -> u64 {
         self.page_get(PAGE_SYSCALLS)
     }
@@ -773,7 +802,8 @@ impl Machine {
             if self.time == limit {
                 return Ok(false);
             }
-            self.time = pending.advance(self.time, limit, self.pit.deadline)?;
+            let t = pending.advance(self.time, limit, self.pit.deadline)?;
+            self.advance_to(t, Cause::Io);
             self.expire_timers()?;
         }
         Ok(true)
@@ -819,7 +849,8 @@ impl Machine {
     }
 
     fn sync_from_page(&mut self, limit: u64) -> Result<(), String> {
-        self.time = self.checked_page_time(limit)?;
+        let t = self.checked_page_time(limit)?;
+        self.advance_to(t, Cause::ClockReads);
         self.sync_pic();
         Ok(())
     }
@@ -1108,6 +1139,7 @@ impl Machine {
             if T::BRANCHES {
                 self.branches += delta;
             }
+            self.stats.time_by[Cause::Progress as usize] += delta;
             self.time += delta;
             if legal {
                 // Sent/Hlt/Exited can return before the next loop synchronizes
@@ -1136,7 +1168,7 @@ impl Machine {
                     // move, so move it there.
                     let v = data[0];
                     if v == 1 && self.pv_clock {
-                        self.time = self.time.max(soft);
+                        self.advance_to(soft, Cause::ClockBound);
                     }
                     self.stats.yields += 1;
                     if self.time >= soft {
@@ -1297,6 +1329,7 @@ impl Machine {
                         0x520 => {
                             let t = self.time.max(advance_time(self.tsc_latch, 1, hard)?);
                             self.tsc_latch = t;
+                            self.stats.time_by[Cause::ClockReads as usize] += t - self.time;
                             self.time = t;
                             data.copy_from_slice(&(t as u32).to_le_bytes()[..data.len()]);
                         }
