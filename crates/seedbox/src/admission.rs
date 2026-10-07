@@ -287,6 +287,24 @@ fn probe_disabled_perf<T>(
     observation
 }
 
+// observe returns only after its descriptor/affinity cleanup. Retain that
+// observation, then fail immediately on established refusal before another core
+// can replace it with an unrelated collection error.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn collect_admitted(
+    cpus: impl IntoIterator<Item = u32>,
+    observations: &mut Vec<CoreObservation>,
+    mut observe: impl FnMut(u32) -> Result<CoreObservation>,
+) -> Result<()> {
+    for cpu in cpus {
+        let observation = observe(cpu)?;
+        let admission = validate_observation(&observation);
+        observations.push(observation);
+        admission?;
+    }
+    Ok(())
+}
+
 // PERF_FLAG_FD_CLOEXEC: set atomically by perf_event_open, never by later fcntl.
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
 const PERF_OPEN_FLAGS: u64 = 1 << 3;
@@ -421,6 +439,57 @@ mod cleanup_tests {
             },
             |_| Err(Error::Execution("restore readback differs".into())),
         );
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("host preflight cleanup failed"));
+        assert!(error.contains("restore readback differs"));
+    }
+    #[test]
+    fn first_sibling_static_refusal_cannot_be_masked_by_later_collection_error() {
+        let mut observations = Vec::new();
+        let mut attempted = Vec::new();
+        let result = collect_admitted([8, 24], &mut observations, |cpu| {
+            attempted.push(cpu);
+            if cpu == 24 {
+                return Err(Error::Setup("later sibling collection failed".into()));
+            }
+            let mut o = static_observation();
+            o.raw_cpuid[0].flags ^= 1;
+            Ok(o)
+        });
+        assert_eq!(attempted, [8]);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].raw_cpuid[0].flags, 1);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("complete effective CPUID policy"));
+    }
+    #[test]
+    fn first_sibling_cleanup_failure_wins_and_later_collection_is_not_attempted() {
+        let mut observations = Vec::new();
+        let mut attempted = Vec::new();
+        let mut restored = false;
+        let result = collect_admitted([8, 24], &mut observations, |cpu| {
+            attempted.push(cpu);
+            if cpu == 24 {
+                return Err(Error::Setup("later sibling collection failed".into()));
+            }
+            scoped_probe(
+                (),
+                || {
+                    let mut o = static_observation();
+                    o.raw_cpuid[0].flags ^= 1;
+                    Ok(o)
+                },
+                |_| {
+                    restored = true;
+                    Err(Error::Execution("restore readback differs".into()))
+                },
+            )
+        });
+        assert!(restored);
+        assert_eq!(attempted, [8]);
+        assert!(observations.is_empty());
         let error = result.unwrap_err().to_string();
         assert!(error.contains("host preflight cleanup failed"));
         assert!(error.contains("restore readback differs"));

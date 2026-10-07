@@ -87,9 +87,11 @@ impl ExecutionBackend for VmmExecutor {
             #[cfg(target_os = "linux")]
             {
                 let reservation = crate::host::CpuReservation::acquire(self.cpu)?;
-                for cpu in &reservation.cpus {
-                    observations.push(crate::admission::observe(*cpu)?);
-                }
+                crate::admission::collect_admitted(
+                    reservation.cpus.iter().copied(),
+                    &mut observations,
+                    crate::admission::observe,
+                )?;
                 drop(reservation); // No reservation/perf/affinity spans OCI or diagnostic publication.
             }
             #[cfg(not(target_os = "linux"))]
