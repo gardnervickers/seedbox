@@ -8,7 +8,9 @@
 //! one conditional branch, and the landing point is the instruction following
 //! the target branch: the same position single-stepping would reach.
 
-use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind, Register};
+use iced_x86::{
+    Code, Decoder, DecoderOptions, FlowControl, Instruction, MemorySize, Mnemonic, OpKind, Register,
+};
 use kvm_bindings::*;
 use kvm_ioctls::VcpuFd;
 
@@ -234,12 +236,24 @@ impl Planner {
         match ins.mnemonic() {
             Mnemonic::Syscall => return Ok(self.lstar),
             Mnemonic::Ret => return read_word(&self.paging, mem, r.rsp, 8),
+            // Far return pops the offset first. The guest's code segments are
+            // flat, so the offset is the linear target.
+            Mnemonic::Retf => {
+                let bytes = match ins.code() {
+                    Code::Retfq | Code::Retfq_imm16 => 8,
+                    Code::Retfd | Code::Retfd_imm16 => 4,
+                    _ => 2,
+                };
+                return read_word(&self.paging, mem, r.rsp, bytes);
+            }
             Mnemonic::Int3 => return self.handler(mem, 3),
             Mnemonic::Int => return self.handler(mem, ins.immediate8() as u64),
             Mnemonic::Ud0 | Mnemonic::Ud1 | Mnemonic::Ud2 => return Ok(self.ud),
             _ => {}
         }
         match ins.op0_kind() {
+            OpKind::FarBranch32 => Ok(ins.far_branch32() as u64),
+            OpKind::FarBranch16 => Ok(ins.far_branch16() as u64),
             OpKind::Register => gpr(r, ins.op0_register()),
             OpKind::Memory => {
                 let ea = if ins.is_ip_rel_memory_operand() {
@@ -261,7 +275,14 @@ impl Planner {
                         _ => ea,
                     }
                 };
-                read_word(&self.paging, mem, ea, (self.bitness / 8) as usize)
+                // A far pointer operand (m16:16/32/64) starts with its offset.
+                let bytes = match ins.memory_size() {
+                    MemorySize::SegPtr16 => 2,
+                    MemorySize::SegPtr32 => 4,
+                    MemorySize::SegPtr64 => 8,
+                    _ => (self.bitness / 8) as usize,
+                };
+                read_word(&self.paging, mem, ea, bytes)
             }
             other => Err(format!(
                 "unsupported control transfer {:?} ({other:?}) at {:#x}",
@@ -365,6 +386,14 @@ impl Planner {
                     }
                     ip = t;
                 }
+                // A direct far jump or call can change the code segment's
+                // mode, so decode no further: stop at its target.
+                FlowControl::UnconditionalBranch | FlowControl::Call
+                    if matches!(ins.op0_kind(), OpKind::FarBranch32 | OpKind::FarBranch16) =>
+                {
+                    targets.push(self.plain_successor(mem, r, &ins)?);
+                    break;
+                }
                 FlowControl::ConditionalBranch => {
                     targets.push(ins.next_ip());
                     targets.push(ins.near_branch_target());
@@ -405,5 +434,45 @@ impl Planner {
         dbg.arch.debugreg[7] = dr7;
         vcpu.set_guest_debug(&dbg)
             .map_err(|e| format!("set breakpoints: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn planner(bitness: u32) -> Planner {
+        Planner {
+            pf: 0xf000,
+            gp: 0xf100,
+            ud: 0xf200,
+            lstar: 0,
+            idt_base: 0,
+            bitness,
+            paging: Paging { pg: false, long: false, cr3: 0 },
+            fs_base: 0,
+            gs_base: 0,
+        }
+    }
+
+    #[test]
+    fn far_return_targets_the_popped_offset() {
+        let mut mem = vec![0u8; 0x4000];
+        mem[0x1000..0x1002].copy_from_slice(&[0x48, 0xcb]); // lretq
+        mem[0x2000..0x2008].copy_from_slice(&0x3000u64.to_le_bytes());
+        mem[0x2008..0x2010].copy_from_slice(&0x10u64.to_le_bytes());
+        let r = kvm_regs { rip: 0x1000, rsp: 0x2000, ..Default::default() };
+        let targets = planner(64).plan(&mem, &r).unwrap();
+        assert_eq!(targets[0], 0x3000);
+    }
+
+    #[test]
+    fn direct_far_jump_stops_at_its_offset() {
+        let mut mem = vec![0u8; 0x4000];
+        // nop; ljmp $0x10, $0x2000 (32-bit)
+        mem[0x1000..0x1008].copy_from_slice(&[0x90, 0xea, 0x00, 0x20, 0x00, 0x00, 0x10, 0x00]);
+        let r = kvm_regs { rip: 0x1000, ..Default::default() };
+        let targets = planner(32).plan(&mem, &r).unwrap();
+        assert_eq!(targets[0], 0x2000);
     }
 }
