@@ -64,6 +64,13 @@ exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
 INCOMPLETE and 124 TIMEOUT. Offline `diff` exits 0 for MATCH, 1 for DIFFERENT,
 and 2 for usage/setup or invalid retained evidence.
 
+Pause a running world from another terminal with `sudo seedbox pause RUN`, then
+continue it with `sudo seedbox resume RUN`. Use the executing attempt directory
+(for replay, its new attempt), identifiable by `RUN/output/host-control`. Both
+commands wait for a boundary acknowledgement. All guests and virtual time freeze;
+wall-time limits and cancellation remain active. See [host pause](docs/runtime.md#host-pause)
+for the mechanism and development-engine verification requirements.
+
 [Draft format and runtime scope](docs/compatibility.md) distinguishes inspection
 and transfer from qualified execution. Same software versions, seed and exact
 retained inputs must replay on a qualified compatible profile; changing versions
