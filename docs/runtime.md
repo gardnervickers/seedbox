@@ -366,6 +366,22 @@ in flight. A slice that runs up to a boundary always ends before the guest can
 send at the boundary itself, so no frame is ever stamped at or after a boundary
 that hasn't been applied yet.
 
+### Machine pause, crash and reboot
+
+Compose guest drivers can call `World.pause(target)`, `resume(target)`,
+`crash(target)` and `reboot(target)` through the [runtime control API](../python/README.md).
+Each acts on the target's whole machine at admission and returns an `Effect`;
+the transcript and service-attributed fault events are validated during run and
+replay. Illegal transitions, and stop or restart of a paused machine, return
+recoverable `invalid_state`; pause/resume
+of an exited VM and process faults whose machine exits or crashes return
+`target_unavailable`. Inspection shows `Paused` and `Down`. After reboot, the
+scenario checks application readiness itself. The check service is the
+controller, which can't be a target, so a lifecycle operation never ends the run
+by itself: a crashed service is not an exited one. See
+[Machine pause, crash and reboot](../harness/worlds/README.md#machine-pause-crash-and-reboot)
+for CPU, timer, network, incarnation and static-plan semantics.
+
 ## Exploration preparation
 
 `seedbox explore [COMPOSE] --seed FIRST --count COUNT` has one worker by default.

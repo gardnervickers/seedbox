@@ -154,6 +154,11 @@ behalf: peers learn about a crash only from silence, as with a power cut.
 When every machine is paused or down with no resume or reboot planned, the
 run idles to `duration_ns`.
 
+A crash is not an exit. Crashing the `end_on_exit` machine doesn't end the
+run: it ends when a later incarnation of that machine exits, or at
+`duration_ns`. In Compose runs that machine is the controller, which can't be
+a lifecycle target.
+
 Process faults belong to an incarnation. A crash makes the machine's waiting
 `stop` and `restart` faults unavailable, a process fault for a machine that is
 down is unavailable at once, and a rebooted machine must report management

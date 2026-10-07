@@ -772,6 +772,28 @@ fn network_effects_have_no_single_service_target() {
 }
 
 #[test]
+fn machine_lifecycle_effects_pass_and_replay_with_their_service() {
+    let mut fixture = Fixture::new();
+    for (i, action) in ["pause", "resume", "crash", "reboot"].iter().enumerate() {
+        fixture.backend.report.faults.push(FaultEvent {
+            requested_at_ns: i as u64 + 1,
+            applied_at_ns: i as u64 + 1,
+            service: "workload".into(),
+            action: (*action).into(),
+            detail: "machine lifecycle".into(),
+        });
+    }
+    let run = fixture.run();
+    assert_eq!(run.record.outcome, Outcome::Pass);
+    assert_eq!(
+        fixture.replay(&run).record.replay.unwrap().status,
+        ReplayStatus::Match
+    );
+    fixture.backend.report.faults[0].service.clear();
+    assert_eq!(fixture.run().record.outcome, Outcome::Error);
+}
+
+#[test]
 fn exploration_freezes_full_closure_and_continues_failure_and_witnessed_timeout() {
     use seedbox::exploration::ExploreOptions;
     struct Sequence<'a>(&'a Fixture);
