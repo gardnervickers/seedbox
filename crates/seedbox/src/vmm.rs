@@ -14,6 +14,9 @@ use std::{
     path::Path,
 };
 
+/// Execution failure whose VMM stderr may be excerpted by the CLI.
+pub const VMM_FAILURE_MESSAGE: &str = "VMM failed; see vmm.stderr";
+
 #[derive(Clone, Debug)]
 pub struct VmmExecutor {
     /// Host CPU to pin the VMM to; `None` leases the first free eligible core.
@@ -242,23 +245,34 @@ impl VmmExecutor {
     }
 
     fn probe(&self) -> AdmissionProbe {
+        self.probe_capacity(1)
+    }
+
+    fn probe_capacity(&self, workers: u32) -> AdmissionProbe {
         let mut selected = None;
         let mut observations = Vec::new();
         let result = (|| -> Result<()> {
             #[cfg(target_os = "linux")]
             {
-                let reservation = crate::host::CpuReservation::acquire(self.cpu)?;
-                selected = Some(reservation.cpu);
-                crate::admission::collect_admitted(
-                    reservation.cpus.iter().copied(),
-                    &mut observations,
-                    crate::admission::observe,
-                )?;
-                drop(reservation); // No reservation/perf/affinity spans later work or publication.
+                with_capacity(
+                    workers,
+                    || crate::host::CpuReservation::acquire(self.cpu),
+                    |reservations| {
+                        selected = reservations.first().map(|reservation| reservation.cpu);
+                        for reservation in reservations {
+                            crate::admission::collect_admitted(
+                                reservation.cpus.iter().copied(),
+                                &mut observations,
+                                crate::admission::observe,
+                            )?;
+                        }
+                        Ok(())
+                    },
+                )?; // All reservations/perf/affinity close before publication or OCI work.
             }
             #[cfg(not(target_os = "linux"))]
             {
-                let _ = &mut selected;
+                let _ = (&mut selected, workers);
                 observations.push(crate::admission::observe(0)?);
             }
             Ok(())
@@ -268,6 +282,19 @@ impl VmmExecutor {
             observations,
             result,
         }
+    }
+
+    /// Seeded survival of the latest unflushed 512-byte sectors on crash.
+    /// Off is represented by omission to preserve existing profile bytes.
+    pub fn with_torn_writes(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.profile
+                .semantic_parameters
+                .insert(DISK_LOSS.into(), TORN_DISK_MODEL.into());
+        } else {
+            self.profile.semantic_parameters.remove(DISK_LOSS);
+        }
+        self
     }
 
     pub fn with_margin(mut self, margin: &str) -> Result<Self> {
@@ -293,6 +320,19 @@ impl VmmExecutor {
 }
 
 const COUNTER: &str = "counter";
+const DISK_LOSS: &str = "disk_loss";
+/// Declares the loss policy, atomic unit, probability and dedicated RNG domain.
+pub const TORN_DISK_MODEL: &str =
+    "flush-stable/seeded-latest-sector-512-half/disk-loss-machine-incarnation/v1";
+
+/// Recover the disk policy from a retained profile, rejecting unknown semantics.
+pub fn recorded_torn_writes(profile: &ExecutionProfile) -> Result<bool> {
+    match profile.semantic_parameters.get(DISK_LOSS) {
+        None => Ok(false),
+        Some(model) if model == TORN_DISK_MODEL => Ok(true),
+        Some(model) => Err(Error::Integrity(format!("unknown disk loss model {model}"))),
+    }
+}
 
 /// The branch counter profile a recorded run was made with.
 pub fn recorded_counter(profile: &ExecutionProfile) -> Result<CounterProfile> {
@@ -303,14 +343,36 @@ pub fn recorded_counter(profile: &ExecutionProfile) -> Result<CounterProfile> {
     }
 }
 
-impl ExecutionBackend for VmmExecutor {
-    fn preflight(&self, output: Option<&Path>) -> Result<()> {
+impl VmmExecutor {
+    fn preflight_capacity(&self, workers: u32, output: Option<&Path>) -> Result<()> {
         crate::admission::validate_profile(&self.profile)?;
         self.validate_execution_mode()?;
         if !self.counter.qualified() {
-            return self.unqualified_preflight(output);
+            if workers == 1 {
+                return self.unqualified_preflight(output);
+            }
+            #[cfg(target_os = "linux")]
+            {
+                return with_capacity(
+                    workers,
+                    || crate::host::CpuReservation::acquire(self.cpu),
+                    |reservations| {
+                        for reservation in reservations {
+                            crate::admission::check_unqualified(
+                                reservation.cpus.iter().copied(),
+                                self.counter,
+                            )?;
+                        }
+                        Ok(())
+                    },
+                );
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                return self.unqualified_preflight(output);
+            }
         }
-        let probe = self.probe();
+        let probe = self.probe_capacity(workers);
         let observations = probe.observations;
         let collection = probe.result;
         crate::admission::finish_admission(collection, |collection| {
@@ -334,6 +396,45 @@ impl ExecutionBackend for VmmExecutor {
             drop(saved);
             Ok(())
         })
+    }
+}
+
+/// Keep the entire capacity reserved during admission, then release it before
+/// returning on either success or failure. The reservation enforces disjoint cores.
+#[cfg(any(target_os = "linux", test))]
+fn with_capacity<T>(
+    workers: u32,
+    mut reserve: impl FnMut() -> Result<T>,
+    check: impl FnOnce(&[T]) -> Result<()>,
+) -> Result<()> {
+    let mut reservations = Vec::new();
+    for _ in 0..workers {
+        reservations.push(reserve().map_err(|error| {
+            if workers > 1 {
+                Error::Setup(format!("--workers {workers}: cannot reserve {workers} distinct eligible physical cores: {error}"))
+            } else {
+                error
+            }
+        })?);
+    }
+    check(&reservations)
+}
+
+impl ExecutionBackend for VmmExecutor {
+    fn preflight_workers(&self, workers: u32) -> Result<()> {
+        if !(1..=32).contains(&workers) {
+            return Err(Error::Setup("--workers: use 1..32".into()));
+        }
+        if workers > 1 && self.cpu.is_some() {
+            return Err(Error::Setup(
+                "--workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU".into(),
+            ));
+        }
+        self.preflight_capacity(workers, None)
+    }
+
+    fn preflight(&self, output: Option<&Path>) -> Result<()> {
+        self.preflight_capacity(1, output)
     }
     fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {
         crate::admission::admit_artifacts(&inputs.profile, &inputs.kernel, self.allow_dev_engine)?;
@@ -376,6 +477,10 @@ fn control_latency(request: &ExecutionRequest<'_>) -> Result<u64> {
         .and_then(|n| n.checked_add(1_000_000))
         .ok_or_else(|| Error::Execution("control latency overflow".into()))
 }
+
+/// Size of the retained disk of a machine whose service mounts named volumes.
+/// Part of the execution semantics: changing it changes runs.
+pub const VOLUME_DISK_MIB: u64 = 1024;
 
 /// Translate an execution request without consulting registry tags or source
 /// paths. Exposed for preparation tools and report inspection without KVM.
@@ -429,16 +534,35 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
         .prepared
         .guests
         .iter()
-        .map(|(name, digest)| Ok(json!({"name":name,"initrd":artifact(digest)?})))
+        .map(|(name, digest)| {
+            let mut machine = json!({"name":name,"initrd":artifact(digest)?});
+            // A machine gets a disk when a service placed on it mounts a volume.
+            let volumes = request.prepared.placement.iter().any(|(service, machine)| {
+                machine == name
+                    && request
+                        .prepared
+                        .images
+                        .get(service)
+                        .is_some_and(|image| !image.launch.disk_volumes.is_empty())
+            });
+            if volumes {
+                machine["disk"] = json!({"size_mib": VOLUME_DISK_MIB});
+            }
+            Ok(machine)
+        })
         .collect::<Result<Vec<_>>>()?;
-    Ok(json!({
+    let mut world = json!({
         "kernel":artifact(&request.prepared.kernel)?, "mem_mb":memory,
         "duration_ns":request.limits.simulated_time_ns,"end_on_exit":workload_machine,
         "timer_jitter_ns":request.schedule.timer_jitter_ns,"stop_tolerance_ns":request.schedule.stop_tolerance_ns,
         "network":{"latency_ns":request.network.latency_ns,"jitter_ns":request.network.jitter_ns},
         "machines":machines,"control":control,
         "control_channel":"virtio-console-v1",
-    }))
+    });
+    if recorded_torn_writes(&request.prepared.profile)? {
+        world[DISK_LOSS] = json!(TORN_DISK_MODEL);
+    }
+    Ok(world)
 }
 
 #[derive(Deserialize)]
@@ -466,6 +590,12 @@ struct MachineReport {
     /// Final simulated time; an exited VM's clock stops at its exit.
     #[serde(default)]
     time_ns: Option<u64>,
+    #[serde(default)]
+    crashed_incarnations: Vec<CrashedIncarnation>,
+}
+#[derive(Deserialize)]
+struct CrashedIncarnation {
+    crashed_at_ns: u64,
 }
 #[derive(Deserialize)]
 struct VmmReport {
@@ -490,9 +620,10 @@ struct VmmReport {
 struct ValidatedControlHistory {
     plans: Vec<seedbox_control::Plan>,
     effects: BTreeMap<u32, u64>,
-    /// Process faults whose target VM exited after admission, before an effect,
-    /// with the exit time the call resolved at.
+    /// Process faults resolved without an effect at a VM exit or crash, or
+    /// admitted while an earlier lifecycle plan left their target down.
     unavailable: BTreeMap<u32, u64>,
+    unavailable_while_down: BTreeSet<u32>,
 }
 
 /// Correlate guest-originated requests to responses and applied engine actions.
@@ -531,6 +662,7 @@ fn validate_control_history(
     let mut session = 0;
     let mut public_id = 0u64;
     let mut accepted = 0u64;
+    let mut down = BTreeSet::new();
     for (i, row) in history.iter().enumerate() {
         if row["status"] == "rejected" && failed {
             continue;
@@ -602,6 +734,11 @@ fn validate_control_history(
                 if metadata["ok"] != false || !metadata["error"].is_object() {
                     return Err(Error::Integrity("invalid control error reply".into()));
                 }
+                if metadata["error"]["code"] == "invalid_state"
+                    && (!row["fault_id"].is_null() || e != a)
+                {
+                    return Err(bad());
+                }
                 if row["fault_id"].is_null() || metadata["error"]["code"] != "target_unavailable" {
                     continue;
                 }
@@ -636,6 +773,18 @@ fn validate_control_history(
                 machine: resolve(&target)?,
             },
             Operation::Restart { target } => Action::Restart {
+                machine: resolve(&target)?,
+            },
+            Operation::Pause { target } => Action::Pause {
+                machine: resolve(&target)?,
+            },
+            Operation::Resume { target } => Action::Resume {
+                machine: resolve(&target)?,
+            },
+            Operation::Crash { target } => Action::Crash {
+                machine: resolve(&target)?,
+            },
+            Operation::Reboot { target } => Action::Reboot {
                 machine: resolve(&target)?,
             },
             Operation::Partition { left, right } => {
@@ -679,6 +828,16 @@ fn validate_control_history(
                 continue;
             }
         };
+        let lifecycle = matches!(
+            action,
+            Action::Pause { .. }
+                | Action::Resume { .. }
+                | Action::Crash { .. }
+                | Action::Reboot { .. }
+        );
+        if lifecycle && (response || e.is_some()) && e != Some(a) {
+            return Err(bad());
+        }
         let plan = Plan {
             id: u32::try_from(expected.plans.len() + 1).map_err(|_| bad())?,
             at_ns: a,
@@ -697,8 +856,22 @@ fn validate_control_history(
                 return Err(bad());
             }
             expected.unavailable.insert(plan.id, e.ok_or_else(bad)?);
+            if e == Some(a) && plan.action.machine().is_some_and(|m| down.contains(m)) {
+                expected.unavailable_while_down.insert(plan.id);
+            }
         } else if response {
             expected.effects.insert(plan.id, e.ok_or_else(bad)?);
+        }
+        if !unavailable && e == Some(a) {
+            match &plan.action {
+                Action::Crash { machine } => {
+                    down.insert(machine.clone());
+                }
+                Action::Reboot { machine } => {
+                    down.remove(machine);
+                }
+                _ => {}
+            }
         }
         expected.plans.push(plan);
     }
@@ -818,21 +991,26 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
             ));
         }
         match (fault.status.as_str(), fault.applied_at_ns) {
-            // A target VM exit after admission resolves the call with no effect,
-            // at the time the target's reported clock stopped.
+            // An unavailable process fault needs a prior crash without reboot
+            // at admission, or the target's exact exit/crash time in its window.
             ("unavailable", None)
                 if expected.unavailable.get(&fault.id).is_some_and(|exit| {
-                    raw.machines.iter().any(|machine| {
-                        Some(&machine.name) == fault.machine.as_ref()
-                            && machine.state.as_deref().is_some_and(|state| {
-                                state
-                                    .strip_prefix("Exited(")
-                                    .and_then(|code| code.strip_suffix(')'))
-                                    .and_then(|code| code.parse::<u8>().ok())
-                                    .is_some_and(|code| state == format!("Exited({code})"))
-                            })
-                            && machine.time_ns == Some(*exit)
-                    })
+                    expected.unavailable_while_down.contains(&fault.id)
+                        || raw.machines.iter().any(|machine| {
+                            Some(&machine.name) == fault.machine.as_ref()
+                                && ((machine.state.as_deref().is_some_and(|state| {
+                                    state
+                                        .strip_prefix("Exited(")
+                                        .and_then(|code| code.strip_suffix(')'))
+                                        .and_then(|code| code.parse::<u8>().ok())
+                                        .is_some_and(|code| state == format!("Exited({code})"))
+                                }) && machine.time_ns == Some(*exit))
+                                    || machine.crashed_incarnations.iter().any(|incarnation| {
+                                        incarnation.crashed_at_ns == *exit
+                                            && *exit >= plan.at_ns
+                                            && *exit <= plan.deadline_ns
+                                    }))
+                        })
                 }) => {}
             _ if expected.unavailable.contains_key(&fault.id) => {
                 return Err(Error::Integrity("invalid fault effect status/time".into()))
@@ -840,6 +1018,15 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
             ("applied", Some(at))
                 if at >= fault.requested_at_ns
                     && at <= plan.deadline_ns
+                    && (request.control.is_none()
+                        || !matches!(
+                            plan.action,
+                            seedbox_control::Action::Pause { .. }
+                                | seedbox_control::Action::Resume { .. }
+                                | seedbox_control::Action::Crash { .. }
+                                | seedbox_control::Action::Reboot { .. }
+                        )
+                        || at == plan.at_ns)
                     && (request.control.is_none()
                         || expected.effects.get(&fault.id).is_none_or(|e| *e == at)) =>
             {
@@ -1096,7 +1283,7 @@ mod linux {
                 break if success {
                     report(&fs::read(&report_path)?, &request)
                 } else {
-                    Err(Error::Execution("VMM failed; see vmm.stderr".into()))
+                    Err(Error::Execution(VMM_FAILURE_MESSAGE.into()))
                 };
             }
             if started.elapsed() >= Duration::from_nanos(request.limits.wall_time_ns) {
@@ -1120,6 +1307,93 @@ mod linux {
 mod doctor_tests {
     use super::*;
     use crate::admission::{required_policy, CoreObservation, ENGINE, GUEST_KERNEL};
+
+    #[test]
+    fn capacity_admission_holds_all_reservations_and_releases_them_on_every_exit() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Reservation<'a>(&'a AtomicUsize);
+        impl Drop for Reservation<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        for (available, refuse) in [(3, false), (2, false), (3, true)] {
+            // An unrelated owner must survive both capacity and admission errors.
+            let held = AtomicUsize::new(1);
+            let mut checked = false;
+            let result = with_capacity(
+                3,
+                || {
+                    if held.load(Ordering::SeqCst) > available {
+                        return Err(Error::Setup("fixture capacity unavailable".into()));
+                    }
+                    held.fetch_add(1, Ordering::SeqCst);
+                    Ok(Reservation(&held))
+                },
+                |reservations| {
+                    checked = true;
+                    assert_eq!(reservations.len(), 3);
+                    assert_eq!(held.load(Ordering::SeqCst), 4);
+                    if refuse {
+                        Err(Error::Setup("fixture core admission refused".into()))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert_eq!(held.load(Ordering::SeqCst), 1);
+            assert_eq!(checked, available == 3);
+            assert_eq!(result.is_ok(), available == 3 && !refuse);
+            if available == 2 {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("--workers 3: cannot reserve 3 distinct eligible physical cores"));
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_preflight_preserves_development_and_experimental_admission_gates() {
+        let pinned = VmmExecutor::from_engine_digest(
+            ContentDigest::try_from(ENGINE.to_owned()).unwrap(),
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap();
+        for workers in [0, 33] {
+            assert!(pinned
+                .preflight_workers(workers)
+                .unwrap_err()
+                .to_string()
+                .contains("--workers: use 1..32"));
+        }
+        let mut dev = pinned
+            .clone()
+            .with_dev_engine(true, &ContentDigest::of(b"dev kernel"));
+        dev.allow_dev_engine = false;
+        assert!(dev
+            .preflight_workers(2)
+            .unwrap_err()
+            .to_string()
+            .contains("--allow-dev-engine"));
+        let experimental = VmmExecutor::from_engine_digest(
+            pinned.profile.engine,
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::IntelIceLake,
+        )
+        .unwrap();
+        assert!(experimental
+            .preflight_workers(2)
+            .unwrap_err()
+            .to_string()
+            .contains("explicitly allow unqualified CPU execution"));
+    }
+
     fn observed(cpu: u32) -> CoreObservation {
         let p = required_policy().unwrap();
         CoreObservation {

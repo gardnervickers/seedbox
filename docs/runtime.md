@@ -8,6 +8,41 @@ These are version-bound results, not qualification of arbitrary OCI runtimes or
 the latest changed example inputs. See [draft formats and runtime scope](compatibility.md)
 for current readers/writers, exit meanings and remaining release gates.
 
+## Disk crash policy
+
+`run` and `prepare` accept `--torn-writes` (off by default). Off retains the
+`flush-stable/drop-all-unflushed/v1` model: crashes drop all unflushed sectors.
+The omitted setting adds no profile or world JSON field and leaves the existing
+disk digest and witness inputs unchanged. Building the modified VMM still changes
+the engine binary hash, as every VMM source change does.
+
+When enabled, the profile's semantic parameter `disk_loss` and each disk report's
+`model` are
+`flush-stable/seeded-latest-sector-512-half/disk-loss-machine-incarnation/v1`.
+Replay restores this policy from the retained profile; there is no replay override
+or environment variable. The low-level world JSON uses the same `disk_loss` key
+and model string. Unknown model strings are rejected.
+
+At each crash, the latest unflushed version of each sector independently has a
+50% chance of surviving. The atomic unit is 512 bytes: multi-sector writes can
+survive as any subset, but a single sector's bytes are never torn. A later sector
+write can survive while an earlier one is lost. Overwritten historical versions
+are not candidates; there is no write log. Lost sectors fall back to their last
+flushed contents or the base image. Every completed FLUSH stabilizes all preceding
+completed writes, so it never loses coverage under this policy.
+
+Selection visits volatile sectors in ascending sector order, using `below(2) == 1`
+from the versioned SHA-256 RNG domain `disk-loss/<machine>/<incarnation>` and the
+run seed. Incarnation identifies the machine that crashed (initially 0). No
+other RNG stream is consumed. Survivors become stable in the next incarnation;
+snapshot/fork restore carries the policy and both disk layers. Reports count
+only actually lost volatile sectors in `disk_lost_sectors`.
+
+This policy applies to retained virtio-blk disks. Current Compose application
+storage remains RAM-backed; attaching named volumes to retained disks is separate
+work. Low-level disk fixtures, including the ext4 fsync ledger, are documented in
+[`harness/worlds/README.md`](../harness/worlds/README.md#retained-disk).
+
 ## Build on the qualified Linux host
 
 From the repository root:
@@ -331,7 +366,15 @@ issue #5's hardware qualification; Darwin source tests do not establish it.
 Each service currently gets one machine and one OCI-root chroot. Its complete
 filesystem is writable RAM-backed initramfs storage, freshly instantiated for
 each run/replay; image volume paths have the same per-run lifetime. Process
-stop/start retains that filesystem. No state persists between fresh machine boots.
+stop/start retains that filesystem. A machine crash loses it.
+
+Named Compose volumes are the exception. A machine whose service mounts one gets
+a 1 GiB virtio-blk disk, zeroed at the start of each run/replay. The supervisor
+formats it as ext4 on first boot (with a static `mke2fs` packaged into the guest),
+mounts it, and bind mounts each volume's directory onto its target. The disk has a
+write cache: data the application flushed (fsync, fdatasync, `O_DSYNC`) survives a
+machine crash and reboot, and every write since the last flush is lost. A new volume
+takes the mode and owner of the image's target directory and starts empty.
 The generic static supervisor is a guest bootstrap alongside the existing C guest
 helpers; configuration, preparation, orchestration, and execution are Rust.
 
@@ -354,6 +397,15 @@ and unsupported guest syscalls are compatibility failures, never workload PASS.
 and timeouts. Serial output is capped at 1 GiB total divided equally between the
 two ports of all machines; exceeding that cap fails execution. Trace recording
 is not enabled by this adapter.
+
+When text output reports `execution: VMM failed; see vmm.stderr`, `run`, `replay`,
+`explore` and `inspect` also print up to five non-empty lines from the final 8 KiB
+of the attempt's `output/vmm.stderr` to stderr. Each line starts with `vmm stderr:`;
+terminal control characters are removed and invalid UTF-8 is replaced. A line
+cut by the byte limit starts with `...`. Missing or unreadable logs are skipped
+without changing the outcome. This excerpt is local diagnostic output only:
+retained records, serde field names, status lines and `--json` output are unchanged.
+`inspect` keeps the recorded `error:` line on stdout alongside the run status.
 
 ## Reproduce acceptance
 
@@ -424,10 +476,33 @@ in flight. A slice that runs up to a boundary always ends before the guest can
 send at the boundary itself, so no frame is ever stamped at or after a boundary
 that hasn't been applied yet.
 
+### Machine pause, crash and reboot
+
+Compose guest drivers can call `World.pause(target)`, `resume(target)`,
+`crash(target)` and `reboot(target)` through the [runtime control API](../python/README.md).
+Each acts on the target's whole machine at admission and returns an `Effect`;
+the transcript and service-attributed fault events are validated during run and
+replay. Illegal transitions, and stop or restart of a paused machine, return
+recoverable `invalid_state`; pause/resume
+of an exited VM and process faults whose machine exits or crashes return
+`target_unavailable`. Inspection shows `Paused` and `Down`. After reboot, the
+scenario checks application readiness itself. The check service is the
+controller, which can't be a target, so a lifecycle operation never ends the run
+by itself: a crashed service is not an exited one. See
+[Machine pause, crash and reboot](../harness/worlds/README.md#machine-pause-crash-and-reboot)
+for CPU, timer, network, incarnation and static-plan semantics.
+
 ## Exploration preparation
 
-`seedbox explore [COMPOSE] --seed FIRST --count COUNT` has one sequential worker.
-Count defaults to 1; seed defaults to the resolved Compose seed. Bounds are finite,
+`seedbox explore [COMPOSE] --seed FIRST --count COUNT` has one worker by default.
+`--workers N` (1..32) permits N simultaneous owned attempts; count defaults to 1
+and seed to the resolved Compose seed. Parallel execution rejects an explicit
+`--cpu` or `SEEDBOX_CPU` before preparation. Automatic selection must reserve N
+eligible physical cores with all SMT siblings together during preflight, verify
+each core's admission and release every transient resource before preparation.
+Insufficient capacity is ERROR; there is no queue/retry on host contention. A
+library execution backend supports only one worker unless it explicitly overrides
+`preflight_workers`. Per-attempt admission and leases remain unchanged. Bounds are finite,
 positive and checked for inclusive u64 overflow before slow work. Runtime inputs and
 backend host admission are checked before the sole preparation; refusal retains
 batch ERROR with no prepared inputs or seed attempts. Transient admission resources
@@ -439,13 +514,24 @@ missing/corrupt bytes cause ERROR without re-preparation or repair.
 
 The owned batch directory contains atomic `exploration.json` checkpoints,
 `preparation/` and `attempts/SEED/ORDINARY-RUN/`. Attempted means entering orchestration,
-not proof that a guest started. Counts distinguish PASS/FAIL, TIMEOUT, ERROR,
-INCOMPLETE and unfinished attempts; remaining seeds are undispatched. A killed process
+not proof that a guest started. Version 2 records explicit indexes (`seed = FIRST +
+index`) in dispatch order, independent of completion order. Each attempt's
+`finished` flag means the coordinator retained its terminal result; false includes
+a result that may already exist in an independently committed run manifest.
+Counts distinguish PASS/FAIL, TIMEOUT, ERROR, INCOMPLETE and unfinished attempts;
+remaining seeds are an undispatched suffix. Unsupported checkpoint versions are
+refused clearly without defaults or migration; version 1 bytes require their prior
+reader, while ordinary run inspection/replay is unchanged. A killed process
 leaves an unfinished INCOMPLETE checkpoint and independently inspectable ordinary
 manifests. There is no resume operation. Checkpoint/evidence failures stop dispatch.
 The final aggregate uses ERROR, INCOMPLETE, TIMEOUT, FAIL, PASS precedence and the
 existing exit codes 2, 3, 124, 1, 0. Application FAIL and witnessed simulated TIMEOUT may
-continue; infrastructure errors, wall expiry and cancellation stop.
+continue; infrastructure errors, wall expiry and cancellation stop new dispatch
+and cancel only owned running attempts. The caller's library token is not modified
+by an internal failure. Scoped workers are joined even if checkpoint retention
+fails. A backend that cannot complete owned cleanup prevents a prompt return; no
+unrelated process or service is stopped. Cancellation races may leave an already
+finished PASS/FAIL beside cancelled INCOMPLETE attempts and undispatched seeds.
 
 Preparation diagnostics belong to the caller, surviving preparer/scratch destruction.
 Raw phase output is capped at 4 MiB per file and 64 MiB total. Bounded prefixes are retained
@@ -475,7 +561,17 @@ shared daemon, unrelated image/container, host service or cache is changed.
 CLI resource fields report self/reaped-child user/system CPU deltas and separate
 self/child RSS high-water readings in bytes, including preparation. They are not
 simultaneous aggregate memory, guest peak memory, simulated time or CPU lease duration.
-Unavailable measurements are null and do not affect run identity.
+Unavailable measurements are null and do not affect run identity. `peak_running`
+is the maximum number of active orchestration attempts. `active_attempt_seconds`
+is the sum of whole attempt wall intervals, including materialization, admission
+and cleanup, for attempts whose terminal results reached the coordinator. Once
+all owned attempts return, it is a conservative guest-core charge for one world
+per worker, not exact lease duration or CPU measurement. Unfinished checkpoints
+omit still-running/uncheckpointed intervals and cannot supply a complete charge. No exact lease telemetry API
+is added. Worker count and core selection are operational choices, absent from
+semantic run identity. Synthetic serial/parallel lifecycle controls do not qualify
+real per-core/witness invariance; that and staggered hardware cancellation remain
+required runtime gates.
 
 Required tool-version provenance uses stdout only, independently of diagnostic
 truncation. Its raw `.stdout` evidence is bounded to 8192 bytes per value and

@@ -92,11 +92,13 @@ class BatchTests(unittest.TestCase):
             with batch.cpu_locks({14,30}, root):
                 pass
 
-    @unittest.skipUnless(hasattr(os,"WNOWAIT"), "Linux waitid lifecycle control")
+    @unittest.skipUnless(sys.platform == 'linux' and hasattr(os,"WNOWAIT"),
+                         "Linux waitid lifecycle control")
     def test_timeout_reaps_before_restore_and_preserves_cpu_locks(self):
         self.exercise_lifecycle()
 
-    @unittest.skipUnless(hasattr(os,"WNOWAIT"), "Linux waitid lifecycle control")
+    @unittest.skipUnless(sys.platform == 'linux' and hasattr(os,"WNOWAIT"),
+                         "Linux waitid lifecycle control")
     def test_interruption_reaps_every_concurrent_child_before_restore(self):
         self.exercise_lifecycle(interrupt=True,count=2)
 

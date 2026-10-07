@@ -31,8 +31,13 @@ measurements do not establish cold-install performance.
 `prepare` JSON cannot be fed into `run`; this tier adds no prepared-input adapter.
 
 The finite normal tier refuses a private wrong-content kernel before its good-input
-operations, requires fixed full-state PASS, then retained default, changed-margin
-and changed-undo MATCH. Replays use the retained engine/kernel without overrides.
+operations, requires fixed full-state PASS, then retained default and
+changed-performance MATCH. One replay changes both settings
+(`--undo 0 --margin 16384`): with undo on, the counter's final approach uses the
+undo margin and never reads `--margin`. Undo-off stepping costs about 17x a
+default replay on this fixture, so the margin is the profile's smallest adaptive
+one. Replays use the retained engine/kernel without overrides. `result.json`,
+`failure.json` and stdout list each phase's wall time.
 It verifies the complete declared object closure, every retained log object's
 hash, semantic identity, full-state/witness/fault comparison and all opaque guest
 console/management bytes. Omitted logs or absent full-state evidence fail this tier.
@@ -76,3 +81,24 @@ identity, the run report and doctor JSON, `dev engine: unqualified` in doctor
 text, and labelled unqualified MATCH output. The default tier keeps pinned
 admission and rejects development markers. Both tiers retain doctor receipts.
 The development tier is unqualified evidence and does not change release policy.
+
+## One PR's host check
+
+`harness/host-check.sh REV CPU` runs the whole per-PR host check for one commit
+on one SMT pair: it makes a worktree, builds the CLI and engine, runs fmt,
+clippy and `harness/acceptance.sh portable`, then this smoke tier, and prints
+each step's time. Set `SEEDBOX_KERNEL` to the accepted kernel. A rebuilt engine
+embeds its build path, so it is never pinned: for the pinned tier set
+`SEEDBOX_VMM` to the stored pinned engine (the build of it is skipped), and to
+check a rebuilt engine set `PINNED_ENGINE` for the development tier. Checks
+of different commits can run at once on different pairs; builds run niced and
+unpinned, and only the smoke tier uses the pair. A pass deletes the worktree
+and evidence and keeps `~/host-check-SHA-cpuN-XXXX.txt` with step and phase times; a failure keeps everything
+and prints its path.
+
+After `bash harness/mac-check.sh REV` passes on any host in the project Nix shell,
+use `harness/host-check.sh --skip-portable REV CPU` to skip fmt, clippy and the
+portable suite's workspace/Python checks and YAML validation. VMM tests still
+run explicitly, and the CLI build, conditional VMM build and smoke tier remain.
+Both scripts print the full checked SHA so the pre-check and host results can be
+matched. The pre-check retains failed worktrees and deletes passing ones.
