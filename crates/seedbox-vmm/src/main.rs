@@ -142,7 +142,9 @@ impl World {
             let mach = &mut self.machines[m];
             match p {
                 Payload::Frame { from, bytes } => {
-                    if !mach.deliver_frame(&bytes).accepted {
+                    let accepted = mach.deliver_frame(&bytes).accepted;
+                    net_log(at, mach.time, from, m, accepted, &bytes);
+                    if !accepted {
                         self.dropped += 1;
                         self.count_link(at,from, m, 2);
                     } else {
@@ -198,6 +200,21 @@ impl World {
                 },
             );
         }
+    }
+}
+
+/// Debug only: one line per delivered frame to $SEEDBOX_NET_LOG (host-side,
+/// invisible to guests): due time, receiver time, link, accepted, length,
+/// and the first 160 bytes in hex.
+fn net_log(at: u64, now: u64, from: usize, to: usize, accepted: bool, bytes: &[u8]) {
+    use std::io::Write;
+    static LOG: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> = std::sync::OnceLock::new();
+    let log = LOG.get_or_init(|| {
+        std::env::var("SEEDBOX_NET_LOG").ok().and_then(|p| std::fs::File::create(p).ok()).map(std::sync::Mutex::new)
+    });
+    if let Some(f) = log {
+        let hex: String = bytes.iter().take(160).map(|b| format!("{b:02x}")).collect();
+        let _ = writeln!(f.lock().unwrap(), "{at} {now} {from} {to} {} {} {hex}", accepted as u8, bytes.len());
     }
 }
 
