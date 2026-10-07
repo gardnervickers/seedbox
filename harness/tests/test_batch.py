@@ -107,7 +107,9 @@ class BatchTests(unittest.TestCase):
             pid_file = Path(tmp)/'descendant'
             child = subprocess.Popen([sys.executable,'-c',
                 'import os,signal,time,sys; p=os.fork(); '
-                'open(sys.argv[1],"w").write(str(p)) if p else None; '
+                # Publish the pid atomically so the wait below never reads an empty file.
+                'open(sys.argv[1]+".tmp","w").write(str(p)) if p else None; '
+                'os.replace(sys.argv[1]+".tmp",sys.argv[1]) if p else None; '
                 'signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(60)',str(pid_file)],
                 start_new_session=True)
             try:
