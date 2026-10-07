@@ -75,7 +75,23 @@ class MapTests(unittest.TestCase):
         self.assert_paths(['harness/worlds/new-fixture.json'])
         for path in ('harness/batch.sh', 'harness/batch.py'):
             plan = host_plan.select_checks({'rev': [path]})
-            self.assertEqual(set(plan['checks']), {'core'})
+            self.assertEqual(set(plan['checks']), CORE)
+
+    def test_batch_and_fixture_rows_keep_cluster_fixed(self):
+        for path in ('harness/batch.sh', 'harness/worlds/cluster-fixed.json'):
+            plan = host_plan.select_checks({'r': [path]})
+            self.assertIn('cluster-fixed', plan['checks'], path)
+
+    def test_cluster_workload_keeps_fixture_and_reviewer_note(self):
+        for path in ('examples/etcd/workload/main.go', 'examples/etcd/workload/go.mod',
+                     'examples/etcd/workload/go.sum'):
+            with self.subTest(path=path):
+                plan = host_plan.select_checks({'r': [path]}, engine_changed=False)
+                self.assertEqual(set(plan['checks']), CORE)
+                self.assertIn(dict(revision='r', path=path, category='cluster workload'),
+                              plan['checks']['cluster-fixed'])
+                self.assertEqual(plan['reviewer_notes'],
+                                 ["example etcd: its reviewer's run list is required"])
 
     def test_other_example_requires_its_reviewer_run_list(self):
         plan = host_plan.select_checks({'rev': ['examples/minio/client/cas.py',
@@ -222,6 +238,96 @@ class MapTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'unknown'):
                 host_plan.load_map(path)
 
+    def test_links_plan_exact_replay_and_feature_off_runs(self):
+        for path in ('crates/seedbox-vmm/src/links.rs',
+                     'crates/seedbox-vmm/src/connections.rs'):
+            with self.subTest(path=path):
+                plan = host_plan.select_checks({'rev': [path]})
+                existing = CORE | ({'net', 'net-pause', 'net-crash'}
+                                   if path.endswith('/links.rs') else set())
+                self.assertEqual(set(plan['checks']), existing)
+                equal_engine = host_plan.select_checks({'rev': [path]}, engine_changed=False)
+                self.assertEqual(set(equal_engine['checks']), existing - {'cluster-fixed'})
+                self.assertEqual(set(equal_engine['runs']), {'L1', 'L2', 'P1', 'M1'})
+                self.assertEqual(set(plan['runs']), {'L1', 'L2', 'P1', 'M1'})
+                for name, run in plan['runs'].items():
+                    self.assertEqual(run['world'], 'harness/worlds/' +
+                                     ('shaped' if name.startswith('L') else 'plain') + '.json')
+                    self.assertEqual(run['engine'], 'main' if name == 'M1' else 'target')
+                    self.assertEqual(run['seed'], 1)
+                    self.assertEqual(run['fixture_pr'], 97)
+                    self.assertEqual(run['reasons'],
+                                     [dict(revision='rev', path=path, category='links')])
+                    self.assertIn('L1 == L2' if name.startswith('L') else 'P1 == M1',
+                                  run['comparison'])
+                text = host_plan.format_plan(dict(plan, target='a' * 40, base='b' * 40))
+                self.assertIn('reviewer host run required', text)
+                self.assertIn('run M1: harness/worlds/plain.json engine=main', text)
+                self.assertNotIn('U1', text)
+                self.assertNotIn('run-links.sh', text)
+
+    def test_short_undo_pair_only_comes_from_shared_undo_rule(self):
+        mapping = host_plan.load_map()
+        owners = [rule['category'] for rule in mapping['rules']
+                  if {'U1', 'U2'} & set(rule.get('runs', []))]
+        self.assertEqual(owners, ['undo-checkpoint-shared'])
+        shared = next(rule for rule in mapping['rules'] if rule['category'] == owners[0])
+        for path in shared['paths']:
+            for code in ('+checkpoint = undo;', '-rollback(margin);', '+counter.stepper();'):
+                with self.subTest(path=path, code=code):
+                    plan = host_plan.select_checks({'rev': [path]}, diffs={('rev', path): code})
+                    self.assertEqual(set(plan['runs']), {'U1', 'U2'})
+                    self.assertIn('perf-replay', plan['checks'])
+                    for run in plan['runs'].values():
+                        self.assertEqual(run['world'], 'harness/worlds/shaped-tol-short.json')
+                        self.assertEqual(run['timeout_seconds'], 600)
+                        self.assertEqual(run['fixture_pr'], 97)
+                        self.assertEqual(run['comparison'], 'U1 == U2 (short undo invariance)')
+                    self.assertEqual(plan['runs']['U1']['undo'], 256)
+                    self.assertEqual(plan['runs']['U2']['undo'], 0)
+            for code in ('', '+self.net = link;', '+checkpoint_count += 1;'):
+                self.assertFalse(host_plan.select_checks({'rev': [path]},
+                                 diffs={('rev', path): code})['runs'])
+        for path in ('crates/seedbox-vmm/src/stepper.rs',
+                     'crates/seedbox-vmm/src/undo.rs', 'crates/seedbox-vmm/src/network.rs'):
+            self.assertFalse(host_plan.select_checks({'rev': [path]})['runs'])
+        self.assertFalse(host_plan.select_checks({}, extra=['perf-replay'])['runs'])
+
+    def test_every_planned_performance_entry_is_short_and_bounded(self):
+        mapping = host_plan.load_map()
+        # Select every rule, including diff-gated rules, and every reviewer extra.
+        paths = [path.replace('**', 'src').replace('*', 'test')
+                 for rule in mapping['rules'] for path in rule['paths']]
+        code = '+undo checkpoint rollback margin stepper counter disk net volume'
+        plan = host_plan.select_checks({'rev': paths}, extra=list(mapping['checks']),
+                                      diffs={('rev', path): code for path in paths})
+        entries = {name: mapping['checks'][name] for name in plan['checks']} | plan['runs']
+        self.assertEqual(set(plan['runs']), set(mapping['runs']))
+        performance = {name: spec for name, spec in entries.items()
+                       if spec.get('undo') == 0 or 'margin' in spec}
+        self.assertEqual(set(performance), {'perf-replay', 'U1', 'U2'})
+        for name, spec in performance.items():
+            with self.subTest(entry=name):
+                self.assertIn(spec['world'], ('examples/faults/compose.yaml',
+                                             'harness/worlds/shaped-tol-short.json'))
+                self.assertGreater(spec['timeout_seconds'], 0)
+                self.assertLessEqual(spec['timeout_seconds'], 600)
+        self.assertNotIn('shaped-tol.json', json.dumps(entries))
+        self.assertNotIn('run-links.sh', json.dumps(entries))
+
+    def test_required_runs_union_and_unknown_run_fails_closed(self):
+        path = 'crates/seedbox-vmm/src/machine.rs'
+        plan = host_plan.select_checks({'rev': [path, 'crates/seedbox-vmm/src/links.rs']},
+                                      diffs={('rev', path): '+undo = checkpoint;'})
+        self.assertEqual(set(plan['runs']), {'L1', 'L2', 'P1', 'M1', 'U1', 'U2'})
+        mapping = host_plan.load_map()
+        mapping['rules'][0]['runs'] = ['invented']
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'map.json'
+            path.write_text(json.dumps(mapping))
+            with self.assertRaisesRegex(ValueError, 'unknown run'):
+                host_plan.load_map(path)
+
 
 class GitPlannerTests(unittest.TestCase):
     def setUp(self):
@@ -286,6 +392,16 @@ class GitPlannerTests(unittest.TestCase):
         self.assertIn('cluster-fixed', host_plan.plan_revision(self.repo, 'base', 'HEAD',
                                                              extra=['cluster-fixed'])['checks'])
 
+    def test_fixture_inputs_select_cluster_with_identical_engine_trees(self):
+        for path in ('harness/batch.sh', 'harness/batch.py',
+                     'harness/worlds/cluster-fixed.json', 'examples/etcd/workload/main.go'):
+            with self.subTest(path=path):
+                self.git('branch', '-f', 'base')
+                self.commit(path)
+                plan = host_plan.plan_revision(self.repo, 'base', 'HEAD')
+                self.assertFalse(plan['engine_changed'])
+                self.assertEqual(set(plan['checks']), CORE)
+
     def test_renames_keep_old_runtime_path_coverage(self):
         source = 'crates/seedbox-vmm/src/disk.rs'
         self.commit(source)
@@ -305,6 +421,26 @@ class GitPlannerTests(unittest.TestCase):
         self.assertFalse(host_plan.plan_revision(self.repo, 'base', 'HEAD')['checks'])
         self.commit(path, '/// New help.\nfn run() { execute(); }\n')
         self.assertEqual(set(host_plan.plan_revision(self.repo, 'base', 'HEAD')['checks']), {'core'})
+
+    def test_public_plan_names_link_runs_and_diff_gates_short_undo(self):
+        path = 'crates/seedbox-vmm/src/machine.rs'
+        self.commit(path, 'fn checkpoint() {}\nfn run() {}\n')
+        self.git('branch', '-f', 'base')
+        self.commit('crates/seedbox-vmm/src/connections.rs')
+        result = self.invoke('host-plan.py', 'base', 'HEAD', '--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(set(json.loads(result.stdout)['runs']), {'L1', 'L2', 'P1', 'M1'})
+        # An unchanged checkpoint line must not select the short undo pair.
+        self.commit(path, 'fn checkpoint() {}\nfn run() { execute(); }\n')
+        self.assertEqual(set(host_plan.plan_revision(self.repo, 'base', 'HEAD')['runs']),
+                         {'L1', 'L2', 'P1', 'M1'})
+        self.commit(path, 'fn checkpoint() {}\nfn run() { undo(); }\n')
+        result = self.invoke('host-plan.py', 'base', 'HEAD')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('run U2: harness/worlds/shaped-tol-short.json', result.stdout)
+        self.assertIn('timeout=600s undo=0 margin=adaptive', result.stdout)
+        plan = host_plan.plan_revision(self.repo, 'base', 'HEAD')
+        self.assertEqual(set(plan['runs']), {'L1', 'L2', 'P1', 'M1', 'U1', 'U2'})
 
     def test_public_planner_none_json_and_repeatable_extras(self):
         none = self.invoke('host-plan.py', 'base', 'HEAD')
