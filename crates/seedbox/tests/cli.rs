@@ -720,6 +720,7 @@ fn checkpoint_flags_are_paired_typed_and_documented() {
     assert!(help.status.success());
     let help = String::from_utf8(help.stdout).unwrap();
     assert!(help.contains("--checkpoint-at-ns"));
+    assert!(help.contains("the parent seed continues unchanged"));
     assert!(help.contains("--branch-seed"));
     assert!(!help.contains("SEEDBOX_CHECKPOINT"));
     fs::write(dir.path().join("compose.yaml"), "name: checkpoint-test\nservices:\n  workload: {image: example/workload:v1}\nx-seedbox:\n  version: 1\n  seed: 0\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: workload}\n").unwrap();

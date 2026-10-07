@@ -297,9 +297,7 @@ impl Orchestrator {
                 });
             }
             let start = Instant::now();
-            let checkpoint_parent = crate::vmm::checkpoint_parent(&record.identity)?;
             let mut report = executor.execute(ExecutionRequest {
-                checkpoint_parent,
                 seed: record.identity.seed,
                 limits: &record.identity.configuration.limits,
                 network: &record.identity.configuration.network,

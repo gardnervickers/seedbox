@@ -142,6 +142,7 @@ struct World {
     boot_seed: u64,
     /// The seed the world plan was armed with; reboots draw from it.
     run_seed: u64,
+    branch_identity: Option<String>,
     /// Per machine, a summary of each incarnation that crashed.
     incarnations: Vec<Vec<Value>>,
     /// Frames queued for each paused machine during its current pause.
@@ -330,9 +331,11 @@ impl World {
     fn crash(&mut self, m: usize, t: u64) -> Result<(), String> {
         let name = self.machines[m].name.clone();
         let next = self.machines[m].incarnation.checked_add(1).ok_or("incarnation overflow")?;
-        let seed = entropy_seed(self.run_seed, &format!("reboot-entropy/{name}/{next}"));
+        let mut rng = Rng::branch(self.run_seed, self.branch_identity.as_deref(), &format!("reboot-entropy/{name}/{next}"));
+        let mut seed = [0u8; 32];
+        for c in seed.chunks_mut(8) {c.copy_from_slice(&rng.next().to_le_bytes());}
         let mut fresh = boot_machine(&self.kvm, &name, &self.boot[m], false, seed)?;
-        fresh.timer_rng = Some(Rng::new(self.run_seed, &format!("timer-jitter/{name}/{next}")));
+        fresh.timer_rng = Some(Rng::branch(self.run_seed, self.branch_identity.as_deref(), &format!("timer-jitter/{name}/{next}")));
         let mut old = std::mem::replace(&mut self.machines[m], fresh);
         let discarded: usize = self.strict_events[m].values().map(Vec::len).sum();
         self.strict_events[m].clear();
@@ -576,6 +579,7 @@ fn run() -> Result<Value, String> {
         barrier,
         boot_seed,
         run_seed: seed,
+        branch_identity: None,
         incarnations: vec![Vec::new(); n],
         paused_ingress: vec![0; n],
         counter: Counter::new()?,
@@ -604,33 +608,31 @@ fn run() -> Result<Value, String> {
     if !forked {
         let kills = arm_seed(&mut world, &cfg, &names, seed, 0)?;
         if !checkpoint_times.is_empty() {
-            let parent = match cfg["checkpoint"]["parent_identity"].as_str() {
-                Some(parent) if parent.len()==64 && parent.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)) => parent.to_string(),
-                Some(_) => return Err("checkpoint.parent_identity must be a lowercase SHA-256 digest".into()),
-                None => {
-                    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-                    let engine = format!("{:x}", Sha256::digest(std::fs::read(exe).map_err(|e| e.to_string())?));
-                    checkpoint::parent_identity(&cfg, seed, &engine, |p| {
-                        std::fs::read(base.join(p)).map(|bytes|format!("{:x}",Sha256::digest(bytes))).map_err(|e|format!("{p}: {e}"))
-                    })?
-                }
-            };
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let engine = format!("{:x}", Sha256::digest(std::fs::read(exe).map_err(|e| e.to_string())?));
+            let parent = checkpoint::parent_identity(&cfg, seed, &engine, |p| {
+                std::fs::read(base.join(p)).map(|bytes|format!("{:x}",Sha256::digest(bytes))).map_err(|e|format!("{p}: {e}"))
+            })?;
+            if let Some(expected) = cfg["checkpoint"]["parent_identity"].as_str() {
+                if expected != parent {return Err("checkpoint parent identity does not match retained world inputs".into());}
+            }
             // Reconstruct each prefix from the same origin: an extra hard
             // stop for an earlier checkpoint must not change a later one's
             // identity or execution. The held snapshots remain independent.
-            let origin = if checkpoint_times.len()>1 {Some(WorldSnapshot::take(&mut world)?)} else {None};
+            let origin = if checkpoint_times.len()>1 {Some(WorldSnapshot::take_checkpoint(&mut world)?)} else {None};
             let mut held = Vec::new();
             for (i, &at) in checkpoint_times.iter().enumerate() {
                 if i>0 {origin.as_ref().unwrap().restore_checkpoint(&mut world)?;}
                 let outcome = simulate_to(&mut world, &cfg, duration, &end_on, None, Some(at))?;
                 if outcome != "checkpoint" {return Err(format!("checkpoint at {at} ns not reached: {outcome}"));}
-                held.push((at, WorldSnapshot::take(&mut world)?));
+                held.push((at, WorldSnapshot::take_checkpoint(&mut world)?));
             }
             let mut reports = Vec::new();
             for (at, snapshot) in &held {
                 for &branch_seed in &seeds {
                     snapshot.restore_checkpoint(&mut world)?;
-                    reseed_checkpoint(&mut world, &names, branch_seed);
+                    let identity = checkpoint::branch_identity(&parent,*at,branch_seed);
+                    let reseed = reseed_checkpoint(&mut world, &names, seed, branch_seed, &identity)?;
                     let dir = format!("{out}/checkpoint-{at}/seed-{branch_seed}");
                     checkpoint_output(&mut world, &dir, args.iter().any(|a| a == "--stream-console"))?;
                     let started = Instant::now();
@@ -639,7 +641,8 @@ fn run() -> Result<Value, String> {
                     // semantic branch seed and identity have explicit fields.
                     let mut r = report(&mut world, outcome, seed, &kills, started.elapsed().as_secs_f64(), digest, &dir, duration, &end_on)?;
                     r["checkpoint"] = json!({"at_ns":at,"branch_seed":branch_seed,"parent_identity":parent,
-                        "branch_identity":checkpoint::branch_identity(&parent,*at,branch_seed)});
+                        "branch_identity":identity});
+                    r["checkpoint_reseed"] = json!(reseed);
                     reports.push(r);
                 }
             }
@@ -684,7 +687,7 @@ fn run() -> Result<Value, String> {
             }
         }
         let started = Instant::now();
-        let kills = release(&mut world, &cfg, &names, seed, release_skew)?;
+        let (kills, reseed) = release(&mut world, &cfg, &names, seed, release_skew)?;
         let outcome = simulate(&mut world, &cfg, duration, &end_on, None)?;
         let host_seconds = started.elapsed().as_secs_f64();
         let mut r = report(&mut world, outcome, seed, &kills, host_seconds, digest, &dir, duration, &end_on)?;
@@ -692,6 +695,7 @@ fn run() -> Result<Value, String> {
             "seed": boot_seed, "barrier_ns": barrier_ns, "fork_at_ns": fork_at, "release_skew_ns": release_skew,
             "boot_host_seconds": boot_host_seconds, "forked": i > 0,
             "restored_pages": restored_pages, "restore_host_seconds": restore_host_seconds,
+            "reseed": reseed,
         });
         reports.push(r);
     }
@@ -707,12 +711,27 @@ fn run() -> Result<Value, String> {
 }
 
 /// Keep the captured plan and all sampled effects. Only future draws change.
-fn reseed_checkpoint(world: &mut World, names: &[String], seed: u64) {
-    world.run_seed = seed;
-    world.link_rng = link_rngs(seed, names);
-    for (mach, name) in world.machines.iter_mut().zip(names) {
-        mach.timer_rng = Some(Rng::new(seed, &format!("checkpoint-timer/{name}/{}", mach.incarnation)));
+fn reseed_checkpoint(world: &mut World, names: &[String], parent_seed: u64, seed: u64, identity: &str) -> Result<Vec<Value>, String> {
+    // Branch P continues every captured stream, including guest entropy.
+    if seed == parent_seed {
+        return Ok(world.machines.iter().map(|m|json!({"machine":m.name,"reseed":"continuation"})).collect());
     }
+    world.run_seed = seed;
+    world.branch_identity = Some(identity.to_string());
+    for ((a,b), rng) in &mut world.link_rng {
+        *rng = Rng::branch(seed, Some(identity), &format!("link/{}/{}", names[*a], names[*b]));
+    }
+    let mut reseed = Vec::new();
+    for (mach, name) in world.machines.iter_mut().zip(names) {
+        mach.timer_rng = Some(Rng::branch(seed, Some(identity), &format!("timer-jitter/{name}/{}", mach.incarnation)));
+        let status = if mach.down || matches!(mach.state, State::Exited(_)) {"not_up"} else {
+            let mut rng = Rng::branch(seed, Some(identity), &format!("guest-entropy/{name}/{}", mach.incarnation));
+            mach.reseed_time_page(std::array::from_fn(|_|rng.next() as u32))?;
+            "time_page"
+        };
+        reseed.push(json!({"machine":name,"incarnation":mach.incarnation,"reseed":status}));
+    }
+    Ok(reseed)
 }
 
 fn checkpoint_output(world: &mut World, out: &str, stream: bool) -> Result<(), String> {
@@ -853,19 +872,26 @@ fn arm_seed(world: &mut World, cfg: &Value, names: &[String], seed: u64, from: u
 
 /// Release a world parked at its launch barrier under `seed`. Every machine
 /// resumes at the latest barrier time plus a seeded skew, so which service
-/// starts first still varies by seed. Each guest reads its seeded entropy and
-/// reseeds its kernel CRNG; timer jitter and the seed's world plan start here.
-fn release(world: &mut World, cfg: &Value, names: &[String], seed: u64, skew: u64) -> Result<Vec<Value>, String> {
+/// starts first still varies by seed. Each guest reseeds its kernel CRNG from
+/// seeded entropy, read at its launch barrier or, after a time fork, taken
+/// from the time page; timer jitter and the seed's world plan start here.
+/// Returns the kills and, per machine, how its entropy was delivered.
+fn release(world: &mut World, cfg: &Value, names: &[String], seed: u64, skew: u64) -> Result<(Vec<Value>, Value), String> {
     let at = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
     check_plan_after(cfg, at.saturating_add(skew))?;
+    let mut reseed = serde_json::Map::new();
     for (i, mach) in world.machines.iter_mut().enumerate() {
         let mut rng = Rng::new(seed, &format!("fork-entropy/{}", names[i]));
         let entropy = std::array::from_fn(|_| rng.next() as u32);
         let delay = Rng::new(seed, &format!("release/{}", names[i])).below(skew.saturating_add(1));
-        mach.release(at.saturating_add(delay), entropy)?;
+        let how = mach.release(at.saturating_add(delay), entropy)?;
+        if how == machine::Reseed::Unsupported {
+            eprintln!("{}: guest ABI {} predates time-page reseeding; its CRNG is not reseeded at this time fork", names[i], mach.abi());
+        }
+        reseed.insert(names[i].clone(), json!(how.as_str()));
         mach.timer_rng = Some(Rng::new(seed, &format!("timer-jitter/{}", names[i])));
     }
-    arm_seed(world, cfg, names, seed, at.saturating_add(skew))
+    Ok((arm_seed(world, cfg, names, seed, at.saturating_add(skew))?, Value::Object(reseed)))
 }
 
 /// A committed world boundary. Runtime forks retain the active plan and RNG
@@ -886,12 +912,20 @@ struct WorldSnapshot {
     control: control::Control,
     link_rng: BTreeMap<(usize, usize), Rng>,
     run_seed: u64,
+    branch_identity: Option<String>,
     incarnations: Vec<Vec<Value>>,
     paused_ingress: Vec<u64>,
 }
 
 impl WorldSnapshot {
     fn take(world: &mut World) -> Result<Self, String> {
+        if world.machines.iter().any(|m| !m.parked) {
+            return Err("boot snapshot requires all machines parked".into());
+        }
+        Self::take_checkpoint(world)
+    }
+
+    fn take_checkpoint(world: &mut World) -> Result<Self, String> {
         Ok(Self {
             machines: world.machines.iter_mut().map(Machine::snapshot).collect::<Result<_, _>>()?,
             events: world.events.clone(),
@@ -906,6 +940,7 @@ impl WorldSnapshot {
             slices: world.slices,
             faults: world.faults.clone(), control: world.control.clone(),
             link_rng: world.link_rng.clone(), run_seed: world.run_seed,
+            branch_identity: world.branch_identity.clone(),
             incarnations: world.incarnations.clone(), paused_ingress: world.paused_ingress.clone(),
         })
     }
@@ -950,6 +985,7 @@ impl WorldSnapshot {
         world.control = self.control.clone();
         world.link_rng = self.link_rng.clone();
         world.run_seed = self.run_seed;
+        world.branch_identity = self.branch_identity.clone();
         Ok(pages)
     }
 }
@@ -968,6 +1004,33 @@ fn simulate(
     simulate_to(world, cfg, duration, end_on, fork, None)
 }
 
+fn drain_machine_messages(world: &mut World, m: usize, until_barrier: bool, exited: bool) -> Result<(), String> {
+    for (id,at,success) in world.machines[m].fault_effects.drain(..) {
+        if id==0 && success {
+            if let Err(error)=world.faults.management_ready(m,at,world.control.latency) {world.faults.error=Some(error);}
+        } else {world.faults.effect(m,id,at,success);}
+    }
+    if exited {if let Some(id)=world.control.pending.as_ref().and_then(|p|p.fault) {world.faults.target_exited(id,m,world.machines[m].time);}}
+    for (at, line) in world.machines[m]
+        .control_requests
+        .drain(..)
+        .collect::<Vec<_>>()
+    {
+        if until_barrier {
+            return Err(format!(
+                "{}: runtime control request at {at} ns, before the fork point; fork earlier (boot.fork_at_ns)",
+                world.machines[m].name
+            ));
+        }
+        let max_time = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
+        if let Err(e) = world.control.request(m, at, &line, max_time) {
+            world.control.log.push(json!({"status":"rejected","machine":world.machines[m].name,"at_ns":at,"frame":String::from_utf8_lossy(&line),"error":e}));
+            world.control.error = Some(e);
+        }
+    }
+    Ok(())
+}
+
 fn simulate_to(
     world: &mut World,
     cfg: &Value,
@@ -983,6 +1046,7 @@ fn simulate_to(
     let mut frames = Vec::new();
     let outcome;
     loop {
+        for m in 0..n {drain_machine_messages(world, m, until_barrier, false)?;}
         let keys: Vec<u64> = (0..n).map(|m| world.key(m)).collect();
         let (m, &key) = keys
             .iter()
@@ -1114,29 +1178,7 @@ fn simulate_to(
         let plan=(m,world.machines[m].time,limit,horizon,world.next_event(m),fault_boundary,control_boundary,world.machines[m].next_deadline(),world.machines[m].pending_io.as_ref().map_or(0,|p|p.remaining_ns),world.seq);
         let stop = world.machines[m].run_until(&mut world.counter, limit, early, &mut frames)?;
         stop_progress(&mut stalled_plan,plan,world.machines[m].time!=plan.1 || stop!=Stop::Reached)?;
-        for (id,at,success) in world.machines[m].fault_effects.drain(..) {
-            if id==0 && success {
-                if let Err(error)=world.faults.management_ready(m,at,world.control.latency) {world.faults.error=Some(error);}
-            } else {world.faults.effect(m,id,at,success);}
-        }
-        if stop==Stop::Exited {if let Some(id)=world.control.pending.as_ref().and_then(|p|p.fault) {world.faults.target_exited(id,m,world.machines[m].time);}}
-        for (at, line) in world.machines[m]
-            .control_requests
-            .drain(..)
-            .collect::<Vec<_>>()
-        {
-            if until_barrier {
-                return Err(format!(
-                    "{}: runtime control request at {at} ns, before the fork point; fork earlier (boot.fork_at_ns)",
-                    world.machines[m].name
-                ));
-            }
-            let max_time = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
-            if let Err(e) = world.control.request(m, at, &line, max_time) {
-                world.control.log.push(json!({"status":"rejected","machine":world.machines[m].name,"at_ns":at,"frame":String::from_utf8_lossy(&line),"error":e}));
-                world.control.error = Some(e);
-            }
-        }
+        drain_machine_messages(world, m, until_barrier, stop==Stop::Exited)?;
         world
             .control
             .observe_faults(&world.faults, world.machines[m].time)?;
@@ -1369,7 +1411,7 @@ mod checkpoint_tests {
             undo_margin:undo,tolerance:0,timer_jitter:0,exact_timer_ppm:0,margin:None,console_limit:None};
         let names=vec!["a".to_string(),"b".to_string()];
         let machines=names.iter().map(|name|boot_machine(&kvm,name,&boot,false,[0;32]).unwrap()).collect();
-        World {machines,kvm,boot:vec![boot.clone(),boot],barrier:false,boot_seed:7,run_seed:7,
+        World {machines,kvm,boot:vec![boot.clone(),boot],barrier:false,boot_seed:7,run_seed:7,branch_identity:None,
             incarnations:vec![vec![],vec![]],paused_ingress:vec![0;2],counter:Counter::new().unwrap(),
             events:vec![BTreeMap::new();2],strict_events:vec![BTreeMap::new();2],seq:0,
             lookahead:100,early:0,latency:100,jitter:10,link_rng:link_rngs(7,&names),
@@ -1389,22 +1431,22 @@ mod checkpoint_tests {
         for undo in [0,256] {
             let mut w=world(undo);
             assert_eq!(simulate_to(&mut w,&json!({}),20_000,&None,None,Some(500)).unwrap(),"checkpoint");
-            let first=WorldSnapshot::take(&mut w).unwrap();
+            let first=WorldSnapshot::take_checkpoint(&mut w).unwrap();
             let first_state:Vec<_>=w.machines.iter_mut().map(|m|m.state_digest().0).collect();
             assert_eq!(simulate_to(&mut w,&json!({}),20_000,&None,None,Some(800)).unwrap(),"checkpoint");
-            let second=WorldSnapshot::take(&mut w).unwrap();
+            let second=WorldSnapshot::take_checkpoint(&mut w).unwrap();
             let want=finish(&mut w);
             second.restore_checkpoint(&mut w).unwrap();
             assert_eq!(finish(&mut w),want,"continuation from second checkpoint, undo={undo}");
             first.restore_checkpoint(&mut w).unwrap();
             assert_eq!(w.machines.iter_mut().map(|m|m.state_digest().0).collect::<Vec<_>>(),first_state);
             let names=vec!["a".to_string(),"b".to_string()];
-            reseed_checkpoint(&mut w,&names,42);
+            reseed_checkpoint(&mut w,&names,7,42,&checkpoint::branch_identity("parent",500,42)).unwrap();
             let branch=finish(&mut w);
             second.restore_checkpoint(&mut w).unwrap();
             finish(&mut w);
             first.restore_checkpoint(&mut w).unwrap();
-            reseed_checkpoint(&mut w,&names,42);
+            reseed_checkpoint(&mut w,&names,7,42,&checkpoint::branch_identity("parent",500,42)).unwrap();
             assert_eq!(finish(&mut w),branch,"old checkpoint restored after newer one, undo={undo}");
         }
     }
@@ -1437,7 +1479,7 @@ mod checkpoint_tests {
                 action:seedbox_control::Action::Partition {handle:"held".into(),left:vec!["a".into()],right:vec!["b".into()]}}).unwrap();
             w.faults.apply_due(500);
             let handles=w.faults.active_handles();
-            let saved=WorldSnapshot::take(&mut w).unwrap();
+            let saved=WorldSnapshot::take_checkpoint(&mut w).unwrap();
             let link_draw=w.link_rng.get_mut(&(0,1)).unwrap().next();
             let timer_draw=w.machines[0].timer_rng.as_mut().unwrap().next();
             w.events[1].clear();w.strict_events[0].clear();w.faults.error=Some("changed".into());
@@ -1456,10 +1498,166 @@ mod checkpoint_tests {
             assert_eq!(w.faults.log.len(),1);
             assert_eq!(w.control.boundary(),1000);assert_eq!(w.control.pending.as_ref().unwrap().relay,1);
             let pending=w.control.pending.as_ref().unwrap().request.clone();
-            reseed_checkpoint(&mut w,&names,99);
+            reseed_checkpoint(&mut w,&names,7,99,&checkpoint::branch_identity("parent",500,99)).unwrap();
             assert_eq!(w.control.pending.as_ref().unwrap().request,pending);
             assert_eq!(w.run_seed,99);
             assert_ne!(w.link_rng.get_mut(&(0,1)).unwrap().next(),link_draw);
+        }
+    }
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn boot_snapshots_require_every_machine_parked() {
+        let mut w=world(0);
+        assert!(WorldSnapshot::take(&mut w).is_err());
+        w.machines[0].park().unwrap();
+        assert!(WorldSnapshot::take(&mut w).is_err());
+        w.machines[1].park().unwrap();
+        assert!(WorldSnapshot::take(&mut w).is_ok());
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn parent_branch_continues_without_restarting_any_stream() {
+        for undo in [0,256] {
+            let mut w=world(undo);
+            let names=vec!["a".to_string(),"b".to_string()];
+            simulate_to(&mut w,&json!({}),20_000,&None,None,Some(500)).unwrap();
+            w.link_rng.get_mut(&(0,1)).unwrap().next();
+            w.machines[0].timer_rng=Some(Rng::new(7,"timer"));
+            w.machines[0].timer_rng.as_mut().unwrap().next();
+            let saved=WorldSnapshot::take_checkpoint(&mut w).unwrap();
+            let want_link=w.link_rng.get_mut(&(0,1)).unwrap().next();
+            let want_timer=w.machines[0].timer_rng.as_mut().unwrap().next();
+            let want=finish(&mut w);
+            saved.restore_checkpoint(&mut w).unwrap();
+            let before:Vec<_>=w.machines.iter_mut().map(|m|m.state_digest().0).collect();
+            let reseed=reseed_checkpoint(&mut w,&names,7,7,&checkpoint::branch_identity("parent",500,7)).unwrap();
+            assert!(reseed.iter().all(|r|r["reseed"]=="continuation"));
+            assert!(w.branch_identity.is_none());
+            assert_eq!(w.machines.iter_mut().map(|m|m.state_digest().0).collect::<Vec<_>>(),before);
+            assert_eq!(w.link_rng.get_mut(&(0,1)).unwrap().next(),want_link);
+            assert_eq!(w.machines[0].timer_rng.as_mut().unwrap().next(),want_timer);
+            assert_eq!(finish(&mut w),want,"undo={undo}");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn checkpoint_drains_fault_effects_and_control_requests_before_capture() {
+        let mut w=world(0);
+        let names=vec!["a".to_string(),"b".to_string()];
+        w.control=control::Control::new(&json!({"machine":"a","latency_ns":1000,"placement":{"a":"a","b":"b"}}),names,100,0).unwrap();
+        simulate_to(&mut w,&json!({}),20_000,&None,None,Some(500)).unwrap();
+        // Model messages produced by the last slice before the scheduler
+        // considers T. A direct snapshot is unsafe; simulate_to drains them.
+        w.machines[0].fault_effects.push((0,499,true));
+        w.machines[0].control_requests.push((499,b"SBX_RPC1 1 1 {\"version\":1,\"id\":1,\"op\":\"inspect\"}".to_vec()));
+        assert!(WorldSnapshot::take_checkpoint(&mut w).is_err());
+        assert_eq!(simulate_to(&mut w,&json!({}),20_000,&None,None,Some(500)).unwrap(),"checkpoint");
+        assert!(w.machines[0].fault_effects.is_empty());
+        assert!(w.machines[0].control_requests.is_empty());
+        assert_eq!(w.faults.readiness,vec![json!({"machine":"a","at_ns":499})]);
+        assert_eq!(w.control.boundary(),1499);
+        assert!(w.control.pending.is_some());
+        let saved=WorldSnapshot::take_checkpoint(&mut w).unwrap();
+        saved.restore_checkpoint(&mut w).unwrap();
+        assert_eq!(w.control.boundary(),1499);
+        assert_eq!(w.faults.readiness.len(),1);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn checkpoint_reseeds_paused_guests_and_reports_down_guests() {
+        let mut w=world(0);
+        let names=vec!["a".to_string(),"b".to_string()];
+        w.machines[0].pause().unwrap();
+        let before=w.machines[0].state_digest().0;
+        w.lifecycle(1,faults::Lifecycle::Crash,0).unwrap();
+        let reseed=reseed_checkpoint(&mut w,&names,7,42,&checkpoint::branch_identity("parent",0,42)).unwrap();
+        assert_eq!(reseed[0]["reseed"],"time_page");
+        assert_eq!(reseed[1]["reseed"],"not_up");
+        assert!(w.machines[0].paused);
+        assert_eq!(w.machines[0].time,0);
+        assert_ne!(w.machines[0].state_digest().0,before);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn checkpoint_identity_keys_live_streams_and_future_incarnations() {
+        let mut w=world(0);
+        let names=vec!["a".to_string(),"b".to_string()];
+        let saved=WorldSnapshot::take_checkpoint(&mut w).unwrap();
+        let mut draws=Vec::new();
+        for at in [100,200,100] {
+            saved.restore_checkpoint(&mut w).unwrap();
+            let identity=checkpoint::branch_identity("parent",at,42);
+            reseed_checkpoint(&mut w,&names,7,42,&identity).unwrap();
+            let link=w.link_rng.get_mut(&(0,1)).unwrap().next();
+            let timer=w.machines[0].timer_rng.as_mut().unwrap().next();
+            let page=w.machines[0].state_digest().1.into_iter().find(|(name,_)|*name=="time_page").unwrap().1;
+            assert_eq!(link,Rng::branch(42,Some(&identity),"link/a/b").next());
+            assert_eq!(timer,Rng::branch(42,Some(&identity),"timer-jitter/a/0").next());
+            w.lifecycle(0,faults::Lifecycle::Crash,0).unwrap();
+            w.lifecycle(0,faults::Lifecycle::Reboot,0).unwrap();
+            let reboot_timer=w.machines[0].timer_rng.as_mut().unwrap().next();
+            assert_eq!(reboot_timer,Rng::branch(42,Some(&identity),"timer-jitter/a/1").next());
+            draws.push((link,timer,page,reboot_timer,w.machines[0].state_digest().0));
+        }
+        assert_eq!(draws[0],draws[2]);
+        assert_ne!(draws[0].0,draws[1].0);
+        assert_ne!(draws[0].1,draws[1].1);
+        assert_ne!(draws[0].2,draws[1].2);
+        assert_ne!(draws[0].3,draws[1].3);
+        assert_ne!(draws[0].4,draws[1].4);
+    }
+
+    /// Build artifacts/entropy-fork.cpio as described in harness/worlds/README.md.
+    #[test]
+    #[ignore = "requires ABI 3 artifacts/bzImage, artifacts/entropy-fork.cpio, exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn runtime_checkpoint_getrandom_and_urandom_repeat_and_diverge() {
+        let root=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut w=world(256);
+        let mut boot=w.boot[0].clone();
+        boot.kernel=std::fs::read(root.join("artifacts/bzImage")).unwrap().into();
+        boot.initrd=std::fs::read(root.join("artifacts/entropy-fork.cpio")).unwrap().into();
+        boot.mem=256*1024*1024;boot.disk=None;boot.control_channel=false;
+        boot.cmdline=("console=ttyS0 nokaslr noapic nolapic acpi=off io_delay=none tsc=reliable tsc_early_khz=1000000 lpj=1000000 clocksource=tsc random.trust_cpu=off random.trust_bootloader=on panic=-1 loglevel=4 rdinit=/init".into(),String::new());
+        w.boot=vec![boot.clone(),boot.clone()];
+        let names=vec!["a".to_string(),"b".to_string()];
+        w.machines=names.iter().map(|name|boot_machine(&w.kvm,name,&boot,false,entropy_seed(7,&format!("boot-entropy/{name}"))).unwrap()).collect();
+        let at=2_000_000_000;
+        let duration=10_000_000_000;
+        w.lookahead=1_000_000;w.latency=1_000_000;
+        assert_eq!(simulate_to(&mut w,&json!({}),duration,&None,None,Some(at)).unwrap(),"checkpoint");
+        for m in &w.machines {
+            let prefix=String::from_utf8_lossy(&m.com1.out);
+            assert!(prefix.contains("before fork:"));assert!(!prefix.contains("after fork:"));
+        }
+        let saved=WorldSnapshot::take_checkpoint(&mut w).unwrap();
+        let mut outputs=Vec::new();
+        for seed in [42,43,42] {
+            saved.restore_checkpoint(&mut w).unwrap();
+            let report=reseed_checkpoint(&mut w,&names,7,seed,&checkpoint::branch_identity("parent",at,seed)).unwrap();
+            assert!(report.iter().all(|r|r["reseed"]=="time_page"));
+            simulate(&mut w,&json!({}),duration,&None,None).unwrap();
+            outputs.push(w.machines.iter().map(|m| {
+                assert_eq!(m.guest_exit_code,Some(0));
+                let output=String::from_utf8_lossy(&m.com1.out);
+                let line=output.lines().find(|l|l.starts_with("after fork:")).unwrap();
+                let values=line.split_whitespace().skip(2).collect::<Vec<_>>();
+                assert_eq!(values.len(),2);
+                for (value,source) in values.iter().zip(["getrandom=","urandom="]) {
+                    let hex=value.strip_prefix(source).unwrap();
+                    assert_eq!(hex.len(),32,"empty or short {source} output");
+                    assert!(hex.bytes().all(|b|b.is_ascii_hexdigit()));
+                }
+                values.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            }).collect::<Vec<_>>());
+        }
+        assert_eq!(outputs[0],outputs[2]);
+        for machine in 0..2 {
+            assert_eq!(outputs[0][machine].len(),2);
+            for source in 0..2 {assert_ne!(outputs[0][machine][source],outputs[1][machine][source]);}
         }
     }
 }

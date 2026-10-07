@@ -31,7 +31,6 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
     };
     let artifacts = BTreeMap::from([(hash, "/verified/retained-input".into())]);
     let request = ExecutionRequest {
-        checkpoint_parent: None,
         seed: 1009,
         limits: &Limits {
             simulated_time_ns: 1_000_000_000,
@@ -131,7 +130,6 @@ fn runtime_requests_resolve_placement_and_reports_validate_rpc_causality() {
             service: "client".into(),
         };
         let request = ExecutionRequest {
-            checkpoint_parent: None,
             control: Some(&c),
             ..*base
         };
@@ -183,7 +181,6 @@ fn runtime_report_rejects_impossible_sleep_and_now_metadata() {
             service: "client".into(),
         };
         let request = ExecutionRequest {
-            checkpoint_parent: None,
             control: Some(&c),
             ..*base
         };
@@ -219,7 +216,6 @@ fn pending_rpc_at_world_cutoff_preserves_timeout_and_workload_failure() {
             service: "client".into(),
         };
         let request = ExecutionRequest {
-            checkpoint_parent: None,
             control: Some(&control),
             ..*base
         };
@@ -273,7 +269,6 @@ fn process_target_exit_after_admission_is_a_recoverable_unavailable_fault() {
             service: "client".into(),
         };
         let request = ExecutionRequest {
-            checkpoint_parent: None,
             control: Some(&control),
             ..*base
         };
@@ -387,7 +382,6 @@ fn in_flight_reply_at_world_cutoff_keeps_outcome_even_when_other_clock_is_later(
             service: "client".into(),
         };
         let request = ExecutionRequest {
-            checkpoint_parent: None,
             control: Some(&control),
             ..*base
         };
@@ -425,7 +419,6 @@ fn transcript_correlates_global_relay_and_connection_local_ids() {
             service: "client".into(),
         };
         let request = ExecutionRequest {
-            checkpoint_parent: None,
             control: Some(&control),
             ..*base
         };
@@ -459,7 +452,6 @@ fn typed_network_plan_preserves_targets_without_attributing_check_service() {
             .placement
             .insert("peer".into(), "peer-machine".into());
         let request = ExecutionRequest {
-            checkpoint_parent: None,
             control: Some(&control),
             prepared: &prepared,
             ..*base
@@ -506,7 +498,6 @@ fn counter_identity_requires_an_attributable_matching_engine_report() {
             .semantic_parameters
             .insert("counter".into(), "intel-0x5111c4".into());
         let request = ExecutionRequest {
-            checkpoint_parent: None,
             prepared: &inputs,
             ..*base
         };
@@ -521,7 +512,6 @@ fn counter_identity_requires_an_attributable_matching_engine_report() {
             .semantic_parameters
             .insert("counter".into(), "unknown".into());
         let request = ExecutionRequest {
-            checkpoint_parent: None,
             prepared: &inputs,
             ..*base
         };
@@ -543,8 +533,7 @@ fn checkpoint_semantics_bind_parent_and_report_and_fail_closed() {
             .profile
             .semantic_parameters
             .insert("checkpoint_branch_seed".into(), "42".into());
-        let mut request = ExecutionRequest {
-            checkpoint_parent: Some(ContentDigest::of(b"parent")),
+        let request = ExecutionRequest {
             prepared: &inputs,
             ..*base
         };
@@ -554,7 +543,7 @@ fn checkpoint_semantics_bind_parent_and_report_and_fail_closed() {
         assert_eq!(
             checkpoint["branch_identity"],
             checkpoint_protocol::branch_identity(
-                request.checkpoint_parent.as_ref().unwrap().hex(),
+                checkpoint["parent_identity"].as_str().unwrap(),
                 500,
                 42
             )
@@ -565,8 +554,6 @@ fn checkpoint_semantics_bind_parent_and_report_and_fail_closed() {
         assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
         raw["checkpoint"]["branch_seed"] = json!(43);
         assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
-        request.checkpoint_parent = None;
-        assert!(vmm::world(&request).is_err());
         inputs
             .profile
             .semantic_parameters
@@ -579,3 +566,70 @@ fn checkpoint_semantics_bind_parent_and_report_and_fail_closed() {
 #[rustfmt::skip]
 #[path = "../../seedbox-vmm/src/checkpoint.rs"]
 mod checkpoint_protocol;
+
+#[test]
+fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
+    fixture(|base| {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input");
+        std::fs::write(&input, b"retained input").unwrap();
+        let mut artifacts = BTreeMap::from([(ContentDigest::of(b"retained input"), input)]);
+        let mut inputs = base.prepared.clone();
+        inputs
+            .profile
+            .semantic_parameters
+            .insert("checkpoint_at_ns".into(), "500".into());
+        inputs
+            .profile
+            .semantic_parameters
+            .insert("checkpoint_branch_seed".into(), "42".into());
+        let cfg = vmm::world(&ExecutionRequest {
+            prepared: &inputs,
+            artifacts: &artifacts,
+            ..*base
+        })
+        .unwrap();
+        let parent = checkpoint_protocol::parent_identity(
+            &cfg,
+            base.seed,
+            inputs.profile.engine.hex(),
+            |path| {
+                Ok(ContentDigest::of(&std::fs::read(path).unwrap())
+                    .hex()
+                    .to_owned())
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg["checkpoint"]["parent_identity"], parent);
+        let relocated = dir.path().join("relocated");
+        std::fs::copy(artifacts.values().next().unwrap(), &relocated).unwrap();
+        *artifacts.values_mut().next().unwrap() = relocated;
+        inputs
+            .profile
+            .semantic_parameters
+            .insert("checkpoint_at_ns".into(), "600".into());
+        inputs
+            .profile
+            .semantic_parameters
+            .insert("checkpoint_branch_seed".into(), "43".into());
+        let moved = vmm::world(&ExecutionRequest {
+            prepared: &inputs,
+            artifacts: &artifacts,
+            ..*base
+        })
+        .unwrap();
+        assert_eq!(moved["checkpoint"]["parent_identity"], parent);
+        assert_ne!(
+            moved["checkpoint"]["branch_identity"],
+            cfg["checkpoint"]["branch_identity"]
+        );
+        inputs.profile.engine = ContentDigest::of(b"another engine");
+        let changed = vmm::world(&ExecutionRequest {
+            prepared: &inputs,
+            artifacts: &artifacts,
+            ..*base
+        })
+        .unwrap();
+        assert_ne!(changed["checkpoint"]["parent_identity"], parent);
+    });
+}

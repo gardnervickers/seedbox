@@ -102,7 +102,7 @@ enum Command {
         /// Capture the world before this simulated nanosecond and continue a branch.
         #[arg(long, requires = "branch_seed", value_parser = clap::value_parser!(u64))]
         checkpoint_at_ns: Option<u64>,
-        /// Seed for future simulator randomness after the checkpoint.
+        /// Branch seed for simulator and guest kernel randomness; the parent seed continues unchanged.
         #[arg(long, requires = "checkpoint_at_ns", value_parser = clap::value_parser!(u64))]
         branch_seed: Option<u64>,
         #[command(flatten)]

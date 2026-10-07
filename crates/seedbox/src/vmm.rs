@@ -14,6 +14,11 @@ use std::{
     path::Path,
 };
 
+#[allow(dead_code)]
+#[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/checkpoint.rs"]
+mod checkpoint;
+
 #[derive(Clone, Debug)]
 pub struct VmmExecutor {
     /// Host CPU to pin the VMM to; `None` leases the first free eligible core.
@@ -334,27 +339,6 @@ pub fn recorded_checkpoint(profile: &ExecutionProfile) -> Result<Option<(u64, u6
     }
 }
 
-/// The hypothetical ordinary parent shares all retained bytes and configuration.
-pub fn checkpoint_parent(
-    identity: &crate::orchestration::RunIdentity,
-) -> Result<Option<ContentDigest>> {
-    if recorded_checkpoint(&identity.inputs.profile)?.is_none() {
-        return Ok(None);
-    }
-    let mut parent = identity.clone();
-    parent
-        .inputs
-        .profile
-        .semantic_parameters
-        .remove("checkpoint_at_ns");
-    parent
-        .inputs
-        .profile
-        .semantic_parameters
-        .remove("checkpoint_branch_seed");
-    Ok(Some(ContentDigest::of(&serde_json::to_vec(&parent)?)))
-}
-
 const COUNTER: &str = "counter";
 
 /// The branch counter profile a recorded run was made with.
@@ -503,13 +487,13 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
         "machines":machines,"control":control,
         "control_channel":"virtio-console-v1",
     });
-    if let Some(checkpoint) = checkpoint_metadata(request)? {
+    if let Some(checkpoint) = checkpoint_metadata(request, &world)? {
         world["checkpoint"] = checkpoint;
     }
     Ok(world)
 }
 
-fn checkpoint_metadata(request: &ExecutionRequest<'_>) -> Result<Option<Value>> {
+fn checkpoint_metadata(request: &ExecutionRequest<'_>, world: &Value) -> Result<Option<Value>> {
     let Some((at, seed)) = recorded_checkpoint(&request.prepared.profile)? else {
         return Ok(None);
     };
@@ -518,18 +502,27 @@ fn checkpoint_metadata(request: &ExecutionRequest<'_>) -> Result<Option<Value>> 
             "checkpoint time must be before the simulated time limit".into(),
         ));
     }
-    let parent = request
-        .checkpoint_parent
-        .as_ref()
-        .ok_or_else(|| Error::Integrity("checkpoint parent identity missing".into()))?;
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(b"seedbox-checkpoint-branch-v1\0");
-    h.update(parent.hex().as_bytes());
-    h.update(at.to_le_bytes());
-    h.update(seed.to_le_bytes());
+    let parent = checkpoint::parent_identity(
+        world,
+        request.seed,
+        request.prepared.profile.engine.hex(),
+        |path| {
+            request
+                .artifacts
+                .iter()
+                .find_map(|(digest, artifact)| {
+                    std::path::absolute(artifact)
+                        .ok()
+                        .filter(|p| p == Path::new(path))
+                        .map(|_| digest.hex().to_owned())
+                })
+                .ok_or_else(|| format!("checkpoint artifact {path} is not verified"))
+        },
+    )
+    .map_err(Error::Integrity)?;
     Ok(Some(
-        json!({"at_ns":at,"branch_seed":seed,"parent_identity":parent,"branch_identity":format!("{:x}",h.finalize())}),
+        json!({"at_ns":at,"branch_seed":seed,"parent_identity":parent,
+        "branch_identity":checkpoint::branch_identity(&parent,at,seed)}),
     ))
 }
 
@@ -806,7 +799,12 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
     if raw.report_version != 1 || raw.seed != request.seed {
         return Err(Error::Integrity("VMM report version/seed mismatch".into()));
     }
-    if raw.checkpoint != checkpoint_metadata(request)? {
+    let expected_checkpoint = if recorded_checkpoint(&request.prepared.profile)?.is_some() {
+        world(request)?.get("checkpoint").cloned()
+    } else {
+        None
+    };
+    if raw.checkpoint != expected_checkpoint {
         return Err(Error::Integrity("VMM checkpoint identity mismatch".into()));
     }
     let counted = recorded_counter(&request.prepared.profile)?;

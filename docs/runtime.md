@@ -12,12 +12,16 @@ for current readers/writers, exit meanings and remaining release gates.
 
 The opt-in `seedbox run --checkpoint-at-ns T --branch-seed B` executes the
 parent seed up to simulated time T, captures the world, and continues a branch
-under B. Both options are semantic parameters, with no environment backing.
+under B. If B equals the parent seed P, it is a plain continuation: no streams
+or guest entropy are reseeded. Both options are semantic parameters, with no
+environment backing.
 Replay reconstructs the parent prefix and checkpoint from retained inputs.
 Without these options the existing execution and witness path is unchanged.
 
 Capture occurs at a scheduler boundary before control, faults and guest work
-at T. Running machines have reached T; halted, paused, down and exited machines
+at T. Queued fault effects and control requests from completed slices are drained
+into world state before testing this boundary; pending world RPCs remain captured.
+Running machines have reached T; halted, paused, down and exited machines
 keep their own clocks. The snapshot includes every machine's RAM, vCPU state,
 shared page, PIC/PIT, UARTs, virtio network/control/block devices, disk durable
 and volatile overlays, pending charged I/O, entropy words and RNG positions.
@@ -26,20 +30,33 @@ link timing/partitions/counters, active fault and control state, lifecycle
 incarnations, paused ingress accounting, logs and witness hash accumulators.
 Immutable boot inputs remain shared in the process.
 
-A branch identifier is SHA-256 over a versioned domain, the parent run identity,
-checkpoint time and branch seed. The public run's retained semantic parameters
-also bind T and B; its parent identity is the ordinary RunIdentity with those
-parameters removed. Branch reports carry both identities. The low-level engine
-uses a content-bound identity of its config, kernel/initrds/disk images, engine
-and parent seed when no public parent identity is supplied. These two parent
-identity namespaces are distinct.
+A branch identifier is SHA-256 over a versioned domain, the parent world identity,
+checkpoint time and branch seed. The CLI and engine use the same parent identity
+function: config with checkpoint metadata removed, artifact paths replaced by
+kernel/initrd/disk content hashes, engine hash and parent seed. The engine
+recomputes it and checks the supplied CLI identity. The retained RunIdentity also
+binds T and B, but is not the checkpoint parent identity. Branch reports carry
+both parent and branch identities.
 
-Only future simulator randomness is reseeded: per-link jitter, each machine's
-timer jitter and entropy for future reboots. Already sampled deadlines, packet
-arrivals, fault plans and control requests remain captured. `arm_seed` must not
-run again at a runtime fork. Guest kernel CRNG and application PRNG state stay
-in captured RAM; arbitrary applications have no safe generic reseeding hook.
-A branch seed therefore does not replace randomness already consumed by guests.
+Runtime checkpoints in PR #103 depend on the ABI 3 kernel reseed hook from
+[PR #93](https://github.com/gardnervickers/seedbox/pull/93), merged at `cd9524ca`.
+Build the changed VMM and guest kernel and use `--allow-dev-engine`; release and
+kernel pins are unchanged. A changed-seed branch keys future per-link jitter,
+timer jitter and guest entropy on the full branch identity, including T. Each
+up machine (including paused guests and controllers) receives 32 bytes through
+the time page. The kernel mixes them into its CRNG before the next kernel random
+output; the timer hook also refreshes the vDSO generation at its next tick.
+Pre-boot machines retain the published entropy until the kernel initializes.
+An announced ABI older than 3 is rejected instead of silently keeping the old
+CRNG. `checkpoint_reseed` reports `time_page`, `not_up` or `continuation` per
+machine; `time_page` means published, not a guest consumption acknowledgement.
+
+Already sampled deadlines, packet arrivals, fault plans and control requests
+remain captured. `arm_seed` must not run again at a runtime fork. Application
+PRNGs seeded before T retain their state; the kernel hook does not reset them or
+replace randomness already consumed. New incarnations created after the branch
+also derive entropy and timer streams from its full identity. Down incarnations
+already created before T retain their sampled boot entropy.
 
 The engine also accepts `--checkpoint-at-ns T1,T2 --fork-seeds B1,B2` alongside
 `--seed P`: it holds the parent checkpoints in memory and runs branches P, B1,
@@ -67,12 +84,19 @@ on exit; these output directories contain reports/logs, not resumable snapshots.
 
 Not yet implemented: event-triggered capture, serialized checkpoint artifacts,
 resume across processes/hosts, branch manifests for a public multi-branch batch,
-and a guest/application reseeding protocol. The public CLI exposes one time and
-one branch; multiple held checkpoints and N forks are engine-only. Host file
+and an application-owned PRNG reseeding protocol. The public CLI exposes one time
+and one branch; multiple held checkpoints and N forks are engine-only. Host file
 descriptors and perf observations are not captured semantic state; VM descriptors
 and undo caches are recreated and the host counter is reused by the slice runner.
-These changes require Linux KVM qualification; portable tests cannot
-establish restored execution or no-option witness equivalence.
+The ignored engine tests cover parent continuation, the all-parked boot snapshot
+guard, queued messages at capture, identity-derived streams across reboots,
+time-page publication, paused/down guests and repeated/divergent guest
+`getrandom` and `/dev/urandom` output. The last test needs
+`artifacts/bzImage` built with ABI 3 and `artifacts/entropy-fork.cpio` from the
+[entropy fixture](../harness/worlds/README.md#boot-once-fork-per-seed), plus the
+usual exclusive CPU/SMT lease and Zen MSR workaround. These tests have not been
+run on KVM for this change. These changes require Linux KVM qualification;
+portable tests cannot establish restored execution or no-option witness equivalence.
 
 ## Build on the qualified Linux host
 

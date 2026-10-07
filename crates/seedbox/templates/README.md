@@ -39,10 +39,12 @@ operations are included in terminal witnesses.
 
 For an experimental runtime fork, `seedbox run --checkpoint-at-ns 1000000000
 --branch-seed 42 --allow-dev-engine` captures the world at one simulated second
-and continues with new simulator randomness. Use the newly built VMM. These are
-semantic options with no environment backing; replay reads them from the retained
-run. Guest PRNG state stays in captured RAM. The public CLI currently supports
-one checkpoint branch, without saved snapshot files or event triggers. See the
+and continues with branch-identity-derived simulator randomness and guest CRNG
+entropy. PR #103 depends on PR #93: use the newly built VMM and ABI 3 guest kernel.
+These are semantic options with no environment backing; replay reads them from
+the retained run. A branch seed equal to the parent seed continues without any
+reseeding. Application-owned PRNG state stays in captured RAM. The public CLI
+currently supports one checkpoint branch, without saved snapshot files or event triggers. See the
 repository's `docs/runtime.md` for coverage and pending KVM qualification.
 
 For optional build timestamp control, `prepare`, `run` and `explore` accept
