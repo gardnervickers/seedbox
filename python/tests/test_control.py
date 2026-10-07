@@ -37,6 +37,45 @@ class Peer:
 
 
 class ControlTests(unittest.TestCase):
+    def test_machine_lifecycle_targets_and_admission_effects(self):
+        for op in ("pause", "resume", "crash", "reboot"):
+            for target, wire in (("server", {"service": "server"}),
+                                 (Machine("server-vm"), {"machine": "server-vm"})):
+                with self.subTest(op=op, target=target):
+                    peer = Peer(reply(effect_at_ns=20, replied_at_ns=30))
+                    with World(peer) as world:
+                        effect = getattr(world, op)(target)
+                        self.assertEqual(effect.effect_at_ns, effect.admitted_at_ns)
+                        self.assertEqual(effect.replied_at_ns, 30)
+                        self.assertEqual(world.last_effect, effect)
+                    self.assertEqual(peer.requests, [
+                        {"version": 1, "id": 1, "op": op, "target": wire}])
+
+    def test_machine_lifecycle_errors_preserve_timing_and_connection(self):
+        for op in ("pause", "resume", "crash", "reboot"):
+            for code in ("invalid_state", "target_unavailable"):
+                with self.subTest(op=op, code=code):
+                    peer = Peer(reply(ok=False, effect_at_ns=20,
+                                      error={"code": code, "message": "unavailable transition"})
+                                + reply(2, {"now_ns": 30}))
+                    with World(peer) as world:
+                        with self.assertRaises(FaultError) as failure:
+                            getattr(world, op)("server")
+                        self.assertEqual(failure.exception.code, code)
+                        self.assertEqual(failure.exception.response["effect_at_ns"], 20)
+                        self.assertEqual(world.now_ns(), 30)
+                    self.assertEqual(len(peer.requests), 2)
+
+    def test_machine_lifecycle_invalid_targets_do_not_send(self):
+        peer = Peer(b"")
+        with World(peer) as world:
+            for op in ("pause", "resume", "crash", "reboot"):
+                for target in ("", Machine(""), None, "x" * 16384):
+                    with self.subTest(op=op, target=target):
+                        with self.assertRaises(ValueError):
+                            getattr(world, op)(target)
+        self.assertEqual(peer.requests, [])
+
     def test_optional_response_details_do_not_relax_required_version(self):
         peer = Peer(reply(result={"now_ns": 30, "extra_result_detail": "opaque"},
                           extra_response_detail={"arbitrary": [1, None]}))

@@ -19,6 +19,9 @@ mod devices;
 #[path = "../../seedbox-vmm/src/faults.rs"]
 mod faults;
 use serde_json::json;
+fn names() -> Vec<String> {
+    vec!["scenario".into(), "client".into(), "server".into()]
+}
 fn complete(c: &control::Control) -> bool {
     c.pending.is_none()
         && c.error.is_none()
@@ -673,5 +676,233 @@ fn invalid_shape_values_and_sides_receive_correlated_invalid_request_without_eff
         assert!(reply.contains("invalid_request"), "{reply}");
         assert!(f.active_handles().is_empty());
         assert!(f.log.is_empty());
+    }
+}
+
+// Exercise the same admission -> fault -> observation -> reply sequence as the scheduler.
+fn lifecycle_call(c: &mut control::Control, f: &mut faults::Faults, id: u32, op: &str) {
+    let t = u64::from(id) * 100;
+    request(
+        c,
+        id,
+        t,
+        json!({"version":1,"id":id,"op":op,"target":{"service":"server"}}),
+    )
+    .unwrap();
+    c.apply_boundary(f, t + 20).unwrap();
+    assert!(f.apply_due(t + 20).is_empty());
+    c.observe_faults(f, t + 20).unwrap();
+    c.apply_boundary(f, t + 40).unwrap();
+    c.mark_delivered(t + 40).unwrap();
+    assert!(complete(c) && f.error.is_none());
+}
+
+#[test]
+fn machine_lifecycle_plans_and_effects_use_admission_and_expose_states() {
+    let mut c = control();
+    let mut f = faults::Faults::new(vec![], names()).unwrap();
+    for (i, (op, state)) in [
+        ("pause", "Paused"),
+        ("resume", "Running"),
+        ("crash", "Down"),
+        ("reboot", "Running"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let id = i as u32 + 1;
+        lifecycle_call(&mut c, &mut f, id, op);
+        let plan = f.plan(id).unwrap();
+        let expected = match *op {
+            "pause" => seedbox_control::Action::Pause {
+                machine: "server".into(),
+            },
+            "resume" => seedbox_control::Action::Resume {
+                machine: "server".into(),
+            },
+            "crash" => seedbox_control::Action::Crash {
+                machine: "server".into(),
+            },
+            "reboot" => seedbox_control::Action::Reboot {
+                machine: "server".into(),
+            },
+            _ => unreachable!(),
+        };
+        assert_eq!(plan.action, expected);
+        assert_eq!(f.process_state(2), *state);
+        assert_eq!(
+            f.outcome(id).unwrap().0,
+            faults::Status::Applied(plan.at_ns)
+        );
+        let response = &c.log[i]["response"];
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["effect_at_ns"], response["admitted_at_ns"]);
+        assert_eq!(response["effect_at_ns"], plan.at_ns);
+    }
+}
+
+#[test]
+fn machine_lifecycle_controller_targets_are_rejected_for_services_and_machines() {
+    for op in ["pause", "resume", "crash", "reboot"] {
+        for target in [json!({"service":"scenario"}), json!({"machine":"scenario"})] {
+            let mut c = control();
+            let mut f = faults::Faults::new(vec![], names()).unwrap();
+            request(
+                &mut c,
+                1,
+                100,
+                json!({"version":1,"id":1,"op":op,"target":target}),
+            )
+            .unwrap();
+            c.apply_boundary(&mut f, 120).unwrap();
+            c.apply_boundary(&mut f, 140).unwrap();
+            c.mark_delivered(140).unwrap();
+            assert_eq!(c.log[0]["response"]["error"]["code"], "invalid_request");
+            assert!(c.log[0]["response"]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("controller"));
+            assert!(f.log.is_empty() && complete(&c));
+        }
+    }
+}
+
+#[test]
+fn machine_lifecycle_checks_current_life_at_admission_and_errors_are_recoverable() {
+    for (initial, op, message) in [
+        (None, "resume", "target machine is not paused"),
+        (None, "reboot", "target machine is not down"),
+        (Some("pause"), "pause", "target machine is not running"),
+        (Some("pause"), "reboot", "target machine is not down"),
+        (Some("pause"), "stop", "target machine is paused"),
+        (Some("pause"), "restart", "target machine is paused"),
+        (Some("crash"), "pause", "target machine is not running"),
+        (Some("crash"), "resume", "target machine is not paused"),
+        (Some("crash"), "crash", "target machine is already down"),
+    ] {
+        let mut c = control();
+        let mut f = faults::Faults::new(vec![], names()).unwrap();
+        // The request is planned while Up. Change Life before its admission.
+        request(
+            &mut c,
+            1,
+            100,
+            json!({"version":1,"id":1,"op":op,"target":{"machine":"server"}}),
+        )
+        .unwrap();
+        if let Some(initial) = initial {
+            let action = if initial == "pause" {
+                seedbox_control::Action::Pause {
+                    machine: "server".into(),
+                }
+            } else {
+                seedbox_control::Action::Crash {
+                    machine: "server".into(),
+                }
+            };
+            f.append(seedbox_control::Plan {
+                id: 0,
+                at_ns: 110,
+                deadline_ns: 110,
+                action,
+            })
+            .unwrap();
+            f.apply_due(110);
+        }
+        let count = f.log.len();
+        c.apply_boundary(&mut f, 120).unwrap();
+        c.apply_boundary(&mut f, 140).unwrap();
+        c.mark_delivered(140).unwrap();
+        assert_eq!(c.log[0]["response"]["error"]["code"], "invalid_state");
+        assert_eq!(c.log[0]["response"]["error"]["message"], message);
+        assert!(c.log[0]["fault_id"].is_null());
+        assert_eq!(f.log.len(), count);
+        request(&mut c, 2, 200, json!({"version":1,"id":2,"op":"now"})).unwrap();
+        c.apply_boundary(&mut f, 220).unwrap();
+        c.apply_boundary(&mut f, 240).unwrap();
+        c.mark_delivered(240).unwrap();
+        assert!(complete(&c) && f.error.is_none());
+    }
+}
+
+#[test]
+fn exited_machines_reject_pause_resume_but_allow_crash_and_reboot() {
+    let mut c = control();
+    let mut f = faults::Faults::new(vec![], names()).unwrap();
+    for (i, op) in ["pause", "resume", "crash", "reboot"].iter().enumerate() {
+        let id = i as u32 + 1;
+        let t = u64::from(id) * 100;
+        request(
+            &mut c,
+            id,
+            t,
+            json!({"version":1,"id":id,"op":op,"target":{"machine":"server"}}),
+        )
+        .unwrap();
+        c.reject_unavailable(&["server".into()]);
+        c.apply_boundary(&mut f, t + 20).unwrap();
+        f.apply_due(t + 20);
+        c.observe_faults(&f, t + 20).unwrap();
+        c.apply_boundary(&mut f, t + 40).unwrap();
+        c.mark_delivered(t + 40).unwrap();
+        if matches!(*op, "pause" | "resume") {
+            assert_eq!(c.log[i]["response"]["error"]["code"], "target_unavailable");
+            assert_eq!(
+                c.log[i]["response"]["error"]["message"],
+                "target VM has exited; crash and reboot it instead"
+            );
+            assert!(c.log[i]["fault_id"].is_null());
+        } else {
+            assert_eq!(c.log[i]["response"]["ok"], true);
+        }
+    }
+    assert_eq!(f.log.len(), 2);
+    assert!(complete(&c) && f.error.is_none());
+}
+
+#[test]
+fn pending_process_fault_resolves_at_crash_and_down_process_faults_are_unavailable() {
+    for ready in [true, false] {
+        let mut c = control();
+        let mut f = faults::Faults::new(vec![], names()).unwrap();
+        if !ready {
+            f.require_readiness();
+        }
+        request(
+            &mut c,
+            1,
+            100,
+            json!({"version":1,"id":1,"op":"stop","target":{"service":"server"}}),
+        )
+        .unwrap();
+        c.apply_boundary(&mut f, 120).unwrap();
+        f.apply_due(120);
+        f.append(seedbox_control::Plan {
+            id: 0,
+            at_ns: 130,
+            deadline_ns: 130,
+            action: seedbox_control::Action::Crash {
+                machine: "server".into(),
+            },
+        })
+        .unwrap();
+        f.apply_due(130);
+        c.observe_faults(&f, 999).unwrap(); // Resolution uses the crash, not observation time.
+        c.apply_boundary(&mut f, 150).unwrap();
+        c.mark_delivered(150).unwrap();
+        assert_eq!(c.log[0]["response"]["error"]["code"], "target_unavailable");
+        assert_eq!(c.log[0]["response"]["effect_at_ns"], 130);
+        assert_eq!(f.outcome(1).unwrap().0, faults::Status::Unavailable(130));
+        for (id, op) in [(2, "stop"), (3, "restart")] {
+            lifecycle_call(&mut c, &mut f, id, op);
+            assert_eq!(
+                c.log[id as usize - 1]["response"]["error"]["code"],
+                "target_unavailable"
+            );
+            assert_eq!(
+                c.log[id as usize - 1]["response"]["effect_at_ns"],
+                u64::from(id) * 100 + 20
+            );
+        }
     }
 }

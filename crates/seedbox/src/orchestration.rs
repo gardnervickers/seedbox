@@ -120,9 +120,9 @@ pub struct Run {
 
 #[derive(Clone, Debug)]
 pub struct Orchestrator {
-    store: ContentStore,
-    runs: PathBuf,
-    log_policy: LogPolicy,
+    pub(crate) store: ContentStore,
+    pub(crate) runs: PathBuf,
+    pub(crate) log_policy: LogPolicy,
 }
 
 impl Orchestrator {
@@ -155,8 +155,37 @@ impl Orchestrator {
                 path: "seed".into(),
                 message: "provide a seed in RunOptions or x-seedbox.seed".into(),
             })?;
-        // Preparation always happens before any execution or host reservation.
+        preparer.validate_runtime_inputs()?;
+        executor.preflight(None)?;
+        // No preflight resource survives preparation.
         let inputs = preparer.prepare(simulation, &self.store)?;
+        self.run_prepared(
+            simulation,
+            RunOptions {
+                seed: Some(seed),
+                ..options
+            },
+            inputs,
+            executor,
+        )
+    }
+
+    /// Execute a complete retained closure without consulting preparation sources.
+    /// The ordinary execution path still verifies profile, placement and bytes.
+    pub fn run_prepared(
+        &self,
+        simulation: &Simulation,
+        options: RunOptions,
+        inputs: PreparedInputs,
+        executor: &dyn ExecutionBackend,
+    ) -> Result<Run> {
+        let seed = options
+            .seed
+            .or(simulation.seed)
+            .ok_or_else(|| Error::Validation {
+                path: "seed".into(),
+                message: "provide a seed in RunOptions or x-seedbox.seed".into(),
+            })?;
         let identity = RunIdentity {
             version: FORMAT_VERSION,
             seed,
@@ -192,7 +221,9 @@ impl Orchestrator {
     ) -> Result<Run> {
         let baseline = inspect(directory)?;
         let mut identity = baseline.identity.clone();
-        if options.allow_engine_change {
+        // Development replay always compares the exact retained artifact pair.
+        if options.allow_engine_change && !crate::admission::is_dev_engine(&identity.inputs.profile)
+        {
             identity.inputs.profile.engine = executor.profile().engine;
         }
         self.execute(
@@ -241,7 +272,10 @@ impl Orchestrator {
         write_record(&directory, &record)?;
         let output = directory.join("output");
         let execution = (|| -> Result<ExecutionReport> {
+            executor.validate_retained(&record.identity.inputs)?;
             validate_inputs(&record.identity, executor)?;
+            fs::create_dir(&output)?;
+            executor.preflight(Some(&output))?;
             let mut artifacts = BTreeMap::new();
             for digest in record.identity.inputs.digests() {
                 if !artifacts.contains_key(digest) {
@@ -251,7 +285,6 @@ impl Orchestrator {
                     );
                 }
             }
-            fs::create_dir(&output)?;
             if cancellation.is_cancelled() {
                 return Ok(ExecutionReport {
                     reason: StopReason::Cancelled,
@@ -260,6 +293,7 @@ impl Orchestrator {
                     full_state: None,
                     faults: vec![],
                     detail: Some("cancelled before execution".into()),
+                    engine_qualification: None,
                 });
             }
             let start = Instant::now();
@@ -288,7 +322,14 @@ impl Orchestrator {
             Ok(report)
         })();
         match execution {
-            Ok(report) => {
+            Ok(mut report) => {
+                report.engine_qualification = record
+                    .identity
+                    .inputs
+                    .profile
+                    .semantic_parameters
+                    .get(crate::admission::ENGINE_QUALIFICATION)
+                    .cloned();
                 match classify(&record.identity, &report) {
                     Ok(outcome) => record.outcome = outcome,
                     Err(error) => {

@@ -217,12 +217,47 @@ def verify_control_cases(run):
                 witness=report["witness"], run=str(run))
 
 
+LIFECYCLE_ERRORS = ["invalid_state"] * 6 + ["target_unavailable"]
+
+
+def verify_lifecycle_cases(run):
+    run, record, report, world = focused_evidence(run, "PASS", "COMPLETED")
+    assert report["workload_exit"] == {"service":"scenario", "code":0}
+    faults = world["faults"]
+    assert [(f["action"], f["status"]) for f in faults] == [
+        ("pause", "applied"), ("resume", "applied"), ("crash", "applied"),
+        ("stop", "unavailable"), ("reboot", "applied")], faults
+    assert all(f["machine"] == "server" for f in faults), faults
+    pause, resume, crash, _, reboot = (f["applied_at_ns"] for f in faults)
+    assert pause < resume < crash < reboot
+    transcript = world["control_history"]
+    errors = [entry["response"]["error"]["code"] for entry in transcript if not entry["response"]["ok"]]
+    assert errors == LIFECYCLE_ERRORS, errors
+    states = [machine["state"] for entry in transcript if entry["request"]["op"] == "inspect"
+              for machine in entry["response"]["result"]["machines"] if machine["name"] == "server"]
+    assert states == ["Paused", "Running", "Down", "Running"], states
+    server = next(machine for machine in world["machines"] if machine["name"] == "server")
+    assert server["incarnation"] == 1 and server["booted_at_ns"] == reboot, server
+    crashed = server["crashed_incarnations"]
+    assert len(crashed) == 1 and crashed[0]["incarnation"] == 0 and crashed[0]["crashed_at_ns"] == crash, crashed
+    console = (run / "output/machines/server.console").read_text()
+    assert console.count("TARGET_SOCKET absent") == 2, console
+    scenario = (run / "output/machines/scenario.console").read_text()
+    results = re.findall(r"^LIFECYCLE_CASES_RESULT (.+)$", scenario, re.M)
+    expected = {"errors":errors, "held_until_resume":True, "silent_while_down":True, "fresh_boot":True}
+    assert len(results) == 1 and json.loads(results[0]) == expected, scenario
+    return dict(case="lifecycle_cases", outcome="PASS", errors=errors,
+                applied_at_ns=dict(pause=pause, resume=resume, crash=crash, reboot=reboot),
+                witness=report["witness"], run=str(run))
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("run")
     p.add_argument("--expected", choices=["PASS", "FAIL"], default="PASS")
     p.add_argument("--no-faults", action="store_true")
-    p.add_argument("--focused", choices=["early-request", "readiness-cutoff", "control-cases"])
+    p.add_argument("--focused", choices=["early-request", "readiness-cutoff", "control-cases", "lifecycle-cases"])
     a = p.parse_args()
-    verifier = {"early-request": verify_early_request, "readiness-cutoff": verify_cutoff, "control-cases": verify_control_cases}.get(a.focused)
+    verifier = {"early-request": verify_early_request, "readiness-cutoff": verify_cutoff, "control-cases": verify_control_cases,
+                "lifecycle-cases": verify_lifecycle_cases}.get(a.focused)
     print(json.dumps(verifier(a.run) if verifier else verify(a.run, a.expected, not a.no_faults), indent=2))

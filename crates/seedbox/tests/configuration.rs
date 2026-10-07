@@ -423,3 +423,111 @@ fn directed_baselines_validate_services_pairs_floor_jitter_and_loss_at_json_path
         );
     }
 }
+
+#[test]
+fn named_volumes_mount_on_one_service_and_reject_binds_and_options() {
+    let with = |service: &str, top: &str| {
+        BASE.replace("    image:", &format!("{service}\n    image:")) + top
+    };
+    let sim = parse(&with(
+        "    volumes: ['data:/var/lib/data', {type: volume, source: logs, target: /logs}]",
+        "volumes:\n  data: {}\n  logs:\n  spare: {}\n",
+    ))
+    .unwrap();
+    let mounts = &sim.services["workload"].volumes;
+    assert_eq!(
+        mounts
+            .iter()
+            .map(|m| (m.source.as_str(), m.target.as_str()))
+            .collect::<Vec<_>>(),
+        [("data", "/var/lib/data"), ("logs", "/logs")]
+    );
+    let image = ImageDefaults {
+        cmd: Some(vec!["app".into()]),
+        ..Default::default()
+    };
+    let launch = resolve_launch(&sim.services["workload"], &image).unwrap();
+    assert_eq!(launch.disk_volumes, *mounts);
+    // Without volumes the serialized simulation is unchanged.
+    assert!(!serde_json::to_string(&parse(BASE).unwrap())
+        .unwrap()
+        .contains("volumes"));
+
+    let declared = "volumes:\n  data: {}\n";
+    for (service, top, path, message) in [
+        (
+            "    volumes: ['./data:/data']",
+            declared,
+            "$.services.workload.volumes[0]",
+            "unknown volume \"./data\"",
+        ),
+        (
+            "    volumes: ['data:/data:ro']",
+            declared,
+            "$.services.workload.volumes[0]",
+            "access modes",
+        ),
+        (
+            "    volumes: ['other:/data']",
+            declared,
+            "$.services.workload.volumes[0]",
+            "unknown volume",
+        ),
+        (
+            "    volumes: ['data:data']",
+            declared,
+            "$.services.workload.volumes[0].target",
+            "absolute",
+        ),
+        (
+            "    volumes: ['data:/']",
+            declared,
+            "$.services.workload.volumes[0]",
+            "other than /",
+        ),
+        (
+            "    volumes: ['data:/a', 'data:/b']",
+            declared,
+            "$.services.workload.volumes[1]",
+            "already mounted",
+        ),
+        (
+            "    volumes: [{type: bind, source: data, target: /d}]",
+            declared,
+            "$.services.workload.volumes[0].type",
+            "named volumes",
+        ),
+        (
+            "    volumes: [{type: volume, source: data, target: /d, read_only: true}]",
+            declared,
+            "$.services.workload.volumes[0].read_only",
+            "",
+        ),
+        (
+            "    volumes: ['data:/d']",
+            "volumes:\n  data: {driver: local}\n",
+            "$.volumes.data.driver",
+            "",
+        ),
+        (
+            "    volumes: ['data:/d']",
+            "volumes:\n  'bad name': {}\n",
+            "$.volumes",
+            "invalid volume name",
+        ),
+    ] {
+        let error = parse(&with(service, top)).unwrap_err().to_string();
+        assert!(
+            error.contains(path) && error.contains(message),
+            "{service}: {error}"
+        );
+    }
+    let two = BASE.replace(
+        "services:\n  workload:\n    image: example/workload:v1\n",
+        "services:\n  workload:\n    image: example/workload:v1\n    volumes: ['data:/d']\n  other:\n    image: example/workload:v1\n    volumes: ['data:/d']\n",
+    ) + declared;
+    assert!(parse(&two)
+        .unwrap_err()
+        .to_string()
+        .contains("each volume lives on one machine's disk"));
+}
