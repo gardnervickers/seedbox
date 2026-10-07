@@ -91,6 +91,9 @@ the retained engine, without inheriting VMM environment variables. `--margin`
 controls PMU approach and stepping distance; syscall exits remain available
 throughout a soft stop interval independently of that setting. Earlier yields
 do not publish a stop, inject an interrupt, or invalidate a checkpoint.
+`--yield-filter` (off by default) has a patched host KVM consume those earlier
+yields in the kernel; it needs [`host/kvm-yield-filter.patch`](../host/README.md)
+and fails at start without it. It is recorded per attempt like `--undo`.
 
 Charged timer-port accesses conserve their full 1000 ns cost across world and
 timer boundaries. Their device effect and read response occur once; the guest

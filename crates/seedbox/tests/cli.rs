@@ -153,6 +153,21 @@ fn bad_values_are_usage_errors() {
     }
 }
 
+#[test]
+fn performance_flags_are_listed_in_help() {
+    let directory = tempfile::tempdir().unwrap();
+    for command in ["run", "replay"] {
+        let output = seedbox(&["help", command], directory.path());
+        assert!(output.status.success(), "{command}");
+        let help = String::from_utf8_lossy(&output.stdout);
+        let section = help
+            .split("Performance (never changes results):")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{command}: no performance section"));
+        assert!(section.contains("--yield-filter"), "{command}: {help}");
+    }
+}
+
 /// A project plus empty stand-ins for every runtime input but BusyBox.
 #[cfg(target_os = "linux")]
 fn runtime_project() -> (tempfile::TempDir, Vec<String>) {

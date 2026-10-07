@@ -56,6 +56,7 @@ may change execution. Release compatibility remains a V0 qualification gate.
 | `examples/` | Runnable Compose applications: etcd cluster and Redis, each with a workload image |
 | `kernel/` | Guest kernel patch, config and build script (Linux 6.12.112) |
 | `guest/` | Generic OCI guest supervisor plus low-level guest fixtures and builders |
+| [`host/`](host/README.md) | Optional simulation-host kernel patches (performance only) |
 | `docs/` | [Vision](docs/vision.md), [runtime instructions](docs/runtime.md), [backends](docs/backends.md), [acceptance record](docs/acceptance.md) |
 | `harness/` | YAML acceptance scenarios, portable checks, low-level world fixtures and their batch runner ([migration map](harness/worlds/README.md)), `msr54.py` |
 | [`tools/mac-tcg/`](tools/mac-tcg/README.md) | Experimental local Mac TCG runner and tests; separate from the production KVM backend |
@@ -160,8 +161,12 @@ Stop placement settings affect speed only, never results. `--undo` controls the
 precise-stop rollback window (default 256; 0 disables it). `--margin` selects the
 PMU approach and stepping distance when undo is off (default `adaptive`). Syscall
 exits remain available throughout a soft stop interval independently of that
-setting; earlier yields do not publish a stop or inject an interrupt. The
-low-level batch runner uses `SEEDBOX_UNDO` and `SEEDBOX_MARGIN` for the same settings.
+setting; earlier yields do not publish a stop or inject an interrupt.
+`--yield-filter` lets a host KVM built with
+[`host/kvm-yield-filter.patch`](host/README.md) skip those earlier yields in the
+kernel instead of exiting to the VMM; without the patch the run fails at start. The
+low-level batch runner uses `SEEDBOX_UNDO`, `SEEDBOX_MARGIN` and
+`SEEDBOX_YIELD_FILTER` for the same settings.
 
 A PMU overshoot aborts an execution. A separate invocation can use a larger
 margin; the failed evidence remains. Charged timer-port accesses apply their

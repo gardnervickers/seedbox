@@ -356,6 +356,17 @@ fn run() -> Result<Value, String> {
         machines,
     };
     world.faults.require_readiness();
+    // In-kernel yield filter (performance only, needs the patched host KVM).
+    match std::env::var("SEEDBOX_YIELD_FILTER").as_deref() {
+        Ok("off") | Err(_) => {}
+        Ok("on") => {
+            let fd = world.counter.fd();
+            for m in world.machines.iter_mut() {
+                m.enable_yield_filter(fd)?;
+            }
+        }
+        Ok(v) => return Err(format!("SEEDBOX_YIELD_FILTER: expected on or off, got {v}")),
+    }
     for a in 0..n {
         for b in 0..n {
             if a != b {
@@ -633,6 +644,9 @@ fn run() -> Result<Value, String> {
             "control_channel":mach.channel.as_ref().map(|_|json!({"transport":"virtio-console-v1","tx_bytes":mach.control_tx_bytes,"rx_dma_bytes":mach.control_dma_bytes})),
             "net": mach.net.as_ref().map(|n| json!({"tx": n.tx_frames, "rx": n.rx_frames, "rx_dropped": n.rx_dropped})),
         }));
+        if let Some(Value::Object(entry)) = report.last_mut() {
+            entry.insert("yields_filtered".into(), json!(mach.yields_filtered()));
+        }
     }
     let sim_ns = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
     Ok(json!({

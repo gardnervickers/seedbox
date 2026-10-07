@@ -30,7 +30,8 @@ Preparation unpacks images with root ownership and runs before the CPU lease.
 `run` picks a free CPU and finds the guest kernel and VMM by default; see
 `seedbox help run`. Run/replay must be invoked with the required KVM/MSR access;
 see the repository's `docs/runtime.md` for setup and limits. `--margin` and
-`--undo` control PMU approach and stepping performance without changing results.
+`--undo` control PMU approach and stepping performance without changing results;
+`--yield-filter` does the same on a host with Seedbox's patched KVM.
 Charged timer I/O retains its full cost across scheduler boundaries; pending
 operations are included in terminal witnesses.
 

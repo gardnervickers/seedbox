@@ -1,0 +1,195 @@
+diff --git a/arch/x86/include/asm/kvm_host.h b/arch/x86/include/asm/kvm_host.h
+index 03866683a..8a9c12295 100644
+--- a/arch/x86/include/asm/kvm_host.h
++++ b/arch/x86/include/asm/kvm_host.h
+@@ -934,6 +934,13 @@ struct kvm_vcpu_arch {
+ 	unsigned long cui_linear_rip;
+ 	int cui_rdmsr_imm_reg;
+ 
++	/* Seedbox yield filter, see KVM_SEEDBOX_YIELD_FILTER. */
++	struct {
++		struct file *perf_file;
++		struct kvm_seedbox_yield_shared __user *shared;
++		u16 port;
++	} seedbox_yield;
++
+ 	gpa_t time;
+ 	s8  pvclock_tsc_shift;
+ 	u32 pvclock_tsc_mul;
+diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
+index f08a34d3f..82a814376 100644
+--- a/arch/x86/kvm/x86.c
++++ b/arch/x86/kvm/x86.c
+@@ -49,6 +49,7 @@
+ #include <linux/srcu.h>
+ #include <linux/slab.h>
+ #include <linux/perf_event.h>
++#include <linux/file.h>
+ #include <linux/uaccess.h>
+ #include <linux/hash.h>
+ #include <linux/pci.h>
+@@ -5807,6 +5808,91 @@ static int kvm_get_reg_list(struct kvm_vcpu *vcpu,
+ 	return 0;
+ }
+ 
++/*
++ * Current count of a perf event that is active on this CPU, as
++ * perf_event_read_local() reads it. That function is not exported to
++ * modules; an event that is not active here is simply not filtered.
++ */
++static bool seedbox_yield_count(struct perf_event *event, u64 *count)
++{
++	unsigned long flags;
++	bool active;
++
++	local_irq_save(flags);
++	active = event->state == PERF_EVENT_STATE_ACTIVE &&
++		 event->oncpu == smp_processor_id();
++	if (active) {
++		event->pmu->read(event);
++		*count = local64_read(&event->count);
++	}
++	local_irq_restore(flags);
++	return active;
++}
++
++/*
++ * Seedbox yield filter: consume the guest's yield write when the count has
++ * not reached userspace's target. Userspace would only resume the guest, so
++ * the guest-visible effect is identical. Any failure exits to userspace.
++ */
++static bool seedbox_yield_consume(struct kvm_vcpu *vcpu, int size,
++				  unsigned short port)
++{
++	struct kvm_seedbox_yield_shared __user *shared = vcpu->arch.seedbox_yield.shared;
++	u64 target, count, consumed;
++
++	if (!shared || port != vcpu->arch.seedbox_yield.port || size != 4)
++		return false;
++	if (get_user(target, &shared->target) || !target)
++		return false;
++	if (!seedbox_yield_count(vcpu->arch.seedbox_yield.perf_file->private_data, &count) ||
++	    count >= target)
++		return false;
++	if (get_user(consumed, &shared->consumed) ||
++	    put_user(consumed + 1, &shared->consumed))
++		return false;
++	return true;
++}
++
++static void seedbox_yield_release(struct kvm_vcpu *vcpu)
++{
++	if (vcpu->arch.seedbox_yield.perf_file)
++		fput(vcpu->arch.seedbox_yield.perf_file);
++	vcpu->arch.seedbox_yield.perf_file = NULL;
++	vcpu->arch.seedbox_yield.shared = NULL;
++}
++
++static int seedbox_yield_set(struct kvm_vcpu *vcpu,
++			     struct kvm_seedbox_yield_filter *f)
++{
++	struct perf_event *event;
++	struct file *file;
++
++	if (f->pad)
++		return -EINVAL;
++	if (f->perf_fd < 0) {
++		seedbox_yield_release(vcpu);
++		return 0;
++	}
++	file = fget(f->perf_fd);
++	if (!file)
++		return -EBADF;
++	/* perf event files are anonymous inodes named "[perf_event]". */
++	if (strcmp(file->f_path.dentry->d_name.name, "[perf_event]")) {
++		fput(file);
++		return -EINVAL;
++	}
++	event = file->private_data;
++	if (!event->attr.exclude_host || event->attr.inherit) {
++		fput(file);
++		return -EINVAL;
++	}
++	seedbox_yield_release(vcpu);
++	vcpu->arch.seedbox_yield.perf_file = file;
++	vcpu->arch.seedbox_yield.shared = u64_to_user_ptr(f->shared);
++	vcpu->arch.seedbox_yield.port = f->port;
++	return 0;
++}
++
+ long kvm_arch_vcpu_ioctl(struct file *filp,
+ 			 unsigned int ioctl, unsigned long arg)
+ {
+@@ -6251,6 +6337,15 @@ long kvm_arch_vcpu_ioctl(struct file *filp,
+ 		r = 0;
+ 		break;
+ 	}
++	case KVM_SEEDBOX_YIELD_FILTER: {
++		struct kvm_seedbox_yield_filter f;
++
++		r = -EFAULT;
++		if (copy_from_user(&f, argp, sizeof(f)))
++			goto out;
++		r = seedbox_yield_set(vcpu, &f);
++		break;
++	}
+ 	case KVM_SET_SREGS2: {
+ 		r = -EINVAL;
+ 		if (vcpu->kvm->arch.has_protected_state &&
+@@ -9267,8 +9362,15 @@ static int complete_fast_pio_out(struct kvm_vcpu *vcpu)
+ static int kvm_fast_pio_out(struct kvm_vcpu *vcpu, int size,
+ 			    unsigned short port)
+ {
+-	unsigned long val = kvm_rax_read(vcpu);
+-	int ret = emulator_pio_out(vcpu, size, port, &val, 1);
++	unsigned long val;
++	int ret;
++
++	/* Consumed: kvm_fast_pio() skips the instruction and re-enters. */
++	if (seedbox_yield_consume(vcpu, size, port))
++		return 1;
++
++	val = kvm_rax_read(vcpu);
++	ret = emulator_pio_out(vcpu, size, port, &val, 1);
+ 
+ 	if (ret)
+ 		return ret;
+@@ -12044,6 +12146,7 @@ void kvm_arch_vcpu_destroy(struct kvm_vcpu *vcpu)
+ 	kvm_mmu_unload(vcpu);
+ 
+ 	kvmclock_reset(vcpu);
++	seedbox_yield_release(vcpu);
+ 
+ 	for_each_possible_cpu(cpu)
+ 		cmpxchg(per_cpu_ptr(&last_vcpu, cpu), vcpu, NULL);
+diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
+index 954e0511c..1c6d0e18e 100644
+--- a/include/uapi/linux/kvm.h
++++ b/include/uapi/linux/kvm.h
+@@ -1617,6 +1617,26 @@ struct kvm_create_guest_memfd {
+ 	__u64 reserved[6];
+ };
+ 
++/*
++ * Seedbox yield filter (out of tree). A guest write of 4 bytes to `port` is
++ * consumed in the kernel, without an exit to userspace, while the count of
++ * the perf event `perf_fd` (a counter of the calling thread) is below
++ * `shared->target`. A target of 0, or a perf_fd of -1, disables it.
++ */
++struct kvm_seedbox_yield_filter {
++	__s32 perf_fd;
++	__u16 port;
++	__u16 pad;
++	__u64 shared;	/* user address of struct kvm_seedbox_yield_shared */
++};
++
++struct kvm_seedbox_yield_shared {
++	__u64 target;	/* written by userspace before KVM_RUN */
++	__u64 consumed;	/* incremented by KVM for each consumed write */
++};
++
++#define KVM_SEEDBOX_YIELD_FILTER _IOW(KVMIO, 0xf0, struct kvm_seedbox_yield_filter)
++
+ #define KVM_PRE_FAULT_MEMORY	_IOWR(KVMIO, 0xd5, struct kvm_pre_fault_memory)
+ 
+ struct kvm_pre_fault_memory {

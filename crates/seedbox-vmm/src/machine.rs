@@ -2,7 +2,7 @@
 //! thread. Guest progress is measured in retired conditional branches; the
 //! machine can be stopped at an exact branch count (precise preemption).
 
-use crate::boundary::{advance_time, hard_limit, io_charge, missed_soft_stop, PendingIo};
+use crate::boundary::{advance_time, hard_limit, io_charge, missed_soft_stop, yield_target, PendingIo};
 use crate::counter::Counter;
 use crate::virtio_console::VirtioConsole;
 use crate::devices::{rtc_read, Pic, Pit, Uart};
@@ -44,6 +44,28 @@ const PAGE_SYSCALLS: usize = 3;
 const PAGE_PIC_IMR: usize = 4;
 const PAGE_NET_ISR: usize = 5;
 pub const PAGE_FIELDS: usize = 6;
+
+/// Shared with the host KVM's yield filter (`host/kvm-yield-filter.patch`):
+/// a guest write to the yield port is consumed in the kernel, without an exit
+/// to userspace, while the branch count is below `target`.
+#[repr(C)]
+#[derive(Default)]
+struct YieldShared {
+    target: u64,
+    consumed: u64,
+}
+
+#[repr(C)]
+struct YieldFilterArgs {
+    perf_fd: i32,
+    port: u16,
+    pad: u16,
+    shared: u64,
+}
+
+/// _IOW(KVMIO, 0xf0, struct kvm_seedbox_yield_filter); not in mainline KVM.
+const KVM_SEEDBOX_YIELD_FILTER: libc::c_ulong = 0x4010_aef0;
+const YIELD_PORT: u16 = 0x52c;
 
 pub struct BootSpec<'a> {
     pub kernel: &'a [u8],
@@ -137,6 +159,8 @@ pub struct Machine {
     require_io_checkpoint: bool,
     planner: Option<Planner>,
     exit_req: bool,
+    /// Set when the host consumes transparent yields in the kernel.
+    yield_filter: Option<Box<YieldShared>>,
     /// The guest uses the shared page for interrupt masks and status (ABI 2).
     pv: bool,
     armed_wake: u64,
@@ -373,6 +397,7 @@ impl Machine {
             require_io_checkpoint: false,
             planner: None,
             exit_req: false,
+            yield_filter: None,
             pv: false,
             armed_wake: 0,
             pit_exact: false,
@@ -391,6 +416,35 @@ impl Machine {
             witness: Sha256::new(),
             trace: None,
         })
+    }
+
+    /// Let the host consume transparent yields in the kernel. Performance only:
+    /// a consumed yield is one this loop would have resumed with no effect.
+    pub fn enable_yield_filter(&mut self, perf_fd: i32) -> Result<(), String> {
+        let shared = Box::new(YieldShared::default());
+        let args = YieldFilterArgs {
+            perf_fd,
+            port: YIELD_PORT,
+            pad: 0,
+            shared: &*shared as *const YieldShared as u64,
+        };
+        let rc = unsafe { libc::ioctl(self.vcpu.as_raw_fd(), KVM_SEEDBOX_YIELD_FILTER, &args) };
+        if rc != 0 {
+            return Err(format!(
+                "{}: host KVM has no yield filter ({}); load the patched kvm module or turn the filter off",
+                self.name,
+                std::io::Error::last_os_error()
+            ));
+        }
+        self.yield_filter = Some(shared);
+        Ok(())
+    }
+
+    /// Yields the host consumed in the kernel, if the filter is on.
+    pub fn yields_filtered(&self) -> Option<u64> {
+        self.yield_filter
+            .as_ref()
+            .map(|s| unsafe { std::ptr::read_volatile(&s.consumed) })
     }
 
     pub fn memory(&mut self) -> &mut [u8] {
@@ -822,6 +876,13 @@ impl Machine {
                 (KVM_SYNC_X86_REGS | KVM_SYNC_X86_SREGS) as u64;
             let syscalls0 = self.page_get(PAGE_SYSCALLS);
             let c0 = counter.last();
+            // Yields before `soft` are transparent (see IoOut(0x52c) below), so
+            // the host may consume them. Never while stepping: the breakpoint
+            // plan is rebuilt after every exit.
+            if let Some(shared) = self.yield_filter.as_mut() {
+                let target = yield_target(c0, self.time, soft, window && !self.stepping);
+                unsafe { std::ptr::write_volatile(&mut shared.target, target) };
+            }
             let t_run = Instant::now();
             let run_ptr = self.vcpu.get_kvm_run() as *mut kvm_run;
             let exit = self.vcpu.run();

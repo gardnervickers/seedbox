@@ -73,6 +73,16 @@ impl VmmExecutor {
             .insert("SEEDBOX_UNDO".into(), branches.to_string());
         Ok(self)
     }
+
+    /// Let the host kernel consume transparent yields without an exit to
+    /// the VMM. It needs a host KVM built with `host/kvm-yield-filter.patch`.
+    pub fn with_yield_filter(mut self, on: bool) -> Self {
+        if on {
+            self.performance
+                .insert("SEEDBOX_YIELD_FILTER".into(), "on".into());
+        }
+        self
+    }
 }
 
 impl ExecutionBackend for VmmExecutor {

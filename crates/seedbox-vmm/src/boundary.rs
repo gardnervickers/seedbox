@@ -75,6 +75,17 @@ impl PendingIo {
     }
 }
 
+/// Branch count below which the host may consume a yield write in the kernel
+/// (`host/kvm-yield-filter.patch`). A yield at count `c` reaches `time + (c -
+/// count)`, so it is transparent exactly when `c < count + (soft - time)`.
+/// 0 disables the filter.
+pub fn yield_target(count: u64, time: u64, soft: u64, open: bool) -> u64 {
+    if !open || soft <= time {
+        return 0;
+    }
+    count.saturating_add(soft - time)
+}
+
 pub fn missed_soft_stop(
     windowed: bool,
     window: bool,
@@ -93,6 +104,21 @@ pub fn missed_soft_stop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn yield_target_consumes_only_transparent_yields() {
+        // Count 1000 at time 5000, soft target 5300.
+        let target = yield_target(1000, 5000, 5300, true);
+        assert_eq!(target, 1300);
+        for c in 1000..1600 {
+            let transparent = 5000 + (c - 1000) < 5300;
+            assert_eq!(c < target, transparent, "count {c}");
+        }
+        assert_eq!(yield_target(1000, 5000, 5300, false), 0);
+        assert_eq!(yield_target(1000, 5300, 5300, true), 0);
+        assert_eq!(yield_target(1000, 5400, 5300, true), 0);
+        assert_eq!(yield_target(u64::MAX - 1, 0, 10, true), u64::MAX);
+    }
 
     #[test]
     fn deterministic_io_cost_cannot_cross_horizon_or_duration() {

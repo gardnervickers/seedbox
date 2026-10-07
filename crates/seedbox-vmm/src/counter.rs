@@ -160,6 +160,11 @@ impl Counter {
         }
     }
 
+    /// The perf event, for the host's in-kernel yield filter.
+    pub fn fd(&self) -> i32 {
+        self.fd
+    }
+
     /// Last value read. Host execution never advances the counter.
     pub fn last(&self) -> u64 {
         self.last

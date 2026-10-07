@@ -281,6 +281,9 @@ struct Performance {
     /// Initial undo margin in branches; 0 disables undo.
     #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u64).range(0..=1 << 18))]
     undo: u64,
+    /// Consume transparent yields in the host kernel (patched host KVM).
+    #[arg(long)]
+    yield_filter: bool,
 }
 
 fn parse_margin(value: &str) -> std::result::Result<String, String> {
@@ -293,7 +296,10 @@ fn parse_margin(value: &str) -> std::result::Result<String, String> {
 
 impl Performance {
     fn apply(&self, executor: VmmExecutor) -> Result<VmmExecutor> {
-        executor.with_margin(&self.margin)?.with_undo(self.undo)
+        Ok(executor
+            .with_margin(&self.margin)?
+            .with_undo(self.undo)?
+            .with_yield_filter(self.yield_filter))
     }
 }
 
