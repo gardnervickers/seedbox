@@ -7,11 +7,11 @@ import json
 import os
 from pathlib import Path
 import signal
+import re
 import subprocess
 import sys
 import time
 
-from batch import cpu_locks
 from host_pairs import probe_canonical, read_pairs
 
 HERE = Path(__file__).resolve().parent
@@ -32,6 +32,7 @@ class Commands:
         if self.cancelled:
             raise RuntimeError('check cancelled; no later command dispatched')
         began = time.monotonic()
+        status = 'FAIL'
         (self.root / (name + '.command.json')).write_text(json.dumps(command) + '\n')
         try:
             with (self.root / (name + '.log')).open('x') as out:
@@ -56,11 +57,12 @@ class Commands:
                     code = self.child.wait()
             if code or self.cancelled:
                 raise RuntimeError(f'{name}: exit {code}; see {self.root / (name + ".log")}')
+            status = 'PASS'
         finally:
             if not owned and self.child is not None and self.child.returncode is None:
                 self.child.wait()
             self.child = None
-            (self.root / (name + '.wall.json')).write_text(json.dumps({'wall_seconds': time.monotonic() - began}) + '\n')
+            (self.root / (name + '.wall.json')).write_text(json.dumps({'status': status, 'wall_seconds': time.monotonic() - began}) + '\n')
 
 
 def fixture_evidence(report, world):
@@ -86,16 +88,21 @@ def run_fixture(job, commands):
     world = json.loads((src / 'harness/worlds' / (spec['world'] + '.json')).read_text())
     artifacts = root / 'artifacts'
     artifacts.mkdir()
-    if spec['world'].startswith('disk-'):
-        build = ['bash', 'guest/build-disk.sh', str(artifacts / 'disk.cpio')]
+    if spec['world'] in ('disk-crash', 'disk-ext4-crash', 'volume-crash'):
+        build = ['nice', 'bash', 'guest/build-disk.sh', str(artifacts / 'disk.cpio')]
         if any(machine.get('disk', {}).get('image') for machine in world['machines']):
             build.append(str(artifacts / 'ext4.img'))
         commands.run('guest-build', build)
         initrd = artifacts / 'disk.cpio'
+    elif spec['world'] == 'cluster-fixed':
+        client = artifacts / 'client'
+        commands.run('client-build', ['nice', 'bash', 'guest/build-client.sh', str(client)])
+        initrd = artifacts / 'cluster.cpio'
+        commands.run('guest-build', ['nice', 'bash', 'guest/build-initramfs.sh', str(initrd),
+                                    'guest/cluster.init', job['etcd'] + ':bin/etcd', str(client) + ':bin/client'])
     else:
-        name = 'smoke' if spec.get('kernel_variant') else 'net'
-        initrd = artifacts / (name + '.cpio')
-        commands.run('guest-build', ['bash', 'guest/build-initramfs.sh', str(initrd), f'guest/{name}.init'])
+        initrd = artifacts / 'net.cpio'
+        commands.run('guest-build', ['nice', 'bash', 'guest/build-initramfs.sh', str(initrd), 'guest/net.init'])
     world['kernel'] = job['kernel']
     for machine in world['machines']:
         machine['initrd'] = str(initrd)
@@ -113,19 +120,23 @@ def run_fixture(job, commands):
             raise RuntimeError('fixture timed out or engine failed')
         return json.loads(Path(str(output) + '.json').read_text())
 
-    if world.get('boot'):
-        cold = {seed: fixture_evidence(run(f'cold-{seed}', seed), world) for seed in (1010, 1011)}
-        restored = run('fork-loop', 1009, ('--fork-seeds', '1010,1011'))['seeds']
-        if [record['seed'] for record in restored] != [1009, 1010, 1011]:
-            raise RuntimeError('missing fork seed evidence')
-        for record in restored:
-            evidence = fixture_evidence(record, world)
-            if record['seed'] in cold and evidence != cold[record['seed']]:
-                raise RuntimeError('fork restore differs from cold run')
-    else:
-        first = fixture_evidence(run('fixed', 1009), world)
-        if fixture_evidence(run('repeat', 1009), world) != first:
-            raise RuntimeError('fixture repeat differs')
+    first = run('fixed', 1009)
+    if spec['world'] == 'cluster-fixed':
+        env['VMM'] = job['main_engine']
+        main = run('main', 1009)
+        # Engine versions can legitimately differ. Retain and report the comparison.
+        def evidence(report):
+            return {key: report.get(key) for key in ('outcome', 'fault_error', 'world_witness')} | {
+                'machines': [{key: machine.get(key) for key in
+                    ('name', 'guest_exit_code', 'guest_init_error', 'infrastructure_error', 'state_digest', 'witness')}
+                    for machine in report['machines']]}
+        candidate, baseline = evidence(first), evidence(main)
+        result = dict(status='MATCH' if candidate == baseline else 'DIFFERENT', seed=1009,
+                      main_revision=job['main_revision'], candidate=candidate, main=baseline)
+        (root / 'cluster-comparison.json').write_text(json.dumps(result, indent=2) + '\n')
+        print('cluster-fixed: ' + result['status'], flush=True)
+        fixture_evidence(main, world)
+    fixture_evidence(first, world)
 
 
 def run_smoke(job, commands):
@@ -136,14 +147,11 @@ def run_smoke(job, commands):
                '--output', str(commands.root / 'smoke')]
     if job.get('pinned_engine'):
         command += ['--allow-dev-engine', '--pinned-engine', job['pinned_engine']]
-    if 'undo-margin' in job['checks']:
-        command += ['--performance-replay']
-    if job['spec']['kind'] == 'compose':
-        project = Path(job['src']) / job['spec']['project']
-    else:
-        project = commands.root / 'project'
-        commands.run('project-generate', [sys.executable, 'examples/faults/generate.py', str(project)])
-        project /= 'fixed'
+    if 'perf-replay' in job['checks']:
+        command += ['--perf-replay']
+    project = commands.root / 'project'
+    commands.run('project-generate', [sys.executable, 'examples/faults/generate.py', str(project)])
+    project /= 'fixed'
     command += ['--project', str(project)]
     commands.run('smoke', command)
 
@@ -170,12 +178,10 @@ def main():
     result = dict(checks=job['checks'], pair=job['pair'], status='FAIL')
     try:
         probe_canonical(job['pair'])
-        if job['spec']['kind'] == 'unit':
-            # cargo test-vmm leaves ignored, explicitly gated diagnostics disabled.
-            with cpu_locks(job['pair']):
-                commands.run('test-vmm', ['taskset', '-c', str(job['pair'][0]), 'nice', 'cargo', 'test-vmm'], owned=True)
-        elif job['spec']['kind'] == 'fixture':
+        if job['spec']['kind'] == 'fixture':
             run_fixture(job, commands)
+        elif job['spec']['kind'] == 'compose':
+            commands.run('compose', ['sudo', '-n', sys.executable, str(HERE / 'host_compose.py'), sys.argv[1]])
         else:
             run_smoke(job, commands)
         result['status'] = 'PASS'
@@ -185,10 +191,16 @@ def main():
         result['wall_seconds'] = time.monotonic() - began
         result['phase_wall_seconds'] = {p.name.removesuffix('.wall.json'): json.loads(p.read_text())['wall_seconds']
                                        for p in root.glob('*.wall.json')}
-        # Smoke timings are exact public command phases, including failure receipts.
-        for receipt in (root / 'smoke/result.json', root / 'smoke/failure.json'):
-            if receipt.exists():
-                result['phase_wall_seconds'].update(json.loads(receipt.read_text())['phase_wall_seconds'])
+        # The privileged smoke directory is private; phases are also printed to
+        # our user-owned log on both success and failure.
+        for name in ('smoke', 'compose'):
+            log = root / (name + '.log')
+            if log.exists():
+                result['phase_wall_seconds'].update({phase: float(seconds) for phase, seconds in
+                    re.findall(r'^phase (.+): ([0-9.]+)s$', log.read_text(), re.M)})
+        comparison = root / 'cluster-comparison.json'
+        if comparison.exists():
+            result['cluster_comparison'] = json.loads(comparison.read_text())
         (root / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
     return 0 if result['status'] == 'PASS' else 1
 

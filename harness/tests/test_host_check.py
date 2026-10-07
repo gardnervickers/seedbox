@@ -3,6 +3,7 @@ import copy
 import contextlib
 import io
 import json
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -15,15 +16,16 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import host_check
 import host_worker
+import host_compose
 
 
 class DispatchTests(unittest.TestCase):
     def test_dependent_replays_share_one_job_no_unrelated_variations(self):
-        jobs = host_check.jobs_for(['fixed', 'default-replay', 'test-vmm', 'disk-crash'])
-        self.assertEqual([job['name'] for job in jobs], ['core-smoke', 'test-vmm', 'disk-crash'])
-        self.assertEqual(jobs[0]['checks'], ['fixed', 'default-replay'])
+        jobs = host_check.jobs_for(['core', 'cluster-fixed', 'disk-crash'])
+        self.assertEqual([job['name'] for job in jobs], ['core-smoke', 'cluster-fixed', 'disk-crash'])
+        self.assertEqual(jobs[0]['checks'], ['core'])
         with self.assertRaisesRegex(ValueError, 'baseline'):
-            host_check.jobs_for(['undo-margin'])
+            host_check.jobs_for(['perf-replay'])
 
     def test_concurrent_lanes_bounded_and_all_times_retained(self):
         jobs = [dict(name=str(i), checks=[str(i)]) for i in range(5)]
@@ -86,23 +88,16 @@ class DispatchTests(unittest.TestCase):
             def __init__(self): self.calls = []
             def run(self, name, command, env=None): self.calls.append((name, command))
         job = dict(src='/source', cli='cli', engine='engine', kernel='kernel', guest_init='init',
-                   busybox='busybox', pair=[1, 17], checks=['fixed', 'default-replay'], spec=dict(kind='smoke'))
+                   busybox='busybox', pair=[1, 17], checks=['core'], spec=dict(kind='smoke'))
         commands = Recorder()
         host_worker.run_smoke(job, commands)
-        self.assertNotIn('--performance-replay', commands.calls[-1][1])
+        self.assertNotIn('--perf-replay', commands.calls[-1][1])
         self.assertIn('/unused/project/fixed', commands.calls[-1][1])
         self.assertIn('examples/faults/generate.py', commands.calls[0][1])
-        job['checks'].append('undo-margin')
+        job['checks'].append('perf-replay')
         commands = Recorder()
         host_worker.run_smoke(job, commands)
-        self.assertIn('--performance-replay', commands.calls[-1][1])
-        job['spec'] = dict(kind='compose', project='examples/redis')
-        job['checks'] = ['compose-redis']
-        commands = Recorder()
-        host_worker.run_smoke(job, commands)
-        self.assertEqual(len(commands.calls), 1)
-        self.assertIn('/source/examples/redis', commands.calls[0][1])
-        self.assertNotIn('--performance-replay', commands.calls[0][1])
+        self.assertIn('--perf-replay', commands.calls[-1][1])
 
     def test_execution_refuses_mac_before_inputs_or_mutation(self):
         with patch.object(host_check.sys, 'platform', 'darwin'), \
@@ -129,9 +124,9 @@ class DispatchTests(unittest.TestCase):
             def reserved(*args, **kwargs):
                 yield [(1, 17), (2, 18)]
             env = dict(SEEDBOX_KERNEL=str(root / 'kernel'), SEEDBOX_BUSYBOX=str(root / 'busybox'),
-                       PINNED_ENGINE=str(root / 'pinned'), HOST_CHECK_DIR=str(root))
-            plan = dict(target='a' * 40, checks=dict(fixed=[], **{'default-replay': [], 'test-vmm': []}))
-            args = SimpleNamespace(repo=root, pairs=2, pv_kernel=[])
+                       PINNED_ENGINE=str(root / 'pinned'), HOST_CHECK_DIR=str(root), PATH='/explicit')
+            plan = dict(target='a' * 40, checks=dict(core=[]))
+            args = SimpleNamespace(repo=root, lanes=[1,2])
             with patch.object(host_check.sys, 'platform', 'linux'), \
                  patch.dict(host_check.os.environ, env, clear=True), \
                  patch.object(host_check, 'Commands', Source), \
@@ -147,7 +142,7 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(summary['status'], 'FAIL')
             self.assertTrue(all(check['status'] == 'NOT_RUN' for check in summary['checks'].values()))
 
-    def exercise_fixture(self, fork=False, mismatch=False):
+    def test_fixture_runs_only_selected_world_once_on_assigned_pair(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             output = root / 'output'
@@ -155,47 +150,133 @@ class DispatchTests(unittest.TestCase):
             worlds = root / 'harness/worlds'
             worlds.mkdir(parents=True)
             world = dict(end_on_exit='d', machines=[dict(name='d', initrd='unused')])
-            if fork:
-                world['boot'] = dict(seed=1, fork_at_ns=200000000)
             (worlds / 'disk-crash.json').write_text(json.dumps(world))
             calls = []
             class Recorder:
                 env = {'PATH': '/explicit'}
                 def __init__(self): self.root = output
                 def run(self, name, command, env=None):
-                    if name == 'guest-build':
-                        return
                     calls.append((name, command, env))
-                    def report(seed):
-                        witness = 'wrong' if mismatch and name in ('repeat', 'fork-loop') else str(seed)
-                        return dict(seed=seed, outcome='end_machine_exited', fault_error=None, world_witness=witness,
-                                    machines=[dict(name='d', guest_exit_code=0, guest_init_error=None,
-                                                   infrastructure_error=False, state_digest=str(seed))])
+                    if name == 'guest-build': return
                     path = output / 'runs' / f'{name}-s{command[4]}-r0'
                     path.parent.mkdir(exist_ok=True)
                     Path(str(path) + '.status').write_text('0\n')
-                    result = dict(seeds=[report(seed) for seed in (1009, 1010, 1011)]) if name == 'fork-loop' else report(int(command[4]))
-                    Path(str(path) + '.json').write_text(json.dumps(result))
-            job = dict(src=str(root), kernel='frozen-kernel', engine='frozen-engine', pair=[7, 23],
+                    report = dict(outcome='end_machine_exited', fault_error=None, world_witness='w',
+                                  machines=[dict(name='d', guest_exit_code=0, guest_init_error=None,
+                                                 infrastructure_error=False, state_digest='s')])
+                    Path(str(path) + '.json').write_text(json.dumps(report))
+            job = dict(src=str(root), kernel='kernel', engine='engine', pair=[7,23],
                        spec=dict(kind='fixture', world='disk-crash'))
-            if mismatch:
-                with self.assertRaisesRegex(RuntimeError, 'differs'):
-                    host_worker.run_fixture(job, Recorder())
-            else:
+            host_worker.run_fixture(job, Recorder())
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0][1][0], 'nice')
+            self.assertNotIn('taskset', calls[0][1])
+            self.assertEqual(calls[1][1][0:2], ['bash', str(host_worker.HERE / 'batch.sh')])
+            self.assertEqual(calls[1][1][4:], ['1009', '--digest'])
+            self.assertEqual(calls[1][2]['CPU0'], '7')
+            self.assertEqual(calls[1][2]['SEEDBOX_MARGIN'], 'adaptive')
+
+    def test_explicit_lanes_reject_host_pair_and_duplicates(self):
+        self.assertEqual(host_check.parse_lanes('3,1,2'), [3,1,2])
+        import argparse
+        for text in ('0', '16', '0,1', '1,1', '2,18', '', '-1', 'x'):
+            with self.subTest(text=text), self.assertRaises(argparse.ArgumentTypeError):
+                host_check.parse_lanes(text)
+
+    def test_cluster_compares_this_engine_and_main_with_identical_inputs(self):
+        for differs in (False, True):
+            with self.subTest(differs=differs), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                output = root / 'output'
+                output.mkdir()
+                worlds = root / 'harness/worlds'
+                worlds.mkdir(parents=True)
+                (worlds / 'cluster-fixed.json').write_text(json.dumps(
+                    dict(end_on_exit='d', machines=[dict(name='d', initrd='unused')], kernel='unused')))
+                calls = []
+                class Recorder:
+                    env = {'PATH': '/explicit'}
+                    def __init__(self): self.root = output
+                    def run(self, name, command, env=None):
+                        calls.append((name, command, dict(env or {})))
+                        if name.endswith('build'): return
+                        path = output / 'runs' / f'{name}-s1009-r0'
+                        path.parent.mkdir(exist_ok=True)
+                        Path(str(path) + '.status').write_text('0\n')
+                        witness = 'different' if differs and name == 'main' else 'w'
+                        report = dict(outcome='end_machine_exited', fault_error=None, world_witness=witness,
+                                      run_ms=1 if name == 'main' else 2,
+                                      machines=[dict(name='d', guest_exit_code=0, guest_init_error=None,
+                                                     infrastructure_error=False, state_digest='s', witness='m')])
+                        Path(str(path) + '.json').write_text(json.dumps(report))
+                job = dict(src=str(root), kernel='kernel', engine='candidate', main_engine='main',
+                           main_revision='main-sha', etcd='etcd', pair=[3,19],
+                           spec=dict(kind='fixture',world='cluster-fixed'))
                 host_worker.run_fixture(job, Recorder())
-            self.assertEqual(len(calls), 3 if fork else 2)
-            self.assertTrue(all(call[2]['CPU0'] == '7' for call in calls))
-            self.assertTrue(all(' ' not in call[1][4] for call in calls))
-            if fork:
-                self.assertEqual(calls[-1][1][-2:], ['--fork-seeds', '1010,1011'])
+                self.assertEqual([call[0] for call in calls], ['client-build','guest-build','fixed','main'])
+                self.assertTrue(all(call[1][0] == 'nice' and 'taskset' not in call[1] for call in calls[:2]))
+                self.assertEqual(calls[2][1][2], calls[3][1][2])
+                self.assertEqual(calls[2][1][4:], ['1009','--digest'])
+                self.assertEqual([call[2]['VMM'] for call in calls[2:]], ['candidate','main'])
+                result = json.loads((output / 'cluster-comparison.json').read_text())
+                self.assertEqual(result['status'], 'DIFFERENT' if differs else 'MATCH')
+                self.assertEqual(result['main_revision'], 'main-sha')
 
-    def test_fixture_repeats_sequentially_on_one_cpu_and_rejects_mismatch(self):
-        self.exercise_fixture()
-        self.exercise_fixture(mismatch=True)
+    def test_pass_keeps_summaries_and_deletes_state_failure_keeps_state(self):
+        for passed in (False, True):
+            with self.subTest(passed=passed), tempfile.TemporaryDirectory() as tmp:
+                work = Path(tmp) / 'owned work'
+                (work / 'src').mkdir(parents=True)
+                (work / 'main').mkdir()
+                (work / 'state').mkdir()
+                commands = []
+                class Source:
+                    def run(self, name, command):
+                        commands.append(command)
+                        shutil.rmtree(command[-1])
+                source = Source()
+                summary = dict(status='PASS' if passed else 'FAIL',source_wall_seconds={'build':1},
+                               jobs=[dict(name='core-smoke',exit=0 if passed else 1,wall_seconds=2,pair=[1,17],
+                                          receipt={'phase_wall_seconds':{'fixed':1,'default':.5}})])
+                def remove(command, **kwargs):
+                    self.assertEqual(command[:5], ['sudo','-n','rm','-rf','--'])
+                    shutil.rmtree(command[-1])
+                output = io.StringIO()
+                with patch.object(host_check.subprocess,'run',side_effect=remove) as cleanup, \
+                     contextlib.redirect_stdout(output):
+                    host_check.finish(work, Path(tmp), summary, source)
+                self.assertEqual(work.exists(), not passed)
+                self.assertEqual(cleanup.call_count, int(passed))
+                self.assertIn('phase default: 0.5s', output.getvalue())
+                self.assertEqual('cleanup:' in output.getvalue(), not passed)
+                if passed:
+                    self.assertEqual(len(commands), 2)
+                    self.assertEqual(json.loads(work.with_suffix('.json').read_text())['status'],'PASS')
+                else:
+                    self.assertIn("'" + str(work) + "'", output.getvalue())
 
-    def test_fork_fixture_compares_cold_to_restored_seeds_on_one_cpu(self):
-        self.exercise_fixture(fork=True)
-        self.exercise_fixture(fork=True, mismatch=True)
+    def test_focused_control_runs_then_replays_without_performance_flags(self):
+        from types import SimpleNamespace
+        campaign = SimpleNamespace(args=SimpleNamespace(cli='cli',kernel='kernel',engine='engine',
+            guest_init='init',busybox='busybox',cpu=1), state=Path('/owned/state'), last_run=Path('/owned/run'))
+        calls, verified = [], []
+        def invoke(name, command, execution):
+            calls.append((name,command,execution))
+            return (1 if name == 'run' else 0), 'FAIL: /owned/run\n', ''
+        campaign.invoke = invoke
+        campaign.inspect = lambda *args: dict(outcome='FAIL',error=None,identity={'key':'same'},
+            replay=dict(status='MATCH',outcome_matches=True,witness_matches=True,
+                        full_state_matches=True,fault_history_matches=True))
+        job = dict(spec={'expected':'FAIL'})
+        host_compose.run_pair(job,campaign,Path('/project/control-cases'),verified.append)
+        self.assertEqual([call[0] for call in calls], ['run','replay'])
+        self.assertEqual(verified, [Path('/owned/run'),Path('/owned/run')])
+        self.assertIn('--full-state',calls[0][1])
+        self.assertEqual(calls[1][1], ['cli','replay','/owned/run','--cpu','1','--state','/owned/state'])
+        for call in calls:
+            self.assertTrue(call[2])
+            self.assertNotIn('--undo',call[1])
+            self.assertNotIn('--margin',call[1])
 
     def test_unit_command_uses_existing_ownership_receipt(self):
         with tempfile.TemporaryDirectory() as tmp:

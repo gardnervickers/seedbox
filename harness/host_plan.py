@@ -1,8 +1,10 @@
-"""Portable path map and merge-base planner. No host probes or execution."""
+"""Portable changed-path planner. No host probes or execution."""
+import argparse
 import json
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 MAP = Path(__file__).with_name('host-check-map.json')
 
@@ -22,44 +24,61 @@ def load_map(path=MAP):
 
 
 def matches(path, glob):
-    # * is one path component; ** is recursive. A leading / anchors the root.
     pattern = re.escape(glob.lstrip('/')).replace(r'\*\*', '.*').replace(r'\*', '[^/]*')
     return re.fullmatch(pattern, path) is not None
 
 
-def select_checks(changes, mapping=None, diffs=None):
-    """changes maps revision labels to paths; preserve every matching reason."""
+def portable(path):
+    return (path.endswith('.md') or path.startswith(('docs/', 'harness/', 'tools/mac-tcg/',
+            'python/tests/', 'crates/seedbox/tests/', 'crates/seedbox/templates/',
+            'crates/seedbox/src/cli/help.rs')) or path.endswith('.py'))
+
+
+def select_checks(changes, mapping=None, extra=(), diffs=None):
+    """Union every matched row and reviewer addition; never subtract a check."""
     mapping = mapping or load_map()
     diffs = diffs or {}
     reasons, skipped, warnings = {}, [], []
+    def add(check, reason):
+        if reason not in reasons.setdefault(check, []):
+            reasons[check].append(reason)
     for revision, paths in changes.items():
         for path in sorted(set(paths)):
+            reason = dict(revision=revision, path=path, category='portable')
+            if path.endswith('.md') or path.startswith('docs/'):
+                skipped.append(reason)
+                continue
+            if path.startswith('kernel/'):
+                warnings.append(f'kernel campaign needed: {path}')
+                continue
+            code = diffs.get((revision, path), '')
+            if path.startswith('crates/seedbox/src/cli/') and help_only(code):
+                skipped.append(dict(reason, category='CLI help text'))
+                continue
             matched = False
-            engine = any(path.startswith(root) for root in mapping['engine_roots'])
-            if engine:
-                for check in mapping['core']:
-                    reasons.setdefault(check, []).append(dict(revision=revision, path=path, category='engine-core'))
             for rule in mapping['rules']:
-                globs = [glob for glob in rule['paths'] if matches(path, glob)]
-                if not globs:
-                    continue
-                if 'diff_regex' in rule and not re.search(rule['diff_regex'], diffs.get((revision, path), '')):
-                    continue
-                matched = True
-                reason = dict(revision=revision, path=path, category=rule['category'], globs=globs)
-                for check in rule['checks']:
-                    if reason not in reasons.setdefault(check, []):
-                        reasons[check].append(reason)
-                if not rule['checks'] and not engine:
-                    skipped.append(reason)
+                if any(matches(path, glob) for glob in rule['paths']):
+                    if 'diff_regex' in rule and not re.search(rule['diff_regex'], code):
+                        continue
+                    matched = True
+                    for check in rule['checks']:
+                        add(check, dict(reason, category=rule['category']))
             if not matched:
-                if engine:
-                    warnings.append(f'{revision}: unmapped engine path {path}; selected core')
-                else:
-                    # Unknown runtime/build inputs must not silently disappear.
-                    warnings.append(f'{revision}: unmapped path {path}; selected core for review')
+                if portable(path):
+                    skipped.append(reason)
+                elif path.startswith('crates/'):
                     for check in mapping['core']:
-                        reasons.setdefault(check, []).append(dict(revision=revision, path=path, category='unmapped'))
+                        add(check, dict(reason, category='unmatched crates (fail safe)'))
+                else:
+                    skipped.append(reason)
+    for check in extra:
+        if check not in mapping['checks']:
+            raise ValueError('unknown extra check: ' + check)
+        reason = dict(revision='reviewer', path='--extra ' + check, category='reviewer addition')
+        add(check, reason)
+        if check in ('core', 'perf-replay'):
+            for required in mapping['core']:
+                add(required, dict(reason, category='core dependency'))
     return dict(checks={check: reasons[check] for check in mapping['checks'] if check in reasons},
                 skipped=skipped, warnings=warnings)
 
@@ -68,36 +87,35 @@ def git(repo, *args):
     return subprocess.check_output(['git', '-C', str(repo), *args], stderr=subprocess.PIPE)
 
 
-def plan_revisions(repo, revisions, base='origin/main'):
-    """Union merge-base diffs; execute once at the last revision (the train tip)."""
-    changes, merges, diffs = {}, {}, {}
-    mapping = load_map()
+def plan_revision(repo, base, head, extra=()):
     base_sha = git(repo, 'rev-parse', '--verify', '--end-of-options', base + '^{commit}').decode().strip()
-    tips = []
-    for revision in revisions:
-        tip = git(repo, 'rev-parse', '--verify', '--end-of-options', revision + '^{commit}').decode().strip()
-        merge = git(repo, 'merge-base', base_sha, tip).decode().strip()
-        # Disable rename detection: both the deleted and added paths select checks.
-        raw = git(repo, 'diff', '--name-only', '--no-renames', '-z', merge, tip, '--')
-        changes[tip] = [path.decode('utf-8', 'surrogateescape') for path in raw.split(b'\0') if path]
-        for path in changes[tip]:
-            if any('diff_regex' in rule and any(matches(path, glob) for glob in rule['paths'])
-                   for rule in mapping['rules']):
-                diff = git(repo, 'diff', '--no-ext-diff', '--no-textconv', '--no-color', '--unified=0', merge, tip, '--', path).decode('utf-8', 'surrogateescape')
-                diffs[tip, path] = changed_code(diff)
-        merges[tip] = merge
-        tips.append(tip)
-    if not tips:
-        raise ValueError('at least one revision is required')
-    return dict(select_checks(changes, mapping, diffs), base=base_sha, merge_bases=merges, revisions=tips,
-                target=tips[-1], changes=changes)
+    tip = git(repo, 'rev-parse', '--verify', '--end-of-options', head + '^{commit}').decode().strip()
+    raw = git(repo, 'diff', '--name-only', '--no-renames', '-z', base_sha + '...' + tip, '--')
+    paths = [path.decode('utf-8', 'surrogateescape') for path in raw.split(b'\0') if path]
+    changes = {tip: paths}
+    diffs = {}
+    mapping = load_map()
+    for path in paths:
+        if path.startswith('crates/seedbox/src/cli/') or any(
+                'diff_regex' in rule and any(matches(path, glob) for glob in rule['paths'])
+                for rule in mapping['rules']):
+            raw_diff = git(repo, 'diff', '--no-ext-diff', '--no-textconv', '--no-color', '--unified=0',
+                           base_sha + '...' + tip, '--', path).decode('utf-8', 'surrogateescape')
+            diffs[tip, path] = changed_code(raw_diff)
+    return dict(select_checks(changes, mapping, extra=extra, diffs=diffs), base=base_sha, target=tip, changes=changes)
 
 
 def changed_code(diff):
-    """Changed lines and hunk function labels, excluding unrelated context."""
     return '\n'.join(line for line in diff.splitlines()
-                     if (line.startswith(('+', '-')) and not line.startswith(('+++', '---')))
-                     or line.startswith('@@'))
+                     if line.startswith(('+', '-')) and not line.startswith(('+++', '---')))
+
+
+def help_only(code):
+    """Only changed comment/help strings; executable CLI changes fail safe."""
+    lines = [line[1:].strip() for line in code.splitlines() if line[1:].strip()]
+    return bool(lines) and all(line.startswith('//') or re.fullmatch(
+        r'(?:#\[(?:arg|command)\()?\s*(?:about|long_about|help|long_help)\s*=\s*"(?:[^"\\]|\\.)*"\s*(?:,|\)\])?',
+        line) for line in lines)
 
 
 def format_plan(plan, mapping=None):
@@ -108,10 +126,24 @@ def format_plan(plan, mapping=None):
         detail = spec.get('description', spec.get('project', 'harness/worlds/' + spec.get('world', '') + '.json'))
         lines.append(f'check {check}: {detail}')
         for reason in reasons:
-            lines.append(f"  reason: {reason['revision'][:12]} {reason['path']} ({reason['category']})")
-    for reason in plan['skipped']:
-        lines.append(f"skip: {reason['revision'][:12]} {reason['path']} ({reason['category']}; no host run)")
-    lines.extend('warning: ' + warning for warning in plan['warnings'])
+            lines.append(f"  reason: {reason['path']} ({reason['category']})")
+    lines.extend(plan['warnings'])
     if not plan['checks']:
-        lines.append('host: no checks selected')
+        lines.append('host: none')
     return '\n'.join(lines)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('base', metavar='BASE')
+    parser.add_argument('head', metavar='HEAD')
+    parser.add_argument('--json', action='store_true', help='Print the plan as JSON.')
+    parser.add_argument('--extra', action='append', default=[], metavar='CHECK', help='Add a check (repeatable).')
+    args = parser.parse_args(argv)
+    try:
+        plan = plan_revision(Path.cwd(), args.base, args.head, args.extra)
+        print(json.dumps(plan, indent=2) if args.json else format_plan(plan))
+        return 0
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        print('error: ' + str(error), file=sys.stderr)
+        return 2

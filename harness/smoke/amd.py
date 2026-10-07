@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import re
 import signal
+import shlex
+import shutil
 import stat
 import sys
 import time
@@ -311,7 +313,7 @@ class Campaign:
         # Undo-off stepping dominates the tier, so the margin is the profile's
         # smallest adaptive margin rather than a larger, slower one.
         replays = [('default', [], None)]
-        if getattr(a, 'performance_replay', False):
+        if getattr(a, 'perf_replay', False):
             replays.append(('undo-margin', ['--undo', '0', '--margin', '16384'],
                             {'SEEDBOX_UNDO': '0', 'SEEDBOX_MARGIN': '16384'}))
         for name, flags, changes in replays:
@@ -336,18 +338,23 @@ def phase_walls(root):
     return {path.parent.name: round(json.loads(path.read_text())['wall_seconds'], 1) for path in paths}
 
 
-def main():
+def argument_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('cli', 'engine', 'kernel', 'guest-init', 'busybox', 'output'):
         parser.add_argument('--' + name, required=True, type=Path)
     parser.add_argument('--cpu', required=True, type=int)
-    parser.add_argument('--performance-replay', action='store_true',
+    parser.add_argument('--perf-replay', action='store_true',
                         help='Add the undo-off/margin replay for stepping, counter or undo changes.')
     parser.add_argument('--project', type=Path,
                         help='Compose workload instead of the generated fixed faults project.')
     parser.add_argument('--allow-dev-engine', action='store_true', help='Exercise unpinned artifacts, visibly unqualified.')
     parser.add_argument('--pinned-engine', type=Path, help='Pinned engine for the unflagged wrong-kernel control; required in dev mode.')
     parser.add_argument('--tool-path', required=True, help='Explicit admitted preparation-tool PATH; no build is performed by this wrapper.')
+    return parser
+
+
+def main():
+    parser = argument_parser()
     args = parser.parse_args()
     if sys.platform != 'linux' or os.geteuid() != 0:
         parser.error('requires the qualified Linux AMD host and root')
@@ -385,11 +392,13 @@ def main():
             raise TimeoutError('final evidence exhausted campaign allocation')
         save(root / 'result.json', {'status': 'COMPLETE_PENDING_INDEPENDENT_REVIEW', 'wall_seconds': time.monotonic() - began,
              'phase_wall_seconds': phase_walls(root)})
+        shutil.rmtree(root / 'state', ignore_errors=False)
         print('complete: staged smoke evidence requires independent review')
         return 0
     except BaseException as error:
         save(root / 'failure.json', {'error': repr(error), 'stop_later_operations': True,
              'phase_wall_seconds': phase_walls(root)})
+        print('cleanup: sudo rm -rf -- ' + shlex.quote(str(root / 'state')), file=sys.stderr)
         raise
     finally:
         for name, seconds in phase_walls(root).items():

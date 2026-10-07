@@ -71,7 +71,7 @@ def coordinator_lock(pair, directory=Path('/tmp')):
 @contextlib.contextmanager
 def allocate_pairs(pairs, count, directory=Path('/tmp'), probe=None, idle=None):
     if not 1 <= count <= 15:
-        raise ValueError('--pairs must be 1..15')
+        raise ValueError('--lanes must request 1..15 pairs')
     probe = probe or (lambda pair: probe_canonical(pair, directory))
     # idle is smoke.pinned_workloads on the real host, injectable for portable tests.
     idle = idle or (lambda pair: None)
@@ -96,4 +96,4 @@ def allocate_pairs(pairs, count, directory=Path('/tmp'), probe=None, idle=None):
             if len(selected) == count:
                 yield selected
                 return
-        raise RuntimeError(f'--pairs {count}: only {len(selected)} free eligible SMT pairs; no checks dispatched')
+        raise RuntimeError(f'--lanes ({count} requested pairs): only {len(selected)} free eligible SMT pairs; no checks dispatched')

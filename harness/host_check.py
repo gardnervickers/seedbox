@@ -5,12 +5,13 @@ import json
 import os
 from pathlib import Path
 import signal
+import shlex
 import subprocess
 import sys
 import tempfile
 import time
 
-from host_plan import format_plan, load_map, plan_revisions
+from host_plan import format_plan, load_map, plan_revision, git
 from host_pairs import allocate_pairs, read_pairs
 from host_worker import Commands
 
@@ -22,8 +23,8 @@ def jobs_for(checks, mapping=None):
     smoke = [check for check in checks if mapping['checks'][check]['kind'] == 'smoke']
     jobs = []
     if smoke:
-        if not {'fixed', 'default-replay'} <= set(smoke):
-            raise ValueError('smoke replays require the fixed baseline and default replay')
+        if 'core' not in smoke:
+            raise ValueError('performance replay requires the core baseline')
         jobs.append(dict(name='core-smoke', checks=smoke, spec=dict(kind='smoke')))
     jobs.extend(dict(name=check, checks=[check], spec=mapping['checks'][check])
                 for check in checks if check not in smoke)
@@ -88,20 +89,10 @@ def execute(plan, args):
         pinned = existing(pinned, 'PINNED_ENGINE')
     if stored:
         stored = existing(stored, 'SEEDBOX_VMM')
-    variants = {}
-    for item in args.pv_kernel:
-        label, sep, path = item.partition('=')
-        if not sep or label not in ('abi1', 'abi2') or label in variants:
-            raise ValueError('--pv-kernel must be abi1=FILE or abi2=FILE, once per label')
-        variants[label] = existing(path, '--pv-kernel')
     selected = jobs_for(plan['checks'])
-    required = {job['spec']['kernel_variant'] for job in selected if 'kernel_variant' in job['spec']}
-    if not required <= variants.keys():
-        raise ValueError('timebase checks require --pv-kernel abi1=FILE and --pv-kernel abi2=FILE; no kernel is built')
-    if required:
-        import hashlib
-        if len({hashlib.sha256(Path(variants[label]).read_bytes()).digest() for label in required}) != len(required):
-            raise ValueError('PV variants must have distinct frozen kernel bytes')
+    cluster = 'cluster-fixed' in plan['checks']
+    etcd = existing(os.environ['SEEDBOX_ETCD'], 'SEEDBOX_ETCD') if cluster else None
+    main_sha = git(args.repo, 'rev-parse', '--verify', 'origin/main^{commit}').decode().strip() if cluster else None
     # Import the existing smoke readiness/lock wrapper only after host admission.
     sys.path.insert(0, str(HERE / 'smoke'))
     from amd import lock_free, pinned_workloads
@@ -112,7 +103,11 @@ def execute(plan, args):
             if str(error) == 'userspace workload pinned to the selected pair':
                 raise BlockingIOError(str(error)) from error
             raise
-    with allocate_pairs(read_pairs(), args.pairs, probe=lock_free, idle=idle) as pairs:
+    available = read_pairs()
+    requested = [(cpu, cpu + 16) for cpu in args.lanes]
+    if any(pair not in available for pair in requested):
+        raise ValueError('--lanes: every requested N,N+16 pair must be online, allowed and reciprocal')
+    with allocate_pairs(requested, len(requested), probe=lock_free, idle=idle) as pairs:
         work = Path(tempfile.mkdtemp(prefix='host-check-' + plan['target'][:7] + '-',
                                      dir=os.environ.get('HOST_CHECK_DIR', tempfile.gettempdir())))
         (work / 'plan.json').write_text(json.dumps(plan, indent=2) + '\n')
@@ -126,21 +121,23 @@ def execute(plan, args):
             source.run('worktree', ['git', 'worktree', 'add', '--detach', '--quiet', str(src), plan['target']])
             source.src = src
             print('evidence: ' + str(work), flush=True)
-            for name, command in [
-                    ('build', ['nice', 'cargo', 'build', '--release', '--locked', '-p', 'seedbox']),
-                    ('fmt', ['cargo', 'fmt', '-p', 'seedbox', '--check']),
-                    ('clippy', ['nice', 'cargo', 'clippy', '-p', 'seedbox', '--all-targets', '--locked', '--', '-D', 'warnings']),
-                    ('workspace', ['nice', 'cargo', 'test', '--workspace', '--locked']),
-                    ('portable', ['nice', sys.executable, '-m', 'unittest', 'discover', '-s', str(HERE / 'tests'), '-q'])]:
-                source.run(name, command)
-                print(f'phase {name}: {json.loads((work / (name + ".wall.json")).read_text())["wall_seconds"]:.1f}s', flush=True)
+            source.run('build', ['nice', 'cargo', 'build', '--release', '--locked', '-p', 'seedbox'])
             engine = stored or str(src / 'crates/seedbox-vmm/target/release/seedbox-vmm')
             if not stored:
                 source.run('vmm-build', ['nice', 'cargo', 'build-vmm'])
             init = work / 'compose-init'
-            source.run('guest-init', ['bash', 'guest/build-compose.sh', str(init)])
+            source.run('guest-init', ['nice', 'bash', 'guest/build-compose.sh', str(init)])
+            main_engine = None
+            if cluster:
+                main_src = work / 'main'
+                source.run('main-worktree', ['git', 'worktree', 'add', '--detach', '--quiet', str(main_src), main_sha])
+                source.src = main_src
+                source.run('main-vmm-build', ['nice', 'cargo', 'build-vmm'])
+                main_engine = str(main_src / 'crates/seedbox-vmm/target/release/seedbox-vmm')
+                source.src = src
             common = dict(src=str(src), cli=str(src / 'target/release/seedbox'), engine=engine,
-                          kernel=kernel, busybox=busybox, pinned_engine=pinned, guest_init=str(init))
+                          kernel=kernel, busybox=busybox, pinned_engine=pinned, guest_init=str(init),
+                          main_engine=main_engine, main_revision=main_sha, etcd=etcd, tool_path=env['PATH'])
             # Raw batch fixtures must not race a core smoke admission refusal.
             # Doctor admits every assigned lane before any guest is dispatched.
             for pair in pairs:
@@ -152,8 +149,6 @@ def execute(plan, args):
 
             def launch(job, pair):
                 data = dict(common, **job, pair=list(pair), output=str(work / job['name']))
-                if 'kernel_variant' in job['spec']:
-                    data['kernel'] = variants[job['spec']['kernel_variant']]
                 path = work / (job['name'] + '.job.json')
                 path.write_text(json.dumps(data, indent=2) + '\n')
                 with (work / (job['name'] + '.log')).open('x') as log:
@@ -169,42 +164,99 @@ def execute(plan, args):
                 signal.signal(sig, handler)
             summary['source_wall_seconds'] = {p.name.removesuffix('.wall.json'): json.loads(p.read_text())['wall_seconds']
                                                for p in work.glob('*.wall.json')}
+            summary['source_steps'] = {p.name.removesuffix('.wall.json'): json.loads(p.read_text())
+                                       for p in work.glob('*.wall.json')}
             summary['checks'] = {check: dict(status='NOT_RUN', wall_seconds=None, reasons=reasons)
                                  for check, reasons in plan['checks'].items()}
             for job in summary['jobs']:
                 receipt = work / job['name'] / 'result.json'
                 if receipt.exists():
                     job['receipt'] = json.loads(receipt.read_text())
+                    if 'cluster_comparison' in job['receipt']:
+                        print('cluster-fixed: ' + job['receipt']['cluster_comparison']['status'], flush=True)
                 for check in job['checks']:
-                    phase = {'default-replay': 'default'}.get(check, check)
+                    phase = {'core': 'fixed', 'perf-replay': 'undo-margin'}.get(check, check)
                     phases = job.get('receipt', {}).get('phase_wall_seconds', {})
-                    seconds = phases.get(phase) if job['name'] == 'core-smoke' else job['wall_seconds']
+                    seconds = job['wall_seconds'] if check == 'core' else (phases.get(phase) if job['name'] == 'core-smoke' else job['wall_seconds'])
                     status = ('PASS' if job['exit'] == 0 else 'FAIL') if seconds is not None else 'NOT_RUN'
                     summary['checks'][check].update(status=status, wall_seconds=seconds, pair=job['pair'])
                     elapsed = 'not run' if seconds is None else f'{seconds:.1f}s'
                     print(f"check {check}: {status} {elapsed} cpu {job['pair']}", flush=True)
-            (work / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
-            print(summary['status'] + ': ' + str(work / 'summary.json'), flush=True)
+            finish(work, args.repo, summary, source)
     return 0 if summary['status'] == 'PASS' else 1
+
+
+def parse_lanes(text):
+    try:
+        lanes = [int(item) for item in text.split(',')]
+    except ValueError as error:
+        raise argparse.ArgumentTypeError('--lanes must be comma-separated pair numbers 1..15') from error
+    if not lanes or len(set(lanes)) != len(lanes) or any(not 1 <= cpu <= 15 for cpu in lanes):
+        raise argparse.ArgumentTypeError('--lanes must name distinct pairs 1..15; CPU 0 and 16 are reserved')
+    return lanes
+
+
+def finish(work, repo, summary, source):
+    """Keep summaries; discard owned run state only after all workers passed."""
+    summary_path = work / 'summary.json'
+    summary_path.write_text(json.dumps(summary, indent=2) + '\n')
+    lines = []
+    for name, seconds in summary['source_wall_seconds'].items():
+        status = summary.get('source_steps', {}).get(name, {}).get('status', 'UNKNOWN')
+        lines.append(f'{name:<18} {status.lower() if status == "PASS" else status} {seconds:6.1f}s')
+    for job in summary['jobs']:
+        status = 'pass' if job['exit'] == 0 else 'FAIL'
+        lines.append(f"{job['name']:<18} {status} {job['wall_seconds']:6.1f}s cpu {job['pair']}")
+        for name, seconds in job.get('receipt', {}).get('phase_wall_seconds', {}).items():
+            lines.append(f'phase {name}: {seconds:.1f}s')
+    (work / 'summary.txt').write_text('\n'.join(lines) + '\n')
+    for line in lines:
+        print(line, flush=True)
+    cleanup = []
+    for name in ('src', 'main'):
+        if (work / name).exists():
+            cleanup.append(shlex.join(['git', '-C', str(repo), 'worktree', 'remove', '--force', str(work / name)]))
+    cleanup.append(shlex.join(['sudo', '-n', 'rm', '-rf', '--', str(work)]))
+    if summary['status'] == 'PASS':
+        # Receipts survive deletion of the private worktrees and root-owned stores.
+        import shutil
+        kept = work.with_suffix('.json')
+        shutil.copyfile(summary_path, kept)
+        shutil.copyfile(work / 'summary.txt', work.with_suffix('.txt'))
+        try:
+            source.src = repo
+            for name in ('src', 'main'):
+                if (work / name).exists():
+                    source.run('remove-' + name, ['git', '-C', str(repo), 'worktree', 'remove', '--force', str(work / name)])
+            source.src = repo
+            subprocess.run(['sudo', '-n', 'rm', '-rf', '--', str(work)], cwd=repo, check=True)
+        except BaseException as error:
+            summary.update(status='FAIL', cleanup_error=repr(error))
+            kept.write_text(json.dumps(summary, indent=2) + '\n')
+            print('cleanup: ' + ' && '.join(cleanup), flush=True)
+        print(summary['status'] + ': ' + str(kept), flush=True)
+    else:
+        print('FAIL: ' + str(summary_path), flush=True)
+        print('cleanup: ' + ' && '.join(cleanup), flush=True)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('revisions', nargs='*', help='SHAs/revisions in train order; execute the union at the last revision.')
-    parser.add_argument('--train', help='Train branch; plan its merge-base diff and check its tip.')
-    parser.add_argument('--base', default='origin/main', help='Local base ref for merge-base diffs [default: origin/main].')
-    parser.add_argument('--plan', action='store_true', help='Print selected checks and matching paths; no host work.')
-    parser.add_argument('--pairs', type=int, default=1, choices=range(1, 16), metavar='N', help='Number of free SMT pairs (1..15) [default: 1].')
-    parser.add_argument('--pv-kernel', action='append', default=[], metavar='ABI=FILE', help='Frozen PV variant kernel: abi1=FILE and abi2=FILE (timebase checks only).')
+    parser.add_argument('revision', nargs='?', default='HEAD', metavar='REV', help='Revision to check [default: HEAD].')
+    parser.add_argument('--base', default='origin/main', help='Base ref for BASE...REV [default: origin/main].')
+    parser.add_argument('--plan', action='store_true', help='Print selected checks and matching paths, then exit.')
+    parser.add_argument('--extra', action='append', default=[], metavar='CHECK', help='Add a reviewer check (repeatable).')
+    parser.add_argument('--lanes', type=parse_lanes, default=[1], metavar='1,2,3', help='Use exactly these SMT pairs N,N+16 [default: 1].')
     args = parser.parse_args(argv)
-    if args.train and args.revisions:
-        parser.error('use a revision list or --train, not both')
-    revisions = [args.train] if args.train else (args.revisions or ['HEAD'])
     try:
         args.repo = Path(subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], text=True).strip())
-        plan = plan_revisions(args.repo, revisions, args.base)
+        plan = plan_revision(args.repo, args.base, args.revision, args.extra)
         print(format_plan(plan), flush=True)
-        if args.plan or not plan['checks']:
+        if args.plan:
+            return 0
+        if plan['warnings']:
+            raise RuntimeError('kernel campaign needed; this plan does not cover kernel changes')
+        if not plan['checks']:
             return 0
         return execute(plan, args)
     except (OSError, ValueError, RuntimeError, KeyError, subprocess.CalledProcessError) as error:
