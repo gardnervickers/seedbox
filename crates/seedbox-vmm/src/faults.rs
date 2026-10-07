@@ -12,6 +12,7 @@ pub enum Status {
     Failed,
     Unavailable(u64),
 }
+#[derive(Clone)]
 struct Entry {
     plan: Plan,
     target: Option<usize>,
@@ -43,6 +44,7 @@ enum Event {
     Dispatch,
     Deadline,
 }
+#[derive(Clone)]
 pub struct Faults {
     pub log: Vec<Value>,
     entries: Vec<Entry>,
