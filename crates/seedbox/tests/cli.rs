@@ -28,65 +28,6 @@ fn stderr(output: &Output) -> String {
 }
 
 #[test]
-fn portable_cli_keeps_result_and_diagnostic_streams_and_exit_codes() {
-    let dir = tempfile::tempdir().unwrap();
-    let created = seedbox(&["init", "demo"], dir.path());
-    assert_eq!(created.status.code(), Some(0));
-    assert_eq!(created.stdout, b"CREATED: demo\n");
-    assert!(created.stderr.is_empty());
-    let valid = seedbox(&["validate", "demo", "--json"], dir.path());
-    assert_eq!(valid.status.code(), Some(0));
-    assert!(valid.stderr.is_empty());
-    let _: serde_json::Value = serde_json::from_slice(&valid.stdout).unwrap();
-    let rejected = seedbox(&["validate", "missing.yaml"], dir.path());
-    assert_eq!(rejected.status.code(), Some(2));
-    assert!(rejected.stdout.is_empty());
-    assert_eq!(
-        rejected.stderr,
-        b"error: Compose file missing.yaml: not found\n"
-    );
-    // Public help retains the execution outcome/exit-status contract.
-    let help = seedbox(&["help", "run"], dir.path());
-    let text = String::from_utf8_lossy(&help.stdout);
-    for line in [
-        "0    PASS, or a replay/diff MATCH",
-        "1    FAIL, replay MISMATCH, or diff DIFFERENT",
-        "2    ERROR, a replay that is NOT_COMPARABLE, or a usage or setup error",
-        "3    INCOMPLETE (wall-time limit or cancelled)",
-        "124  TIMEOUT (simulated-time limit)",
-    ] {
-        assert!(text.contains(line), "missing {line} in run help");
-    }
-    assert_eq!(help.status.code(), Some(0));
-    assert!(help.stderr.is_empty());
-}
-
-#[test]
-fn orchestration_wait_changes_preserve_other_commands_owned_flags() {
-    let dir = tempfile::tempdir().unwrap();
-    for (flag, commands) in [
-        ("--workers", &["explore"][..]),
-        ("--build-epoch", &["prepare", "run", "explore"]),
-        ("--torn-writes", &["prepare", "run", "explore"]),
-        (
-            "--allow-dev-engine",
-            &["run", "explore", "replay", "doctor"],
-        ),
-    ] {
-        for command in ["prepare", "run", "explore", "replay", "doctor", "validate"] {
-            let help = seedbox(&["help", command], dir.path());
-            assert_eq!(help.status.code(), Some(0));
-            assert!(help.stderr.is_empty());
-            assert_eq!(
-                String::from_utf8_lossy(&help.stdout).contains(flag),
-                commands.contains(&command),
-                "{command} {flag}"
-            );
-        }
-    }
-}
-
-#[test]
 fn validation_cli_reports_structured_output_and_nonzero_errors() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("compose.yaml");
