@@ -4,11 +4,14 @@ Adds an isolated ARM64 machine with a patched Linux PV clock, deterministic
 interrupt rendezvous, seeded entropy, full RAM witnesses, and native Mac HVF
 and Linux KVM adapters. Production x86 paths remain unchanged.
 
-Native HVF repeat/noise acceptance passes. Operator KVM acceptance at `7e178d5`
-passes and all 2,291 exits plus console bytes match HVF for both seeds. Full
-cross-backend RAM equality remains open. Optional `--ram-pages FILE` diagnostics
-locate differing 4 KiB pages without changing the witness. The latest KVM
-interrupt-count normalization still needs operator execution.
+Native HVF and nested KVM repeat/noise acceptance pass after rerunning both
+suites. The KVM setup regression is fixed: Linux 6.8 caps `NR_IRQS` at 1023
+with 32-ID alignment, so KVM uses the closest valid total, 992 (960 SPIs,
+ITLinesNumber=30). HVF remains at 1024 advertised IDs (988 usable SPIs,
+ITLinesNumber=31); its two witnesses are unchanged. All 2,291 exits plus console
+bytes match across backends for both seeds. Full cross-backend RAM equality and
+the remaining GIC count difference stay open. Optional `--ram-pages FILE`
+diagnostics locate differing 4 KiB pages without changing the witness.
 
 ## Try it on your Mac
 

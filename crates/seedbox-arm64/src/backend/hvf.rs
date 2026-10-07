@@ -104,12 +104,12 @@ impl Gic {
         os_release(config);
         result?;
         // HVF has no SPI-count configuration API. Require its advertised
-        // interrupt range to match the shared profile rather than assuming it.
+        // interrupt range to match the HVF profile rather than assuming it.
         let typer = gic_dist(4)?;
-        if (typer & 31) != (crate::GIC_NR_IRQS / 32 - 1) as u64 {
+        if (typer & 31) != (crate::HVF_GIC_NR_IRQS / 32 - 1) as u64 {
             return Err(format!(
                 "HVF GICD_TYPER={typer:#x}: expected {} interrupt IDs",
-                crate::GIC_NR_IRQS
+                crate::HVF_GIC_NR_IRQS
             ));
         }
         Ok(Self { set_spi })

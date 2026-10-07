@@ -5,16 +5,17 @@ main `4a89dce`. It does not change the production x86 engine or its guest inputs
 The crate has its own workspace, lockfile and target directory. The only changes
 to existing build files are the root workspace exclusion and the two aliases.
 
-**Status: native HVF and operator-run nested KVM determinism acceptance PASS;
+**Status: native HVF and nested KVM determinism acceptance PASS;
 exit traces and console now MATCH across backends, but full RAM/witness equality
 still FAILS.** The same idle-rendezvous Image from `180705e` boots reproducibly
 on both. The shared CPU policy now hides Fine Grained Traps before boot,
 removing the extra guest printk clock read responsible for HVF's 1 ns drift.
-Both seeds' new HVF traces and consoles exactly match the operator's retained
-`7e178d5` KVM reports. Full CPU/GIC normalization remains open; see the
-[page diagnostics and policy](#power-off-page-diagnostics-and-architectural-policy-2026-10-07).
+Both seeds' HVF traces and consoles exactly match the current nested KVM
+reports. The `0d9ec53` KVM setup regression is fixed and both hardware suites
+were rerun; see the [VGIC count correction](#vgic-count-correction-2026-10-07).
+Full CPU/GIC normalization remains open, including the interrupt-count difference.
 
-Current Mac checks: `cargo test-arm64` passes 19 portable tests; the two
+Current Mac checks: `cargo test-arm64` passes 20 portable tests; the two
 hardware tests remain ignored by default. Crate formatting and clippy with
 warnings denied pass, as do seven Python input tests and the root portable
 acceptance checks. The explicitly signed `hvf_determinism` and `hvf_cpu_features`
@@ -1063,9 +1064,9 @@ masked or excluded.
 | MMFR0.FGT | Existing shared policy clears bits 59:56, preserving all other fields with exact full-register readback. |
 | MPIDR | Shared policy requires `0x80000000` (one CPU, affinity zero); skip an already-equal write, then require exact readback. HVF already had this value; KVM no longer implicitly owns topology policy. |
 | PMU | Shared policy clears DFR0.PMUVer bits 11:8 and checks the entire register, retaining all debug fields. HVF reads `0x10305006`. KVM never enables `KVM_ARM_VCPU_PMU_V3`. No PMU device/IRQ is advertised. |
-| GIC interrupt count | Shared profile has 1024 IDs, including private/reserved IDs: 988 usable SPIs. KVM now sets `KVM_DEV_ARM_VGIC_GRP_NR_IRQS=1024` before initialization and reads back exactly 1024. HVF has no count setter; its `GICD_TYPER.ITLinesNumber` must equal 31 or setup fails. Live HVF TYPER is `0x0478001f`. This normalizes count only, not the whole TYPER. |
+| GIC interrupt count | KVM sets and reads back `KVM_DEV_ARM_VGIC_GRP_NR_IRQS=992` before initialization: 32 private IDs + 960 SPIs. After init, it requires `GICD_TYPER.ITLinesNumber=30`; live TYPER is `0x0048001e`. HVF has no count setter and requires ITLinesNumber=31: 1024 advertised IDs, including four reserved IDs, or 988 usable SPIs. Live HVF TYPER is `0x0478001f`. Exact count equality is unavailable on Linux 6.8; see the correction below. |
 | MIDR / REVIDR | HVF MIDR is `0x610f0000`; REVIDR API reads fail with `HV_BAD_ARGUMENT`. Linux KVM's invariant-register API checks MIDR/REVIDR against host values rather than allowing an arbitrary replacement. No invented common model is installed. |
-| Other ID_AA64 fields | Preserved and inventoried. There is no retained KVM inventory here to justify additional feature changes. Defining a complete profile requires matching inventories and support constraints; blindly clearing capability nibbles is unsafe. |
+| Other ID_AA64 fields | Preserved and inventoried on both backends. This count correction adds no further CPU feature changes. Defining a complete profile requires matching inventories and support constraints; blindly clearing capability nibbles is unsafe. |
 | CTR_EL0 / DCZID / CLIDR / CNTFRQ | All four HVF sysreg API reads return `HV_BAD_ARGUMENT` on this Mac. Exact readback through this adapter is unavailable, so no normalization is claimed. These can still be read by guest instructions and may survive in RAM. Architectural counter/timer leak rejection stays strict. |
 | GIC IIDR / remaining TYPER fields | HVF IIDR API read returns `HV_BAD_ARGUMENT`; PIDR2 reads `0x30`. KVM ignores writes to read-only distributor registers except explicitly documented fields. RSS, ID width, priority capabilities and implementation identity remain an open common-GIC-model problem. |
 | PSCI | Already common: shared HVC handling reports version 0.2, MIGRATE_INFO_TYPE=2 and unsupported services=-1. KVM forwards these calls via its SMCCC filter. No host PSCI version enters this interface. |
@@ -1098,13 +1099,70 @@ are unchanged from `7e178d5`, as these policies already match its defaults.
 19 portable ARM64 Rust tests, ARM64 fmt/clippy, seven Python guest-input tests,
 shell syntax, root fmt/clippy/workspace tests and portable acceptance pass.
 Tests cover diagnostic witness neutrality, all pages including zeros, refusal to
-overwrite output, and ignored/rejected CPU-policy writes. Linux KVM execution still needs
-the operator's hardware run. The project Nix Rust toolchain lacks Linux std;
+overwrite output, and ignored/rejected CPU-policy writes. At `0d9ec53`, Linux
+KVM execution still needed the operator's hardware run; that run exposed the
+count regression corrected below. The project Nix Rust toolchain lacks Linux std;
 subsequent all-target Linux `cargo check` and clippy with warnings denied passed
 using the already installed nightly cross-target sysroot and a separate `/tmp`
 target directory (`linux-check.log`, `linux-clippy.log`). Linux-only `cargo test-vmm` was not run. Frozen production paths are unchanged.
 The clean-checkout Lima recipe was checked against the CLI documentation but
 not executed here; the operator owns new guest builds.
+
+### VGIC count correction (2026-10-07)
+
+`0d9ec53` incorrectly reused HVF's 1024-ID advertised range as KVM's
+`NR_IRQS`, causing `set VGIC NR_IRQS: Invalid argument (os error 22)` before
+any guest execution. This was a count-bound error, not an nVHE or initialization
+ordering issue. [Linux 6.8 vgic_set_common_attr](https://github.com/torvalds/linux/blob/v6.8/arch/arm64/kvm/vgic/vgic-kvm-device.c#L206-L233)
+requires at least 64 total INTIDs, a multiple of 32, and at most
+[`VGIC_MAX_RESERVED=1023`](https://github.com/torvalds/linux/blob/v6.8/include/kvm/arm_vgic.h#L24-L30),
+despite its comment saying "at most 1024". The attribute includes the 32
+SGIs/PPIs; the kernel subtracts 32 to obtain its SPI count. Neither 1024 nor
+HVF's 988 usable SPIs plus 32 (1020) is accepted. The closest valid total is
+992, giving 960 SPIs and
+[`ITLinesNumber=(992 / 32)-1=30`](https://github.com/torvalds/linux/blob/v6.8/arch/arm64/kvm/vgic/vgic-mmio-v3.c#L78-L86).
+
+The backend profiles are now explicit. KVM sets 992 and requires exact readback
+before `KVM_DEV_ARM_VGIC_CTRL_INIT`, then checks the guest-visible TYPER count
+after initialization. HVF keeps its existing 1024-ID / ITLinesNumber=31 check.
+KVM consequently advertises one fewer 32-ID block and has 28 fewer usable SPIs
+than HVF (HVF IDs 1020–1023 are reserved). Neither read-only TYPER is rewritten.
+The portable regression test applies the kernel bounds and alignment, checks
+that KVM's count is the nearest valid value to HVF's, and checks both device
+SPIs remain available.
+
+Both hardware suites were rerun directly, using the unchanged Image/initrd
+hashes above. Native HVF was rebuilt and both executables signed after all
+Cargo builds. KVM ran in the existing Ubuntu 24.04 arm64 nested VM with host
+kernel `6.8.0-142-generic`, using a fresh temporary source directory and its
+existing Cargo. Both `hvf_cpu_features` / `kvm_cpu_features` and both
+repeat/seed/noise determinism suites pass. Live TYPER values are HVF
+`0x0478001f` and KVM `0x0048001e`.
+
+| Backend / boot | Witness | Wall seconds |
+| --- | --- | ---: |
+| HVF seed 1 first | `b3de4bbdaa7a747b54d3a940f02c4281bd3f26fe8574454c6cb7f06a3658a2a7` | 0.239455 |
+| HVF seed 1 repeat | Same | 0.234455 |
+| HVF seed 1 host noise | Same | 7.263367 |
+| HVF seed 2 | `3477c8e474cbe111646f5a6aa03acadffefc5bb2995212bcd2aafec648e6dabe` | 0.234063 |
+| KVM seed 1 first | `8051275dcc880eb5aa49b8857a03e90aa6cb5724858c9c42decd8f8c93a32429` | 0.531792 |
+| KVM seed 1 repeat | Same | 0.536127 |
+| KVM seed 1 host noise | Same | 6.858662 |
+| KVM seed 2 | `0a1e8291632b90ee5071629280fab20a71cacb6d11284bee8092c45b8e8b56de` | 0.585483 |
+
+All eight runs have 2,291 exits and 1,010,051,041 virtual ns. Every HVF
+witness, RAM hash, console hash and trace matches its prior `hvf-ram-pages/`
+report. KVM witnesses changed with the count as expected. Both seeds' traces
+and console hashes still match across backends; full RAM/witness equality
+remains open.
+
+Evidence is retained under `artifacts/arm64-irq-rendezvous/hvf-vgic-count-fix/`
+and `kvm-vgic-count-fix/`. The first directory also holds KVM build and hardware
+logs. Twenty portable ARM64 Rust tests pass on both Mac and Linux. Native
+ARM64 fmt/clippy, Linux-target ARM64 clippy, seven Python guest-input tests,
+root fmt/clippy/workspace tests and portable acceptance pass. The VM has no
+Clippy component, so Linux-target clippy used the existing Mac cross toolchain.
+Linux-only production x86 `cargo test-vmm` was not run on these arm64 hosts.
 
 ### Next KVM page capture
 
@@ -1123,7 +1181,7 @@ cargo clippy --manifest-path crates/seedbox-arm64/Cargo.toml \
 cargo build-arm64 --target aarch64-unknown-linux-gnu
 export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-irq-rendezvous/Image"
 export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-irq-rendezvous/init.cpio"
-export SEEDBOX_ARM64_REPORT_DIR="$PWD/artifacts/arm64-irq-rendezvous/kvm-ram-pages"
+export SEEDBOX_ARM64_REPORT_DIR="$PWD/artifacts/arm64-irq-rendezvous/kvm-ram-pages-vgic-fix"
 mkdir "$SEEDBOX_ARM64_REPORT_DIR" # fresh directory; preserve previous evidence
 cargo test-arm64 --target aarch64-unknown-linux-gnu --test hardware \
   -- --ignored --exact kvm_cpu_features --nocapture --test-threads=1 \

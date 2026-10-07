@@ -112,7 +112,9 @@ impl Backend for Kvm {
                 }),
             )?;
         }
-        let mut nr_irqs = crate::GIC_NR_IRQS;
+        // Total INTIDs (including SGIs/PPIs), set before VGIC_CTRL_INIT in
+        // create_vcpu. HVF's 1024-ID TYPER range is not a valid KVM count.
+        let mut nr_irqs = crate::KVM_GIC_NR_IRQS;
         let mut attr = kvm_device_attr {
             group: KVM_DEV_ARM_VGIC_GRP_NR_IRQS,
             attr: 0,
@@ -124,10 +126,10 @@ impl Backend for Kvm {
         context("read VGIC NR_IRQS", unsafe {
             gic.get_device_attr(&mut attr)
         })?;
-        if nr_irqs != crate::GIC_NR_IRQS {
+        if nr_irqs != crate::KVM_GIC_NR_IRQS {
             return Err(format!(
                 "VGIC NR_IRQS readback: expected {}, got {nr_irqs}",
-                crate::GIC_NR_IRQS
+                crate::KVM_GIC_NR_IRQS
             ));
         }
         Ok(Self {
@@ -193,6 +195,13 @@ impl Backend for Kvm {
                 ..Default::default()
             }),
         )?;
+        let typer = self.get_gic_dist(4)?;
+        if (typer & 31) != (crate::KVM_GIC_NR_IRQS / 32 - 1) as u64 {
+            return Err(format!(
+                "KVM GICD_TYPER={typer:#x}: expected {} interrupt IDs",
+                crate::KVM_GIC_NR_IRQS
+            ));
+        }
         Ok(())
     }
     fn get_reg(&self, reg: CoreReg) -> Result<u64> {
