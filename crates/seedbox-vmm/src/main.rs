@@ -8,6 +8,7 @@ mod devices;
 mod events;
 mod faults;
 mod links;
+mod connections;
 mod machine;
 mod network_counters;
 mod profile;
@@ -153,8 +154,8 @@ impl World {
         let dst_mac: [u8; 6] = frame[0..6].try_into().unwrap();
         let targets = links::candidates(src,dst_mac,&self.macs);
         for dst in targets {
-            let cut = self.faults.blocked(src,dst) || *self.partitioned.get(&(src,dst)).unwrap_or(&false);
-            let t = match self.faults.links.decide(src,dst,send_time,cut) {
+            let cut = *self.partitioned.get(&(src,dst)).unwrap_or(&false);
+            let t = match self.faults.route(src,dst,send_time,&frame,cut) {
                 links::Outcome::Cut => { self.dropped += 1; self.count_link(send_time,src,dst,1); continue; }
                 links::Outcome::Lost => { self.dropped += 1; self.count_link(send_time,src,dst,3); continue; }
                 links::Outcome::Deliver(t) => t,
@@ -487,11 +488,13 @@ fn check_plan_after(cfg: &Value, from: u64) -> Result<(), String> {
 fn arm_seed(world: &mut World, cfg: &Value, names: &[String], seed: u64, from: u64) -> Result<Vec<Value>, String> {
     check_plan_after(cfg, from)?;
     let booted = std::mem::take(&mut world.faults.readiness);
+    let connections = world.faults.connections.clone();
     world.faults = faults::Faults::with_links(
         cfg["faults"].as_array().cloned().unwrap_or_default(),
         names.to_vec(),
         world.faults.links.clone(),
     )?;
+    world.faults.connections = connections;
     world.control = control::Control::new(&cfg["control"], names.to_vec(), world.latency, world.early)?;
     world.faults.require_readiness();
     replay_readiness(&mut world.faults, names, &booted, world.latency)?;
@@ -574,6 +577,7 @@ struct WorldSnapshot {
     strict_events: Vec<BTreeMap<(u64, u64), Vec<u8>>>,
     seq: u64,
     links: links::Links,
+    connections: connections::Connections,
     partitioned: BTreeMap<(usize, usize), bool>,
     dropped: u64,
     delivered: u64,
@@ -594,6 +598,7 @@ impl WorldSnapshot {
             strict_events: world.strict_events.clone(),
             seq: world.seq,
             links: world.faults.links.clone(),
+            connections: world.faults.connections.clone(),
             partitioned: world.partitioned.clone(),
             dropped: world.dropped,
             delivered: world.delivered,
@@ -621,6 +626,7 @@ impl WorldSnapshot {
         world.slices = self.slices;
         let names: Vec<String> = world.machines.iter().map(|m| m.name.clone()).collect();
         world.faults = boot_faults(&names, &self.readiness, world.latency, self.links.clone())?;
+        world.faults.connections = self.connections.clone();
         world.control = control::Control::new(&Value::Null, names, world.latency, world.early)?;
         Ok(pages)
     }
@@ -848,7 +854,7 @@ fn report(
     let mut world_witness = Sha256::new();
     // Only a run that uses link policy carries the network witness, so a run
     // without it keeps the world witness it had before link policy existed.
-    if world.faults.links.in_use() {
+    if world.faults.links.in_use() || world.faults.connections.used {
         world_witness.update(network_witness);
     }
     if world.control.controller.is_some() {

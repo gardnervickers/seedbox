@@ -46,6 +46,12 @@ class Shape:
     effect: Effect
 
 
+@dataclass(frozen=True)
+class ConnectionDrop:
+    handle: str
+    effect: Effect
+
+
 def _target(value):
     kind, name = ("machine", value.name) if isinstance(value, Machine) else ("service", value)
     if not isinstance(name, str) or not name:
@@ -195,11 +201,35 @@ class World:
             raise ProtocolError("shape response lacks an opaque handle")
         return Shape(result["handle"], effect)
 
+    def connections(self, from_, to, *, after=0):
+        """Return up to 32 open directional incarnations and a next_after cursor.
+
+        Discovery is a live admission-time page, not a frozen inventory.
+        """
+        if type(after) is not int or not 0 <= after <= 2**64 - 1:
+            raise ValueError("after must be an unsigned 64-bit incarnation")
+        return self._call("connections", **{"from": _target(from_), "to": _target(to), "after": after})[0]
+
+    def drop_connection(self, connection):
+        """Arm loss for one discovered direction/incarnation; heal reports drop evidence.
+
+        Arming does not prove a packet was dropped. Inspect retained selection_counts
+        or the heal result and require dropped > 0 in the scenario's own check.
+        """
+        if not isinstance(connection, dict):
+            raise TypeError("connection must be an entry returned by connections")
+        result, effect = self._call("drop_connection", connection=connection)
+        if not isinstance(result.get("handle"), str) or not result["handle"]:
+            self.close()
+            raise ProtocolError("drop_connection response lacks an opaque handle")
+        return ConnectionDrop(result["handle"], effect)
+
     def heal(self, partition):
         """Release this handle only; prior shape layers or overlapping cuts remain."""
-        if not isinstance(partition, (Partition, Shape)):
-            raise TypeError("heal expects the Partition or Shape returned by this API")
-        return self._call("heal", handle=partition.handle)[1]
+        if not isinstance(partition, (Partition, Shape, ConnectionDrop)):
+            raise TypeError("heal expects a fault handle returned by this API")
+        result, effect = self._call("heal", handle=partition.handle)
+        return result if isinstance(partition, ConnectionDrop) else effect
 
 
 # Descriptive controller name; retain World for existing scenarios.

@@ -245,12 +245,12 @@ Counters distinguish `delivered`, `partition_dropped`, `receiver_dropped`, and
 `loss_dropped`; `loss_dropped` is omitted for a link that has lost nothing.
 The report's `network_witness` hashes in-flight frames, per-link last
 arrivals, stream positions, live layers, cuts and baselines. It is folded into
-`world_witness` only when the run has baseline overrides or applied a shape, so
+`world_witness` only when the run has baseline overrides, applied a shape or used a connection selector, so
 a run without link policy keeps its previous world witness. Shape/heal evidence follows the same strict-before-admission
 counter boundary as partitions. Fork snapshots retain baselines, last arrivals,
 and both RNG streams; arming a run seed reseeds those streams as before.
 
-Every final report includes `network_witness`, folded into `world_witness`. Its
+Every final report includes `network_witness`, conditionally folded into `world_witness` as described above. Its
 versioned, little-endian, length-prefixed encoding hashes pending frame arrival,
 sequence, directed indices and SHA-256 of frame bytes; last arrivals; loss/jitter
 stream counters; layers ordered by fault ID with handle, pairs and policy; active
@@ -258,6 +258,79 @@ cuts; and baselines. Counts delimit collections and strings. It retains bounded
 infrastructure state without packet contents or application schemas. This VMM
 change creates a new engine identity; hardware/replay qualification is separate
 from portable policy tests.
+
+## Connection selectors
+
+Guest controllers can discover an IPv4 TCP direction and arm a scoped loss:
+
+```python
+page = world.connections("server", "client")
+connection = next(c for c in page["connections"] if c["dst_port"] == 4000)
+handle = world.drop_connection(connection)
+# Run the workload phase that must encounter loss.
+evidence = world.heal(handle)
+assert evidence["dropped"] > 0
+```
+
+Discovery returns at most 32 records per live page in incarnation order. Use
+`after=page["next_after"]` for the next page. Selection binds the complete
+machine/address/port/direction/incarnation record at the globally committed
+admission boundary. A connection that disappears between discovery and admission
+is rejected with `invalid_state`. The controller cannot select itself.
+
+The bounded classifier observes candidate Ethernet sends before partition/link
+loss decisions. An unfragmented IPv4 TCP SYN without ACK admits both directions
+of a tuple and assigns a monotonically increasing run-local incarnation. A SYN
+retransmission with the same initial sequence number retains it. A different
+initial sequence number replaces it, even without a close. Simultaneous open
+joins the same incarnation; SYN-ACK must acknowledge the opposite initial sequence
+number plus one (wrapping u32). A SYN-ACK alone or midstream traffic without an
+observed opening SYN does not create a connection. A same-ISN opening SYN after
+observed closure creates a new incarnation. There is no idle timeout.
+
+FIN half-closes one direction; both observed FINs or either RST close admission.
+FIN/RST and subsequent retransmissions still classify under that incarnation until
+a replacement SYN. Tracking describes observed sends, including dropped packets,
+not a kernel's confirmed TCP state. Process stop/restart does not reset the NIC or
+classifier. Restart/reuse without a close and with an identical opening ISN is
+indistinguishable from a SYN retransmission and deliberately retains identity.
+After replacement, newly sent non-SYN packets on the tuple classify under the
+latest incarnation; TCP sequence-window validation is not implemented. Already
+routed frames retain their old drop/arrival decisions regardless of later reuse.
+
+Only untagged unicast Ethernet carrying structurally valid IPv4/TCP is classified.
+IPv4/TCP options are bounded by their header lengths; checksum validation is left
+to the guest (including checksum offload). All IPv4 fragments, including first
+fragments with MF, malformed/truncated headers, VLAN, IPv6, ARP, UDP, multicast
+and broadcast bypass connection selection and retain ordinary link policies.
+There is no reassembly or application-protocol decoding.
+
+At most 1024 bidirectional tuples and 1024 active selector handles are retained.
+A new tuple at capacity evicts the oldest admitted incarnation, including an
+actively selected one; stale handles keep their counts but cannot attach to a
+replacement. Evicted midstream traffic is unclassified until a fresh opening SYN.
+Selector capacity exhaustion is an explicit admission error. Counters and IDs do
+not reset on discovery, process restart or healing. Fork snapshots preserve the
+classifier and selector state, and reseeding does not reset their identities.
+
+Partitions dominate selected loss, which dominates directed link shapes.
+Selected loss drops every matching candidate before link RNG and FIFO updates;
+unselected traffic uses the existing link policy and global causal floor. No
+selector draws RNG. Broadcast candidate ordering remains ascending machine index.
+Overlapping handles each retain their matched/dropped counts, and healing only
+releases its own handle. Arming is not evidence of injection: require a positive
+`dropped` count from heal or retained `selection_counts`. Pending frames are never
+reclassified by a fault, healing or tuple reuse.
+
+Once a selector is applied, the network witness includes a tagged encoding of
+classifier tuples, incarnation counter, eviction count, SYN/FIN/RST state, active
+selectors and their counters. The world witness then includes that network
+witness even after healing. Without selector use, tracking contributes no witness
+bytes or report fields and leaves legacy RNG, frame decisions and results intact.
+This changes the engine identity. Portable tests exercise the production modules;
+AMD execution, replay and observation/performance qualification remain separate.
+The finite [AMD procedure](connection-selectors-amd.md) uses the guest-owned
+`harness/acceptance/workloads/connections.yaml` fixture.
 
 ## Bundles
 
