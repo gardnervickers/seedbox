@@ -31,6 +31,7 @@ directory. Every runtime input has a default, so no flags are required:
 | --- | --- | --- |
 | Compose file | `compose.yaml` in the given directory (default `.`) | positional path |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
+| Runtime checkpoint | absent; ordinary execution | `--checkpoint-at-ns T --branch-seed B` (run only; no environment backing) |
 | Exploration count | `1`, sequential execution | `--count` |
 | CPU | first free core other than CPU 0's, under the shared lease | `--cpu`, `SEEDBOX_CPU` |
 | Guest kernel | `bzImage` in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`, `./artifacts`, then `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
@@ -57,6 +58,13 @@ INCOMPLETE and 124 TIMEOUT.
 and transfer from qualified execution. Same software versions, seed and exact
 retained inputs must replay on a qualified compatible profile; changing versions
 may change execution. Release compatibility remains a V0 qualification gate.
+
+Experimental runtime forks use `seedbox run examples/redis --checkpoint-at-ns
+1000000000 --branch-seed 42 --allow-dev-engine` with the newly built VMM. The
+ordinary seed drives the prefix; future simulator randomness uses seed 42 after
+one simulated second. Replay reads these semantic settings from the retained run.
+Guest PRNG state remains captured. See the [checkpoint design](docs/runtime.md#runtime-checkpoint-design-experimental)
+for state coverage, engine-only multiple checkpoints/branches and unverified KVM behavior.
 
 ## Finite exploration
 

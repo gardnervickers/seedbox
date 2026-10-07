@@ -116,6 +116,8 @@ impl CancellationToken {
 /// Only materialized, verified inputs reach the executor. Original Compose paths,
 /// registry references, and build contexts are deliberately absent.
 pub struct ExecutionRequest<'a> {
+    /// Ordinary retained parent identity for an opt-in runtime checkpoint.
+    pub checkpoint_parent: Option<ContentDigest>,
     pub seed: u64,
     pub limits: &'a Limits,
     pub network: &'a Network,

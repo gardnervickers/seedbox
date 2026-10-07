@@ -690,3 +690,68 @@ fn doctor_dev_opt_in_keeps_host_refusal_and_creates_no_state() {
         assert!(!dir.path().join(".seedbox").exists());
     }
 }
+
+#[test]
+fn checkpoint_flags_are_paired_typed_and_documented() {
+    let dir = tempfile::tempdir().unwrap();
+    for (args, phrase) in [
+        (vec!["run", "--checkpoint-at-ns", "1"], "--branch-seed"),
+        (vec!["run", "--branch-seed", "2"], "--checkpoint-at-ns"),
+        (
+            vec!["run", "--checkpoint-at-ns", "bad", "--branch-seed", "2"],
+            "--checkpoint-at-ns",
+        ),
+        (
+            vec![
+                "run",
+                "--checkpoint-at-ns",
+                "1",
+                "--branch-seed",
+                "18446744073709551616",
+            ],
+            "--branch-seed",
+        ),
+    ] {
+        let result = seedbox_with(&args, dir.path(), None);
+        assert_eq!(result.status.code(), Some(2));
+        assert!(stderr(&result).contains(phrase), "{}", stderr(&result));
+    }
+    let help = seedbox_with(&["help", "run"], dir.path(), None);
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("--checkpoint-at-ns"));
+    assert!(help.contains("--branch-seed"));
+    assert!(!help.contains("SEEDBOX_CHECKPOINT"));
+    fs::write(dir.path().join("compose.yaml"), "name: checkpoint-test\nservices:\n  workload: {image: example/workload:v1}\nx-seedbox:\n  version: 1\n  seed: 0\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: workload}\n").unwrap();
+    let result = seedbox_with(
+        &[
+            "run",
+            "--checkpoint-at-ns",
+            "1000000000",
+            "--branch-seed",
+            "2",
+        ],
+        dir.path(),
+        None,
+    );
+    assert_eq!(result.status.code(), Some(2));
+    assert_eq!(stderr(&result), "error: --checkpoint-at-ns must be before the simulated time limit; choose an earlier checkpoint\n");
+    assert!(!dir.path().join(".seedbox").exists());
+    let accepted = seedbox_with(
+        &[
+            "run",
+            "--checkpoint-at-ns",
+            "0",
+            "--branch-seed",
+            "0",
+            "--vmm",
+            "/checkpoint-missing-vmm",
+        ],
+        dir.path(),
+        None,
+    );
+    assert_eq!(
+        stderr(&accepted),
+        "error: --vmm /checkpoint-missing-vmm: not found\n"
+    );
+}

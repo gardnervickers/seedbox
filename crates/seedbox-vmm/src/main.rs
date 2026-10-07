@@ -2,6 +2,7 @@
 //! all executed by one host thread. A seed and the config fully determine the run.
 
 mod boundary;
+mod checkpoint;
 mod control;
 mod counter;
 mod devices;
@@ -419,6 +420,25 @@ fn run() -> Result<Value, String> {
     let kernel = std::fs::read(path(&cfg["kernel"])).map_err(|e| format!("kernel: {e}"))?;
     let mem = cfg["mem_mb"].as_u64().unwrap_or(512) as usize * 1024 * 1024;
     let duration = cfg["duration_ns"].as_u64().unwrap_or(60_000_000_000);
+    let checkpoint_list = arg(&args, "--checkpoint-at-ns");
+    if args.iter().any(|a| a == "--checkpoint-at-ns") && checkpoint_list.is_none() {
+        return Err("--checkpoint-at-ns requires comma-separated unsigned nanoseconds".into());
+    }
+    let checkpoint_times = if let Some(list) = checkpoint_list.as_deref() {
+        if !cfg["checkpoint"].is_null() {return Err("--checkpoint-at-ns cannot override config.checkpoint".into());}
+        checkpoint::times(list, duration)?
+    } else if !cfg["checkpoint"].is_null() {
+        let t = cfg["checkpoint"]["at_ns"].as_u64().ok_or("checkpoint.at_ns required")?;
+        seeds = vec![cfg["checkpoint"]["branch_seed"].as_u64().ok_or("checkpoint.branch_seed required")?];
+        if arg(&args, "--fork-seeds").is_some() {return Err("--fork-seeds cannot override config.checkpoint".into());}
+        checkpoint::times(&t.to_string(), duration)?
+    } else {Vec::new()};
+    if !checkpoint_times.is_empty() {
+        if cfg["boot"].is_object() {return Err("runtime checkpoints cannot mix with boot forks".into());}
+        if args.iter().any(|a| a == "--trace") {return Err("--trace cannot be combined with runtime checkpoints".into());}
+        let unique: std::collections::BTreeSet<_> = seeds.iter().collect();
+        if unique.len() != seeds.len() {return Err("runtime checkpoint branch seeds must be distinct".into());}
+    }
     let end_on: Option<String> = cfg["end_on_exit"].as_str().map(String::from);
     let names: Vec<String> = cfg["machines"]
         .as_array()
@@ -449,7 +469,7 @@ fn run() -> Result<Value, String> {
         // again at the release.
         check_plan_after(&cfg, t.saturating_add(release_skew))?;
     }
-    if seeds.len() > 1 && !forked {
+    if seeds.len() > 1 && !forked && checkpoint_times.is_empty() {
         return Err("--fork-seeds requires boot.seed in the config".into());
     }
     if seeds.len() > 1 && args.iter().any(|a| a == "--trace") {
@@ -583,6 +603,49 @@ fn run() -> Result<Value, String> {
     };
     if !forked {
         let kills = arm_seed(&mut world, &cfg, &names, seed, 0)?;
+        if !checkpoint_times.is_empty() {
+            let parent = match cfg["checkpoint"]["parent_identity"].as_str() {
+                Some(parent) if parent.len()==64 && parent.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)) => parent.to_string(),
+                Some(_) => return Err("checkpoint.parent_identity must be a lowercase SHA-256 digest".into()),
+                None => {
+                    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+                    let engine = format!("{:x}", Sha256::digest(std::fs::read(exe).map_err(|e| e.to_string())?));
+                    checkpoint::parent_identity(&cfg, seed, &engine, |p| {
+                        std::fs::read(base.join(p)).map(|bytes|format!("{:x}",Sha256::digest(bytes))).map_err(|e|format!("{p}: {e}"))
+                    })?
+                }
+            };
+            // Reconstruct each prefix from the same origin: an extra hard
+            // stop for an earlier checkpoint must not change a later one's
+            // identity or execution. The held snapshots remain independent.
+            let origin = if checkpoint_times.len()>1 {Some(WorldSnapshot::take(&mut world)?)} else {None};
+            let mut held = Vec::new();
+            for (i, &at) in checkpoint_times.iter().enumerate() {
+                if i>0 {origin.as_ref().unwrap().restore_checkpoint(&mut world)?;}
+                let outcome = simulate_to(&mut world, &cfg, duration, &end_on, None, Some(at))?;
+                if outcome != "checkpoint" {return Err(format!("checkpoint at {at} ns not reached: {outcome}"));}
+                held.push((at, WorldSnapshot::take(&mut world)?));
+            }
+            let mut reports = Vec::new();
+            for (at, snapshot) in &held {
+                for &branch_seed in &seeds {
+                    snapshot.restore_checkpoint(&mut world)?;
+                    reseed_checkpoint(&mut world, &names, branch_seed);
+                    let dir = format!("{out}/checkpoint-{at}/seed-{branch_seed}");
+                    checkpoint_output(&mut world, &dir, args.iter().any(|a| a == "--stream-console"))?;
+                    let started = Instant::now();
+                    let outcome = simulate(&mut world, &cfg, duration, &end_on, None)?;
+                    // The public report's seed remains the parent seed; the
+                    // semantic branch seed and identity have explicit fields.
+                    let mut r = report(&mut world, outcome, seed, &kills, started.elapsed().as_secs_f64(), digest, &dir, duration, &end_on)?;
+                    r["checkpoint"] = json!({"at_ns":at,"branch_seed":branch_seed,"parent_identity":parent,
+                        "branch_identity":checkpoint::branch_identity(&parent,*at,branch_seed)});
+                    reports.push(r);
+                }
+            }
+            if reports.len()==1 {return Ok(reports.pop().unwrap());}
+            return Ok(json!({"report_version":1,"parent_identity":parent,"checkpoints":reports}));
+        }
         let started = Instant::now();
         let outcome = simulate(&mut world, &cfg, duration, &end_on, None)?;
         let host_seconds = started.elapsed().as_secs_f64();
@@ -641,6 +704,30 @@ fn run() -> Result<Value, String> {
                  "snapshot_host_seconds": snapshot_host_seconds},
         "seeds": reports,
     }))
+}
+
+/// Keep the captured plan and all sampled effects. Only future draws change.
+fn reseed_checkpoint(world: &mut World, names: &[String], seed: u64) {
+    world.run_seed = seed;
+    world.link_rng = link_rngs(seed, names);
+    for (mach, name) in world.machines.iter_mut().zip(names) {
+        mach.timer_rng = Some(Rng::new(seed, &format!("checkpoint-timer/{name}/{}", mach.incarnation)));
+    }
+}
+
+fn checkpoint_output(world: &mut World, out: &str, stream: bool) -> Result<(), String> {
+    std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
+    if stream {
+        use std::io::Write;
+        for mach in &mut world.machines {
+            for (uart, ext) in [(&mut mach.com1, "console"), (&mut mach.com2, "mgmt")] {
+                let mut file = std::fs::File::create(format!("{out}/{}.{ext}", mach.name)).map_err(|e| e.to_string())?;
+                file.write_all(&uart.out).map_err(|e| e.to_string())?;
+                uart.output_file = Some(file);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn link_rngs(seed: u64, names: &[String]) -> BTreeMap<(usize, usize), Rng> {
@@ -781,10 +868,8 @@ fn release(world: &mut World, cfg: &Value, names: &[String], seed: u64, skew: u6
     arm_seed(world, cfg, names, seed, at.saturating_add(skew))
 }
 
-/// A world parked at its launch barrier, kept so that later seeds start from
-/// it without booting. Faults, control and scenarios are not captured: they
-/// are empty until the release, which builds them from the run seed. Only
-/// the management readiness recorded during boot carries over.
+/// A committed world boundary. Runtime forks retain the active plan and RNG
+/// positions; boot forks still replace the plan and streams at release.
 struct WorldSnapshot {
     machines: Vec<MachineSnapshot>,
     events: Vec<BTreeMap<(u64, u64), Payload>>,
@@ -797,14 +882,16 @@ struct WorldSnapshot {
     link_counts: BTreeMap<(usize, usize), [u64; 3]>,
     semantic_counts: network_counters::NetworkCounters,
     slices: u64,
-    readiness: Vec<Value>,
+    faults: faults::Faults,
+    control: control::Control,
+    link_rng: BTreeMap<(usize, usize), Rng>,
+    run_seed: u64,
+    incarnations: Vec<Vec<Value>>,
+    paused_ingress: Vec<u64>,
 }
 
 impl WorldSnapshot {
     fn take(world: &mut World) -> Result<Self, String> {
-        if !world.machines.iter().all(|m| m.parked) {
-            return Err("world fork requires every machine at its launch barrier".into());
-        }
         Ok(Self {
             machines: world.machines.iter_mut().map(Machine::snapshot).collect::<Result<_, _>>()?,
             events: world.events.clone(),
@@ -817,8 +904,21 @@ impl WorldSnapshot {
             link_counts: world.link_counts.clone(),
             semantic_counts: world.semantic_counts.clone(),
             slices: world.slices,
-            readiness: world.faults.readiness.clone(),
+            faults: world.faults.clone(), control: world.control.clone(),
+            link_rng: world.link_rng.clone(), run_seed: world.run_seed,
+            incarnations: world.incarnations.clone(), paused_ingress: world.paused_ingress.clone(),
         })
+    }
+
+    /// Multiple held snapshots cannot share Undo's single dirty-page baseline.
+    /// Fresh VMs force full RAM copies and discard stale incarnation/KVM state.
+    fn restore_checkpoint(&self, world: &mut World) -> Result<u64, String> {
+        for i in 0..world.machines.len() {
+            let name = world.machines[i].name.clone();
+            let seed = entropy_seed(world.boot_seed, &format!("boot-entropy/{name}"));
+            world.machines[i] = boot_machine(&world.kvm, &name, &world.boot[i], world.barrier, seed)?;
+        }
+        self.restore(world)
     }
 
     /// Put the world back to the fork point. Returns RAM pages copied back.
@@ -834,8 +934,8 @@ impl WorldSnapshot {
             }
             pages += world.machines[i].restore(snapshot)?;
         }
-        world.incarnations.iter_mut().for_each(Vec::clear);
-        world.paused_ingress.fill(0);
+        world.incarnations = self.incarnations.clone();
+        world.paused_ingress = self.paused_ingress.clone();
         world.events = self.events.clone();
         world.strict_events = self.strict_events.clone();
         world.seq = self.seq;
@@ -846,9 +946,10 @@ impl WorldSnapshot {
         world.link_counts = self.link_counts.clone();
         world.semantic_counts = self.semantic_counts.clone();
         world.slices = self.slices;
-        let names: Vec<String> = world.machines.iter().map(|m| m.name.clone()).collect();
-        world.faults = boot_faults(&names, &self.readiness, world.latency)?;
-        world.control = control::Control::new(&Value::Null, names, world.latency, world.early)?;
+        world.faults = self.faults.clone();
+        world.control = self.control.clone();
+        world.link_rng = self.link_rng.clone();
+        world.run_seed = self.run_seed;
         Ok(pages)
     }
 }
@@ -864,6 +965,17 @@ fn simulate(
     end_on: &Option<String>,
     fork: Option<Option<u64>>,
 ) -> Result<&'static str, String> {
+    simulate_to(world, cfg, duration, end_on, fork, None)
+}
+
+fn simulate_to(
+    world: &mut World,
+    cfg: &Value,
+    duration: u64,
+    end_on: &Option<String>,
+    fork: Option<Option<u64>>,
+    checkpoint: Option<u64>,
+) -> Result<&'static str, String> {
     let until_barrier = fork.is_some();
     let fork_at = fork.flatten();
     let n = world.machines.len();
@@ -877,6 +989,11 @@ fn simulate(
             .enumerate()
             .min_by_key(|(i, k)| (**k, *i))
             .unwrap();
+        // Capture before every action at T. Sleeping/frozen machines may
+        // have earlier local clocks; their next possible action is >= T.
+        if checkpoint.is_some_and(|t| key >= t && world.control.boundary() >= t && world.faults.next_boundary() >= t) {
+            return Ok("checkpoint");
+        }
         if until_barrier
             && world.machines.iter().all(|m| m.parked || matches!(m.state, State::Exited(_)))
         {
@@ -969,7 +1086,8 @@ fn simulate(
             .min(world.next_event(m))
             .min(duration)
             .min(fault_boundary)
-            .min(control_boundary);
+            .min(control_boundary)
+            .min(checkpoint.unwrap_or(u64::MAX));
         if let Some(t) = fork_at {
             // Stop exactly at the fork time, or as soon after it as owed I/O
             // cost allows.
@@ -980,6 +1098,7 @@ fn simulate(
         // A slice ending at the horizon or an event may stop a little early
         // (at a cheap deterministic point); the run's end is exact.
         let early = if limit == duration
+            || checkpoint == Some(limit)
             || fork_at == Some(limit)
             || limit == fault_boundary
             || limit == control_boundary
@@ -1233,5 +1352,114 @@ mod progress_tests {
         assert!(stop_progress(&mut previous,delivered,true).is_ok());
         assert_eq!(previous,None);
         assert!(stop_progress(&mut previous,delivered,false).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+
+    fn world(undo: u64) -> World {
+        let kvm=kvm_ioctls::Kvm::new().unwrap();
+        // Increment a RAM marker on every counted loop iteration, then halt.
+        let code=[0xb9,0x10,0x27,0,0,0xff,0x05,0,0,8,0,0x49,0x75,0xf7,0xf4];
+        let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
+        let boot=BootInputs {kernel:kernel.into(),initrd:Rc::from([]),cmdline:(String::new(),String::new()),
+            mem:0x0810_0000,mac:None,control_channel:true,disk:Some(disk::Disk::new(None,Some(8)).unwrap()),
+            undo_margin:undo,tolerance:0,timer_jitter:0,exact_timer_ppm:0,margin:None,console_limit:None};
+        let names=vec!["a".to_string(),"b".to_string()];
+        let machines=names.iter().map(|name|boot_machine(&kvm,name,&boot,false,[0;32]).unwrap()).collect();
+        World {machines,kvm,boot:vec![boot.clone(),boot],barrier:false,boot_seed:7,run_seed:7,
+            incarnations:vec![vec![],vec![]],paused_ingress:vec![0;2],counter:Counter::new().unwrap(),
+            events:vec![BTreeMap::new();2],strict_events:vec![BTreeMap::new();2],seq:0,
+            lookahead:100,early:0,latency:100,jitter:10,link_rng:link_rngs(7,&names),
+            link_last:BTreeMap::new(),partitioned:BTreeMap::new(),faults:boot_faults(&names,&[],100).unwrap(),
+            control:control::Control::new(&Value::Null,names,100,0).unwrap(),macs:vec![],
+            dropped:0,delivered:0,link_counts:BTreeMap::new(),semantic_counts:network_counters::NetworkCounters::default(),slices:0}
+    }
+
+    fn finish(world: &mut World) -> Vec<(String,String)> {
+        simulate(world,&json!({}),20_000,&None,None).unwrap();
+        world.machines.iter_mut().map(|m|(m.exit_witness(),m.state_digest().0)).collect()
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn several_checkpoints_restore_nonmonotonically_and_repeat_branches() {
+        for undo in [0,256] {
+            let mut w=world(undo);
+            assert_eq!(simulate_to(&mut w,&json!({}),20_000,&None,None,Some(500)).unwrap(),"checkpoint");
+            let first=WorldSnapshot::take(&mut w).unwrap();
+            let first_state:Vec<_>=w.machines.iter_mut().map(|m|m.state_digest().0).collect();
+            assert_eq!(simulate_to(&mut w,&json!({}),20_000,&None,None,Some(800)).unwrap(),"checkpoint");
+            let second=WorldSnapshot::take(&mut w).unwrap();
+            let want=finish(&mut w);
+            second.restore_checkpoint(&mut w).unwrap();
+            assert_eq!(finish(&mut w),want,"continuation from second checkpoint, undo={undo}");
+            first.restore_checkpoint(&mut w).unwrap();
+            assert_eq!(w.machines.iter_mut().map(|m|m.state_digest().0).collect::<Vec<_>>(),first_state);
+            let names=vec!["a".to_string(),"b".to_string()];
+            reseed_checkpoint(&mut w,&names,42);
+            let branch=finish(&mut w);
+            second.restore_checkpoint(&mut w).unwrap();
+            finish(&mut w);
+            first.restore_checkpoint(&mut w).unwrap();
+            reseed_checkpoint(&mut w,&names,42);
+            assert_eq!(finish(&mut w),branch,"old checkpoint restored after newer one, undo={undo}");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn checkpoint_keeps_lifecycle_disk_network_control_and_rng_state() {
+        for undo in [0,256] {
+            let mut w=world(undo);
+            let names=vec!["a".to_string(),"b".to_string()];
+            w.control=control::Control::new(&json!({"machine":"a","latency_ns":1000,"placement":{"a":"a","b":"b"}}),names.clone(),100,0).unwrap();
+            w.control.request(0,0,b"SBX_RPC1 1 1 {\"version\":1,\"id\":1,\"op\":\"inspect\"}",0).unwrap();
+            assert_eq!(simulate_to(&mut w,&json!({}),20_000,&None,None,Some(500)).unwrap(),"checkpoint");
+            w.schedule(1,900,Payload::Frame {from:0,bytes:vec![1,2,3]});
+            w.strict_events[0].insert((950,99),b"management\n".to_vec());
+            w.partitioned.insert((0,1),true);
+            w.link_last.insert((0,1),900);
+            w.count_link(900,0,1,0);
+            w.lifecycle(1,faults::Lifecycle::Crash,500).unwrap();
+            w.lifecycle(1,faults::Lifecycle::Reboot,500).unwrap();
+            w.lifecycle(1,faults::Lifecycle::Pause,500).unwrap();
+            w.paused_ingress[1]=2;
+            w.machines[0].timer_rng=Some(Rng::new(7,"timer"));
+            w.machines[0].timer_rng.as_mut().unwrap().next();
+            let disk=&mut w.machines[0].blk.as_mut().unwrap().disk;
+            disk.write(0,&[1;512]).unwrap();disk.flush();disk.write(1,&[2;512]).unwrap();
+            let disk_digest=disk.digest();
+            w.faults.management_ready(0,300,100).unwrap();
+            w.faults.append(seedbox_control::Plan {id:0,at_ns:500,deadline_ns:600,
+                action:seedbox_control::Action::Partition {handle:"held".into(),left:vec!["a".into()],right:vec!["b".into()]}}).unwrap();
+            w.faults.apply_due(500);
+            let handles=w.faults.active_handles();
+            let saved=WorldSnapshot::take(&mut w).unwrap();
+            let link_draw=w.link_rng.get_mut(&(0,1)).unwrap().next();
+            let timer_draw=w.machines[0].timer_rng.as_mut().unwrap().next();
+            w.events[1].clear();w.strict_events[0].clear();w.faults.error=Some("changed".into());
+            w.lifecycle(0,faults::Lifecycle::Crash,500).unwrap();
+            saved.restore_checkpoint(&mut w).unwrap();
+            assert_eq!(w.machines[1].incarnation,1);assert!(w.machines[1].paused);
+            assert_eq!(w.incarnations[1].len(),1);assert_eq!(w.paused_ingress[1],2);
+            assert!(matches!(&w.events[1].values().next().unwrap(),Payload::Frame{from:0,bytes} if bytes==&vec![1,2,3]));
+            assert_eq!(w.strict_events[0][&(950,99)],b"management\n");
+            assert_eq!(w.link_last[&(0,1)],900);assert!(w.partitioned[&(0,1)]);
+            assert_eq!(w.machines[0].blk.as_ref().unwrap().disk.digest(),disk_digest);
+            assert_eq!(w.link_rng.get_mut(&(0,1)).unwrap().next(),link_draw);
+            assert_eq!(w.machines[0].timer_rng.as_mut().unwrap().next(),timer_draw);
+            assert!(w.faults.error.is_none());assert_eq!(w.faults.readiness.len(),1);
+            assert_eq!(w.faults.active_handles(),handles);assert!(w.faults.blocked(0,1));
+            assert_eq!(w.faults.log.len(),1);
+            assert_eq!(w.control.boundary(),1000);assert_eq!(w.control.pending.as_ref().unwrap().relay,1);
+            let pending=w.control.pending.as_ref().unwrap().request.clone();
+            reseed_checkpoint(&mut w,&names,99);
+            assert_eq!(w.control.pending.as_ref().unwrap().request,pending);
+            assert_eq!(w.run_seed,99);
+            assert_ne!(w.link_rng.get_mut(&(0,1)).unwrap().next(),link_draw);
+        }
     }
 }

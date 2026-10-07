@@ -270,6 +270,25 @@ impl VmmExecutor {
         }
     }
 
+    /// Bind a runtime checkpoint and its branch seed into retained semantics.
+    pub fn with_checkpoint(mut self, at_ns: u64, branch_seed: u64) -> Self {
+        self.profile
+            .semantic_parameters
+            .insert("checkpoint_at_ns".into(), at_ns.to_string());
+        self.profile
+            .semantic_parameters
+            .insert("checkpoint_branch_seed".into(), branch_seed.to_string());
+        self
+    }
+
+    /// Reconstruct checkpoint settings from retained inputs during replay.
+    pub fn with_recorded_checkpoint(self, profile: &ExecutionProfile) -> Result<Self> {
+        Ok(match recorded_checkpoint(profile)? {
+            Some((at, seed)) => self.with_checkpoint(at, seed),
+            None => self,
+        })
+    }
+
     pub fn with_margin(mut self, margin: &str) -> Result<Self> {
         if margin != "adaptive" && margin.parse::<u64>().ok().is_none_or(|value| value == 0) {
             return Err(Error::Execution(
@@ -292,6 +311,50 @@ impl VmmExecutor {
     }
 }
 
+/// Checkpoints are optional, but partial or malformed retained settings fail closed.
+pub fn recorded_checkpoint(profile: &ExecutionProfile) -> Result<Option<(u64, u64)>> {
+    let parameters = &profile.semantic_parameters;
+    match (
+        parameters.get("checkpoint_at_ns"),
+        parameters.get("checkpoint_branch_seed"),
+    ) {
+        (None, None) => Ok(None),
+        (Some(at), Some(seed)) => {
+            let invalid = || Error::Integrity("invalid checkpoint semantic parameters".into());
+            let t: u64 = at.parse().map_err(|_| invalid())?;
+            let b: u64 = seed.parse().map_err(|_| invalid())?;
+            if at != &t.to_string() || seed != &b.to_string() {
+                return Err(invalid());
+            }
+            Ok(Some((t, b)))
+        }
+        _ => Err(Error::Integrity(
+            "incomplete checkpoint semantic parameters".into(),
+        )),
+    }
+}
+
+/// The hypothetical ordinary parent shares all retained bytes and configuration.
+pub fn checkpoint_parent(
+    identity: &crate::orchestration::RunIdentity,
+) -> Result<Option<ContentDigest>> {
+    if recorded_checkpoint(&identity.inputs.profile)?.is_none() {
+        return Ok(None);
+    }
+    let mut parent = identity.clone();
+    parent
+        .inputs
+        .profile
+        .semantic_parameters
+        .remove("checkpoint_at_ns");
+    parent
+        .inputs
+        .profile
+        .semantic_parameters
+        .remove("checkpoint_branch_seed");
+    Ok(Some(ContentDigest::of(&serde_json::to_vec(&parent)?)))
+}
+
 const COUNTER: &str = "counter";
 
 /// The branch counter profile a recorded run was made with.
@@ -305,6 +368,7 @@ pub fn recorded_counter(profile: &ExecutionProfile) -> Result<CounterProfile> {
 
 impl ExecutionBackend for VmmExecutor {
     fn preflight(&self, output: Option<&Path>) -> Result<()> {
+        recorded_checkpoint(&self.profile)?;
         crate::admission::validate_profile(&self.profile)?;
         self.validate_execution_mode()?;
         if !self.counter.qualified() {
@@ -431,14 +495,42 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
         .iter()
         .map(|(name, digest)| Ok(json!({"name":name,"initrd":artifact(digest)?})))
         .collect::<Result<Vec<_>>>()?;
-    Ok(json!({
+    let mut world = json!({
         "kernel":artifact(&request.prepared.kernel)?, "mem_mb":memory,
         "duration_ns":request.limits.simulated_time_ns,"end_on_exit":workload_machine,
         "timer_jitter_ns":request.schedule.timer_jitter_ns,"stop_tolerance_ns":request.schedule.stop_tolerance_ns,
         "network":{"latency_ns":request.network.latency_ns,"jitter_ns":request.network.jitter_ns},
         "machines":machines,"control":control,
         "control_channel":"virtio-console-v1",
-    }))
+    });
+    if let Some(checkpoint) = checkpoint_metadata(request)? {
+        world["checkpoint"] = checkpoint;
+    }
+    Ok(world)
+}
+
+fn checkpoint_metadata(request: &ExecutionRequest<'_>) -> Result<Option<Value>> {
+    let Some((at, seed)) = recorded_checkpoint(&request.prepared.profile)? else {
+        return Ok(None);
+    };
+    if at >= request.limits.simulated_time_ns {
+        return Err(Error::Execution(
+            "checkpoint time must be before the simulated time limit".into(),
+        ));
+    }
+    let parent = request
+        .checkpoint_parent
+        .as_ref()
+        .ok_or_else(|| Error::Integrity("checkpoint parent identity missing".into()))?;
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"seedbox-checkpoint-branch-v1\0");
+    h.update(parent.hex().as_bytes());
+    h.update(at.to_le_bytes());
+    h.update(seed.to_le_bytes());
+    Ok(Some(
+        json!({"at_ns":at,"branch_seed":seed,"parent_identity":parent,"branch_identity":format!("{:x}",h.finalize())}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -469,6 +561,8 @@ struct MachineReport {
 }
 #[derive(Deserialize)]
 struct VmmReport {
+    #[serde(default)]
+    checkpoint: Option<Value>,
     report_version: u32,
     seed: u64,
     /// Absent from engines older than counter profiles, which are all Zen.
@@ -711,6 +805,9 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
     let raw: VmmReport = serde_json::from_slice(bytes)?;
     if raw.report_version != 1 || raw.seed != request.seed {
         return Err(Error::Integrity("VMM report version/seed mismatch".into()));
+    }
+    if raw.checkpoint != checkpoint_metadata(request)? {
+        return Err(Error::Integrity("VMM checkpoint identity mismatch".into()));
     }
     let counted = recorded_counter(&request.prepared.profile)?;
     if counted != CounterProfile::Zen && raw.counter_profile.is_none() {
@@ -1141,6 +1238,39 @@ mod doctor_tests {
             raw_cpuid: p.effective_cpuid,
         }
     }
+    #[test]
+    fn replay_reconstructs_checkpoint_profile_without_performance_changes() {
+        let ordinary = VmmExecutor::from_engine_digest(
+            ContentDigest::of(b"engine"),
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap();
+        let branch = ordinary.clone().with_checkpoint(500, 42);
+        assert_eq!(
+            branch.performance_parameters(),
+            ordinary.performance_parameters()
+        );
+        assert_eq!(
+            ordinary
+                .clone()
+                .with_recorded_checkpoint(&branch.profile())
+                .unwrap()
+                .profile(),
+            branch.profile()
+        );
+        assert_eq!(
+            ordinary
+                .clone()
+                .with_recorded_checkpoint(&ordinary.profile())
+                .unwrap()
+                .profile(),
+            ordinary.profile()
+        );
+    }
+
     #[test]
     fn dev_artifact_pairs_require_permission_and_consistent_markers() {
         let pinned_engine = ContentDigest::try_from(ENGINE.to_owned()).unwrap();

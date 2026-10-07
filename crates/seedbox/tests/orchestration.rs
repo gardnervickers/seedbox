@@ -1405,3 +1405,46 @@ fn exploration_checks_inputs_first_and_releases_preflight_scope_before_preparing
         }
     }
 }
+
+#[test]
+fn checkpoint_identity_names_ordinary_parent_and_replays_retained_semantics() {
+    let mut fixture = Fixture::new();
+    let parent = fixture.run();
+    assert_eq!(
+        seedbox::vmm::checkpoint_parent(&parent.record.identity).unwrap(),
+        None
+    );
+    fixture
+        .backend
+        .profile
+        .semantic_parameters
+        .insert("checkpoint_at_ns".into(), "500".into());
+    fixture
+        .backend
+        .profile
+        .semantic_parameters
+        .insert("checkpoint_branch_seed".into(), "42".into());
+    fixture.preparer.inputs.profile = fixture.backend.profile.clone();
+    let branch = fixture.run();
+    assert_eq!(branch.record.outcome, Outcome::Pass);
+    assert_eq!(
+        seedbox::vmm::checkpoint_parent(&branch.record.identity).unwrap(),
+        Some(parent.record.run_id.clone())
+    );
+    assert_ne!(branch.record.run_id, parent.record.run_id);
+    let replay = fixture.replay(&branch);
+    assert_eq!(replay.record.run_id, branch.record.run_id);
+    assert_eq!(replay.record.replay.unwrap().status, ReplayStatus::Match);
+    fixture
+        .backend
+        .profile
+        .semantic_parameters
+        .insert("checkpoint_branch_seed".into(), "43".into());
+    fixture.preparer.inputs.profile = fixture.backend.profile.clone();
+    let other = fixture.run();
+    assert_ne!(other.record.run_id, branch.record.run_id);
+    assert_eq!(
+        seedbox::vmm::checkpoint_parent(&other.record.identity).unwrap(),
+        Some(parent.record.run_id)
+    );
+}

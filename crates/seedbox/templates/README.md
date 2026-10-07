@@ -37,6 +37,14 @@ see the repository's `docs/runtime.md` for setup and limits. `--margin` and
 Charged timer I/O retains its full cost across scheduler boundaries; pending
 operations are included in terminal witnesses.
 
+For an experimental runtime fork, `seedbox run --checkpoint-at-ns 1000000000
+--branch-seed 42 --allow-dev-engine` captures the world at one simulated second
+and continues with new simulator randomness. Use the newly built VMM. These are
+semantic options with no environment backing; replay reads them from the retained
+run. Guest PRNG state stays in captured RAM. The public CLI currently supports
+one checkpoint branch, without saved snapshot files or event triggers. See the
+repository's `docs/runtime.md` for coverage and pending KVM qualification.
+
 For optional build timestamp control, `prepare`, `run` and `explore` accept
 `--build-epoch SECONDS` (0..=4294967295; default absent, no environment backing).
 This explicitly changes new build-layer file and directory timestamps and

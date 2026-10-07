@@ -99,6 +99,12 @@ enum Command {
         /// Simulation seed [default: x-seedbox.seed from the Compose file].
         #[arg(long)]
         seed: Option<u64>,
+        /// Capture the world before this simulated nanosecond and continue a branch.
+        #[arg(long, requires = "branch_seed", value_parser = clap::value_parser!(u64))]
+        checkpoint_at_ns: Option<u64>,
+        /// Seed for future simulator randomness after the checkpoint.
+        #[arg(long, requires = "checkpoint_at_ns", value_parser = clap::value_parser!(u64))]
+        branch_seed: Option<u64>,
         #[command(flatten)]
         cpu: CpuArg,
         #[command(flatten)]
@@ -503,6 +509,8 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Run {
             compose,
             seed,
+            checkpoint_at_ns,
+            branch_seed,
             cpu,
             state,
             mut inputs,
@@ -510,6 +518,9 @@ fn run(cli: Cli) -> Result<u8> {
             performance,
         } => {
             let simulation = compose.load()?;
+            if checkpoint_at_ns.is_some_and(|t| t >= simulation.limits.simulated_time_ns) {
+                return Err(Error::Setup("--checkpoint-at-ns must be before the simulated time limit; choose an earlier checkpoint".into()));
+            }
             build.configure(&simulation, &mut inputs)?;
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
@@ -523,6 +534,10 @@ fn run(cli: Cli) -> Result<u8> {
                 executor.with_dev_engine(true, &seedbox::admission::file_digest(&preparer.kernel)?)
             } else {
                 executor
+            };
+            let executor = match (checkpoint_at_ns, branch_seed) {
+                (Some(at), Some(branch)) => executor.with_checkpoint(at, branch),
+                _ => executor,
             };
             preparer.profile = executor.profile();
             preparer.tools.build_epoch = build.build_epoch;
@@ -672,7 +687,8 @@ fn run(cli: Cli) -> Result<u8> {
                     counter,
                 )?
                 .with_unqualified_cpu(cpu.allow_unqualified_cpu)
-                .with_dev_engine(cpu.allow_dev_engine, &previous.identity.inputs.kernel),
+                .with_dev_engine(cpu.allow_dev_engine, &previous.identity.inputs.kernel)
+                .with_recorded_checkpoint(profile)?,
             )?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
