@@ -5,13 +5,14 @@ main `4a89dce`. It does not change the production x86 engine or its guest inputs
 The crate has its own workspace, lockfile and target directory. The only changes
 to existing build files are the root workspace exclusion and the two aliases.
 
-**Status: native HVF acceptance PASSES with the idle-rendezvous Image built
-from `180705e`.** Seed 1 matches across two ordinary boots and a boot with host
-noise, including all guest RAM; seed 2 differs. Init succeeds and PSCI SYSTEM_OFF
-completes in about 0.25 wall seconds despite a verified one-second guest sleep.
-The rebuilt guest fixes the observed IRQ delivery skid by reaching idle MMIO
-with IRQs already unmasked. This qualifies the controlled native HVF fixture
-below; Linux/KVM execution and cross-backend equality remain untested.
+**Status: native HVF and operator-run nested KVM determinism acceptance PASS;
+cross-backend equality still FAILS.** The same idle-rendezvous Image from
+`180705e` boots reproducibly on both. This continuation makes the two debug
+unlock writes transparent to scheduling and the witness. Signed HVF acceptance
+still passes, including noise and all RAM. Comparing the new HVF report with
+retained KVM evidence exposes a separate 1 ns guest-progress difference and
+RAM mismatch; it does not establish cross-backend equality. See the
+[continuation record](#transparent-debug-completion-and-cross-backend-analysis-2026-10-07).
 
 Current Mac checks: `cargo test-arm64` passes 15 portable tests; the hardware
 test remains ignored by default. Crate formatting and clippy with warnings
@@ -27,7 +28,7 @@ idle-rendezvous Image. Earlier failures remain recorded below.
 | `machine::Machine<B>` | Own RAM, shared page, PL011, clockevent, PV clock and witness. Load Image/initrd/FDT; reconcile guest reads, perform device operations, judge timer expiry, inject while stopped, complete the exit, publish before re-entry. | Same loop for both backends. Backend selection exists only in CLI/tests. |
 | `timebase::Timebase` | `prepare` publishes time and bound; `read` reconciles guest progress; `judge` determines expiry/idle advance. The trait uses numbers and `Publication`, not a hypervisor or machine type. | `PvClock` only. A future counted timebase needs a progress-sampling/stop-planning extension; it must not silently charge host elapsed time through this interface. |
 | `devices::MmioDevice` | Width-checked register reads/writes produce values and explicit effects. Device effects never call a host API. | PL011, shared time-page register view, and clockevent registers. Machine owns IRQ line transitions. |
-| `witness` | Canonical, versioned, little-endian exit encoding plus console and all guest RAM, including the shared page. | Host API raw structures, wall time and jitter are excluded. No RAM masks or skipped differing exits. |
+| `witness` | Canonical, versioned, little-endian semantic-exit encoding plus console and all guest RAM, including the shared page. | Host API raw structures, wall time, jitter and the two defined no-op debug completions are excluded. No RAM masks or comparison-time filtering. |
 
 `CoreReg::Sp` means SP_EL1, not the active stack selected by PSTATE. `SysReg`
 uses the architectural 16-bit encoding. KVM translates its special core-register
@@ -50,7 +51,14 @@ next `KVM_RUN`; the adapter writes the response into the held `kvm_run` buffer.
 KVM doesn't expose MMIO's register number, so `reg` is optional and is not hashed.
 The shared machine accepts zero writes to OSDLR_EL1 (`S2_0_C1_C3_4`,
 `0x809c` = 32924) and OSLAR_EL1 (`S2_0_C1_C0_4`, `0x8084`). These preserve
-the unlocked debug state; locking and other debug accesses remain errors.
+the unlocked debug state. When exposed, they are **backend-internal completions**,
+not scheduling points: complete the instruction once without reconciling or
+publishing PV time, judging timers, injecting IRQs, or recording an exit. The
+raw-stop budget and timer/counter leak checks still apply. This rule is shared
+by both backends and is limited to these exact zero writes; other exposed debug
+operations (including reads, nonzero writes and other encodings) remain errors.
+KVM handles debug register accesses internally, so this is not a claim that the
+machine can reject all unexposed KVM debug use. This fixture does not use it.
 The encodings follow the [ARM ARM debug-register tables](https://www.bitsavers.org/components/arm/ARM_Architecture_Reference_Manual_ARMv8_Rev_A.k_201609.pdf).
 HVF completes a sysreg instruction by advancing PC by four and, for supported
 reads, supplying the shared machine's response. Sysreg read witnesses include
@@ -99,7 +107,7 @@ only CPU 0 exists in the FDT and `nosmp maxcpus=1` is supplied.
 The time page contains little-endian u64 `now`, `last`, `bound`, `abi` at offsets
 0, 8, 16, 24. Host owns now/bound/abi; guest owns last. The kernel serializes reads
 with local IRQ masking: return now if newer, otherwise last+1, store last. At
-an exit Machine reconciles `max(now,last)` and republishes. Between exits,
+a semantic exit Machine reconciles `max(now,last)` and republishes. Between exits,
 computation costs zero time. Guest-local read progress becomes host-visible
 only at the next exit, matching the shape of the x86 PV design.
 
@@ -110,7 +118,8 @@ to it and raises SPI 40 while stopped. New IRQ assertions require PSTATE.I to
 be clear; masked admission fails without changing the guest mask. The updated
 guest idle helper unmasks IRQs and executes ISB before the MMIO rendezvous, then
 restores its incoming mask. The rebuilt guest passes the native HVF repeat/noise
-acceptance below; other workloads and KVM still need hardware validation.
+acceptance below and the operator reports passing nested KVM acceptance; other
+workloads still need hardware validation.
 Idle without a deadline or a pending interrupt is an error. Crossing a polling bound yields, expires the timer and
 republishes, so a clock poll cannot run past a deadline without an exit.
 UART accesses and firmware calls have no extra time charge. PL011 transmission
@@ -124,7 +133,8 @@ The reference semantics were read from
 branch. This milestone omits syscall charging, counted stops, and fixed-point
 spin detection. A guest computing forever without exits can still hang; use an
 external operator timeout. A host timeout must fail, never advance virtual time.
-The 5,000,000-exit limit catches exit-producing runaway guests.
+The 5,000,000 raw-stop limit catches exit-producing runaway guests, including
+repeated transparent debug writes. Report `exits` counts witnessed semantic stops.
 
 ## Kernel patch
 
@@ -267,32 +277,37 @@ artifacts separate. If `/dev/kvm` is not writable by the VM user, run with its
 operator-provided KVM access rather than changing permissions on the Mac.
 
 ```sh
+set -euo pipefail
 test -r /dev/kvm && test -w /dev/kvm
+(cd artifacts/arm64-irq-rendezvous && sha256sum -c SHA256SUMS)
 cargo test-arm64 --target aarch64-unknown-linux-gnu
 cargo build-arm64 --target aarch64-unknown-linux-gnu
 export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-irq-rendezvous/Image"
 export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-irq-rendezvous/init.cpio"
-export SEEDBOX_ARM64_REPORT_DIR="$PWD/artifacts/arm64-irq-rendezvous/kvm-acceptance"
+export SEEDBOX_ARM64_REPORT_DIR="$PWD/artifacts/arm64-irq-rendezvous/kvm-transparent-debug"
+test ! -e "$SEEDBOX_ARM64_REPORT_DIR"
 cargo test-arm64 --target aarch64-unknown-linux-gnu --test hardware \
   -- --ignored --exact kvm_determinism --nocapture --test-threads=1
 for case in 1a 1b 2; do
   seed="${case%[ab]}"
   crates/seedbox-arm64/target/aarch64-unknown-linux-gnu/release/seedbox-arm64 run \
     --kernel "$SEEDBOX_ARM64_KERNEL" --initrd "$SEEDBOX_ARM64_INITRD" \
-    --seed "$seed" --backend kvm --witness "artifacts/arm64-irq-rendezvous/kvm-cli-$case.json"
+    --seed "$seed" --backend kvm --witness "$SEEDBOX_ARM64_REPORT_DIR/cli-$case.json"
 done
-python3 crates/seedbox-arm64/compare.py artifacts/arm64-irq-rendezvous/kvm-cli-1a.json artifacts/arm64-irq-rendezvous/kvm-cli-1b.json
-python3 crates/seedbox-arm64/compare.py artifacts/arm64-irq-rendezvous/hvf-cli-1a.json artifacts/arm64-irq-rendezvous/kvm-cli-1a.json
+python3 crates/seedbox-arm64/compare.py "$SEEDBOX_ARM64_REPORT_DIR/cli-1a.json" "$SEEDBOX_ARM64_REPORT_DIR/cli-1b.json"
+python3 crates/seedbox-arm64/compare.py "$SEEDBOX_ARM64_REPORT_DIR/kvm-seed1-a.json" "$SEEDBOX_ARM64_REPORT_DIR/cli-1a.json"
+python3 crates/seedbox-arm64/compare.py artifacts/arm64-irq-rendezvous/hvf-transparent-debug/hvf-seed1-a.json "$SEEDBOX_ARM64_REPORT_DIR/cli-1a.json"
 ```
 
-The KVM suite performs the same four determinism runs but does not impose the
-native-HVF wall-time bound. Retain failures, including setup errors, rather than
+The final cross-backend compare is expected to exit 1 with the retained
+progress mismatch described below; preserve that output. The KVM suite performs
+the same four determinism runs but does not impose the native-HVF wall-time bound. Retain failures, including setup errors, rather than
 switching to a host timer or retrying until witnesses happen to match.
 
 ## Witness interpretation and remaining gates
 
 The SHA-256 domain begins `arch=arm64 timebase=pv`, followed by witness version 1.
-Each exit encodes kind (u8), virtual ns/PC/address/data (four little-endian u64s),
+Each semantic exit encodes kind (u8), virtual ns/PC/address/data (four little-endian u64s),
 length (u8), write (u8). MMIO reads record the supplied response. The final hash
 binds trace count/hash, console length/hash and length-delimited RAM/page hash.
 JSON also retains the full trace, exact console, seed, input hashes, exit count,
@@ -303,7 +318,9 @@ registers and in-kernel GIC behavior can differ between HVF and nested KVM, even
 on the same physical Mac. This implementation does not claim a normalized CPU
 model. Such differences may appear in Linux's selected code paths, console,
 register saves and RAM. Run `compare.py` and investigate the first divergence;
-do not suppress CPU-dependent lines, skip exits or mask differing RAM. A trace
+do not suppress CPU-dependent lines, filter differing semantic exits or mask
+differing RAM. The two exact no-op debug writes are classified before machine
+scheduling, never removed by comparison tooling. A trace
 match with a RAM mismatch is still a mismatch. After input hashes match, retain
 both JSON files and report the exact boundary needing further normalization.
 
@@ -646,6 +663,129 @@ retry. No HVF acceptance gate remains failing. KVM, cross-backend equality and
 broader workloads remain untested. Frozen production paths are unchanged.
 This continuation changes only this acceptance document; artifacts remain
 ignored, and no push or PR is performed.
+
+## Transparent debug completion and cross-backend analysis (2026-10-07)
+
+### KVM evidence supplied by the operator
+
+The operator ran engine `451ddd4` in the Ubuntu arm64 Lima VM (`vz`, nested KVM,
+nVHE), using the exact Image/initrd hashes recorded above. `cargo test-arm64`
+passed, and the ignored `kvm_determinism` test passed all four boots:
+
+| Boot | Witness | Exits | Wall seconds |
+| --- | --- | ---: | ---: |
+| Seed 1 first/repeat | `ed30d3bb6b1c4d6418cbd33beffa3be4699e1732a2ea6a26e4a8d3dd1c87b073` | 2,291 | about 0.49 |
+| Seed 1 with host noise | `ed30d3bb6b1c4d6418cbd33beffa3be4699e1732a2ea6a26e4a8d3dd1c87b073` | 2,291 | 6.75 |
+| Seed 2 | `f024317d83bff80afbcbf712c21cacf96c2ab18c0d10765593f1f538eb1b57cf` | 2,291 | not supplied |
+
+Virtual time was 1,010,051,041 ns. CLI runs also passed with the same witnesses.
+`kvm-cli-1a.json` and `kvm-cli-2.json` are retained beside the inputs and were
+inspected on the Mac; the repeat/noise results above are operator-reported.
+The seed-1 CLI report records 0.507982151 wall seconds.
+
+### Two debug exits, followed by a separate progress mismatch
+
+The original `hvf-cli-signed-1a.json` versus `kvm-cli-1a.json` comparison first
+differs at zero-based index 1203. HVF exposes OSDLR_EL1=0 at
+PC `0xffff800080013d08`, time 307 ns, followed by OSLAR_EL1=0 at
+`0xffff800080013d0c`, also 307 ns. KVM exposes neither. Its index 1203 is the
+PL011 peripheral-ID read at address `0x09000fe0`, PC `0xffff80008020282c`, time
+331 ns; HVF's corresponding read was index 1205, time 332 ns.
+
+Linux's debug initialization clears both locks. The
+[Linux 6.12 KVM handlers](https://github.com/torvalds/linux/blob/v6.12/arch/arm64/kvm/sys_regs.c)
+consume OSDLR as read-as-zero/write-ignore and update OSLAR's lock bit in-kernel.
+With the fixture's unlocked state, both zero writes have no guest-visible effect.
+[KVM_SET_GUEST_DEBUG](https://docs.kernel.org/virt/kvm/api.html#kvm-set-guest-debug)
+configures single-step and breakpoint/watchpoint events; it is not an API for
+forwarding these MSR accesses as matching userspace SysReg exits. Adding debug
+execution machinery would not define a suitable common scheduling boundary.
+
+The implemented policy completes just these two no-op write forms before
+clock reconciliation and timer/IRQ decisions. HVF still advances their PC by
+four through its normal `complete` method; KVM needs no change. Publication
+occurs at startup and after semantic completions, never on an internal stop.
+All other exit handling, leak checks, IRQ-mask guards, RAM hashing and host-noise
+checks remain intact. The 5,000,000 raw-stop budget includes internal stops;
+`Report.exits` and trace count include only semantic stops. The witness encoding
+and its format version remain 1; the change is in which events are scheduling
+points, not the byte encoding. Old and new HVF witnesses intentionally differ.
+
+**The original attribution to a per-exit time charge was incorrect.** `PvClock`
+charges no fixed cost for exits: it reconciles `max(now,last)` and advances to
+deadlines. Guest PV reads increment `last`. At the two debug stops, the first
+deadline (10,000,011 ns) is still far away. Republishing `now=last` does not
+change the next guest read (`last+1`). The new boots experimentally confirm that
+removing these scheduling points changes only the trace/count; HVF's console
+and complete RAM hashes are exactly the same as before.
+
+Comparing the **unfiltered new HVF trace** with the retained KVM report now finds:
+
+- Both have 2,291 records. Every kind, PC, address, width and direction matches.
+- First difference: index 1203, the PL011 ID read above, **332 vs 331 ns**, data
+  17 on both. The previous common exit (1202) arms 10,000,011 ns at time 11 ns,
+  PC `0xffff80008001df30`. Thus the new difference is guest progress between
+  those two semantic boundaries, not a userspace exit charge or MMIO decoding.
+- 495 record timestamps differ by exactly +1 ns on HVF: indices 1203–1397 and
+  1494–1793. All other timestamps agree, including final virtual time.
+- 101 timer-arm values at `0x0a010000` are +1 on HVF. The first is index 1404:
+  time 10,001,023 ns on both, deadline 20,000,413 vs 20,000,412 ns.
+- The only other data difference is UART output at index 1486 (`0x34` vs `0x35`),
+  console character 514: the 10 ms sleep reports 10,000,124 vs 10,000,125 ns.
+  The rest of the console, including getrandom bytes, matches.
+- RAM still differs: HVF `4ded95524ffbd8e5616b91ca8b3219653883956f5611e452e195c97e01418b77`,
+  KVM `325b0ad204e5e8b60f55afb8bac1f07d36a8ee72f372a4365817c6952420472d`.
+
+The reports do not contain instruction traces, CPU feature readbacks or RAM
+bytes, so they cannot identify the extra guest PV read's call site or locate
+all differing RAM. Both adapters use their host's default vCPU model; KVM uses
+`KVM_ARM_PREFERRED_TARGET`, HVF uses a null vCPU configuration. CPU feature/cache
+registers and in-kernel GIC behavior remain possible causes, not proven diagnoses.
+The next deeper investigation needs matched guest-progress/architectural-state
+diagnostics from both hosts around exits 1202–1203. Do not subtract 1 ns, alter
+timer arms, filter console bytes or mask RAM to force equality.
+
+### New native HVF acceptance
+
+The same verified Image/initrd were used without a guest rebuild. All Cargo
+builds finished before signing the CLI and test executable. The signed hardware
+suite passed on its first attempt, retaining reports under
+`artifacts/arm64-irq-rendezvous/hvf-transparent-debug/` and its log in
+`hvf-transparent-debug.log` beside that directory:
+
+| Boot | Witness | Wall seconds | Semantic exits |
+| --- | --- | ---: | ---: |
+| Seed 1 first | `f2394e95b08172d3eb398748f36a35710a2b58044a56a05d88768671ae9b10a5` | 0.237980625 | 2,291 |
+| Seed 1 repeat | `f2394e95b08172d3eb398748f36a35710a2b58044a56a05d88768671ae9b10a5` | 0.238356625 | 2,291 |
+| Seed 1 with host noise | `f2394e95b08172d3eb398748f36a35710a2b58044a56a05d88768671ae9b10a5` | 8.380519084 | 2,291 |
+| Seed 2 | `cd779f002d6d106d99410d578d7b1af15dd1f065754e8bb32aaec2e1a7a10f07` | 0.238297458 | 2,291 |
+
+All boots passed init and PSCI SYSTEM_OFF at 1,010,051,041 ns. Signed CLI
+seed 1 twice and seed 2 match the corresponding test witnesses; reports/logs
+are `cli-1a`, `cli-1b`, and `cli-2` in that directory. Seed-1 trace hash is
+`6b3ee22a33d09e560b228b110b215face0b2249d00a6e713ffb9bd48b6e8ff8f`;
+console and RAM hashes are unchanged from the previous HVF acceptance.
+
+Regression coverage compares a mock backend exposing the unlocks against one
+consuming them internally, with guest progress reaching an armed deadline
+before the writes. It checks identical full witnesses, no premature publication
+or IRQ admission, and exactly-once completion. Negative controls retain rejection
+of nonzero writes, reads, unknown debug registers, timer/counter leaks and masked
+IRQ admission. `cargo test-arm64`, arm64 fmt/clippy, seven Python input tests,
+root fmt/clippy/workspace tests and portable acceptance pass. The portable log
+is `portable-transparent-debug.log`. Linux-only `cargo test-vmm` cannot run here.
+Frozen production paths are unchanged; no guest rebuild, push or PR is needed.
+
+### Expected next VM result
+
+Run section 4 on the updated commit, keeping the same inputs and using the new
+`kvm-transparent-debug` report directory. No guest rebuild is required. Because
+KVM exposes neither debug write, its semantic execution is unchanged; its new
+seed-1 witness is expected to remain `ed30d3bb…`, not become `f2394e95…`.
+The hardware suite should still pass. The final cross-backend comparison is
+expected to exit 1 at the PL011 read described above. Retain that result and
+any new divergence; equality remains an open gate. Native HVF and nested KVM
+repeatability are separate demonstrated properties.
 
 ## Cleanup and portable checks
 

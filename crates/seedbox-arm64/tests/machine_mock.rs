@@ -5,6 +5,9 @@ struct Fake<
     const COUNTER_CONTROL: u64 = 0,
     const TIMER_CONTROL: u64 = 0,
     const MASKED_IDLE: bool = false,
+    const HIDE_DEBUG: bool = false,
+    const DEBUG_READ: bool = false,
+    const UNKNOWN_DEBUG: bool = false,
 > {
     step: usize,
     regs: [u64; 34],
@@ -12,7 +15,16 @@ struct Fake<
     held: bool,
     irq: bool,
 }
-impl<const D: u64, const C: u64, const T: u64, const I: bool> Backend for Fake<D, C, T, I> {
+impl<
+        const D: u64,
+        const C: u64,
+        const T: u64,
+        const I: bool,
+        const H: bool,
+        const R: bool,
+        const U: bool,
+    > Backend for Fake<D, C, T, I, H, R, U>
+{
     fn create() -> Result<Self> {
         Ok(Self {
             step: 0,
@@ -72,50 +84,64 @@ impl<const D: u64, const C: u64, const T: u64, const I: bool> Backend for Fake<D
             data,
             reg: None,
         };
-        let exit = if self.step < 2 {
-            Exit::SysReg {
-                reg: [SysReg::OSDLR, SysReg::OSLAR][self.step].0,
-                write: true,
+        // The guest reaches its deadline immediately before debug unlocks.
+        // A backend may expose both writes or execute both internally. Neither
+        // may publish last, assert the IRQ, or change the witnessed PC sequence.
+        if self.step == 2 {
+            unsafe {
+                self.mapped[&1].set_word(8, 1_000_000_000)?;
+            }
+            if H {
+                self.step = 4;
+            }
+        }
+        let exit = match self.step {
+            0 => {
+                unsafe {
+                    self.mapped[&1].set_word(8, 7)?;
+                }
+                mmio(EVENT_ADDR + 32, 1)
+            }
+            1 => {
+                assert_eq!(unsafe { self.mapped[&1].word(0)? }, 7);
+                mmio(EVENT_ADDR, 1_000_000_000)
+            }
+            2 | 3 => Exit::SysReg {
+                reg: if U {
+                    0x808c
+                } else {
+                    [SysReg::OSDLR, SysReg::OSLAR][self.step - 2].0
+                },
+                write: !R,
                 rt: 31,
                 data: D,
+            },
+            4 => {
+                assert!(!self.irq, "debug completion must not admit a timer");
+                assert_eq!(unsafe { self.mapped[&1].word(0)? }, 7);
+                if !I {
+                    self.regs[33] &= !(1 << 7);
+                }
+                mmio(EVENT_ADDR + 16, 1)
             }
-        } else {
-            match self.step - 2 {
-                0 => {
-                    unsafe {
-                        self.mapped[&1].set_word(8, 7)?;
-                    }
-                    mmio(EVENT_ADDR + 32, 1)
+            5 => {
+                assert!(self.irq);
+                assert_eq!(unsafe { self.mapped[&1].word(0)? }, 1_000_000_000);
+                mmio(EVENT_ADDR + 8, 1)
+            }
+            n if n - 6 < b"SEEDBOX_INIT_PASS\r\n".len() => {
+                assert!(!self.irq);
+                Exit::Mmio {
+                    addr: UART_ADDR,
+                    len: 1,
+                    write: true,
+                    data: b"SEEDBOX_INIT_PASS\r\n"[n - 6] as u64,
+                    reg: None,
                 }
-                1 => {
-                    assert_eq!(unsafe { self.mapped[&1].word(0)? }, 7);
-                    mmio(EVENT_ADDR, 1_000_000_000)
-                }
-                2 => {
-                    if !I {
-                        self.regs[33] &= !(1 << 7);
-                    }
-                    mmio(EVENT_ADDR + 16, 1)
-                }
-                3 => {
-                    assert!(self.irq);
-                    assert_eq!(unsafe { self.mapped[&1].word(0)? }, 1_000_000_000);
-                    mmio(EVENT_ADDR + 8, 1)
-                }
-                n if n - 4 < b"SEEDBOX_INIT_PASS\r\n".len() => {
-                    assert!(!self.irq);
-                    Exit::Mmio {
-                        addr: UART_ADDR,
-                        len: 1,
-                        write: true,
-                        data: b"SEEDBOX_INIT_PASS\r\n"[n - 4] as u64,
-                        reg: None,
-                    }
-                }
-                _ => {
-                    self.regs[0] = 0x84000008;
-                    Exit::Hvc { imm: 0 }
-                }
+            }
+            _ => {
+                self.regs[0] = 0x84000008;
+                Exit::Hvc { imm: 0 }
             }
         };
         self.step += 1;
@@ -159,8 +185,15 @@ fn machine_reconciles_reads_completes_once_and_injects_while_stopped() {
     assert_eq!(a.witness, b.witness);
     assert_ne!(a.witness, c.witness);
     assert_eq!(a.virtual_ns, 1_000_000_000);
-    assert_eq!(a.trace[2].time, 7);
-    assert_eq!(a.trace[4].time, 1_000_000_000);
+    assert_eq!(a.trace[0].time, 7);
+    assert_eq!(a.trace[2].time, 1_000_000_000);
+    let hidden = Machine::<Fake<0, 0, 0, false, true>>::new(&kernel, b"cpio", 1)
+        .unwrap()
+        .run(|| {})
+        .unwrap();
+    assert_eq!(a.trace, hidden.trace);
+    assert_eq!(a.witness, hidden.witness);
+    assert_eq!(a.exits, hidden.exits);
 }
 
 #[test]
@@ -173,6 +206,16 @@ fn rejects_debug_locking_and_hardware_time_leaks() {
         .run(|| {})
         .unwrap_err();
     assert!(debug.contains("unsupported exit SysReg"), "{debug}");
+    let read = Machine::<Fake<0, 0, 0, false, false, true>>::new(&kernel, b"cpio", 1)
+        .unwrap()
+        .run(|| {})
+        .unwrap_err();
+    assert!(read.contains("unsupported exit SysReg"), "{read}");
+    let unknown = Machine::<Fake<0, 0, 0, false, false, false, true>>::new(&kernel, b"cpio", 1)
+        .unwrap()
+        .run(|| {})
+        .unwrap_err();
+    assert!(unknown.contains("unsupported exit SysReg"), "{unknown}");
     let counter = Machine::<Fake<0, 2>>::new(&kernel, b"cpio", 1)
         .unwrap()
         .run(|| {})

@@ -91,8 +91,8 @@ impl<B: Backend> Machine<B> {
     }
     fn run_inner(&mut self, mut before_run: impl FnMut()) -> Result<Report> {
         let start = Instant::now();
+        self.publish()?;
         for _ in 0..5_000_000 {
-            self.publish()?;
             before_run();
             let stop = self.backend.run()?;
             if self.backend.get_sys_reg(SysReg::CNTV_CTL)? & 1 != 0 {
@@ -105,6 +105,17 @@ impl<B: Backend> Machine<B> {
                         "CNTKCTL_EL1={control:#x} after PV handshake: hardware counter access or event stream enabled; rebuild kernel-arm64 with the exec/context-switch counter-access fix"
                     ));
                 }
+            }
+            // These writes preserve our initially unlocked debug state. KVM
+            // consumes them in-kernel; HVF exposes them. They are completion
+            // work, not architectural scheduling points: do not reconcile or
+            // publish the PV page, judge timers, or add a witness record here.
+            // Keep the leak checks above and the raw-exit budget for all stops.
+            if matches!(stop.exit, Exit::SysReg { reg, write: true, data: 0, .. }
+                if matches!(SysReg(reg), SysReg::OSDLR | SysReg::OSLAR))
+            {
+                self.backend.complete(None)?;
+                continue;
             }
             // All guest memory accesses happen after the synchronous exit.
             self.clock.read(unsafe { self.page.word(8)? })?;
@@ -180,17 +191,6 @@ impl<B: Backend> Machine<B> {
                         }
                     }
                 }
-                Exit::SysReg {
-                    reg,
-                    write: true,
-                    data: 0,
-                    ..
-                } if matches!(SysReg(reg), SysReg::OSDLR | SysReg::OSLAR) => {
-                    // The machine has no external debugger or powered-down
-                    // debug domain. Both locks start unlocked. Linux's unlock
-                    // writes preserve that state; other debug operations remain
-                    // unsupported rather than silently enabling host debug.
-                }
                 ref other => {
                     return Err(format!("unsupported exit {other:?} at PC {:#x}", stop.pc))
                 }
@@ -244,6 +244,7 @@ impl<B: Backend> Machine<B> {
                 });
             }
             self.backend.complete(response)?;
+            self.publish()?;
         }
         Err("exit budget exhausted (5,000,000); no successful power-off".into())
     }
