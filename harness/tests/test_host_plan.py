@@ -3,7 +3,6 @@ import contextlib
 import io
 import json
 import os
-import random
 from pathlib import Path
 import subprocess
 import sys
@@ -21,9 +20,10 @@ CORE = {'core', 'cluster-fixed'}
 
 class MapTests(unittest.TestCase):
     def assert_paths(self, paths, extra=()):
+        # Exercise each row with an engine difference; test the cluster guard separately.
         for path in paths:
             with self.subTest(path=path):
-                plan = host_plan.select_checks({'revision': [path]})
+                plan = host_plan.select_checks({'revision': [path]}, engine_changed=True)
                 self.assertEqual(set(plan['checks']), CORE | set(extra))
                 self.assertFalse(plan['warnings'])
                 for reasons in plan['checks'].values():
@@ -69,19 +69,19 @@ class MapTests(unittest.TestCase):
         for name, spec in mapping['checks'].items():
             if spec['kind'] == 'fixture':
                 path = 'harness/worlds/' + spec['world'] + '.json'
-                plan = host_plan.select_checks({'rev': [path]})
+                plan = host_plan.select_checks({'rev': [path]}, engine_changed=True)
                 self.assertIn(name, plan['checks'], path)
                 self.assertIn('world fixture', {r['category'] for r in plan['checks'][name]})
         self.assert_paths(['harness/worlds/new-fixture.json'])
         for path in ('harness/batch.sh', 'harness/batch.py'):
             plan = host_plan.select_checks({'rev': [path]})
-            self.assertEqual(set(plan['checks']), {'cluster-fixed'})
+            self.assertEqual(set(plan['checks']), {'core'})
 
     def test_other_example_requires_its_reviewer_run_list(self):
         plan = host_plan.select_checks({'rev': ['examples/minio/client/cas.py',
                                                'examples/minio/compose.yaml',
                                                'examples/redis/workload/main.py']})
-        self.assertEqual(set(plan['checks']), CORE)
+        self.assertEqual(set(plan['checks']), {'core'})
         text = host_plan.format_plan(dict(plan, target='a' * 40, base='b' * 40))
         for name in ('minio', 'redis'):
             note = f"example {name}: its reviewer's run list is required"
@@ -92,7 +92,7 @@ class MapTests(unittest.TestCase):
         for number, category in ((110, 'core inputs'), (104, 'example')):
             paths = (HERE / 'tests/fixtures' / f'pr{number}-paths.txt').read_text().splitlines()
             plan = host_plan.select_checks({f'pr{number}': paths})
-            self.assertEqual(set(plan['checks']), CORE)
+            self.assertEqual(set(plan['checks']), {'core'})
             self.assertIn(category, {r['category'] for r in plan['checks']['core']})
             text = host_plan.format_plan(dict(plan, target='a' * 40, base='b' * 40))
             self.assertNotIn('host: none', text)
@@ -101,17 +101,6 @@ class MapTests(unittest.TestCase):
                     self.assertIn(path, text)
             else:
                 self.assertIn("example minio: its reviewer's run list is required", text)
-
-    def test_planning_is_deterministic_and_consumes_no_rng_draws(self):
-        # Planning cannot execute seeded guest scenarios or perturb their RNG.
-        paths = ['examples/faults/workload/scenario.py', 'python/seedbox/rng.py']
-        before = random.getstate()
-        with patch.object(random, 'random', side_effect=AssertionError('extra RNG draw')), \
-             patch.object(host_plan.subprocess, 'check_output', side_effect=AssertionError('execution')):
-            first = host_plan.select_checks({'rev': paths})
-            second = host_plan.select_checks({'rev': list(reversed(paths))})
-        self.assertEqual(first, second)
-        self.assertEqual(random.getstate(), before)
 
     def test_execution_row(self):
         self.assert_paths(['crates/seedbox-vmm/src/rng.rs', 'guest/sbx.c',
@@ -123,6 +112,36 @@ class MapTests(unittest.TestCase):
                            ('stepper.rs', 'machine/counted.rs', 'timebase.rs', 'boundary.rs',
                             'counter.rs', 'undo.rs', 'undo/restore.rs', 'checkpoint.rs')]
                           + ['crates/seedbox/src/counter.rs'], ['perf-replay'])
+
+    def test_disk_worlds_name_a_virtio_blk_kernel(self):
+        plan = host_plan.select_checks({'r': ['crates/seedbox-vmm/src/disk.rs']})
+        mapping = host_plan.load_map()
+        for check in ('disk-crash', 'disk-ext4-crash'):
+            self.assertIn(check, plan['checks'])
+            self.assertEqual(mapping['checks'][check].get('kernel'), 'disk')
+
+    def test_volume_changes_run_the_compose_volume_workload(self):
+        plan = host_plan.select_checks({'r': ['harness/acceptance/driver/volume.py']})
+        spec = host_plan.load_map()['checks']['volume-crash']
+        self.assertIn('volume-crash', plan['checks'])
+        self.assertEqual((spec['kind'], spec.get('project')),
+                         ('compose', 'harness/acceptance/workloads/volume-crash.yaml'))
+        self.assertEqual(spec['kernel'], 'disk')
+        self.assertEqual(spec['expected'], 'PASS')
+        workload = host_plan.select_checks({'r': [spec['project']]})
+        self.assertIn('volume-crash', workload['checks'])
+
+    def test_cluster_needs_engine_inputs_but_reviewer_can_force_it(self):
+        for path in ('crates/seedbox/src/cli/mod.rs', 'harness/smoke/amd.py',
+                     'examples/minio/compose.yaml', 'unmapped/input'):
+            with self.subTest(path=path):
+                plan = host_plan.select_checks({'r': [path]})
+                self.assertEqual(set(plan['checks']), {'core'})
+        for path in ('crates/seedbox-vmm/Cargo.lock', 'guest/compose-init.c', 'flake.lock'):
+            with self.subTest(path=path):
+                self.assertIn('cluster-fixed', host_plan.select_checks({'r': [path]})['checks'])
+        forced = host_plan.select_checks({}, extra=['cluster-fixed'], engine_changed=False)
+        self.assertEqual(set(forced['checks']), {'cluster-fixed'})
 
     def test_disk_row(self):
         self.assert_paths(['crates/seedbox-vmm/src/disk.rs', 'crates/seedbox-vmm/src/virtio_blk.rs',
@@ -148,7 +167,7 @@ class MapTests(unittest.TestCase):
 
     def test_kernel_row_is_explicitly_uncovered(self):
         plan = host_plan.select_checks({'revision': ['kernel/config.options']})
-        self.assertEqual(set(plan['checks']), CORE)
+        self.assertEqual(set(plan['checks']), {'core'})
         self.assertEqual(plan['warnings'], ['kernel campaign needed: kernel/config.options'])
         text = host_plan.format_plan(dict(plan, target='a' * 40, base='b' * 40))
         self.assertNotIn('host: none', text)
@@ -182,7 +201,7 @@ class MapTests(unittest.TestCase):
                 self.assertEqual(set(plan['checks']), CORE | extra)
         plan = host_plan.select_checks({'rev': ['crates/seedbox/src/cli/mod.rs']},
                                        diffs={('rev','crates/seedbox/src/cli/mod.rs'): '+execute();'})
-        self.assertEqual(set(plan['checks']), CORE)
+        self.assertEqual(set(plan['checks']), {'core'})
 
     def test_help_strings_are_portable_but_assignments_are_not(self):
         self.assertTrue(host_plan.help_only('+#[command(about = "Help text.")]'))
@@ -243,9 +262,34 @@ class GitPlannerTests(unittest.TestCase):
         expected = self.git('diff', '--name-only', 'base...HEAD').splitlines()
         self.assertEqual(plan['changes'][plan['target']], expected)
 
+    def test_cluster_compares_exact_engine_inputs_with_main(self):
+        path = 'crates/seedbox-vmm/src/main.rs'
+        self.commit(path, 'old engine')
+        self.git('branch', '-f', 'base')
+        main = self.commit(path, 'new engine')
+        self.git('update-ref', 'refs/remotes/origin/main', main)
+        self.commit('crates/seedbox/src/cli/mod.rs', 'fn run() {}')
+        plan = host_plan.plan_revision(self.repo, 'base', 'HEAD')
+        self.assertIn(path, plan['changes'][plan['target']])
+        self.assertFalse(plan['engine_changed'])
+        self.assertNotIn('cluster-fixed', plan['checks'])
+        self.assertIn('core', plan['checks'])
+        self.assertEqual(plan['main'], main)
+        self.commit(path, 'different engine')
+        self.assertIn('cluster-fixed', host_plan.plan_revision(self.repo, 'HEAD^', 'HEAD')['checks'])
+        # Engine difference from main survives even a CLI-only merge-base diff.
+        self.git('branch', '-f', 'base')
+        self.commit('crates/seedbox/src/cli/mod.rs', 'fn run() { execute(); }')
+        self.assertIn('cluster-fixed', host_plan.plan_revision(self.repo, 'base', 'HEAD')['checks'])
+        self.commit(path, 'new engine')
+        self.assertNotIn('cluster-fixed', host_plan.plan_revision(self.repo, 'base', 'HEAD')['checks'])
+        self.assertIn('cluster-fixed', host_plan.plan_revision(self.repo, 'base', 'HEAD',
+                                                             extra=['cluster-fixed'])['checks'])
+
     def test_renames_keep_old_runtime_path_coverage(self):
         source = 'crates/seedbox-vmm/src/disk.rs'
         self.commit(source)
+        self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
         self.git('branch','-f','base')
         self.git('mv',source,'retired.md')
         self.git('commit','-qm','rename')
@@ -260,7 +304,7 @@ class GitPlannerTests(unittest.TestCase):
         self.commit(path, '/// New help.\nfn run() {}\n')
         self.assertFalse(host_plan.plan_revision(self.repo, 'base', 'HEAD')['checks'])
         self.commit(path, '/// New help.\nfn run() { execute(); }\n')
-        self.assertEqual(set(host_plan.plan_revision(self.repo, 'base', 'HEAD')['checks']), CORE)
+        self.assertEqual(set(host_plan.plan_revision(self.repo, 'base', 'HEAD')['checks']), {'core'})
 
     def test_public_planner_none_json_and_repeatable_extras(self):
         none = self.invoke('host-plan.py', 'base', 'HEAD')

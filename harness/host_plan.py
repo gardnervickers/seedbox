@@ -7,6 +7,8 @@ import subprocess
 import sys
 
 MAP = Path(__file__).with_name('host-check-map.json')
+ENGINE_INPUTS = ('crates/seedbox-vmm/**', 'guest/**', 'flake.nix', 'flake.lock',
+                 'rust-toolchain*', 'Cargo.lock', '.cargo/**')
 
 
 def load_map(path=MAP):
@@ -35,12 +37,17 @@ def portable(path):
             matches(path, 'crates/*/tests/**') or matches(path, 'crates/*/templates/**'))
 
 
-def select_checks(changes, mapping=None, extra=(), diffs=None):
-    """Union every matched row and reviewer addition; never subtract a check."""
+def select_checks(changes, mapping=None, extra=(), diffs=None, engine_changed=None):
+    """Union matched rows; automatic cluster comparison needs changed engine inputs."""
     mapping = mapping or load_map()
     diffs = diffs or {}
+    if engine_changed is None:
+        engine_changed = any(not portable(path) and any(matches(path, glob) for glob in ENGINE_INPUTS)
+                             for paths in changes.values() for path in paths)
     reasons, skipped, warnings, reviewer_notes = {}, [], [], []
-    def add(check, reason):
+    def add(check, reason, explicit=False):
+        if check == 'cluster-fixed' and not engine_changed and not explicit:
+            return
         if reason not in reasons.setdefault(check, []):
             reasons[check].append(reason)
     for revision, paths in changes.items():
@@ -81,7 +88,7 @@ def select_checks(changes, mapping=None, extra=(), diffs=None):
         if check not in mapping['checks']:
             raise ValueError('unknown extra check: ' + check)
         reason = dict(revision='reviewer', path='--extra ' + check, category='reviewer addition')
-        add(check, reason)
+        add(check, reason, explicit=True)
         if check in ('core', 'perf-replay'):
             for required in mapping['core']:
                 add(required, dict(reason, category='core dependency'))
@@ -108,7 +115,16 @@ def plan_revision(repo, base, head, extra=()):
             raw_diff = git(repo, 'diff', '--no-ext-diff', '--no-textconv', '--no-color', '--unified=0',
                            base_sha + '...' + tip, '--', path).decode('utf-8', 'surrogateescape')
             diffs[tip, path] = changed_code(raw_diff)
-    return dict(select_checks(changes, mapping, extra=extra, diffs=diffs), base=base_sha, target=tip, changes=changes)
+    # Compare exact trees with main, not the merge-base diff used for row selection.
+    # A merged/reverted engine change can have identical inputs despite changed paths.
+    main_sha = git(repo, 'rev-parse', '--verify', 'origin/main^{commit}').decode().strip()
+    engine_paths = git(repo, 'diff', '--name-only', '--no-renames', '-z', main_sha, tip, '--',
+                       'crates/seedbox-vmm', 'guest', 'flake.nix', 'flake.lock',
+                       'rust-toolchain*', 'Cargo.lock', '.cargo').split(b'\0')
+    engine_changed = any(path and not portable(path.decode('utf-8', 'surrogateescape'))
+                         for path in engine_paths)
+    return dict(select_checks(changes, mapping, extra=extra, diffs=diffs, engine_changed=engine_changed),
+                base=base_sha, target=tip, changes=changes, main=main_sha, engine_changed=engine_changed)
 
 
 def changed_code(diff):

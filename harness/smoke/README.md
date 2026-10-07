@@ -89,13 +89,14 @@ The development tier is unqualified evidence and does not change release policy.
 `harness/host-plan.py BASE HEAD` reads `git diff --name-only BASE...HEAD` and
 prints every selected check with the path that selected it. `--json` emits the
 same plan as JSON. Repeatable `--extra CHECK` adds reviewer checks; selection
-unions all matching rows and additions, so none can drop an earlier selection.
+unions all matching rows and additions. Automatic `cluster-fixed` selection is
+conditional on changed engine inputs; explicit reviewer additions are always kept.
 The [checked-in map](../host-check-map.json) defines these rows:
 
 | Changed paths | Host checks |
 |---|---|
 | only *.md, docs/, crates/*/tests/, harness/tests/, python/tests/, templates/, crates/*/templates/, tools/mac-tcg/, or CLI help text | none (portable checks only) |
-| crates/seedbox-vmm/**, guest/**, or the CLI execution path (vmm.rs, host.rs, admission.rs, counter.rs, orchestration.rs) | core: wrong-kernel refusal, doctor, one fixed --full-state run, one default replay (MATCH), cluster-fixed 1009 on this engine and on main's (report any difference) |
+| crates/seedbox-vmm/**, guest/**, or the CLI execution path (vmm.rs, host.rs, admission.rs, counter.rs, orchestration.rs) | core: wrong-kernel refusal, doctor, one fixed --full-state run, one default replay (MATCH) |
 | stepper.rs, machine/counted.rs, timebase.rs, boundary.rs, counter.rs, undo/checkpoint code | core + one --undo 0 --margin 16384 replay |
 | disk.rs, virtio-blk, guest/disk*, build-disk.sh | core + disk-crash and disk-ext4-crash worlds |
 | network, link, faults routing | core + net, net-pause, net-crash worlds |
@@ -103,15 +104,19 @@ The [checked-in map](../host-check-map.json) defines these rows:
 | guest/compose-init.c, preparation, images, volumes | core + sanity (+ volume-crash if volumes changed) |
 | examples/faults/**, harness/smoke/**, harness/host*, python/seedbox/** | core (control.py also keeps control-cases) |
 | harness/worlds/<name>.json | the named fixture's check when mapped, otherwise core; other matching rows can add checks |
-| harness/batch.* | cluster-fixed |
+| harness/batch.* | core |
 | examples/<other>/** | core + "example <name>: its reviewer's run list is required" |
 | flake.nix, flake.lock, rust-toolchain*, Cargo.lock, .cargo/** | core |
 | kernel/ | core + "kernel campaign needed"; execution refuses incomplete coverage |
 | anything else unmatched | core (fail closed) |
 
 The plan names `core` (public CLI smoke) and `cluster-fixed` separately so their
-execution and comparison times are visible. `perf-replay` is the single opt-in
-undo-off/margin replay. A reviewer adding `core` or `perf-replay` also selects
+execution and comparison times are visible. Automatic `cluster-fixed` runs only
+when VMM, guest or toolchain/build inputs differ from local `origin/main`. The
+planner compares exact trees even when `--base` uses another ref, so merged or
+reverted engine changes with equal inputs skip the second build and both cluster
+runs. Reviewer `--extra cluster-fixed` still forces the comparison. `perf-replay`
+is the single opt-in undo-off/margin replay. A reviewer adding `core` or `perf-replay` also selects
 its core dependencies. Other additions select exactly the named check.
 Shared machine code adds disk, network or undo checks when changed lines touch
 those controls. Shared preparation/supervisor code adds `volume-crash` when
@@ -139,6 +144,7 @@ Execute in the project development shell on the qualified Linux AMD host:
 
 ```sh
 export SEEDBOX_KERNEL=/absolute/accepted-bzImage
+export SEEDBOX_DISK_KERNEL=/absolute/virtio-blk-bzImage # only when disk/volume rows are planned
 export PINNED_ENGINE=/absolute/stored-pinned-seedbox-vmm
 export SEEDBOX_ETCD=/absolute/static-etcd
 bash harness/host-check.sh --lanes 1,2,3 REV --extra control-cases
@@ -163,8 +169,14 @@ Failed checks retain evidence and exit 1; setup/admission errors exit 2.
 
 `SEEDBOX_BUSYBOX`, `SEEDBOX_STATIC_CC` and `SEEDBOX_MKE2FS` come from the project
 shell. `SEEDBOX_ETCD` supplies a frozen static etcd binary for `cluster-fixed`;
-its client and initramfs are built once and used with both engines. The main
-engine is built from a detached worktree of local `origin/main`, even when
+its client and initramfs are built once and used with both engines.
+`SEEDBOX_KERNEL` remains the accepted kernel for core, cluster and network checks.
+Until K2 is accepted, `disk-crash`, `disk-ext4-crash` and the Compose
+`volume-crash` check require a separate `SEEDBOX_DISK_KERNEL` with `VIRTIO_BLK`
+and `EXT4_FS`. Missing/invalid disk input refuses before reservations, builds or
+state creation, naming that variable. Every selected kernel goes through the
+existing doctor admission on each lane; development kernels require the existing
+`PINNED_ENGINE` opt-in path. The main engine is built from a detached worktree of local `origin/main`, even when
 `--base` selects another diff base. The summary records main's revision and
 MATCH/DIFFERENT evidence; a difference is reported without treating a changed
 engine as a replay mismatch. Failed fixture execution still fails the check.
@@ -184,16 +196,20 @@ remains 16384; the harness does not modify VMM source.
 `control-cases` generates the existing focused lifecycle-error scenario, checks
 its intentional workload FAIL, then requires default replay MATCH and verifies
 both retained control transcripts. `sanity` runs the existing planted-missing-ack
-YAML through public run/replay. `volume-crash` is the low-level ext4 flushed-volume
-crash/reboot ledger fixture, using the same retained-disk probe as
-`disk-ext4-crash`; it does not establish persistent Compose volume support.
+YAML through public run/replay. `volume-crash` runs
+`harness/acceptance/workloads/volume-crash.yaml` through public run/replay, requiring PASS then MATCH. Its etcd service mounts a named
+volume and the driver crashes/reboots it to check acknowledged data survives.
+The job passes the shell's `SEEDBOX_MKE2FS` explicitly as `--mke2fs` because the
+public campaign uses a clean environment.
 Raw commands have a 120-second limit; public campaigns use the smoke's finite
 five-minute allocation and cleanup reserve. No check retries a failed run.
 
 `HOST_CHECK_DIR` selects the evidence parent (default the system temporary
 directory). `summary.json` and the text summary retain step and phase wall times,
-assigned pairs, reasons, undispatched jobs and the cluster comparison. Fixed-run
-wall time includes preparation. Passing public campaigns delete their state;
+assigned pairs, reasons, selected kernels, undispatched jobs and the cluster
+comparison. Reviewer requirements appear in both summaries and repeat on the
+final PASS/FAIL line as `not run`, so a passing mapped check cannot hide an
+example's outstanding reviewer run list. Fixed-run wall time includes preparation. Passing public campaigns delete their state;
 a passing host check removes its private worktrees and run state, keeping the
 summaries beside the removed directory. Failures retain state and print an
 explicit cleanup command. Cleanup failures are failures.

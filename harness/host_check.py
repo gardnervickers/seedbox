@@ -76,10 +76,37 @@ def existing(value, name):
     return str(path)
 
 
+def kernels_for(jobs):
+    """Resolve every selected kernel before reservations, builds or state."""
+    kernels = {}
+    if any(job['spec'].get('kernel') == 'disk' for job in jobs):
+        value = os.environ.get('SEEDBOX_DISK_KERNEL')
+        if not value:
+            raise ValueError('disk checks planned; set SEEDBOX_DISK_KERNEL to a kernel with VIRTIO_BLK and EXT4_FS')
+        try:
+            kernels['disk'] = existing(value, 'SEEDBOX_DISK_KERNEL')
+        except (OSError, ValueError) as error:
+            raise ValueError(f'SEEDBOX_DISK_KERNEL {value}: must name an existing kernel with VIRTIO_BLK and EXT4_FS') from error
+    kernels['default'] = existing(os.environ['SEEDBOX_KERNEL'], 'SEEDBOX_KERNEL')
+    return kernels
+
+
 def execute(plan, args):
     if sys.platform != 'linux':
         raise RuntimeError('host execution requires the qualified Linux KVM host; use --plan on this Mac')
-    kernel = existing(os.environ['SEEDBOX_KERNEL'], 'SEEDBOX_KERNEL')
+    selected = jobs_for(plan['checks'])
+    kernels = kernels_for(selected)
+    kernel = kernels['default']
+    for job in selected:
+        job['kernel'] = kernels[job['spec'].get('kernel', 'default')]
+        if job['name'] == 'volume-crash':
+            value = os.environ.get('SEEDBOX_MKE2FS')
+            if not value:
+                raise ValueError('volume-crash planned; set SEEDBOX_MKE2FS from the project development shell')
+            try:
+                job['mke2fs'] = existing(value, 'SEEDBOX_MKE2FS')
+            except (OSError, ValueError) as error:
+                raise ValueError(f'SEEDBOX_MKE2FS {value}: must name an existing static mke2fs from the project development shell') from error
     busybox = existing(os.environ['SEEDBOX_BUSYBOX'], 'SEEDBOX_BUSYBOX')
     pinned = os.environ.get('PINNED_ENGINE')
     stored = os.environ.get('SEEDBOX_VMM')
@@ -89,10 +116,9 @@ def execute(plan, args):
         pinned = existing(pinned, 'PINNED_ENGINE')
     if stored:
         stored = existing(stored, 'SEEDBOX_VMM')
-    selected = jobs_for(plan['checks'])
     cluster = 'cluster-fixed' in plan['checks']
     etcd = existing(os.environ['SEEDBOX_ETCD'], 'SEEDBOX_ETCD') if cluster else None
-    main_sha = git(args.repo, 'rev-parse', '--verify', 'origin/main^{commit}').decode().strip() if cluster else None
+    main_sha = (plan.get('main') or git(args.repo, 'rev-parse', '--verify', 'origin/main^{commit}').decode().strip()) if cluster else None
     # Import the existing smoke readiness/lock wrapper only after host admission.
     sys.path.insert(0, str(HERE / 'smoke'))
     from amd import lock_free, pinned_workloads
@@ -116,7 +142,8 @@ def execute(plan, args):
         env.pop('CARGO_TARGET_DIR', None)
         source = Commands(work, args.repo, env)
         old_handlers = {sig: signal.signal(sig, source.interrupt) for sig in (signal.SIGINT, signal.SIGTERM)}
-        summary = dict(status='FAIL', target=plan['target'], pairs=pairs, jobs=[], undispatched=[])
+        summary = dict(status='FAIL', target=plan['target'], pairs=pairs, jobs=[], undispatched=[],
+                       reviewer_notes=plan.get('reviewer_notes', []), kernels=kernels)
         try:
             source.run('worktree', ['git', 'worktree', 'add', '--detach', '--quiet', str(src), plan['target']])
             source.src = src
@@ -149,11 +176,13 @@ def execute(plan, args):
             # Raw batch fixtures must not race a core smoke admission refusal.
             # Doctor admits every assigned lane before any guest is dispatched.
             for pair in pairs:
-                doctor = ['sudo', '-n', common['cli'], 'doctor', '--kernel', kernel,
-                          '--vmm', engine, '--cpu', str(pair[0])]
-                if pinned:
-                    doctor += ['--allow-dev-engine']
-                source.run(f'doctor-cpu{pair[0]}', doctor)
+                for kind, selected_kernel in kernels.items():
+                    doctor = ['sudo', '-n', common['cli'], 'doctor', '--kernel', selected_kernel,
+                              '--vmm', engine, '--cpu', str(pair[0])]
+                    if pinned:
+                        doctor += ['--allow-dev-engine']
+                    name = f'doctor-cpu{pair[0]}' if kind == 'default' else f'doctor-{kind}-cpu{pair[0]}'
+                    source.run(name, doctor)
 
             def launch(job, pair):
                 data = dict(common, **job, pair=list(pair), output=str(work / job['name']))
@@ -215,7 +244,9 @@ def finish(work, repo, summary, source):
     """Keep summaries; discard owned run state only after all workers passed."""
     summary_path = work / 'summary.json'
     summary_path.write_text(json.dumps(summary, indent=2) + '\n')
-    lines = []
+    notes = summary.get('reviewer_notes', [])
+    suffix = '; not run: ' + '; '.join(notes) if notes else ''
+    lines = [note for note in notes]
     for name, seconds in summary['source_wall_seconds'].items():
         status = summary.get('source_steps', {}).get(name, {}).get('status', 'UNKNOWN')
         lines.append(f'{name:<8} {status.lower() if status == "PASS" else status} {int(seconds):4d}s')
@@ -249,9 +280,9 @@ def finish(work, repo, summary, source):
             summary.update(status='FAIL', cleanup_error=repr(error))
             kept.write_text(json.dumps(summary, indent=2) + '\n')
             print('cleanup: ' + ' && '.join(cleanup), flush=True)
-        print(summary['status'] + ': ' + str(kept), flush=True)
+        print(summary['status'] + ': ' + str(kept) + suffix, flush=True)
     else:
-        print('FAIL: ' + str(summary_path), flush=True)
+        print('FAIL: ' + str(summary_path) + suffix, flush=True)
         print('cleanup: ' + ' && '.join(cleanup), flush=True)
 
 

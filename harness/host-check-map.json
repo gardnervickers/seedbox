@@ -20,11 +20,13 @@
     },
     "disk-crash": {
       "kind": "fixture",
-      "world": "disk-crash"
+      "world": "disk-crash",
+      "kernel": "disk"
     },
     "disk-ext4-crash": {
       "kind": "fixture",
-      "world": "disk-ext4-crash"
+      "world": "disk-ext4-crash",
+      "kernel": "disk"
     },
     "net": {
       "kind": "fixture",
@@ -39,8 +41,10 @@
       "world": "net-crash"
     },
     "volume-crash": {
-      "kind": "fixture",
-      "world": "volume-crash"
+      "kind": "compose",
+      "project": "harness/acceptance/workloads/volume-crash.yaml",
+      "expected": "PASS",
+      "kernel": "disk"
     },
     "control-cases": {
       "kind": "compose",
@@ -272,6 +276,7 @@
         "harness/batch.*"
       ],
       "checks": [
+        "core",
         "cluster-fixed"
       ]
     },
@@ -281,6 +286,7 @@
         "harness/worlds/cluster-fixed.json"
       ],
       "checks": [
+        "core",
         "cluster-fixed"
       ]
     },
@@ -330,9 +336,9 @@
       ]
     },
     {
-      "category": "world fixture",
+      "category": "Compose volume workload",
       "paths": [
-        "harness/worlds/volume-crash.json"
+        "harness/acceptance/workloads/volume-crash.yaml"
       ],
       "checks": [
         "volume-crash"

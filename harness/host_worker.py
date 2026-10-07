@@ -92,7 +92,7 @@ def run_fixture(job, commands):
     world = json.loads((src / 'harness/worlds' / (spec['world'] + '.json')).read_text())
     artifacts = root / 'artifacts'
     artifacts.mkdir()
-    if spec['world'] in ('disk-crash', 'disk-ext4-crash', 'volume-crash'):
+    if spec['world'] in ('disk-crash', 'disk-ext4-crash'):
         build = ['nice', 'bash', 'guest/build-disk.sh', str(artifacts / 'disk.cpio')]
         if any(machine.get('disk', {}).get('image') for machine in world['machines']):
             build.append(str(artifacts / 'ext4.img'))

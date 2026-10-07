@@ -46,11 +46,6 @@ See the [one-VM fixture instructions](../../README.md#one-vm-network-fixture) fo
 building and running those experiments. Use the [runtime fault API](../../python/README.md)
 for new application scenarios.
 
-`volume-crash.json` names the same flushed ext4 volume crash/reboot ledger
-probe as `disk-ext4-crash.json` for change-scoped volume checks. It exercises
-retained block storage; Compose image volume paths remain RAM-backed and this
-fixture does not qualify persistent Compose volumes.
-
 ## Boot once, fork per seed
 
 `cluster-fork.json` is `cluster-fixed.json` with a `boot` object. With `boot`,

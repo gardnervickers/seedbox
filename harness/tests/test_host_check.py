@@ -105,6 +105,35 @@ class DispatchTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'Linux'):
                 host_check.execute({}, None)
 
+    def test_disk_kernel_required_before_reservations_builds_or_state(self):
+        for check in ('disk-crash', 'disk-ext4-crash', 'volume-crash'):
+            for value in (None, '', '/missing/disk-kernel'):
+                env = {} if value is None else {'SEEDBOX_DISK_KERNEL': value}
+                with self.subTest(check=check, value=value), \
+                     patch.object(host_check.sys, 'platform', 'linux'), \
+                     patch.dict(host_check.os.environ, env, clear=True), \
+                     patch.object(host_check, 'allocate_pairs', side_effect=AssertionError('reservation')), \
+                     patch.object(host_check, 'Commands', side_effect=AssertionError('build')), \
+                     patch.object(host_check.tempfile, 'mkdtemp', side_effect=AssertionError('state')):
+                    with self.assertRaisesRegex(ValueError, 'SEEDBOX_DISK_KERNEL.*VIRTIO_BLK.*EXT4_FS'):
+                        host_check.execute(dict(checks={check: []}), None)
+
+    def test_volume_requires_shell_mke2fs_before_reservations_or_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kernel = Path(tmp) / 'kernel'
+            kernel.write_bytes(b'kernel')
+            for value in (None, '', str(Path(tmp) / 'missing')):
+                env = dict(SEEDBOX_KERNEL=str(kernel), SEEDBOX_DISK_KERNEL=str(kernel))
+                if value is not None:
+                    env['SEEDBOX_MKE2FS'] = value
+                with self.subTest(value=value), \
+                     patch.object(host_check.sys, 'platform', 'linux'), \
+                     patch.dict(host_check.os.environ, env, clear=True), \
+                     patch.object(host_check, 'allocate_pairs', side_effect=AssertionError('reservation')), \
+                     patch.object(host_check.tempfile, 'mkdtemp', side_effect=AssertionError('state')):
+                    with self.assertRaisesRegex(ValueError, 'SEEDBOX_MKE2FS.*project development shell'):
+                        host_check.execute(dict(checks={'volume-crash': []}), None)
+
     def test_lane_admission_refusal_stops_before_parallel_dispatch(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -142,10 +171,10 @@ class DispatchTests(unittest.TestCase):
             self.assertEqual(summary['status'], 'FAIL')
             self.assertTrue(all(check['status'] == 'NOT_RUN' for check in summary['checks'].values()))
 
-    def exercise_gate(self, skip_portable=False, stored=False, fail=None):
+    def exercise_gate(self, skip_portable=False, stored=False, fail=None, disk=False):
         with tempfile.TemporaryDirectory(prefix='host gate with spaces ') as tmp:
             root = Path(tmp)
-            for name in ('kernel', 'busybox', 'pinned', 'stored'):
+            for name in ('kernel', 'busybox', 'pinned', 'stored', 'disk-kernel', 'mke2fs'):
                 (root / name).write_bytes(name.encode())
             calls = []
             class Source:
@@ -163,10 +192,16 @@ class DispatchTests(unittest.TestCase):
                 yield [(2, 18)]
             env = dict(SEEDBOX_KERNEL=str(root / 'kernel'), SEEDBOX_BUSYBOX=str(root / 'busybox'),
                        PINNED_ENGINE=str(root / 'pinned'), HOST_CHECK_DIR=str(root), PATH='/explicit')
+            if disk:
+                env['SEEDBOX_DISK_KERNEL'] = str(root / 'disk-kernel')
+                env['SEEDBOX_MKE2FS'] = str(root / 'mke2fs')
             if stored:
                 env['SEEDBOX_VMM'] = str(root / 'stored')
                 env.pop('PINNED_ENGINE')
-            plan = dict(target='a' * 40, checks=dict(core=[]))
+            notes = ["example minio: its reviewer's run list is required"]
+            plan = dict(target='a' * 40, checks=dict(core=[]), reviewer_notes=notes)
+            if disk:
+                plan['checks'].update({'disk-crash': [], 'disk-ext4-crash': [], 'volume-crash': []})
             args = SimpleNamespace(repo=root, lanes=[2], skip_portable=skip_portable)
             with patch.object(host_check.sys, 'platform', 'linux'), \
                  patch.dict(host_check.os.environ, env, clear=True), \
@@ -174,7 +209,7 @@ class DispatchTests(unittest.TestCase):
                  patch.object(host_check, 'read_pairs', return_value=[(2, 18)]), \
                  patch.object(host_check, 'allocate_pairs', reserved), \
                  patch.object(host_check, 'run_jobs', return_value=dict(status='PASS', jobs=[], undispatched=[])) as dispatch, \
-                 patch.object(host_check, 'finish'), contextlib.redirect_stdout(io.StringIO()):
+                 patch.object(host_check, 'finish') as finish, contextlib.redirect_stdout(io.StringIO()):
                 if fail:
                     with self.assertRaisesRegex(RuntimeError, 'injected failure'):
                         host_check.execute(plan, args)
@@ -182,7 +217,27 @@ class DispatchTests(unittest.TestCase):
                 else:
                     self.assertEqual(host_check.execute(plan, args), 0)
                     dispatch.assert_called_once()
+                    jobs = dispatch.call_args.args[0]
+                    self.assertEqual(jobs[0]['kernel'], str((root / 'kernel').resolve()))
+                    if disk:
+                        self.assertEqual([job['name'] for job in jobs[1:]],
+                                         ['disk-crash', 'disk-ext4-crash', 'volume-crash'])
+                        self.assertTrue(all(job['kernel'] == str((root / 'disk-kernel').resolve()) for job in jobs[1:]))
+                        self.assertEqual(jobs[-1]['spec']['kind'], 'compose')
+                        self.assertEqual(jobs[-1]['mke2fs'], str((root / 'mke2fs').resolve()))
+                    self.assertEqual(finish.call_args.args[2]['reviewer_notes'], notes)
             return calls
+
+    def test_disk_and_compose_volume_jobs_admit_and_use_separate_kernel(self):
+        calls = self.exercise_gate(disk=True)
+        doctors = {name: command for name, command in calls if name.startswith('doctor-')}
+        self.assertEqual(set(doctors), {'doctor-cpu2', 'doctor-disk-cpu2'})
+        for name, file in (('doctor-cpu2', 'kernel'), ('doctor-disk-cpu2', 'disk-kernel')):
+            command = doctors[name]
+            self.assertEqual(Path(command[command.index('--kernel') + 1]).name, file)
+            self.assertIn('--allow-dev-engine', command)
+        calls = self.exercise_gate(disk=True, fail='doctor-disk-cpu2')
+        self.assertEqual(calls[-1][0], 'doctor-disk-cpu2')
 
     def test_default_portable_steps_before_guest_admission(self):
         calls = self.exercise_gate()
@@ -264,9 +319,10 @@ class DispatchTests(unittest.TestCase):
                                   machines=[dict(name='d', guest_exit_code=0, guest_init_error=None,
                                                  infrastructure_error=False, state_digest='s')])
                     Path(str(path) + '.json').write_text(json.dumps(report))
-            job = dict(src=str(root), kernel='kernel', engine='engine', pair=[7,23],
+            job = dict(src=str(root), kernel='disk-kernel', engine='engine', pair=[7,23],
                        spec=dict(kind='fixture', world='disk-crash'))
             host_worker.run_fixture(job, Recorder())
+            self.assertEqual(json.loads((output / 'world.json').read_text())['kernel'], 'disk-kernel')
             self.assertEqual(len(calls), 2)
             self.assertEqual(calls[0][1][0], 'nice')
             self.assertNotIn('taskset', calls[0][1])
@@ -335,6 +391,7 @@ class DispatchTests(unittest.TestCase):
                         shutil.rmtree(command[-1])
                 source = Source()
                 summary = dict(status='PASS' if passed else 'FAIL',source_wall_seconds={'build':1},
+                               reviewer_notes=["example minio: its reviewer's run list is required"],
                                jobs=[dict(name='core-smoke',exit=0 if passed else 1,wall_seconds=2,pair=[1,17],
                                           receipt={'phase_wall_seconds':{'fixed':1,'default':.5}})])
                 def remove(command, **kwargs):
@@ -344,6 +401,14 @@ class DispatchTests(unittest.TestCase):
                 with patch.object(host_check.subprocess,'run',side_effect=remove) as cleanup, \
                      contextlib.redirect_stdout(output):
                     host_check.finish(work, Path(tmp), summary, source)
+                status_line = next(line for line in output.getvalue().splitlines()
+                                   if line.startswith(('PASS: ', 'FAIL: ')))
+                note = summary['reviewer_notes'][0]
+                self.assertTrue(status_line.endswith('; not run: ' + note))
+                receipt = work.with_suffix('.json') if passed else work / 'summary.json'
+                self.assertEqual(json.loads(receipt.read_text())['reviewer_notes'], [note])
+                text = work.with_suffix('.txt') if passed else work / 'summary.txt'
+                self.assertIn(note, text.read_text())
                 self.assertEqual(work.exists(), not passed)
                 self.assertEqual(cleanup.call_count, int(passed))
                 self.assertIn('phase default: 0.5s', output.getvalue())
@@ -377,6 +442,25 @@ class DispatchTests(unittest.TestCase):
             self.assertTrue(call[2])
             self.assertNotIn('--undo',call[1])
             self.assertNotIn('--margin',call[1])
+
+    def test_compose_volume_run_uses_disk_kernel_and_requires_pass_then_match(self):
+        campaign = SimpleNamespace(args=SimpleNamespace(cli='cli', kernel='disk-kernel', engine='engine',
+            guest_init='init', busybox='busybox', cpu=1), state=Path('/owned/state'), last_run=Path('/owned/run'))
+        calls = []
+        def invoke(name, command, execution):
+            calls.append(command)
+            return 0, 'PASS: /owned/run\n', ''
+        campaign.invoke = invoke
+        campaign.inspect = lambda *args: dict(outcome='PASS', error=None, identity={'key': 'same'},
+            replay=dict(status='MATCH', outcome_matches=True, witness_matches=True,
+                        full_state_matches=True, fault_history_matches=True))
+        job = dict(pinned_engine='pinned', mke2fs='static-mke2fs', spec={'expected': 'PASS'})
+        host_compose.run_pair(job, campaign, Path('harness/acceptance/workloads/volume-crash.yaml'))
+        self.assertEqual(calls[0][calls[0].index('--kernel') + 1], 'disk-kernel')
+        self.assertEqual(calls[0][calls[0].index('--mke2fs') + 1], 'static-mke2fs')
+        self.assertEqual(calls[0][2], 'harness/acceptance/workloads/volume-crash.yaml')
+        self.assertIn('--allow-dev-engine', calls[0])
+        self.assertEqual(calls[1][1], 'replay')
 
     def test_unit_command_uses_existing_ownership_receipt(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -22,6 +22,8 @@ def run_pair(job, campaign, project, verifier=None):
     flags = ['--allow-dev-engine'] if job.get('pinned_engine') else []
     runtime = ['--kernel', a.kernel, '--vmm', a.engine, '--guest-init', a.guest_init,
                '--busybox', a.busybox, '--cpu', str(a.cpu), '--state', str(state), '--memory-mb', '512']
+    if job.get('mke2fs'):
+        runtime += ['--mke2fs', job['mke2fs']]
     expected = job['spec']['expected']
     code, stdout, _ = campaign.invoke('run', [a.cli, 'run', str(project), '--full-state', *runtime, *flags], True)
     if code != (1 if expected == 'FAIL' else 0) or not stdout.startswith(expected + ': '):
