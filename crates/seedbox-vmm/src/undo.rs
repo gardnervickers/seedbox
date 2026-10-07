@@ -341,6 +341,10 @@ impl Undo {
         Ok(())
     }
 
+    pub fn holds_fork_point(&self) -> bool {
+        self.since_fork.is_some()
+    }
+
     /// Put RAM and the shadow back to `image`, the RAM saved at the fork point,
     /// on every page written since. Returns the page count.
     pub fn return_to_fork(&mut self, vm: &VmFd, mem: *mut u8, image: *const u8) -> Result<u64, String> {

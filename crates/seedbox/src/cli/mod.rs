@@ -7,15 +7,17 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use seedbox::{
     bundle, config,
     counter::CounterProfile,
+    diff,
     execution::{
         CancellationToken, ExecutionBackend, ExecutionProfile, PreparationBackend, WitnessMode,
     },
+    exploration::{self, ExploreOptions},
     oci::OciTools,
     orchestration::{self, Orchestrator, Outcome, ReplayOptions, ReplayStatus, RunOptions},
     preparation::OciPreparer,
     store::ContentStore,
     templates::Template,
-    vmm::{recorded_counter, VmmExecutor},
+    vmm::{recorded_counter, recorded_torn_writes, VmmExecutor},
     Error, Result,
 };
 use signals::Signals;
@@ -26,8 +28,8 @@ use std::{
 
 const EXIT_CODES: &str = "\
 Exit status:
-  0    PASS, or a replay MATCH
-  1    FAIL, or a replay MISMATCH
+  0    PASS, or a replay/diff MATCH
+  1    FAIL, replay MISMATCH, or diff DIFFERENT
   2    ERROR, a replay that is NOT_COMPARABLE, or a usage or setup error
   3    INCOMPLETE (wall-time limit or cancelled)
   124  TIMEOUT (simulated-time limit)";
@@ -63,6 +65,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Check execution-profile compatibility without images or guests (Linux KVM host, root).
+    #[command(
+        after_help = "Success means profile compatibility, not cross-host replay qualification. Doctor never builds missing runtime inputs."
+    )]
+    Doctor {
+        #[command(flatten)]
+        cpu: CpuArg,
+        /// Print the admitted observations as JSON.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        inputs: KvmInputs,
+    },
     /// Resolve images and build guest artifacts, without running.
     Prepare {
         #[command(flatten)]
@@ -74,6 +89,8 @@ enum Command {
         state: StateArg,
         #[command(flatten)]
         inputs: RuntimeInputs,
+        #[command(flatten)]
+        build: BuildOptions,
     },
     /// Prepare images and run a simulation (Linux KVM host, root).
     #[command(after_help = EXIT_CODES)]
@@ -89,6 +106,36 @@ enum Command {
         state: StateArg,
         #[command(flatten)]
         inputs: RuntimeInputs,
+        #[command(flatten)]
+        build: BuildOptions,
+        #[command(flatten)]
+        performance: Performance,
+    },
+    /// Explore a finite seed sequence with one frozen preparation (Linux KVM host, root).
+    #[command(after_help = EXIT_CODES)]
+    Explore {
+        #[command(flatten)]
+        compose: ComposeArg,
+        /// First simulation seed [default: x-seedbox.seed from the Compose file].
+        #[arg(long)]
+        seed: Option<u64>,
+        /// Number of consecutive seeds to execute.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..))]
+        count: u64,
+        /// Maximum active attempts; omit --cpu for parallel execution.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=32))]
+        workers: u32,
+        /// Print exactly one exploration report as JSON.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        cpu: CpuArg,
+        #[command(flatten)]
+        state: StateArg,
+        #[command(flatten)]
+        inputs: RuntimeInputs,
+        #[command(flatten)]
+        build: BuildOptions,
         #[command(flatten)]
         performance: Performance,
     },
@@ -131,6 +178,17 @@ enum Command {
         state: StateArg,
         #[command(flatten)]
         transfer: Transfer,
+    },
+    /// Compare retained run evidence without executing guests.
+    #[command(after_help = EXIT_CODES)]
+    Diff {
+        /// First retained run directory.
+        run_a: PathBuf,
+        /// Second retained run directory.
+        run_b: PathBuf,
+        /// Print exactly one comparison report as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Show a recorded run after verifying its manifest.
     Inspect {
@@ -181,6 +239,9 @@ struct CpuArg {
     /// Run even when this CPU's branch counter profile is unqualified; its results are unverified.
     #[arg(long)]
     allow_unqualified_cpu: bool,
+    /// Allow unpinned engines or guest kernels; their results are unqualified.
+    #[arg(long)]
+    allow_dev_engine: bool,
 }
 
 impl CpuArg {
@@ -217,21 +278,31 @@ impl StateArg {
 
 #[derive(Args)]
 #[command(next_help_heading = "Runtime inputs")]
-struct RuntimeInputs {
+struct KvmInputs {
     /// Guest kernel bzImage [default: bzImage in $SEEDBOX_ARTIFACTS, $SEEDBOX_WORK/artifacts,
     /// ./artifacts, then ~/seedbox-sim/artifacts for the user and any sudo caller].
     #[arg(long, env = "SEEDBOX_KERNEL")]
     kernel: Option<PathBuf>,
     /// VMM binary [default: next to an installed seedbox, then this checkout's `cargo build-vmm`
-    /// output (built by `cargo run` if missing), then PATH].
+    /// output (built by `cargo run` for run/prepare if missing), then PATH].
     #[arg(long, env = "SEEDBOX_VMM")]
     vmm: Option<PathBuf>,
+}
+
+#[derive(Args)]
+#[command(next_help_heading = "Runtime inputs")]
+struct RuntimeInputs {
+    #[command(flatten)]
+    kvm: KvmInputs,
     /// Static guest supervisor [default: the copy built into this binary].
     #[arg(long, env = "SEEDBOX_GUEST_INIT")]
     guest_init: Option<PathBuf>,
     /// Static Linux amd64 BusyBox [default: busybox on PATH, if static].
     #[arg(long, env = "SEEDBOX_BUSYBOX")]
     busybox: Option<PathBuf>,
+    /// Static Linux amd64 mke2fs, for named volumes [default: mke2fs on PATH, if static].
+    #[arg(long, env = "SEEDBOX_MKE2FS")]
+    mke2fs: Option<PathBuf>,
     /// Docker-compatible client for `build:` services.
     #[arg(long, default_value = "podman")]
     builder: PathBuf,
@@ -241,6 +312,9 @@ struct RuntimeInputs {
     /// Also record and compare every machine's RAM and registers.
     #[arg(long)]
     full_state: bool,
+    /// Keep a seeded subset of unflushed disk sectors on crash (512-byte atomicity; off by default).
+    #[arg(long)]
+    torn_writes: bool,
 }
 
 impl RuntimeInputs {
@@ -252,13 +326,14 @@ impl RuntimeInputs {
         counter: CounterProfile,
         scratch: &Path,
     ) -> Result<(OciPreparer, VmmExecutor)> {
-        let engine = defaults::engine(self.vmm.clone())?;
+        let engine = defaults::engine(self.kvm.vmm.clone())?;
         let witness = if self.full_state {
             WitnessMode::FullState
         } else {
             WitnessMode::Exits
         };
-        let executor = VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?;
+        let executor = VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?
+            .with_torn_writes(self.torn_writes);
         let preparer = self.preparer(engine, store, scratch, executor.profile())?;
         Ok((preparer, executor))
     }
@@ -270,17 +345,55 @@ impl RuntimeInputs {
         scratch: &Path,
         profile: ExecutionProfile,
     ) -> Result<OciPreparer> {
+        let mut tools = OciTools {
+            docker: self.builder.clone(),
+            ..OciTools::default()
+        };
+        for tool in [&mut tools.skopeo, &mut tools.umoci] {
+            if let Ok(resolved) = defaults::preparation_tool(tool) {
+                *tool = resolved;
+            }
+        }
         Ok(OciPreparer {
-            tools: OciTools {
-                docker: self.builder.clone(),
-                ..OciTools::default()
-            },
-            kernel: defaults::kernel(self.kernel.clone())?,
+            tools,
+            kernel: defaults::kernel(self.kvm.kernel.clone())?,
             engine,
             init: defaults::guest_init(self.guest_init.clone(), store, scratch)?,
             busybox: defaults::busybox(self.busybox.clone())?,
+            mke2fs: defaults::mke2fs(self.mke2fs.clone())?,
             profile,
         })
+    }
+}
+
+#[derive(Args)]
+#[command(next_help_heading = "Preparation")]
+struct BuildOptions {
+    /// Clamp new build-layer timestamps to this Unix epoch (qualified native Podman only) [default: absent].
+    #[arg(long, allow_hyphen_values = true, value_parser = clap::value_parser!(u32))]
+    build_epoch: Option<u32>,
+}
+
+impl BuildOptions {
+    fn configure(&self, simulation: &config::Simulation, inputs: &mut RuntimeInputs) -> Result<()> {
+        if simulation
+            .services
+            .values()
+            .any(|service| matches!(service.source, config::ImageSource::Build { .. }))
+        {
+            match defaults::preparation_tool(&inputs.builder) {
+                Ok(builder) => inputs.builder = builder,
+                Err(error) if self.build_epoch.is_some() => return Err(Error::Setup(format!("--build-epoch: {error}; use the qualified project-Nix local Podman or omit --build-epoch"))),
+                Err(_) => (), // Preserve ordinary custom-builder discovery at execution.
+            }
+            OciTools {
+                docker: inputs.builder.clone(),
+                build_epoch: self.build_epoch,
+                ..OciTools::default()
+            }
+            .validate_build_epoch()?;
+        }
+        Ok(())
     }
 }
 
@@ -349,11 +462,44 @@ fn run(cli: Cli) -> Result<u8> {
             }
             Ok(0)
         }
+        Command::Doctor { cpu, inputs, json } => {
+            let engine = defaults::engine_lookup(inputs.vmm)?;
+            let kernel = defaults::kernel(inputs.kernel)?;
+            let report = VmmExecutor::doctor_with_dev_engine(
+                &engine,
+                &kernel,
+                cpu.cpu,
+                cpu.allow_dev_engine,
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("VALID: compatible execution profile");
+                if report.engine_qualification.is_some() {
+                    println!("dev engine: unqualified");
+                }
+                println!("policy: {}", report.policy_version);
+                println!("cpu: {}", report.cpu);
+                println!(
+                    "cpus: {}",
+                    report
+                        .cpus
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+                println!("engine: {}", report.engine.hex());
+                println!("kernel: {}", report.kernel.hex());
+            }
+            Ok(0)
+        }
         Command::Prepare {
             compose,
             output,
             state,
-            inputs,
+            mut inputs,
+            build,
         } => {
             if output.exists() {
                 return Err(Error::Setup(format!(
@@ -362,12 +508,12 @@ fn run(cli: Cli) -> Result<u8> {
                 )));
             }
             let simulation = compose.load()?;
+            build.configure(&simulation, &mut inputs)?;
             let (store, _) = state.open()?;
             let scratch = tempfile::tempdir()?;
-            // Preparation runs no guest, so it may run on any machine; off a
-            // supported CPU it prepares for the qualified Zen profile.
             let counter = CounterProfile::host().unwrap_or(CounterProfile::Zen);
-            let (preparer, _) = inputs.backends(&store, None, counter, scratch.path())?;
+            let (mut preparer, _) = inputs.backends(&store, None, counter, scratch.path())?;
+            preparer.tools.build_epoch = build.build_epoch;
             let prepared = preparer.prepare(&simulation, &store)?;
             let file = std::fs::OpenOptions::new()
                 .write(true)
@@ -382,21 +528,29 @@ fn run(cli: Cli) -> Result<u8> {
             seed,
             cpu,
             state,
-            inputs,
+            mut inputs,
+            build,
             performance,
         } => {
             let simulation = compose.load()?;
+            build.configure(&simulation, &mut inputs)?;
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
-            // Report a CPU without a usable profile only after the input
-            // checks; until then, Zen stands in.
             let detected = CounterProfile::host();
             let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
-            let (preparer, executor) = inputs.backends(&store, cpu.cpu, counter, scratch.path())?;
+            let (mut preparer, executor) =
+                inputs.backends(&store, cpu.cpu, counter, scratch.path())?;
+            cpu.admit(detected?)?;
+            let executor = executor.with_unqualified_cpu(cpu.allow_unqualified_cpu);
+            let executor = if cpu.allow_dev_engine {
+                executor.with_dev_engine(true, &seedbox::admission::file_digest(&preparer.kernel)?)
+            } else {
+                executor
+            };
+            preparer.profile = executor.profile();
+            preparer.tools.build_epoch = build.build_epoch;
             let executor = performance.apply(executor)?;
-            // After the fast input checks, before slow image preparation.
-            let counter = cpu.admit(detected?)?;
-            require_kvm_host(counter)?;
+            // Backend admission checks the selected core before preparation.
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
             let result = orchestrator.run(
@@ -406,6 +560,101 @@ fn run(cli: Cli) -> Result<u8> {
                 &executor,
             )?;
             Ok(report(&result))
+        }
+        Command::Explore {
+            compose,
+            seed,
+            count,
+            workers,
+            json,
+            cpu,
+            state,
+            mut inputs,
+            build,
+            performance,
+        } => {
+            let resources = Resources::start();
+            let simulation = compose.load()?;
+            build.configure(&simulation, &mut inputs)?;
+            let cancellation = CancellationToken::default();
+            let options = ExploreOptions {
+                seed,
+                count,
+                workers,
+                cancellation: cancellation.clone(),
+            };
+            exploration::bounds(&simulation, &options)?;
+            if workers > 1 && cpu.cpu.is_some() {
+                return Err(Error::Setup("--workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU".into()));
+            }
+            let (store, orchestrator) = state.open()?;
+            let scratch = tempfile::tempdir()?;
+            let detected = CounterProfile::host();
+            let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
+            let (mut preparer, executor) =
+                inputs.backends(&store, cpu.cpu, counter, scratch.path())?;
+            preparer.tools.build_epoch = build.build_epoch;
+            preparer.tools.skopeo = defaults::preparation_tool(&preparer.tools.skopeo)?;
+            preparer.tools.umoci = defaults::preparation_tool(&preparer.tools.umoci)?;
+            if simulation
+                .services
+                .values()
+                .any(|s| matches!(s.source, config::ImageSource::Build { .. }))
+            {
+                preparer.tools.docker = defaults::preparation_tool(&preparer.tools.docker)?;
+            }
+            cpu.admit(detected?)?;
+            let executor = executor.with_unqualified_cpu(cpu.allow_unqualified_cpu);
+            let executor = if cpu.allow_dev_engine {
+                executor.with_dev_engine(true, &seedbox::admission::file_digest(&preparer.kernel)?)
+            } else {
+                executor
+            };
+            preparer.profile = executor.profile();
+            let executor = performance.apply(executor)?;
+            // Exploration retains any backend admission refusal in its batch checkpoint.
+            let _signals = Signals::register(&cancellation)?;
+            let mut result = orchestrator.explore(&simulation, options, &preparer, &executor)?;
+            result.record_resources(resources.finish())?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("{}: {}", word(&result.outcome), result.directory.display());
+                println!("seeds: {}..={}", result.first_seed, result.last_seed);
+                println!("workers: {}", result.workers);
+                println!("peak-running: {}", result.peak_running);
+                println!(
+                    "active-attempt-seconds: {:.3}",
+                    result.active_attempt_seconds
+                );
+                println!("attempted: {}", result.attempts.len());
+                println!("pass: {}", result.counts.pass);
+                println!("fail: {}", result.counts.fail);
+                println!("timeout: {}", result.counts.timeout);
+                println!("error-count: {}", result.counts.error);
+                println!("incomplete: {}", result.counts.incomplete);
+                println!("unfinished: {}", result.counts.unfinished);
+                println!("undispatched: {}", result.undispatched_count);
+                println!("elapsed-seconds: {:.3}", result.total_seconds);
+                for attempt in &result.attempts {
+                    if let (Some(directory), Some(outcome)) = (&attempt.directory, &attempt.outcome)
+                    {
+                        eprintln!(
+                            "seed {}: {} {}",
+                            attempt.seed,
+                            word(outcome),
+                            directory.display()
+                        );
+                        if let Some(error) = &attempt.error {
+                            eprintln!("error: seed {}: {error}", attempt.seed);
+                        }
+                    }
+                }
+                if let Some(error) = &result.error {
+                    eprintln!("error: {error}");
+                }
+            }
+            Ok(outcome_code(&result.outcome))
         }
         Command::Replay {
             run,
@@ -417,13 +666,24 @@ fn run(cli: Cli) -> Result<u8> {
         } => {
             let run = defaults::run_directory(run)?;
             let previous = orchestration::inspect(&run)?;
-            let counter = cpu.admit(CounterProfile::host()?)?;
-            same_counter(
-                &run,
-                recorded_counter(&previous.identity.inputs.profile)?,
-                counter,
-            )?;
-            require_kvm_host(counter)?;
+            let detected = CounterProfile::host();
+            let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
+            // Historical/incompatible records must reach the retained-proof gate
+            // and remain captured as NOT_COMPARABLE before querying this host.
+            if seedbox::admission::admit_artifacts(
+                &previous.identity.inputs.profile,
+                &previous.identity.inputs.kernel,
+                cpu.allow_dev_engine,
+            )
+            .is_ok()
+            {
+                cpu.admit(detected?)?;
+                same_counter(
+                    &run,
+                    recorded_counter(&previous.identity.inputs.profile)?,
+                    counter,
+                )?;
+            }
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
             let profile = &previous.identity.inputs.profile;
@@ -436,14 +696,19 @@ fn run(cli: Cli) -> Result<u8> {
                 .get("memory_mb")
                 .and_then(|value| value.parse().ok())
                 .ok_or_else(|| Error::Integrity("recorded profile missing memory_mb".into()))?;
-            let executor = performance.apply(VmmExecutor::new(
-                &engine,
-                &store,
-                cpu.cpu,
-                memory,
-                profile.witness_mode.clone(),
-                counter,
-            )?)?;
+            let executor = performance.apply(
+                VmmExecutor::new(
+                    &engine,
+                    &store,
+                    cpu.cpu,
+                    memory,
+                    profile.witness_mode.clone(),
+                    counter,
+                )?
+                .with_torn_writes(recorded_torn_writes(profile)?)
+                .with_unqualified_cpu(cpu.allow_unqualified_cpu)
+                .with_dev_engine(cpu.allow_dev_engine, &previous.identity.inputs.kernel),
+            )?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
             let result = orchestrator.replay_with_options(
@@ -523,6 +788,46 @@ fn run(cli: Cli) -> Result<u8> {
             print_omissions(&run.record);
             Ok(0)
         }
+        Command::Diff { run_a, run_b, json } => {
+            let comparison = diff::diff(&run_a, &run_b)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&comparison)?);
+            } else {
+                println!(
+                    "{}: {} <> {}",
+                    word(&comparison.status),
+                    run_a.display(),
+                    run_b.display()
+                );
+                println!(
+                    "world witness: {}",
+                    serde_json::to_string(&comparison.world_witness)?
+                );
+                for machine in &comparison.machines {
+                    println!("machine: {}", serde_json::to_string(machine)?);
+                }
+                println!(
+                    "first record: {}",
+                    serde_json::to_string(&comparison.first_record)?
+                );
+                for (label, differences) in [
+                    ("identity", &comparison.identity_differences),
+                    ("result", &comparison.result_differences),
+                    ("evidence", &comparison.evidence_differences),
+                ] {
+                    for difference in differences {
+                        println!("{label}: {}", serde_json::to_string(difference)?);
+                    }
+                }
+                for limitation in &comparison.limitations {
+                    println!("limitation: {limitation}");
+                }
+            }
+            Ok(match comparison.status {
+                diff::Status::Match => 0,
+                diff::Status::Different => 1,
+            })
+        }
         Command::Inspect { run, json } => {
             let run = defaults::run_directory(run)?;
             let record = orchestration::inspect(&run)?;
@@ -537,7 +842,12 @@ fn run(cli: Cli) -> Result<u8> {
                 record.identity.seed
             );
             if let Some(replay) = record.replay {
-                println!("replay: {}", word(&replay.status));
+                let label = if seedbox::admission::is_dev_engine(&record.identity.inputs.profile) {
+                    " (unqualified dev engine)"
+                } else {
+                    ""
+                };
+                println!("replay: {}{label}", word(&replay.status));
             }
             if let Some(error) = record.error {
                 println!("error: {error}");
@@ -545,40 +855,6 @@ fn run(cli: Cli) -> Result<u8> {
             Ok(0)
         }
     }
-}
-
-/// Fail fast when this host cannot execute: no KVM, or no MSR access when the
-/// counter profile needs a workaround.
-fn require_kvm_host(counter: CounterProfile) -> Result<()> {
-    if !cfg!(target_os = "linux") {
-        return Err(Error::Setup(
-            "run and replay require the qualified Linux KVM host".into(),
-        ));
-    }
-    for (path, fix) in host_devices(counter) {
-        std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .map_err(|error| Error::Setup(format!("{path}: {error}; {fix}")))?;
-    }
-    Ok(())
-}
-
-/// Devices `run` and `replay` need: KVM, plus MSR access only when the
-/// counter profile has a host workaround.
-fn host_devices(counter: CounterProfile) -> Vec<(&'static str, &'static str)> {
-    let mut devices = vec![(
-        "/dev/kvm",
-        "enable KVM and run as root (e.g. sudo -E env PATH=\"$PATH\" seedbox ...)",
-    )];
-    if counter.workaround().is_some() {
-        devices.push((
-            "/dev/cpu/0/msr",
-            "run as root (e.g. sudo -E env PATH=\"$PATH\" seedbox ...) with the msr module loaded",
-        ));
-    }
-    devices
 }
 
 /// Refuse an unqualified counter profile unless the caller allowed it, and
@@ -619,18 +895,29 @@ fn same_counter(run: &Path, recorded: CounterProfile, host: CounterProfile) -> R
 fn report(run: &orchestration::Run) -> u8 {
     // Scripts parse the run directory from this one `OUTCOME: path` line.
     println!("{}: {}", word(&run.record.outcome), run.directory.display());
+    if seedbox::admission::is_dev_engine(&run.record.identity.inputs.profile) {
+        println!("engine_qualification: dev-unpinned (unqualified dev engine)");
+    }
     if let Some(error) = &run.record.error {
         eprintln!("{error}");
     }
     if let Some(replay) = &run.record.replay {
-        println!("replay: {}", word(&replay.status));
+        let label = if seedbox::admission::is_dev_engine(&run.record.identity.inputs.profile) {
+            " (unqualified dev engine)"
+        } else {
+            ""
+        };
+        println!("replay: {}{label}", word(&replay.status));
         return match replay.status {
             ReplayStatus::Match => 0,
             ReplayStatus::Mismatch => 1,
             ReplayStatus::NotComparable => 2,
         };
     }
-    match run.record.outcome {
+    outcome_code(&run.record.outcome)
+}
+fn outcome_code(outcome: &Outcome) -> u8 {
+    match outcome {
         Outcome::Pass => 0,
         Outcome::Fail => 1,
         Outcome::Error => 2,
@@ -647,6 +934,65 @@ fn word(value: &impl serde::Serialize) -> String {
     }
 }
 
+/// Invocation-wide CPU deltas and separate process-family RSS high-water marks.
+struct Resources {
+    #[cfg(unix)]
+    self_usage: Option<libc::rusage>,
+    #[cfg(unix)]
+    child_usage: Option<libc::rusage>,
+}
+impl Resources {
+    fn start() -> Self {
+        Self {
+            #[cfg(unix)]
+            self_usage: usage(libc::RUSAGE_SELF),
+            #[cfg(unix)]
+            child_usage: usage(libc::RUSAGE_CHILDREN),
+        }
+    }
+    fn finish(self) -> Option<exploration::ProcessResources> {
+        #[cfg(unix)]
+        {
+            let current = usage(libc::RUSAGE_SELF)?;
+            let children = usage(libc::RUSAGE_CHILDREN)?;
+            let before = self.self_usage?;
+            let before_children = self.child_usage?;
+            let seconds =
+                |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 / 1_000_000.0;
+            let bytes = |rss: libc::c_long| {
+                if cfg!(target_os = "macos") {
+                    rss as u64
+                } else {
+                    (rss as u64).saturating_mul(1024)
+                }
+            };
+            Some(exploration::ProcessResources {
+                self_user_seconds: seconds(current.ru_utime) - seconds(before.ru_utime),
+                self_system_seconds: seconds(current.ru_stime) - seconds(before.ru_stime),
+                reaped_children_user_seconds: seconds(children.ru_utime)
+                    - seconds(before_children.ru_utime),
+                reaped_children_system_seconds: seconds(children.ru_stime)
+                    - seconds(before_children.ru_stime),
+                self_rss_high_water_bytes: bytes(current.ru_maxrss),
+                reaped_children_rss_high_water_bytes: bytes(children.ru_maxrss),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
+}
+#[cfg(unix)]
+fn usage(who: libc::c_int) -> Option<libc::rusage> {
+    let mut usage = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrusage(who, &mut usage) } == 0 {
+        Some(usage)
+    } else {
+        None
+    }
+}
+
 fn print_omissions(record: &orchestration::RunRecord) {
     if !record.omitted_logs.is_empty() {
         println!("omitted files: {}", record.omitted_logs.len());
@@ -656,18 +1002,6 @@ fn print_omissions(record: &orchestration::RunRecord) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_profiles_with_a_workaround_need_msr_access() {
-        let paths = |counter| {
-            host_devices(counter)
-                .into_iter()
-                .map(|(path, _)| path)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(paths(CounterProfile::Zen), ["/dev/kvm", "/dev/cpu/0/msr"]);
-        assert_eq!(paths(CounterProfile::IntelIceLake), ["/dev/kvm"]);
-    }
 
     #[test]
     fn replay_on_another_vendor_names_both_counters() {

@@ -413,7 +413,7 @@ mod tests {
         kernel.extend(code);
         let spec = BootSpec {
             kernel: &kernel, initrd: &[], cmdline: String::new(), mem: INITRD_ADDR + 0x100000,
-            rng_seed: [0; 32], mac: None, control_channel: false, undo_margin: undo, barrier: false,
+            rng_seed: [0; 32], mac: None, control_channel: false, disk: None, undo_margin: undo, barrier: false,
             pv_clock: true,
         };
         let mut m = Machine::new(kvm, "pv-probe", &spec).unwrap();
