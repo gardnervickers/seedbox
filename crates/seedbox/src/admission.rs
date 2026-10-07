@@ -408,6 +408,28 @@ pub(crate) fn observe(cpu: u32) -> Result<CoreObservation> {
     }
 }
 
+/// Applicable readiness for explicitly unqualified execution, never AMD qualification.
+#[cfg(target_os = "linux")]
+pub(crate) fn check_unqualified(
+    cpus: impl IntoIterator<Item = u32>,
+    counter: crate::counter::CounterProfile,
+) -> Result<()> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        for cpu in cpus {
+            linux::check_unqualified(cpu, counter)?;
+        }
+        Ok(())
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (cpus, counter);
+        Err(Error::Setup(
+            "experimental execution requires x86-64 Linux KVM".into(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod cleanup_tests {
     use super::*;
@@ -677,24 +699,3 @@ mod cleanup_tests {
     }
 }
 
-/// Applicable readiness for explicitly unqualified execution, never AMD qualification.
-#[cfg(target_os = "linux")]
-pub(crate) fn check_unqualified(
-    cpus: impl IntoIterator<Item = u32>,
-    counter: crate::counter::CounterProfile,
-) -> Result<()> {
-    #[cfg(target_arch = "x86_64")]
-    {
-        for cpu in cpus {
-            linux::check_unqualified(cpu, counter)?;
-        }
-        Ok(())
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        let _ = (cpus, counter);
-        Err(Error::Setup(
-            "experimental execution requires x86-64 Linux KVM".into(),
-        ))
-    }
-}
