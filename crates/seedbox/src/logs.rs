@@ -1,6 +1,7 @@
 //! Committed-time observation of retained binary console and management streams.
-//! Chunk times are VMM commit times, not application timestamps. Equal times are
-//! ordered by machine name, then the machine's output sequence across both streams.
+//! Chunk times are the first byte's VMM commit time, not application timestamps.
+//! Equal times are ordered by machine name, then the machine's output sequence
+//! across both streams.
 use crate::{orchestration, retained, Error, Result};
 use serde::Serialize;
 use std::{
@@ -32,9 +33,9 @@ impl Stream {
 pub struct Filter {
     pub machine: Option<String>,
     pub stream: Option<Stream>,
-    /// Inclusive lower bound, in simulated nanoseconds.
+    /// Inclusive lower bound on the chunk's first-byte time, in simulated nanoseconds.
     pub since_ns: Option<u64>,
-    /// Exclusive upper bound, in simulated nanoseconds.
+    /// Exclusive upper bound on the chunk's first-byte time, in simulated nanoseconds.
     pub until_ns: Option<u64>,
 }
 #[derive(Clone, Debug, Serialize)]

@@ -934,10 +934,29 @@ mod timed_logs {
         timed_fixture(&root.join("run"));
         let text = seedbox(&["logs", "run"], root);
         assert!(text.status.success(), "{}", stderr(&text));
-        assert!(text.stderr.is_empty());
-        let text = String::from_utf8(text.stdout).unwrap();
-        assert!(text.starts_with("LOGS: run\n"));
-        assert_eq!(text.lines().filter(|l| l.starts_with("chunk: ")).count(), 4);
+        assert_eq!(stderr(&text), "logs: run\n");
+        assert_eq!(text.stdout, b"\0\xff\xfeA\nB");
+        let text = seedbox(
+            &[
+                "logs",
+                "run",
+                "--stream",
+                "console",
+                "--since-ns",
+                "10",
+                "--until-ns",
+                "20",
+            ],
+            root,
+        );
+        assert!(text.status.success());
+        assert_eq!(text.stdout, b"\0\xffA\n");
+        let text = seedbox(&["logs", "run", "--since-ns", "20"], root);
+        assert!(text.status.success());
+        assert_eq!(text.stdout, b"B"); // No added newline or chunk decoration.
+        let text = seedbox(&["logs", "run", "--until-ns", "10"], root);
+        assert!(text.status.success());
+        assert!(text.stdout.is_empty());
         for (args, orders) in [
             (vec!["logs", "run", "--json"], vec![0, 1, 2, 3]),
             (
@@ -1024,6 +1043,10 @@ mod timed_logs {
             .as_str()
             .unwrap()
             .contains("unavailable"));
+        let out = seedbox(&["logs", "run"], root);
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"\xfe");
+        assert_eq!(stderr(&out), "logs: run\nomission: [\"machines/workload.console.chunks\",\"committed-time index unavailable; raw bytes cannot be timed\"]\n");
         add_log(
             &path,
             &mut record,

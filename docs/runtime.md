@@ -501,8 +501,15 @@ a determinism guarantee.
 `seedbox logs RUN --machine NAME --stream console --since-ns 1000000000
 --until-ns 2000000000 --json` filters retained chunks in the half-open simulated
 nanosecond interval. All filters are optional; the run directory is positional.
-Without `--json`, output starts with `LOGS: RUN`, followed by lowercase `chunk:`
-and `omission:` records. Both formats encode arbitrary payloads as `bytes_hex`.
+Consecutive bytes from the same machine/incarnation/stream coalesce within one
+world slice until another stream writes. Each chunk retains its first byte's
+commit time; filters select the whole chunk by that time, including later bytes
+that may commit beyond the upper bound.
+Without `--json`, stdout contains only the selected raw bytes in chunk order,
+with no prefixes, encoding changes or added newlines. Lowercase `logs:` status
+and `omission:` diagnostics go to stderr. Use `--machine` and `--stream` to
+recover one stream's indexed bytes exactly. `--json` includes chunk metadata and
+lossless hexadecimal payloads as `bytes_hex` in one report.
 Success exits 0, including explicitly incomplete capture; invalid inputs or
 corrupt evidence exit 2. No runtime inputs, images, host tools or KVM are needed.
 

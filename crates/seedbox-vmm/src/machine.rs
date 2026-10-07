@@ -998,6 +998,7 @@ impl Machine {
         let started = Instant::now();
         let r = self.run_inner(tb, limit, early, frames);
         self.capture_output();
+        self.com1.chunks.finish();self.com2.chunks.finish();
         self.stats.run_ns += started.elapsed().as_nanos();
         r
     }
@@ -2141,9 +2142,8 @@ mod timed_log_tests {
         let mut new=output_machine(&kvm,256);new.succeed(&mut old,5000).unwrap();new.boot_at(5000).unwrap();
         assert_eq!(new.run_until(&mut counter,7000,0,&mut frames).unwrap(),Stop::Exited);
         assert_eq!(new.com1.out,b"\0AB\0AB");assert_eq!(new.com2.out,b"\xff\xff");
-        assert_eq!(new.com1.chunks.records[3],[5000,1,4,3,1]);
-        assert_eq!(new.com2.chunks.records[1],[5000,1,5,1,1]);
-        assert_eq!(new.com1.chunks.records[5],[6000,1,7,5,1]);
+        assert_eq!(new.com1.chunks.records,vec![[0,0,0,0,1],[0,0,2,1,2],[5000,1,3,3,1],[5000,1,5,4,2]]);
+        assert_eq!(new.com2.chunks.records,vec![[0,0,1,0,1],[5000,1,4,1,1]]);
     }
 
     // Inject a judge decision at a real KVM output exit to exercise the commit
@@ -2173,7 +2173,7 @@ mod timed_log_tests {
             if rollback {
                 assert_eq!(result.unwrap(),Stop::Exited);
                 assert!(m.undo.as_ref().unwrap().stats.rollbacks>0);
-                assert_eq!(m.com1.out,b"\0AB");assert_eq!(m.com1.chunks.records.len(),3);
+                assert_eq!(m.com1.out,b"\0AB");assert_eq!(m.com1.chunks.records,vec![[0,0,0,0,1],[0,0,2,1,2]]);
                 assert_eq!(m.com1.chunks.records[0],[0,0,0,0,1]);
             } else {
                 assert!(result.unwrap_err().contains("overshoot"));

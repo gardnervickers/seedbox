@@ -22,7 +22,7 @@ cargo run -- validate examples/etcd
 sudo -E env PATH="$PATH" target/release/seedbox run examples/etcd
 sudo -E env PATH="$PATH" target/release/seedbox replay .seedbox/runs/ATTEMPT
 cargo run -- inspect .seedbox/runs/ATTEMPT
-cargo run -- logs .seedbox/runs/ATTEMPT --machine client --since-ns 1000000000 --json
+cargo run -- logs .seedbox/runs/ATTEMPT --machine client --stream console --since-ns 1000000000
 cargo run -- diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
 ```
 
@@ -43,7 +43,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Engine qualification | pinned engine and guest kernel; dev artifacts require explicit opt-in | `--allow-dev-engine` (run/explore/replay/doctor; no environment backing) |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
 | Diff inputs | Two required retained run directories; no runtime inputs or state lookup | positional `RUN_A RUN_B` |
-| Log selection | All indexed machines and both streams, with no time bounds | `logs RUN --machine NAME --stream console --since-ns N --until-ns N` |
+| Log selection | All indexed machines and both streams, with no time bounds; raw bytes on stdout (`--json` for metadata) | `logs RUN --machine NAME --stream console --since-ns N --until-ns N` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
 
 For development artifacts, pass `--allow-dev-engine` to `run`, `explore`, `replay`
@@ -245,17 +245,24 @@ See [comparison details](docs/runtime.md#compare-retained-runs).
 
 `seedbox logs RUN [--machine NAME] [--stream console|mgmt] [--since-ns N]
 [--until-ns N] [--json]` reads checksum-verified retained output on Linux or macOS.
-Times are simulated nanoseconds at the VMM output commit point; the lower bound
-is inclusive and the upper bound exclusive. Equal-time chunks sort by machine
-name, then the machine's output order across both streams. Incarnations and byte
-ranges remain visible. Payloads use lossless `bytes_hex`; the library's
-`logs::Reader::copy_chunk` returns the exact raw bytes. No application schema or
-line framing is imposed.
+Each chunk coalesces consecutive bytes from one machine/incarnation/stream within
+a world slice, ending when another stream writes or the slice returns. Its time
+is the first byte's simulated commit time. Filters select whole chunks by that
+time: the lower bound is inclusive and the upper bound exclusive, even if later
+bytes in a selected chunk commit beyond the upper bound. Equal-time chunks sort
+by machine name, then the machine's output order across both streams.
+
+By default, stdout contains the selected raw bytes in chunk order, without
+prefixes, encoding changes or added newlines. Status and omission diagnostics go
+to stderr. Select one machine and stream for its exact indexed byte sequence.
+`--json` includes times, incarnations, byte ranges and lossless `bytes_hex` in one
+report. The library's `logs::Reader::copy_chunk` also returns the exact raw bytes.
+No application schema or line framing is imposed.
 
 Capture is bounded and independent of the witness. Missing indexes (including
 older engines), unindexed raw suffixes, and retention omissions are explicit.
-A successful read does not claim complete logs; check `omissions`. Bundles retain
-the indexes through the ordinary log policy. This source change creates a new
+A successful read does not claim complete logs; check stderr or JSON `omissions`.
+Bundles retain the indexes through the ordinary log policy. This source change creates a new
 **unqualified engine**; the frozen engine and release pins are unchanged.
 See [format, portable demo and AMD validation](docs/timed-logs.md) for the pending
 hardware acceptance.

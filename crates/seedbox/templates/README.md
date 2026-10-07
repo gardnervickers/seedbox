@@ -117,9 +117,13 @@ means equality of compared evidence, not replay qualification; DIFFERENT exits 1
 and usage/setup or invalid evidence exits 2. No guests execute and no state is created.
 
 Read committed-time chunks with `seedbox logs RUN --machine NAME --since-ns N
---until-ns N --json`. Times are simulated nanoseconds, inclusive at the start and
-exclusive at the end. Omit filters to read all indexed output. Payloads are
-lossless hexadecimal (`bytes_hex`), ordered by time, machine name and per-machine
-output order; no application log format is required. Check `omissions` for old
-engines without indexes, capture bounds or retention limits. Indexes travel with
-retained logs in export/import bundles. Reading logs needs no KVM or root.
+--until-ns N`. Consecutive bytes from the same machine/incarnation/stream within
+one world slice coalesce until another stream writes. Times are the first byte's
+simulated commit time, inclusive at the start and exclusive at the end. Filters
+select whole chunks, so a selected chunk can contain later bytes beyond the
+upper bound. Omit filters to read all indexed output. Stdout contains raw bytes
+in time, machine name and per-machine output order, without prefixes or added
+newlines; status and omissions go to stderr. Add `--json` for metadata and
+lossless hexadecimal (`bytes_hex`). No application log format is required.
+Check stderr or JSON `omissions` for old engines without indexes, capture bounds
+or retention limits. Indexes travel with retained logs in export/import bundles. Reading logs needs no KVM or root.

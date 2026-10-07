@@ -17,9 +17,14 @@ Each stream has a sidecar `machines/NAME.console.chunks` or
 `machines/NAME.mgmt.chunks`. Its eight-byte magic/version is `SBLOG001`, followed
 by 40-byte records: five little-endian u64 values `(time_ns, incarnation, order,
 offset, length)`. Incarnation fits u32; offsets address the unchanged raw stream.
-A record represents one output effect, not an application line. Per-machine
-order increases across both streams and survives reboot. Forks restore both
-metadata and ordering to the snapshot. Equal times across machines sort by
+A record covers consecutive bytes from one machine/incarnation/stream within a
+world slice, not an application line. Contiguous byte writes extend the open
+record until another stream writes, the incarnation changes, or `run_until`
+returns (including errors). The timestamp is the **first byte's commit time**;
+later bytes in the same chunk can have later times. Time filters select whole
+chunks by that first time, so selected bytes may extend beyond an exclusive
+upper bound. Per-machine order increases for each new burst across both streams
+and survives reboot. Forks restore both metadata and ordering to the snapshot. Equal times across machines sort by
 machine name; this is a deterministic display tie-break, not host dispatch order
 or a claim that concurrent machines have a physical total order.
 
@@ -27,10 +32,18 @@ The hard cap is 65,536 records per stream (2,621,448 bytes including header).
 The host adapter divides a 1,048,576-record budget among all streams (40 MiB of
 records total). Low-level `--log-chunk-limit` can reduce capture to zero for
 observation controls; it is not a semantic parameter. Raw bytes continue after
-the metadata cap. Sidecars stream as complete records during execution, so
-cancellation retains the committed prefix without requiring a terminal report.
-A killed write can leave a partial record, which the reader rejects. A complete
-record prefix shorter than the raw stream reports the uncovered byte interval;
+the metadata cap; the last allowed open record can still grow within its slice.
+One MiB emitted through one-byte exits over 256 slices of 4 KiB each uses 256
+records (10,248 bytes including header), rather than exhausting the cap at 64 KiB.
+Alternating streams or one-byte slices can still exhaust the bound.
+
+Records are serialized only after closing, through a buffered writer flushed at
+every slice return and normal drop. There is no per-byte index write syscall.
+Cancellation retains the flushed committed prefix without requiring a terminal
+report. Abrupt termination may leave an unindexed raw suffix from the current
+slice or buffered records. A killed write can leave a partial record, which the
+reader rejects. A complete record prefix shorter than the raw stream reports
+the uncovered byte interval;
 it cannot distinguish capture limits, abrupt interruption, or sink failure.
 
 `logs::Reader` validates the manifest, index sizes/version, contiguous byte
@@ -64,7 +77,16 @@ workload  0            console  10       2      2       2       410a
 The final console byte `42` is committed at time 20 in incarnation 1 and is
 excluded by the exclusive upper bound. The default read includes it. These
 values are asserted through the public CLI in `tests/cli.rs` and through the
-library's raw byte API in `tests/logs.rs`.
+library's raw byte API in `tests/logs.rs`. Without `--json`, stdout contains the
+selected bytes themselves: the unfiltered fixture yields `00 ff fe 41 0a 42`,
+including the binary bytes and without an added trailing newline. Status and
+omissions are lowercase stderr diagnostics. JSON retains the chunk metadata and
+`bytes_hex`; neither mode parses application output.
+
+Portable tests also exercise the real index producer with one MiB of byte exits,
+verify first-byte filtering and exact byte recovery through the reader, and cover
+stream switches, incarnation/slice boundaries, the hard cap, sink failure,
+snapshot reopening and flushing the last record on drop.
 
 ## AMD KVM acceptance still required
 

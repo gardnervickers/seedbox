@@ -188,7 +188,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show committed-time log chunks without executing guests.
+    /// Show committed-time logs as raw bytes without executing guests.
     Logs {
         /// Retained run directory.
         run: PathBuf,
@@ -198,10 +198,10 @@ enum Command {
         /// Select the console or management stream [default: both].
         #[arg(long, value_enum)]
         stream: Option<LogStream>,
-        /// Include chunks committed at or after this simulated nanosecond.
+        /// Include chunks whose first byte commits at or after this simulated nanosecond.
         #[arg(long)]
         since_ns: Option<u64>,
-        /// Include chunks committed before this simulated nanosecond.
+        /// Include chunks whose first byte commits before this simulated nanosecond.
         #[arg(long)]
         until_ns: Option<u64>,
         /// Print one JSON document with lossless hexadecimal payloads.
@@ -870,10 +870,11 @@ fn run(cli: Cli) -> Result<u8> {
                     serde_json::to_string_pretty(&reader.report.omissions)?
                 )?;
             } else {
-                writeln!(output, "{}: {}", word(&reader.report.status), run.display())?;
+                let mut diagnostics = std::io::stderr().lock();
+                writeln!(diagnostics, "logs: {}", run.display())?;
                 for (name, reason) in &reader.report.omissions {
                     writeln!(
-                        output,
+                        diagnostics,
                         "omission: {}",
                         serde_json::to_string(&(name, reason))?
                     )?;
@@ -882,14 +883,14 @@ fn run(cli: Cli) -> Result<u8> {
             for index in 0..reader.report.chunks.len() {
                 if json {
                     output.write_all(b"    ")?;
+                    reader.write_chunk_json(index, &mut output)?;
+                    if index + 1 < reader.report.chunks.len() {
+                        output.write_all(b",")?;
+                    }
+                    output.write_all(b"\n")?;
                 } else {
-                    output.write_all(b"chunk: ")?;
+                    reader.copy_chunk(index, &mut output)?;
                 }
-                reader.write_chunk_json(index, &mut output)?;
-                if json && index + 1 < reader.report.chunks.len() {
-                    output.write_all(b",")?;
-                }
-                output.write_all(b"\n")?;
             }
             if json {
                 writeln!(output, "  ]\n}}")?;
