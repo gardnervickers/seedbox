@@ -6,6 +6,7 @@ mod signals;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use seedbox::{
     bundle, config,
+    counter::CounterProfile,
     execution::{
         CancellationToken, ExecutionBackend, ExecutionProfile, PreparationBackend, WitnessMode,
     },
@@ -14,7 +15,7 @@ use seedbox::{
     preparation::OciPreparer,
     store::ContentStore,
     templates::Template,
-    vmm::VmmExecutor,
+    vmm::{recorded_counter, VmmExecutor},
     Error, Result,
 };
 use signals::Signals;
@@ -245,7 +246,14 @@ impl RuntimeInputs {
         } else {
             WitnessMode::Exits
         };
-        let executor = VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness)?;
+        let executor = VmmExecutor::new(
+            &engine,
+            store,
+            cpu,
+            self.memory_mb,
+            witness,
+            CounterProfile::host()?,
+        )?;
         let preparer = self.preparer(engine, store, scratch, executor.profile())?;
         Ok((preparer, executor))
     }
@@ -375,7 +383,7 @@ fn run(cli: Cli) -> Result<u8> {
             let (preparer, executor) = inputs.backends(&store, cpu.cpu, scratch.path())?;
             let executor = performance.apply(executor)?;
             // After the fast input checks, before slow image preparation.
-            require_kvm_host()?;
+            require_kvm_host(executor.counter())?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
             let result = orchestrator.run(
@@ -396,7 +404,8 @@ fn run(cli: Cli) -> Result<u8> {
         } => {
             let run = defaults::run_directory(run)?;
             let previous = orchestration::inspect(&run)?;
-            require_kvm_host()?;
+            let counter = CounterProfile::host()?;
+            require_kvm_host(counter)?;
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
             let profile = &previous.identity.inputs.profile;
@@ -409,12 +418,23 @@ fn run(cli: Cli) -> Result<u8> {
                 .get("memory_mb")
                 .and_then(|value| value.parse().ok())
                 .ok_or_else(|| Error::Integrity("recorded profile missing memory_mb".into()))?;
+            let recorded = recorded_counter(profile)?;
+            if counter != recorded {
+                return Err(Error::Setup(format!(
+                    "{}: recorded with the {} branch counter, but this host has {}; \
+                     replay it on a host of the same CPU vendor",
+                    run.display(),
+                    recorded.name(),
+                    counter.name()
+                )));
+            }
             let executor = performance.apply(VmmExecutor::new(
                 &engine,
                 &store,
                 cpu.cpu,
                 memory,
                 profile.witness_mode.clone(),
+                counter,
             )?)?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
@@ -519,8 +539,9 @@ fn run(cli: Cli) -> Result<u8> {
     }
 }
 
-/// Fail fast when this host cannot execute: no KVM, or no MSR access.
-fn require_kvm_host() -> Result<()> {
+/// Fail fast when this host cannot execute: no KVM, or no MSR access when the
+/// counter profile needs a workaround.
+fn require_kvm_host(counter: CounterProfile) -> Result<()> {
     if !cfg!(target_os = "linux") {
         return Err(Error::Setup(
             "run and replay require the qualified Linux KVM host".into(),
@@ -535,7 +556,10 @@ fn require_kvm_host() -> Result<()> {
             "/dev/cpu/0/msr",
             "run as root (e.g. sudo -E env PATH=\"$PATH\" seedbox ...) with the msr module loaded",
         ),
-    ] {
+    ]
+    .into_iter()
+    .take(if counter.workaround().is_some() { 2 } else { 1 })
+    {
         std::fs::OpenOptions::new()
             .read(true)
             .write(true)

@@ -4,6 +4,7 @@
 
 use crate::boundary::{advance_time, hard_limit, io_charge, missed_soft_stop, PendingIo};
 use crate::counter::Counter;
+use crate::profile::CounterProfile;
 use crate::virtio_console::VirtioConsole;
 use crate::devices::{rtc_read, Pic, Pit, Uart};
 use crate::stepper::Planner;
@@ -21,21 +22,6 @@ pub const NET_IRQ: u8 = 5;
 pub const CHANNEL_MMIO: u64 = 0xd1000000;
 pub const CHANNEL_IRQ: u8 = 6;
 const INITRD_ADDR: usize = 0x0800_0000;
-/// Default distance (in branches) before a stop target at which we stop
-/// trusting the overflow interrupt and advance by breakpoints. It must exceed
-/// the PMU interrupt skid; it affects only speed, never where a stop lands.
-/// An overshoot aborts the run, which can be rerun with a larger margin.
-pub const MARGIN: u64 = 12288;
-/// Host-time allowance for overflow-interrupt skid used to size an adaptive
-/// margin (observed tail ~10 us, with headroom).
-const SKID_NS: f64 = 18_000.0;
-/// Distance of the first, rate-measuring overflow before a hard stop.
-const APPROACH: u64 = 65536;
-/// Floor of the adaptive margin. Skids of 5-14k branches occur in dense code,
-/// and the syscall-exit window before a soft stop must outlast them.
-const MARGIN_MIN: u64 = 16384;
-/// With undo-able stops, the largest final margin tried after rollbacks.
-const UNDO_MAX: u64 = 1 << 18;
 /// Pending interrupts are injected only when the next stop is further away
 /// than this. Part of the execution semantics: changing it changes runs.
 pub const INJECT_GUARD: u64 = 65536;
@@ -104,6 +90,7 @@ pub struct Stats {
 
 pub struct Machine {
     pub name: String,
+    profile: &'static CounterProfile,
     _vm: VmFd,
     vcpu: VcpuFd,
     mem: *mut u8,
@@ -228,6 +215,7 @@ fn guest_cpuid(kvm: &Kvm) -> Result<CpuId, String> {
 
 impl Machine {
     pub fn new(kvm: &Kvm, name: &str, spec: &BootSpec) -> Result<Self, String> {
+        let profile = crate::profile::host()?;
         if !kvm.check_extension(kvm_ioctls::Cap::ImmediateExit) {
             return Err("KVM immediate-exit capability required for I/O completion".into());
         }
@@ -343,6 +331,7 @@ impl Machine {
         };
         Ok(Self {
             name: name.to_string(),
+            profile,
             _vm: vm,
             vcpu,
             mem,
@@ -381,7 +370,7 @@ impl Machine {
             tolerance: 0,
             timer_jitter: 0,
             timer_rng: None,
-            margin: MARGIN,
+            margin: profile.margin,
             adaptive_margin: false,
             step_started: None,
             undo,
@@ -775,10 +764,10 @@ impl Machine {
                 self.set_stepping(false)?;
                 let wake = if rem_soft > self.margin {
                     rem_soft - self.margin
-                } else if (self.adaptive_margin || undo) && remaining > APPROACH {
+                } else if (self.adaptive_margin || undo) && remaining > self.profile.approach {
                     // Approach a hard stop in two overflows: the first measures
                     // the branch rate of the code actually running near it.
-                    remaining - APPROACH
+                    remaining - self.profile.approach
                 } else {
                     // Final approach. With a checkpoint, aim close and undo an
                     // overshoot rather than step through a worst-case skid.
@@ -856,7 +845,7 @@ impl Machine {
                 self.stepping,
             );
             if (overshoot || soft_miss) && self.undo.as_ref().is_some_and(|u| u.valid) {
-                if overshoot && self.fm >= UNDO_MAX {
+                if overshoot && self.fm >= self.profile.undo_max {
                     return Err(format!(
                         "overshoot on {}: {} branches past stop target at final margin {}",
                         self.name,
@@ -867,7 +856,7 @@ impl Machine {
                 drop(exit);
                 self.rollback()?;
                 // A rollback costs far less than stepping, so grow slowly.
-                self.fm = (self.fm * 2).min(UNDO_MAX);
+                self.fm = (self.fm * 2).min(self.profile.undo_max);
                 if !overshoot {
                     self.stats.soft_undos += 1;
                 }
@@ -917,7 +906,7 @@ impl Machine {
             // that rate. Performance only: stops land on the same count.
             if self.adaptive_margin && !self.stepping && run_ns > 20_000 && delta > 0 {
                 let rate = delta as f64 / run_ns as f64; // branches per host ns
-                self.margin = ((rate * SKID_NS) as u64).clamp(MARGIN_MIN, APPROACH);
+                self.margin = ((rate * self.profile.skid_ns) as u64).clamp(self.profile.margin_min, self.profile.approach);
             }
             legal = !interrupted;
             if matches!(exit, Ok(VcpuExit::Debug(_))) {

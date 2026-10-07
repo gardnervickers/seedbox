@@ -1,7 +1,8 @@
-//! Shared per-core reservation and scoped MSR workaround. This module owns no
-//! process: the executor must reap its VMM before restoring and releasing it.
+//! Shared per-core reservation and the counter profile's scoped MSR workaround.
+//! This module owns no process: the executor must reap its VMM before restoring
+//! and releasing it.
 
-use crate::{Error, Result};
+use crate::{counter::MsrWorkaround, Error, Result};
 use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
@@ -13,12 +14,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const MSR: u64 = 0xc0011020;
-const WORKAROUND: u64 = 1 << 54;
-
 pub(crate) struct HostLease {
     _locks: Vec<File>,
+    /// Empty when the profile needs no workaround.
     registers: Vec<(u32, File, u64)>,
+    register: u64,
     snapshot: PathBuf,
     restored: bool,
 }
@@ -145,9 +145,14 @@ fn candidates(
 
 impl HostLease {
     #[cfg(target_os = "linux")]
-    pub(crate) fn acquire(cpu: u32, output: &Path) -> Result<Self> {
+    pub(crate) fn acquire(
+        cpu: u32,
+        workaround: Option<MsrWorkaround>,
+        output: &Path,
+    ) -> Result<Self> {
         Self::acquire_at(
             &siblings(cpu)?,
+            workaround,
             Path::new("/tmp"),
             Path::new("/dev/cpu"),
             output,
@@ -156,7 +161,10 @@ impl HostLease {
 
     /// Lease the first free candidate CPU and return it with the lease.
     #[cfg(target_os = "linux")]
-    pub(crate) fn acquire_any(output: &Path) -> Result<(u32, Self)> {
+    pub(crate) fn acquire_any(
+        workaround: Option<MsrWorkaround>,
+        output: &Path,
+    ) -> Result<(u32, Self)> {
         let online = cpu_list(&sysfs("/sys/devices/system/cpu/online")?)?;
         let allowed = &online & &allowed_cpus()?;
         let candidates = candidates(&allowed, siblings)?;
@@ -167,9 +175,13 @@ impl HostLease {
             )));
         }
         for (cpu, core) in candidates {
-            if let Some(lease) =
-                Self::try_acquire_at(&core, Path::new("/tmp"), Path::new("/dev/cpu"), output)?
-            {
+            if let Some(lease) = Self::try_acquire_at(
+                &core,
+                workaround,
+                Path::new("/tmp"),
+                Path::new("/dev/cpu"),
+                output,
+            )? {
                 return Ok((cpu, lease));
             }
         }
@@ -180,23 +192,25 @@ impl HostLease {
 
     fn acquire_at(
         cpus: &BTreeSet<u32>,
+        workaround: Option<MsrWorkaround>,
         lock_directory: &Path,
         devices: &Path,
         output: &Path,
     ) -> Result<Self> {
         let locks = locks(cpus, lock_directory)?;
-        Self::with_locks(locks, cpus, devices, output)
+        Self::with_locks(locks, cpus, workaround, devices, output)
     }
 
     #[cfg(target_os = "linux")]
     fn try_acquire_at(
         cpus: &BTreeSet<u32>,
+        workaround: Option<MsrWorkaround>,
         lock_directory: &Path,
         devices: &Path,
         output: &Path,
     ) -> Result<Option<Self>> {
         match try_locks(cpus, lock_directory)? {
-            Some(locks) => Self::with_locks(locks, cpus, devices, output).map(Some),
+            Some(locks) => Self::with_locks(locks, cpus, workaround, devices, output).map(Some),
             None => Ok(None),
         }
     }
@@ -204,9 +218,20 @@ impl HostLease {
     fn with_locks(
         locks: Vec<File>,
         cpus: &BTreeSet<u32>,
+        workaround: Option<MsrWorkaround>,
         devices: &Path,
         output: &Path,
     ) -> Result<Self> {
+        let snapshot = output.join("msr-original.json");
+        let Some(MsrWorkaround { register, bit }) = workaround else {
+            return Ok(Self {
+                _locks: locks,
+                registers: Vec::new(),
+                register: 0,
+                snapshot,
+                restored: true,
+            });
+        };
         let mut registers = Vec::new();
         for cpu in cpus {
             let path = devices.join(cpu.to_string()).join("msr");
@@ -215,10 +240,9 @@ impl HostLease {
                 .write(true)
                 .open(&path)
                 .map_err(|error| msr_error(&path, error))?;
-            let original = read(&file)?;
+            let original = read(&file, register)?;
             registers.push((*cpu, file, original));
         }
-        let snapshot = output.join("msr-original.json");
         let saved: std::collections::BTreeMap<_, _> = registers
             .iter()
             .map(|(cpu, _, value)| (*cpu, *value))
@@ -233,13 +257,14 @@ impl HostLease {
         let lease = Self {
             _locks: locks,
             registers,
+            register,
             snapshot,
             restored: false,
         };
         // Once the snapshot is durable, Drop restores every saved register even
         // if setting or reading back any individual CPU fails.
         for (_, file, original) in &lease.registers {
-            write_verified(file, *original | WORKAROUND)?;
+            write_verified(file, register, *original | bit)?;
         }
         Ok(lease)
     }
@@ -250,7 +275,7 @@ impl HostLease {
         }
         let mut failures = Vec::new();
         for (cpu, file, original) in &self.registers {
-            if let Err(error) = write_verified(file, *original) {
+            if let Err(error) = write_verified(file, self.register, *original) {
                 failures.push(format!("CPU {cpu}: {error}"));
             }
         }
@@ -284,15 +309,15 @@ fn msr_error(path: &Path, error: std::io::Error) -> Error {
     Error::Setup(format!("{}: {error}{hint}", path.display()))
 }
 
-fn read(file: &File) -> Result<u64> {
+fn read(file: &File, register: u64) -> Result<u64> {
     let mut bytes = [0; 8];
-    if file.read_at(&mut bytes, MSR)? != 8 {
+    if file.read_at(&mut bytes, register)? != 8 {
         return Err(Error::Execution("short MSR read".into()));
     }
     Ok(u64::from_le_bytes(bytes))
 }
-fn write_verified(file: &File, value: u64) -> Result<()> {
-    if file.write_at(&value.to_le_bytes(), MSR)? != 8 || read(file)? != value {
+fn write_verified(file: &File, register: u64, value: u64) -> Result<()> {
+    if file.write_at(&value.to_le_bytes(), register)? != 8 || read(file, register)? != value {
         return Err(Error::Execution("MSR write/readback mismatch".into()));
     }
     Ok(())
@@ -301,6 +326,11 @@ fn write_verified(file: &File, value: u64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::counter::CounterProfile;
+
+    const ZEN: Option<MsrWorkaround> = CounterProfile::Zen.workaround();
+    const MSR: u64 = 0xc0011020;
+    const WORKAROUND: u64 = 1 << 54;
     #[test]
     fn shared_lease_and_original_register_values_survive_cleanup() {
         let dir = tempfile::tempdir().unwrap();
@@ -312,13 +342,17 @@ mod tests {
                 .unwrap();
         }
         {
-            let _lease = HostLease::acquire_at(&cpus, dir.path(), dir.path(), dir.path()).unwrap();
+            let _lease =
+                HostLease::acquire_at(&cpus, ZEN, dir.path(), dir.path(), dir.path()).unwrap();
             assert!(locks(&BTreeSet::from([18]), dir.path()).is_err());
             assert!(dir.path().join("msr-original.json").exists());
             for cpu in &cpus {
                 assert_eq!(
-                    read(&File::open(dir.path().join(cpu.to_string()).join("msr")).unwrap())
-                        .unwrap(),
+                    read(
+                        &File::open(dir.path().join(cpu.to_string()).join("msr")).unwrap(),
+                        MSR
+                    )
+                    .unwrap(),
                     (*cpu as u64 + 9) | WORKAROUND
                 );
             }
@@ -326,7 +360,11 @@ mod tests {
         assert!(!dir.path().join("msr-original.json").exists());
         for cpu in &cpus {
             assert_eq!(
-                read(&File::open(dir.path().join(cpu.to_string()).join("msr")).unwrap()).unwrap(),
+                read(
+                    &File::open(dir.path().join(cpu.to_string()).join("msr")).unwrap(),
+                    MSR
+                )
+                .unwrap(),
                 *cpu as u64 + 9
             );
         }
@@ -343,13 +381,27 @@ mod tests {
             .unwrap();
         assert!(HostLease::acquire_at(
             &BTreeSet::from([2, 18]),
+            ZEN,
             dir.path(),
             dir.path(),
             dir.path()
         )
         .is_err());
-        assert_eq!(read(&File::open(path).unwrap()).unwrap(), 17);
+        assert_eq!(read(&File::open(path).unwrap(), MSR).unwrap(), 17);
         assert!(!dir.path().join("msr-original.json").exists());
+    }
+    #[test]
+    fn profile_without_workaround_leases_cores_and_never_touches_msrs() {
+        let dir = tempfile::tempdir().unwrap();
+        let cpus = BTreeSet::from([2, 18]);
+        {
+            let mut lease =
+                HostLease::acquire_at(&cpus, None, dir.path(), dir.path(), dir.path()).unwrap();
+            assert!(locks(&BTreeSet::from([18]), dir.path()).is_err());
+            assert!(!dir.path().join("msr-original.json").exists());
+            lease.restore().unwrap();
+        }
+        assert!(locks(&cpus, dir.path()).is_ok());
     }
     #[test]
     fn busy_core_is_skipped_rather_than_failing_selection() {

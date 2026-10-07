@@ -133,8 +133,9 @@ def run_batch(root, world, prefix, seeds, extra, cpus, timeout, vmm, margin,
             snapshot = state_dir / 'saved.json'
             try:
                 check_signal()
-                msr54.show(sorted(protected))
-                msr54.set_workaround(sorted(protected), snapshot)
+                if msr54.required():
+                    msr54.show(sorted(protected))
+                    msr54.set_workaround(sorted(protected), snapshot)
                 for cpu, seed, out in zip(cpus, seeds, outputs):
                     check_signal()
                     out.parent.mkdir(parents=True, exist_ok=True)
