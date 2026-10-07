@@ -8,7 +8,7 @@ interrupt timing.
 
 ## Quick start
 
-`validate`, `init`, `inspect`, `diff`, `export` and `import` run on Linux or macOS. `run`,
+`validate`, `init`, `inspect`, `diff`, `logs`, `export` and `import` run on Linux or macOS. `run`,
 `explore` and `replay` need the
 qualified host (see [host requirements](#host-requirements)) and root.
 
@@ -22,6 +22,7 @@ cargo run -- validate examples/etcd
 sudo -E env PATH="$PATH" target/release/seedbox run examples/etcd
 sudo -E env PATH="$PATH" target/release/seedbox replay .seedbox/runs/ATTEMPT
 cargo run -- inspect .seedbox/runs/ATTEMPT
+cargo run -- logs .seedbox/runs/ATTEMPT --machine client --since-ns 1000000000 --json
 cargo run -- diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
 ```
 
@@ -42,6 +43,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Engine qualification | pinned engine and guest kernel; dev artifacts require explicit opt-in | `--allow-dev-engine` (run/explore/replay/doctor; no environment backing) |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
 | Diff inputs | Two required retained run directories; no runtime inputs or state lookup | positional `RUN_A RUN_B` |
+| Log selection | All indexed machines and both streams, with no time bounds | `logs RUN --machine NAME --stream console --since-ns N --until-ns N` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
 
 For development artifacts, pass `--allow-dev-engine` to `run`, `explore`, `replay`
@@ -238,6 +240,25 @@ MATCH means equality of the compared evidence, even if incomplete; it does not
 qualify replay or prove equality of unrecorded state. Performance counters,
 margin/undo, attempt metadata and arbitrary console output are excluded.
 See [comparison details](docs/runtime.md#compare-retained-runs).
+
+## Read committed-time logs
+
+`seedbox logs RUN [--machine NAME] [--stream console|mgmt] [--since-ns N]
+[--until-ns N] [--json]` reads checksum-verified retained output on Linux or macOS.
+Times are simulated nanoseconds at the VMM output commit point; the lower bound
+is inclusive and the upper bound exclusive. Equal-time chunks sort by machine
+name, then the machine's output order across both streams. Incarnations and byte
+ranges remain visible. Payloads use lossless `bytes_hex`; the library's
+`logs::Reader::copy_chunk` returns the exact raw bytes. No application schema or
+line framing is imposed.
+
+Capture is bounded and independent of the witness. Missing indexes (including
+older engines), unindexed raw suffixes, and retention omissions are explicit.
+A successful read does not claim complete logs; check `omissions`. Bundles retain
+the indexes through the ordinary log policy. This source change creates a new
+**unqualified engine**; the frozen engine and release pins are unchanged.
+See [format, portable demo and AMD validation](docs/timed-logs.md) for the pending
+hardware acceptance.
 
 ## Sharing a retained run
 

@@ -65,6 +65,7 @@ struct BootInputs {
     /// A fixed stepping margin; None adapts it.
     margin: Option<u64>,
     console_limit: Option<usize>,
+    log_chunk_limit: Option<usize>,
 }
 
 fn entropy_seed(seed: u64, domain: &str) -> [u8; 32] {
@@ -122,6 +123,8 @@ fn boot_machine(kvm: &kvm_ioctls::Kvm, name: &str, b: &BootInputs, barrier: bool
     let mut mach = Machine::new(kvm, name, &spec)?;
     mach.com1.output_limit = b.console_limit;
     mach.com2.output_limit = b.console_limit;
+    mach.com1.chunks.limit = b.log_chunk_limit;
+    mach.com2.chunks.limit = b.log_chunk_limit;
     mach.tolerance = b.tolerance;
     mach.timer_jitter = b.timer_jitter;
     mach.exact_timer_ppm = b.exact_timer_ppm;
@@ -514,6 +517,7 @@ fn run() -> Result<Value, String> {
             exact_timer_ppm: cfg["exact_timer_ppm"].as_u64().unwrap_or(0),
             margin,
             console_limit,
+            log_chunk_limit: arg(&args,"--log-chunk-limit").map(|v|v.parse::<usize>()).transpose().map_err(|e|e.to_string())?,
         };
         let seed = entropy_seed(boot_seed, &format!("boot-entropy/{}", names[i]));
         let mut mach = boot_machine(&kvm, &names[i], &boot, barrier, seed)?;
@@ -528,6 +532,8 @@ fn run() -> Result<Value, String> {
                     .map_err(|error| error.to_string())?,
             );
         }
+        mach.com1.chunks.open(&format!("{out}/{}.console.chunks",names[i]));
+        mach.com2.chunks.open(&format!("{out}/{}.mgmt.chunks",names[i]));
         mach.timer_rng = Some(Rng::new(boot_seed, &format!("timer-jitter/{}", names[i])));
         if args.iter().any(|a| a == "--trace") {
             let f = std::fs::File::create(format!("{out}/{}.trace", names[i]))
@@ -608,6 +614,12 @@ fn run() -> Result<Value, String> {
         let dir = if seeds.len() > 1 { format!("{out}/seed-{seed}") } else { out.clone() };
         if seeds.len() > 1 {
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            if !stream {
+                for mach in &mut world.machines {
+                    mach.com1.chunks.open(&format!("{dir}/{}.console.chunks",mach.name));
+                    mach.com2.chunks.open(&format!("{dir}/{}.mgmt.chunks",mach.name));
+                }
+            }
             if stream {
                 for mach in world.machines.iter_mut() {
                     for (uart, ext) in [(&mut mach.com1, "console"), (&mut mach.com2, "mgmt")] {
@@ -616,6 +628,7 @@ fn run() -> Result<Value, String> {
                             .map_err(|e| e.to_string())?;
                         file.write_all(&uart.out).map_err(|e| e.to_string())?;
                         uart.output_file = Some(file);
+                        uart.chunks.open(&format!("{dir}/{}.{ext}.chunks",mach.name));
                     }
                 }
             }

@@ -495,3 +495,21 @@ match the engine; admission adds PERF_FLAG_FD_CLOEXEC8 rather than engineopen0
 solely to protect descriptor inheritance. It never enables, maps or reads the
 guest event. Source tests and warned Intel opt-in are not Intel qualification or
 a determinism guarantee.
+
+## Committed-time logs
+
+`seedbox logs RUN --machine NAME --stream console --since-ns 1000000000
+--until-ns 2000000000 --json` filters retained chunks in the half-open simulated
+nanosecond interval. All filters are optional; the run directory is positional.
+Without `--json`, output starts with `LOGS: RUN`, followed by lowercase `chunk:`
+and `omission:` records. Both formats encode arbitrary payloads as `bytes_hex`.
+Success exits 0, including explicitly incomplete capture; invalid inputs or
+corrupt evidence exit 2. No runtime inputs, images, host tools or KVM are needed.
+
+The library exposes `logs::Reader`, `Filter`, chunk metadata, omissions, and
+streaming byte access. Only manifest-declared, checksum-verified evidence is
+used. An absent index never causes host receipt order or application timestamps
+to be substituted. Filtering cannot change execution or witness identity.
+Indexes share the existing retention limits and bundle transfer path; missing
+raw streams and indexes stay explicit after import. See [timed logs](timed-logs.md)
+for format bounds, a portable demo and the pending AMD validation commands.

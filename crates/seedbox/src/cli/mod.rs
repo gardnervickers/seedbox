@@ -12,6 +12,7 @@ use seedbox::{
         CancellationToken, ExecutionBackend, ExecutionProfile, PreparationBackend, WitnessMode,
     },
     exploration::{self, ExploreOptions},
+    logs,
     oci::OciTools,
     orchestration::{self, Orchestrator, Outcome, ReplayOptions, ReplayStatus, RunOptions},
     preparation::OciPreparer,
@@ -187,6 +188,26 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show committed-time log chunks without executing guests.
+    Logs {
+        /// Retained run directory.
+        run: PathBuf,
+        /// Select one machine from the retained run.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Select the console or management stream [default: both].
+        #[arg(long, value_enum)]
+        stream: Option<LogStream>,
+        /// Include chunks committed at or after this simulated nanosecond.
+        #[arg(long)]
+        since_ns: Option<u64>,
+        /// Include chunks committed before this simulated nanosecond.
+        #[arg(long)]
+        until_ns: Option<u64>,
+        /// Print one JSON document with lossless hexadecimal payloads.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show a recorded run after verifying its manifest.
     Inspect {
         /// Run directory, as printed by `run` or `replay`.
@@ -195,6 +216,22 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum LogStream {
+    /// Raw COM1 console bytes.
+    Console,
+    /// Raw management transport bytes.
+    Mgmt,
+}
+impl From<LogStream> for logs::Stream {
+    fn from(value: LogStream) -> Self {
+        match value {
+            LogStream::Console => Self::Console,
+            LogStream::Mgmt => Self::Mgmt,
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -804,6 +841,61 @@ fn run(cli: Cli) -> Result<u8> {
                 diff::Status::Match => 0,
                 diff::Status::Different => 1,
             })
+        }
+        Command::Logs {
+            run,
+            machine,
+            stream,
+            since_ns,
+            until_ns,
+            json,
+        } => {
+            let run = defaults::run_directory(run)?;
+            let mut reader = logs::Reader::open(
+                &run,
+                &logs::Filter {
+                    machine,
+                    stream: stream.map(Into::into),
+                    since_ns,
+                    until_ns,
+                },
+            )?;
+            use std::io::Write;
+            let mut output = std::io::BufWriter::new(std::io::stdout().lock());
+            if json {
+                writeln!(
+                    output,
+                    "{{\n  \"status\": {},\n  \"omissions\": {},\n  \"chunks\": [",
+                    serde_json::to_string(&reader.report.status)?,
+                    serde_json::to_string_pretty(&reader.report.omissions)?
+                )?;
+            } else {
+                writeln!(output, "{}: {}", word(&reader.report.status), run.display())?;
+                for (name, reason) in &reader.report.omissions {
+                    writeln!(
+                        output,
+                        "omission: {}",
+                        serde_json::to_string(&(name, reason))?
+                    )?;
+                }
+            }
+            for index in 0..reader.report.chunks.len() {
+                if json {
+                    output.write_all(b"    ")?;
+                } else {
+                    output.write_all(b"chunk: ")?;
+                }
+                reader.write_chunk_json(index, &mut output)?;
+                if json && index + 1 < reader.report.chunks.len() {
+                    output.write_all(b",")?;
+                }
+                output.write_all(b"\n")?;
+            }
+            if json {
+                writeln!(output, "  ]\n}}")?;
+            }
+            output.flush()?;
+            Ok(0)
         }
         Command::Inspect { run, json } => {
             let run = defaults::run_directory(run)?;

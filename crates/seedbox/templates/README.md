@@ -115,3 +115,11 @@ record. Ordinary runs do not retain exit traces; terminal times cannot locate an
 earlier divergence. Missing evidence and omissions stay explicit. Exit 0 MATCH
 means equality of compared evidence, not replay qualification; DIFFERENT exits 1,
 and usage/setup or invalid evidence exits 2. No guests execute and no state is created.
+
+Read committed-time chunks with `seedbox logs RUN --machine NAME --since-ns N
+--until-ns N --json`. Times are simulated nanoseconds, inclusive at the start and
+exclusive at the end. Omit filters to read all indexed output. Payloads are
+lossless hexadecimal (`bytes_hex`), ordered by time, machine name and per-machine
+output order; no application log format is required. Check `omissions` for old
+engines without indexes, capture bounds or retention limits. Indexes travel with
+retained logs in export/import bundles. Reading logs needs no KVM or root.

@@ -919,3 +919,145 @@ mod diff_tests {
         assert_eq!(result["machines"][0]["witness"]["matches"], true);
     }
 }
+
+#[allow(dead_code)]
+mod timed_logs {
+    use super::*;
+    use seedbox as sb;
+    include!("support/diff_fixture.rs");
+    include!("support/logs_fixture.rs");
+
+    #[test]
+    fn logs_defaults_filters_and_binary_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        timed_fixture(&root.join("run"));
+        let text = seedbox(&["logs", "run"], root);
+        assert!(text.status.success(), "{}", stderr(&text));
+        assert!(text.stderr.is_empty());
+        let text = String::from_utf8(text.stdout).unwrap();
+        assert!(text.starts_with("LOGS: run\n"));
+        assert_eq!(text.lines().filter(|l| l.starts_with("chunk: ")).count(), 4);
+        for (args, orders) in [
+            (vec!["logs", "run", "--json"], vec![0, 1, 2, 3]),
+            (
+                vec![
+                    "logs",
+                    "run",
+                    "--machine",
+                    "workload",
+                    "--stream",
+                    "console",
+                    "--since-ns",
+                    "10",
+                    "--until-ns",
+                    "20",
+                    "--json",
+                ],
+                vec![0, 2],
+            ),
+            (vec!["logs", "run", "--stream", "mgmt", "--json"], vec![1]),
+            (vec!["logs", "run", "--since-ns", "20", "--json"], vec![3]),
+            (vec!["logs", "run", "--until-ns", "10", "--json"], vec![]),
+        ] {
+            let output = seedbox(&args, root);
+            assert!(output.status.success(), "{}", stderr(&output));
+            assert!(output.stderr.is_empty());
+            let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                json["chunks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v["order"].as_u64().unwrap())
+                    .collect::<Vec<_>>(),
+                orders
+            );
+            assert_eq!(json["status"], "LOGS");
+            assert_eq!(json["omissions"], serde_json::json!({}));
+        }
+        let out = seedbox(&["logs", "run", "--json"], root);
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(json["chunks"][0]["bytes_hex"], "00ff");
+    }
+
+    #[test]
+    fn logs_errors_and_omissions_are_explicit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let path = root.join("run");
+        let mut record = timed_fixture(&path);
+        for (args, expected) in [
+            (
+                vec!["logs", "missing"],
+                "error: run directory missing: not found\n",
+            ),
+            (
+                vec!["logs", "run", "--machine", "unknown"],
+                "error: --machine unknown: unknown machine; use a machine from inspect --json\n",
+            ),
+            (
+                vec!["logs", "run", "--since-ns", "20", "--until-ns", "10"],
+                "error: --until-ns must be at least --since-ns\n",
+            ),
+        ] {
+            let out = seedbox(&args, root);
+            assert_eq!(out.status.code(), Some(2));
+            assert_eq!(stderr(&out), expected);
+            assert!(out.stdout.is_empty());
+        }
+        for (flag, value) in [
+            ("--stream", "stdout"),
+            ("--since-ns", "1s"),
+            ("--until-ns", "18446744073709551616"),
+        ] {
+            let out = seedbox(&["logs", "run", flag, value], root);
+            assert_eq!(out.status.code(), Some(2));
+            assert!(stderr(&out).contains(flag));
+        }
+        record.logs.remove("machines/workload.console.chunks");
+        write_fixture(&path, &mut record, None, None);
+        let out = seedbox(&["logs", "run", "--json"], root);
+        assert!(out.status.success());
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(json["omissions"]["machines/workload.console.chunks"]
+            .as_str()
+            .unwrap()
+            .contains("unavailable"));
+        add_log(
+            &path,
+            &mut record,
+            "machines/workload.console.chunks",
+            b"SBLOG001x",
+        );
+        write_fixture(&path, &mut record, None, None);
+        let out = seedbox(&["logs", "run"], root);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(out.stdout.is_empty());
+        assert_eq!(stderr(&out),"error: logs run: machines/workload.console.chunks: truncated or oversized chunk index; use an intact retained run directory (import bundles first)\n");
+    }
+}
+
+#[test]
+fn logs_help_is_portable_and_has_no_runtime_options() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = seedbox(&["help", "logs"], tmp.path());
+    assert!(out.status.success());
+    let help = String::from_utf8(out.stdout).unwrap();
+    for text in [
+        "<RUN>",
+        "--machine",
+        "--stream",
+        "--since-ns",
+        "--until-ns",
+        "--json",
+    ] {
+        assert!(help.contains(text));
+    }
+    for text in ["--kernel", "--seed", "--vmm", "--cpu", "--state"] {
+        assert!(!help.contains(text));
+    }
+    let out = seedbox(&["logs"], tmp.path());
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stderr(&out).contains("<RUN>"));
+}
