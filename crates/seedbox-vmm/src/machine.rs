@@ -157,6 +157,8 @@ pub struct Stats {
     pub spin_probes: u64,
     pub spin_idles: u64,
     pub spin_false: u64,
+    /// Per state part, cycle checks that failed first on it.
+    pub spin_mismatch: std::collections::BTreeMap<String, u64>,
 }
 
 pub struct Machine {
@@ -679,6 +681,11 @@ impl Machine {
             self.raise_net();
         }
         outcome
+    }
+
+    /// Syscalls the guest has entered (counted in the time page).
+    pub fn syscalls(&self) -> u64 {
+        self.page_get(PAGE_SYSCALLS)
     }
 
     fn page_get(&self, i: usize) -> u64 {

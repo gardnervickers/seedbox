@@ -295,6 +295,7 @@ impl Planner {
     }
 
     /// Breakpoint addresses for the next advance from the current state.
+    #[cfg(test)]
     pub fn plan(&self, mem: &[u8], r: &kvm_regs) -> Result<Vec<u64>, String> {
         self.plan_capped(mem, r).map(|(targets, _)| targets)
     }

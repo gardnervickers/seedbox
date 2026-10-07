@@ -90,19 +90,36 @@ impl VcpuState {
         Ok(())
     }
 
-    /// Whether two saved states are equal in every part a checkpoint restores
-    /// that the guest can change by running: registers, FPU/XSAVE, XCRs,
-    /// MSRs and pending events.
-    pub fn same(&self, o: &Self) -> bool {
-        fn bytes<T>(v: &T) -> &[u8] {
-            unsafe { std::slice::from_raw_parts((v as *const T).cast(), std::mem::size_of::<T>()) }
-        }
-        bytes(&self.regs) == bytes(&o.regs)
-            && bytes(&self.sregs) == bytes(&o.sregs)
-            && self.xsave.region == o.xsave.region
-            && bytes(&self.xcrs) == bytes(&o.xcrs)
-            && bytes(&self.events) == bytes(&o.events)
-            && self.msrs.as_slice().iter().zip(o.msrs.as_slice()).all(|(a, b)| a.index == b.index && a.data == b.data)
+    /// The first part, if any, in which two saved states differ, among those
+    /// a checkpoint restores that the guest can change by running: registers,
+    /// FPU/XSAVE, XCRs, MSRs other than free-running counters, and pending
+    /// events (not KVM's bookkeeping flags).
+    pub fn differs(&self, o: &Self) -> Option<String> {
+        let (e, f) = (&self.events, &o.events);
+        let events = e.exception == f.exception
+            && e.interrupt == f.interrupt
+            && e.nmi == f.nmi
+            && e.smi == f.smi
+            && e.triple_fault == f.triple_fault
+            && e.exception_has_payload == f.exception_has_payload
+            && e.exception_payload == f.exception_payload;
+        let part = if self.regs != o.regs {
+            "regs"
+        } else if self.sregs != o.sregs {
+            "sregs"
+        } else if self.xsave.region != o.xsave.region {
+            "xsave"
+        } else if self.xcrs != o.xcrs {
+            "xcrs"
+        } else if !events {
+            "events"
+        } else {
+            let msr = self.msrs.as_slice().iter().zip(o.msrs.as_slice()).find(|(a, b)| {
+                (a.index != b.index || a.data != b.data) && !is_free_running(a.index)
+            });
+            return msr.map(|(a, _)| format!("msr {:#x}", a.index));
+        };
+        Some(part.into())
     }
 
     /// Write the state back. The vCPU must have no I/O pending completion.
@@ -162,6 +179,12 @@ pub struct Undo {
     pub branches: u64,
     pub exit_req: bool,
     pub stats: UndoStats,
+}
+
+/// Counters that move while the guest runs whatever it does: APERF/MPERF,
+/// AMD's read-only copies and IRPERF, and the legacy and core perf counters.
+fn is_free_running(i: u32) -> bool {
+    matches!(i, 0xe7 | 0xe8 | 0xc000_00e7..=0xc000_00e9 | 0xc001_0004..=0xc001_0007 | 0xc001_0200..=0xc001_020b)
 }
 
 fn is_tsc_or_pv(i: u32) -> bool {

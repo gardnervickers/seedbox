@@ -967,7 +967,8 @@ fn report(
             "net": mach.net.as_ref().map(|n| json!({"tx": n.tx_frames, "rx": n.rx_frames, "rx_dropped": n.rx_dropped})),
         }));
         if let Clock::Pv(_) = world.clock {
-            report.last_mut().unwrap()["spin"] = json!({"probes": s.spin_probes, "idles": s.spin_idles, "false_alarms": s.spin_false});
+            report.last_mut().unwrap()["spin"] = json!({"probes": s.spin_probes, "idles": s.spin_idles, "false_alarms": s.spin_false, "mismatch": s.spin_mismatch});
+            report.last_mut().unwrap()["syscalls"] = json!(mach.syscalls());
         }
     }
     let sim_ns = world.machines.iter().map(|m| m.time).max().unwrap_or(0);

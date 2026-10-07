@@ -48,6 +48,8 @@ pub struct PvClock {
     probe: Option<Probe>,
     /// The vCPU stands at a step landing the probe has not seen yet.
     landed: bool,
+    /// Fail rather than run on after this many checks found no spin (tests).
+    pub max_false_alarms: u64,
 }
 
 /// A step landing: RIP, then the general registers and flags.
@@ -76,6 +78,7 @@ impl PvClock {
             remaining: 0,
             probe: None,
             landed: false,
+            max_false_alarms: u64::MAX,
         })
     }
 
@@ -203,6 +206,12 @@ impl Timebase for PvClock {
                 }
                 Some(p) => return Ok(p),
                 None => {
+                    if m.stats.spin_false >= self.max_false_alarms {
+                        return Err(format!(
+                            "{}: {} spin checks found no cycle; first differences: {:?}",
+                            m.name, m.stats.spin_false, m.stats.spin_mismatch
+                        ));
+                    }
                     self.backoff = (self.backoff * 2).clamp(1, 1 << 10);
                     self.skip = self.backoff;
                 }
@@ -286,19 +295,35 @@ impl Saved {
         Ok(Self { cpu, page: page_copy(m), ram })
     }
 
+    /// Whether the machine is back in this state; if not, the first part
+    /// that differs is counted in the machine's stats.
     fn same(&self, m: &mut Machine) -> Result<bool, String> {
         let mut cpu = VcpuState::new(m.msrs.clone());
         cpu.save(&m.vcpu, "spin check")?;
-        if !self.cpu.same(&cpu) || *self.page != *page_copy(m) {
-            return Ok(false);
-        }
-        match (&self.ram, m.undo.as_mut()) {
-            (None, Some(u)) => u.unchanged_since_sync(&m._vm, m.mem),
-            (Some(ram), _) => Ok(unsafe {
-                std::slice::from_raw_parts(ram.ptr, ram.size)
-                    == std::slice::from_raw_parts(m.mem, m.mem_size)
-            }),
-            (None, None) => Err("spin check: RAM not saved".into()),
+        let page = page_copy(m);
+        let part = match self.cpu.differs(&cpu) {
+            Some(part) => Some(part),
+            None => match self.page.iter().zip(page.iter()).position(|(a, b)| a != b) {
+                Some(at) => Some(format!("time page word {}", at / 8)),
+                None => {
+                    let ram = match (&self.ram, m.undo.as_mut()) {
+                        (None, Some(u)) => u.unchanged_since_sync(&m._vm, m.mem)?,
+                        (Some(ram), _) => unsafe {
+                            std::slice::from_raw_parts(ram.ptr, ram.size)
+                                == std::slice::from_raw_parts(m.mem, m.mem_size)
+                        },
+                        (None, None) => return Err("spin check: RAM not saved".into()),
+                    };
+                    (!ram).then(|| "ram".to_string())
+                }
+            },
+        };
+        match part {
+            None => Ok(true),
+            Some(part) => {
+                *m.stats.spin_mismatch.entry(part).or_default() += 1;
+                Ok(false)
+            }
         }
     }
 }
@@ -379,12 +404,17 @@ mod tests {
 
     /// Run to the first stop under several watchdog periods and undo
     /// settings; all must agree. Returns the stop, rip, rcx and the machine.
-    fn run(code: &[u8]) -> (Stop, u64, u64, Machine) {
+    /// `idle`: the guest should go idle, so fail after a few checks that
+    /// find no cycle rather than spin until the test times out.
+    fn run(code: &[u8], idle: bool) -> (Stop, u64, u64, Machine) {
         let kvm = Kvm::new().unwrap();
         let mut first: Option<(u64, u64, u64, String)> = None;
         let mut last = None;
         for (ms, undo) in [(2, 256), (7, 0), (3, 0)] {
             let mut clock = PvClock::new(Duration::from_millis(ms)).unwrap();
+            if idle {
+                clock.max_false_alarms = 10;
+            }
             let mut m = machine(&kvm, code, undo);
             let stop = m.run_until(&mut clock, 1_000_000_000, 0, &mut Vec::new()).unwrap();
             let r = m.vcpu.get_regs().unwrap();
@@ -402,7 +432,7 @@ mod tests {
     #[test]
     #[ignore = "requires KVM"]
     fn a_jump_to_itself_is_idle_at_the_jump() {
-        let (stop, rip, _, m) = run(&[0xeb, 0xfe]); // jmp $
+        let (stop, rip, _, m) = run(&[0xeb, 0xfe], true); // jmp $
         assert_eq!(stop, Stop::Halted);
         assert_eq!(rip, 0x100000);
         assert_eq!(m.time, 0, "compute costs no virtual time");
@@ -413,7 +443,7 @@ mod tests {
     #[ignore = "requires KVM"]
     fn a_cycle_with_an_inner_loop_is_idle_at_its_canonical_point() {
         // outer: mov ecx,5; inner: dec ecx; jnz inner; jmp outer
-        let (stop, rip, rcx, m) = run(&[0xb9, 5, 0, 0, 0, 0x49, 0x75, 0xfd, 0xeb, 0xf6]);
+        let (stop, rip, rcx, m) = run(&[0xb9, 5, 0, 0, 0, 0x49, 0x75, 0xfd, 0xeb, 0xf6], true);
         assert_eq!(stop, Stop::Halted);
         // The least landing: inner head, with ecx at its least there.
         assert_eq!((rip, rcx as u32), (0x100005, 1));
@@ -424,7 +454,7 @@ mod tests {
     #[ignore = "requires KVM"]
     fn a_long_finite_loop_is_left_alone() {
         // mov ecx,0x20000000; l: dec ecx; jnz l; hlt
-        let (stop, rip, rcx, m) = run(&[0xb9, 0, 0, 0, 0x20, 0x49, 0x75, 0xfd, 0xf4]);
+        let (stop, rip, rcx, m) = run(&[0xb9, 0, 0, 0, 0x20, 0x49, 0x75, 0xfd, 0xf4], false);
         assert_eq!(stop, Stop::Halted);
         assert_eq!((rip, rcx as u32), (0x100009, 0));
         assert_eq!(m.stats.spin_idles, 0);
