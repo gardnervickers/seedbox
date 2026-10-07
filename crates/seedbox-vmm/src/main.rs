@@ -46,6 +46,7 @@ const PAUSED_INGRESS_FRAMES: u64 = 256;
 
 /// Everything a machine boots from. A reboot starts a new incarnation from
 /// exactly these inputs, with its own entropy and timer seeds.
+#[derive(Clone)]
 struct BootInputs {
     kernel: Rc<[u8]>,
     initrd: Rc<[u8]>,

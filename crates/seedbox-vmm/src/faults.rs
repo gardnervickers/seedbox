@@ -12,6 +12,7 @@ pub enum Status {
     Failed,
     Unavailable(u64),
 }
+#[derive(Clone)]
 struct Entry {
     plan: Plan,
     target: Option<usize>,
@@ -43,6 +44,7 @@ enum Event {
     Dispatch,
     Deadline,
 }
+#[derive(Clone)]
 pub struct Faults {
     pub log: Vec<Value>,
     entries: Vec<Entry>,
@@ -190,6 +192,7 @@ impl Faults {
     pub fn next_lifecycle(&self, m: usize) -> u64 {
         self.lifecycle_at[m].first().map(|e| e.0).unwrap_or(u64::MAX)
     }
+    #[allow(dead_code)] // The world reads Machine::paused/down; tests read this.
     pub fn life(&self, m: usize) -> Life {
         self.life[m]
     }

@@ -120,10 +120,13 @@ down) fails the run with a fault error, as a duplicate partition does.
 Lifecycle actions apply before anything else at their time, in plan order.
 A machine never receives early a frame that arrives at or after its next
 pause or crash. Other machines keep running and sending throughout. A frame
-that arrives while its receiver is paused waits for the resume; at most 256
-such frames wait per pause, and later ones are dropped at the receiver. A
-frame that arrives while its receiver is down is dropped, and so is anything
-the dead incarnation was holding. Frames already in flight when the receiver
+that arrives while its receiver is paused waits for the resume. Of the frames
+sent after the pause began, at most 256 wait; later ones are dropped at the
+receiver. Frames already in flight when it paused also wait, uncounted, since
+there can only be a lookahead's worth. A frame that arrives while its
+receiver is down is dropped, and so is anything the dead incarnation was
+holding. Frames still queued for a machine that is down when the run ends
+count as neither delivered nor dropped, like any frame in flight at the end. Frames already in flight when the receiver
 reboots, and everything sent to it afterwards, reach the new incarnation's
 network device like any other frame. The engine sends nothing on a machine's
 behalf: peers learn about a crash only from silence, as with a power cut.
