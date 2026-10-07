@@ -16,7 +16,11 @@
     },
     "perf-replay": {
       "kind": "smoke",
-      "description": "one replay --undo 0 --margin 16384"
+      "description": "one replay --undo 0 --margin 16384",
+      "world": "examples/faults/compose.yaml",
+      "timeout_seconds": 300,
+      "undo": 0,
+      "margin": 16384
     },
     "disk-crash": {
       "kind": "fixture",
@@ -137,6 +141,20 @@
       ]
     },
     {
+      "category": "links",
+      "paths": [
+        "crates/seedbox-vmm/src/links.rs",
+        "crates/seedbox-vmm/src/connections.rs"
+      ],
+      "checks": [],
+      "runs": [
+        "L1",
+        "L2",
+        "P1",
+        "M1"
+      ]
+    },
+    {
       "category": "control",
       "paths": [
         "**/control.rs",
@@ -193,6 +211,10 @@
         "core",
         "cluster-fixed",
         "perf-replay"
+      ],
+      "runs": [
+        "U1",
+        "U2"
       ]
     },
     {
@@ -357,5 +379,59 @@
         "volume-crash"
       ]
     }
-  ]
+  ],
+  "runs": {
+    "L1": {
+      "world": "harness/worlds/shaped.json",
+      "engine": "target",
+      "seed": 1,
+      "timeout_seconds": 1800,
+      "comparison": "L1 == L2 (shaped replay witnesses)",
+      "fixture_pr": 97
+    },
+    "L2": {
+      "world": "harness/worlds/shaped.json",
+      "engine": "target",
+      "seed": 1,
+      "timeout_seconds": 1800,
+      "comparison": "L1 == L2 (shaped replay witnesses)",
+      "fixture_pr": 97
+    },
+    "P1": {
+      "world": "harness/worlds/plain.json",
+      "engine": "target",
+      "seed": 1,
+      "timeout_seconds": 1800,
+      "comparison": "P1 == M1 (feature-off witnesses)",
+      "fixture_pr": 97
+    },
+    "M1": {
+      "world": "harness/worlds/plain.json",
+      "engine": "main",
+      "seed": 1,
+      "timeout_seconds": 1800,
+      "comparison": "P1 == M1 (feature-off witnesses)",
+      "fixture_pr": 97
+    },
+    "U1": {
+      "world": "harness/worlds/shaped-tol-short.json",
+      "engine": "target",
+      "seed": 1,
+      "timeout_seconds": 600,
+      "comparison": "U1 == U2 (short undo invariance)",
+      "fixture_pr": 97,
+      "undo": 256,
+      "margin": "adaptive"
+    },
+    "U2": {
+      "world": "harness/worlds/shaped-tol-short.json",
+      "engine": "target",
+      "seed": 1,
+      "timeout_seconds": 600,
+      "comparison": "U1 == U2 (short undo invariance)",
+      "fixture_pr": 97,
+      "undo": 0,
+      "margin": "adaptive"
+    }
+  }
 }
