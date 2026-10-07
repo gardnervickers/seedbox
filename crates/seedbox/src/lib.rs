@@ -6,6 +6,7 @@
 
 #![doc = include_str!("../README.md")]
 
+pub mod bundle;
 pub mod config;
 pub mod execution;
 pub mod guest;

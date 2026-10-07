@@ -2,7 +2,7 @@
 
 This Rust crate implements [issue #2](https://github.com/gardnervickers/seedbox/issues/2)'s
 Compose-shaped application configuration and OCI run/replay path. The CLI exposes
-`init`, `validate`, `prepare`, `run`, `inspect`, and `replay`. `OciPreparer` and
+`init`, `validate`, `prepare`, `run`, `inspect`, `replay`, `export`, and `import`. `OciPreparer` and
 `VmmExecutor` implement separate programmatic preparation/execution interfaces;
 the orchestration API can be called directly by future simulation schedulers.
 
@@ -247,7 +247,18 @@ No control configuration preserves the prior no-control serialization/witness pa
 
 ## Follow-on scope
 
-The legacy fixtures retain their own pinned inputs and runner. Multi-core campaign
-dispatch, whole-machine persistent storage, and broad guest image qualification
-are separate work. The supported Compose path runs one service per VM with
+The low-level kernel/network and one-VM fixtures retain their own inputs and
+batch runner. Application acceptance uses direct YAML runs; the old application
+campaign runner has been removed. Multi-core dispatch, whole-machine persistent
+storage, and broad guest image qualification are separate work. The supported Compose path runs one service per VM with
 explicit host/runtime inputs and RAM-backed storage.
+
+## Retained run bundles
+
+`bundle::export` and `bundle::import` transfer the existing manifest and declared
+content closure without preparation or execution. Import returns an ordinary
+`orchestration::Run` for inspect/replay, preserves original metadata and opaque
+retained logs, and keeps capture omissions explicit. It publishes into fresh run
+storage using bounded, verified streaming and no-follow filesystem operations.
+See the [runtime bundle contract](../../docs/runtime.md#bundles) for format/limits
+and qualification boundaries.

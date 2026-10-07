@@ -3,10 +3,9 @@
 All fifteen executions produced their expected outcomes, and every replay
 matched. The runtime implementation is from `f3d00e2`, including the review fixes
 for lifecycle errors, sessions, cutoff classification and nominal-time inspection.
-The [initial shared-memory record](ACCEPTANCE-SHMEM-INITIAL-20261006.md),
-[UART record](ACCEPTANCE-RPC-20261006.md) and
-[static-schedule record](ACCEPTANCE-STATIC-20261006.md) retain their own identities;
-they do not qualify this engine.
+Earlier static-schedule, UART and initial shared-memory records remain in
+[Git history](https://github.com/gardnervickers/seedbox/tree/67bd5e1bb9149fc0493cef50b351da9330c8f9e6/examples/faults).
+They retain their own identities and do not qualify this engine.
 
 ## Reproduction
 

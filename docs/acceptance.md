@@ -140,6 +140,229 @@ The two rootful OCI tests had passed separately earlier; they remain explicitly
 ignored in the ordinary portable test invocation. The legacy engine smoke/full
 fault matrix was not rerun as part of this Compose acceptance.
 
+## 2026-10-06 — initial YAML preparation migration (superseded)
+
+This records the earlier PR #27 implementation. The guest-driver migration
+below replaces its test-only preparation bridge and batch execution path.
+
+The full Python acceptance suite passed using the YAML workloads in
+`sim/acceptance/workloads/`, prepared by the test-only `acceptance_prepare` target.
+The production crate, CLI, VMM, generic guest supervisor and batch supervisor
+were unchanged. Source revision: `3406e1e`.
+
+The run used `nix develop ./sim` on `nixos.local`, CPUs 2–7 with SMT siblings
+18–23, the controlled kernel with SHA-256
+`01f9c903a4754bfe9eca4c197cc3335ab8ff582944164982463518128639e0d8`, and VMM
+`a55ecd4a2d3b98f9a575e461695aebabcfe22a5e36d1572bbb3ce59a558289b8`.
+Evidence is retained under `/home/gvickers/seedbox-yaml-acceptance/runs/acceptance-full-20261006T192231Z-2621786/`.
+
+- Portable checks passed on Darwin and Linux; all-target Clippy passed on both.
+- Fresh exit and full-state replay matched, including every machine digest.
+- Undo 0/16 and margin 32768 preserved the witness without retries.
+- Four race seeds produced distinct lost-update counts; the atomic control was
+  clean, and a fresh replay matched the sampled race failure.
+- The intentionally planted missing acknowledgement produced the expected failure.
+- Both scheduled short-workload kill/restarts were acknowledged; the workload recovered.
+- All 11 etcd 3.5.3 seeds (4000–4010) passed with acknowledged recovery.
+- Cross-build equivalence was skipped because this changes workload setup, not
+  engine performance. No historical failure seed or witness was required.
+
+The full tier completed in 768.6 seconds. All ten batches verified restoration;
+final MSR readbacks on every selected CPU and sibling matched the initial
+`0x4480000000000`. No restoration snapshots remained.
+
+After rebasing onto the workspace restructure (`926060d`), source `184abf5`
+passed fresh YAML preparation and the full smoke tier in 334.9 seconds. Evidence
+is retained under `/home/gvickers/seedbox-yaml-workspace/runs/acceptance-smoke-20261006T193802Z-2640154/`.
+All eight batches restored their snapshots, and final MSR readbacks matched the
+same baseline on CPUs 2–7 and 18–23 with no snapshots remaining. The original
+full-tier record above predates the layout change; at that revision workloads lived under
+`harness/acceptance/workloads/` and the helper under `crates/seedbox/tests/`.
+
+Workspace tests and portable checks passed on both hosts after the rebase.
+Linux all-target Clippy passed with warnings denied. Darwin's strict check
+encountered main's existing `HostLease::try_acquire_at` dead-code warning;
+all-target Clippy passed with only the `dead_code` lint allowed. Production
+source was left unchanged. Independent review passed after the path/API updates.
+
+## 2026-10-06 — guest drivers with host acceptance matrix (superseded)
+
+This records the intermediate host-matrix implementation. The direct-command
+migration below removes that matrix and its preparation and launch adapters.
+
+Source `584fca1` replaces the earlier preparation bridge and batch path with
+ordinary `seedbox run`, `replay` and `inspect` calls. YAML selects the application,
+Python driver, control/check service and limits. Guest Python owns the workload,
+fault sequence and verification; host Python owns the acceptance matrix and
+report. The diff against main `788fc43` contains only harness and documentation
+changes. Existing Rust, guest supervisor, Python binding and Go/C workload
+sources are unchanged.
+
+The final bounded run uses four workers on `nixos.local`, CPUs 2–5 with SMT
+siblings 18–21, in `/home/gvickers/seedbox-acceptance-drivers`. Its command is:
+
+```sh
+nix develop --command bash harness/acceptance.sh full \
+  --root /home/gvickers/seedbox-acceptance-drivers \
+  --kernel /home/gvickers/seedbox-scoped-faults-20261006/artifacts-shmem/bzImage \
+  --cpus 2-5 \
+  --report /home/gvickers/seedbox-acceptance-drivers/full-bounded-report.json
+```
+
+Evidence is retained under
+`runs/acceptance-full-20261006T212656Z-2783040/` in that checkout. The live
+acceptance, binding and runtime source files were compared with the local commit
+by SHA-256. Runtime identities:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| CLI | `14e3d03c33cd2bcd6fe196314b573f8fef4e457094be6c512aab9a8d4ced0cb6` |
+| VMM | `af0debdb6fe642543e771fe6e66efb56fecb7b29696d7508136b3cee37b082e3` |
+| Kernel | `e8ece7cba2d5fc4924da83e39cc672ae2516c117f8f76ecfa04aeaa98e697847` |
+
+Formatting, strict all-target Clippy, workspace tests and portable acceptance
+passed on Darwin. Linux strict Clippy, portable acceptance and VMM tests passed.
+All 23 acceptance unit tests passed, including error classification, bounded
+overshoot retries, CPU lease waiting, cancellation cleanup, retained-output
+integrity and required packet-drop evidence. Independent review passed.
+
+Two earlier overlapping six-worker attempts were invalidated by host memory
+exhaustion; they also encountered registry and temporary-image cleanup failures.
+Both were cancelled cooperatively, their processes exited, every selected CPU
+and SMT sibling matched its saved MSR value, and no restoration snapshots
+remained. They are not acceptance passes. Both suite tiers now default to four
+workers, and the final attempt runs alone.
+
+The bounded full tier finished in 1119.4 seconds with **UNRESOLVED** (exit 3),
+24 distinct executions and zero retries:
+
+- Exit witnesses and full-state digests matched fresh replays.
+- Undo 0/16 and margin 32768 preserved the reference witness.
+- Four race seeds produced four different lost-update counts; the atomic control
+  remained clean and seed 1 reproduced its sampled loss of 2,065,650 updates.
+- The planted missing acknowledgement produced the expected FAIL.
+- The short etcd workload passed after two stop/restart/partition/heal rounds,
+  with eight confirmed effects and 20 partition-dropped packets.
+- Ten of eleven etcd 3.5.3 seeds passed. Each completed all 20 fault rounds,
+  recording 80 effects and 224–261 partition-dropped packets.
+- Seed 4004 stopped with a VMM clock-bound error. It was neither retried nor
+  counted as a workload failure or pass. This keeps the full tier UNRESOLVED.
+- Cross-engine equivalence was skipped because this is not a performance-only
+  engine change.
+
+The unresolved execution is
+`state/runs/a0835e9a061571fb-PSg7WD/` under the evidence directory. Its retained
+`output/vmm.stderr` says:
+
+```text
+error: clock bound exceeded: time 3793645758 + 1000 exceeds hard stop 3793646723
+```
+
+Every used CPU and sibling matched the original MSR value `0x4480000000000`
+after the suite, and no restoration snapshots remained. The suite report and
+all staged projects, CLI commands, outputs and private run records are retained.
+The clock-bound result remains an engine-validation blocker; no production
+boundary rule or scenario seed was changed to make this run pass.
+
+A separate diagnostic replay with identical retained inputs and VMM produced the
+same clock-bound message at the exact same values. Its run is
+`state/runs/a0835e9a061571fb-hj0gt0/`. The CLI correctly reports
+`ERROR / NOT_COMPARABLE`: neither attempt produced a completed execution witness.
+MSRs again matched the saved values, no snapshots remained, and no suite-owned
+CLI or VMM processes were left running. This diagnostic does not replace the
+unresolved suite result.
+
+```sh
+sudo -n target/debug/seedbox replay \
+  /home/gvickers/seedbox-acceptance-drivers/runs/acceptance-full-20261006T212656Z-2783040/state/runs/a0835e9a061571fb-PSg7WD \
+  --cpu 2 \
+  --state /home/gvickers/seedbox-acceptance-drivers/runs/acceptance-full-20261006T212656Z-2783040/state \
+  --vmm /home/gvickers/seedbox-acceptance-drivers/crates/seedbox-vmm/target/release/seedbox-vmm \
+  --allow-engine-change --undo 256 --margin adaptive
+```
+
+The explicit `--vmm` requires `--allow-engine-change`; in this diagnostic the
+VMM hash is unchanged.
+
+## 2026-10-06 — direct CLI acceptance scenarios
+
+Source `32bef7c` removes the host acceptance matrix, launcher, preparer and result
+parsers. Each checked-in YAML file can be passed directly to `seedbox run`.
+Compose configs supply the guest driver and Python API; build contexts reference
+the existing Go/C source directories. Guest drivers own the packet-drop,
+acknowledgement and atomic-control assertions. The planted negative control
+expects checker exit 1 in YAML, making its normal CLI outcome PASS when the
+checker detects the intended missing acknowledgement.
+
+Source validation passed: six guest-driver tests on Darwin and Linux, four
+public YAML validations, Darwin portable/workspace checks, formatting and strict
+all-target Clippy. Independent review passed. Production Rust, the guest
+supervisor, Python API and Go/C workload sources are unchanged.
+
+Direct hardware validation uses the fresh checkout
+`/home/gvickers/seedbox-direct-acceptance` on `nixos.local`, with CLI state under
+`/home/gvickers/seedbox-direct-runs`. Commands use the CLI, VMM and kernel hashes
+recorded in the preceding section. Runtime paths are supplied explicitly through
+sudo, including the project shell's static BusyBox. There is no workload staging
+or scenario-specific host runner. At most two commands run concurrently, on
+CPUs 2 and 4 with SMT siblings 18 and 20.
+
+The short etcd run (`--full-state`), race run, and sanity run all returned CLI
+exit 0 / PASS. The sanity report records checker exit 1 as declared by its YAML.
+The first long-run command, using the default adaptive margin, returned ERROR /
+exit 2 with this VMM error:
+
+```text
+error: soft overshoot on n2: 12395 branches past (or an ambiguous overflow at) a soft stop before its syscall window opened
+```
+
+That failed execution remains at `runs/aa40e2f2e4b2ef56-dBjdxh` under the CLI state
+directory. It is not a scenario pass. The follow-up command uses the same YAML
+and seed with explicit `--margin 98304`; there is no automatic acceptance retry
+or host verdict rewriting.
+
+The short scenario replay at `--margin 32768` returned PASS / MATCH, including
+all four full-state digests and the fault history. The first larger-margin long
+command failed during image download with a registry TLS error, before guest
+execution; it did not produce a run verdict. A subsequent invocation of the same
+command is recorded separately.
+
+Final direct-command results:
+
+| Scenario / command option | CLI result | Retained run |
+| --- | --- | --- |
+| Short etcd, `--full-state` | PASS / exit 0 | `34679a6bcc7500bf-YlCWGH` |
+| Race, default seed 1 | PASS / exit 0 | `b5b70ed0bfbdd580-jtlrVp` |
+| Sanity, expected checker exit 1 | PASS / exit 0 | `11b4247ba69d5280-WehCHH` |
+| Short replay, `--margin 32768` | PASS / MATCH / exit 0 | `34679a6bcc7500bf-jZCTdx` |
+| Long etcd, default adaptive margin | ERROR / exit 2 (PMU overshoot) | `aa40e2f2e4b2ef56-dBjdxh` |
+| Long etcd, `--margin 98304` | PASS / exit 0 | `ff080b00d539ec53-njFhCs` |
+
+Run paths are relative to `/home/gvickers/seedbox-direct-runs/runs/`. The passing
+long run completed twenty fault rounds, with 80 recorded effects and 245
+partition-dropped packets. The guest driver checked the packet-drop increase and
+acknowledgement ledger itself. Its freshly prepared client image differs from
+the earlier failed attempt, so this is a separate passing scenario execution,
+not proof of replay equivalence or an isolated diagnosis of the PMU failure.
+The short replay is the retained-input performance comparison.
+
+All nineteen relevant scenario, driver, binding and workload files were checked
+by SHA-256 against source `32bef7c`. After all commands finished, CPUs 2/4 and SMT
+siblings 18/20 exactly matched their saved MSR values (`0x4480000000000`). No
+restoration snapshots or scenario-owned CLI/VMM processes remained. The earlier
+clock-bound and current default-margin errors remain retained; this migration
+does not claim they are fixed or that the full eleven-seed sweep is qualified.
+
+The follow-up cleanup removes the superseded campaign runner/result parser and
+their tests, five duplicate etcd/race world definitions, and `guest/race.init`.
+Independent review found no remaining active callers. Darwin and Linux portable
+checks passed after deletion, including the retained batch/MSR tests on Linux,
+workspace tests, Linux VMM tests and all four YAML validations. Darwin formatting
+and strict all-target Clippy passed. Scenario drivers and runtime source are
+unchanged; hardware execution was not repeated for this removal-only cleanup.
+The remaining raw kernel/NIC and one-VM comparison fixtures still need their
+batch/MSR helpers and shared guest builders. Historical research remains available at commit `788fc43`.
+
 ## Local Mac TCG feasibility
 
 The retained [experimental tool](../tools/mac-tcg/README.md) was measured on
@@ -175,3 +398,16 @@ Historical single-VM networking measurements are likewise preserved in
 The 4.830-second versus 27.310-second medians (5.65x, 128 successful writes,
 two repeats per layout) used the older ABI1 backend. They do not establish
 the current PV/undo advantage or equal bug-finding coverage; #10 remains open.
+
+## 2026-10-06 — final PR #27 merge validation
+
+After merging main `8a3e14a`, formatting, strict all-target Clippy, workspace
+tests, portable checks and all four YAML validations passed on Darwin and in
+the fresh Linux checkout `/home/gvickers/seedbox-pr27-final-20261006`.
+Linux VMM tests passed, including the updated fault-target lifecycle tests.
+Independent final review passed. Main's removal of obsolete research and the
+single-member etcd fixture is preserved.
+
+The direct KVM results above retain their recorded engine identities; hardware
+execution was not repeated for this merge. The seed-4004 clock-bound failure is
+tracked in [issue #33](https://github.com/gardnervickers/seedbox/issues/33).

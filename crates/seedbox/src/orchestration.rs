@@ -488,7 +488,12 @@ fn compare(baseline: &RunRecord, fresh: &RunRecord) -> ReplayComparison {
 }
 
 pub fn inspect(directory: &Path) -> Result<RunRecord> {
-    let manifest: Manifest = serde_json::from_slice(&fs::read(directory.join("manifest.json"))?)?;
+    inspect_bytes(&fs::read(directory.join("manifest.json"))?)
+}
+
+/// Validate a retained manifest without consulting its original directory.
+pub(crate) fn inspect_bytes(bytes: &[u8]) -> Result<RunRecord> {
+    let manifest: Manifest = serde_json::from_slice(bytes)?;
     let record = manifest.record;
     if ContentDigest::of(&serde_json::to_vec(&record)?) != manifest.sha256
         || ContentDigest::of(&serde_json::to_vec(&record.identity)?) != record.run_id

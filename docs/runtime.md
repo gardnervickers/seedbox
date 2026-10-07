@@ -83,7 +83,19 @@ a CPU lease. Application memory can require a larger value; the etcd image faile
 to unpack at 512 MiB and passed at 1024 MiB. `--margin` and `--undo` are recorded per attempt and do not change identity.
 `--undo` defaults to 256 branches; zero disables undo and 16 exercises a smaller
 margin. The accepted range is 0..262144. Both settings are passed explicitly to
-the retained engine, without inheriting VMM environment variables.
+the retained engine, without inheriting VMM environment variables. `--margin`
+controls PMU approach and stepping distance; syscall exits remain available
+throughout a soft stop interval independently of that setting. Earlier yields
+do not publish a stop, inject an interrupt, or invalidate a checkpoint.
+
+Charged timer-port accesses conserve their full 1000 ns cost across world and
+timer boundaries. Their device effect and read response occur once; the guest
+cannot resume while a charged operation remains pending. Due timers latch before
+the next portion of the cost is paid. A duration cutoff can retain the pending
+operation, including its remaining cost and transferred bytes, in the exit
+witness and the full-state `pending_io` part. Other clock advances retain the
+strict hard-stop check.
+
 Replay defaults to the retained engine. An explicit `--vmm NEW_BINARY
 --allow-engine-change` permits a fresh identity and witness comparison with it.
 Replay does not require registry access, a builder, or the original Compose files.
@@ -177,3 +189,45 @@ Inspection and partition/heal counter snapshots count nominal send, drop and
 arrival times strictly before admission. A packet physically delivered in an
 early scheduler window is excluded until its nominal arrival precedes that
 boundary. Final report counters still record physical NIC acceptance totals.
+
+## Bundles
+
+`seedbox export RUN [-o FILE] [--state STATE]` writes one uncompressed
+`.seedbox.tar` file. Without `-o`, the file is named after the source run directory
+in the current directory. `seedbox import FILE [--state STATE]` creates a fresh
+run directory and reports its path. Both work without OCI tools or guest execution
+on Linux and macOS. Export reads retained objects from the selected state; import
+verifies the entire declared closure before publishing a run.
+
+The original manifest bytes, configuration, seed, identity, results and retained
+opaque log bytes survive unchanged. The imported directory has a new local name;
+its manifest keeps the original attempt metadata. Parent replay attempts are not
+recursively included. Witness hashes are retained comparison evidence, not RAM
+snapshot files. Capture omissions remain recorded, and their reasons describe the
+original attempt: an oversized file left only in that attempt's output directory
+is not bundled. This feature does not collect new guest files.
+
+The v1 container accepts the existing v2 run manifest, its identity object, all
+prepared-input objects and recorded log objects. Missing/corrupt objects,
+unsupported versions, links/special entries, unsafe names and extra/truncated data
+are rejected. Import rejects symlinked state roots and object/run directory
+components and never repairs a corrupt existing object. Existing destinations
+are never replaced. Import performs no installation or execution.
+
+`--max-bytes` defaults to 34359738368 (32 GiB). It independently caps unique-object
+bytes and the total bytes materialized across log paths; multiple names for one
+object each count toward the latter. Other limits are 8,192 objects, 8,192 log
+paths, 8 MiB each for container metadata and manifest, and 4 KiB per log name.
+Exceeding a limit fails instead of truncating bytes. Staging can require up to
+twice the unique-object bytes plus the materialized logs on disk. Failed or
+cancelled transfers publish no partial run; valid unreferenced objects may remain
+if final publication fails. A force-killed importer may leave private `.bundle-*`
+staging directories for manual removal after confirming no importer owns them.
+
+Inspect needs no original checkout or registry. Ordinary replay from the imported
+state uses the retained engine/guest/kernel inputs and preserves existing
+PASS/FAIL, ERROR, INCOMPLETE, TIMEOUT and MATCH/MISMATCH meanings. It requires the
+compatible installed Seedbox release and qualified host runtime/profile. Exporting
+engine bytes does not establish cross-host or cross-backend compatibility; full
+host drift admission remains issue #5. Portable fixture replay verifies the bundle
+mechanism; offline application replay requires separate hardware acceptance.

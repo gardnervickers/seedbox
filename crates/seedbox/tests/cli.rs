@@ -236,3 +236,26 @@ fn busybox_default_requires_a_static_busybox_on_path() {
         );
     }
 }
+
+#[test]
+fn bundle_cli_validates_paths_limits_and_positional_inputs() {
+    let directory = tempfile::tempdir().unwrap();
+    for command in ["export", "import"] {
+        let output = seedbox(&[command], directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).contains("required arguments"));
+        let output = seedbox(&[command, "missing", "--max-bytes", "0"], directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).contains("--max-bytes"));
+        let output = seedbox(
+            &[command, "missing", "--max-bytes", "not-a-number"],
+            directory.path(),
+        );
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).contains("--max-bytes"));
+    }
+    let output = seedbox(&["export", "missing"], directory.path());
+    assert_eq!(stderr(&output), "error: run directory missing: not found\n");
+    let output = seedbox(&["import", "missing"], directory.path());
+    assert_eq!(stderr(&output), "error: bundle missing: not found\n");
+}

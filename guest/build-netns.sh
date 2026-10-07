@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Usage: build-netns.sh OUTPUT ETCD_BINARY [single|multi]
-# Run in sim's Linux shell. Both layouts embed the same iproute2 closure.
+# Run in the project's Linux shell. Both layouts embed the same iproute2 closure.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 out=$(realpath -m "$1"); etcd=$(realpath "$2"); variant=${3:-single}

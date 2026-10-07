@@ -70,9 +70,9 @@ interpret them.
 
 1. **Integrated simtest** (the current milestone): seeded races and service
    faults with a reproducible failing seed and a fixed control.
-2. **Scenarios and output**: land #24's scenario API for
-   [issue #3](https://github.com/gardnervickers/seedbox/issues/3), the scenario
-   verdict and free-form output, Seedbox metrics, and the first library pieces.
+2. **Scenarios and output**: build on the [Python fault API](../python/README.md)
+   with scenario verdicts and free-form output, Seedbox metrics, and the first
+   library pieces.
 3. **Network faults and topology**: regions with per-link latency,
    per-connection drops, pauses, clock skew and triggers.
 4. **Speed**: boot snapshots and forks, parallel seeds, a remote fleet.
