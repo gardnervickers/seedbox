@@ -54,11 +54,11 @@ class LinkTests(unittest.TestCase):
         # probe gap, not 50% receipts, and exclude the c|a cut's whole interval.
         exposed = sum(links.policy_at(short, 'c', 'a', t) ==
                       (1_000_000, 500_000, 500_000)
-                      for t in range(0, 1_500_000_000, 1_000_000))
-        self.assertEqual(exposed, 340)
-        self.assertGreaterEqual(exposed, 300)
+                      for t in range(0, 1_100_000_000, 4_000_000))
+        self.assertEqual(exposed, 85)
+        self.assertGreaterEqual(exposed, 80)
         init = (REPO / 'harness/fixtures/links/link-short.init').read_text()
-        self.assertIn('link-probe "$name" 1000000 1500000000', init)
+        self.assertIn('link-probe "$name" 4000000 1100000000', init)
     def test_full_world_plan_preserves_every_direction_and_fifo_transition(self):
         plan = links.window_plan(world('shaped'))
         def windows(parts):

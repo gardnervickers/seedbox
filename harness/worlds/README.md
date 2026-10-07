@@ -280,12 +280,15 @@ verify equality again, since its engine bytes determine identity.
 Only U1/U2 use `shaped-tol-short.json`, with undo on/off and 600-second host
 timeouts. It keeps the 200 us stop tolerance and the same 16 fault IDs, actions,
 handles and policies in the same order. Faults run from 0.3 to 1.0 s; the short
-init uses a 1 ms probe gap and a 1.5 s probe end, exits after a 0.1 s reporting grace,
-and the world has a 2.5 s duration cap. Compression is nonuniform: fitting the
-whole 2.2-second schedule into 0.7 seconds with uniform scaling would leave only
-about 159 uncut lossmid sends at a 1 ms gap. The short fixture instead preserves
-340 ms of uncut lossmid exposure (0.6–0.7 and 0.76–1.0 s), an estimated 340 sends,
-with 500 us jitter and 50% loss. Actual guest send counts remain host evidence.
+init uses a 4 ms probe gap and a 1.1 s probe end, exits after a 0.1 s reporting grace,
+and the world has a 2.5 s duration cap. Undo off costs about one margin of
+single-stepping (~16k branches, ~0.1 s on the AMD host) per precise stop, so the
+probe sets the U2 budget: a 1 ms gap to 1.5 s gave U1 5,800 precise stops and U2
+timed out at 600 s. The 4 ms gap to 1.1 s sends about 5.5x fewer frames. Compression
+is nonuniform: the fixture preserves 340 ms of uncut lossmid exposure (0.6–0.7 and
+0.76–1.0 s), an estimated 85 sends at the 4 ms gap, with 500 us jitter and 50% loss,
+so losing none has probability about 2^-85. Actual guest send counts remain host
+evidence.
 
 `harness/links.py` derives full-world sender-stamp window expectations from the
 retained world JSON, using cut precedence, highest live shape ID and heal by

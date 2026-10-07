@@ -9,6 +9,6 @@ ip link set lo up
 ip addr add 10.0.0.$((idx+1))/24 brd 10.0.0.255 dev eth0
 ip link set eth0 up
 echo "link: $name up at index $idx"
-link-probe "$name" 1000000 1500000000
+link-probe "$name" 4000000 1100000000
 [ "$name" = a ] && { sleep 0.1; sbx exit 0; }
 while true; do sleep 10; done

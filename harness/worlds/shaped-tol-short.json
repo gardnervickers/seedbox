@@ -1,5 +1,5 @@
 {
-  "_comment": "Short undo-invariance control only; same policies and ordered faults as shaped-tol.json. run-links.sh supplies the 1 ms / 1.5 s probe initrd.",
+  "_comment": "Short undo-invariance control only; same policies and ordered faults as shaped-tol.json. run-links.sh supplies the 4 ms / 1.1 s probe initrd.",
   "kernel": "KERNEL",
   "mem_mb": 256,
   "duration_ns": 2500000000,
