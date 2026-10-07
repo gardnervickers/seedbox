@@ -87,14 +87,14 @@ marker. All host, CPU, PMU, MSR, lease, ABI and control-channel checks still app
 
 `seedbox run --torn-writes` enables seeded partial survival of unflushed
 512-byte disk sectors on crash. It is recorded in run identity and replayed
-automatically. It applies to retained disks; Compose storage is still RAM-backed
-until named-volume disk support lands. See [disk semantics](docs/runtime.md#disk-crash-policy).
+automatically. It applies to retained disks, including Compose named volumes. See [disk semantics](docs/runtime.md#disk-crash-policy).
 
 `seedbox help run` lists every option. The guest Python API supports
 [bounded committed console triggers](docs/triggers.md) for future stop/partition
 faults in the development engine; see that contract and AMD validation handoff. A run prints `OUTCOME: run-directory`;
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
-INCOMPLETE and 124 TIMEOUT. Offline `diff` exits 0 for MATCH, 1 for DIFFERENT,
+INCOMPLETE and 124 TIMEOUT. A cancelled or incomplete replay exits 2
+(NOT_COMPARABLE). Offline `diff` exits 0 for MATCH, 1 for DIFFERENT,
 and 2 for usage/setup or invalid retained evidence.
 
 Pause a running world from another terminal with `sudo seedbox pause RUN`, then
@@ -231,7 +231,7 @@ On macOS, the pre-check skips the Linux-only VMM tests and batch supervisor
 lifecycle tests. On Linux, the portable suite includes those tests; VMM tests
 keep their standalone target directory instead of using the workspace cache.
 The pre-check does not execute guests. VMM builds and KVM acceptance remain
-Linux host checks. After the pre-check passes a committed revision, run:
+Linux host checks. After a Linux pre-check passes a committed revision, run:
 
 ```sh
 bash harness/host-check.sh --skip-portable REV CPU
@@ -240,7 +240,8 @@ bash harness/host-check.sh --skip-portable REV CPU
 This skips fmt, clippy and the portable suite (including workspace tests), while
 keeping the CLI build, VMM build (unless `SEEDBOX_VMM` selects a stored engine),
 VMM tests and AMD smoke checks. Both gates print the full SHA; match them before
-using the skip option. A pre-check with local changes only verifies those local
+using the skip option. A Mac pass alone does not justify skipping the Linux
+portable checks. A pre-check with local changes only verifies those local
 bytes and does not establish a pass for the committed SHA.
 
 ## How execution is controlled
@@ -347,8 +348,9 @@ configuration, engine, logs and result. Replay uses the retained content store
 without registry pulls or builds. PASS, FAIL, ERROR, TIMEOUT and INCOMPLETE are
 separate results; a reproduced FAIL is a successful MATCH. `--full-state` adds
 per-machine RAM/register comparisons. `--margin` and `--undo` change performance without
-changing semantic identity. Application storage is private RAM-backed state for
-each run; the default is 1024 MiB per service. See [runtime instructions](docs/runtime.md)
+changing semantic identity. Each run has private application storage: image filesystems are RAM-backed,
+and named volumes use retained ext4 disks that survive guest crash/reboot.
+The default RAM allocation is 1024 MiB per service. See [runtime instructions](docs/runtime.md)
 for compatibility, memory sizing, root access, cancellation and the supported subset.
 
 The [acceptance record](docs/acceptance.md) includes real etcd/Redis passes,
@@ -359,8 +361,9 @@ lease contention and exact MSR restoration on the workstation.
 
 `seedbox diff RUN_A RUN_B [--json]` compares two retained directories on Linux or
 macOS without executing guests. It reports the world witness, each machine's
-exit/full-state witnesses, the first differing retained trace record (or terminal
-record), and changed identity fields including seed, engine, kernel, images and
+exit/full-state witnesses and state parts (such as RAM and disk), the first
+differing retained trace record (or terminal record with state parts), and changed
+identity fields including seed, engine, kernel, images and
 semantic parameters. Import bundles first, then pass their printed run paths.
 
 Only manifest-declared, checksum-verified evidence is read. The adapter does not
@@ -507,6 +510,18 @@ YAML without starting guests. It has no hardware tiers. The low-level batch
 runner remains available for the distinct fixtures below. Hardware results and known runtime failures
 are recorded in [docs/acceptance.md](docs/acceptance.md).
 
+`bash harness/host-check.sh --plan SHA` shows change-scoped host checks from the
+merge-base diff without executing anything. On the qualified Linux host,
+`--lanes 1,2,3` spreads the selected checks over SMT pairs `(N, N+16)`.
+Host-free selection uses an explicit allow-list; unknown paths select core.
+Other examples also require their reviewer's run list, and kernel changes keep
+the campaign warning while selecting core. Execution runs portable checks by
+default; `REV CPU` remains shorthand for `REV --lanes CPU` (1..15).
+Disk and Compose-volume rows require `SEEDBOX_DISK_KERNEL` until K2 is accepted.
+Automatic `cluster-fixed` runs only when engine inputs differ from local main;
+reviewer requirements repeat on the final status and in retained summaries.
+Use repeatable `--extra CHECK` to add reviewer checks. See [the host-check map and execution instructions](harness/smoke/README.md#change-scoped-host-checks).
+
 The focused race comparison records a fixed `SOURCE_DATE_EPOCH=0` for Podman image
 build metadata and requires two public preparations to have identical complete
 inputs before execution. Every run must retain that same input closure. It runs four seeds, requires distinct lost-update counts
@@ -586,3 +601,5 @@ seeded kill/restart schedule, eight writers for 60 seconds, and etcd 3.5.3
 controls over the same seeds. The historical ABI1 timings are in
 [the historical networking report](https://github.com/gardnervickers/seedbox/blob/788fc4376b7e2cc96d1bc51ed2ae3d4635d16abd/research/single-vm-network/REPORT.md)
 and must not be attributed to these revised sources.
+
+See [the experimental arm64 backend quickstart](docs/arm64-backends.md#experimental-arm64-quickstart) for the isolated HVF/KVM fixture.

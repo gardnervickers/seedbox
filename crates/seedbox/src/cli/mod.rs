@@ -34,6 +34,7 @@ Exit status:
   1    FAIL, replay MISMATCH, or diff DIFFERENT
   2    ERROR, a replay that is NOT_COMPARABLE, or a usage or setup error
   3    INCOMPLETE (wall-time limit or cancelled)
+       A cancelled or incomplete replay reports 2 (NOT_COMPARABLE)
   124  TIMEOUT (simulated-time limit)";
 
 const HOST_CONTROL_HELP: &str = "\
@@ -201,7 +202,7 @@ enum Command {
         #[command(flatten)]
         transfer: Transfer,
     },
-    /// Compare retained run evidence without executing guests.
+    /// Compare retained run evidence, including terminal state parts, without executing guests.
     #[command(after_help = EXIT_CODES)]
     Diff {
         /// First retained run directory.

@@ -587,19 +587,43 @@ struct RawFault {
     detail: String,
 }
 
+/// State parts emitted by `Machine::state_digest`: `events` is descriptive
+/// text, while every other part is a lowercase SHA-256 digest. Keep unknown
+/// part names digest-checked too, so new hashed parts remain safe to compare.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(try_from = "BTreeMap<String, String>")]
+pub(crate) struct StateDigestParts(BTreeMap<String, String>);
+
+impl TryFrom<BTreeMap<String, String>> for StateDigestParts {
+    type Error = Error;
+
+    fn try_from(parts: BTreeMap<String, String>) -> Result<Self> {
+        for (name, value) in &parts {
+            if name != "events" {
+                ContentDigest::try_from(value.clone())?;
+            }
+        }
+        Ok(Self(parts))
+    }
+}
+
 #[derive(Deserialize)]
-struct MachineReport {
-    name: String,
-    infrastructure_error: bool,
-    guest_exit_code: Option<u8>,
-    guest_init_error: Option<u8>,
-    state_digest: Option<ContentDigest>,
+pub(crate) struct MachineReport {
+    pub(crate) name: String,
+    pub(crate) infrastructure_error: bool,
+    pub(crate) guest_exit_code: Option<u8>,
+    pub(crate) guest_init_error: Option<u8>,
+    pub(crate) state_digest: Option<ContentDigest>,
+    pub(crate) state_digest_parts: Option<StateDigestParts>,
+    pub(crate) witness: Option<ContentDigest>,
+    pub(crate) branches: Option<u64>,
+    pub(crate) pending_io: Option<Value>,
     /// Final machine state, `Exited(code)` once the VM has exited.
     #[serde(default)]
-    state: Option<String>,
+    pub(crate) state: Option<String>,
     /// Final simulated time; an exited VM's clock stops at its exit.
     #[serde(default)]
-    time_ns: Option<u64>,
+    pub(crate) time_ns: Option<u64>,
     #[serde(default)]
     crashed_incarnations: Vec<CrashedIncarnation>,
 }
@@ -608,14 +632,14 @@ struct CrashedIncarnation {
     crashed_at_ns: u64,
 }
 #[derive(Deserialize)]
-struct VmmReport {
-    report_version: u32,
+pub(crate) struct VmmReport {
+    pub(crate) report_version: u32,
     seed: u64,
     /// Absent from engines older than counter profiles, which are all Zen.
     counter_profile: Option<String>,
     outcome: String,
-    world_witness: ContentDigest,
-    machines: Vec<MachineReport>,
+    pub(crate) world_witness: ContentDigest,
+    pub(crate) machines: Vec<MachineReport>,
     #[serde(default)]
     faults: Vec<RawFault>,
     #[serde(default)]
