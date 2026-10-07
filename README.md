@@ -135,6 +135,7 @@ rebuilt OCI images to have identical bytes.
 | `guest/` | Generic OCI guest supervisor plus low-level guest fixtures and builders |
 | `docs/` | [Vision](docs/vision.md), [runtime instructions](docs/runtime.md), [backends](docs/backends.md), [acceptance record](docs/acceptance.md) |
 | `harness/` | YAML acceptance scenarios, portable checks, low-level world fixtures and their batch runner ([migration map](harness/worlds/README.md)), `msr54.py` |
+| [`nix/host-runner.nix`](nix/host-runner.nix) | Optional owner-triggered AMD PR runner ([setup and security](docs/host-runner.md)); Gardner applies the host configuration |
 | [`tools/mac-tcg/`](tools/mac-tcg/README.md) | Experimental local Mac TCG runner and tests; separate from the production KVM backend |
 
 ## How execution is controlled

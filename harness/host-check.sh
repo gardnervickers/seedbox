@@ -18,6 +18,8 @@ Environment:
   PINNED_ENGINE      a pinned seedbox-vmm; with it, a rebuilt engine is checked
                      as the development tier (--allow-dev-engine)
   HOST_CHECK_DIR     where to work [default: $HOME]
+  HOST_CHECK_CPU_WRAPPER installed runner wrapper (otherwise use manual sudo)
+  HOST_CHECK_SUMMARY copy the summary here, including setup/failed checks
 EOF
   exit 2
 }
@@ -40,9 +42,16 @@ SHA=$(git -C "$REPO" rev-parse --verify "$REV^{commit}")
 git -C "$REPO" worktree prune
 WORK=$(mktemp -d "${HOST_CHECK_DIR:-$HOME}/host-check-${SHA:0:7}-cpu$CPU-XXXX")
 SRC=$WORK/src
-git -C "$REPO" worktree add --detach --quiet "$SRC" "$SHA"
 SUMMARY=$WORK/summary.txt
 echo "host-check ${SHA:0:12} cpu $CPU ($siblings) kernel $(sha256sum "$SEEDBOX_KERNEL" | cut -c1-12)" | tee "$SUMMARY"
+finish() {
+  local status=$?
+  if [[ $status != 0 ]]; then echo "host-check exit: $status" >> "$SUMMARY"; fi
+  if [[ -f $SUMMARY ]]; then cp "$SUMMARY" "${HOST_CHECK_SUMMARY:-$WORK.txt}"; fi
+  return "$status"
+}
+trap finish EXIT
+git -C "$REPO" worktree add --detach --quiet "$SRC" "$SHA"
 
 # Builds and source checks run niced and unpinned: they never change results,
 # and the leased pair stays free for the guests.
@@ -56,6 +65,8 @@ step() {
   grep '^phase ' "$WORK/$name.log" >> "$SUMMARY" || true
   if [[ $status != 0 ]]; then
     tail -n 20 "$WORK/$name.log" >&2
+    printf '\n%s failure excerpt:\n' "$name" >> "$SUMMARY"
+    tail -n 20 "$WORK/$name.log" >> "$SUMMARY"
     cp "$SUMMARY" "$WORK.txt"
     echo "FAIL: $WORK.txt; once reported: git -C $REPO worktree remove --force $SRC && sudo rm -rf $WORK"
     exit 1
@@ -70,19 +81,31 @@ step suite nice bash harness/acceptance.sh portable
 
 init=$(ls -t "$SRC"/target/release/build/seedbox-*/out/compose-init 2>/dev/null | head -n 1 || true)
 if [[ -z $init ]]; then
-  echo "FAIL: the build embedded no guest supervisor (compose-init); see $WORK/build.log"
+  echo "FAIL: the build embedded no guest supervisor (compose-init); see $WORK/build.log" | tee -a "$SUMMARY"
   exit 1
 fi
 dev=()
 if [[ -n ${PINNED_ENGINE:-} ]]; then dev=(--allow-dev-engine --pinned-engine "$PINNED_ENGINE"); fi
-step smoke sudo python3 harness/smoke/amd.py --cli "$SRC/target/release/seedbox" \
-  --engine "$engine" --kernel "$SEEDBOX_KERNEL" \
-  --guest-init "$init" --busybox "$SEEDBOX_BUSYBOX" --cpu "$CPU" --tool-path "$PATH" \
-  --output "$WORK/smoke" "${dev[@]}"
+if [[ -n ${HOST_CHECK_CPU_WRAPPER:-} ]]; then
+  mode=pinned
+  if [[ -n ${PINNED_ENGINE:-} ]]; then mode=dev; fi
+  step smoke sudo -n "$HOST_CHECK_CPU_WRAPPER" smoke "$WORK" "$CPU" "$init" "$mode"
+else
+  step smoke sudo python3 harness/smoke/amd.py --cli "$SRC/target/release/seedbox" \
+    --engine "$engine" --kernel "$SEEDBOX_KERNEL" \
+    --guest-init "$init" --busybox "$SEEDBOX_BUSYBOX" --cpu "$CPU" --tool-path "$PATH" \
+    --output "$WORK/smoke" "${dev[@]}"
+fi
 grep '^phase ' "$SUMMARY"
 
 # Passed: keep only the summary, beside the work directory.
 cp "$SUMMARY" "$WORK.txt"
+if [[ -n ${HOST_CHECK_CPU_WRAPPER:-} ]]; then
+  # The coordinator always stops the privileged unit and removes this entire
+  # job (including failures). It prunes worktree metadata after removal.
+  echo "PASS: ${HOST_CHECK_SUMMARY:-$WORK.txt}"
+  exit 0
+fi
 git -C "$REPO" worktree remove --force "$SRC"
 sudo rm -rf "$WORK"
 echo "PASS: $WORK.txt"

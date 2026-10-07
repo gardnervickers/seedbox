@@ -1,0 +1,194 @@
+name: AMD host check
+
+on:
+  pull_request_target:
+    types: [labeled, synchronize, closed]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+# Only an owner request or a head/closure event can cancel an existing check.
+# Random issue comments and labels get their own harmless concurrency group.
+concurrency:
+  group: >-
+    seedbox-host-${{ ((github.event_name == 'pull_request_target' &&
+    (github.event.action == 'synchronize' || github.event.action == 'closed' ||
+    (github.event.action == 'labeled' && github.event.label.name == 'needs-host' &&
+    github.event.sender.login == 'gardnervickers'))) ||
+    (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+    github.event.comment.user.login == 'gardnervickers' &&
+    github.event.comment.body == '/host-check')) &&
+    (github.event.pull_request.number || github.event.issue.number) || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    if: >-
+      github.repository == 'gardnervickers/seedbox' &&
+      ((github.event_name == 'pull_request_target' &&
+      (github.event.action == 'synchronize' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'needs-host' &&
+      github.event.sender.login == 'gardnervickers'))) ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+      github.event.comment.user.login == 'gardnervickers' &&
+      github.event.comment.body == '/host-check'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    outputs:
+      allowed: ${{ steps.gate.outputs.allowed }}
+      number: ${{ steps.gate.outputs.number }}
+      sha: ${{ steps.gate.outputs.sha }}
+      mode: ${{ steps.gate.outputs.mode }}
+    steps:
+      - uses: actions/github-script@v7
+        id: gate
+        with:
+          script: |
+            const repo = context.repo;
+            const number = context.payload.pull_request?.number ?? context.payload.issue?.number;
+            const {data: pr} = await github.rest.pulls.get({...repo, pull_number: number});
+            if (pr.state !== 'open' || pr.head.repo?.full_name !== 'gardnervickers/seedbox' || pr.head.repo.fork) return;
+            if (context.payload.action === 'synchronize') {
+              if (!pr.labels.some(l => l.name === 'needs-host')) return;
+              const events = await github.paginate(github.rest.issues.listEvents, {...repo, issue_number: number, per_page: 100});
+              const labels = events.filter(e => ['labeled', 'unlabeled'].includes(e.event) && e.label?.name === 'needs-host');
+              const last = labels.at(-1);
+              if (last?.event !== 'labeled' || last.actor?.login !== 'gardnervickers') return;
+              // A delayed synchronize event must not re-dispatch an obsolete head.
+              if (pr.head.sha !== context.payload.pull_request.head.sha) return;
+            }
+            const files = await github.paginate(github.rest.pulls.listFiles, {...repo, pull_number: number, per_page: 100});
+            // GitHub caps this endpoint at 3000 files: fail closed rather than
+            // risk missing a policy change beyond the cap.
+            if (files.length >= 3000) throw new Error('PR too large for release-policy inspection');
+            const policy = 'crates/seedbox/src/admission.rs';
+            const mode = files.some(f => f.filename === policy || f.previous_filename === policy) ? 'pinned' : 'dev';
+            core.setOutput('allowed', 'true');
+            core.setOutput('number', number);
+            core.setOutput('sha', pr.head.sha);
+            core.setOutput('mode', mode);
+
+  host:
+    needs: gate
+    if: needs.gate.outputs.allowed == 'true'
+    runs-on: [self-hosted, Linux, X64, seedbox-amd]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      # All control code and the flake come from the trusted workflow revision.
+      # host-check.sh makes a separate worktree for the candidate SHA.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Initialize summary
+        env:
+          SHA: ${{ needs.gate.outputs.sha }}
+        run: |
+          printf 'host-check %s\nsetup did not complete\n' "$SHA" > "$RUNNER_TEMP/summary.txt"
+          sudo -n "$HOST_CHECK_CPU_WRAPPER" reap "$HOST_RUNNER_JOBS"
+          git worktree prune
+      - name: Confirm current same-repository head
+        uses: actions/github-script@v7
+        env:
+          NUMBER: ${{ needs.gate.outputs.number }}
+          SHA: ${{ needs.gate.outputs.sha }}
+        with:
+          script: |
+            const {data: pr} = await github.rest.pulls.get({...context.repo, pull_number: Number(process.env.NUMBER)});
+            if (pr.state !== 'open' || pr.head.repo?.full_name !== 'gardnervickers/seedbox' || pr.head.repo.fork || pr.head.sha !== process.env.SHA) {
+              throw new Error('request is stale or no longer an open same-repository PR');
+            }
+      - name: Check candidate on a free SMT pair
+        env:
+          SHA: ${{ needs.gate.outputs.sha }}
+          MODE: ${{ needs.gate.outputs.mode }}
+        run: |
+          git fetch --no-tags https://github.com/gardnervickers/seedbox.git "$SHA"
+          nix develop --command python3 harness/host_runner.py run "$SHA" --mode "$MODE" \
+            --summary "$RUNNER_TEMP/summary.txt" --result "$RUNNER_TEMP/result.json"
+      - name: Stop owned privileged work and remove local evidence
+        if: always()
+        run: |
+          if ! sudo -n "$HOST_CHECK_CPU_WRAPPER" reap "$HOST_RUNNER_JOBS"; then
+            printf 'cleanup failed: privileged job files or processes may remain\n' >> "$RUNNER_TEMP/summary.txt"
+            exit 1
+          fi
+          if ! git worktree prune; then
+            printf 'cleanup failed: worktree metadata may remain\n' >> "$RUNNER_TEMP/summary.txt"
+            exit 1
+          fi
+      - name: Retain only the quoted summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-summary-${{ github.run_id }}
+          path: ${{ runner.temp }}/summary.txt
+          if-no-files-found: error
+          retention-days: 7
+      - name: Remove temporary receipts after upload
+        if: always()
+        run: rm -f "$RUNNER_TEMP/summary.txt" "$RUNNER_TEMP/result.json"
+
+  report:
+    needs: [gate, host]
+    if: always() && !cancelled() && needs.gate.outputs.allowed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: host-summary-${{ github.run_id }}
+          path: report
+      - name: Format bounded summary
+        env:
+          SHA: ${{ needs.gate.outputs.sha }}
+          MODE: ${{ needs.gate.outputs.mode }}
+          STATUS: ${{ needs.host.result == 'success' && 'pass' || 'fail' }}
+          RUN_URL: https://github.com/gardnervickers/seedbox/actions/runs/${{ github.run_id }}
+        run: |
+          mkdir -p report
+          if [[ ! -f report/summary.txt ]]; then
+            printf 'No summary was uploaded; inspect the linked workflow for setup or cleanup failure.\n' > report/summary.txt
+          fi
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          Path('report/result.json').write_text(json.dumps(dict(sha=os.environ['SHA'], mode=os.environ['MODE'], status=os.environ['STATUS'])))
+          PY
+          python3 harness/host_runner.py comment --summary report/summary.txt \
+            --result report/result.json --run-url "$RUN_URL" > report/comment.txt
+      - name: Comment and consume needs-host
+        uses: actions/github-script@v7
+        env:
+          NUMBER: ${{ needs.gate.outputs.number }}
+          SHA: ${{ needs.gate.outputs.sha }}
+        with:
+          script: |
+            const fs = require('fs');
+            const number = Number(process.env.NUMBER);
+            const {data: pr} = await github.rest.pulls.get({...context.repo, pull_number: number});
+            // Stale results must not consume a new head's request label.
+            if (pr.state !== 'open' || pr.head.sha !== process.env.SHA || pr.head.repo?.full_name !== 'gardnervickers/seedbox') return;
+            await github.rest.issues.createComment({...context.repo, issue_number: number, body: fs.readFileSync('report/comment.txt', 'utf8')});
+            try {
+              await github.rest.issues.removeLabel({...context.repo, issue_number: number, name: 'needs-host'});
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }

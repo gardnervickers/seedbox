@@ -24,6 +24,7 @@
           });
         };
     in {
+      nixosModules.host-runner = import ./nix/host-runner.nix;
       devShells = nixpkgs.lib.genAttrs systems shell;
       packages = nixpkgs.lib.genAttrs systems (system: { networkTools = (import nixpkgs { inherit system; }).iproute2; });
     };
