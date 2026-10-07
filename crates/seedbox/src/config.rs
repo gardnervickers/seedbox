@@ -126,49 +126,6 @@ pub fn load(path: &Path, environment: &BTreeMap<String, String>) -> Result<Simul
 }
 
 pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Result<Simulation> {
-    parse_inner(yaml, source, host, ParseMode::Legacy)
-}
-
-/// Load finished-image authoring for the selected guest platform. Build options
-/// belong to external tooling; Seedbox consumes each service's declared image.
-pub fn load_native(
-    path: &Path,
-    environment: &BTreeMap<String, String>,
-    platform: crate::oci::GuestPlatform,
-) -> Result<Simulation> {
-    let source = path.canonicalize()?;
-    parse_native(
-        &std::fs::read_to_string(&source)?,
-        &source,
-        environment,
-        platform,
-    )
-}
-
-/// Parse finished images for an explicit guest platform without accessing a
-/// registry or builder. An unused build context need not exist on this host.
-/// This does not establish execution compatibility for the selected platform.
-pub fn parse_native(
-    yaml: &str,
-    source: &Path,
-    host: &BTreeMap<String, String>,
-    platform: crate::oci::GuestPlatform,
-) -> Result<Simulation> {
-    parse_inner(yaml, source, host, ParseMode::Native(platform))
-}
-
-#[derive(Clone, Copy)]
-enum ParseMode {
-    Legacy,
-    Native(crate::oci::GuestPlatform),
-}
-
-fn parse_inner(
-    yaml: &str,
-    source: &Path,
-    host: &BTreeMap<String, String>,
-    mode: ParseMode,
-) -> Result<Simulation> {
     let doc: Value = serde_yaml_ng::from_str(yaml)?;
     reject_tags(&doc, "$")?;
     let top = fields(
@@ -265,9 +222,18 @@ fn parse_inner(
                 "networks",
             ],
         )?;
-        let image_source = match mode {
-            ParseMode::Legacy => match (svc.get("image"), svc.get("build")) {
-                (Some(image), None) => registry_source(image, &p)?,
+        let image_source =
+            match (svc.get("image"), svc.get("build")) {
+                (Some(image), None) => {
+                    let reference = text(image, &format!("{p}.image"))?;
+                    if reference.chars().any(char::is_whitespace) || reference.contains("://") {
+                        return invalid(
+                            &format!("{p}.image"),
+                            "expected a registry image reference without a transport prefix",
+                        );
+                    }
+                    ImageSource::Registry { reference }
+                }
                 (None, Some(build)) => {
                     let (context, dockerfile) = if build.is_string() {
                         let context = local_path(build, &format!("{p}.build"), base, true)?;
@@ -304,33 +270,11 @@ fn parse_inner(
                     &p,
                     "specify exactly one of image or build; pull/build precedence is unsupported",
                 ),
-            },
-            ParseMode::Native(_) => match svc.get("image") {
-                Some(image) => registry_source(image, &p)?,
-                None if svc.contains_key("build") => return invalid(
-                    &format!("{p}.build"),
-                    "Seedbox consumes finished images and does not build Dockerfiles; build externally and supply an image: reference",
-                ),
-                None => return invalid(
-                    &format!("{p}.image"),
-                    "specify image: with a finished image reference",
-                ),
-            },
-        };
-        let expected_platform = match mode {
-            ParseMode::Legacy => "linux/amd64",
-            ParseMode::Native(platform) => platform.as_str(),
-        };
+            };
         let platform = optional_text(svc.get("platform"), &format!("{p}.platform"))?
-            .unwrap_or(expected_platform.into());
-        if platform != expected_platform {
-            match mode {
-                ParseMode::Legacy => return invalid(&format!("{p}.platform"), "only linux/amd64 is supported"),
-                ParseMode::Native(_) => return invalid(
-                    &format!("{p}.platform"),
-                    format!("expected {expected_platform} for the selected guest platform, found {platform}"),
-                ),
-            }
+            .unwrap_or("linux/amd64".into());
+        if platform != "linux/amd64" {
+            return invalid(&format!("{p}.platform"), "only linux/amd64 is supported");
         }
         let nets = match svc.get("networks") {
             None => vec!["default".into()],
@@ -618,18 +562,6 @@ fn parse_inner(
         },
         seed,
     })
-}
-
-fn registry_source(image: &Value, service_path: &str) -> Result<ImageSource> {
-    let path = format!("{service_path}.image");
-    let reference = text(image, &path)?;
-    if reference.chars().any(char::is_whitespace) || reference.contains("://") {
-        return invalid(
-            &path,
-            "expected a registry image reference without a transport prefix",
-        );
-    }
-    Ok(ImageSource::Registry { reference })
 }
 
 fn reject_static_faults(raw: Option<&Value>) -> Result<()> {

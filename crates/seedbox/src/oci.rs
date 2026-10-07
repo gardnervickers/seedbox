@@ -20,34 +20,6 @@ use std::{
     process::{Command, Stdio},
 };
 
-pub mod filesystem;
-pub mod native;
-mod tar_reader;
-
-/// The image platform selected by the guest executor, independently of the host.
-/// Importing an image for a platform does not qualify execution on that platform.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GuestPlatform {
-    LinuxAmd64,
-    LinuxArm64,
-}
-
-impl GuestPlatform {
-    pub fn architecture(self) -> &'static str {
-        match self {
-            Self::LinuxAmd64 => "amd64",
-            Self::LinuxArm64 => "arm64",
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::LinuxAmd64 => "linux/amd64",
-            Self::LinuxArm64 => "linux/arm64",
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct OciTools {
     pub skopeo: PathBuf,
@@ -106,7 +78,7 @@ impl FrozenContext {
     }
 }
 
-#[derive(Clone, serde::Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Descriptor {
     media_type: String,
@@ -151,20 +123,6 @@ impl OciTools {
     ) -> Result<ImportedImage> {
         self.import_with_context(service, directory, store, None)
     }
-
-    /// Import for an explicitly selected guest platform. The existing `import`
-    /// and Compose preparation paths remain Linux amd64 until the ARM64 guest
-    /// executor and its runtime assets are integrated.
-    pub fn import_for_platform(
-        &self,
-        service: &Service,
-        directory: &Path,
-        store: &ContentStore,
-        platform: GuestPlatform,
-    ) -> Result<ImportedImage> {
-        self.import_frozen_for_platform(service, directory, store, None, None, platform)
-    }
-
     pub(crate) fn import_with_context(
         &self,
         service: &Service,
@@ -181,25 +139,6 @@ impl OciTools {
         store: &ContentStore,
         context_options: Option<(&crate::preparation::PreparationContext, &str)>,
         frozen: Option<&FrozenContext>,
-    ) -> Result<ImportedImage> {
-        self.import_frozen_for_platform(
-            service,
-            directory,
-            store,
-            context_options,
-            frozen,
-            GuestPlatform::LinuxAmd64,
-        )
-    }
-
-    fn import_frozen_for_platform(
-        &self,
-        service: &Service,
-        directory: &Path,
-        store: &ContentStore,
-        context_options: Option<(&crate::preparation::PreparationContext, &str)>,
-        frozen: Option<&FrozenContext>,
-        platform: GuestPlatform,
     ) -> Result<ImportedImage> {
         if matches!(service.source, ImageSource::Build { .. }) {
             self.validate_build_epoch()?;
@@ -313,7 +252,7 @@ impl OciTools {
                     cmd.args([
                         "build",
                         "--platform",
-                        platform.as_str(),
+                        "linux/amd64",
                         "--tag",
                         &tag,
                         "--file",
@@ -372,7 +311,7 @@ impl OciTools {
                     "--override-os",
                     "linux",
                     "--override-arch",
-                    platform.architecture(),
+                    "amd64",
                     "copy",
                     "--preserve-digests",
                 ])
@@ -383,7 +322,7 @@ impl OciTools {
             false,
             false,
         )?;
-        let image = import_metadata_for_platform(&raw, service, store, platform)?;
+        let image = import_metadata(&raw, service, store)?;
         provenance.insert(
             "resolved-manifest".into(),
             format!("sha256:{}", image.manifest.hex()),
@@ -427,17 +366,6 @@ pub fn import_metadata(
     service: &Service,
     store: &ContentStore,
 ) -> Result<PreparedImage> {
-    import_metadata_for_platform(raw, service, store, GuestPlatform::LinuxAmd64)
-}
-
-/// Verify an image against the selected guest platform, including every config
-/// and layer descriptor. Platform validation precedes unpacking.
-pub fn import_metadata_for_platform(
-    raw: &Path,
-    service: &Service,
-    store: &ContentStore,
-    platform: GuestPlatform,
-) -> Result<PreparedImage> {
     let manifest_bytes = fs::read(raw.join("manifest.json"))?;
     let manifest: Manifest = serde_json::from_slice(&manifest_bytes)?;
     if manifest.schema_version != 2 {
@@ -457,7 +385,25 @@ pub fn import_metadata_for_platform(
     }
     let config_digest = retain_descriptor(raw, &manifest.config, store)?;
     let config: ImageConfig = serde_json::from_slice(&store.read(&config_digest)?)?;
-    let launch = config_launch(&config, service, platform)?;
+    if config.os != "linux" || config.architecture != "amd64" {
+        return Err(Error::Integrity("image must be linux/amd64".into()));
+    }
+    for field in ["OnBuild", "Healthcheck"] {
+        if let Some(value) = config.config.get(field) {
+            if !value.is_null() && value.as_array().is_none_or(|v| !v.is_empty()) {
+                return Err(Error::Integrity(format!(
+                    "image config {field} is unsupported"
+                )));
+            }
+        }
+    }
+    if config.config.get("ArgsEscaped").and_then(|v| v.as_bool()) == Some(true) {
+        return Err(Error::Integrity(
+            "image config ArgsEscaped is unsupported".into(),
+        ));
+    }
+    let defaults: ImageDefaults = serde_json::from_value(config.config)?;
+    let launch = resolve_launch(service, &defaults)?;
     let mut layers = Vec::new();
     for layer in &manifest.layers {
         if ![
@@ -481,35 +427,6 @@ pub fn import_metadata_for_platform(
         layers,
         launch,
     })
-}
-
-fn config_launch(
-    config: &ImageConfig,
-    service: &Service,
-    platform: GuestPlatform,
-) -> Result<crate::image::Launch> {
-    if config.os != "linux" || config.architecture != platform.architecture() {
-        return Err(Error::Integrity(format!(
-            "image must be {}",
-            platform.as_str()
-        )));
-    }
-    for field in ["OnBuild", "Healthcheck"] {
-        if let Some(value) = config.config.get(field) {
-            if !value.is_null() && value.as_array().is_none_or(|v| !v.is_empty()) {
-                return Err(Error::Integrity(format!(
-                    "image config {field} is unsupported"
-                )));
-            }
-        }
-    }
-    if config.config.get("ArgsEscaped").and_then(|v| v.as_bool()) == Some(true) {
-        return Err(Error::Integrity(
-            "image config ArgsEscaped is unsupported".into(),
-        ));
-    }
-    let defaults: ImageDefaults = serde_json::from_value(config.config.clone())?;
-    resolve_launch(service, &defaults)
 }
 
 fn retain_descriptor(

@@ -117,32 +117,6 @@ pub fn build_initramfs_with(
     archive.finish()
 }
 
-/// Package a virtual Linux image filesystem without host ownership remapping.
-/// Image paths are never extracted onto the host. The caller owns the private
-/// file spools for the lifetime of this operation.
-pub fn build_initramfs_image(
-    rootfs: &crate::oci::filesystem::ImageFilesystem,
-    init: &Path,
-    busybox: &Path,
-    mke2fs: Option<&Path>,
-    recipe: &[u8],
-    output: &Path,
-    check: &dyn Fn() -> Result<()>,
-) -> Result<()> {
-    check()?;
-    rootfs.validate()?;
-    let mut archive = Newc::new(fs::File::create(output)?);
-    archive.owned("seedbox", 0o040755, &[])?;
-    archive.owned("init", 0o100755, &fs::read(init)?)?;
-    archive.owned("seedbox/busybox", 0o100755, &fs::read(busybox)?)?;
-    if let Some(mke2fs) = mke2fs {
-        archive.owned("seedbox/mke2fs", 0o100755, &fs::read(mke2fs)?)?;
-    }
-    archive.owned("seedbox/launch.bin", 0o100400, recipe)?;
-    archive.image(rootfs, check)?;
-    archive.finish()
-}
-
 struct Newc<W> {
     output: W,
     next_inode: u32,
@@ -172,7 +146,6 @@ impl<W: Write> Newc<W> {
         size: u32,
     ) -> Result<()> {
         if name.as_bytes().contains(&0)
-            || name.len() + 1 > 4096
             || name.starts_with('/')
             || name.split('/').any(|p| p == "..")
         {
@@ -305,64 +278,6 @@ impl<W: Write> Newc<W> {
                     item.path().display()
                 )));
             }
-        }
-        Ok(())
-    }
-
-    fn image(
-        &mut self,
-        root: &crate::oci::filesystem::ImageFilesystem,
-        check: &dyn Fn() -> Result<()>,
-    ) -> Result<()> {
-        use crate::oci::filesystem::Contents;
-        let mut counts = BTreeMap::<u32, u32>::new();
-        for node in root.entries.values() {
-            *counts.entry(node.inode).or_default() += 1;
-        }
-        let mut inodes = BTreeMap::new();
-        for (path, node) in &root.entries {
-            check()?;
-            let name = if path.is_empty() {
-                "rootfs".into()
-            } else {
-                format!("rootfs/{path}")
-            };
-            let (inode, first) = match inodes.get(&node.inode) {
-                Some(inode) => (*inode, false),
-                None => {
-                    let inode = self.next_inode;
-                    self.next_inode += 1;
-                    inodes.insert(node.inode, inode);
-                    (inode, true)
-                }
-            };
-            let (size, links) = match &node.contents {
-                Contents::Directory => (0, 2),
-                Contents::Symlink(target) => (target.len() as u32, 1),
-                Contents::File { size, .. } => (if first { *size } else { 0 }, counts[&node.inode]),
-            };
-            self.header(
-                &name, inode, node.mode, node.uid, node.gid, links, node.mtime, size,
-            )?;
-            match &node.contents {
-                Contents::Directory => (),
-                Contents::Symlink(target) => self.output.write_all(target)?,
-                Contents::File { path, .. } if size > 0 => {
-                    let copied = crate::oci::filesystem::copy_checked(
-                        &mut fs::File::open(path)?,
-                        &mut self.output,
-                        size.into(),
-                        check,
-                    )?;
-                    if copied != u64::from(size) {
-                        return Err(Error::Integrity(
-                            "image spool changed during packaging".into(),
-                        ));
-                    }
-                }
-                Contents::File { .. } => (),
-            }
-            self.padding(size.into())?;
         }
         Ok(())
     }
