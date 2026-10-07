@@ -74,23 +74,31 @@ impl PreparationContext {
         }
     }
     fn metadata(&self, name: &str, value: &impl Serialize) -> Result<()> {
-        let bytes = serde_json::to_vec_pretty(value)?;
-        let mut quota = self
-            .quotas
-            .lock()
-            .map_err(|_| Error::Execution("preparation evidence lock poisoned".into()))?;
-        if quota.1.saturating_add(bytes.len() as u64) > METADATA_LIMIT {
-            return Err(Error::Execution(
-                "preparation metadata quota exhausted; cleanup evidence unavailable".into(),
-            ));
-        }
-        let mut temp = tempfile::NamedTempFile::new_in(&self.directory)?;
-        temp.write_all(&bytes)?;
-        temp.as_file().sync_all()?;
-        temp.persist(self.directory.join(name))
-            .map_err(|e| e.error)?;
-        quota.1 += bytes.len() as u64;
-        Ok(())
+        let result = (|| -> Result<()> {
+            let bytes = serde_json::to_vec_pretty(value)?;
+            let mut quota = self.quotas.lock().map_err(|_| {
+                Error::PreparationCleanupUnverified(
+                    "required preparation evidence lock poisoned".into(),
+                )
+            })?;
+            if quota.1.saturating_add(bytes.len() as u64) > METADATA_LIMIT {
+                return Err(Error::Execution(
+                    "preparation metadata quota exhausted; cleanup evidence unavailable".into(),
+                ));
+            }
+            let mut temp = tempfile::NamedTempFile::new_in(&self.directory)?;
+            temp.write_all(&bytes)?;
+            temp.as_file().sync_all()?;
+            temp.persist(self.directory.join(name))
+                .map_err(|e| e.error)?;
+            quota.1 += bytes.len() as u64;
+            Ok(())
+        })();
+        result.map_err(|error| {
+            Error::PreparationCleanupUnverified(format!(
+                "required preparation evidence {name}: {error}"
+            ))
+        })
     }
     /// Admit only the inspected immutable project-Nix launcher/native closure.
     pub(crate) fn admit_builder(&self, requested: &Path) -> Result<()> {
@@ -114,11 +122,9 @@ impl PreparationContext {
         if !admitted {
             return Err(Error::Setup(format!("builder {}: exploration requires the inspected project-Nix local Podman launch closure; unknown wrappers, remote clients and daemon delegation are unsupported", requested.display())));
         }
-        *self
-            .admitted_builder
-            .lock()
-            .map_err(|_| Error::Execution("builder admission lock poisoned".into()))? =
-            Some(launcher);
+        *self.admitted_builder.lock().map_err(|_| {
+            Error::PreparationCleanupUnverified("builder admission lock poisoned".into())
+        })? = Some(launcher);
         self.run(
             Command::new(requested).args([
                 "--remote=false",
@@ -183,7 +189,9 @@ impl PreparationContext {
             if let Some(admitted) = self
                 .admitted_builder
                 .lock()
-                .map_err(|_| Error::Execution("builder admission lock poisoned".into()))?
+                .map_err(|_| {
+                    Error::PreparationCleanupUnverified("builder admission lock poisoned".into())
+                })?
                 .as_ref()
             {
                 if admitted != &resolved {
@@ -224,10 +232,11 @@ impl PreparationContext {
         };
         let metadata = format!("{phase}.json");
         self.metadata(&metadata, &receipt)?;
-        let quota = self
-            .quotas
-            .lock()
-            .map_err(|_| Error::Execution("preparation evidence lock poisoned".into()))?;
+        let quota = self.quotas.lock().map_err(|_| {
+            Error::PreparationCleanupUnverified(
+                "required preparation evidence lock poisoned".into(),
+            )
+        })?;
         let phase_limit = if phase.ends_with("version") {
             8192
         } else {
@@ -236,7 +245,12 @@ impl PreparationContext {
         let remaining = phase_limit.min(TOTAL_LIMIT.saturating_sub(quota.0));
         drop(quota);
         let log = self.directory.join(format!("{phase}.log"));
-        let mut file = fs::File::create(&log)?;
+        let mut file = fs::File::create(&log).map_err(|error| {
+            Error::PreparationCleanupUnverified(format!(
+                "required preparation log {}: {error}",
+                log.display()
+            ))
+        })?;
         let (mut reader, writer) = UnixStream::pair()?;
         reader.set_read_timeout(Some(Duration::from_millis(50)))?;
         command
@@ -359,16 +373,22 @@ impl PreparationContext {
         finish.store(true, Ordering::Release);
         receipt.reaped = status.is_ok();
         receipt.elapsed_seconds = began.elapsed().as_secs_f64();
-        let output = drain
-            .join()
-            .map_err(|_| Error::Execution("preparation output reader panicked".into()))?;
+        let output = drain.join().map_err(|_| {
+            Error::PreparationCleanupUnverified(
+                "required preparation output reader panicked".into(),
+            )
+        })?;
         if let Ok((retained, omitted, complete)) = &output {
             receipt.output_complete = *complete;
             receipt.retained_bytes = *retained;
             receipt.omitted_bytes = *omitted;
             self.quotas
                 .lock()
-                .map_err(|_| Error::Execution("preparation evidence lock poisoned".into()))?
+                .map_err(|_| {
+                    Error::PreparationCleanupUnverified(
+                        "required preparation evidence lock poisoned".into(),
+                    )
+                })?
                 .0 += *retained;
             if *omitted > 0 {
                 receipt.omission_reason = Some("phase or total payload quota".into());
@@ -391,15 +411,19 @@ impl PreparationContext {
             receipt.cleanup = "cleanup-unverified".into();
         }
         self.metadata(&metadata, &receipt)?;
-        output?;
+        output.map_err(|error| {
+            Error::PreparationCleanupUnverified(format!(
+                "required preparation output {phase}: {error}"
+            ))
+        })?;
         if !receipt.output_complete {
             return Err(Error::PreparationCleanupUnverified(format!(
                 "{phase}: output stream remained open after cleanup; private tag retained"
             )));
         }
         let status = status.map_err(|e| {
-            Error::Execution(format!(
-                "command {}: {e}; cleanup-unverified",
+            Error::PreparationCleanupUnverified(format!(
+                "command {}: wait/reap ownership uncertain: {e}",
                 receipt.program.display()
             ))
         })?;
@@ -658,7 +682,63 @@ mod tests {
     fn owned_process_fixture() {
         let mode = std::env::var("SEEDBOX_FIXTURE_MODE").unwrap();
         let ready = PathBuf::from(std::env::var_os("SEEDBOX_FIXTURE_READY").unwrap());
-        if mode == "grandchild" {
+        if mode == "ownership-loss" || mode == "evidence-loss" {
+            let root = ready.parent().unwrap();
+            let context = root.join("context");
+            fs::create_dir(&context).unwrap();
+            fs::write(context.join("Dockerfile"), "FROM scratch\n").unwrap();
+            let release = root.join("release");
+            let removed = root.join("tag-removed");
+            let transport = script(root, "transport", "exit 0");
+            let builder=script(root,"builder",&format!("if [ \"$1\" = --version ]; then echo fixture-builder; exit 0; fi; if [ \"$1\" = --remote=false ]; then shift; fi; if [ \"$1\" = build ]; then echo $$ > '{}'; while [ ! -e '{}' ]; do :; done; exit 0; fi; echo cleanup > '{}'",ready.display(),release.display(),removed.display()));
+            let simulation=crate::config::parse("name: ownership-loss\nservices:\n  probe: {build: ./context}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: probe}\n",&root.join("compose.yaml"),&std::collections::BTreeMap::new()).unwrap();
+            let tools = crate::oci::OciTools {
+                skopeo: transport.clone(),
+                umoci: transport,
+                docker: builder,
+            };
+            let evidence =
+                PreparationContext::new(root.join("evidence"), CancellationToken::default())
+                    .unwrap();
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    let deadline = Instant::now() + Duration::from_secs(3);
+                    while fs::read_to_string(&ready)
+                        .ok()
+                        .and_then(|s| s.trim().parse::<u32>().ok())
+                        .is_none()
+                    {
+                        assert!(Instant::now() < deadline);
+                        std::thread::yield_now();
+                    }
+                    if mode == "ownership-loss" {
+                        unsafe {
+                            libc::signal(libc::SIGCHLD, libc::SIG_IGN);
+                        };
+                    } else {
+                        fs::rename(root.join("evidence"), root.join("preserved-evidence")).unwrap();
+                        fs::write(
+                            root.join("evidence"),
+                            b"metadata destination became unavailable",
+                        )
+                        .unwrap();
+                    }
+                    fs::write(&release, b"exit now").unwrap();
+                });
+                let result = tools.import_with_context(
+                    &simulation.services["probe"],
+                    &root.join("import"),
+                    &crate::store::ContentStore::new(root.join("store")),
+                    Some((&evidence, "probe")),
+                );
+                assert!(matches!(
+                    result,
+                    Err(Error::PreparationCleanupUnverified(_))
+                ));
+                assert!(!removed.exists());
+            });
+            return;
+        } else if mode == "grandchild" {
             loop {
                 std::thread::sleep(Duration::from_millis(20));
             }
@@ -818,5 +898,69 @@ mod tests {
                 .unwrap();
         assert_eq!(receipt["reaped"], true);
         assert_eq!(receipt["output_complete"], true);
+    }
+    #[test]
+    fn actual_lost_child_ownership_keeps_typed_uncertainty_and_blocks_tag_removal() {
+        let _process_creation = PROCESS_TEST_LOCK.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let ready = directory.path().join("ready");
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "preparation_command::tests::owned_process_fixture",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("SEEDBOX_FIXTURE_MODE", "ownership-loss")
+            .env("SEEDBOX_FIXTURE_READY", &ready)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stdout)
+        );
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &fs::read(directory.path().join("evidence/probe-build.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["reaped"], false);
+        assert!(receipt["cleanup"].as_str().unwrap().contains("unverified"));
+        assert!(!directory.path().join("tag-removed").exists());
+        assert!(!directory
+            .path()
+            .join("evidence/probe-tag-cleanup.json")
+            .exists());
+    }
+    #[test]
+    fn required_post_build_evidence_failure_blocks_private_tag_cleanup() {
+        let _process_creation = PROCESS_TEST_LOCK.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let ready = directory.path().join("ready");
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "preparation_command::tests::owned_process_fixture",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("SEEDBOX_FIXTURE_MODE", "evidence-loss")
+            .env("SEEDBOX_FIXTURE_READY", &ready)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stdout)
+        );
+        assert!(directory
+            .path()
+            .join("preserved-evidence/probe-build.log")
+            .is_file());
+        assert!(!directory.path().join("tag-removed").exists());
+        assert!(!directory
+            .path()
+            .join("preserved-evidence/probe-tag-cleanup.json")
+            .exists());
     }
 }
