@@ -149,7 +149,7 @@ rebuilt OCI images to have identical bytes.
 | --- | --- |
 | [`crates/seedbox/`](crates/seedbox/README.md) | Configuration, OCI preparation, orchestration and the `seedbox` CLI |
 | `crates/seedbox-vmm/` | KVM VMM and world scheduler (`seedbox-vmm`); its own workspace and lockfile, because its binary hash is the run's engine identity |
-| `examples/` | Runnable Compose applications: etcd cluster and Redis, each with a workload image |
+| `examples/` | Compose applications: etcd, Redis, [TCP faults/recovery](examples/faults/README.md), and [one-service MinIO conditional writes](examples/minio/README.md) (MinIO runtime qualification pending) |
 | `kernel/` | Guest kernel patch, config and build script (Linux 6.12.112) |
 | `guest/` | Generic OCI guest supervisor plus low-level guest fixtures and builders |
 | `docs/` | [Vision](docs/vision.md), [runtime instructions](docs/runtime.md), [backends](docs/backends.md), [acceptance record](docs/acceptance.md) |
