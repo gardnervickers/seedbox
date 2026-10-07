@@ -8,14 +8,15 @@ use seedbox::{
     bundle, config,
     counter::CounterProfile,
     execution::{
-        CancellationToken, ExecutionBackend, ExecutionProfile, PreparationBackend, WitnessMode,
+        CancellationToken, ExecutionBackend, ExecutionProfile, PreparationBackend, Timebase,
+        WitnessMode,
     },
     oci::OciTools,
     orchestration::{self, Orchestrator, Outcome, ReplayOptions, ReplayStatus, RunOptions},
     preparation::OciPreparer,
     store::ContentStore,
     templates::Template,
-    vmm::{recorded_counter, VmmExecutor},
+    vmm::{recorded_counter, recorded_timebase, VmmExecutor},
     Error, Result,
 };
 use signals::Signals;
@@ -159,6 +160,23 @@ impl From<TemplateArg> for Template {
     }
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum TimebaseArg {
+    /// Count retired guest branches with the host PMU.
+    Counter,
+    /// Advance time at guest exits, syscalls and clock reads.
+    Pv,
+}
+
+impl From<TimebaseArg> for Timebase {
+    fn from(timebase: TimebaseArg) -> Self {
+        match timebase {
+            TimebaseArg::Counter => Self::Counter,
+            TimebaseArg::Pv => Self::Pv,
+        }
+    }
+}
+
 #[derive(Args)]
 struct ComposeArg {
     /// Compose file, or a directory containing compose.yaml.
@@ -238,6 +256,9 @@ struct RuntimeInputs {
     /// Guest RAM per service, in MiB.
     #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(64..=65536))]
     memory_mb: u32,
+    /// Timebase for guest progress; changes run identity and results.
+    #[arg(long, value_enum, default_value_t = TimebaseArg::Counter)]
+    timebase: TimebaseArg,
     /// Also record and compare every machine's RAM and registers.
     #[arg(long)]
     full_state: bool,
@@ -258,7 +279,8 @@ impl RuntimeInputs {
         } else {
             WitnessMode::Exits
         };
-        let executor = VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?;
+        let executor = VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?
+            .with_timebase(self.timebase.into());
         let preparer = self.preparer(engine, store, scratch, executor.profile())?;
         Ok((preparer, executor))
     }
@@ -417,6 +439,7 @@ fn run(cli: Cli) -> Result<u8> {
         } => {
             let run = defaults::run_directory(run)?;
             let previous = orchestration::inspect(&run)?;
+            let timebase = recorded_timebase(&previous.identity.inputs.profile)?;
             let counter = cpu.admit(CounterProfile::host()?)?;
             same_counter(
                 &run,
@@ -436,14 +459,17 @@ fn run(cli: Cli) -> Result<u8> {
                 .get("memory_mb")
                 .and_then(|value| value.parse().ok())
                 .ok_or_else(|| Error::Integrity("recorded profile missing memory_mb".into()))?;
-            let executor = performance.apply(VmmExecutor::new(
-                &engine,
-                &store,
-                cpu.cpu,
-                memory,
-                profile.witness_mode.clone(),
-                counter,
-            )?)?;
+            let executor = performance.apply(
+                VmmExecutor::new(
+                    &engine,
+                    &store,
+                    cpu.cpu,
+                    memory,
+                    profile.witness_mode.clone(),
+                    counter,
+                )?
+                .with_timebase(timebase),
+            )?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
             let result = orchestrator.replay_with_options(
@@ -536,6 +562,7 @@ fn run(cli: Cli) -> Result<u8> {
                 record.attempt,
                 record.identity.seed
             );
+            print_timebase(&record);
             if let Some(replay) = record.replay {
                 println!("replay: {}", word(&replay.status));
             }
@@ -619,6 +646,7 @@ fn same_counter(run: &Path, recorded: CounterProfile, host: CounterProfile) -> R
 fn report(run: &orchestration::Run) -> u8 {
     // Scripts parse the run directory from this one `OUTCOME: path` line.
     println!("{}: {}", word(&run.record.outcome), run.directory.display());
+    print_timebase(&run.record);
     if let Some(error) = &run.record.error {
         eprintln!("{error}");
     }
@@ -645,6 +673,18 @@ fn word(value: &impl serde::Serialize) -> String {
         Ok(serde_json::Value::String(word)) => word,
         _ => "UNKNOWN".into(),
     }
+}
+
+fn print_timebase(record: &orchestration::RunRecord) {
+    let timebase = record
+        .identity
+        .inputs
+        .profile
+        .semantic_parameters
+        .get("timebase")
+        .map(String::as_str)
+        .unwrap_or("counter");
+    println!("timebase: {timebase}");
 }
 
 fn print_omissions(record: &orchestration::RunRecord) {

@@ -60,6 +60,7 @@ seedbox=./target/release/seedbox
 
 "$seedbox" prepare examples/redis --output prepared.json
 "$seedbox" run examples/redis
+"$seedbox" run examples/redis --timebase pv
 "$seedbox" inspect .seedbox/runs/ATTEMPT --json
 "$seedbox" replay .seedbox/runs/ATTEMPT
 ```
@@ -85,6 +86,25 @@ with another profile the executor leases the cores and leaves MSRs alone. Other
 profiles are unqualified and run only with `--allow-unqualified-cpu`. An unsuccessful restore retains `output/msr-original.json`.
 Library cancellation and CLI SIGINT/SIGTERM/SIGHUP cause cleanup through the same
 path. SIGKILL and host loss cannot guarantee cleanup.
+
+`run` and `prepare` accept `--timebase counter|pv`, defaulting to `counter`.
+This is a semantic choice with no environment override. Counter time advances
+with retired guest branches; PV compute between exits costs no virtual time,
+with progress charged at guest exits, syscalls and clock reads. The same seed
+under the two models produces different identities and retained manifests.
+The semantic profile records `timebase` only for PV, preserving existing counter
+identity bytes and hashes. Replay reads the recorded choice, accepts no timebase
+override, and refuses unknown recorded values or a backend with a different
+timebase, even with `--allow-engine-change`. Bundles preserve the choice.
+The VMM report is checked against it; reports from older engines without a
+timebase field mean counter. Run/replay and inspect print `timebase: VALUE`.
+`inspect --json` exposes the semantic profile and, when present, the VMM's
+reported `report.timebase` through the library's serialization.
+
+PV uses no host PMU counter, but the CLI currently retains the same CPU profile
+admission, CPU/SMT leases and Zen MSR workaround for both choices. This change
+does not qualify additional PV hosts. The counter stop-placement description
+below applies to the default counter model; PV uses its own exit-based progress.
 
 `--state` chooses the content store and attempts root (default `.seedbox`).
 `--memory-mb` defaults to 1024 MiB per service and is a semantic parameter; `--full-state` requests RAM/register

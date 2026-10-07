@@ -18,6 +18,7 @@ use std::{
 pub struct VmmExecutor {
     /// Host CPU to pin the VMM to; `None` leases the first free eligible core.
     pub cpu: Option<u32>,
+    #[cfg(target_os = "linux")]
     counter: CounterProfile,
     profile: ExecutionProfile,
     performance: BTreeMap<String, String>,
@@ -49,6 +50,7 @@ impl VmmExecutor {
         }
         Ok(Self {
             cpu,
+            #[cfg(target_os = "linux")]
             counter,
             profile: ExecutionProfile {
                 backend: "seedbox-kvm".into(),
@@ -61,6 +63,18 @@ impl VmmExecutor {
                 ("SEEDBOX_UNDO".into(), "256".into()),
             ]),
         })
+    }
+
+    /// Counter is recorded by omission to preserve existing run identities.
+    pub fn with_timebase(mut self, timebase: Timebase) -> Self {
+        if timebase == Timebase::Counter {
+            self.profile.semantic_parameters.remove("timebase");
+        } else {
+            self.profile
+                .semantic_parameters
+                .insert("timebase".into(), timebase.name().into());
+        }
+        self
     }
 
     pub fn with_margin(mut self, margin: &str) -> Result<Self> {
@@ -93,6 +107,17 @@ pub fn recorded_counter(profile: &ExecutionProfile) -> Result<CounterProfile> {
         None => Ok(CounterProfile::Zen),
         Some(name) => CounterProfile::from_name(name)
             .ok_or_else(|| Error::Integrity(format!("unknown counter profile {name}"))),
+    }
+}
+
+/// Missing timebase means counter, including records from older engines.
+pub fn recorded_timebase(profile: &ExecutionProfile) -> Result<Timebase> {
+    match profile.semantic_parameters.get("timebase").map(String::as_str) {
+        None | Some("counter") => Ok(Timebase::Counter),
+        Some("pv") => Ok(Timebase::Pv),
+        Some(value) => Err(Error::Integrity(format!(
+            "recorded --timebase {value}: expected counter or pv; use a run recorded with a supported timebase"
+        ))),
     }
 }
 
@@ -220,6 +245,8 @@ struct MachineReport {
 }
 #[derive(Deserialize)]
 struct VmmReport {
+    /// Older engines always used counter.
+    timebase: Option<String>,
     report_version: u32,
     seed: u64,
     /// Absent from engines older than counter profiles, which are all Zen.
@@ -463,6 +490,14 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
     if raw.report_version != 1 || raw.seed != request.seed {
         return Err(Error::Integrity("VMM report version/seed mismatch".into()));
     }
+    let timebase = recorded_timebase(&request.prepared.profile)?;
+    let reported = raw.timebase.as_deref().unwrap_or("counter");
+    if reported != timebase.name() {
+        return Err(Error::Integrity(format!(
+            "VMM --timebase {reported}: does not match recorded --timebase {}",
+            timebase.name()
+        )));
+    }
     let expected = recorded_counter(&request.prepared.profile)?.name();
     if raw
         .counter_profile
@@ -622,6 +657,7 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
         reason = StopReason::Error;
     }
     Ok(ExecutionReport {
+        timebase: Some(timebase),
         reason,
         workload_exit,
         witness: Some(raw.world_witness),
@@ -712,6 +748,7 @@ mod linux {
         {
             return Err(Error::Execution("CPU exceeds affinity mask".into()));
         }
+        let timebase = recorded_timebase(&backend.profile)?;
         let world = world(&request)?;
         let world_path = request.output.join("world.json");
         fs::write(&world_path, serde_json::to_vec_pretty(&world)?)?;
@@ -729,6 +766,9 @@ mod linux {
             .arg(request.seed.to_string())
             .arg("--out")
             .arg(request.output.join("machines"));
+        if timebase != Timebase::Counter {
+            command.arg("--timebase").arg(timebase.name());
+        }
         command
             .arg("--stream-console")
             .arg("--console-limit")
@@ -742,6 +782,7 @@ mod linux {
             .stdout(fs::File::create(&report_path)?)
             .stderr(fs::File::create(request.output.join("vmm.stderr"))?);
         let incomplete = |reason| ExecutionReport {
+            timebase: Some(timebase),
             reason,
             workload_exit: None,
             witness: None,

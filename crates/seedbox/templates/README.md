@@ -22,6 +22,7 @@ from this directory:
 ```sh
 seedbox validate
 seedbox run
+seedbox run --timebase pv
 seedbox inspect .seedbox/runs/ATTEMPT --json
 seedbox replay .seedbox/runs/ATTEMPT
 ```
@@ -31,6 +32,19 @@ Preparation unpacks images with root ownership and runs before the CPU lease.
 `seedbox help run`. Run/replay must be invoked with the required KVM/MSR access;
 see the repository's `docs/runtime.md` for setup and limits. `--margin` and
 `--undo` control PMU approach and stepping performance without changing results.
+
+`--timebase counter|pv` chooses semantic guest progress (default `counter`),
+with no environment override. Counter counts retired guest branches; PV compute
+between exits costs no virtual time, and time advances at guest exits, syscalls
+and clock reads. The choice changes run identity and results. Counter is omitted
+from semantic parameters to preserve existing identities; PV is retained as
+`timebase: pv`. Replay uses the recorded choice and accepts no override; unknown
+or mismatched timebases are refused, even when an engine change is allowed.
+Run/replay and inspect print `timebase: VALUE`; `inspect --json` includes the
+semantic profile and the VMM's reported `report.timebase` when available.
+Bundles preserve the timebase. PV uses no PMU counter, but the CLI retains the
+same host admission, CPU/SMT lease and Zen MSR policy for both choices.
+
 Charged timer I/O retains its full cost across scheduler boundaries; pending
 operations are included in terminal witnesses.
 

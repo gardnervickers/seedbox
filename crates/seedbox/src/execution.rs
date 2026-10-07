@@ -33,6 +33,26 @@ pub struct ExecutionProfile {
     pub semantic_parameters: BTreeMap<String, String>,
 }
 
+/// How guest progress advances virtual time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Timebase {
+    /// Count retired guest branches with the host PMU.
+    #[default]
+    Counter,
+    /// Advance time at guest exits, syscalls and clock reads.
+    Pv,
+}
+
+impl Timebase {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Counter => "counter",
+            Self::Pv => "pv",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WitnessMode {
@@ -157,6 +177,9 @@ pub struct FaultEvent {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionReport {
+    /// Execution timebase; absent in older records or other backends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timebase: Option<Timebase>,
     pub reason: StopReason,
     pub workload_exit: Option<WorkloadExit>,
     pub witness: Option<ContentDigest>,

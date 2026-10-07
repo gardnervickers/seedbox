@@ -488,3 +488,57 @@ fn typed_network_plan_preserves_targets_without_attributing_check_service() {
         assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
     });
 }
+
+#[test]
+fn timebase_reports_validate_recorded_semantics_and_accept_legacy_counter_reports() {
+    fixture(|base| {
+        let legacy = vmm::report(&serde_json::to_vec(&report()).unwrap(), base).unwrap();
+        assert_eq!(legacy.timebase, Some(Timebase::Counter));
+        for timebase in [Timebase::Counter, Timebase::Pv] {
+            let mut prepared = base.prepared.clone();
+            if timebase == Timebase::Pv {
+                prepared
+                    .profile
+                    .semantic_parameters
+                    .insert("timebase".into(), "pv".into());
+            }
+            let request = ExecutionRequest {
+                prepared: &prepared,
+                ..*base
+            };
+            let mut raw = report();
+            raw["timebase"] = json!(timebase.name());
+            raw["counter_profile"] = json!(null);
+            let parsed = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
+            assert_eq!(parsed.timebase, Some(timebase));
+            assert_eq!(
+                serde_json::to_value(parsed).unwrap()["timebase"],
+                timebase.name()
+            );
+            for other in ["counter", "pv", "unknown"] {
+                if other == timebase.name() {
+                    continue;
+                }
+                raw["timebase"] = json!(other);
+                let error = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request)
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains(&format!("--timebase {other}")), "{error}");
+            }
+            raw.as_object_mut().unwrap().remove("timebase");
+            assert_eq!(
+                vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok(),
+                timebase == Timebase::Counter
+            );
+        }
+        let mut prepared = base.prepared.clone();
+        prepared
+            .profile
+            .semantic_parameters
+            .insert("timebase".into(), "future".into());
+        let error = vmm::recorded_timebase(&prepared.profile)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("recorded --timebase future: expected counter or pv"));
+    });
+}

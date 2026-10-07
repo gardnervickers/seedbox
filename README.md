@@ -30,6 +30,7 @@ directory. Every runtime input has a default, so no flags are required:
 | --- | --- | --- |
 | Compose file | `compose.yaml` in the given directory (default `.`) | positional path |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
+| Timebase | `counter` (retired guest branches) | `--timebase` |
 | CPU | first free core other than CPU 0's, under the shared lease | `--cpu`, `SEEDBOX_CPU` |
 | Guest kernel | `bzImage` in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`, `./artifacts`, then `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | `seedbox-vmm` next to an installed `seedbox`, then this checkout's `cargo build-vmm` output, then on `PATH`; `cargo run` builds it if missing | `--vmm`, `SEEDBOX_VMM` |
@@ -37,6 +38,15 @@ directory. Every runtime input has a default, so no flags are required:
 | BusyBox | `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
+
+Choose `seedbox run examples/etcd --timebase pv` for the PV clock model:
+compute between exits costs no virtual time; time advances at guest exits,
+syscalls and clock reads. The default `counter` counts retired guest branches.
+The choice changes results and run identity, has no environment override, and is
+retained through export/import. Replay uses the recorded timebase and accepts no
+`--timebase` override. `inspect` and run/replay output show `timebase: VALUE`;
+`inspect --json` includes the VMM's reported timebase in `report.timebase` when a
+report is available. Older counter records omit this report field.
 
 `seedbox help run` lists every option. A run prints `OUTCOME: run-directory`;
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
@@ -62,10 +72,11 @@ may change execution. Release compatibility remains a V0 qualification gate.
 
 ## How execution is controlled
 
-- **Progress and time.** Guest progress is the host perf count of retired
+- **Progress and time.** With the default counter timebase, guest progress is
+  the host perf count of retired
   conditional branches (guest only, kernel and user). Virtual time advances
   1 ns per branch; idle machines jump to their next event.
-- **Stops.** Events (timer deadlines, frames, scenario commands) are delivered
+- **Stops (counter timebase).** Events (timer deadlines, frames, scenario commands) are delivered
   at deterministic points only: a natural VM exit, or an exact branch count
   reached by overflow interrupt plus hardware-breakpoint stepping (no TF).
   Syscalls are not stopping points. A timer interrupt fires at the first
@@ -97,6 +108,9 @@ may change execution. Release compatibility remains a V0 qualification gate.
   (`intel-0x5101c4` up to Comet Lake, `intel-0x5111c4` from Ice Lake) that
   have never run on hardware; `run` and `replay` refuse them unless given
   `--allow-unqualified-cpu`, and then warn that results are unverified.
+- The CLI retains the same host admission, CPU/SMT leasing and MSR policy for
+  both timebases. PV itself does not use a host perf counter; selecting it does
+  not qualify additional hosts through this CLI.
 - **The Zen SpeculativeLockMap workaround must be on** for the cores running
   simulations (MSR 0xC0011020 bit 54, rr's workaround). Without it, branch
   counts drift on lock-heavy code (e.g. Go) and runs diverge. The Rust executor

@@ -277,3 +277,104 @@ fn bundle_cli_validates_paths_limits_and_positional_inputs() {
     let output = seedbox(&["import", "missing"], directory.path());
     assert_eq!(stderr(&output), "error: bundle missing: not found\n");
 }
+
+#[test]
+fn timebase_help_values_and_replay_uses_only_the_recorded_choice() {
+    let directory = tempfile::tempdir().unwrap();
+    let help = seedbox(&["help", "run"], directory.path());
+    assert!(help.status.success());
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(help.contains("--timebase <TIMEBASE>"));
+    assert!(help.contains("[default: counter]"));
+    assert!(help.contains("Count retired guest branches with the host PMU"));
+    assert!(help.contains("Advance time at guest exits, syscalls and clock reads"));
+    let bad = seedbox(&["run", "--timebase", "future"], directory.path());
+    assert_eq!(bad.status.code(), Some(2));
+    assert!(stderr(&bad).contains("--timebase <TIMEBASE>"));
+    assert!(stderr(&bad).contains("possible values: counter, pv"));
+    let help = seedbox(&["help", "replay"], directory.path());
+    assert!(help.status.success());
+    assert!(!String::from_utf8_lossy(&help.stdout).contains("--timebase"));
+    let override_attempt = seedbox(&["replay", ".", "--timebase", "pv"], directory.path());
+    assert_eq!(override_attempt.status.code(), Some(2));
+    assert!(stderr(&override_attempt).contains("unexpected argument '--timebase'"));
+    assert!(seedbox(&["init", "demo"], directory.path())
+        .status
+        .success());
+    for value in ["counter", "pv"] {
+        let output = seedbox(
+            &["run", "no-such.yaml", "--timebase", value],
+            directory.path(),
+        );
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(
+            stderr(&output),
+            "error: Compose file no-such.yaml: not found\n"
+        );
+    }
+}
+
+fn timebase_record(directory: &Path, timebase: Option<&str>) {
+    use seedbox::{orchestration::RunRecord, store::ContentDigest};
+    let fixture: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/formats/synthetic-c84-v2.json")).unwrap();
+    let mut record: RunRecord = serde_json::from_value(fixture["record"].clone()).unwrap();
+    record.identity.inputs.profile.backend = "seedbox-kvm".into();
+    if let Some(value) = timebase {
+        record
+            .identity
+            .inputs
+            .profile
+            .semantic_parameters
+            .insert("timebase".into(), value.into());
+    }
+    if let Some(report) = &mut record.report {
+        report.timebase = match timebase {
+            Some("pv") => Some(seedbox::execution::Timebase::Pv),
+            None => Some(seedbox::execution::Timebase::Counter),
+            _ => None,
+        };
+    }
+    record.run_id = ContentDigest::of(&serde_json::to_vec(&record.identity).unwrap());
+    let checksum = ContentDigest::of(&serde_json::to_vec(&record).unwrap());
+    fs::write(
+        directory.join("manifest.json"),
+        serde_json::to_vec(&serde_json::json!({"sha256": checksum, "record": record})).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn inspect_shows_timebase_and_json_preserves_library_fields() {
+    let directory = tempfile::tempdir().unwrap();
+    for (parameter, value) in [(None, "counter"), (Some("pv"), "pv")] {
+        timebase_record(directory.path(), parameter);
+        let output = seedbox(&["inspect", "."], directory.path());
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert!(String::from_utf8_lossy(&output.stdout).contains(&format!("\ntimebase: {value}\n")));
+        let output = seedbox(&["inspect", ".", "--json"], directory.path());
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert!(output.stderr.is_empty());
+        let record: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(record["report"]["timebase"], value);
+        assert_eq!(
+            record["identity"]["inputs"]["profile"]["semantic_parameters"]["timebase"].as_str(),
+            parameter
+        );
+    }
+}
+
+#[test]
+fn replay_rejects_unknown_recorded_timebase_before_host_checks() {
+    let directory = tempfile::tempdir().unwrap();
+    timebase_record(directory.path(), Some("future"));
+    let output = seedbox(&["replay", "."], directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stderr(&output), "error: input integrity: recorded --timebase future: expected counter or pv; use a run recorded with a supported timebase\n");
+    assert!(output.stdout.is_empty());
+    assert!(!directory.path().join(".seedbox").exists());
+    // Inspection remains available for diagnosing unsupported recorded values.
+    let inspect = seedbox(&["inspect", "."], directory.path());
+    assert!(inspect.status.success(), "{}", stderr(&inspect));
+    assert!(String::from_utf8_lossy(&inspect.stdout).contains("timebase: future"));
+}

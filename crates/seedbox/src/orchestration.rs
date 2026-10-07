@@ -191,6 +191,17 @@ impl Orchestrator {
         options: ReplayOptions,
     ) -> Result<Run> {
         let baseline = inspect(directory)?;
+        // Refuse timebase drift before creating an attempt or executing anything.
+        if baseline.identity.inputs.profile.backend == "seedbox-kvm" {
+            let recorded = crate::vmm::recorded_timebase(&baseline.identity.inputs.profile)?;
+            let requested = crate::vmm::recorded_timebase(&executor.profile())?;
+            if recorded != requested {
+                return Err(Error::Integrity(format!(
+                    "replay --timebase {}: does not match recorded --timebase {}; replay with the recorded timebase",
+                    requested.name(), recorded.name()
+                )));
+            }
+        }
         let mut identity = baseline.identity.clone();
         if options.allow_engine_change {
             identity.inputs.profile.engine = executor.profile().engine;
@@ -254,6 +265,7 @@ impl Orchestrator {
             fs::create_dir(&output)?;
             if cancellation.is_cancelled() {
                 return Ok(ExecutionReport {
+                    timebase: None,
                     reason: StopReason::Cancelled,
                     workload_exit: None,
                     witness: None,

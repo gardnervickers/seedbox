@@ -128,6 +128,7 @@ impl Fixture {
             performance: BTreeMap::from([("SEEDBOX_UNDO".into(), "256".into())]),
             extra_logs: BTreeMap::new(),
             report: ExecutionReport {
+                timebase: None,
                 reason: StopReason::Completed,
                 workload_exit: Some(WorkloadExit {
                     service: "workload".into(),
@@ -768,4 +769,39 @@ fn envelope_missing_unrelated_and_over_count_objects_fail_before_opening_state()
         rejected(&path, &state, &Options::default());
         assert!(!state.exists());
     }
+}
+
+#[test]
+fn pv_timebase_round_trips_with_identity_and_report_then_replays() {
+    let mut f = Fixture::new();
+    f.backend.profile.backend = "seedbox-kvm".into();
+    f.backend
+        .profile
+        .semantic_parameters
+        .insert("timebase".into(), "pv".into());
+    f.preparer.inputs.profile = f.backend.profile.clone();
+    f.backend.report.timebase = Some(Timebase::Pv);
+    let run = f.run();
+    let archive = export(&f, &run);
+    let state = f.directory.path().join("imported");
+    let imported = bundle::import(&archive, &state, &Options::default()).unwrap();
+    assert_eq!(imported.record, run.record);
+    assert_eq!(
+        imported.record.identity.inputs.profile.semantic_parameters["timebase"],
+        "pv"
+    );
+    assert_eq!(
+        imported.record.report.as_ref().unwrap().timebase,
+        Some(Timebase::Pv)
+    );
+    let replay = Orchestrator::new(ContentStore::new(state.join("objects")), state.join("runs"))
+        .replay(
+            &imported.directory,
+            &f.backend,
+            &CancellationToken::default(),
+        )
+        .unwrap();
+    assert_eq!(replay.record.run_id, run.record.run_id);
+    assert_eq!(replay.record.replay.unwrap().status, ReplayStatus::Match);
+    assert_eq!(f.preparer.calls.load(Ordering::SeqCst), 1);
 }
