@@ -128,7 +128,9 @@ a running application or stopping an already stopped application returns
 `invalid_state`. Commands targeting a VM that has exited return `target_unavailable`,
 as does a stop or restart whose target VM exits after admission but before the
 effect is acknowledged; the scenario can inspect that exit and decide its own
-outcome. An inspection whose response would exceed the frame limit returns
+outcome. That recovery applies to process faults requested through this RPC; a
+legacy static fault plan given directly to the VMM keeps the acknowledgement
+deadline below. An inspection whose response would exceed the frame limit returns
 `result_too_large`.
 These errors are recoverable: the connection stays usable, the error is retained
 in the transcript, and no operation is reported as applied. Missing or
