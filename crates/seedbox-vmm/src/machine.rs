@@ -131,6 +131,8 @@ pub struct Machine {
     pub control_dma_bytes: u64,
     pub control_tx_bytes: u64,
     stepping: bool,
+    /// Seeded from authoritative ioctls or a successful synchronized KVM exit.
+    sync_regs_ready: bool,
     #[cfg(test)]
     require_io_checkpoint: bool,
     planner: Option<Planner>,
@@ -366,6 +368,7 @@ impl Machine {
             control_dma_bytes:0,
             control_tx_bytes:0,
             stepping: false,
+            sync_regs_ready: false,
             #[cfg(test)]
             require_io_checkpoint: false,
             planner: None,
@@ -588,6 +591,7 @@ impl Machine {
         let run = self.vcpu.get_kvm_run();
         run.s.regs.regs = regs;
         run.s.regs.sregs = sregs;
+        self.sync_regs_ready = true;
         Ok(())
     }
 
@@ -611,6 +615,17 @@ impl Machine {
             return Ok(());
         }
         if on {
+            // The mmap starts with zeroed synchronization fields, even after
+            // KVM_SET_REGS/SREGS configured the actual guest. A first short
+            // slice must not RF-resume those zeroes as the boot state.
+            if !self.sync_regs_ready {
+                let regs=self.vcpu.get_regs().map_err(|e|format!("initial step registers: {e}"))?;
+                let sregs=self.vcpu.get_sregs().map_err(|e|format!("initial step system registers: {e}"))?;
+                let run=self.vcpu.get_kvm_run();
+                run.s.regs.regs=regs;
+                run.s.regs.sregs=sregs;
+                self.sync_regs_ready=true;
+            }
             let mem = unsafe { std::slice::from_raw_parts(self.mem, self.mem_size) };
             self.planner = Some(Planner::load(&self.vcpu, mem)?);
         } else {
@@ -810,6 +825,9 @@ impl Machine {
             let t_run = Instant::now();
             let run_ptr = self.vcpu.get_kvm_run() as *mut kvm_run;
             let exit = self.vcpu.run();
+            // Requested validity bits alone are not initialized output. A
+            // successful run with both bits set provides the synchronized state.
+            if exit.is_ok() { self.sync_regs_ready=true; }
             let run_ns = t_run.elapsed().as_nanos();
             let kind = match &exit {
                 Err(_) => 0,
