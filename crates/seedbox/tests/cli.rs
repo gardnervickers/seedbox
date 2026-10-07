@@ -236,3 +236,84 @@ fn busybox_default_requires_a_static_busybox_on_path() {
         );
     }
 }
+
+#[test]
+fn explore_bounds_and_help_are_public_before_runtime_inputs_or_state() {
+    let directory = tempfile::tempdir().unwrap();
+    assert!(seedbox(&["init", "demo"], directory.path())
+        .status
+        .success());
+    let project = directory.path().join("demo");
+    for count in ["0", "nope"] {
+        let output = seedbox(&["explore", "--count", count], &project);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).contains("--count"));
+        assert!(!project.join(".seedbox").exists());
+    }
+    let overflow = seedbox(
+        &["explore", "--seed", "18446744073709551615", "--count", "2"],
+        &project,
+    );
+    assert_eq!(stderr(&overflow),"error: --seed/--count: range is empty or overflows u64; use a positive --count and reduce the range\n");
+    assert!(!project.join(".seedbox").exists());
+    let boundary = seedbox(
+        &["explore", "--seed", "18446744073709551615", "--count", "1"],
+        &project,
+    );
+    assert_eq!(boundary.status.code(), Some(2));
+    assert!(!stderr(&boundary).contains("overflows"));
+    let help = seedbox(&["help", "explore"], &project);
+    assert!(help.status.success());
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(
+        text.contains("--count")
+            && text.contains("[default: 1]")
+            && text.contains("--json")
+            && text.contains("Exit status:")
+    );
+    assert!(!text.contains("--workers"));
+    fs::write(project.join("compose.yaml"),"services:\n  a: {image: example/a}\nx-seedbox:\n  version: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: a}\n").unwrap();
+    let missing = seedbox(&["explore"], &project);
+    assert_eq!(
+        stderr(&missing),
+        "error: --seed: no Compose seed; provide --seed FIRST\n"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn explore_resolves_tools_before_host_or_preparation() {
+    let (directory, mut args) = runtime_project();
+    args[0] = "explore".into();
+    let busybox = directory.path().join("busybox");
+    let mut elf = [0u8; 64];
+    elf[..6].copy_from_slice(b"\x7fELF\x02\x01");
+    fs::write(&busybox, elf).unwrap();
+    args.extend([
+        "--busybox".into(),
+        busybox.to_str().unwrap().into(),
+        "--json".into(),
+    ]);
+    let refs: Vec<_> = args.iter().map(String::as_str).collect();
+    let missing = seedbox(&refs, directory.path());
+    assert_eq!(
+        stderr(&missing),
+        "error: skopeo not found; install it or enter `nix develop`\n"
+    );
+    assert!(missing.stdout.is_empty());
+    assert!(!directory.path().join(".seedbox/runs").exists());
+    let bin = directory.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    fs::write(bin.join("skopeo"), b"must not execute").unwrap();
+    let missing = seedbox_with(&refs, directory.path(), Some(&bin));
+    assert_eq!(
+        stderr(&missing),
+        "error: umoci not found; install it or enter `nix develop`\n"
+    );
+    fs::write(bin.join("umoci"), b"must not execute").unwrap();
+    let missing = seedbox_with(&refs, directory.path(), Some(&bin));
+    assert_eq!(
+        stderr(&missing),
+        "error: podman not found; install it or enter `nix develop`\n"
+    );
+}

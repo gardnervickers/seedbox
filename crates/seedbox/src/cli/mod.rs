@@ -9,6 +9,7 @@ use seedbox::{
     execution::{
         CancellationToken, ExecutionBackend, ExecutionProfile, PreparationBackend, WitnessMode,
     },
+    exploration::{self, ExploreOptions},
     oci::OciTools,
     orchestration::{self, Orchestrator, Outcome, ReplayOptions, ReplayStatus, RunOptions},
     preparation::OciPreparer,
@@ -82,6 +83,29 @@ enum Command {
         /// Simulation seed [default: x-seedbox.seed from the Compose file].
         #[arg(long)]
         seed: Option<u64>,
+        #[command(flatten)]
+        cpu: CpuArg,
+        #[command(flatten)]
+        state: StateArg,
+        #[command(flatten)]
+        inputs: RuntimeInputs,
+        #[command(flatten)]
+        performance: Performance,
+    },
+    /// Explore a finite seed sequence with one frozen preparation (Linux KVM host, root).
+    #[command(after_help = EXIT_CODES)]
+    Explore {
+        #[command(flatten)]
+        compose: ComposeArg,
+        /// First simulation seed [default: x-seedbox.seed from the Compose file].
+        #[arg(long)]
+        seed: Option<u64>,
+        /// Number of consecutive seeds to execute sequentially.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..))]
+        count: u64,
+        /// Print exactly one exploration report as JSON.
+        #[arg(long)]
+        json: bool,
         #[command(flatten)]
         cpu: CpuArg,
         #[command(flatten)]
@@ -358,6 +382,76 @@ fn run(cli: Cli) -> Result<u8> {
             )?;
             Ok(report(&result))
         }
+        Command::Explore {
+            compose,
+            seed,
+            count,
+            json,
+            cpu,
+            state,
+            inputs,
+            performance,
+        } => {
+            let resources = Resources::start();
+            let simulation = compose.load()?;
+            let cancellation = CancellationToken::default();
+            let options = ExploreOptions {
+                seed,
+                count,
+                cancellation: cancellation.clone(),
+            };
+            exploration::bounds(&simulation, &options)?;
+            let (store, orchestrator) = state.open()?;
+            let scratch = tempfile::tempdir()?;
+            let (mut preparer, executor) = inputs.backends(&store, cpu.cpu, scratch.path())?;
+            preparer.tools.skopeo = defaults::preparation_tool(&preparer.tools.skopeo)?;
+            preparer.tools.umoci = defaults::preparation_tool(&preparer.tools.umoci)?;
+            if simulation
+                .services
+                .values()
+                .any(|s| matches!(s.source, config::ImageSource::Build { .. }))
+            {
+                preparer.tools.docker = defaults::preparation_tool(&preparer.tools.docker)?;
+            }
+            let executor = performance.apply(executor)?;
+            require_kvm_host()?;
+            let _signals = Signals::register(&cancellation)?;
+            let mut result = orchestrator.explore(&simulation, options, &preparer, &executor)?;
+            result.record_resources(resources.finish())?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("{}: {}", word(&result.outcome), result.directory.display());
+                println!("seeds: {}..={}", result.first_seed, result.last_seed);
+                println!("attempted: {}", result.attempts.len());
+                println!("pass: {}", result.counts.pass);
+                println!("fail: {}", result.counts.fail);
+                println!("timeout: {}", result.counts.timeout);
+                println!("error-count: {}", result.counts.error);
+                println!("incomplete: {}", result.counts.incomplete);
+                println!("unfinished: {}", result.counts.unfinished);
+                println!("undispatched: {}", result.undispatched_count);
+                println!("elapsed-seconds: {:.3}", result.total_seconds);
+                for attempt in &result.attempts {
+                    if let (Some(directory), Some(outcome)) = (&attempt.directory, &attempt.outcome)
+                    {
+                        eprintln!(
+                            "seed {}: {} {}",
+                            attempt.seed,
+                            word(outcome),
+                            directory.display()
+                        );
+                        if let Some(error) = &attempt.error {
+                            eprintln!("error: seed {}: {error}", attempt.seed);
+                        }
+                    }
+                }
+                if let Some(error) = &result.error {
+                    eprintln!("error: {error}");
+                }
+            }
+            Ok(outcome_code(&result.outcome))
+        }
         Command::Replay {
             run,
             cpu,
@@ -465,7 +559,10 @@ fn report(run: &orchestration::Run) -> u8 {
             ReplayStatus::NotComparable => 2,
         };
     }
-    match run.record.outcome {
+    outcome_code(&run.record.outcome)
+}
+fn outcome_code(outcome: &Outcome) -> u8 {
+    match outcome {
         Outcome::Pass => 0,
         Outcome::Fail => 1,
         Outcome::Error => 2,
@@ -479,5 +576,64 @@ fn word(value: &impl serde::Serialize) -> String {
     match serde_json::to_value(value) {
         Ok(serde_json::Value::String(word)) => word,
         _ => "UNKNOWN".into(),
+    }
+}
+
+/// Invocation-wide CPU deltas and separate process-family RSS high-water marks.
+struct Resources {
+    #[cfg(unix)]
+    self_usage: Option<libc::rusage>,
+    #[cfg(unix)]
+    child_usage: Option<libc::rusage>,
+}
+impl Resources {
+    fn start() -> Self {
+        Self {
+            #[cfg(unix)]
+            self_usage: usage(libc::RUSAGE_SELF),
+            #[cfg(unix)]
+            child_usage: usage(libc::RUSAGE_CHILDREN),
+        }
+    }
+    fn finish(self) -> Option<exploration::ProcessResources> {
+        #[cfg(unix)]
+        {
+            let current = usage(libc::RUSAGE_SELF)?;
+            let children = usage(libc::RUSAGE_CHILDREN)?;
+            let before = self.self_usage?;
+            let before_children = self.child_usage?;
+            let seconds =
+                |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 / 1_000_000.0;
+            let bytes = |rss: libc::c_long| {
+                if cfg!(target_os = "macos") {
+                    rss as u64
+                } else {
+                    (rss as u64).saturating_mul(1024)
+                }
+            };
+            Some(exploration::ProcessResources {
+                self_user_seconds: seconds(current.ru_utime) - seconds(before.ru_utime),
+                self_system_seconds: seconds(current.ru_stime) - seconds(before.ru_stime),
+                reaped_children_user_seconds: seconds(children.ru_utime)
+                    - seconds(before_children.ru_utime),
+                reaped_children_system_seconds: seconds(children.ru_stime)
+                    - seconds(before_children.ru_stime),
+                self_rss_high_water_bytes: bytes(current.ru_maxrss),
+                reaped_children_rss_high_water_bytes: bytes(children.ru_maxrss),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
+}
+#[cfg(unix)]
+fn usage(who: libc::c_int) -> Option<libc::rusage> {
+    let mut usage = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrusage(who, &mut usage) } == 0 {
+        Some(usage)
+    } else {
+        None
     }
 }

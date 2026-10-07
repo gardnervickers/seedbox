@@ -26,6 +26,15 @@ struct Preparer {
     calls: AtomicUsize,
 }
 impl PreparationBackend for Preparer {
+    fn prepare_cancellable(
+        &self,
+        simulation: &Simulation,
+        store: &ContentStore,
+        context: &seedbox::preparation::PreparationContext,
+    ) -> Result<PreparedInputs> {
+        context.check()?;
+        self.prepare(simulation, store)
+    }
     fn prepare(&self, _: &Simulation, _: &ContentStore) -> Result<PreparedInputs> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.inputs.clone())
@@ -759,4 +768,317 @@ fn network_effects_have_no_single_service_target() {
     assert_eq!(fixture.run().record.outcome, Outcome::Pass);
     fixture.backend.report.faults[0].action = "stop".into();
     assert_eq!(fixture.run().record.outcome, Outcome::Error);
+}
+
+#[test]
+fn exploration_freezes_full_closure_and_continues_failure_and_witnessed_timeout() {
+    use seedbox::exploration::ExploreOptions;
+    struct Sequence<'a>(&'a Fixture);
+    impl ExecutionBackend for Sequence<'_> {
+        fn profile(&self) -> ExecutionProfile {
+            self.0.backend.profile()
+        }
+        fn performance_parameters(&self) -> BTreeMap<String, String> {
+            self.0.backend.performance_parameters()
+        }
+        fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
+            let seed = request.seed;
+            // Sources disappear after preparation. Every next run must materialize
+            // the original complete closure and keep its provenance unchanged.
+            if seed == 10 {
+                fs::remove_file(&self.0.simulation.source)?;
+            }
+            let mut report = self.0.backend.execute(request)?;
+            if seed == 11 {
+                report.workload_exit.as_mut().unwrap().code = 3;
+            }
+            if seed == 12 {
+                report.reason = StopReason::SimulatedTimeLimit;
+            }
+            if seed == 13 {
+                return Err(Error::Execution("real retained backend error".into()));
+            }
+            Ok(report)
+        }
+    }
+    let fixture = Fixture::new();
+    let batch = fixture
+        .orchestrator
+        .explore(
+            &fixture.simulation,
+            ExploreOptions {
+                seed: Some(10),
+                count: 5,
+                ..Default::default()
+            },
+            &fixture.preparer,
+            &Sequence(&fixture),
+        )
+        .unwrap();
+    assert_eq!(fixture.preparer.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(batch.outcome, Outcome::Error);
+    assert_eq!(batch.undispatched_count, 1);
+    assert_eq!(
+        batch
+            .attempts
+            .iter()
+            .map(|a| a.outcome.clone().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            Outcome::Pass,
+            Outcome::Fail,
+            Outcome::Timeout,
+            Outcome::Error
+        ]
+    );
+    for attempt in &batch.attempts {
+        let record = inspect(attempt.directory.as_ref().unwrap()).unwrap();
+        assert_eq!(record.identity.inputs, fixture.preparer.inputs);
+        assert_eq!(record.identity.configuration, fixture.simulation);
+        assert_eq!(record.performance_parameters, fixture.backend.performance);
+        assert_eq!(record.logs.len(), 1);
+    }
+    let retained = seedbox::exploration::inspect(&batch.directory).unwrap();
+    assert!(retained.finished);
+    assert_eq!(retained.outcome, Outcome::Error);
+}
+
+#[test]
+fn exploration_bounds_fail_before_state_and_huge_count_is_lazy() {
+    use seedbox::exploration::ExploreOptions;
+    let fixture = Fixture::new();
+    for options in [
+        ExploreOptions {
+            count: 0,
+            ..Default::default()
+        },
+        ExploreOptions {
+            seed: Some(u64::MAX),
+            count: 2,
+            ..Default::default()
+        },
+    ] {
+        assert!(fixture
+            .orchestrator
+            .explore(
+                &fixture.simulation,
+                options,
+                &fixture.preparer,
+                &fixture.backend
+            )
+            .is_err());
+        assert!(!fixture.directory.path().join("runs").exists());
+    }
+    assert_eq!(
+        seedbox::exploration::bounds(
+            &fixture.simulation,
+            &ExploreOptions {
+                seed: Some(u64::MAX),
+                ..Default::default()
+            }
+        )
+        .unwrap(),
+        (u64::MAX, u64::MAX)
+    );
+    let token = CancellationToken::default();
+    token.cancel();
+    let batch = fixture
+        .orchestrator
+        .explore(
+            &fixture.simulation,
+            ExploreOptions {
+                seed: Some(0),
+                count: u64::MAX,
+                cancellation: token,
+            },
+            &fixture.preparer,
+            &fixture.backend,
+        )
+        .unwrap();
+    assert_eq!(batch.outcome, Outcome::Incomplete);
+    assert!(batch.attempts.is_empty());
+    assert_eq!(batch.undispatched_count, u64::MAX);
+    assert_eq!(fixture.preparer.calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn exploration_corrupt_frozen_blob_retains_error_without_repreparing() {
+    use seedbox::exploration::ExploreOptions;
+    struct Corrupt<'a>(&'a Fixture);
+    impl ExecutionBackend for Corrupt<'_> {
+        fn profile(&self) -> ExecutionProfile {
+            self.0.backend.profile()
+        }
+        fn performance_parameters(&self) -> BTreeMap<String, String> {
+            self.0.backend.performance_parameters()
+        }
+        fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
+            let report = self.0.backend.execute(request)?;
+            fs::write(
+                self.0
+                    .directory
+                    .path()
+                    .join("store/sha256")
+                    .join(self.0.preparer.inputs.kernel.hex()),
+                b"corrupted actual retained bytes",
+            )?;
+            Ok(report)
+        }
+    }
+    let fixture = Fixture::new();
+    let batch = fixture
+        .orchestrator
+        .explore(
+            &fixture.simulation,
+            ExploreOptions {
+                count: 3,
+                ..Default::default()
+            },
+            &fixture.preparer,
+            &Corrupt(&fixture),
+        )
+        .unwrap();
+    assert_eq!(batch.outcome, Outcome::Error);
+    assert_eq!(batch.attempts.len(), 2);
+    assert_eq!(fixture.preparer.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.backend.calls.load(Ordering::SeqCst), 1);
+    let error = inspect(batch.attempts[1].directory.as_ref().unwrap()).unwrap();
+    assert_eq!(error.outcome, Outcome::Error);
+    assert!(error.error.unwrap().contains("integrity"));
+}
+
+#[test]
+fn exploration_active_run_is_durable_incomplete_then_cancellation_stops_dispatch() {
+    use seedbox::exploration::ExploreOptions;
+    use std::sync::{mpsc, Mutex};
+    struct Blocked<'a> {
+        fixture: &'a Fixture,
+        ready: mpsc::Sender<std::path::PathBuf>,
+        resume: Mutex<mpsc::Receiver<()>>,
+    }
+    impl ExecutionBackend for Blocked<'_> {
+        fn profile(&self) -> ExecutionProfile {
+            self.fixture.backend.profile()
+        }
+        fn performance_parameters(&self) -> BTreeMap<String, String> {
+            self.fixture.backend.performance_parameters()
+        }
+        fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
+            self.ready
+                .send(request.output.parent().unwrap().to_owned())
+                .unwrap();
+            self.resume.lock().unwrap().recv().unwrap();
+            self.fixture.backend.execute(request)
+        }
+    }
+    let fixture = Fixture::new();
+    let token = CancellationToken::default();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let backend = Blocked {
+        fixture: &fixture,
+        ready: ready_tx,
+        resume: Mutex::new(resume_rx),
+    };
+    std::thread::scope(|scope| {
+        let cancellation = token.clone();
+        let task = scope.spawn(|| {
+            fixture
+                .orchestrator
+                .explore(
+                    &fixture.simulation,
+                    ExploreOptions {
+                        count: 3,
+                        cancellation,
+                        ..Default::default()
+                    },
+                    &fixture.preparer,
+                    &backend,
+                )
+                .unwrap()
+        });
+        let directory = ready_rx.recv().unwrap();
+        let before = inspect(&directory).unwrap();
+        assert_eq!(before.outcome, Outcome::Incomplete);
+        let exploration = directory
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let partial = seedbox::exploration::inspect(exploration).unwrap();
+        assert!(!partial.finished);
+        assert_eq!(partial.outcome, Outcome::Incomplete);
+        assert_eq!(partial.attempts.len(), 1);
+        token.cancel();
+        resume_tx.send(()).unwrap();
+        let batch = task.join().unwrap();
+        assert_eq!(batch.outcome, Outcome::Incomplete);
+        assert_eq!(batch.undispatched_count, 2);
+        assert_eq!(inspect(&directory).unwrap().outcome, Outcome::Incomplete);
+    });
+}
+
+#[test]
+fn exploration_checkpoint_failure_leaves_real_committed_run_and_no_later_dispatch() {
+    use seedbox::exploration::ExploreOptions;
+    struct BreakCheckpoint<'a>(&'a Fixture);
+    impl ExecutionBackend for BreakCheckpoint<'_> {
+        fn profile(&self) -> ExecutionProfile {
+            self.0.backend.profile()
+        }
+        fn performance_parameters(&self) -> BTreeMap<String, String> {
+            self.0.backend.performance_parameters()
+        }
+        fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
+            let exploration = request
+                .output
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap();
+            fs::rename(
+                exploration.join("exploration.json"),
+                exploration.join("before.json"),
+            )?;
+            fs::create_dir(exploration.join("exploration.json"))?;
+            self.0.backend.execute(request)
+        }
+    }
+    let fixture = Fixture::new();
+    assert!(fixture
+        .orchestrator
+        .explore(
+            &fixture.simulation,
+            ExploreOptions {
+                count: 3,
+                ..Default::default()
+            },
+            &fixture.preparer,
+            &BreakCheckpoint(&fixture)
+        )
+        .is_err());
+    assert_eq!(fixture.backend.calls.load(Ordering::SeqCst), 1);
+    let batch = fs::read_dir(fixture.directory.path().join("runs"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let before: seedbox::exploration::Exploration =
+        serde_json::from_slice(&fs::read(batch.join("before.json")).unwrap()).unwrap();
+    assert!(!before.finished);
+    assert_eq!(before.outcome, Outcome::Incomplete);
+    let run = fs::read_dir(&before.attempts[0].subtree)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(inspect(&run).unwrap().outcome, Outcome::Pass);
 }

@@ -8,6 +8,7 @@
 
 pub mod config;
 pub mod execution;
+pub mod exploration;
 pub mod guest;
 #[cfg(any(target_os = "linux", test))]
 mod host;

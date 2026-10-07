@@ -276,6 +276,21 @@ fn is_static_elf(path: &Path) -> bool {
     })
 }
 
+/// Resolve a preparation executable at the CLI environment boundary.
+pub fn preparation_tool(path: &Path) -> Result<PathBuf> {
+    let candidate = if path.components().count() == 1 {
+        path.to_str().and_then(on_path)
+    } else {
+        Some(path.to_owned())
+    };
+    candidate.filter(|p| p.is_file()).ok_or_else(|| {
+        Error::Setup(format!(
+            "{} not found; install it or enter `nix develop`",
+            path.display()
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

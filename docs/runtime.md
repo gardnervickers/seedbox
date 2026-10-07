@@ -189,3 +189,53 @@ Inspection and partition/heal counter snapshots count nominal send, drop and
 arrival times strictly before admission. A packet physically delivered in an
 early scheduler window is excluded until its nominal arrival precedes that
 boundary. Final report counters still record physical NIC acceptance totals.
+
+
+## Exploration preparation
+
+`seedbox explore [COMPOSE] --seed FIRST --count COUNT` has one sequential worker.
+Count defaults to 1; seed defaults to the resolved Compose seed. Bounds are finite,
+positive and checked for inclusive u64 overflow before slow work. The complete
+configuration, PreparedInputs and performance parameters are frozen once. Every
+attempt verifies the full retained closure through the ordinary run lifecycle;
+missing/corrupt bytes cause ERROR without re-preparation or repair.
+
+The owned batch directory contains atomic `exploration.json` checkpoints,
+`preparation/` and `attempts/SEED/ORDINARY-RUN/`. Attempted means entering orchestration,
+not proof that a guest started. Counts distinguish PASS/FAIL, TIMEOUT, ERROR,
+INCOMPLETE and unfinished attempts; remaining seeds are undispatched. A killed process
+leaves an unfinished INCOMPLETE checkpoint and independently inspectable ordinary
+manifests. There is no resume operation. Checkpoint/evidence failures stop dispatch.
+The final aggregate uses ERROR, INCOMPLETE, TIMEOUT, FAIL, PASS precedence and the
+existing exit codes 2, 3, 124, 1, 0. Application FAIL and witnessed simulated TIMEOUT may
+continue; infrastructure errors, wall expiry and cancellation stop.
+
+Preparation diagnostics belong to the caller, surviving preparer/scratch destruction.
+Raw phase output is capped at 4 MiB per file and 64 MiB total. Bounded prefixes are retained
+while the rest is drained, with exact observed omission counts/reasons. An output
+stream still open after owned cleanup is incomplete evidence with an explicitly
+unknown further byte count and cleanup-unverified ERROR. Compact command/cleanup
+receipts have a separate 4 MiB budget; version text is capped at 8 KiB. Required evidence
+write failure is ERROR. Receipts record program/hash/arguments/cwd, local mode,
+private tag and build-input digests, process status, cancellation/escalation/reap,
+elapsed time and cleanup disposition. Application stdout is never parsed for verdicts.
+
+Initial build admission is the inspected project-Nix Linux Podman launcher and
+native binary closure, invoked through the launcher with `--remote=false`. Its
+local storage/runtime information is retained. Unknown opaque wrappers, remote-only
+clients, Docker daemon builders and unverified delegation are unsupported. Registry
+projects do not acquire a builder requirement. Existing run/prepare semantics remain.
+
+Cancellation signals only an owned process group, preserving the unreaped leader
+identity until final group signalling, then reaps it. Graceful termination escalates
+after 250 ms; an unconfirmed exit after 5 s is cleanup-unverified ERROR. This cannot
+promise cleanup for a process blocked indefinitely in the kernel or delegated
+builder work. Cancelled builds remain cleanup-unverified and keep their unique tag;
+no image-rm races a potentially running build. After a completed build, private-tag
+cleanup is separately bounded; cleanup failure outranks clean cancellation. No
+shared daemon, unrelated image/container, host service or cache is changed.
+
+CLI resource fields report self/reaped-child user/system CPU deltas and separate
+self/child RSS high-water readings in bytes, including preparation. They are not
+simultaneous aggregate memory, guest peak memory, simulated time or CPU lease duration.
+Unavailable measurements are null and do not affect run identity.

@@ -8,7 +8,7 @@ interrupt timing.
 
 ## Quick start
 
-`validate`, `init` and `inspect` run anywhere. `run` and `replay` need the
+`validate`, `init` and `inspect` run anywhere. `run`, `explore` and `replay` need the
 qualified host (see [host requirements](#host-requirements)) and root.
 
 ```sh
@@ -30,6 +30,7 @@ directory. Every runtime input has a default, so no flags are required:
 | --- | --- | --- |
 | Compose file | `compose.yaml` in the given directory (default `.`) | positional path |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
+| Exploration count | `1`, sequential execution | `--count` |
 | CPU | first free core other than CPU 0's, under the shared lease | `--cpu`, `SEEDBOX_CPU` |
 | Guest kernel | `bzImage` in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`, `./artifacts`, then `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | `seedbox-vmm` next to an installed `seedbox`, then this checkout's `cargo build-vmm` output, then on `PATH`; `cargo run` builds it if missing | `--vmm`, `SEEDBOX_VMM` |
@@ -40,6 +41,29 @@ directory. Every runtime input has a default, so no flags are required:
 `seedbox help run` lists every option. A run prints `OUTCOME: run-directory`;
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
 INCOMPLETE and 124 TIMEOUT.
+
+## Finite exploration
+
+`seedbox explore [COMPOSE] --seed FIRST --count COUNT` runs consecutive seeds
+sequentially, preparing the complete input closure once. Compose defaults to `.`,
+the first seed to the Compose seed, and count to 1. Empty/overflowing ranges fail
+before state creation or preparation. Application FAIL and witnessed simulated
+TIMEOUT continue; ERROR, INCOMPLETE and cancellation stop dispatch. No seed is retried.
+
+Each exploration retains `exploration.json`, preparation diagnostics and ordinary
+per-seed run directories under `attempts/SEED/`. Inspect and replay those run paths
+with the existing commands. An unfinished checkpoint remains INCOMPLETE, including
+when a process dies after committing a run but before updating the batch. The final
+exit precedence is ERROR (2), INCOMPLETE (3), TIMEOUT (124), FAIL (1), PASS (0). `--json` emits one
+report with per-attempt outcomes, undispatched count, elapsed time and CLI process-family
+resource measurements; application logs remain arbitrary bytes.
+
+Exploration `build:` admission currently accepts only the inspected immutable
+project-Nix Linux Podman launcher/native closure in explicit local mode. Unknown
+wrappers and daemon/remote delegation are rejected. Cancelled builds produce
+ERROR / cleanup-unverified and retain their unique private tag; process-group
+cleanup alone does not prove builder cessation. Ordinary run/prepare builder
+behavior is unchanged. See [preparation evidence and cancellation](docs/runtime.md#exploration-preparation).
 
 ## Layout
 
@@ -183,11 +207,7 @@ seedbox replay /path/to/retained/run --undo 0
 seedbox replay /path/to/retained/run --undo 16
 seedbox replay /path/to/retained/run --margin 32768
 
-(
-  for seed in {4000..4010}; do
-    seedbox run harness/acceptance/workloads/kill-3.5.3.yaml --seed "$seed" || exit "$?"
-  done
-)
+seedbox explore harness/acceptance/workloads/kill-3.5.3.yaml --seed 4000 --count 11
 ```
 
 The CLI owns image preparation, CPU leases, restoration, retained evidence and

@@ -120,9 +120,9 @@ pub struct Run {
 
 #[derive(Clone, Debug)]
 pub struct Orchestrator {
-    store: ContentStore,
-    runs: PathBuf,
-    log_policy: LogPolicy,
+    pub(crate) store: ContentStore,
+    pub(crate) runs: PathBuf,
+    pub(crate) log_policy: LogPolicy,
 }
 
 impl Orchestrator {
@@ -157,6 +157,33 @@ impl Orchestrator {
             })?;
         // Preparation always happens before any execution or host reservation.
         let inputs = preparer.prepare(simulation, &self.store)?;
+        self.run_prepared(
+            simulation,
+            RunOptions {
+                seed: Some(seed),
+                ..options
+            },
+            inputs,
+            executor,
+        )
+    }
+
+    /// Execute a complete retained closure without consulting preparation sources.
+    /// The ordinary execution path still verifies profile, placement and bytes.
+    pub fn run_prepared(
+        &self,
+        simulation: &Simulation,
+        options: RunOptions,
+        inputs: PreparedInputs,
+        executor: &dyn ExecutionBackend,
+    ) -> Result<Run> {
+        let seed = options
+            .seed
+            .or(simulation.seed)
+            .ok_or_else(|| Error::Validation {
+                path: "seed".into(),
+                message: "provide a seed in RunOptions or x-seedbox.seed".into(),
+            })?;
         let identity = RunIdentity {
             version: FORMAT_VERSION,
             seed,

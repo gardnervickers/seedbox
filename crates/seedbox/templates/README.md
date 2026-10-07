@@ -17,6 +17,7 @@ from this directory:
 ```sh
 seedbox validate
 seedbox run
+seedbox explore --count 2
 seedbox inspect .seedbox/runs/ATTEMPT --json
 seedbox replay .seedbox/runs/ATTEMPT
 ```
@@ -38,3 +39,12 @@ For a negative control, set `SEEDBOX_PLANT_FAILURE: "1"` in the Redis workload,
 or append `--plant, missing` to the etcd client's command list. The expected result
 is FAIL; a fresh replay must reproduce that FAIL with MATCH. Nonempty fault
 schedules remain unsupported until their guest effect timing is verified.
+
+`explore` prepares once and executes a finite consecutive seed sequence sequentially.
+Each run retains its ordinary manifest and replay inputs under the printed batch
+path. FAIL and witnessed simulated TIMEOUT continue; infrastructure errors and
+cancellation stop. Count defaults to 1 and seed to the Compose seed. `--json` prints
+one report with separate outcomes and undispatched seeds. Build exploration requires
+the inspected local project-Nix Podman closure; cancelled builds remain
+cleanup-unverified ERROR with their private tag retained until cessation is verified.
+See the repository's `docs/runtime.md` for bounded preparation evidence and limits.
