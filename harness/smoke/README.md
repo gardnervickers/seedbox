@@ -258,4 +258,4 @@ Smoke now uses `batch=4`: 16 acknowledgements, healthy recovery of 4 then 12
 records, and 12 lost values in the broken restart control. All faults, probes
 and per-acknowledgement checks remain; the full example stays at `batch=32`.
 [PR #110](https://github.com/gardnervickers/seedbox/pull/110) records the portable
-evidence and tracks the pending host timing and replay evidence against PR #99.
+evidence.

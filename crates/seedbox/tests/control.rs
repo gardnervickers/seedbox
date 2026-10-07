@@ -1,3 +1,19 @@
+#[allow(dead_code)]
+#[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/connections.rs"]
+mod connections;
+#[allow(dead_code)]
+#[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/triggers.rs"]
+mod triggers;
+#[allow(dead_code)]
+#[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/links.rs"]
+mod links;
+#[allow(dead_code)]
+#[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/rng.rs"]
+mod rng;
 #[rustfmt::skip]
 #[path = "../../seedbox-vmm/src/control.rs"]
 mod control;
@@ -452,7 +468,7 @@ fn oversized_inspection_is_a_bounded_recoverable_reply() {
         .flat_map(|from| {
             (0..12).filter(move |&to|to!=from).map(move |to|(
         format!("chatty-machine-{from:02}->chatty-machine-{to:02}"),
-        json!({"delivered":u64::MAX,"partition_dropped":u64::MAX,"receiver_dropped":u64::MAX})
+        json!({"delivered":u64::MAX,"partition_dropped":u64::MAX,"receiver_dropped":u64::MAX,"loss_dropped":u64::MAX})
     ))
         })
         .collect::<std::collections::BTreeMap<_, _>>();
@@ -593,6 +609,166 @@ fn target_exit_after_admission_is_recoverable_only_while_effect_is_outstanding()
             assert_eq!(c.log[0]["response"]["error"]["code"], "effect_failed");
         }
     }
+}
+
+#[test]
+fn shape_uses_partition_handle_counter_and_only_changes_links_at_admission() {
+    let mut c = control();
+    let mut f = faults::Faults::new(
+        vec![],
+        vec!["scenario".into(), "client".into(), "server".into()],
+    )
+    .unwrap();
+    request(&mut c,1,100,json!({"version":1,"id":1,"op":"shape","from":[{"service":"client"}],"to":[{"service":"server"}],"latency_ns":30,"jitter_ns":5,"loss_ppm":500_000})).unwrap();
+    assert!(f.active_handles().is_empty());
+    c.apply_boundary(&mut f, 120).unwrap();
+    assert!(f.active_handles().is_empty());
+    f.apply_due(120);
+    assert_eq!(f.active_handles(), vec!["p1"]);
+    assert_eq!(f.links.policy((1, 2)).latency_ns, 30);
+    assert_eq!(f.links.policy((2, 1)).latency_ns, 1);
+    c.observe_faults(&f, 120).unwrap();
+    let reply = c.response(140).unwrap();
+    assert!(String::from_utf8(reply)
+        .unwrap()
+        .contains("\"handle\":\"p1\""));
+    c.mark_delivered(140).unwrap();
+    request(&mut c,2,200,json!({"version":1,"id":2,"op":"partition","left":[{"service":"client"}],"right":[{"service":"server"}]})).unwrap();
+    c.apply_boundary(&mut f, 220).unwrap();
+    f.apply_due(220);
+    c.observe_faults(&f, 220).unwrap();
+    c.response(240).unwrap();
+    c.mark_delivered(240).unwrap();
+    assert_eq!(f.active_handles(), vec!["p1", "p2"]);
+    request(
+        &mut c,
+        3,
+        300,
+        json!({"version":1,"id":3,"op":"heal","handle":"p1"}),
+    )
+    .unwrap();
+    c.apply_boundary(&mut f, 320).unwrap();
+    f.apply_due(320);
+    c.observe_faults(&f, 320).unwrap();
+    c.response(340).unwrap();
+    c.mark_delivered(340).unwrap();
+    assert_eq!(f.active_handles(), vec!["p2"]);
+    assert!(f.blocked(1, 2));
+    assert_eq!(f.links.policy((1, 2)).latency_ns, 1);
+}
+
+#[test]
+fn invalid_shape_values_and_sides_receive_correlated_invalid_request_without_effects() {
+    let good = json!({"version":1,"id":1,"op":"shape","from":[{"service":"client"}],"to":[{"service":"server"}],"latency_ns":10,"jitter_ns":0,"loss_ppm":0});
+    for (key, value) in [
+        ("latency_ns", json!(9)),
+        ("jitter_ns", json!(10)),
+        ("loss_ppm", json!(1_000_001)),
+        ("latency_ns", json!(3_600_000_000_001u64)),
+        ("from", json!([])),
+        ("to", json!([{"service":"client"}])),
+        ("from", json!([{"service":"client"},{"machine":"client"}])),
+        ("from", json!([{"service":"scenario"}])),
+    ] {
+        let mut c = control();
+        let mut call = good.clone();
+        call[key] = value;
+        request(&mut c, 1, 100, call).unwrap();
+        let mut f = faults::Faults::new(
+            vec![],
+            vec!["scenario".into(), "client".into(), "server".into()],
+        )
+        .unwrap();
+        c.apply_boundary(&mut f, 120).unwrap();
+        let reply = String::from_utf8(c.response(140).unwrap()).unwrap();
+        assert!(reply.contains("invalid_request"), "{reply}");
+        assert!(f.active_handles().is_empty());
+        assert!(f.log.is_empty());
+    }
+}
+
+#[test]
+fn connection_discovery_admission_race_and_heal_evidence_use_actual_packet_state() {
+    let mut c = control();
+    let mut f = faults::Faults::new(
+        vec![],
+        vec!["scenario".into(), "client".into(), "server".into()],
+    )
+    .unwrap();
+    let mut syn = vec![0; 54];
+    syn[12..14].copy_from_slice(&[8, 0]);
+    syn[14] = 0x45;
+    syn[17] = 40;
+    syn[23] = 6;
+    syn[26..30].copy_from_slice(&[10, 0, 0, 1]);
+    syn[30..34].copy_from_slice(&[10, 0, 0, 2]);
+    syn[34..36].copy_from_slice(&4000u16.to_be_bytes());
+    syn[37] = 80;
+    syn[41] = 7;
+    syn[46] = 0x50;
+    syn[47] = 2;
+    request(&mut c,1,100,json!({"version":1,"id":1,"op":"connections","from":{"service":"client"},"to":{"service":"server"}})).unwrap();
+    // SYN arrives after request observation but before admission.
+    f.route(1, 2, 110, &syn, false);
+    c.apply_boundary(&mut f, 120).unwrap();
+    c.response(140).unwrap();
+    c.mark_delivered(140).unwrap();
+    let selected = c.log[0]["response"]["result"]["connections"][0].clone();
+    assert_eq!(selected["src_port"], 4000);
+    assert!(!f.connections.used);
+    request(
+        &mut c,
+        2,
+        200,
+        json!({"version":1,"id":2,"op":"drop_connection","connection":selected}),
+    )
+    .unwrap();
+    // Tuple changes before admission: reject, do not bind to replacement.
+    syn[41] = 9;
+    f.route(1, 2, 210, &syn, false);
+    c.apply_boundary(&mut f, 220).unwrap();
+    c.response(240).unwrap();
+    c.mark_delivered(240).unwrap();
+    assert_eq!(c.log[1]["response"]["error"]["code"], "invalid_state");
+    assert!(f.log.is_empty());
+    assert!(!f.connections.used);
+    let replacement = f.connections("client", "server", 0)[0].clone();
+    request(
+        &mut c,
+        3,
+        300,
+        json!({"version":1,"id":3,"op":"drop_connection","connection":replacement}),
+    )
+    .unwrap();
+    assert!(f.active_handles().is_empty());
+    c.apply_boundary(&mut f, 320).unwrap();
+    f.apply_due(320);
+    c.observe_faults(&f, 320).unwrap();
+    c.response(340).unwrap();
+    c.mark_delivered(340).unwrap();
+    assert_eq!(f.route(1, 2, 350, &syn, false), links::Outcome::Lost);
+    let handle = c.log[2]["response"]["result"]["handle"].clone();
+    request(
+        &mut c,
+        4,
+        400,
+        json!({"version":1,"id":4,"op":"heal","handle":handle}),
+    )
+    .unwrap();
+    c.apply_boundary(&mut f, 420).unwrap();
+    f.apply_due(420);
+    c.observe_faults(&f, 420).unwrap();
+    c.response(440).unwrap();
+    c.mark_delivered(440).unwrap();
+    assert_eq!(
+        c.log[3]["response"]["result"],
+        json!({"matched":1,"dropped":1})
+    );
+    assert!(f.active_handles().is_empty());
+    assert!(matches!(
+        f.route(1, 2, 450, &syn, false),
+        links::Outcome::Deliver(_)
+    ));
 }
 
 // Exercise the same admission -> fault -> observation -> reply sequence as the scheduler.
@@ -819,6 +995,151 @@ fn pending_process_fault_resolves_at_crash_and_down_process_faults_are_unavailab
                 c.log[id as usize - 1]["response"]["effect_at_ns"],
                 u64::from(id) * 100 + 20
             );
+        }
+    }
+}
+
+#[test]
+fn matched_stop_trigger_rejects_target_already_stopped_through_control() {
+    let mut c = control();
+    let mut f = faults::Faults::new(
+        vec![],
+        vec!["scenario".into(), "client".into(), "server".into()],
+    )
+    .unwrap();
+    request(
+        &mut c,
+        1,
+        100,
+        json!({"version":1,"id":1,"op":"arm_trigger","source":{"service":"server"},"marker":[65],"match_timeout_ns":1000,"fault":{"action":"stop","target":{"service":"server"}}}),
+    )
+    .unwrap();
+    c.apply_boundary(&mut f, 120).unwrap();
+    c.apply_boundary(&mut f, 140).unwrap();
+    c.mark_delivered(140).unwrap();
+    assert_eq!(c.triggers.records[0].status, "armed");
+    request(
+        &mut c,
+        2,
+        200,
+        json!({"version":1,"id":2,"op":"stop","target":{"service":"server"}}),
+    )
+    .unwrap();
+    c.apply_boundary(&mut f, 220).unwrap();
+    assert_eq!(f.apply_due(220), vec![(2, b"stop 1\n".to_vec())]);
+    f.effect(2, 1, 225, true);
+    c.observe_faults(&f, 225).unwrap();
+    c.apply_boundary(&mut f, 245).unwrap();
+    c.mark_delivered(245).unwrap();
+    assert_eq!(f.process_state(2), "Stopped");
+    let stopped_log = f.log.clone();
+
+    c.triggers.committed("server", 260, b'A', 20, 275).unwrap();
+    assert_eq!(c.triggers.records[0].status, "matched");
+    c.triggers.apply_boundary(&mut f, 280).unwrap();
+    let record = &c.triggers.records[0];
+    assert_eq!(record.status, "rejected");
+    assert_eq!(
+        record.rejection_reason.as_deref(),
+        Some("target process is already stopped")
+    );
+    assert_eq!(record.matched_at_ns, Some(260));
+    assert_eq!(record.effect_at_ns, Some(280));
+    assert_eq!(record.fault_id, None);
+    let evidence = c.triggers.evidence().unwrap().unwrap();
+    assert_eq!(
+        evidence[0]["rejection_reason"],
+        "target process is already stopped"
+    );
+    assert_eq!(c.triggers.boundary(), u64::MAX);
+    c.triggers.apply_boundary(&mut f, 280).unwrap();
+    c.triggers.committed("server", 281, b'A', 20, 296).unwrap();
+    assert!(f.apply_due(280).is_empty());
+    assert_eq!(f.log, stopped_log);
+    assert_eq!(f.next_boundary(), u64::MAX);
+    assert_eq!(f.process_state(2), "Stopped");
+    assert!(f.error.is_none());
+    assert!(complete(&c));
+}
+
+#[test]
+fn arm_cancel_use_admission_and_match_is_not_the_arm_reply_effect() {
+    let mut c = control();
+    let mut f = faults::Faults::new(
+        vec![],
+        vec!["scenario".into(), "client".into(), "server".into()],
+    )
+    .unwrap();
+    request(&mut c,1,100,json!({"version":1,"id":1,"op":"arm_trigger","source":{"service":"server"},"marker":[65,66],"match_timeout_ns":1000,"fault":{"action":"partition","left":[{"service":"server"}],"right":[{"service":"client"}]}})).unwrap();
+    assert!(!c.triggers.observes("server"));
+    c.apply_boundary(&mut f, 120).unwrap();
+    assert!(c.triggers.observes("server"));
+    assert!(f.log.is_empty());
+    c.apply_boundary(&mut f, 140).unwrap();
+    c.mark_delivered(140).unwrap();
+    assert_eq!(
+        c.log[0]["response"]["result"],
+        json!({"trigger_id":1,"handle":"p1"})
+    );
+    c.triggers.committed("server", 150, 65, 20, 160).unwrap();
+    request(
+        &mut c,
+        2,
+        151,
+        json!({"version":1,"id":2,"op":"cancel_trigger","trigger_id":1}),
+    )
+    .unwrap();
+    assert!(c.triggers.observes("server"));
+    c.apply_boundary(&mut f, 171).unwrap();
+    c.apply_boundary(&mut f, 191).unwrap();
+    c.mark_delivered(191).unwrap();
+    assert!(!c.triggers.observes("server"));
+    assert_eq!(c.triggers.records[0].cancelled_at_ns, Some(171));
+    assert!(f.log.is_empty());
+}
+
+#[test]
+fn arm_rejections_and_pending_arm_cutoff_remain_correlated() {
+    for change in [
+        json!({"marker":[]}),
+        json!({"marker":vec![0;257]}),
+        json!({"match_timeout_ns":0}),
+        json!({"source":{"machine":"unknown"}}),
+        json!({"fault":{"action":"stop","target":{"service":"scenario"}}}),
+    ] {
+        let mut c = control();
+        let mut f = faults::Faults::new(
+            vec![],
+            vec!["scenario".into(), "client".into(), "server".into()],
+        )
+        .unwrap();
+        let mut body = json!({"version":1,"id":1,"op":"arm_trigger","source":{"service":"server"},"marker":[65],"match_timeout_ns":1000,"fault":{"action":"stop","target":{"service":"server"}}});
+        body.as_object_mut()
+            .unwrap()
+            .extend(change.as_object().unwrap().clone());
+        request(&mut c, 1, 100, body).unwrap();
+        c.apply_boundary(&mut f, 120).unwrap();
+        c.apply_boundary(&mut f, 140).unwrap();
+        c.mark_delivered(140).unwrap();
+        assert_eq!(c.log[0]["response"]["ok"], false);
+        assert!(c.triggers.evidence().unwrap().is_none());
+        assert!(f.log.is_empty());
+    }
+    for admitted in [false, true] {
+        let mut c = control();
+        let mut f = faults::Faults::new(
+            vec![],
+            vec!["scenario".into(), "client".into(), "server".into()],
+        )
+        .unwrap();
+        request(&mut c,1,100,json!({"version":1,"id":1,"op":"arm_trigger","source":{"service":"server"},"marker":[65],"match_timeout_ns":1000,"fault":{"action":"stop","target":{"service":"server"}}})).unwrap();
+        if admitted {
+            c.apply_boundary(&mut f, 120).unwrap();
+        }
+        c.cut_off(&f, if admitted { 130 } else { 110 });
+        assert_eq!(c.triggers.records.len(), usize::from(admitted));
+        if admitted {
+            assert_eq!(c.log[0]["result"]["trigger_id"], 1);
         }
     }
 }

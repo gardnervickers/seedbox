@@ -368,6 +368,63 @@ fn runtime_control_selects_known_service_and_static_schedules_are_rejected() {
 }
 
 #[test]
+fn directed_baselines_validate_services_pairs_floor_jitter_and_loss_at_json_paths() {
+    let base = BASE.replace(
+        "services:\n",
+        "services:\n  server:\n    image: example/server:v1\n",
+    );
+    let parse_link = |entries: &str| {
+        parse(&base.replace(
+            "network: {latency: 1ms, jitter: 200us}",
+            &format!("network: {{latency: 1ms, links: [{entries}]}}"),
+        ))
+    };
+    let good = "{from: server, to: workload, latency: 1ms}";
+    let sim = parse_link(good).unwrap();
+    assert_eq!(
+        sim.network.links[0],
+        config::Link {
+            from: "server".into(),
+            to: "workload".into(),
+            latency_ns: 1_000_000,
+            jitter_ns: 0,
+            loss_ppm: 0
+        }
+    );
+    assert!(parse_link("{from: server, to: workload, latency: 2ms, jitter: 1ms, loss_ppm: 1000000}, {from: workload, to: server, latency: 1ms}").is_ok());
+    for (entry, path) in [
+        (format!("{good}, {good}"), "links[1]"),
+        (
+            good.replace("from: server", "from: missing"),
+            "links[0].from",
+        ),
+        (good.replace("to: workload", "to: missing"), "links[0].to"),
+        (good.replace("1ms", "999us"), "links[0].latency"),
+        (good.replace("1ms}", "1ms, jitter: 1ms}"), "links[0].jitter"),
+        (
+            good.replace("1ms}", "1ms, loss_ppm: 1000001}"),
+            "links[0].loss_ppm",
+        ),
+        (
+            good.replace("1ms}", "1ms, loss_ppm: -1}"),
+            "links[0].loss_ppm",
+        ),
+        (
+            good.replace("1ms}", "1ms, loss_ppm: 0.5}"),
+            "links[0].loss_ppm",
+        ),
+        (good.replace(", latency: 1ms", ""), "links[0].latency"),
+        (good.replace("1ms}", "1h, jitter: 1ns}"), "links[0]"),
+    ] {
+        let error = parse_link(&entry).unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("$.x-seedbox.network.{path}")),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn named_volumes_mount_on_one_service_and_reject_binds_and_options() {
     let with = |service: &str, top: &str| {
         BASE.replace("    image:", &format!("{service}\n    image:")) + top

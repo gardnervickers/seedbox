@@ -525,6 +525,45 @@ fn bundle_cli_validates_paths_limits_and_positional_inputs() {
 }
 
 #[test]
+fn validate_cli_resolves_directed_baselines_and_reports_each_policy_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("compose.yaml");
+    let yaml = "name: cli-links\nservices:\n  server: {image: example/server:v1}\n  client: {image: example/client:v1}\nx-seedbox:\n  version: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  network: {latency: 1ms, links: [LINKS]}\n  check: {service: client}\n";
+    let good = "{from: server, to: client, latency: 1ms}";
+    fs::write(&source, yaml.replace("LINKS", good)).unwrap();
+    let output = seedbox(&["validate", "--json"], directory.path());
+    assert!(output.status.success(), "{}", stderr(&output));
+    let resolved: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        resolved["network"]["links"][0],
+        serde_json::json!({"from":"server","to":"client","latency_ns":1_000_000,"jitter_ns":0,"loss_ppm":0})
+    );
+    for (entry, path) in [
+        (format!("{good},{good}"), "links[1]"),
+        (
+            good.replace("from: server", "from: unknown"),
+            "links[0].from",
+        ),
+        (good.replace("1ms", "999us"), "links[0].latency"),
+        (good.replace("1ms}", "1ms, jitter: 1ms}"), "links[0].jitter"),
+        (
+            good.replace("1ms}", "1ms, loss_ppm: 1000001}"),
+            "links[0].loss_ppm",
+        ),
+    ] {
+        fs::write(&source, yaml.replace("LINKS", &entry)).unwrap();
+        let output = seedbox(&["validate"], directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(
+            stderr(&output).contains(&format!("$.x-seedbox.network.{path}")),
+            "{}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
 fn build_epoch_custom_builder_fails_before_runtime_resolution_or_state_creation() {
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("Dockerfile"), "FROM scratch\n").unwrap();
@@ -1241,6 +1280,171 @@ mod diff_tests {
         assert_eq!(result["status"], "MATCH");
         assert_eq!(result["machines"][0]["witness"]["matches"], true);
     }
+}
+
+#[allow(dead_code)]
+mod timed_logs {
+    use super::*;
+    use seedbox as sb;
+    include!("support/diff_fixture.rs");
+    include!("support/logs_fixture.rs");
+
+    #[test]
+    fn logs_defaults_filters_and_binary_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        timed_fixture(&root.join("run"));
+        let text = seedbox(&["logs", "run"], root);
+        assert!(text.status.success(), "{}", stderr(&text));
+        assert_eq!(stderr(&text), "logs: run\n");
+        assert_eq!(text.stdout, b"\0\xff\xfeA\nB");
+        let text = seedbox(
+            &[
+                "logs",
+                "run",
+                "--stream",
+                "console",
+                "--since-ns",
+                "10",
+                "--until-ns",
+                "20",
+            ],
+            root,
+        );
+        assert!(text.status.success());
+        assert_eq!(text.stdout, b"\0\xffA\n");
+        let text = seedbox(&["logs", "run", "--since-ns", "20"], root);
+        assert!(text.status.success());
+        assert_eq!(text.stdout, b"B"); // No added newline or chunk decoration.
+        let text = seedbox(&["logs", "run", "--until-ns", "10"], root);
+        assert!(text.status.success());
+        assert!(text.stdout.is_empty());
+        for (args, orders) in [
+            (vec!["logs", "run", "--json"], vec![0, 1, 2, 3]),
+            (
+                vec![
+                    "logs",
+                    "run",
+                    "--machine",
+                    "workload",
+                    "--stream",
+                    "console",
+                    "--since-ns",
+                    "10",
+                    "--until-ns",
+                    "20",
+                    "--json",
+                ],
+                vec![0, 2],
+            ),
+            (vec!["logs", "run", "--stream", "mgmt", "--json"], vec![1]),
+            (vec!["logs", "run", "--since-ns", "20", "--json"], vec![3]),
+            (vec!["logs", "run", "--until-ns", "10", "--json"], vec![]),
+        ] {
+            let output = seedbox(&args, root);
+            assert!(output.status.success(), "{}", stderr(&output));
+            assert!(output.stderr.is_empty());
+            let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                json["chunks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v["order"].as_u64().unwrap())
+                    .collect::<Vec<_>>(),
+                orders
+            );
+            assert_eq!(json["status"], "LOGS");
+            assert_eq!(json["omissions"], serde_json::json!({}));
+        }
+        let out = seedbox(&["logs", "run", "--json"], root);
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(json["chunks"][0]["bytes_hex"], "00ff");
+    }
+
+    #[test]
+    fn logs_errors_and_omissions_are_explicit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let path = root.join("run");
+        let mut record = timed_fixture(&path);
+        for (args, expected) in [
+            (
+                vec!["logs", "missing"],
+                "error: run directory missing: not found\n",
+            ),
+            (
+                vec!["logs", "run", "--machine", "unknown"],
+                "error: --machine unknown: unknown machine; use a machine from inspect --json\n",
+            ),
+            (
+                vec!["logs", "run", "--since-ns", "20", "--until-ns", "10"],
+                "error: --until-ns must be at least --since-ns\n",
+            ),
+        ] {
+            let out = seedbox(&args, root);
+            assert_eq!(out.status.code(), Some(2));
+            assert_eq!(stderr(&out), expected);
+            assert!(out.stdout.is_empty());
+        }
+        for (flag, value) in [
+            ("--stream", "stdout"),
+            ("--since-ns", "1s"),
+            ("--until-ns", "18446744073709551616"),
+        ] {
+            let out = seedbox(&["logs", "run", flag, value], root);
+            assert_eq!(out.status.code(), Some(2));
+            assert!(stderr(&out).contains(flag));
+        }
+        record.logs.remove("machines/workload.console.chunks");
+        write_fixture(&path, &mut record, None, None);
+        let out = seedbox(&["logs", "run", "--json"], root);
+        assert!(out.status.success());
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(json["omissions"]["machines/workload.console.chunks"]
+            .as_str()
+            .unwrap()
+            .contains("unavailable"));
+        let out = seedbox(&["logs", "run"], root);
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"\xfe");
+        assert_eq!(stderr(&out), "logs: run\nomission: [\"machines/workload.console.chunks\",\"committed-time index unavailable; raw bytes cannot be timed\"]\n");
+        add_log(
+            &path,
+            &mut record,
+            "machines/workload.console.chunks",
+            b"SBLOG001x",
+        );
+        write_fixture(&path, &mut record, None, None);
+        let out = seedbox(&["logs", "run"], root);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(out.stdout.is_empty());
+        assert_eq!(stderr(&out),"error: logs run: machines/workload.console.chunks: truncated or oversized chunk index; use an intact retained run directory (import bundles first)\n");
+    }
+}
+
+#[test]
+fn logs_help_is_portable_and_has_no_runtime_options() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = seedbox(&["help", "logs"], tmp.path());
+    assert!(out.status.success());
+    let help = String::from_utf8(out.stdout).unwrap();
+    for text in [
+        "<RUN>",
+        "--machine",
+        "--stream",
+        "--since-ns",
+        "--until-ns",
+        "--json",
+    ] {
+        assert!(help.contains(text));
+    }
+    for text in ["--kernel", "--seed", "--vmm", "--cpu", "--state"] {
+        assert!(!help.contains(text));
+    }
+    let out = seedbox(&["logs"], tmp.path());
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stderr(&out).contains("<RUN>"));
 }
 
 #[test]
