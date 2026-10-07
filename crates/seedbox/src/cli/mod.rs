@@ -275,7 +275,7 @@ impl RuntimeInputs {
 #[derive(Args)]
 #[command(next_help_heading = "Performance (never changes results)")]
 struct Performance {
-    /// Branches before a soft stop at which syscall exits are requested: a count or `adaptive`.
+    /// PMU approach and stepping distance in branches: a count or `adaptive`.
     #[arg(long, default_value = "adaptive", value_parser = parse_margin)]
     margin: String,
     /// Initial undo margin in branches; 0 disables undo.

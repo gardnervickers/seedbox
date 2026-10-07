@@ -24,7 +24,10 @@ seedbox replay .seedbox/runs/ATTEMPT
 Preparation unpacks images with root ownership and runs before the CPU lease.
 `run` picks a free CPU and finds the guest kernel and VMM by default; see
 `seedbox help run`. Run/replay must be invoked with the required KVM/MSR access;
-see the repository's `docs/runtime.md` for setup and limits.
+see the repository's `docs/runtime.md` for setup and limits. `--margin` and
+`--undo` control PMU approach and stepping performance without changing results.
+Charged timer I/O retains its full cost across scheduler boundaries; pending
+operations are included in terminal witnesses.
 
 All application storage, including Redis AOF and etcd data directories, is private
 RAM-backed storage recreated on each fresh run/replay. No data persists to the host.
