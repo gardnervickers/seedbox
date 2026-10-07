@@ -4,7 +4,7 @@
 use crate::{
     config::Simulation,
     execution::{ExecutionProfile, PreparationBackend, PreparedInputs},
-    guest::{build_initramfs, launch_recipe, minimum_memory_mb},
+    guest::{build_initramfs_with, launch_recipe, minimum_memory_mb},
     oci::{FrozenContext, OciTools},
     store::{ContentDigest, ContentStore},
     Error, Result,
@@ -23,6 +23,9 @@ pub struct OciPreparer {
     pub engine: PathBuf,
     pub init: PathBuf,
     pub busybox: PathBuf,
+    /// Static mke2fs, needed only when a service mounts a named volume: the
+    /// guest formats its blank retained disk with it on first boot.
+    pub mke2fs: Option<PathBuf>,
     pub profile: ExecutionProfile,
 }
 
@@ -102,10 +105,30 @@ impl OciPreparer {
         for path in [&self.init, &self.busybox] {
             amd64_elf(path)?;
         }
+        for (name, service) in &simulation.services {
+            for mount in &service.volumes {
+                validate_config_target(&mount.target).map_err(|_| Error::Validation {
+                    path: format!("$.services.{name}.volumes"),
+                    message: format!("reserved guest runtime path {}", mount.target),
+                })?;
+            }
+        }
+        let volumes = simulation.services.values().any(|s| !s.volumes.is_empty());
         let mut auxiliary = BTreeMap::from([
             ("guest-init".into(), store.put_file(&self.init)?),
             ("guest-busybox".into(), store.put_file(&self.busybox)?),
         ]);
+        if volumes {
+            let mke2fs = self.mke2fs.as_ref().ok_or_else(|| {
+                Error::Setup(
+                    "named volumes need a static mke2fs to format the guest disk; enter \
+                     `nix develop`, or pass --mke2fs or set SEEDBOX_MKE2FS"
+                        .into(),
+                )
+            })?;
+            amd64_elf(mke2fs)?;
+            auxiliary.insert("guest-mke2fs".into(), store.put_file(mke2fs)?);
+        }
         let mut configs = BTreeMap::new();
         for (name, path) in &simulation.configs {
             let mut data = Vec::new();
@@ -139,6 +162,10 @@ impl OciPreparer {
         )?;
         amd64_elf(&init)?;
         amd64_elf(&busybox)?;
+        let mke2fs = auxiliary
+            .get("guest-mke2fs")
+            .map(|digest| store.materialize(digest, &temporary.path().join("mke2fs")))
+            .transpose()?;
         let mut images = BTreeMap::new();
         let mut guests = BTreeMap::new();
         let mut provenance = BTreeMap::new();
@@ -251,7 +278,8 @@ impl OciPreparer {
             let archive = temporary.path().join(format!("{name}.cpio"));
             // Package only retained bootstrap bytes. The source paths may be
             // replaced by another build while an image is being downloaded.
-            build_initramfs(&imported.rootfs, &init, &busybox, &recipe, &archive)?;
+            let mke2fs = mke2fs.as_deref().filter(|_| !service.volumes.is_empty());
+            build_initramfs_with(&imported.rootfs, &init, &busybox, mke2fs, &recipe, &archive)?;
             let memory_mb = self
                 .profile
                 .semantic_parameters

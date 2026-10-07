@@ -54,6 +54,8 @@ not establish image/kernel compatibility; preparation must check that separately
 | `working_dir`, `user` | Explicit strings overriding image defaults. Working directories must be normalized absolute guest paths. Unknown users/groups fail guest bootstrap as infrastructure errors. |
 | Top-level `configs` | Named `{file: local-path}` entries. |
 | Service `configs` | Names, or `{source, target}`. Default target is `/<name>`. Read-only file semantics are required of preparation/execution. Permission/ownership overrides are rejected. |
+| Top-level `volumes` | Named volumes with no options (`{}` or empty). |
+| Service `volumes` | `NAME:/path`, or `{type: volume, source, target}`. Each named volume is mounted by at most one service, at an absolute directory other than `/`. It lives on that service machine's retained disk (ext4 on a 1 GiB virtio-blk disk, formatted on first boot) and starts empty. What the application flushed (fsync) survives a machine crash and reboot; anything unflushed is lost. Bind mounts, access modes and volume options are rejected. |
 | `networks` | One private network, with no driver/host options. Service lists or empty option maps are accepted. Default is `default`; a differently named network must be explicitly selected by each service. |
 | `x-seedbox.version` | Required integer `1`. |
 | `x-seedbox.seed` | Optional unsigned 64-bit fixed seed. The library run option overrides it; absence of both is an error. Zero is valid. |
@@ -70,7 +72,7 @@ Durations use `ns`, `us`, `ms`, `s`, `m`, or `h`, including exact decimals such 
 `1.25ms`. Fractional nanoseconds and overflow are rejected. `image` and `build`
 cannot be combined until pull/build precedence is implemented. Duplicate mapping
 keys, custom YAML tags and merges, unknown extension fields, Compose interpolation,
-`.env`, `env_file`, host integrations, ports, volumes, restart policies, healthchecks,
+`.env`, `env_file`, host integrations, ports, bind mounts, restart policies, healthchecks,
 and dependency ordering are unsupported. Unknown fields fail rather than disappear.
 `$$` escapes a literal dollar, including inside explicitly invoked shell commands.
 
