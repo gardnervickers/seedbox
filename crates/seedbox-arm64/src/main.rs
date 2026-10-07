@@ -33,6 +33,9 @@ enum Command {
         /// Write the report, full exit trace, and console to a new JSON file.
         #[arg(long)]
         witness: Option<PathBuf>,
+        /// Write power-off RAM page SHA-256 diagnostics to a new file (not witnessed).
+        #[arg(long, value_name = "FILE")]
+        ram_pages: Option<PathBuf>,
     },
 }
 fn execute(args: Args) -> Result<()> {
@@ -42,6 +45,7 @@ fn execute(args: Args) -> Result<()> {
         seed,
         backend,
         witness,
+        ram_pages,
     } = args.command;
     let choice = backend.unwrap_or(if cfg!(target_os = "macos") {
         Choice::Hvf
@@ -52,7 +56,28 @@ fn execute(args: Args) -> Result<()> {
         std::fs::read(&kernel).map_err(|e| format!("--kernel {}: {e}", kernel.display()))?;
     let initrd =
         std::fs::read(&initrd).map_err(|e| format!("--initrd {}: {e}", initrd.display()))?;
-    let report = run(choice, &kernel, &initrd, seed)?;
+    let mut pages = ram_pages
+        .as_ref()
+        .map(|path| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .map_err(|e| {
+                    format!(
+                        "--ram-pages {}: {e}; choose a new output path",
+                        path.display()
+                    )
+                })
+        })
+        .transpose()?;
+    let report = run(
+        choice,
+        &kernel,
+        &initrd,
+        seed,
+        pages.as_mut().map(|f| f as &mut dyn std::io::Write),
+    )?;
     if let Some(path) = witness {
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
@@ -79,12 +104,19 @@ fn execute(args: Args) -> Result<()> {
     println!("PASS: {}", report.witness);
     Ok(())
 }
-fn run(choice: Choice, kernel: &[u8], initrd: &[u8], seed: u64) -> Result<Report> {
+fn run(
+    choice: Choice,
+    kernel: &[u8],
+    initrd: &[u8],
+    seed: u64,
+    ram_pages: Option<&mut dyn std::io::Write>,
+) -> Result<Report> {
     match choice {
         Choice::Hvf => {
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             {
-                Machine::<seedbox_arm64::backend::hvf::Hvf>::new(kernel, initrd, seed)?.run(|| {})
+                Machine::<seedbox_arm64::backend::hvf::Hvf>::new(kernel, initrd, seed)?
+                    .run_with_diagnostics(|| {}, ram_pages)
             }
             #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
             {
@@ -94,7 +126,8 @@ fn run(choice: Choice, kernel: &[u8], initrd: &[u8], seed: u64) -> Result<Report
         Choice::Kvm => {
             #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
             {
-                Machine::<seedbox_arm64::backend::kvm::Kvm>::new(kernel, initrd, seed)?.run(|| {})
+                Machine::<seedbox_arm64::backend::kvm::Kvm>::new(kernel, initrd, seed)?
+                    .run_with_diagnostics(|| {}, ram_pages)
             }
             #[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
             {

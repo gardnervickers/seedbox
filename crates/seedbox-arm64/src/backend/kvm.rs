@@ -112,6 +112,24 @@ impl Backend for Kvm {
                 }),
             )?;
         }
+        let mut nr_irqs = crate::GIC_NR_IRQS;
+        let mut attr = kvm_device_attr {
+            group: KVM_DEV_ARM_VGIC_GRP_NR_IRQS,
+            attr: 0,
+            addr: &mut nr_irqs as *mut u32 as u64,
+            flags: 0,
+        };
+        context("set VGIC NR_IRQS", gic.set_device_attr(&attr))?;
+        nr_irqs = 0;
+        context("read VGIC NR_IRQS", unsafe {
+            gic.get_device_attr(&mut attr)
+        })?;
+        if nr_irqs != crate::GIC_NR_IRQS {
+            return Err(format!(
+                "VGIC NR_IRQS readback: expected {}, got {nr_irqs}",
+                crate::GIC_NR_IRQS
+            ));
+        }
         Ok(Self {
             cpu: None,
             gic,
@@ -188,6 +206,22 @@ impl Backend for Kvm {
     }
     fn set_sys_reg(&mut self, reg: SysReg, value: u64) -> Result<()> {
         self.set(sys_id(reg), value)
+    }
+    fn get_gic_dist(&self, offset: u16) -> Result<u64> {
+        let mut value = 0u32;
+        context(
+            "read VGIC distributor",
+            // The stopped device writes exactly one u32 into live stack storage.
+            unsafe {
+                self.gic.get_device_attr(&mut kvm_device_attr {
+                    group: KVM_DEV_ARM_VGIC_GRP_DIST_REGS,
+                    attr: offset as u64,
+                    addr: &mut value as *mut u32 as u64,
+                    flags: 0,
+                })
+            },
+        )?;
+        Ok(value as u64)
     }
     fn run(&mut self) -> Result<Stop> {
         if self.pending.is_some() {

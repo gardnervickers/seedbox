@@ -103,7 +103,25 @@ impl Gic {
         })();
         os_release(config);
         result?;
+        // HVF has no SPI-count configuration API. Require its advertised
+        // interrupt range to match the shared profile rather than assuming it.
+        let typer = gic_dist(4)?;
+        if (typer & 31) != (crate::GIC_NR_IRQS / 32 - 1) as u64 {
+            return Err(format!(
+                "HVF GICD_TYPER={typer:#x}: expected {} interrupt IDs",
+                crate::GIC_NR_IRQS
+            ));
+        }
         Ok(Self { set_spi })
+    }
+}
+fn gic_dist(offset: u16) -> Result<u64> {
+    unsafe {
+        let get: unsafe extern "C" fn(u16, *mut u64) -> i32 =
+            std::mem::transmute(symbol(c"hv_gic_get_distributor_reg")?);
+        let mut value = 0;
+        check("hv_gic_get_distributor_reg", get(offset, &mut value))?;
+        Ok(value)
     }
 }
 struct Pending {
@@ -249,6 +267,9 @@ impl Backend for Hvf {
                 hv_vcpu_set_sys_reg(self.cpu()?, reg.0, value),
             )
         }
+    }
+    fn get_gic_dist(&self, offset: u16) -> Result<u64> {
+        gic_dist(offset)
     }
     fn run(&mut self) -> Result<Stop> {
         if self.pending.is_some() {

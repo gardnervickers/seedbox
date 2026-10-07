@@ -15,6 +15,8 @@ struct Fake<
     held: bool,
     irq: bool,
     mmfr0: u64,
+    mpidr: u64,
+    dfr0: u64,
     ignore_feature_write: bool,
     reject_feature_write: bool,
 }
@@ -31,6 +33,8 @@ impl<
     fn create() -> Result<Self> {
         Ok(Self {
             step: 0,
+            mpidr: 0,
+            dfr0: 0x10305606,
             regs: [0; 34],
             mapped: BTreeMap::new(),
             held: false,
@@ -75,11 +79,27 @@ impl<
             T
         } else if reg == SysReg::ID_AA64MMFR0 {
             self.mmfr0
+        } else if reg == SysReg::MPIDR {
+            self.mpidr
+        } else if reg == SysReg::ID_AA64DFR0 {
+            self.dfr0
         } else {
             0
         })
     }
     fn set_sys_reg(&mut self, reg: SysReg, value: u64) -> Result<()> {
+        if matches!(reg, SysReg::MPIDR | SysReg::ID_AA64DFR0) {
+            if self.reject_feature_write {
+                return Err("feature register write rejected".into());
+            }
+            if !self.ignore_feature_write {
+                if reg == SysReg::MPIDR {
+                    self.mpidr = value;
+                } else {
+                    self.dfr0 = value;
+                }
+            }
+        }
         if reg == SysReg::ID_AA64MMFR0 {
             assert_eq!(self.step, 0, "feature policy must precede guest execution");
             if self.reject_feature_write {
@@ -93,6 +113,8 @@ impl<
     }
     fn run(&mut self) -> Result<Stop> {
         assert_eq!(self.mmfr0, 0x0000_1000_0000_0023);
+        assert_eq!(self.mpidr, 0x8000_0000);
+        assert_eq!(self.dfr0, 0x10305006);
         assert!(!self.held);
         self.held = true;
         let mmio = |addr, data| Exit::Mmio {
@@ -192,10 +214,22 @@ fn machine_reconciles_reads_completes_once_and_injects_while_stopped() {
         .unwrap()
         .run(|| {})
         .unwrap();
+    let mut pages = Vec::new();
     let b = Machine::<Fake>::new(&kernel, b"cpio", 1)
         .unwrap()
-        .run(|| {})
+        .run_with_diagnostics(|| {}, Some(&mut pages))
         .unwrap();
+    let diagnostic: serde_json::Value = serde_json::from_slice(&pages).unwrap();
+    assert_eq!(diagnostic["witness"], b.witness);
+    assert_eq!(diagnostic["ram_hash"], b.ram_hash);
+    assert_eq!(
+        diagnostic["regions"][0]["sha256"].as_array().unwrap().len(),
+        RAM_SIZE / 4096
+    );
+    assert_eq!(
+        diagnostic["regions"][1]["sha256"].as_array().unwrap().len(),
+        PAGE_SIZE / 4096
+    );
     let c = Machine::<Fake>::new(&kernel, b"cpio", 2)
         .unwrap()
         .run(|| {})
@@ -290,5 +324,30 @@ fn cpu_feature_policy_preserves_other_fields_and_rejects_failed_readback() {
     );
     // An already absent feature must work even with a read-only register.
     backend.mmfr0 &= !(0xf << 56);
+    backend.mpidr = 0x8000_0000;
+    backend.dfr0 &= !(0xf << 8);
     configure_cpu_features(&mut backend).unwrap();
+}
+
+#[test]
+fn topology_and_pmu_require_exact_readback() {
+    use seedbox_arm64::machine::configure_cpu_features;
+    for reg in [SysReg::MPIDR, SysReg::ID_AA64DFR0] {
+        let mut backend = Fake::<0>::create().unwrap();
+        configure_cpu_features(&mut backend).unwrap();
+        assert_eq!(backend.mpidr, 0x8000_0000);
+        assert_eq!(backend.dfr0, 0x10305006);
+        if reg == SysReg::MPIDR {
+            backend.mpidr = 7;
+        } else {
+            backend.dfr0 |= 6 << 8;
+        }
+        backend.ignore_feature_write = true;
+        assert!(configure_cpu_features(&mut backend)
+            .unwrap_err()
+            .contains("feature policy readback"));
+        backend.ignore_feature_write = false;
+        backend.reject_feature_write = true;
+        assert!(configure_cpu_features(&mut backend).is_err());
+    }
 }

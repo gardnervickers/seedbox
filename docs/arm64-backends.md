@@ -11,14 +11,87 @@ still FAILS.** The same idle-rendezvous Image from `180705e` boots reproducibly
 on both. The shared CPU policy now hides Fine Grained Traps before boot,
 removing the extra guest printk clock read responsible for HVF's 1 ns drift.
 Both seeds' new HVF traces and consoles exactly match the operator's retained
-`48e25a1` KVM reports. Full CPU/GIC normalization remains open; see the
-[FGT continuation](#fgt-feature-policy-and-the-extra-pv-read-2026-10-07).
+`7e178d5` KVM reports. Full CPU/GIC normalization remains open; see the
+[page diagnostics and policy](#power-off-page-diagnostics-and-architectural-policy-2026-10-07).
 
-Current Mac checks: `cargo test-arm64` passes 16 portable tests; the two
+Current Mac checks: `cargo test-arm64` passes 19 portable tests; the two
 hardware tests remain ignored by default. Crate formatting and clippy with
 warnings denied pass, as do seven Python input tests and the root portable
 acceptance checks. The explicitly signed `hvf_determinism` and `hvf_cpu_features`
 tests pass. Earlier failures remain recorded below.
+
+## Try it on your Mac
+
+Requires an M-series Mac, macOS 15+, Xcode Command Line Tools, and Nix with
+flakes enabled. This runs the experimental single-CPU PV fixture. The Linux VM
+only builds its inputs; HVF executes the fixture directly on the Mac. Allow
+about 24 GiB of VM disk and several minutes for the kernel build.
+
+```sh
+git clone --branch astra/arm64-hvf https://github.com/gardnervickers/seedbox.git
+cd seedbox
+nix develop
+cargo build-arm64
+bash crates/seedbox-arm64/codesign.sh
+
+# Enter a temporary shell with Lima. Stay in the checkout root.
+nix shell nixpkgs#lima -c bash
+export LIMA_HOME="$(mktemp -d /tmp/sb-lima.XXXXXX)"
+cat > "$LIMA_HOME/seedbox-build.yaml" <<'YAML'
+vmType: vz
+arch: aarch64
+cpus: 4
+memory: 8GiB
+disk: 24GiB
+images:
+  - location: https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img
+    arch: aarch64
+mounts: []
+containerd:
+  system: false
+  user: false
+YAML
+limactl start --name=seedbox-build --tty=false "$LIMA_HOME/seedbox-build.yaml"
+limactl copy -r kernel-arm64 seedbox-build:/tmp/kernel-arm64
+limactl shell --workdir /tmp seedbox-build sudo apt-get update
+limactl shell --workdir /tmp seedbox-build sudo apt-get install -y \
+  build-essential musl-tools flex bison bc libssl-dev libelf-dev curl xz-utils python3
+limactl shell --workdir /tmp seedbox-build env BUILD_JOBS=4 \
+  bash /tmp/kernel-arm64/build.sh /tmp/seedbox-arm64-inputs
+mkdir -p artifacts/arm64-mac
+limactl copy -r seedbox-build:/tmp/seedbox-arm64-inputs/. artifacts/arm64-mac/
+(cd artifacts/arm64-mac && shasum -a 256 -c SHA256SUMS)
+# Preserve the inputs on the Mac, then remove only this task's VM.
+limactl stop seedbox-build
+limactl delete --force seedbox-build
+exit  # leave the Lima shell; return to nix develop in the checkout
+
+for repeat in 1 2; do
+  crates/seedbox-arm64/target/release/seedbox-arm64 run \
+    --backend hvf --kernel artifacts/arm64-mac/Image \
+    --initrd artifacts/arm64-mac/init.cpio --seed 1
+done
+```
+
+Both runs print this stdout line; guest console and timing go to stderr:
+
+```text
+PASS: b3de4bbdaa7a747b54d3a940f02c4281bd3f26fe8574454c6cb7f06a3658a2a7
+```
+
+That is the current tested HVF witness with Image SHA-256
+`7ea8fa2858ef33d05da559e9de5e5a9329c6d397e5b03fd7f4fcd3ebb75d9ff1`
+and init.cpio SHA-256
+`9b952991625d7603e2db03e5ccdb87f78f1f7a16e6c664062505b7ddc75d8649`.
+These inputs were built with Ubuntu GCC 13.3.0 and binutils 2.42. Updated build
+tools or a different Mac CPU feature profile can change the witness; repeated
+runs with identical inputs on the same supported host must still match. Expected
+fixture output includes `SEEDBOX_INIT_PASS`, 2,291 exits, and 1,010,051,041 virtual
+ns. Sign again after any Cargo command that relinks the executable.
+
+The configuration follows [Lima's VZ documentation](https://lima-vm.io/docs/config/vmtype/)
+and uses Ubuntu's published arm64 cloud image. Nested virtualization is not
+needed for this build-only VM. KVM execution is a separate operator step.
 
 ## Abstraction boundaries
 
@@ -259,6 +332,9 @@ runs can take minutes because the sleeps are deliberately per exit. Use a fresh
 report directory for each attempt: evidence files are never overwritten.
 
 ### 4. Build and run KVM inside the VM
+
+Historical FGT-only procedure. For the current commit use
+[Next KVM page capture](#next-kvm-page-capture), which includes the new policy.
 
 Use the VM's existing `$HOME/.cargo/bin/cargo`; **Nix is not installed there**.
 The explicit Linux target keeps Linux and macOS build artifacts separate. Run
@@ -944,6 +1020,150 @@ also pass (`portable-fgt-policy.log`). Linux-only `cargo test-vmm` was not run
 on the Mac. No witness normalization, RAM masks, trace filtering, clock charge
 adjustments, relaxed leak checks or changed noise gates were introduced.
 Frozen production paths are unchanged; no push or PR is performed.
+
+## Power-off page diagnostics and architectural policy (2026-10-07)
+
+The operator reports `cargo test-arm64`, `kvm_cpu_features` and KVM repeat/noise
+acceptance passing at `7e178d5`. The supplied `kvm-fgt-policy/` reports confirm
+all 2,291 exits and console bytes match HVF for both seeds, while RAM differs.
+Seed-1 KVM witness is `ed30d3bb…`, seed 2 `f024317d…`. The CPU inventory log was
+not in the copied directory, so other KVM register values are not inferred from
+those hash-only reports.
+
+### Diagnostic format and timing
+
+`run --ram-pages FILE` reserves a new output file before creating the VM and
+writes JSON only after successful PSCI SYSTEM_OFF, acceptance-marker validation,
+and final PV publication. It hashes every 4 KiB guest page, including zero pages:
+32,768 main RAM pages plus four pages covering the separate 16 KiB PV mapping.
+This uses the kernel's 4 KiB granularity rather than HVF's host mapping alignment.
+Region `base` and `length` are byte addresses/sizes; `sha256[i]` covers offset
+`i * page_size`. The sidecar includes the witness, RAM hash, seed and exact input
+hashes to identify its paired report. It contains hashes, not RAM contents.
+
+The diagnostic is disabled by default, is not a Report field, and does not
+change witness encoding, clock reconciliation, memory, or the measured run
+wall time. There is no extra vCPU entry. An existing output path is refused;
+a failed run can leave an empty reserved file, and an output I/O failure is an
+error rather than PASS. `compare-pages.py LEFT RIGHT` prints differing page
+indices, offsets and GPAs; exits are 0 equal, 1 different, 2 invalid/incompatible.
+Continue using `compare.py` for full witness acceptance.
+
+### What is normalized, and what remains host-dependent
+
+Linux stores CPU feature registers in boot CPU data and sanitized feature tables.
+It also records GIC discovery and CPU/cache details in the suppressed printk
+ring, with temporary values surviving in stacks or freed allocations. Thus
+identical console and semantic exits need not imply equal RAM. These remain
+likely causes until KVM page hashes locate the changed pages; no RAM bytes are
+masked or excluded.
+
+| Input | Policy and evidence |
+| --- | --- |
+| MMFR0.FGT | Existing shared policy clears bits 59:56, preserving all other fields with exact full-register readback. |
+| MPIDR | Shared policy requires `0x80000000` (one CPU, affinity zero); skip an already-equal write, then require exact readback. HVF already had this value; KVM no longer implicitly owns topology policy. |
+| PMU | Shared policy clears DFR0.PMUVer bits 11:8 and checks the entire register, retaining all debug fields. HVF reads `0x10305006`. KVM never enables `KVM_ARM_VCPU_PMU_V3`. No PMU device/IRQ is advertised. |
+| GIC interrupt count | Shared profile has 1024 IDs, including private/reserved IDs: 988 usable SPIs. KVM now sets `KVM_DEV_ARM_VGIC_GRP_NR_IRQS=1024` before initialization and reads back exactly 1024. HVF has no count setter; its `GICD_TYPER.ITLinesNumber` must equal 31 or setup fails. Live HVF TYPER is `0x0478001f`. This normalizes count only, not the whole TYPER. |
+| MIDR / REVIDR | HVF MIDR is `0x610f0000`; REVIDR API reads fail with `HV_BAD_ARGUMENT`. Linux KVM's invariant-register API checks MIDR/REVIDR against host values rather than allowing an arbitrary replacement. No invented common model is installed. |
+| Other ID_AA64 fields | Preserved and inventoried. There is no retained KVM inventory here to justify additional feature changes. Defining a complete profile requires matching inventories and support constraints; blindly clearing capability nibbles is unsafe. |
+| CTR_EL0 / DCZID / CLIDR / CNTFRQ | All four HVF sysreg API reads return `HV_BAD_ARGUMENT` on this Mac. Exact readback through this adapter is unavailable, so no normalization is claimed. These can still be read by guest instructions and may survive in RAM. Architectural counter/timer leak rejection stays strict. |
+| GIC IIDR / remaining TYPER fields | HVF IIDR API read returns `HV_BAD_ARGUMENT`; PIDR2 reads `0x30`. KVM ignores writes to read-only distributor registers except explicitly documented fields. RSS, ID width, priority capabilities and implementation identity remain an open common-GIC-model problem. |
+| PSCI | Already common: shared HVC handling reports version 0.2, MIGRATE_INFO_TYPE=2 and unsupported services=-1. KVM forwards these calls via its SMCCC filter. No host PSCI version enters this interface. |
+
+See [KVM VGIC API](https://docs.kernel.org/virt/kvm/devices/arm-vgic-v3.html),
+[Linux 6.12 register implementation](https://raw.githubusercontent.com/torvalds/linux/v6.12/arch/arm64/kvm/sys_regs.c),
+and [Apple GIC API](https://developer.apple.com/documentation/hypervisor/gic-functions).
+The native inventory is retained in `hvf-ram-pages/cpu-features.log`. The new
+KVM interrupt count intentionally changes an architectural input and can change
+its RAM/witness. Its new witness must be measured, not assumed to remain the old
+`ed30d3bb…`. Complete cross-backend equality remains open.
+
+### Native acceptance and checks
+
+Final native evidence is under `artifacts/arm64-irq-rendezvous/hvf-ram-pages/`.
+The same verified Image/initrd were used; no guest rebuild was performed.
+
+| Boot | Witness | Wall seconds |
+| --- | --- | ---: |
+| Seed 1 first | `b3de4bbdaa7a747b54d3a940f02c4281bd3f26fe8574454c6cb7f06a3658a2a7` | 0.259302 |
+| Seed 1 repeat | Same | 0.251053 |
+| Seed 1 host noise | Same | 7.419816 |
+| Seed 2 | `3477c8e474cbe111646f5a6aa03acadffefc5bb2995212bcd2aafec648e6dabe` | 0.248365 |
+
+All have 2,291 exits and finish at 1,010,051,041 ns. CLI runs with page hashing
+for seeds 1, 1 and 2 match the corresponding ordinary hardware-test reports.
+The seed-1 page sidecars have zero differing pages. HVF witnesses and RAM hashes
+are unchanged from `7e178d5`, as these policies already match its defaults.
+
+19 portable ARM64 Rust tests, ARM64 fmt/clippy, seven Python guest-input tests,
+shell syntax, root fmt/clippy/workspace tests and portable acceptance pass.
+Tests cover diagnostic witness neutrality, all pages including zeros, refusal to
+overwrite output, and ignored/rejected CPU-policy writes. Linux KVM execution still needs
+the operator's hardware run. The project Nix Rust toolchain lacks Linux std;
+subsequent all-target Linux `cargo check` and clippy with warnings denied passed
+using the already installed nightly cross-target sysroot and a separate `/tmp`
+target directory (`linux-check.log`, `linux-clippy.log`). Linux-only `cargo test-vmm` was not run. Frozen production paths are unchanged.
+The clean-checkout Lima recipe was checked against the CLI documentation but
+not executed here; the operator owns new guest builds.
+
+### Next KVM page capture
+
+Run in the existing nested KVM VM on this commit; no guest rebuild is needed.
+Keep the CPU inventory and all sidecars alongside the reports. This supersedes
+section 4's historical FGT-only output directory and expected KVM witnesses.
+
+```sh
+set -euo pipefail
+cd /Users/gardnervickers/.claude/worktrees/seedbox-astra-arm64
+export PATH="$HOME/.cargo/bin:$PATH"
+(cd artifacts/arm64-irq-rendezvous && sha256sum -c SHA256SUMS)
+cargo test-arm64 --target aarch64-unknown-linux-gnu
+cargo clippy --manifest-path crates/seedbox-arm64/Cargo.toml \
+  --target aarch64-unknown-linux-gnu --all-targets --locked -- -D warnings
+cargo build-arm64 --target aarch64-unknown-linux-gnu
+export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-irq-rendezvous/Image"
+export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-irq-rendezvous/init.cpio"
+export SEEDBOX_ARM64_REPORT_DIR="$PWD/artifacts/arm64-irq-rendezvous/kvm-ram-pages"
+mkdir "$SEEDBOX_ARM64_REPORT_DIR" # fresh directory; preserve previous evidence
+cargo test-arm64 --target aarch64-unknown-linux-gnu --test hardware \
+  -- --ignored --exact kvm_cpu_features --nocapture --test-threads=1 \
+  > "$SEEDBOX_ARM64_REPORT_DIR/cpu-features.log" 2>&1
+cargo test-arm64 --target aarch64-unknown-linux-gnu --test hardware \
+  -- --ignored --exact kvm_determinism --nocapture --test-threads=1 \
+  > "$SEEDBOX_ARM64_REPORT_DIR/determinism.log" 2>&1
+for case in 1a 1b 2; do
+  seed="${case%[ab]}"
+  crates/seedbox-arm64/target/aarch64-unknown-linux-gnu/release/seedbox-arm64 run \
+    --backend kvm --kernel "$SEEDBOX_ARM64_KERNEL" --initrd "$SEEDBOX_ARM64_INITRD" \
+    --seed "$seed" --witness "$SEEDBOX_ARM64_REPORT_DIR/cli-$case.json" \
+    --ram-pages "$SEEDBOX_ARM64_REPORT_DIR/cli-$case.pages.json" \
+    > "$SEEDBOX_ARM64_REPORT_DIR/cli-$case.log" 2>&1
+done
+python3 crates/seedbox-arm64/compare.py \
+  "$SEEDBOX_ARM64_REPORT_DIR/kvm-seed1-a.json" "$SEEDBOX_ARM64_REPORT_DIR/cli-1a.json"
+python3 crates/seedbox-arm64/compare-pages.py \
+  "$SEEDBOX_ARM64_REPORT_DIR/cli-1a.pages.json" "$SEEDBOX_ARM64_REPORT_DIR/cli-1b.pages.json"
+for case in 1a 2; do
+  for tool in compare compare-pages; do
+    suffix=json
+    if [ "$tool" = compare-pages ]; then suffix=pages.json; fi
+    rc=0
+    python3 "crates/seedbox-arm64/$tool.py" \
+      "artifacts/arm64-irq-rendezvous/hvf-ram-pages/cli-$case.$suffix" \
+      "$SEEDBOX_ARM64_REPORT_DIR/cli-$case.$suffix" \
+      > "$SEEDBOX_ARM64_REPORT_DIR/$tool-$case.log" 2>&1 || rc=$?
+    cat "$SEEDBOX_ARM64_REPORT_DIR/$tool-$case.log"
+    printf 'comparison exit: %s (0=match, 1=different, 2=error)\n' "$rc"
+    test "$rc" -le 1
+  done
+done
+```
+
+The comparison loop permits a differing result only to retain both seed logs;
+it prints and preserves each status and does not declare equality. If these
+pages still differ, use the printed GPAs with the matching kernel symbol map or
+a separately authorized byte capture to distinguish CPU-data, printk, GIC state
+and residual stack differences.
 
 ## Cleanup and portable checks
 

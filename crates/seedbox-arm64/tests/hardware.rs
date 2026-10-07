@@ -148,16 +148,22 @@ fn cpu_features<B: Backend>() {
             configure_cpu_features(&mut backend).unwrap();
         }
         for reg in [
-            0xc000, 0xc005, // MIDR, MPIDR
+            0xc000, 0xc005, 0xc006, // MIDR, MPIDR, REVIDR
             0xc020, 0xc021, // ID_AA64PFR0/1
             0xc028, 0xc029, // ID_AA64DFR0/1
             0xc030, 0xc031, 0xc032, // ID_AA64ISAR0/1/2
             0xc038, 0xc039, 0xc03a, // ID_AA64MMFR0/1/2
-            0xc800, 0xd801, 0xd807, // CLIDR, CTR, DCZID
+            0xc800, 0xd801, 0xd807, 0xdf00, // CLIDR, CTR, DCZID, CNTFRQ
         ] {
             match backend.get_sys_reg(SysReg(reg)) {
                 Ok(value) => eprintln!("{phase} {reg:#06x}: {value:#018x}"),
                 Err(error) => eprintln!("{phase} {reg:#06x}: unavailable: {error}"),
+            }
+        }
+        for (name, offset) in [("GICD_TYPER", 4), ("GICD_IIDR", 8), ("GICD_PIDR2", 0xffe8)] {
+            match backend.get_gic_dist(offset) {
+                Ok(value) => eprintln!("{phase} {name}: {value:#018x}"),
+                Err(error) => eprintln!("{phase} {name}: unavailable: {error}"),
             }
         }
     }

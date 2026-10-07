@@ -78,9 +78,18 @@ impl<B: Backend> Machine<B> {
     }
     /// `before_run` is a performance-only hook for acceptance jitter. It cannot
     /// access guest state. Host duration is report metadata, never witness input.
-    pub fn run(mut self, before_run: impl FnMut()) -> Result<Report> {
+    pub fn run(self, before_run: impl FnMut()) -> Result<Report> {
+        self.run_with_diagnostics(before_run, None)
+    }
+    /// Optionally write page hashes after successful power-off, with the vCPU
+    /// stopped and the final PV publication complete. Never part of the witness.
+    pub fn run_with_diagnostics(
+        mut self,
+        before_run: impl FnMut(),
+        ram_pages: Option<&mut dyn std::io::Write>,
+    ) -> Result<Report> {
         let start = Instant::now();
-        self.run_inner(before_run).map_err(|error| {
+        let report = self.run_inner(before_run).map_err(|error| {
             format!(
                 "{error}\nexits: {}\nwall_seconds: {:.6}\nlast exit: {:?}\nconsole:\n{}",
                 self.trace.len(),
@@ -88,7 +97,19 @@ impl<B: Backend> Machine<B> {
                 self.trace.last(),
                 String::from_utf8_lossy(&self.uart.console)
             )
-        })
+        })?;
+        if let Some(output) = ram_pages {
+            // run_inner returned at SYSTEM_OFF; no further vCPU entry occurs.
+            unsafe {
+                crate::diagnostics::write_ram_pages(
+                    output,
+                    &report,
+                    self.ram.bytes(),
+                    self.page.bytes(),
+                )?;
+            }
+        }
+        Ok(report)
     }
     fn run_inner(&mut self, mut before_run: impl FnMut()) -> Result<Report> {
         let start = Instant::now();
@@ -289,6 +310,35 @@ pub fn configure_cpu_features(backend: &mut impl Backend) -> Result<()> {
     if actual != expected {
         return Err(format!(
             "ID_AA64MMFR0_EL1 feature policy readback: expected {expected:#018x}, got {actual:#018x}; backend must hide FGT and preserve all other fields"
+        ));
+    }
+    // One CPU, affinity 0, architectural RES1 bit. Never inherit host topology.
+    exact_register(backend, SysReg::MPIDR, 0x8000_0000, "MPIDR_EL1")?;
+    // This machine has no PMU device or PMU interrupt. KVM never enables
+    // KVM_ARM_VCPU_PMU_V3; make the advertised feature agree on both hosts.
+    let dfr0 = backend.get_sys_reg(SysReg::ID_AA64DFR0)?;
+    exact_register(
+        backend,
+        SysReg::ID_AA64DFR0,
+        dfr0 & !(0xf << 8),
+        "ID_AA64DFR0_EL1",
+    )?;
+    Ok(())
+}
+
+fn exact_register(
+    backend: &mut impl Backend,
+    reg: SysReg,
+    expected: u64,
+    name: &str,
+) -> Result<()> {
+    if backend.get_sys_reg(reg)? != expected {
+        backend.set_sys_reg(reg, expected)?;
+    }
+    let actual = backend.get_sys_reg(reg)?;
+    if actual != expected {
+        return Err(format!(
+            "{name} feature policy readback: expected {expected:#018x}, got {actual:#018x}"
         ));
     }
     Ok(())

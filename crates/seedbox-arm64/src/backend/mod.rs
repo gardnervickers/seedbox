@@ -25,6 +25,7 @@ impl SysReg {
     pub const OSLAR: Self = Self(0x8084);
     /// AArch64 Memory Model Feature Register 0 (S3_0_C0_C7_0).
     pub const ID_AA64MMFR0: Self = Self(0xc038);
+    pub const ID_AA64DFR0: Self = Self(0xc028);
     pub const SCTLR: Self = Self(0xc080);
     pub const MPIDR: Self = Self(0xc005);
     pub const CNTKCTL: Self = Self(0xc708);
@@ -77,6 +78,10 @@ pub trait Backend: Sized {
     fn set_reg(&mut self, reg: CoreReg, value: u64) -> Result<()>;
     fn get_sys_reg(&self, reg: SysReg) -> Result<u64>;
     fn set_sys_reg(&mut self, reg: SysReg, value: u64) -> Result<()>;
+    /// Read a stopped GIC distributor register for architectural inventory.
+    fn get_gic_dist(&self, _offset: u16) -> Result<u64> {
+        Err("GIC register inventory unsupported".into())
+    }
     fn run(&mut self) -> Result<Stop>;
     fn complete(&mut self, read: Option<u64>) -> Result<()>;
     fn inject_spi(&mut self, intid: u32, level: bool) -> Result<()>;
