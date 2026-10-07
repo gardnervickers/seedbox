@@ -16,9 +16,13 @@ pub enum CoreReg {
     /// EL1 stack pointer (SP_EL1), independent of the current PSTATE.SP.
     Sp,
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SysReg(pub u16);
 impl SysReg {
+    /// ARM ARM: S2_0_C1_C3_4, OS Double Lock Register.
+    pub const OSDLR: Self = Self(0x809c);
+    /// ARM ARM: S2_0_C1_C0_4, OS Lock Access Register.
+    pub const OSLAR: Self = Self(0x8084);
     pub const SCTLR: Self = Self(0xc080);
     pub const MPIDR: Self = Self(0xc005);
     pub const CNTKCTL: Self = Self(0xc708);

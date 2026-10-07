@@ -78,10 +78,12 @@ impl<B: Backend> Machine<B> {
     /// `before_run` is a performance-only hook for acceptance jitter. It cannot
     /// access guest state. Host duration is report metadata, never witness input.
     pub fn run(mut self, before_run: impl FnMut()) -> Result<Report> {
+        let start = Instant::now();
         self.run_inner(before_run).map_err(|error| {
             format!(
-                "{error}\nexits: {}\nlast exit: {:?}\nconsole:\n{}",
+                "{error}\nexits: {}\nwall_seconds: {:.6}\nlast exit: {:?}\nconsole:\n{}",
                 self.trace.len(),
+                start.elapsed().as_secs_f64(),
                 self.trace.last(),
                 String::from_utf8_lossy(&self.uart.console)
             )
@@ -95,6 +97,14 @@ impl<B: Backend> Machine<B> {
             let stop = self.backend.run()?;
             if self.backend.get_sys_reg(SysReg::CNTV_CTL)? & 1 != 0 {
                 return Err("architectural virtual timer enabled: PV timer leak".into());
+            }
+            if self.ready {
+                let control = self.backend.get_sys_reg(SysReg::CNTKCTL)?;
+                if control != 0 {
+                    return Err(format!(
+                        "CNTKCTL_EL1={control:#x} after PV handshake: hardware counter access or event stream enabled; rebuild kernel-arm64 with the exec/context-switch counter-access fix"
+                    ));
+                }
             }
             // All guest memory accesses happen after the synchronous exit.
             self.clock.read(unsafe { self.page.word(8)? })?;
@@ -170,6 +180,17 @@ impl<B: Backend> Machine<B> {
                         }
                     }
                 }
+                Exit::SysReg {
+                    reg,
+                    write: true,
+                    data: 0,
+                    ..
+                } if matches!(SysReg(reg), SysReg::OSDLR | SysReg::OSLAR) => {
+                    // The machine has no external debugger or powered-down
+                    // debug domain. Both locks start unlocked. Linux's unlock
+                    // writes preserve that state; other debug operations remain
+                    // unsupported rather than silently enabling host debug.
+                }
                 ref other => {
                     return Err(format!("unsupported exit {other:?} at PC {:#x}", stop.pc))
                 }
@@ -193,9 +214,7 @@ impl<B: Backend> Machine<B> {
                     .lines()
                     .any(|line| line.trim_end() == "SEEDBOX_INIT_PASS")
                 {
-                    return Err(format!(
-                        "guest powered off without acceptance marker; console:\n{console}"
-                    ));
+                    return Err("guest powered off without acceptance marker".into());
                 }
                 self.publish()?;
                 let (witness, trace_hash, console_hash, ram_hash) = unsafe {

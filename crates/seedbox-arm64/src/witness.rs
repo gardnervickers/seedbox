@@ -53,7 +53,7 @@ impl Record {
                 r.addr = reg as u64;
                 r.len = rt;
                 r.write = write;
-                r.data = data;
+                r.data = if write { data } else { response.unwrap_or(0) };
             }
             Exit::Other(raw) => {
                 r.kind = 255;
@@ -157,6 +157,19 @@ mod tests {
         assert_ne!(
             finish(&[], b"ab", b"c", b"").0,
             finish(&[], b"a", b"bc", b"").0
+        );
+    }
+    #[test]
+    fn sysreg_read_hashes_emulated_response() {
+        let exit = Exit::SysReg {
+            reg: 0x808c,
+            write: false,
+            rt: 0,
+            data: 0,
+        };
+        assert_ne!(
+            Record::new(&exit, 0, 4, Some(0)).encode(),
+            Record::new(&exit, 0, 4, Some(2)).encode()
         );
     }
 }

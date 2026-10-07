@@ -350,6 +350,15 @@ impl Backend for Hvf {
                 self.set_reg(CoreReg::Pc, p.pc + 4)
             }
             Exit::Wfi => self.set_reg(CoreReg::Pc, p.pc + 4),
+            Exit::SysReg { write, rt, .. } => {
+                if !write {
+                    let value = read.ok_or("missing sysreg read response")?;
+                    if rt != 31 {
+                        self.set_reg(CoreReg::X(rt), value)?;
+                    }
+                }
+                self.set_reg(CoreReg::Pc, p.pc + 4)
+            }
             Exit::Hvc { .. } => Ok(()), // HVC's architectural PC already advanced
             _ => Err("unsupported HVF exit completion".into()),
         }
