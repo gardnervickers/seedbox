@@ -146,7 +146,18 @@ KVM/MSR access checks, leases and workaround readbacks.
 Clock and entropy evidence admits the tested workloads, not arbitrary Linux
 images or JVM/JIT programs. Broader instruction, CPU-feature, clock and entropy
 coverage belongs to #5; the Java workloads in issues #6 and #7 need admission
-before their historical litmuses can be claimed. Retired native-calibration,
+before their historical litmuses can be claimed.
+
+Guest randomness comes from the seeded kernel CRNG only. The engine clears
+RDRAND (CPUID leaf 1 ECX bit 30) and RDSEED (leaf 7 EBX bit 18), so the guest
+kernel and runtimes that check CPUID before using them (OpenSSL, Rust's
+`getrandom` fallback; Go and glibc never use them for randomness) stay
+deterministic. On AMD, SVM cannot intercept either instruction: guest code that
+executes them without checking CPUID, for example code built with `-mrdrnd`
+that calls the intrinsic directly, reads the hardware generator, and its runs
+do not replay. Admitting a workload therefore assumes it honours CPUID for
+RDRAND and RDSEED. On Intel, KVM makes the hidden instructions raise #UD
+instead. `harness/worlds/rdrand.json` and `rdrand-raw.json` show both cases. Retired native-calibration,
 10x speedup and 100-microsecond stop targets are not acceptance requirements.
 
 Process restart retains guest tmpfs data. It does not model machine reboot,
