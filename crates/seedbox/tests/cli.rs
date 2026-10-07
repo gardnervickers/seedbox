@@ -153,6 +153,42 @@ fn bad_values_are_usage_errors() {
     }
 }
 
+#[test]
+fn build_epoch_is_bounded_and_only_available_for_preparation_commands() {
+    let directory = tempfile::tempdir().unwrap();
+    for value in ["-1", "4294967296", "not-a-number"] {
+        let output = seedbox(
+            &["prepare", "--output", "out.json", "--build-epoch", value],
+            directory.path(),
+        );
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            stderr(&output).contains("--build-epoch"),
+            "{}",
+            stderr(&output)
+        );
+        assert!(!directory.path().join("out.json").exists());
+    }
+    for command in ["prepare", "run", "explore"] {
+        let output = seedbox(&[command, "--help"], directory.path());
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("--build-epoch"));
+    }
+    for command in ["replay", "validate", "inspect", "init"] {
+        let output = seedbox(&[command, "--help"], directory.path());
+        assert!(output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("--build-epoch"));
+    }
+    for value in ["0", "4294967295"] {
+        let output = seedbox(
+            &["prepare", "--output", "out.json", "--build-epoch", value],
+            directory.path(),
+        );
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).starts_with("error: no Compose file found"));
+    }
+}
+
 /// A project plus empty stand-ins for every runtime input but BusyBox.
 #[cfg(target_os = "linux")]
 fn runtime_project() -> (tempfile::TempDir, Vec<String>) {
@@ -256,6 +292,87 @@ fn busybox_default_requires_a_static_busybox_on_path() {
 }
 
 #[test]
+fn explore_bounds_and_help_are_public_before_runtime_inputs_or_state() {
+    let directory = tempfile::tempdir().unwrap();
+    assert!(seedbox(&["init", "demo"], directory.path())
+        .status
+        .success());
+    let project = directory.path().join("demo");
+    for count in ["0", "nope"] {
+        let output = seedbox(&["explore", "--count", count], &project);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).contains("--count"));
+        assert!(!project.join(".seedbox").exists());
+    }
+    let overflow = seedbox(
+        &["explore", "--seed", "18446744073709551615", "--count", "2"],
+        &project,
+    );
+    assert_eq!(stderr(&overflow),"error: --seed/--count: range is empty or overflows u64; use a positive --count and reduce the range\n");
+    assert!(!project.join(".seedbox").exists());
+    let boundary = seedbox(
+        &["explore", "--seed", "18446744073709551615", "--count", "1"],
+        &project,
+    );
+    assert_eq!(boundary.status.code(), Some(2));
+    assert!(!stderr(&boundary).contains("overflows"));
+    let help = seedbox(&["help", "explore"], &project);
+    assert!(help.status.success());
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(
+        text.contains("--count")
+            && text.contains("[default: 1]")
+            && text.contains("--json")
+            && text.contains("Exit status:")
+    );
+    assert!(!text.contains("--workers"));
+    fs::write(project.join("compose.yaml"),"services:\n  a: {image: example/a}\nx-seedbox:\n  version: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: a}\n").unwrap();
+    let missing = seedbox(&["explore"], &project);
+    assert_eq!(
+        stderr(&missing),
+        "error: --seed: no Compose seed; provide --seed FIRST\n"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn explore_resolves_tools_before_host_or_preparation() {
+    let (directory, mut args) = runtime_project();
+    args[0] = "explore".into();
+    let busybox = directory.path().join("busybox");
+    let mut elf = [0u8; 64];
+    elf[..6].copy_from_slice(b"\x7fELF\x02\x01");
+    fs::write(&busybox, elf).unwrap();
+    args.extend([
+        "--busybox".into(),
+        busybox.to_str().unwrap().into(),
+        "--json".into(),
+    ]);
+    let refs: Vec<_> = args.iter().map(String::as_str).collect();
+    let missing = seedbox(&refs, directory.path());
+    assert_eq!(
+        stderr(&missing),
+        "error: skopeo not found; install it or enter `nix develop`\n"
+    );
+    assert!(missing.stdout.is_empty());
+    assert!(!directory.path().join(".seedbox/runs").exists());
+    let bin = directory.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    fs::write(bin.join("skopeo"), b"must not execute").unwrap();
+    let missing = seedbox_with(&refs, directory.path(), Some(&bin));
+    assert_eq!(
+        stderr(&missing),
+        "error: umoci not found; install it or enter `nix develop`\n"
+    );
+    fs::write(bin.join("umoci"), b"must not execute").unwrap();
+    let missing = seedbox_with(&refs, directory.path(), Some(&bin));
+    assert_eq!(
+        stderr(&missing),
+        "error: podman not found; install it or enter `nix develop`\n"
+    );
+}
+
+#[test]
 fn bundle_cli_validates_paths_limits_and_positional_inputs() {
     let directory = tempfile::tempdir().unwrap();
     for command in ["export", "import"] {
@@ -276,4 +393,243 @@ fn bundle_cli_validates_paths_limits_and_positional_inputs() {
     assert_eq!(stderr(&output), "error: run directory missing: not found\n");
     let output = seedbox(&["import", "missing"], directory.path());
     assert_eq!(stderr(&output), "error: bundle missing: not found\n");
+}
+
+#[test]
+fn build_epoch_custom_builder_fails_before_runtime_resolution_or_state_creation() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("Dockerfile"), "FROM scratch\n").unwrap();
+    fs::write(root.path().join("compose.yaml"), "name: epoch\nservices:\n  app: {build: .}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n").unwrap();
+    fs::write(
+        root.path().join("builder"),
+        "custom builder must not execute",
+    )
+    .unwrap();
+    for command in ["run", "explore", "prepare"] {
+        let mut args = vec![command, "--build-epoch", "0", "--builder", "./builder"];
+        if command == "prepare" {
+            args.extend(["--output", "prepared.json"]);
+        }
+        let output = seedbox(&args, root.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(stderr(&output), "error: --build-epoch: builder ./builder is unsupported; use the qualified project-Nix local Podman or omit --build-epoch\n");
+        assert!(output.stdout.is_empty());
+        assert!(!root.path().join(".seedbox").exists());
+        assert!(!root.path().join("prepared.json").exists());
+    }
+}
+
+#[test]
+fn old_host_proof_replay_is_not_comparable_while_inspection_and_transfer_stay_available() {
+    use seedbox::{
+        config,
+        execution::*,
+        image::Launch,
+        orchestration::*,
+        store::{ContentDigest, ContentStore},
+    };
+    use std::collections::BTreeMap;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::write(root.join("compose.yaml"), "name: old\nservices:\n  workload: {image: fixture:v1}\nx-seedbox:\n  version: 1\n  seed: 0\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: workload}\n").unwrap();
+    let simulation = config::load(&root.join("compose.yaml"), &BTreeMap::new()).unwrap();
+    let store = ContentStore::new(root.join("state/objects"));
+    let object = store.put(b"opaque retained fixture").unwrap();
+    let inputs = PreparedInputs {
+        kernel: object.clone(),
+        profile: ExecutionProfile {
+            backend: "seedbox-kvm".into(),
+            engine: object.clone(),
+            witness_mode: WitnessMode::Exits,
+            semantic_parameters: BTreeMap::from([("memory_mb".into(), "512".into())]),
+        },
+        placement: BTreeMap::from([("workload".into(), "workload".into())]),
+        guests: BTreeMap::from([("workload".into(), object.clone())]),
+        images: BTreeMap::from([(
+            "workload".into(),
+            PreparedImage {
+                manifest: object.clone(),
+                config: object.clone(),
+                layers: vec![],
+                launch: Launch {
+                    argv: vec!["/app".into()],
+                    environment: BTreeMap::new(),
+                    user: "".into(),
+                    working_dir: "/".into(),
+                    volumes: vec![],
+                },
+            },
+        )]),
+        auxiliary: BTreeMap::new(),
+        provenance: BTreeMap::new(),
+    };
+    let identity = RunIdentity {
+        version: 2,
+        seed: 0,
+        configuration: simulation,
+        inputs,
+    };
+    let run_id = store.put(&serde_json::to_vec(&identity).unwrap()).unwrap();
+    let record = RunRecord {
+        run_id,
+        attempt: "old".into(),
+        identity,
+        performance_parameters: BTreeMap::new(),
+        allow_engine_change: false,
+        log_policy: LogPolicy::default(),
+        omitted_logs: BTreeMap::new(),
+        outcome: Outcome::Pass,
+        report: Some(ExecutionReport {
+            reason: StopReason::Completed,
+            workload_exit: Some(WorkloadExit {
+                service: "workload".into(),
+                code: 0,
+            }),
+            witness: Some(ContentDigest::of(b"fixture witness")),
+            full_state: None,
+            faults: vec![],
+            detail: None,
+        }),
+        error: None,
+        logs: BTreeMap::new(),
+        replay_of: None,
+        replay: None,
+    };
+    fs::create_dir_all(root.join("state/runs/old")).unwrap();
+    let manifest = serde_json::to_vec(&serde_json::json!({"sha256": ContentDigest::of(&serde_json::to_vec(&record).unwrap()), "record": record})).unwrap();
+    fs::write(root.join("state/runs/old/manifest.json"), &manifest).unwrap();
+    for override_engine in [false, true] {
+        let mut args = vec!["replay", "state/runs/old", "--state", "state"];
+        if override_engine {
+            args.push("--allow-engine-change");
+        }
+        let output = seedbox(&args, root);
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.starts_with("ERROR: "), "{stdout}");
+        assert!(stdout.contains("replay: NOT_COMPARABLE"), "{stdout}");
+        assert_eq!(stderr(&output), "input integrity: host admission proof missing: host_policy; use the retained previous CLI only for historical evidence\n");
+        assert_eq!(
+            fs::read(root.join("state/runs/old/manifest.json")).unwrap(),
+            manifest
+        );
+    }
+    assert!(seedbox(&["inspect", "state/runs/old", "--json"], root)
+        .status
+        .success());
+    let exported = seedbox(
+        &[
+            "export",
+            "state/runs/old",
+            "--state",
+            "state",
+            "--output",
+            "old.tar",
+        ],
+        root,
+    );
+    assert!(exported.status.success(), "{}", stderr(&exported));
+    let imported = seedbox(&["import", "old.tar", "--state", "imported"], root);
+    assert!(imported.status.success(), "{}", stderr(&imported));
+    assert_eq!(
+        fs::read(root.join("state/runs/old/manifest.json")).unwrap(),
+        manifest
+    );
+}
+
+#[test]
+fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let help = seedbox(&["help", "doctor"], root);
+    assert!(help.status.success());
+    let text = String::from_utf8(help.stdout).unwrap();
+    assert!(text.contains("Linux KVM host, root"));
+    for flag in ["--cpu", "--kernel", "--vmm", "--json"] {
+        assert!(text.contains(flag), "{text}");
+    }
+    for flag in [
+        "--state",
+        "--builder",
+        "--undo",
+        "--memory-mb",
+        "--guest-init",
+    ] {
+        assert!(!text.contains(flag), "{text}");
+    }
+    assert!(text.contains("Doctor never builds"));
+    let invalid = seedbox(&["doctor", "--cpu", "1024"], root);
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(stderr(&invalid).contains("--cpu"));
+    for json in [false, true] {
+        let mut args = vec!["doctor", "--vmm", "missing"];
+        if json {
+            args.push("--json");
+        }
+        let output = seedbox(&args, root);
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(stderr(&output), "error: --vmm missing: not found\n");
+        assert!(output.stdout.is_empty());
+    }
+    fs::write(root.join("engine"), b"unsupported engine").unwrap();
+    let missing_kernel = seedbox(&["doctor", "--vmm", "engine", "--kernel", "missing"], root);
+    assert_eq!(
+        stderr(&missing_kernel),
+        "error: --kernel missing: not found\n"
+    );
+    assert!(!root.join(".seedbox").exists());
+}
+
+#[test]
+fn doctor_bad_inputs_execute_no_tools_and_create_no_state_even_with_cargo_environment() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let tools = root.join("tools");
+    fs::create_dir(&tools).unwrap();
+    let marker = root.join("tool-called");
+    for name in ["cargo", "podman", "skopeo", "umoci"] {
+        let tool = tools.join(name);
+        fs::write(
+            &tool,
+            format!(
+                "#!/bin/sh\necho invoked >> '{}'\nexit 0\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    fs::write(root.join("kernel"), b"unqualified fixture kernel").unwrap();
+    for json in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_seedbox"));
+        command.args(["doctor", "--kernel", "kernel"]);
+        if json {
+            command.arg("--json");
+        }
+        let output = command
+            .current_dir(root)
+            .env_clear()
+            .env("HOME", root)
+            .env("PATH", &tools)
+            .env("CARGO_MANIFEST_DIR", env!("CARGO_MANIFEST_DIR"))
+            .env("CARGO", tools.join("cargo"))
+            .env("SEEDBOX_STATE", root.join("unwanted-state"))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        assert!(output.stdout.is_empty());
+        assert!(
+            !marker.exists(),
+            "doctor invoked a runtime/build/preparation program"
+        );
+        assert!(!root.join("unwanted-state").exists());
+        assert!(!root.join(".seedbox").exists());
+        assert!(!root.join("output").exists());
+    }
+    fs::write(root.join("engine"), b"unsupported engine").unwrap();
+    let output = seedbox(&["doctor", "--vmm", "engine", "--kernel", "kernel"], root);
+    assert_eq!(stderr(&output),"error: input integrity: engine is outside the admitted host policy; no engine-change override bypass is available\n");
+    assert!(!marker.exists());
+    assert!(output.stdout.is_empty());
 }

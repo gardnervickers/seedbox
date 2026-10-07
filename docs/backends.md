@@ -138,10 +138,12 @@ The tested production profile is Linux/KVM on the AMD Ryzen 5950X workstation,
 with the Zen SpeculativeLockMap workaround verified for the leased cores and
 SMT siblings. Guest kernel, supervisor, engine and semantic settings are run
 identity inputs. Host kernel/microcode changes or a new CPU need fresh
-qualification; same-seed equality across hosts is not established. Full host
-inventory admission and drift rejection remain
-[issue #5](https://github.com/gardnervickers/seedbox/issues/5), beyond the current
-KVM/MSR access checks, leases and workaround readbacks.
+qualification; same-seed equality across hosts is not established. The versioned
+host admission and drift refusal implemented for
+[issue #5](https://github.com/gardnervickers/seedbox/issues/5) add capability/input
+checks and lock-held revalidation. Their Linux collection and the new profile
+still require actual acceptance; source checks do not qualify them. Matching the
+full policy on another machine admits compatibility, not cross-host determinism.
 
 Clock and entropy evidence admits the tested workloads, not arbitrary Linux
 images or JVM/JIT programs. Broader instruction, CPU-feature, clock and entropy

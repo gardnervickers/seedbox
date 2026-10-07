@@ -21,7 +21,8 @@ python3 harness/smoke/amd.py --cli /absolute/seedbox \
 
 The wrapper does not build Seedbox CLI, VMM, kernel, supervisor or toolchain
 artifacts; those frozen artifacts are prerequisites. The baseline public `run`
-prepares the fixed `examples/faults` application and may build its workload images
+generates the fixed `examples/faults` project into the evidence directory with
+`examples/faults/generate.py`, prepares it, and may build its workload images
 or pull missing base images. All of that preparation is charged within the
 baseline command's wall-time budget and the five-minute campaign allocation.
 The baseline timer includes preparation and execution; there is no separate

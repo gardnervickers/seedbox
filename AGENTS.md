@@ -103,8 +103,11 @@ deliberately change one.
 3. On failure, return `missing(what, &searched, fix)`, which lists every
    location tried and one way to fix it.
 4. Resolve it in `RuntimeInputs::backends` or earlier, before any slow work
-   (image pulls, builds, CPU leases). Fail fast. `run` and `replay` then check
-   the host (`require_kvm_host`: KVM and MSR access) before preparing anything.
+   (image pulls, builds, CPU leases). Fail fast. `run` and `explore` check immutable runtime
+   inputs and backend host admission before
+   preparation; no transient perf descriptor, affinity or CPU reservation survives
+   that check. Replay validates retained host-policy proof before live admission,
+   so old/missing proof is a retained NOT_COMPARABLE rejection before execution.
 5. Add it to the defaults table in README.md's quick start.
 
 ### Help text
@@ -166,3 +169,9 @@ deliberately change one.
 - When behaviour changes, update `seedbox help`, README.md (quick start and
   defaults table), docs/runtime.md, and `crates/seedbox/templates/README.md`.
   The last one is copied into every project `seedbox init` creates.
+
+`doctor` shares execution admission and kernel/VMM defaults, with lookup-only VMM
+resolution: it must never trigger the cargo auto-build fallback. Success reports
+only the exact cleaned-up probe observations and selected core; the library does
+not read arguments/environment or print. It creates no state/run and never prepares
+images or executes guests. Compatibility readiness is not replay qualification.
