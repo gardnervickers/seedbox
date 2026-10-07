@@ -66,6 +66,7 @@ pub struct Control {
     last_session: u32,
     last_public: u32,
     handles: u32,
+    lookahead: u64,
     undelivered_reply: bool,
 }
 impl Control {
@@ -115,6 +116,7 @@ impl Control {
             last_session: 0,
             last_public: 0,
             handles: 0,
+            lookahead,
             undelivered_reply: false,
         })
     }
@@ -187,6 +189,25 @@ impl Control {
                     left: sides.remove(0),
                     right: sides.remove(0),
                 })
+            }
+            Operation::Shape {from,to,latency_ns,jitter_ns,loss_ppm} => {
+                crate::links::Policy {latency_ns:*latency_ns,jitter_ns:*jitter_ns,loss_ppm:*loss_ppm}.validate(self.lookahead)?;
+                if from.is_empty() || to.is_empty() { return Err("shape sides must be nonempty".into()); }
+                let mut members = BTreeSet::new();
+                let mut sides = Vec::new();
+                for side in [from,to] {
+                    let mut names = Vec::new();
+                    for target in side {
+                        let name = self.target(target)?;
+                        if !members.insert(name.clone()) { return Err("shape sides must be disjoint with unique machines".into()); }
+                        names.push(name);
+                    }
+                    sides.push(names);
+                }
+                self.handles = self.handles.checked_add(1).ok_or("fault handles exhausted")?;
+                let handle = format!("p{}",self.handles);
+                result = json!({"handle":handle});
+                Some(Action::Shape {handle,from:sides.remove(0),to:sides.remove(0),latency_ns:*latency_ns,jitter_ns:*jitter_ns,loss_ppm:*loss_ppm})
             }
             Operation::Heal { handle } => {
                 if handle.is_empty() {
@@ -346,7 +367,7 @@ impl Control {
                     p.error=Some(error.into());p.error_code=Some("invalid_state");p.effect=Some(now);
                 } else if matches!(&plan.action,Action::Heal{handle} if !faults.active_handles().contains(handle))
                 {
-                    p.error = Some("heal of inactive partition handle".into());
+                    p.error = Some("heal of inactive handle".into());
                     p.effect = Some(now);
                 } else {
                     p.fault = Some(faults.append(plan)?);

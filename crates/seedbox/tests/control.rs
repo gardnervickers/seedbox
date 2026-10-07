@@ -1,3 +1,11 @@
+#[allow(dead_code)]
+#[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/links.rs"]
+mod links;
+#[allow(dead_code)]
+#[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/rng.rs"]
+mod rng;
 #[rustfmt::skip]
 #[path = "../../seedbox-vmm/src/control.rs"]
 mod control;
@@ -452,7 +460,7 @@ fn oversized_inspection_is_a_bounded_recoverable_reply() {
         .flat_map(|from| {
             (0..12).filter(move |&to|to!=from).map(move |to|(
         format!("chatty-machine-{from:02}->chatty-machine-{to:02}"),
-        json!({"delivered":u64::MAX,"partition_dropped":u64::MAX,"receiver_dropped":u64::MAX})
+        json!({"delivered":u64::MAX,"partition_dropped":u64::MAX,"receiver_dropped":u64::MAX,"loss_dropped":u64::MAX})
     ))
         })
         .collect::<std::collections::BTreeMap<_, _>>();
@@ -592,6 +600,82 @@ fn target_exit_after_admission_is_recoverable_only_while_effect_is_outstanding()
         if !success {
             assert_eq!(c.log[0]["response"]["error"]["code"], "effect_failed");
         }
+    }
+}
+
+#[test]
+fn shape_uses_partition_handle_counter_and_only_changes_links_at_admission() {
+    let mut c = control();
+    let mut f = faults::Faults::new(
+        vec![],
+        vec!["scenario".into(), "client".into(), "server".into()],
+    )
+    .unwrap();
+    request(&mut c,1,100,json!({"version":1,"id":1,"op":"shape","from":[{"service":"client"}],"to":[{"service":"server"}],"latency_ns":30,"jitter_ns":5,"loss_ppm":500_000})).unwrap();
+    assert!(f.active_handles().is_empty());
+    c.apply_boundary(&mut f, 120).unwrap();
+    assert!(f.active_handles().is_empty());
+    f.apply_due(120);
+    assert_eq!(f.active_handles(), vec!["p1"]);
+    assert_eq!(f.links.policy((1, 2)).latency_ns, 30);
+    assert_eq!(f.links.policy((2, 1)).latency_ns, 1);
+    c.observe_faults(&f, 120).unwrap();
+    let reply = c.response(140).unwrap();
+    assert!(String::from_utf8(reply)
+        .unwrap()
+        .contains("\"handle\":\"p1\""));
+    c.mark_delivered(140).unwrap();
+    request(&mut c,2,200,json!({"version":1,"id":2,"op":"partition","left":[{"service":"client"}],"right":[{"service":"server"}]})).unwrap();
+    c.apply_boundary(&mut f, 220).unwrap();
+    f.apply_due(220);
+    c.observe_faults(&f, 220).unwrap();
+    c.response(240).unwrap();
+    c.mark_delivered(240).unwrap();
+    assert_eq!(f.active_handles(), vec!["p1", "p2"]);
+    request(
+        &mut c,
+        3,
+        300,
+        json!({"version":1,"id":3,"op":"heal","handle":"p1"}),
+    )
+    .unwrap();
+    c.apply_boundary(&mut f, 320).unwrap();
+    f.apply_due(320);
+    c.observe_faults(&f, 320).unwrap();
+    c.response(340).unwrap();
+    c.mark_delivered(340).unwrap();
+    assert_eq!(f.active_handles(), vec!["p2"]);
+    assert!(f.blocked(1, 2));
+    assert_eq!(f.links.policy((1, 2)).latency_ns, 1);
+}
+
+#[test]
+fn invalid_shape_values_and_sides_receive_correlated_invalid_request_without_effects() {
+    let good = json!({"version":1,"id":1,"op":"shape","from":[{"service":"client"}],"to":[{"service":"server"}],"latency_ns":10,"jitter_ns":0,"loss_ppm":0});
+    for (key, value) in [
+        ("latency_ns", json!(9)),
+        ("jitter_ns", json!(10)),
+        ("loss_ppm", json!(1_000_001)),
+        ("latency_ns", json!(3_600_000_000_001u64)),
+        ("from", json!([])),
+        ("to", json!([{"service":"client"}])),
+        ("from", json!([{"service":"client"},{"machine":"client"}])),
+        ("from", json!([{"service":"scenario"}])),
+    ] {
+        let mut c = control();
+        let mut call = good.clone();
+        call[key] = value;
+        request(&mut c, 1, 100, call).unwrap();
+        let mut f = faults::Faults::new(
+            vec![],
+            vec!["scenario".into(), "client".into(), "server".into()],
+        )
+        .unwrap();
+        c.apply_boundary(&mut f, 120).unwrap();
+        let reply = String::from_utf8(c.response(140).unwrap()).unwrap();
+        assert!(reply.contains("invalid_request"), "{reply}");
+        assert!(f.active_handles().is_empty());
+        assert!(f.log.is_empty());
     }
 }
 
