@@ -19,8 +19,9 @@ x-seedbox:
 ```
 
 The control service must also be the check service, so another application cannot
-complete the run before the scenario finishes. The controller is outside the fault model. Stop/restart cannot target it, and
-partition groups cannot contain it. Its control transport and network links
+complete the run before the scenario finishes. The controller is outside the fault
+model. Stop/restart and machine lifecycle operations cannot target it, and partition
+groups cannot contain it. Its control transport and network links
 remain available during cuts between other guests. A stopped application still
 cannot answer application requests; restart confirmation means successful exec,
 so the scenario must check application readiness separately. Normal controller
@@ -90,6 +91,10 @@ Common fields are `version: 1`, `id`, and `op`. Targets are typed objects:
 | `sleep` | `duration_ns`: unsigned 64-bit nanoseconds | `{}` after simulated sleep |
 | `stop` | `target`: a typed target | `{}` after process-group termination and reap |
 | `restart` | `target`: a typed target | `{}` after successful exec of its retained launch recipe |
+| `pause` | `target`: a typed target | `{}` after freezing the whole machine |
+| `resume` | `target`: a typed target | `{}` after continuing a paused machine |
+| `crash` | `target`: a typed target | `{}` after destroying the machine |
+| `reboot` | `target`: a typed target | `{}` after booting a crashed machine from its retained image |
 | `partition` | `left`, `right`: nonempty, disjoint arrays of typed targets | `{"handle":"opaque value"}` |
 | `shape` | `from`, `to`: nonempty disjoint typed-target arrays; `latency_ns`, `jitter_ns`, `loss_ppm`: integers | `{"handle":"opaque value"}` |
 | `connections` | `from`, `to`: distinct typed targets; `after`: optional unsigned incarnation cursor (default 0) | `connections`: up to 32 directional records; `next_after`: last returned incarnation (or input cursor) |
@@ -101,13 +106,22 @@ Partitions cut both directions between their two groups. Each handle is
 independent: a link remains cut while any applicable handle exists. Already
 routed packets stay in flight; new sends crossing an active cut are dropped.
 Inspect returns the retained service-to-machine mapping, application lifecycle
-states (`Running`, `Stopped`, or `Exited(code)`), active partition, shape and connection handles and
-directed-link counters. It exposes simulator state, not application object memory.
+states (`Running`, `Stopped`, `Paused`, `Down`, or `Exited(code)`), active partition, shape and connection
+handles and directed-link counters. It exposes simulator state, not application object memory.
 Transient CPU halt state is not an application lifecycle state. Counters include
 sends, drops and arrivals whose nominal simulated timestamps are strictly before
 the admission boundary; equal-time packets follow admission. This excludes
 packets that the scheduler has delivered early but whose nominal arrival is
 still in the future. Partition/shape/heal evidence uses the same counter boundary.
+
+Machine lifecycle effects occur at admission without a guest acknowledgement.
+`pause` freezes the whole machine while others keep running; `resume` continues
+it, with missed timer ticks firing once, late. `crash` destroys RAM, sockets and
+queued I/O; nothing is sent on the machine's behalf. `reboot` starts a fresh
+incarnation from the retained image. Application readiness remains the scenario's
+own check. The allowed transitions are running to paused, paused to running,
+running or paused to down, and down to running, respectively. An application
+process that is stopped still belongs to a running machine.
 
 For example:
 
@@ -177,10 +191,18 @@ An operation error uses `ok: false` and `error` instead of a result:
 A scenario can handle rejected arguments or an inactive fault handle.
 `restart` starts a stopped application using its retained launch recipe. Restarting
 a running application or stopping an already stopped application returns
-`invalid_state`. Commands targeting a VM that has exited return `target_unavailable`,
-as does a stop or restart whose target VM exits after admission but before the
-effect is acknowledged; the scenario can inspect that exit and decide its own
-outcome. That recovery applies to process faults requested through this RPC; a
+`invalid_state`. Illegal machine lifecycle transitions also return `invalid_state`
+without creating a fault plan: pause requires a running machine, resume a paused
+machine, crash a machine that is not down, and reboot a down machine. Stop and
+restart of a paused machine also return `invalid_state`, since its supervisor
+cannot act until it resumes. Stop/restart
+and pause/resume targeting a VM that has exited return `target_unavailable`;
+crash and reboot are allowed for an exited machine, subject to those transitions.
+Stop/restart targeting a down machine resolve as `target_unavailable` at admission,
+and pending process commands resolve with that error at their machine's crash time.
+A stop or restart whose target VM exits after admission but before the effect is
+acknowledged also returns `target_unavailable`; the scenario can inspect that exit
+and decide its own outcome. That recovery applies to process faults requested through this RPC; a
 legacy static fault plan given directly to the VMM keeps the acknowledgement
 deadline below. An inspection whose response would exceed the frame limit returns
 `result_too_large`.
@@ -203,8 +225,9 @@ It must cover scheduler lookahead and the ordinary early-delivery window.
 - `requested_at_ns = T`: complete request observed.
 - `admitted_at_ns = A = T + L`: all relevant guests have reached the exact
   admission boundary; the operation can start without changing another guest's past.
-- `effect_at_ns = E`: a partition/heal takes effect at admission; stop/restart
-  waits for the supervisor's correlated confirmation; sleep wakes at `A + duration_ns`.
+- `effect_at_ns = E`: partition/heal and pause/resume/crash/reboot take effect at
+  admission; stop/restart waits for the supervisor's correlated confirmation;
+  sleep wakes at `A + duration_ns`.
 - `replied_at_ns = R = E + L`: response delivery is scheduled strictly at this
   time, never through the ordinary early packet-delivery window.
 

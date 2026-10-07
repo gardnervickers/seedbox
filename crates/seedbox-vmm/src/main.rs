@@ -5,6 +5,7 @@ mod boundary;
 mod control;
 mod counter;
 mod devices;
+mod disk;
 mod events;
 mod faults;
 mod links;
@@ -16,15 +17,17 @@ mod rng;
 mod stepper;
 mod timebase;
 mod undo;
+mod virtio_blk;
 mod virtio_net;
 mod virtio_console;
 
 use counter::Counter;
-use machine::{BootSpec, Machine, MachineSnapshot, State, Stop, NET_IRQ, NET_MMIO, CHANNEL_IRQ, CHANNEL_MMIO};
+use machine::{BootSpec, Machine, MachineSnapshot, State, Stop, NET_IRQ, NET_MMIO, CHANNEL_IRQ, CHANNEL_MMIO, BLK_IRQ, BLK_MMIO};
 use rng::Rng;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::time::Instant;
 
 thread_local! {
@@ -38,8 +41,112 @@ enum Payload {
     Partition { from: usize, to: usize, on: bool },
 }
 
+/// Frames that may wait for a paused machine, queued while it is paused and
+/// due before it resumes. Later ones are dropped at the receiver. Part of the
+/// execution semantics: changing it changes runs.
+const PAUSED_INGRESS_FRAMES: u64 = 256;
+
+/// Everything a machine boots from. A reboot starts a new incarnation from
+/// exactly these inputs, with its own entropy and timer seeds.
+#[derive(Clone)]
+struct BootInputs {
+    kernel: Rc<[u8]>,
+    initrd: Rc<[u8]>,
+    /// The command line before and after the launch barrier flag.
+    cmdline: (String, String),
+    mem: usize,
+    mac: Option<[u8; 6]>,
+    control_channel: bool,
+    /// The disk as configured, with nothing written. Only the first
+    /// incarnation boots from it; a reboot inherits its predecessor's.
+    disk: Option<disk::Disk>,
+    undo_margin: u64,
+    tolerance: u64,
+    timer_jitter: u64,
+    exact_timer_ppm: u64,
+    /// A fixed stepping margin; None adapts it.
+    margin: Option<u64>,
+    console_limit: Option<usize>,
+}
+
+fn entropy_seed(seed: u64, domain: &str) -> [u8; 32] {
+    let mut rng = Rng::new(seed, domain);
+    let mut out = [0u8; 32];
+    for c in out.chunks_mut(8) {
+        c.copy_from_slice(&rng.next().to_le_bytes());
+    }
+    out
+}
+
+/// A machine's `disk`: `{"size_mib": N}` for a zeroed disk, or
+/// `{"image": PATH}` for a raw image (with `size_mib`, it must be that size).
+fn machine_disk(cfg: &Value, path: &dyn Fn(&Value) -> std::path::PathBuf) -> Result<Option<disk::Disk>, String> {
+    if cfg.is_null() {
+        return Ok(None);
+    }
+    let fields = cfg.as_object().ok_or("disk must be an object")?;
+    if let Some(key) = fields.keys().find(|k| !matches!(k.as_str(), "size_mib" | "image")) {
+        return Err(format!("disk: unknown field {key}"));
+    }
+    let sectors = match &cfg["size_mib"] {
+        Value::Null => None,
+        v => Some(v.as_u64().filter(|&m| m > 0 && m <= 1 << 20).ok_or("disk.size_mib must be 1..=1048576")? * 2048),
+    };
+    let image = match &cfg["image"] {
+        Value::Null => None,
+        v if v.is_string() => {
+            let p = path(v);
+            Some(std::fs::read(&p).map_err(|e| format!("disk image {}: {e}", p.display()))?)
+        }
+        _ => return Err("disk.image must be a path".into()),
+    };
+    disk::Disk::new(image, sectors).map(Some)
+}
+
+fn boot_machine(kvm: &kvm_ioctls::Kvm, name: &str, b: &BootInputs, barrier: bool, rng_seed: [u8; 32]) -> Result<Machine, String> {
+    let mut cmdline = b.cmdline.0.clone();
+    if barrier {
+        cmdline += " seedbox.barrier=1";
+    }
+    cmdline += &b.cmdline.1;
+    let spec = BootSpec {
+        kernel: &b.kernel,
+        initrd: &b.initrd,
+        cmdline,
+        mem: b.mem,
+        rng_seed,
+        mac: b.mac,
+        control_channel: b.control_channel,
+        disk: b.disk.clone(),
+        undo_margin: b.undo_margin,
+        barrier,
+    };
+    let mut mach = Machine::new(kvm, name, &spec)?;
+    mach.com1.output_limit = b.console_limit;
+    mach.com2.output_limit = b.console_limit;
+    mach.tolerance = b.tolerance;
+    mach.timer_jitter = b.timer_jitter;
+    mach.exact_timer_ppm = b.exact_timer_ppm;
+    match b.margin {
+        None => mach.adaptive_margin = true,
+        Some(m) => mach.margin = m,
+    }
+    Ok(mach)
+}
+
 struct World {
     machines: Vec<Machine>,
+    kvm: kvm_ioctls::Kvm,
+    boot: Vec<BootInputs>,
+    /// The first incarnation parks at its launch barrier.
+    barrier: bool,
+    boot_seed: u64,
+    /// The seed the world plan was armed with; reboots draw from it.
+    run_seed: u64,
+    /// Per machine, a summary of each incarnation that crashed.
+    incarnations: Vec<Vec<Value>>,
+    /// Frames queued for each paused machine during its current pause.
+    paused_ingress: Vec<u64>,
     counter: Counter,
     events: Vec<BTreeMap<(u64, u64), Payload>>,
     seq: u64,
@@ -101,7 +208,7 @@ impl World {
     /// Earliest virtual time at which machine m can next act.
     fn key(&self, m: usize) -> u64 {
         let mach = &self.machines[m];
-        if mach.parked {
+        if mach.parked || mach.paused || mach.down {
             return u64::MAX;
         }
         match mach.state {
@@ -125,7 +232,9 @@ impl World {
                 self.control.mark_delivered(self.machines[m].time)?;
             }
         }
-        let now = self.machines[m].time + self.early;
+        // Never early across this machine's next lifecycle boundary: what
+        // arrives at or after a pause or crash must not reach it before.
+        let now = events::early_bound(self.machines[m].time, self.early, self.faults.next_lifecycle(m));
         while let Some((at,p)) = events::pop_due_at(&mut self.events[m], now) {
             let mach = &mut self.machines[m];
             match p {
@@ -154,12 +263,30 @@ impl World {
         let dst_mac: [u8; 6] = frame[0..6].try_into().unwrap();
         let targets = links::candidates(src,dst_mac,&self.macs);
         for dst in targets {
+            let last = self.faults.links.last.get(&(src,dst)).copied();
             let cut = *self.partitioned.get(&(src,dst)).unwrap_or(&false);
             let t = match self.faults.route(src,dst,send_time,&frame,cut) {
                 links::Outcome::Cut => { self.dropped += 1; self.count_link(send_time,src,dst,1); continue; }
                 links::Outcome::Lost => { self.dropped += 1; self.count_link(send_time,src,dst,3); continue; }
                 links::Outcome::Deliver(t) => t,
             };
+            // A frame arriving while its receiver is down meets no NIC; one
+            // arriving while it is paused waits, up to a fixed backlog.
+            let to = &self.machines[dst];
+            match events::arrival(t, self.faults.next_lifecycle(dst), to.down, to.paused, self.paused_ingress[dst], PAUSED_INGRESS_FRAMES) {
+                events::Arrival::Queue => {}
+                events::Arrival::Held => self.paused_ingress[dst] += 1,
+                events::Arrival::Drop => {
+                    // Receiver rejection consumes policy draws but reserves no FIFO arrival.
+                    match last {
+                        Some(last) => { self.faults.links.last.insert((src,dst),last); }
+                        None => { self.faults.links.last.remove(&(src,dst)); }
+                    }
+                    self.dropped += 1;
+                    self.count_link(t, src, dst, 2);
+                    continue;
+                }
+            }
             self.schedule(
                 dst,
                 t,
@@ -169,6 +296,67 @@ impl World {
                 },
             );
         }
+    }
+
+    /// Carry out a lifecycle transition at world boundary `t`, before any
+    /// machine runs at `t`.
+    fn lifecycle(&mut self, m: usize, op: faults::Lifecycle, t: u64) -> Result<(), String> {
+        if self.machines[m].time > t {
+            return Err("lifecycle boundary is in committed machine past".into());
+        }
+        match op {
+            faults::Lifecycle::Pause => {
+                self.paused_ingress[m] = 0;
+                self.machines[m].pause()
+            }
+            faults::Lifecycle::Resume => self.machines[m].resume(t),
+            faults::Lifecycle::Crash => self.crash(m, t),
+            faults::Lifecycle::Reboot => self.reboot(m, t),
+        }
+    }
+
+    /// Destroy machine m's VM at `t` and build its next incarnation from the
+    /// retained boot inputs, ready to boot when it reboots. Management
+    /// commands queued for the dead incarnation go with it; frames in world
+    /// transit stay queued for the reboot to sort out.
+    fn crash(&mut self, m: usize, t: u64) -> Result<(), String> {
+        let name = self.machines[m].name.clone();
+        let next = self.machines[m].incarnation.checked_add(1).ok_or("incarnation overflow")?;
+        let seed = entropy_seed(self.run_seed, &format!("reboot-entropy/{name}/{next}"));
+        let mut fresh = boot_machine(&self.kvm, &name, &self.boot[m], false, seed)?;
+        fresh.timer_rng = Some(Rng::new(self.run_seed, &format!("timer-jitter/{name}/{next}")));
+        let mut old = std::mem::replace(&mut self.machines[m], fresh);
+        let discarded: usize = self.strict_events[m].values().map(Vec::len).sum();
+        self.strict_events[m].clear();
+        let mut summary = json!({
+            "incarnation": old.incarnation, "booted_at_ns": old.booted_at, "crashed_at_ns": t,
+            "time_ns": old.time, "branches": old.branches, "exits": old.stats.exits,
+            "state": format!("{:?}", old.state), "paused": old.paused,
+            "discarded_pending_io": old.pending_io.is_some(), "discarded_management_bytes": discarded,
+            "witness": old.exit_witness(),
+        });
+        summary["disk_lost_sectors"] = json!(self.machines[m].succeed(&mut old, t, self.run_seed)?);
+        self.incarnations[m].push(summary);
+        Ok(())
+    }
+
+    /// Boot machine m's next incarnation at `t`. Frames that reached it
+    /// before `t` (held while it was paused, or arriving while it was down)
+    /// belonged to the dead NIC and are dropped; later ones arrive normally.
+    fn reboot(&mut self, m: usize, t: u64) -> Result<(), String> {
+        while let Some((at, p)) = events::pop_before(&mut self.events[m], t) {
+            match p {
+                Payload::Frame { from, .. } => {
+                    self.dropped += 1;
+                    self.count_link(at, from, m, 2);
+                }
+                Payload::Serial(_) => {}
+                Payload::Partition { from, to, on } => {
+                    self.partitioned.insert((from, to), on);
+                }
+            }
+        }
+        self.machines[m].boot_at(t)
     }
 }
 
@@ -217,6 +405,11 @@ fn run() -> Result<Value, String> {
         &std::fs::read(&config_path).map_err(|e| format!("{config_path}: {e}"))?,
     )
     .map_err(|e| format!("config: {e}"))?;
+    let torn_writes = match &cfg["disk_loss"] {
+        Value::Null => false,
+        Value::String(model) if model == disk::TORN_MODEL => true,
+        _ => return Err("unknown disk_loss model".into()),
+    };
     let base = std::path::Path::new(&config_path)
         .parent()
         .unwrap()
@@ -262,24 +455,30 @@ fn run() -> Result<Value, String> {
         return Err("--trace cannot be combined with --fork-seeds".into());
     }
     let kvm = kvm_ioctls::Kvm::new().map_err(|e| format!("kvm: {e}"))?;
+    let kernel: Rc<[u8]> = kernel.into();
+    let margin = match std::env::var("SEEDBOX_MARGIN").as_deref() {
+        Ok("adaptive") | Err(_) => None,
+        Ok(m) => Some(m.parse().map_err(|e| format!("margin: {e}"))?),
+    };
+    let console_limit = match arg(&args, "--console-limit") {
+        Some(limit) => Some(limit.parse::<usize>().map_err(|error| format!("console limit: {error}"))?),
+        None => None,
+    };
+    let barrier = forked && fork_at.is_none();
     let mut machines = Vec::new();
     let mut macs = Vec::new();
-    let mut initrds: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut boots = Vec::new();
+    let mut initrds: BTreeMap<String, Rc<[u8]>> = BTreeMap::new();
     for (i, mc) in cfg["machines"].as_array().unwrap().iter().enumerate() {
         let ipath = path(&mc["initrd"]).to_string_lossy().to_string();
         if !initrds.contains_key(&ipath) {
             initrds.insert(
                 ipath.clone(),
-                std::fs::read(&ipath).map_err(|e| format!("{ipath}: {e}"))?,
+                std::fs::read(&ipath).map_err(|e| format!("{ipath}: {e}"))?.into(),
             );
         }
         let mac = [0x52, 0x54, 0x00, 0x00, 0x00, i as u8 + 1];
         macs.push(mac);
-        let mut rng = Rng::new(boot_seed, &format!("boot-entropy/{}", names[i]));
-        let mut rng_seed = [0u8; 32];
-        for c in rng_seed.chunks_mut(8) {
-            c.copy_from_slice(&rng.next().to_le_bytes());
-        }
         let mut cmdline = format!(
             "console=ttyS0 nokaslr noapic nolapic acpi=off io_delay=none tsc=reliable tsc_early_khz=1000000 lpj=1000000 \
              clocksource=tsc random.trust_cpu=off random.trust_bootloader=on panic=-1 loglevel=4 rdinit=/init \
@@ -290,26 +489,34 @@ fn run() -> Result<Value, String> {
             cmdline += &format!(" virtio_mmio.device=4K@{NET_MMIO:#x}:{NET_IRQ}");
         }
         if control_channel {cmdline+=&format!(" virtio_mmio.device=4K@{CHANNEL_MMIO:#x}:{CHANNEL_IRQ}");}
-        if forked && fork_at.is_none() {
-            cmdline += " seedbox.barrier=1";
+        let disk = machine_disk(&mc["disk"], &path)?.map(|d| d.with_torn_writes(torn_writes));
+        if disk.is_some() {
+            cmdline += &format!(" virtio_mmio.device=4K@{BLK_MMIO:#x}:{BLK_IRQ}");
         }
-        if names.get(i).is_some_and(|name|cfg["control"]["machine"].as_str()==Some(name.as_str())) {cmdline+=" seedbox.control=1";}
+        let mut after = String::new();
+        if names.get(i).is_some_and(|name|cfg["control"]["machine"].as_str()==Some(name.as_str())) {after+=" seedbox.control=1";}
         if let Some(extra) = mc["cmdline"].as_str() {
-            cmdline += " ";
-            cmdline += extra;
+            after += " ";
+            after += extra;
         }
-        let spec = BootSpec {
-            kernel: &kernel,
-            initrd: &initrds[&ipath],
-            cmdline,
+        let boot = BootInputs {
+            kernel: kernel.clone(),
+            initrd: initrds[&ipath].clone(),
+            cmdline: (cmdline, after),
             mem,
-            rng_seed,
             mac: networked.then_some(mac),
             control_channel,
+            disk,
             undo_margin,
-            barrier: forked && fork_at.is_none(),
+            tolerance: cfg["stop_tolerance_ns"].as_u64().unwrap_or(0),
+            timer_jitter: cfg["timer_jitter_ns"].as_u64().unwrap_or(0),
+            exact_timer_ppm: cfg["exact_timer_ppm"].as_u64().unwrap_or(0),
+            margin,
+            console_limit,
         };
-        let mut mach = Machine::new(&kvm, &names[i], &spec)?;
+        let seed = entropy_seed(boot_seed, &format!("boot-entropy/{}", names[i]));
+        let mut mach = boot_machine(&kvm, &names[i], &boot, barrier, seed)?;
+        boots.push(boot);
         if args.iter().any(|arg| arg == "--stream-console") {
             mach.com1.output_file = Some(
                 std::fs::File::create(format!("{out}/{}.console", names[i]))
@@ -320,25 +527,11 @@ fn run() -> Result<Value, String> {
                     .map_err(|error| error.to_string())?,
             );
         }
-        if let Some(limit) = arg(&args, "--console-limit") {
-            let limit = limit
-                .parse::<usize>()
-                .map_err(|error| format!("console limit: {error}"))?;
-            mach.com1.output_limit = Some(limit);
-            mach.com2.output_limit = Some(limit);
-        }
-        mach.tolerance = cfg["stop_tolerance_ns"].as_u64().unwrap_or(0);
-        mach.timer_jitter = cfg["timer_jitter_ns"].as_u64().unwrap_or(0);
-        mach.exact_timer_ppm = cfg["exact_timer_ppm"].as_u64().unwrap_or(0);
         mach.timer_rng = Some(Rng::new(boot_seed, &format!("timer-jitter/{}", names[i])));
         if args.iter().any(|a| a == "--trace") {
             let f = std::fs::File::create(format!("{out}/{}.trace", names[i]))
                 .map_err(|e| e.to_string())?;
             mach.trace = Some(std::io::BufWriter::new(f));
-        }
-        match std::env::var("SEEDBOX_MARGIN").as_deref() {
-            Ok("adaptive") | Err(_) => mach.adaptive_margin = true,
-            Ok(m) => mach.margin = m.parse().map_err(|e| format!("margin: {e}"))?,
         }
         machines.push(mach);
     }
@@ -357,6 +550,13 @@ fn run() -> Result<Value, String> {
     let latency = net["latency_ns"].as_u64().unwrap_or(1_000_000);
     let early = (latency / 2).min(cfg["stop_tolerance_ns"].as_u64().unwrap_or(0));
     let mut world = World {
+        kvm,
+        boot: boots,
+        barrier,
+        boot_seed,
+        run_seed: seed,
+        incarnations: vec![Vec::new(); n],
+        paused_ingress: vec![0; n],
         counter: Counter::new()?,
         events: (0..n).map(|_| BTreeMap::new()).collect(),
         seq: 0,
@@ -499,6 +699,7 @@ fn arm_seed(world: &mut World, cfg: &Value, names: &[String], seed: u64, from: u
     world.faults.require_readiness();
     replay_readiness(&mut world.faults, names, &booted, world.latency)?;
     world.faults.links.reseed(seed, names);
+    world.run_seed = seed;
     let index = |name: &str| {
         names
             .iter()
@@ -612,9 +813,18 @@ impl WorldSnapshot {
     /// Put the world back to the fork point. Returns RAM pages copied back.
     fn restore(&self, world: &mut World) -> Result<u64, String> {
         let mut pages = 0;
-        for (mach, snapshot) in world.machines.iter_mut().zip(&self.machines) {
-            pages += mach.restore(snapshot)?;
+        for (i, snapshot) in self.machines.iter().enumerate() {
+            // A machine the last seed crashed is a later incarnation in a new
+            // VM: rebuild the first one to restore into.
+            if world.machines[i].incarnation > 0 {
+                let name = world.machines[i].name.clone();
+                let seed = entropy_seed(world.boot_seed, &format!("boot-entropy/{name}"));
+                world.machines[i] = boot_machine(&world.kvm, &name, &world.boot[i], world.barrier, seed)?;
+            }
+            pages += world.machines[i].restore(snapshot)?;
         }
+        world.incarnations.iter_mut().for_each(Vec::clear);
+        world.paused_ingress.fill(0);
         world.events = self.events.clone();
         world.strict_events = self.strict_events.clone();
         world.seq = self.seq;
@@ -703,11 +913,16 @@ fn simulate(
                 let snapshot=world.counter_snapshot(world.semantic_counts.counts());world.faults.log[i]["network_counters"]=snapshot;
             }
             for (target, command) in commands {
-                if world.machines[target].state == State::Halted {
+                if world.machines[target].state == State::Halted && !world.machines[target].paused {
                     world.machines[target].wake(fault_boundary);
                 }
                 world.seq += 1;
                 world.strict_events[target].insert((fault_boundary, world.seq), command);
+            }
+            // After the commands, so a crash at this boundary discards those
+            // its machine was just sent.
+            for (target, op) in world.faults.take_lifecycle() {
+                world.lifecycle(target, op, fault_boundary)?;
             }
             world
                 .control
@@ -719,7 +934,9 @@ fn simulate(
             continue;
         }
         if key == u64::MAX {
-            outcome = "quiescent";
+            // Paused or down machines with nothing left to resume or reboot
+            // them sit out the rest of the run.
+            outcome = if world.machines.iter().any(|m| m.paused || m.down) { "duration" } else { "quiescent" };
             break;
         }
         if key >= duration {
@@ -867,7 +1084,7 @@ fn report(
         world_witness.update(serde_json::to_vec(&world.network_snapshot()).map_err(|e| e.to_string())?);
     }
     let mut report = Vec::new();
-    for mach in world.machines.iter_mut() {
+    for (index, mach) in world.machines.iter_mut().enumerate() {
         if let Some(t) = mach.trace.as_mut() {
             use std::io::Write;
             let _ = t.flush();
@@ -891,6 +1108,11 @@ fn report(
         if let Some(d) = &state_digest {
             world_witness.update(d.as_bytes());
         }
+        // A disk outlives its machine's crashes: what it holds is part of
+        // the outcome even without --digest.
+        if let Some(b) = &mach.blk {
+            world_witness.update(b.disk.digest().as_bytes());
+        }
         std::fs::write(format!("{out}/{}.console", mach.name), &mach.com1.out)
             .map_err(|e| e.to_string())?;
         std::fs::write(format!("{out}/{}.mgmt", mach.name), &mach.com2.out)
@@ -900,9 +1122,9 @@ fn report(
         sk.sort();
         let skid_p50 = sk.get(sk.len() / 2).copied();
         let skid_p99 = sk.get(sk.len() * 99 / 100).copied();
-        report.push(json!({
+        let mut row = json!({
             "name": mach.name,
-            "state": format!("{:?}", mach.state),
+            "state": if mach.down {"Down".into()} else if mach.paused {"Paused".into()} else {format!("{:?}", mach.state)},
             "guest_exit_code": mach.guest_exit_code,
             "guest_init_error": mach.guest_init_error,
             "infrastructure_error": matches!(mach.state, State::Exited(_)) && mach.guest_exit_code.is_none(),
@@ -929,7 +1151,18 @@ fn report(
             "kvm_n_by_exit": s.kvm_n,
             "control_channel":mach.channel.as_ref().map(|_|json!({"transport":"virtio-console-v1","tx_bytes":mach.control_tx_bytes,"rx_dma_bytes":mach.control_dma_bytes})),
             "net": mach.net.as_ref().map(|n| json!({"tx": n.tx_frames, "rx": n.rx_frames, "rx_dropped": n.rx_dropped})),
-        }));
+        });
+        row["disk"] = json!(mach.blk.as_ref().map(|b| json!({
+                "model": b.disk.model(), "capacity_sectors": b.disk.capacity(), "base_sha256": b.disk.base_sha256(),
+                "digest": b.disk.digest(), "stable_sectors": b.disk.stable_sectors(), "volatile_sectors": b.disk.volatile_sectors(),
+                "reads": b.stats.reads, "writes": b.stats.writes, "flushes": b.stats.flushes,
+                "sectors_read": b.stats.sectors_read, "sectors_written": b.stats.sectors_written,
+                "sectors_flushed": b.stats.sectors_flushed, "errors": b.stats.errors,
+            })));
+        row["incarnation"] = json!(mach.incarnation);
+        row["booted_at_ns"] = json!(mach.booted_at);
+        row["crashed_incarnations"] = json!(world.incarnations[index]);
+        report.push(row);
     }
     let sim_ns = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
     Ok(json!({

@@ -78,6 +78,54 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
         assert_eq!(world["timer_jitter_ns"], 50_000);
         assert_eq!(world["stop_tolerance_ns"], 40_000);
         assert_eq!(world["duration_ns"], 1_000_000_000);
+        assert!(world["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m.get("disk").is_none()));
+        // A machine whose service mounts a named volume gets a retained disk.
+        let mut prepared = request.prepared.clone();
+        let hash = ContentDigest::of(b"retained input");
+        prepared.images.insert(
+            "server".into(),
+            PreparedImage {
+                manifest: hash.clone(),
+                config: hash.clone(),
+                layers: vec![],
+                launch: seedbox::image::Launch {
+                    argv: vec!["/app".into()],
+                    environment: BTreeMap::new(),
+                    working_dir: "/".into(),
+                    user: String::new(),
+                    volumes: vec![],
+                    disk_volumes: vec![seedbox::config::VolumeMount {
+                        source: "state".into(),
+                        target: "/state".into(),
+                    }],
+                },
+            },
+        );
+        let world = vmm::world(&ExecutionRequest {
+            prepared: &prepared,
+            ..*request
+        })
+        .unwrap();
+        let disks: Vec<_> = world["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| (m["name"].as_str().unwrap(), m.get("disk").cloned()))
+            .collect();
+        assert_eq!(
+            disks,
+            [
+                ("client-machine", None),
+                (
+                    "server-machine",
+                    Some(json!({"size_mib": vmm::VOLUME_DISK_MIB}))
+                )
+            ]
+        );
     });
 }
 
@@ -660,5 +708,368 @@ fn connection_selector_transcripts_bind_exact_machine_tuple_incarnation_and_time
         raw["control_history"][0]["response"]["result"] =
             json!({"connections":[connection],"next_after":7});
         assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
+    });
+}
+
+fn machine_fault_row(
+    id: u32,
+    op: &str,
+    t: u64,
+    latency: u64,
+) -> (serde_json::Value, serde_json::Value) {
+    let a = t + latency;
+    let reply = a + latency;
+    let plan = json!({"id":id,"action":op,"machine":"server-machine","at_ns":a,"deadline_ns":a+5_000_000_000u64});
+    (
+        json!({"relay_id":id,"session_id":1,"request":{"version":1,"id":id,"op":op,"target":{"service":"server"}},"response":{"version":1,"id":id,"ok":true,"result":{},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":a,"replied_at_ns":reply},"fault_id":id,"delivered_at_ns":reply}),
+        json!({"id":id,"request":plan,"requested_at_ns":a,"applied_at_ns":a,"action":op,"machine":"server-machine","status":"applied","detail":"machine lifecycle"}),
+    )
+}
+
+#[test]
+fn machine_lifecycle_transcripts_attribute_services_and_require_admission_effects() {
+    fixture(|base| {
+        let control = seedbox::config::Control {
+            service: "client".into(),
+        };
+        let request = ExecutionRequest {
+            control: Some(&control),
+            ..*base
+        };
+        let l = vmm::world(&request).unwrap()["control"]["latency_ns"]
+            .as_u64()
+            .unwrap();
+        let mut raw = report();
+        raw["control_latency_ns"] = json!(l);
+        let rows: Vec<_> = ["pause", "resume", "crash", "reboot"]
+            .iter()
+            .enumerate()
+            .map(|(i, op)| machine_fault_row(i as u32 + 1, op, (i as u64 + 1) * 10_000_000, l))
+            .collect();
+        raw["control_history"] = json!(rows.iter().map(|(r, _)| r).collect::<Vec<_>>());
+        raw["faults"] = json!(rows.iter().map(|(_, f)| f).collect::<Vec<_>>());
+        let parse =
+            |raw: &serde_json::Value| vmm::report(&serde_json::to_vec(raw).unwrap(), &request);
+        let parsed = parse(&raw).unwrap();
+        assert_eq!(parsed.reason, StopReason::Completed);
+        assert_eq!(parsed.faults.len(), 4);
+        for (i, op) in ["pause", "resume", "crash", "reboot"].iter().enumerate() {
+            assert_eq!(parsed.faults[i].action, *op);
+            assert_eq!(parsed.faults[i].service, "server");
+            assert_eq!(
+                parsed.faults[i].requested_at_ns,
+                parsed.faults[i].applied_at_ns
+            );
+            let mut late = raw.clone();
+            let a = late["control_history"][i]["response"]["admitted_at_ns"]
+                .as_u64()
+                .unwrap();
+            late["control_history"][i]["response"]["effect_at_ns"] = json!(a + 1);
+            late["control_history"][i]["response"]["replied_at_ns"] = json!(a + 1 + l);
+            late["control_history"][i]["delivered_at_ns"] = json!(a + 1 + l);
+            late["faults"][i]["applied_at_ns"] = json!(a + 1);
+            assert!(parse(&late).is_err());
+            for target in [
+                json!({"service":"client"}),
+                json!({"machine":"client-machine"}),
+            ] {
+                let mut controller = raw.clone();
+                controller["control_history"][i]["request"]["target"] = target;
+                controller["faults"][i]["request"]["machine"] = json!("client-machine");
+                controller["faults"][i]["machine"] = json!("client-machine");
+                assert!(parse(&controller).is_err());
+            }
+            let mut machine = raw.clone();
+            machine["control_history"][i]["request"]["target"] =
+                json!({"machine":"server-machine"});
+            assert!(parse(&machine).is_ok());
+        }
+        // A cutoff lifecycle plan must also have applied exactly at admission.
+        let mut cut = report();
+        let (row, fault) = machine_fault_row(1, "crash", 10_000_000, l);
+        let a = row["response"]["admitted_at_ns"].as_u64().unwrap();
+        cut["control_latency_ns"] = json!(l);
+        cut["outcome"] = json!("duration");
+        cut["control_history"] = json!([{"relay_id":1,"session_id":1,"request":row["request"],"status":"cut_off","requested_at_ns":10_000_000,"admitted_at_ns":a,"admitted_done":true,"effect_at_ns":a,"replied_at_ns":a+l,"cut_off_at_ns":a+l-1,"fault_id":1,"plan":fault["request"],"error":null,"fatal":false}]);
+        cut["faults"] = json!([fault]);
+        assert_eq!(parse(&cut).unwrap().reason, StopReason::SimulatedTimeLimit);
+        cut["faults"][0]["applied_at_ns"] = json!(a + 1);
+        assert!(parse(&cut).is_err());
+    });
+}
+
+#[test]
+fn lifecycle_invalid_state_and_exited_pause_resume_are_recoverable_without_faults() {
+    fixture(|base| {
+        let control = seedbox::config::Control {
+            service: "client".into(),
+        };
+        let request = ExecutionRequest {
+            control: Some(&control),
+            ..*base
+        };
+        let l = vmm::world(&request).unwrap()["control"]["latency_ns"]
+            .as_u64()
+            .unwrap();
+        for (op, code) in [
+            ("pause", "invalid_state"),
+            ("resume", "invalid_state"),
+            ("crash", "invalid_state"),
+            ("reboot", "invalid_state"),
+            ("pause", "target_unavailable"),
+            ("resume", "target_unavailable"),
+        ] {
+            let mut raw = report();
+            raw["control_latency_ns"] = json!(l);
+            let (mut row, _) = machine_fault_row(1, op, 10_000_000, l);
+            row["fault_id"] = json!(null);
+            row["response"]["ok"] = json!(false);
+            row["response"]["error"] = json!({"code":code,"message":"transition rejected"});
+            raw["control_history"] = json!([row]);
+            let parse =
+                |raw: &serde_json::Value| vmm::report(&serde_json::to_vec(raw).unwrap(), &request);
+            let parsed = parse(&raw).unwrap();
+            assert_eq!(parsed.reason, StopReason::Completed);
+            assert!(parsed.faults.is_empty() && parsed.detail.is_none());
+            if code == "invalid_state" {
+                raw["control_history"][0]["fault_id"] = json!(1);
+                assert!(parse(&raw).is_err());
+            }
+        }
+    });
+}
+
+fn unavailable_machine_fault(
+    row: &mut serde_json::Value,
+    fault: &mut serde_json::Value,
+    e: u64,
+    latency: u64,
+) {
+    row["response"]["ok"] = json!(false);
+    row["response"]["error"] =
+        json!({"code":"target_unavailable","message":"target machine unavailable"});
+    row["response"]["effect_at_ns"] = json!(e);
+    row["response"]["replied_at_ns"] = json!(e + latency);
+    row["delivered_at_ns"] = json!(e + latency);
+    fault["applied_at_ns"] = json!(null);
+    fault["status"] = json!("unavailable");
+}
+
+#[test]
+fn unavailable_process_fault_requires_exact_crash_evidence_in_its_window() {
+    fixture(|base| {
+        let control = seedbox::config::Control {
+            service: "client".into(),
+        };
+        let request = ExecutionRequest {
+            control: Some(&control),
+            ..*base
+        };
+        let l = vmm::world(&request).unwrap()["control"]["latency_ns"]
+            .as_u64()
+            .unwrap();
+        let mut raw = report();
+        raw["control_latency_ns"] = json!(l);
+        let parse =
+            |raw: &serde_json::Value| vmm::report(&serde_json::to_vec(raw).unwrap(), &request);
+        for op in ["stop", "restart"] {
+            let (mut row, mut fault) = machine_fault_row(1, op, 10_000_000, l);
+            let a = row["response"]["admitted_at_ns"].as_u64().unwrap();
+            let e = a + 1000;
+            unavailable_machine_fault(&mut row, &mut fault, e, l);
+            raw["control_history"] = json!([row]);
+            raw["faults"] = json!([fault]);
+            // A newer running incarnation need not have a stopped clock.
+            raw["machines"][1]["state"] = json!("Running");
+            raw["machines"][1]["time_ns"] = json!(e + 10_000);
+            raw["machines"][1]["crashed_incarnations"] =
+                json!([{"incarnation":0,"crashed_at_ns":e}]);
+            let parsed = parse(&raw).unwrap();
+            assert_eq!(parsed.reason, StopReason::Completed);
+            assert!(parsed.faults.is_empty());
+            for crashes in [
+                json!([]),
+                json!([{"crashed_at_ns":e-1}]),
+                json!([{"crashed_at_ns":e+1}]),
+            ] {
+                let mut bad = raw.clone();
+                bad["machines"][1]["crashed_incarnations"] = crashes;
+                assert!(parse(&bad).is_err());
+            }
+            let mut other = raw.clone();
+            other["machines"][0]["crashed_incarnations"] =
+                other["machines"][1]["crashed_incarnations"].take();
+            assert!(parse(&other).is_err());
+            for e in [a - 1, a + 5_000_000_001] {
+                let mut bad = raw.clone();
+                let mut row = bad["control_history"][0].take();
+                let mut fault = bad["faults"][0].take();
+                unavailable_machine_fault(&mut row, &mut fault, e, l);
+                bad["control_history"][0] = row;
+                bad["faults"][0] = fault;
+                bad["machines"][1]["crashed_incarnations"] = json!([{"crashed_at_ns":e}]);
+                assert!(parse(&bad).is_err());
+            }
+        }
+    });
+}
+
+#[test]
+fn unavailable_at_admission_requires_prior_crash_without_intervening_reboot() {
+    fixture(|base| {
+        let control = seedbox::config::Control {
+            service: "client".into(),
+        };
+        let request = ExecutionRequest {
+            control: Some(&control),
+            ..*base
+        };
+        let l = vmm::world(&request).unwrap()["control"]["latency_ns"]
+            .as_u64()
+            .unwrap();
+        let parse =
+            |raw: &serde_json::Value| vmm::report(&serde_json::to_vec(raw).unwrap(), &request);
+        for op in ["stop", "restart"] {
+            let mut raw = report();
+            raw["control_latency_ns"] = json!(l);
+            let (crash, crash_fault) = machine_fault_row(1, "crash", 10_000_000, l);
+            let crash_at = crash_fault["applied_at_ns"].clone();
+            let (mut unavailable, mut unavailable_fault) = machine_fault_row(2, op, 20_000_000, l);
+            let a = unavailable["response"]["admitted_at_ns"].as_u64().unwrap();
+            unavailable_machine_fault(&mut unavailable, &mut unavailable_fault, a, l);
+            raw["control_history"] = json!([crash, unavailable]);
+            raw["faults"] = json!([crash_fault, unavailable_fault]);
+            raw["machines"][1]["state"] = json!("Down");
+            raw["machines"][1]["crashed_incarnations"] = json!([{"crashed_at_ns":crash_at}]);
+            let parsed = parse(&raw).unwrap();
+            assert_eq!(parsed.reason, StopReason::Completed);
+            assert_eq!(parsed.faults.len(), 1);
+            assert_eq!(parsed.faults[0].action, "crash");
+            let mut late = raw.clone();
+            let mut row = late["control_history"][1].take();
+            let mut fault = late["faults"][1].take();
+            unavailable_machine_fault(&mut row, &mut fault, a + 1, l);
+            late["control_history"][1] = row;
+            late["faults"][1] = fault;
+            assert!(parse(&late).is_err());
+            // Reboot clears admission-time evidence even if final state says Down.
+            let (reboot, reboot_fault) = machine_fault_row(2, "reboot", 20_000_000, l);
+            let (mut row, mut fault) = machine_fault_row(3, op, 30_000_000, l);
+            let a = row["response"]["admitted_at_ns"].as_u64().unwrap();
+            unavailable_machine_fault(&mut row, &mut fault, a, l);
+            raw["control_history"].as_array_mut().unwrap()[1] = reboot;
+            raw["control_history"].as_array_mut().unwrap().push(row);
+            raw["faults"].as_array_mut().unwrap()[1] = reboot_fault;
+            raw["faults"].as_array_mut().unwrap().push(fault);
+            assert!(parse(&raw).is_err());
+        }
+    });
+}
+
+#[test]
+fn counter_identity_requires_an_attributable_matching_engine_report() {
+    fixture(|base| {
+        let mut inputs = base.prepared.clone();
+        inputs
+            .profile
+            .semantic_parameters
+            .insert("counter".into(), "intel-0x5111c4".into());
+        let request = ExecutionRequest {
+            prepared: &inputs,
+            ..*base
+        };
+        assert!(vmm::report(&serde_json::to_vec(&report()).unwrap(), &request).is_err());
+        let mut raw = report();
+        raw["counter_profile"] = json!("amd-zen");
+        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
+        raw["counter_profile"] = json!("intel-0x5111c4");
+        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
+        inputs
+            .profile
+            .semantic_parameters
+            .insert("counter".into(), "unknown".into());
+        let request = ExecutionRequest {
+            prepared: &inputs,
+            ..*base
+        };
+        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
+    });
+}
+
+#[test]
+fn torn_writes_are_recorded_replayed_and_omitted_when_disabled() {
+    use seedbox::{counter::CounterProfile, store::ContentStore};
+    let dir = tempfile::tempdir().unwrap();
+    let engine = dir.path().join("engine");
+    std::fs::write(&engine, b"engine").unwrap();
+    let store = ContentStore::new(dir.path().join("objects"));
+    let executor = vmm::VmmExecutor::new(
+        &engine,
+        &store,
+        None,
+        512,
+        WitnessMode::Exits,
+        CounterProfile::Zen,
+    )
+    .unwrap();
+    let original = executor.profile();
+    // Off adds nothing; the host policy parameters #83 records stay as they are.
+    assert!(!original.semantic_parameters.contains_key("disk_loss"));
+    assert_eq!(original.semantic_parameters["memory_mb"], "512");
+    let encoded = serde_json::to_vec(&original).unwrap();
+    assert!(!vmm::recorded_torn_writes(&original).unwrap());
+    assert_eq!(
+        serde_json::to_vec(&executor.clone().with_torn_writes(false).profile()).unwrap(),
+        encoded
+    );
+    let enabled = executor.clone().with_torn_writes(true);
+    let recorded: ExecutionProfile =
+        serde_json::from_slice(&serde_json::to_vec(&enabled.profile()).unwrap()).unwrap();
+    assert_eq!(
+        recorded.semantic_parameters["disk_loss"],
+        vmm::TORN_DISK_MODEL
+    );
+    assert_ne!(serde_json::to_vec(&recorded).unwrap(), encoded);
+    let replay = executor
+        .clone()
+        .with_torn_writes(vmm::recorded_torn_writes(&recorded).unwrap());
+    assert_eq!(replay.profile(), recorded);
+    assert_eq!(
+        replay.performance_parameters(),
+        executor.performance_parameters()
+    );
+    assert_eq!(enabled.with_torn_writes(false).profile(), original);
+
+    fixture(|base| {
+        let original_world = vmm::world(base).unwrap();
+        assert!(original_world.get("disk_loss").is_none());
+        let mut prepared = base.prepared.clone();
+        prepared.profile = recorded;
+        let request = ExecutionRequest {
+            prepared: &prepared,
+            ..*base
+        };
+        let mut world = vmm::world(&request).unwrap();
+        assert_eq!(
+            world.as_object_mut().unwrap().remove("disk_loss"),
+            Some(json!(vmm::TORN_DISK_MODEL))
+        );
+        assert_eq!(
+            serde_json::to_vec(&world).unwrap(),
+            serde_json::to_vec(&original_world).unwrap()
+        );
+        prepared
+            .profile
+            .semantic_parameters
+            .insert("disk_loss".into(), "unknown".into());
+        assert!(vmm::recorded_torn_writes(&prepared.profile)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown disk loss model unknown"));
+        let request = ExecutionRequest {
+            prepared: &prepared,
+            ..*base
+        };
+        assert!(vmm::world(&request).is_err());
     });
 }

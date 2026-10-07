@@ -47,6 +47,18 @@ pub enum Operation {
     Restart {
         target: Target,
     },
+    Pause {
+        target: Target,
+    },
+    Resume {
+        target: Target,
+    },
+    Crash {
+        target: Target,
+    },
+    Reboot {
+        target: Target,
+    },
     Partition {
         left: Vec<Target>,
         right: Vec<Target>,
@@ -107,6 +119,22 @@ pub enum Action {
     Heal {
         handle: String,
     },
+    /// Freeze the machine's CPU and devices; the world goes on.
+    Pause {
+        machine: String,
+    },
+    /// Continue a paused machine, catching up its timers and held ingress.
+    Resume {
+        machine: String,
+    },
+    /// Destroy the machine's VM: RAM, devices, queued I/O and sockets.
+    Crash {
+        machine: String,
+    },
+    /// Boot a crashed machine again as a new incarnation.
+    Reboot {
+        machine: String,
+    },
 }
 impl Action {
     pub fn name(&self) -> &'static str {
@@ -117,11 +145,20 @@ impl Action {
             Self::Partition { .. } => "partition",
             Self::Shape { .. } => "shape",
             Self::Heal { .. } => "heal",
+            Self::Pause { .. } => "pause",
+            Self::Resume { .. } => "resume",
+            Self::Crash { .. } => "crash",
+            Self::Reboot { .. } => "reboot",
         }
     }
     pub fn machine(&self) -> Option<&str> {
         match self {
-            Self::Stop { machine } | Self::Restart { machine } => Some(machine),
+            Self::Stop { machine }
+            | Self::Restart { machine }
+            | Self::Pause { machine }
+            | Self::Resume { machine }
+            | Self::Crash { machine }
+            | Self::Reboot { machine } => Some(machine),
             _ => None,
         }
     }
@@ -152,5 +189,24 @@ mod tests {
         }
         let r:Request=serde_json::from_str(r#"{"version":1,"id":1,"op":"partition","left":[{"service":"c"}],"right":[{"machine":"s"}]}"#).unwrap();
         assert!(matches!(r.operation, Operation::Partition { .. }));
+        for op in ["pause", "resume", "crash", "reboot"] {
+            for target in [Target::Service("s".into()), Target::Machine("m".into())] {
+                let wire = serde_json::json!({"version":1,"id":1,"op":op,"target":target});
+                let request: Request = serde_json::from_value(wire.clone()).unwrap();
+                assert_eq!(serde_json::to_value(request).unwrap(), wire);
+            }
+            for arguments in [
+                serde_json::json!({}),
+                serde_json::json!({"target":"s"}),
+                serde_json::json!({"target":{"service":"s","machine":"m"}}),
+                serde_json::json!({"target":{"service":"s"},"extra":1}),
+            ] {
+                let mut wire = serde_json::json!({"version":1,"id":1,"op":op});
+                wire.as_object_mut()
+                    .unwrap()
+                    .extend(arguments.as_object().unwrap().clone());
+                assert!(serde_json::from_value::<Request>(wire).is_err());
+            }
+        }
     }
 }
