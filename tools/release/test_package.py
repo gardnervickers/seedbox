@@ -92,6 +92,18 @@ class Packaging(unittest.TestCase):
                     package(payload, payload / "runtime-store-paths", output, store_root=self.store)
                 self.assertFalse(output.exists())
 
+    def test_symlinked_required_parent_refused_before_output(self):
+        payload = self.payload("symlink-parent")
+        outside = self.root / "outside-bin"
+        (payload / "bin").rename(outside)
+        (payload / "bin").symlink_to(outside, target_is_directory=True)
+        # Real binaries exist through the link, but are not archive members.
+        self.assertTrue((payload / "bin/seedbox").is_file())
+        output = self.root / "symlink-parent-output"
+        with self.assertRaisesRegex(ValueError, "missing regular archive member: payload/bin/"):
+            package(payload, payload / "runtime-store-paths", output, store_root=self.store)
+        self.assertFalse(output.exists())
+
     def test_existing_output_and_recursive_output_refused(self):
         payload = self.payload("payload")
         with self.assertRaisesRegex(ValueError, "outside"):

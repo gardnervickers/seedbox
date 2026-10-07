@@ -70,6 +70,11 @@ def package(payload, store_paths, output, *, store_root=Path("/nix/store")):
             checksums[name] = digest.hexdigest()
         elif not (stat.S_ISDIR(mode) or stat.S_ISLNK(mode)):
             raise ValueError("unsupported archive member: " + name)
+    # Required files must be actual regular members. A symlinked ancestor may
+    # pass is_file() above, while entries() deliberately does not traverse it.
+    missing = sorted("payload/" + name for name in REQUIRED if "payload/" + name not in checksums)
+    if missing:
+        raise ValueError("missing regular archive member: " + missing[0])
     # Symlinks and modes are covered by the archive hash, regular bytes by this
     # manifest as well. Tar never inherits host mtime, uid/gid, PAX or traversal.
     manifest = (json.dumps(checksums, sort_keys=True, indent=2) + "\n").encode()
