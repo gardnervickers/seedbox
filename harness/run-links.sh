@@ -7,9 +7,9 @@
 # about 60x the stepping of undo on in the zero-tolerance world (L1: 166k
 # precise stops, 400 s), so the undo-off pair uses a stop tolerance to make
 # most slices end at natural exits. The short world's 10 ms lookahead and
-# 5 ms early window cover its 1 ms probe gap; see worlds/README.md for stop
-# estimates and the trace's attribution limits. U1/U2 retain a 600 s timeout,
-# with an undo-off performance target below 300 s.
+# 5 ms early window cover its 1 ms probe gap; worlds/README.md has the measured
+# stops and seconds (U2 118.5 s). U1/U2 retain a 600 s timeout, with an undo-off
+# target below 300 s.
 # Run as the normal user on distinct free physical cores with idle SMT siblings:
 #   CPUS="2 3 4 5 6 7" SHA=<PR head> MAIN=<main sha> bash harness/run-links.sh
 # Subsets: RUNS="L1 U1" CPUS="14 15" (default: all six lanes).

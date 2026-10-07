@@ -303,83 +303,32 @@ exceeds the longest shaped delay, 17 ms. The unchanged 2.5 s cap leaves reportin
 headroom. Actual send counts and completed reports remain host evidence; a
 scheduled candidate count is not a measured guest send count.
 
-### Short-world stop budget (source estimate)
+### Short-world stop budget
 
-The dominant non-probe source is the **cross-machine horizon**, not idle ticks.
-In `crates/seedbox-vmm/src/main.rs`, a slice is capped by the earliest other
-machine's key plus global latency, the receiver's next delivery, duration, faults
-and control boundaries. `machine.rs` then combines that cap with its PIT deadline
-via `boundary::hard_limit`. `machine/counted.rs` enters stepping near the hard
-count. `precise_stops` counts entries into stepping, including approaches that
-subsequently end at a natural exit; it is not a count of completed hard boundaries.
+Most precise stops in the old short world came from the **cross-machine
+horizon**, not the probe: a slice is capped by the earliest other machine's key
+plus global latency (`crates/seedbox-vmm/src/main.rs`), and the probe's busy
+polling gives no natural exit before that cap. With a 1 ms horizon and a 200 us
+early window, slices ended between sends by stepping. The 10 ms horizon and 5 ms
+windows cover several 1 ms send gaps, so the next natural send or device exit
+usually ends the slice first. `precise_stops` counts entries into stepping; the
+engine's `--trace` does not record why a stepping entry began.
 
-The probe's busy polling uses syscalls and trapped user RDTSC, but the latter is
-emulated inside the guest kernel and neither supplies a natural KVM exit. Sends
-are natural virtio exits. With a 4 ms gap and a 1 ms horizon, there can be several
-forced slice ends between sends. The 200 us early window rarely reaches the next
-send. The new 10 ms horizon and 5 ms windows cover several 1 ms send gaps, so the
-first natural send/device exit can satisfy most soft targets before stepping.
+Measured on the AMD host (main b6e9809, PR #127 at 47cfb5e):
 
-| Source | Old opportunities over about 1.2 s | Expected contribution after widening |
-| --- | --- | --- |
-| Cross-machine horizon / slice ends | roughly 3,300–4,100 over 1.1 s of active probes; dominant share of the observed 2,845 stepping entries | roughly 400–700 conservative allowance, largely boot or near-boundary approaches; active probes usually exit naturally |
-| Network deliveries | up to about 1,480 delivered probe candidates at a 4 ms gap, plus boot traffic; overlaps horizon and timer stops | up to about 5,910 at a 1 ms gap, but the 5 ms early window coalesces due deliveries and covers natural exits; allow about 100–200 residual approaches |
-| PIT / scheduler timers | HZ=100: about 330 active-probe deadlines plus 30 in reporting grace, with possible extra boot/oneshot timers | usually natural exits within the 5 ms timer window; halted machines jump to the deadline without counted stepping; allow about 0–100 residual approaches |
-| Scheduled faults / scenario / control | 16 faults at 8 distinct exact times: about 24 machine boundary approaches; no guest controller/scenario in this fixture | same roughly 24; tolerance does not relax these exact boundaries |
-| Duration and reporting end | duration cap normally unused; a exits naturally after reports and sleep | 0 expected duration stops; retain cap/grace rather than truncate reports |
+| World | U1 precise stops | U1 rollbacks | U1 seconds | U2 seconds |
+| --- | --- | --- | --- | --- |
+| 1 ms latency, 200 us tolerance, 4 ms probe gap | 2,845 | not recorded | 30 | 564 |
+| 10 ms latency, 5 ms tolerance, 1 ms probe gap | 433 | 3 | 33.0 | 118.5 |
 
-Opportunity counts overlap and must not be added as precise-stop counts. The
-post-change allowances suggest **roughly 600–1,000 U1 stepping entries**, below
-the roughly 1,400 budget. At the supplied 0.2 seconds per undo-off entry, this
-means roughly 120–200 seconds of U2 stepping cost, leaving headroom for boot and
-other execution. This is a code/world estimate, not an AMD measurement. The
-configured kernel uses HZ=100 and NO_HZ_IDLE (`kernel/config.options`); traces
-should check the accepted host kernel's actual timer behavior.
+U1 and U2 share world witness b0427503f6428b12 and network witness
+32838ac9f494e2fb, with loss on c->a and c->b, the c|a cut counted both ways, all
+16 faults applied in order and no reorders. `links.py` fails U1 if it records no
+rollbacks, so the pair always exercises undo.
 
-### Verify the U pair and inspect timer traffic on the host
-
-Run `RUNS="U1 U2"` on the next train through `harness/run-links.sh`, using two
-free physical cores with idle SMT siblings. U2 is a fresh same-seed performance
-variant, not the retained-run replay command. The existing analyzer derives fault
-times from retained JSON, checks all 16 applications, loss/cut counters, FIFO
-receipts and U1 == U2. Its full-world receipt window expectations are unchanged.
-
-After the runner prints its retained results directory, use:
-
-```sh
-RESULTS=path/to/retained-results-directory
-python3 harness/links.py "$RESULTS" U1 U2
-jq '{host_seconds, precise_stops: ([.machines[].precise_stops] | add),
-     machines: [.machines[] | {name, time_ns, precise_stops, step_ms}]}' "$RESULTS/U1.json"
-jq -e '([.machines[].precise_stops] | add) < 1400' "$RESULTS/U1.json"
-jq -e '.host_seconds < 300' "$RESULTS/U2.json"
-python3 - "$RESULTS/U1" <<'PYTRACE'
-from collections import Counter
-from pathlib import Path
-import sys
-for path in sorted(Path(sys.argv[1]).glob('*.trace')):
-    events = Counter()
-    timer_by_100ms = Counter()
-    for line in path.read_text().splitlines():
-        kind, branches, time, extra, rip = line.split()
-        events[kind] += 1
-        if kind == 'I' and int(extra, 16) == 0x20:
-            timer_by_100ms[int(time) // 100_000_000] += 1
-    print(path.name, 'natural records:', dict(sorted(events.items())))
-    print('  IRQ0 injections by 100 ms:', dict(sorted(timer_by_100ms.items())))
-PYTRACE
-```
-
-**Exact precise-stop attribution cannot be recovered from this engine's
-`--trace`.** `Machine::record` writes only kind/branches/time/extra/RIP for
-observable machine/device events. `set_stepping(true)` increments the report
-counter without writing a record, and neither the world slice plan nor PIT
-expiry is traced. Even the 16-bit timer reload at port 0x530 retains only its
-first byte in the `O` record. Counting `I`/IRQ0 records counts timer injections,
-not precise stops, and omits coalesced/masked expiries. The commands above give
-exact report totals and timer diagnostics, not exact causes. Cause-level counts
-would require separate engine instrumentation of stepping entry and its active
-hard-limit source; that is outside this world-only engine scope.
+Run the pair with `RUNS="U1 U2"` through `harness/run-links.sh` on two free
+physical cores with idle SMT siblings. U2 is a fresh same-seed run with undo off,
+not a replay of U1.
 
 `harness/links.py` derives full-world sender-stamp window expectations from the
 retained world JSON, using cut precedence, highest live shape ID and heal by
