@@ -135,9 +135,11 @@ impl VmmExecutor {
             {
                 let reservation = crate::host::CpuReservation::acquire(self.cpu)?;
                 selected = Some(reservation.cpu);
-                for cpu in &reservation.cpus {
-                    observations.push(crate::admission::observe(*cpu)?);
-                }
+                crate::admission::collect_admitted(
+                    reservation.cpus.iter().copied(),
+                    &mut observations,
+                    crate::admission::observe,
+                )?;
                 drop(reservation); // No reservation/perf/affinity spans later work or publication.
             }
             #[cfg(not(target_os = "linux"))]
