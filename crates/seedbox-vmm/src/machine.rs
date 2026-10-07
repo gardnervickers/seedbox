@@ -31,8 +31,7 @@ pub const MARGIN: u64 = 12288;
 const SKID_NS: f64 = 18_000.0;
 /// Distance of the first, rate-measuring overflow before a hard stop.
 const APPROACH: u64 = 65536;
-/// Floor of the adaptive margin. Skids of 5-14k branches occur in dense code,
-/// and the syscall-exit window before a soft stop must outlast them.
+/// Floor of the adaptive margin. Skids of 5-14k branches occur in dense code.
 const MARGIN_MIN: u64 = 16384;
 /// With undo-able stops, the largest final margin tried after rollbacks.
 const UNDO_MAX: u64 = 1 << 18;
@@ -700,7 +699,7 @@ impl Machine {
     ) -> Result<Stop, String> {
         // Invariant: entered at a deterministic point. Guest-visible state (time
         // page, interrupts, timer expiry) changes only at deterministic points:
-        // natural exits, requested syscall exits and exact counted stops, never
+        // natural exits and exact counted stops, never
         // at overflow landings or intermediate single steps.
         let slice_end = limit
             .saturating_sub(early)
@@ -736,8 +735,8 @@ impl Machine {
                 }
                 self.publish();
             }
-            // Stop at the first natural exit at or after `soft`, at the latest
-            // by an exact counted stop at `hard`. Two rules combine: the slice
+            // Stop at the first natural exit at or after `soft` and below
+            // `hard`, otherwise by an exact counted stop at `hard`. Two rules combine: the slice
             // ends in [slice_end, limit], and a timer due at `pit` fires in
             // [pit, pit + tolerance] (exactly at `pit` if so drawn). Neither
             // passes `limit`, the world's causal boundary. Syscalls are not
@@ -835,8 +834,10 @@ impl Machine {
             let c1 = counter.read_fast();
             let delta = c1 - c0;
             let interrupted = matches!(&exit, Err(e) if e.errno() == libc::EINTR);
-            let overshoot =
-                delta > remaining || (interrupted && !self.stepping && delta == remaining);
+            // A free run that reaches the hard count, even by a natural exit
+            // exactly there, has passed the counted stop: stepping would have
+            // stopped before that instruction.
+            let overshoot = delta > remaining || (!self.stepping && delta == remaining);
             // With the yield window closed, a run must not pass `soft`: a
             // syscall there would have been the stop.
             let soft_miss = missed_soft_stop(
@@ -1444,30 +1445,37 @@ mod io_boundary_tests {
     fn stops_at_natural_exits_or_exact_hard_counts_without_yields() {
         let kvm=Kvm::new().unwrap();
         let mut counter=Counter::new().unwrap();
-        for undo in [0,16,256] {
-            // No natural exit in the interval: an exact counted stop at the
-            // hard target (the slice limit), never earlier.
-            let mut m=loop_probe(&kvm,false,undo);
-            let mut frames=Vec::new();
-            assert_eq!(m.run_until(&mut counter,300_000,150_000,&mut frames).unwrap(),Stop::Reached);
-            assert_eq!(m.time,300_000,"undo={undo}");
-            assert_eq!(m.branches,300_000);
-            assert_eq!(m.page_get(2),0,"a yield window was requested");
-            assert_eq!(m.stats.yields,0);
-            // A natural exit every 1000 branches: the stop is the first one at
-            // or after the soft target (limit - early), with no counted stop.
-            let mut m=loop_probe(&kvm,true,undo);
-            let before=m.stats.precise_stops;
-            assert_eq!(m.run_until(&mut counter,300_000,150_000,&mut frames).unwrap(),Stop::Reached);
-            assert!(m.time>=150_000 && m.time<151_001,"undo={undo} time={}",m.time);
-            assert_eq!(m.stats.precise_stops,before,"undo={undo}: counted stop despite a natural exit");
-            assert_eq!(m.page_get(2),0);
-            assert_eq!(m.stats.yields,0);
-            // The same inputs land on the same count whatever the undo setting.
-            let first=m.time;
-            let mut again=loop_probe(&kvm,true,0);
-            assert_eq!(again.run_until(&mut counter,300_000,150_000,&mut frames).unwrap(),Stop::Reached);
-            assert_eq!(again.time,first);
+        // (exits, limit, early): no natural exit, so an exact counted stop at
+        // the hard target; an exit every 1000 branches with soft below hard,
+        // so the first exit at or after soft; and soft == hard with an exit
+        // exactly on the hard count, which must stop before that exit.
+        let cases=[(false,300_000,150_000),(true,300_000,150_000),(true,150_000,0)];
+        for (exits,limit,early) in cases {
+            let mut want=None;
+            for undo in [0,16,256] {
+                let mut m=loop_probe(&kvm,exits,undo);
+                // The fixed margin can be shorter than a skid in this loop.
+                m.adaptive_margin=true;
+                let mut frames=Vec::new();
+                assert_eq!(m.run_until(&mut counter,limit,early,&mut frames).unwrap(),Stop::Reached);
+                let what=format!("exits={exits} limit={limit} early={early} undo={undo}");
+                assert_eq!(m.page_get(2),0,"{what}: a yield window was requested");
+                assert_eq!(m.stats.yields,0);
+                match (exits,early) {
+                    (false,_) => assert_eq!(m.time,limit,"{what}"),
+                    (true,0) => {
+                        assert_eq!(m.time,limit,"{what}");
+                        assert_eq!(m.stats.pio,limit/1000-1,"{what}: ran the exit at the hard count");
+                    }
+                    (true,_) => {
+                        assert!(m.time>=limit-early && m.time<limit-early+1001,"{what} time={}",m.time);
+                        assert_eq!(m.stats.precise_stops,0,"{what}: counted stop despite a natural exit");
+                    }
+                }
+                let rip=m.vcpu.get_regs().unwrap().rip;
+                let evidence=(m.time,rip,m.exit_witness(),m.state_digest().0);
+                if let Some(want)=&want {assert_eq!(&evidence,want,"{what}");} else {want=Some(evidence);}
+            }
         }
     }
 

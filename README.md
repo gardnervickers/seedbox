@@ -160,7 +160,7 @@ Stop placement settings affect speed only, never results. `--undo` controls the
 precise-stop rollback window (default 256; 0 disables it). `--margin` selects the
 PMU approach and stepping distance when undo is off (default `adaptive`). Neither
 setting decides where a stop lands: the first natural exit at or after the soft
-target, or an exact count at the hard target. The
+target and below the hard target, otherwise an exact count at the hard target. The
 low-level batch runner uses `SEEDBOX_UNDO` and `SEEDBOX_MARGIN` for the same settings.
 
 A PMU overshoot aborts an execution. A separate invocation can use a larger

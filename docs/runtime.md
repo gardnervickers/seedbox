@@ -88,9 +88,10 @@ to unpack at 512 MiB and passed at 1024 MiB. `--margin` and `--undo` are recorde
 `--undo` defaults to 256 branches; zero disables undo and 16 exercises a smaller
 margin. The accepted range is 0..262144. Both settings are passed explicitly to
 the retained engine, without inheriting VMM environment variables. `--margin`
-controls PMU approach and stepping distance. Neither setting decides where a
-stop lands: the first natural VM exit at or after the soft target, or an exact
-branch count at the hard target. Syscalls are not stopping points, and the
+controls PMU approach and stepping distance when undo is off. Neither setting
+decides where a stop lands: the first natural VM exit at or after the soft
+target and below the hard target, otherwise an exact branch count at the hard
+target, before the instruction there runs. Syscalls are not stopping points, and the
 engine requests no syscall yield exits.
 
 Charged timer-port accesses conserve their full 1000 ns cost across world and
