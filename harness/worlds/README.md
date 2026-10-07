@@ -31,7 +31,7 @@ and identities.
 | `cluster-fork-late.json` | The same cluster forked at 1.4 simulated seconds, after etcd has started, with timer and link jitter (see below) |
 | `cluster-fork-skew.json` | `cluster-fork.json` released with up to 50 ms of seeded skew, jitter, and a timed partition after the release (see below) |
 | `net-pause.json`, `net-crash.json`, `net-crash-fork.json` | `net.json` with machine `b` paused, or crashed and rebooted, while `a` pings it (see below) |
-| `disk-nocrash.json`, `disk-crash.json`, `disk-ext4-crash.json` | One machine with a retained disk: raw-block FLUSH/FUA probe with and without a crash, and an fsync ledger on ext4 across a crash (see below) |
+| `disk-nocrash.json`, `disk-crash.json`, `disk-crash-fork.json`, `disk-ext4-crash.json` | One machine with a retained disk: raw-block FLUSH/FUA probe with and without a crash, and an fsync ledger on ext4 across a crash (see below) |
 
 `batch.sh`, `batch.py` and `msr54.py` still run these fixtures with shared CPU/SMT
 leases and verified MSR restoration. Runtime lifecycle tests also use their CPU
@@ -182,7 +182,7 @@ semantics (`disk.rs`, model `flush-stable/drop-all-unflushed/v1`):
   makes every write completed before it stable before it is acknowledged.
 - A crash drops every volatile write and keeps every stable one. The next
   incarnation boots with that disk and a fresh device. No torn writes and no
-  seeded surviving subsets. This models a machine crash, not host power loss:
+  seeded surviving subsets (tracked in #94). This models a machine crash, not host power loss:
   nothing is written to host storage.
 - A fork restore puts the whole disk back, both layers.
 
@@ -208,8 +208,13 @@ a kernel with `VIRTIO_BLK` and `EXT4_FS` (`kernel/config.options`).
   each and 20 without to a file on ext4, then the machine crashes and
   reboots. After journal recovery the file must hold records 1..M in order,
   whole, with 50 <= M <= 70.
+- `disk-crash-fork.json`: `disk-crash.json` with a time fork at 0.2 s, before
+  the probe writes. Each later seed restores a disk that the previous seed
+  wrote, flushed and crashed, so it must match that seed's cold run.
 
 ```sh
 for w in disk-nocrash disk-crash disk-ext4-crash; do CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/$w.json $w "1009 1009" --digest --trace; done
 CPU0=14 SEEDBOX_UNDO=0 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/disk-crash.json disk-crash-undo0 "1009" --digest
+for s in 1010 1011; do CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/disk-crash-fork.json disk-fork-cold "$s" --digest; done
+CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/disk-crash-fork.json disk-fork-loop "1009" --digest --fork-seeds 1010,1011
 ```
