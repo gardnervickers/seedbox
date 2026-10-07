@@ -536,10 +536,13 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
                 if expected.unavailable.get(&fault.id).is_some_and(|exit| {
                     raw.machines.iter().any(|machine| {
                         Some(&machine.name) == fault.machine.as_ref()
-                            && machine
-                                .state
-                                .as_deref()
-                                .is_some_and(|s| s.starts_with("Exited("))
+                            && machine.state.as_deref().is_some_and(|state| {
+                                state
+                                    .strip_prefix("Exited(")
+                                    .and_then(|code| code.strip_suffix(')'))
+                                    .and_then(|code| code.parse::<u8>().ok())
+                                    .is_some_and(|code| state == format!("Exited({code})"))
+                            })
                             && machine.time_ns == Some(*exit)
                     })
                 }) => {}

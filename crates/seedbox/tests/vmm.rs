@@ -322,6 +322,32 @@ fn process_target_exit_after_admission_is_a_recoverable_unavailable_fault() {
             mismatch["machines"][1]["time_ns"] = time;
             assert!(parse(&mismatch).is_err());
         }
+        // The engine's debug state is canonical Exited(u8), not an arbitrary prefix.
+        for state in [
+            "Exited(",
+            "Exited()",
+            "Exited(Running)",
+            "Exited(256)",
+            "Exited(-1)",
+            "Exited(+0)",
+            "Exited(00)",
+            "Exited(0)garbage",
+            "Exited(0)\n",
+            "Exited( 0)",
+        ] {
+            let mut malformed = raw.clone();
+            malformed["machines"][1]["state"] = json!(state);
+            assert!(
+                parse(&malformed).is_err(),
+                "accepted malformed exit state: {state:?}"
+            );
+        }
+        for code in [1u8, u8::MAX] {
+            let mut exited = raw.clone();
+            exited["machines"][1]["state"] = json!(format!("Exited({code})"));
+            exited["machines"][1]["guest_exit_code"] = json!(code);
+            assert!(parse(&exited).is_ok());
+        }
         // Only a target_unavailable reply after admission permits the status.
         let mut other = raw.clone();
         other["control_history"][0]["response"]["error"]["code"] = json!("invalid_state");
