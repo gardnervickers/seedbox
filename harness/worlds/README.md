@@ -267,3 +267,41 @@ and a filesystem journal commit can already have flushed it. This fixture's
 seed variation and ext4 recovery under the new policy remain hardware acceptance
 checks; portable disk-model tests do not establish them. The raw `blkprobe` crash
 fixture explicitly expects drop-all loss and is not an oracle for this policy.
+
+## Directed-link policy controls
+
+`harness/run-links.sh` runs six low-level broadcast-probe controls on the AMD
+host. `shaped.json` and `plain.json`, and the full probe's C source and init,
+retain the experiment inputs from `14aab0c`: L1/L2 repeat the full shaped world;
+P1/M1 compare the full plain world on the PR and base engines. Prior train/3
+witness prefixes were `ca9a7f6d` and `b66611d2`, respectively; a new train must
+verify equality again, since its engine bytes determine identity.
+
+Only U1/U2 use `shaped-tol-short.json`, with undo on/off and 600-second host
+timeouts. It keeps the 200 us stop tolerance and the same 16 fault IDs, actions,
+handles and policies in the same order. Faults run from 0.3 to 1.0 s; the short
+init uses a 1 ms probe gap and a 1.5 s probe end, exits after a 0.1 s reporting grace,
+and the world has a 2.5 s duration cap. Compression is nonuniform: fitting the
+whole 2.2-second schedule into 0.7 seconds with uniform scaling would leave only
+about 159 uncut lossmid sends at a 1 ms gap. The short fixture instead preserves
+340 ms of uncut lossmid exposure (0.6–0.7 and 0.76–1.0 s), an estimated 340 sends,
+with 500 us jitter and 50% loss. Actual guest send counts remain host evidence.
+
+`harness/links.py` derives full-world sender-stamp window expectations from the
+retained world JSON, using cut precedence, highest live shape ID and heal by
+handle. Window 45 of a<-c (4.5–4.6 s) is still lossmid: healing the cut at 4.5 s
+does not heal lossmid until 4.7 s. A packet's arrival cannot shift its reported
+window, since the probe indexes receipts by the sender's stamp.
+
+The prior checker already expected 50% receipts there. Train/3's 207/400 receipts,
+1.004 ms minimum and 1.25 ms mean satisfy that plan. Its 1.64 ms maximum violated
+an unrelated 1.6 ms cap, which assumed at most 100 us of guest overhead. The
+probe stamps before `sendto` and reads time after `recv`; it does not measure
+nominal engine arrival and does not bound that overhead. The receipt maximum
+is now reported as a diagnostic, while the original count, floor and mean
+checks remain. Negative controls reject incorrect loss, latency floor and mean.
+`crates/seedbox/tests/link_worlds.rs` applies the JSON through production
+`Faults`/`Links`, checks all six directions' policies and cuts throughout the
+full windows, and enforces the exact 1.0–1.5 ms nominal arrival range and FIFO
+for delivered c->a frames in window 45. These portable checks do not establish
+the cause of the observed guest receipt tail or qualify actual AMD delivery.
