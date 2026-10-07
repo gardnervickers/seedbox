@@ -853,11 +853,18 @@ fn dev_replay_permission_exact_hashes_and_bundle_marker_round_trip() {
         .env_clear()
         .env("HOME", f.directory.path())
         .env("PATH", "")
+        // Replay creates scratch storage even when retained admission refuses.
+        // Keep it in the fixture rather than macOS's sandbox-restricted default.
+        .env("TMPDIR", f.directory.path())
         .output()
         .unwrap();
     assert_eq!(cli_refusal.status.code(), Some(2));
     let stdout = String::from_utf8(cli_refusal.stdout).unwrap();
-    assert!(stdout.starts_with("ERROR: "));
+    assert!(
+        stdout.starts_with("ERROR: "),
+        "stdout: {stdout:?}; stderr: {:?}",
+        String::from_utf8_lossy(&cli_refusal.stderr)
+    );
     assert!(stdout.contains("replay: NOT_COMPARABLE (unqualified dev engine)"));
     assert!(String::from_utf8(cli_refusal.stderr)
         .unwrap()

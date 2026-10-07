@@ -119,9 +119,12 @@ enum Command {
         /// First simulation seed [default: x-seedbox.seed from the Compose file].
         #[arg(long)]
         seed: Option<u64>,
-        /// Number of consecutive seeds to execute sequentially.
+        /// Number of consecutive seeds to execute.
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..))]
         count: u64,
+        /// Maximum active attempts; omit --cpu for parallel execution.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=32))]
+        workers: u32,
         /// Print exactly one exploration report as JSON.
         #[arg(long)]
         json: bool,
@@ -554,6 +557,7 @@ fn run(cli: Cli) -> Result<u8> {
             compose,
             seed,
             count,
+            workers,
             json,
             cpu,
             state,
@@ -568,9 +572,13 @@ fn run(cli: Cli) -> Result<u8> {
             let options = ExploreOptions {
                 seed,
                 count,
+                workers,
                 cancellation: cancellation.clone(),
             };
             exploration::bounds(&simulation, &options)?;
+            if workers > 1 && cpu.cpu.is_some() {
+                return Err(Error::Setup("--workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU".into()));
+            }
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
             let detected = CounterProfile::host();
@@ -605,6 +613,12 @@ fn run(cli: Cli) -> Result<u8> {
             } else {
                 println!("{}: {}", word(&result.outcome), result.directory.display());
                 println!("seeds: {}..={}", result.first_seed, result.last_seed);
+                println!("workers: {}", result.workers);
+                println!("peak-running: {}", result.peak_running);
+                println!(
+                    "active-attempt-seconds: {:.3}",
+                    result.active_attempt_seconds
+                );
                 println!("attempted: {}", result.attempts.len());
                 println!("pass: {}", result.counts.pass);
                 println!("fail: {}", result.counts.fail);

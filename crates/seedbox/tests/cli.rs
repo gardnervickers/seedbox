@@ -5,14 +5,15 @@ use std::{
 };
 
 /// Run the CLI with a scrubbed environment: no `SEEDBOX_*`, `CARGO*` or
-/// `SUDO_USER` variables, `HOME` at `cwd`, and `PATH` set to `path` (empty if
-/// `None`), so no default can come from the developer's machine.
+/// `SUDO_USER` variables, `HOME` and scratch storage at `cwd`, and `PATH` set to
+/// `path` (empty if `None`), so no default can come from the developer's machine.
 fn seedbox_with(args: &[&str], cwd: &Path, path: Option<&Path>) -> Output {
     Command::new(env!("CARGO_BIN_EXE_seedbox"))
         .args(args)
         .current_dir(cwd)
         .env_clear()
         .env("HOME", cwd)
+        .env("TMPDIR", cwd)
         .env("PATH", path.map(Path::as_os_str).unwrap_or_default())
         .output()
         .unwrap()
@@ -310,6 +311,28 @@ fn explore_bounds_and_help_are_public_before_runtime_inputs_or_state() {
     );
     assert_eq!(stderr(&overflow),"error: --seed/--count: range is empty or overflows u64; use a positive --count and reduce the range\n");
     assert!(!project.join(".seedbox").exists());
+    for workers in ["0", "33", "nope"] {
+        let output = seedbox(&["explore", "--workers", workers], &project);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).contains("--workers"));
+        assert!(!project.join(".seedbox").exists());
+    }
+    let pinned = seedbox(&["explore", "--workers", "2", "--cpu", "4"], &project);
+    assert_eq!(pinned.status.code(), Some(2));
+    assert_eq!(stderr(&pinned), "error: --workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU\n");
+    assert!(!project.join(".seedbox").exists());
+    let env_pinned = Command::new(env!("CARGO_BIN_EXE_seedbox"))
+        .args(["explore", "--workers", "2"])
+        .current_dir(&project)
+        .env_clear()
+        .env("HOME", &project)
+        .env("PATH", "")
+        .env("SEEDBOX_CPU", "4")
+        .output()
+        .unwrap();
+    assert_eq!(env_pinned.status.code(), Some(2));
+    assert_eq!(stderr(&env_pinned), stderr(&pinned));
+    assert!(!project.join(".seedbox").exists());
     let boundary = seedbox(
         &["explore", "--seed", "18446744073709551615", "--count", "1"],
         &project,
@@ -325,7 +348,7 @@ fn explore_bounds_and_help_are_public_before_runtime_inputs_or_state() {
             && text.contains("--json")
             && text.contains("Exit status:")
     );
-    assert!(!text.contains("--workers"));
+    assert!(text.contains("--workers"));
     fs::write(project.join("compose.yaml"),"services:\n  a: {image: example/a}\nx-seedbox:\n  version: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: a}\n").unwrap();
     let missing = seedbox(&["explore"], &project);
     assert_eq!(

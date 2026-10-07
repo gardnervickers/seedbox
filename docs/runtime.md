@@ -368,8 +368,15 @@ that hasn't been applied yet.
 
 ## Exploration preparation
 
-`seedbox explore [COMPOSE] --seed FIRST --count COUNT` has one sequential worker.
-Count defaults to 1; seed defaults to the resolved Compose seed. Bounds are finite,
+`seedbox explore [COMPOSE] --seed FIRST --count COUNT` has one worker by default.
+`--workers N` (1..32) permits N simultaneous owned attempts; count defaults to 1
+and seed to the resolved Compose seed. Parallel execution rejects an explicit
+`--cpu` or `SEEDBOX_CPU` before preparation. Automatic selection must reserve N
+eligible physical cores with all SMT siblings together during preflight, verify
+each core's admission and release every transient resource before preparation.
+Insufficient capacity is ERROR; there is no queue/retry on host contention. A
+library execution backend supports only one worker unless it explicitly overrides
+`preflight_workers`. Per-attempt admission and leases remain unchanged. Bounds are finite,
 positive and checked for inclusive u64 overflow before slow work. Runtime inputs and
 backend host admission are checked before the sole preparation; refusal retains
 batch ERROR with no prepared inputs or seed attempts. Transient admission resources
@@ -381,13 +388,24 @@ missing/corrupt bytes cause ERROR without re-preparation or repair.
 
 The owned batch directory contains atomic `exploration.json` checkpoints,
 `preparation/` and `attempts/SEED/ORDINARY-RUN/`. Attempted means entering orchestration,
-not proof that a guest started. Counts distinguish PASS/FAIL, TIMEOUT, ERROR,
-INCOMPLETE and unfinished attempts; remaining seeds are undispatched. A killed process
+not proof that a guest started. Version 2 records explicit indexes (`seed = FIRST +
+index`) in dispatch order, independent of completion order. Each attempt's
+`finished` flag means the coordinator retained its terminal result; false includes
+a result that may already exist in an independently committed run manifest.
+Counts distinguish PASS/FAIL, TIMEOUT, ERROR, INCOMPLETE and unfinished attempts;
+remaining seeds are an undispatched suffix. Unsupported checkpoint versions are
+refused clearly without defaults or migration; version 1 bytes require their prior
+reader, while ordinary run inspection/replay is unchanged. A killed process
 leaves an unfinished INCOMPLETE checkpoint and independently inspectable ordinary
 manifests. There is no resume operation. Checkpoint/evidence failures stop dispatch.
 The final aggregate uses ERROR, INCOMPLETE, TIMEOUT, FAIL, PASS precedence and the
 existing exit codes 2, 3, 124, 1, 0. Application FAIL and witnessed simulated TIMEOUT may
-continue; infrastructure errors, wall expiry and cancellation stop.
+continue; infrastructure errors, wall expiry and cancellation stop new dispatch
+and cancel only owned running attempts. The caller's library token is not modified
+by an internal failure. Scoped workers are joined even if checkpoint retention
+fails. A backend that cannot complete owned cleanup prevents a prompt return; no
+unrelated process or service is stopped. Cancellation races may leave an already
+finished PASS/FAIL beside cancelled INCOMPLETE attempts and undispatched seeds.
 
 Preparation diagnostics belong to the caller, surviving preparer/scratch destruction.
 Raw phase output is capped at 4 MiB per file and 64 MiB total. Bounded prefixes are retained
@@ -417,7 +435,17 @@ shared daemon, unrelated image/container, host service or cache is changed.
 CLI resource fields report self/reaped-child user/system CPU deltas and separate
 self/child RSS high-water readings in bytes, including preparation. They are not
 simultaneous aggregate memory, guest peak memory, simulated time or CPU lease duration.
-Unavailable measurements are null and do not affect run identity.
+Unavailable measurements are null and do not affect run identity. `peak_running`
+is the maximum number of active orchestration attempts. `active_attempt_seconds`
+is the sum of whole attempt wall intervals, including materialization, admission
+and cleanup, for attempts whose terminal results reached the coordinator. Once
+all owned attempts return, it is a conservative guest-core charge for one world
+per worker, not exact lease duration or CPU measurement. Unfinished checkpoints
+omit still-running/uncheckpointed intervals and cannot supply a complete charge. No exact lease telemetry API
+is added. Worker count and core selection are operational choices, absent from
+semantic run identity. Synthetic serial/parallel lifecycle controls do not qualify
+real per-core/witness invariance; that and staggered hardware cancellation remain
+required runtime gates.
 
 Required tool-version provenance uses stdout only, independently of diagnostic
 truncation. Its raw `.stdout` evidence is bounded to 8192 bytes per value and

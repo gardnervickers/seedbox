@@ -61,12 +61,24 @@ is FAIL; a fresh replay must reproduce that FAIL with MATCH. Nonempty fault
 schedules remain unsupported until their guest effect timing is verified.
 
 `explore` validates runtime inputs and host admission before its one preparation,
-then executes a finite consecutive seed sequence sequentially. Admission refusal
+then executes a finite consecutive seed sequence with one worker by default.
+`--workers N` (1..32) bounds parallel attempts and requires automatic CPU selection
+(omit `--cpu` and `SEEDBOX_CPU`); all N eligible physical cores and siblings must be
+available and admitted before preparation. Admission refusal
 retains batch ERROR without preparation or seed dispatch; each seed rechecks its host.
 Each run retains its ordinary manifest and replay inputs under the printed batch
 path. FAIL and witnessed simulated TIMEOUT continue; infrastructure errors and
 cancellation stop. Count defaults to 1 and seed to the Compose seed. `--json` prints
-one report with separate outcomes and undispatched seeds. Build exploration requires
+one report with separate outcomes and undispatched seeds. Version 2 batch
+checkpoints preserve seed/index dispatch ordering independently of completion order,
+with unfinished/running attribution and a pending suffix. Earlier batch bytes need
+their prior reader; ordinary run inspection/replay is unchanged. Infrastructure
+uncertainty stops new dispatch, cancels only owned work and waits for cleanup.
+Reports separate measured process-family CPU, elapsed wall, peak active attempts
+and summed completed-attempt wall (a conservative guest-core charge once all
+owned attempts return, not exact lease time). Partial sums omit running intervals.
+Real serial/parallel and core invariance still require runtime qualification.
+Build exploration requires
 the inspected local project-Nix Podman closure; cancelled builds remain
 cleanup-unverified ERROR with their private tag retained until cessation is verified.
 See the repository's `docs/runtime.md` for bounded preparation evidence and limits.
