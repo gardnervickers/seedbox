@@ -22,7 +22,9 @@ seedbox inspect .seedbox/runs/ATTEMPT --json
 seedbox replay .seedbox/runs/ATTEMPT
 ```
 
-Preparation unpacks images with root ownership and runs before the CPU lease.
+Preparation unpacks images with root ownership and runs before the execution CPU
+lease. Admission briefly checks an eligible core first and releases all temporary
+resources before preparation.
 `run` picks a free CPU and finds the guest kernel and VMM by default; see
 `seedbox help run`. Run/replay must be invoked with the required KVM/MSR access;
 see the repository's `docs/runtime.md` for setup and limits. `--margin` and
@@ -58,3 +60,9 @@ image rebuild is needed. Bundles preserve retained logs and visible omissions;
 output omitted by the original capture policy is not transferred. Export/import
 never replace existing data; the default transfer cap is 32 GiB for unique objects
 and separately for materialized log bytes (`--max-bytes` overrides it).
+
+Run/replay enforce the versioned admitted host/engine/kernel policy. Matching a
+second machine is compatibility admission, not cross-host qualification. Old
+records stay inspectable/exportable/importable, but absent or drifted host proof
+is NOT_COMPARABLE (exit 2) in this CLI and cannot be bypassed with
+`--allow-engine-change`. A retained previous CLI is only historical evidence.

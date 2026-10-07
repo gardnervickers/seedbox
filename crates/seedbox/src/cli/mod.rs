@@ -398,8 +398,7 @@ fn run(cli: Cli) -> Result<u8> {
             let scratch = tempfile::tempdir()?;
             let (preparer, executor) = inputs.backends(&store, cpu.cpu, scratch.path())?;
             let executor = performance.apply(executor)?;
-            // After the fast input checks, before slow image preparation.
-            require_kvm_host()?;
+            // Backend admission checks the selected core before preparation.
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
             let result = orchestrator.run(
@@ -490,7 +489,6 @@ fn run(cli: Cli) -> Result<u8> {
         } => {
             let run = defaults::run_directory(run)?;
             let previous = orchestration::inspect(&run)?;
-            require_kvm_host()?;
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
             let profile = &previous.identity.inputs.profile;
@@ -611,32 +609,6 @@ fn run(cli: Cli) -> Result<u8> {
             Ok(0)
         }
     }
-}
-
-/// Fail fast when this host cannot execute: no KVM, or no MSR access.
-fn require_kvm_host() -> Result<()> {
-    if !cfg!(target_os = "linux") {
-        return Err(Error::Setup(
-            "run and replay require the qualified Linux KVM host".into(),
-        ));
-    }
-    for (path, fix) in [
-        (
-            "/dev/kvm",
-            "enable KVM and run as root (e.g. sudo -E env PATH=\"$PATH\" seedbox ...)",
-        ),
-        (
-            "/dev/cpu/0/msr",
-            "run as root (e.g. sudo -E env PATH=\"$PATH\" seedbox ...) with the msr module loaded",
-        ),
-    ] {
-        std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .map_err(|error| Error::Setup(format!("{path}: {error}; {fix}")))?;
-    }
-    Ok(())
 }
 
 /// Print a finished run and return its exit status (see `EXIT_CODES`).

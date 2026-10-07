@@ -340,3 +340,121 @@ fn bundle_cli_validates_paths_limits_and_positional_inputs() {
     let output = seedbox(&["import", "missing"], directory.path());
     assert_eq!(stderr(&output), "error: bundle missing: not found\n");
 }
+
+#[test]
+fn old_host_proof_replay_is_not_comparable_while_inspection_and_transfer_stay_available() {
+    use seedbox::{
+        config,
+        execution::*,
+        image::Launch,
+        orchestration::*,
+        store::{ContentDigest, ContentStore},
+    };
+    use std::collections::BTreeMap;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::write(root.join("compose.yaml"), "name: old\nservices:\n  workload: {image: fixture:v1}\nx-seedbox:\n  version: 1\n  seed: 0\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: workload}\n").unwrap();
+    let simulation = config::load(&root.join("compose.yaml"), &BTreeMap::new()).unwrap();
+    let store = ContentStore::new(root.join("state/objects"));
+    let object = store.put(b"opaque retained fixture").unwrap();
+    let inputs = PreparedInputs {
+        kernel: object.clone(),
+        profile: ExecutionProfile {
+            backend: "seedbox-kvm".into(),
+            engine: object.clone(),
+            witness_mode: WitnessMode::Exits,
+            semantic_parameters: BTreeMap::from([("memory_mb".into(), "512".into())]),
+        },
+        placement: BTreeMap::from([("workload".into(), "workload".into())]),
+        guests: BTreeMap::from([("workload".into(), object.clone())]),
+        images: BTreeMap::from([(
+            "workload".into(),
+            PreparedImage {
+                manifest: object.clone(),
+                config: object.clone(),
+                layers: vec![],
+                launch: Launch {
+                    argv: vec!["/app".into()],
+                    environment: BTreeMap::new(),
+                    user: "".into(),
+                    working_dir: "/".into(),
+                    volumes: vec![],
+                },
+            },
+        )]),
+        auxiliary: BTreeMap::new(),
+        provenance: BTreeMap::new(),
+    };
+    let identity = RunIdentity {
+        version: 2,
+        seed: 0,
+        configuration: simulation,
+        inputs,
+    };
+    let run_id = store.put(&serde_json::to_vec(&identity).unwrap()).unwrap();
+    let record = RunRecord {
+        run_id,
+        attempt: "old".into(),
+        identity,
+        performance_parameters: BTreeMap::new(),
+        allow_engine_change: false,
+        log_policy: LogPolicy::default(),
+        omitted_logs: BTreeMap::new(),
+        outcome: Outcome::Pass,
+        report: Some(ExecutionReport {
+            reason: StopReason::Completed,
+            workload_exit: Some(WorkloadExit {
+                service: "workload".into(),
+                code: 0,
+            }),
+            witness: Some(ContentDigest::of(b"fixture witness")),
+            full_state: None,
+            faults: vec![],
+            detail: None,
+        }),
+        error: None,
+        logs: BTreeMap::new(),
+        replay_of: None,
+        replay: None,
+    };
+    fs::create_dir_all(root.join("state/runs/old")).unwrap();
+    let manifest = serde_json::to_vec(&serde_json::json!({"sha256": ContentDigest::of(&serde_json::to_vec(&record).unwrap()), "record": record})).unwrap();
+    fs::write(root.join("state/runs/old/manifest.json"), &manifest).unwrap();
+    for override_engine in [false, true] {
+        let mut args = vec!["replay", "state/runs/old", "--state", "state"];
+        if override_engine {
+            args.push("--allow-engine-change");
+        }
+        let output = seedbox(&args, root);
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.starts_with("ERROR: "), "{stdout}");
+        assert!(stdout.contains("replay: NOT_COMPARABLE"), "{stdout}");
+        assert_eq!(stderr(&output), "input integrity: host admission proof missing: host_policy; use the retained previous CLI only for historical evidence\n");
+        assert_eq!(
+            fs::read(root.join("state/runs/old/manifest.json")).unwrap(),
+            manifest
+        );
+    }
+    assert!(seedbox(&["inspect", "state/runs/old", "--json"], root)
+        .status
+        .success());
+    let exported = seedbox(
+        &[
+            "export",
+            "state/runs/old",
+            "--state",
+            "state",
+            "--output",
+            "old.tar",
+        ],
+        root,
+    );
+    assert!(exported.status.success(), "{}", stderr(&exported));
+    let imported = seedbox(&["import", "old.tar", "--state", "imported"], root);
+    assert!(imported.status.success(), "{}", stderr(&imported));
+    assert_eq!(
+        fs::read(root.join("state/runs/old/manifest.json")).unwrap(),
+        manifest
+    );
+}

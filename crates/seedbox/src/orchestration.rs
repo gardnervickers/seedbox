@@ -155,7 +155,9 @@ impl Orchestrator {
                 path: "seed".into(),
                 message: "provide a seed in RunOptions or x-seedbox.seed".into(),
             })?;
-        // Preparation always happens before any execution or host reservation.
+        preparer.validate_runtime_inputs()?;
+        executor.preflight(None)?;
+        // No preflight resource survives preparation.
         let inputs = preparer.prepare(simulation, &self.store)?;
         self.run_prepared(
             simulation,
@@ -268,7 +270,10 @@ impl Orchestrator {
         write_record(&directory, &record)?;
         let output = directory.join("output");
         let execution = (|| -> Result<ExecutionReport> {
+            executor.validate_retained(&record.identity.inputs)?;
             validate_inputs(&record.identity, executor)?;
+            fs::create_dir(&output)?;
+            executor.preflight(Some(&output))?;
             let mut artifacts = BTreeMap::new();
             for digest in record.identity.inputs.digests() {
                 if !artifacts.contains_key(digest) {
@@ -278,7 +283,6 @@ impl Orchestrator {
                     );
                 }
             }
-            fs::create_dir(&output)?;
             if cancellation.is_cancelled() {
                 return Ok(ExecutionReport {
                     reason: StopReason::Cancelled,

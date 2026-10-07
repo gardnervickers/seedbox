@@ -29,7 +29,20 @@ pub struct OciPreparer {
 pub use crate::preparation_command::PreparationContext;
 
 impl PreparationBackend for OciPreparer {
+    fn validate_runtime_inputs(&self) -> Result<()> {
+        if self.profile.backend == "seedbox-kvm" {
+            crate::admission::validate_profile(&self.profile)?;
+            crate::admission::validate_kernel(&crate::admission::file_digest(&self.kernel)?)?;
+            if crate::admission::file_digest(&self.engine)? != self.profile.engine {
+                return Err(Error::Integrity(
+                    "VMM changed after profile construction".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
     fn prepare(&self, simulation: &Simulation, store: &ContentStore) -> Result<PreparedInputs> {
+        self.validate_runtime_inputs()?;
         self.prepare_inner(simulation, store, None)
     }
     fn prepare_cancellable(
@@ -39,6 +52,7 @@ impl PreparationBackend for OciPreparer {
         context: &PreparationContext,
     ) -> Result<PreparedInputs> {
         context.check()?;
+        self.validate_runtime_inputs()?;
         if simulation
             .services
             .values()
@@ -58,6 +72,10 @@ impl OciPreparer {
     ) -> Result<PreparedInputs> {
         if let Some(context) = context {
             context.check()?;
+        }
+        let kernel = store.put_file(&self.kernel)?;
+        if self.profile.backend == "seedbox-kvm" {
+            crate::admission::validate_kernel(&kernel)?;
         }
         let engine = store.put_file(&self.engine)?;
         if engine != self.profile.engine {
@@ -84,13 +102,9 @@ impl OciPreparer {
             auxiliary.insert(format!("config/{name}"), store.put(&data)?);
             configs.insert(name, data);
         }
-        let frozen_kernel = if let Some(context) = context {
-            let kernel = store.put_file(&self.kernel)?;
+        if let Some(context) = context {
             context.setup_inputs(&auxiliary, &engine, &kernel)?;
-            Some(kernel)
-        } else {
-            None
-        };
+        }
         let addresses: BTreeMap<_, _> = simulation
             .services
             .keys()
@@ -178,10 +192,7 @@ impl OciPreparer {
             );
         }
         Ok(PreparedInputs {
-            kernel: match frozen_kernel {
-                Some(kernel) => kernel,
-                None => store.put_file(&self.kernel)?,
-            },
+            kernel,
             images,
             guests,
             placement: simulation

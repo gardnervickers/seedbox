@@ -117,6 +117,25 @@ behavior is unchanged. See [preparation evidence and cancellation](docs/runtime.
   it with readback, then restores the exact originals after reaping its child.
   The legacy `batch.sh` runner uses the same lease protocol.
 
+The versioned `amd-zen3-engine168ad-v1` admission policy checks AMD family 25,
+model 33, stepping 0 and microcode 0xa20102e, exact booted/current host kernel and
+controlled guest-kernel bytes, accepted engine bytes, KVM capabilities and the
+engine's complete existing CPUID policy. Before image preparation, it temporarily
+reserves an eligible core, checks each online/allowed SMT sibling and opens the
+exact perf event disabled. Descriptors close and affinity/reservations restore
+before preparation. The leased execution core is checked again before MSR writes.
+This is readiness admission; it does not prove guest counting, overflow behavior
+or cross-host determinism. Matching a second machine admits compatibility without
+host-ID enrollment. Support evidence remains the tested host and inputs.
+
+New run identities bind the full policy and its fingerprint. Existing records
+remain inspectable and transferable, but replay through this CLI rejects missing
+or drifted host-policy proof as ERROR/NOT_COMPARABLE (exit 2), even with
+`--allow-engine-change`. A retained previous CLI can still be used for explicitly
+historical evidence; its execution does not establish new-policy admission.
+A new engine/kernel/policy requires its own acceptance. Admission source checks
+are separate from the still-required focused Linux guest/profile acceptance.
+
 ## Applications
 
 `seedbox init my-app --template etcd` (or `redis`) creates a self-contained

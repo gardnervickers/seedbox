@@ -1082,3 +1082,94 @@ fn exploration_checkpoint_failure_leaves_real_committed_run_and_no_later_dispatc
         .path();
     assert_eq!(inspect(&run).unwrap().outcome, Outcome::Pass);
 }
+
+struct AdmissionBackend<'a> {
+    backend: &'a Backend,
+    checks: AtomicUsize,
+    fail_at: usize,
+}
+impl ExecutionBackend for AdmissionBackend<'_> {
+    fn profile(&self) -> ExecutionProfile {
+        self.backend.profile()
+    }
+    fn preflight(&self, _: Option<&std::path::Path>) -> Result<()> {
+        let call = self.checks.fetch_add(1, Ordering::SeqCst) + 1;
+        if call == self.fail_at {
+            return Err(Error::Setup("injected host drift/cleanup rejection".into()));
+        }
+        Ok(())
+    }
+    fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
+        self.backend.execute(request)
+    }
+}
+
+#[test]
+fn rejected_preflight_never_prepares_and_post_preparation_drift_never_executes() {
+    for fail_at in [1, 2] {
+        let fixture = Fixture::new();
+        let backend = AdmissionBackend {
+            backend: &fixture.backend,
+            checks: AtomicUsize::new(0),
+            fail_at,
+        };
+        let result = fixture.orchestrator.run(
+            &fixture.simulation,
+            RunOptions::default(),
+            &fixture.preparer,
+            &backend,
+        );
+        assert_eq!(fixture.backend.calls.load(Ordering::SeqCst), 0);
+        if fail_at == 1 {
+            assert!(result.unwrap_err().to_string().contains("host drift"));
+            assert_eq!(fixture.preparer.calls.load(Ordering::SeqCst), 0);
+        } else {
+            let run = result.unwrap();
+            assert_eq!(fixture.preparer.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(run.record.outcome, Outcome::Error);
+            assert!(run.record.error.as_ref().unwrap().contains("host drift"));
+            assert_eq!(inspect(&run.directory).unwrap(), run.record);
+        }
+    }
+}
+
+#[test]
+fn actual_vmm_admission_rejects_old_proof_before_execution_and_engine_override() {
+    let fixture = Fixture::new();
+    let original = fixture.run();
+    let manifest = fs::read(original.directory.join("manifest.json")).unwrap();
+    let engine = fixture.directory.path().join("retained-engine");
+    fs::write(&engine, b"fixture engine").unwrap();
+    let store = ContentStore::new(fixture.directory.path().join("store"));
+    let executor =
+        seedbox::vmm::VmmExecutor::new(&engine, &store, None, 512, WitnessMode::Exits).unwrap();
+    for allow_engine_change in [false, true] {
+        let rejected = fixture
+            .orchestrator
+            .replay_with_options(
+                &original.directory,
+                &executor,
+                ReplayOptions {
+                    allow_engine_change,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(rejected.record.outcome, Outcome::Error);
+        assert_eq!(
+            rejected.record.replay.unwrap().status,
+            ReplayStatus::NotComparable
+        );
+        assert!(rejected
+            .record
+            .error
+            .unwrap()
+            .contains("host admission proof missing"));
+        assert!(!rejected.directory.join("output").exists());
+        assert_eq!(
+            fs::read(original.directory.join("manifest.json")).unwrap(),
+            manifest
+        );
+    }
+    assert_eq!(fixture.preparer.calls.load(Ordering::SeqCst), 1);
+}
