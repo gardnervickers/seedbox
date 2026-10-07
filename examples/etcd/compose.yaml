@@ -13,7 +13,7 @@ services:
       - --initial-cluster=n1=http://n1:2380,n2=http://n2:2380,n3=http://n3:2380
       - --initial-cluster-state=new
       - --logger=zap
-      - --log-level=error
+      - --log-level=info
     environment: {GOMAXPROCS: "4"}
   n2:
     image: quay.io/coreos/etcd:v3.5.2
@@ -28,7 +28,7 @@ services:
       - --initial-cluster=n1=http://n1:2380,n2=http://n2:2380,n3=http://n3:2380
       - --initial-cluster-state=new
       - --logger=zap
-      - --log-level=error
+      - --log-level=info
     environment: {GOMAXPROCS: "4"}
   n3:
     image: quay.io/coreos/etcd:v3.5.2
@@ -43,7 +43,7 @@ services:
       - --initial-cluster=n1=http://n1:2380,n2=http://n2:2380,n3=http://n3:2380
       - --initial-cluster-state=new
       - --logger=zap
-      - --log-level=error
+      - --log-level=info
     environment: {GOMAXPROCS: "4"}
   client:
     build: ./workload

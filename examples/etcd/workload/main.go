@@ -67,6 +67,7 @@ func runWrites(dur time.Duration, conc, writes int, put func(context.Context, st
 					acks = append(acks, ack{k, v, rev})
 				} else {
 					failed++
+					fmt.Printf("DEBUG %s w%d put %s err=%v\n", time.Now().Format("15:04:05.000000"), w, k, err)
 				}
 				mu.Unlock()
 				if err != nil {

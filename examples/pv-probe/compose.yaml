@@ -1,0 +1,16 @@
+name: pv-probe
+services:
+  server:
+    build: ./probe
+    command: [serve]
+    environment: {GOMAXPROCS: "4"}
+  client:
+    build: ./probe
+    environment: {GOMAXPROCS: "4"}
+x-seedbox:
+  version: 1
+  seed: 1009
+  limits: {simulated_time: 60s, wall_time: 10m}
+  network: {latency: 1ms, jitter: 200us}
+  schedule: {timer_jitter: 1ms, stop_tolerance: 2ms}
+  check: {service: client, exit_code: 0}
