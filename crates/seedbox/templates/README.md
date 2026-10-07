@@ -85,3 +85,8 @@ second machine is compatibility admission, not cross-host qualification. Old
 records stay inspectable/exportable/importable, but absent or drifted host proof
 is NOT_COMPARABLE (exit 2) in this CLI and cannot be bypassed with
 `--allow-engine-change`. A retained previous CLI is only historical evidence.
+
+Check the host and installed engine/kernel with `seedbox doctor` (Linux KVM,
+root) before running. It uses the normal CPU/runtime defaults without building,
+preparing images or starting guests. `VALID` means execution-profile compatibility,
+not cross-host replay qualification; `--json` shows the admitted observations.

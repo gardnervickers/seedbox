@@ -6,7 +6,7 @@ use crate::{
     store::{ContentDigest, ContentStore},
     Error, Result,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -22,10 +22,42 @@ pub struct VmmExecutor {
     admission: std::sync::Arc<std::sync::Mutex<Vec<Vec<crate::admission::CoreObservation>>>>,
 }
 
+/// Successful compatibility observation; it is not empirical replay qualification.
+#[derive(Debug, Serialize)]
+pub struct DoctorReport {
+    pub policy_version: String,
+    pub policy_fingerprint: String,
+    pub cpu: u32,
+    pub cpus: Vec<u32>,
+    pub engine: ContentDigest,
+    pub kernel: ContentDigest,
+    pub observations: Vec<crate::admission::CoreObservation>,
+}
+
+struct AdmissionProbe {
+    cpu: Option<u32>,
+    observations: Vec<crate::admission::CoreObservation>,
+    result: Result<()>,
+}
+
 impl VmmExecutor {
     pub fn new(
         engine: &Path,
         store: &ContentStore,
+        cpu: Option<u32>,
+        memory_mb: u32,
+        witness_mode: WitnessMode,
+    ) -> Result<Self> {
+        if !(64..=65536).contains(&memory_mb) {
+            return Err(Error::Execution(
+                "guest memory must be 64..65536 MiB".into(),
+            ));
+        }
+        Self::from_engine_digest(store.put_file(engine)?, cpu, memory_mb, witness_mode)
+    }
+
+    fn from_engine_digest(
+        engine: ContentDigest,
         cpu: Option<u32>,
         memory_mb: u32,
         witness_mode: WitnessMode,
@@ -46,7 +78,7 @@ impl VmmExecutor {
             admission: Default::default(),
             profile: ExecutionProfile {
                 backend: "seedbox-kvm".into(),
-                engine: store.put_file(engine)?,
+                engine,
                 witness_mode,
                 semantic_parameters,
             },
@@ -55,6 +87,73 @@ impl VmmExecutor {
                 ("SEEDBOX_UNDO".into(), "256".into()),
             ]),
         })
+    }
+
+    /// Check the existing execution policy without storing inputs or starting guests.
+    /// Host observations are the same bounded probe used by execution preflight.
+    pub fn doctor(engine: &Path, kernel: &Path, cpu: Option<u32>) -> Result<DoctorReport> {
+        let executor = Self::from_engine_digest(
+            crate::admission::file_digest(engine)?,
+            cpu,
+            1024,
+            WitnessMode::Exits,
+        )?;
+        crate::admission::validate_profile(&executor.profile)?;
+        let kernel = crate::admission::file_digest(kernel)?;
+        crate::admission::validate_kernel(&kernel)?;
+        let probe = executor.probe();
+        executor.doctor_report(kernel, probe)
+    }
+
+    fn doctor_report(&self, kernel: ContentDigest, probe: AdmissionProbe) -> Result<DoctorReport> {
+        probe.result?;
+        for observation in &probe.observations {
+            crate::admission::validate_observation(observation)?;
+        }
+        Ok(DoctorReport {
+            policy_version: self.profile.semantic_parameters["host_policy"].clone(),
+            policy_fingerprint: self.profile.semantic_parameters["host_policy_fingerprint"].clone(),
+            cpu: probe
+                .cpu
+                .ok_or_else(|| Error::Execution("host probe did not select a CPU".into()))?,
+            cpus: probe
+                .observations
+                .iter()
+                .map(|observation| observation.cpu)
+                .collect(),
+            engine: self.profile.engine.clone(),
+            kernel,
+            observations: probe.observations,
+        })
+    }
+
+    fn probe(&self) -> AdmissionProbe {
+        let mut selected = None;
+        let mut observations = Vec::new();
+        let result = (|| -> Result<()> {
+            #[cfg(target_os = "linux")]
+            {
+                let reservation = crate::host::CpuReservation::acquire(self.cpu)?;
+                selected = Some(reservation.cpu);
+                crate::admission::collect_admitted(
+                    reservation.cpus.iter().copied(),
+                    &mut observations,
+                    crate::admission::observe,
+                )?;
+                drop(reservation); // No reservation/perf/affinity spans later work or publication.
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = &mut selected;
+                observations.push(crate::admission::observe(0)?);
+            }
+            Ok(())
+        })();
+        AdmissionProbe {
+            cpu: selected,
+            observations,
+            result,
+        }
     }
 
     pub fn with_margin(mut self, margin: &str) -> Result<Self> {
@@ -82,24 +181,9 @@ impl VmmExecutor {
 impl ExecutionBackend for VmmExecutor {
     fn preflight(&self, output: Option<&Path>) -> Result<()> {
         crate::admission::validate_profile(&self.profile)?;
-        let mut observations = Vec::new();
-        let collection = (|| -> Result<()> {
-            #[cfg(target_os = "linux")]
-            {
-                let reservation = crate::host::CpuReservation::acquire(self.cpu)?;
-                crate::admission::collect_admitted(
-                    reservation.cpus.iter().copied(),
-                    &mut observations,
-                    crate::admission::observe,
-                )?;
-                drop(reservation); // No reservation/perf/affinity spans OCI or diagnostic publication.
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                observations.push(crate::admission::observe(0)?);
-            }
-            Ok(())
-        })();
+        let probe = self.probe();
+        let observations = probe.observations;
+        let collection = probe.result;
         crate::admission::finish_admission(collection, |collection| {
             let mut saved = self
                 .admission
@@ -847,5 +931,101 @@ mod linux {
             serde_json::to_vec_pretty(&originals)?,
         )?;
         completion
+    }
+}
+
+#[cfg(test)]
+mod doctor_tests {
+    use super::*;
+    use crate::admission::{required_policy, CoreObservation, ENGINE, GUEST_KERNEL};
+    fn observed(cpu: u32) -> CoreObservation {
+        let p = required_policy().unwrap();
+        CoreObservation {
+            cpu,
+            architecture: p.architecture,
+            vendor: p.vendor,
+            family: p.family,
+            model: p.model,
+            stepping: p.stepping,
+            microcode: p.microcode,
+            booted_kernel: p.host_kernel.clone(),
+            current_kernel: p.host_kernel,
+            kvm_api: p.kvm_api,
+            immediate_exit: p.immediate_exit,
+            guest_debug: p.guest_debug,
+            sync_regs: 7,
+            perf_type: p.perf_type,
+            perf_disabled_open: true,
+            perf_error: None,
+            workaround_msr: 17,
+            raw_cpuid: p.effective_cpuid,
+        }
+    }
+    #[test]
+    fn doctor_report_preserves_actual_selected_core_and_exact_admitted_observations() {
+        let executor = VmmExecutor::from_engine_digest(
+            ContentDigest::try_from(ENGINE.to_owned()).unwrap(),
+            None,
+            1024,
+            WitnessMode::Exits,
+        )
+        .unwrap();
+        let observations = vec![observed(2), observed(18)];
+        let report = executor
+            .doctor_report(
+                ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap(),
+                AdmissionProbe {
+                    cpu: Some(18),
+                    observations: observations.clone(),
+                    result: Ok(()),
+                },
+            )
+            .unwrap();
+        assert_eq!(report.cpu, 18); // Selected CPU need not be the first sorted sibling.
+        assert_eq!(report.cpus, [2, 18]);
+        assert_eq!(report.observations, observations);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["observations"],
+            serde_json::to_value(&observations).unwrap()
+        );
+        assert_eq!(json["cpu"], 18);
+        assert!(executor.admission.lock().unwrap().is_empty()); // No cached/second observation supplied the receipt.
+    }
+    #[test]
+    fn no_doctor_success_report_on_probe_cleanup_error_or_capability_drift() {
+        let executor = VmmExecutor::from_engine_digest(
+            ContentDigest::try_from(ENGINE.to_owned()).unwrap(),
+            Some(2),
+            1024,
+            WitnessMode::Exits,
+        )
+        .unwrap();
+        for case in 0..3 {
+            let mut observation = observed(2);
+            if case == 1 {
+                observation.perf_disabled_open = false;
+            }
+            if case == 2 {
+                observation.raw_cpuid[0].flags ^= 1;
+            }
+            let result = if case == 0 {
+                Err(Error::Execution(
+                    "host preflight cleanup failed: affinity readback mismatch".into(),
+                ))
+            } else {
+                Ok(())
+            };
+            assert!(executor
+                .doctor_report(
+                    ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap(),
+                    AdmissionProbe {
+                        cpu: Some(2),
+                        observations: vec![observation],
+                        result
+                    }
+                )
+                .is_err());
+        }
     }
 }
