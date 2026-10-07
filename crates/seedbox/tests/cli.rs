@@ -827,6 +827,133 @@ mod diff_tests {
     include!("support/diff_fixture.rs");
 
     #[test]
+    fn diff_current_multi_machine_parts_and_cli_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let a = current_report(true);
+        let mut b = a.clone();
+        b["machines"][1]["state_digest_parts"]["disk"] =
+            serde_json::to_value(sb::store::ContentDigest::of(b"changed disk")).unwrap();
+        write_fixture(&root.join("a"), &mut fixture(), Some(&a), None);
+        write_fixture(&root.join("b"), &mut fixture(), Some(&b), None);
+        for (right, code, status) in [("a", 0, "MATCH"), ("b", 1, "DIFFERENT")] {
+            for json in [false, true] {
+                let mut args = vec!["diff", "a", right];
+                if json {
+                    args.push("--json");
+                }
+                let output = seedbox(&args, root);
+                assert_eq!(output.status.code(), Some(code), "{}", stderr(&output));
+                assert!(output.stderr.is_empty());
+                let value: serde_json::Value = if json {
+                    serde_json::from_slice(&output.stdout).unwrap()
+                } else {
+                    let plain = String::from_utf8(output.stdout).unwrap();
+                    assert!(plain.starts_with(&format!("{status}: a <> {right}\n")));
+                    assert_eq!(
+                        plain
+                            .lines()
+                            .filter(|l| l.starts_with("MATCH: ") || l.starts_with("DIFFERENT: "))
+                            .count(),
+                        1
+                    );
+                    let first = plain
+                        .lines()
+                        .find_map(|l| l.strip_prefix("first record: "))
+                        .unwrap();
+                    serde_json::json!({"first_record": serde_json::from_str::<serde_json::Value>(first).unwrap()})
+                };
+                if json {
+                    assert_eq!(value["status"], status);
+                    assert_eq!(value["machines"].as_array().unwrap().len(), 2);
+                }
+                if code == 1 {
+                    let first = &value["first_record"];
+                    assert_eq!(first["machine"], "server");
+                    assert_eq!(first["source"], "terminal");
+                    assert!(first["record"].is_null());
+                    assert_eq!(first["a"]["time_ns"], 100);
+                    assert_eq!(
+                        first["a"]["value"]["state_digest_parts"]["disk"],
+                        a["machines"][1]["state_digest_parts"]["disk"]
+                    );
+                    assert_eq!(
+                        first["b"]["value"]["state_digest_parts"]["disk"],
+                        b["machines"][1]["state_digest_parts"]["disk"]
+                    );
+                    if json {
+                        assert_eq!(
+                            value["machines"][0]["differences"][0]["field"],
+                            "/state_digest_parts/disk"
+                        );
+                        assert_eq!(
+                            value["machines"][0]["differences"]
+                                .as_array()
+                                .unwrap()
+                                .len(),
+                            1
+                        );
+                        assert!(value["machines"][1]["differences"]
+                            .as_array()
+                            .unwrap()
+                            .is_empty());
+                    }
+                } else {
+                    assert!(value["first_record"].is_null());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn diff_current_digest_fields_remain_strict_and_manifest_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for pointer in [
+            "/world_witness",
+            "/machines/1/witness",
+            "/machines/1/state_digest",
+            "/machines/1/state_digest_parts/regs",
+            "/machines/1/state_digest_parts/xsave",
+            "/machines/1/state_digest_parts/xcrs",
+            "/machines/1/state_digest_parts/msrs",
+            "/machines/1/state_digest_parts/time_page",
+            "/machines/1/state_digest_parts/pending_io",
+            "/machines/1/state_digest_parts/ram",
+            "/machines/1/state_digest_parts/disk",
+            "/machines/1/state_digest_parts/devices",
+        ] {
+            for invalid in ["ABCDEF".repeat(11), "not a digest".into(), "A".repeat(64)] {
+                let mut raw = current_report(true);
+                raw["machines"][1]["state_digest_parts"]["devices"] =
+                    serde_json::to_value(sb::store::ContentDigest::of(b"devices")).unwrap();
+                *raw.pointer_mut(pointer).unwrap() = invalid.into();
+                write_fixture(&root.join("a"), &mut fixture(), Some(&raw), None);
+                let output = seedbox(&["diff", "a", "a", "--json"], root);
+                assert_eq!(output.status.code(), Some(2), "{pointer}");
+                assert!(output.stdout.is_empty());
+                assert!(stderr(&output).starts_with("error: diff a/output/vmm.json: "));
+                assert!(stderr(&output).contains("expected a lowercase SHA-256 digest"));
+            }
+        }
+        let mut record = fixture();
+        record.report.as_mut().unwrap().full_state = Some(std::collections::BTreeMap::from([(
+            "server".into(),
+            sb::store::ContentDigest::of(b"wrong"),
+        )]));
+        write_fixture(
+            &root.join("a"),
+            &mut record,
+            Some(&current_report(true)),
+            None,
+        );
+        let output = seedbox(&["diff", "a", "a"], root);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert_eq!(stderr(&output), "error: diff a: machine state digest disagrees with manifest; use an intact retained run directory (import bundles first)\n");
+    }
+
+    #[test]
     fn inspect_vmm_failure_shows_bounded_diagnostics_only_on_stderr() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
