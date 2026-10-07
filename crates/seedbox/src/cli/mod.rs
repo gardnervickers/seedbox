@@ -31,7 +31,13 @@ Exit status:
   1    FAIL, or a replay MISMATCH
   2    ERROR, a replay that is NOT_COMPARABLE, or a usage or setup error
   3    INCOMPLETE (wall-time limit or cancelled)
-  124  TIMEOUT (simulated-time limit)";
+  124  TIMEOUT (simulated-time limit)
+
+Host execution control:
+  seedbox pause RUN     Wait for a host slice-boundary pause
+  seedbox resume RUN    Resume the same live world
+Pause preserves guest time and witnesses. Wall-time limits and cancellation remain active.
+The executing attempt has an output/host-control locator; replay uses its new attempt.";
 
 #[derive(Parser)]
 #[command(
@@ -153,6 +159,16 @@ enum Command {
         // Last: its help heading applies to every flag declared after it.
         #[command(flatten)]
         performance: Performance,
+    },
+    /// Pause host execution at a slice boundary (executing run or replay).
+    Pause {
+        /// Directory of the executing run or replay attempt.
+        run: PathBuf,
+    },
+    /// Resume host execution from a paused slice boundary.
+    Resume {
+        /// Directory of the executing run or replay attempt.
+        run: PathBuf,
     },
     /// Export a recorded run and its retained inputs and logs.
     Export {
@@ -412,6 +428,16 @@ pub fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<u8> {
     match cli.command {
+        Command::Pause { run } => {
+            let status = seedbox::host_control::set_paused(&run, true)?;
+            println!("{}: {}", word(&status), run.display());
+            Ok(0)
+        }
+        Command::Resume { run } => {
+            let status = seedbox::host_control::set_paused(&run, false)?;
+            println!("{}: {}", word(&status), run.display());
+            Ok(0)
+        }
         Command::Init {
             directory,
             template,
