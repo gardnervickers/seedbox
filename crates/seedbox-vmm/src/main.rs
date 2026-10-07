@@ -303,6 +303,10 @@ fn run() -> Result<Value, String> {
             mach.checkpoint_at = v.parse().map_err(|e| format!("SEEDBOX_CHECKPOINT_AT: {e}"))?;
         }
         mach.fm_learn = std::env::var("SEEDBOX_FM_LEARN").is_ok_and(|v| v == "1");
+        if let Ok(v) = std::env::var("SEEDBOX_FM_GROW") {
+            mach.fm_grow = v.parse().map_err(|e| format!("SEEDBOX_FM_GROW: {e}"))?;
+        }
+        mach.arm_cache = std::env::var("SEEDBOX_ARM_CACHE").is_ok_and(|v| v == "1");
         mach.timer_jitter = cfg["timer_jitter_ns"].as_u64().unwrap_or(0);
         mach.exact_timer_ppm = cfg["exact_timer_ppm"].as_u64().unwrap_or(0);
         mach.timer_rng = Some(Rng::new(seed, &format!("timer-jitter/{}", names[i])));
@@ -612,6 +616,7 @@ fn run() -> Result<Value, String> {
             "mid_approaches": s.mid_approaches, "final_overflows": s.final_overflows,
             "final_skid_mean": if s.final_overflows > 0 { s.final_skid_sum / s.final_overflows } else { 0 },
             "checkpoint_at": mach.checkpoint_at, "fm_learn": mach.fm_learn,
+            "fm_grow": mach.fm_grow, "arm_cache": mach.arm_cache, "arms": s.arms,
         });
         let mut entry = json!({
             "name": mach.name,

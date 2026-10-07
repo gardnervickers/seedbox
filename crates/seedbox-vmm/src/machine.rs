@@ -103,6 +103,8 @@ pub struct Stats {
     /// Final-approach overflows and their summed skid, for the learned margin.
     pub final_overflows: u64,
     pub final_skid_sum: u64,
+    /// Breakpoint arming ioctls while stepping.
+    pub arms: u64,
     /// Of the soft misses, those with no syscall in the run (provably harmless).
     pub soft_misses_clean: u64,
 }
@@ -171,6 +173,12 @@ pub struct Machine {
     pub fm_learn: bool,
     skid_est: u64,
     final_armed: bool,
+    /// Growth of the final margin per rollback, in percent (200 doubles).
+    /// Performance only.
+    pub fm_grow: u64,
+    /// Skip re-arming breakpoints that are already armed. Performance only.
+    pub arm_cache: bool,
+    armed_targets: Option<Vec<u64>>,
     pub stats: Stats,
     pub witness: Sha256,
     pub trace: Option<std::io::BufWriter<std::fs::File>>,
@@ -404,6 +412,9 @@ impl Machine {
             fm_learn: false,
             skid_est: 0,
             final_armed: false,
+            fm_grow: 200,
+            arm_cache: false,
+            armed_targets: None,
             stats: Stats::default(),
             witness: Sha256::new(),
             trace: None,
@@ -594,6 +605,7 @@ impl Machine {
 
     fn rollback(&mut self) -> Result<(), String> {
         let t = Instant::now();
+        self.armed_targets = None;
         self.complete_io()?;
         let u = self.undo.as_mut().unwrap();
         let (regs, sregs) = u.restore(&self._vm, &self.vcpu, self.mem)?;
@@ -649,6 +661,7 @@ impl Machine {
             self.vcpu
                 .set_guest_debug(&kvm_guest_debug::default())
                 .map_err(|e| format!("guest debug: {e}"))?;
+            self.armed_targets = None;
             self.planner = None;
         }
         self.stepping = on;
@@ -836,7 +849,11 @@ impl Machine {
                 let targets = planner
                     .plan(mem, &r)
                     .map_err(|e| format!("{}: step plan: {e}", self.name))?;
-                Planner::arm(&self.vcpu, &targets)?;
+                if !self.arm_cache || self.armed_targets.as_ref() != Some(&targets) {
+                    Planner::arm(&self.vcpu, &targets)?;
+                    self.stats.arms += 1;
+                    self.armed_targets = Some(targets.clone());
+                }
                 self.last_plan = (r.rip, targets.clone());
                 if targets.contains(&r.rip) {
                     let mut resumed = r;
@@ -904,7 +921,7 @@ impl Machine {
                 drop(exit);
                 self.rollback()?;
                 // A rollback costs far less than stepping, so grow slowly.
-                self.fm = (self.fm * 2).min(UNDO_MAX);
+                self.fm = (self.fm * self.fm_grow / 100).max(self.fm + 1).min(UNDO_MAX);
                 if self.fm_learn && overshoot {
                     // The retry replays the same code: expect the same skid.
                     let skid = delta.saturating_sub(self.armed_wake);
