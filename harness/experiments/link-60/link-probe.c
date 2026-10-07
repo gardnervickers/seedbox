@@ -2,7 +2,10 @@
  * numbered datagram every GAP ns of guest time and drains every datagram it
  * receives, until guest time END. Per source and per 100 ms window of the
  * SENDER's stamp it records receipts, min/max/sum one-way delay (receiver
- * clock minus sender stamp) and out-of-order receipts, then prints them. */
+ * world clock minus sender stamp) and out-of-order receipts, then prints them. It
+ * also prints how many datagrams it sent per window: the guest clock only
+ * advances at deterministic points, so the real send rate varies with the
+ * exit pattern and can't be assumed from GAP. */
 #define _POSIX_C_SOURCE 200809L
 #include <arpa/inet.h>
 #include <stdint.h>
@@ -10,15 +13,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <time.h>
 #define WIN 100000000ULL
 #define NWIN 64
 #define NSRC 8
-static uint64_t now(void) { struct timespec t; if (clock_gettime(CLOCK_MONOTONIC, &t)) exit(3); return (uint64_t)t.tv_sec * 1000000000 + t.tv_nsec; }
+/* World time in ns: user RDTSC traps (CR4.TSD) and the guest kernel returns
+ * the VMM's virtual TSC (1 GHz). CLOCK_MONOTONIC would not do: it starts when
+ * the guest's timekeeping starts, tens of ms after world time 0, so stamps
+ * would not line up with fault times. */
+static uint64_t now(void) { uint32_t lo, hi; __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi)); return (uint64_t)hi << 32 | lo; }
 struct cell { uint64_t n, min, max, sum; };
 static struct cell cells[NSRC][NWIN];
 static char names[NSRC][16];
-static uint64_t last_seq[NSRC], reorders[NSRC], have[NSRC];
+static uint64_t last_seq[NSRC], reorders[NSRC], have[NSRC], sent[NWIN];
 static int src_index(const char *n) {
 	for (int i = 0; i < NSRC; i++) {
 		if (!names[i][0]) { snprintf(names[i], sizeof(names[i]), "%s", n); return i; }
@@ -44,6 +50,7 @@ int main(int argc, char **argv) {
 			char b[64]; int n = snprintf(b, sizeof(b), "LNK %s %llu %llu", name, (unsigned long long)seq++, (unsigned long long)t);
 			if (sendto(fd, b, n, 0, (void *)&a, sizeof(a)) != n) { perror("sendto"); return 3; }
 			next = t + gap;
+			if (t / WIN < NWIN) sent[t / WIN]++;
 		}
 		char r[64];
 		int n;
@@ -65,6 +72,8 @@ int main(int argc, char **argv) {
 		}
 	}
 	printf("LINK-PROBE %s sent=%llu gap=%llu\n", name, (unsigned long long)seq, (unsigned long long)gap);
+	for (int w = 0; w < NWIN; w++)
+		if (sent[w]) printf("LINK-SENT %s w=%d n=%llu\n", name, w, (unsigned long long)sent[w]);
 	for (int i = 0; i < NSRC && names[i][0]; i++) {
 		printf("LINK-SRC %s<-%s reorders=%llu\n", name, names[i], (unsigned long long)reorders[i]);
 		for (int w = 0; w < NWIN; w++) {
