@@ -87,9 +87,11 @@ impl ExecutionBackend for VmmExecutor {
             #[cfg(target_os = "linux")]
             {
                 let reservation = crate::host::CpuReservation::acquire(self.cpu)?;
-                for cpu in &reservation.cpus {
-                    observations.push(crate::admission::observe(*cpu)?);
-                }
+                crate::admission::collect_admitted(
+                    reservation.cpus.iter().copied(),
+                    &mut observations,
+                    crate::admission::observe,
+                )?;
                 drop(reservation); // No reservation/perf/affinity spans OCI or diagnostic publication.
             }
             #[cfg(not(target_os = "linux"))]
@@ -98,29 +100,27 @@ impl ExecutionBackend for VmmExecutor {
             }
             Ok(())
         })();
-        let mut saved = self
-            .admission
-            .lock()
-            .map_err(|_| Error::Execution("host admission evidence lock poisoned".into()))?;
-        if saved.len() == 4 {
-            saved.remove(0);
-        }
-        saved.push(observations.clone());
-        if let Some(output) = output {
-            std::fs::write(
-                output.join("host-static.json"),
-                serde_json::to_vec_pretty(&*saved)?,
-            )?;
-            if let Err(error) = &collection {
-                std::fs::write(output.join("host-static-error.txt"), error.to_string())?;
+        crate::admission::finish_admission(collection, |collection| {
+            let mut saved = self
+                .admission
+                .lock()
+                .map_err(|_| Error::Execution("host admission evidence lock poisoned".into()))?;
+            if saved.len() == 4 {
+                saved.remove(0);
             }
-        }
-        drop(saved);
-        collection?;
-        for observation in &observations {
-            crate::admission::validate_observation(observation)?;
-        }
-        Ok(())
+            saved.push(observations.clone());
+            if let Some(output) = output {
+                std::fs::write(
+                    output.join("host-static.json"),
+                    serde_json::to_vec_pretty(&*saved)?,
+                )?;
+                if let Err(error) = collection {
+                    std::fs::write(output.join("host-static-error.txt"), error.to_string())?;
+                }
+            }
+            drop(saved);
+            Ok(())
+        })
     }
     fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {
         crate::admission::validate_profile(&inputs.profile)?;
@@ -784,30 +784,24 @@ mod linux {
         let (cpu, mut lease) =
             HostLease::acquire_checked(backend.cpu, request.output, |reservation| {
                 let mut observed = Vec::new();
-                for cpu in &reservation.cpus {
-                    match crate::admission::observe(*cpu) {
-                        Ok(observation) => observed.push(observation),
-                        Err(error) => {
-                            fs::write(
-                                request.output.join("host-leased.json"),
-                                serde_json::to_vec_pretty(&observed)?,
-                            )?;
-                            fs::write(
-                                request.output.join("host-leased-error.txt"),
-                                error.to_string(),
-                            )?;
-                            return Err(error);
-                        }
+                let admission = crate::admission::collect_admitted(
+                    reservation.cpus.iter().copied(),
+                    &mut observed,
+                    crate::admission::observe,
+                );
+                crate::admission::finish_admission(admission, |admission| {
+                    fs::write(
+                        request.output.join("host-leased.json"),
+                        serde_json::to_vec_pretty(&observed)?,
+                    )?;
+                    if let Err(error) = admission {
+                        fs::write(
+                            request.output.join("host-leased-error.txt"),
+                            error.to_string(),
+                        )?;
                     }
-                }
-                fs::write(
-                    request.output.join("host-leased.json"),
-                    serde_json::to_vec_pretty(&observed)?,
-                )?;
-                for observation in &observed {
-                    crate::admission::validate_observation(observation)?;
-                }
-                Ok(())
+                    Ok(())
+                })
             })?;
         let originals = lease.original_registers();
         fs::write(

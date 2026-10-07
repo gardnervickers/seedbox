@@ -37,15 +37,17 @@ see the repository's `docs/runtime.md` for setup and limits. `--margin` and
 Charged timer I/O retains its full cost across scheduler boundaries; pending
 operations are included in terminal witnesses.
 
-For owned reproducible build inputs, `prepare`, `run` and `explore` accept
+For optional build timestamp control, `prepare`, `run` and `explore` accept
 `--build-epoch SECONDS` (0..=4294967295; default absent, no environment backing).
 This explicitly changes new build-layer file and directory timestamps and
-requires the qualified project-Nix native Podman, including for exploration.
+requires the admitted project-Nix native Podman, including for exploration.
 Registry and base image metadata is preserved. Pin/control other build inputs;
 an epoch alone cannot make arbitrary builds reproducible. Services sharing one
 frozen native build source reuse preparation work in that call, while retaining
 independent launch/config overrides. Replay needs no epoch option and uses the
-complete retained layers. See `docs/runtime.md` in the Seedbox repository.
+complete retained application release layers. Deterministic execution uses those
+captured bytes and does not require independently rebuilt OCI images to match.
+See `docs/runtime.md` in the Seedbox repository.
 
 All application storage, including Redis AOF and etcd data directories, is private
 RAM-backed storage recreated on each fresh run/replay. No data persists to the host.

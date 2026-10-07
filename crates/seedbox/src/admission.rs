@@ -249,13 +249,13 @@ fn validate_fields(o: &CoreObservation, require_perf: bool) -> Result<()> {
             "KVM sync-register capability",
         ),
         (
+            effective_cpuid(&o.raw_cpuid) == p.effective_cpuid,
+            "complete effective CPUID policy",
+        ),
+        (
             o.perf_type == p.perf_type
                 && (!require_perf || (o.perf_disabled_open && o.perf_error.is_none())),
             "disabled exact-event perf readiness",
-        ),
-        (
-            effective_cpuid(&o.raw_cpuid) == p.effective_cpuid,
-            "complete effective CPUID policy",
         ),
     ];
     for (valid, field) in checks {
@@ -264,6 +264,75 @@ fn validate_fields(o: &CoreObservation, require_perf: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// Retain static observations on refusal; no perf event is attempted until every
+// static field (including complete ordered CPUID) is valid. Final validation uses
+// that same order, so an unattempted event cannot conceal the original failure.
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
+fn probe_disabled_perf<T>(
+    mut observation: CoreObservation,
+    open: impl FnOnce() -> Result<T>,
+) -> CoreObservation {
+    if validate_fields(&observation, false).is_err() {
+        return observation;
+    }
+    match open() {
+        Ok(descriptor) => {
+            drop(descriptor);
+            observation.perf_disabled_open = true;
+        }
+        Err(error) => observation.perf_error = Some(error.to_string()),
+    }
+    observation
+}
+
+// observe returns only after its descriptor/affinity cleanup. Retain that
+// observation, then fail immediately on established refusal before another core
+// can replace it with an unrelated collection error.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn collect_admitted(
+    cpus: impl IntoIterator<Item = u32>,
+    observations: &mut Vec<CoreObservation>,
+    mut observe: impl FnMut(u32) -> Result<CoreObservation>,
+) -> Result<()> {
+    for cpu in cpus {
+        let observation = observe(cpu)?;
+        let admission = validate_observation(&observation);
+        observations.push(observation);
+        admission?;
+    }
+    Ok(())
+}
+
+// Publication never replaces an established refusal, especially cleanup
+// uncertainty. Keep both bounded internal diagnostics; no application bytes are
+// parsed or included here.
+pub(crate) fn finish_admission(
+    admission: Result<()>,
+    publish: impl FnOnce(&Result<()>) -> Result<()>,
+) -> Result<()> {
+    let publication = publish(&admission);
+    match (admission, publication) {
+        (Ok(()), publication) => publication,
+        (Err(refusal), Ok(())) => Err(refusal),
+        (Err(refusal), Err(publication)) => {
+            fn bounded(error: &Error) -> String {
+                let text = error.to_string();
+                let mut chars = text.chars();
+                let mut prefix: String = chars.by_ref().take(4096).collect();
+                if chars.next().is_some() {
+                    prefix.push_str(" [truncated]");
+                }
+                prefix
+            }
+            Err(Error::Execution(format!(
+                "host admission refused: {}; additionally, evidence publication failed: {}",
+                bounded(&refusal),
+                bounded(&publication)
+            )))
+        }
+    }
 }
 
 // PERF_FLAG_FD_CLOEXEC: set atomically by perf_event_open, never by later fcntl.
@@ -327,6 +396,177 @@ pub(crate) fn observe(cpu: u32) -> Result<CoreObservation> {
 mod cleanup_tests {
     use super::*;
     use std::{cell::RefCell, rc::Rc};
+    fn static_observation() -> CoreObservation {
+        let p = required_policy().unwrap();
+        CoreObservation {
+            cpu: 8,
+            architecture: p.architecture,
+            vendor: p.vendor,
+            family: p.family,
+            model: p.model,
+            stepping: p.stepping,
+            microcode: p.microcode,
+            booted_kernel: p.host_kernel.clone(),
+            current_kernel: p.host_kernel,
+            kvm_api: p.kvm_api,
+            immediate_exit: p.immediate_exit,
+            guest_debug: p.guest_debug,
+            sync_regs: p.sync_regs_required,
+            perf_type: p.perf_type,
+            perf_disabled_open: false,
+            perf_error: None,
+            workaround_msr: 0,
+            raw_cpuid: p.effective_cpuid,
+        }
+    }
+    #[test]
+    fn static_cpuid_refusal_is_honest_and_does_not_attempt_perf() {
+        use std::cell::Cell;
+        let attempted = Cell::new(false);
+        let mut observation = static_observation();
+        observation.raw_cpuid[0].flags ^= 1;
+        let original = validate_fields(&observation, false)
+            .unwrap_err()
+            .to_string();
+        let observed = probe_disabled_perf(observation, || {
+            attempted.set(true);
+            Ok(())
+        });
+        assert!(!attempted.get());
+        assert!(!observed.perf_disabled_open);
+        assert!(observed.perf_error.is_none());
+        let final_error = validate_observation(&observed).unwrap_err().to_string();
+        assert_eq!(final_error, original);
+        assert!(final_error.contains("complete effective CPUID policy"));
+    }
+    #[test]
+    fn actual_perf_open_refusal_preserves_its_cause_and_cleanup_precedence() {
+        use std::cell::Cell;
+        let attempted = Cell::new(false);
+        let observed = probe_disabled_perf(static_observation(), || {
+            attempted.set(true);
+            Err::<(), _>(Error::Setup("perf_event_open: EACCES (13)".into()))
+        });
+        assert!(attempted.get());
+        assert!(!observed.perf_disabled_open);
+        assert_eq!(
+            observed.perf_error.as_deref(),
+            Some("perf_event_open: EACCES (13)")
+        );
+        assert!(validate_observation(&observed)
+            .unwrap_err()
+            .to_string()
+            .contains("disabled exact-event perf readiness"));
+
+        let mut static_refusal = static_observation();
+        static_refusal.raw_cpuid[0].flags ^= 1;
+        let result = scoped_probe(
+            (),
+            || {
+                Ok(probe_disabled_perf::<()>(static_refusal, || {
+                    panic!("unexpected perf attempt")
+                }))
+            },
+            |_| Err(Error::Execution("restore readback differs".into())),
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("host preflight cleanup failed"));
+        assert!(error.contains("restore readback differs"));
+    }
+    #[test]
+    fn first_sibling_static_refusal_cannot_be_masked_by_later_collection_error() {
+        let mut observations = Vec::new();
+        let mut attempted = Vec::new();
+        let result = collect_admitted([8, 24], &mut observations, |cpu| {
+            attempted.push(cpu);
+            if cpu == 24 {
+                return Err(Error::Setup("later sibling collection failed".into()));
+            }
+            let mut o = static_observation();
+            o.raw_cpuid[0].flags ^= 1;
+            Ok(o)
+        });
+        assert_eq!(attempted, [8]);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].raw_cpuid[0].flags, 1);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("complete effective CPUID policy"));
+    }
+    #[test]
+    fn first_sibling_cleanup_failure_wins_and_later_collection_is_not_attempted() {
+        let mut observations = Vec::new();
+        let mut attempted = Vec::new();
+        let mut restored = false;
+        let result = collect_admitted([8, 24], &mut observations, |cpu| {
+            attempted.push(cpu);
+            if cpu == 24 {
+                return Err(Error::Setup("later sibling collection failed".into()));
+            }
+            scoped_probe(
+                (),
+                || {
+                    let mut o = static_observation();
+                    o.raw_cpuid[0].flags ^= 1;
+                    Ok(o)
+                },
+                |_| {
+                    restored = true;
+                    Err(Error::Execution("restore readback differs".into()))
+                },
+            )
+        });
+        assert!(restored);
+        assert_eq!(attempted, [8]);
+        assert!(observations.is_empty());
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("host preflight cleanup failed"));
+        assert!(error.contains("restore readback differs"));
+    }
+    #[test]
+    fn evidence_failure_cannot_replace_static_or_cleanup_refusal_or_admit_success() {
+        let mut drift = static_observation();
+        drift.raw_cpuid[0].flags ^= 1;
+        let static_refusal = validate_observation(&drift);
+        let cleanup_refusal = scoped_probe(
+            (),
+            || validate_observation(&drift),
+            |_| Err(Error::Execution("restore readback differs".into())),
+        );
+        for (admission, cause) in [
+            (static_refusal, "complete effective CPUID policy"),
+            (cleanup_refusal, "host preflight cleanup failed"),
+        ] {
+            let mut published = false;
+            let error = finish_admission(admission, |established| {
+                assert!(established.is_err());
+                published = true;
+                Err(Error::Setup("injected evidence ENOSPC".into()))
+            })
+            .unwrap_err()
+            .to_string();
+            assert!(published);
+            assert!(error.contains(cause));
+            assert!(error.contains("additionally, evidence publication failed"));
+            assert!(error.contains("injected evidence ENOSPC"));
+        }
+        let error = finish_admission(Ok(()), |established| {
+            assert!(established.is_ok());
+            Err(Error::Setup("injected evidence ENOSPC".into()))
+        })
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "injected evidence ENOSPC");
+
+        let bounded = finish_admission(Err(Error::Execution("r".repeat(10000))), |_| {
+            Err(Error::Execution("p".repeat(10000)))
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(bounded.len() < 8400);
+        assert!(bounded.contains("[truncated]"));
+    }
     #[test]
     fn perf_open_requires_atomic_close_on_exec() {
         // Linux UAPI PERF_FLAG_FD_CLOEXEC, independent of perf event attributes.

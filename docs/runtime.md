@@ -71,6 +71,13 @@ rules. There is no cross-call cache; custom builders and registry imports keep
 their existing preparation behavior. Failed, cancelled or cleanup-unverified
 sources are never reused as successful preparation.
 
+Each prepared application release is a captured input closure. Same-version
+deterministic execution and replay use its exact retained bytes, seed and
+qualified profile; they do not rebuild the application. Independently rebuilding
+an OCI image need not produce identical bytes for V0. The optional timestamp
+policy is user-selected metadata control, not a prerequisite for this execution
+guarantee or an image reproducibility guarantee.
+
 ## Preparation, execution, and replay
 
 After building the binaries above, as root with the Nix tools on PATH
@@ -103,7 +110,13 @@ before preparation on success/error; cleanup failure refuses admission. The actu
 leased core/siblings are rechecked before any workaround MSR write or VMM spawn.
 Complete raw static/leased CPUID observations and workaround/restore diagnostics
 are retained as Seedbox-owned output. The expected filtered table is source-derived;
-it is not an actual guest-visible CPUID observation.
+it is not an actual guest-visible CPUID observation. The complete table retains
+KVM's entry order, as the unchanged engine does; live observations are never
+sorted or repaired. Correcting the earlier sorted expected table changes the full
+policy fingerprint and run identity. A prior full proof of that table remains
+NOT_COMPARABLE, with the original manifest preserved. Zero padding remains a
+strict expectation; decoded syscall traces do not measure those padding bytes.
+A static field refusal is reported before unattempted perf readiness.
 
 Inspect, export and import keep old manifests unchanged. Missing or drifted proof
 in an old replay produces a retained ERROR/NOT_COMPARABLE rejection with a specific

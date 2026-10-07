@@ -77,13 +77,15 @@ cleanup alone does not prove builder cessation. Ordinary run/prepare continue
 supporting custom builders; the optional native timestamp policy below has a
 narrower admission requirement. See [preparation evidence and cancellation](docs/runtime.md#exploration-preparation).
 
-For owned reproducible build inputs, `--build-epoch 0` selects the qualified
+For optional build timestamp control, `--build-epoch 0` selects the admitted
 project-Nix native Podman's creation-time and new-layer timestamp policy.
 It changes guest-visible new-layer file and directory timestamps, so it is
 optional and never applied to registry or base layers. The range is
 0..=4294967295 Unix seconds; custom builders are unsupported with this option.
 Moving base tags, network downloads and arbitrary build programs can still
-change inputs. Replay uses the complete retained closure without this option.
+change inputs. Replay uses the complete retained application release closure
+without this option; deterministic execution does not require independently
+rebuilt OCI images to have identical bytes.
 
 
 ## Layout
