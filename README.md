@@ -139,18 +139,19 @@ rebuilt OCI images to have identical bytes.
 
 ## Contributor checks
 
-Every PR and merge train runs the Mac precheck before going to the AMD host:
+Every PR and merge train runs the Mac check before going to the AMD host:
 
 ```sh
-bash harness/mac-precheck.sh main     # any local revision or branch
-bash harness/mac-precheck.sh          # current checkout, including local changes
+bash harness/mac-check.sh main     # any local revision or branch
+bash harness/mac-check.sh          # current checkout, including local changes
 ```
 
-Run from within the checkout on macOS with Git and Nix available. With a revision,
+Run from within the checkout on macOS inside the project's Nix dev shell. With a revision,
 the script creates a detached worktree under `$TMPDIR` (or `/tmp` if unset) and
-removes it on exit, including failed checks. Without a revision, it checks the
-existing checkout. It enters the selected checkout's project Nix dev shell and
-runs, in order:
+deletes it on a pass; on failure it keeps the worktree and prints its path.
+Without a revision, it checks the existing checkout, including local changes.
+It prints the full checked SHA and uses the caller's development shell to
+run, in order:
 
 - `cargo fmt -p seedbox --check`
 - `cargo clippy -p seedbox --all-targets --locked -- -D warnings`
@@ -160,7 +161,8 @@ runs, in order:
 - `python3 -m unittest discover python/tests`
 
 All steps run even if an earlier step fails. Command output goes to stderr;
-stdout ends with one `PASS` or `FAIL` line per step and its elapsed whole seconds.
+stdout ends with timed step/phase lines in `harness/host-check.sh`'s exact format:
+`printf '%-8s %s %4ss\n' STEP pass|FAIL SECONDS`, with `phase ` lines preserved.
 The gate exits 0 only if every step passes, and 1 if any step fails; setup errors
 also exit nonzero. The runner comes from the invoking checkout, so it can check
 revisions that predate the script.
@@ -168,7 +170,18 @@ revisions that predate the script.
 The Mac gate does not build or test the Linux-only VMM or execute guests.
 Python discovery skips the batch supervisor's Linux-only lifecycle tests.
 `cargo build-vmm`, `cargo test-vmm`, and KVM acceptance remain AMD Linux host
-checks; a passing Mac precheck is the prerequisite for that host work.
+checks; a passing Mac check is the prerequisite for that host work. After the Mac
+passes a committed revision, run:
+
+```sh
+bash harness/host-check.sh --skip-portable REV CPU
+```
+
+This skips fmt, clippy and the portable suite (including workspace tests), while
+keeping the CLI build, VMM build (unless `SEEDBOX_VMM` selects a stored engine),
+VMM tests and AMD smoke checks. Both gates print the full SHA; match them before
+using the skip option. A Mac run with local changes only verifies those local
+bytes and does not establish a pass for the committed SHA.
 
 ## How execution is controlled
 

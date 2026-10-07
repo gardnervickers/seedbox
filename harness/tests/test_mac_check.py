@@ -1,4 +1,4 @@
-"""Portable precheck controls; fake shell entry, no Nix, Cargo or KVM."""
+"""Mac check controls with fake Cargo/Python commands and real Git worktrees."""
 import os
 from pathlib import Path
 import shutil
@@ -13,28 +13,35 @@ HARNESS = Path(__file__).resolve().parents[1]
 class SummaryTests(unittest.TestCase):
     def run_steps(self, commands):
         return subprocess.run(
-            ['bash', '-c', 'source "$1"\n' + commands + '\nprecheck_summary',
-             'precheck-test', str(HARNESS / 'mac-precheck-steps.sh')],
+            ['bash', '-c', 'source "$1"\n' + commands + '\ncheck_summary',
+             'check-test', str(HARNESS / 'mac-check-steps.sh')],
             capture_output=True, text=True, check=False,
         )
 
     def test_all_pass_and_timing(self):
-        result = self.run_steps('''precheck_step first true
-advance_clock() { SECONDS=$((SECONDS + 3)); }
-precheck_step timed advance_clock''')
+        result = self.run_steps('''date() { echo "${CHECK_CLOCK:-0}"; }
+check_step first true
+advance_clock() { CHECK_CLOCK=3; }
+check_step timed advance_clock''')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertRegex(result.stdout, r'^PASS first \d+s\nPASS timed \d+s\n$')
-        self.assertGreaterEqual(int(result.stdout.splitlines()[1].split()[2][:-1]), 3)
+        self.assertEqual(result.stdout, 'first    pass    0s\ntimed    pass    3s\n')
 
     def test_failures_do_not_hide_later_steps_or_pollute_summary(self):
-        result = self.run_steps('''precheck_step first bash -c 'echo first-log; exit 7'
-precheck_step second bash -c 'echo second-log; exit 2'
-precheck_step last bash -c 'echo last-log'
+        result = self.run_steps('''check_step first bash -c 'echo first-log; exit 7'
+check_step second bash -c 'echo second-log; exit 2'
+check_step last bash -c 'echo last-log'
 ''')
         self.assertEqual(result.returncode, 1)
-        self.assertRegex(result.stdout, r'^FAIL first \d+s\nFAIL second \d+s\nPASS last \d+s\n$')
+        self.assertRegex(result.stdout, r'^first    FAIL +\d+s\nsecond   FAIL +\d+s\nlast     pass +\d+s\n$')
         for log in ('first-log', 'second-log', 'last-log'):
             self.assertIn(log, result.stderr)
+
+    def test_phase_lines_preserve_host_summary_format(self):
+        result = self.run_steps("check_step smoke bash -c 'echo phase run pass 2s; echo other-log'")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stdout, r'^smoke    pass +\d+s\nphase run pass 2s\n$')
+        self.assertIn('other-log', result.stderr)
+        self.assertNotIn('other-log', result.stdout)
 
 
 class SuiteTests(unittest.TestCase):
@@ -44,19 +51,19 @@ class SuiteTests(unittest.TestCase):
             (root / 'bin').mkdir()
             (root / 'harness').mkdir()
             (root / 'harness' / 'acceptance.sh').write_text(
-                'echo "portable $*" >> "$PRECHECK_TEST_LOG"\n')
+                'echo "portable $*" >> "$CHECK_TEST_LOG"\n')
             for name in ('cargo', 'python3'):
                 path = root / 'bin' / name
                 path.write_text(f'''#!/bin/sh
-echo "{name} $*" >> "$PRECHECK_TEST_LOG"
+echo "{name} $*" >> "$CHECK_TEST_LOG"
 echo command-output
-if [ "$1" = clippy ]; then exit "$PRECHECK_TEST_STATUS"; fi
+if [ "$1" = clippy ]; then exit "$CHECK_TEST_STATUS"; fi
 ''')
                 path.chmod(0o755)
             log = root / 'commands'
             env = dict(os.environ, PATH=f'{root / "bin"}{os.pathsep}{os.environ["PATH"]}',
-                       PRECHECK_TEST_LOG=str(log), PRECHECK_TEST_STATUS='7')
-            result = subprocess.run(['bash', str(HARNESS / 'mac-precheck-steps.sh')],
+                       CHECK_TEST_LOG=str(log), CHECK_TEST_STATUS='7')
+            result = subprocess.run(['bash', str(HARNESS / 'mac-check-steps.sh')],
                                     cwd=root, env=env, capture_output=True,
                                     text=True, check=False)
             self.assertEqual(result.returncode, 1, result.stderr)
@@ -69,8 +76,8 @@ if [ "$1" = clippy ]; then exit "$PRECHECK_TEST_STATUS"; fi
                 'python3 -m unittest discover python/tests',
             ])
             self.assertEqual([line.split()[:2] for line in result.stdout.splitlines()], [
-                ['PASS', 'fmt'], ['FAIL', 'clippy'], ['PASS', 'workspace'],
-                ['PASS', 'portable'], ['PASS', 'harness-python'], ['PASS', 'python'],
+                ['fmt', 'pass'], ['clippy', 'FAIL'], ['workspace', 'pass'],
+                ['portable', 'pass'], ['harness-python', 'pass'], ['python', 'pass'],
             ])
             self.assertIn('command-output', result.stderr)
 
@@ -84,13 +91,14 @@ class WorktreeTests(unittest.TestCase):
         self.repo.mkdir()
         self.git('init', '-q')
         (self.repo / 'tracked').write_text('committed\n')
-        self.git('add', 'tracked')
+        (self.repo / 'harness').mkdir()
+        (self.repo / 'harness' / 'acceptance.sh').write_text('true\n')
+        self.git('add', 'tracked', 'harness/acceptance.sh')
         self.git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
                  '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture')
         self.git('branch', 'fixture-branch')
         # Keep the runner uncommitted: the selected revision does not have it.
-        (self.repo / 'harness').mkdir()
-        for name in ('mac-precheck.sh', 'mac-precheck-steps.sh'):
+        for name in ('mac-check.sh', 'mac-check-steps.sh'):
             shutil.copyfile(HARNESS / name, self.repo / 'harness' / name)
         self.bin = self.root / 'bin'
         self.bin.mkdir()
@@ -99,39 +107,44 @@ class WorktreeTests(unittest.TestCase):
         self.log = self.root / 'shell-entry'
         for name, script in {
             'uname': '#!/bin/sh\necho Darwin\n',
+            'cargo': '''#!/bin/sh
+if [ "$1" = fmt ]; then
+pwd > "$CHECK_TEST_LOG"
+cat tracked >> "$CHECK_TEST_LOG"
+fi
+if [ "$1" = clippy ]; then exit "$CHECK_TEST_STATUS"; fi
+''',
+            'python3': '#!/bin/sh\nexit 0\n',
             'nix': '''#!/bin/sh
-[ "$#" -eq 4 ] && [ "$1" = develop ] && [ "$2" = --command ] && [ "$3" = bash ] || exit 99
-[ -f "$4" ] || exit 98
-pwd > "$PRECHECK_TEST_LOG"
-cat tracked >> "$PRECHECK_TEST_LOG"
-exit "$PRECHECK_TEST_STATUS"
+echo 'must use the existing development shell' >&2
+exit 99
 ''',
         }.items():
             path = self.bin / name
             path.write_text(script)
             path.chmod(0o755)
         self.env = dict(os.environ, PATH=f'{self.bin}{os.pathsep}{os.environ["PATH"]}',
-                        TMPDIR=str(self.tmpdir), PRECHECK_TEST_LOG=str(self.log),
-                        PRECHECK_TEST_STATUS='0')
+                        TMPDIR=str(self.tmpdir), CHECK_TEST_LOG=str(self.log),
+                        CHECK_TEST_STATUS='0')
 
     def git(self, *args):
         return subprocess.run(['git', '-C', str(self.repo), *args], check=True,
                               capture_output=True, text=True).stdout
 
     def invoke(self, *args):
-        return subprocess.run(['bash', 'harness/mac-precheck.sh', *args],
+        return subprocess.run(['bash', 'harness/mac-check.sh', *args],
                               cwd=self.repo, env=self.env, capture_output=True,
                               text=True, check=False)
 
-    def test_revision_cleanup_on_success_and_failure(self):
+    def test_revision_cleanup_on_success(self):
         (self.repo / 'tracked').write_text('dirty checkout\n')
         before = self.git('worktree', 'list', '--porcelain')
-        for status, revision in (('0', 'HEAD'), ('1', 'fixture-branch'),
-                                 ('42', self.git('rev-parse', 'HEAD').strip())):
-            with self.subTest(status=status):
-                self.env['PRECHECK_TEST_STATUS'] = status
+        sha = self.git('rev-parse', 'HEAD').strip()
+        for revision in ('HEAD', 'fixture-branch', sha):
+            with self.subTest(revision=revision):
                 result = self.invoke(revision)
-                self.assertEqual(result.returncode, int(status), result.stderr)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f'mac-check revision: {sha}\n', result.stdout)
                 lines = self.log.read_text().splitlines()
                 self.assertTrue(Path(lines[0]).is_relative_to(self.tmpdir.resolve()))
                 self.assertEqual(lines[1], 'committed')
@@ -140,10 +153,24 @@ exit "$PRECHECK_TEST_STATUS"
                 self.assertEqual(self.git('worktree', 'list', '--porcelain'), before)
         self.assertEqual((self.repo / 'tracked').read_text(), 'dirty checkout\n')
 
+    def test_revision_kept_on_failure(self):
+        self.env['CHECK_TEST_STATUS'] = '42'
+        result = self.invoke('fixture-branch')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        source = Path(self.log.read_text().splitlines()[0])
+        self.assertTrue(source.exists())
+        self.assertIn(f'FAIL: worktree kept at {source}', result.stderr)
+        self.assertIn(str(source), self.git('worktree', 'list', '--porcelain'))
+        self.assertIn('python   pass', result.stdout)
+        self.git('worktree', 'remove', '--force', str(source))
+
     def test_omitted_revision_uses_local_changes(self):
         (self.repo / 'tracked').write_text('local changes\n')
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f'mac-check revision: {self.git("rev-parse", "HEAD").strip()}',
+                      result.stdout)
+        self.assertIn('including local changes', result.stderr)
         self.assertEqual(self.log.read_text().splitlines(),
                          [str(self.repo.resolve()), 'local changes'])
         self.assertEqual(list(self.tmpdir.iterdir()), [])
@@ -154,14 +181,30 @@ exit "$PRECHECK_TEST_STATUS"
         self.assertFalse(self.log.exists())
         self.assertEqual(list(self.tmpdir.iterdir()), [])
 
-    def test_termination_removes_worktree(self):
-        fake_nix = self.bin / 'nix'
-        fake_nix.write_text('#!/bin/sh\nkill -TERM "$PPID"\n')
-        before = self.git('worktree', 'list', '--porcelain')
+    def test_termination_keeps_worktree(self):
+        fake_cargo = self.bin / 'cargo'
+        fake_cargo.write_text('#!/bin/sh\npwd > "$CHECK_TEST_LOG"\nkill -TERM "$PPID"\n')
         result = self.invoke('HEAD')
         self.assertEqual(result.returncode, 143, result.stderr)
+        source = Path(self.log.read_text().strip())
+        self.assertTrue(source.exists())
+        self.assertIn(f'FAIL: worktree kept at {source}', result.stderr)
+        self.git('worktree', 'remove', '--force', str(source))
+
+    def test_bad_arguments_do_not_create_worktree(self):
+        for args in (('--unknown',), ('HEAD', 'extra')):
+            with self.subTest(args=args):
+                result = self.invoke(*args)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn('Usage: harness/mac-check.sh', result.stderr)
+                self.assertEqual(list(self.tmpdir.iterdir()), [])
+
+    def test_non_mac_host_is_rejected(self):
+        (self.bin / 'uname').write_text('#!/bin/sh\necho Linux\n')
+        result = self.invoke('HEAD')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('mac-check requires macOS', result.stderr)
         self.assertEqual(list(self.tmpdir.iterdir()), [])
-        self.assertEqual(self.git('worktree', 'list', '--porcelain'), before)
 
 
 if __name__ == '__main__':

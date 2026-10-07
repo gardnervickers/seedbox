@@ -44,13 +44,17 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 
 ## Checks
 
-Every PR and merge train runs `bash harness/mac-precheck.sh REV` on the Mac
-before going to the AMD host. Omit `REV` to check the current checkout, including
-local changes. The gate enters the selected checkout's Nix dev shell, runs all
-portable checks below plus both Python unittest suites, and prints a timed
-PASS/FAIL summary. A revision uses a temporary detached worktree under `$TMPDIR`,
-removed on exit even if checks fail. Any failed step makes the gate exit nonzero;
-all steps still run. See [contributor checks](README.md#contributor-checks).
+Every PR and merge train runs `bash harness/mac-check.sh REV` on the Mac
+before going to the AMD host. Run inside the project's Nix dev shell. Omit `REV`
+to check the current checkout, including local changes. The gate runs all portable
+checks below plus both Python unittest suites, prints the full checked SHA and
+uses the host check's timed step/phase summary format. A revision uses a temporary
+detached worktree under `$TMPDIR`, deleted on a pass; a failure keeps it and prints
+its path. Any failed step makes the gate exit nonzero; all steps still run.
+After a Mac pass, `bash harness/host-check.sh --skip-portable REV CPU` skips fmt,
+clippy and the portable suite (including workspace tests), while retaining VMM
+build/tests and host-specific checks. Match the full SHA printed by both gates.
+See [contributor checks](README.md#contributor-checks).
 
 Run these before committing:
 

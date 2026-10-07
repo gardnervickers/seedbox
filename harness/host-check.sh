@@ -6,9 +6,11 @@
 set -euo pipefail
 usage() {
   cat >&2 <<'EOF'
-Usage: harness/host-check.sh REV CPU
+Usage: harness/host-check.sh [--skip-portable] REV CPU
   REV   commit to check (a worktree is made for it)
   CPU   first CPU of the SMT pair to lease; never 0 or its sibling
+  --skip-portable  skip fmt, clippy and the portable suite after mac-check
+                   passed the same SHA; VMM tests and host checks still run
 Environment:
   SEEDBOX_KERNEL     guest kernel (required; the accepted bzImage)
   SEEDBOX_BUSYBOX    static busybox (set by nix develop)
@@ -21,7 +23,12 @@ Environment:
 EOF
   exit 2
 }
-[[ $# -eq 2 && $2 =~ ^[0-9]+$ ]] || usage
+skip_portable=0
+if [[ ${1:-} == --skip-portable ]]; then
+  skip_portable=1
+  shift
+fi
+[[ $# -eq 2 && $1 != -* && $2 =~ ^[0-9]+$ ]] || usage
 REV=$1 CPU=$2
 : "${SEEDBOX_KERNEL:?set SEEDBOX_KERNEL to the accepted bzImage}"
 : "${SEEDBOX_BUSYBOX:?set SEEDBOX_BUSYBOX or enter nix develop}"
@@ -35,14 +42,14 @@ if [[ ,$siblings, == *,0,* ]]; then
   exit 2
 fi
 REPO=$(git rev-parse --show-toplevel)
-SHA=$(git -C "$REPO" rev-parse --verify "$REV^{commit}")
+SHA=$(git -C "$REPO" rev-parse --verify --end-of-options "$REV^{commit}")
 # Forget worktrees whose directories an earlier failed check already deleted.
 git -C "$REPO" worktree prune
 WORK=$(mktemp -d "${HOST_CHECK_DIR:-$HOME}/host-check-${SHA:0:7}-cpu$CPU-XXXX")
 SRC=$WORK/src
 git -C "$REPO" worktree add --detach --quiet "$SRC" "$SHA"
 SUMMARY=$WORK/summary.txt
-echo "host-check ${SHA:0:12} cpu $CPU ($siblings) kernel $(sha256sum "$SEEDBOX_KERNEL" | cut -c1-12)" | tee "$SUMMARY"
+echo "host-check $SHA cpu $CPU ($siblings) kernel $(sha256sum "$SEEDBOX_KERNEL" | cut -c1-12)" | tee "$SUMMARY"
 
 # Builds and source checks run niced and unpinned: they never change results,
 # and the leased pair stays free for the guests.
@@ -64,9 +71,14 @@ step() {
 step build nice cargo build --release --locked -p seedbox
 engine=${SEEDBOX_VMM:-$SRC/crates/seedbox-vmm/target/release/seedbox-vmm}
 if [[ -z ${SEEDBOX_VMM:-} ]]; then step vmm nice cargo build-vmm; fi
-step fmt cargo fmt -p seedbox --check
-step clippy nice cargo clippy -p seedbox --all-targets --locked -- -D warnings
-step suite nice bash harness/acceptance.sh portable
+if [[ $skip_portable == 0 ]]; then
+  step fmt cargo fmt -p seedbox --check
+  step clippy nice cargo clippy -p seedbox --all-targets --locked -- -D warnings
+  step suite nice bash harness/acceptance.sh portable
+else
+  # The portable suite also runs these Linux-only tests; retain them here.
+  step vmm-test nice cargo test-vmm
+fi
 
 init=$(ls -t "$SRC"/target/release/build/seedbox-*/out/compose-init 2>/dev/null | head -n 1 || true)
 if [[ -z $init ]]; then
