@@ -47,6 +47,9 @@ and transfer from qualified execution. Same software versions, seed and exact
 retained inputs must replay on a qualified compatible profile; changing versions
 may change execution. Release compatibility remains a V0 qualification gate.
 
+The [draft pinned artifact recipe](docs/release-draft.md) describes source-only
+packaging work; its candidate engine and installation are not qualified.
+
 ## Layout
 
 | Path | Contents |

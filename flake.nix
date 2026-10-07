@@ -1,7 +1,7 @@
 {
   description = "Seedbox simulator: deterministic multi-VM world on KVM";
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-  outputs = { nixpkgs, ... }:
+  outputs = { self, nixpkgs, ... }:
     let
       systems = [ "aarch64-darwin" "x86_64-linux" ];
       shell = system:
@@ -24,6 +24,15 @@
         };
     in {
       devShells = nixpkgs.lib.genAttrs systems shell;
-      packages = nixpkgs.lib.genAttrs systems (system: { networkTools = (import nixpkgs { inherit system; }).iproute2; });
+      packages = nixpkgs.lib.genAttrs systems (system:
+        let pkgs = import nixpkgs { inherit system; };
+        in { networkTools = pkgs.iproute2; }
+        // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          releaseDraft = import ./nix/release {
+            inherit pkgs;
+            sourceRevision = self.rev or "uncommitted";
+            nixpkgsRevision = nixpkgs.rev;
+          };
+        });
     };
 }
