@@ -25,6 +25,7 @@ seedbox run
 seedbox explore --count 2
 seedbox inspect .seedbox/runs/ATTEMPT --json
 seedbox replay .seedbox/runs/ATTEMPT
+seedbox diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
 ```
 
 Preparation unpacks images with root ownership and runs before the execution CPU
@@ -115,3 +116,11 @@ requires the flag and the exact retained artifact hashes and labels comparisons
 flag. Doctor prints `dev engine: unqualified` for dev artifacts. The flag with
 both pinned artifacts adds no marker. Every host/CPU/PMU/MSR/lease/ABI check
 still applies, and release qualification still requires its own acceptance.
+
+Compare two retained run directories on Linux or macOS with `seedbox diff RUN_A
+RUN_B [--json]`. Import bundles first. Diff reports world and machine witnesses,
+changed identity/semantic fields, and the first differing retained trace or terminal
+record. Ordinary runs do not retain exit traces; terminal times cannot locate an
+earlier divergence. Missing evidence and omissions stay explicit. Exit 0 MATCH
+means equality of compared evidence, not replay qualification; DIFFERENT exits 1,
+and usage/setup or invalid evidence exits 2. No guests execute and no state is created.

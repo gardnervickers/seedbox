@@ -53,6 +53,7 @@ pub struct Call {
     pub error_code: Option<&'static str>,
     pub fatal: bool,
 }
+#[derive(Clone)]
 pub struct Control {
     pub controller: Option<usize>,
     pub latency: u64,

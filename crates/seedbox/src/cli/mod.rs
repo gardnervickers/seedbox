@@ -7,6 +7,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use seedbox::{
     bundle, config,
     counter::CounterProfile,
+    diff,
     execution::{
         CancellationToken, ExecutionBackend, ExecutionProfile, PreparationBackend, WitnessMode,
     },
@@ -27,12 +28,13 @@ use std::{
 
 const EXIT_CODES: &str = "\
 Exit status:
-  0    PASS, or a replay MATCH
-  1    FAIL, or a replay MISMATCH
+  0    PASS, or a replay/diff MATCH
+  1    FAIL, replay MISMATCH, or diff DIFFERENT
   2    ERROR, a replay that is NOT_COMPARABLE, or a usage or setup error
   3    INCOMPLETE (wall-time limit or cancelled)
-  124  TIMEOUT (simulated-time limit)
+  124  TIMEOUT (simulated-time limit)";
 
+const HOST_CONTROL_HELP: &str = "\
 Host execution control:
   seedbox pause RUN     Wait for a host slice-boundary pause
   seedbox resume RUN    Resume the same live world
@@ -160,12 +162,14 @@ enum Command {
         #[command(flatten)]
         performance: Performance,
     },
-    /// Pause host execution at a slice boundary (executing run or replay).
+    /// Pause host execution at a slice boundary (Linux KVM host, same user or root).
+    #[command(after_help = HOST_CONTROL_HELP)]
     Pause {
         /// Directory of the executing run or replay attempt.
         run: PathBuf,
     },
-    /// Resume host execution from a paused slice boundary.
+    /// Resume host execution from a paused slice boundary (Linux KVM host, same user or root).
+    #[command(after_help = HOST_CONTROL_HELP)]
     Resume {
         /// Directory of the executing run or replay attempt.
         run: PathBuf,
@@ -190,6 +194,17 @@ enum Command {
         state: StateArg,
         #[command(flatten)]
         transfer: Transfer,
+    },
+    /// Compare retained run evidence without executing guests.
+    #[command(after_help = EXIT_CODES)]
+    Diff {
+        /// First retained run directory.
+        run_a: PathBuf,
+        /// Second retained run directory.
+        run_b: PathBuf,
+        /// Print exactly one comparison report as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Show a recorded run after verifying its manifest.
     Inspect {
@@ -778,6 +793,46 @@ fn run(cli: Cli) -> Result<u8> {
             println!("IMPORTED: {}", run.directory.display());
             print_omissions(&run.record);
             Ok(0)
+        }
+        Command::Diff { run_a, run_b, json } => {
+            let comparison = diff::diff(&run_a, &run_b)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&comparison)?);
+            } else {
+                println!(
+                    "{}: {} <> {}",
+                    word(&comparison.status),
+                    run_a.display(),
+                    run_b.display()
+                );
+                println!(
+                    "world witness: {}",
+                    serde_json::to_string(&comparison.world_witness)?
+                );
+                for machine in &comparison.machines {
+                    println!("machine: {}", serde_json::to_string(machine)?);
+                }
+                println!(
+                    "first record: {}",
+                    serde_json::to_string(&comparison.first_record)?
+                );
+                for (label, differences) in [
+                    ("identity", &comparison.identity_differences),
+                    ("result", &comparison.result_differences),
+                    ("evidence", &comparison.evidence_differences),
+                ] {
+                    for difference in differences {
+                        println!("{label}: {}", serde_json::to_string(difference)?);
+                    }
+                }
+                for limitation in &comparison.limitations {
+                    println!("limitation: {limitation}");
+                }
+            }
+            Ok(match comparison.status {
+                diff::Status::Match => 0,
+                diff::Status::Different => 1,
+            })
         }
         Command::Inspect { run, json } => {
             let run = defaults::run_directory(run)?;

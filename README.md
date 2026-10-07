@@ -8,7 +8,7 @@ interrupt timing.
 
 ## Quick start
 
-`validate`, `init`, `inspect`, `export` and `import` run on Linux or macOS. `run`,
+`validate`, `init`, `inspect`, `diff`, `export` and `import` run on Linux or macOS. `run`,
 `explore` and `replay` need the
 qualified host (see [host requirements](#host-requirements)) and root.
 
@@ -22,6 +22,7 @@ cargo run -- validate examples/etcd
 sudo -E env PATH="$PATH" target/release/seedbox run examples/etcd
 sudo -E env PATH="$PATH" target/release/seedbox replay .seedbox/runs/ATTEMPT
 cargo run -- inspect .seedbox/runs/ATTEMPT
+cargo run -- diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
 ```
 
 `seedbox run` with no arguments runs the Compose project in the current
@@ -40,8 +41,8 @@ directory. Every runtime input has a default, so no flags are required:
 | Build epoch | absent; preserve the builder's ordinary timestamp policy | `--build-epoch` (prepare/run/explore; no environment backing) |
 | Engine qualification | pinned engine and guest kernel; dev artifacts require explicit opt-in | `--allow-dev-engine` (run/explore/replay/doctor; no environment backing) |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
+| Diff inputs | Two required retained run directories; no runtime inputs or state lookup | positional `RUN_A RUN_B` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
-| Host execution | running; pause/resume the live attempt at slice boundaries | `seedbox pause RUN`, `seedbox resume RUN` |
 
 For development artifacts, pass `--allow-dev-engine` to `run`, `explore`, `replay`
 or `doctor`. Unpinned engine or guest-kernel bytes record the semantic parameter
@@ -52,7 +53,8 @@ marker. All host, CPU, PMU, MSR, lease, ABI and control-channel checks still app
 
 `seedbox help run` lists every option. A run prints `OUTCOME: run-directory`;
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
-INCOMPLETE and 124 TIMEOUT.
+INCOMPLETE and 124 TIMEOUT. Offline `diff` exits 0 for MATCH, 1 for DIFFERENT,
+and 2 for usage/setup or invalid retained evidence.
 
 Pause a running world from another terminal with `sudo seedbox pause RUN`, then
 continue it with `sudo seedbox resume RUN`. Use the executing attempt directory
@@ -227,6 +229,22 @@ for compatibility, memory sizing, root access, cancellation and the supported su
 The [acceptance record](docs/acceptance.md) includes real etcd/Redis passes,
 intentional failures, exact replays, full-state comparisons, timeout/cancellation,
 lease contention and exact MSR restoration on the workstation.
+
+## Compare retained runs
+
+`seedbox diff RUN_A RUN_B [--json]` compares two retained directories on Linux or
+macOS without executing guests. It reports the world witness, each machine's
+exit/full-state witnesses, the first differing retained trace record (or terminal
+record), and changed identity fields including seed, engine, kernel, images and
+semantic parameters. Import bundles first, then pass their printed run paths.
+
+Only manifest-declared, checksum-verified evidence is read. The adapter does not
+record traces by default: terminal times cannot identify an earlier exit where
+execution diverged. Missing witnesses, traces and capture omissions are explicit.
+MATCH means equality of the compared evidence, even if incomplete; it does not
+qualify replay or prove equality of unrecorded state. Performance counters,
+margin/undo, attempt metadata and arbitrary console output are excluded.
+See [comparison details](docs/runtime.md#compare-retained-runs).
 
 ## Sharing a retained run
 

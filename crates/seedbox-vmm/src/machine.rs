@@ -12,6 +12,8 @@ use crate::devices::{rtc_read, Pic, Pit, Uart};
 use crate::stepper::Planner;
 use crate::undo::{Undo, UndoStats, VcpuState};
 use crate::virtio_net::{ReceiveOutcome, VirtioNet};
+use crate::virtio_blk::VirtioBlk;
+use crate::disk::Disk;
 use kvm_bindings::*;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 use sha2::{Digest, Sha256};
@@ -25,6 +27,8 @@ pub const NET_MMIO: u64 = 0xd000_1000;
 pub const NET_IRQ: u8 = 5;
 pub const CHANNEL_MMIO: u64 = 0xd1000000;
 pub const CHANNEL_IRQ: u8 = 6;
+pub const BLK_MMIO: u64 = 0xd000_2000;
+pub const BLK_IRQ: u8 = 7;
 const INITRD_ADDR: usize = 0x0800_0000;
 /// Pending interrupts are injected only when the next stop is further away
 /// than this. Part of the execution semantics: changing it changes runs.
@@ -43,6 +47,8 @@ pub struct BootSpec<'a> {
     pub rng_seed: [u8; 32],
     pub mac: Option<[u8; 6]>,
     pub control_channel: bool,
+    /// The retained disk this incarnation boots with, as virtio-blk.
+    pub disk: Option<Disk>,
     /// Final overflow margin for undo-able precise stops; 0 disables them.
     pub undo_margin: u64,
     /// The guest parks at its launch barrier until the world releases it.
@@ -73,6 +79,7 @@ pub struct MachineSnapshot {
     management_framer: crate::control::ManagementFramer,
     net: Option<VirtioNet>,
     channel: Option<VirtioConsole>,
+    blk: Option<VirtioBlk>,
     control_dma_bytes: u64,
     control_tx_bytes: u64,
     pv: bool,
@@ -172,6 +179,7 @@ pub struct Machine {
     management_framer: crate::control::ManagementFramer,
     pub net: Option<VirtioNet>,
     pub channel: Option<VirtioConsole>,
+    pub blk: Option<VirtioBlk>,
     pub control_dma_bytes: u64,
     pub control_tx_bytes: u64,
     stepping: bool,
@@ -204,6 +212,16 @@ pub struct Machine {
     fm: u64,
     /// Parked at the launch barrier: the world does not run this machine.
     pub parked: bool,
+    /// Paused by a lifecycle fault: CPU and devices are frozen, any unpaid
+    /// I/O cost stays owed, and the world does not run this machine.
+    pub paused: bool,
+    /// Built for a reboot that has not happened yet: the world does not run
+    /// this machine. Its predecessor's VM is already gone.
+    pub down: bool,
+    /// Boots of this machine before this one: 0 for the first.
+    pub incarnation: u32,
+    /// Virtual time at which this incarnation started executing.
+    pub booted_at: u64,
     barrier: bool,
     /// Per-seed words the guest reads after its release.
     entropy: [u32; ENTROPY_WORDS],
@@ -420,6 +438,7 @@ impl Machine {
             management_framer: crate::control::ManagementFramer::default(),
             net,
             channel: spec.control_channel.then(VirtioConsole::new),
+            blk: spec.disk.clone().map(VirtioBlk::new),
             control_dma_bytes:0,
             control_tx_bytes:0,
             stepping: false,
@@ -443,6 +462,10 @@ impl Machine {
             undo_margin: spec.undo_margin,
             fm: spec.undo_margin,
             parked: false,
+            paused: false,
+            down: false,
+            incarnation: 0,
+            booted_at: 0,
             barrier: spec.barrier,
             entropy: [0; ENTROPY_WORDS],
             entropy_read: 0,
@@ -500,6 +523,68 @@ impl Machine {
         Ok(())
     }
 
+    /// Freeze the machine at a world boundary. Nothing about the vCPU changes:
+    /// an exit KVM still has to complete, and the I/O cost owed for it, stay
+    /// exactly as they are until the machine resumes.
+    pub fn pause(&mut self) -> Result<(), String> {
+        if self.paused || self.down || self.parked {
+            return Err(format!("{}: cannot pause here", self.name));
+        }
+        self.paused = true;
+        self.record(b'Z', 0);
+        Ok(())
+    }
+
+    /// Continue a paused machine at virtual time `at`. The paused interval
+    /// passes like idle time, as at a release: timers that fell due fire now,
+    /// late and coalesced, keeping their phase.
+    pub fn resume(&mut self, at: u64) -> Result<(), String> {
+        if !self.paused {
+            return Err(format!("{}: resumed without being paused", self.name));
+        }
+        self.paused = false;
+        self.time = self.time.max(at);
+        self.expire_timers()?;
+        self.record(b'U', self.time);
+        Ok(())
+    }
+
+    /// Take a machine built for a reboot to its first instruction at `at`.
+    pub fn boot_at(&mut self, at: u64) -> Result<(), String> {
+        if !self.down || at < self.time {
+            return Err(format!("{}: cannot boot here", self.name));
+        }
+        self.down = false;
+        self.time = at;
+        self.booted_at = at;
+        self.record(b'N', self.incarnation as u64);
+        Ok(())
+    }
+
+    /// Carry what outlives a crash from the previous incarnation into this
+    /// one, which is built but not booted: the console and management logs
+    /// and their sinks, the trace, and the event witness, so the final
+    /// witness covers every incarnation. Nothing else crosses: RAM, device
+    /// queues, KVM's I/O state and the undo checkpoint die with the VM.
+    pub fn succeed(&mut self, old: &mut Machine, at: u64) -> Result<(), String> {
+        self.incarnation = old.incarnation.checked_add(1).ok_or("incarnation overflow")?;
+        self.down = true;
+        self.time = at;
+        for (new, old) in [(&mut self.com1, &mut old.com1), (&mut self.com2, &mut old.com2)] {
+            new.out = std::mem::take(&mut old.out);
+            new.output_file = old.output_file.take();
+            new.output_limit = old.output_limit;
+        }
+        self.trace = old.trace.take();
+        // The disk keeps what was flushed; unflushed writes die with the VM.
+        if let (Some(new), Some(old)) = (self.blk.as_mut(), old.blk.as_ref()) {
+            *new = VirtioBlk::new(old.disk.crashed().0);
+        }
+        self.witness.update(old.exit_witness().as_bytes());
+        self.record(b'C', at);
+        Ok(())
+    }
+
     /// Park the machine at a fork point the world chose (a simulated time),
     /// rather than one the guest announced. It must owe no I/O cost.
     pub fn park(&mut self) -> Result<(), String> {
@@ -538,7 +623,7 @@ impl Machine {
             pic: self.pic.clone(), pit: self.pit.clone(), rtc_index: self.rtc_index,
             com1: self.com1.snapshot(), com2: self.com2.snapshot(),
             management_framer: self.management_framer.clone(),
-            net: self.net.clone(), channel: self.channel.clone(),
+            net: self.net.clone(), channel: self.channel.clone(), blk: self.blk.clone(),
             control_dma_bytes: self.control_dma_bytes, control_tx_bytes: self.control_tx_bytes,
             pv: self.pv, armed_wake: self.armed_wake, pit_exact: self.pit_exact, exit_req: self.exit_req,
             margin: self.margin, fm: self.fm, parked: self.parked,
@@ -556,6 +641,15 @@ impl Machine {
         let _ = self.complete_io();
         self.set_stepping(false)?;
         let pages = match self.undo.as_mut() {
+            // A machine rebuilt for this restore (the run rebooted it) has
+            // held no fork point yet: copy everything, then hold one here.
+            Some(u) if !u.holds_fork_point() => {
+                unsafe { std::ptr::copy_nonoverlapping(s.ram.ptr, self.mem, self.mem_size) };
+                u.mark(0, self.mem_size);
+                u.fork_point(&self._vm, self.mem)?;
+                u.stats = s.undo_stats.clone().unwrap_or_default();
+                (self.mem_size / 4096) as u64
+            }
             Some(u) => {
                 let pages = u.return_to_fork(&self._vm, self.mem, s.ram.ptr)?;
                 // Each seed reports its own undo work on top of the boot's.
@@ -595,6 +689,7 @@ impl Machine {
         self.management_framer = s.management_framer.clone();
         self.net = s.net.clone();
         self.channel = s.channel.clone();
+        self.blk = s.blk.clone();
         self.control_dma_bytes = s.control_dma_bytes;
         self.control_tx_bytes = s.control_tx_bytes;
         self.pv = s.pv;
@@ -604,6 +699,10 @@ impl Machine {
         self.margin = s.margin;
         self.fm = s.fm;
         self.parked = s.parked;
+        self.paused = false;
+        self.down = false;
+        self.incarnation = 0;
+        self.booted_at = 0;
         self.entropy = [0; ENTROPY_WORDS];
         self.entropy_read = 0;
         self.stats = s.stats.clone();
@@ -696,6 +795,16 @@ impl Machine {
         }
         if let Some(channel)=self.channel.as_mut() {
             match self.undo.as_mut() {Some(undo)=>{for (address,length) in channel.dirty.drain(..){undo.mark(address,length);}},None=>channel.dirty.clear()}
+        }
+        if let Some(blk) = self.blk.as_mut() {
+            match self.undo.as_mut() {
+                Some(u) => {
+                    for (a, l) in blk.dirty.drain(..) {
+                        u.mark(a, l);
+                    }
+                }
+                None => blk.dirty.clear(),
+            }
         }
     }
 
@@ -1244,6 +1353,8 @@ impl Machine {
                     self.stats.mmio += 1;
                     let v = if (CHANNEL_MMIO..CHANNEL_MMIO+0x1000).contains(&addr) {
                         self.channel.as_mut().map(|channel|channel.read(addr-CHANNEL_MMIO)).unwrap_or(0)
+                    } else if (BLK_MMIO..BLK_MMIO + 0x1000).contains(&addr) {
+                        self.blk.as_mut().map(|b| b.read(addr - BLK_MMIO)).unwrap_or(0)
                     } else {match self.net.as_mut() {
                         Some(n) if (NET_MMIO..NET_MMIO + 0x1000).contains(&addr) => {
                             n.read(addr - NET_MMIO)
@@ -1268,6 +1379,26 @@ impl Machine {
                             let output=channel.write(memory,addr-CHANNEL_MMIO,v)?;
                             self.take_dma();if output.irq {self.pic.raise(CHANNEL_IRQ);}
                             if self.channel_output(&output.bytes)? {self.set_stepping(false)?;return Ok(Stop::Control);}
+                        }
+                    }
+                    if (BLK_MMIO..BLK_MMIO + 0x1000).contains(&addr) {
+                        let m = unsafe { std::slice::from_raw_parts_mut(self.mem, self.mem_size) };
+                        if let Some(b) = self.blk.as_mut() {
+                            let done = b.write(m, addr - BLK_MMIO, v)?;
+                            self.take_dma();
+                            if done.completed > 0 {
+                                // The disk changed outside guest RAM: no rollback
+                                // may cross this point.
+                                if let Some(u) = self.undo.as_mut() { u.valid = false; }
+                            }
+                            // Each request, in completion order: the trace shows
+                            // where every FLUSH falls among the writes.
+                            for (kind, sector, status) in done.log {
+                                self.record(b'd', (kind as u64) << 56 | (status as u64) << 48 | sector);
+                            }
+                            if done.irq {
+                                self.pic.raise(BLK_IRQ);
+                            }
                         }
                     }
                     if (NET_MMIO..NET_MMIO + 0x1000).contains(&addr) {
@@ -1318,8 +1449,8 @@ impl Machine {
     /// Hashes of guest RAM and the vCPU state a checkpoint restores, by part:
     /// general and control registers with segment bases, FPU/XSAVE, XCRs,
     /// pending exception/interrupt/NMI state, syscall/TLS MSRs, the shared time
-    /// page and RAM. The digest is the hash of the parts. Not covered: other
-    /// MSRs, debug registers and VMM device models.
+    /// page, RAM and any retained disk. The digest is the hash of the parts.
+    /// Not covered: other MSRs, debug registers and other VMM device models.
     pub fn state_digest(&mut self) -> (String, Vec<(&'static str, String)>) {
         let hex = |h: Sha256| format!("{:x}", h.finalize());
         let mut parts = Vec::new();
@@ -1413,6 +1544,9 @@ impl Machine {
         let mut h = Sha256::new();
         h.update(self.pending_io_bytes());
         parts.push(("pending_io", hex(h)));
+        if let Some(b) = &self.blk {
+            parts.push(("disk", b.disk.digest()));
+        }
         let mut all = Sha256::new();
         for (_, d) in &parts {
             all.update(d.as_bytes());
@@ -1446,7 +1580,7 @@ mod io_boundary_tests {
         else {code.push(if write {0xee} else {0xec});}
         code.extend_from_slice(&[0x85,0xc0,0x74,0x00,0xc7,0x05,0x00,0x00,0x08,0x00,0x78,0x56,0x34,0x12,0xf4]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo,barrier:false};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false};
         let mut machine=Machine::new(kvm,"io-probe",&spec).unwrap();
         let mut r=machine.vcpu.get_regs().unwrap();r.rflags=0x202;machine.vcpu.set_regs(&r).unwrap();
         machine.pit.write(0x43,0x34,0);
@@ -1564,7 +1698,7 @@ mod io_boundary_tests {
         let back=-(code.len() as i8+2);
         code.extend_from_slice(&[0xeb,back as u8]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo,barrier:false};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false};
         let mut machine=Machine::new(kvm,"stop-probe",&spec).unwrap();
         let mut r=machine.vcpu.get_regs().unwrap();r.rflags=0x2;machine.vcpu.set_regs(&r).unwrap();
         machine.pic.set_masks(0xffff);
@@ -1641,6 +1775,65 @@ mod io_boundary_tests {
         assert_eq!(stop.unwrap(),Stop::Halted);
     }
 
+    /// Pause with 161 ns of I/O cost owed and a periodic timer armed: while
+    /// paused nothing runs and nothing is paid. Resumed later, the missed
+    /// ticks fire once, late, in phase, and the debt is paid from the resume.
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn a_pause_keeps_owed_io_cost_and_resumes_in_timer_phase() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        let mut want=None;
+        for undo in [0,16,256] {
+            let mut m=probe(&kvm,0x530,true,undo);
+            let mut frames=Vec::new();
+            assert_eq!(m.run_until(&mut counter,839,0,&mut frames).unwrap(),Stop::Reached);
+            assert_eq!(m.pending_io.as_ref().unwrap().remaining_ns,161);
+            assert_eq!(m.pit.deadline,Some(1678));
+            m.pause().unwrap();
+            assert!(m.pause().is_err());
+            let rip=m.vcpu.get_regs().unwrap().rip;
+            m.resume(5000).unwrap();
+            assert!(m.resume(5000).is_err());
+            assert_eq!(m.time,5000);
+            assert_eq!(m.pit.deadline,Some(1678+4*839),"undo={undo}");
+            assert_eq!(m.pending_io.as_ref().unwrap().remaining_ns,161,"debt kept while paused");
+            assert_eq!((m.branches,m.vcpu.get_regs().unwrap().rip,m.stats.irqs),(0,rip,0));
+            assert_eq!(m.run_until(&mut counter,5100,0,&mut frames).unwrap(),Stop::Reached);
+            assert_eq!(m.pending_io.as_ref().unwrap().remaining_ns,61);
+            assert_eq!(m.run_until(&mut counter,5161,0,&mut frames).unwrap(),Stop::Reached);
+            assert!(m.pending_io.is_none());assert_eq!(m.branches,0);
+            assert_eq!(m.run_until(&mut counter,7000,0,&mut frames).unwrap(),Stop::Halted);
+            assert_eq!(m.branches,1);
+            assert_eq!(&m.memory()[0x80000..0x80004],&[0x78,0x56,0x34,0x12]);
+            let evidence=(m.time,m.exit_witness(),m.state_digest().0);
+            if let Some(want)=&want {assert_eq!(&evidence,want,"undo={undo}");} else {want=Some(evidence);}
+        }
+    }
+
+    /// Pause once the debt is paid but before the guest runs on: resuming
+    /// later runs exactly what an unpaused machine runs, just later.
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn a_pause_with_no_debt_runs_on_unchanged_after_resume() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        for undo in [0,256] {
+            let mut m=probe(&kvm,0x61,false,undo);
+            let mut frames=Vec::new();
+            assert_eq!(m.run_until(&mut counter,1000,0,&mut frames).unwrap(),Stop::Reached);
+            assert!(m.pending_io.is_none());
+            let rax=m.vcpu.get_regs().unwrap().rax;
+            m.pause().unwrap();
+            m.resume(3000).unwrap();
+            assert_eq!(m.vcpu.get_regs().unwrap().rax,rax);
+            assert_eq!(m.run_until(&mut counter,5000,0,&mut frames).unwrap(),Stop::Halted);
+            assert_eq!(m.branches,1);
+            assert!(m.time>=3000 && m.time<5000);
+            assert_eq!(&m.memory()[0x80000..0x80004],&[0x78,0x56,0x34,0x12]);
+        }
+    }
+
 }
 
 #[cfg(test)]
@@ -1659,7 +1852,7 @@ mod fork_tests {
         code.extend_from_slice(&[0xb9,0xe8,0x03,0,0, 0x49, 0x75,0xfd]);
         code.extend_from_slice(&[0xc7,0x05,0x00,0x10,0x08,0x00,0xad,0xde,0,0, 0xf4]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo,barrier};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier};
         Machine::new(kvm,"fork-probe",&spec).unwrap()
     }
 
@@ -1772,5 +1965,113 @@ mod fork_tests {
             assert_eq!(m.time,500);
             assert_eq!(finish(&mut m,&mut counter),want,"restored fork, undo={undo}");
         }
+    }
+
+    /// A seed that crashed a machine leaves a later incarnation in a new VM,
+    /// so the next seed restores into a freshly built machine that holds no
+    /// fork point: a full copy, after which it holds one and later restores
+    /// take the cheap path again. Every restore must match the cold run.
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn a_fork_restores_into_a_freshly_built_machine() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        for undo in [0,256] {
+            let mut cold=barrier_machine(&kvm,undo);
+            to_barrier(&mut cold,&mut counter);
+            let want=released(&mut cold,&mut counter,7);
+
+            let mut m=barrier_machine(&kvm,undo);
+            to_barrier(&mut m,&mut counter);
+            let snapshot=m.snapshot().unwrap();
+            drop(m);
+            let mut fresh=barrier_machine(&kvm,undo);
+            if undo>0 {assert!(!fresh.undo.as_ref().unwrap().holds_fork_point());}
+            let pages=fresh.restore(&snapshot).unwrap();
+            assert_eq!(pages,(fresh.mem_size/4096) as u64,"full copy, undo={undo}");
+            assert!(fresh.parked);
+            assert_eq!(released(&mut fresh,&mut counter,7),want,"restored into a fresh machine, undo={undo}");
+            if undo>0 {assert!(fresh.undo.as_ref().unwrap().holds_fork_point());}
+            let pages=fresh.restore(&snapshot).unwrap();
+            if undo>0 {assert!(pages<(fresh.mem_size/4096) as u64,"only written pages copied back");}
+            assert_eq!(released(&mut fresh,&mut counter,7),want,"second restore, undo={undo}");
+        }
+    }
+
+    fn to_halt(m: &mut Machine, counter: &mut Counter, limit: u64) {
+        let mut frames=Vec::new();
+        while !matches!(m.run_until(counter,limit,0,&mut frames).unwrap(),Stop::Exited|Stop::Halted) {}
+    }
+
+    /// Crash a machine and boot its next incarnation from the same inputs:
+    /// fresh RAM, the program runs again from its first instruction at the
+    /// reboot time, and the logs and witness carry across.
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn a_crashed_machine_reboots_fresh_from_its_boot_inputs() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        let mut want=None;
+        for undo in [0,256] {
+            let mut old=probe_machine(&kvm,undo,false);
+            to_halt(&mut old,&mut counter,1_000_000);
+            assert_eq!(&old.memory()[0x81000..0x81004],&[0xad,0xde,0,0]);
+            let first=(old.branches,old.exit_witness());
+            old.com1.out.extend_from_slice(b"first boot\n");
+            let crash=old.time+100;
+            let mut new=probe_machine(&kvm,undo,false);
+            new.succeed(&mut old,crash).unwrap();
+            assert!(new.down && !new.paused);
+            assert_eq!((new.incarnation,new.time),(1,crash));
+            assert_eq!(&new.memory()[0x80000..0x80004],&[0,0,0,0]);
+            assert_eq!(&new.memory()[0x81000..0x81004],&[0,0,0,0]);
+            assert_eq!(new.com1.out,b"first boot\n");
+            assert!(old.com1.out.is_empty());
+            drop(old);
+            assert!(new.boot_at(crash-1).is_err());
+            new.boot_at(crash+1000).unwrap();
+            assert!(new.boot_at(crash+1000).is_err());
+            let rip=new.vcpu.get_regs().unwrap().rip;
+            assert_eq!(rip,0x100000,"the new incarnation starts at the kernel entry");
+            to_halt(&mut new,&mut counter,crash+1_000_000);
+            assert_eq!(&new.memory()[0x81000..0x81004],&[0xad,0xde,0,0]);
+            assert_eq!(new.branches,first.0,"same program, counted from zero");
+            assert!(new.time>crash+1000);
+            assert_ne!(new.exit_witness(),first.1,"the witness covers both incarnations");
+            let evidence=(first,new.time,new.exit_witness(),new.state_digest().0);
+            if let Some(want)=&want {assert_eq!(&evidence,want,"undo={undo}");} else {want=Some(evidence);}
+        }
+    }
+
+    /// A crash keeps exactly the flushed disk writes: the next incarnation
+    /// boots with the stable layer, a fresh virtio-blk transport, and none of
+    /// the volatile writes. A fork restore puts the whole disk back.
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn a_reboot_keeps_flushed_disk_writes_only() {
+        let kvm=Kvm::new().unwrap();
+        let with_disk=|m: &mut Machine| m.blk=Some(VirtioBlk::new(Disk::new(None,Some(8)).unwrap()));
+        let mut counter=Counter::new().unwrap();
+        let mut old=probe_machine(&kvm,256,false);
+        with_disk(&mut old);
+        to_halt(&mut old,&mut counter,1_000_000);
+        let snap=old.snapshot().unwrap();
+        let disk=&mut old.blk.as_mut().unwrap().disk;
+        disk.write(0,&[b'A';512]).unwrap();
+        disk.flush();
+        disk.write(0,&[b'B';512]).unwrap();
+        disk.write(1,&[b'C';512]).unwrap();
+        let mut new=probe_machine(&kvm,256,false);
+        with_disk(&mut new);
+        new.succeed(&mut old,1000).unwrap();
+        let disk=&new.blk.as_ref().unwrap().disk;
+        let mut buf=[0u8;1024];
+        disk.read(0,&mut buf).unwrap();
+        assert_eq!((buf[0],buf[512]),(b'A',0));
+        assert_eq!((disk.stable_sectors(),disk.volatile_sectors()),(1,0));
+        assert_eq!(new.blk.as_ref().unwrap().stats.writes,0,"a fresh transport");
+        assert_eq!(old.blk.as_ref().unwrap().disk.volatile_sectors(),2,"the old incarnation is untouched");
+        old.restore(&snap).unwrap();
+        assert_eq!(old.blk.as_ref().unwrap().disk.digest(),Disk::new(None,Some(8)).unwrap().digest());
     }
 }
