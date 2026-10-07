@@ -100,6 +100,19 @@ impl ContentStore {
         Ok(bytes)
     }
 
+    /// Size of a regular retained object, for bounded streaming containers.
+    pub fn size(&self, digest: &ContentDigest) -> Result<u64> {
+        let metadata = fs::symlink_metadata(self.path(digest))
+            .map_err(|e| Error::Integrity(format!("{}: {e}", digest.hex())))?;
+        if !metadata.is_file() {
+            return Err(Error::Integrity(format!(
+                "{}: object is not a regular file",
+                digest.hex()
+            )));
+        }
+        Ok(metadata.len())
+    }
+
     fn open(&self, digest: &ContentDigest) -> Result<fs::File> {
         fs::File::open(self.path(digest))
             .map_err(|e| Error::Integrity(format!("{}: {e}", digest.hex())))

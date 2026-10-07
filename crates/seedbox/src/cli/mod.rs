@@ -5,7 +5,7 @@ mod signals;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use seedbox::{
-    config,
+    bundle, config,
     execution::{
         CancellationToken, ExecutionBackend, ExecutionProfile, PreparationBackend, WitnessMode,
     },
@@ -134,6 +134,27 @@ enum Command {
         #[command(flatten)]
         performance: Performance,
     },
+    /// Export a recorded run and its retained inputs and logs.
+    Export {
+        /// Run directory, as printed by run or replay.
+        run: PathBuf,
+        /// Bundle file to create [default: RUN-directory-name.seedbox.tar].
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+        #[command(flatten)]
+        state: StateArg,
+        #[command(flatten)]
+        transfer: Transfer,
+    },
+    /// Import a bundle into fresh run storage, without executing it.
+    Import {
+        /// Bundle file to import.
+        bundle: PathBuf,
+        #[command(flatten)]
+        state: StateArg,
+        #[command(flatten)]
+        transfer: Transfer,
+    },
     /// Show a recorded run after verifying its manifest.
     Inspect {
         /// Run directory, as printed by `run` or `replay`.
@@ -187,6 +208,13 @@ struct StateArg {
     /// Directory holding the content store and recorded runs.
     #[arg(long, env = "SEEDBOX_STATE", default_value = ".seedbox")]
     state: PathBuf,
+}
+
+#[derive(Args)]
+struct Transfer {
+    /// Maximum unique object payload and materialized log bytes.
+    #[arg(long, default_value_t = bundle::DEFAULT_MAX_BYTES, value_parser = clap::value_parser!(u64).range(1..))]
+    max_bytes: u64,
 }
 
 impl StateArg {
@@ -494,6 +522,73 @@ fn run(cli: Cli) -> Result<u8> {
             )?;
             Ok(report(&result))
         }
+        Command::Export {
+            run,
+            output,
+            state,
+            transfer,
+        } => {
+            let run = defaults::run_directory(run)?;
+            let output = match output {
+                Some(path) => path,
+                None => {
+                    let name = run.file_name().ok_or_else(|| {
+                        Error::Setup(format!("{}: no run directory name", run.display()))
+                    })?;
+                    let mut name = name.to_os_string();
+                    name.push(".seedbox.tar");
+                    PathBuf::from(name)
+                }
+            };
+            if output.symlink_metadata().is_ok() {
+                return Err(Error::Setup(format!(
+                    "--output {}: already exists; choose a new file",
+                    output.display()
+                )));
+            }
+            let cancellation = CancellationToken::default();
+            let _signals = Signals::register(&cancellation)?;
+            let options = bundle::Options {
+                max_bytes: transfer.max_bytes,
+                cancellation,
+            };
+            let store = ContentStore::new(state.state.join("objects"));
+            let record = bundle::export(&run, &store, &output, &options).map_err(|e| {
+                Error::Setup(format!(
+                    "export {} to {}: {e}",
+                    run.display(),
+                    output.display()
+                ))
+            })?;
+            println!("EXPORTED: {}", output.display());
+            print_omissions(&record);
+            Ok(0)
+        }
+        Command::Import {
+            bundle: path,
+            state,
+            transfer,
+        } => {
+            let path = defaults::existing("bundle", path)?;
+            let cancellation = CancellationToken::default();
+            let _signals = Signals::register(&cancellation)?;
+            let options = bundle::Options {
+                max_bytes: transfer.max_bytes,
+                cancellation,
+            };
+            // Import performs its own no-follow opening; StateArg::open would
+            // canonicalize away root symlink evidence.
+            let run = bundle::import(&path, &state.state, &options).map_err(|e| {
+                Error::Setup(format!(
+                    "import {} into {}: {e}",
+                    path.display(),
+                    state.state.display()
+                ))
+            })?;
+            println!("IMPORTED: {}", run.directory.display());
+            print_omissions(&run.record);
+            Ok(0)
+        }
         Command::Inspect { run, json } => {
             let run = defaults::run_directory(run)?;
             let record = orchestration::inspect(&run)?;
@@ -635,5 +730,11 @@ fn usage(who: libc::c_int) -> Option<libc::rusage> {
         Some(usage)
     } else {
         None
+    }
+}
+
+fn print_omissions(record: &orchestration::RunRecord) {
+    if !record.omitted_logs.is_empty() {
+        println!("omitted files: {}", record.omitted_logs.len());
     }
 }

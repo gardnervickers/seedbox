@@ -48,3 +48,13 @@ one report with separate outcomes and undispatched seeds. Build exploration requ
 the inspected local project-Nix Podman closure; cancelled builds remain
 cleanup-unverified ERROR with their private tag retained until cessation is verified.
 See the repository's `docs/runtime.md` for bounded preparation evidence and limits.
+
+To share a retained run, use `seedbox export .seedbox/runs/ATTEMPT -o run.seedbox.tar`.
+On Linux or macOS, `seedbox import run.seedbox.tar --state imported` prints a new run
+directory that `seedbox inspect` can read. Replay that directory with
+`seedbox replay IMPORTED_RUN --state imported` on the qualified AMD Linux host
+using a compatible installed Seedbox release. No original checkout, registry or
+image rebuild is needed. Bundles preserve retained logs and visible omissions;
+output omitted by the original capture policy is not transferred. Export/import
+never replace existing data; the default transfer cap is 32 GiB for unique objects
+and separately for materialized log bytes (`--max-bytes` overrides it).

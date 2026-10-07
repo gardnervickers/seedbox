@@ -8,7 +8,8 @@ interrupt timing.
 
 ## Quick start
 
-`validate`, `init` and `inspect` run anywhere. `run`, `explore` and `replay` need the
+`validate`, `init`, `inspect`, `export` and `import` run on Linux or macOS. `run`,
+`explore` and `replay` need the
 qualified host (see [host requirements](#host-requirements)) and root.
 
 ```sh
@@ -37,6 +38,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Guest supervisor | built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | BusyBox | `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
+| Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
 
 `seedbox help run` lists every option. A run prints `OUTCOME: run-directory`;
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
@@ -137,6 +139,30 @@ for compatibility, memory sizing, root access, cancellation and the supported su
 The [acceptance record](docs/acceptance.md) includes real etcd/Redis passes,
 intentional failures, exact replays, full-state comparisons, timeout/cancellation,
 lease contention and exact MSR restoration on the workstation.
+
+## Sharing a retained run
+
+Export a run with its exact retained inputs and logs, then import it into fresh
+state on Linux or macOS:
+
+```sh
+seedbox export .seedbox/runs/ATTEMPT -o failure.seedbox.tar
+seedbox import failure.seedbox.tar --state imported
+seedbox inspect IMPORTED_RUN
+seedbox replay IMPORTED_RUN --state imported
+```
+
+Use the run directory printed by `import` as `IMPORTED_RUN`. Import executes
+nothing. Replay uses the bundled engine and inputs without image preparation,
+registry access or the original checkout, and requires a compatible installed
+Seedbox release and qualified AMD Linux host. Transfer does not qualify a new
+host. A reproduced application FAIL is replay MATCH.
+
+Bundles include only retained logs. Any capture omissions remain visible and
+are printed as `omitted files: N`; omitted local output is not transferred.
+Existing files/runs are never replaced. `--max-bytes` changes the local transfer
+cap without changing run identity. See [runtime instructions](docs/runtime.md#bundles)
+for bounds and supported formats.
 
 ## Low-level engine fixtures
 
