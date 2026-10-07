@@ -38,6 +38,10 @@ y VIRTIO_MMIO
 y VIRTIO_MMIO_CMDLINE_DEVICES
 y VIRTIO_NET
 y VIRTIO_CONSOLE
+# Retained disk (#58, #59): virtio-blk, and ext4 for filesystem probes.
+y BLOCK
+y VIRTIO_BLK
+y EXT4_FS
 y HIGH_RES_TIMERS
 y NO_HZ_IDLE
 y HZ_100
