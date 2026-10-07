@@ -30,6 +30,7 @@ and identities.
 | `cluster-fork.json` | `cluster-fixed.json` booted once and forked per seed (see below) |
 | `cluster-fork-late.json` | The same cluster forked at 1.4 simulated seconds, after etcd has started, with timer and link jitter (see below) |
 | `cluster-fork-skew.json` | `cluster-fork.json` released with up to 50 ms of seeded skew, jitter, and a timed partition after the release (see below) |
+| `rdrand.json`, `rdrand-raw.json` | RDRAND/RDSEED as a guest sees them: hidden from CPUID and, with `-raw`, executed anyway (see below) |
 
 `batch.sh`, `batch.py` and `msr54.py` still run these fixtures with shared CPU/SMT
 leases and verified MSR restoration. Runtime lifecycle tests also use their CPU
@@ -105,3 +106,15 @@ CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/cluster-fork-skew.js
 The second command's `seed-1010` report must carry the first command's world
 witness. Each seed report's `boot` object records the barrier time, the boot's
 host seconds, and for forked seeds the restored page count and restore time.
+
+## RDRAND and RDSEED
+
+The engine hides both from CPUID, but AMD SVM cannot intercept them
+([backends.md](../../docs/backends.md#qualification-and-capability-limits)).
+Build `rdrand.cpio` from `guest/rdrand.init` with `guest/rdrandprobe.c` at
+`bin/rdrandprobe`. `rdrand.json` must print `cpuid: rdrand=0 rdseed=0` and
+`not offered` for both, and two runs of one seed must give the same
+`world_witness`. `rdrand-raw.json` also executes both instructions without
+asking CPUID: `#UD` means the CPU refused them (Intel), and differing values
+across runs of one seed mean they reached the hardware (AMD), which only code
+that ignores CPUID can do.
