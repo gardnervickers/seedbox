@@ -3,8 +3,8 @@
 This is source staging for [issue68](https://github.com/gardnervickers/seedbox/issues/68).
 It has not qualified an engine or enabled a runner. Run only under a separately
 reviewed finite hardware release on the compatible qualified AMD host as root.
-The admission CLI must be bound to the exact frozen engine/kernel candidate;
-there is no engine-change override. The source admission policy selects the accepted engine and guest kernel. Final combined admission/CPUID-selected profile integration
+The admission CLI must be bound to the exact frozen engine/guest-kernel candidate;
+there is no engine-change override. Host-kernel bytes are not checked. The source admission policy selects the accepted engine and guest kernel. Final combined admission/CPUID-selected profile integration
 is a compatibility prerequisite; this entrypoint never passes
 `--allow-unqualified-cpu` or `--allow-engine-change`. A merged engine PR does not update or qualify that policy.
 
@@ -109,7 +109,7 @@ The [checked-in map](../host-check-map.json) defines these rows:
 | harness/worlds/<name>.json | the named fixture's check when mapped, otherwise core; other matching rows can add checks |
 | harness/batch.*, harness/worlds/cluster-fixed.json, examples/etcd/workload/** | core + cluster-fixed, even with identical engine inputs |
 | examples/<other>/** | core + "example <name>: its reviewer's run list is required" |
-| flake.nix, flake.lock, rust-toolchain*, Cargo.lock, .cargo/** | core |
+| flake.nix, flake.lock, rust-toolchain*, Cargo.lock, .cargo/**, harness/vmm-rustc.py, crates/seedbox-control/** | core (control source also keeps control-cases) |
 | kernel/ | core + "kernel campaign needed"; execution refuses incomplete coverage |
 | anything else unmatched | core (fail closed) |
 

@@ -17,6 +17,12 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   `seedbox` run from the checkout finds it. Don't set a global
   `target-dir` in `.cargo/config.toml`: cargo applies it by current directory,
   so it would also move standalone crate builds and break their scripts.
+  These two aliases select `harness/vmm-rustc.py` for path remapping and removal
+  of the Nix dev shell's synthetic checkout RPATH; keep that wrapper isolated
+  from other builds. Keep release debug info enabled. On Linux, verify committed
+  inputs with `bash harness/check-vmm-reproducible.sh [REV]` in the dev shell.
+  The wrapper includes its content hash in Cargo's compiler fingerprint to
+  invalidate older unremapped builds and later wrapper revisions.
 - New crates go in `crates/<name>/` and inherit `version`, `edition` and
   `publish` from `[workspace.package]`. Put a dependency used by two or more
   workspace crates in `[workspace.dependencies]`. Commit both lockfiles.
@@ -39,7 +45,11 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   lockfile, its `[profile.release]`, or even reformatting (which moves panic
   line numbers; `crates/seedbox-vmm/rustfmt.toml` disables formatting). Build
   it only with `cargo build-vmm`. Don't tidy the VMM as a side effect of other
-  work.
+  work. `crates/seedbox-control/**`, `harness/vmm-rustc.py` and the VMM alias
+  flags in `.cargo/config.toml` also determine engine bytes and identity. The
+  VMM reaches the shared control crate through its in-workspace symlink so
+  Cargo's crate metadata does not hash an absolute checkout path; its inherited
+  workspace package and dependency keys must match the root workspace.
 - Performance settings (`--margin`, `--undo`) must never change results.
 
 ## Checks
@@ -194,8 +204,9 @@ deliberately change one.
   defaults table), docs/runtime.md, and `crates/seedbox/templates/README.md`.
   The last one is copied into every project `seedbox init` creates.
 
-`doctor` shares execution admission and kernel/VMM defaults, with lookup-only VMM
-resolution: it must never trigger the cargo auto-build fallback. Success reports
+`doctor` shares execution admission and guest-kernel/VMM defaults; host-kernel
+bytes are not checked. VMM resolution is lookup-only and must never trigger the
+cargo auto-build fallback. Success reports
 only the exact cleaned-up probe observations and selected core; the library does
 not read arguments/environment or print. It creates no state/run and never prepares
 images or executes guests. Compatibility readiness is not replay qualification.
