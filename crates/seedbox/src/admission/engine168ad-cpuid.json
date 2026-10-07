@@ -198,24 +198,6 @@
     "edx": 0
   },
   {
-    "function": 1073741824,
-    "index": 0,
-    "flags": 0,
-    "eax": 0,
-    "ebx": 0,
-    "ecx": 0,
-    "edx": 0
-  },
-  {
-    "function": 1073741825,
-    "index": 0,
-    "flags": 0,
-    "eax": 0,
-    "ebx": 0,
-    "ecx": 0,
-    "edx": 0
-  },
-  {
     "function": 2147483648,
     "index": 0,
     "flags": 0,
@@ -559,6 +541,24 @@
   },
   {
     "function": 2147483682,
+    "index": 0,
+    "flags": 0,
+    "eax": 0,
+    "ebx": 0,
+    "ecx": 0,
+    "edx": 0
+  },
+  {
+    "function": 1073741824,
+    "index": 0,
+    "flags": 0,
+    "eax": 0,
+    "ebx": 0,
+    "ecx": 0,
+    "edx": 0
+  },
+  {
+    "function": 1073741825,
     "index": 0,
     "flags": 0,
     "eax": 0,

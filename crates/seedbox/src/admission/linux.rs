@@ -287,19 +287,9 @@ pub(super) fn observe(cpu: u32) -> Result<CoreObservation> {
     scoped_probe(
         affinity,
         || {
-            let mut observation = collect(cpu)?;
-            if validate_fields(&observation, false).is_err() {
-                return Ok(observation);
-            }
-            // Descriptor is closed before either validation or affinity restoration.
-            match disabled_perf() {
-                Ok(descriptor) => {
-                    drop(descriptor);
-                    observation.perf_disabled_open = true;
-                }
-                Err(error) => observation.perf_error = Some(error.to_string()),
-            }
-            Ok(observation)
+            // The shared gate preserves static evidence and closes any disabled
+            // event descriptor before affinity restoration.
+            Ok(probe_disabled_perf(collect(cpu)?, disabled_perf))
         },
         Affinity::restore,
     )
