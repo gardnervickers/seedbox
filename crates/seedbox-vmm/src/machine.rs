@@ -736,14 +736,14 @@ impl Machine {
                 }
                 self.publish();
             }
-            // Stop at the first deterministic point at or after `soft`, at the
-            // latest by an exact counted stop at `hard`. Two rules combine: the
-            // slice ends in [slice_end, limit], and a timer due at `pit` fires
-            // in [pit, pit + tolerance] (exactly at `pit` if so drawn). Neither
-            // passes `limit`, the world's causal boundary.
+            // Stop by an exact counted stop at `soft`: the slice ends at
+            // `slice_end` and a timer due at `pit` fires exactly at `pit`.
+            // Neither passes `limit`, the world's causal boundary. Stopping at
+            // a count rather than at the guest's next syscall needs no yield
+            // window, so syscalls before the stop cost no exit.
             let pit = self.pit.deadline.unwrap_or(u64::MAX);
             let soft = slice_end.min(pit);
-            let hard = hard_limit(limit, self.pit.deadline, self.pit_exact, self.tolerance);
+            let hard = soft;
             let remaining = hard - self.time;
             // Interrupt injection depends only on the distance to the stop, never
             // on the stepping margin, so it is deterministic.
