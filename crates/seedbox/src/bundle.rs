@@ -48,6 +48,7 @@ impl Options {
 struct Envelope {
     version: u32,
     manifest: Object,
+    #[serde(deserialize_with = "read_objects")]
     objects: Vec<Object>,
 }
 #[derive(Serialize, Deserialize)]
@@ -55,6 +56,31 @@ struct Envelope {
 struct Object {
     digest: ContentDigest,
     bytes: u64,
+}
+fn read_objects<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<Object>, D::Error> {
+    struct Objects;
+    impl<'de> serde::de::Visitor<'de> for Objects {
+        type Value = Vec<Object>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("at most 8192 object descriptors")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut objects = Vec::new();
+            while let Some(object) = seq.next_element()? {
+                if objects.len() == MAX_OBJECTS {
+                    return Err(serde::de::Error::custom("more than 8192 objects"));
+                }
+                objects.push(object);
+            }
+            Ok(objects)
+        }
+    }
+    deserializer.deserialize_seq(Objects)
 }
 fn bad(message: impl Into<String>) -> Error {
     Error::Integrity(format!("bundle: {}", message.into()))

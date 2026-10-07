@@ -507,6 +507,28 @@ fn log_paths_prefix_collisions_and_alias_amplification_fail_before_state_creatio
     };
     rejected(&path, &state, &options);
     assert!(!state.exists());
+    let manifest: serde_json::Value = serde_json::from_slice(&e[1].bytes).unwrap();
+    let aliases: RunRecord = serde_json::from_value(manifest["record"].clone()).unwrap();
+    let lengths: BTreeMap<_, _> = env["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| (o["digest"].as_str().unwrap(), o["bytes"].as_u64().unwrap()))
+        .collect();
+    let materialized: u64 = aliases.logs.values().map(|d| lengths[d.hex()]).sum();
+    let exact = Options {
+        max_bytes: materialized,
+        ..Default::default()
+    };
+    bundle::import(&path, &f.directory.path().join("alias-exact"), &exact).unwrap();
+    rejected(
+        &path,
+        &f.directory.path().join("alias-over"),
+        &Options {
+            max_bytes: materialized - 1,
+            ..Default::default()
+        },
+    );
     let mut e = entries(&archive);
     modify_record(&mut e, |r| {
         let d = r.logs["large.bin"].clone();
@@ -527,7 +549,7 @@ fn symlinked_state_root_components_and_objects_never_modify_outside_storage() {
     let f = Fixture::new();
     let run = f.run();
     let archive = export(&f, &run);
-    for (i, component) in ["root", "objects", "objects/sha256"]
+    for (i, component) in ["root", "objects", "objects/sha256", "runs"]
         .into_iter()
         .enumerate()
     {
@@ -717,4 +739,33 @@ fn portable_cli_default_export_import_and_inspect_need_no_tools_or_original_stat
         String::from_utf8_lossy(&collision.stderr),
         format!("error: --output {name}: already exists; choose a new file\n")
     );
+}
+
+#[test]
+fn envelope_missing_unrelated_and_over_count_objects_fail_before_opening_state() {
+    let f = Fixture::new();
+    let archive = export(&f, &f.run());
+    for case in 0..3 {
+        let mut e = entries(&archive);
+        let mut envelope: serde_json::Value = serde_json::from_slice(&e[0].bytes).unwrap();
+        match case {
+            0 => {
+                envelope["objects"].as_array_mut().unwrap().pop();
+            }
+            1 => {
+                envelope["objects"][0]["digest"] =
+                    serde_json::to_value(ContentDigest::of(b"unrelated")).unwrap();
+            }
+            _ => {
+                let object = envelope["objects"][0].clone();
+                envelope["objects"] = serde_json::Value::Array(vec![object; 8193]);
+            }
+        }
+        e[0].bytes = serde_json::to_vec(&envelope).unwrap();
+        let path = f.directory.path().join(format!("inventory-{case}.tar"));
+        write_entries(&path, &mut e);
+        let state = f.directory.path().join(format!("inventory-{case}"));
+        rejected(&path, &state, &Options::default());
+        assert!(!state.exists());
+    }
 }
