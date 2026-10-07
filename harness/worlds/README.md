@@ -77,6 +77,15 @@ CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/cluster-fork.json fo
 With `boot.fork_at_ns` instead, the world forks at a simulated time rather
 than at the guests' barrier: every machine parks at its first deterministic
 point at or after that time, so boot and application startup are both shared.
+The x86 time page is u64-indexed: fields 0–5 retain the counter ABI;
+`pv_clock`, `bound`, and `syscall_target` occupy 6, 7, and 8;
+`entropy_gen` occupies 9 and the four entropy words occupy 10–13. Both
+`SEEDBOX_ABI` and `ABI_PAGE_RESEED` are 3. The checkpoint and dedicated
+time-page digest retain only fields 0–5 (`PAGE_FIELDS = 6`). The VMM never
+writes fields 6–8 in counter mode; it writes fields 9–13 only when releasing
+a parked time fork with ABI >= 3. Full world-fork snapshots still copy the
+whole page so later seeds restore the original generation.
+
 No guest cooperation is needed. On a guest kernel with time page ABI 3, the
 engine writes the seed's entropy into the time page at the release and the
 kernel mixes it in and reseeds its CRNG before its next random output, so

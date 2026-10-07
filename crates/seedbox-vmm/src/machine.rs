@@ -42,16 +42,31 @@ const PAGE_NET_ISR: usize = 5;
 pub const PAGE_FIELDS: usize = 6;
 /// Fork entropy (ABI 3): written by the VMM only while the world is parked,
 /// so undo checkpoints need not carry them.
-const PAGE_ENTROPY_GEN: usize = 6;
-const PAGE_ENTROPY: usize = 7;
+const PAGE_ENTROPY_GEN: usize = 9;
+const PAGE_ENTROPY: usize = 10;
 const PAGE_ENTROPY_FIELDS: usize = 4;
 /// Guest ABI from which the kernel reseeds its CRNG from the page.
 pub const ABI_PAGE_RESEED: u64 = 3;
 /// PV clock fields, written by the VMM and outside `PAGE_FIELDS` (they are
 /// zero in the counter timebase, whose checkpoints and digests skip them).
-const PAGE_PV_CLOCK: usize = 11;
-const PAGE_BOUND: usize = 12;
-const PAGE_SYSCALL_TARGET: usize = 13;
+const PAGE_PV_CLOCK: usize = 6;
+const PAGE_BOUND: usize = 7;
+const PAGE_SYSCALL_TARGET: usize = 8;
+
+// Pin every extension word without extending the checkpoint/digest prefix.
+const _: () = {
+    assert!(PAGE_FIELDS == 6);
+    assert!(PAGE_PV_CLOCK == 6);
+    assert!(PAGE_BOUND == 7);
+    assert!(PAGE_SYSCALL_TARGET == 8);
+    assert!(PAGE_ENTROPY_GEN == 9);
+    assert!(PAGE_ENTROPY == 10);
+    assert!(PAGE_ENTROPY + 1 == 11);
+    assert!(PAGE_ENTROPY + 2 == 12);
+    assert!(PAGE_ENTROPY + 3 == 13);
+    assert!(PAGE_ENTROPY_FIELDS == 4);
+    assert!(ABI_PAGE_RESEED == 3);
+};
 
 pub struct BootSpec<'a> {
     pub kernel: &'a [u8],
@@ -2124,11 +2139,64 @@ mod fork_tests {
         assert_eq!(fields["syscalls"], (PAGE_SYSCALLS, 1));
         assert_eq!(fields["pic_imr"], (PAGE_PIC_IMR, 1));
         assert_eq!(fields["net_isr"], (PAGE_NET_ISR, 1));
+        assert_eq!(fields["pv_clock"], (PAGE_PV_CLOCK, 1));
+        assert_eq!(fields["bound"], (PAGE_BOUND, 1));
+        assert_eq!(fields["syscall_target"], (PAGE_SYSCALL_TARGET, 1));
         assert_eq!(fields["entropy_gen"], (PAGE_ENTROPY_GEN, 1));
         assert_eq!(fields["entropy"], (PAGE_ENTROPY, PAGE_ENTROPY_FIELDS));
+        assert_eq!(index, 14);
+        assert_eq!(PAGE_FIELDS, PAGE_PV_CLOCK);
         assert_eq!(PAGE_ENTROPY_FIELDS * 8, ENTROPY_WORDS * 4);
         let abi: u64 = header.lines().find_map(|l| l.strip_prefix("#define SEEDBOX_ABI\t")).unwrap().trim().parse().unwrap();
         assert_eq!(abi, ABI_PAGE_RESEED);
+    }
+
+    // These tests create a vCPU but never enter the guest or open a perf event.
+    #[test]
+    #[ignore = "requires Linux x86-64 KVM"]
+    fn abi_below_3_time_forks_do_not_write_extensions_or_add_reseed_witnesses() {
+        let kvm=Kvm::new().unwrap();
+        for abi in 0..ABI_PAGE_RESEED {
+            let mut m=probe_machine(&kvm,0,false);
+            assert!((6..14).all(|i|m.page_get(i)==0),"counter boot, ABI {abi}");
+            for i in 6..14 {m.page_set(i,100+i as u64);}
+            m.abi=abi;
+            m.park().unwrap();
+            let mut witness=m.witness.clone();
+            witness.update([b'R']);
+            witness.update(m.branches.to_le_bytes());
+            witness.update(m.time.to_le_bytes());
+            witness.update(m.time.to_le_bytes());
+            assert_eq!(m.release(m.time,[7;ENTROPY_WORDS]).unwrap(),Reseed::Unsupported);
+            assert!((6..14).all(|i|m.page_get(i)==100+i as u64),"ABI {abi}");
+            assert_eq!(m.exit_witness(),format!("{:x}",witness.finalize()),"ABI {abi}");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Linux x86-64 KVM"]
+    fn a_time_fork_writes_only_entropy_and_a_barrier_writes_none() {
+        let kvm=Kvm::new().unwrap();
+        for barrier in [false,true] {
+            let mut m=probe_machine(&kvm,0,barrier);
+            assert!((6..14).all(|i|m.page_get(i)==0),"counter boot");
+            m.abi=ABI_PAGE_RESEED;
+            for i in 0..14 {m.page_set(i,100+i as u64);}
+            let before:Vec<_>=(0..14).map(|i|m.page_get(i)).collect();
+            // Both release paths require a parked world, before any page write.
+            assert!(m.release(m.time,[7;ENTROPY_WORDS]).is_err());
+            assert_eq!((0..14).map(|i|m.page_get(i)).collect::<Vec<_>>(),before);
+            m.park().unwrap();
+            let how=m.release(m.time,[7;ENTROPY_WORDS]).unwrap();
+            assert_eq!(how,if barrier {Reseed::Barrier} else {Reseed::Page});
+            assert_eq!((0..9).map(|i|m.page_get(i)).collect::<Vec<_>>(),before[..9]);
+            if barrier {
+                assert_eq!((9..14).map(|i|m.page_get(i)).collect::<Vec<_>>(),before[9..14]);
+            } else {
+                assert_eq!(m.page_get(PAGE_ENTROPY_GEN),before[9]+1);
+                assert_eq!((10..14).map(|i|m.page_get(i)).collect::<Vec<_>>(),page_entropy(&[7;ENTROPY_WORDS]));
+            }
+        }
     }
 
     /// 32-bit payload through the real boot handoff: announce the launch

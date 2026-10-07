@@ -31,8 +31,6 @@ struct seedbox_time_page {
 	u64 syscalls;	/* syscalls entered */
 	u64 pic_imr;	/* 8259 masks, master | slave << 8 */
 	u64 net_isr;	/* virtio-mmio interrupt status: VMM sets, guest clears */
-	u64 entropy_gen;	/* VMM bumps after writing entropy at a time fork */
-	u64 entropy[4];	/* 32 bytes the kernel mixes in before reseeding */
 	/*
 	 * PV clock timebase only (pv_clock set by the VMM before boot). Guest
 	 * progress is not counted: virtual time moves only at exits. The
@@ -43,6 +41,8 @@ struct seedbox_time_page {
 	u64 pv_clock;
 	u64 bound;
 	u64 syscall_target;
+	u64 entropy_gen;	/* VMM bumps after writing entropy at a time fork */
+	u64 entropy[4];	/* 32 bytes the kernel mixes in before reseeding */
 };
 
 /* Enabled at boot in the PV clock timebase; a no-op (no branch) otherwise. */
