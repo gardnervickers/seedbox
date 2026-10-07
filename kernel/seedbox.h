@@ -15,6 +15,7 @@
 #define SEEDBOX_PV_READ_NS	100
 
 #ifndef __ASSEMBLY__
+#include <linux/init.h>
 #include <linux/types.h>
 #include <linux/jump_label.h>
 #include <asm/io.h>
@@ -50,6 +51,7 @@ extern struct seedbox_time_page *seedbox_page;
 unsigned long long seedbox_rdtsc(void);
 bool seedbox_emulate_user_tsc(struct pt_regs *regs);
 unsigned long seedbox_tsc_khz(void);
+void __init seedbox_time_init(void);
 
 /*
  * Offer the VMM a deterministic stopping point. The executed conditional

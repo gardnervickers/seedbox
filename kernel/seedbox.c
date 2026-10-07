@@ -24,6 +24,7 @@
 #include <linux/kernel.h>
 #include <linux/printk.h>
 #include <asm/cpufeature.h>
+#include <asm/fixmap.h>
 #include <asm/i8259.h>
 #include <asm/insn-eval.h>
 #include <asm/seedbox.h>
@@ -105,13 +106,19 @@ unsigned long seedbox_tsc_khz(void)
 	return SEEDBOX_TSC_KHZ;
 }
 
-static int __init seedbox_time_init(void)
+void __init seedbox_time_init(void)
 {
 	struct seedbox_time_page *p;
 
-	p = memremap(SEEDBOX_TIME_PAGE_PHYS, PAGE_SIZE, MEMREMAP_WB);
-	if (!p)
-		panic("seedbox: cannot map time page");
+	/*
+	 * setup_arch calls us after jump_label_init and early_ioremap_init,
+	 * before tsc_early_init selects delay_tsc. A permanent, write-back
+	 * fixmap needs no allocator and survives the boot page-table switch.
+	 * In particular, the PIC's 8 * 2 us + 100 us initialization delays
+	 * must poll this page, not make two port exits per nanosecond.
+	 */
+	set_fixmap(FIX_SEEDBOX_TIME, SEEDBOX_TIME_PAGE_PHYS);
+	p = (struct seedbox_time_page *)fix_to_virt(FIX_SEEDBOX_TIME);
 	WRITE_ONCE(p->last, seedbox_early_last);
 	if (READ_ONCE(p->pv_clock)) {
 		static_branch_enable(&seedbox_pv_clock);
@@ -120,8 +127,13 @@ static int __init seedbox_time_init(void)
 	WRITE_ONCE(p->pic_imr, cached_irq_mask);
 	outl(SEEDBOX_ABI, SEEDBOX_PORT_TIME_READY);
 	WRITE_ONCE(seedbox_page, p);
-	cr4_set_bits(X86_CR4_TSD);
 	pr_info("seedbox: deterministic time page active\n");
+}
+
+static int __init seedbox_user_tsc_init(void)
+{
+	/* cpu_init clears TSD after setup_arch; enable user traps afterwards. */
+	cr4_set_bits(X86_CR4_TSD);
 	return 0;
 }
-early_initcall(seedbox_time_init);
+early_initcall(seedbox_user_tsc_init);
