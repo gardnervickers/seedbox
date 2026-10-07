@@ -298,18 +298,58 @@ P1/M1 compare the full plain world on the PR and base engines. Prior train/3
 witness prefixes were `ca9a7f6d` and `b66611d2`, respectively; a new train must
 verify equality again, since its engine bytes determine identity.
 
-Only U1/U2 use `shaped-tol-short.json`, with undo on/off and 600-second host
-timeouts. It keeps the 200 us stop tolerance and the same 16 fault IDs, actions,
-handles and policies in the same order. Faults run from 0.3 to 1.0 s; the short
-init uses a 4 ms probe gap and a 1.1 s probe end, exits after a 0.1 s reporting grace,
-and the world has a 2.5 s duration cap. Undo off costs about one margin of
-single-stepping (~16k branches, ~0.1 s on the AMD host) per precise stop, so the
-probe sets the U2 budget: a 1 ms gap to 1.5 s gave U1 5,800 precise stops and U2
-timed out at 600 s. The 4 ms gap to 1.1 s sends about 5.5x fewer frames. Compression
-is nonuniform: the fixture preserves 340 ms of uncut lossmid exposure (0.6–0.7 and
-0.76–1.0 s), an estimated 85 sends at the 4 ms gap, with 500 us jitter and 50% loss,
-so losing none has probability about 2^-85. Actual guest send counts remain host
-evidence.
+Only U1/U2 use `shaped-tol-short.json`, with default undo (U1) and undo off
+(U2), identical world/initrd/seed, and retained 600-second safety timeouts. The
+performance target is **U2 below 300 seconds**, with U1 == U2. The previous
+1 ms global latency, 200 us tolerance and 4 ms probe gap produced 2,845 U1
+precise stops and a 564-second U2 run. Shortening the 2.5 s duration cap alone
+would not help: `end_on_exit: a` normally ends execution near 1.2 s.
+
+The short world now raises **every latency by 9 ms**: global 10 ms, a->b baseline
+12 ms, old/new shape layers 14/17 ms, and loss layers 10 ms. This preserves
+relative delays and keeps every policy above the global scheduling floor. Its
+5 ms `stop_tolerance_ns` gives both a 5 ms early world window
+(`min(global_latency / 2, tolerance)`) and a 5 ms late timer window. These
+are semantic world inputs, applied identically to U1 and U2; undo remains a
+performance-only variant. No engine or full L/P fixture bytes change.
+
+All 16 fault IDs, actions, handles, jitter/loss settings and times stay in order
+from 0.3 to 1.0 s. Each machine's world `cmdline` sets
+`seedbox.link_gap_ns=1000000`; `link-short.init` reads it, retaining its old 4 ms
+default when absent. The 1.1 s end and a's 0.1 s reporting grace stay fixed.
+This restores an estimated
+**340 uncut lossmid sends** over 0.6–0.7 and 0.76–1.0 s, with 500 us jitter and
+50% loss (the old 4 ms gap allowed only 85). The 100 ms after the final heal
+exceeds the longest shaped delay, 17 ms. The unchanged 2.5 s cap leaves reporting
+headroom. Actual send counts and completed reports remain host evidence; a
+scheduled candidate count is not a measured guest send count.
+
+### Short-world stop budget
+
+Most precise stops in the old short world came from the **cross-machine
+horizon**, not the probe: a slice is capped by the earliest other machine's key
+plus global latency (`crates/seedbox-vmm/src/main.rs`), and the probe's busy
+polling gives no natural exit before that cap. With a 1 ms horizon and a 200 us
+early window, slices ended between sends by stepping. The 10 ms horizon and 5 ms
+windows cover several 1 ms send gaps, so the next natural send or device exit
+usually ends the slice first. `precise_stops` counts entries into stepping; the
+engine's `--trace` does not record why a stepping entry began.
+
+Measured on the AMD host (main b6e9809, PR #127 at 47cfb5e):
+
+| World | U1 precise stops | U1 rollbacks | U1 seconds | U2 seconds |
+| --- | --- | --- | --- | --- |
+| 1 ms latency, 200 us tolerance, 4 ms probe gap | 2,845 | not recorded | 30 | 564 |
+| 10 ms latency, 5 ms tolerance, 1 ms probe gap | 433 | 3 | 33.0 | 118.5 |
+
+U1 and U2 share world witness b0427503f6428b12 and network witness
+32838ac9f494e2fb, with loss on c->a and c->b, the c|a cut counted both ways, all
+16 faults applied in order and no reorders. `links.py` fails U1 if it records no
+rollbacks, so the pair always exercises undo.
+
+Run the pair with `RUNS="U1 U2"` through `harness/run-links.sh` on two free
+physical cores with idle SMT siblings. U2 is a fresh same-seed run with undo off,
+not a replay of U1.
 
 `harness/links.py` derives full-world sender-stamp window expectations from the
 retained world JSON, using cut precedence, highest live shape ID and heal by
