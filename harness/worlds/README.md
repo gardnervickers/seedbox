@@ -1,36 +1,41 @@
-# Engine fixtures and legacy fault campaigns
+# Low-level engine fixtures
 
-Application authoring now uses [Compose examples](../../examples/README.md) and the
-Rust `seedbox run` / `seedbox replay` commands. World JSON is generated internally
-by that adapter; new application tests should not construct guest initramfs files
-or encode configuration in kernel command-line arguments.
+Application acceptance uses the [YAML scenarios](../acceptance/workloads/) with
+`seedbox run` / `seedbox replay`. Faults, workloads and verification run in their
+guest drivers. Seed sweeps are ordinary CLI loops.
 
-| Previous definition | Current path / reason for retention |
+## Removed application paths
+
+| Removed definition | Replacement |
 | --- | --- |
-| `cluster.json` | Replaced by the [etcd Compose example](../../examples/etcd/compose.yaml), using the same acknowledgement-ledger checker in an OCI workload image. The acceptance template uses a fixed 160-write target rather than timed load. |
-| `kill-3.5.2.json`, `kill-3.5.3.json`, `sanity.json` | Retained legacy fault campaigns for #3. Their seeded restarts have not been silently removed or claimed equivalent to the no-fault Compose examples. |
-| `cluster-fixed.json`, `single-vm*.json` | Retained placement/network comparison fixtures for #10; Compose currently uses one VM per service. |
-| `smoke.json`, `net.json`, `race.json` | Retained low-level kernel/device/scheduler tests. |
+| `etcd1.json`, `guest/etcd1.init` | Removed obsolete single-member boot fixture; use the etcd Compose example |
+| `cluster.json` | [etcd Compose example](../../examples/etcd/compose.yaml) |
+| `kill-3.5.2.json`, `short-kill-3.5.2.json` | [etcd 3.5.2 scenario](../acceptance/workloads/short-kill-3.5.2.yaml) |
+| `kill-3.5.3.json` | [etcd 3.5.3 scenario](../acceptance/workloads/kill-3.5.3.yaml) |
+| `sanity.json` | [planted-failure control](../acceptance/workloads/sanity.yaml) |
+| `race.json`, `guest/race.init` | [race scenario](../acceptance/workloads/race.yaml), using the existing C workload |
+| `campaign.sh`, `campaign-result.py` and their tests | `seedbox run` exit status, retained reports, and CLI seed loops |
 
-To reproduce a legacy fault hunt, build its guest artifacts and use
-`harness/batch.sh` / `harness/campaign.sh` with the unchanged JSON file. From the repository
-root inside the project Nix shell, with `SEEDBOX_ROOT` naming the runtime tree:
+These replace the application acceptance workflow; they do not preserve the old
+serial fault schedule, witnesses or historical failing seeds. The removed files
+from this cleanup are available in Git at `c7d7c22`. Historical research records at commit `788fc43` retain their original references
+and identities.
 
-```sh
-bash guest/build-client.sh "$SEEDBOX_ROOT/artifacts/client"
-bash guest/build-initramfs.sh "$SEEDBOX_ROOT/artifacts/cluster-3.5.2.cpio" \
-  guest/cluster.init "$SEEDBOX_ROOT/src/etcd/v3.5.2/etcd:bin/etcd" \
-  "$SEEDBOX_ROOT/artifacts/client:bin/client"
-harness/batch.sh harness/worlds/kill-3.5.2.json demo "7 7"
-harness/campaign.sh harness/worlds/kill-3.5.2.json hunt 1000 8
-```
+## Remaining fixtures and dependencies
 
-These commands require the legacy runtime layout, controlled kernel and etcd
-binary; they are not needed for Compose runs. Both old and new
-executors share the CPU/SMT lease protocol. The old workload build helper reads
-the checker source now housed in `examples/etcd/workload`.
+| Definition | Why it remains |
+| --- | --- |
+| `smoke.json`, `net.json` | Raw kernel boot/timer/entropy and virtual NIC checks |
+| `cluster-fixed.json`, `single-vm*.json` | Matched multi-VM versus one-VM network-namespace experiments; Compose uses one service per VM |
 
-Compose controllers use the [runtime fault API](../../crates/seedbox/README.md#structured-faults)
-with correlated process acknowledgments and overlapping partition handles.
-The [recovery examples](../../examples/faults/README.md) retain their own inputs and
-results. The legacy fixtures remain available with their separate run identities.
+`batch.sh`, `batch.py` and `msr54.py` still run these fixtures with shared CPU/SMT
+leases and verified MSR restoration. Runtime lifecycle tests also use their CPU
+topology/readback helpers. `guest/build-netns.sh` still needs `build-client.sh`,
+`build-initramfs.sh`, `cluster.init`, `single.init`, `network.sh`, `members.sh`,
+`netprobe.c` and `sbx.c` for the one-VM/multi-VM comparison. The raw boot/network
+fixtures use the same initramfs builder. These dependencies are not replaced by
+the application YAML scenarios.
+
+See the [one-VM fixture instructions](../../README.md#one-vm-network-fixture) for
+building and running those experiments. Use the [runtime fault API](../../python/README.md)
+for new application scenarios.

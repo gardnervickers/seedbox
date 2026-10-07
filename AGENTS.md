@@ -25,8 +25,10 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   in the current crates, guest inputs and harness rather than reviving old
   prototypes. `tools/mac-tcg/` retains the experimental local Mac runner,
   its own pinned Nix shell and portable tests; it is not a production backend.
-- `harness/` holds the Python acceptance suite and legacy world-file runners;
-  `kernel/` and `guest/` hold guest build inputs.
+- `harness/` holds YAML acceptance scenarios with guest Python drivers, portable
+  checks, and the batch runner for low-level world fixtures. Application
+  acceptance uses `seedbox run` / `seedbox replay` directly; do not add a host
+  scenario runner. `kernel/` and `guest/` hold guest build inputs.
 
 ## Identity and determinism
 
