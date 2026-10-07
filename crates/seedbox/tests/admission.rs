@@ -153,3 +153,47 @@ fn old_or_drifted_proof_is_distinct_from_engine_mismatch_and_cannot_be_synthesiz
     assert!(validate_kernel(&ContentDigest::of(b"other kernel")).is_err());
     validate_kernel(&ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap()).unwrap();
 }
+
+#[test]
+fn unchanged_actual_and_synthetic_historical_records_are_readable_but_not_admitted() {
+    use seedbox::orchestration::{self, Orchestrator, Outcome, ReplayOptions, ReplayStatus};
+    use seedbox::{store::ContentStore, vmm::VmmExecutor};
+    use std::fs;
+    for manifest in [
+        include_bytes!("fixtures/formats/demo41-fail-v2.json").as_slice(),
+        include_bytes!("fixtures/formats/synthetic-c84-v2.json").as_slice(),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let original = root.path().join("original");
+        fs::create_dir(&original).unwrap();
+        fs::write(original.join("manifest.json"), manifest).unwrap();
+        let record = orchestration::inspect(&original).unwrap();
+        assert_eq!(record.outcome, Outcome::Fail);
+        let engine = root.path().join("test-only-executor-engine");
+        fs::write(&engine, b"synthetic executor bytes; never execute").unwrap();
+        let store = ContentStore::new(root.path().join("objects"));
+        let executor = VmmExecutor::new(&engine, &store, None, 512, WitnessMode::Exits).unwrap();
+        let runner = Orchestrator::new(store, root.path().join("runs"));
+        for allow_engine_change in [false, true] {
+            let rejected = runner
+                .replay_with_options(
+                    &original,
+                    &executor,
+                    ReplayOptions {
+                        allow_engine_change,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            assert_eq!(rejected.record.outcome, Outcome::Error);
+            assert_eq!(
+                rejected.record.replay.as_ref().unwrap().status,
+                ReplayStatus::NotComparable
+            );
+            assert_eq!(rejected.record.error.as_deref(),Some("input integrity: host admission proof missing: host_policy; use the retained previous CLI only for historical evidence"));
+            assert!(!rejected.directory.join("output").exists());
+            assert!(!rejected.directory.join("inputs").exists());
+            assert_eq!(fs::read(original.join("manifest.json")).unwrap(), manifest);
+        }
+    }
+}

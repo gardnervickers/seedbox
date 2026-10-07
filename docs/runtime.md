@@ -4,6 +4,10 @@ The etcd and Redis Compose examples have passed real guest runs, failure control
 and replay on the qualified Linux workstation. See [the acceptance record](acceptance.md)
 for the tested engine, kernel, image digests and lifecycle checks.
 
+These are version-bound results, not qualification of arbitrary OCI runtimes or
+the latest changed example inputs. See [draft formats and runtime scope](compatibility.md)
+for current readers/writers, exit meanings and remaining release gates.
+
 ## Build on the qualified Linux host
 
 From the repository root:
