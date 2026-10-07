@@ -245,7 +245,7 @@ class Campaign:
         a = self.args
         runtime = ['--kernel', str(a.kernel), '--vmm', str(a.engine), '--guest-init', str(a.guest_init),
                    '--busybox', str(a.busybox), '--cpu', str(a.cpu), '--state', str(self.state), '--memory-mb', '512']
-        wrong = self.root / 'wrong-kernel'
+        wrong = self.root / 'wrong-kernel-input'
         wrong.write_bytes(b'private wrong kernel; real kernel unchanged\n')
         invalid = runtime.copy()
         invalid[1] = str(wrong)

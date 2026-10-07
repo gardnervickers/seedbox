@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -126,6 +127,39 @@ class SmokeTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'required policy refusal'):
                 campaign.run()
             pair.assert_not_called()
+
+    def test_wrong_kernel_actual_invoke_uses_distinct_input_and_phase(self):
+        root = self.root / 'campaign'
+        root.mkdir()
+        cli = self.root / 'harmless-cli'
+        cli.write_text('#!' + sys.executable + '\n' +
+            'import pathlib, sys\n' +
+            'assert sys.argv[1] == "run"\n' +
+            'assert pathlib.Path(sys.argv[sys.argv.index("--kernel")+1]).read_bytes().startswith(b"private wrong kernel")\n' +
+            'print("error: guest kernel is outside the admitted host policy", file=sys.stderr)\n' +
+            'sys.exit(2)\n')
+        cli.chmod(0o700)
+        args = type('Args', (), dict(kernel='kernel', engine='engine', guest_init='init',
+                                    busybox='busybox', cpu=8, cli=cli, tool_path=''))()
+        campaign = smoke.Campaign(args, root, 1e100)
+        def harmless_command(command, env, out, err, *args, **kwargs):
+            # Actual invoke/filesystem/command boundary; no Linux ownership claim.
+            completed = subprocess.run(command, env=env, stdout=out, stderr=err,
+                                       cwd=kwargs['cwd'], timeout=5)
+            return dict(exit=completed.returncode, failure=None, manager_handoff=False,
+                        leader_reaped=True, owned_session_gone=True)
+        with patch.object(smoke, 'run_owned_replay', side_effect=harmless_command) as command, \
+             patch.object(smoke, 'pair', side_effect=RuntimeError('stop before hardware')) as pair, \
+             patch.object(smoke, 'snapshot') as snapshot:
+            with self.assertRaisesRegex(RuntimeError, 'stop before hardware'):
+                campaign.run()
+            command.assert_called_once()
+            pair.assert_called_once()
+            snapshot.assert_not_called()
+        self.assertTrue((root / 'wrong-kernel-input').is_file())
+        self.assertTrue((root / 'wrong-kernel').is_dir())
+        self.assertEqual((root / 'wrong-kernel/stdout').read_bytes(), b'')
+        self.assertTrue((root / 'wrong-kernel/wall.json').is_file())
 
     def test_cleanup_collected_before_bad_exit_assertion(self):
         args = type('Args', (), dict(tool_path=''))()
