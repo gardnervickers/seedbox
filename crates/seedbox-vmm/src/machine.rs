@@ -707,9 +707,6 @@ impl Machine {
             .max(self.time.saturating_add(1))
             .min(limit);
         let mut legal = true;
-        // Exact stop target, chosen at each deterministic point and kept
-        // across the overflow landings, steps and rollbacks that approach it.
-        let mut target = 0;
         loop {
             if self.pending_io.is_some() {
                 if !self.drain_io(limit)? {
@@ -739,29 +736,16 @@ impl Machine {
                 }
                 self.publish();
             }
-            // Stop by an exact counted stop. The slice ends in
-            // [slice_end, limit] and a timer due at `pit` fires in
-            // [pit, pit + tolerance]; neither passes `limit`, the world's
-            // causal boundary. Stopping at a count rather than at the guest's
-            // next syscall needs no yield window, so syscalls before the stop
-            // cost no exit.
-            //
-            // The target is the earliest allowed point, `soft`, unless an
-            // interrupt is pending and `soft` is too close to inject it: then
-            // it is the latest allowed point, so a run of short slices or
-            // short timers cannot starve interrupt delivery.
-            if legal {
-                let pit = self.pit.deadline.unwrap_or(u64::MAX);
-                let soft = slice_end.min(pit);
-                let latest = hard_limit(limit, self.pit.deadline, self.pit_exact, self.tolerance);
-                target = if self.pic.pending().is_some() && soft.saturating_sub(self.time) <= INJECT_GUARD {
-                    latest
-                } else {
-                    soft
-                };
-            }
-            let soft = target;
-            let hard = target;
+            // Stop at the first natural exit at or after `soft`, at the latest
+            // by an exact counted stop at `hard`. Two rules combine: the slice
+            // ends in [slice_end, limit], and a timer due at `pit` fires in
+            // [pit, pit + tolerance] (exactly at `pit` if so drawn). Neither
+            // passes `limit`, the world's causal boundary. Syscalls are not
+            // stopping points, so no yield window is requested: a natural exit
+            // is never skipped, whatever the overflow skid.
+            let pit = self.pit.deadline.unwrap_or(u64::MAX);
+            let soft = slice_end.min(pit);
+            let hard = hard_limit(limit, self.pit.deadline, self.pit_exact, self.tolerance);
             let remaining = hard - self.time;
             // Interrupt injection depends only on the distance to the stop, never
             // on the stepping margin, so it is deterministic.
@@ -772,17 +756,9 @@ impl Machine {
                     self.vcpu.get_kvm_run().request_interrupt_window = 0;
                 }
             }
-            // Near a soft stop, ask the guest kernel to exit at its next syscall:
-            // the first such exit at or after `soft` is a deterministic stopping
-            // point, much cheaper than counting our way to `hard`. Earlier yield
-            // exits are transparent.
-            //
-            // Keep the transparent syscall window open for the entire soft
-            // interval. Host skid and a performance margin cannot decide
-            // whether a syscall at the semantic stop is offered as an exit.
             let rem_soft = soft.saturating_sub(self.time);
-            let windowed = soft < hard;
-            let window = windowed;
+            let windowed = false;
+            let window = false;
             if window != self.exit_req {
                 unsafe { std::ptr::write_volatile(self.page.add(2), window as u64) };
                 self.exit_req = window;
@@ -791,9 +767,7 @@ impl Machine {
             let threshold = if undo { self.fm } else { self.margin };
             if remaining > threshold {
                 self.set_stepping(false)?;
-                let wake = if rem_soft > self.margin {
-                    rem_soft - self.margin
-                } else if (self.adaptive_margin || undo) && remaining > APPROACH {
+                let wake = if (self.adaptive_margin || undo) && remaining > APPROACH {
                     // Approach a hard stop in two overflows: the first measures
                     // the branch rate of the code actually running near it.
                     remaining - APPROACH
