@@ -2,7 +2,9 @@
 //! thread. Guest progress is measured in retired conditional branches; the
 //! machine can be stopped at an exact branch count (precise preemption).
 
-use crate::boundary::{advance_time, hard_limit, io_charge, missed_soft_stop, PendingIo};
+use crate::boundary::{advance_time, hard_limit, io_charge, PendingIo};
+use crate::timebase::{Judge, Run, Timebase, Verdict};
+#[cfg(test)]
 use crate::counter::Counter;
 use crate::profile::CounterProfile;
 use crate::virtio_console::VirtioConsole;
@@ -15,6 +17,8 @@ use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 use sha2::{Digest, Sha256};
 use std::os::fd::AsRawFd;
 use std::time::Instant;
+
+mod counted;
 
 pub const TIME_PAGE: u64 = 0xd000_0000;
 pub const NET_MMIO: u64 = 0xd000_1000;
@@ -863,22 +867,22 @@ impl Machine {
     /// Run to the first deterministic point at or after `limit - early` (at
     /// the latest an exact stop at `limit`), or until the guest halts, exits or
     /// sends frames. Never runs past `limit`.
-    pub fn run_until(
+    pub fn run_until<T: Timebase>(
         &mut self,
-        counter: &mut Counter,
+        tb: &mut T,
         limit: u64,
         early: u64,
         frames: &mut Vec<Vec<u8>>,
     ) -> Result<Stop, String> {
         let started = Instant::now();
-        let r = self.run_inner(counter, limit, early, frames);
+        let r = self.run_inner(tb, limit, early, frames);
         self.stats.run_ns += started.elapsed().as_nanos();
         r
     }
 
-    fn run_inner(
+    fn run_inner<T: Timebase>(
         &mut self,
-        counter: &mut Counter,
+        tb: &mut T,
         limit: u64,
         early: u64,
         frames: &mut Vec<Vec<u8>>,
@@ -948,57 +952,11 @@ impl Machine {
                 unsafe { std::ptr::write_volatile(self.page.add(2), window as u64) };
                 self.exit_req = window;
             }
-            let undo = self.undo.is_some();
-            let threshold = if undo { self.fm } else { self.margin };
-            if remaining > threshold {
-                self.set_stepping(false)?;
-                let wake = if (self.adaptive_margin || undo) && remaining > self.profile.approach {
-                    // Approach a hard stop in two overflows: the first measures
-                    // the branch rate of the code actually running near it.
-                    remaining - self.profile.approach
-                } else {
-                    // Final approach. With a checkpoint, aim close and undo an
-                    // overshoot rather than step through a worst-case skid.
-                    if undo && !self.undo.as_ref().unwrap().valid {
-                        self.checkpoint()?;
-                    }
-                    remaining - threshold
-                };
-                let now = counter.last();
-                if wake >= crate::counter::NEVER {
-                    counter.disarm();
-                    self.armed_wake = 0;
-                } else {
-                    counter.arm(now, now + wake);
-                    self.armed_wake = wake;
-                }
-            } else {
-                if !self.stepping {
-                    counter.disarm();
-                }
-                self.set_stepping(true)?;
-                let (r, sr) = {
-                    let run = self.vcpu.get_kvm_run();
-                    unsafe { (run.s.regs.regs, run.s.regs.sregs) }
-                };
-                let mem = unsafe { std::slice::from_raw_parts(self.mem, self.mem_size) };
-                let planner = self.planner.as_mut().unwrap();
-                planner.refresh_from(&sr);
-                let targets = planner
-                    .plan(mem, &r)
-                    .map_err(|e| format!("{}: step plan: {e}", self.name))?;
-                Planner::arm(&self.vcpu, &targets)?;
-                self.last_plan = (r.rip, targets.clone());
-                if targets.contains(&r.rip) {
-                    let mut resumed = r;
-                    resumed.rflags |= 1 << 16; // RF: do not re-trigger at the current instruction
-                    self.vcpu.set_regs(&resumed).map_err(|e| e.to_string())?;
-                }
-            }
+            tb.prepare(self, remaining)?;
             self.vcpu.get_kvm_run().kvm_valid_regs =
                 (KVM_SYNC_X86_REGS | KVM_SYNC_X86_SREGS) as u64;
             let syscalls0 = self.page_get(PAGE_SYSCALLS);
-            let c0 = counter.last();
+            let c0 = tb.start();
             let t_run = Instant::now();
             let run_ptr = self.vcpu.get_kvm_run() as *mut kvm_run;
             let exit = self.vcpu.run();
@@ -1017,90 +975,59 @@ impl Machine {
             };
             self.stats.kvm_ns[kind] += run_ns;
             self.stats.kvm_n[kind] += 1;
-            let c1 = counter.read_fast();
+            let c1 = tb.read();
             let delta = c1 - c0;
             let interrupted = matches!(&exit, Err(e) if e.errno() == libc::EINTR);
-            // A free run that reaches the hard count, even by a natural exit
-            // exactly there, has passed the counted stop: stepping would have
-            // stopped before that instruction.
-            let overshoot = delta > remaining || (!self.stepping && delta == remaining);
-            // With the yield window closed, a run must not pass `soft`: a
-            // syscall there would have been the stop.
-            let soft_miss = missed_soft_stop(
+            let syscalled =
+                unsafe { std::ptr::read_volatile(self.page.add(PAGE_SYSCALLS)) } != syscalls0;
+            let run = Run {
+                delta,
+                remaining,
+                rem_soft,
                 windowed,
                 window,
-                delta,
-                rem_soft,
                 interrupted,
-                self.stepping,
-            );
-            if (overshoot || soft_miss) && self.undo.as_ref().is_some_and(|u| u.valid) {
-                if overshoot && self.fm >= self.profile.undo_max {
+                debug: matches!(exit, Ok(VcpuExit::Debug(_))),
+                run_ns,
+                syscalled,
+            };
+            let judge = Judge {
+                name: &self.name,
+                stepping: self.stepping,
+                pv: self.pv,
+                undo_valid: self.undo.as_ref().is_some_and(|u| u.valid),
+                fm: &mut self.fm,
+                margin: &mut self.margin,
+                adaptive_margin: self.adaptive_margin,
+                armed_wake: self.armed_wake,
+                profile: self.profile,
+                stats: &mut self.stats,
+            };
+            match tb.judge(judge, &run)? {
+                Verdict::Advance { legal: l } => legal = l,
+                Verdict::Rollback => {
+                    drop(exit);
+                    self.rollback()?;
+                    legal = false;
+                    continue;
+                }
+                Verdict::Overshoot => {
+                    let what = exit
+                        .as_ref()
+                        .map(|e| format!("{e:?}"))
+                        .unwrap_or_else(|e| e.to_string());
+                    drop(exit);
+                    let r = self.vcpu.get_regs().ok();
                     return Err(format!(
-                        "overshoot on {}: {} branches past stop target at final margin {}",
+                        "overshoot on {}: {} branches past stop target (stepping={} exit={} rip={:#x?} last_plan={:x?})",
                         self.name,
                         delta - remaining,
-                        self.fm
+                        self.stepping,
+                        what,
+                        r.map(|r| r.rip),
+                        self.last_plan,
                     ));
                 }
-                drop(exit);
-                self.rollback()?;
-                // A rollback costs far less than stepping, so grow slowly.
-                self.fm = (self.fm * 2).min(self.profile.undo_max);
-                if !overshoot {
-                    self.stats.soft_undos += 1;
-                }
-                legal = false;
-                continue;
-            }
-            // Changing the margin must never change where a stop lands. A
-            // paravirtual guest counts syscalls: a run without one skipped no
-            // stop. Otherwise the run fails.
-            if soft_miss && !overshoot {
-                self.stats.soft_misses += 1;
-                let syscalls = unsafe { std::ptr::read_volatile(self.page.add(PAGE_SYSCALLS)) };
-                if !self.pv || syscalls != syscalls0 {
-                    return Err(format!(
-                        "soft overshoot on {}: {} branches past (or an ambiguous overflow at) a soft stop before its syscall window opened",
-                        self.name,
-                        delta - rem_soft
-                    ));
-                }
-                self.stats.soft_misses_clean += 1;
-            }
-            if overshoot {
-                let what = exit
-                    .as_ref()
-                    .map(|e| format!("{e:?}"))
-                    .unwrap_or_else(|e| e.to_string());
-                drop(exit);
-                let r = self.vcpu.get_regs().ok();
-                return Err(format!(
-                    "overshoot on {}: {} branches past stop target (stepping={} exit={} rip={:#x?} last_plan={:x?})",
-                    self.name,
-                    delta - remaining,
-                    self.stepping,
-                    what,
-                    r.map(|r| r.rip),
-                    self.last_plan,
-                ));
-            }
-            if interrupted && !self.stepping {
-                let skid = delta.saturating_sub(self.armed_wake);
-                self.stats.skid_max = self.stats.skid_max.max(skid);
-                self.stats.skids.push(skid);
-            }
-            // Overflow skid is roughly constant in host time, so its size in
-            // branches follows the guest's recent branch rate (Go's GC scan loop
-            // is several times denser than ordinary code). Size the margin from
-            // that rate. Performance only: stops land on the same count.
-            if self.adaptive_margin && !self.stepping && run_ns > 20_000 && delta > 0 {
-                let rate = delta as f64 / run_ns as f64; // branches per host ns
-                self.margin = ((rate * self.profile.skid_ns) as u64).clamp(self.profile.margin_min, self.profile.approach);
-            }
-            legal = !interrupted;
-            if matches!(exit, Ok(VcpuExit::Debug(_))) {
-                legal = delta == remaining;
             }
             self.branches += delta;
             self.time += delta;
