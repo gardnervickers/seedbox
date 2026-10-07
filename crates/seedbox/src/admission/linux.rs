@@ -43,19 +43,48 @@ impl Affinity {
     }
     fn restore(&mut self) -> Result<()> {
         if self.active {
-            if unsafe {
-                libc::sched_setaffinity(0, std::mem::size_of_val(&self.original), &self.original)
-            } != 0
-            {
-                return Err(Error::Execution(format!(
-                    "restore preflight affinity: {}",
-                    std::io::Error::last_os_error()
-                )));
-            }
+            let expected = affinity_bits(&self.original);
+            checked_affinity_restore(
+                &expected,
+                || {
+                    if unsafe {
+                        libc::sched_setaffinity(
+                            0,
+                            std::mem::size_of_val(&self.original),
+                            &self.original,
+                        )
+                    } != 0
+                    {
+                        return Err(Error::Execution(format!(
+                            "restore preflight affinity: {}",
+                            std::io::Error::last_os_error()
+                        )));
+                    }
+                    Ok(())
+                },
+                || {
+                    let mut restored = unsafe { std::mem::zeroed() };
+                    if unsafe {
+                        libc::sched_getaffinity(0, std::mem::size_of_val(&restored), &mut restored)
+                    } != 0
+                    {
+                        return Err(Error::Execution(format!(
+                            "read restored preflight affinity: {}",
+                            std::io::Error::last_os_error()
+                        )));
+                    }
+                    Ok(affinity_bits(&restored))
+                },
+            )?;
             self.active = false;
         }
         Ok(())
     }
+}
+fn affinity_bits(mask: &libc::cpu_set_t) -> Vec<u32> {
+    (0..libc::CPU_SETSIZE as u32)
+        .filter(|cpu| unsafe { libc::CPU_ISSET(*cpu as usize, mask) })
+        .collect()
 }
 impl Drop for Affinity {
     fn drop(&mut self) {
@@ -136,7 +165,8 @@ fn disabled_perf() -> Result<File> {
         flags: policy.perf_flags,
         ..Default::default()
     };
-    let fd = unsafe { libc::syscall(libc::SYS_perf_event_open, &attr, 0, -1, -1, 0) } as i32;
+    let fd = unsafe { libc::syscall(libc::SYS_perf_event_open, &attr, 0, -1, -1, PERF_OPEN_FLAGS) }
+        as i32;
     if fd < 0 {
         return Err(Error::Setup(format!(
             "disabled exact-event perf admission: {}; run as root on the admitted host",

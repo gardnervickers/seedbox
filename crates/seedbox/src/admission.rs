@@ -266,6 +266,25 @@ fn validate_fields(o: &CoreObservation, require_perf: bool) -> Result<()> {
     Ok(())
 }
 
+// PERF_FLAG_FD_CLOEXEC: set atomically by perf_event_open, never by later fcntl.
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
+const PERF_OPEN_FLAGS: u64 = 1 << 3;
+
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
+fn checked_affinity_restore(
+    expected: &[u32],
+    set: impl FnOnce() -> Result<()>,
+    read: impl FnOnce() -> Result<Vec<u32>>,
+) -> Result<()> {
+    set()?;
+    if read()? != expected {
+        return Err(Error::Execution(
+            "restored preflight affinity differs from original; cleanup is unverified".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// The same scope boundary is exercised by portable cleanup controls.
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
 fn scoped_probe<T, G>(
@@ -308,6 +327,45 @@ pub(crate) fn observe(cpu: u32) -> Result<CoreObservation> {
 mod cleanup_tests {
     use super::*;
     use std::{cell::RefCell, rc::Rc};
+    #[test]
+    fn perf_open_requires_atomic_close_on_exec() {
+        // Linux UAPI PERF_FLAG_FD_CLOEXEC, independent of perf event attributes.
+        assert_eq!(PERF_OPEN_FLAGS, 8);
+    }
+    #[test]
+    fn successful_restore_setter_cannot_hide_restricted_or_unreadable_affinity() {
+        use std::cell::Cell;
+        for observed in [
+            Ok(vec![2, 18]),
+            Ok(vec![2]),
+            Err(Error::Execution("readback failed".into())),
+        ] {
+            let set = Cell::new(false);
+            let should_pass = observed.as_ref().is_ok_and(|cpus| cpus == &[2, 18]);
+            let result = scoped_probe(
+                (),
+                || Ok(()),
+                |_| {
+                    checked_affinity_restore(
+                        &[2, 18],
+                        || {
+                            set.set(true);
+                            Ok(())
+                        },
+                        || observed,
+                    )
+                },
+            );
+            assert!(set.get());
+            assert_eq!(result.is_ok(), should_pass);
+            if !should_pass {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("preflight cleanup failed"));
+            }
+        }
+    }
     #[test]
     fn descriptors_close_then_affinity_restores_on_success_and_probe_errors() {
         struct Descriptor(Rc<RefCell<Vec<&'static str>>>);
