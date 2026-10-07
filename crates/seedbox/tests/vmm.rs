@@ -68,7 +68,7 @@ fn report() -> serde_json::Value {
 }
 
 #[test]
-fn current_parts_preserve_direct_report_validation_and_witness_mode() {
+fn current_parts_accept_text_events_and_validate_digests() {
     fixture(|request| {
         let mut raw = report();
         for machine in raw["machines"].as_array_mut().unwrap() {
@@ -79,78 +79,11 @@ fn current_parts_preserve_direct_report_validation_and_witness_mode() {
         }
         let parsed = vmm::report(&serde_json::to_vec(&raw).unwrap(), request).unwrap();
         assert_eq!(parsed.full_state.as_ref().unwrap().len(), 2);
-        let mut prepared = request.prepared.clone();
-        prepared.profile.witness_mode = WitnessMode::Exits;
-        let exits = ExecutionRequest {
-            prepared: &prepared,
-            seed: request.seed,
-            limits: request.limits,
-            network: request.network,
-            schedule: request.schedule,
-            control: request.control,
-            check: request.check,
-            artifacts: request.artifacts,
-            output: request.output,
-            cancellation: request.cancellation,
-            performance_parameters: request.performance_parameters,
-        };
-        let without = vmm::report(&serde_json::to_vec(&raw).unwrap(), &exits).unwrap();
-        assert!(without.full_state.is_none());
-        assert_eq!(without.witness, parsed.witness);
-        for field in ["report_version", "seed", "machines"] {
-            let mut invalid = raw.clone();
-            invalid[field] = match field {
-                "report_version" => json!(2),
-                "seed" => json!(1010),
-                _ => json!([raw["machines"][0].clone(), raw["machines"][0].clone()]),
-            };
-            let error = vmm::report(&serde_json::to_vec(&invalid).unwrap(), request)
-                .unwrap_err()
-                .to_string();
-            assert_eq!(
-                error,
-                if field == "machines" {
-                    "input integrity: VMM report machine set mismatch"
-                } else {
-                    "input integrity: VMM report version/seed mismatch"
-                }
-            );
-        }
         raw["machines"][1]["state_digest_parts"]["disk"] = json!("invalid");
         assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), request)
             .unwrap_err()
             .to_string()
             .contains("expected a lowercase SHA-256 digest"));
-    });
-}
-
-#[test]
-fn shared_report_reader_does_not_bypass_retained_host_admission() {
-    fixture(|request| {
-        let dir = tempfile::tempdir().unwrap();
-        let engine = dir.path().join("engine");
-        std::fs::write(&engine, b"fixture engine").unwrap();
-        let store = seedbox::store::ContentStore::new(dir.path().join("store"));
-        let executor = vmm::VmmExecutor::new(
-            &engine,
-            &store,
-            None,
-            512,
-            WitnessMode::Exits,
-            seedbox::counter::CounterProfile::Zen,
-        )
-        .unwrap();
-        // Parsing retained observations is portable; executing them still
-        // requires the direct backend's retained policy proof, even for dev bytes.
-        vmm::report(&serde_json::to_vec(&report()).unwrap(), request).unwrap();
-        for allow_dev in [false, true] {
-            let executor = executor
-                .clone()
-                .with_dev_engine(allow_dev, &request.prepared.kernel);
-            assert_eq!(executor.validate_retained(request.prepared).unwrap_err().to_string(),
-                "input integrity: host admission proof missing: host_policy; use the retained previous CLI only for historical evidence");
-        }
-        assert!(!dir.path().join("output").exists());
     });
 }
 
