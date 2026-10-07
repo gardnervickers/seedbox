@@ -146,9 +146,9 @@ implement Compose networking or multi-machine worlds. The
 [PV CLI #89](https://github.com/gardnervickers/seedbox/pull/89),
 [K2 kernel fix #114](https://github.com/gardnervickers/seedbox/pull/114), and
 [K2 integration #126](https://github.com/gardnervickers/seedbox/pull/126) remain
-open drafts. The CLI work in
+open drafts. Directed-link policy [#97](https://github.com/gardnervickers/seedbox/pull/97)
+is merged and included in this branch. The remaining CLI work in
 [#105](https://github.com/gardnervickers/seedbox/pull/105),
-[#97](https://github.com/gardnervickers/seedbox/pull/97) →
 [#106](https://github.com/gardnervickers/seedbox/pull/106) →
 [#109](https://github.com/gardnervickers/seedbox/pull/109) is also mid-merge.
 Refresh the integration base after those changes land. Reuse their reviewed

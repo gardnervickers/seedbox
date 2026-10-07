@@ -34,8 +34,11 @@ The machine run loop does not yet accept world horizons. Initial PV-handshake
 clock reconciliation, cooperative machine stops, network/control/disk devices,
 multi-process HVF workers, guest supervisor support and retained-run integration
 remain work for Compose execution. The CLI still runs only the isolated
-fixture. The new APIs have portable coverage; same-input guest execution with
-the changed executable must also be checked before claiming runtime acceptance.
+fixture. Same-input native HVF fixture regression passes at `d9dc6f5`: all
+eight CLI and hardware-suite boots match #120's complete same-seed witnesses,
+including host load and randomized entry sleeps. The application layout and
+finite horizon APIs retain portable/mock coverage. [PR #129](https://github.com/gardnervickers/seedbox/pull/129)
+records the validation and its scope.
 
 ## Experimental arm64 quickstart
 
