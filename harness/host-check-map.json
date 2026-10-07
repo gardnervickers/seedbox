@@ -238,6 +238,105 @@
         "sanity",
         "volume-crash"
       ]
+    },
+    {
+      "category": "core inputs",
+      "paths": [
+        "examples/faults/**",
+        "harness/smoke/**",
+        "harness/host*",
+        "python/seedbox/**"
+      ],
+      "checks": [
+        "core",
+        "cluster-fixed"
+      ]
+    },
+    {
+      "category": "toolchain",
+      "paths": [
+        "flake.nix",
+        "flake.lock",
+        "rust-toolchain*",
+        "Cargo.lock",
+        ".cargo/**"
+      ],
+      "checks": [
+        "core",
+        "cluster-fixed"
+      ]
+    },
+    {
+      "category": "batch runner",
+      "paths": [
+        "harness/batch.*"
+      ],
+      "checks": [
+        "cluster-fixed"
+      ]
+    },
+    {
+      "category": "world fixture",
+      "paths": [
+        "harness/worlds/cluster-fixed.json"
+      ],
+      "checks": [
+        "cluster-fixed"
+      ]
+    },
+    {
+      "category": "world fixture",
+      "paths": [
+        "harness/worlds/disk-crash.json"
+      ],
+      "checks": [
+        "disk-crash"
+      ]
+    },
+    {
+      "category": "world fixture",
+      "paths": [
+        "harness/worlds/disk-ext4-crash.json"
+      ],
+      "checks": [
+        "disk-ext4-crash"
+      ]
+    },
+    {
+      "category": "world fixture",
+      "paths": [
+        "harness/worlds/net.json"
+      ],
+      "checks": [
+        "net"
+      ]
+    },
+    {
+      "category": "world fixture",
+      "paths": [
+        "harness/worlds/net-pause.json"
+      ],
+      "checks": [
+        "net-pause"
+      ]
+    },
+    {
+      "category": "world fixture",
+      "paths": [
+        "harness/worlds/net-crash.json"
+      ],
+      "checks": [
+        "net-crash"
+      ]
+    },
+    {
+      "category": "world fixture",
+      "paths": [
+        "harness/worlds/volume-crash.json"
+      ],
+      "checks": [
+        "volume-crash"
+      ]
     }
   ]
 }

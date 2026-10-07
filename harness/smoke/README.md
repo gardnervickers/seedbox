@@ -94,15 +94,20 @@ The [checked-in map](../host-check-map.json) defines these rows:
 
 | Changed paths | Host checks |
 |---|---|
-| only docs, *.md, CLI help text, portable Python/tests | none (Mac checks only) |
+| only *.md, docs/, crates/*/tests/, harness/tests/, python/tests/, templates/, crates/*/templates/, tools/mac-tcg/, or CLI help text | none (portable checks only) |
 | crates/seedbox-vmm/**, guest/**, or the CLI execution path (vmm.rs, host.rs, admission.rs, counter.rs, orchestration.rs) | core: wrong-kernel refusal, doctor, one fixed --full-state run, one default replay (MATCH), cluster-fixed 1009 on this engine and on main's (report any difference) |
 | stepper.rs, machine/counted.rs, timebase.rs, boundary.rs, counter.rs, undo/checkpoint code | core + one --undo 0 --margin 16384 replay |
 | disk.rs, virtio-blk, guest/disk*, build-disk.sh | core + disk-crash and disk-ext4-crash worlds |
 | network, link, faults routing | core + net, net-pause, net-crash worlds |
 | control.rs, host control, python/seedbox/control.py | core + control-cases (run, then replay) |
 | guest/compose-init.c, preparation, images, volumes | core + sanity (+ volume-crash if volumes changed) |
-| kernel/ | not covered: print "kernel campaign needed" |
-| anything unmatched under crates/ | core (fail safe) |
+| examples/faults/**, harness/smoke/**, harness/host*, python/seedbox/** | core (control.py also keeps control-cases) |
+| harness/worlds/<name>.json | the named fixture's check when mapped, otherwise core; other matching rows can add checks |
+| harness/batch.* | cluster-fixed |
+| examples/<other>/** | core + "example <name>: its reviewer's run list is required" |
+| flake.nix, flake.lock, rust-toolchain*, Cargo.lock, .cargo/** | core |
+| kernel/ | core + "kernel campaign needed"; execution refuses incomplete coverage |
+| anything else unmatched | core (fail closed) |
 
 The plan names `core` (public CLI smoke) and `cluster-fixed` separately so their
 execution and comparison times are visible. `perf-replay` is the single opt-in
@@ -113,7 +118,8 @@ those controls. Shared preparation/supervisor code adds `volume-crash` when
 changed lines touch volumes. Changed comment/help lines in the CLI need only
 portable checks; executable changes fall back to core. Unchanged diff context
 and file headers do not select extra checks. Review the printed reasons for
-shared code; this mapping does not prove semantic coverage.
+shared code; this mapping does not prove semantic coverage. A missed keyword
+only loses an extra fixture, never core.
 
 ```sh
 python3 harness/host-plan.py origin/main HEAD --json --extra net
@@ -126,7 +132,8 @@ through `REV` (default `HEAD`) and exits without host probes, builds or state.
 Refs are local; the planner never fetches. Rename detection is disabled so both
 old and new paths retain their coverage; deleted paths also select checks. An empty selection prints `host: none`
 and exits 0, including when `--plan` is omitted. Kernel changes print
-`kernel campaign needed`; execution refuses to claim coverage of such a plan.
+`kernel campaign needed` and select core, never `host: none`; execution refuses
+to claim coverage of such a plan.
 
 Execute in the project development shell on the qualified Linux AMD host:
 
@@ -138,13 +145,21 @@ bash harness/host-check.sh --lanes 1,2,3 REV --extra control-cases
 ```
 
 `--lanes 1,2,3` selects exactly SMT pairs `(1,17)`, `(2,18)`, `(3,19)` in that
-order, with one worker per pair. Numbers must be distinct and in 1..15; CPU 0
+order, with one worker per pair. `host-check.sh REV CPU` remains shorthand for
+`host-check.sh REV --lanes CPU`. Do not combine CPU and `--lanes`. Numbers must be distinct and in 1..15; CPU 0
 and 16 are refused. Each pair must be online, allowed, reciprocal and free.
 The allocator holds separate coordinator reservations and probes existing
 canonical CPU/MSR leases, releasing the latter for the public CLI or batch
 supervisor to own during execution. Busy or unsafe requested pairs fail before
 builds; no replacement pair is silently selected. Cancellation/failure stops
 new dispatch and joins owned workers before releasing reservations.
+
+Host execution runs fmt, clippy and `harness/acceptance.sh portable` by default
+in the target worktree before any guest dispatch. `--skip-portable` skips those
+steps and runs `cargo test-vmm` explicitly, even with a stored engine. Use the
+skip only after a Linux pre-check passed the same full SHA; a Mac pre-check omits
+VMM and batch-supervisor tests. The plan prints the full target and base SHA.
+Failed checks retain evidence and exit 1; setup/admission errors exit 2.
 
 `SEEDBOX_BUSYBOX`, `SEEDBOX_STATIC_CC` and `SEEDBOX_MKE2FS` come from the project
 shell. `SEEDBOX_ETCD` supplies a frozen static etcd binary for `cluster-fixed`;

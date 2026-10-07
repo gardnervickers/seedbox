@@ -128,6 +128,8 @@ class SmokeTests(unittest.TestCase):
              patch.object(smoke, 'snapshot', return_value={}), \
              patch.object(smoke, 'pinned_workloads'):
             campaign.run()
+        self.assertEqual(list(commands), ['wrong-kernel', 'doctor', 'doctor-json', 'fixed', 'default'] +
+                         (['undo-margin'] if performance else []))
         self.assertEqual(inspected, ['fixed-inspect', 'default-inspect'] +
                          (['undo-margin-inspect'] if performance else []))
         self.assertIn('--full-state', commands['fixed'])
@@ -139,6 +141,25 @@ class SmokeTests(unittest.TestCase):
             self.assertNotIn('undo-margin', commands)
             self.assertNotIn('--undo', commands['default'])
             self.assertNotIn('--margin', commands['default'])
+
+    def test_wrong_kernel_refusal_stops_before_direct_admission_and_guest(self):
+        args = type('Args', (), dict(kernel='kernel', engine='engine', guest_init='init',
+            busybox='busybox', cpu=1, cli='cli', tool_path='', project='/project'))()
+        campaign = smoke.Campaign(args, self.root, 1e100)
+        with patch.object(campaign, 'invoke', return_value=(0, 'PASS: unexpected', '')) as invoke, \
+             patch.object(smoke, 'pair', side_effect=AssertionError('admission after bad refusal')):
+            with self.assertRaisesRegex(RuntimeError, 'required policy refusal'):
+                campaign.run()
+        self.assertEqual(invoke.call_count, 1)
+        self.assertEqual(invoke.call_args.args[0], 'wrong-kernel')
+
+    def test_default_replay_checks_witness_without_performance_feature(self):
+        self.exercise_dev_success(False)
+        changed = copy.deepcopy(self.record)
+        changed['report']['witness'] = 'drifted'
+        streams = self.verify()
+        with self.assertRaisesRegex(RuntimeError, 'deterministic report'):
+            smoke.compare(self.record, changed, streams, streams)
 
     def test_dev_success_forwards_flag_and_checks_all_replay_markers(self):
         self.exercise_dev_success(True)

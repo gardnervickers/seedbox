@@ -29,33 +29,44 @@ def matches(path, glob):
 
 
 def portable(path):
-    return (path.endswith('.md') or path.startswith(('docs/', 'harness/', 'tools/mac-tcg/',
-            'python/tests/', 'crates/seedbox/tests/', 'crates/seedbox/templates/',
-            'crates/seedbox/src/cli/help.rs')) or path.endswith('.py'))
+    """Host-free paths are an allow-list; unknown inputs require core."""
+    return (path.endswith('.md') or path.startswith(('docs/', 'harness/tests/',
+            'python/tests/', 'templates/', 'tools/mac-tcg/')) or
+            matches(path, 'crates/*/tests/**') or matches(path, 'crates/*/templates/**'))
 
 
 def select_checks(changes, mapping=None, extra=(), diffs=None):
     """Union every matched row and reviewer addition; never subtract a check."""
     mapping = mapping or load_map()
     diffs = diffs or {}
-    reasons, skipped, warnings = {}, [], []
+    reasons, skipped, warnings, reviewer_notes = {}, [], [], []
     def add(check, reason):
         if reason not in reasons.setdefault(check, []):
             reasons[check].append(reason)
     for revision, paths in changes.items():
         for path in sorted(set(paths)):
             reason = dict(revision=revision, path=path, category='portable')
-            if path.endswith('.md') or path.startswith('docs/'):
+            if portable(path):
                 skipped.append(reason)
                 continue
             if path.startswith('kernel/'):
                 warnings.append(f'kernel campaign needed: {path}')
+                for check in mapping['core']:
+                    add(check, dict(reason, category='kernel campaign'))
                 continue
             code = diffs.get((revision, path), '')
             if path.startswith('crates/seedbox/src/cli/') and help_only(code):
                 skipped.append(dict(reason, category='CLI help text'))
                 continue
             matched = False
+            if path.startswith('examples/') and not path.startswith('examples/faults/'):
+                matched = True
+                name = path.split('/')[1]
+                note = f"example {name}: its reviewer's run list is required"
+                if note not in reviewer_notes:
+                    reviewer_notes.append(note)
+                for check in mapping['core']:
+                    add(check, dict(reason, category='example'))
             for rule in mapping['rules']:
                 if any(matches(path, glob) for glob in rule['paths']):
                     if 'diff_regex' in rule and not re.search(rule['diff_regex'], code):
@@ -64,13 +75,8 @@ def select_checks(changes, mapping=None, extra=(), diffs=None):
                     for check in rule['checks']:
                         add(check, dict(reason, category=rule['category']))
             if not matched:
-                if portable(path):
-                    skipped.append(reason)
-                elif path.startswith('crates/'):
-                    for check in mapping['core']:
-                        add(check, dict(reason, category='unmatched crates (fail safe)'))
-                else:
-                    skipped.append(reason)
+                for check in mapping['core']:
+                    add(check, dict(reason, category='unmatched path (fail closed)'))
     for check in extra:
         if check not in mapping['checks']:
             raise ValueError('unknown extra check: ' + check)
@@ -80,7 +86,7 @@ def select_checks(changes, mapping=None, extra=(), diffs=None):
             for required in mapping['core']:
                 add(required, dict(reason, category='core dependency'))
     return dict(checks={check: reasons[check] for check in mapping['checks'] if check in reasons},
-                skipped=skipped, warnings=warnings)
+                skipped=skipped, warnings=warnings, reviewer_notes=reviewer_notes)
 
 
 def git(repo, *args):
@@ -127,6 +133,7 @@ def format_plan(plan, mapping=None):
         lines.append(f'check {check}: {detail}')
         for reason in reasons:
             lines.append(f"  reason: {reason['path']} ({reason['category']})")
+    lines.extend(plan.get('reviewer_notes', []))
     lines.extend(plan['warnings'])
     if not plan['checks']:
         lines.append('host: none')

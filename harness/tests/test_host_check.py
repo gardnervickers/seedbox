@@ -126,7 +126,7 @@ class DispatchTests(unittest.TestCase):
             env = dict(SEEDBOX_KERNEL=str(root / 'kernel'), SEEDBOX_BUSYBOX=str(root / 'busybox'),
                        PINNED_ENGINE=str(root / 'pinned'), HOST_CHECK_DIR=str(root), PATH='/explicit')
             plan = dict(target='a' * 40, checks=dict(core=[]))
-            args = SimpleNamespace(repo=root, lanes=[1,2])
+            args = SimpleNamespace(repo=root, lanes=[1,2], skip_portable=False)
             with patch.object(host_check.sys, 'platform', 'linux'), \
                  patch.dict(host_check.os.environ, env, clear=True), \
                  patch.object(host_check, 'Commands', Source), \
@@ -141,6 +141,105 @@ class DispatchTests(unittest.TestCase):
             summary = json.loads(next(root.glob('host-check-*/summary.json')).read_text())
             self.assertEqual(summary['status'], 'FAIL')
             self.assertTrue(all(check['status'] == 'NOT_RUN' for check in summary['checks'].values()))
+
+    def exercise_gate(self, skip_portable=False, stored=False, fail=None):
+        with tempfile.TemporaryDirectory(prefix='host gate with spaces ') as tmp:
+            root = Path(tmp)
+            for name in ('kernel', 'busybox', 'pinned', 'stored'):
+                (root / name).write_bytes(name.encode())
+            calls = []
+            class Source:
+                cancelled = False
+                def __init__(self, work, src, env): self.work = work
+                def interrupt(self, *args): self.cancelled = True
+                def run(self, name, command):
+                    calls.append((name, command))
+                    (self.work / (name + '.wall.json')).write_text(json.dumps(
+                        dict(wall_seconds=0, status='FAIL' if name == fail else 'PASS')))
+                    if name == fail:
+                        raise RuntimeError(name + ': injected failure')
+            @contextlib.contextmanager
+            def reserved(*args, **kwargs):
+                yield [(2, 18)]
+            env = dict(SEEDBOX_KERNEL=str(root / 'kernel'), SEEDBOX_BUSYBOX=str(root / 'busybox'),
+                       PINNED_ENGINE=str(root / 'pinned'), HOST_CHECK_DIR=str(root), PATH='/explicit')
+            if stored:
+                env['SEEDBOX_VMM'] = str(root / 'stored')
+                env.pop('PINNED_ENGINE')
+            plan = dict(target='a' * 40, checks=dict(core=[]))
+            args = SimpleNamespace(repo=root, lanes=[2], skip_portable=skip_portable)
+            with patch.object(host_check.sys, 'platform', 'linux'), \
+                 patch.dict(host_check.os.environ, env, clear=True), \
+                 patch.object(host_check, 'Commands', Source), \
+                 patch.object(host_check, 'read_pairs', return_value=[(2, 18)]), \
+                 patch.object(host_check, 'allocate_pairs', reserved), \
+                 patch.object(host_check, 'run_jobs', return_value=dict(status='PASS', jobs=[], undispatched=[])) as dispatch, \
+                 patch.object(host_check, 'finish'), contextlib.redirect_stdout(io.StringIO()):
+                if fail:
+                    with self.assertRaisesRegex(RuntimeError, 'injected failure'):
+                        host_check.execute(plan, args)
+                    dispatch.assert_not_called()
+                else:
+                    self.assertEqual(host_check.execute(plan, args), 0)
+                    dispatch.assert_called_once()
+            return calls
+
+    def test_default_portable_steps_before_guest_admission(self):
+        calls = self.exercise_gate()
+        names = [name for name, command in calls]
+        self.assertEqual(names, ['worktree', 'build', 'vmm-build', 'fmt', 'clippy',
+                                 'suite', 'guest-init', 'doctor-cpu2'])
+        self.assertIn(['cargo', 'fmt', '-p', 'seedbox', '--check'], [cmd for name, cmd in calls])
+        self.assertIn(['nice', 'cargo', 'clippy', '-p', 'seedbox', '--all-targets', '--locked',
+                       '--', '-D', 'warnings'], [cmd for name, cmd in calls])
+        self.assertIn(['nice', 'bash', 'harness/acceptance.sh', 'portable'], [cmd for name, cmd in calls])
+
+    def test_skip_portable_keeps_vmm_tests_with_built_or_stored_engine(self):
+        for stored in (False, True):
+            with self.subTest(stored=stored):
+                calls = self.exercise_gate(skip_portable=True, stored=stored)
+                names = [name for name, cmd in calls]
+                self.assertEqual(names, ['worktree', 'build'] + ([] if stored else ['vmm-build']) +
+                                 ['vmm-test', 'guest-init', 'doctor-cpu2'])
+                self.assertIn(['nice', 'cargo', 'test-vmm'], [cmd for name, cmd in calls])
+
+    def test_portable_or_vmm_test_failure_prevents_guest_dispatch(self):
+        for skip, name in ((False, 'fmt'), (False, 'clippy'), (False, 'suite'), (True, 'vmm-test')):
+            with self.subTest(name=name):
+                calls = self.exercise_gate(skip_portable=skip, fail=name)
+                self.assertEqual(calls[-1][0], name)
+                self.assertFalse(any(step.startswith('doctor-') for step, cmd in calls))
+
+    def test_dispatched_check_failure_exit_and_stderr_contract(self):
+        plan = dict(target='a' * 40, base='b' * 40, checks={'core': []}, warnings=[])
+        with patch.object(host_check, 'plan_revision', return_value=plan), \
+             patch.object(host_check, 'execute', side_effect=host_worker.CheckFailure('vmm-test: exit 7')), \
+             contextlib.redirect_stdout(io.StringIO()) as out, \
+             contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(host_check.main(['--skip-portable', 'HEAD', '2']), 1)
+        self.assertEqual(err.getvalue(), 'error: vmm-test: exit 7\n')
+        self.assertIn('target: ' + 'a' * 40, out.getvalue())
+        with tempfile.TemporaryDirectory() as tmp:
+            commands = host_worker.Commands(Path(tmp), Path(tmp), {})
+            with self.assertRaises(host_worker.CheckFailure):
+                commands.run('vmm-test', [sys.executable, '-c', 'import sys; sys.exit(7)'])
+            receipt = json.loads((Path(tmp) / 'vmm-test.wall.json').read_text())
+            self.assertEqual(receipt['status'], 'FAIL')
+
+    def test_legacy_cpu_and_other_pr_flags_reach_execution(self):
+        plan = dict(target='a' * 40, base='b' * 40, checks={'core': []}, warnings=[])
+        for argv, lanes, skip in ((['HEAD', '2'], [2], False),
+                                 (['--skip-portable', 'HEAD', '2', '--extra', 'net'], [2], True),
+                                 (['HEAD', '--lanes', '2,3'], [2,3], False)):
+            with patch.object(host_check, 'plan_revision', return_value=plan) as planner, \
+                 patch.object(host_check, 'execute', return_value=0) as execute, \
+                 contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(host_check.main(argv), 0)
+                args = execute.call_args.args[1]
+                self.assertEqual(args.lanes, lanes)
+                self.assertEqual(args.skip_portable, skip)
+                self.assertEqual(planner.call_args.args[3], ['net'] if skip else [])
+                self.assertIn('target: ' + 'a' * 40, output.getvalue())
 
     def test_fixture_runs_only_selected_world_once_on_assigned_pair(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -248,6 +347,7 @@ class DispatchTests(unittest.TestCase):
                 self.assertEqual(work.exists(), not passed)
                 self.assertEqual(cleanup.call_count, int(passed))
                 self.assertIn('phase default: 0.5s', output.getvalue())
+                self.assertIn('build    UNKNOWN    1s', output.getvalue())
                 self.assertEqual('cleanup:' in output.getvalue(), not passed)
                 if passed:
                     self.assertEqual(len(commands), 2)

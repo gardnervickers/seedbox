@@ -120,6 +120,7 @@ impl Fixture {
                         user: "".into(),
                         working_dir: "/".into(),
                         volumes: vec![],
+                        disk_volumes: vec![],
                     },
                 },
             )]),
@@ -768,6 +769,28 @@ fn network_effects_have_no_single_service_target() {
     });
     assert_eq!(fixture.run().record.outcome, Outcome::Pass);
     fixture.backend.report.faults[0].action = "stop".into();
+    assert_eq!(fixture.run().record.outcome, Outcome::Error);
+}
+
+#[test]
+fn machine_lifecycle_effects_pass_and_replay_with_their_service() {
+    let mut fixture = Fixture::new();
+    for (i, action) in ["pause", "resume", "crash", "reboot"].iter().enumerate() {
+        fixture.backend.report.faults.push(FaultEvent {
+            requested_at_ns: i as u64 + 1,
+            applied_at_ns: i as u64 + 1,
+            service: "workload".into(),
+            action: (*action).into(),
+            detail: "machine lifecycle".into(),
+        });
+    }
+    let run = fixture.run();
+    assert_eq!(run.record.outcome, Outcome::Pass);
+    assert_eq!(
+        fixture.replay(&run).record.replay.unwrap().status,
+        ReplayStatus::Match
+    );
+    fixture.backend.report.faults[0].service.clear();
     assert_eq!(fixture.run().record.outcome, Outcome::Error);
 }
 
@@ -1929,4 +1952,33 @@ fn checkpoint_version_refusal_preserves_old_bytes_and_ordinary_run_inspection() 
     assert_eq!(read.version, 2);
     assert_eq!(read.workers, 1);
     assert_eq!(read.attempts[0].index, 0);
+}
+
+#[test]
+fn torn_write_policy_changes_identity_and_replay_requires_the_recorded_policy() {
+    let mut fixture = Fixture::new();
+    let off = fixture.run();
+    fixture
+        .backend
+        .profile
+        .semantic_parameters
+        .insert("disk_loss".into(), seedbox::vmm::TORN_DISK_MODEL.into());
+    fixture.preparer.inputs.profile = fixture.backend.profile.clone();
+    let on = fixture.run();
+    assert_ne!(on.record.run_id, off.record.run_id);
+    assert_eq!(
+        fixture.replay(&on).record.replay.unwrap().status,
+        ReplayStatus::Match
+    );
+    assert_eq!(fixture.replay(&off).record.outcome, Outcome::Error);
+    fixture
+        .backend
+        .profile
+        .semantic_parameters
+        .remove("disk_loss");
+    assert_eq!(fixture.replay(&on).record.outcome, Outcome::Error);
+    assert_eq!(
+        fixture.replay(&off).record.replay.unwrap().status,
+        ReplayStatus::Match
+    );
 }

@@ -13,7 +13,7 @@ import time
 
 from host_plan import format_plan, load_map, plan_revision, git
 from host_pairs import allocate_pairs, read_pairs
-from host_worker import Commands
+from host_worker import CheckFailure, Commands
 
 HERE = Path(__file__).resolve().parent
 
@@ -125,6 +125,14 @@ def execute(plan, args):
             engine = stored or str(src / 'crates/seedbox-vmm/target/release/seedbox-vmm')
             if not stored:
                 source.run('vmm-build', ['nice', 'cargo', 'build-vmm'])
+            if args.skip_portable:
+                source.run('vmm-test', ['nice', 'cargo', 'test-vmm'])
+            else:
+                source.run('fmt', ['cargo', 'fmt', '-p', 'seedbox', '--check'])
+                source.run('clippy', ['nice', 'cargo', 'clippy', '-p', 'seedbox',
+                                      '--all-targets', '--locked', '--', '-D', 'warnings'])
+                # On Linux the portable suite includes the standalone VMM tests.
+                source.run('suite', ['nice', 'bash', 'harness/acceptance.sh', 'portable'])
             init = work / 'compose-init'
             source.run('guest-init', ['nice', 'bash', 'guest/build-compose.sh', str(init)])
             main_engine = None
@@ -196,6 +204,13 @@ def parse_lanes(text):
     return lanes
 
 
+def parse_cpu(text):
+    lanes = parse_lanes(text)
+    if len(lanes) != 1:
+        raise argparse.ArgumentTypeError('CPU must name one pair number 1..15')
+    return lanes[0]
+
+
 def finish(work, repo, summary, source):
     """Keep summaries; discard owned run state only after all workers passed."""
     summary_path = work / 'summary.json'
@@ -203,7 +218,7 @@ def finish(work, repo, summary, source):
     lines = []
     for name, seconds in summary['source_wall_seconds'].items():
         status = summary.get('source_steps', {}).get(name, {}).get('status', 'UNKNOWN')
-        lines.append(f'{name:<18} {status.lower() if status == "PASS" else status} {seconds:6.1f}s')
+        lines.append(f'{name:<8} {status.lower() if status == "PASS" else status} {int(seconds):4d}s')
     for job in summary['jobs']:
         status = 'pass' if job['exit'] == 0 else 'FAIL'
         lines.append(f"{job['name']:<18} {status} {job['wall_seconds']:6.1f}s cpu {job['pair']}")
@@ -243,11 +258,18 @@ def finish(work, repo, summary, source):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('revision', nargs='?', default='HEAD', metavar='REV', help='Revision to check [default: HEAD].')
+    parser.add_argument('cpu', nargs='?', type=parse_cpu, metavar='CPU',
+                        help='Use one SMT pair N,N+16 (shorthand for --lanes N).')
+    parser.add_argument('--skip-portable', action='store_true',
+                        help='Skip fmt, clippy and the portable suite after a Linux pre-check at the same SHA; keep VMM tests.')
     parser.add_argument('--base', default='origin/main', help='Base ref for BASE...REV [default: origin/main].')
     parser.add_argument('--plan', action='store_true', help='Print selected checks and matching paths, then exit.')
     parser.add_argument('--extra', action='append', default=[], metavar='CHECK', help='Add a reviewer check (repeatable).')
-    parser.add_argument('--lanes', type=parse_lanes, default=[1], metavar='1,2,3', help='Use exactly these SMT pairs N,N+16 [default: 1].')
+    parser.add_argument('--lanes', type=parse_lanes, metavar='1,2,3', help='Use exactly these SMT pairs N,N+16 [default: 1].')
     args = parser.parse_args(argv)
+    if args.cpu is not None and args.lanes is not None:
+        parser.error('CPU and --lanes cannot be used together')
+    args.lanes = args.lanes if args.lanes is not None else [args.cpu if args.cpu is not None else 1]
     try:
         args.repo = Path(subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], text=True).strip())
         plan = plan_revision(args.repo, args.base, args.revision, args.extra)
@@ -259,6 +281,9 @@ def main(argv=None):
         if not plan['checks']:
             return 0
         return execute(plan, args)
+    except CheckFailure as error:
+        print('error: ' + str(error), file=sys.stderr)
+        return 1
     except (OSError, ValueError, RuntimeError, KeyError, subprocess.CalledProcessError) as error:
         print('error: ' + str(error), file=sys.stderr)
         return 2

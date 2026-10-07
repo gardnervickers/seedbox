@@ -17,6 +17,10 @@ from host_pairs import probe_canonical, read_pairs
 HERE = Path(__file__).resolve().parent
 
 
+class CheckFailure(RuntimeError):
+    """A dispatched check failed (host gate exit 1)."""
+
+
 class Commands:
     def __init__(self, root, src, env):
         self.root, self.src, self.env = root, src, env
@@ -56,7 +60,7 @@ class Commands:
                     # A catchable signal never releases the lane before the wrapper returns.
                     code = self.child.wait()
             if code or self.cancelled:
-                raise RuntimeError(f'{name}: exit {code}; see {self.root / (name + ".log")}')
+                raise CheckFailure(f'{name}: exit {code}; see {self.root / (name + ".log")}')
             status = 'PASS'
         finally:
             if not owned and self.child is not None and self.child.returncode is None:

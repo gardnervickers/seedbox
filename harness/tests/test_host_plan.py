@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import random
 from pathlib import Path
 import subprocess
 import sys
@@ -31,11 +32,86 @@ class MapTests(unittest.TestCase):
     def test_portable_row(self):
         paths = ['docs/runtime.md', 'README.md', 'kernel/README.md', 'crates/seedbox-vmm/README.md',
                  'crates/seedbox/src/cli/mod.rs', 'python/tests/test_control.py',
-                 'harness/smoke/amd.py', 'crates/seedbox/tests/cli.rs']
+                 'harness/tests/test_smoke.py', 'crates/seedbox/tests/cli.rs',
+                 'crates/seedbox-vmm/tests/control.rs', 'crates/new/tests/volume.rs',
+                 'templates/example.yaml', 'crates/seedbox/templates/compose.yaml',
+                 'tools/mac-tcg/run.py', 'docs/generated.json']
         plan = host_plan.select_checks({'revision': paths},
             diffs={('revision','crates/seedbox/src/cli/mod.rs'): '-    /// Old help.\n+    /// New help.'})
         self.assertFalse(plan['checks'])
         self.assertEqual(len(plan['skipped']), len(paths))
+
+    def test_core_inputs_and_unknown_paths_fail_closed(self):
+        self.assert_paths(['examples/faults/workload/main.py', 'examples/faults/generate.py',
+                           'harness/smoke/amd.py', 'harness/host-check.sh', 'harness/host_plan.py',
+                           'python/seedbox/rng.py', 'flake.nix', 'flake.lock', 'Cargo.lock',
+                           'rust-toolchain', 'rust-toolchain.toml', '.cargo/config.toml',
+                           '.cargo/new-config', 'scripts/new.py', 'harness/new.sh',
+                           'crates/seedbox/src/cli/help.rs', 'unknown/input.json'])
+
+    def test_new_rows_retain_their_path_reasons(self):
+        for path, category in (
+                ('examples/faults/workload/scenario.py', 'core inputs'),
+                ('harness/smoke/amd.py', 'core inputs'),
+                ('harness/host_check.py', 'core inputs'),
+                ('python/seedbox/control.py', 'core inputs'),
+                ('flake.nix', 'toolchain'), ('flake.lock', 'toolchain'),
+                ('rust-toolchain.toml', 'toolchain'), ('Cargo.lock', 'toolchain'),
+                ('.cargo/config.toml', 'toolchain'),
+                ('harness/batch.sh', 'batch runner')):
+            with self.subTest(path=path):
+                plan = host_plan.select_checks({'rev': [path]})
+                reasons = [reason for values in plan['checks'].values() for reason in values]
+                self.assertIn(dict(revision='rev', path=path, category=category), reasons)
+
+    def test_world_and_batch_rows(self):
+        mapping = host_plan.load_map()
+        for name, spec in mapping['checks'].items():
+            if spec['kind'] == 'fixture':
+                path = 'harness/worlds/' + spec['world'] + '.json'
+                plan = host_plan.select_checks({'rev': [path]})
+                self.assertIn(name, plan['checks'], path)
+                self.assertIn('world fixture', {r['category'] for r in plan['checks'][name]})
+        self.assert_paths(['harness/worlds/new-fixture.json'])
+        for path in ('harness/batch.sh', 'harness/batch.py'):
+            plan = host_plan.select_checks({'rev': [path]})
+            self.assertEqual(set(plan['checks']), {'cluster-fixed'})
+
+    def test_other_example_requires_its_reviewer_run_list(self):
+        plan = host_plan.select_checks({'rev': ['examples/minio/client/cas.py',
+                                               'examples/minio/compose.yaml',
+                                               'examples/redis/workload/main.py']})
+        self.assertEqual(set(plan['checks']), CORE)
+        text = host_plan.format_plan(dict(plan, target='a' * 40, base='b' * 40))
+        for name in ('minio', 'redis'):
+            note = f"example {name}: its reviewer's run list is required"
+            self.assertEqual(text.count(note), 1)
+
+    def test_actual_pr_changed_file_lists(self):
+        # Captured with gh pr view NUMBER --json files -q '.files[].path'.
+        for number, category in ((110, 'core inputs'), (104, 'example')):
+            paths = (HERE / 'tests/fixtures' / f'pr{number}-paths.txt').read_text().splitlines()
+            plan = host_plan.select_checks({f'pr{number}': paths})
+            self.assertEqual(set(plan['checks']), CORE)
+            self.assertIn(category, {r['category'] for r in plan['checks']['core']})
+            text = host_plan.format_plan(dict(plan, target='a' * 40, base='b' * 40))
+            self.assertNotIn('host: none', text)
+            if number == 110:
+                for path in ('examples/faults/workload/main.py', 'harness/smoke/amd.py'):
+                    self.assertIn(path, text)
+            else:
+                self.assertIn("example minio: its reviewer's run list is required", text)
+
+    def test_planning_is_deterministic_and_consumes_no_rng_draws(self):
+        # Planning cannot execute seeded guest scenarios or perturb their RNG.
+        paths = ['examples/faults/workload/scenario.py', 'python/seedbox/rng.py']
+        before = random.getstate()
+        with patch.object(random, 'random', side_effect=AssertionError('extra RNG draw')), \
+             patch.object(host_plan.subprocess, 'check_output', side_effect=AssertionError('execution')):
+            first = host_plan.select_checks({'rev': paths})
+            second = host_plan.select_checks({'rev': list(reversed(paths))})
+        self.assertEqual(first, second)
+        self.assertEqual(random.getstate(), before)
 
     def test_execution_row(self):
         self.assert_paths(['crates/seedbox-vmm/src/rng.rs', 'guest/sbx.c',
@@ -72,8 +148,10 @@ class MapTests(unittest.TestCase):
 
     def test_kernel_row_is_explicitly_uncovered(self):
         plan = host_plan.select_checks({'revision': ['kernel/config.options']})
-        self.assertFalse(plan['checks'])
+        self.assertEqual(set(plan['checks']), CORE)
         self.assertEqual(plan['warnings'], ['kernel campaign needed: kernel/config.options'])
+        text = host_plan.format_plan(dict(plan, target='a' * 40, base='b' * 40))
+        self.assertNotIn('host: none', text)
 
     def test_unmatched_crates_row_fails_safe(self):
         self.assert_paths(['crates/new/src/unmapped.rs', 'crates/seedbox/src/diff.rs'])
@@ -217,7 +295,30 @@ class GitPlannerTests(unittest.TestCase):
         planned = self.invoke('host_check.py', '--plan')
         self.assertEqual(planned.returncode, 0)
         self.assertIn('kernel campaign needed', planned.stdout)
+        self.assertIn('check core:', planned.stdout)
+        self.assertNotIn('host: none', planned.stdout)
+        self.assertEqual(planned.stderr, '')
         self.assertEqual(self.invoke('host_check.py').returncode, 2)
+
+    def test_cli_output_and_legacy_cpu_contract(self):
+        self.commit('harness/smoke/amd.py')
+        for flags in (['HEAD', '2'], ['--skip-portable', 'HEAD', '2'],
+                      ['HEAD', '--lanes', '2']):
+            result = self.invoke('host_check.py', '--plan', *flags)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr, '')
+            self.assertIn('target: ' + self.git('rev-parse', 'HEAD'), result.stdout)
+            self.assertIn('check core:', result.stdout)
+        for flags in (['HEAD', '0'], ['HEAD', '16'], ['HEAD', 'bad'],
+                      ['HEAD', '2', '--lanes', '3']):
+            result = self.invoke('host_check.py', '--plan', *flags)
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, '')
+            self.assertIn('error:', result.stderr)
+        bad = self.invoke('host_check.py', '--plan', '--extra', 'bad')
+        self.assertEqual(bad.returncode, 2)
+        self.assertEqual(bad.stdout, '')
+        self.assertEqual(bad.stderr, 'error: unknown extra check: bad\n')
 
     def test_invalid_revision_is_error(self):
         self.assertEqual(self.invoke('host-plan.py', 'base', 'missing').returncode, 2)
