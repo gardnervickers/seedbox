@@ -624,6 +624,8 @@ struct VmmReport {
     control_history: Vec<Value>,
     #[serde(default)]
     control_latency_ns: Option<u64>,
+    #[serde(default)]
+    triggers: Option<Vec<seedbox_control::TriggerRecord>>,
 }
 
 #[derive(Default)]
@@ -642,6 +644,7 @@ fn validate_control_history(
     latency: Option<u64>,
     request: &ExecutionRequest<'_>,
     failed: bool,
+    trigger_plans: Vec<seedbox_control::Plan>,
 ) -> Result<ValidatedControlHistory> {
     let expected_latency = control_latency(request)?;
     let latency = latency
@@ -672,10 +675,14 @@ fn validate_control_history(
     let mut session = 0;
     let mut public_id = 0u64;
     let mut accepted = 0u64;
+    let mut next_fault_id = 1u32;
     let mut down = BTreeSet::new();
     for (i, row) in history.iter().enumerate() {
         if row["status"] == "rejected" && failed {
             continue;
+        }
+        while trigger_plans.iter().any(|plan| plan.id == next_fault_id) {
+            next_fault_id = next_fault_id.checked_add(1).ok_or_else(bad)?;
         }
         accepted += 1;
         let r = &row["request"];
@@ -752,7 +759,7 @@ fn validate_control_history(
                 if row["fault_id"].is_null() || metadata["error"]["code"] != "target_unavailable" {
                     continue;
                 }
-                if row["fault_id"].as_u64() != Some(expected.plans.len() as u64 + 1) {
+                if row["fault_id"].as_u64() != Some(u64::from(next_fault_id)) {
                     return Err(bad());
                 }
             }
@@ -768,7 +775,7 @@ fn validate_control_history(
                 }
                 continue;
             }
-            if !admitted || row["fault_id"].as_u64() != Some(expected.plans.len() as u64 + 1) {
+            if !admitted || row["fault_id"].as_u64() != Some(u64::from(next_fault_id)) {
                 return Err(bad());
             }
         }
@@ -898,6 +905,12 @@ fn validate_control_history(
                 }
                 continue;
             }
+            Operation::ArmTrigger { .. } | Operation::CancelTrigger { .. } => {
+                if e != Some(a) {
+                    return Err(bad());
+                }
+                continue;
+            }
             Operation::Sleep { duration_ns } => {
                 if a.checked_add(duration_ns) != e {
                     return Err(bad());
@@ -916,7 +929,7 @@ fn validate_control_history(
             return Err(bad());
         }
         let plan = Plan {
-            id: u32::try_from(expected.plans.len() + 1).map_err(|_| bad())?,
+            id: next_fault_id,
             at_ns: a,
             deadline_ns: a.checked_add(PROCESS_EFFECT_TIMEOUT_NS).ok_or_else(bad)?,
             action,
@@ -951,8 +964,232 @@ fn validate_control_history(
             }
         }
         expected.plans.push(plan);
+        next_fault_id = next_fault_id.checked_add(1).ok_or_else(bad)?;
+    }
+    expected.plans.extend(trigger_plans);
+    expected.plans.sort_by_key(|p| p.id);
+    if expected
+        .plans
+        .iter()
+        .enumerate()
+        .any(|(i, p)| p.id as usize != i + 1)
+    {
+        return Err(bad());
     }
     Ok(expected)
+}
+
+/// Check the bounded semantic trigger records against arm/cancel RPCs and
+/// derive the sole fault each committed match may schedule. The engine owns
+/// commitment; this validator rejects malformed or uncorrelated evidence.
+fn validate_triggers(
+    records: Option<&[seedbox_control::TriggerRecord]>,
+    history: &[Value],
+    request: &ExecutionRequest<'_>,
+) -> Result<Vec<seedbox_control::Plan>> {
+    use seedbox_control::{
+        Action, Operation, Plan, Request, Target, TriggerFault, MAX_TRIGGERS, MAX_TRIGGER_MARKER,
+        PROCESS_EFFECT_TIMEOUT_NS,
+    };
+    let bad = || Error::Integrity("invalid committed trigger evidence".into());
+    if records.is_some_and(|r| r.is_empty() || r.len() > MAX_TRIGGERS) {
+        return Err(bad());
+    }
+    let records = records.unwrap_or_default();
+    let latency = control_latency(request)?;
+    let controller = request
+        .control
+        .and_then(|c| request.prepared.placement.get(&c.service));
+    let resolve = |target: &Target, fault: bool| -> Result<String> {
+        let name = match target {
+            Target::Service(s) => request.prepared.placement.get(s).ok_or_else(bad)?,
+            Target::Machine(m) => m,
+        };
+        if !request.prepared.guests.contains_key(name) || (fault && Some(name) == controller) {
+            return Err(bad());
+        }
+        Ok(name.clone())
+    };
+    let mut arms = 0;
+    let mut cancellations = BTreeMap::new();
+    for row in history {
+        let metadata = if row["response"].is_object() {
+            &row["response"]
+        } else {
+            row
+        };
+        let accepted = if row["response"].is_object() {
+            metadata["ok"] == true
+        } else {
+            row["admitted_done"] == true && row["error"].is_null()
+        };
+        if !accepted {
+            continue;
+        }
+        let op = row["request"]["op"].as_str().unwrap_or_default();
+        if op != "arm_trigger" && op != "cancel_trigger" {
+            continue;
+        }
+        let call: Request = serde_json::from_value(row["request"].clone()).map_err(|_| bad())?;
+        let at = metadata["admitted_at_ns"].as_u64().ok_or_else(bad)?;
+        match call.operation {
+            Operation::CancelTrigger { trigger_id } => {
+                if trigger_id == 0
+                    || trigger_id as usize > arms
+                    || cancellations.insert(trigger_id, at).is_some()
+                {
+                    return Err(bad());
+                }
+            }
+            Operation::ArmTrigger {
+                source,
+                marker,
+                match_timeout_ns,
+                fault,
+            } => {
+                let r = records.get(arms).ok_or_else(bad)?;
+                arms += 1;
+                if r.id as usize != arms
+                    || metadata["result"]["trigger_id"].as_u64() != Some(u64::from(r.id))
+                    || r.source != resolve(&source, false)?
+                    || r.marker != marker
+                    || marker.is_empty()
+                    || marker.len() > MAX_TRIGGER_MARKER
+                    || match_timeout_ns == 0
+                    || r.armed_at_ns != at
+                    || at.checked_add(match_timeout_ns) != Some(r.match_deadline_ns)
+                {
+                    return Err(bad());
+                }
+                let action = match fault {
+                    TriggerFault::Stop { target } => Action::Stop {
+                        machine: resolve(&target, true)?,
+                    },
+                    TriggerFault::Partition { left, right } => {
+                        let handle = metadata["result"]["handle"]
+                            .as_str()
+                            .filter(|h| !h.is_empty())
+                            .ok_or_else(bad)?
+                            .to_owned();
+                        let left = left
+                            .iter()
+                            .map(|t| resolve(t, true))
+                            .collect::<Result<Vec<_>>>()?;
+                        let right = right
+                            .iter()
+                            .map(|t| resolve(t, true))
+                            .collect::<Result<Vec<_>>>()?;
+                        let unique: BTreeSet<_> = left.iter().chain(&right).collect();
+                        if left.is_empty()
+                            || right.is_empty()
+                            || unique.len() != left.len() + right.len()
+                        {
+                            return Err(bad());
+                        }
+                        Action::Partition {
+                            handle,
+                            left,
+                            right,
+                        }
+                    }
+                };
+                if r.action != action {
+                    return Err(bad());
+                }
+            }
+            _ => return Err(bad()),
+        }
+    }
+    if arms != records.len() {
+        return Err(bad());
+    }
+    let mut plans = Vec::new();
+    for r in records {
+        let matched = r.matched_at_ns.is_some();
+        if r.prefix > r.marker.len()
+            || r.seen < r.prefix as u64
+            || r.match_deadline_ns
+                .checked_add(latency)
+                .and_then(|d| d.checked_add(PROCESS_EFFECT_TIMEOUT_NS))
+                .is_none()
+            || r.effect_at_ns.is_some() != matched
+            || (matched && r.prefix != r.marker.len())
+            || (!matched && r.prefix == r.marker.len())
+            || r.cancelled_at_ns != cancellations.get(&r.id).copied()
+            || (r.status != "rejected" && r.rejection_reason.is_some())
+        {
+            return Err(bad());
+        }
+        if let Some(m) = r.matched_at_ns {
+            if m < r.armed_at_ns
+                || m >= r.match_deadline_ns
+                || m.checked_add(latency) != r.effect_at_ns
+            {
+                return Err(bad());
+            }
+        }
+        if r.cancelled_at_ns.is_some_and(|c| {
+            c < r.armed_at_ns || c > r.match_deadline_ns || c >= request.limits.simulated_time_ns
+        }) || r
+            .cut_off_at_ns
+            .is_some_and(|c| c < r.armed_at_ns || c > request.limits.simulated_time_ns)
+        {
+            return Err(bad());
+        }
+        match r.status.as_str() {
+            "rejected"
+                if matched
+                    && r.cancelled_at_ns.is_none()
+                    && r.cut_off_at_ns.is_none()
+                    && r.fault_id.is_none()
+                    && r.effect_at_ns
+                        .is_some_and(|e| e < request.limits.simulated_time_ns)
+                    && r.rejection_reason
+                        .as_ref()
+                        .is_some_and(|reason| !reason.is_empty()) => {}
+            "fired" if matched && r.cancelled_at_ns.is_none() && r.cut_off_at_ns.is_none() => {
+                let at_ns = r.effect_at_ns.ok_or_else(bad)?;
+                if at_ns >= request.limits.simulated_time_ns {
+                    return Err(bad());
+                }
+                plans.push(Plan {
+                    id: r.fault_id.ok_or_else(bad)?,
+                    at_ns,
+                    deadline_ns: at_ns
+                        .checked_add(PROCESS_EFFECT_TIMEOUT_NS)
+                        .ok_or_else(bad)?,
+                    action: r.action.clone(),
+                });
+            }
+            "expired"
+                if !matched
+                    && r.cancelled_at_ns.is_none()
+                    && r.cut_off_at_ns.is_none()
+                    && r.match_deadline_ns < request.limits.simulated_time_ns
+                    && r.fault_id.is_none() => {}
+            "cancelled"
+                if !matched
+                    && r.cancelled_at_ns.is_some()
+                    && r.cut_off_at_ns.is_none()
+                    && r.fault_id.is_none() => {}
+            "cut_off"
+                if r.cancelled_at_ns.is_none()
+                    && r.fault_id.is_none()
+                    && r.cut_off_at_ns.is_some_and(|c| {
+                        if matched {
+                            r.effect_at_ns.is_some_and(|e| e >= c)
+                        } else {
+                            c <= r.match_deadline_ns
+                        }
+                    }) => {}
+            _ => return Err(bad()),
+        }
+    }
+    plans.sort_by_key(|p| p.at_ns);
+    if plans.windows(2).any(|p| p[0].id >= p[1].id) {
+        return Err(bad());
+    }
+    Ok(plans)
 }
 
 /// Parse the engine's structured completion report. Never infer application
@@ -1028,7 +1265,9 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
         ),
     };
     if request.control.is_none()
-        && (!raw.control_history.is_empty() || raw.control_latency_ns.is_some_and(|n| n != 0))
+        && (!raw.control_history.is_empty()
+            || raw.control_latency_ns.is_some_and(|n| n != 0)
+            || raw.triggers.is_some())
     {
         return Err(Error::Integrity("unexpected control transcript".into()));
     }
@@ -1038,6 +1277,7 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
             raw.control_latency_ns,
             request,
             raw.fault_error.is_some(),
+            validate_triggers(raw.triggers.as_deref(), &raw.control_history, request)?,
         )?
     } else {
         ValidatedControlHistory::default()
@@ -1068,6 +1308,47 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
             ));
         }
         match (fault.status.as_str(), fault.applied_at_ns) {
+            // Triggered stops have no RPC reply; unavailable effects retain
+            // the same exit/crash window and prior-down evidence as process RPCs.
+            ("unavailable", None)
+                if raw.triggers.as_ref().is_some_and(|records| {
+                    records.iter().any(|r| r.fault_id == Some(fault.id))
+                }) && matches!(plan.action, seedbox_control::Action::Stop { .. })
+                    && (raw.machines.iter().any(|m| {
+                        Some(&m.name) == fault.machine.as_ref()
+                            && ((m.state.as_deref().is_some_and(|s| {
+                                s.strip_prefix("Exited(")
+                                    .and_then(|c| c.strip_suffix(')'))
+                                    .and_then(|c| c.parse::<u8>().ok())
+                                    .is_some_and(|c| s == format!("Exited({c})"))
+                            }) && m
+                                .time_ns
+                                .is_some_and(|t| t >= plan.at_ns && t <= plan.deadline_ns))
+                                || m.crashed_incarnations.iter().any(|incarnation| {
+                                    incarnation.crashed_at_ns >= plan.at_ns
+                                        && incarnation.crashed_at_ns <= plan.deadline_ns
+                                }))
+                    }) || expected
+                        .plans
+                        .iter()
+                        .take(i)
+                        .rev()
+                        .find(|prior| {
+                            prior.action.machine() == plan.action.machine()
+                                && matches!(
+                                    prior.action,
+                                    seedbox_control::Action::Crash { .. }
+                                        | seedbox_control::Action::Reboot { .. }
+                                )
+                        })
+                        .is_some_and(|prior| {
+                            matches!(prior.action, seedbox_control::Action::Crash { .. })
+                                && prior.at_ns <= plan.at_ns
+                                && raw.faults.get(prior.id as usize - 1).is_some_and(|fault| {
+                                    fault.status == "applied"
+                                        && fault.applied_at_ns == Some(prior.at_ns)
+                                })
+                        })) => {}
             // An unavailable process fault needs a prior crash without reboot
             // at admission, or the target's exact exit/crash time in its window.
             ("unavailable", None)

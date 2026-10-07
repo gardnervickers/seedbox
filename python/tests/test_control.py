@@ -238,5 +238,34 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(peer.requests[0]["op"], "inspect")
 
 
+
+class TriggerTests(unittest.TestCase):
+    def test_arm_and_cancel_literal_wire_and_partition_handle(self):
+        from seedbox import Trigger
+        peer = Peer(reply(result={"trigger_id": 1}) + reply(2) + reply(3, {"trigger_id": 2, "handle": "p1"}) + reply(4))
+        with World(peer) as world:
+            stop = world.arm_console_stop("server", b"A\x00B", Machine("server-vm"), match_timeout=1)
+            self.assertIsInstance(stop, Trigger)
+            world.cancel_trigger(stop)
+            cut = world.arm_console_partition(Machine("server-vm"), b"DONE", ["server"], ["client"], match_timeout=2)
+            world.heal(cut.partition)
+        self.assertEqual(peer.requests[0], {"version": 1, "id": 1, "op": "arm_trigger", "source": {"service": "server"}, "marker": [65, 0, 66], "match_timeout_ns": 1_000_000_000, "fault": {"action": "stop", "target": {"machine": "server-vm"}}})
+        self.assertEqual(peer.requests[1], {"version": 1, "id": 2, "op": "cancel_trigger", "trigger_id": 1})
+        self.assertEqual(peer.requests[2]["fault"], {"action": "partition", "left": [{"service": "server"}], "right": [{"service": "client"}]})
+        self.assertEqual(peer.requests[3]["handle"], "p1")
+
+    def test_invalid_markers_timeouts_and_reply_identity(self):
+        for marker, timeout in [(b"", 1), (b"x" * 257, 1), ("text", 1), (b"x", 0), (b"x", -1)]:
+            peer = Peer(b"")
+            with World(peer) as world:
+                with self.assertRaises(ValueError):
+                    world.arm_console_stop("server", marker, "server", match_timeout=timeout)
+            self.assertEqual(peer.requests, [])
+        for result in [{}, {"trigger_id": True}, {"trigger_id": 0}, {"trigger_id": 65}]:
+            with World(Peer(reply(result=result))) as world:
+                with self.assertRaises(ProtocolError):
+                    world.arm_console_stop("server", b"x", "server", match_timeout=1)
+
+
 if __name__ == "__main__":
     unittest.main()

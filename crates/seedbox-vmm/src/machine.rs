@@ -76,6 +76,7 @@ pub struct MachineSnapshot {
     rtc_index: u8,
     com1: Uart,
     com2: Uart,
+    observe_console: bool,
     management_framer: crate::control::ManagementFramer,
     net: Option<VirtioNet>,
     channel: Option<VirtioConsole>,
@@ -176,6 +177,8 @@ pub struct Machine {
     pub com2: Uart,
     pub fault_effects: Vec<(u32, u64, bool)>,
     pub control_requests: Vec<(u64, Vec<u8>)>,
+    pub observe_console: bool,
+    pub committed_console: Option<(u64,u8)>,
     management_framer: crate::control::ManagementFramer,
     pub net: Option<VirtioNet>,
     pub channel: Option<VirtioConsole>,
@@ -435,6 +438,7 @@ impl Machine {
             com2: Uart::default(),
             fault_effects: Vec::new(),
             control_requests: Vec::new(),
+            observe_console:false, committed_console:None,
             management_framer: crate::control::ManagementFramer::default(),
             net,
             channel: spec.control_channel.then(VirtioConsole::new),
@@ -605,7 +609,7 @@ impl Machine {
 
     /// Capture this machine at the world's fork point: parked, no I/O owed.
     pub fn snapshot(&mut self) -> Result<MachineSnapshot, String> {
-        if self.pending_io.is_some() || self.stepping || !self.fault_effects.is_empty() || !self.control_requests.is_empty() {
+        if self.pending_io.is_some() || self.stepping || !self.fault_effects.is_empty() || !self.control_requests.is_empty() || self.committed_console.is_some() {
             return Err(format!("{}: not at a fork point", self.name));
         }
         self.complete_io()?;
@@ -625,6 +629,7 @@ impl Machine {
             guest_exit_code: self.guest_exit_code, guest_init_error: self.guest_init_error,
             pic: self.pic.clone(), pit: self.pit.clone(), rtc_index: self.rtc_index,
             com1: self.com1.snapshot(), com2: self.com2.snapshot(),
+            observe_console:self.observe_console,
             management_framer: self.management_framer.clone(),
             net: self.net.clone(), channel: self.channel.clone(), blk: self.blk.clone(),
             control_dma_bytes: self.control_dma_bytes, control_tx_bytes: self.control_tx_bytes,
@@ -689,6 +694,7 @@ impl Machine {
         self.com2.restore(&s.com2);
         self.fault_effects.clear();
         self.control_requests.clear();
+        self.observe_console=s.observe_console;self.committed_console=None;
         self.management_framer = s.management_framer.clone();
         self.net = s.net.clone();
         self.channel = s.channel.clone();
@@ -1190,6 +1196,7 @@ impl Machine {
                     }
                     let after_io = self.time;
                     let mut control_stop = false;
+                    let console_before=self.com1.out.len();
                     match port {
                         0x3f8..=0x3ff => {
                             if port == 0x3f8
@@ -1297,6 +1304,13 @@ impl Machine {
                             return Ok(Stop::Exited);
                         }
                         _ => {}
+                    }
+                    if self.observe_console && self.com1.out.len()>console_before {
+                        // Judge::Rollback discarded the exit before reaching here.
+                        // Console ports have zero charge; the sink and pending KVM
+                        // response are committed once at this deterministic exit.
+                        self.committed_console=Some((after_io,v));control_stop=true;
+                        if let Some(u)=self.undo.as_mut() {u.valid=false;}
                     }
                     self.record(b'O', (port as u64) << 8 | v as u64);
                     self.serial_edges();
@@ -2116,5 +2130,38 @@ mod fork_tests {
         assert_eq!(old.blk.as_ref().unwrap().disk.volatile_sectors(),2,"the old incarnation is untouched");
         old.restore(&snap).unwrap();
         assert_eq!(old.blk.as_ref().unwrap().disk.digest(),Disk::new(None,Some(8)).unwrap().digest());
+    }
+}
+
+#[cfg(test)]
+mod committed_trigger_tests {
+    use super::*;
+    /// Force a real KVM UART candidate through the actual rollback branch.
+    /// This is a commitment control, not a hardware counter qualification.
+    struct DiscardFirst {prepared:bool,discarded:bool}
+    impl Timebase for DiscardFirst {
+        fn prepare(&mut self,m:&mut Machine,_:u64)->Result<(),String> {
+            if !self.prepared {m.checkpoint()?;self.prepared=true;}
+            Ok(())
+        }
+        fn start(&self)->u64 {0}
+        fn read(&mut self)->u64 {0}
+        fn judge(&mut self,_:Judge<'_>,_:&Run)->Result<Verdict,String> {
+            if !self.discarded {self.discarded=true;Ok(Verdict::Rollback)} else {Ok(Verdict::Advance{legal:true})}
+        }
+    }
+    #[test]
+    #[ignore = "requires KVM"]
+    fn committed_console_discards_rolled_back_candidate_before_matcher_feed() {
+        let kvm=Kvm::new().unwrap();
+        let mut kernel=vec![0;1024];kernel[0x1f1]=1;kernel.extend_from_slice(&[0xb0,b'A',0xe6,0xe9,0xf4]);
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:256,barrier:false};
+        let mut m=Machine::new(&kvm,"source",&spec).unwrap();m.observe_console=true;
+        let mut tb=DiscardFirst{prepared:false,discarded:false};let mut frames=Vec::new();
+        assert_eq!(m.run_until(&mut tb,10,0,&mut frames).unwrap(),Stop::Control);
+        assert!(tb.discarded);assert_eq!(m.undo.as_ref().unwrap().stats.rollbacks,1);
+        assert_eq!(m.com1.out,b"A");assert_eq!(m.committed_console.take(),Some((0,b'A')));
+        assert_eq!(m.run_until(&mut tb,10,0,&mut frames).unwrap(),Stop::Exited);
+        assert_eq!(m.committed_console,None);assert_eq!(m.com1.out,b"A");
     }
 }

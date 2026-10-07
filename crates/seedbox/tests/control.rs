@@ -4,6 +4,10 @@
 mod connections;
 #[allow(dead_code)]
 #[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/triggers.rs"]
+mod triggers;
+#[allow(dead_code)]
+#[rustfmt::skip]
 #[path = "../../seedbox-vmm/src/links.rs"]
 mod links;
 #[allow(dead_code)]
@@ -991,6 +995,151 @@ fn pending_process_fault_resolves_at_crash_and_down_process_faults_are_unavailab
                 c.log[id as usize - 1]["response"]["effect_at_ns"],
                 u64::from(id) * 100 + 20
             );
+        }
+    }
+}
+
+#[test]
+fn matched_stop_trigger_rejects_target_already_stopped_through_control() {
+    let mut c = control();
+    let mut f = faults::Faults::new(
+        vec![],
+        vec!["scenario".into(), "client".into(), "server".into()],
+    )
+    .unwrap();
+    request(
+        &mut c,
+        1,
+        100,
+        json!({"version":1,"id":1,"op":"arm_trigger","source":{"service":"server"},"marker":[65],"match_timeout_ns":1000,"fault":{"action":"stop","target":{"service":"server"}}}),
+    )
+    .unwrap();
+    c.apply_boundary(&mut f, 120).unwrap();
+    c.apply_boundary(&mut f, 140).unwrap();
+    c.mark_delivered(140).unwrap();
+    assert_eq!(c.triggers.records[0].status, "armed");
+    request(
+        &mut c,
+        2,
+        200,
+        json!({"version":1,"id":2,"op":"stop","target":{"service":"server"}}),
+    )
+    .unwrap();
+    c.apply_boundary(&mut f, 220).unwrap();
+    assert_eq!(f.apply_due(220), vec![(2, b"stop 1\n".to_vec())]);
+    f.effect(2, 1, 225, true);
+    c.observe_faults(&f, 225).unwrap();
+    c.apply_boundary(&mut f, 245).unwrap();
+    c.mark_delivered(245).unwrap();
+    assert_eq!(f.process_state(2), "Stopped");
+    let stopped_log = f.log.clone();
+
+    c.triggers.committed("server", 260, b'A', 20, 275).unwrap();
+    assert_eq!(c.triggers.records[0].status, "matched");
+    c.triggers.apply_boundary(&mut f, 280).unwrap();
+    let record = &c.triggers.records[0];
+    assert_eq!(record.status, "rejected");
+    assert_eq!(
+        record.rejection_reason.as_deref(),
+        Some("target process is already stopped")
+    );
+    assert_eq!(record.matched_at_ns, Some(260));
+    assert_eq!(record.effect_at_ns, Some(280));
+    assert_eq!(record.fault_id, None);
+    let evidence = c.triggers.evidence().unwrap().unwrap();
+    assert_eq!(
+        evidence[0]["rejection_reason"],
+        "target process is already stopped"
+    );
+    assert_eq!(c.triggers.boundary(), u64::MAX);
+    c.triggers.apply_boundary(&mut f, 280).unwrap();
+    c.triggers.committed("server", 281, b'A', 20, 296).unwrap();
+    assert!(f.apply_due(280).is_empty());
+    assert_eq!(f.log, stopped_log);
+    assert_eq!(f.next_boundary(), u64::MAX);
+    assert_eq!(f.process_state(2), "Stopped");
+    assert!(f.error.is_none());
+    assert!(complete(&c));
+}
+
+#[test]
+fn arm_cancel_use_admission_and_match_is_not_the_arm_reply_effect() {
+    let mut c = control();
+    let mut f = faults::Faults::new(
+        vec![],
+        vec!["scenario".into(), "client".into(), "server".into()],
+    )
+    .unwrap();
+    request(&mut c,1,100,json!({"version":1,"id":1,"op":"arm_trigger","source":{"service":"server"},"marker":[65,66],"match_timeout_ns":1000,"fault":{"action":"partition","left":[{"service":"server"}],"right":[{"service":"client"}]}})).unwrap();
+    assert!(!c.triggers.observes("server"));
+    c.apply_boundary(&mut f, 120).unwrap();
+    assert!(c.triggers.observes("server"));
+    assert!(f.log.is_empty());
+    c.apply_boundary(&mut f, 140).unwrap();
+    c.mark_delivered(140).unwrap();
+    assert_eq!(
+        c.log[0]["response"]["result"],
+        json!({"trigger_id":1,"handle":"p1"})
+    );
+    c.triggers.committed("server", 150, 65, 20, 160).unwrap();
+    request(
+        &mut c,
+        2,
+        151,
+        json!({"version":1,"id":2,"op":"cancel_trigger","trigger_id":1}),
+    )
+    .unwrap();
+    assert!(c.triggers.observes("server"));
+    c.apply_boundary(&mut f, 171).unwrap();
+    c.apply_boundary(&mut f, 191).unwrap();
+    c.mark_delivered(191).unwrap();
+    assert!(!c.triggers.observes("server"));
+    assert_eq!(c.triggers.records[0].cancelled_at_ns, Some(171));
+    assert!(f.log.is_empty());
+}
+
+#[test]
+fn arm_rejections_and_pending_arm_cutoff_remain_correlated() {
+    for change in [
+        json!({"marker":[]}),
+        json!({"marker":vec![0;257]}),
+        json!({"match_timeout_ns":0}),
+        json!({"source":{"machine":"unknown"}}),
+        json!({"fault":{"action":"stop","target":{"service":"scenario"}}}),
+    ] {
+        let mut c = control();
+        let mut f = faults::Faults::new(
+            vec![],
+            vec!["scenario".into(), "client".into(), "server".into()],
+        )
+        .unwrap();
+        let mut body = json!({"version":1,"id":1,"op":"arm_trigger","source":{"service":"server"},"marker":[65],"match_timeout_ns":1000,"fault":{"action":"stop","target":{"service":"server"}}});
+        body.as_object_mut()
+            .unwrap()
+            .extend(change.as_object().unwrap().clone());
+        request(&mut c, 1, 100, body).unwrap();
+        c.apply_boundary(&mut f, 120).unwrap();
+        c.apply_boundary(&mut f, 140).unwrap();
+        c.mark_delivered(140).unwrap();
+        assert_eq!(c.log[0]["response"]["ok"], false);
+        assert!(c.triggers.evidence().unwrap().is_none());
+        assert!(f.log.is_empty());
+    }
+    for admitted in [false, true] {
+        let mut c = control();
+        let mut f = faults::Faults::new(
+            vec![],
+            vec!["scenario".into(), "client".into(), "server".into()],
+        )
+        .unwrap();
+        request(&mut c,1,100,json!({"version":1,"id":1,"op":"arm_trigger","source":{"service":"server"},"marker":[65],"match_timeout_ns":1000,"fault":{"action":"stop","target":{"service":"server"}}})).unwrap();
+        if admitted {
+            c.apply_boundary(&mut f, 120).unwrap();
+        }
+        c.cut_off(&f, if admitted { 130 } else { 110 });
+        assert_eq!(c.triggers.records.len(), usize::from(admitted));
+        if admitted {
+            assert_eq!(c.log[0]["result"]["trigger_id"], 1);
         }
     }
 }

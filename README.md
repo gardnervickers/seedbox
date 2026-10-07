@@ -88,7 +88,9 @@ marker. All host, CPU, PMU, MSR, lease, ABI and control-channel checks still app
 automatically. It applies to retained disks; Compose storage is still RAM-backed
 until named-volume disk support lands. See [disk semantics](docs/runtime.md#disk-crash-policy).
 
-`seedbox help run` lists every option. A run prints `OUTCOME: run-directory`;
+`seedbox help run` lists every option. The guest Python API supports
+[bounded committed console triggers](docs/triggers.md) for future stop/partition
+faults in the development engine; see that contract and AMD validation handoff. A run prints `OUTCOME: run-directory`;
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
 INCOMPLETE and 124 TIMEOUT. Offline `diff` exits 0 for MATCH, 1 for DIFFERENT,
 and 2 for usage/setup or invalid retained evidence.
