@@ -247,9 +247,16 @@ echo "joined:$rc:$(find "$RESULTS" -name '*.finished' | wc -l)"
             self.assertIn('SKIP shaped replay', output.getvalue())
             trace = root / 'L1/network.jsonl'
             before = trace.read_text()
+            # Absent: the host has no routed capture; link_worlds.rs covers the bounds.
             trace.unlink()
-            self.assertEqual(analyze(), 1)
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(links.analyze(root), 0)
+            self.assertIn('SKIP L1: exact latency/jitter/FIFO bounds covered by link_worlds.rs',
+                          output.getvalue())
+            # Present but violating, or present but unreadable, still fails.
             trace.write_text(before.replace('4501500000', '4501500001'))
+            self.assertEqual(analyze(), 1)
+            trace.write_text('not json\n')
             self.assertEqual(analyze(), 1)
             trace.write_text(before)
             with self.assertRaises(ValueError):

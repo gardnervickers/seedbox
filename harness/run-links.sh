@@ -8,10 +8,11 @@
 # precise stops, 400 s), so the undo-off pair uses a stop tolerance to make
 # most slices end at natural exits. U1/U2 use a 600 s timeout.
 # Run as the normal user on distinct free physical cores with idle SMT siblings:
-#   CPUS="14 15 16 17 18 19" SHA=<PR head> MAIN=<main sha> bash harness/run-links.sh
+#   CPUS="2 3 4 5 6 7" SHA=<PR head> MAIN=<main sha> bash harness/run-links.sh
 # Subsets: RUNS="L1 U1" CPUS="14 15" (default: all six lanes).
 # Optional NETWORK_TRACE_ROOT holds L1/network.jsonl, L2/network.jsonl from an
-# external route capture; current VMM --trace does not record routed arrivals.
+# external route capture; current VMM --trace does not record routed arrivals,
+# so without one links.py reports the exact bounds as covered by link_worlds.rs.
 # To test another engine (a train head), add ENGINE=<commit> and FETCH="<refs>":
 # the PR side is then ENGINE's tree plus the link fixtures from SHA, and
 # MAIN should be the engine's base (the run compares P1 against it).

@@ -301,16 +301,19 @@ and receiver timing follows `recv`, including both kernels and concurrent bursts
 Jittered windows now keep a loose 200 us receipt allowance (1.7 ms for window 45).
 Count, floor and mean checks remain; fixed-delay receipt tails stay diagnostic.
 
-The analyzer requires actual routed-frame records in each selected full shaped
-lane's `network.jsonl`. Each line is a JSON object with machine names `src` and
+When a full shaped lane has a `network.jsonl` of routed-frame records, the
+analyzer checks it exactly. Each line is a JSON object with machine names `src` and
 `dst`, and integer `send_ns` and `arrival_ns`. Include **every queued frame**,
 including boot/ARP traffic, in routing order, not receipt order; omit cut/lost
 frames, which reserve no FIFO arrival. The bound is
 `max(send_ns + latency_ns + jitter_ns, link_last + 1)`, with a lower bound of
 `max(send_ns + latency_ns, link_last + 1)`. Thus delay decreases can preserve an
 old FIFO tail, but a FIFO extension is exactly one nanosecond. At least one c->a
-arrival must be present in routed-time window 45. Missing, empty, invalid or
-out-of-bound evidence fails the analyzer. Synthetic portable tests cover both
+arrival must be present in routed-time window 45. A present file that is empty,
+invalid or out of bounds fails the analyzer. An absent file is a SKIP: the
+portable `crates/seedbox/tests/link_worlds.rs` covers the exact bounds instead,
+by driving the production `links.rs` and `faults.rs` through `shaped.json` and
+checking nominal arrivals in window 45. Synthetic portable tests cover both
 inclusive boundaries and one-nanosecond violations; the Rust fixture tests still
 exercise production `Faults`/`Links` directly.
 
@@ -322,9 +325,9 @@ output. `NETWORK_TRACE_ROOT` can instead point to same-run captures under
 `L1/network.jsonl` and `L2/network.jsonl`. Such captures must come from the exact
 runs being analyzed; a model-generated trace or a different run is not engine
 evidence. No route capture is implemented here, since changing the engine is
-outside this follow-up's scope. Consequently L1/L2 cannot pass the new exact
-check with the current engine's output alone. AMD capture integration and actual
-arrival qualification remain unresolved.
+outside this follow-up's scope, so on the host L1/L2 report the exact-bound
+check as covered by `link_worlds.rs`. The host lanes still check witnesses,
+counters, fault application, FIFO receipt order and the receipt-time plan.
 
 Run selected lanes concurrently, one distinct physical core per lane:
 
