@@ -42,6 +42,11 @@ directory. Every runtime input has a default, so no flags are required:
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
 INCOMPLETE and 124 TIMEOUT.
 
+[Draft format and runtime scope](docs/compatibility.md) distinguishes inspection
+and transfer from qualified execution. Same software versions, seed and exact
+retained inputs must replay on a qualified compatible profile; changing versions
+may change execution. Release compatibility remains a V0 qualification gate.
+
 ## Layout
 
 | Path | Contents |
