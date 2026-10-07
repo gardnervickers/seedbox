@@ -33,14 +33,6 @@ client)
   ;;
 *)
   start_etcd
-  # Debug only: at 6 s, dump etcd's thread states and goroutines to the console.
-  (sleep 6; pid=$(cat /tmp/etcd.pid)
-   echo "DUMP $name at $(sbx time)" > /dev/ttyS0
-   for t in /proc/$pid/task/*; do echo "TASK $name ${t##*/} $(cut -d' ' -f3 $t/stat) $(cat $t/wchan) $(tr '\0' ' ' < $t/comm)"; done > /dev/ttyS0
-   grep -E 'timer|eth|virtio|NET' /proc/interrupts | sed "s/^/IRQ $name /" > /dev/ttyS0
-   tail -40 /tmp/etcd.log | sed "s/^/LOG $name /" > /dev/ttyS0
-   kill -QUIT $pid; sleep 1; sed -n '/^SIGQUIT/,$p' /tmp/etcd.log | grep -vE '^\s*$' | sed "s/^/GR $name /" > /dev/ttyS0
-   echo "DUMP $name done" > /dev/ttyS0) &
   # Test helper on COM2: unclean stop (SIGKILL) and restart on request.
   stty -F /dev/ttyS1 raw -echo 2>/dev/null
   while read -r cmd < /dev/ttyS1; do
