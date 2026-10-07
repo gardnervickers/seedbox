@@ -120,6 +120,20 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(peer.requests[0], {"version": 1, "id": 1, "op": "shape", "from": [{"service": "client"}], "to": [{"machine": "server-vm"}], "latency_ns": 20_000_000, "jitter_ns": 1_000_000, "loss_ppm": 500_000})
         self.assertEqual(peer.requests[1]["handle"], "p1")
 
+    def test_connection_discovery_drop_and_heal_preserve_explicit_zero_evidence(self):
+        connection = {"from": "server-vm", "to": "client-vm", "src_addr": "10.0.0.2",
+                      "dst_addr": "10.0.0.1", "src_port": 80, "dst_port": 4000, "incarnation": 7}
+        page = {"connections": [connection], "next_after": 7}
+        peer = Peer(reply(result=page) + reply(2, {"handle": "p1"}) + reply(3, {"matched": 0, "dropped": 0}))
+        with World(peer) as world:
+            self.assertEqual(world.connections("server", Machine("client-vm"), after=3), page)
+            handle = world.drop_connection(connection)
+            self.assertEqual(world.heal(handle), {"matched": 0, "dropped": 0})
+        self.assertEqual(peer.requests[0], {"version": 1, "id": 1, "op": "connections",
+                         "from": {"service": "server"}, "to": {"machine": "client-vm"}, "after": 3})
+        self.assertEqual(peer.requests[1]["connection"], connection)
+        self.assertEqual(peer.requests[2]["handle"], "p1")
+
     def test_shape_defaults_and_invalid_local_values(self):
         peer = Peer(reply(result={"handle": "p1"}))
         with World(peer) as world:

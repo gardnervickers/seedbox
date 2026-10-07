@@ -411,3 +411,21 @@ single-member etcd fixture is preserved.
 The direct KVM results above retain their recorded engine identities; hardware
 execution was not repeated for this merge. The seed-4004 clock-bound failure is
 tracked in [issue #33](https://github.com/gardnervickers/seedbox/issues/33).
+
+
+## Change-scoped host-check source staging
+
+The [host-check planner and smoke tier](../harness/smoke/README.md#change-scoped-host-checks)
+select a minimal core for engine changes and add only the affected disk, link,
+preparation, control or stepping checks. `host-plan.py BASE HEAD` prints paths
+from `BASE...HEAD`, supports JSON and unions repeatable reviewer `--extra`
+additions. `host-check.sh --plan` performs no host work; `--lanes 1,2,3`
+selects explicit reciprocal SMT pairs and refuses CPU 0/16. Core includes the
+fixed full-state smoke, default MATCH and a seed-1009 cluster comparison against
+main. Only selected stepping/counter/undo checks add `--perf-replay`. Passing
+checks discard run state and keep timing/comparison summaries; failures print
+a cleanup command. Portable controls
+exercise the map, Git planning, real disposable flock contention and harmless
+concurrent workers. These controls do not execute a guest or qualify a candidate.
+Parallel dispatch and its host cleanup behavior have not been accepted on Linux;
+no new hardware result, release pin or qualification is recorded here.

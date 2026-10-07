@@ -55,7 +55,7 @@ def stop(process):
         process.wait(timeout=3)
 
 
-def check_case(root, broken, restart):
+def check_case(root, broken, restart, batch=32):
     root.mkdir()
     server_address, control_address = address(), address()
     state = root / "kv.log"
@@ -64,10 +64,10 @@ def check_case(root, broken, restart):
     with (root / "server.log").open("w") as server_log, (root / "client.log").open("w") as client_log:
         try:
             server = start("server", server_address, server_log, *server_args)
-            client = start("client", control_address, client_log, "--address", server_address)
+            client = start("client", control_address, client_log, "--address", server_address, "--batch", str(batch))
             assert json.loads(wire(control_address, "STATUS"))["acked"] == 0
             first = json.loads(wire(control_address, "LOAD 1"))
-            assert first == {"acked": 32, "generation": 1, "total": 32}, first
+            assert first == {"acked": batch, "generation": 1, "total": batch}, first
             assert wire(server_address, "GET k/000000") == "VALUE 1 v000000"
             if restart:
                 stop(server)
@@ -76,34 +76,34 @@ def check_case(root, broken, restart):
                 assert probe == {"attempts": 4, "failed": 4, "acked": 0}, probe
                 server = start("server", server_address, server_log, *server_args)
                 assert wire(server_address, "GET k/000000") == ("MISSING 2" if broken else "VALUE 2 v000000")
-                assert json.loads(wire(control_address, "LOAD 2"))["acked"] == 32
-                assert json.loads(wire(control_address, "LOAD 2"))["total"] == 96
+                assert json.loads(wire(control_address, "LOAD 2"))["acked"] == batch
+                assert json.loads(wire(control_address, "LOAD 2"))["total"] == 3 * batch
                 stop(server)
                 server = None
                 server = start("server", server_address, server_log, *server_args)
-                assert json.loads(wire(control_address, "LOAD 3"))["total"] == 128
+                assert json.loads(wire(control_address, "LOAD 3"))["total"] == 4 * batch
             else:
-                for total in [64, 96, 128]:
+                for total in [2 * batch, 3 * batch, 4 * batch]:
                     assert json.loads(wire(control_address, "LOAD 1"))["total"] == total
             result = json.loads(wire(control_address, "VERIFY"))
-            expected_missing = 96 if broken and restart else 0
-            assert result == dict(status="fail" if expected_missing else "pass", acked=128,
-                                 pre_restart=32 if restart else 128,
-                                 post_restart=32 if restart else 128,
+            expected_missing = 3 * batch if broken and restart else 0
+            assert result == dict(status="fail" if expected_missing else "pass", acked=4 * batch,
+                                 pre_restart=batch if restart else 4 * batch,
+                                 post_restart=batch if restart else 4 * batch,
                                  generation=3 if restart else 1, missing=expected_missing), result
             # A status request does not manufacture writes or alter the result.
-            assert json.loads(wire(control_address, "STATUS"))["acked"] == 128
+            assert json.loads(wire(control_address, "STATUS"))["acked"] == 4 * batch
             assert json.loads(wire(control_address, "VERIFY")) == result
         finally:
             stop(client)
             stop(server)
     client_output = (root / "client.log").read_text()
     assert client_output.count("RESULT ") == 1, client_output
-    assert client_output.count("MISSING_ACK ") == (96 if broken and restart else 0), client_output
+    assert client_output.count("MISSING_ACK ") == (3 * batch if broken and restart else 0), client_output
     server_output = (root / "server.log").read_text()
     if restart and not broken:
-        assert "generation=2 recovered=32" in server_output, server_output
-        assert "generation=3 recovered=96" in server_output, server_output
+        assert f"generation=2 recovered={batch}" in server_output, server_output
+        assert f"generation=3 recovered={3 * batch}" in server_output, server_output
     print(f"broken={broken} restart={restart} {result['status']} acknowledged={result['acked']} missing={result['missing']}")
 
 

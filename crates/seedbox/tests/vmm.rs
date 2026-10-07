@@ -69,6 +69,26 @@ fn report() -> serde_json::Value {
 }
 
 #[test]
+fn current_parts_accept_text_events_and_validate_digests() {
+    fixture(|request| {
+        let mut raw = report();
+        for machine in raw["machines"].as_array_mut().unwrap() {
+            machine["state_digest_parts"] = json!({
+                "ram": ContentDigest::of(b"ram"), "disk": ContentDigest::of(b"disk"),
+                "events": "exc:none int:none shadow:0 nmi:0/0/0"
+            });
+        }
+        let parsed = vmm::report(&serde_json::to_vec(&raw).unwrap(), request).unwrap();
+        assert_eq!(parsed.full_state.as_ref().unwrap().len(), 2);
+        raw["machines"][1]["state_digest_parts"]["disk"] = json!("invalid");
+        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), request)
+            .unwrap_err()
+            .to_string()
+            .contains("expected a lowercase SHA-256 digest"));
+    });
+}
+
+#[test]
 fn world_uses_verified_artifacts_and_explicit_placement() {
     fixture(|request| {
         let world = vmm::world(request).unwrap();
@@ -638,6 +658,75 @@ fn shape_transcripts_validate_handle_timing_absolute_policy_and_directed_sides()
         raw["control_history"][0]["admitted_at_ns"] = json!(a);
         raw["control_history"][0]["admitted_done"] = json!(true);
         raw["control_history"][0]["delivered_at_ns"] = json!(null);
+        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
+    });
+}
+
+#[test]
+fn connection_selector_transcripts_bind_exact_machine_tuple_incarnation_and_time() {
+    fixture(|base| {
+        let mut prepared = base.prepared.clone();
+        let hash = prepared.kernel.clone();
+        prepared
+            .placement
+            .insert("scenario".into(), "scenario-machine".into());
+        prepared
+            .guests
+            .insert("scenario-machine".into(), hash.clone());
+        let check = Check {
+            service: "scenario".into(),
+            exit_code: 0,
+        };
+        let control = seedbox::config::Control {
+            service: "scenario".into(),
+        };
+        let request = ExecutionRequest {
+            prepared: &prepared,
+            check: &check,
+            control: Some(&control),
+            ..*base
+        };
+        let latency = vmm::world(&request).unwrap()["control"]["latency_ns"]
+            .as_u64()
+            .unwrap();
+        let t = 10_000_000;
+        let a = t + latency;
+        let reply = a + latency;
+        let connection = json!({"from":"server-machine","to":"client-machine","src_addr":"10.0.0.2","dst_addr":"10.0.0.1","src_port":80,"dst_port":4000,"incarnation":7});
+        let mut raw = report();
+        raw["machines"].as_array_mut().unwrap().push(json!({"name":"scenario-machine","guest_exit_code":0,"guest_init_error":null,"infrastructure_error":false,"state_digest":hash}));
+        raw["control_latency_ns"] = json!(latency);
+        let call = json!({"version":1,"id":1,"op":"drop_connection","connection":connection});
+        let plan = json!({"id":1,"at_ns":a,"deadline_ns":a+5_000_000_000,"action":"drop_connection","handle":"p1","connection":connection});
+        raw["control_history"] = json!([{"relay_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":{"handle":"p1"},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":a,"replied_at_ns":reply},"delivered_at_ns":reply}]);
+        raw["faults"] = json!([{"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":a,"action":"drop_connection","machine":null,"status":"applied","detail":"armed","selection_counts":{"matched":0,"dropped":0}}]);
+        let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
+        assert_eq!(result.faults[0].action, "drop_connection");
+        for (key, value) in [
+            ("incarnation", json!(8)),
+            ("incarnation", json!(0)),
+            ("src_port", json!(0)),
+            ("dst_addr", json!("bad")),
+            ("from", json!("scenario-machine")),
+            ("to", json!("server-machine")),
+        ] {
+            let mut bad = raw.clone();
+            bad["control_history"][0]["request"]["connection"][key] = value;
+            assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        }
+        let mut bad = raw.clone();
+        bad["control_history"][0]["response"]["effect_at_ns"] = json!(a + 1);
+        assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        // A unavailable incarnation is a recoverable admission error with no plan.
+        raw["faults"] = json!([]);
+        raw["control_history"][0]["response"]["ok"] = json!(false);
+        raw["control_history"][0]["response"]["error"] =
+            json!({"code":"invalid_state","message":"connection incarnation unavailable"});
+        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
+        raw["control_history"][0]["request"] = json!({"version":1,"id":1,"op":"connections","from":{"service":"server"},"to":{"service":"client"},"after":0});
+        raw["control_history"][0]["response"]["ok"] = json!(true);
+        raw["control_history"][0]["response"]["result"] =
+            json!({"connections":[connection],"next_after":7});
         assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
     });
 }

@@ -97,7 +97,9 @@ Common fields are `version: 1`, `id`, and `op`. Targets are typed objects:
 | `reboot` | `target`: a typed target | `{}` after booting a crashed machine from its retained image |
 | `partition` | `left`, `right`: nonempty, disjoint arrays of typed targets | `{"handle":"opaque value"}` |
 | `shape` | `from`, `to`: nonempty disjoint typed-target arrays; `latency_ns`, `jitter_ns`, `loss_ppm`: integers | `{"handle":"opaque value"}` |
-| `heal` | `handle`: a previously returned handle | `{}` after releasing that handle |
+| `connections` | `from`, `to`: distinct typed targets; `after`: optional unsigned incarnation cursor (default 0) | `connections`: up to 32 directional records; `next_after`: last returned incarnation (or input cursor) |
+| `drop_connection` | `connection`: one exact discovery record | `{"handle":"opaque value"}` after arming selected loss |
+| `heal` | `handle`: a previously returned handle | `{}` for links; `{"matched": N, "dropped": N}` for connection handles |
 | `inspect` | None | `services`, `machines`, `active_handles`, `network_counters`; `triggers` only after an arm |
 | `arm_trigger` | `source`: typed target; `marker`: 1..=256 byte integers; `match_timeout_ns`: positive u64; `fault`: typed trigger fault below | `{"trigger_id": N}`; also `handle` for a partition |
 | `cancel_trigger` | `trigger_id`: previously returned positive ID | `{}` after cancellation at admission |
@@ -106,7 +108,7 @@ Partitions cut both directions between their two groups. Each handle is
 independent: a link remains cut while any applicable handle exists. Already
 routed packets stay in flight; new sends crossing an active cut are dropped.
 Inspect returns the retained service-to-machine mapping, application lifecycle
-states (`Running`, `Stopped`, `Paused`, `Down`, or `Exited(code)`), active partition and shape
+states (`Running`, `Stopped`, `Paused`, `Down`, or `Exited(code)`), active partition, shape and connection
 handles and directed-link counters. It exposes simulator state, not application object memory.
 Transient CPU halt state is not an application lifecycle state. Counters include
 sends, drops and arrivals whose nominal simulated timestamps are strictly before
@@ -153,11 +155,34 @@ A cut always dominates. Latency must be at least the global network latency,
 jitter must be less than latency, their sum must not exceed one hour, and
 `loss_ppm` must be in `[0, 1000000]`. Invalid values receive `invalid_request`.
 The Python API is `world.shape(from_, to, latency=..., jitter=0, loss_ppm=0)`
-with nanosecond integers (`Controller` is an alias for `World`); `world.heal()` accepts either returned handle type.
+with nanosecond integers (`Controller` is an alias for `World`); `world.heal()` accepts each returned handle type.
 Shapes take effect at admission, and each frame retains its send-time decision.
 Counters include `delivered`, `partition_dropped`, `receiver_dropped`, and
-`loss_dropped` (omitted while zero); even a lost candidate consumes one loss
-and one jitter sample.
+`loss_dropped` (omitted while zero); a candidate lost by link policy consumes one loss
+and one jitter sample. Selected connection loss consumes neither.
+
+Connection discovery and selection take effect at the exact admission barrier,
+including frames sent before it and excluding equal-time sends. Discovery records
+have exactly `from`, `to` (prepared-machine names), `src_addr`, `dst_addr`
+(canonical IPv4 strings), `src_port`, `dst_port` (nonzero u16), and `incarnation`
+(nonzero u64). The record selects only that direction. Discovery resolves typed
+service targets and excludes the controller. It is read-only; paginate using
+`after=next_after` until an empty page. Pages are live views, ordered by increasing
+incarnation, not a frozen inventory. Long machine names can still produce
+`result_too_large`; no result is silently truncated beyond the stated page size.
+
+`drop_connection` shares the link fault handle counter. A missing, closed, evicted
+or replaced incarnation at admission returns `invalid_state` without a fault.
+An accepted handle means **armed**, not that loss occurred. `heal` returns matched
+and actually dropped candidate counts; retained selector fault rows carry the
+same `selection_counts`, including explicit zeros. Scenarios asserting an injected
+fault must require `dropped > 0`. `matched` includes packets masked by a partition;
+`dropped` excludes them. Overlapping connection handles each count their matched
+drops, and healing one leaves others active. A stale active handle never follows
+a reused tuple; it remains healable with its accumulated evidence.
+
+See [connection classification](../docs/runtime.md#connection-selectors) for TCP
+lifecycle, bounded eviction, unsupported traffic and send-time semantics.
 
 An operation error uses `ok: false` and `error` instead of a result:
 
