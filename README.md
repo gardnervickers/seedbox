@@ -131,12 +131,29 @@ rebuilt OCI images to have identical bytes.
 ## Host requirements
 
 - x86-64 AMD Zen host with KVM, run as root (guest-only perf counting).
+  Seedbox picks a branch counter profile from CPUID at startup
+  (`crates/seedbox/src/counter.rs`, `crates/seedbox-vmm/src/profile.rs`) and
+  records it in each run's identity, so a run replays only with the counter
+  that made it. Only Zen is qualified. Non-hybrid Intel cores have profiles
+  (`intel-0x5101c4` up to Comet Lake, `intel-0x5111c4` from Ice Lake) that
+  have never run on hardware; `run` and `replay` refuse them unless given
+  `--allow-unqualified-cpu`, and then warn that results are unverified.
 - **The Zen SpeculativeLockMap workaround must be on** for the cores running
   simulations (MSR 0xC0011020 bit 54, rr's workaround). Without it, branch
   counts drift on lock-heavy code (e.g. Go) and runs diverge. The Rust executor
   acquires the shared CPU/SMT leases, sets
   it with readback, then restores the exact originals after reaping its child.
   The legacy `batch.sh` runner uses the same lease protocol.
+
+`--allow-unqualified-cpu` also applies to `explore`. This explicit non-Zen
+path is experimental: it retains the counter in identity, validates exact
+supported release inputs and applicable KVM capabilities, and holds every SMT
+lease through child cleanup. It carries no qualified AMD host-policy proof and
+never opens AMD workaround MSRs. `doctor` refuses an unqualified counter rather
+than reporting qualified compatibility. The current source integration still
+pins engine168ad and its guest kernel; the incoming counter-aware engine requires
+a separately reviewed release-policy update and runtime acceptance before this
+staged path is usable. It does not establish Intel determinism.
 
 The versioned `amd-zen3-engine168ad-v1` admission policy checks AMD family 25,
 model 33, stepping 0 and microcode 0xa20102e, exact booted/current host kernel and
@@ -149,7 +166,7 @@ This is readiness admission; it does not prove guest counting, overflow behavior
 or cross-host determinism. Matching a second machine admits compatibility without
 host-ID enrollment. Support evidence remains the tested host and inputs.
 
-New run identities bind the full policy and its fingerprint. Existing records
+Qualified Zen run identities bind the full policy and its fingerprint. Existing records
 remain inspectable and transferable, but replay through this CLI rejects missing
 or drifted host-policy proof as ERROR/NOT_COMPARABLE (exit 2), even with
 `--allow-engine-change`. A retained previous CLI can still be used for explicitly

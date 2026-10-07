@@ -294,3 +294,39 @@ pub(super) fn observe(cpu: u32) -> Result<CoreObservation> {
         Affinity::restore,
     )
 }
+
+pub(super) fn check_unqualified(cpu: u32, counter: crate::counter::CounterProfile) -> Result<()> {
+    let affinity = Affinity::pin(cpu)?;
+    scoped_probe(
+        affinity,
+        || {
+            if unsafe { libc::sched_getcpu() } != cpu as i32
+                || crate::counter::CounterProfile::host()? != counter
+            {
+                return Err(Error::Setup(format!(
+                    "CPU {cpu}: branch counter differs from selected profile"
+                )));
+            }
+            let kvm = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/kvm")
+                .map_err(|e| {
+                    Error::Setup(format!(
+                        "/dev/kvm experimental execution: {e}; enable KVM and run as root"
+                    ))
+                })?;
+            if query(&kvm, 0xae00, 0)? != 12
+                || query(&kvm, 0xae03, 136)? < 1
+                || query(&kvm, 0xae03, 23)? < 1
+                || query(&kvm, 0xae03, 74)? & 3 != 3
+            {
+                return Err(Error::Setup(format!(
+                    "CPU {cpu}: required KVM capabilities unavailable for experimental execution"
+                )));
+            }
+            Ok(())
+        },
+        Affinity::restore,
+    )
+}

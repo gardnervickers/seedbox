@@ -9,6 +9,7 @@
 pub mod admission;
 pub mod bundle;
 pub mod config;
+pub mod counter;
 pub mod execution;
 pub mod exploration;
 pub mod guest;

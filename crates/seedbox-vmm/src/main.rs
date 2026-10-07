@@ -9,6 +9,7 @@ mod events;
 mod faults;
 mod machine;
 mod network_counters;
+mod profile;
 mod rng;
 mod stepper;
 mod undo;
@@ -932,6 +933,7 @@ fn report(
     Ok(json!({
         "report_version": 1,
         "seed": seed,
+        "counter_profile": profile::host()?.name,
         "outcome": outcome,
         "sim_seconds": sim_ns as f64 / 1e9,
         "host_seconds": host_seconds,

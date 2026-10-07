@@ -76,6 +76,7 @@ class BatchTests(unittest.TestCase):
                 sender.start()
             with patch.object(batch, 'siblings', side_effect=lambda cpu:{cpu,cpu+16}), \
                  patch.object(batch.subprocess, 'Popen', side_effect=launch), \
+                 patch.object(batch.msr54, 'required', return_value=True), \
                  patch.object(batch.msr54, 'show'), \
                  patch.object(batch.msr54, 'set_workaround', side_effect=set_msr), \
                  patch.object(batch.msr54, 'restore_snapshot', side_effect=restore):

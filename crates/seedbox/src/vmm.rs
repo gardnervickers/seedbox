@@ -2,6 +2,7 @@
 //! execution artifact generated from verified inputs, not the authoring format.
 
 use crate::{
+    counter::CounterProfile,
     execution::*,
     store::{ContentDigest, ContentStore},
     Error, Result,
@@ -17,6 +18,8 @@ use std::{
 pub struct VmmExecutor {
     /// Host CPU to pin the VMM to; `None` leases the first free eligible core.
     pub cpu: Option<u32>,
+    counter: CounterProfile,
+    allow_unqualified: bool,
     profile: ExecutionProfile,
     performance: BTreeMap<String, String>,
     admission: std::sync::Arc<std::sync::Mutex<Vec<Vec<crate::admission::CoreObservation>>>>,
@@ -47,13 +50,20 @@ impl VmmExecutor {
         cpu: Option<u32>,
         memory_mb: u32,
         witness_mode: WitnessMode,
+        counter: CounterProfile,
     ) -> Result<Self> {
         if !(64..=65536).contains(&memory_mb) {
             return Err(Error::Execution(
                 "guest memory must be 64..65536 MiB".into(),
             ));
         }
-        Self::from_engine_digest(store.put_file(engine)?, cpu, memory_mb, witness_mode)
+        Self::from_engine_digest(
+            store.put_file(engine)?,
+            cpu,
+            memory_mb,
+            witness_mode,
+            counter,
+        )
     }
 
     fn from_engine_digest(
@@ -61,6 +71,7 @@ impl VmmExecutor {
         cpu: Option<u32>,
         memory_mb: u32,
         witness_mode: WitnessMode,
+        counter: CounterProfile,
     ) -> Result<Self> {
         if !(64..=65536).contains(&memory_mb) {
             return Err(Error::Execution(
@@ -72,9 +83,15 @@ impl VmmExecutor {
             ("control_channel".into(), "virtio-console-v1".into()),
             ("memory_mb".into(), memory_mb.to_string()),
         ]);
-        semantic_parameters.extend(crate::admission::bindings()?);
+        if counter == CounterProfile::Zen {
+            semantic_parameters.extend(crate::admission::bindings()?);
+        } else {
+            semantic_parameters.insert(COUNTER.into(), counter.name().into());
+        }
         Ok(Self {
             cpu,
+            counter,
+            allow_unqualified: false,
             admission: Default::default(),
             profile: ExecutionProfile {
                 backend: "seedbox-kvm".into(),
@@ -97,12 +114,37 @@ impl VmmExecutor {
             cpu,
             1024,
             WitnessMode::Exits,
+            CounterProfile::Zen,
         )?;
         crate::admission::validate_profile(&executor.profile)?;
         let kernel = crate::admission::file_digest(kernel)?;
         crate::admission::validate_kernel(&kernel)?;
+        Self::doctor_counter(crate::counter::CounterProfile::host()?)?;
         let probe = executor.probe();
         executor.doctor_report(kernel, probe)
+    }
+
+    fn doctor_counter(counter: CounterProfile) -> Result<()> {
+        if !counter.qualified() {
+            return Err(Error::Setup(format!("doctor cannot qualify the unqualified {} counter; --allow-unqualified-cpu permits experimental execution only", counter.name())));
+        }
+        Ok(())
+    }
+
+    /// Explicitly permit an experimental counter; release and input checks still apply.
+    pub fn with_unqualified_cpu(mut self, allow: bool) -> Self {
+        self.allow_unqualified = allow;
+        self
+    }
+
+    fn validate_execution_mode(&self) -> Result<()> {
+        if !self.counter.qualified() && !self.allow_unqualified {
+            return Err(Error::Setup(format!(
+                "{} is unqualified; explicitly allow unqualified CPU execution",
+                self.counter.name()
+            )));
+        }
+        Ok(())
     }
 
     fn doctor_report(&self, kernel: ContentDigest, probe: AdmissionProbe) -> Result<DoctorReport> {
@@ -125,6 +167,35 @@ impl VmmExecutor {
             kernel,
             observations: probe.observations,
         })
+    }
+
+    fn unqualified_preflight(&self, output: Option<&Path>) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            let reservation = crate::host::CpuReservation::acquire(self.cpu)?;
+            let result =
+                crate::admission::check_unqualified(reservation.cpus.iter().copied(), self.counter);
+            if let Some(output) = output {
+                crate::admission::finish_admission(result, |_| {
+                    std::fs::write(
+                        output.join("host-unqualified.json"),
+                        serde_json::to_vec_pretty(
+                            &serde_json::json!({"counter":self.counter.name(),"qualified":false,"cpu":reservation.cpu,"cpus":reservation.cpus}),
+                        )?,
+                    )?;
+                    Ok(())
+                })
+            } else {
+                result
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = output;
+            Err(Error::Setup(
+                "experimental execution requires a Linux KVM host".into(),
+            ))
+        }
     }
 
     fn probe(&self) -> AdmissionProbe {
@@ -178,9 +249,24 @@ impl VmmExecutor {
     }
 }
 
+const COUNTER: &str = "counter";
+
+/// The branch counter profile a recorded run was made with.
+pub fn recorded_counter(profile: &ExecutionProfile) -> Result<CounterProfile> {
+    match profile.semantic_parameters.get(COUNTER) {
+        None => Ok(CounterProfile::Zen),
+        Some(name) => CounterProfile::from_name(name)
+            .ok_or_else(|| Error::Integrity(format!("unknown counter profile {name}"))),
+    }
+}
+
 impl ExecutionBackend for VmmExecutor {
     fn preflight(&self, output: Option<&Path>) -> Result<()> {
         crate::admission::validate_profile(&self.profile)?;
+        self.validate_execution_mode()?;
+        if !self.counter.qualified() {
+            return self.unqualified_preflight(output);
+        }
         let probe = self.probe();
         let observations = probe.observations;
         let collection = probe.result;
@@ -207,7 +293,13 @@ impl ExecutionBackend for VmmExecutor {
         })
     }
     fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {
+        self.validate_execution_mode()?;
         crate::admission::validate_profile(&inputs.profile)?;
+        if recorded_counter(&inputs.profile)? != self.counter {
+            return Err(Error::Integrity(
+                "recorded branch counter differs from executor".into(),
+            ));
+        }
         crate::admission::validate_kernel(&inputs.kernel)
     }
 
@@ -336,6 +428,8 @@ struct MachineReport {
 struct VmmReport {
     report_version: u32,
     seed: u64,
+    /// Absent from engines older than counter profiles, which are all Zen.
+    counter_profile: Option<String>,
     outcome: String,
     world_witness: ContentDigest,
     machines: Vec<MachineReport>,
@@ -574,6 +668,22 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
     let raw: VmmReport = serde_json::from_slice(bytes)?;
     if raw.report_version != 1 || raw.seed != request.seed {
         return Err(Error::Integrity("VMM report version/seed mismatch".into()));
+    }
+    let counted = recorded_counter(&request.prepared.profile)?;
+    if counted != CounterProfile::Zen && raw.counter_profile.is_none() {
+        return Err(Error::Integrity(
+            "unqualified VMM report is missing its counter profile".into(),
+        ));
+    }
+    let expected = counted.name();
+    if raw
+        .counter_profile
+        .as_deref()
+        .is_some_and(|name| name != expected)
+    {
+        return Err(Error::Integrity(format!(
+            "VMM counted with a different branch counter profile than the recorded {expected}"
+        )));
     }
     let names: BTreeSet<_> = raw.machines.iter().map(|machine| &machine.name).collect();
     if names.len() != raw.machines.len() || names != request.prepared.guests.keys().collect() {
@@ -861,12 +971,32 @@ mod linux {
             .lock()
             .map_err(|_| Error::Execution("host admission evidence lock poisoned".into()))?
             .clone();
-        fs::write(
-            request.output.join("host-static.json"),
-            serde_json::to_vec_pretty(&static_evidence)?,
-        )?;
-        let (cpu, mut lease) =
-            HostLease::acquire_checked(backend.cpu, request.output, |reservation| {
+        if backend.counter.qualified() {
+            fs::write(
+                request.output.join("host-static.json"),
+                serde_json::to_vec_pretty(&static_evidence)?,
+            )?;
+        }
+        let (cpu, mut lease) = HostLease::acquire_checked(
+            backend.cpu,
+            backend.counter.workaround(),
+            request.output,
+            |reservation| {
+                if !backend.counter.qualified() {
+                    let check = crate::admission::check_unqualified(
+                        reservation.cpus.iter().copied(),
+                        backend.counter,
+                    );
+                    return crate::admission::finish_admission(check, |result| {
+                        fs::write(
+                            request.output.join("host-leased-unqualified.json"),
+                            serde_json::to_vec_pretty(
+                                &serde_json::json!({"counter":backend.counter.name(),"qualified":false,"cpu":reservation.cpu,"cpus":reservation.cpus,"applicable_checks_passed":result.is_ok(),"error":result.as_ref().err().map(ToString::to_string)}),
+                            )?,
+                        )?;
+                        Ok(())
+                    });
+                }
                 let mut observed = Vec::new();
                 let admission = crate::admission::collect_admitted(
                     reservation.cpus.iter().copied(),
@@ -886,12 +1016,15 @@ mod linux {
                     }
                     Ok(())
                 })
-            })?;
-        let originals = lease.original_registers();
-        fs::write(
-            request.output.join("host-workaround.json"),
-            serde_json::to_vec_pretty(&lease.enabled_registers()?)?,
+            },
         )?;
+        let originals = lease.original_registers();
+        if backend.counter.workaround().is_some() {
+            fs::write(
+                request.output.join("host-workaround.json"),
+                serde_json::to_vec_pretty(&lease.enabled_registers()?)?,
+            )?;
+        }
         unsafe {
             command.pre_exec(move || {
                 if libc::setpgid(0, 0) != 0 {
@@ -926,10 +1059,12 @@ mod linux {
         };
         child.stop()?;
         lease.restore()?;
-        fs::write(
-            request.output.join("host-restored.json"),
-            serde_json::to_vec_pretty(&originals)?,
-        )?;
+        if backend.counter.workaround().is_some() {
+            fs::write(
+                request.output.join("host-restored.json"),
+                serde_json::to_vec_pretty(&originals)?,
+            )?;
+        }
         completion
     }
 }
@@ -962,12 +1097,87 @@ mod doctor_tests {
         }
     }
     #[test]
+    fn experimental_mode_never_carries_amd_proof_and_cannot_relax_release_or_counter_checks() {
+        let make = |counter| {
+            VmmExecutor::from_engine_digest(
+                ContentDigest::try_from(ENGINE.to_owned()).unwrap(),
+                None,
+                512,
+                WitnessMode::Exits,
+                counter,
+            )
+            .unwrap()
+        };
+        let experimental = make(CounterProfile::IntelIceLake);
+        assert!(experimental.validate_execution_mode().is_err());
+        assert!(experimental
+            .clone()
+            .with_unqualified_cpu(true)
+            .validate_execution_mode()
+            .is_ok());
+        assert!(!experimental
+            .profile
+            .semantic_parameters
+            .keys()
+            .any(|key| key.starts_with("host_policy")));
+        assert_eq!(
+            recorded_counter(&experimental.profile).unwrap(),
+            CounterProfile::IntelIceLake
+        );
+        assert!(crate::admission::validate_profile(&experimental.profile).is_ok());
+        for counter in [CounterProfile::IntelIceLake, CounterProfile::IntelSkylake] {
+            assert!(VmmExecutor::doctor_counter(counter).is_err());
+        }
+        assert!(VmmExecutor::doctor_counter(CounterProfile::Zen).is_ok());
+        let mut wrong = experimental.profile.clone();
+        wrong.engine = ContentDigest::of(b"tampered engine");
+        assert!(crate::admission::validate_profile(&wrong).is_err());
+        wrong = experimental.profile.clone();
+        wrong
+            .semantic_parameters
+            .extend(crate::admission::bindings().unwrap());
+        assert!(crate::admission::validate_profile(&wrong).is_err());
+        wrong = experimental.profile.clone();
+        wrong
+            .semantic_parameters
+            .insert("counter".into(), "unknown".into());
+        assert!(crate::admission::validate_profile(&wrong).is_err());
+        assert!(crate::admission::validate_kernel(&ContentDigest::of(b"tampered kernel")).is_err());
+        let inputs = PreparedInputs {
+            kernel: ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap(),
+            images: BTreeMap::new(),
+            placement: BTreeMap::new(),
+            guests: BTreeMap::new(),
+            profile: experimental.profile.clone(),
+            auxiliary: BTreeMap::new(),
+            provenance: BTreeMap::new(),
+        };
+        assert!(experimental.validate_retained(&inputs).is_err());
+        assert!(experimental
+            .clone()
+            .with_unqualified_cpu(true)
+            .validate_retained(&inputs)
+            .is_ok());
+        assert!(make(CounterProfile::IntelSkylake)
+            .with_unqualified_cpu(true)
+            .validate_retained(&inputs)
+            .is_err());
+        let zen = make(CounterProfile::Zen);
+        let mut stripped = zen.profile.clone();
+        stripped
+            .semantic_parameters
+            .retain(|key, _| !key.starts_with("host_policy"));
+        assert!(crate::admission::validate_profile(&stripped).is_err());
+    }
+
+    #[test]
     fn doctor_report_preserves_actual_selected_core_and_exact_admitted_observations() {
         let executor = VmmExecutor::from_engine_digest(
             ContentDigest::try_from(ENGINE.to_owned()).unwrap(),
             None,
             1024,
             WitnessMode::Exits,
+            CounterProfile::Zen,
         )
         .unwrap();
         let observations = vec![observed(2), observed(18)];
@@ -999,6 +1209,7 @@ mod doctor_tests {
             Some(2),
             1024,
             WitnessMode::Exits,
+            CounterProfile::Zen,
         )
         .unwrap();
         for case in 0..3 {

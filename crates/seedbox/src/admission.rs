@@ -157,7 +157,23 @@ pub fn bindings() -> Result<BTreeMap<String, String>> {
 }
 
 pub fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
-    for (name, required) in bindings()? {
+    let counter = crate::vmm::recorded_counter(profile)?;
+    if counter != crate::counter::CounterProfile::Zen
+        && profile
+            .semantic_parameters
+            .keys()
+            .any(|k| k.starts_with("host_policy"))
+    {
+        return Err(Error::Integrity(
+            "unqualified counter cannot carry qualified AMD host policy bindings".into(),
+        ));
+    }
+    let required_bindings = if counter == crate::counter::CounterProfile::Zen {
+        bindings()?
+    } else {
+        BTreeMap::new()
+    };
+    for (name, required) in required_bindings {
         match profile.semantic_parameters.get(&name) {
             None => return Err(Error::Integrity(format!("host admission proof missing: {name}; use the retained previous CLI only for historical evidence"))),
             Some(actual) if actual != &required => return Err(Error::Integrity(format!("host admission proof incompatible: {name}"))),
@@ -658,5 +674,27 @@ mod cleanup_tests {
                 .to_string()
                 .contains("preflight cleanup failed"));
         }
+    }
+}
+
+/// Applicable readiness for explicitly unqualified execution, never AMD qualification.
+#[cfg(target_os = "linux")]
+pub(crate) fn check_unqualified(
+    cpus: impl IntoIterator<Item = u32>,
+    counter: crate::counter::CounterProfile,
+) -> Result<()> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        for cpu in cpus {
+            linux::check_unqualified(cpu, counter)?;
+        }
+        Ok(())
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (cpus, counter);
+        Err(Error::Setup(
+            "experimental execution requires x86-64 Linux KVM".into(),
+        ))
     }
 }

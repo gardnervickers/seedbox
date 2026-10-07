@@ -106,7 +106,7 @@ The guest supervisor is built into `seedbox`, and BusyBox comes from
 `SEEDBOX_BUSYBOX`. A missing input fails before preparation starts and names
 every location searched.
 
-Execution now requires the versioned `amd-zen3-engine168ad-v1` host policy in
+Qualified Zen execution requires the versioned `amd-zen3-engine168ad-v1` host policy in
 [host requirements](../README.md#host-requirements). Run validates immutable
 engine/kernel inputs and performs host admission before OCI work. Temporary
 core reservations, affinity and disabled exact-event perf descriptors are released
@@ -136,7 +136,9 @@ leases exactly that core and fails if another run holds it. The executor reserve
 the chosen core and all SMT siblings with the same `/tmp/seedbox-msr-cpu-N.lock` flock
 protocol as `harness/batch.py`, before reading or changing MSRs. It snapshots exact
 values, sets bit 54 with readback, pins the VMM, and restores with readback only
-after reaping it. An unsuccessful restore retains `output/msr-original.json`.
+after reaping it. Only the Zen counter profile needs this workaround; on a host
+with another profile the executor leases the cores and leaves MSRs alone. Other
+profiles are unqualified and run only with `--allow-unqualified-cpu`. An unsuccessful restore retains `output/msr-original.json`.
 Library cancellation and CLI SIGINT/SIGTERM/SIGHUP cause cleanup through the same
 path. SIGKILL and host loss cannot guarantee cleanup.
 
@@ -384,3 +386,27 @@ engine bytes does not establish cross-host or cross-backend compatibility; full
 host drift is refused by the versioned admission policy; focused guest/profile
 acceptance remains a separate gate. Portable fixture replay verifies the bundle
 mechanism; offline application replay requires separate hardware acceptance.
+
+### Explicit unqualified counters
+
+`--allow-unqualified-cpu` applies consistently to run, explore and replay. It
+permits only an explicitly selected known non-Zen counter, with a warning that
+results are unverified. Its `counter` semantic parameter identifies the
+experimental profile; qualified AMD `host_policy` fields are absent and a mixed
+profile is refused. Replay still requires the recorded counter and exact
+supported release/input bytes. The flag cannot bypass release pins, checksums,
+retained-profile checks or CPU ownership. This encoding is intentional; old
+records are not silently upgraded or relabeled.
+
+The experimental path checks the counter on each selected SMT sibling and
+applicable KVM capabilities under a scoped affinity guard, then rechecks while
+all canonical leases are held. A counter without a workaround does not open,
+write or claim restoration of AMD MSRs. Every child is reaped before applicable
+restoration and lease release. `doctor` returns a setup refusal for unqualified
+counters, including when the experimental flag is present, so it never emits an
+AMD `VALID` success for Intel. Exit meanings remain unchanged.
+
+The current staged source retains engine168ad/kernel release pins. Supporting
+the newly merged counter-aware engine requires one final frozen artifact,
+reviewed policy update and separate runtime acceptance. Source tests and warned
+Intel opt-in are not Intel qualification or a determinism guarantee.

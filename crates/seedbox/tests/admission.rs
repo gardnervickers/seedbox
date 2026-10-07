@@ -216,7 +216,15 @@ fn previous_full_sorted_policy_proof_remains_not_comparable_and_immutable() {
     let engine = root.path().join("unused-engine");
     fs::write(&engine, b"not executed").unwrap();
     let store = ContentStore::new(root.path().join("objects"));
-    let executor = VmmExecutor::new(&engine, &store, None, 512, WitnessMode::Exits).unwrap();
+    let executor = VmmExecutor::new(
+        &engine,
+        &store,
+        None,
+        512,
+        WitnessMode::Exits,
+        seedbox::counter::CounterProfile::Zen,
+    )
+    .unwrap();
     let runner = Orchestrator::new(store, root.path().join("runs"));
     for allow_engine_change in [false, true] {
         let result = runner
@@ -294,7 +302,15 @@ fn unchanged_actual_and_synthetic_historical_records_are_readable_but_not_admitt
         let engine = root.path().join("test-only-executor-engine");
         fs::write(&engine, b"synthetic executor bytes; never execute").unwrap();
         let store = ContentStore::new(root.path().join("objects"));
-        let executor = VmmExecutor::new(&engine, &store, None, 512, WitnessMode::Exits).unwrap();
+        let executor = VmmExecutor::new(
+            &engine,
+            &store,
+            None,
+            512,
+            WitnessMode::Exits,
+            seedbox::counter::CounterProfile::Zen,
+        )
+        .unwrap();
         let runner = Orchestrator::new(store, root.path().join("runs"));
         for allow_engine_change in [false, true] {
             let rejected = runner

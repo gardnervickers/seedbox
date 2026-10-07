@@ -90,3 +90,9 @@ Check the host and installed engine/kernel with `seedbox doctor` (Linux KVM,
 root) before running. It uses the normal CPU/runtime defaults without building,
 preparing images or starting guests. `VALID` means execution-profile compatibility,
 not cross-host replay qualification; `--json` shows the admitted observations.
+
+Known non-Zen counters require explicit `--allow-unqualified-cpu` for run,
+explore and replay and remain unverified. They retain exact release/counter/input
+checks and SMT ownership but carry no qualified AMD proof or AMD MSR writes.
+`doctor` refuses those counters. The staged engine policy must be updated and
+accepted for the final engine before fresh runtime use; Intel is not qualified.

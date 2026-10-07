@@ -244,6 +244,24 @@ fn explicit_inputs_must_exist() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn unqualified_cpu_permission_is_checked_after_the_inputs() {
+    // Whatever this host's CPU, input errors come first, with or without the flag.
+    let (directory, mut args) = runtime_project();
+    let bin = directory.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    for allow in [false, true] {
+        if allow {
+            args.push("--allow-unqualified-cpu".into());
+        }
+        let args: Vec<_> = args.iter().map(String::as_str).collect();
+        let output = seedbox_with(&args, directory.path(), Some(&bin));
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).starts_with("error: no static BusyBox found;"));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn busybox_default_requires_a_static_busybox_on_path() {
     let (directory, args) = runtime_project();
     let args: Vec<_> = args.iter().map(String::as_str).collect();
