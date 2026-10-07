@@ -58,6 +58,8 @@ class MapTests(unittest.TestCase):
                 ('flake.nix', 'toolchain'), ('flake.lock', 'toolchain'),
                 ('rust-toolchain.toml', 'toolchain'), ('Cargo.lock', 'toolchain'),
                 ('.cargo/config.toml', 'toolchain'),
+                ('harness/vmm-rustc.py', 'toolchain'),
+                ('crates/seedbox-control/Cargo.toml', 'toolchain'),
                 ('harness/batch.sh', 'batch runner')):
             with self.subTest(path=path):
                 plan = host_plan.select_checks({'rev': [path]})
@@ -153,7 +155,9 @@ class MapTests(unittest.TestCase):
             with self.subTest(path=path):
                 plan = host_plan.select_checks({'r': [path]})
                 self.assertEqual(set(plan['checks']), {'core'})
-        for path in ('crates/seedbox-vmm/Cargo.lock', 'guest/compose-init.c', 'flake.lock'):
+        for path in ('crates/seedbox-vmm/Cargo.lock', 'guest/compose-init.c', 'flake.lock',
+                     'harness/vmm-rustc.py', 'crates/seedbox-control/Cargo.toml',
+                     'crates/seedbox-control/src/lib.rs'):
             with self.subTest(path=path):
                 self.assertIn('cluster-fixed', host_plan.select_checks({'r': [path]})['checks'])
         forced = host_plan.select_checks({}, extra=['cluster-fixed'], engine_changed=False)
@@ -401,6 +405,24 @@ class GitPlannerTests(unittest.TestCase):
                 plan = host_plan.plan_revision(self.repo, 'base', 'HEAD')
                 self.assertFalse(plan['engine_changed'])
                 self.assertEqual(set(plan['checks']), CORE)
+
+    def test_wrapper_and_control_are_engine_inputs_compared_with_main(self):
+        for path in ('harness/vmm-rustc.py', 'crates/seedbox-control/Cargo.toml',
+                     'crates/seedbox-control/src/lib.rs'):
+            with self.subTest(path=path):
+                self.commit(path, 'original')
+                self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+                self.git('branch', '-f', 'base')
+                self.commit(path, 'changed')
+                plan = host_plan.plan_revision(self.repo, 'base', 'HEAD')
+                self.assertTrue(plan['engine_changed'])
+                self.assertIn('cluster-fixed', plan['checks'])
+                self.assertIn(dict(revision=plan['target'], path=path, category='toolchain'),
+                              plan['checks']['cluster-fixed'])
+                self.commit(path, 'original')
+                plan = host_plan.plan_revision(self.repo, 'base', 'HEAD')
+                self.assertFalse(plan['engine_changed'])
+                self.assertNotIn('cluster-fixed', plan['checks'])
 
     def test_renames_keep_old_runtime_path_coverage(self):
         source = 'crates/seedbox-vmm/src/disk.rs'
