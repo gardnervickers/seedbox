@@ -31,6 +31,7 @@ and identities.
 | `cluster-fork-late.json` | The same cluster forked at 1.4 simulated seconds, after etcd has started, with timer and link jitter (see below) |
 | `cluster-fork-skew.json` | `cluster-fork.json` released with up to 50 ms of seeded skew, jitter, and a timed partition after the release (see below) |
 | `net-pause.json`, `net-crash.json`, `net-crash-fork.json` | `net.json` with machine `b` paused, or crashed and rebooted, while `a` pings it (see below) |
+| `disk-nocrash.json`, `disk-crash.json`, `disk-ext4-crash.json` | One machine with a retained disk: raw-block FLUSH/FUA probe with and without a crash, and an fsync ledger on ext4 across a crash (see below) |
 
 `batch.sh`, `batch.py` and `msr54.py` still run these fixtures with shared CPU/SMT
 leases and verified MSR restoration. Runtime lifecycle tests also use their CPU
@@ -147,10 +148,9 @@ across incarnations, and its exit witness covers all of them. A machine's
 crashed a machine leaves no trace in the next: the engine boots a first
 incarnation again to restore into.
 
-This is RAM-only crash and reboot. Nothing persists across a crash, so the
-new incarnation starts from its initramfs. Retained disks (#58, #59) will
-add the one thing that survives: the crash path is where the engine decides
-what the next incarnation inherits, and today that is only the logs.
+Without a disk this is RAM-only crash and reboot: the new incarnation starts
+from its initramfs. A machine with a `disk` (below) also keeps the disk's
+flushed writes.
 
 `net-pause.json` pauses `b` from 2 s to 3.5 s while `a` pings it, and
 `net-crash.json` crashes `b` at 2 s and reboots it at 2.5 s. Check that a run
@@ -163,4 +163,53 @@ CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/net-crash.json crash
 CPU0=14 SEEDBOX_UNDO=0 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/net-crash.json crash-undo0 "1009" --digest
 for s in 1010 1011; do CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/net-crash-fork.json crash-fork-cold "$s" --digest; done
 CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/net-crash-fork.json crash-fork-loop "1009" --digest --fork-seeds 1010,1011
+```
+
+## Retained disk
+
+A machine's `disk` gives it a virtio-blk disk at `/dev/vda`:
+`{"size_mib": N}` for a zeroed disk, or `{"image": PATH}` for a raw image
+(relative to the config; with `size_mib` too, it must be that size). Its
+semantics (`disk.rs`, model `flush-stable/drop-all-unflushed/v1`):
+
+- The device offers a write cache with FLUSH and no native FUA, as virtio 1.2
+  defines it, so Linux runs it in writeback mode and emulates FUA with a
+  FLUSH after the write. One queue; reads, writes, FLUSH and GET_ID.
+- Requests run in ring order when the guest notifies the queue and complete
+  before the notify returns, at a deterministic point. No rollback crosses a
+  completed request.
+- A completed write is volatile; reads see it at once. A completed FLUSH
+  makes every write completed before it stable before it is acknowledged.
+- A crash drops every volatile write and keeps every stable one. The next
+  incarnation boots with that disk and a fresh device. No torn writes and no
+  seeded surviving subsets. This models a machine crash, not host power loss:
+  nothing is written to host storage.
+- A fork restore puts the whole disk back, both layers.
+
+Each machine's report has a `disk` object: the model, capacity, the base
+image's SHA-256 (null for a zeroed disk), a `digest` of both layers, their sizes and request counts.
+The disk's digest feeds the world witness, and with `--digest` it is the
+`disk` part of the machine's state digest. Each crashed incarnation reports
+`disk_lost_sectors`. With `--trace`, each completed request is a `d` line
+whose value is `type << 56 | status << 48 | sector` (type 1 write, 4 flush).
+
+`guest/build-disk.sh artifacts/disk.cpio artifacts/ext4.img` builds the
+probes' initramfs and a fixed ext4 image (it needs `mkfs.ext4`). Disks need
+a kernel with `VIRTIO_BLK` and `EXT4_FS` (`kernel/config.options`).
+
+- `disk-nocrash.json`: `guest/blkprobe.c` writes a header and `A` with an
+  fsync each, `F` with `O_DSYNC` (FUA), then `B` over `A` and `C` with no
+  flush, reads them back, flushes and checks again. Exits 0 on PASS.
+- `disk-crash.json`: the same writes, then the machine crashes at 5 s and
+  reboots at 5.5 s. The next incarnation must read `A`, `F` and zeros: the
+  flushed and FUA writes survive, the unflushed ones do not. The crashed
+  incarnation reports 16 lost sectors.
+- `disk-ext4-crash.json`: `guest/fsledger.c` appends 50 records with an fsync
+  each and 20 without to a file on ext4, then the machine crashes and
+  reboots. After journal recovery the file must hold records 1..M in order,
+  whole, with 50 <= M <= 70.
+
+```sh
+for w in disk-nocrash disk-crash disk-ext4-crash; do CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/$w.json $w "1009 1009" --digest --trace; done
+CPU0=14 SEEDBOX_UNDO=0 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/disk-crash.json disk-crash-undo0 "1009" --digest
 ```
