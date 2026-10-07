@@ -31,11 +31,13 @@ measurements do not establish cold-install performance.
 `prepare` JSON cannot be fed into `run`; this tier adds no prepared-input adapter.
 
 The finite normal tier refuses a private wrong-content kernel before its good-input
-operations, requires fixed full-state PASS, then retained default, changed-margin
-and changed-undo MATCH. The changed-margin replay also turns undo off
-(`--undo 0 --margin 32768`): with undo on, the counter's final approach uses the
-undo margin and never reads `--margin`. Replays use the retained engine/kernel
-without overrides. `result.json` and stdout list each phase's wall time.
+operations, requires fixed full-state PASS, then retained default and
+changed-performance MATCH. One replay changes both settings
+(`--undo 0 --margin 16384`): with undo on, the counter's final approach uses the
+undo margin and never reads `--margin`. Undo-off stepping costs about 17x a
+default replay on this fixture, so the margin is the profile's smallest adaptive
+one. Replays use the retained engine/kernel without overrides. `result.json`,
+`failure.json` and stdout list each phase's wall time.
 It verifies the complete declared object closure, every retained log object's
 hash, semantic identity, full-state/witness/fault comparison and all opaque guest
 console/management bytes. Omitted logs or absent full-state evidence fail this tier.

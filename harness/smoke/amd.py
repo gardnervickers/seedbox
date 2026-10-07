@@ -304,12 +304,13 @@ class Campaign:
             raise RuntimeError('dev engine label missing from public run output')
         if baseline['identity']['inputs']['kernel'] != digest(a.kernel) or baseline['identity']['inputs']['profile']['engine'] != digest(a.engine):
             raise RuntimeError('executed kernel/engine differ from frozen supplied bytes')
-        # With undo on, the counter's final approach uses the undo margin and
-        # never reads --margin, so the margin change is only exercised with undo off.
+        # One undo-off replay covers both performance settings: with undo on, the
+        # counter's final approach uses the undo margin and never reads --margin.
+        # Undo-off stepping dominates the tier, so the margin is the profile's
+        # smallest adaptive margin rather than a larger, slower one.
         for name, flags, changes in [
                 ('default', [], None),
-                ('margin', ['--undo', '0', '--margin', '32768'], {'SEEDBOX_UNDO': '0', 'SEEDBOX_MARGIN': '32768'}),
-                ('undo', ['--undo', '0'], {'SEEDBOX_UNDO': '0'})]:
+                ('undo-margin', ['--undo', '0', '--margin', '16384'], {'SEEDBOX_UNDO': '0', 'SEEDBOX_MARGIN': '16384'})]:
             code, stdout, _ = self.invoke(name, [str(a.cli), 'replay', str(baseline_run), '--cpu', str(a.cpu), '--state', str(self.state), *dev_flags, *flags], True)
             if code != 0:
                 raise RuntimeError('retained replay failed')

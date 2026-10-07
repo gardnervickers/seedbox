@@ -103,10 +103,8 @@ class SmokeTests(unittest.TestCase):
         def inspect(name, run):
             inspected.append(name)
             record = copy.deepcopy(self.record)
-            if name == 'margin-inspect':
-                record['performance_parameters']['SEEDBOX_MARGIN'] = '32768'
-                record['performance_parameters']['SEEDBOX_UNDO'] = '0'
-            if name == 'undo-inspect':
+            if name == 'undo-margin-inspect':
+                record['performance_parameters']['SEEDBOX_MARGIN'] = '16384'
                 record['performance_parameters']['SEEDBOX_UNDO'] = '0'
             return record
         item = self.record['identity']['inputs']['kernel']
@@ -119,9 +117,8 @@ class SmokeTests(unittest.TestCase):
              patch.object(smoke, 'snapshot', return_value={}), \
              patch.object(smoke, 'pinned_workloads'):
             campaign.run()
-        self.assertEqual(inspected, ['fixed-inspect', 'default-inspect', 'margin-inspect', 'undo-inspect'])
-        self.assertEqual(commands['margin'][-4:], ['--undo', '0', '--margin', '32768'])
-        self.assertEqual(commands['undo'][-2:], ['--undo', '0'])
+        self.assertEqual(inspected, ['fixed-inspect', 'default-inspect', 'undo-margin-inspect'])
+        self.assertEqual(commands['undo-margin'][-4:], ['--undo', '0', '--margin', '16384'])
 
     def test_dev_doctor_cannot_claim_qualified_readiness(self):
         args = type('Args', (), dict(kernel='kernel', engine='engine', guest_init='init',
