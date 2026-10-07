@@ -8,7 +8,7 @@ use crate::{
     witness::{self, Record, Report},
     *,
 };
-use std::{rc::Rc, time::Instant};
+use std::{collections::BTreeSet, rc::Rc, time::Instant};
 
 /// Memory/device ownership and semantic decisions live here, never in a backend.
 /// Backend drops first and also retains its own references to every mapping.
@@ -18,6 +18,7 @@ pub struct Machine<B: Backend> {
     page: Rc<Memory>,
     uart: Pl011,
     uart_irq: bool,
+    deferred_spis: BTreeSet<u32>,
     event: ClockEvent,
     clock: PvClock,
     ready: bool,
@@ -67,6 +68,7 @@ impl<B: Backend> Machine<B> {
             page,
             uart: Pl011::default(),
             uart_irq: false,
+            deferred_spis: BTreeSet::new(),
             event: ClockEvent,
             clock: PvClock::default(),
             ready: false,
@@ -178,7 +180,7 @@ impl<B: Backend> Machine<B> {
                         }
                         Effect::Ack => {
                             self.clock.ack();
-                            self.backend.inject_spi(TIMER_SPI, false)?;
+                            self.inject_spi(TIMER_SPI, false)?;
                         }
                         Effect::Yield => self.clock.at_bound()?,
                         Effect::Ready(v) => {
@@ -225,6 +227,7 @@ impl<B: Backend> Machine<B> {
             if self.clock.judge(idle)? {
                 self.inject_spi(TIMER_SPI, true)?;
             }
+            self.flush_spis()?;
             self.trace
                 .push(Record::new(&stop.exit, self.clock.now(), stop.pc, response));
             if off {
@@ -248,6 +251,7 @@ impl<B: Backend> Machine<B> {
                     )
                 };
                 return Ok(Report {
+                    backend: B::NAME.into(),
                     arch: "arm64".into(),
                     timebase: "pv".into(),
                     format: 1,
@@ -271,16 +275,24 @@ impl<B: Backend> Machine<B> {
         Err("exit budget exhausted (5,000,000); no successful power-off".into())
     }
     fn inject_spi(&mut self, intid: u32, level: bool) -> Result<()> {
-        // A pending hardware IRQ can skid across instructions when the guest
-        // later unmasks DAIF.I. Linux records the interrupted PC in its stack
-        // and interrupt entropy pool. Require an unmasked admission boundary;
-        // never clear the guest's mask here or normalize the resulting RAM.
+        // Retain level assertions until an unmasked semantic exit. Queuing an
+        // IRQ in hardware while masked lets it skid after a later guest unmask.
+        // Deassertions also cancel an assertion not yet sent to the backend.
         if level && self.backend.get_reg(CoreReg::Pstate)? & (1 << 7) != 0 {
-            return Err(format!(
-                "SPI {intid} asserted with PSTATE.I masked: nondeterministic interrupt admission; rebuild kernel-arm64 with the unmasked PV idle rendezvous"
-            ));
+            self.deferred_spis.insert(intid);
+            return Ok(());
         }
+        self.deferred_spis.remove(&intid);
         self.backend.inject_spi(intid, level)
+    }
+    fn flush_spis(&mut self) -> Result<()> {
+        if !self.deferred_spis.is_empty() && self.backend.get_reg(CoreReg::Pstate)? & (1 << 7) == 0
+        {
+            for intid in std::mem::take(&mut self.deferred_spis) {
+                self.backend.inject_spi(intid, true)?;
+            }
+        }
+        Ok(())
     }
     fn publish(&mut self) -> Result<()> {
         let last = unsafe { self.page.word(8)? };

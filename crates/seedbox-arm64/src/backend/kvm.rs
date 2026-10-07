@@ -60,6 +60,7 @@ impl Kvm {
     }
 }
 impl Backend for Kvm {
+    const NAME: &'static str = "kvm";
     fn create() -> Result<Self> {
         let kvm = context(
             "open /dev/kvm (requires Linux arm64 and KVM access)",

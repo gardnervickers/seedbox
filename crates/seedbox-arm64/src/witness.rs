@@ -73,6 +73,7 @@ impl Record {
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Report {
+    pub backend: String,
     pub arch: String,
     pub timebase: String,
     pub format: u32,

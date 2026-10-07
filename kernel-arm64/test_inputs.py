@@ -21,8 +21,29 @@ apply = load("apply", "apply.py")
 initramfs = load("initramfs", "build-initramfs.py")
 audit = load("audit", "audit.py")
 config = load("config", "check-config.py")
+hashes = load("hashes", "check-hashes.py")
 
 class Inputs(unittest.TestCase):
+    def test_hashes_require_independent_expected_values(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected = root / "expected"
+            for name in ["Image", "init.cpio"]:
+                (root / name).write_bytes(name.encode())
+            expected.write_text("".join(
+                f"{hashlib.sha256(name.encode()).hexdigest()}  {name}\n"
+                for name in ["Image", "init.cpio"]))
+            hashes.check(root, expected)
+            (root / "Image").write_bytes(b"changed toolchain")
+            # A self-generated manifest must not override independent values.
+            (root / "SHA256SUMS").write_text("ignored")
+            with self.assertRaisesRegex(ValueError, "different source or toolchain"):
+                hashes.check(root, expected)
+            expected.write_text("REBUILD_REQUIRED_IMAGE_SHA256  Image\n")
+            with self.assertRaisesRegex(ValueError, "operator must fill"):
+                hashes.check(root, expected)
+
     def test_config_rejects_unknown_disabled_and_dropped_requests(self):
         requested = config.settings('CONFIG_PRESENT=y\nCONFIG_REMOVED=n\nCONFIG_HZ=100\n')
         actual = config.settings('# CONFIG_PRESENT is not set\nCONFIG_HZ=1000\n')
@@ -113,6 +134,64 @@ int main(void) {
         with tempfile.TemporaryDirectory() as directory:
             c = Path(directory) / "idle.c"
             exe = Path(directory) / "idle"
+            c.write_text(fixture)
+            subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
+                "-Wall", "-Wextra", "-Werror", str(c), "-o", str(exe)
+            ], check=True, capture_output=True)
+            subprocess.run([str(exe)], check=True, capture_output=True)
+
+    def test_poll_yield_preserves_caller_mask_and_retries_after_irq(self):
+        source = (HERE / "seedbox.c").read_text()
+        read = source[source.index("u64 notrace seedbox_read(void)"):
+                      source.index("static u64 cs_read")]
+        fixture = r"""
+#include <assert.h>
+#include <stdint.h>
+#include <stdlib.h>
+typedef uint64_t u64;
+#define notrace
+#define unlikely(x) (x)
+#define panic(...) abort()
+static unsigned long irq_flags, caller_flags;
+static int synchronized, writes;
+static char registers[64];
+static void *event = registers;
+static struct { u64 now, last, bound; } storage, *page = &storage;
+static u64 early_last;
+#define local_irq_save(saved) do { (saved) = irq_flags; irq_flags |= 128; } while (0)
+#define local_irq_enable() do { irq_flags &= ~128UL; synchronized = 0; } while (0)
+#define local_irq_disable() do { irq_flags |= 128; } while (0)
+#define local_irq_restore(saved) do { irq_flags = (saved); } while (0)
+#define irqs_disabled_flags(saved) ((saved) & 128)
+#define isb() do { synchronized = 1; } while (0)
+#define READ_ONCE(x) (assert(irq_flags & 128), (x))
+#define WRITE_ONCE(x, v) do { assert(irq_flags & 128); (x) = (v); } while (0)
+static void writeq(unsigned long value, void *address) {
+    assert(value == 1 && address == registers + 24);
+    assert(irq_flags == caller_flags);
+    if (!(caller_flags & 128)) assert(synchronized);
+    ++writes;
+    page->now = 100;
+    page->bound = UINT64_MAX;
+    /* Simulate IRQ clock reads during the unmasked rendezvous. */
+    if (!(caller_flags & 128)) page->last = 105;
+}
+""" + read + r"""
+int main(void) {
+    for (int masked = 0; masked != 2; ++masked) {
+        caller_flags = irq_flags = masked ? 0x3c0 : 0x340;
+        storage.now = storage.last = storage.bound = 100;
+        writes = synchronized = 0;
+        assert(seedbox_read() == (masked ? 101 : 106));
+        assert(irq_flags == caller_flags && writes == 1);
+        assert(seedbox_read() == (masked ? 102 : 107));
+        assert(irq_flags == caller_flags && writes == 1);
+    }
+}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            c = Path(directory) / "poll.c"
+            exe = Path(directory) / "poll"
             c.write_text(fixture)
             subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
                 "-Wall", "-Wextra", "-Werror", str(c), "-o", str(exe)

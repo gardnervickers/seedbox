@@ -116,6 +116,16 @@ fn suite<B: Backend>(name: &str, fast: bool) {
         "guest must verify a 1s sleep: {}",
         a.console
     );
+    assert!(
+        a.console.contains("busy-wait elapsed="),
+        "rebuild kernel-arm64/init.c"
+    );
+    assert!(
+        a.trace
+            .iter()
+            .any(|r| r.kind == 1 && r.write && r.addr == seedbox_arm64::EVENT_ADDR + 24),
+        "busy-wait must cross a polling bound"
+    );
     if fast {
         assert!(
             a.wall_seconds < 1.0,

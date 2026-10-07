@@ -316,3 +316,80 @@ seeded kill/restart schedule, eight writers for 60 seconds, and etcd 3.5.3
 controls over the same seeds. The historical ABI1 timings are in
 [the historical networking report](https://github.com/gardnervickers/seedbox/blob/788fc4376b7e2cc96d1bc51ed2ae3d4635d16abd/research/single-vm-network/REPORT.md)
 and must not be attributed to these revised sources.
+
+## Experimental arm64 quickstart
+
+The isolated `seedbox-arm64` crate runs a single-CPU PV fixture on native Mac
+HVF or Linux arm64 KVM. It is separate from the Compose/x86 CLI above.
+
+**Rebuild pending:** the review fix changes both the kernel and `/init`.
+`kernel-arm64/expected-hashes.sha256` deliberately contains `REBUILD_REQUIRED_*`
+placeholders. The operator must fill both with independently reviewed SHA-256
+values after rebuilding and accepting the new guest. The check below fails
+until then. Do not derive expected hashes from the local files being checked.
+The build-generated `SHA256SUMS` only checks transfer integrity.
+
+Requires an M-series Mac, macOS 15+, Xcode Command Line Tools, and Nix with
+flakes enabled. This runs the experimental single-CPU PV fixture. The Linux VM
+only builds its inputs; HVF executes the fixture directly on the Mac. Allow
+about 24 GiB of VM disk and several minutes for the kernel build.
+
+```sh
+git clone --branch astra/arm64-hvf https://github.com/gardnervickers/seedbox.git
+cd seedbox
+nix develop
+cargo build-arm64
+bash crates/seedbox-arm64/codesign.sh
+
+# Enter a temporary shell with Lima. Stay in the checkout root.
+nix shell nixpkgs#lima -c bash
+export LIMA_HOME="$(mktemp -d /tmp/sb-lima.XXXXXX)"
+cat > "$LIMA_HOME/seedbox-build.yaml" <<'YAML'
+vmType: vz
+arch: aarch64
+cpus: 4
+memory: 8GiB
+disk: 24GiB
+images:
+  - location: https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img
+    arch: aarch64
+mounts: []
+containerd:
+  system: false
+  user: false
+YAML
+limactl start --name=seedbox-build --tty=false "$LIMA_HOME/seedbox-build.yaml"
+limactl copy -r kernel-arm64 seedbox-build:/tmp/kernel-arm64
+limactl shell --workdir /tmp seedbox-build sudo apt-get update
+limactl shell --workdir /tmp seedbox-build sudo apt-get install -y \
+  build-essential musl-tools flex bison bc libssl-dev libelf-dev curl xz-utils python3
+limactl shell --workdir /tmp seedbox-build env BUILD_JOBS=4 \
+  bash /tmp/kernel-arm64/build.sh /tmp/seedbox-arm64-inputs
+mkdir -p artifacts/arm64-mac
+limactl copy -r seedbox-build:/tmp/seedbox-arm64-inputs/. artifacts/arm64-mac/
+python3 kernel-arm64/check-hashes.py artifacts/arm64-mac || exit "$?"
+# Preserve the inputs on the Mac, then remove only this task's VM.
+limactl stop seedbox-build
+limactl delete --force seedbox-build
+exit  # leave the Lima shell; return to nix develop in the checkout
+
+for repeat in 1 2; do
+  crates/seedbox-arm64/target/release/seedbox-arm64 run \
+    --backend hvf --kernel artifacts/arm64-mac/Image \
+    --initrd artifacts/arm64-mac/init.cpio --seed 1 > "artifacts/arm64-mac/run-$repeat.stdout" || exit "$?"
+  cat "artifacts/arm64-mac/run-$repeat.stdout"
+done
+cmp artifacts/arm64-mac/run-1.stdout artifacts/arm64-mac/run-2.stdout
+```
+
+The acceptance test is that both runs exit 0 and print **identical** stdout
+lines, `WITNESS: <hex>`; `cmp` checks equality. A witness line alone does not
+compare against a known result. Console and timing go to stderr; setup/runtime
+errors exit 2. Sign again after Cargo relinks the executable.
+
+The hash checker explicitly compares `Image` and `init.cpio` with the checked-in
+expected values. A mismatch means different inputs, often from a changed source
+or toolchain, and can produce a different witness. Ubuntu's cloud image and apt
+toolchain are not pinned. Same-input, same-host repeatability remains required.
+See [the ABI, backend contract and operator steps](docs/arm64-backends.md) for
+rebuild handoff, full acceptance and the remaining cross-backend RAM difference.

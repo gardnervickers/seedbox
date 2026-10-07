@@ -101,7 +101,7 @@ fn execute(args: Args) -> Result<()> {
         "exits: {}\nvirtual_ns: {}\nwall_seconds: {:.6}",
         report.exits, report.virtual_ns, report.wall_seconds
     );
-    println!("PASS: {}", report.witness);
+    println!("WITNESS: {}", report.witness);
     Ok(())
 }
 fn run(

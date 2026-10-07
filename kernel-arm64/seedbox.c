@@ -39,8 +39,20 @@ again:
 	if (unlikely(!value))
 		panic("seedbox: clock overflow");
 	if (value > READ_ONCE(page->bound)) {
-		/* The VMM reconciles last, expires the timer and republishes. */
-		writeq(1, event + 24);
+		/* Deliver at the yield when the caller permits IRQs. Restore the
+		 * caller's state before the unmasked rendezvous, then serialize
+		 * the retry against IRQ clock reads again. Masked callers leave
+		 * the level pending until a later unmasked semantic exit.
+		 */
+		if (!irqs_disabled_flags(flags)) {
+			local_irq_restore(flags);
+			local_irq_enable();
+			isb();
+			writeq(1, event + 24);
+			local_irq_disable();
+		} else {
+			writeq(1, event + 24);
+		}
 		goto again;
 	}
 	WRITE_ONCE(page->last, value);

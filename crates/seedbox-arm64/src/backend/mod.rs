@@ -70,6 +70,8 @@ pub enum DirtyPages {
 /// on KVM the kernel finishes MMIO on the next entry, before executing guest code.
 /// Neither host interruptions nor backend maintenance may advance guest time.
 pub trait Backend: Sized {
+    /// Report metadata only; excluded from the canonical witness.
+    const NAME: &'static str = "mock";
     fn create() -> Result<Self>;
     fn map_memory(&mut self, slot: u32, ipa: u64, memory: Rc<Memory>) -> Result<()>;
     fn unmap_memory(&mut self, slot: u32) -> Result<()>;

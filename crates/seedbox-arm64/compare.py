@@ -8,7 +8,9 @@ def main():
     if len(sys.argv) != 3: raise SystemExit(f"usage: {sys.argv[0]} LEFT.json RIGHT.json")
     with open(sys.argv[1]) as f: a = json.load(f)
     with open(sys.argv[2]) as f: b = json.load(f)
-    for key in ["arch", "timebase", "format", "seed", "kernel_sha256", "initrd_sha256"]:
+    if not a.get("backend") or not b.get("backend"):
+        raise SystemExit("NOT_COMPARABLE: backend missing; regenerate reports with backend metadata")
+    for key in ["backend", "arch", "timebase", "format", "seed", "kernel_sha256", "initrd_sha256"]:
         if a[key] != b[key]: raise SystemExit(f"NOT_COMPARABLE: {key}: {a[key]} != {b[key]}")
     if a["witness"] == b["witness"]:
         print("MATCH:", a["witness"]); return

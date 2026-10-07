@@ -198,6 +198,7 @@ impl<
     fn inject_spi(&mut self, intid: u32, level: bool) -> Result<()> {
         assert!(self.held);
         assert_eq!(intid, TIMER_SPI);
+        assert!(!level || self.regs[33] & (1 << 7) == 0);
         self.irq = level;
         Ok(())
     }
@@ -246,6 +247,9 @@ fn machine_reconciles_reads_completes_once_and_injects_while_stopped() {
     assert_eq!(a.trace, hidden.trace);
     assert_eq!(a.witness, hidden.witness);
     assert_eq!(a.exits, hidden.exits);
+    assert_eq!(a.virtual_ns, hidden.virtual_ns);
+    let json = serde_json::to_value(&a).unwrap();
+    assert_eq!(json["backend"], "mock");
 }
 
 #[test]
@@ -283,21 +287,6 @@ fn rejects_debug_locking_and_hardware_time_leaks() {
     assert!(
         timer.contains("architectural virtual timer enabled"),
         "{timer}"
-    );
-}
-
-#[test]
-fn rejects_masked_interrupt_admission() {
-    let mut kernel = [0; 64];
-    kernel[56..60].copy_from_slice(b"ARM\x64");
-    kernel[16..24].copy_from_slice(&4096u64.to_le_bytes());
-    let error = Machine::<Fake<0, 0, 0, true>>::new(&kernel, b"cpio", 1)
-        .unwrap()
-        .run(|| {})
-        .unwrap_err();
-    assert!(
-        error.contains("SPI 40 asserted with PSTATE.I masked"),
-        "{error}"
     );
 }
 

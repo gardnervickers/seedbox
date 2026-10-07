@@ -144,6 +144,7 @@ impl Hvf {
     }
 }
 impl Backend for Hvf {
+    const NAME: &'static str = "hvf";
     fn create() -> Result<Self> {
         unsafe {
             check("hv_vm_create", hv_vm_create(std::ptr::null_mut()))?;

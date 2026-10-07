@@ -37,6 +37,17 @@ static void sleep_check(uint64_t ns)
     printf("sleep requested=%llu elapsed=%llu\n", (unsigned long long)ns, (unsigned long long)elapsed);
     if (elapsed < ns || elapsed > ns + 20000000) { errno = ERANGE; fail("PV sleep duration"); }
 }
+static void busy_wait_check(void)
+{
+    /* CONFIG_HZ=100: 20 ms crosses at least one 10 ms tick without idle.
+     * The vDSO is disabled, so each read enters seedbox_read() in the kernel.
+     */
+    uint64_t before = clock_ns(CLOCK_MONOTONIC), elapsed;
+    do {
+        elapsed = clock_ns(CLOCK_MONOTONIC) - before;
+    } while (elapsed < 20000000);
+    printf("busy-wait elapsed=%llu\n", (unsigned long long)elapsed);
+}
 int main(void)
 {
     /* /dev/console is also present in the cpio so printk and init stdio work. */
@@ -50,6 +61,7 @@ int main(void)
         uint64_t mono = clock_ns(CLOCK_MONOTONIC), real = clock_ns(CLOCK_REALTIME);
         printf("clock mono=%llu real=%llu\n", (unsigned long long)mono, (unsigned long long)real);
     }
+    busy_wait_check();
     sleep_check(10000000);
     sleep_check(1000000000);
     uint64_t first, second;
