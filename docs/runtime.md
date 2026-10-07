@@ -240,6 +240,11 @@ self/child RSS high-water readings in bytes, including preparation. They are not
 simultaneous aggregate memory, guest peak memory, simulated time or CPU lease duration.
 Unavailable measurements are null and do not affect run identity.
 
+Required tool-version provenance uses stdout only, independently of diagnostic
+truncation. Its raw `.stdout` evidence is bounded to 8192 bytes per value and
+4 MiB per preparation; an oversized or incomplete value fails preparation.
+Version stderr remains quota-limited `.log` diagnostics with omission receipts.
+
 ## Bundles
 
 `seedbox export RUN [-o FILE] [--state STATE]` writes one uncompressed

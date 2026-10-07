@@ -22,13 +22,15 @@ pub(crate) static PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
 const FILE_LIMIT: u64 = 4 * 1024 * 1024;
 const TOTAL_LIMIT: u64 = 64 * 1024 * 1024;
 const METADATA_LIMIT: u64 = 4 * 1024 * 1024;
+const VERSION_LIMIT: u64 = 8192;
+const VERSION_TOTAL_LIMIT: u64 = 4 * 1024 * 1024;
 
 /// Caller-owned preparation evidence and the shared cancellation token.
 #[derive(Debug)]
 pub struct PreparationContext {
     pub cancellation: CancellationToken,
     pub directory: PathBuf,
-    quotas: Mutex<(u64, u64)>,
+    quotas: Mutex<(u64, u64, u64)>,
     admitted_builder: Mutex<Option<PathBuf>>,
 }
 #[derive(Serialize)]
@@ -52,6 +54,8 @@ struct Receipt {
     omission_reason: Option<String>,
     output_complete: bool,
     pid: Option<u32>,
+    required_stdout_retained_bytes: Option<u64>,
+    required_stdout_omitted_bytes: Option<u64>,
 }
 impl PreparationContext {
     pub fn new(directory: impl Into<PathBuf>, cancellation: CancellationToken) -> Result<Self> {
@@ -62,7 +66,7 @@ impl PreparationContext {
         Ok(Self {
             cancellation,
             directory,
-            quotas: Mutex::new((0, 0)),
+            quotas: Mutex::new((0, 0, 0)),
             admitted_builder: Mutex::new(None),
         })
     }
@@ -170,7 +174,7 @@ impl PreparationContext {
         if !cleanup {
             self.check()?;
         }
-        self.run_owned(command, phase, tag, build, cleanup)
+        self.run_owned(command, phase, tag, build, cleanup, None)
     }
     #[cfg(unix)]
     fn run_owned(
@@ -180,6 +184,7 @@ impl PreparationContext {
         tag: Option<&str>,
         build: bool,
         cleanup: bool,
+        stdout_value: Option<&mut Vec<u8>>,
     ) -> Result<()> {
         use std::os::unix::{net::UnixStream, process::CommandExt};
         let program = PathBuf::from(command.get_program());
@@ -229,6 +234,8 @@ impl PreparationContext {
             omission_reason: None,
             output_complete: false,
             pid: None,
+            required_stdout_retained_bytes: None,
+            required_stdout_omitted_bytes: None,
         };
         let metadata = format!("{phase}.json");
         self.metadata(&metadata, &receipt)?;
@@ -243,6 +250,7 @@ impl PreparationContext {
             FILE_LIMIT
         };
         let remaining = phase_limit.min(TOTAL_LIMIT.saturating_sub(quota.0));
+        let version_remaining = VERSION_LIMIT.min(VERSION_TOTAL_LIMIT.saturating_sub(quota.2));
         drop(quota);
         let log = self.directory.join(format!("{phase}.log"));
         let mut file = fs::File::create(&log).map_err(|error| {
@@ -253,9 +261,18 @@ impl PreparationContext {
         })?;
         let (mut reader, writer) = UnixStream::pair()?;
         reader.set_read_timeout(Some(Duration::from_millis(50)))?;
+        // Required stdout is independent of stderr and the diagnostic quota.
+        let required_stream = if stdout_value.is_some() {
+            let (required_reader, required_writer) = UnixStream::pair()?;
+            required_reader.set_read_timeout(Some(Duration::from_millis(50)))?;
+            command.stdout(Stdio::from(std::os::fd::OwnedFd::from(required_writer)));
+            Some(required_reader)
+        } else {
+            command.stdout(Stdio::from(std::os::fd::OwnedFd::from(writer.try_clone()?)));
+            None
+        };
         command
             .process_group(0)
-            .stdout(Stdio::from(std::os::fd::OwnedFd::from(writer.try_clone()?)))
             .stderr(Stdio::from(std::os::fd::OwnedFd::from(writer)));
         let began = Instant::now();
         let mut child = match command.spawn() {
@@ -311,6 +328,48 @@ impl PreparationContext {
             }
             file.sync_all()?;
             Ok((retained, seen - retained, complete))
+        });
+        let required_done = finish.clone();
+        let required_drain = required_stream.map(|mut reader| {
+            std::thread::spawn(move || -> std::io::Result<(Vec<u8>, u64, bool)> {
+                let mut value = Vec::new();
+                let mut seen = 0u64;
+                let mut bytes = [0u8; 8192];
+                let mut complete = false;
+                let mut finishing = None;
+                loop {
+                    if required_done.load(Ordering::Acquire) {
+                        let at = finishing.get_or_insert_with(Instant::now);
+                        if at.elapsed() > Duration::from_millis(200) {
+                            break;
+                        }
+                    }
+                    match reader.read(&mut bytes) {
+                        Ok(0) => {
+                            complete = true;
+                            break;
+                        }
+                        Ok(n) => {
+                            seen = seen.saturating_add(n as u64);
+                            let keep =
+                                (version_remaining - value.len() as u64).min(n as u64) as usize;
+                            value.extend_from_slice(&bytes[..keep]);
+                        }
+                        Err(e)
+                            if matches!(
+                                e.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            ) =>
+                        {
+                            if required_done.load(Ordering::Acquire) {
+                                break;
+                            }
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok((value, seen, complete))
+            })
         });
         let pid = child.id() as i32;
         let mut cancellation_at = None;
@@ -394,6 +453,39 @@ impl PreparationContext {
                 receipt.omission_reason = Some("phase or total payload quota".into());
             }
         }
+        let required_output = required_drain
+            .map(|drain| {
+                drain
+                    .join()
+                    .map_err(|_| {
+                        Error::PreparationCleanupUnverified(
+                            "required stdout reader panicked".into(),
+                        )
+                    })?
+                    .map_err(|e| {
+                        Error::PreparationCleanupUnverified(format!("required stdout {phase}: {e}"))
+                    })
+            })
+            .transpose()?;
+        if let Some((value, seen, complete)) = &required_output {
+            // This bounded raw stdout survives even if diagnostic payload is exhausted.
+            fs::write(self.directory.join(format!("{phase}.stdout")), value).map_err(|e| {
+                Error::PreparationCleanupUnverified(format!(
+                    "required stdout evidence {phase}: {e}"
+                ))
+            })?;
+            receipt.required_stdout_retained_bytes = Some(value.len() as u64);
+            receipt.required_stdout_omitted_bytes = Some(seen - value.len() as u64);
+            receipt.output_complete &= complete;
+            self.quotas
+                .lock()
+                .map_err(|_| {
+                    Error::PreparationCleanupUnverified(
+                        "required stdout evidence lock poisoned".into(),
+                    )
+                })?
+                .2 += value.len() as u64;
+        }
         receipt.status = match &status {
             Ok(status) => status.to_string(),
             Err(e) => e.to_string(),
@@ -446,6 +538,14 @@ impl PreparationContext {
                 String::from_utf8_lossy(&tail[..tail.len().min(8192)])
             )));
         }
+        if let Some((value, seen, _)) = required_output {
+            if seen > value.len() as u64 {
+                return Err(Error::Execution(format!("{phase}: required stdout version exceeds 8192-byte phase or 4-MiB total bound; PreparedInputs not accepted")));
+            }
+            if let Some(destination) = stdout_value {
+                *destination = value;
+            }
+        }
         Ok(())
     }
     #[cfg(not(unix))]
@@ -456,23 +556,23 @@ impl PreparationContext {
         _tag: Option<&str>,
         _build: bool,
         _cleanup: bool,
+        _stdout_value: Option<&mut Vec<u8>>,
     ) -> Result<()> {
         Err(Error::Setup(
             "exploration preparation requires Unix owned process groups".into(),
         ))
     }
     pub(crate) fn version(&self, tool: &Path, phase: &str) -> Result<String> {
-        self.run(
+        self.check()?;
+        let mut bytes = Vec::new();
+        self.run_owned(
             Command::new(tool).arg("--version"),
             phase,
             None,
             false,
             false,
+            Some(&mut bytes),
         )?;
-        let mut bytes = Vec::new();
-        fs::File::open(self.directory.join(format!("{phase}.log")))?
-            .take(8192)
-            .read_to_end(&mut bytes)?;
         Ok(String::from_utf8_lossy(&bytes).trim().into())
     }
 }
@@ -486,6 +586,103 @@ mod tests {
         fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         path
+    }
+    #[test]
+    fn required_version_stdout_ignores_warnings_and_diagnostic_quota() {
+        let _process_creation = PROCESS_TEST_LOCK.lock().unwrap();
+        let owned = tempfile::tempdir().unwrap();
+        let tool = script(
+            owned.path(),
+            "tool",
+            "printf 'stable-v1\\n'; printf '%s\\n' \"$VERSION_WARNING\" >&2",
+        );
+        let context =
+            PreparationContext::new(owned.path().join("evidence"), CancellationToken::default())
+                .unwrap();
+        // Change the same executable's stderr using a caller-owned input file.
+        fs::write(
+            &tool,
+            format!(
+                "#!/bin/sh\nprintf 'stable-v1\\n'; cat '{}' >&2\n",
+                owned.path().join("warning").display()
+            ),
+        )
+        .unwrap();
+        fs::write(owned.path().join("warning"), b"warning-one\n").unwrap();
+        let first = context.version(&tool, "first-version").unwrap();
+        fs::write(owned.path().join("warning"), b"different-warning\n").unwrap();
+        let second = context.version(&tool, "second-version").unwrap();
+        assert_eq!(first, "stable-v1");
+        assert_eq!(first, second);
+        assert_eq!(
+            fs::read(context.directory.join("first-version.log")).unwrap(),
+            b"warning-one\n"
+        );
+        assert_eq!(
+            fs::read(context.directory.join("second-version.log")).unwrap(),
+            b"different-warning\n"
+        );
+        // Exercise actual draining/accounting with only three payload bytes left.
+        context.quotas.lock().unwrap().0 = TOTAL_LIMIT - 3;
+        let exhaust = script(owned.path(), "exhaust", "printf 'abcdef'");
+        context
+            .run(&mut Command::new(exhaust), "exhaust", None, false, false)
+            .unwrap();
+        assert_eq!(context.quotas.lock().unwrap().0, TOTAL_LIMIT);
+        let third = context.version(&tool, "third-version").unwrap();
+        assert_eq!(third, first);
+        let directory = context.directory.clone();
+        drop(context);
+        assert_eq!(
+            fs::read(directory.join("third-version.stdout")).unwrap(),
+            b"stable-v1\n"
+        );
+        assert!(fs::read(directory.join("third-version.log"))
+            .unwrap()
+            .is_empty());
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("third-version.json")).unwrap())
+                .unwrap();
+        assert_eq!(receipt["omitted_bytes"], b"different-warning\n".len());
+        assert_eq!(receipt["required_stdout_omitted_bytes"], 0);
+        assert_eq!(
+            receipt["required_stdout_retained_bytes"],
+            b"stable-v1\n".len()
+        );
+    }
+    #[test]
+    fn required_version_bound_fails_instead_of_accepting_a_prefix() {
+        let _process_creation = PROCESS_TEST_LOCK.lock().unwrap();
+        let owned = tempfile::tempdir().unwrap();
+        let tool = script(owned.path(), "tool", "printf '%08193d' 0");
+        let context =
+            PreparationContext::new(owned.path().join("evidence"), CancellationToken::default())
+                .unwrap();
+        let result = context.version(&tool, "large-version");
+        assert!(
+            matches!(result, Err(Error::Execution(ref error)) if error.contains("required stdout version exceeds"))
+        );
+        assert_eq!(
+            fs::metadata(context.directory.join("large-version.stdout"))
+                .unwrap()
+                .len(),
+            VERSION_LIMIT
+        );
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &fs::read(context.directory.join("large-version.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["required_stdout_omitted_bytes"], 1);
+        let small = script(owned.path(), "small", "printf 'abcd'");
+        context.quotas.lock().unwrap().2 = VERSION_TOTAL_LIMIT - 3;
+        assert!(matches!(
+            context.version(&small, "total-version"),
+            Err(Error::Execution(_))
+        ));
+        assert_eq!(
+            fs::read(context.directory.join("total-version.stdout")).unwrap(),
+            b"abc"
+        );
     }
     #[test]
     fn bounded_output_is_drained_and_survives_scratch_and_context_drop() {
