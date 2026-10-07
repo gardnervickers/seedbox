@@ -215,6 +215,8 @@ pub struct Stats {
     pub spin_probes: u64,
     pub spin_idles: u64,
     pub spin_false: u64,
+    /// Of the false alarms, probes abandoned as soon as the guest clock moved.
+    pub spin_clock_progress: u64,
     /// Per state part, cycle checks that failed first on it.
     pub spin_mismatch: std::collections::BTreeMap<String, u64>,
     /// Virtual time advanced, by cause (see `Cause`).
