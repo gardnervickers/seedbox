@@ -305,6 +305,36 @@ pub(crate) fn collect_admitted(
     Ok(())
 }
 
+// Publication never replaces an established refusal, especially cleanup
+// uncertainty. Keep both bounded internal diagnostics; no application bytes are
+// parsed or included here.
+pub(crate) fn finish_admission(
+    admission: Result<()>,
+    publish: impl FnOnce(&Result<()>) -> Result<()>,
+) -> Result<()> {
+    let publication = publish(&admission);
+    match (admission, publication) {
+        (Ok(()), publication) => publication,
+        (Err(refusal), Ok(())) => Err(refusal),
+        (Err(refusal), Err(publication)) => {
+            fn bounded(error: &Error) -> String {
+                let text = error.to_string();
+                let mut chars = text.chars();
+                let mut prefix: String = chars.by_ref().take(4096).collect();
+                if chars.next().is_some() {
+                    prefix.push_str(" [truncated]");
+                }
+                prefix
+            }
+            Err(Error::Execution(format!(
+                "host admission refused: {}; additionally, evidence publication failed: {}",
+                bounded(&refusal),
+                bounded(&publication)
+            )))
+        }
+    }
+}
+
 // PERF_FLAG_FD_CLOEXEC: set atomically by perf_event_open, never by later fcntl.
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
 const PERF_OPEN_FLAGS: u64 = 1 << 3;
@@ -493,6 +523,49 @@ mod cleanup_tests {
         let error = result.unwrap_err().to_string();
         assert!(error.contains("host preflight cleanup failed"));
         assert!(error.contains("restore readback differs"));
+    }
+    #[test]
+    fn evidence_failure_cannot_replace_static_or_cleanup_refusal_or_admit_success() {
+        let mut drift = static_observation();
+        drift.raw_cpuid[0].flags ^= 1;
+        let static_refusal = validate_observation(&drift);
+        let cleanup_refusal = scoped_probe(
+            (),
+            || validate_observation(&drift),
+            |_| Err(Error::Execution("restore readback differs".into())),
+        );
+        for (admission, cause) in [
+            (static_refusal, "complete effective CPUID policy"),
+            (cleanup_refusal, "host preflight cleanup failed"),
+        ] {
+            let mut published = false;
+            let error = finish_admission(admission, |established| {
+                assert!(established.is_err());
+                published = true;
+                Err(Error::Setup("injected evidence ENOSPC".into()))
+            })
+            .unwrap_err()
+            .to_string();
+            assert!(published);
+            assert!(error.contains(cause));
+            assert!(error.contains("additionally, evidence publication failed"));
+            assert!(error.contains("injected evidence ENOSPC"));
+        }
+        let error = finish_admission(Ok(()), |established| {
+            assert!(established.is_ok());
+            Err(Error::Setup("injected evidence ENOSPC".into()))
+        })
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "injected evidence ENOSPC");
+
+        let bounded = finish_admission(Err(Error::Execution("r".repeat(10000))), |_| {
+            Err(Error::Execution("p".repeat(10000)))
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(bounded.len() < 8400);
+        assert!(bounded.contains("[truncated]"));
     }
     #[test]
     fn perf_open_requires_atomic_close_on_exec() {
