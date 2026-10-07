@@ -304,6 +304,7 @@ terminal control characters are removed and invalid UTF-8 is replaced. A line
 cut by the byte limit starts with `...`. Missing or unreadable logs are skipped
 without changing the outcome. This excerpt is local diagnostic output only:
 retained records, serde field names, status lines and `--json` output are unchanged.
+`inspect` keeps the recorded `error:` line on stdout alongside the run status.
 
 ## Reproduce acceptance
 

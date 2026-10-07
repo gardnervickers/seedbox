@@ -193,7 +193,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show a recorded run after verifying its manifest.
+    /// Show a recorded run, including its error on stdout, after verifying its manifest.
     #[command(after_help = VMM_FAILURE_HELP)]
     Inspect {
         /// Run directory, as printed by `run` or `replay`.
@@ -846,7 +846,7 @@ fn run(cli: Cli) -> Result<u8> {
                 println!("replay: {}{label}", word(&replay.status));
             }
             if let Some(error) = record.error {
-                eprintln!("error: {error}");
+                println!("error: {error}");
                 diagnostics::vmm_failure(&run, &error);
             }
             Ok(0)

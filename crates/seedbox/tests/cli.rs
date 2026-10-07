@@ -727,7 +727,8 @@ mod diff_tests {
         let mut record = fixture();
         record.outcome = sb::orchestration::Outcome::Error;
         record.report = None;
-        record.error = Some("execution: VMM failed; see vmm.stderr".into());
+        let error = sb::Error::Execution(sb::vmm::VMM_FAILURE_MESSAGE.into()).to_string();
+        record.error = Some(error.clone());
         write_fixture(&run, &mut record, None, None);
         let manifest = fs::read(run.join("manifest.json")).unwrap();
         let diagnostic = run.join("output/vmm.stderr");
@@ -741,16 +742,13 @@ mod diff_tests {
             ),
         )
         .unwrap();
+        let expected_stdout = format!("ERROR: fixture (seed 0)\nerror: {error}\n");
         let output = seedbox(&["inspect", "failed"], root);
         assert!(output.status.success());
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout),
-            "ERROR: fixture (seed 0)\n"
-        );
-        let expected_error = "error: execution: VMM failed; see vmm.stderr\n";
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
         assert_eq!(
             stderr(&output),
-            format!("{expected_error}vmm stderr: first\nvmm stderr: second\nvmm stderr: third\nvmm stderr: ERROR: misleading status\nvmm stderr: {overshoot}\n")
+            format!("vmm stderr: first\nvmm stderr: second\nvmm stderr: third\nvmm stderr: ERROR: misleading status\nvmm stderr: {overshoot}\n")
         );
         let statuses = output
             .stdout
@@ -770,21 +768,21 @@ mod diff_tests {
 
         for bytes in [b"".as_slice(), b"\n \t\r\n"] {
             fs::write(&diagnostic, bytes).unwrap();
-            assert_eq!(
-                stderr(&seedbox(&["inspect", "failed"], root)),
-                expected_error
-            );
+            let output = seedbox(&["inspect", "failed"], root);
+            assert!(output.status.success());
+            assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
+            assert!(output.stderr.is_empty());
         }
         fs::remove_file(&diagnostic).unwrap();
-        assert_eq!(
-            stderr(&seedbox(&["inspect", "failed"], root)),
-            expected_error
-        );
+        let output = seedbox(&["inspect", "failed"], root);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
+        assert!(output.stderr.is_empty());
         fs::create_dir(&diagnostic).unwrap();
-        assert_eq!(
-            stderr(&seedbox(&["inspect", "failed"], root)),
-            expected_error
-        );
+        let output = seedbox(&["inspect", "failed"], root);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
+        assert!(output.stderr.is_empty());
     }
 
     #[test]

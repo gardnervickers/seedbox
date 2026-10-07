@@ -1,5 +1,6 @@
 //! Best-effort excerpts of local execution diagnostics, for text output only.
 
+use seedbox::{vmm::VMM_FAILURE_MESSAGE, Error};
 use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom},
@@ -10,7 +11,7 @@ const TAIL_BYTES: u64 = 8 * 1024;
 const TAIL_LINES: usize = 5;
 
 pub(super) fn vmm_failure(directory: &Path, error: &str) {
-    if error != "execution: VMM failed; see vmm.stderr" {
+    if error != Error::Execution(VMM_FAILURE_MESSAGE.into()).to_string() {
         return;
     }
     // Missing/unreadable diagnostics must not replace the execution outcome.

@@ -61,6 +61,7 @@ On a VMM failure, text output from `run`, `replay`, `explore` and `inspect`
 also prints up to five non-empty lines from the final 8 KiB of that attempt's
 `output/vmm.stderr` to stderr, prefixed with `vmm stderr:`. Missing or unreadable
 logs do not change the outcome. Retained records and `--json` output are unchanged.
+`inspect` keeps the recorded `error:` line on stdout alongside the run status.
 
 [Draft format and runtime scope](docs/compatibility.md) distinguishes inspection
 and transfer from qualified execution. Same software versions, seed and exact
