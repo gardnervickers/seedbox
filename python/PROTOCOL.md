@@ -54,6 +54,14 @@ with `World.connect()`; a closed `World` never reconnects itself.
 The response echoes the version and ID. The API has no implicit retry, automatic
 heal, or garbage-collection-based operation.
 
+Version 1 request operations/arguments are strict; unknown fields are rejected.
+The Python binding validates required response fields, version, IDs and simulated
+timing while tolerating unrelated response detail keys. Such keys do not permit
+changing required meanings or make a new request operation supported by an old
+peer. Version compatibility remains a release decision; see
+[current draft formats](../docs/compatibility.md). Application output and optional
+user files remain opaque and are not RPC response schemas.
+
 The private supervisor-to-VMM relay framing is not part of the public socket
 protocol; custom bindings do not implement virtqueue or device I/O. Private frames
 carry a run-wide relay ID and a connection session ID before the public JSON:

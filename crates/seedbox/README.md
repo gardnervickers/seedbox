@@ -209,6 +209,11 @@ unknown services are rejected.
 The draft run-manifest format is now version 2; earlier version 1 records are not
 migrated. Compose authoring remains `x-seedbox.version: 1`.
 
+See [current draft readers/writers and runtime scope](../../docs/compatibility.md).
+`inspect --json` prints the typed record with nested `identity.version`, not the
+manifest checksum envelope. Inspection/transfer do not establish execution
+admission. Release format compatibility is still a V0 gate.
+
 ## Structured faults
 
 The fault API is a versioned RPC interface, with a Python binding for ordinary

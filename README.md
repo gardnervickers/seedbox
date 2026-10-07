@@ -44,6 +44,11 @@ directory. Every runtime input has a default, so no flags are required:
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
 INCOMPLETE and 124 TIMEOUT.
 
+[Draft format and runtime scope](docs/compatibility.md) distinguishes inspection
+and transfer from qualified execution. Same software versions, seed and exact
+retained inputs must replay on a qualified compatible profile; changing versions
+may change execution. Release compatibility remains a V0 qualification gate.
+
 ## Finite exploration
 
 `seedbox explore [COMPOSE] --seed FIRST --count COUNT` runs consecutive seeds
@@ -69,6 +74,7 @@ wrappers and daemon/remote delegation are rejected. Cancelled builds produce
 ERROR / cleanup-unverified and retain their unique private tag; process-group
 cleanup alone does not prove builder cessation. Ordinary run/prepare builder
 behavior is unchanged. See [preparation evidence and cancellation](docs/runtime.md#exploration-preparation).
+
 
 ## Layout
 
