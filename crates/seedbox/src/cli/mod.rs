@@ -548,8 +548,6 @@ fn run(cli: Cli) -> Result<u8> {
             let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
             let (mut preparer, executor) =
                 inputs.backends(&store, cpu.cpu, counter, scratch.path())?;
-            cpu.admit(detected?)?;
-            let executor = executor.with_unqualified_cpu(cpu.allow_unqualified_cpu);
             preparer.tools.build_epoch = build.build_epoch;
             preparer.tools.skopeo = defaults::preparation_tool(&preparer.tools.skopeo)?;
             preparer.tools.umoci = defaults::preparation_tool(&preparer.tools.umoci)?;
@@ -560,6 +558,8 @@ fn run(cli: Cli) -> Result<u8> {
             {
                 preparer.tools.docker = defaults::preparation_tool(&preparer.tools.docker)?;
             }
+            cpu.admit(detected?)?;
+            let executor = executor.with_unqualified_cpu(cpu.allow_unqualified_cpu);
             let executor = performance.apply(executor)?;
             // Exploration retains any backend admission refusal in its batch checkpoint.
             let _signals = Signals::register(&cancellation)?;
