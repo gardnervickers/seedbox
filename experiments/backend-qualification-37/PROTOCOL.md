@@ -114,6 +114,20 @@ the manifest checksum, not every content-store blob. Replay verifies its declare
 input bytes before the backend runs. Rich inventory/drift enforcement is future
 #5 work, outside this research branch.
 
+Each proposed admission requirement enables a current functional dependency:
+input/binary hashes bind the replay to the execution that failed; concrete host
+and guest CPU controls bound counted progress and instruction/clock behavior;
+default/performance/observation comparisons protect within-version determinism;
+result/exit and fault-effect records establish completion and what actually
+happened; retained bytes permit offline colleague replay; leases and exact MSR
+restoration prevent interference and preserve host state. Hostname, timestamps
+and costs are attribution, not new compatibility restrictions.
+
+The JSON formats on this branch are disposable **research receipts**, not
+external schemas, SDK conventions or production API proposals. They impose no
+application-output/signature format, checker logic or workload coordination.
+Application payloads, artifacts and their meanings remain user-owned.
+
 ## Minimum cross-host admission matrix
 
 Prerequisites: engine #33's integrated candidate passes default/performance tests;
@@ -140,6 +154,12 @@ remains NOT_EXECUTED/UNRESOLVED; historical results do not silently fill those
 cells. JVM/JIT, arbitrary instruction paths, reboot, disks/durability, full
 world snapshots, debugger/reverse-step observation and guest-local netem jitter
 are outside this admission unless separately tested.
+
+The listed applications and controls are the qualification corpus for the
+approved Seedbox bring-up. Their existing checkers establish the test's expected
+behavior; they do not prescribe how other users write applications, represent
+histories or interpret custom outputs. Retaining raw output for audit does not
+make its payload semantics a platform contract.
 
 For every completed semantic case originate one default full-state baseline on
 A and retain it. Perform two fresh default self-replays on A, two A-origin
