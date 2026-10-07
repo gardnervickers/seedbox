@@ -18,8 +18,6 @@ use std::{
 pub struct VmmExecutor {
     /// Host CPU to pin the VMM to; `None` leases the first free eligible core.
     pub cpu: Option<u32>,
-    // Only the Linux executor leases a host core with the counter's workaround.
-    #[cfg_attr(not(target_os = "linux"), expect(dead_code))]
     counter: CounterProfile,
     allow_unqualified: bool,
     profile: ExecutionProfile,

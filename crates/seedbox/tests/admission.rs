@@ -356,6 +356,6 @@ fn successor_release_rejects_previous_exact_engine_and_policy_without_migration(
         .contains("host admission proof incompatible"));
     assert_eq!(
         ENGINE,
-        "ff96f8e2bc4a0643a5d5ec17e4efffdf5caed140ff48400fcfbb7226f511c772"
+        "52eb41490f521a0104ea4ab06297cbdbdd7bc9a68261febf6c5cc19854bacdcf"
     );
 }

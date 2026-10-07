@@ -106,7 +106,7 @@ The guest supervisor is built into `seedbox`, and BusyBox comes from
 `SEEDBOX_BUSYBOX`. A missing input fails before preparation starts and names
 every location searched.
 
-Qualified Zen execution requires the versioned `amd-zen3-engineff96-v1` host policy in
+Qualified Zen execution requires the versioned `amd-zen3-engine52eb-v1` host policy in
 [host requirements](../README.md#host-requirements). Run validates immutable
 engine/kernel inputs and performs host admission before OCI work. Temporary
 core reservations, affinity and disabled exact-event perf descriptors are released
@@ -406,7 +406,7 @@ restoration and lease release. `doctor` returns a setup refusal for unqualified
 counters, including when the experimental flag is present, so it never emits an
 AMD `VALID` success for Intel. Exit meanings remain unchanged.
 
-The current staged source pins frozen engineff96 and accepted kernele8ece.
+The current staged source pins frozen engine52eb and accepted kernele8ece.
 The artifact has build provenance but is not runtime qualified. Fresh ordinary
 full-state run/replay acceptance remains required. Experimental readiness opens
 the selected raw perf event disabled before preparation and under each held
