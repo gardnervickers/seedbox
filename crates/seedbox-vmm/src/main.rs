@@ -433,7 +433,7 @@ fn run() -> Result<Value, String> {
             }
         }
         let started = Instant::now();
-        let kills = release(&mut world, &cfg, &names, seed, release_skew)?;
+        let (kills, reseed) = release(&mut world, &cfg, &names, seed, release_skew)?;
         let outcome = simulate(&mut world, &cfg, duration, &end_on, None)?;
         let host_seconds = started.elapsed().as_secs_f64();
         let mut r = report(&mut world, outcome, seed, &kills, host_seconds, digest, &dir, duration, &end_on)?;
@@ -441,6 +441,7 @@ fn run() -> Result<Value, String> {
             "seed": boot_seed, "barrier_ns": barrier_ns, "fork_at_ns": fork_at, "release_skew_ns": release_skew,
             "boot_host_seconds": boot_host_seconds, "forked": i > 0,
             "restored_pages": restored_pages, "restore_host_seconds": restore_host_seconds,
+            "reseed": reseed,
         });
         reports.push(r);
     }
@@ -577,19 +578,26 @@ fn arm_seed(world: &mut World, cfg: &Value, names: &[String], seed: u64, from: u
 
 /// Release a world parked at its launch barrier under `seed`. Every machine
 /// resumes at the latest barrier time plus a seeded skew, so which service
-/// starts first still varies by seed. Each guest reads its seeded entropy and
-/// reseeds its kernel CRNG; timer jitter and the seed's world plan start here.
-fn release(world: &mut World, cfg: &Value, names: &[String], seed: u64, skew: u64) -> Result<Vec<Value>, String> {
+/// starts first still varies by seed. Each guest reseeds its kernel CRNG from
+/// seeded entropy, read at its launch barrier or, after a time fork, taken
+/// from the time page; timer jitter and the seed's world plan start here.
+/// Returns the kills and, per machine, how its entropy was delivered.
+fn release(world: &mut World, cfg: &Value, names: &[String], seed: u64, skew: u64) -> Result<(Vec<Value>, Value), String> {
     let at = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
     check_plan_after(cfg, at.saturating_add(skew))?;
+    let mut reseed = serde_json::Map::new();
     for (i, mach) in world.machines.iter_mut().enumerate() {
         let mut rng = Rng::new(seed, &format!("fork-entropy/{}", names[i]));
         let entropy = std::array::from_fn(|_| rng.next() as u32);
         let delay = Rng::new(seed, &format!("release/{}", names[i])).below(skew.saturating_add(1));
-        mach.release(at.saturating_add(delay), entropy)?;
+        let how = mach.release(at.saturating_add(delay), entropy)?;
+        if how == machine::Reseed::Unsupported {
+            eprintln!("{}: guest ABI {} predates time-page reseeding; its CRNG is not reseeded at this time fork", names[i], mach.abi());
+        }
+        reseed.insert(names[i].clone(), json!(how.as_str()));
         mach.timer_rng = Some(Rng::new(seed, &format!("timer-jitter/{}", names[i])));
     }
-    arm_seed(world, cfg, names, seed, at.saturating_add(skew))
+    Ok((arm_seed(world, cfg, names, seed, at.saturating_add(skew))?, Value::Object(reseed)))
 }
 
 /// A world parked at its launch barrier, kept so that later seeds start from

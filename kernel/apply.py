@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Apply the Seedbox guest changes to a clean Linux 6.12.112 tree (idempotent check)."""
 import pathlib
+import re
 import shutil
 import sys
 
@@ -14,6 +15,19 @@ def edit(rel, old, new, count=1):
     if text.count(old) != count:
         raise SystemExit(f"{rel}: expected {count} match(es) of patch anchor")
     path.write_text(text.replace(old, new))
+
+
+def edit_re(rel, pattern, repl, count=1):
+    path = src / rel
+    text, n = re.subn(pattern, repl, path.read_text())
+    if n != count:
+        raise SystemExit(f"{rel}: expected {count} match(es) of patch pattern, found {n}")
+    path.write_text(text)
+
+
+def append(rel, text):
+    path = src / rel
+    path.write_text(path.read_text() + text)
 
 
 shutil.copy(here / "seedbox.c", src / "arch/x86/kernel/seedbox.c")
@@ -106,5 +120,44 @@ edit(
     "arch/x86/kernel/process.c",
     "int set_tsc_mode(unsigned int val)\n{\n",
     "int set_tsc_mode(unsigned int val)\n{\n\treturn -EINVAL;\n",
+)
+# Fork entropy (ABI 3). A world forked at a simulated time parks guests
+# without their cooperation, so the VMM writes the seed's entropy into the time
+# page and bumps a generation. The next random output mixes it into the input
+# pool and reseeds, so each seed draws its own stream from the fork on. Batched
+# get_random_u*() values check too, before they compare generations.
+edit(
+    "drivers/char/random.c",
+    "#include <linux/random.h>\n",
+    "#include <linux/random.h>\n#include <asm/seedbox.h>\n",
+)
+edit(
+    "drivers/char/random.c",
+    "static void crng_make_state(u32 chacha_state[CHACHA_STATE_WORDS],\n",
+    "static void seedbox_take_entropy(void);\n"
+    "static void __crng_make_state(u32 chacha_state[CHACHA_STATE_WORDS],\n"
+    "\t\t\t      u8 *random_data, size_t random_data_len);\n\n"
+    "static void crng_make_state(u32 chacha_state[CHACHA_STATE_WORDS],\n"
+    "\t\t\t    u8 *random_data, size_t random_data_len)\n{\n"
+    "\tseedbox_take_entropy();\n"
+    "\t__crng_make_state(chacha_state, random_data, random_data_len);\n}\n\n"
+    "static void __crng_make_state(u32 chacha_state[CHACHA_STATE_WORDS],\n",
+)
+edit_re(
+    "drivers/char/random.c",
+    r"\n(\tnext_gen = READ_ONCE\(base_crng\.generation\);[ \t]*\\\n)",
+    lambda m: "\n\tseedbox_take_entropy();\t\t\t\t\t\t\t\\\n" + m.group(1),
+)
+append(
+    "drivers/char/random.c",
+    "\nstatic void seedbox_take_entropy(void)\n{\n"
+    "\tstruct seedbox_time_page *p = READ_ONCE(seedbox_page);\n"
+    "\tstatic u64 seen;\n\tu64 gen;\n\n"
+    "\tif (!p)\n\t\treturn;\n"
+    "\tgen = READ_ONCE(p->entropy_gen);\n"
+    "\tif (likely(gen == seen))\n\t\treturn;\n"
+    "\tseen = gen;\n"
+    "\tmix_pool_bytes(p->entropy, sizeof(p->entropy));\n"
+    "\tcrng_reseed(NULL);\n}\n",
 )
 print("seedbox guest changes applied")

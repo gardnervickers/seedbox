@@ -30,6 +30,8 @@ and identities.
 | `cluster-fork.json` | `cluster-fixed.json` booted once and forked per seed (see below) |
 | `cluster-fork-late.json` | The same cluster forked at 1.4 simulated seconds, after etcd has started, with timer and link jitter (see below) |
 | `cluster-fork-skew.json` | `cluster-fork.json` released with up to 50 ms of seeded skew, jitter, and a timed partition after the release (see below) |
+| `entropy-fork.json` | One machine printing `getrandom` and `/dev/urandom` bytes before and after a time fork (see below) |
+| `rdrand.json` | One machine executing RDRAND without consulting CPUID, which hides it (see below) |
 
 `batch.sh`, `batch.py` and `msr54.py` still run these fixtures with shared CPU/SMT
 leases and verified MSR restoration. Runtime lifecycle tests also use their CPU
@@ -72,12 +74,23 @@ CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/cluster-fork.json fo
 With `boot.fork_at_ns` instead, the world forks at a simulated time rather
 than at the guests' barrier: every machine parks at its first deterministic
 point at or after that time, so boot and application startup are both shared.
-No guest cooperation is needed, but nothing reseeds the guest kernels either:
-seeds differ only through what the run seed drives after the fork (timer and
-link jitter, release skew, faults, control and scenario events). A world with
-no jitter and no faults therefore runs identically for every seed after a
-time fork, which is why `cluster-fork-late.json` adds jitter. Run it the same
-way, with `fork-late-cold` and `fork-late-loop` prefixes.
+No guest cooperation is needed. On a guest kernel with time page ABI 3, the
+engine writes the seed's entropy into the time page at the release and the
+kernel mixes it in and reseeds its CRNG before its next random output, so
+`getrandom`, `/dev/urandom` and batched kernel randomness differ per seed from
+the fork on. Userspace generators seeded before the fork keep their state.
+Older kernels (ABI 2, such as `e8ece7cb`) are not reseeded: the engine says so
+on stderr, and seeds differ only through what the run seed drives after the
+fork (timer and link jitter, release skew, faults, control and scenario
+events), so a world with no jitter and no faults runs identically for every
+seed. Each seed's report records the delivery per machine in `boot.reseed`
+(`barrier`, `time_page` or `unsupported`). `cluster-fork-late.json` adds jitter;
+run it the same way, with `fork-late-cold` and `fork-late-loop` prefixes.
+`entropy-fork.json` prints random bytes on either side of a time fork at 2
+simulated seconds; build its initramfs with `guest/rngprobe.c` at `bin/rngprobe`.
+`rdrand.json` checks whether RDRAND, hidden from CPUID, still reaches the
+hardware: `rdrand: #UD` is safe, and differing values across runs of one seed
+are a determinism hole.
 
 Times in a forked world's plan (`faults[].at_ns`, `scenario[].at_ns`,
 `kill_restart.start_ns`) must be at or after the release, the fork point plus

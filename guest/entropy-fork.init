@@ -1,0 +1,9 @@
+#!/bin/busybox sh
+# Random bytes before and after a time fork (harness/worlds/entropy-fork.json).
+/bin/busybox --install -s
+mount -t proc proc /proc
+mount -t devtmpfs devtmpfs /dev
+echo "before fork: getrandom=$(rngprobe) urandom=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+sleep 3
+echo "after fork: getrandom=$(rngprobe) urandom=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+sbx exit 0
