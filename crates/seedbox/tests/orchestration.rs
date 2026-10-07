@@ -1953,3 +1953,32 @@ fn checkpoint_version_refusal_preserves_old_bytes_and_ordinary_run_inspection() 
     assert_eq!(read.workers, 1);
     assert_eq!(read.attempts[0].index, 0);
 }
+
+#[test]
+fn torn_write_policy_changes_identity_and_replay_requires_the_recorded_policy() {
+    let mut fixture = Fixture::new();
+    let off = fixture.run();
+    fixture
+        .backend
+        .profile
+        .semantic_parameters
+        .insert("disk_loss".into(), seedbox::vmm::TORN_DISK_MODEL.into());
+    fixture.preparer.inputs.profile = fixture.backend.profile.clone();
+    let on = fixture.run();
+    assert_ne!(on.record.run_id, off.record.run_id);
+    assert_eq!(
+        fixture.replay(&on).record.replay.unwrap().status,
+        ReplayStatus::Match
+    );
+    assert_eq!(fixture.replay(&off).record.outcome, Outcome::Error);
+    fixture
+        .backend
+        .profile
+        .semantic_parameters
+        .remove("disk_loss");
+    assert_eq!(fixture.replay(&on).record.outcome, Outcome::Error);
+    assert_eq!(
+        fixture.replay(&off).record.replay.unwrap().status,
+        ReplayStatus::Match
+    );
+}
