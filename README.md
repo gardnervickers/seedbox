@@ -70,6 +70,13 @@ also prints up to five non-empty lines from the final 8 KiB of that attempt's
 logs do not change the outcome. Retained records and `--json` output are unchanged.
 `inspect` keeps the recorded `error:` line on stdout alongside the run status.
 
+Pause a running world from another terminal with `sudo seedbox pause RUN`, then
+continue it with `sudo seedbox resume RUN`. Use the executing attempt directory
+(for replay, its new attempt), identifiable by `RUN/output/host-control`. Both
+commands wait for a boundary acknowledgement. All guests and virtual time freeze;
+wall-time limits and cancellation remain active. See [host pause](docs/runtime.md#host-pause)
+for the mechanism and development-engine verification requirements.
+
 [Draft format and runtime scope](docs/compatibility.md) distinguishes inspection
 and transfer from qualified execution. Same software versions, seed and exact
 retained inputs must replay on a qualified compatible profile; changing versions
