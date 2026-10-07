@@ -405,6 +405,11 @@ fn run(cli: Cli) -> Result<u8> {
             let run = defaults::run_directory(run)?;
             let previous = orchestration::inspect(&run)?;
             let counter = CounterProfile::host()?;
+            same_counter(
+                &run,
+                recorded_counter(&previous.identity.inputs.profile)?,
+                counter,
+            )?;
             require_kvm_host(counter)?;
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
@@ -418,16 +423,6 @@ fn run(cli: Cli) -> Result<u8> {
                 .get("memory_mb")
                 .and_then(|value| value.parse().ok())
                 .ok_or_else(|| Error::Integrity("recorded profile missing memory_mb".into()))?;
-            let recorded = recorded_counter(profile)?;
-            if counter != recorded {
-                return Err(Error::Setup(format!(
-                    "{}: recorded with the {} branch counter, but this host has {}; \
-                     replay it on a host of the same CPU vendor",
-                    run.display(),
-                    recorded.name(),
-                    counter.name()
-                )));
-            }
             let executor = performance.apply(VmmExecutor::new(
                 &engine,
                 &store,
@@ -547,19 +542,7 @@ fn require_kvm_host(counter: CounterProfile) -> Result<()> {
             "run and replay require the qualified Linux KVM host".into(),
         ));
     }
-    for (path, fix) in [
-        (
-            "/dev/kvm",
-            "enable KVM and run as root (e.g. sudo -E env PATH=\"$PATH\" seedbox ...)",
-        ),
-        (
-            "/dev/cpu/0/msr",
-            "run as root (e.g. sudo -E env PATH=\"$PATH\" seedbox ...) with the msr module loaded",
-        ),
-    ]
-    .into_iter()
-    .take(if counter.workaround().is_some() { 2 } else { 1 })
-    {
+    for (path, fix) in host_devices(counter) {
         std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -567,6 +550,36 @@ fn require_kvm_host(counter: CounterProfile) -> Result<()> {
             .map_err(|error| Error::Setup(format!("{path}: {error}; {fix}")))?;
     }
     Ok(())
+}
+
+/// Devices `run` and `replay` need: KVM, plus MSR access only when the
+/// counter profile has a host workaround.
+fn host_devices(counter: CounterProfile) -> Vec<(&'static str, &'static str)> {
+    let mut devices = vec![(
+        "/dev/kvm",
+        "enable KVM and run as root (e.g. sudo -E env PATH=\"$PATH\" seedbox ...)",
+    )];
+    if counter.workaround().is_some() {
+        devices.push((
+            "/dev/cpu/0/msr",
+            "run as root (e.g. sudo -E env PATH=\"$PATH\" seedbox ...) with the msr module loaded",
+        ));
+    }
+    devices
+}
+
+/// A run replays only with the branch counter it was recorded with.
+fn same_counter(run: &Path, recorded: CounterProfile, host: CounterProfile) -> Result<()> {
+    if recorded == host {
+        return Ok(());
+    }
+    Err(Error::Setup(format!(
+        "{}: recorded with the {} branch counter, but this host has {}; \
+         replay it on a host of the same CPU vendor",
+        run.display(),
+        recorded.name(),
+        host.name()
+    )))
 }
 
 /// Print a finished run and return its exit status (see `EXIT_CODES`).
@@ -604,5 +617,34 @@ fn word(value: &impl serde::Serialize) -> String {
 fn print_omissions(record: &orchestration::RunRecord) {
     if !record.omitted_logs.is_empty() {
         println!("omitted files: {}", record.omitted_logs.len());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_profiles_with_a_workaround_need_msr_access() {
+        let paths = |counter| {
+            host_devices(counter)
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(paths(CounterProfile::Zen), ["/dev/kvm", "/dev/cpu/0/msr"]);
+        assert_eq!(paths(CounterProfile::Intel), ["/dev/kvm"]);
+    }
+
+    #[test]
+    fn replay_on_another_vendor_names_both_counters() {
+        let run = Path::new("/runs/abc");
+        assert!(same_counter(run, CounterProfile::Zen, CounterProfile::Zen).is_ok());
+        let error = same_counter(run, CounterProfile::Zen, CounterProfile::Intel).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "/runs/abc: recorded with the amd-zen branch counter, but this host has intel; \
+             replay it on a host of the same CPU vendor"
+        );
     }
 }
