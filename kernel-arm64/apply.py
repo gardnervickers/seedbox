@@ -49,6 +49,15 @@ def changes(root):
             s = body(s, name, "\treturn seedbox_read();")
         return body(s, "arch_timer_get_cntfrq", "\treturn 1000000000U;")
     edit("arch/arm64/include/asm/arch_timer.h", arch_timer)
+    # The generic CPU feature-register switch also reads CNTFRQ directly.
+    # Keep it consistent with cpuinfo and the PV timer, including in dead code
+    # that the mandatory vmlinux instruction audit still inspects.
+    def cpufeature(s):
+        s = replace(s, "#include <asm/cpu.h>",
+                    "#include <asm/arch_timer.h>\n#include <asm/cpu.h>")
+        return replace(s, "\tread_sysreg_case(SYS_CNTFRQ_EL0);",
+                       "\tcase SYS_CNTFRQ_EL0:\n\t\treturn arch_timer_get_cntfrq();")
+    edit("arch/arm64/kernel/cpufeature.c", cpufeature)
     def delay(s):
         s = body(s, "__delay_cycles", "\treturn seedbox_read();")
         return body(s, "__delay", "\tcycles_t start = __delay_cycles();\n\twhile ((__delay_cycles() - start) < cycles)\n\t\tcpu_relax();")

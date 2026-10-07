@@ -3,6 +3,7 @@
 import importlib.util
 from pathlib import Path
 import stat
+import tempfile
 import unittest
 
 HERE = Path(__file__).resolve().parent
@@ -16,8 +17,38 @@ def load(name, file):
 apply = load("apply", "apply.py")
 initramfs = load("initramfs", "build-initramfs.py")
 audit = load("audit", "audit.py")
+config = load("config", "check-config.py")
 
 class Inputs(unittest.TestCase):
+    def test_config_rejects_unknown_disabled_and_dropped_requests(self):
+        requested = config.settings('CONFIG_PRESENT=y\nCONFIG_REMOVED=n\nCONFIG_HZ=100\n')
+        actual = config.settings('# CONFIG_PRESENT is not set\nCONFIG_HZ=1000\n')
+        self.assertEqual(config.errors(requested, actual, {'CONFIG_PRESENT', 'CONFIG_HZ'}), [
+            'CONFIG_PRESENT: requested y, resolved n',
+            'CONFIG_REMOVED: not defined in arm64 Kconfig sources',
+            'CONFIG_HZ: requested 100, resolved 1000',
+        ])
+        self.assertEqual(config.errors(config.settings('# CONFIG_PRESENT is not set\n'),
+                                       {}, {'CONFIG_PRESENT'}), [])
+        with self.assertRaises(ValueError):
+            config.settings('CONFIG_PRESENT=y\nCONFIG_PRESENT=n\n')
+
+    def test_config_definitions_exclude_other_architectures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for file, text in {
+                'arch/Kconfig': 'config GENERIC\n',
+                'arch/arm64/Kconfig': '\tconfig ARM64_ONLY\n',
+                'arch/x86/Kconfig': 'config X86_ONLY\n',
+                'drivers/Kconfig': 'menuconfig DRIVER\n',
+            }.items():
+                path = root / file
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+            self.assertEqual(config.defined_symbols(root), {
+                'CONFIG_GENERIC', 'CONFIG_ARM64_ONLY', 'CONFIG_DRIVER',
+            })
+
     def test_newc_independent_parse(self):
         image = initramfs.archive(b"ELF-test")
         self.assertEqual(image, initramfs.archive(b"ELF-test"))
