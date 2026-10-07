@@ -6,6 +6,11 @@ workstation with the controlled Seedbox kernel and 1024 MiB RAM per service.
 See the repository's `docs/acceptance.md` for the tested image/kernel hashes.
 This establishes those image versions, not compatibility with arbitrary OCI images.
 
+Production preparation uses one service per VM, with private RAM-backed storage
+retained across process restart only. The repository's `docs/compatibility.md`
+describes current draft formats and version-bound runtime evidence; V0 release
+compatibility and host-proof admission remain qualification gates.
+
 The etcd template packages Seedbox's existing Go acknowledgement-ledger workload
 in a Dockerfile and describes three registry-image members in Compose. The Redis
 template builds a dependency-free Rust workload that checks PING, SET acknowledgements,
