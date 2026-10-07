@@ -1729,7 +1729,10 @@ mod fork_tests {
             assert!(m.parked);
             assert_eq!(&m.memory()[0x80000..0x80004],&[0,0,0,0]);
             let other=released(&mut m,&mut counter,9);
-            assert_ne!(other.0,want.0);assert_ne!(other.1,want.1);
+            // Both seeds take the same path, and the event witness records
+            // port reads without their values, so only the state differs.
+            assert_eq!(other.0,want.0);assert_ne!(other.1,want.1);
+            assert_eq!(other.4,9u32.to_le_bytes());
             m.restore(&snapshot).unwrap();
             assert_eq!(released(&mut m,&mut counter,7),want,"seed restored from the fork, undo={undo}");
         }
