@@ -9,11 +9,14 @@ along with the gap from today to each capability and the hard problems. It
 follows a developer changing an S3-backed, cross-region Paxos log, with MinIO as
 the S3 dependency. They write a scenario, explore it under many seeds, narrow a
 failure that changes an acknowledged append, debug it across time, and check
-the fix. This page keeps the parts that guide day-to-day decisions. What exists
-today is in [research/STATUS.md](../research/STATUS.md) and
-[research/NEXT_STEPS.md](../research/NEXT_STEPS.md). Only the first
-requirement is partly in place (Compose files and runtime defaults, without
-builder plugins); the rest are not implemented yet.
+the fix. This page keeps the parts that guide day-to-day decisions. The current
+[runtime](runtime.md) supports Compose/OCI run and replay, seeded scheduling,
+and a Python scenario API for scoped network and process faults. The
+[acceptance record](acceptance.md) states what has been tested; the
+[backend contract](backends.md#qualification-and-capability-limits) states the
+remaining qualification limits. Builder plugins, broader faults and topology,
+exploration, portable bundles, snapshots, reverse debugging and `verify`
+remain future work tracked in issue #25.
 
 The architecture stays as it is: real Linux machines on KVM, one host thread per
 world, virtual time from counted guest progress, and seeds that choose every
@@ -67,9 +70,9 @@ interpret them.
 
 1. **Integrated simtest** (the current milestone): seeded races and service
    faults with a reproducible failing seed and a fixed control.
-2. **Scenarios and output**: land #24's scenario API for
-   [issue #3](https://github.com/gardnervickers/seedbox/issues/3), the scenario
-   verdict and free-form output, Seedbox metrics, and the first library pieces.
+2. **Scenarios and output**: build on the [Python fault API](../python/README.md)
+   with scenario verdicts and free-form output, Seedbox metrics, and the first
+   library pieces.
 3. **Network faults and topology**: regions with per-link latency,
    per-connection drops, pauses, clock skew and triggers.
 4. **Speed**: boot snapshots and forks, parallel seeds, a remote fleet.

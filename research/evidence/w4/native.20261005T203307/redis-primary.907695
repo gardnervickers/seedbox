@@ -1,7 +1,0 @@
-1791246787.545017 [ 334] rseq({cpu_id_start=0, cpu_id=RSEQ_CPU_ID_UNINITIALIZED, rseq_cs=NULL, flags=0, node_id=0, mm_cid=0, slice_ctrl={request=0, granted=0, __reserved=0}, __reserved=0}, 32, 0, 0x53053053) = 0 <0.000035>
-1791246787.545097 [ 273] set_robust_list(0x7ffff437d9a0, 24) = 0 <0.000014>
-1791246787.545144 [  14] rt_sigprocmask(SIG_SETMASK, [], NULL, 8) = 0 <0.000012>
-1791246787.545190 [ 157] prctl(PR_SET_NAME, "bio_lazy_free") = 0 <0.000020>
-1791246787.545241 [  14] rt_sigprocmask(SIG_BLOCK, [ALRM], NULL, 8) = 0 <0.000015>
-1791246787.545299 [ 202] futex(0x5555559ad0c0, FUTEX_WAIT_BITSET_PRIVATE|FUTEX_CLOCK_REALTIME, 0, NULL, FUTEX_BITSET_MATCH_ANY) = ?
-1791246788.379550 [ 202] +++ exited with 0 +++

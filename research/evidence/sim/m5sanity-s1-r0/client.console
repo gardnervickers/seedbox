@@ -1,3 +1,0 @@
-LOAD acked=7814 failed=21 elapsed=10.005422631s
-PLANT missing acknowledgment k/99/000000
-RESULT fail acked=7815 failed=21 member 10.0.0.1:2379 missing 1 acknowledged writes (first k/99/000000@0) rev=7816 hashes=map[10.0.0.1:2379:271049530]

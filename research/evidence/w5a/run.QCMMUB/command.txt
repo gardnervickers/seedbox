@@ -1,1 +1,0 @@
-sudo -n /etc/profiles/per-user/gvickers/bin/python3 /tmp/seedbox-round-1.S74xJ4/amd-counter/msr_guard.py --workaround original --receipt /tmp/seedbox-round-1.S74xJ4/evidence/w5a/preempt-original-idle-3-exits-2000-500-correct-1791248540399806903.json --probe-sha256 e0d52753246173d39ea62bffa79a87608d9b0dbea2a590aa0b06a63cb34f7026 exits 2000 500 correct 

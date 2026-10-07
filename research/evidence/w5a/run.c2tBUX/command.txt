@@ -1,1 +1,0 @@
-nix develop path:/tmp/seedbox-round-1.S74xJ4/env --command flock -n -E 75 /tmp/seedbox-round-1.S74xJ4/measurement.lock timeout 15 taskset -c 2 target/debug/seedbox-amd-counter branch 10000 both 0 209 0 

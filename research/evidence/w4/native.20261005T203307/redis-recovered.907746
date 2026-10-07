@@ -1,6 +1,0 @@
-1791246788.428493 [ 334] rseq({cpu_id_start=0, cpu_id=RSEQ_CPU_ID_UNINITIALIZED, rseq_cs=NULL, flags=0, node_id=0, mm_cid=0, slice_ctrl={request=0, granted=0, __reserved=0}, __reserved=0}, 32, 0, 0x53053053) = 0 <0.000032>
-1791246788.428577 [ 273] set_robust_list(0x7ffff337b9a0, 24) = 0 <0.000027>
-1791246788.428645 [  14] rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1], NULL, 8) = 0 <0.000027>
-1791246788.428711 [ 157] prctl(PR_SET_NAME, "jemalloc_bg_thd"...) = 0 <0.000027>
-1791246788.428774 [ 202] futex(0x7ffff6716e48, FUTEX_WAIT_BITSET_PRIVATE|FUTEX_CLOCK_REALTIME, 0, NULL, FUTEX_BITSET_MATCH_ANY) = ?
-1791246788.510457 [ 202] +++ exited with 0 +++

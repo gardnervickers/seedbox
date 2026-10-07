@@ -364,6 +364,7 @@ impl Control {
                             p.fatal = true;
                             Some(time)
                         }
+                        Some((crate::faults::Status::Unavailable(at), detail)) => {p.error=Some(detail.to_owned());p.error_code=Some("target_unavailable");Some(at)}
                         _ => None,
                     };
                     if let Some(at) = at {

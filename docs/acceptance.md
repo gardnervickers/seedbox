@@ -361,4 +361,53 @@ workspace tests, Linux VMM tests and all four YAML validations. Darwin formattin
 and strict all-target Clippy passed. Scenario drivers and runtime source are
 unchanged; hardware execution was not repeated for this removal-only cleanup.
 The remaining raw kernel/NIC and one-VM comparison fixtures still need their
-batch/MSR helpers and shared guest builders. Frozen research is unchanged.
+batch/MSR helpers and shared guest builders. Historical research remains available at commit `788fc43`.
+
+## Local Mac TCG feasibility
+
+The retained [experimental tool](../tools/mac-tcg/README.md) was measured on
+Apple M4 Max / Mac16,6, macOS 27.0.1 / 26A434, QEMU 11.1.1 and stock Linux
+6.18.54. The input-control probe had nine successful fresh processes over
+three seeds, matching console and ordered observations within each seed;
+median boot-to-exit time was 2.992 seconds. Omitted entropy, omitted icount,
+planted failure and wall-time controls exposed their intended failures.
+These are observation hashes, not an execution witness or full-state check.
+
+The single-kernel etcd service fixture demonstrated namespace packet controls,
+live directed partition/heal, process stop/restart, real recovery checks and
+a planted missing-write failure. Five fresh seed-1009 fault runs matched
+console, management logs and the historical scoped witness; median wall time
+was 14.643 seconds. Their decoder records remain provisional. Two fresh runs
+with the corrected decoder subsequently matched the original observations
+and canonical witness; the rest of the historical matrix was not requalified.
+The 39 service-phase attempts, including failures, used 573.504 QEMU seconds
+under the original 600-second budget. This is feasibility evidence, not a
+bug-discovery-rate comparison or qualification of a production Mac backend.
+
+The corrected plugin hashes selected instruction dispatches and architectural
+discontinuities up to explicit guest completion (`seedbox.tcg.boundaries.v2`).
+It does not cover all instructions, registers, RAM or device state and is not
+comparable to KVM witnesses. Shared-kernel clock/storage/failure limitations,
+manual cached-input preparation and untested cross-host binary reproducibility
+remain explicit. Exact executed sources, receipts, failed attempts and review
+fixes are in the
+[historical service report](https://github.com/gardnervickers/seedbox/blob/788fc4376b7e2cc96d1bc51ed2ae3d4635d16abd/research/mac-tcg/SERVICE_REPORT.md).
+
+Historical single-VM networking measurements are likewise preserved in
+[their report](https://github.com/gardnervickers/seedbox/blob/788fc4376b7e2cc96d1bc51ed2ae3d4635d16abd/research/single-vm-network/REPORT.md).
+The 4.830-second versus 27.310-second medians (5.65x, 128 successful writes,
+two repeats per layout) used the older ABI1 backend. They do not establish
+the current PV/undo advantage or equal bug-finding coverage; #10 remains open.
+
+## 2026-10-06 — final PR #27 merge validation
+
+After merging main `8a3e14a`, formatting, strict all-target Clippy, workspace
+tests, portable checks and all four YAML validations passed on Darwin and in
+the fresh Linux checkout `/home/gvickers/seedbox-pr27-final-20261006`.
+Linux VMM tests passed, including the updated fault-target lifecycle tests.
+Independent final review passed. Main's removal of obsolete research and the
+single-member etcd fixture is preserved.
+
+The direct KVM results above retain their recorded engine identities; hardware
+execution was not repeated for this merge. The seed-4004 clock-bound failure is
+tracked in [issue #33](https://github.com/gardnervickers/seedbox/issues/33).

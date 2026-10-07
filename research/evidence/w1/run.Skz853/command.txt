@@ -1,1 +1,0 @@
-nix develop /private/tmp/seedbox-round-1.S74xJ4/env --command bash /private/tmp/seedbox-round-1.S74xJ4/world/check.sh 

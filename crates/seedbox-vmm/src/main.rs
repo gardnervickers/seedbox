@@ -509,6 +509,7 @@ fn run() -> Result<Value, String> {
                 if let Err(error)=world.faults.management_ready(m,at,world.control.latency) {world.faults.error=Some(error);}
             } else {world.faults.effect(m,id,at,success);}
         }
+        if stop==Stop::Exited {if let Some(id)=world.control.pending.as_ref().and_then(|p|p.fault) {world.faults.target_exited(id,m,world.machines[m].time);}}
         for (at, line) in world.machines[m]
             .control_requests
             .drain(..)

@@ -8,6 +8,7 @@ guest drivers. Seed sweeps are ordinary CLI loops.
 
 | Removed definition | Replacement |
 | --- | --- |
+| `etcd1.json`, `guest/etcd1.init` | Removed obsolete single-member boot fixture; use the etcd Compose example |
 | `cluster.json` | [etcd Compose example](../../examples/etcd/compose.yaml) |
 | `kill-3.5.2.json`, `short-kill-3.5.2.json` | [etcd 3.5.2 scenario](../acceptance/workloads/short-kill-3.5.2.yaml) |
 | `kill-3.5.3.json` | [etcd 3.5.3 scenario](../acceptance/workloads/kill-3.5.3.yaml) |
@@ -17,15 +18,14 @@ guest drivers. Seed sweeps are ordinary CLI loops.
 
 These replace the application acceptance workflow; they do not preserve the old
 serial fault schedule, witnesses or historical failing seeds. The removed files
-from this cleanup are available in Git at `c7d7c22`. Frozen research records retain
-their original references and identities.
+from this cleanup are available in Git at `c7d7c22`. Historical research records at commit `788fc43` retain their original references
+and identities.
 
 ## Remaining fixtures and dependencies
 
 | Definition | Why it remains |
 | --- | --- |
 | `smoke.json`, `net.json` | Raw kernel boot/timer/entropy and virtual NIC checks |
-| `etcd1.json` | A low-level single-member guest boot fixture |
 | `cluster-fixed.json`, `single-vm*.json` | Matched multi-VM versus one-VM network-namespace experiments; Compose uses one service per VM |
 
 `batch.sh`, `batch.py` and `msr54.py` still run these fixtures with shared CPU/SMT

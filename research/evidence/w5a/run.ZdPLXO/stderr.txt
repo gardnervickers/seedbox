@@ -1,1 +1,0 @@
-{"guard_receipt": "/tmp/seedbox-round-1.S74xJ4/evidence/w5a/preempt-original-idle-reference-uncond-100000-10000-correct-1791249842412230244.json", "guard_errors": [], "child_exit": 2, "timed_out": false}

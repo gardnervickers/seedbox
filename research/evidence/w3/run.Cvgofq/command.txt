@@ -1,1 +1,0 @@
-nix develop /private/tmp/seedbox-round-1.S74xJ4/env --command cargo fmt --manifest-path /private/tmp/seedbox-round-1.S74xJ4/determinism/Cargo.toml -- --check 

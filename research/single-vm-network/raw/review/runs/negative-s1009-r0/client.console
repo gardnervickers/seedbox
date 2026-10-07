@@ -1,5 +1,0 @@
-SEEDBOX_PHASE client_start guest_ns=1573808781
-LOAD acked=128 failed=0 elapsed=378.107487ms
-PLANT missing acknowledgment k/99/000000
-RESULT fail acked=129 failed=0 member 10.0.1.1:2379 missing 1 acknowledged writes (first k/99/000000@0) rev=129 hashes=map[10.0.1.1:2379:2018078439]
-INIT exit=1

@@ -1,1 +1,0 @@
-TICKLESS_PROFILE_REJECTED {'CONFIG_NO_HZ_IDLE': {'expected': 'y', 'actual': 'n'}, 'CONFIG_NO_HZ_FULL': {'expected': 'n', 'actual': None}, 'CONFIG_HZ_100': {'expected': 'y', 'actual': 'n'}, 'CONFIG_HZ': {'expected': '100', 'actual': '250'}, 'CONFIG_HZ_250': {'expected': 'n', 'actual': 'y'}}

@@ -16,17 +16,15 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   it again is an error. It builds into `crates/seedbox-vmm/target`, where a
   `seedbox` run from the checkout finds it. Don't set a global
   `target-dir` in `.cargo/config.toml`: cargo applies it by current directory,
-  so it would also move the research crates' builds and break their scripts.
+  so it would also move standalone crate builds and break their scripts.
 - New crates go in `crates/<name>/` and inherit `version`, `edition` and
   `publish` from `[workspace.package]`. Put a dependency used by two or more
   workspace crates in `[workspace.dependencies]`. Commit both lockfiles.
-- `research/` is frozen: design conclusions, evidence records and the scripts
-  that produced them, excluded from the workspace. Don't edit it to fit code
-  changes elsewhere. The standalone research crates (`kvm-runner`, `world`,
-  `determinism`, the `intel-probe` crates, `workloads/tokio-service`) were
-  removed. They, and scripts that still use `sim/` paths, are at commit
-  `bc07f35`, the last commit with the old layout. The crates under
-  `research/evidence/**/source` stay as the recorded source of measured results.
+- Historical experiments and evidence are preserved at commit `788fc43`;
+  the earlier standalone prototypes are at `bc07f35`. Keep new runtime work
+  in the current crates, guest inputs and harness rather than reviving old
+  prototypes. `tools/mac-tcg/` retains the experimental local Mac runner,
+  its own pinned Nix shell and portable tests; it is not a production backend.
 - `harness/` holds YAML acceptance scenarios with guest Python drivers, portable
   checks, and the batch runner for low-level world fixtures. Application
   acceptance uses `seedbox run` / `seedbox replay` directly; do not add a host

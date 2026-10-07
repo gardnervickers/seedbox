@@ -52,7 +52,7 @@ INCOMPLETE and 124 TIMEOUT.
 | `guest/` | Generic OCI guest supervisor plus low-level guest fixtures and builders |
 | `docs/` | [Vision](docs/vision.md), [runtime instructions](docs/runtime.md), [backends](docs/backends.md), [acceptance record](docs/acceptance.md) |
 | `harness/` | YAML acceptance scenarios, portable checks, low-level world fixtures and their batch runner ([migration map](harness/worlds/README.md)), `msr54.py` |
-| `research/` | Design conclusions and evidence records ([status](research/STATUS.md)); research crates removed, see commit `bc07f35` |
+| [`tools/mac-tcg/`](tools/mac-tcg/README.md) | Experimental local Mac TCG runner and tests; separate from the production KVM backend |
 
 ## How execution is controlled
 
@@ -256,5 +256,5 @@ bug-finding rate. Before backend selection,
 matched optimized PV/undo comparison, qualified guest-local jitter, the full
 seeded kill/restart schedule, eight writers for 60 seconds, and etcd 3.5.3
 controls over the same seeds. The historical ABI1 timings are in
-[`research/single-vm-network/REPORT.md`](research/single-vm-network/REPORT.md)
+[the historical networking report](https://github.com/gardnervickers/seedbox/blob/788fc4376b7e2cc96d1bc51ed2ae3d4635d16abd/research/single-vm-network/REPORT.md)
 and must not be attributed to these revised sources.

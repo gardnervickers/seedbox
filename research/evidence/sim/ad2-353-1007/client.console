@@ -1,2 +1,0 @@
-LOAD acked=52954 failed=133 elapsed=1m0.005331448s
-RESULT pass acked=52954 failed=133 rev=52992 hash=3b5d305c

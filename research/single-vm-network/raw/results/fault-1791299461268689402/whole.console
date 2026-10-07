@@ -1,6 +1,0 @@
-SEEDBOX_PHASE client_start uptime=1.55 1.49
-NETWORK partition n1
-NETWORK heal n1
-LOAD acked=142 failed=3 elapsed=3.806215945s
-RESULT pass acked=142 failed=3 rev=144 hash=1331143e
-INIT exit=0

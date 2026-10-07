@@ -1,2 +1,0 @@
-{"name": "controls", "supervisor_status": 0, "attempt_status": "0", "accepted": false, "wall_seconds": 2.096694360021502, "host_seconds": 1.212523946, "guest_ns": null, "result": [], "world_witness": "ec8e2c8c2012330371d91d6fc82111ec2bb6db6646163aad128dd9ec1ac07c0c"}
-acceptance failed; stopping bounded validation
