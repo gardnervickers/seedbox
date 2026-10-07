@@ -1162,6 +1162,104 @@ fn rejected_preflight_never_prepares_and_post_preparation_drift_never_executes()
 }
 
 #[test]
+fn direct_and_parallel_requests_validate_inputs_before_admission_or_preparation() {
+    struct InvalidInputs;
+    impl PreparationBackend for InvalidInputs {
+        fn validate_runtime_inputs(&self) -> Result<()> {
+            Err(Error::Setup("test runtime input rejected".into()))
+        }
+        fn prepare(&self, _: &Simulation, _: &ContentStore) -> Result<PreparedInputs> {
+            panic!("invalid inputs reached preparation")
+        }
+        fn prepare_cancellable(
+            &self,
+            _: &Simulation,
+            _: &ContentStore,
+            _: &seedbox::preparation::PreparationContext,
+        ) -> Result<PreparedInputs> {
+            panic!("invalid inputs reached exploration preparation")
+        }
+    }
+    let fixture = Fixture::new();
+    let backend = AdmissionBackend {
+        backend: &fixture.backend,
+        checks: AtomicUsize::new(0),
+        fail_at: 1,
+    };
+    let error = fixture
+        .orchestrator
+        .run(
+            &fixture.simulation,
+            RunOptions::default(),
+            &InvalidInputs,
+            &backend,
+        )
+        .unwrap_err();
+    assert_eq!(error.to_string(), "test runtime input rejected");
+    let batch = fixture
+        .orchestrator
+        .explore(
+            &fixture.simulation,
+            seedbox::exploration::ExploreOptions {
+                workers: 2,
+                ..Default::default()
+            },
+            &InvalidInputs,
+            &backend,
+        )
+        .unwrap();
+    assert_eq!(batch.outcome, Outcome::Error);
+    assert_eq!(batch.error.as_deref(), Some("test runtime input rejected"));
+    assert!(batch.attempts.is_empty());
+    assert_eq!(backend.checks.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.backend.calls.load(Ordering::SeqCst), 0);
+
+    // Valid inputs must still go through the ordinary direct admission path.
+    assert!(fixture
+        .orchestrator
+        .run(
+            &fixture.simulation,
+            RunOptions::default(),
+            &fixture.preparer,
+            &backend,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("host drift"));
+    assert_eq!(backend.checks.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.preparer.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.backend.calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn default_serial_exploration_preserves_direct_run_identity_logs_and_witnesses() {
+    let fixture = Fixture::new();
+    let direct = fixture.run();
+    let batch = fixture
+        .orchestrator
+        .explore(
+            &fixture.simulation,
+            seedbox::exploration::ExploreOptions::default(),
+            &fixture.preparer,
+            &fixture.backend,
+        )
+        .unwrap();
+    assert_eq!(batch.workers, 1);
+    assert_eq!(batch.attempts.len(), 1);
+    let serial = inspect(batch.attempts[0].directory.as_ref().unwrap()).unwrap();
+    assert_eq!(serial.identity, direct.record.identity);
+    assert_eq!(serial.run_id, direct.record.run_id);
+    assert_eq!(serial.report, direct.record.report);
+    assert!(serial.report.as_ref().unwrap().witness.is_some());
+    assert_eq!(serial.logs, direct.record.logs);
+    assert_eq!(serial.outcome, Outcome::Pass);
+    assert_eq!(
+        fixture.replay(&direct).record.replay.unwrap().status,
+        ReplayStatus::Match
+    );
+}
+
+#[test]
 fn actual_vmm_admission_rejects_old_proof_before_execution_and_engine_override() {
     let fixture = Fixture::new();
     let original = fixture.run();
@@ -1432,6 +1530,17 @@ fn exploration_checks_inputs_first_and_releases_preflight_scope_before_preparing
 
 // Controlled completions exercise the real coordinator and retained lifecycle.
 // Channels, rather than host sleep ordering, determine which attempt finishes.
+// Allow loaded portable hosts time to schedule threads and retain artifacts.
+const WORKER_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn worker_fixture() -> Fixture {
+    let mut fixture = Fixture::new();
+    // A worker may wait through several control exchanges. The fixture's
+    // execution limit must not turn a slow test handshake into INCOMPLETE.
+    fixture.simulation.limits.wall_time_ns = 600_000_000_000;
+    fixture
+}
+
 #[derive(Clone, Copy)]
 enum WorkerControl {
     Complete,
@@ -1483,14 +1592,14 @@ impl ExecutionBackend for ControlledWorkers<'_> {
         let command = self.controls[&request.seed]
             .lock()
             .unwrap()
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(WORKER_WAIT)
             .expect("test control deadline");
         match command {
             WorkerControl::CleanupUnverified => {
                 return Err(Error::Execution("owned cleanup-unverified".into()))
             }
             WorkerControl::WaitForCancellation => {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                let deadline = std::time::Instant::now() + WORKER_WAIT;
                 while !request.cancellation.is_cancelled() {
                     assert!(
                         std::time::Instant::now() < deadline,
@@ -1558,7 +1667,7 @@ fn worker_ready(
     receiver: &std::sync::mpsc::Receiver<(u64, std::path::PathBuf)>,
 ) -> (u64, std::path::PathBuf) {
     receiver
-        .recv_timeout(std::time::Duration::from_secs(5))
+        .recv_timeout(WORKER_WAIT)
         .expect("worker did not start")
 }
 fn batch_of(run: &std::path::Path) -> &std::path::Path {
@@ -1568,7 +1677,7 @@ fn batch_of(run: &std::path::Path) -> &std::path::Path {
 #[test]
 fn parallel_completion_keeps_seed_indexes_and_one_full_closure_with_serial_equivalence() {
     use seedbox::exploration::ExploreOptions;
-    let fixture = Fixture::new();
+    let fixture = worker_fixture();
     let (backend, ready, senders) = controlled_workers(&fixture, 10, 6, 3);
     let batch = std::thread::scope(|scope| {
         let task = scope.spawn(|| {
@@ -1673,7 +1782,7 @@ fn parallel_completion_keeps_seed_indexes_and_one_full_closure_with_serial_equiv
 #[test]
 fn parallel_cleanup_uncertainty_cancels_owned_sibling_without_dispatching_pending_seeds() {
     use seedbox::exploration::ExploreOptions;
-    let fixture = Fixture::new();
+    let fixture = worker_fixture();
     let caller = CancellationToken::default();
     let (backend, ready, senders) = controlled_workers(&fixture, 10, 5, 2);
     let batch = std::thread::scope(|scope| {
@@ -1730,7 +1839,7 @@ fn parallel_cleanup_uncertainty_cancels_owned_sibling_without_dispatching_pendin
 #[test]
 fn parallel_staggered_external_cancellation_keeps_completed_running_and_pending_attribution() {
     use seedbox::exploration::ExploreOptions;
-    let fixture = Fixture::new();
+    let fixture = worker_fixture();
     let caller = CancellationToken::default();
     let (backend, ready, senders) = controlled_workers(&fixture, 10, 6, 2);
     let batch = std::thread::scope(|scope| {
@@ -1788,7 +1897,7 @@ fn parallel_staggered_external_cancellation_keeps_completed_running_and_pending_
 #[test]
 fn parallel_checkpoint_failure_unwinds_owned_work_and_preserves_independent_manifests() {
     use seedbox::exploration::ExploreOptions;
-    let fixture = Fixture::new();
+    let fixture = worker_fixture();
     let (backend, ready, senders) = controlled_workers(&fixture, 10, 5, 2);
     let paths = std::thread::scope(|scope| {
         let task = scope.spawn(|| {
