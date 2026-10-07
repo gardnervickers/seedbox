@@ -96,20 +96,23 @@ Common fields are `version: 1`, `id`, and `op`. Targets are typed objects:
 | `crash` | `target`: a typed target | `{}` after destroying the machine |
 | `reboot` | `target`: a typed target | `{}` after booting a crashed machine from its retained image |
 | `partition` | `left`, `right`: nonempty, disjoint arrays of typed targets | `{"handle":"opaque value"}` |
+| `shape` | `from`, `to`: nonempty disjoint typed-target arrays; `latency_ns`, `jitter_ns`, `loss_ppm`: integers | `{"handle":"opaque value"}` |
 | `heal` | `handle`: a previously returned handle | `{}` after releasing that handle |
-| `inspect` | None | `services`, `machines`, `active_handles`, `network_counters` |
+| `inspect` | None | `services`, `machines`, `active_handles`, `network_counters`; `triggers` only after an arm |
+| `arm_trigger` | `source`: typed target; `marker`: 1..=256 byte integers; `match_timeout_ns`: positive u64; `fault`: typed trigger fault below | `{"trigger_id": N}`; also `handle` for a partition |
+| `cancel_trigger` | `trigger_id`: previously returned positive ID | `{}` after cancellation at admission |
 
 Partitions cut both directions between their two groups. Each handle is
 independent: a link remains cut while any applicable handle exists. Already
 routed packets stay in flight; new sends crossing an active cut are dropped.
 Inspect returns the retained service-to-machine mapping, application lifecycle
-states (`Running`, `Stopped`, `Paused`, `Down`, or `Exited(code)`), active partition
+states (`Running`, `Stopped`, `Paused`, `Down`, or `Exited(code)`), active partition and shape
 handles and directed-link counters. It exposes simulator state, not application object memory.
 Transient CPU halt state is not an application lifecycle state. Counters include
 sends, drops and arrivals whose nominal simulated timestamps are strictly before
 the admission boundary; equal-time packets follow admission. This excludes
 packets that the scheduler has delivered early but whose nominal arrival is
-still in the future. Partition/heal evidence uses the same counter boundary.
+still in the future. Partition/shape/heal evidence uses the same counter boundary.
 
 Machine lifecycle effects occur at admission without a guest acknowledgement.
 `pause` freezes the whole machine while others keep running; `resume` continues
@@ -138,13 +141,31 @@ The next request can release exactly that handle:
 {"version":1,"id":2,"op":"heal","handle":"p1"}
 ```
 
+A directed shape uses a complete, absolute policy:
+
+```json
+{"version":1,"id":3,"op":"shape","from":[{"service":"client"}],"to":[{"service":"server"}],"latency_ns":20000000,"jitter_ns":2000000,"loss_ppm":50000}
+```
+
+Shapes use the same handle counter as partitions. The highest live fault ID
+covering a directed pair wins; healing reveals the previous layer or baseline.
+A cut always dominates. Latency must be at least the global network latency,
+jitter must be less than latency, their sum must not exceed one hour, and
+`loss_ppm` must be in `[0, 1000000]`. Invalid values receive `invalid_request`.
+The Python API is `world.shape(from_, to, latency=..., jitter=0, loss_ppm=0)`
+with nanosecond integers (`Controller` is an alias for `World`); `world.heal()` accepts either returned handle type.
+Shapes take effect at admission, and each frame retains its send-time decision.
+Counters include `delivered`, `partition_dropped`, `receiver_dropped`, and
+`loss_dropped` (omitted while zero); even a lost candidate consumes one loss
+and one jitter sample.
+
 An operation error uses `ok: false` and `error` instead of a result:
 
 ```json
-{"version":1,"id":2,"ok":false,"error":{"code":"invalid_request","message":"inactive partition handle"},"requested_at_ns":1020000000,"admitted_at_ns":1027000000,"effect_at_ns":1027000000,"replied_at_ns":1034000000}
+{"version":1,"id":2,"ok":false,"error":{"code":"invalid_request","message":"inactive fault handle"},"requested_at_ns":1020000000,"admitted_at_ns":1027000000,"effect_at_ns":1027000000,"replied_at_ns":1034000000}
 ```
 
-A scenario can handle rejected arguments or an inactive partition handle.
+A scenario can handle rejected arguments or an inactive fault handle.
 `restart` starts a stopped application using its retained launch recipe. Restarting
 a running application or stopping an already stopped application returns
 `invalid_state`. Illegal machine lifecycle transitions also return `invalid_state`
@@ -201,3 +222,28 @@ Request order, handles, effects, replies and packet counters are retained in the
 execution evidence. Performance settings such as undo margin must not change this
 history. The controller's Python source, its binding, and its image are retained
 with the run so replay executes the same inputs.
+
+## Committed console trigger extension (development engine)
+
+`fault` is either `{"action":"stop","target":{"service":"server"}}` or
+`{"action":"partition","left":[{"service":"client"}],"right":[{"service":"server"}]}`.
+Arguments and nested faults reject unknown fields. Sources may include the
+controller; fault targets may not. Stop and partition are the only trigger
+actions in this initial extension. No network/control-event selectors are
+exposed. Arm replies confirm admission, not firing. Cancellation rejects any
+trigger no longer armed. A partition handle can be healed after its effect.
+
+A run admits at most 64 triggers total. Each marker uses bounded streaming
+matching of future COM1/debug-port transmitted bytes, including split writes.
+Matching is once per trigger in `[admission, admission + match_timeout_ns)`.
+The final byte supplies the committed match timestamp; its effect is scheduled
+at that time plus the fixed control latency. Same-time effects follow arm ID.
+Existing in-flight retention and five-second process effect deadlines apply.
+Expiry is retained without a fault; cutoff retains unmatched prefixes or pending
+effects. `inspect.triggers` and terminal `vmm.json.triggers` contain the same
+canonical matcher/effect records, with cutoff added at termination. The world
+witness includes those records only when triggers have been used.
+
+The full [time/commitment contract and AMD controls](../docs/triggers.md) define
+tie order, snapshots, discarded candidates and charged-I/O boundaries. Plain
+console bytes do not establish an accepted PUT or any application commit.

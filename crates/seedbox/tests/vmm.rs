@@ -37,6 +37,7 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
             wall_time_ns: 5_000_000_000,
         },
         network: &Network {
+            links: Vec::new(),
             name: "private".into(),
             latency_ns: 100_000,
             jitter_ns: 20_000,
@@ -537,6 +538,110 @@ fn typed_network_plan_preserves_targets_without_attributing_check_service() {
     });
 }
 
+#[test]
+fn baseline_links_resolve_service_names_to_prepared_machines() {
+    fixture(|base| {
+        assert!(vmm::world(base).unwrap()["network"].get("links").is_none());
+        let mut network = base.network.clone();
+        network.links.push(seedbox::config::Link {
+            from: "server".into(),
+            to: "client".into(),
+            latency_ns: 200_000,
+            jitter_ns: 10_000,
+            loss_ppm: 500_000,
+        });
+        let request = ExecutionRequest {
+            network: &network,
+            ..*base
+        };
+        assert_eq!(
+            vmm::world(&request).unwrap()["network"]["links"],
+            json!([{"from":"server-machine","to":"client-machine","latency_ns":200_000,"jitter_ns":10_000,"loss_ppm":500_000}])
+        );
+        network.links[0].from = "missing".into();
+        assert!(vmm::world(&ExecutionRequest {
+            network: &network,
+            ..*base
+        })
+        .is_err());
+    });
+}
+
+#[test]
+fn shape_transcripts_validate_handle_timing_absolute_policy_and_directed_sides() {
+    fixture(|base| {
+        // Use a third machine as controller so both sides are in the failure model.
+        let mut prepared = base.prepared.clone();
+        let hash = prepared.kernel.clone();
+        prepared
+            .placement
+            .insert("scenario".into(), "scenario-machine".into());
+        prepared
+            .guests
+            .insert("scenario-machine".into(), hash.clone());
+        let check = Check {
+            service: "scenario".into(),
+            exit_code: 0,
+        };
+        let control = seedbox::config::Control {
+            service: "scenario".into(),
+        };
+        let request = ExecutionRequest {
+            prepared: &prepared,
+            check: &check,
+            control: Some(&control),
+            ..*base
+        };
+        let latency = vmm::world(&request).unwrap()["control"]["latency_ns"]
+            .as_u64()
+            .unwrap();
+        let t = 10_000_000;
+        let a = t + latency;
+        let reply = a + latency;
+        let mut raw = report();
+        raw["machines"].as_array_mut().unwrap().push(json!({"name":"scenario-machine","guest_exit_code":0,"guest_init_error":null,"infrastructure_error":false,"state_digest":hash}));
+        raw["control_latency_ns"] = json!(latency);
+        let call = json!({"version":1,"id":1,"op":"shape","from":[{"service":"server"}],"to":[{"service":"client"}],"latency_ns":200_000,"jitter_ns":10_000,"loss_ppm":500_000});
+        let plan = json!({"id":1,"at_ns":a,"deadline_ns":a+5_000_000_000,"action":"shape","handle":"p1","from":["server-machine"],"to":["client-machine"],"latency_ns":200_000,"jitter_ns":10_000,"loss_ppm":500_000});
+        raw["control_history"] = json!([{"relay_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":{"handle":"p1"},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":a,"replied_at_ns":reply},"delivered_at_ns":reply}]);
+        raw["faults"] = json!([{"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":a,"action":"shape","machine":null,"status":"applied","detail":"handle=p1"}]);
+        let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
+        assert_eq!(result.faults[0].action, "shape");
+        assert!(result.faults[0].service.is_empty());
+        for (key, value) in [
+            ("latency_ns", json!(99_999)),
+            ("jitter_ns", json!(200_000)),
+            ("loss_ppm", json!(1_000_001)),
+            ("from", json!([])),
+            ("to", json!([{"service":"server"}])),
+        ] {
+            let mut bad = raw.clone();
+            bad["control_history"][0]["request"][key] = value;
+            assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        }
+        for handle in [json!(""), json!(null), json!("p2")] {
+            let mut bad = raw.clone();
+            bad["control_history"][0]["response"]["result"]["handle"] = handle;
+            assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        }
+        let mut bad = raw.clone();
+        bad["control_history"][0]["response"]["effect_at_ns"] = json!(a + 1);
+        assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        // Admission followed by world cutoff retains the planned handle and policy.
+        raw["outcome"] = json!("duration");
+        raw["control_history"][0]["plan"] = raw["faults"][0]["request"].clone();
+        raw["control_history"][0]["fault_id"] = json!(1);
+        raw["control_history"][0]["response"] = json!(null);
+        raw["control_history"][0]["cut_off_at_ns"] = json!(a);
+        raw["control_history"][0]["status"] = json!("cut_off");
+        raw["control_history"][0]["requested_at_ns"] = json!(t);
+        raw["control_history"][0]["admitted_at_ns"] = json!(a);
+        raw["control_history"][0]["admitted_done"] = json!(true);
+        raw["control_history"][0]["delivered_at_ns"] = json!(null);
+        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
+    });
+}
+
 fn machine_fault_row(
     id: u32,
     op: &str,
@@ -819,6 +924,176 @@ fn counter_identity_requires_an_attributable_matching_engine_report() {
             ..*base
         };
         assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
+    });
+}
+
+#[test]
+fn committed_trigger_reports_correlate_arms_effects_cancellation_and_cutoff() {
+    fixture(|base| {
+        let c = seedbox::config::Control {
+            service: "client".into(),
+        };
+        let request = ExecutionRequest {
+            control: Some(&c),
+            ..*base
+        };
+        let latency = vmm::world(&request).unwrap()["control"]["latency_ns"]
+            .as_u64()
+            .unwrap();
+        let arm = 100 + latency;
+        let matched = arm + 2 * latency;
+        let effect = matched + latency;
+        let trigger = json!({"id":1,"source":"server-machine","marker":[65,66],"armed_at_ns":arm,"match_deadline_ns":arm+10_000_000,"action":{"action":"stop","machine":"server-machine"},"prefix":2,"seen":2,"resets":0,"matched_at_ns":matched,"effect_at_ns":effect,"fault_id":1,"cancelled_at_ns":null,"cut_off_at_ns":null,"status":"fired"});
+        let mut raw = report();
+        raw["control_latency_ns"] = json!(latency);
+        raw["control_history"] = json!([{"relay_id":1,"session_id":1,"request":{"version":1,"id":1,"op":"arm_trigger","source":{"service":"server"},"marker":[65,66],"match_timeout_ns":10_000_000,"fault":{"action":"stop","target":{"service":"server"}}},"response":{"version":1,"id":1,"ok":true,"result":{"trigger_id":1},"requested_at_ns":100,"admitted_at_ns":arm,"effect_at_ns":arm,"replied_at_ns":arm+latency},"delivered_at_ns":arm+latency}]);
+        raw["triggers"] = json!([trigger]);
+        let plan = json!({"id":1,"at_ns":effect,"deadline_ns":effect+5_000_000_000u64,"action":"stop","machine":"server-machine"});
+        raw["faults"] = json!([{"id":1,"request":plan,"requested_at_ns":effect,"applied_at_ns":effect+10,"action":"stop","machine":"server-machine","status":"applied","detail":"reaped"}]);
+        let parse =
+            |raw: &serde_json::Value| vmm::report(&serde_json::to_vec(raw).unwrap(), &request);
+        assert_eq!(parse(&raw).unwrap().faults.len(), 1);
+        // A matched trigger rejected at admission creates no second fault.
+        let mut rejected = raw.clone();
+        let stop_at = arm + 2 * latency;
+        let stopped = stop_at + 1;
+        rejected["control_history"].as_array_mut().unwrap().push(json!({"relay_id":2,"session_id":1,"fault_id":1,"request":{"version":1,"id":2,"op":"stop","target":{"service":"server"}},"response":{"version":1,"id":2,"ok":true,"result":{},"requested_at_ns":arm+latency,"admitted_at_ns":stop_at,"effect_at_ns":stopped,"replied_at_ns":stopped+latency},"delivered_at_ns":stopped+latency}));
+        rejected["faults"][0]["request"]["at_ns"] = json!(stop_at);
+        rejected["faults"][0]["request"]["deadline_ns"] = json!(stop_at + 5_000_000_000u64);
+        rejected["faults"][0]["requested_at_ns"] = json!(stop_at);
+        rejected["faults"][0]["applied_at_ns"] = json!(stopped);
+        rejected["triggers"][0]["matched_at_ns"] = json!(arm + 4 * latency);
+        rejected["triggers"][0]["effect_at_ns"] = json!(arm + 5 * latency);
+        rejected["triggers"][0]["status"] = json!("rejected");
+        rejected["triggers"][0]["fault_id"] = json!(null);
+        rejected["triggers"][0]["rejection_reason"] = json!("target process is already stopped");
+        assert_eq!(parse(&rejected).unwrap().faults.len(), 1);
+        for (field, value) in [
+            ("rejection_reason", json!(null)),
+            ("rejection_reason", json!("")),
+            ("fault_id", json!(2)),
+            ("matched_at_ns", json!(null)),
+            ("effect_at_ns", json!(request.limits.simulated_time_ns)),
+            ("cancelled_at_ns", json!(arm)),
+            ("cut_off_at_ns", json!(arm + 5 * latency)),
+        ] {
+            let mut bad = rejected.clone();
+            bad["triggers"][0][field] = value;
+            assert!(parse(&bad).is_err(), "accepted rejected trigger {field}");
+        }
+        let mut unavailable = raw.clone();
+        unavailable["faults"][0]["status"] = json!("unavailable");
+        unavailable["faults"][0]["applied_at_ns"] = json!(null);
+        unavailable["machines"][1]["state"] = json!("Exited(0)");
+        unavailable["machines"][1]["time_ns"] = json!(effect + 5);
+        assert!(parse(&unavailable).is_ok());
+        unavailable["machines"][1]["time_ns"] = json!(effect - 1);
+        assert!(parse(&unavailable).is_err());
+
+        // Triggered stops can become unavailable when their machine crashes,
+        // even if the final report describes a later running incarnation.
+        let mut crashed = unavailable.clone();
+        crashed["machines"][1]["state"] = json!("Running");
+        crashed["machines"][1]["time_ns"] = json!(effect + 100);
+        for crash_at in [effect, effect + 5] {
+            crashed["machines"][1]["crashed_incarnations"] = json!([{"crashed_at_ns":crash_at}]);
+            assert!(parse(&crashed).is_ok());
+        }
+        for crash_at in [effect - 1, effect + 5_000_000_001] {
+            crashed["machines"][1]["crashed_incarnations"] = json!([{"crashed_at_ns":crash_at}]);
+            assert!(parse(&crashed).is_err());
+        }
+        // A crash before the effect needs a matching prior control plan.
+        let mut down = crashed.clone();
+        let crash_at = effect - 1;
+        down["machines"][1]["crashed_incarnations"] = json!([{"crashed_at_ns":crash_at}]);
+        down["triggers"][0]["fault_id"] = json!(2);
+        down["faults"][0]["id"] = json!(2);
+        down["faults"][0]["request"]["id"] = json!(2);
+        let (mut row, crash_fault) = machine_fault_row(1, "crash", crash_at - latency, latency);
+        row["relay_id"] = json!(2);
+        row["request"]["id"] = json!(2);
+        row["response"]["id"] = json!(2);
+        down["control_history"].as_array_mut().unwrap().push(row);
+        down["faults"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, crash_fault);
+        assert!(parse(&down).is_ok(), "{:?}", parse(&down));
+        for op in ["pause", "reboot"] {
+            let mut bad = down.clone();
+            bad["control_history"][1]["request"]["op"] = json!(op);
+            bad["faults"][0]["action"] = json!(op);
+            bad["faults"][0]["request"]["action"] = json!(op);
+            assert!(parse(&bad).is_err());
+        }
+
+        for (field, value) in [
+            ("source", json!("client-machine")),
+            ("matched_at_ns", json!(arm - 1)),
+            ("effect_at_ns", json!(matched)),
+            ("fault_id", json!(2)),
+            ("prefix", json!(1)),
+            ("status", json!("armed")),
+            ("marker", json!([65])),
+            ("rejection_reason", json!("unexpected rejection")),
+        ] {
+            let mut bad = raw.clone();
+            bad["triggers"][0][field] = value;
+            assert!(parse(&bad).is_err(), "accepted {field}");
+        }
+        let mut missing = raw.clone();
+        missing.as_object_mut().unwrap().remove("triggers");
+        assert!(parse(&missing).is_err());
+        let mut duplicate = raw.clone();
+        let duplicate_record = duplicate["triggers"][0].clone();
+        duplicate["triggers"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate_record);
+        assert!(parse(&duplicate).is_err());
+        // Armed with no match at the terminal cutoff retains its partial prefix.
+        let mut cutoff = raw.clone();
+        cutoff["faults"] = json!([]);
+        for field in ["matched_at_ns", "effect_at_ns", "fault_id"] {
+            cutoff["triggers"][0][field] = json!(null);
+        }
+        cutoff["triggers"][0]["prefix"] = json!(1);
+        cutoff["triggers"][0]["status"] = json!("cut_off");
+        cutoff["triggers"][0]["cut_off_at_ns"] = json!(arm + 1000);
+        assert!(parse(&cutoff).is_ok());
+        // Arm admitted but its reply was not yet generated at cutoff.
+        let mut pending = cutoff.clone();
+        let row = &mut pending["control_history"][0];
+        let metadata = row["response"].clone();
+        row.as_object_mut().unwrap().remove("response");
+        for field in ["requested_at_ns", "admitted_at_ns", "effect_at_ns"] {
+            row[field] = metadata[field].clone();
+        }
+        row["replied_at_ns"] = json!(arm + latency);
+        row["result"] = json!({"trigger_id":1});
+        row["status"] = json!("cut_off");
+        row["admitted_done"] = json!(true);
+        row["cut_off_at_ns"] = json!(arm + 1000);
+        row["delivered_at_ns"] = json!(null);
+        assert!(parse(&pending).is_ok());
+        // A cancellation must have a successful causally correlated request.
+        let mut cancelled = cutoff.clone();
+        cancelled["triggers"][0]["cut_off_at_ns"] = json!(null);
+        cancelled["triggers"][0]["status"] = json!("cancelled");
+        let time = arm + 2 * latency;
+        let admission = time + latency;
+        cancelled["triggers"][0]["cancelled_at_ns"] = json!(admission);
+        assert!(parse(&cancelled).is_err());
+        cancelled["control_history"].as_array_mut().unwrap().push(json!({"relay_id":2,"session_id":1,"request":{"version":1,"id":2,"op":"cancel_trigger","trigger_id":1},"response":{"version":1,"id":2,"ok":true,"result":{},"requested_at_ns":time,"admitted_at_ns":admission,"effect_at_ns":admission,"replied_at_ns":admission+latency},"delivered_at_ns":admission+latency}));
+        assert!(parse(&cancelled).is_ok());
+        // A regular RPC after the triggered fault shares the sequential fault IDs.
+        let mut interleaved = raw.clone();
+        let admission = effect + 1000 + latency;
+        let plan = json!({"id":2,"at_ns":admission,"deadline_ns":admission+5_000_000_000u64,"action":"stop","machine":"server-machine"});
+        interleaved["control_history"].as_array_mut().unwrap().push(json!({"relay_id":2,"session_id":1,"fault_id":2,"request":{"version":1,"id":2,"op":"stop","target":{"service":"server"}},"response":{"version":1,"id":2,"ok":true,"result":{},"requested_at_ns":effect+1000,"admitted_at_ns":admission,"effect_at_ns":admission+1,"replied_at_ns":admission+1+latency},"delivered_at_ns":admission+1+latency}));
+        interleaved["faults"].as_array_mut().unwrap().push(json!({"id":2,"request":plan,"requested_at_ns":admission,"applied_at_ns":admission+1,"action":"stop","machine":"server-machine","status":"applied","detail":"reaped"}));
+        assert_eq!(parse(&interleaved).unwrap().faults.len(), 2);
     });
 }
 

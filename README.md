@@ -31,6 +31,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Input | Default | Override |
 | --- | --- | --- |
 | Compose file | `compose.yaml` in the given directory (default `.`) | positional path |
+| Directed link baselines | no overrides; global latency/jitter and zero loss | `x-seedbox.network.links` |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
 | Exploration count | `1` | `--count` |
 | Exploration workers | `1`, sequential execution | `--workers` (1..32; automatic CPU selection for parallel execution) |
@@ -47,6 +48,25 @@ directory. Every runtime input has a default, so no flags are required:
 | Diff inputs | Two required retained run directories; no runtime inputs or state lookup | positional `RUN_A RUN_B` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
 
+Directed baselines are optional Compose settings. For example, with `server` and
+`client` services:
+
+```yaml
+x-seedbox:
+  network:
+    latency: 1ms
+    links:
+      - {from: server, to: client, latency: 20ms, jitter: 2ms, loss_ppm: 50000}
+```
+
+Each entry affects one direction. Latency is required; jitter and loss default to
+zero. Global latency remains the fixed scheduling lower bound for every link.
+`seedbox validate` checks the services, duplicate pairs, and policy bounds before
+preparation. Guest controllers can temporarily override links with
+`world.shape(["server"], ["client"], latency=20_000_000, jitter=2_000_000, loss_ppm=50000)`
+and release the returned handle with `world.heal(handle)`; see
+[network policy](docs/runtime.md#directed-link-policy).
+
 For development artifacts, pass `--allow-dev-engine` to `run`, `explore`, `replay`
 or `doctor`. Unpinned engine or guest-kernel bytes record the semantic parameter
 `engine_qualification = "dev-unpinned"` and are reported as an unqualified dev
@@ -59,10 +79,18 @@ marker. All host, CPU, PMU, MSR, lease, ABI and control-channel checks still app
 automatically. It applies to retained disks; Compose storage is still RAM-backed
 until named-volume disk support lands. See [disk semantics](docs/runtime.md#disk-crash-policy).
 
-`seedbox help run` lists every option. A run prints `OUTCOME: run-directory`;
+`seedbox help run` lists every option. The guest Python API supports
+[bounded committed console triggers](docs/triggers.md) for future stop/partition
+faults in the development engine; see that contract and AMD validation handoff. A run prints `OUTCOME: run-directory`;
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
 INCOMPLETE and 124 TIMEOUT. Offline `diff` exits 0 for MATCH, 1 for DIFFERENT,
 and 2 for usage/setup or invalid retained evidence.
+
+On a VMM failure, text output from `run`, `replay`, `explore` and `inspect`
+also prints up to five non-empty lines from the final 8 KiB of that attempt's
+`output/vmm.stderr` to stderr, prefixed with `vmm stderr:`. Missing or unreadable
+logs do not change the outcome. Retained records and `--json` output are unchanged.
+`inspect` keeps the recorded `error:` line on stdout alongside the run status.
 
 [Draft format and runtime scope](docs/compatibility.md) distinguishes inspection
 and transfer from qualified execution. Same software versions, seed and exact
@@ -161,14 +189,15 @@ rebuilt OCI images to have identical bytes.
   virtual time; user RDTSC/RDTSCP trap via CR4.TSD and are emulated. The
   kernel's syscall yield hook remains, but the engine never requests it.
 - **Network and scheduling.** virtio-net over virtio-mmio into an in-memory
-  fabric with seeded latency/jitter and directed partitions. The world runs the
+  fabric with per-direction latency, jitter, loss and partitions. The world runs the
   machine furthest behind in slices that never pass its causal horizon (the
   other machines' times plus link latency) or its next event. A slice may end
   at the first deterministic point in the last half-latency before that
   boundary (capped by `stop_tolerance_ns`), and events are delivered at the
   first stop up to that long before they are due: early by a bounded amount,
   never late, and never before they were sent.
-- **Witness.** Each machine hashes every deterministic exit; `--digest` adds
+- **Witness.** A network hash covers pending frames, link streams and active policies.
+  Each machine hashes every deterministic exit; `--digest` adds
   a hash of registers and all guest RAM; `--trace` writes every exit.
 
 ## Host requirements

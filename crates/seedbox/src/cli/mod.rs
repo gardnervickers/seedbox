@@ -1,6 +1,7 @@
 //! The `seedbox` command line. Style rules for changes: `AGENTS.md`, "CLI".
 
 mod defaults;
+mod diagnostics;
 mod signals;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -34,6 +35,8 @@ Exit status:
   3    INCOMPLETE (wall-time limit or cancelled)
   124  TIMEOUT (simulated-time limit)";
 
+const VMM_FAILURE_HELP: &str = "Text VMM failures also show up to 5 non-empty lines from the final 8 KiB of output/vmm.stderr on stderr; JSON output is unchanged.";
+
 #[derive(Parser)]
 #[command(
     version,
@@ -57,7 +60,7 @@ enum Command {
         #[arg(long, value_enum, default_value_t = TemplateArg::Etcd)]
         template: TemplateArg,
     },
-    /// Check a Compose file against the supported subset, without images or guests.
+    /// Check Compose services and directed network policies, without images or guests.
     Validate {
         #[command(flatten)]
         compose: ComposeArg,
@@ -93,7 +96,7 @@ enum Command {
         build: BuildOptions,
     },
     /// Prepare images and run a simulation (Linux KVM host, root).
-    #[command(after_help = EXIT_CODES)]
+    #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
     Run {
         #[command(flatten)]
         compose: ComposeArg,
@@ -112,7 +115,7 @@ enum Command {
         performance: Performance,
     },
     /// Explore a finite seed sequence with one frozen preparation (Linux KVM host, root).
-    #[command(after_help = EXIT_CODES)]
+    #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
     Explore {
         #[command(flatten)]
         compose: ComposeArg,
@@ -140,7 +143,7 @@ enum Command {
         performance: Performance,
     },
     /// Re-execute a recorded run from its retained inputs and compare (Linux KVM host, root).
-    #[command(after_help = EXIT_CODES)]
+    #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
     Replay {
         /// Run directory, as printed by `run`.
         run: PathBuf,
@@ -190,7 +193,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show a recorded run after verifying its manifest.
+    /// Show a recorded run, including its error on stdout, after verifying its manifest.
+    #[command(after_help = VMM_FAILURE_HELP)]
     Inspect {
         /// Run directory, as printed by `run` or `replay`.
         run: PathBuf,
@@ -647,6 +651,7 @@ fn run(cli: Cli) -> Result<u8> {
                         );
                         if let Some(error) = &attempt.error {
                             eprintln!("error: seed {}: {error}", attempt.seed);
+                            diagnostics::vmm_failure(directory, error);
                         }
                     }
                 }
@@ -851,6 +856,7 @@ fn run(cli: Cli) -> Result<u8> {
             }
             if let Some(error) = record.error {
                 println!("error: {error}");
+                diagnostics::vmm_failure(&run, &error);
             }
             Ok(0)
         }
@@ -900,6 +906,7 @@ fn report(run: &orchestration::Run) -> u8 {
     }
     if let Some(error) = &run.record.error {
         eprintln!("{error}");
+        diagnostics::vmm_failure(&run.directory, error);
     }
     if let Some(replay) = &run.record.replay {
         let label = if seedbox::admission::is_dev_engine(&run.record.identity.inputs.profile) {

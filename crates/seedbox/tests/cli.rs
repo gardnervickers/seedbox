@@ -436,6 +436,45 @@ fn bundle_cli_validates_paths_limits_and_positional_inputs() {
 }
 
 #[test]
+fn validate_cli_resolves_directed_baselines_and_reports_each_policy_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("compose.yaml");
+    let yaml = "name: cli-links\nservices:\n  server: {image: example/server:v1}\n  client: {image: example/client:v1}\nx-seedbox:\n  version: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  network: {latency: 1ms, links: [LINKS]}\n  check: {service: client}\n";
+    let good = "{from: server, to: client, latency: 1ms}";
+    fs::write(&source, yaml.replace("LINKS", good)).unwrap();
+    let output = seedbox(&["validate", "--json"], directory.path());
+    assert!(output.status.success(), "{}", stderr(&output));
+    let resolved: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        resolved["network"]["links"][0],
+        serde_json::json!({"from":"server","to":"client","latency_ns":1_000_000,"jitter_ns":0,"loss_ppm":0})
+    );
+    for (entry, path) in [
+        (format!("{good},{good}"), "links[1]"),
+        (
+            good.replace("from: server", "from: unknown"),
+            "links[0].from",
+        ),
+        (good.replace("1ms", "999us"), "links[0].latency"),
+        (good.replace("1ms}", "1ms, jitter: 1ms}"), "links[0].jitter"),
+        (
+            good.replace("1ms}", "1ms, loss_ppm: 1000001}"),
+            "links[0].loss_ppm",
+        ),
+    ] {
+        fs::write(&source, yaml.replace("LINKS", &entry)).unwrap();
+        let output = seedbox(&["validate"], directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(
+            stderr(&output).contains(&format!("$.x-seedbox.network.{path}")),
+            "{}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
 fn build_epoch_custom_builder_fails_before_runtime_resolution_or_state_creation() {
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("Dockerfile"), "FROM scratch\n").unwrap();
@@ -736,6 +775,72 @@ mod diff_tests {
     use super::*;
     use seedbox as sb;
     include!("support/diff_fixture.rs");
+
+    #[test]
+    fn inspect_vmm_failure_shows_bounded_diagnostics_only_on_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run = root.join("failed");
+        let mut record = fixture();
+        record.outcome = sb::orchestration::Outcome::Error;
+        record.report = None;
+        let error = sb::Error::Execution(sb::vmm::VMM_FAILURE_MESSAGE.into()).to_string();
+        record.error = Some(error.clone());
+        write_fixture(&run, &mut record, None, None);
+        let manifest = fs::read(run.join("manifest.json")).unwrap();
+        let diagnostic = run.join("output/vmm.stderr");
+        let overshoot = "overshoot on client: 17 branches past stop target 100";
+        // The old prefix exceeds the read cap; blanks do not consume line slots.
+        fs::write(
+            &diagnostic,
+            format!(
+                "{}\nold\nfirst\n\nsecond\n \t\r\nthird\nERROR: misleading status\n{overshoot}\n\n",
+                "x".repeat(32 * 1024)
+            ),
+        )
+        .unwrap();
+        let expected_stdout = format!("ERROR: fixture (seed 0)\nerror: {error}\n");
+        let output = seedbox(&["inspect", "failed"], root);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
+        assert_eq!(
+            stderr(&output),
+            format!("vmm stderr: first\nvmm stderr: second\nvmm stderr: third\nvmm stderr: ERROR: misleading status\nvmm stderr: {overshoot}\n")
+        );
+        let statuses = output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .chain(output.stderr.split(|byte| *byte == b'\n'))
+            .filter(|line| line.starts_with(b"ERROR: "))
+            .count();
+        assert_eq!(statuses, 1);
+        let json = seedbox(&["inspect", "failed", "--json"], root);
+        assert!(json.status.success());
+        assert!(json.stderr.is_empty());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&json.stdout).unwrap(),
+            serde_json::to_value(&record).unwrap()
+        );
+        assert_eq!(fs::read(run.join("manifest.json")).unwrap(), manifest);
+
+        for bytes in [b"".as_slice(), b"\n \t\r\n"] {
+            fs::write(&diagnostic, bytes).unwrap();
+            let output = seedbox(&["inspect", "failed"], root);
+            assert!(output.status.success());
+            assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
+            assert!(output.stderr.is_empty());
+        }
+        fs::remove_file(&diagnostic).unwrap();
+        let output = seedbox(&["inspect", "failed"], root);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
+        assert!(output.stderr.is_empty());
+        fs::create_dir(&diagnostic).unwrap();
+        let output = seedbox(&["inspect", "failed"], root);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
+        assert!(output.stderr.is_empty());
+    }
 
     #[test]
     fn diff_plain_and_json_status_and_trace_details() {

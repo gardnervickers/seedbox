@@ -340,6 +340,15 @@ and timeouts. Serial output is capped at 1 GiB total divided equally between the
 two ports of all machines; exceeding that cap fails execution. Trace recording
 is not enabled by this adapter.
 
+When text output reports `execution: VMM failed; see vmm.stderr`, `run`, `replay`,
+`explore` and `inspect` also print up to five non-empty lines from the final 8 KiB
+of the attempt's `output/vmm.stderr` to stderr. Each line starts with `vmm stderr:`;
+terminal control characters are removed and invalid UTF-8 is replaced. A line
+cut by the byte limit starts with `...`. Missing or unreadable logs are skipped
+without changing the outcome. This excerpt is local diagnostic output only:
+retained records, serde field names, status lines and `--json` output are unchanged.
+`inspect` keeps the recorded `error:` line on stdout alongside the run status.
+
 ## Reproduce acceptance
 
 From the repository root in `nix develop`:
@@ -392,18 +401,77 @@ run-wide relay IDs and connection-local request IDs. Redundant lifecycle command
 and commands targeting exited VMs return recoverable RPC errors. The controller
 can inspect the application exit and choose PASS or FAIL.
 
-Inspection and partition/heal counter snapshots count nominal send, drop and
+Inspection and partition/shape/heal counter snapshots count nominal send, drop and
 arrival times strictly before admission. A packet physically delivered in an
 early scheduler window is excluded until its nominal arrival precedes that
 boundary. Final report counters still record physical NIC acceptance totals.
 
-Faults and control requests that take effect at the same simulated time T are
-ordered against sends as follows. The world applies a boundary at T only once
-every machine has reached T, so a machine that is still running before T keeps
-sending under the earlier network state, even when another machine is already
-waiting at T. At T, control admission and effects come first, then faults in
-ID order, and only then does any machine run, so every frame sent at T or
-later sees the new state. A frame's partition decision and arrival time are
+### Directed-link policy
+
+`x-seedbox.network.links` accepts a list of directed service pairs:
+
+```yaml
+network:
+  latency: 1ms
+  jitter: 100us
+  links:
+    - {from: server, to: client, latency: 20ms, jitter: 2ms, loss_ppm: 50000}
+```
+
+Within `x-seedbox`, each pair must be unique and name existing services. An entry
+requires `latency`; `jitter` and `loss_ppm` default to zero. Policies are absolute:
+a missing jitter or loss does not inherit the global value. Every baseline and
+runtime shape requires latency at least the global latency, jitter less than its
+latency, latency plus jitter at most one hour, and integer loss in `[0, 1000000]`.
+The global latency remains the whole-run lookahead; it cannot be lowered by a shape.
+
+`world.shape(from_, to, latency=..., jitter=0, loss_ppm=0)` uses nanosecond integers
+and returns a healable handle. Its nonempty sides must name distinct machines.
+It shapes only `from_ × to`; partitions still cut both directions. Among live
+shape layers the highest fault ID wins. Healing removes exactly one handle and
+reveals the previous layer, then the baseline, then global latency/jitter with zero
+loss where no baseline exists. Any active partition covering a pair dominates
+all shapes. Inspect includes both kinds in `active_handles`.
+
+At a boundary T every machine reaches T before control admission, trigger effects
+in arm order, and faults in ID order, followed by sends at T or later. Routing fixes each candidate's loss
+and arrival at send time; later shaping or healing retains in-flight decisions.
+Broadcast expands to other machines in ascending index order. Cuts consume no
+randomness; every other candidate consumes one independent per-pair loss draw
+then one jitter draw, including zero and total loss. Exact scaled multiplication
+maps jitter inclusively into `[0, jitter_ns]` and loss onto its ppm threshold.
+A lost frame increments `loss_dropped` and does not move the pair's last arrival.
+A delivered frame arrives at `max(send + latency + jitter, last_arrival + 1)`;
+a delay decrease preserves FIFO and head-of-line waiting. The scheduler's global
+early-delivery window remains unchanged.
+
+Counters distinguish `delivered`, `partition_dropped`, `receiver_dropped`, and
+`loss_dropped`; `loss_dropped` is omitted for a link that has lost nothing.
+The report's `network_witness` hashes in-flight frames, per-link last
+arrivals, stream positions, live layers, cuts and baselines. It is folded into
+`world_witness` only when the run has baseline overrides or applied a shape, so
+a run without link policy keeps its previous world witness. Shape/heal evidence follows the same strict-before-admission
+counter boundary as partitions. Fork snapshots retain baselines, last arrivals,
+and both RNG streams; arming a run seed reseeds those streams as before.
+
+Every final report includes `network_witness`; runs using link policy fold it into
+`world_witness` as described above. Its
+versioned, little-endian, length-prefixed encoding hashes pending frame arrival,
+sequence, directed indices and SHA-256 of frame bytes; last arrivals; loss/jitter
+stream counters; layers ordered by fault ID with handle, pairs and policy; active
+cuts; and baselines. Counts delimit collections and strings. It retains bounded
+infrastructure state without packet contents or application schemas. This VMM
+change creates a new engine identity; hardware/replay qualification is separate
+from portable policy tests.
+
+Faults, triggers and control requests that take effect at the same simulated
+time T are ordered against sends as follows. The world applies a boundary at T
+only once every machine has reached T, so a machine that is still running before
+T keeps sending under the earlier network state, even when another machine is already
+waiting at T. At T, control admission and effects come first, then trigger
+effects in arm ID order (taking the next fault IDs), then faults in ID order,
+and only then does any machine run, so every frame sent at T or later sees the
+new state. A frame's partition decision and arrival time are
 fixed when it is sent; a later partition or heal never changes a frame already
 in flight. A slice that runs up to a boundary always ends before the guest can
 send at the boundary itself, so no frame is ever stamped at or after a boundary
@@ -582,3 +650,12 @@ match the engine; admission adds PERF_FLAG_FD_CLOEXEC8 rather than engineopen0
 solely to protect descriptor inheritance. It never enables, maps or reads the
 guest event. Source tests and warned Intel opt-in are not Intel qualification or
 a determinism guarantee.
+
+## Committed console triggers
+
+The development engine implements bounded, exactly-once console marker triggers
+through the guest control API. Arm/cancel admission, match deadlines, future
+causal effect barriers, snapshot state and witness evidence are specified in
+[the trigger contract](triggers.md). No trigger ever armed adds no report fields,
+witness bytes or console stopping points. This changes the engine and requires
+`--allow-dev-engine`; AMD KVM validation remains outstanding.

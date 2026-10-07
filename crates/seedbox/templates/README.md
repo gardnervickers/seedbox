@@ -28,6 +28,12 @@ seedbox replay .seedbox/runs/ATTEMPT
 seedbox diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
 ```
 
+On a VMM failure, text output from `run`, `replay`, `explore` and `inspect`
+prints up to five non-empty lines from the final 8 KiB of the attempt's
+`output/vmm.stderr` to stderr, prefixed with `vmm stderr:`. Missing or unreadable
+logs do not change the outcome; retained records and `--json` output are unchanged.
+`inspect` keeps the recorded `error:` line on stdout alongside the run status.
+
 Preparation unpacks images with root ownership and runs before the execution CPU
 lease. Admission briefly checks an eligible core first and releases all temporary
 resources before preparation.
@@ -97,6 +103,20 @@ output omitted by the original capture policy is not transferred. Export/import
 never replace existing data; the default transfer cap is 32 GiB for unique objects
 and separately for materialized log bytes (`--max-bytes` overrides it).
 
+Directed network baselines belong in `x-seedbox.network.links`, for example
+`[{from: server, to: client, latency: 20ms, jitter: 2ms, loss_ppm: 50000}]`
+using this project's service names. Each pair is unique; latency is required,
+jitter and loss default to zero. Latency cannot be below global network latency,
+jitter must be less than latency, their sum is at most one hour, and loss is an
+integer from 0 to 1000000. `seedbox validate` checks these bounds.
+
+Guest controllers can call `world.shape(["server"], ["client"], latency=20_000_000,
+jitter=2_000_000, loss_ppm=50000)` and `world.heal(handle)`. Shapes apply only in
+the requested direction. The latest live layer wins; healing reveals the prior
+policy. Partitions dominate shapes, and already routed frames retain their
+send-time decisions. Inspection includes shape handles and `loss_dropped` counters.
+Network state contributes a `network_witness` to the final world witness.
+
 Run/replay enforce the versioned admitted host/engine/kernel policy. Matching a
 second machine is compatibility admission, not cross-host qualification. Old
 records stay inspectable/exportable/importable, but absent or drifted host proof
@@ -131,3 +151,12 @@ record. Ordinary runs do not retain exit traces; terminal times cannot locate an
 earlier divergence. Missing evidence and omissions stay explicit. Exit 0 MATCH
 means equality of compared evidence, not replay qualification; DIFFERENT exits 1,
 and usage/setup or invalid evidence exits 2. No guests execute and no state is created.
+
+For a scenario using the guest control API, the development engine supports
+`world.arm_console_stop(source, b"MARKER", target, match_timeout=1)` and
+`world.arm_console_partition(source, b"MARKER", left, right, match_timeout=1)`.
+Arm confirmation means armed; inspect the trigger and target state for the
+actual effect. `world.cancel_trigger(trigger)` cancels an unmatched trigger.
+Markers use only future committed console bytes, and effects occur at a safe
+future world barrier. See [the trigger contract](https://github.com/gardnervickers/seedbox/blob/main/docs/triggers.md)
+for bounds, deadlines and the outstanding development-engine AMD checks.
