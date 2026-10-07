@@ -135,6 +135,6 @@ fn write_pages(path: &std::path::Path, record: &mut sb::orchestration::RunRecord
     for pfn in pfns {
         bytes[pfn * 8..pfn * 8 + 8].copy_from_slice(&0x0123456789abcdefu64.to_le_bytes());
     }
-    std::fs::write(path.join("output/server.pages"), &bytes).unwrap();
-    record.logs.insert("server.pages".into(), sb::store::ContentDigest::of(&bytes));
+    std::fs::write(path.join("output/machines/server.pages"), &bytes).unwrap();
+    record.logs.insert("machines/server.pages".into(), sb::store::ContentDigest::of(&bytes));
 }

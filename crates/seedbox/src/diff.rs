@@ -3,7 +3,7 @@
 use crate::{
     orchestration::{self, RunRecord},
     store::ContentDigest,
-    vmm::{MachineReport, StateDigestParts, VmmReport},
+    vmm::{page_hash_log, MachineReport, StateDigestParts, VmmReport},
     Error, Result,
 };
 use serde::{Deserialize, Serialize};
@@ -508,7 +508,7 @@ fn ram_pages(a: &Path, left: &Evidence, b: &Path, right: &Evidence) -> Result<Ra
         if !ram_only(x, y) {
             continue;
         }
-        let name = format!("{machine}.pages");
+        let name = page_hash_log(machine);
         let x = page_file(a, left, &name)?;
         let y = page_file(b, right, &name)?;
         if let (Some(x), Some(y)) = (x, y) {
@@ -611,6 +611,32 @@ mod tests {
     include!("../tests/support/diff_fixture.rs");
 
     #[test]
+    fn ram_pages_are_read_where_the_vmm_writes_them() {
+        // vmm.rs passes --out output/machines, so NAME.pages sits beside NAME.trace.
+        let (a, b) = ram_pair();
+        let dir = tempfile::tempdir().unwrap();
+        for (name, raw, pfns) in [("a", &a, vec![]), ("b", &b, vec![3usize])] {
+            let path = dir.path().join(name);
+            let mut record = fixture();
+            write_fixture(&path, &mut record, Some(raw), None);
+            let mut bytes = vec![0u8; 1024 * 1024];
+            for pfn in pfns {
+                bytes[pfn * 8] = 1;
+            }
+            std::fs::write(path.join("output/machines/server.pages"), &bytes).unwrap();
+            record
+                .logs
+                .insert("machines/server.pages".into(), ContentDigest::of(&bytes));
+            write_fixture(&path, &mut record, Some(raw), None);
+        }
+        let report = diff(&dir.path().join("a"), &dir.path().join("b")).unwrap();
+        assert_eq!(
+            report.machines[0].ram_pages.as_ref().unwrap().first_pfns,
+            [3]
+        );
+    }
+
+    #[test]
     fn ram_pages_count_all_pfns_and_bound_the_sample() {
         let (a, b) = ram_pair();
         let dir = tempfile::tempdir().unwrap();
@@ -655,31 +681,31 @@ mod tests {
         let mut ra = fixture();
         let mut rb = fixture();
         // Unregistered files on disk are ignored.
-        std::fs::write(left.join("output/server.pages"), b"junk").unwrap();
+        std::fs::write(left.join("output/machines/server.pages"), b"junk").unwrap();
         assert!(diff(&left, &right).unwrap().machines[0].ram_pages.is_none());
         write_pages(&left, &mut ra, &[]);
         write_pages(&right, &mut rb, &[1]);
         write_fixture(&left, &mut ra, Some(&a), None);
         write_fixture(&right, &mut rb, Some(&b), None);
-        std::fs::write(right.join("output/server.pages"), b"corrupt").unwrap();
+        std::fs::write(right.join("output/machines/server.pages"), b"corrupt").unwrap();
         assert!(diff(&left, &right)
             .unwrap_err()
             .to_string()
             .contains("evidence checksum mismatch"));
         for length in [7, 8, 1024 * 1024 - 8] {
             let bytes = vec![0; length];
-            std::fs::write(right.join("output/server.pages"), &bytes).unwrap();
+            std::fs::write(right.join("output/machines/server.pages"), &bytes).unwrap();
             rb.logs
-                .insert("server.pages".into(), ContentDigest::of(&bytes));
+                .insert("machines/server.pages".into(), ContentDigest::of(&bytes));
             write_fixture(&right, &mut rb, Some(&b), None);
             assert!(diff(&left, &right)
                 .unwrap_err()
                 .to_string()
                 .contains("page hash length must be 1048576 bytes"));
         }
-        rb.logs.remove("server.pages");
+        rb.logs.remove("machines/server.pages");
         rb.omitted_logs
-            .insert("server.pages".into(), "retention cap".into());
+            .insert("machines/server.pages".into(), "retention cap".into());
         write_fixture(&right, &mut rb, Some(&b), None);
         let result = diff(&left, &right).unwrap();
         assert!(result.machines[0].ram_pages.is_none());

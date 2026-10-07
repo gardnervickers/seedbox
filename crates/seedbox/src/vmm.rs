@@ -17,6 +17,14 @@ use std::{
 /// Execution failure whose VMM stderr may be excerpted by the CLI.
 pub const VMM_FAILURE_MESSAGE: &str = "VMM failed; see vmm.stderr";
 
+/// VMM `--out` directory relative to run output; recursive retention keeps this prefix.
+pub(crate) const MACHINE_OUTPUT_DIR: &str = "machines";
+
+/// Manifest-relative page evidence, beside the VMM's per-machine traces.
+pub(crate) fn page_hash_log(machine: &str) -> String {
+    format!("{MACHINE_OUTPUT_DIR}/{machine}.pages")
+}
+
 #[derive(Clone, Debug)]
 pub struct VmmExecutor {
     /// Host CPU to pin the VMM to; `None` leases the first free eligible core.
@@ -1211,7 +1219,7 @@ mod linux {
             .arg("--seed")
             .arg(request.seed.to_string())
             .arg("--out")
-            .arg(request.output.join("machines"));
+            .arg(request.output.join(MACHINE_OUTPUT_DIR));
         command
             .arg("--stream-console")
             .arg("--console-limit")

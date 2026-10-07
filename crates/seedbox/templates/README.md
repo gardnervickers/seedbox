@@ -134,15 +134,7 @@ Compare two retained run directories on Linux or macOS with `seedbox diff RUN_A
 RUN_B [--json]`. Import bundles first. Diff reports world and machine witnesses,
 changed identity/semantic fields, full-state parts such as RAM and disk, and the
 first differing retained trace or terminal record (including state parts).
-`seedbox run --full-state` also retains `output/NAME.pages`: headerless
-little-endian 64-bit entries in guest PFN order, each the first eight SHA-256
-bytes of a 4 KiB RAM page interpreted little-endian. Replay inherits the mode.
-For RAM-only state-digest differences, plain diff and MISMATCH replay print the
-differing PFN count and first eight PFNs on stderr. JSON diff adds
-`machines[].ram_pages`; replay evidence is retained under `replay.ram_pages`.
-These files follow log retention and bundle transfer, without affecting identity,
-witnesses or replay verdicts. Missing files are limitations; corrupt declared
-files make offline diff exit 2 and remain diagnostics on MISMATCH replay.
+`seedbox run --full-state` retains per-page RAM evidence for diff and replay diagnostics; see [docs/runtime.md](https://github.com/gardnervickers/seedbox/blob/main/docs/runtime.md#compare-retained-runs).
 Ordinary runs do not retain exit traces; terminal times cannot locate an
 earlier divergence. Missing evidence and omissions stay explicit. Exit 0 MATCH
 means equality of compared evidence, not replay qualification; DIFFERENT exits 1,

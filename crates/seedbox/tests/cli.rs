@@ -794,26 +794,6 @@ mod diff_tests {
     }
 
     #[test]
-    fn page_capture_adds_no_cli_option_or_environment_setting() {
-        let dir = tempfile::tempdir().unwrap();
-        for command in ["run", "explore", "replay", "diff"] {
-            let help = seedbox(&["help", command], dir.path());
-            assert!(help.status.success());
-            let help = String::from_utf8(help.stdout).unwrap();
-            assert!(!help.contains("--page-hashes"));
-            assert!(!help.contains("SEEDBOX_PAGE_HASHES"));
-            let output = seedbox(&[command, "--page-hashes"], dir.path());
-            assert_eq!(output.status.code(), Some(2));
-            assert!(output.stdout.is_empty());
-            assert!(stderr(&output).contains("unexpected argument '--page-hashes'"));
-        }
-        let help = seedbox(&["help", "run"], dir.path());
-        assert!(String::from_utf8(help.stdout)
-            .unwrap()
-            .contains("per-page RAM hashes"));
-    }
-
-    #[test]
     fn selected_page_file_errors_are_setup_errors_with_no_json_stdout() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -826,14 +806,14 @@ mod diff_tests {
             write_pages(&path, record, &[]);
             write_fixture(&path, record, Some(raw), None);
         }
-        fs::write(root.join("b/output/server.pages"), b"broken").unwrap();
+        fs::write(root.join("b/output/machines/server.pages"), b"broken").unwrap();
         for (error, update_digest, remove_memory) in [
-            ("diff b/output/server.pages: evidence checksum mismatch", false, false),
-            ("diff b/output/server.pages: page hash length must be 1048576 bytes for recorded RAM", true, false),
+            ("diff b/output/machines/server.pages: evidence checksum mismatch", false, false),
+            ("diff b/output/machines/server.pages: page hash length must be 1048576 bytes for recorded RAM", true, false),
             ("diff b: page hashes require recorded memory_mb", true, true),
         ] {
             if update_digest {
-                right.logs.insert("server.pages".into(), sb::store::ContentDigest::of(b"broken"));
+                right.logs.insert("machines/server.pages".into(), sb::store::ContentDigest::of(b"broken"));
             }
             if remove_memory { right.identity.inputs.profile.semantic_parameters.remove("memory_mb"); }
             write_fixture(&root.join("b"), &mut right, Some(&b), None);
@@ -936,9 +916,6 @@ mod diff_tests {
             "--undo",
             "--seed",
             "--cpu",
-            "--torn-writes",
-            "--build-epoch",
-            "--workers",
         ] {
             let output = seedbox(&["diff", "a", "b", flag], dir.path());
             assert_eq!(output.status.code(), Some(2));

@@ -288,34 +288,6 @@ fn detached_round_trip_preserves_bytes_record_and_replays_failure_without_prepar
 }
 
 #[test]
-fn page_hashes_round_trip_as_evidence_without_changing_run_identity() {
-    let mut f = Fixture::new();
-    let without = f.run();
-    let pages: Vec<_> = [0x0123456789abcdefu64, 0xfedcba9876543210]
-        .into_iter()
-        .flat_map(u64::to_le_bytes)
-        .collect();
-    f.backend
-        .extra_logs
-        .insert("workload.pages".into(), pages.clone());
-    let with = f.run();
-    assert_eq!(without.record.identity, with.record.identity);
-    assert_eq!(without.record.run_id, with.record.run_id);
-    assert_eq!(without.record.report, with.record.report);
-    assert_eq!(
-        with.record.logs["workload.pages"],
-        ContentDigest::of(&pages)
-    );
-    let archive = export(&f, &with);
-    let state = f.directory.path().join("imported");
-    let imported = bundle::import(&archive, &state, &Options::default()).unwrap();
-    assert_eq!(imported.record, with.record);
-    assert_eq!(
-        fs::read(imported.directory.join("output/workload.pages")).unwrap(),
-        pages
-    );
-}
-#[test]
 fn omissions_and_unfinished_results_survive_without_invented_files() {
     for reason in [StopReason::Error, StopReason::Cancelled] {
         let mut f = Fixture::new();

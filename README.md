@@ -45,7 +45,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Engine qualification | pinned engine and guest kernel; dev artifacts require explicit opt-in | `--allow-dev-engine` (run/explore/replay/doctor; no environment backing) |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
 | Diff inputs | Two required retained run directories; no runtime inputs or state lookup | positional `RUN_A RUN_B` |
-| Per-page RAM evidence | off; under `--full-state`, retain `output/NAME.pages` with eight bytes per 4 KiB page | existing `--full-state` |
+| Per-page RAM evidence | off; under `--full-state`, retain `output/machines/NAME.pages` beside machine traces | existing `--full-state` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
 
 For development artifacts, pass `--allow-dev-engine` to `run`, `explore`, `replay`

@@ -251,7 +251,10 @@ State parts such as `ram`, `disk` and `pending_io` are compared separately;
 `events` is the engine's descriptive event state, while the other parts are
 validated lowercase SHA-256 digests.
 
-With `--full-state`, the VMM also writes `output/NAME.pages` for each machine.
+With `--full-state`, the VMM also writes `output/machines/NAME.pages` for each machine.
+The host passes `output/MACHINE_OUTPUT_DIR` as `--out`, using the shared directory
+and page-log resolver in `crates/seedbox/src/vmm.rs`. Recursive retention preserves
+the prefix as `logs["machines/NAME.pages"]`; diff and replay use the same resolver.
 The binary format has no header: entry PFN `p` occupies bytes `8*p..8*p+8` and is
 a little-endian `u64`, formed by interpreting the first eight SHA-256 bytes of
 guest RAM bytes `4096*p..4096*p+4096` as little-endian. Entries cover all guest

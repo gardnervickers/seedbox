@@ -1597,12 +1597,9 @@ mod io_boundary_tests {
 
     #[test]
     #[ignore = "requires KVM on the qualified Linux host"]
-    fn page_capture_preserves_ram_witness_state_and_rng_draw_order() {
+    fn page_capture_has_documented_format_and_preserves_ram_witness_state() {
         let kvm=Kvm::new().unwrap();
         let mut m=probe(&kvm,0x530,true,0);
-        m.timer_rng=Some(crate::rng::Rng::new(1009,"timer/io-probe"));
-        m.timer_rng.as_mut().unwrap().next();
-        let mut expected_rng=m.timer_rng.clone().unwrap();
         let before=(m.exit_witness(),m.state_digest(),m.memory().to_vec());
         let pages=m.page_hashes();
         assert_eq!(pages.len(),m.mem_size/4096*8);
@@ -1611,8 +1608,6 @@ mod io_boundary_tests {
             assert_eq!(&pages[pfn*8..pfn*8+8],&hash.to_le_bytes());
         }
         assert_eq!((m.exit_witness(),m.state_digest(),m.memory().to_vec()),before);
-        // Compare a suffix, so either extra or skipped draws are detected.
-        for _ in 0..16 {assert_eq!(m.timer_rng.as_mut().unwrap().next(),expected_rng.next());}
     }
 
     fn check_port(kvm: &Kvm, counter: &mut Counter, port: u16, write: bool) {

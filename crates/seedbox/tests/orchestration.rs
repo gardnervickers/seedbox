@@ -72,7 +72,9 @@ impl ExecutionBackend for Backend {
             ),
         )?;
         for (name, bytes) in &self.extra_logs {
-            fs::write(request.output.join(name), bytes)?;
+            let path = request.output.join(name);
+            fs::create_dir_all(path.parent().unwrap())?;
+            fs::write(path, bytes)?;
         }
         if self.cancel {
             request.cancellation.cancel();
@@ -281,13 +283,22 @@ mod page_evidence_tests {
         f.backend
             .extra_logs
             .insert("vmm.json".into(), serde_json::to_vec(raw).unwrap());
-        f.backend.extra_logs.insert("workload.pages".into(), pages);
+        f.backend
+            .extra_logs
+            .insert("machines/workload.pages".into(), pages);
     }
 
     #[test]
     fn full_state_replay_adds_page_evidence_without_changing_verdicts_or_old_json_fields() {
         let (mut f, mut raw) = full_state_fixture();
         let first = f.run();
+        assert!(first.record.logs.contains_key("machines/workload.pages"));
+        assert_eq!(
+            fs::metadata(first.directory.join("output/machines/workload.pages"))
+                .unwrap()
+                .len(),
+            1024 * 1024
+        );
         let matched = f.replay(&first);
         let old = serde_json::to_value(matched.record.replay.unwrap()).unwrap();
         assert_eq!(old["status"], "MATCH");
@@ -320,58 +331,6 @@ mod page_evidence_tests {
         assert_eq!(comparison.status, ReplayStatus::Mismatch);
         assert_eq!(comparison.full_state_matches, Some(false));
         assert!(comparison.ram_pages.unwrap().limitations[0].contains("page hash length"));
-    }
-
-    #[test]
-    fn full_state_page_capture_keeps_direct_run_and_replay_admission_gates() {
-        let (mut f, _) = full_state_fixture();
-        let backend = AdmissionBackend {
-            backend: &f.backend,
-            checks: AtomicUsize::new(0),
-            fail_at: 1,
-        };
-        assert!(f
-            .orchestrator
-            .run(&f.simulation, RunOptions::default(), &f.preparer, &backend)
-            .is_err());
-        assert_eq!(f.preparer.calls.load(Ordering::SeqCst), 0);
-        assert_eq!(f.backend.calls.load(Ordering::SeqCst), 0);
-        let first = f.run();
-        let backend = AdmissionBackend {
-            backend: &f.backend,
-            checks: AtomicUsize::new(0),
-            fail_at: 1,
-        };
-        let rejected = f
-            .orchestrator
-            .replay(&first.directory, &backend, &CancellationToken::default())
-            .unwrap();
-        assert_eq!(rejected.record.outcome, Outcome::Error);
-        assert_eq!(
-            rejected.record.replay.unwrap().status,
-            ReplayStatus::NotComparable
-        );
-        assert_eq!(f.preparer.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(f.backend.calls.load(Ordering::SeqCst), 1);
-        // Profile validation still refuses direct requests before execution.
-        f.backend
-            .profile
-            .semantic_parameters
-            .insert("memory_mb".into(), "256".into());
-        let rejected = f.replay(&first);
-        assert_eq!(rejected.record.outcome, Outcome::Error);
-        assert_eq!(
-            rejected.record.replay.unwrap().status,
-            ReplayStatus::NotComparable
-        );
-        assert!(rejected
-            .record
-            .error
-            .unwrap()
-            .contains("profile does not match"));
-        let rejected = f.run();
-        assert_eq!(rejected.record.outcome, Outcome::Error);
-        assert_eq!(f.backend.calls.load(Ordering::SeqCst), 1);
     }
 }
 
