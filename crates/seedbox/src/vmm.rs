@@ -130,12 +130,12 @@ fn control_latency(request: &ExecutionRequest<'_>) -> Result<u64> {
         .ok_or_else(|| Error::Execution("control latency overflow".into()))
 }
 
-/// Translate an execution request without consulting registry tags or source
-/// paths. Exposed for preparation tools and report inspection without KVM.
 /// Size of the retained disk of a machine whose service mounts named volumes.
 /// Part of the execution semantics: changing it changes runs.
 pub const VOLUME_DISK_MIB: u64 = 1024;
 
+/// Translate an execution request without consulting registry tags or source
+/// paths. Exposed for preparation tools and report inspection without KVM.
 pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
     if request
         .control
