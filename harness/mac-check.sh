@@ -5,10 +5,6 @@ if [[ $# -gt 1 || ${1:-} == -* ]]; then
   echo 'Usage: harness/mac-check.sh [REV|BRANCH]' >&2
   exit 2
 fi
-if [[ $(uname -s) != Darwin ]]; then
-  echo 'mac-check requires macOS; run the Linux checks on the AMD host' >&2
-  exit 2
-fi
 repo=$(git rev-parse --show-toplevel)
 runner=$(cd "$(dirname "$0")" && pwd)/mac-check-steps.sh
 source_dir=$repo
@@ -37,14 +33,28 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 if [[ $# -eq 1 ]]; then
   revision=$(git -C "$repo" rev-parse --verify --end-of-options "$1^{commit}")
+else
+  revision=$(git -C "$repo" rev-parse HEAD)
+fi
+echo "revision: $revision"
+# Share workspace fingerprints across revision worktrees. Resolve relative
+# overrides before changing directory; never relocate the standalone VMM.
+if [[ $(uname -s) == Darwin ]]; then
+  cache_root=${XDG_CACHE_HOME:-$HOME/Library/Caches}
+else
+  cache_root=${XDG_CACHE_HOME:-$HOME/.cache}
+fi
+target_dir=${SEEDBOX_PRECHECK_TARGET:-${CARGO_TARGET_DIR:-$cache_root/seedbox/precheck-target}}
+mkdir -p "$target_dir"
+export CARGO_TARGET_DIR
+CARGO_TARGET_DIR=$(cd "$target_dir" && pwd)
+if [[ $# -eq 1 ]]; then
   work=$(mktemp -d "${TMPDIR:-/tmp}/seedbox-mac-check.XXXXXX")
   source_dir=$work/src
   git -C "$repo" worktree add --detach --quiet "$source_dir" "$revision"
 else
-  revision=$(git -C "$repo" rev-parse HEAD)
   echo "mac-check checkout: $repo (including local changes)" >&2
 fi
-echo "mac-check revision: $revision"
 # Use this checkout's runner even when checking a revision predating the gate.
 # Run in the caller's project development shell.
 (cd "$source_dir" && bash "$runner")

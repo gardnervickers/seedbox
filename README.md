@@ -139,26 +139,33 @@ rebuilt OCI images to have identical bytes.
 
 ## Contributor checks
 
-Every PR and merge train runs the Mac check before going to the AMD host:
+Portable checks must pass at the PR or merge-train head before spending AMD
+host time. Use the fast pre-check on a Mac or any other non-KVM machine:
 
 ```sh
 bash harness/mac-check.sh main     # any local revision or branch
 bash harness/mac-check.sh          # current checkout, including local changes
 ```
 
-Run from within the checkout on macOS inside the project's Nix dev shell. With a revision,
-the script creates a detached worktree under `$TMPDIR` (or `/tmp` if unset) and
+Run from within the checkout on any host inside the project's Nix dev shell.
+With a revision, the script creates a detached worktree under `$TMPDIR` (or `/tmp` if unset) and
 deletes it on a pass; on failure it keeps the worktree and prints its path.
 Without a revision, it checks the existing checkout, including local changes.
-It prints the full checked SHA and uses the caller's development shell to
-run, in order:
+Its first stdout line is `revision: FULL_SHA`. It uses the caller's development
+shell to run, in order:
 
 - `cargo fmt -p seedbox --check`
 - `cargo clippy -p seedbox --all-targets --locked -- -D warnings`
-- `cargo test --workspace --locked`
 - `bash harness/acceptance.sh portable`
-- `python3 -m unittest discover harness/tests`
-- `python3 -m unittest discover python/tests`
+
+The portable suite includes workspace tests, both Python unittest suites and
+YAML validation. Workspace builds share a persistent target directory at
+`$XDG_CACHE_HOME/seedbox/precheck-target` when set, otherwise
+`~/Library/Caches/seedbox/precheck-target` on macOS or
+`~/.cache/seedbox/precheck-target` elsewhere. `SEEDBOX_PRECHECK_TARGET` overrides
+that path; an existing `CARGO_TARGET_DIR` is respected when the override is unset.
+Relative overrides resolve from the invoking directory, before entering a
+revision worktree. Cargo fingerprints determine which build outputs can be reused.
 
 All steps run even if an earlier step fails. Command output goes to stderr;
 stdout ends with timed step/phase lines in `harness/host-check.sh`'s exact format:
@@ -167,11 +174,11 @@ The gate exits 0 only if every step passes, and 1 if any step fails; setup error
 also exit nonzero. The runner comes from the invoking checkout, so it can check
 revisions that predate the script.
 
-The Mac gate does not build or test the Linux-only VMM or execute guests.
-Python discovery skips the batch supervisor's Linux-only lifecycle tests.
-`cargo build-vmm`, `cargo test-vmm`, and KVM acceptance remain AMD Linux host
-checks; a passing Mac check is the prerequisite for that host work. After the Mac
-passes a committed revision, run:
+On macOS, the pre-check skips the Linux-only VMM tests and batch supervisor
+lifecycle tests. On Linux, the portable suite includes those tests; VMM tests
+keep their standalone target directory instead of using the workspace cache.
+The pre-check does not execute guests. VMM builds and KVM acceptance remain
+Linux host checks. After the pre-check passes a committed revision, run:
 
 ```sh
 bash harness/host-check.sh --skip-portable REV CPU
@@ -180,7 +187,7 @@ bash harness/host-check.sh --skip-portable REV CPU
 This skips fmt, clippy and the portable suite (including workspace tests), while
 keeping the CLI build, VMM build (unless `SEEDBOX_VMM` selects a stored engine),
 VMM tests and AMD smoke checks. Both gates print the full SHA; match them before
-using the skip option. A Mac run with local changes only verifies those local
+using the skip option. A pre-check with local changes only verifies those local
 bytes and does not establish a pass for the committed SHA.
 
 ## How execution is controlled

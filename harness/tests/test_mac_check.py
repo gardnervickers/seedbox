@@ -1,4 +1,4 @@
-"""Mac check controls with fake Cargo/Python commands and real Git worktrees."""
+"""Portable pre-check controls with fake commands and real Git worktrees."""
 import os
 from pathlib import Path
 import shutil
@@ -45,7 +45,7 @@ check_step last bash -c 'echo last-log'
 
 
 class SuiteTests(unittest.TestCase):
-    def test_runner_executes_all_six_commands_after_failure(self):
+    def test_runner_executes_three_commands_after_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / 'bin').mkdir()
@@ -70,16 +70,43 @@ if [ "$1" = clippy ]; then exit "$CHECK_TEST_STATUS"; fi
             self.assertEqual(log.read_text().splitlines(), [
                 'cargo fmt -p seedbox --check',
                 'cargo clippy -p seedbox --all-targets --locked -- -D warnings',
-                'cargo test --workspace --locked',
                 'portable portable',
-                'python3 -m unittest discover harness/tests',
-                'python3 -m unittest discover python/tests',
             ])
             self.assertEqual([line.split()[:2] for line in result.stdout.splitlines()], [
-                ['fmt', 'pass'], ['clippy', 'FAIL'], ['workspace', 'pass'],
-                ['portable', 'pass'], ['harness-python', 'pass'], ['python', 'pass'],
+                ['fmt', 'pass'], ['clippy', 'FAIL'], ['portable', 'pass'],
             ])
             self.assertIn('command-output', result.stderr)
+
+    def test_linux_portable_suite_keeps_workspace_cache_out_of_vmm(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'bin').mkdir()
+            (root / 'harness' / 'tests').mkdir(parents=True)
+            (root / 'python').mkdir()
+            shutil.copyfile(HARNESS / 'acceptance.sh', root / 'harness' / 'acceptance.sh')
+            scripts = {
+                'uname': '#!/bin/sh\necho Linux\n',
+                'git': '#!/bin/sh\nexit 0\n',
+                'python3': '#!/bin/sh\nexit 0\n',
+                'cargo': '''#!/bin/sh
+echo "$* target=${CARGO_TARGET_DIR-unset}" >> "$CHECK_TEST_LOG"
+''',
+            }
+            for name, script in scripts.items():
+                path = root / 'bin' / name
+                path.write_text(script)
+                path.chmod(0o755)
+            log = root / 'commands'
+            cache = root / 'workspace cache'
+            env = dict(os.environ, PATH=f'{root / "bin"}{os.pathsep}{os.environ["PATH"]}',
+                       CHECK_TEST_LOG=str(log), CARGO_TARGET_DIR=str(cache))
+            result = subprocess.run(['bash', 'harness/acceptance.sh', 'portable'],
+                                    cwd=root, env=env, capture_output=True,
+                                    text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(log.read_text().splitlines()[:2], [
+                'test-vmm target=unset', f'test --workspace --locked target={cache}',
+            ])
 
 
 class WorktreeTests(unittest.TestCase):
@@ -111,6 +138,8 @@ class WorktreeTests(unittest.TestCase):
 if [ "$1" = fmt ]; then
 pwd > "$CHECK_TEST_LOG"
 cat tracked >> "$CHECK_TEST_LOG"
+echo "$CARGO_TARGET_DIR" >> "$CHECK_TEST_LOG"
+echo build >> "$CARGO_TARGET_DIR/cache-marker"
 fi
 if [ "$1" = clippy ]; then exit "$CHECK_TEST_STATUS"; fi
 ''',
@@ -125,7 +154,9 @@ exit 99
             path.chmod(0o755)
         self.env = dict(os.environ, PATH=f'{self.bin}{os.pathsep}{os.environ["PATH"]}',
                         TMPDIR=str(self.tmpdir), CHECK_TEST_LOG=str(self.log),
-                        CHECK_TEST_STATUS='0')
+                        CHECK_TEST_STATUS='0', HOME=str(self.root))
+        for name in ('XDG_CACHE_HOME', 'CARGO_TARGET_DIR', 'SEEDBOX_PRECHECK_TARGET'):
+            self.env.pop(name, None)
 
     def git(self, *args):
         return subprocess.run(['git', '-C', str(self.repo), *args], check=True,
@@ -140,14 +171,18 @@ exit 99
         (self.repo / 'tracked').write_text('dirty checkout\n')
         before = self.git('worktree', 'list', '--porcelain')
         sha = self.git('rev-parse', 'HEAD').strip()
-        for revision in ('HEAD', 'fixture-branch', sha):
+        cache = self.root / 'Library' / 'Caches' / 'seedbox' / 'precheck-target'
+        for count, revision in enumerate(('HEAD', 'fixture-branch', sha), start=1):
             with self.subTest(revision=revision):
                 result = self.invoke(revision)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn(f'mac-check revision: {sha}\n', result.stdout)
+                self.assertEqual(result.stdout.splitlines()[0], f'revision: {sha}')
                 lines = self.log.read_text().splitlines()
                 self.assertTrue(Path(lines[0]).is_relative_to(self.tmpdir.resolve()))
                 self.assertEqual(lines[1], 'committed')
+                self.assertEqual(lines[2], str(cache))
+                self.assertEqual((cache / 'cache-marker').read_text().splitlines(),
+                                 ['build'] * count)
                 self.assertFalse(Path(lines[0]).exists())
                 self.assertEqual(list(self.tmpdir.iterdir()), [])
                 self.assertEqual(self.git('worktree', 'list', '--porcelain'), before)
@@ -161,18 +196,19 @@ exit 99
         self.assertTrue(source.exists())
         self.assertIn(f'FAIL: worktree kept at {source}', result.stderr)
         self.assertIn(str(source), self.git('worktree', 'list', '--porcelain'))
-        self.assertIn('python   pass', result.stdout)
+        self.assertIn('portable pass', result.stdout)
         self.git('worktree', 'remove', '--force', str(source))
 
     def test_omitted_revision_uses_local_changes(self):
         (self.repo / 'tracked').write_text('local changes\n')
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f'mac-check revision: {self.git("rev-parse", "HEAD").strip()}',
-                      result.stdout)
+        self.assertEqual(result.stdout.splitlines()[0],
+                         f'revision: {self.git("rev-parse", "HEAD").strip()}')
         self.assertIn('including local changes', result.stderr)
         self.assertEqual(self.log.read_text().splitlines(),
-                         [str(self.repo.resolve()), 'local changes'])
+                         [str(self.repo.resolve()), 'local changes',
+                          str(self.root / 'Library' / 'Caches' / 'seedbox' / 'precheck-target')])
         self.assertEqual(list(self.tmpdir.iterdir()), [])
 
     def test_invalid_revision_does_not_create_worktree(self):
@@ -199,12 +235,39 @@ exit 99
                 self.assertIn('Usage: harness/mac-check.sh', result.stderr)
                 self.assertEqual(list(self.tmpdir.iterdir()), [])
 
-    def test_non_mac_host_is_rejected(self):
+    def test_non_mac_host_runs_with_persistent_cache(self):
         (self.bin / 'uname').write_text('#!/bin/sh\necho Linux\n')
         result = self.invoke('HEAD')
-        self.assertEqual(result.returncode, 2)
-        self.assertIn('mac-check requires macOS', result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.log.read_text().splitlines()[2],
+                         str(self.root / '.cache' / 'seedbox' / 'precheck-target'))
         self.assertEqual(list(self.tmpdir.iterdir()), [])
+
+    def test_xdg_cache_home(self):
+        self.env['XDG_CACHE_HOME'] = str(self.root / 'xdg cache')
+        result = self.invoke('HEAD')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.log.read_text().splitlines()[2],
+                         str(self.root / 'xdg cache' / 'seedbox' / 'precheck-target'))
+
+    def test_relative_target_overrides_resolve_before_entering_worktree(self):
+        for name in ('CARGO_TARGET_DIR', 'SEEDBOX_PRECHECK_TARGET'):
+            with self.subTest(name=name):
+                self.env[name] = 'shared target'
+                result = self.invoke('HEAD')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.log.read_text().splitlines()[2],
+                                 str(self.repo / 'shared target'))
+                self.env.pop(name)
+
+    def test_precheck_override_takes_precedence_over_cargo_target(self):
+        self.env['CARGO_TARGET_DIR'] = str(self.root / 'cargo target')
+        self.env['SEEDBOX_PRECHECK_TARGET'] = str(self.root / 'precheck target')
+        result = self.invoke('HEAD')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.log.read_text().splitlines()[2],
+                         self.env['SEEDBOX_PRECHECK_TARGET'])
+        self.assertFalse(Path(self.env['CARGO_TARGET_DIR']).exists())
 
 
 if __name__ == '__main__':

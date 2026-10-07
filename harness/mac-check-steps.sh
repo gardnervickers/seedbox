@@ -33,9 +33,6 @@ check_summary() {
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
   check_step fmt cargo fmt -p seedbox --check
   check_step clippy cargo clippy -p seedbox --all-targets --locked -- -D warnings
-  check_step workspace cargo test --workspace --locked
   check_step portable bash harness/acceptance.sh portable
-  check_step harness-python python3 -m unittest discover harness/tests
-  check_step python python3 -m unittest discover python/tests
   check_summary
 fi
