@@ -68,9 +68,15 @@ lane_faults() {  # cpu 3: #105 items 1-2, sequential so host seconds compare
   done
   cmp -s "$OUT/f-post1.logs.json" "$OUT/f-post2.logs.json" && note "  post logs --json: IDENTICAL" || note "  post logs --json: DIFFER"
 }
-lane_kvm_fixtures() {  # cpu 4: #105 item 3
+lane_kvm_fixtures() {  # cpu 4: #105 item 3 plus the reviewer's ordering proof (ignored KVM tests, leased)
   (cd "$T" && sb python3 harness/check-timed-logs-kvm.py 4) > "$OUT/timed-logs-kvm.log" 2>&1
-  note "check-timed-logs-kvm: exit $? $(tail -n 2 "$OUT/timed-logs-kvm.log" | tr '\n' ' ')"
+  note "check-timed-logs-kvm: exit $? $(grep -h '^test result' "$OUT/timed-logs-kvm.log" | tail -n 1)"   # want 3 passed
+  local bin
+  bin=$(cd "$T" && cargo test-vmm --no-run --message-format=json 2>/dev/null \
+    | jq -r 'select(.executable != null and (.target.kind | index("bin"))) | .executable' | tail -n 1)
+  # committed_console_discards_rolled_back_candidate_before_matcher_feed + trigger_world_tests
+  (cd "$T" && sb python3 harness/test-triggers.py 4 "$bin") > "$OUT/test-triggers.log" 2>&1
+  note "test-triggers: exit $? $(grep -h '^test result' "$OUT/test-triggers.log" | tr '\n' ' ')"
 }
 lane_cancel() {  # cpu 5: #105 item 4; interrupt a post run after guest output, want exit 3 + committed prefix
   local s=$OUT/cancel-state pid
