@@ -449,6 +449,10 @@ fn control_latency(request: &ExecutionRequest<'_>) -> Result<u64> {
         .ok_or_else(|| Error::Execution("control latency overflow".into()))
 }
 
+/// Size of the retained disk of a machine whose service mounts named volumes.
+/// Part of the execution semantics: changing it changes runs.
+pub const VOLUME_DISK_MIB: u64 = 1024;
+
 /// Translate an execution request without consulting registry tags or source
 /// paths. Exposed for preparation tools and report inspection without KVM.
 pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
@@ -501,7 +505,22 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
         .prepared
         .guests
         .iter()
-        .map(|(name, digest)| Ok(json!({"name":name,"initrd":artifact(digest)?})))
+        .map(|(name, digest)| {
+            let mut machine = json!({"name":name,"initrd":artifact(digest)?});
+            // A machine gets a disk when a service placed on it mounts a volume.
+            let volumes = request.prepared.placement.iter().any(|(service, machine)| {
+                machine == name
+                    && request
+                        .prepared
+                        .images
+                        .get(service)
+                        .is_some_and(|image| !image.launch.disk_volumes.is_empty())
+            });
+            if volumes {
+                machine["disk"] = json!({"size_mib": VOLUME_DISK_MIB});
+            }
+            Ok(machine)
+        })
         .collect::<Result<Vec<_>>>()?;
     Ok(json!({
         "kernel":artifact(&request.prepared.kernel)?, "mem_mb":memory,
