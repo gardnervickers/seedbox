@@ -1,0 +1,6 @@
+# Image is the independently supplied, unchanged f9d7e6a ABI-2 kernel.
+# init.cpio is independently supplied from the operator's 23c619e rebuild.
+# HVF acceptance is recorded in docs/arm64-backends.md.
+# build.sh must never generate or update this file.
+141289b842d3a42ca13a634598372a7e66605da70d36c2f2c1cd5a2806bfb01f  Image
+9d39fa9367b3ab9899c13a99eaf05e14a2b0a0cd47911377064cafc485b02408  init.cpio

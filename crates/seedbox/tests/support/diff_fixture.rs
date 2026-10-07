@@ -56,11 +56,41 @@ fn fixture() -> sb::orchestration::RunRecord {
 
 fn raw_report() -> serde_json::Value {
     serde_json::json!({
-        "report_version": 1, "world_witness": sb::store::ContentDigest::of(b"fixture"),
+        "report_version": 1, "seed": 0, "outcome": "end_machine_exited",
+        "world_witness": sb::store::ContentDigest::of(b"fixture"),
         "machines": [{"name":"workload", "witness":sb::store::ContentDigest::of(b"machine"),
             "state":"Exited(0)", "time_ns":100, "branches":90, "guest_exit_code":0,
             "guest_init_error":null, "infrastructure_error":false, "run_ms":10}]
     })
+}
+
+// The current engine emits textual events alongside hashed state parts.
+fn current_report(full_state: bool) -> serde_json::Value {
+    let mut raw = raw_report();
+    let mut server = raw["machines"][0].clone();
+    server["name"] = "server".into();
+    server["state"] = "Halted".into();
+    server["guest_exit_code"] = serde_json::Value::Null;
+    raw["machines"].as_array_mut().unwrap().push(server);
+    for machine in raw["machines"].as_array_mut().unwrap() {
+        machine["pending_io"] = serde_json::Value::Null;
+        machine["state_digest"] = if full_state {
+            serde_json::to_value(sb::store::ContentDigest::of(b"full state")).unwrap()
+        } else {
+            serde_json::Value::Null
+        };
+        machine["state_digest_parts"] = if full_state {
+            let mut parts = serde_json::Map::new();
+            for part in ["regs", "xsave", "xcrs", "msrs", "time_page", "ram", "pending_io", "disk"] {
+                parts.insert(part.into(), serde_json::to_value(sb::store::ContentDigest::of(part.as_bytes())).unwrap());
+            }
+            parts.insert("events".into(), "exc:none int:none shadow:0 nmi:0/0/0".into());
+            parts.into()
+        } else {
+            serde_json::Value::Null
+        };
+    }
+    raw
 }
 
 fn write_fixture(
