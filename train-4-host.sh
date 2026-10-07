@@ -6,15 +6,24 @@
 # Portable checks passed at this SHA on Linux (harness/mac-check.sh), so
 # host-check runs with --skip-portable.
 # Run as gvickers from the main seedbox checkout; re-enters the train worktree's
-# own `nix develop`. Needs cores 2-7 (siblings 18-23) free and network for the
+# own `nix develop`. Needs the LANE_CPUS cores (and their SMT siblings) free and network for the
 # python:3.13-alpine image.
 # Usage: train-4-host.sh TRAIN_SHA OUT     (OUT must not exist)
 # Env: A (accepted kernel e8ece7cb), ARTS (dir with multi.cpio, net.cpio, disk.cpio),
-#      PINNED (stored 52eb engine, for host-check's wrong-kernel control).
+#      PINNED (stored 52eb engine, for host-check's wrong-kernel control),
+#      LANE_CPUS="B1 FAULTS KVM CANCEL HOSTCHECK" (default "2 3 4 5 7"); move a lane
+#      off a core a straggler still holds, e.g. LANE_CPUS="2 8 4 5 7". Never 0 or 16.
 set -uo pipefail
 TRAIN=$1 OUT=$2
 : "${A:?} ${ARTS:?} ${PINNED:?}"
 REPO=${REPO:-$PWD} T=$OUT/train P=$OUT/pre
+LANE_CPUS=${LANE_CPUS:-"2 3 4 5 7"}
+read -r C_B1 C_FAULTS C_KVM C_CANCEL C_HC <<< "$LANE_CPUS"
+[[ -n ${C_HC:-} ]] || { echo "LANE_CPUS needs 5 cores: B1 FAULTS KVM CANCEL HOSTCHECK"; exit 2; }
+for c in $LANE_CPUS; do
+  [[ $c != 0 && $c != 16 ]] || { echo "LANE_CPUS: never CPU 0 or 16"; exit 2; }
+  f=/tmp/seedbox-msr-cpu-$c.lock; [[ -e $f ]] && ! flock -n "$f" true && { echo "cpu $c lease is held; pick another in LANE_CPUS"; exit 2; }
+done
 if [[ -z ${TRAIN_INNER:-} ]]; then
   test ! -e "$OUT" || { echo "$OUT exists"; exit 2; }
   mkdir -p "$OUT"
@@ -40,16 +49,16 @@ mkdir -p "$T/artifacts"; cp "$ARTS"/*.cpio "$T/artifacts/"; ln -sfn "$A" "$T/art
 sb() { sudo -E env "PATH=$PATH" "$@"; }
 attempt() { sed -n 's/^[A-Z_]*: //p' "$1" | tail -n 1; }
 
-lane_b1() {  # cpu 2: feature-off witness equality (want 4b0b13cc, as train/3)
-  (cd "$T" && SEEDBOX_ROOT="$T" VMM="$TE" CPU0=2 SEEDBOX_TIMEOUT=600 \
+lane_b1() {  # C_B1: feature-off witness equality (want 4b0b13cc, as train/3)
+  (cd "$T" && SEEDBOX_ROOT="$T" VMM="$TE" CPU0=$C_B1 SEEDBOX_TIMEOUT=600 \
     harness/batch.sh harness/worlds/cluster-fixed.json b1-cluster-fixed 1009 --digest) > "$OUT/world-b1.log" 2>&1
   note "world b1: exit $? $(sudo jq -c 'with_entries(select(.key|test("witness";"i")))' "$T"/runs/b1-cluster-fixed-s1009-r0.json 2>/dev/null)"
 }
-lane_faults() {  # cpu 3: #105 items 1-2, sequential so host seconds compare
+lane_faults() {  # C_FAULTS: #105 items 1-2, sequential so host seconds compare
   local s=$OUT/faults-state g=$OUT/faults-projects t0 run
   python3 "$T/examples/faults/generate.py" "$g" > "$OUT/faults-generate.log" 2>&1 || { note "faults: generate FAILED"; return; }
   t0=$SECONDS
-  sb "$PC" run "$g/fixed" --kernel "$A" --vmm "$PE" --cpu 3 --state "$s" --allow-dev-engine --full-state \
+  sb "$PC" run "$g/fixed" --kernel "$A" --vmm "$PE" --cpu "$C_FAULTS" --state "$s" --allow-dev-engine --full-state \
     > "$OUT/f-pre-run.out" 2> "$OUT/f-pre-run.err"
   note "f-pre-run: exit $? $(head -n 1 "$OUT/f-pre-run.out") $((SECONDS - t0))s"   # want PASS
   run=$(attempt "$OUT/f-pre-run.out")
@@ -57,7 +66,7 @@ lane_faults() {  # cpu 3: #105 items 1-2, sequential so host seconds compare
     local extra=(); [[ $name == post* ]] && extra=(--vmm "$TE" --allow-engine-change)
     local bin=$TC; [[ $name == pre ]] && bin=$PC
     t0=$SECONDS
-    sb "$bin" replay "$run" --cpu 3 --state "$s" --allow-dev-engine "${extra[@]}" > "$OUT/f-$name.out" 2> "$OUT/f-$name.err"
+    sb "$bin" replay "$run" --cpu "$C_FAULTS" --state "$s" --allow-dev-engine "${extra[@]}" > "$OUT/f-$name.out" 2> "$OUT/f-$name.err"
     note "f-$name: exit $? $(grep -h '^replay:' "$OUT/f-$name.out") $((SECONDS - t0))s"   # want MATCH
   done
   for name in post1 post2; do
@@ -68,19 +77,19 @@ lane_faults() {  # cpu 3: #105 items 1-2, sequential so host seconds compare
   done
   cmp -s "$OUT/f-post1.logs.json" "$OUT/f-post2.logs.json" && note "  post logs --json: IDENTICAL" || note "  post logs --json: DIFFER"
 }
-lane_kvm_fixtures() {  # cpu 4: #105 item 3 plus the reviewer's ordering proof (ignored KVM tests, leased)
-  (cd "$T" && sb python3 harness/check-timed-logs-kvm.py 4) > "$OUT/timed-logs-kvm.log" 2>&1
+lane_kvm_fixtures() {  # C_KVM: #105 item 3 plus the reviewer's ordering proof (ignored KVM tests, leased)
+  (cd "$T" && sb python3 harness/check-timed-logs-kvm.py "$C_KVM") > "$OUT/timed-logs-kvm.log" 2>&1
   note "check-timed-logs-kvm: exit $? $(grep -h '^test result' "$OUT/timed-logs-kvm.log" | tail -n 1)"   # want 3 passed
   local bin
   bin=$(cd "$T" && cargo test-vmm --no-run --message-format=json 2>/dev/null \
     | jq -r 'select(.executable != null and (.target.kind | index("bin"))) | .executable' | tail -n 1)
   # committed_console_discards_rolled_back_candidate_before_matcher_feed + trigger_world_tests
-  (cd "$T" && sb python3 harness/test-triggers.py 4 "$bin") > "$OUT/test-triggers.log" 2>&1
+  (cd "$T" && sb python3 harness/test-triggers.py "$C_KVM" "$bin") > "$OUT/test-triggers.log" 2>&1
   note "test-triggers: exit $? $(grep -h '^test result' "$OUT/test-triggers.log" | tr '\n' ' ')"
 }
-lane_cancel() {  # cpu 5: #105 item 4; interrupt a post run after guest output, want exit 3 + committed prefix
+lane_cancel() {  # C_CANCEL: #105 item 4; interrupt a post run after guest output, want exit 3 + committed prefix
   local s=$OUT/cancel-state pid
-  sb "$TC" run "$T/harness/acceptance/workloads/kill-3.5.3.yaml" --seed 4000 --kernel "$A" --vmm "$TE" --cpu 5 \
+  sb "$TC" run "$T/harness/acceptance/workloads/kill-3.5.3.yaml" --seed 4000 --kernel "$A" --vmm "$TE" --cpu "$C_CANCEL" \
     --state "$s" --allow-dev-engine > "$OUT/cancel.out" 2> "$OUT/cancel.err" & pid=$!
   sleep 25
   for p in $(pgrep -x seedbox); do grep -q kill-3.5.3 /proc/$p/cmdline 2>/dev/null && sudo kill -INT "$p"; done
@@ -91,12 +100,12 @@ lane_cancel() {  # cpu 5: #105 item 4; interrupt a post run after guest output, 
 
 lane_b1 & P1=$!; lane_faults & P2=$!; lane_kvm_fixtures & P3=$!; lane_cancel & P4=$!
 wait $P1 $P2 $P3 $P4
-(cd "$REPO" && SEEDBOX_KERNEL=$A PINNED_ENGINE=$PINNED HOST_CHECK_DIR=$OUT bash "$T/harness/host-check.sh" --skip-portable "$TRAIN" 7) > "$OUT/host-check.log" 2>&1
+(cd "$REPO" && SEEDBOX_KERNEL=$A PINNED_ENGINE=$PINNED HOST_CHECK_DIR=$OUT bash "$T/harness/host-check.sh" --skip-portable "$TRAIN" "$C_HC") > "$OUT/host-check.log" 2>&1
 note "host-check: exit $? $(tail -n 1 "$OUT/host-check.log")"
 hc=$(sed -n 's/^[A-Z]*: \([^;]*\).*/\1/p' "$OUT/host-check.log" | tail -n 1); [[ -f $hc ]] && tee -a "$SUM" < "$hc"
 
 note "vmm processes left: $(pgrep -c seedbox-vmm || true)"
-for c in 2 3 4 5 7; do f=/tmp/seedbox-msr-cpu-$c.lock; [[ -e $f ]] && ! flock -n "$f" true && note "lease $c still HELD"; done
+for c in $LANE_CPUS; do f=/tmp/seedbox-msr-cpu-$c.lock; [[ -e $f ]] && ! flock -n "$f" true && note "lease $c still HELD"; done
 note "leases checked; MSRs are checked by each run's lease readback"
 note "done $(date -u +%FT%TZ)"
 cp "$SUM" "$OUT.txt"
