@@ -1090,6 +1090,11 @@ fn report(
                 std::fs::write(format!("{out}/{}.pages", mach.name), mach.page_hashes())
                     .map_err(|e| e.to_string())?;
             }
+            // Debug only: the whole guest RAM, to diff two runs page by page.
+            if std::env::var("SEEDBOX_RAM_DUMP").is_ok() {
+                std::fs::write(format!("{out}/{}.ram", mach.name), &*mach.memory())
+                    .map_err(|e| e.to_string())?;
+            }
             let parts: serde_json::Map<String, Value> = parts
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), json!(v)))
