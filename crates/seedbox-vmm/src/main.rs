@@ -367,6 +367,7 @@ fn run() -> Result<Value, String> {
         mach.timer_jitter = cfg["timer_jitter_ns"].as_u64().unwrap_or(0);
         mach.exact_timer_ppm = cfg["exact_timer_ppm"].as_u64().unwrap_or(0);
         mach.timer_rng = Some(Rng::new(boot_seed, &format!("timer-jitter/{}", names[i])));
+        mach.syscall_ns = machine::pv::syscall_ns(&mut Rng::new(boot_seed, &format!("pv-speed/{}", names[i])));
         if args.iter().any(|a| a == "--trace") {
             let f = std::fs::File::create(format!("{out}/{}.trace", names[i]))
                 .map_err(|e| e.to_string())?;
@@ -622,6 +623,7 @@ fn release(world: &mut World, cfg: &Value, names: &[String], seed: u64, skew: u6
         let delay = Rng::new(seed, &format!("release/{}", names[i])).below(skew.saturating_add(1));
         mach.release(at.saturating_add(delay), entropy)?;
         mach.timer_rng = Some(Rng::new(seed, &format!("timer-jitter/{}", names[i])));
+        mach.syscall_ns = machine::pv::syscall_ns(&mut Rng::new(seed, &format!("pv-speed/{}", names[i])));
     }
     arm_seed(world, cfg, names, seed, at.saturating_add(skew))
 }
@@ -975,6 +977,7 @@ fn report(
         if let Clock::Pv(_) = world.clock {
             report.last_mut().unwrap()["spin"] = json!({"probes": s.spin_probes, "idles": s.spin_idles, "false_alarms": s.spin_false, "mismatch": s.spin_mismatch});
             report.last_mut().unwrap()["syscalls"] = json!(mach.syscalls());
+            report.last_mut().unwrap()["syscall_ns"] = json!(mach.syscall_ns);
             let by: serde_json::Map<String, Value> = machine::Cause::NAMES
                 .iter()
                 .zip(s.time_by)

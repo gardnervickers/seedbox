@@ -3,7 +3,9 @@
 //!
 //! - exits the guest makes anyway (I/O, MMIO, HLT), with their usual costs,
 //! - guest clock reads, 1 ns each as in every timebase (`seedbox_rdtsc`),
-//! - syscalls, `SYSCALL_NS` each, counted by the guest in the time page.
+//! - syscalls, counted by the guest in the time page, each costing the
+//!   machine's `Machine::syscall_ns`: `SYSCALL_NS` scaled by a seeded
+//!   per-machine speed (see `syscall_ns`).
 //!
 //! So a run needs no counted stop: the guest kernel exits by itself when its
 //! clock would pass the soft stop (the `bound` we publish) or at the syscall
@@ -29,8 +31,24 @@ use crate::timebase::{Judge, Prepared, Run, Timebase, Verdict};
 use crate::undo::VcpuState;
 use std::time::Duration;
 
-/// Virtual time one syscall costs. Part of the PV clock's semantics.
+/// Nominal virtual time one syscall costs. Part of the PV clock's semantics.
 pub const SYSCALL_NS: u64 = 1000;
+/// Spread of per-machine syscall cost around `SYSCALL_NS`, in percent.
+pub const SPEED_SPREAD_PCT: u64 = 10;
+
+/// One machine's syscall cost, drawn from `rng`: uniform within
+/// `SPEED_SPREAD_PCT` of `SYSCALL_NS`.
+///
+/// Compute is free in this model, so identical machines booting the same
+/// image would otherwise make the same syscalls at the same nanoseconds
+/// forever. Real machines never run in lockstep, and software relies on it:
+/// etcd seeds raft's election timeouts from the clock, and three members in
+/// lockstep split every vote. A seeded speed per machine, like the varying
+/// cost of real CPUs, separates them.
+pub fn syscall_ns(rng: &mut crate::rng::Rng) -> u64 {
+    let spread = SYSCALL_NS * SPEED_SPREAD_PCT / 100;
+    SYSCALL_NS - spread + rng.below(2 * spread + 1)
+}
 /// Steps one spin check may take before it gives up.
 const PROBE_STEPS: usize = 4096;
 
@@ -45,6 +63,8 @@ pub struct PvClock {
     backoff: u32,
     syscalls0: u64,
     remaining: u64,
+    /// The running machine's syscall cost.
+    syscall_ns: u64,
     probe: Option<Probe>,
     /// The vCPU stands at a step landing the probe has not seen yet.
     landed: bool,
@@ -76,6 +96,7 @@ impl PvClock {
             backoff: 0,
             syscalls0: 0,
             remaining: 0,
+            syscall_ns: SYSCALL_NS,
             probe: None,
             landed: false,
             max_false_alarms: u64::MAX,
@@ -186,6 +207,7 @@ impl Timebase for PvClock {
 
     fn prepare(&mut self, m: &mut Machine, remaining: u64, soft: u64) -> Result<Prepared, String> {
         self.remaining = remaining;
+        self.syscall_ns = m.syscall_ns;
         if self.probe.is_some() {
             let step = if std::mem::take(&mut self.landed) {
                 self.probe_step(m)?
@@ -222,7 +244,7 @@ impl Timebase for PvClock {
         // syscall whose cost reaches it.
         m.page_set(PAGE_BOUND, soft);
         let syscalls = m.page_get(PAGE_SYSCALLS);
-        let left = soft.saturating_sub(m.time).div_ceil(SYSCALL_NS).max(1);
+        let left = soft.saturating_sub(m.time).div_ceil(self.syscall_ns).max(1);
         m.page_set(PAGE_SYSCALL_TARGET, syscalls + left);
         Ok(Prepared::Run)
     }
@@ -233,7 +255,7 @@ impl Timebase for PvClock {
     }
 
     fn read(&mut self, syscalls: u64) -> u64 {
-        (syscalls - self.syscalls0).saturating_mul(SYSCALL_NS).min(self.remaining)
+        (syscalls - self.syscalls0).saturating_mul(self.syscall_ns).min(self.remaining)
     }
 
     fn inject_guard(&self) -> u64 {

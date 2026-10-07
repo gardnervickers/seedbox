@@ -259,6 +259,8 @@ pub struct Machine {
     last_plan: (u64, Vec<u64>),
     pub tolerance: u64,
     pub timer_jitter: u64,
+    /// PV clock: virtual time one syscall costs on this machine.
+    pub syscall_ns: u64,
     pub timer_rng: Option<crate::rng::Rng>,
     pub margin: u64,
     /// Recompute `margin` from the recent guest branch rate.
@@ -509,6 +511,7 @@ impl Machine {
             last_plan: (0, Vec::new()),
             tolerance: 0,
             timer_jitter: 0,
+            syscall_ns: pv::SYSCALL_NS,
             timer_rng: None,
             margin: profile.margin,
             adaptive_margin: false,
