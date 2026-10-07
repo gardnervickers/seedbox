@@ -119,7 +119,14 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
     let top = fields(
         &doc,
         "$",
-        &["name", "services", "configs", "volumes", "networks", "x-seedbox"],
+        &[
+            "name",
+            "services",
+            "configs",
+            "volumes",
+            "networks",
+            "x-seedbox",
+        ],
     )?;
     let base = source.parent().unwrap_or(Path::new("."));
     let name = match top.get("name") {
@@ -310,7 +317,12 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
                     let short = text(item, &vp)?;
                     match short.split(':').collect::<Vec<_>>()[..] {
                         [source, target] => (source.to_owned(), target.to_owned()),
-                        _ => return invalid(&vp, "expected NAME:/path; access modes and bind mounts are unsupported"),
+                        _ => {
+                            return invalid(
+                                &vp,
+                                "expected NAME:/path; access modes and bind mounts are unsupported",
+                            )
+                        }
                     }
                 } else {
                     let mount = fields(item, &vp, &["type", "source", "target"])?;
@@ -331,7 +343,10 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
                 if target == "/" || volume_mounts.iter().any(|m| m.target == target) {
                     return invalid(&vp, "volume target must be a unique directory other than /");
                 }
-                if mounts.iter().any(|m| m.target == target || m.target.starts_with(&format!("{target}/"))) {
+                if mounts
+                    .iter()
+                    .any(|m| m.target == target || m.target.starts_with(&format!("{target}/")))
+                {
                     return invalid(&vp, "volume target overlaps a config mount");
                 }
                 volume_mounts.push(VolumeMount { source, target });

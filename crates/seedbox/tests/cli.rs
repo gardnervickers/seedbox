@@ -255,6 +255,23 @@ fn busybox_default_requires_a_static_busybox_on_path() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn an_explicit_mke2fs_must_exist() {
+    let (directory, mut args) = runtime_project();
+    let busybox = directory.path().join("busybox");
+    fs::write(&busybox, b"").unwrap();
+    args.extend(["--busybox".into(), busybox.to_str().unwrap().to_owned()]);
+    args.extend(["--mke2fs".into(), "/nonexistent/mke2fs".into()]);
+    let args: Vec<_> = args.iter().map(String::as_str).collect();
+    let output = seedbox(&args, directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        "error: --mke2fs /nonexistent/mke2fs: not found\n"
+    );
+}
+
 #[test]
 fn bundle_cli_validates_paths_limits_and_positional_inputs() {
     let directory = tempfile::tempdir().unwrap();

@@ -318,6 +318,7 @@ mod tests {
         assert_eq!(kernel(Some(path.clone())).unwrap(), path);
         assert_eq!(engine(Some(path.clone())).unwrap(), path);
         assert_eq!(busybox(Some(path.clone())).unwrap(), path);
+        assert_eq!(mke2fs(Some(path.clone())).unwrap(), Some(path.clone()));
         let error = kernel(Some("/nonexistent/bzImage".into())).unwrap_err();
         assert_eq!(
             error.to_string(),

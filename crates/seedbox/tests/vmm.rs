@@ -77,6 +77,54 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
         assert_eq!(world["timer_jitter_ns"], 50_000);
         assert_eq!(world["stop_tolerance_ns"], 40_000);
         assert_eq!(world["duration_ns"], 1_000_000_000);
+        assert!(world["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m.get("disk").is_none()));
+        // A machine whose service mounts a named volume gets a retained disk.
+        let mut prepared = request.prepared.clone();
+        let hash = ContentDigest::of(b"retained input");
+        prepared.images.insert(
+            "server".into(),
+            PreparedImage {
+                manifest: hash.clone(),
+                config: hash.clone(),
+                layers: vec![],
+                launch: seedbox::image::Launch {
+                    argv: vec!["/app".into()],
+                    environment: BTreeMap::new(),
+                    working_dir: "/".into(),
+                    user: String::new(),
+                    volumes: vec![],
+                    disk_volumes: vec![seedbox::config::VolumeMount {
+                        source: "state".into(),
+                        target: "/state".into(),
+                    }],
+                },
+            },
+        );
+        let world = vmm::world(&ExecutionRequest {
+            prepared: &prepared,
+            ..*request
+        })
+        .unwrap();
+        let disks: Vec<_> = world["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| (m["name"].as_str().unwrap(), m.get("disk").cloned()))
+            .collect();
+        assert_eq!(
+            disks,
+            [
+                ("client-machine", None),
+                (
+                    "server-machine",
+                    Some(json!({"size_mib": vmm::VOLUME_DISK_MIB}))
+                )
+            ]
+        );
     });
 }
 

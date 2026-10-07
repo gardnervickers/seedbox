@@ -113,7 +113,10 @@ fn binary_recipe_keeps_arguments_and_config_bytes_literal() {
         working_dir: "/".into(),
         user: "123:456".into(),
         volumes: vec!["/data".into()],
-        disk_volumes: vec![],
+        disk_volumes: vec![seedbox::config::VolumeMount {
+            source: "state".into(),
+            target: "/var/lib/state".into(),
+        }],
     };
     let recipe = launch_recipe(
         &launch,
@@ -146,6 +149,10 @@ fn binary_recipe_keeps_arguments_and_config_bytes_literal() {
     assert_eq!(field(&recipe, &mut cursor), b"NAME=a=b\nc");
     assert_eq!(count(&recipe, &mut cursor), 1);
     assert_eq!(field(&recipe, &mut cursor), b"/data");
+    // Named volumes as name, target pairs, read before the image root.
+    assert_eq!(count(&recipe, &mut cursor), 2);
+    assert_eq!(field(&recipe, &mut cursor), b"state");
+    assert_eq!(field(&recipe, &mut cursor), b"/var/lib/state");
     assert_eq!(count(&recipe, &mut cursor), 1);
     assert_eq!(field(&recipe, &mut cursor), b"/config");
     assert_eq!(field(&recipe, &mut cursor), [0, 255, 10]);

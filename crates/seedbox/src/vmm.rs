@@ -191,7 +191,11 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
             // A machine gets a disk when a service placed on it mounts a volume.
             let volumes = request.prepared.placement.iter().any(|(service, machine)| {
                 machine == name
-                    && request.prepared.images.get(service).is_some_and(|image| !image.launch.disk_volumes.is_empty())
+                    && request
+                        .prepared
+                        .images
+                        .get(service)
+                        .is_some_and(|image| !image.launch.disk_volumes.is_empty())
             });
             if volumes {
                 machine["disk"] = json!({"size_mib": VOLUME_DISK_MIB});
