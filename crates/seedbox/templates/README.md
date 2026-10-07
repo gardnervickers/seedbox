@@ -126,8 +126,9 @@ policy. Partitions dominate shapes, and already routed frames retain their
 send-time decisions. Inspection includes shape handles and `loss_dropped` counters.
 Network state contributes a `network_witness` to the final world witness.
 
-Run/replay enforce the versioned admitted host/engine/kernel policy. Matching a
-second machine is compatibility admission, not cross-host qualification. Old
+Run/replay enforce the versioned admitted host/engine/guest-kernel policy;
+host-kernel bytes are not checked. Matching a second machine is compatibility
+admission, not cross-host qualification. Old
 records stay inspectable/exportable/importable, but absent or drifted host proof
 is NOT_COMPARABLE (exit 2) in this CLI and cannot be bypassed with
 `--allow-engine-change`. A retained previous CLI is only historical evidence.

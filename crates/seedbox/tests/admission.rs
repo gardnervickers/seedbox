@@ -12,8 +12,6 @@ fn observed() -> CoreObservation {
         model: p.model,
         stepping: p.stepping,
         microcode: p.microcode,
-        booted_kernel: p.host_kernel.clone(),
-        current_kernel: p.host_kernel,
         kvm_api: p.kvm_api,
         immediate_exit: p.immediate_exit,
         guest_debug: p.guest_debug,
@@ -82,8 +80,6 @@ fn every_required_host_drift_or_missing_readiness_is_rejected() {
         |o| o.model += 1,
         |o| o.stepping += 1,
         |o| o.microcode += 1,
-        |o| o.booted_kernel = "different".into(),
-        |o| o.current_kernel = "different".into(),
         |o| o.kvm_api = 11,
         |o| o.immediate_exit = 0,
         |o| o.guest_debug = 0,
@@ -176,16 +172,12 @@ fn previous_full_sorted_policy_proof_remains_not_comparable_and_immutable() {
     let mut previous = required_policy().unwrap();
     previous.version = "amd-zen3-engine168ad-v1".into();
     previous.engine = "168ad5db0e63919a3c04dbfed6c22f133aa14600747db4f64ebc3f3dc2c37c7d".into();
-    // Reconstruct the old recorded proof only; production never sorts observations.
+    // Reconstruct the previous sorted CPUID policy; production never sorts observations.
     previous
         .effective_cpuid
         .sort_by_key(|e| (e.function, e.index, e.flags));
     let old_fields = serde_json::to_string(&previous).unwrap();
     let old_fingerprint = ContentDigest::of(old_fields.as_bytes());
-    assert_eq!(
-        old_fingerprint.hex(),
-        "411dc2b0286a7d8d96b142d95363500388c37f8e417e0e5483e48b2beb98c3d3"
-    );
     assert_ne!(
         bindings().unwrap()["host_policy_fingerprint"],
         "8da34a9c7dfdd133bf4a93cf5b5cc7046ad30985e2352e9d21212ec8333024a5"

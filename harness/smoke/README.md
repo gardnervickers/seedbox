@@ -3,8 +3,8 @@
 This is source staging for [issue68](https://github.com/gardnervickers/seedbox/issues/68).
 It has not qualified an engine or enabled a runner. Run only under a separately
 reviewed finite hardware release on the compatible qualified AMD host as root.
-The admission CLI must be bound to the exact frozen engine/kernel candidate;
-there is no engine-change override. The source admission policy selects the accepted engine and guest kernel. Final combined admission/CPUID-selected profile integration
+The admission CLI must be bound to the exact frozen engine/guest-kernel candidate;
+there is no engine-change override. Host-kernel bytes are not checked. The source admission policy selects the accepted engine and guest kernel. Final combined admission/CPUID-selected profile integration
 is a compatibility prerequisite; this entrypoint never passes
 `--allow-unqualified-cpu` or `--allow-engine-change`. A merged engine PR does not update or qualify that policy.
 

@@ -191,8 +191,9 @@ deliberately change one.
   defaults table), docs/runtime.md, and `crates/seedbox/templates/README.md`.
   The last one is copied into every project `seedbox init` creates.
 
-`doctor` shares execution admission and kernel/VMM defaults, with lookup-only VMM
-resolution: it must never trigger the cargo auto-build fallback. Success reports
+`doctor` shares execution admission and guest-kernel/VMM defaults; host-kernel
+bytes are not checked. VMM resolution is lookup-only and must never trigger the
+cargo auto-build fallback. Success reports
 only the exact cleaned-up probe observations and selected core; the library does
 not read arguments/environment or print. It creates no state/run and never prepares
 images or executes guests. Compatibility readiness is not replay qualification.
