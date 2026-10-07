@@ -85,6 +85,7 @@ pub struct WriteOutcome { pub irq: bool, pub bytes: Vec<u8> }
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct ReceiveOutcome { pub accepted: bool, pub irq: bool }
 
+#[derive(Clone)]
 pub struct VirtioConsole {
     dev_sel: u32, drv_sel: u32, drv_features: [u32;2], queue_sel: u32,
     q: [Queue;4], status: u32, isr: u32,

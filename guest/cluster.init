@@ -22,6 +22,8 @@ start_etcd() {
 concurrency=$(arg concurrency); concurrency=${concurrency:-8}
 writes=$(arg writes); writes=${writes:-0}
 delay=$(arg delay); delay=${delay:-0}
+# Fork point: a no-op unless the world boots once and forks per seed.
+sbx barrier || exit 1
 case $name in
 client)
   sleep "$delay"

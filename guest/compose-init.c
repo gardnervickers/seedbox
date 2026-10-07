@@ -19,6 +19,7 @@
 #include <sys/io.h>
 #endif
 #include "control.h"
+#include "barrier.h"
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -478,6 +479,9 @@ int main(void) {
     }
     close(recipe_fd);
     relay_socket("/proc/cmdline", "/run/seedbox/control.sock");
+    /* Everything before this point is fixed by the boot seed; the application
+     * starts after the world is released under the run seed. */
+    if (seedbox_launch_barrier("/proc/cmdline", "/dev/urandom")) die("launch barrier");
     pid_t child = start();
     if (child < 0) die("initial application launch failed");
     management_ready();
