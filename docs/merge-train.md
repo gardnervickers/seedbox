@@ -72,9 +72,12 @@ train: one branch, one host job, then ordinary merges with no further host time.
    bisect the train by halves. Drop the culprit, rebuild the train from the
    rest, and rerun. The culprit goes back to its author with the evidence.
    PRs stacked on the culprit leave with it. A PR that doesn't contain the
-   culprit and doesn't touch `crates/seedbox-vmm/`, `kernel/` or `guest/`
-   keeps its passing evidence and merges without a rerun, since main plus
-   that PR keeps main's engine. If the culprit's fix changes only its own
+   culprit keeps its passing evidence only if the culprit couldn't have
+   changed what that evidence ran: the culprit is feature-off neutral for
+   every world or project in that PR's checks. If the culprit deliberately
+   changes some worlds (for example #97 and any world with network jitter),
+   the PR's own checks that use such worlds rerun on main plus the PR, even
+   when the PR touches no engine code. If the culprit's fix changes only its own
    fixtures or checker, the engine is unchanged: the rest of the train's
    evidence for it and the PRs stacked on it stands, and only the failed
    check reruns.
