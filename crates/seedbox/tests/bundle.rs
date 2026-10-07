@@ -286,7 +286,6 @@ fn detached_round_trip_preserves_bytes_record_and_replays_failure_without_prepar
         assert_eq!(f.preparer.calls.load(Ordering::SeqCst), 1);
     }
 }
-
 #[test]
 fn omissions_and_unfinished_results_survive_without_invented_files() {
     for reason in [StopReason::Error, StopReason::Cancelled] {

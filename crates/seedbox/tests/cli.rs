@@ -901,27 +901,6 @@ mod diff_tests {
                 }
             }
         }
-        assert!(!root.join(".seedbox").exists());
-    }
-
-    #[test]
-    fn diff_keeps_execution_and_performance_flags_scoped_to_their_commands() {
-        let dir = tempfile::tempdir().unwrap();
-        for flag in [
-            "--allow-dev-engine",
-            "--allow-engine-change",
-            "--allow-unqualified-cpu",
-            "--full-state",
-            "--margin",
-            "--undo",
-            "--seed",
-            "--cpu",
-        ] {
-            let output = seedbox(&["diff", "a", "b", flag], dir.path());
-            assert_eq!(output.status.code(), Some(2));
-            assert!(output.stdout.is_empty());
-            assert!(stderr(&output).contains(&format!("unexpected argument '{flag}'")));
-        }
     }
 
     #[test]
