@@ -42,8 +42,9 @@ class EvidenceControls(unittest.TestCase):
         text = console('fixed')
         transient = alter(text.splitlines()[0], 'MINIO_HTTP', 0, status=503)
         check_console(transient + '\n' + text, 'fixed')
+        check_console((transient + '\n') * 119 + text, 'fixed')
         with self.assertRaises(EvidenceError):
-            check_console((transient + '\n') * 8 + text, 'fixed')
+            check_console((transient + '\n') * 120 + text, 'fixed')
         with self.assertRaises(EvidenceError):
             check_console(alter(text, 'MINIO_HTTP', 0, status=403), 'fixed')
 
@@ -53,7 +54,8 @@ class EvidenceControls(unittest.TestCase):
             check_console(text, mode)
             for bad in (text[:text.index('MINIO_RESULT')], text + text,
                         alter(text, 'MINIO_RESULT', 0, passed=(mode == 'broken')),
-                        'qualification/setup error: timeout\n' + text):
+                        'qualification/setup error: timeout\n' + text,
+                        'infrastructure error: MinIO not ready within 30 s of simulated time\n' + text):
                 with self.subTest(mode=mode), self.assertRaises(EvidenceError):
                     check_console(bad, mode)
 

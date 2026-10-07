@@ -8,12 +8,17 @@ import sys
 import time
 import boto3
 from botocore.config import Config
-from botocore.exceptions import ClientError, EndpointConnectionError, ReadTimeoutError
+from botocore.exceptions import (
+    ClientError, ConnectionClosedError, ConnectTimeoutError,
+    EndpointConnectionError, ReadTimeoutError,
+)
 
 BUCKET = "seedbox-cas"
 A = b"acknowledged-value-A"
 B = b"conflicting-value-B"
 OUTPUT_LOCK = Lock()
+READINESS_SECONDS = 30
+READINESS_INTERVAL = 0.25
 
 def emit(kind, **receipt):
     # These are this application's diagnostics, opaque to Seedbox.
@@ -21,6 +26,9 @@ def emit(kind, **receipt):
         print(kind + " " + json.dumps(receipt, sort_keys=True), flush=True)
 
 class QualificationError(Exception):
+    pass
+
+class InfrastructureError(Exception):
     pass
 
 def client(endpoint, access_key, secret_key):
@@ -51,19 +59,27 @@ def require_status(actual, expected):
         raise QualificationError(f"expected HTTP {expected}, received {actual}")
 
 def ready(s3):
-    for attempt in range(8):
+    # In the guest, monotonic time and sleep advance simulated time. Include
+    # time spent in SDK calls, rather than granting a fresh budget per attempt.
+    deadline = time.monotonic() + READINESS_SECONDS
+    last_error = "no response"
+    while time.monotonic() < deadline:
         try:
             status, _ = observed(s3.list_buckets)
-            if status == 200:
+            if status == 200 and time.monotonic() <= deadline:
                 return
-            if status not in (500, 503):
+            if status not in (200, 500, 503):
                 raise QualificationError(f"readiness returned HTTP {status}")
-        except (EndpointConnectionError, ReadTimeoutError):
-            if attempt == 7:
-                raise
-        if attempt != 7:
-            time.sleep(0.25)
-    raise QualificationError("finite readiness budget exhausted")
+            last_error = f"HTTP {status}"
+        except (EndpointConnectionError, ConnectionClosedError,
+                ConnectTimeoutError, ReadTimeoutError) as error:
+            last_error = f"{type(error).__name__}: {error}"
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(READINESS_INTERVAL, remaining))
+    raise InfrastructureError(
+        f"MinIO not ready within {READINESS_SECONDS} s of simulated time; "
+        f"last readiness error: {last_error}")
 
 def create_bucket(s3):
     status, _ = observed(s3.create_bucket, Bucket=BUCKET)
@@ -169,6 +185,9 @@ def main():
         if arguments.mode == "qualification":
             return qualify(s3, make_client)
         return planted(s3, make_client, arguments.mode, arguments.ledger)
+    except InfrastructureError as error:
+        print(f"infrastructure error: {error}", file=sys.stderr)
+        return 2
     except Exception as error:
         print(f"qualification/setup error: {type(error).__name__}: {error}", file=sys.stderr)
         return 2

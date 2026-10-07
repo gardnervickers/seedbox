@@ -19,6 +19,7 @@ def receipts(console, kind):
             if line.startswith(kind + " ")]
 
 def check_console(console, mode):
+    require("infrastructure error:" not in console, "MinIO infrastructure failed")
     require("qualification/setup error:" not in console, "application setup/qualification failed")
     results = receipts(console, "MINIO_RESULT")
     require(len(results) == 1, "missing/ambiguous application result")
@@ -27,7 +28,7 @@ def check_console(console, mode):
             "wrong application verdict/mode")
     http = receipts(console, "MINIO_HTTP")
     setup_end = next((i for i, r in enumerate(http) if r['operation'] == 'create_bucket'), None)
-    require(setup_end is not None and 1 <= setup_end <= 8, "readiness/bucket setup not qualified")
+    require(setup_end is not None and 1 <= setup_end <= 120, "readiness/bucket setup not qualified")
     ready = http[:setup_end]
     require(all(r['operation'] == 'list_buckets' for r in ready) and
             all(r['status'] in (500, 503) for r in ready[:-1]) and ready[-1]['status'] == 200 and
