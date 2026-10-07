@@ -76,7 +76,35 @@ impl OciTools {
         directory: &Path,
         store: &ContentStore,
     ) -> Result<ImportedImage> {
+        self.import_with_context(service, directory, store, None)
+    }
+    pub(crate) fn import_with_context(
+        &self,
+        service: &Service,
+        directory: &Path,
+        store: &ContentStore,
+        context_options: Option<(&crate::preparation::PreparationContext, &str)>,
+    ) -> Result<ImportedImage> {
         fs::create_dir_all(directory)?;
+        let run = |command: &mut Command,
+                   phase: &str,
+                   tag: Option<&str>,
+                   build: bool,
+                   cleanup: bool|
+         -> Result<()> {
+            if let Some((evidence, name)) = context_options {
+                evidence.run(command, &format!("{name}-{phase}"), tag, build, cleanup)
+            } else {
+                checked(command, &directory.join(format!("{phase}.log")))
+            }
+        };
+        let tool_version = |path: &Path, phase: &str| -> Result<String> {
+            if let Some((evidence, name)) = context_options {
+                evidence.version(path, &format!("{name}-{phase}"))
+            } else {
+                version(path)
+            }
+        };
         let raw = directory.join("source");
         let layout = directory.join("oci");
         let bundle = directory.join("bundle");
@@ -87,8 +115,11 @@ impl OciTools {
         }
         let mut auxiliary = BTreeMap::new();
         let mut provenance = BTreeMap::new();
-        provenance.insert("skopeo".into(), version(&self.skopeo)?);
-        provenance.insert("umoci".into(), version(&self.umoci)?);
+        provenance.insert(
+            "skopeo".into(),
+            tool_version(&self.skopeo, "skopeo-version")?,
+        );
+        provenance.insert("umoci".into(), tool_version(&self.umoci, "umoci-version")?);
         let source = match &service.source {
             ImageSource::Registry { reference } => format!("docker://{reference}"),
             ImageSource::Build {
@@ -113,7 +144,10 @@ impl OciTools {
                     "dockerfile".into(),
                     store.put_file(&frozen_context.join(relative))?,
                 );
-                provenance.insert("docker".into(), version(&self.docker)?);
+                provenance.insert(
+                    "docker".into(),
+                    tool_version(&self.docker, "builder-version")?,
+                );
                 let archive = directory.join("build.tar");
                 // A unique tag avoids deleting any pre-existing user image. The
                 // Docker cache is preserved; only this private tag is removed.
@@ -129,8 +163,19 @@ impl OciTools {
                         .to_string_lossy()
                         .to_ascii_lowercase()
                 );
+                if let Some((evidence, name)) = context_options {
+                    evidence.build_identity(
+                        name,
+                        &tag,
+                        &auxiliary["build-context"],
+                        &auxiliary["dockerfile"],
+                    )?;
+                }
                 let build = (|| -> Result<()> {
                     let mut cmd = Command::new(&self.docker);
+                    if context_options.is_some() {
+                        cmd.arg("--remote=false");
+                    }
                     cmd.args([
                         "build",
                         "--platform",
@@ -141,31 +186,44 @@ impl OciTools {
                     ])
                     .arg(frozen_context.join(relative))
                     .arg(&frozen_context);
-                    checked(&mut cmd, &directory.join("build.log"))?;
-                    checked(
-                        Command::new(&self.docker)
-                            .args(["save", "--output"])
-                            .arg(&archive)
-                            .arg(&tag),
-                        &directory.join("save.log"),
-                    )?;
+                    run(&mut cmd, "build", Some(&tag), true, false)?;
+                    let mut save = Command::new(&self.docker);
+                    if context_options.is_some() {
+                        save.arg("--remote=false");
+                    }
+                    save.args(["save", "--output"]).arg(&archive).arg(&tag);
+                    run(&mut save, "save", Some(&tag), false, false)?;
                     Ok(())
                 })();
-                let cleanup = Command::new(&self.docker)
-                    .args(["image", "rm", &tag])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-                build?;
-                if !cleanup?.success() {
-                    return Err(Error::Execution(
-                        "could not remove private build tag".into(),
-                    ));
+                if let Some((evidence, _)) = context_options {
+                    // Cancelled build cessation is not yet qualified. Preserve the tag;
+                    // save cancellation occurs after build completion and permits cleanup.
+                    if matches!(&build, Err(Error::PreparationCleanupUnverified(_))) {
+                        return build
+                            .and_then(|_| Err(Error::Execution("unreachable build state".into())));
+                    }
+                    let mut cleanup = Command::new(&self.docker);
+                    cleanup.args(["--remote=false", "image", "rm", &tag]);
+                    run(&mut cleanup, "tag-cleanup", Some(&tag), false, true)?;
+                    build?;
+                    evidence.check()?;
+                } else {
+                    let cleanup = Command::new(&self.docker)
+                        .args(["image", "rm", &tag])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                    build?;
+                    if !cleanup?.success() {
+                        return Err(Error::Execution(
+                            "could not remove private build tag".into(),
+                        ));
+                    }
                 }
                 format!("docker-archive:{}", archive.display())
             }
         };
-        checked(
+        run(
             Command::new(&self.skopeo)
                 .args([
                     "--insecure-policy",
@@ -178,29 +236,38 @@ impl OciTools {
                 ])
                 .arg(&source)
                 .arg(format!("dir:{}", raw.display())),
-            &directory.join("copy.log"),
+            "copy",
+            None,
+            false,
+            false,
         )?;
         let image = import_metadata(&raw, service, store)?;
         provenance.insert(
             "resolved-manifest".into(),
             format!("sha256:{}", image.manifest.hex()),
         );
-        checked(
+        run(
             Command::new(&self.skopeo)
                 .args(["--insecure-policy", "copy", "--format", "oci"])
                 .arg(format!("dir:{}", raw.display()))
                 .arg(format!("oci:{}:seedbox", layout.display())),
-            &directory.join("normalize.log"),
+            "normalize",
+            None,
+            false,
+            false,
         )?;
         // umoci performs the extraction rather than custom host-side tar unpacking.
         // Root preserves image UID/GID/modes; rootless remapping would change the
         // application's filesystem semantics and is intentionally not used.
-        checked(
+        run(
             Command::new(&self.umoci)
                 .args(["unpack", "--image"])
                 .arg(format!("{}:seedbox", layout.display()))
                 .arg(&bundle),
-            &directory.join("unpack.log"),
+            "unpack",
+            None,
+            false,
+            false,
         )?;
         Ok(ImportedImage {
             image,
@@ -360,7 +427,7 @@ fn version(path: &Path) -> Result<String> {
 }
 
 /// Name the program in launch failures; a bare ENOENT does not say what is missing.
-fn spawn_error(program: &std::ffi::OsStr, error: io::Error) -> Error {
+pub(crate) fn spawn_error(program: &std::ffi::OsStr, error: io::Error) -> Error {
     let program = Path::new(program).display();
     if error.kind() == io::ErrorKind::NotFound {
         Error::Setup(format!(

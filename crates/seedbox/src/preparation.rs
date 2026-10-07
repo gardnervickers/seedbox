@@ -26,8 +26,39 @@ pub struct OciPreparer {
     pub profile: ExecutionProfile,
 }
 
+pub use crate::preparation_command::PreparationContext;
+
 impl PreparationBackend for OciPreparer {
     fn prepare(&self, simulation: &Simulation, store: &ContentStore) -> Result<PreparedInputs> {
+        self.prepare_inner(simulation, store, None)
+    }
+    fn prepare_cancellable(
+        &self,
+        simulation: &Simulation,
+        store: &ContentStore,
+        context: &PreparationContext,
+    ) -> Result<PreparedInputs> {
+        context.check()?;
+        if simulation
+            .services
+            .values()
+            .any(|s| matches!(s.source, crate::config::ImageSource::Build { .. }))
+        {
+            context.admit_builder(&self.tools.docker)?;
+        }
+        self.prepare_inner(simulation, store, Some(context))
+    }
+}
+impl OciPreparer {
+    fn prepare_inner(
+        &self,
+        simulation: &Simulation,
+        store: &ContentStore,
+        context: Option<&PreparationContext>,
+    ) -> Result<PreparedInputs> {
+        if let Some(context) = context {
+            context.check()?;
+        }
         let engine = store.put_file(&self.engine)?;
         if engine != self.profile.engine {
             return Err(Error::Integrity(
@@ -53,6 +84,13 @@ impl PreparationBackend for OciPreparer {
             auxiliary.insert(format!("config/{name}"), store.put(&data)?);
             configs.insert(name, data);
         }
+        let frozen_kernel = if let Some(context) = context {
+            let kernel = store.put_file(&self.kernel)?;
+            context.setup_inputs(&auxiliary, &engine, &kernel)?;
+            Some(kernel)
+        } else {
+            None
+        };
         let addresses: BTreeMap<_, _> = simulation
             .services
             .keys()
@@ -75,6 +113,9 @@ impl PreparationBackend for OciPreparer {
         let mut guests = BTreeMap::new();
         let mut provenance = BTreeMap::new();
         for (name, service) in &simulation.services {
+            if let Some(context) = context {
+                context.check()?;
+            }
             let mounts = service
                 .configs
                 .iter()
@@ -89,9 +130,15 @@ impl PreparationBackend for OciPreparer {
                     ))
                 })
                 .collect::<Result<BTreeMap<_, _>>>()?;
-            let imported = self
-                .tools
-                .import(service, &temporary.path().join(name), store)?;
+            let imported = self.tools.import_with_context(
+                service,
+                &temporary.path().join(name),
+                store,
+                context.map(|c| (c, name.as_str())),
+            )?;
+            if let Some(context) = context {
+                context.check()?;
+            }
             let recipe = launch_recipe(
                 &imported.image.launch,
                 &format!("{}/24", addresses[name]),
@@ -112,6 +159,9 @@ impl PreparationBackend for OciPreparer {
             if memory_mb < minimum {
                 return Err(Error::Execution(format!("service {name}: {memory_mb} MiB guest RAM is below the archive boot floor of {minimum} MiB; increase --memory-mb (application memory may require more)")));
             }
+            if let Some(context) = context {
+                context.check()?;
+            }
             guests.insert(name.clone(), store.put_file(&archive)?);
             images.insert(name.clone(), imported.image);
             auxiliary.extend(
@@ -128,7 +178,10 @@ impl PreparationBackend for OciPreparer {
             );
         }
         Ok(PreparedInputs {
-            kernel: store.put_file(&self.kernel)?,
+            kernel: match frozen_kernel {
+                Some(kernel) => kernel,
+                None => store.put_file(&self.kernel)?,
+            },
             images,
             guests,
             placement: simulation

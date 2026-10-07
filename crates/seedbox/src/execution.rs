@@ -84,6 +84,18 @@ impl PreparedInputs {
 /// No guest execution, CPU pinning, or host-state mutation is allowed here.
 pub trait PreparationBackend: Send + Sync {
     fn prepare(&self, simulation: &Simulation, store: &ContentStore) -> Result<PreparedInputs>;
+    /// Exploration preparation owns diagnostics independently of scratch inputs.
+    /// Backends must explicitly support cancellation; the default fails before work.
+    fn prepare_cancellable(
+        &self,
+        _simulation: &Simulation,
+        _store: &ContentStore,
+        _context: &crate::preparation::PreparationContext,
+    ) -> Result<PreparedInputs> {
+        Err(crate::Error::Setup(
+            "preparation backend does not support exploration cancellation".into(),
+        ))
+    }
 }
 
 #[derive(Clone, Debug, Default)]

@@ -303,6 +303,9 @@ mod tests {
     use super::*;
     #[test]
     fn shared_lease_and_original_register_values_survive_cleanup() {
+        let _process_creation = crate::preparation_command::PROCESS_TEST_LOCK
+            .lock()
+            .unwrap();
         let dir = tempfile::tempdir().unwrap();
         let cpus = BTreeSet::from([2, 18]);
         for cpu in &cpus {
