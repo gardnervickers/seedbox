@@ -146,8 +146,8 @@ impl<const EXTENDED: bool, const REARM: bool> Backend for G<EXTENDED, REARM> {
             exit
         } else {
             match self.step {
-                0 => mmio(EVENT_ADDR + 32, 1), // handshake
-                1 => mmio(EVENT_ADDR, 100),    // arm deadline at 100 ns (e.g. HZ tick)
+                0 => mmio(EVENT_ADDR + 32, ABI), // handshake
+                1 => mmio(EVENT_ADDR, 100),      // arm deadline at 100 ns (e.g. HZ tick)
                 2 => {
                     // seedbox_read(): local_irq_save(), page->now+1 > bound -> yield.
                     self.regs[33] |= 1 << 7;

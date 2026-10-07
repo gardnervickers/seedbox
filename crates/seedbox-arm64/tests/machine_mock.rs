@@ -140,7 +140,7 @@ impl<
                 unsafe {
                     self.mapped[&1].set_word(8, 7)?;
                 }
-                mmio(EVENT_ADDR + 32, 1)
+                mmio(EVENT_ADDR + 32, ABI)
             }
             1 => {
                 assert_eq!(unsafe { self.mapped[&1].word(0)? }, 7);

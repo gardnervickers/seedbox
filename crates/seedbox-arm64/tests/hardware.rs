@@ -127,12 +127,9 @@ fn suite<B: Backend>(name: &str, fast: bool) {
         "busy-wait must cross a polling bound"
     );
     if fast {
-        // The 20 ms PV busy-wait advances in 1 ns clock reads and takes about
-        // 2 seconds of host CPU time. Keep a bounded performance gate for the
-        // expanded fixture; the former sleep-only fixture used 1 second.
         assert!(
-            a.wall_seconds < 5.0,
-            "baseline HVF boot including 20ms guest busy-wait and 1s sleep took {:.3}s; report timing failure (5s budget)",
+            a.wall_seconds < 1.0,
+            "baseline HVF boot including 200us guest alarm spin and 1s sleep took {:.3}s; report timing failure (1s budget)",
             a.wall_seconds
         );
     }

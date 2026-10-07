@@ -75,10 +75,10 @@ fn ram_pages_refuses_existing_file_before_opening_hypervisor() {
     std::fs::remove_file(path).unwrap();
 }
 
-/// Frozen pre-review inputs: deliberately separate from new-fixture acceptance.
+/// Historical ABI-1 acceptance: run at 66cf845, before the ABI-2 page change.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
-#[ignore = "requires signed CLI, HVF, old SEEDBOX_ARM64_KERNEL/INITRD and fresh REPORT_DIR"]
+#[ignore = "historical ABI-1 test: requires checkout 66cf845, signed CLI, HVF and old inputs"]
 fn hvf_old_fixture_regression() {
     use seedbox_arm64::witness::{hash, Report};
     let input = |key| std::path::PathBuf::from(std::env::var_os(key).expect(key));

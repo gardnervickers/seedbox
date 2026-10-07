@@ -156,7 +156,7 @@ static unsigned long irq_flags, caller_flags;
 static int synchronized, writes;
 static char registers[64];
 static void *event = registers;
-static struct { u64 now, last, bound; } storage, *page = &storage;
+static struct { u64 now, last, bound, abi, deferred_irq_pending; } storage, *page = &storage;
 static u64 early_last;
 #define local_irq_save(saved) do { (saved) = irq_flags; irq_flags |= 128; } while (0)
 #define local_irq_enable() do { irq_flags &= ~128UL; synchronized = 0; } while (0)
@@ -173,6 +173,7 @@ static void writeq(unsigned long value, void *address) {
     ++writes;
     page->now = 100;
     page->bound = UINT64_MAX;
+    page->deferred_irq_pending = !!(caller_flags & 128);
     /* Simulate IRQ clock reads during the unmasked rendezvous. */
     if (!(caller_flags & 128)) page->last = 105;
 }
@@ -181,11 +182,21 @@ int main(void) {
     for (int masked = 0; masked != 2; ++masked) {
         caller_flags = irq_flags = masked ? 0x3c0 : 0x340;
         storage.now = storage.last = storage.bound = 100;
+        storage.deferred_irq_pending = 0;
         writes = synchronized = 0;
         assert(seedbox_read() == (masked ? 101 : 106));
         assert(irq_flags == caller_flags && writes == 1);
         assert(seedbox_read() == (masked ? 102 : 107));
         assert(irq_flags == caller_flags && writes == 1);
+        assert(storage.deferred_irq_pending == (u64)masked);
+        if (masked) {
+            /* No idle or other MMIO: the next unmasked read delivers it. */
+            caller_flags = irq_flags = 0x340;
+            assert(seedbox_read() == 106);
+            assert(irq_flags == caller_flags && writes == 2);
+            assert(storage.deferred_irq_pending == 0);
+            assert(seedbox_read() == 107 && writes == 2);
+        }
     }
 }
 """
@@ -196,7 +207,7 @@ int main(void) {
             subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
                 "-Wall", "-Wextra", "-Werror", str(c), "-o", str(exe)
             ], check=True, capture_output=True)
-            subprocess.run([str(exe)], check=True, capture_output=True)
+            subprocess.run([str(exe)], check=True, capture_output=True, timeout=10)
 
     def test_exec_cannot_reenable_hardware_counter(self):
         source = """static void update_cntkctl_el1(struct task_struct *next)

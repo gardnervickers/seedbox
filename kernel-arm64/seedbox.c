@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Single-CPU PV ABI 1. Matches crates/seedbox-arm64; no architectural timer. */
+/* Single-CPU PV ABI 2. Matches crates/seedbox-arm64; no architectural timer. */
 #include <linux/clockchips.h>
 #include <linux/clocksource.h>
 #include <linux/init.h>
@@ -15,7 +15,7 @@
 
 #define TIME_IPA 0x0a000000UL
 #define EVENT_IPA 0x0a010000UL
-struct seedbox_page { u64 now, last, bound, abi; };
+struct seedbox_page { u64 now, last, bound, abi, deferred_irq_pending; };
 static struct seedbox_page *page;
 static void __iomem *event;
 static u64 early_last;
@@ -38,11 +38,13 @@ again:
 		value = last + 1;
 	if (unlikely(!value))
 		panic("seedbox: clock overflow");
-	if (value > READ_ONCE(page->bound)) {
+	if (value > READ_ONCE(page->bound) ||
+	    (!irqs_disabled_flags(flags) && READ_ONCE(page->deferred_irq_pending))) {
 		/* Deliver at the yield when the caller permits IRQs. Restore the
 		 * caller's state before the unmasked rendezvous, then serialize
 		 * the retry against IRQ clock reads again. Masked callers leave
-		 * the level pending until a later unmasked semantic exit.
+		 * the level pending; the page word makes the next unmasked read
+		 * rendezvous even when no deadline remains armed.
 		 */
 		if (!irqs_disabled_flags(flags)) {
 			local_irq_restore(flags);
@@ -123,11 +125,11 @@ void __init seedbox_time_init(void)
 	isb();
 	event = ioremap(EVENT_IPA, SZ_16K);
 	page = memremap(TIME_IPA, SZ_16K, MEMREMAP_WB);
-	if (!event || !page || READ_ONCE(page->abi) != 1)
-		panic("seedbox: PV ABI 1 page unavailable");
+	if (!event || !page || READ_ONCE(page->abi) != 2)
+		panic("seedbox: PV ABI 2 page unavailable");
 	WRITE_ONCE(page->last, early_last);
-	writeq(1, event + 32);
-	node = of_find_compatible_node(NULL, NULL, "seedbox,pv-time-v1");
+	writeq(2, event + 32);
+	node = of_find_compatible_node(NULL, NULL, "seedbox,pv-time-v2");
 	if (!node)
 		panic("seedbox: missing PV FDT node");
 	irq = irq_of_parse_and_map(node, 0);

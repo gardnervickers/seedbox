@@ -1,9 +1,89 @@
 # Experimental arm64 PV machine
 
 `crates/seedbox-arm64` and `kernel-arm64` are isolated from the production x86
-engine. The [README quickstart](../README.md#experimental-arm64-quickstart)
+engine. The [quickstart below](#experimental-arm64-quickstart)
 contains Mac setup and input verification. This is a single-CPU fixture backend,
 not Compose application support.
+
+## Experimental arm64 quickstart
+
+The isolated `seedbox-arm64` crate runs a single-CPU PV fixture on native Mac
+HVF or Linux arm64 KVM. It is separate from the Compose/x86 CLI.
+
+ABI-2 input hashes and witnesses are pending the operator rebuild. The
+checked-in `kernel-arm64/expected-hashes.sha256` records historical ABI-1 inputs.
+Before running the hash check below, obtain independently reviewed ABI-2 hashes
+in `artifacts/arm64-abi2-expected.sha256`; do not derive expected hashes from the
+files being checked. Build-generated `SHA256SUMS` only checks transfer integrity.
+
+Requires an M-series Mac, macOS 15+, Xcode Command Line Tools, and Nix with
+flakes enabled. This runs the experimental single-CPU PV fixture. The Linux VM
+only builds its inputs; HVF executes the fixture directly on the Mac. Allow
+about 24 GiB of VM disk and several minutes for the kernel build.
+
+```sh
+git clone --branch astra/arm64-hvf https://github.com/gardnervickers/seedbox.git
+cd seedbox
+nix develop
+cargo build-arm64
+bash crates/seedbox-arm64/codesign.sh
+
+# Enter a temporary shell with Lima. Stay in the checkout root.
+nix shell nixpkgs#lima -c bash
+export LIMA_HOME="$(mktemp -d /tmp/sb-lima.XXXXXX)"
+cat > "$LIMA_HOME/seedbox-build.yaml" <<'YAML'
+vmType: vz
+arch: aarch64
+cpus: 4
+memory: 8GiB
+disk: 24GiB
+images:
+  - location: https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img
+    arch: aarch64
+mounts: []
+containerd:
+  system: false
+  user: false
+YAML
+limactl start --name=seedbox-build --tty=false "$LIMA_HOME/seedbox-build.yaml"
+limactl copy -r kernel-arm64 seedbox-build:/tmp/kernel-arm64
+limactl shell --workdir /tmp seedbox-build sudo apt-get update
+limactl shell --workdir /tmp seedbox-build sudo apt-get install -y \
+  build-essential musl-tools flex bison bc libssl-dev libelf-dev curl xz-utils python3
+limactl shell --workdir /tmp seedbox-build env BUILD_JOBS=4 \
+  bash /tmp/kernel-arm64/build.sh /tmp/seedbox-arm64-inputs
+mkdir -p artifacts/arm64-mac
+limactl copy -r seedbox-build:/tmp/seedbox-arm64-inputs/. artifacts/arm64-mac/
+python3 kernel-arm64/check-hashes.py artifacts/arm64-mac \
+  --expected artifacts/arm64-abi2-expected.sha256 || exit "$?"
+# Preserve the inputs on the Mac, then remove only this task's VM.
+limactl stop seedbox-build
+limactl delete --force seedbox-build
+exit  # leave the Lima shell; return to nix develop in the checkout
+
+for repeat in 1 2; do
+  crates/seedbox-arm64/target/release/seedbox-arm64 run \
+    --backend hvf --kernel artifacts/arm64-mac/Image \
+    --initrd artifacts/arm64-mac/init.cpio --seed 1 > "artifacts/arm64-mac/run-$repeat.stdout" || exit "$?"
+  cat "artifacts/arm64-mac/run-$repeat.stdout"
+done
+cmp artifacts/arm64-mac/run-1.stdout artifacts/arm64-mac/run-2.stdout
+```
+
+The acceptance test is that both runs exit 0 and print **identical** stdout
+lines; `cmp` checks equality. The ABI-1 witness recorded below is historical;
+ABI-2 witnesses must be recorded after the rebuild.
+
+Console and timing go to stderr; setup/runtime errors exit 2. Sign again after
+Cargo relinks the executable. A different host CPU profile can change guest RAM
+and the witness; this result does not establish cross-host or KVM equality.
+
+The hash checker explicitly compares `Image` and `init.cpio` with the
+independently reviewed expected values. A mismatch means different inputs, often from a changed source
+or toolchain, and can produce a different witness. Ubuntu's cloud image and apt
+toolchain are not pinned. Same-input, same-host repeatability remains required.
+See [the operator steps](#operator-steps) for
+rebuild handoff, full acceptance and the remaining cross-backend RAM difference.
 
 ## Backend contract
 
@@ -69,7 +149,7 @@ required API is absent. HVF reports dirty tracking as `Unsupported`; KVM returns
 its dirty bitmap and native host page size. Neither is used to omit RAM bytes
 from the power-off hash.
 
-## Guest layout and PV ABI 1
+## Guest layout and PV ABI 2
 
 The FDT describes 128 MiB RAM, one CPU, GICv3, a PL011 with fixed 24 MHz input
 clocks, PSCI/HVC, chosen/initrd/bootargs, and the PV node. It has no architectural
@@ -88,8 +168,11 @@ only CPU 0 exists in the FDT and `nosmp maxcpus=1` is supplied.
 | `0x46000000` | initrd, at most 16 MiB |
 | `0x47000000` | FDT |
 
-The time page contains little-endian u64 `now`, `last`, `bound`, `abi` at offsets
-0, 8, 16, 24. Host owns now/bound/abi; guest owns last. The kernel serializes reads
+The time page contains little-endian u64 `now`, `last`, `bound`, `abi`,
+`deferred_irq_pending` at offsets 0, 8, 16, 24, 32. Host owns all words except
+`last`, which the guest owns. `abi` is 2 and the FDT compatible is
+`seedbox,pv-time-v2`; ABI-1 guests must be rebuilt. The pending word is 1 when
+any SPI assertion is deferred and 0 otherwise. The kernel serializes reads
 with local IRQ masking: return now if newer, otherwise last+1, store last. At
 a semantic exit Machine reconciles `max(now,last)` and republishes. Between exits,
 computation costs zero time. Guest-local read progress becomes host-visible
@@ -97,7 +180,7 @@ only at the next exit, matching the shape of the x86 PV design.
 
 Clockevent u64 writes: offset 0 arms an absolute deadline (zero cancels); 8
 acknowledges and lowers the IRQ; 16 declares idle; 24 yields at the published
-clock bound; 32 performs the ABI-1 handshake. Idle with an armed deadline jumps
+clock bound; 32 performs the ABI-2 handshake. Idle with an armed deadline jumps
 to it and raises SPI 40 while stopped. New IRQ assertions require PSTATE.I to
 be clear. Masked level assertions are retained in Machine and delivered at the
 next unmasked semantic exit; deassertions cancel any queued assertion. Debug
@@ -105,7 +188,13 @@ unlock completions do not flush pending lines. The idle helper unmasks IRQs and
 executes ISB before the MMIO rendezvous, then restores its incoming mask.
 A polling yield restores and unmasks IRQs, executes ISB, writes event+24, then
 masks again before retrying, provided the caller had IRQs enabled. A masked
-caller stays masked and leaves delivery to a later rendezvous.
+caller stays masked and ignores the pending word, allowing reads to progress.
+When `deferred_irq_pending` is set, an unmasked caller takes that same yield
+rendezvous even with `bound = u64::MAX`. Machine accepts this yield without an
+armed deadline and flushes the deferred SPI only with PSTATE.I clear. It does
+not advance to a future deadline if one has since been armed. Publication
+clears the word after delivery or cancellation; it never lowers the bound just
+to request deferred delivery.
 Idle without a deadline or a pending interrupt is an error. Crossing a polling bound yields, expires the timer and
 republishes, so a clock poll cannot run past a deadline without an exit.
 UART accesses and firmware calls have no extra time charge. PL011 transmission
@@ -125,45 +214,45 @@ RAM and the shared page; no backend-specific bytes are filtered out.
 
 ## Operator steps
 
-### Review-fix guest build
+### Round-2 guest rebuild (ABI 2; operator required)
 
-Build **both** the Linux Image and initramfs from the updated `kernel-arm64/`
-directory. `seedbox.c` changes polling-yield IRQ handling; `init.c` adds a 20 ms
-CLOCK_MONOTONIC busy-wait across at least one HZ=100 tick. Copy the entire updated
-directory to the existing arm64 Linux build VM, replacing its old source copy.
-Run there from the checkout root, with output on its Linux disk:
+Build **both** the Linux `Image` and `init.cpio` from the updated `kernel-arm64/`
+directory. `seedbox.c` adds the ABI-2 deferred-IRQ word and unmasked read
+rendezvous; `init.c` replaces the 20 ms busy-wait with a 200 us
+`setitimer(ITIMER_REAL)` and a `clock_gettime` spin until SIGALRM arrives.
+Copy the entire updated directory to the existing arm64 Linux build VM,
+replacing its old source copy. From its parent directory, with output on the
+VM's Linux disk, run:
 
 ```sh
-BUILD_JOBS=4 bash kernel-arm64/build.sh artifacts/arm64-review-yield
+BUILD_JOBS=4 bash kernel-arm64/build.sh artifacts/arm64-review-deferred
 ```
 
-For a VM containing only the copied directory, run the same command from its
-parent. The build requires GCC, binutils, musl-tools, flex, bison, bc, libssl-dev,
+The build requires GCC, binutils, musl-tools, flex, bison, bc, libssl-dev,
 libelf-dev, curl, xz-utils and Python 3. It verifies the Linux 6.12.112 archive,
 uses a fresh source/object tree, checks the resolved config and audits vmlinux
 and the vDSO for counter/RNG leaks before exporting runnable inputs.
 
 Copy back `Image`, `init.cpio`, `kernel.config`, `counter-audit.txt`, `SHA256SUMS`
-and `build-directory.txt` into a fresh `artifacts/arm64-review-yield/` on the Mac.
-Retain the old inputs separately. The checked-in expected hashes now contain the
-operator-supplied values for the accepted `90fb080` guest. Verify them with
-`python3 kernel-arm64/check-hashes.py artifacts/arm64-review-yield`.
-Build-generated `SHA256SUMS` is only a copy check. The old-input regression checks
-only unchanged behavior:
+and `build-directory.txt` into a fresh `artifacts/arm64-review-deferred/` on the
+Mac. Retain the old inputs separately. The checked-in
+`kernel-arm64/expected-hashes.sha256` and the acceptance record below describe
+**ABI 1**, not these new inputs. Keep those historical hashes until new hashes
+are independently reviewed; do not copy build-generated hashes over them to
+make the check pass. For ABI-2 verification, obtain an independently reviewed
+two-entry hash file at `artifacts/arm64-abi2-expected.sha256` and run:
 
-| Seed | Old-fixture HVF witness |
-| --- | --- |
-| 1 | `b3de4bbdaa7a747b54d3a940f02c4281bd3f26fe8574454c6cb7f06a3658a2a7` |
-| 2 | `3477c8e474cbe111646f5a6aa03acadffefc5bb2995212bcd2aafec648e6dabe` |
+```sh
+python3 kernel-arm64/check-hashes.py artifacts/arm64-review-deferred \
+  --expected artifacts/arm64-abi2-expected.sha256
+```
 
-Those inputs are Image SHA-256
-`7ea8fa2858ef33d05da559e9de5e5a9329c6d397e5b03fd7f4fcd3ebb75d9ff1`
-and init.cpio SHA-256
-`9b952991625d7603e2db03e5ccdb87f78f1f7a16e6c664062505b7ddc75d8649`.
-The ignored `hvf_old_fixture_regression` CLI test checks these input hashes,
-both witnesses and trace hashes, exit code 0 and exact one-line stdout.
+Build-generated `SHA256SUMS` checks transfer integrity only. ABI-2 hardware
+acceptance and the restored one-second HVF timing gate are pending this rebuild.
+Old-input witness tests require the ABI-1 VMM at `66cf845`; current guest/VMM
+inputs must use ABI 2 together.
 
-### Rebuilt guest acceptance (2026-10-07)
+### Historical ABI-1 guest acceptance (2026-10-07)
 
 Inputs rebuilt by the operator from `90fb080` and independently hash-checked:
 
@@ -264,23 +353,20 @@ invalidates the entitlement signature; invoke signed tests directly.
 ### Acceptance after the rebuild
 
 ```sh
-export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-review-yield/Image"
-export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-review-yield/init.cpio"
-export SEEDBOX_ARM64_REPORT_DIR="$PWD/artifacts/arm64-review-yield/hvf-acceptance"
+export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-review-deferred/Image"
+export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-review-deferred/init.cpio"
+export SEEDBOX_ARM64_REPORT_DIR="$PWD/artifacts/arm64-review-deferred/hvf-acceptance"
 "$arm64_test_binary" --ignored --exact hvf_determinism --nocapture --test-threads=1
 ```
 
 Use a fresh report directory. The suite runs seeds 1, 1, 2 and seed 1 with host
 CPU load and randomized pre-entry sleeps. It compares complete witnesses,
 checks seed sensitivity, guest sleep checks, the busy-wait marker and at least
-one event+24 yield. The undisturbed HVF timing budget is five seconds for this
-expanded fixture. Its 20 ms PV busy-wait advances through 1 ns clock reads and
-takes about two seconds of host CPU time; the former one-second sleep-only
-budget no longer fits. This is a performance budget change only; no witness,
-RAM, seed-sensitivity, guest sleep or IRQ assertion is relaxed.
+one event+24 yield. The undisturbed HVF timing budget is one second, including
+the 200 us alarm spin. No witness, RAM, seed-sensitivity, guest sleep or IRQ assertion is relaxed.
 The guest must print `SEEDBOX_INIT_PASS` and reach PSCI SYSTEM_OFF.
 
-Then perform the README's two CLI runs with these rebuilt inputs: both must
+Then perform the quickstart's two CLI runs with these rebuilt inputs: both must
 exit 0 and print identical `WITNESS: <hex>` lines. `--witness FILE` additionally
 writes a new JSON report; compare same-backend reports with:
 
@@ -297,12 +383,13 @@ and init.cpio. From the checkout root, using the VM's existing Cargo:
 ```sh
 set -eu
 export PATH="$HOME/.cargo/bin:$PATH"
-python3 kernel-arm64/check-hashes.py artifacts/arm64-review-yield
+python3 kernel-arm64/check-hashes.py artifacts/arm64-review-deferred \
+  --expected artifacts/arm64-abi2-expected.sha256
 cargo build-arm64
-cargo test-arm64 --test review_yield_masked
-export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-review-yield/Image"
-export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-review-yield/init.cpio"
-export SEEDBOX_ARM64_REPORT_DIR="$(mktemp -d "$PWD/artifacts/arm64-review-yield/kvm-acceptance.XXXXXX")"
+cargo test-arm64 --test review_yield_masked --test review_deferred_bound
+export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-review-deferred/Image"
+export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-review-deferred/init.cpio"
+export SEEDBOX_ARM64_REPORT_DIR="$(mktemp -d "$PWD/artifacts/arm64-review-deferred/kvm-acceptance.XXXXXX")"
 cargo test-arm64 --test hardware -- --ignored --exact kvm_determinism --nocapture --test-threads=1
 
 for run in 1-a 1-b 2-a 2-b; do
@@ -332,8 +419,10 @@ witness. `compare-pages.py` locates divergent pages for diagnostics.
 
 ## Open items
 
-- The rebuilt polling-yield kernel and busy-wait fixture still require native
-  Linux arm64 KVM acceptance. HVF results do not establish KVM behavior.
+- The ABI-2 kernel and alarm-spin fixture require a Linux VM rebuild and fresh
+  HVF and Linux arm64 KVM acceptance. Historical ABI-1 results do not validate
+  these inputs. Record seed-1 trace_hash and console_hash for both backends
+  alongside same-backend repeats; equal exit counts alone do not show equality.
 - Full RAM witnesses are backend-specific. Earlier inputs had identical traces
   and console across HVF/KVM but 296 differing RAM pages. HVF advertises 1024 GIC
   IDs; the Linux 6.8 KVM limit is 992. Guest GIC count policy, MIDR and other CPU

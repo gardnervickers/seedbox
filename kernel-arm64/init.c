@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +12,7 @@
 #include <sys/mount.h>
 #include <sys/random.h>
 #include <sys/reboot.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -37,16 +39,30 @@ static void sleep_check(uint64_t ns)
     printf("sleep requested=%llu elapsed=%llu\n", (unsigned long long)ns, (unsigned long long)elapsed);
     if (elapsed < ns || elapsed > ns + 20000000) { errno = ERANGE; fail("PV sleep duration"); }
 }
+static volatile sig_atomic_t alarm_received;
+static void alarm_handler(int signal)
+{
+    (void)signal;
+    alarm_received = 1;
+}
 static void busy_wait_check(void)
 {
-    /* CONFIG_HZ=100: 20 ms crosses at least one 10 ms tick without idle.
-     * The vDSO is disabled, so each read enters seedbox_read() in the kernel.
+    /* Cross a short hrtimer deadline without idling. Each clock read enters
+     * seedbox_read(); a deferred tick must reach this spinning task.
      */
+    struct sigaction action = { .sa_handler = alarm_handler };
+    struct itimerval timer = { .it_value = { .tv_usec = 200 } };
+    if (sigemptyset(&action.sa_mask) || sigaction(SIGALRM, &action, NULL))
+        fail("sigaction SIGALRM");
+    alarm_received = 0;
     uint64_t before = clock_ns(CLOCK_MONOTONIC), elapsed;
+    if (setitimer(ITIMER_REAL, &timer, NULL)) fail("setitimer");
     do {
         elapsed = clock_ns(CLOCK_MONOTONIC) - before;
-    } while (elapsed < 20000000);
+    } while (!alarm_received);
+    elapsed = clock_ns(CLOCK_MONOTONIC) - before;
     printf("busy-wait elapsed=%llu\n", (unsigned long long)elapsed);
+    if (elapsed < 200000) { errno = ERANGE; fail("PV alarm duration"); }
 }
 int main(void)
 {

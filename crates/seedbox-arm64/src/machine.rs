@@ -182,7 +182,14 @@ impl<B: Backend> Machine<B> {
                             self.clock.ack();
                             self.inject_spi(TIMER_SPI, false)?;
                         }
-                        Effect::Yield => self.clock.at_bound()?,
+                        Effect::Yield => {
+                            // A deferred IRQ requests a rendezvous independently
+                            // of the deadline. Do not advance to a future timer
+                            // when the guest is yielding just to deliver it.
+                            if self.deferred_spis.is_empty() {
+                                self.clock.at_bound()?;
+                            }
+                        }
                         Effect::Ready(v) => {
                             if v != ABI || self.ready {
                                 return Err(format!("invalid PV handshake {v}"));
@@ -296,8 +303,8 @@ impl<B: Backend> Machine<B> {
     }
     fn publish(&mut self) -> Result<()> {
         let last = unsafe { self.page.word(8)? };
-        let mut page = TimePage::from_clock(&self.clock, last);
-        for offset in [0, 16, 24] {
+        let mut page = TimePage::from_clock(&self.clock, last, !self.deferred_spis.is_empty());
+        for offset in [0, 16, 24, 32] {
             unsafe {
                 self.page.set_word(offset as usize, page.read(offset, 8)?)?;
             }
