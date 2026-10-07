@@ -1,0 +1,37 @@
+{
+  "kernel": "../../artifacts/bzImage",
+  "mem_mb": 256,
+  "duration_ns": 60000000000,
+  "stop_tolerance_ns": 2000000,
+  "end_on_exit": "a",
+  "network": {
+    "latency_ns": 1000000,
+    "jitter_ns": 100000
+  },
+  "machines": [
+    {
+      "name": "a",
+      "initrd": "../../artifacts/net.cpio"
+    },
+    {
+      "name": "b",
+      "initrd": "../../artifacts/net.cpio"
+    }
+  ],
+  "faults": [
+    {
+      "id": 1,
+      "at_ns": 2000000000,
+      "deadline_ns": 2000000000,
+      "action": "crash",
+      "machine": "b"
+    },
+    {
+      "id": 2,
+      "at_ns": 2500000000,
+      "deadline_ns": 2500000000,
+      "action": "reboot",
+      "machine": "b"
+    }
+  ]
+}
