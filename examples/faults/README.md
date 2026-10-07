@@ -136,7 +136,7 @@ scenario also checks six `invalid_state` transitions, stop of a down machine
 returning `target_unavailable`, and `inspect()` reporting `Paused` and `Down`.
 The verifier checks the applied effect times, the crashed incarnation record and
 the second boot in the server console. With all optional supervisors supplied,
-the complete matrix contains eighteen executions. Use
+the complete matrix contains seventeen executions. Use
 `verify.py RUN --focused lifecycle-cases` to inspect this evidence separately.
 
 Portable tests require no KVM. Run `python3 examples/faults/portable.py` to
