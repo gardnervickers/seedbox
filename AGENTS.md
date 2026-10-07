@@ -77,7 +77,7 @@ deliberately change one.
 - Required flags are a last resort. Every runtime input needs a sensible
   default or a search, so `seedbox run` works with no arguments on a set-up
   host. The only required inputs are those with no possible default (`init
-  DIRECTORY`, `prepare --output`).
+  DIRECTORY`, `prepare --output`, `diff RUN_A RUN_B`).
 - A command's main object is positional: the Compose path (default `.`,
   and a directory resolves to its `compose.yaml`) or the run directory.
 - Flags are long kebab-case. Don't add short flags except `-o`/`-h`/`-V`.
@@ -122,7 +122,7 @@ deliberately change one.
   options, "Runtime inputs", and "Performance (never changes results)". A flag
   takes the heading of the group declared before it, so flatten
   general-purpose groups (`CpuArg`, `StateArg`) before `RuntimeInputs`.
-- `run` and `replay` show `EXIT_CODES` in `after_help`.
+- `run`, `replay` and `diff` show `EXIT_CODES` in `after_help`.
 - Check the result with `cargo run -- help <command>`.
 
 ### Output
@@ -153,7 +153,7 @@ deliberately change one.
   reach the user. Check the path first (`existing`), or add context as
   `oci::spawn_error` does.
 - Exit codes are a fixed contract (`EXIT_CODES`, README.md, docs/runtime.md,
-  and the acceptance scripts): 0 PASS/MATCH, 1 FAIL/MISMATCH, 2
+  and the acceptance scripts): 0 PASS/MATCH, 1 FAIL/MISMATCH/DIFFERENT, 2
   ERROR/NOT_COMPARABLE/usage/setup, 3 INCOMPLETE, 124 TIMEOUT. Don't change
   what a code means. A new code must be added to all four places.
 
