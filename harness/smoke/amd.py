@@ -169,9 +169,9 @@ def compare(base, replay, baseline_streams, replay_streams):
         raise RuntimeError('opaque guest streams differ')
 
 
-def verify_performance(base, replay, parameter=None, value=None):
+def verify_performance(base, replay, changes=None):
     expected = base['performance_parameters'].copy()
-    if parameter is not None:
+    for parameter, value in (changes or {}).items():
         if parameter not in expected or expected[parameter] == value:
             raise RuntimeError('baseline cannot exercise the requested performance change')
         expected[parameter] = value
@@ -303,7 +303,12 @@ class Campaign:
             raise RuntimeError('dev engine label missing from public run output')
         if baseline['identity']['inputs']['kernel'] != digest(a.kernel) or baseline['identity']['inputs']['profile']['engine'] != digest(a.engine):
             raise RuntimeError('executed kernel/engine differ from frozen supplied bytes')
-        for name, flags, parameter, value in [('default', [], None, None), ('margin', ['--margin', '32768'], 'SEEDBOX_MARGIN', '32768'), ('undo', ['--undo', '0'], 'SEEDBOX_UNDO', '0')]:
+        # With undo on, the counter's final approach uses the undo margin and
+        # never reads --margin, so the margin change is only exercised with undo off.
+        for name, flags, changes in [
+                ('default', [], None),
+                ('margin', ['--undo', '0', '--margin', '32768'], {'SEEDBOX_UNDO': '0', 'SEEDBOX_MARGIN': '32768'}),
+                ('undo', ['--undo', '0'], {'SEEDBOX_UNDO': '0'})]:
             code, stdout, _ = self.invoke(name, [str(a.cli), 'replay', str(baseline_run), '--cpu', str(a.cpu), '--state', str(self.state), *dev_flags, *flags], True)
             if code != 0:
                 raise RuntimeError('retained replay failed')
@@ -313,7 +318,7 @@ class Campaign:
             verify_qualification(record, dev_engine)
             if dev_engine and 'replay: MATCH (unqualified dev engine)' not in stdout:
                 raise RuntimeError('dev replay is missing its unqualified label')
-            verify_performance(baseline, record, parameter, value)
+            verify_performance(baseline, record, changes)
         if pair(a.cpu) != self.cpus:
             raise RuntimeError('sibling topology changed')
         save(self.root / 'final-cleanup.json', {'cpus': self.cpus, 'locks': lock_free(self.cpus, self.locks), 'msrs': snapshot(self.cpus)})
@@ -360,7 +365,11 @@ def main():
         Campaign(args, root, deadline).run()
         if time.monotonic() >= deadline - CLEANUP_SECONDS:
             raise TimeoutError('final evidence exhausted campaign allocation')
-        save(root / 'result.json', {'status': 'COMPLETE_PENDING_INDEPENDENT_REVIEW', 'wall_seconds': time.monotonic() - began})
+        phases = {path.parent.name: json.loads(path.read_text())['wall_seconds'] for path in sorted(root.glob('*/wall.json'))}
+        save(root / 'result.json', {'status': 'COMPLETE_PENDING_INDEPENDENT_REVIEW', 'wall_seconds': time.monotonic() - began,
+             'phase_wall_seconds': phases})
+        for name, seconds in sorted(phases.items(), key=lambda item: -item[1]):
+            print(f'phase {name}: {seconds:.1f}s')
         print('complete: staged smoke evidence requires independent review')
         return 0
     except BaseException as error:

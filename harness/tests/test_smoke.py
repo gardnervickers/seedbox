@@ -84,8 +84,9 @@ class SmokeTests(unittest.TestCase):
         self.record['identity']['inputs']['profile']['semantic_parameters'] = {'engine_qualification': 'dev-unpinned'}
         self.record['report']['engine_qualification'] = 'dev-unpinned'
         self.record['performance_parameters'] = {'SEEDBOX_MARGIN': 'adaptive', 'SEEDBOX_UNDO': '256'}
-        inspected = []
+        inspected, commands = [], {}
         def invoke(name, command, execution=False):
+            commands[name] = command
             if name == 'wrong-kernel':
                 self.assertNotIn('--allow-dev-engine', command)
                 return 2, '', 'guest kernel is outside the admitted host policy'
@@ -104,6 +105,7 @@ class SmokeTests(unittest.TestCase):
             record = copy.deepcopy(self.record)
             if name == 'margin-inspect':
                 record['performance_parameters']['SEEDBOX_MARGIN'] = '32768'
+                record['performance_parameters']['SEEDBOX_UNDO'] = '0'
             if name == 'undo-inspect':
                 record['performance_parameters']['SEEDBOX_UNDO'] = '0'
             return record
@@ -118,6 +120,8 @@ class SmokeTests(unittest.TestCase):
              patch.object(smoke, 'pinned_workloads'):
             campaign.run()
         self.assertEqual(inspected, ['fixed-inspect', 'default-inspect', 'margin-inspect', 'undo-inspect'])
+        self.assertEqual(commands['margin'][-4:], ['--undo', '0', '--margin', '32768'])
+        self.assertEqual(commands['undo'][-2:], ['--undo', '0'])
 
     def test_dev_doctor_cannot_claim_qualified_readiness(self):
         args = type('Args', (), dict(kernel='kernel', engine='engine', guest_init='init',
@@ -192,12 +196,17 @@ class SmokeTests(unittest.TestCase):
         base = {'performance_parameters': {'SEEDBOX_MARGIN': 'adaptive', 'SEEDBOX_UNDO': '256'}}
         changed = copy.deepcopy(base)
         changed['performance_parameters']['SEEDBOX_MARGIN'] = '32768'
-        smoke.verify_performance(base, changed, 'SEEDBOX_MARGIN', '32768')
+        smoke.verify_performance(base, changed, {'SEEDBOX_MARGIN': '32768'})
         for replay in (base, {'performance_parameters': {'SEEDBOX_UNDO': '256'}}):
             with self.assertRaises(RuntimeError):
-                smoke.verify_performance(base, replay, 'SEEDBOX_MARGIN', '32768')
+                smoke.verify_performance(base, replay, {'SEEDBOX_MARGIN': '32768'})
         with self.assertRaises(RuntimeError):
             smoke.verify_performance(base, changed)
+        # The margin replay must also turn undo off, or the margin is never read.
+        with self.assertRaises(RuntimeError):
+            smoke.verify_performance(base, changed, {'SEEDBOX_UNDO': '0', 'SEEDBOX_MARGIN': '32768'})
+        changed['performance_parameters']['SEEDBOX_UNDO'] = '0'
+        smoke.verify_performance(base, changed, {'SEEDBOX_UNDO': '0', 'SEEDBOX_MARGIN': '32768'})
 
     def test_public_result_must_be_unique_and_owned(self):
         self.assertEqual(smoke.result_directory(f'PASS: {self.run}\n', self.state), self.run.resolve())
