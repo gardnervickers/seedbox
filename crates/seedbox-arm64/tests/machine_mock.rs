@@ -238,6 +238,8 @@ fn machine_reconciles_reads_completes_once_and_injects_while_stopped() {
     assert_eq!(a.witness, b.witness);
     assert_ne!(a.witness, c.witness);
     assert_eq!(a.virtual_ns, 1_000_000_000);
+    assert_eq!(a.deferred_spi_events, 0);
+    assert_eq!(a.deferred_clock_read_spis, 0);
     assert_eq!(a.trace[0].time, 7);
     assert_eq!(a.trace[2].time, 1_000_000_000);
     let hidden = Machine::<Fake<0, 0, 0, false, true>>::new(&kernel, b"cpio", 1)
@@ -250,6 +252,8 @@ fn machine_reconciles_reads_completes_once_and_injects_while_stopped() {
     assert_eq!(a.virtual_ns, hidden.virtual_ns);
     let json = serde_json::to_value(&a).unwrap();
     assert_eq!(json["backend"], "mock");
+    assert_eq!(json["deferred_spi_events"], 0);
+    assert_eq!(json["deferred_clock_read_spis"], 0);
 }
 
 #[test]

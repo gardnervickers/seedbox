@@ -19,6 +19,8 @@ pub struct Machine<B: Backend> {
     uart: Pl011,
     uart_irq: bool,
     deferred_spis: BTreeSet<u32>,
+    deferred_spi_events: u64,
+    deferred_clock_read_spis: u64,
     event: ClockEvent,
     clock: PvClock,
     ready: bool,
@@ -69,6 +71,8 @@ impl<B: Backend> Machine<B> {
             uart: Pl011::default(),
             uart_irq: false,
             deferred_spis: BTreeSet::new(),
+            deferred_spi_events: 0,
+            deferred_clock_read_spis: 0,
             event: ClockEvent,
             clock: PvClock::default(),
             ready: false,
@@ -233,6 +237,14 @@ impl<B: Backend> Machine<B> {
             }
             if self.clock.judge(idle)? {
                 self.inject_spi(TIMER_SPI, true)?;
+                // A timer expiry at the guest clock-read rendezvous with
+                // PSTATE.I set proves the masked-deadline path was exercised.
+                if self.deferred_spis.contains(&TIMER_SPI)
+                    && matches!(stop.exit, Exit::Mmio { addr, write: true, .. }
+                        if addr == EVENT_ADDR + 24)
+                {
+                    self.deferred_clock_read_spis += 1;
+                }
             }
             self.flush_spis()?;
             self.trace
@@ -272,6 +284,8 @@ impl<B: Backend> Machine<B> {
                     exits: self.trace.len(),
                     virtual_ns: self.clock.now(),
                     wall_seconds: start.elapsed().as_secs_f64(),
+                    deferred_spi_events: self.deferred_spi_events,
+                    deferred_clock_read_spis: self.deferred_clock_read_spis,
                     console,
                     trace: std::mem::take(&mut self.trace),
                 });
@@ -286,7 +300,9 @@ impl<B: Backend> Machine<B> {
         // IRQ in hardware while masked lets it skid after a later guest unmask.
         // Deassertions also cancel an assertion not yet sent to the backend.
         if level && self.backend.get_reg(CoreReg::Pstate)? & (1 << 7) != 0 {
-            self.deferred_spis.insert(intid);
+            if self.deferred_spis.insert(intid) {
+                self.deferred_spi_events += 1;
+            }
             return Ok(());
         }
         self.deferred_spis.remove(&intid);

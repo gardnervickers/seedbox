@@ -16,6 +16,29 @@ fn same(a: &Report, b: &Report) {
         panic!("witness mismatch\nfirst differing exit: {first:?}\nleft: {:?}\nright: {:?}\nexit lengths: {} / {}\nconsole hashes: {} / {}\nRAM hashes: {} / {}", first.and_then(|i| a.trace.get(i)), first.and_then(|i| b.trace.get(i)), a.exits, b.exits, a.console_hash, b.console_hash, a.ram_hash, b.ram_hash);
     }
 }
+fn busy_wait_elapsed(console: &str) -> Option<u64> {
+    console
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("busy-wait elapsed="))
+        .and_then(|value| value.parse().ok())
+        .filter(|ns| (200_000..=300_000).contains(ns))
+}
+#[test]
+fn busy_wait_requires_hrtimer_duration() {
+    assert_eq!(
+        busy_wait_elapsed("busy-wait elapsed=200017\r\n"),
+        Some(200017)
+    );
+    for console in [
+        "busy-wait elapsed=199999",
+        "busy-wait elapsed=300001",
+        "busy-wait elapsed=10000000",
+        "busy-wait elapsed=garbage",
+        "SEEDBOX_INIT_PASS",
+    ] {
+        assert_eq!(busy_wait_elapsed(console), None);
+    }
+}
 struct Burner {
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -69,8 +92,9 @@ fn suite<B: Backend>(name: &str, fast: bool) {
         f.write_all(&serde_json::to_vec_pretty(report).unwrap())
             .unwrap();
         eprintln!(
-            "{name} {label}: {} exits={} wall={:.6}s virtual={}ns",
-            report.witness, report.exits, report.wall_seconds, report.virtual_ns
+            "{name} {label}: {} exits={} wall={:.6}s virtual={}ns deferred_spis={} deferred_clock_read_spis={}",
+            report.witness, report.exits, report.wall_seconds, report.virtual_ns,
+            report.deferred_spi_events, report.deferred_clock_read_spis
         );
     };
     let a = Machine::<B>::new(&kernel, &initrd, 1)
@@ -116,10 +140,20 @@ fn suite<B: Backend>(name: &str, fast: bool) {
         "guest must verify a 1s sleep: {}",
         a.console
     );
-    assert!(
-        a.console.contains("busy-wait elapsed="),
-        "rebuild kernel-arm64/init.c"
-    );
+    for report in [&a, &b, &c, &d] {
+        assert!(
+            busy_wait_elapsed(&report.console).is_some(),
+            "guest must complete the 200us timerfd spin within 300us; rebuild kernel-arm64/init.c: {}",
+            report.console
+        );
+        if report.seed == 1 {
+            assert!(report.deferred_spi_events >= 1, "no masked SPI deferral");
+            assert!(
+                report.deferred_clock_read_spis >= 1,
+                "no clockevent deadline crossed during a masked clock read"
+            );
+        }
+    }
     assert!(
         a.trace
             .iter()
@@ -129,7 +163,7 @@ fn suite<B: Backend>(name: &str, fast: bool) {
     if fast {
         assert!(
             a.wall_seconds < 1.0,
-            "baseline HVF boot including 200us guest alarm spin and 1s sleep took {:.3}s; report timing failure (1s budget)",
+            "baseline HVF boot including 200us guest timerfd spin and 1s sleep took {:.3}s; report timing failure (1s budget)",
             a.wall_seconds
         );
     }

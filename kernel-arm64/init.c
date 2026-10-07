@@ -4,7 +4,6 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
-#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,7 +11,7 @@
 #include <sys/mount.h>
 #include <sys/random.h>
 #include <sys/reboot.h>
-#include <sys/time.h>
+#include <sys/timerfd.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -39,30 +38,32 @@ static void sleep_check(uint64_t ns)
     printf("sleep requested=%llu elapsed=%llu\n", (unsigned long long)ns, (unsigned long long)elapsed);
     if (elapsed < ns || elapsed > ns + 20000000) { errno = ERANGE; fail("PV sleep duration"); }
 }
-static volatile sig_atomic_t alarm_received;
-static void alarm_handler(int signal)
-{
-    (void)signal;
-    alarm_received = 1;
-}
 static void busy_wait_check(void)
 {
     /* Cross a short hrtimer deadline without idling. Each clock read enters
      * seedbox_read(); a deferred tick must reach this spinning task.
+     * ITIMER_REAL is jiffy-granular on this guest; timerfd uses an hrtimer.
      */
-    struct sigaction action = { .sa_handler = alarm_handler };
-    struct itimerval timer = { .it_value = { .tv_usec = 200 } };
-    if (sigemptyset(&action.sa_mask) || sigaction(SIGALRM, &action, NULL))
-        fail("sigaction SIGALRM");
-    alarm_received = 0;
+    int fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    if (fd < 0) fail("timerfd_create");
+    struct itimerspec timer = { .it_value = { .tv_nsec = 200000 } };
     uint64_t before = clock_ns(CLOCK_MONOTONIC), elapsed;
-    if (setitimer(ITIMER_REAL, &timer, NULL)) fail("setitimer");
-    do {
+    uint64_t expirations = 0;
+    if (timerfd_settime(fd, 0, &timer, NULL)) fail("timerfd_settime");
+    for (;;) {
         elapsed = clock_ns(CLOCK_MONOTONIC) - before;
-    } while (!alarm_received);
+        ssize_t n = read(fd, &expirations, sizeof(expirations));
+        if (n == (ssize_t)sizeof(expirations)) break;
+        if (n >= 0) { errno = EIO; fail("short timerfd read"); }
+        if (errno != EAGAIN && errno != EINTR) fail("read timerfd");
+        if (elapsed > 300000) break;
+    }
     elapsed = clock_ns(CLOCK_MONOTONIC) - before;
+    if (close(fd)) fail("close timerfd");
     printf("busy-wait elapsed=%llu\n", (unsigned long long)elapsed);
-    if (elapsed < 200000) { errno = ERANGE; fail("PV alarm duration"); }
+    if (expirations != 1 || elapsed < 200000 || elapsed > 300000) {
+        errno = ERANGE; fail("PV timerfd duration");
+    }
 }
 int main(void)
 {

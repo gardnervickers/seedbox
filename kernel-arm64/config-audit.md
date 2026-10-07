@@ -32,6 +32,12 @@ resolved values; `n (absent)` means a defined symbol hidden by disabled dependen
 Explicit disabled requests remain intentional constraints, even when already off
 in allnoconfig. The merge script's redefinition messages for `=n` are harmless.
 
+Timerfd fixture follow-up: the fragment also explicitly requests `TIMERFD=y`.
+The retained `artifacts/arm64-abi2/kernel.config` already has `CONFIG_TIMERFD=y`,
+`CONFIG_HIGH_RES_TIMERS=y`, `CONFIG_TICK_ONESHOT=y` and `CONFIG_HZ=100`.
+This pins an existing selection; the next Linux build will recheck all fragment
+requests through `check-config.py`. No new Kconfig build is claimed here.
+
 Key dependency chains checked:
 
 - ARM64 selects ARM_AMBA, ARM_GIC_V3, ARM_PSCI_FW, COMMON_CLK, OF,

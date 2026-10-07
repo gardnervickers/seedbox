@@ -87,6 +87,13 @@ pub struct Report {
     pub exits: usize,
     pub virtual_ns: u64,
     pub wall_seconds: f64,
+    /// Newly queued masked SPI assertions, including later cancellations.
+    /// Diagnostic metadata only; neither counter is an input to finish().
+    #[serde(default)]
+    pub deferred_spi_events: u64,
+    /// Timer SPI deferrals at event+24 clock-read yields with PSTATE.I set.
+    #[serde(default)]
+    pub deferred_clock_read_spis: u64,
     pub console: String,
     pub trace: Vec<Record>,
 }

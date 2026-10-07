@@ -163,6 +163,8 @@ fn unmasked_clock_read_delivers_deferred_tick_without_an_armed_deadline() {
         .run(|| {})
         .unwrap();
     assert_eq!(report.virtual_ns, 100);
+    assert_eq!(report.deferred_spi_events, 1);
+    assert_eq!(report.deferred_clock_read_spis, 1);
     assert_eq!(report.trace[3].addr, EVENT_ADDR + 24);
 }
 

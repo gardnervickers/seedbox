@@ -205,6 +205,10 @@ fn clock_poll_crossing_bound_must_not_abort_run() {
     k[16..24].copy_from_slice(&4096u64.to_le_bytes());
     let r = Machine::<G>::new(&k, b"cpio", 1).unwrap().run(|| {});
     assert!(r.is_ok(), "{}", r.unwrap_err().lines().next().unwrap());
+    let report = r.unwrap();
+    // Cancellation does not erase evidence of the masked expiry.
+    assert_eq!(report.deferred_spi_events, 1);
+    assert_eq!(report.deferred_clock_read_spis, 1);
 }
 
 #[test]
@@ -217,6 +221,9 @@ fn deferred_timer_and_uart_wait_for_semantic_unmask_and_assert_once() {
         .run(|| {})
         .unwrap();
     assert_eq!(r.virtual_ns, 101);
+    // UART deferral is counted, but is not a masked clock-read expiry.
+    assert_eq!(r.deferred_spi_events, 2);
+    assert_eq!(r.deferred_clock_read_spis, 1);
     assert!(r.trace.iter().all(|record| record.kind != 4));
     assert_eq!(r.trace[6].time, 101);
 }

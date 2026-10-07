@@ -10,8 +10,11 @@ not Compose application support.
 The isolated `seedbox-arm64` crate runs a single-CPU PV fixture on native Mac
 HVF or Linux arm64 KVM. It is separate from the Compose/x86 CLI.
 
-The checked-in `kernel-arm64/expected-hashes.sha256` records independently
-supplied operator hashes for the ABI-2 guest rebuilt from `f9d7e6a`. Do not
+The timerfd fixture requires a guest rebuild before running this quickstart.
+The checked-in `kernel-arm64/expected-hashes.sha256` retains the independently
+supplied ABI-2 Image hash from `f9d7e6a`, but deliberately blocks input checks
+until the new init.cpio hash is independently reviewed. See the
+[timerfd rebuild handoff](#timerfd-fixture-rebuild-pending). Do not
 derive expected hashes from the files being checked. Build-generated
 `SHA256SUMS` only checks transfer integrity.
 
@@ -69,14 +72,14 @@ cmp artifacts/arm64-mac/run-1.stdout artifacts/arm64-mac/run-2.stdout
 ```
 
 The acceptance test is that both runs exit 0 and print **identical** stdout
-lines; `cmp` checks equality. With the accepted ABI-2 inputs on the Mac profile
-recorded below, the expected line is:
+lines; `cmp` checks equality. With the historical ABI-2 SIGALRM inputs on the
+Mac profile recorded below, the line was (not an expectation for timerfd):
 
 ```text
 WITNESS: 028d2b7c14c1e6786c38cb78013f51707e5fc23400ac9d9ed95b2b491dec26a1
 ```
 
-The full hardware suite currently fails its one-second timing gate; see the
+The historical full hardware suite failed its one-second timing gate; see the
 [ABI-2 acceptance record](#abi-2-guest-acceptance-2026-10-07).
 
 Console and timing go to stderr; setup/runtime errors exit 2. Sign again after
@@ -219,6 +222,45 @@ RAM and the shared page; no backend-specific bytes are filtered out.
 
 ## Operator steps
 
+### Timerfd fixture rebuild pending
+
+The fixture now arms a one-shot `timerfd_create(CLOCK_MONOTONIC)` timer for
+200,000 ns, then alternates clock reads with nonblocking timerfd reads. It
+requires exactly one expiration and logs `busy-wait elapsed=N`, with N in
+200,000–300,000 ns. A missing expiration or the former ~10 ms jiffy delay fails.
+The undisturbed HVF wall gate remains **1 second**.
+
+Both `artifacts/arm64-abi2/kernel.config` and `kernel-arm64/config.fragment`
+have `CONFIG_HIGH_RES_TIMERS=y` and `CONFIG_TICK_ONESHOT=y`, with HZ=100.
+The retained config also has `CONFIG_TIMERFD=y`; the fragment now explicitly
+pins that existing selection. No kernel feature change or HZ fallback is needed.
+
+Reports add `deferred_spi_events` (newly queued masked SPI assertions, including
+later cancellations) and `deferred_clock_read_spis` (timer expiries deferred at
+event+24 clock-read yields with PSTATE.I set). Both are diagnostics outside the
+witness, and neither affects delivery. Hardware acceptance requires both counts
+to be at least one for every seed-1 run and checks the short elapsed duration
+for every run. Portable mocks cover masked expiry, cancellation, delivery and
+the distinction between UART deferral and a masked clock-read expiry.
+
+**No new guest build or hardware acceptance has been run.** The short guest
+elapsed time, seed-1 counters and one-second wall gate still require live proof.
+Only `init.cpio` needs new guest code; the existing ABI-2 Image can be reused.
+For the canonical audited build, copy the updated `kernel-arm64/` directory to
+the Linux arm64 build VM, then run from its checkout root:
+
+```sh
+BUILD_JOBS=4 bash kernel-arm64/build.sh /tmp/seedbox-arm64-hrtimer
+```
+
+This regenerates both `Image` and `init.cpio`. Retain all six outputs (`Image`,
+`init.cpio`, `kernel.config`, `counter-audit.txt`, `SHA256SUMS`,
+`build-directory.txt`) and copy them to a fresh `artifacts/arm64-hrtimer/` on the
+Mac. Review the new hashes independently before filling the init.cpio placeholder;
+Image and kernel.config should match the previous build with the same toolchain.
+Preserve the old ABI-2 timing-failure artifacts. Then rebuild/sign the VMM and
+hardware test using the commands below and run acceptance with the new inputs.
+
 ### ABI-2 guest acceptance (2026-10-07)
 
 The operator rebuilt **both** `Image` and `init.cpio` from `f9d7e6a` in the
@@ -230,7 +272,7 @@ Linux VM. The Mac independently checked the supplied hashes before execution:
 | init.cpio | `7f73307576b5ff352ccc9920bd3cb7178ed6dc60d42e2f9360f39e2efbf539df` |
 | kernel.config | `85f8af523f252b63298a7943b2f5cd57ecbfb7c040cc1d3146b44da05a9caf0a` (unchanged) |
 
-The checked-in expected hashes now identify these ABI-2 inputs. The supplied
+The expected hashes at that revision identified these ABI-2 inputs. The supplied
 counter audit reports no hardware counter/RNG reads in vmlinux or the vDSO.
 For subsequent rebuilds, copy the entire updated `kernel-arm64/` directory to
 the Linux VM and run `BUILD_JOBS=4 bash kernel-arm64/build.sh OUTPUT_DIRECTORY`.
@@ -394,17 +436,19 @@ invalidates the entitlement signature; invoke signed tests directly.
 ### Run hardware acceptance
 
 ```sh
-export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-abi2/Image"
-export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-abi2/init.cpio"
-export SEEDBOX_ARM64_REPORT_DIR="$(mktemp -d "$PWD/artifacts/arm64-abi2/hvf-acceptance.XXXXXX")"
+export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-hrtimer/Image"
+export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-hrtimer/init.cpio"
+export SEEDBOX_ARM64_REPORT_DIR="$(mktemp -d "$PWD/artifacts/arm64-hrtimer/hvf-acceptance.XXXXXX")"
 "$arm64_test_binary" --ignored --exact hvf_determinism --nocapture --test-threads=1
 ```
 
 Use a fresh report directory. The suite runs seeds 1, 1, 2 and seed 1 with host
 CPU load and randomized pre-entry sleeps. It compares complete witnesses,
-checks seed sensitivity, guest sleep checks, the SIGALRM spin marker and at least
-one event+24 yield. The undisturbed HVF timing budget is one second, including
-the 200 us alarm spin. No witness, RAM, seed-sensitivity, guest sleep or IRQ assertion is relaxed.
+checks seed sensitivity, guest sleep checks, a 200–300 us timerfd spin and at least
+one event+24 yield. Every seed-1 run must report at least one deferred SPI and
+one timer deferral at a masked clock-read yield. The undisturbed HVF timing
+budget is one second, including the 200 us timerfd spin. No witness, RAM,
+seed-sensitivity, guest sleep or IRQ assertion is relaxed.
 The guest must print `SEEDBOX_INIT_PASS` and reach PSCI SYSTEM_OFF.
 
 Then perform the quickstart's two CLI runs with these rebuilt inputs: both must
@@ -424,12 +468,12 @@ and init.cpio. From the checkout root, using the VM's existing Cargo:
 ```sh
 set -eu
 export PATH="$HOME/.cargo/bin:$PATH"
-python3 kernel-arm64/check-hashes.py artifacts/arm64-abi2
+python3 kernel-arm64/check-hashes.py artifacts/arm64-hrtimer
 cargo build-arm64
 cargo test-arm64 --test review_yield_masked --test review_deferred_bound
-export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-abi2/Image"
-export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-abi2/init.cpio"
-export SEEDBOX_ARM64_REPORT_DIR="$(mktemp -d "$PWD/artifacts/arm64-abi2/kvm-acceptance.XXXXXX")"
+export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-hrtimer/Image"
+export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-hrtimer/init.cpio"
+export SEEDBOX_ARM64_REPORT_DIR="$(mktemp -d "$PWD/artifacts/arm64-hrtimer/kvm-acceptance.XXXXXX")"
 cargo test-arm64 --test hardware -- --ignored --exact kvm_determinism --nocapture --test-threads=1
 
 for run in 1-a 1-b 2-a 2-b; do
@@ -471,11 +515,14 @@ witness. `compare-pages.py` locates divergent pages for diagnostics.
 
 ## Open items
 
-- ABI-2 HVF witnesses match across repeats and host noise, but the unchanged
-  one-second wall gate fails at 1.067484 seconds. ABI-2 Linux arm64 KVM acceptance
-  remains pending. Record KVM seed-1 trace_hash and console_hash alongside
-  same-backend repeats and compare them with the HVF values above; equal exit
-  counts alone do not show equality.
+- The timerfd fixture needs a rebuilt init.cpio and live HVF proof of its
+  200–300 us elapsed duration, positive seed-1 deferral counters and unchanged
+  one-second wall gate. Historical SIGALRM ABI-2 HVF witnesses match across
+  repeats and host noise, but failed that gate at 1.067484 seconds. Linux arm64
+  KVM acceptance remains pending. Record new KVM seed-1 trace_hash and
+  console_hash alongside same-backend repeats and compare them with new HVF
+  results using the identical rebuilt inputs; equal exit counts alone do not
+  show equality.
 - Full RAM witnesses are backend-specific. Earlier inputs had identical traces
   and console across HVF/KVM but 296 differing RAM pages. HVF advertises 1024 GIC
   IDs; the Linux 6.8 KVM limit is 992. Guest GIC count policy, MIDR and other CPU
