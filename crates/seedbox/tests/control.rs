@@ -690,6 +690,8 @@ fn machine_lifecycle_checks_current_life_at_admission_and_errors_are_recoverable
         (None, "reboot", "target machine is not down"),
         (Some("pause"), "pause", "target machine is not running"),
         (Some("pause"), "reboot", "target machine is not down"),
+        (Some("pause"), "stop", "target machine is paused"),
+        (Some("pause"), "restart", "target machine is paused"),
         (Some("crash"), "pause", "target machine is not running"),
         (Some("crash"), "resume", "target machine is not paused"),
         (Some("crash"), "crash", "target machine is already down"),
@@ -761,6 +763,10 @@ fn exited_machines_reject_pause_resume_but_allow_crash_and_reboot() {
         c.mark_delivered(t + 40).unwrap();
         if matches!(*op, "pause" | "resume") {
             assert_eq!(c.log[i]["response"]["error"]["code"], "target_unavailable");
+            assert_eq!(
+                c.log[i]["response"]["error"]["message"],
+                "target VM has exited; crash and reboot it instead"
+            );
             assert!(c.log[i]["fault_id"].is_null());
         } else {
             assert_eq!(c.log[i]["response"]["ok"], true);

@@ -309,7 +309,8 @@ impl Control {
     pub fn reject_unavailable(&mut self, exited: &[String]) {
         if let Some(p)=self.pending.as_mut() {
             if !p.admitted_done && p.plan.as_ref().is_some_and(|plan|matches!(plan.action,Action::Stop{..}|Action::Restart{..}|Action::Pause{..}|Action::Resume{..}) && plan.action.machine().is_some_and(|name|exited.iter().any(|n|n==name))) {
-                p.plan=None;p.effect=Some(p.admitted);p.error=Some("target VM has exited; restart only starts a stopped process".into());p.error_code=Some("target_unavailable");
+                let message=if matches!(p.plan.as_ref().map(|plan|&plan.action),Some(Action::Pause{..}|Action::Resume{..})) {"target VM has exited; crash and reboot it instead"} else {"target VM has exited; restart only starts a stopped process"};
+                p.plan=None;p.effect=Some(p.admitted);p.error=Some(message.into());p.error_code=Some("target_unavailable");
             }
         }
     }

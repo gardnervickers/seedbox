@@ -165,19 +165,19 @@ class World:
         return self._call("restart", target=_target(target))[1]
 
     def pause(self, target):
-        """Freeze the target's whole machine; other machines keep running"""
+        """Freeze the target's whole machine; other machines keep running."""
         return self._call("pause", target=_target(target))[1]
 
     def resume(self, target):
-        """Continue it; missed timer ticks fire once, late"""
+        """Continue a paused machine; missed timer ticks fire once, late."""
         return self._call("resume", target=_target(target))[1]
 
     def crash(self, target):
-        """Destroy the machine: RAM, sockets and queued I/O are lost; nothing is sent on its behalf"""
+        """Destroy the machine: RAM, sockets and queued I/O are lost; nothing is sent on its behalf."""
         return self._call("crash", target=_target(target))[1]
 
     def reboot(self, target):
-        """Boot a crashed machine again from its image; readiness is the application's own check"""
+        """Boot a crashed machine again from its image; readiness is the application's own check."""
         return self._call("reboot", target=_target(target))[1]
 
     def partition(self, left, right):

@@ -66,7 +66,8 @@ that `World` and use `World.connect()` for a new session; partition handles rema
 valid. Restarting a running application or stopping one twice raises a recoverable
 `FaultError` with code `invalid_state`. Machine operations require running→paused
 for pause, paused→running for resume, running or paused→down for crash, and
-down→running for reboot; other transitions raise `invalid_state` without a fault.
+down→running for reboot; other transitions raise `invalid_state` without a fault,
+as do stop and restart of a paused machine.
 Stop/restart and pause/resume of an exited VM raise `target_unavailable`; crash
 and reboot of one are allowed subject to the machine transition rules. A
 stop/restart admitted while down, or still pending when the machine crashes,
