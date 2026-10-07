@@ -88,7 +88,7 @@ let
     version = kernelVersion;
     inherit src;
     sourceRoot = "seedbox";
-    nativeBuildInputs = with pkgs; [ python3 gnumake bc bison flex perl pkg-config ];
+    nativeBuildInputs = with pkgs; [ bash python3 gnumake bc bison flex perl pkg-config ];
     buildInputs = [ pkgs.elfutils pkgs.openssl ];
     dontFixup = true;
     env = {
@@ -111,7 +111,11 @@ let
       # Fresh Nix sandbox: no reused kernel-out, network fetch or source checkout.
       test ! -e "$SEEDBOX_KBUILD"
       cp ${tarball} "$SEEDBOX_WORK/src/linux-${kernelVersion}.tar.xz"
-      bash kernel/build.sh
+      # Linux scripts/config uses /usr/bin/env, absent from the Nix sandbox.
+      # Adjust only its three calls in the shared builder; other sources stay raw.
+      substituteInPlace kernel/build.sh \
+        --replace-fail '"$src/scripts/config"' '"${pkgs.bash}/bin/bash" "$src/scripts/config"'
+      ${pkgs.bash}/bin/bash kernel/build.sh
     '';
     installPhase = ''
       mkdir -p "$out/share/seedbox"
@@ -140,11 +144,11 @@ let
     flakeLockSha256 = builtins.hashFile "sha256" ../../flake.lock;
     cargoLockSha256 = builtins.hashFile "sha256" ../../Cargo.lock;
     vmmCargoLockSha256 = builtins.hashFile "sha256" ../../crates/seedbox-vmm/Cargo.lock;
-    recipes = { cli = "cargo build --release --locked --offline"; vmm = "cargo build-vmm --offline"; kernel = "bash kernel/build.sh"; };
+    recipes = { cli = "cargo build --release --locked --offline"; vmm = "cargo build-vmm --offline"; kernel = "pinned bash kernel/build.sh; scripts/config via pinned bash"; };
     toolchain = {
       rustc = toString pkgs.rustc; cargo = toString pkgs.cargo;
       cc = toString pkgs.stdenv.cc; staticCc = toString pkgs.pkgsStatic.stdenv.cc;
-      binutils = toString pkgs.binutils; busybox = toString busybox;
+      bash = toString pkgs.bash; binutils = toString pkgs.binutils; busybox = toString busybox;
     };
     inputs = {
       sourceRoot = "/build/seedbox"; rustRemap = common.RUSTFLAGS;
@@ -154,6 +158,7 @@ let
       nativeTarget = "x86_64-unknown-linux-gnu";
       bootstrapTarget = "x86_64-unknown-linux-musl";
       bootstrapFlags = [ "-O2" "-static" "-Wall" "-Wextra" "-Werror" ];
+      kernelConfigurationHelperShell = "${pkgs.bash}/bin/bash";
       kernelPathMap = "-ffile-prefix-map=/build=/seedbox-build";
       cargoProfile = "release (unaltered)"; strip = false; cargoAuditable = false; buildJobs = 2;
     };

@@ -27,7 +27,11 @@ The kernel uses the existing pinned tarball/hash, patch/config scripts and build
 script. Each derivation gets a fresh source/output tree. Build version is 1,
 LOCALVERSION is empty, architecture is x86, epoch is 0, user/host are seedbox and
 the timestamp is the existing epoch timestamp. Kernel C, assembly and host-tool
-path maps are explicit. Compiler/binutils dependencies come from the flake pin.
+path maps are explicit. Compiler/binutils dependencies come from the flake pin. The recipe invokes the
+shared builder and all three Linux `scripts/config` calls through pinned Bash;
+the configuration helper's `/usr/bin/env` shebang is unavailable in a Nix sandbox.
+Only those helper calls are adjusted in the sandbox source copy, and the shell
+path is recorded in provenance.
 Both Rust builds and the kernel use two build jobs.
 
 Packaging retains raw binaries and a runtime Nix closure (including GNU loader
