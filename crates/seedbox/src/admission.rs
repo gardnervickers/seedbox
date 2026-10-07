@@ -249,13 +249,13 @@ fn validate_fields(o: &CoreObservation, require_perf: bool) -> Result<()> {
             "KVM sync-register capability",
         ),
         (
+            effective_cpuid(&o.raw_cpuid) == p.effective_cpuid,
+            "complete effective CPUID policy",
+        ),
+        (
             o.perf_type == p.perf_type
                 && (!require_perf || (o.perf_disabled_open && o.perf_error.is_none())),
             "disabled exact-event perf readiness",
-        ),
-        (
-            effective_cpuid(&o.raw_cpuid) == p.effective_cpuid,
-            "complete effective CPUID policy",
         ),
     ];
     for (valid, field) in checks {
@@ -264,6 +264,27 @@ fn validate_fields(o: &CoreObservation, require_perf: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// Retain static observations on refusal; no perf event is attempted until every
+// static field (including complete ordered CPUID) is valid. Final validation uses
+// that same order, so an unattempted event cannot conceal the original failure.
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
+fn probe_disabled_perf<T>(
+    mut observation: CoreObservation,
+    open: impl FnOnce() -> Result<T>,
+) -> CoreObservation {
+    if validate_fields(&observation, false).is_err() {
+        return observation;
+    }
+    match open() {
+        Ok(descriptor) => {
+            drop(descriptor);
+            observation.perf_disabled_open = true;
+        }
+        Err(error) => observation.perf_error = Some(error.to_string()),
+    }
+    observation
 }
 
 // PERF_FLAG_FD_CLOEXEC: set atomically by perf_event_open, never by later fcntl.
@@ -327,6 +348,83 @@ pub(crate) fn observe(cpu: u32) -> Result<CoreObservation> {
 mod cleanup_tests {
     use super::*;
     use std::{cell::RefCell, rc::Rc};
+    fn static_observation() -> CoreObservation {
+        let p = required_policy().unwrap();
+        CoreObservation {
+            cpu: 8,
+            architecture: p.architecture,
+            vendor: p.vendor,
+            family: p.family,
+            model: p.model,
+            stepping: p.stepping,
+            microcode: p.microcode,
+            booted_kernel: p.host_kernel.clone(),
+            current_kernel: p.host_kernel,
+            kvm_api: p.kvm_api,
+            immediate_exit: p.immediate_exit,
+            guest_debug: p.guest_debug,
+            sync_regs: p.sync_regs_required,
+            perf_type: p.perf_type,
+            perf_disabled_open: false,
+            perf_error: None,
+            workaround_msr: 0,
+            raw_cpuid: p.effective_cpuid,
+        }
+    }
+    #[test]
+    fn static_cpuid_refusal_is_honest_and_does_not_attempt_perf() {
+        use std::cell::Cell;
+        let attempted = Cell::new(false);
+        let mut observation = static_observation();
+        observation.raw_cpuid[0].flags ^= 1;
+        let original = validate_fields(&observation, false)
+            .unwrap_err()
+            .to_string();
+        let observed = probe_disabled_perf(observation, || {
+            attempted.set(true);
+            Ok(())
+        });
+        assert!(!attempted.get());
+        assert!(!observed.perf_disabled_open);
+        assert!(observed.perf_error.is_none());
+        let final_error = validate_observation(&observed).unwrap_err().to_string();
+        assert_eq!(final_error, original);
+        assert!(final_error.contains("complete effective CPUID policy"));
+    }
+    #[test]
+    fn actual_perf_open_refusal_preserves_its_cause_and_cleanup_precedence() {
+        use std::cell::Cell;
+        let attempted = Cell::new(false);
+        let observed = probe_disabled_perf(static_observation(), || {
+            attempted.set(true);
+            Err::<(), _>(Error::Setup("perf_event_open: EACCES (13)".into()))
+        });
+        assert!(attempted.get());
+        assert!(!observed.perf_disabled_open);
+        assert_eq!(
+            observed.perf_error.as_deref(),
+            Some("perf_event_open: EACCES (13)")
+        );
+        assert!(validate_observation(&observed)
+            .unwrap_err()
+            .to_string()
+            .contains("disabled exact-event perf readiness"));
+
+        let mut static_refusal = static_observation();
+        static_refusal.raw_cpuid[0].flags ^= 1;
+        let result = scoped_probe(
+            (),
+            || {
+                Ok(probe_disabled_perf::<()>(static_refusal, || {
+                    panic!("unexpected perf attempt")
+                }))
+            },
+            |_| Err(Error::Execution("restore readback differs".into())),
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("host preflight cleanup failed"));
+        assert!(error.contains("restore readback differs"));
+    }
     #[test]
     fn perf_open_requires_atomic_close_on_exec() {
         // Linux UAPI PERF_FLAG_FD_CLOEXEC, independent of perf event attributes.

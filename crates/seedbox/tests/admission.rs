@@ -124,6 +124,128 @@ fn cpuid_order_flags_indices_padding_and_unmasked_bits_are_not_omitted() {
 }
 
 #[test]
+fn independent_native_trace_order_is_required_without_dropping_fields() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/admission-cpu8-20261007.json")).unwrap();
+    let raw: Vec<CpuidEntry> = serde_json::from_value(fixture["entries"].clone()).unwrap();
+    assert_eq!(raw.len(), 63);
+    assert_eq!(
+        (raw[22].function, raw[61].function, raw[62].function),
+        (0x80000000, 0x40000000, 0x40000001)
+    );
+    let mut o = observed();
+    o.raw_cpuid = raw.clone();
+    validate_observation(&o).unwrap();
+    // Padding was not decoded by strace; default zero remains strict, not measured.
+    let changes: [fn(&mut Vec<CpuidEntry>); 6] = [
+        |c: &mut Vec<CpuidEntry>| c.sort_by_key(|e| (e.function, e.index, e.flags)),
+        |c: &mut Vec<CpuidEntry>| {
+            c.pop();
+        },
+        |c: &mut Vec<CpuidEntry>| c.push(c[0]),
+        |c: &mut Vec<CpuidEntry>| c[22].eax ^= 1,
+        |c: &mut Vec<CpuidEntry>| c[22].flags ^= 1,
+        |c: &mut Vec<CpuidEntry>| c[22].padding[0] = 1,
+    ];
+    for change in changes {
+        let mut o = observed();
+        o.raw_cpuid = raw.clone();
+        change(&mut o.raw_cpuid);
+        assert!(validate_observation(&o)
+            .unwrap_err()
+            .to_string()
+            .contains("complete effective CPUID policy"));
+    }
+}
+
+#[test]
+fn previous_full_sorted_policy_proof_remains_not_comparable_and_immutable() {
+    use seedbox::{orchestration::*, store::ContentStore, vmm::VmmExecutor};
+    use std::fs;
+    let root = tempfile::tempdir().unwrap();
+    let original = root.path().join("previous-full-proof");
+    fs::create_dir(&original).unwrap();
+    let mut record = serde_json::from_value::<RunRecord>(
+        serde_json::from_slice::<serde_json::Value>(include_bytes!(
+            "fixtures/formats/demo41-fail-v2.json"
+        ))
+        .unwrap()["record"]
+            .clone(),
+    )
+    .unwrap();
+    let mut previous = required_policy().unwrap();
+    // Reconstruct the old recorded proof only; production never sorts observations.
+    previous
+        .effective_cpuid
+        .sort_by_key(|e| (e.function, e.index, e.flags));
+    let old_fields = serde_json::to_string(&previous).unwrap();
+    let old_fingerprint = ContentDigest::of(old_fields.as_bytes());
+    assert_eq!(
+        old_fingerprint.hex(),
+        "411dc2b0286a7d8d96b142d95363500388c37f8e417e0e5483e48b2beb98c3d3"
+    );
+    assert_eq!(
+        bindings().unwrap()["host_policy_fingerprint"],
+        "8da34a9c7dfdd133bf4a93cf5b5cc7046ad30985e2352e9d21212ec8333024a5"
+    );
+    assert_ne!(
+        old_fingerprint.hex(),
+        bindings().unwrap()["host_policy_fingerprint"]
+    );
+    record
+        .identity
+        .inputs
+        .profile
+        .semantic_parameters
+        .extend(BTreeMap::from([
+            ("host_policy".into(), POLICY_VERSION.into()),
+            ("host_policy_fields".into(), old_fields),
+            (
+                "host_policy_fingerprint".into(),
+                old_fingerprint.hex().into(),
+            ),
+        ]));
+    record.run_id = ContentDigest::of(&serde_json::to_vec(&record.identity).unwrap());
+    let manifest = serde_json::to_vec_pretty(&serde_json::json!({
+        "sha256": ContentDigest::of(&serde_json::to_vec(&record).unwrap()),
+        "record": record,
+    }))
+    .unwrap();
+    fs::write(original.join("manifest.json"), &manifest).unwrap();
+    inspect(&original).unwrap();
+    let engine = root.path().join("unused-engine");
+    fs::write(&engine, b"not executed").unwrap();
+    let store = ContentStore::new(root.path().join("objects"));
+    let executor = VmmExecutor::new(&engine, &store, None, 512, WitnessMode::Exits).unwrap();
+    let runner = Orchestrator::new(store, root.path().join("runs"));
+    for allow_engine_change in [false, true] {
+        let result = runner
+            .replay_with_options(
+                &original,
+                &executor,
+                ReplayOptions {
+                    allow_engine_change,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(result.record.outcome, Outcome::Error);
+        assert_eq!(
+            result.record.replay.unwrap().status,
+            ReplayStatus::NotComparable
+        );
+        assert!(result
+            .record
+            .error
+            .unwrap()
+            .contains("host admission proof incompatible"));
+        assert!(!result.directory.join("output").exists());
+        assert!(!result.directory.join("inputs").exists());
+        assert_eq!(fs::read(original.join("manifest.json")).unwrap(), manifest);
+    }
+}
+
+#[test]
 fn old_or_drifted_proof_is_distinct_from_engine_mismatch_and_cannot_be_synthesized() {
     for key in bindings().unwrap().keys() {
         let mut p = profile();
