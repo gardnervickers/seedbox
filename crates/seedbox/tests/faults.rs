@@ -213,3 +213,64 @@ fn process_commands_wait_for_ready_and_undispatched_acks_cannot_fulfill_them() {
     assert!(f.error.is_some());
     assert_eq!(f.log[0]["status"], "failed");
 }
+
+#[test]
+fn same_time_overlapping_cuts_heal_by_handle_and_id_without_opening_other_links() {
+    let mut faults = engine::Faults::new(vec![
+        json!({"id":1,"at_ns":10,"deadline_ns":20,"action":"partition","handle":"a","left":["n1"],"right":["n2"]}),
+        json!({"id":2,"at_ns":10,"deadline_ns":20,"action":"partition","handle":"b","left":["n1"],"right":["n2","n3"]}),
+        json!({"id":3,"at_ns":10,"deadline_ns":20,"action":"heal","handle":"a"}),
+        json!({"id":4,"at_ns":11,"deadline_ns":21,"action":"heal","handle":"b"}),
+    ], vec!["n1".into(), "n2".into(), "n3".into()]).unwrap();
+    assert!(faults.apply_due(9).is_empty());
+    assert!(!faults.blocked(0, 1));
+    assert!(faults.apply_due(10).is_empty());
+    assert!(faults.error.is_none());
+    assert_eq!(faults.active_handles(), vec!["b"]);
+    for peer in [1, 2] {
+        assert!(faults.blocked(0, peer));
+        assert!(faults.blocked(peer, 0));
+    }
+    assert!(!faults.blocked(1, 2));
+    assert!(!faults.blocked(2, 1));
+    for log in &faults.log[..3] {
+        assert_eq!(log["status"], "applied");
+        assert_eq!(log["applied_at_ns"], 10);
+    }
+    assert!(faults.apply_due(11).is_empty());
+    assert!(faults.error.is_none());
+    assert!(faults.active_handles().is_empty());
+    assert_eq!(faults.next_boundary(), u64::MAX);
+    for peer in [1, 2] {
+        assert!(!faults.blocked(0, peer));
+        assert!(!faults.blocked(peer, 0));
+    }
+    assert_eq!(faults.log[3]["applied_at_ns"], 11);
+}
+
+#[test]
+fn event_queue_preserves_opaque_payloads_nominal_arrival_and_same_time_sequence() {
+    use std::collections::BTreeMap;
+    // Queue contract only: this does not call World::route or establish that
+    // later cut/heal effects preserve its routing decision or FIFO tail.
+    let first = vec![0xff, 0, 0x80, b'\n', 1];
+    let second = vec![0, 0xfe, b'\r', 0x81, 2];
+    let later = vec![0x82, 0xff, 0, 3];
+    let mut pending = BTreeMap::from([
+        ((11, 2), second.clone()),
+        ((11, 1), first.clone()),
+        ((15, 3), later.clone()),
+    ]);
+    let frozen = pending.clone();
+    assert!(events::pop_due_at(&mut pending, 9).is_none());
+    assert_eq!(pending, frozen);
+    // Equal-time insertion sequence and original nominal arrival are retained.
+    assert_eq!(events::pop_due_at(&mut pending, 11), Some((11, first)));
+    assert_eq!(events::pop_due_at(&mut pending, 11), Some((11, second)));
+    assert!(events::pop_due_at(&mut pending, 11).is_none());
+    assert_eq!(pending, BTreeMap::from([((15, 3), later.clone())]));
+    assert!(events::pop_due_at(&mut pending, 14).is_none());
+    // Late polling still reports nominal arrival, not polling time.
+    assert_eq!(events::pop_due_at(&mut pending, 19), Some((15, later)));
+    assert!(pending.is_empty());
+}
