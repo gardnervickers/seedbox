@@ -36,9 +36,10 @@ if [[ ,$siblings, == *,0,* ]]; then
 fi
 REPO=$(git rev-parse --show-toplevel)
 SHA=$(git -C "$REPO" rev-parse --verify "$REV^{commit}")
-WORK=${HOST_CHECK_DIR:-$HOME}/host-check-${SHA:0:7}-cpu$CPU
+# Forget worktrees whose directories an earlier failed check already deleted.
+git -C "$REPO" worktree prune
+WORK=$(mktemp -d "${HOST_CHECK_DIR:-$HOME}/host-check-${SHA:0:7}-cpu$CPU-XXXX")
 SRC=$WORK/src
-mkdir "$WORK"
 git -C "$REPO" worktree add --detach --quiet "$SRC" "$SHA"
 SUMMARY=$WORK/summary.txt
 echo "host-check ${SHA:0:12} cpu $CPU ($siblings) kernel $(sha256sum "$SEEDBOX_KERNEL" | cut -c1-12)" | tee "$SUMMARY"
@@ -52,9 +53,11 @@ step() {
   (cd "$SRC" && "$@") > "$WORK/$name.log" 2>&1 || status=$?
   printf '%-8s %s %4ss\n' "$name" "$([[ $status == 0 ]] && echo pass || echo FAIL)" \
     "$(($(date +%s) - started))" | tee -a "$SUMMARY"
+  grep '^phase ' "$WORK/$name.log" >> "$SUMMARY" || true
   if [[ $status != 0 ]]; then
     tail -n 20 "$WORK/$name.log" >&2
-    echo "FAIL: $WORK; once reported: git -C $REPO worktree remove --force $SRC && sudo rm -rf $WORK"
+    cp "$SUMMARY" "$WORK.txt"
+    echo "FAIL: $WORK.txt; once reported: git -C $REPO worktree remove --force $SRC && sudo rm -rf $WORK"
     exit 1
   fi
 }
@@ -76,7 +79,7 @@ step smoke sudo python3 harness/smoke/amd.py --cli "$SRC/target/release/seedbox"
   --engine "$engine" --kernel "$SEEDBOX_KERNEL" \
   --guest-init "$init" --busybox "$SEEDBOX_BUSYBOX" --cpu "$CPU" --tool-path "$PATH" \
   --output "$WORK/smoke" "${dev[@]}"
-grep '^phase ' "$WORK/smoke.log" | tee -a "$SUMMARY"
+grep '^phase ' "$SUMMARY"
 
 # Passed: keep only the summary, beside the work directory.
 cp "$SUMMARY" "$WORK.txt"

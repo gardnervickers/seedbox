@@ -91,5 +91,5 @@ embeds its build path, so it is never pinned: for the pinned tier set
 check a rebuilt engine set `PINNED_ENGINE` for the development tier. Checks
 of different commits can run at once on different pairs; builds run niced and
 unpinned, and only the smoke tier uses the pair. A pass deletes the worktree
-and evidence and keeps `~/host-check-SHA-cpuN.txt`; a failure keeps everything
+and evidence and keeps `~/host-check-SHA-cpuN-XXXX.txt` with step and phase times; a failure keeps everything
 and prints its path.

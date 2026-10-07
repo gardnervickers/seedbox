@@ -225,6 +225,8 @@ class Campaign:
                     lambda child: save(phase / 'spawn.json', {'pid': child.pid}),
                     capture, lambda value: save(phase / 'lifecycle.json', value), cwd=self.root)
         finally:
+            # Timed even when the phase fails, so a slow phase shows up in the receipt.
+            save(phase / 'wall.json', {'wall_seconds': time.monotonic() - started})
             # Cleanup measurements precede every exit/text assertion, including errors.
             if execution:
                 errors = []
@@ -245,7 +247,6 @@ class Campaign:
                 self.last_run = next(iter(new))
         if life is None or life['failure'] or life['manager_handoff'] or not life['leader_reaped'] or not life['owned_session_gone']:
             raise RuntimeError('owned command failed or cleanup uncertain')
-        save(phase / 'wall.json', {'wall_seconds': time.monotonic() - started})
         self.remaining()
         return life['exit'], (phase / 'stdout').read_text(), (phase / 'stderr').read_text()
 
@@ -324,6 +325,12 @@ class Campaign:
         save(self.root / 'final-cleanup.json', {'cpus': self.cpus, 'locks': lock_free(self.cpus, self.locks), 'msrs': snapshot(self.cpus)})
 
 
+def phase_walls(root):
+    """Each phase's wall time, in the order the phases started."""
+    paths = sorted(root.glob('*/wall.json'), key=lambda path: (path.parent / 'command.json').stat().st_mtime_ns)
+    return {path.parent.name: round(json.loads(path.read_text())['wall_seconds'], 1) for path in paths}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('cli', 'engine', 'kernel', 'guest-init', 'busybox', 'output'):
@@ -365,17 +372,17 @@ def main():
         Campaign(args, root, deadline).run()
         if time.monotonic() >= deadline - CLEANUP_SECONDS:
             raise TimeoutError('final evidence exhausted campaign allocation')
-        phases = {path.parent.name: json.loads(path.read_text())['wall_seconds'] for path in sorted(root.glob('*/wall.json'))}
         save(root / 'result.json', {'status': 'COMPLETE_PENDING_INDEPENDENT_REVIEW', 'wall_seconds': time.monotonic() - began,
-             'phase_wall_seconds': phases})
-        for name, seconds in sorted(phases.items(), key=lambda item: -item[1]):
-            print(f'phase {name}: {seconds:.1f}s')
+             'phase_wall_seconds': phase_walls(root)})
         print('complete: staged smoke evidence requires independent review')
         return 0
     except BaseException as error:
-        save(root / 'failure.json', {'error': repr(error), 'stop_later_operations': True})
+        save(root / 'failure.json', {'error': repr(error), 'stop_later_operations': True,
+             'phase_wall_seconds': phase_walls(root)})
         raise
     finally:
+        for name, seconds in phase_walls(root).items():
+            print(f'phase {name}: {seconds:.1f}s', flush=True)
         signal.setitimer(signal.ITIMER_REAL, 0)
         for sig, handler in old.items():
             signal.signal(sig, handler)
