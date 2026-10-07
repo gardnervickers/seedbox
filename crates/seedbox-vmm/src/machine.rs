@@ -85,6 +85,8 @@ pub struct MachineSnapshot {
     rtc_index: u8,
     com1: Uart,
     com2: Uart,
+    log_order: u64,
+    observe_console: bool,
     management_framer: crate::control::ManagementFramer,
     net: Option<VirtioNet>,
     channel: Option<VirtioConsole>,
@@ -242,8 +244,11 @@ pub struct Machine {
     rtc_index: u8,
     pub com1: Uart,
     pub com2: Uart,
+    log_order: u64,
     pub fault_effects: Vec<(u32, u64, bool)>,
     pub control_requests: Vec<(u64, Vec<u8>)>,
+    pub observe_console: bool,
+    pub committed_console: Option<(u64,u8)>,
     management_framer: crate::control::ManagementFramer,
     pub net: Option<VirtioNet>,
     pub channel: Option<VirtioConsole>,
@@ -509,8 +514,10 @@ impl Machine {
             rtc_index: 0,
             com1: Uart::default(),
             com2: Uart::default(),
+            log_order: 0,
             fault_effects: Vec::new(),
             control_requests: Vec::new(),
+            observe_console:false, committed_console:None,
             management_framer: crate::control::ManagementFramer::default(),
             net,
             channel: spec.control_channel.then(VirtioConsole::new),
@@ -654,7 +661,9 @@ impl Machine {
             new.out = std::mem::take(&mut old.out);
             new.output_file = old.output_file.take();
             new.output_limit = old.output_limit;
+            new.chunks = std::mem::take(&mut old.chunks);
         }
+        self.log_order = old.log_order;
         self.trace = old.trace.take();
         // The same machine: under the PV clock it keeps its speed, or members
         // restarted together would run in lockstep again.
@@ -687,7 +696,7 @@ impl Machine {
 
     /// Capture this machine at the world's fork point: parked, no I/O owed.
     pub fn snapshot(&mut self) -> Result<MachineSnapshot, String> {
-        if self.pending_io.is_some() || self.stepping || !self.fault_effects.is_empty() || !self.control_requests.is_empty() {
+        if self.pending_io.is_some() || self.stepping || !self.fault_effects.is_empty() || !self.control_requests.is_empty() || self.committed_console.is_some() {
             return Err(format!("{}: not at a fork point", self.name));
         }
         self.complete_io()?;
@@ -706,7 +715,8 @@ impl Machine {
             time: self.time, branches: self.branches, tsc_latch: self.tsc_latch, state: self.state,
             guest_exit_code: self.guest_exit_code, guest_init_error: self.guest_init_error,
             pic: self.pic.clone(), pit: self.pit.clone(), rtc_index: self.rtc_index,
-            com1: self.com1.snapshot(), com2: self.com2.snapshot(),
+            com1: self.com1.snapshot(), com2: self.com2.snapshot(), log_order: self.log_order,
+            observe_console:self.observe_console,
             management_framer: self.management_framer.clone(),
             net: self.net.clone(), channel: self.channel.clone(), blk: self.blk.clone(),
             control_dma_bytes: self.control_dma_bytes, control_tx_bytes: self.control_tx_bytes,
@@ -769,8 +779,10 @@ impl Machine {
         self.rtc_index = s.rtc_index;
         self.com1.restore(&s.com1);
         self.com2.restore(&s.com2);
+        self.log_order = s.log_order;
         self.fault_effects.clear();
         self.control_requests.clear();
+        self.observe_console=s.observe_console;self.committed_console=None;
         self.management_framer = s.management_framer.clone();
         self.net = s.net.clone();
         self.channel = s.channel.clone();
@@ -820,10 +832,16 @@ impl Machine {
         if !complete {return Err("control transport receive capacity insufficient at exact delivery time".into())}
         self.control_dma_bytes+=bytes.len() as u64;Ok(())
     }
+    fn capture_output(&mut self) {
+        for uart in [&mut self.com1,&mut self.com2] {
+            uart.chunks.capture(uart.out.len() as u64,self.time,self.incarnation,&mut self.log_order);
+        }
+    }
     fn channel_output(&mut self,bytes:&[u8])->Result<bool,String> {
         if self.com2.output_limit.is_some_and(|limit|self.com2.out.len().checked_add(bytes.len()).is_none_or(|n|n>limit)){return Err("guest control output limit exceeded".into())}
         if let Some(file)=self.com2.output_file.as_mut() {use std::io::Write;file.write_all(bytes).map_err(|e|format!("control log: {e}"))?;}
         self.com2.out.extend_from_slice(bytes);self.control_tx_bytes+=bytes.len() as u64;
+        self.capture_output();
         let frames=self.management_framer.receive(bytes)?;let stop=!frames.is_empty();
         self.control_requests.extend(frames.into_iter().map(|f|(self.time,f)));Ok(stop)
     }
@@ -1143,6 +1161,8 @@ impl Machine {
     ) -> Result<Stop, String> {
         let started = Instant::now();
         let r = self.run_inner(tb, limit, early, frames);
+        self.capture_output();
+        self.com1.chunks.finish();self.com2.chunks.finish();
         self.stats.run_ns += started.elapsed().as_nanos();
         r
     }
@@ -1358,6 +1378,7 @@ impl Machine {
                     }
                     let after_io = self.time;
                     let mut control_stop = false;
+                    let console_before=self.com1.out.len();
                     match port {
                         0x3f8..=0x3ff => {
                             if port == 0x3f8
@@ -1487,6 +1508,14 @@ impl Machine {
                             return Ok(Stop::Exited);
                         }
                         _ => {}
+                    }
+                    self.capture_output();
+                    if self.observe_console && self.com1.out.len()>console_before {
+                        // Judge::Rollback discarded the exit before reaching here.
+                        // Console ports have zero charge; the sink and pending KVM
+                        // response are committed once at this deterministic exit.
+                        self.committed_console=Some((after_io,v));control_stop=true;
+                        if let Some(u)=self.undo.as_mut() {u.valid=false;}
                     }
                     self.record(b'O', (port as u64) << 8 | v as u64);
                     self.serial_edges();
@@ -2311,5 +2340,140 @@ mod fork_tests {
         assert_eq!(old.blk.as_ref().unwrap().disk.volatile_sectors(),2,"the old incarnation is untouched");
         old.restore(&snap).unwrap();
         assert_eq!(old.blk.as_ref().unwrap().disk.digest(),Disk::new(None,Some(8)).unwrap().digest());
+    }
+}
+
+#[cfg(test)]
+mod timed_log_tests {
+    use super::*;
+
+    fn output_machine(kvm:&Kvm,undo:u64)->Machine {
+        // Two console bytes and one management byte, with no intervening
+        // conditional branch: all three must have the same committed time.
+        let code=[0xb0,0x00,0xe6,0xe9,0xba,0xf8,0x02,0,0,0xb0,0xff,0xee,
+            0xb0,b'A',0xe6,0xe9,0xbb,0xe8,0x03,0,0,0x4b,0x75,0xfd,
+            0xb0,b'B',0xe6,0xe9,0xb0,0,0xe6,0xf4];
+        let mut kernel=vec![0;1024];kernel[0x1f1]=1;kernel.extend_from_slice(&code);
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false,pv_clock:false};
+        let mut m=Machine::new(kvm,"timed",&spec).unwrap();
+        let mut r=m.vcpu.get_regs().unwrap();r.rflags=2;m.vcpu.set_regs(&r).unwrap();m.pic.set_masks(0xffff);m
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn timed_logs_commit_order_and_observation_controls() {
+        let kvm=Kvm::new().unwrap();let mut counter=Counter::new().unwrap();let mut expected=None;
+        for undo in [0,16,256] {
+            for cap in [0,2,65_536] {
+                let mut m=output_machine(&kvm,undo);m.com1.chunks.limit=Some(cap);m.com2.chunks.limit=Some(cap);
+                let mut frames=Vec::new();
+                // Force an exact counted boundary inside the branch loop.
+                assert_eq!(m.run_until(&mut counter,500,0,&mut frames).unwrap(),Stop::Reached);
+                assert_eq!(m.com1.out,b"\0A");assert_eq!(m.com2.out,b"\xff");
+                if cap>0 {
+                    assert_eq!(m.com1.chunks.records,vec![[0,0,0,0,1],[0,0,2,1,1]]);
+                    assert_eq!(m.com2.chunks.records,vec![[0,0,1,0,1]]);
+                }
+                // Reading metadata and taking a full-state digest are observation only.
+                let before=m.exit_witness();if cap>0 {let _=m.state_digest();}assert_eq!(before,m.exit_witness());
+                assert_eq!(m.run_until(&mut counter,2000,0,&mut frames).unwrap(),Stop::Exited);
+                assert_eq!(m.com1.out,b"\0AB");assert_eq!(m.com2.out,b"\xff");
+                if cap>2 {assert_eq!(m.com1.chunks.records[2],[1000,0,3,2,1]);}
+                let evidence=(m.time,m.exit_witness(),m.state_digest().0,m.com1.out.clone(),m.com2.out.clone());
+                if let Some(want)=&expected {assert_eq!(&evidence,want,"undo={undo} cap={cap}");} else {expected=Some(evidence);}
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn timed_logs_survive_machine_incarnations() {
+        let kvm=Kvm::new().unwrap();let mut counter=Counter::new().unwrap();
+        let mut old=output_machine(&kvm,256);let mut frames=Vec::new();
+        assert_eq!(old.run_until(&mut counter,2000,0,&mut frames).unwrap(),Stop::Exited);
+        let mut new=output_machine(&kvm,256);new.succeed(&mut old,5000,1009).unwrap();new.boot_at(5000).unwrap();
+        assert_eq!(new.run_until(&mut counter,7000,0,&mut frames).unwrap(),Stop::Exited);
+        assert_eq!(new.com1.out,b"\0AB\0AB");assert_eq!(new.com2.out,b"\xff\xff");
+        assert_eq!(new.com1.chunks.records,vec![[0,0,0,0,1],[0,0,2,1,2],[5000,1,3,3,1],[5000,1,5,4,2]]);
+        assert_eq!(new.com2.chunks.records,vec![[0,0,1,0,1],[5000,1,4,1,1]]);
+    }
+
+    // Inject a judge decision at a real KVM output exit to exercise the commit
+    // gate deterministically. This is not evidence of actual PMU skid behavior.
+    struct RejectOnce {counter:Counter,rollback:bool,first:bool}
+    impl Timebase for RejectOnce {
+        const BRANCHES:bool=true;
+        fn prepare(&mut self,m:&mut Machine,remaining:u64,soft:u64)->Result<Prepared,String> {
+            let prepared=self.counter.prepare(m,remaining,soft)?;
+            if self.first && self.rollback {m.checkpoint()?;}
+            Ok(prepared)
+        }
+        fn start(&mut self,syscalls:u64)->u64 {self.counter.start(syscalls)}
+        fn read(&mut self,_:u64)->u64 {if self.first && !self.rollback {self.counter.read()+1_000_000} else {self.counter.read()}}
+        fn inject_guard(&self)->u64 {INJECT_GUARD}
+        fn judge(&mut self,j:Judge<'_>,run:&Run)->Result<Verdict,String> {
+            if self.first {self.first=false;return Ok(if self.rollback {assert!(j.undo_valid);Verdict::Rollback} else {Verdict::Overshoot});}
+            self.counter.judge(j,run)
+        }
+    }
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn timed_logs_commit_gate_rejection_and_rollback() {
+        let kvm=Kvm::new().unwrap();
+        for rollback in [false,true] {
+            let mut m=output_machine(&kvm,256);
+            let mut tb=RejectOnce {counter:Counter::new().unwrap(),rollback,first:true};
+            let mut frames=Vec::new();let result=m.run_until(&mut tb,2000,0,&mut frames);
+            if rollback {
+                assert_eq!(result.unwrap(),Stop::Exited);
+                assert!(m.undo.as_ref().unwrap().stats.rollbacks>0);
+                assert_eq!(m.com1.out,b"\0AB");assert_eq!(m.com1.chunks.records,vec![[0,0,0,0,1],[0,0,2,1,2]]);
+                assert_eq!(m.com1.chunks.records[0],[0,0,0,0,1]);
+            } else {
+                assert!(result.unwrap_err().contains("overshoot"));
+                assert!(m.com1.out.is_empty());assert!(m.com1.chunks.records.is_empty());
+                assert_eq!(m.log_order,0);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod committed_trigger_tests {
+    use super::*;
+    /// Force a real KVM UART candidate through the actual rollback branch.
+    /// This is a commitment control, not a hardware counter qualification.
+    struct DiscardFirst {prepared:bool,discarded:bool}
+    impl Timebase for DiscardFirst {
+        const BRANCHES:bool=true;
+        fn prepare(&mut self,m:&mut Machine,_:u64,_:u64)->Result<Prepared,String> {
+            if !self.prepared {m.checkpoint()?;self.prepared=true;}
+            Ok(Prepared::Run)
+        }
+        fn start(&mut self,_:u64)->u64 {0}
+        fn read(&mut self,_:u64)->u64 {0}
+        fn inject_guard(&self)->u64 {INJECT_GUARD}
+        fn judge(&mut self,_:Judge<'_>,_:&Run)->Result<Verdict,String> {
+            if !self.discarded {self.discarded=true;Ok(Verdict::Rollback)} else {Ok(Verdict::Advance{legal:true})}
+        }
+    }
+    #[test]
+    #[ignore = "requires KVM"]
+    fn committed_console_discards_rolled_back_candidate_before_matcher_feed() {
+        let kvm=Kvm::new().unwrap();
+        let mut kernel=vec![0;1024];kernel[0x1f1]=1;kernel.extend_from_slice(&[0xb0,b'A',0xe6,0xe9,0xf4]);
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:256,barrier:false,pv_clock:false};
+        let mut m=Machine::new(&kvm,"source",&spec).unwrap();m.observe_console=true;
+        let mut tb=DiscardFirst{prepared:false,discarded:false};let mut frames=Vec::new();
+        assert_eq!(m.run_until(&mut tb,10,0,&mut frames).unwrap(),Stop::Control);
+        assert!(tb.discarded);assert_eq!(m.undo.as_ref().unwrap().stats.rollbacks,1);
+        assert_eq!(m.com1.out,b"A");assert_eq!(m.committed_console.take(),Some((0,b'A')));
+        // A trigger stop must retain exactly the accepted byte's timed chunk
+        // and invalidate the checkpoint before returning control to the world.
+        assert!(!m.undo.as_ref().unwrap().valid);
+        assert_eq!(m.com1.chunks.records,vec![[0,0,0,0,1]]);assert_eq!(m.log_order,1);
+        assert_eq!(m.run_until(&mut tb,10,0,&mut frames).unwrap(),Stop::Exited);
+        assert_eq!(m.committed_console,None);assert_eq!(m.com1.out,b"A");
+        assert_eq!(m.com1.chunks.records,vec![[0,0,0,0,1]]);assert_eq!(m.log_order,1);
     }
 }
