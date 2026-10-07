@@ -38,7 +38,11 @@ the supported Linux amd64 host; Darwin is for configuration and portable tests.
 and blobs with preserved digests. Seedbox verifies descriptor hashes and sizes,
 retains their exact bytes, resolves launch defaults, and delegates OCI whiteouts
 and extraction to `umoci`. Dockerfile builds use a retained, frozen local context;
-the builder applies `.dockerignore`. The unique build tag is removed afterward.
+the builder applies `.dockerignore`. The unique build tag is removed afterward,
+but the builder's layer cache is kept between runs: a step such as
+`RUN go mod download` re-runs only when the frozen context or Dockerfile changes.
+To force fresh fetches, change the context or run `podman image prune`, which
+also reclaims the cache; seedbox never prunes it.
 Registry TLS verification remains enabled; signature policy is not enforced by
 this importer. Build progress logs are not semantic identity inputs.
 Use fully qualified Dockerfile `FROM` references such as

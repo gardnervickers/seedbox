@@ -115,8 +115,9 @@ impl OciTools {
                 );
                 provenance.insert("docker".into(), version(&self.docker)?);
                 let archive = directory.join("build.tar");
-                // A unique tag avoids deleting any pre-existing user image. The
-                // Docker cache is preserved; only this private tag is removed.
+                // A unique tag avoids deleting any pre-existing user image. Only
+                // this private tag is removed; --no-prune keeps its untagged
+                // parent layers, which are the build cache for the next run.
                 let tag_directory = tempfile::Builder::new()
                     .prefix("image-")
                     .tempdir_in(directory)?;
@@ -152,7 +153,7 @@ impl OciTools {
                     Ok(())
                 })();
                 let cleanup = Command::new(&self.docker)
-                    .args(["image", "rm", &tag])
+                    .args(["image", "rm", "--no-prune", &tag])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .status();
