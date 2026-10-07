@@ -12,7 +12,10 @@ Usage: harness/host-check.sh REV CPU
 Environment:
   SEEDBOX_KERNEL     guest kernel (required; the accepted bzImage)
   SEEDBOX_BUSYBOX    static busybox (set by nix develop)
-  PINNED_ENGINE      a pinned seedbox-vmm; set it to check an unpinned engine
+  SEEDBOX_VMM        a stored engine to check instead of building one; the
+                     pinned tier needs it, since a rebuilt engine embeds its
+                     build path and so is never pinned
+  PINNED_ENGINE      a pinned seedbox-vmm; with it, a rebuilt engine is checked
                      as the development tier (--allow-dev-engine)
   HOST_CHECK_DIR     where to work [default: $HOME]
 EOF
@@ -22,6 +25,10 @@ EOF
 REV=$1 CPU=$2
 : "${SEEDBOX_KERNEL:?set SEEDBOX_KERNEL to the accepted bzImage}"
 : "${SEEDBOX_BUSYBOX:?set SEEDBOX_BUSYBOX or enter nix develop}"
+if [[ -z ${SEEDBOX_VMM:-} && -z ${PINNED_ENGINE:-} ]]; then
+  echo 'a rebuilt engine is never pinned: set SEEDBOX_VMM to the stored engine, or PINNED_ENGINE for the development tier' >&2
+  exit 2
+fi
 siblings=$(cat "/sys/devices/system/cpu/cpu$CPU/topology/thread_siblings_list")
 if [[ ,$siblings, == *,0,* ]]; then
   echo "cpu $CPU: its pair ($siblings) includes cpu 0, which the host keeps" >&2
@@ -47,21 +54,26 @@ step() {
     "$(($(date +%s) - started))" | tee -a "$SUMMARY"
   if [[ $status != 0 ]]; then
     tail -n 20 "$WORK/$name.log" >&2
-    echo "FAIL: $WORK (delete it once the failure is reported)"
+    echo "FAIL: $WORK; once reported: git -C $REPO worktree remove --force $SRC && sudo rm -rf $WORK"
     exit 1
   fi
 }
 step build nice cargo build --release --locked -p seedbox
-step vmm nice cargo build-vmm
+engine=${SEEDBOX_VMM:-$SRC/crates/seedbox-vmm/target/release/seedbox-vmm}
+if [[ -z ${SEEDBOX_VMM:-} ]]; then step vmm nice cargo build-vmm; fi
 step fmt cargo fmt -p seedbox --check
 step clippy nice cargo clippy -p seedbox --all-targets --locked -- -D warnings
 step suite nice bash harness/acceptance.sh portable
 
-init=$(ls -t "$SRC"/target/release/build/seedbox-*/out/compose-init | head -n 1)
+init=$(ls -t "$SRC"/target/release/build/seedbox-*/out/compose-init 2>/dev/null | head -n 1 || true)
+if [[ -z $init ]]; then
+  echo "FAIL: the build embedded no guest supervisor (compose-init); see $WORK/build.log"
+  exit 1
+fi
 dev=()
 if [[ -n ${PINNED_ENGINE:-} ]]; then dev=(--allow-dev-engine --pinned-engine "$PINNED_ENGINE"); fi
 step smoke sudo python3 harness/smoke/amd.py --cli "$SRC/target/release/seedbox" \
-  --engine "$SRC/crates/seedbox-vmm/target/release/seedbox-vmm" --kernel "$SEEDBOX_KERNEL" \
+  --engine "$engine" --kernel "$SEEDBOX_KERNEL" \
   --guest-init "$init" --busybox "$SEEDBOX_BUSYBOX" --cpu "$CPU" --tool-path "$PATH" \
   --output "$WORK/smoke" "${dev[@]}"
 grep '^phase ' "$WORK/smoke.log" | tee -a "$SUMMARY"

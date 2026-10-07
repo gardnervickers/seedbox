@@ -85,8 +85,10 @@ The development tier is unqualified evidence and does not change release policy.
 `harness/host-check.sh REV CPU` runs the whole per-PR host check for one commit
 on one SMT pair: it makes a worktree, builds the CLI and engine, runs fmt,
 clippy and `harness/acceptance.sh portable`, then this smoke tier, and prints
-each step's time. Set `SEEDBOX_KERNEL` to the accepted kernel, and
-`PINNED_ENGINE` to a pinned engine when the commit's engine is unpinned. Checks
+each step's time. Set `SEEDBOX_KERNEL` to the accepted kernel. A rebuilt engine
+embeds its build path, so it is never pinned: for the pinned tier set
+`SEEDBOX_VMM` to the stored pinned engine (the build of it is skipped), and to
+check a rebuilt engine set `PINNED_ENGINE` for the development tier. Checks
 of different commits can run at once on different pairs; builds run niced and
 unpinned, and only the smoke tier uses the pair. A pass deletes the worktree
 and evidence and keeps `~/host-check-SHA-cpuN.txt`; a failure keeps everything
