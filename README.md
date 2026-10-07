@@ -540,3 +540,5 @@ seeded kill/restart schedule, eight writers for 60 seconds, and etcd 3.5.3
 controls over the same seeds. The historical ABI1 timings are in
 [the historical networking report](https://github.com/gardnervickers/seedbox/blob/788fc4376b7e2cc96d1bc51ed2ae3d4635d16abd/research/single-vm-network/REPORT.md)
 and must not be attributed to these revised sources.
+
+See [the experimental arm64 backend quickstart](docs/arm64-backends.md#experimental-arm64-quickstart) for the isolated HVF/KVM fixture.
