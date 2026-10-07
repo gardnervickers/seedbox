@@ -966,6 +966,12 @@ fn report(
             "control_channel":mach.channel.as_ref().map(|_|json!({"transport":"virtio-console-v1","tx_bytes":mach.control_tx_bytes,"rx_dma_bytes":mach.control_dma_bytes})),
             "net": mach.net.as_ref().map(|n| json!({"tx": n.tx_frames, "rx": n.rx_frames, "rx_dropped": n.rx_dropped})),
         }));
+        let skew: serde_json::Map<String, Value> = machine::Site::NAMES
+            .iter()
+            .zip(&s.skew)
+            .map(|(k, v)| (k.to_string(), json!({"n": v.n, "ahead": v.ahead, "ahead_max_ns": v.ahead_max_ns, "behind": v.behind, "behind_max_ns": v.behind_max_ns})))
+            .collect();
+        report.last_mut().unwrap()["timer"] = json!({"writes": s.timer_writes, "overdue": s.timer_overdue, "overdue_max_ns": s.timer_overdue_max_ns, "overdue_syscalls_max": s.timer_write_syscalls_max, "guest_clock_skew": skew});
         if let Clock::Pv(_) = world.clock {
             report.last_mut().unwrap()["spin"] = json!({"probes": s.spin_probes, "idles": s.spin_idles, "false_alarms": s.spin_false, "mismatch": s.spin_mismatch});
             report.last_mut().unwrap()["syscalls"] = json!(mach.syscalls());

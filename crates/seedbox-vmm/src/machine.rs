@@ -161,6 +161,37 @@ pub struct Stats {
     pub spin_mismatch: std::collections::BTreeMap<String, u64>,
     /// Virtual time advanced, by cause (see `Cause`).
     pub time_by: [u64; 5],
+    /// Report-only timer diagnostics. Writes to the PIT or port 0x530, and
+    /// of those, writes that found the old deadline already due (with how
+    /// far past due, and the syscalls charged in that run).
+    pub timer_writes: u64,
+    pub timer_overdue: u64,
+    pub timer_overdue_max_ns: u64,
+    pub timer_write_syscalls_max: u64,
+    /// Guest clock (`page.last`) against VMM time at timer writes, sends
+    /// and halts (`Site`).
+    pub skew: [Skew; 3],
+}
+
+/// Where `Stats::skew` was sampled.
+pub enum Site {
+    Timer,
+    Sent,
+    Halt,
+}
+
+impl Site {
+    pub const NAMES: [&'static str; 3] = ["timer_write", "sent", "halt"];
+}
+
+/// Guest clock minus VMM time: how often and how far ahead or behind.
+#[derive(Default, Debug, Clone)]
+pub struct Skew {
+    pub n: u64,
+    pub ahead: u64,
+    pub ahead_max_ns: u64,
+    pub behind: u64,
+    pub behind_max_ns: u64,
 }
 
 /// Why virtual time moved, for `Stats::time_by`.
@@ -781,6 +812,19 @@ impl Machine {
         format!("{:x}", h.finalize())
     }
 
+    fn note_skew(&mut self, site: Site) {
+        let last = self.page_get(1);
+        let k = &mut self.stats.skew[site as usize];
+        k.n += 1;
+        if last > self.time {
+            k.ahead += 1;
+            k.ahead_max_ns = k.ahead_max_ns.max(last - self.time);
+        } else if last < self.time {
+            k.behind += 1;
+            k.behind_max_ns = k.behind_max_ns.max(self.time - last);
+        }
+    }
+
     fn expire_timers(&mut self) -> Result<(), String> {
         if self.pit.expire_through(self.time)? > 0 {
             self.pic.raise(0);
@@ -1087,6 +1131,7 @@ impl Machine {
             let delta = c1 - c0;
             let interrupted = matches!(&exit, Err(e) if e.errno() == libc::EINTR);
             let syscalled = syscalls1 != syscalls0;
+            let run_syscalls = syscalls1.wrapping_sub(syscalls0);
             let run = Run {
                 delta,
                 remaining,
@@ -1255,9 +1300,25 @@ impl Machine {
                             }
                         }
                         0x40..=0x43 | 0x61 | 0x530 => {
+                            let hi = data.get(1).copied().unwrap_or(0);
+                            self.stats.timer_writes += 1;
+                            self.note_skew(Site::Timer);
+                            if let Some(d) = self.pit.deadline.filter(|&d| d <= now) {
+                                // The run that ends here can pass the deadline
+                                // (PV syscall charges, or counter tolerance).
+                                // Rewriting the PIT would drop that tick.
+                                let s = &mut self.stats;
+                                s.timer_overdue += 1;
+                                s.timer_overdue_max_ns = s.timer_overdue_max_ns.max(now - d);
+                                s.timer_write_syscalls_max = s.timer_write_syscalls_max.max(run_syscalls);
+                                // PV only, so counter witnesses don't move:
+                                // deliver the due tick before the write.
+                                if self.pv_clock {
+                                    self.expire_timers()?;
+                                }
+                            }
                             if port == 0x530 {
-                                let hi = data.get(1).copied().unwrap_or(0);
-                                let ticks = u16::from_le_bytes([data[0], hi]);
+                                let ticks = u16::from_le_bytes([v, hi]);
                                 self.pit.program(ticks, now);
                             } else {
                                 self.pit.write(port, v, now);
@@ -1405,6 +1466,7 @@ impl Machine {
                             }
                             if !out.frames.is_empty() {
                                 frames.extend(out.frames);
+                                self.note_skew(Site::Sent);
                                 self.set_stepping(false)?;
                                 return Ok(Stop::Sent);
                             }
@@ -1413,6 +1475,7 @@ impl Machine {
                 }
                 Ok(VcpuExit::Hlt) => {
                     self.stats.halts += 1;
+                    self.note_skew(Site::Halt);
                     self.record(b'H', 0);
                     // The world checks pending interrupts while halted.
                     self.sync_pic();
