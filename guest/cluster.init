@@ -16,7 +16,7 @@ start_etcd() {
   /bin/etcd --name $name --data-dir /data/$name \
     --listen-client-urls http://$ip:2379 --advertise-client-urls http://$ip:2379 \
     --listen-peer-urls http://$ip:2380 --initial-advertise-peer-urls http://$ip:2380 \
-    --initial-cluster $peers --initial-cluster-state new --logger zap --log-level error >> /tmp/etcd.log 2>&1 &
+    --initial-cluster $peers --initial-cluster-state new --logger zap --log-level "$(arg etcdlog | grep . || echo info)" --log-outputs /dev/ttyS0,/tmp/etcd.log >> /tmp/etcd.log 2>&1 &
   echo $! > /tmp/etcd.pid
 }
 concurrency=$(arg concurrency); concurrency=${concurrency:-8}
