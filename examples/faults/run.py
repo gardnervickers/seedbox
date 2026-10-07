@@ -175,7 +175,11 @@ def checked_run(command):
         persist_evidence()
         assert before == after, "host MSR restoration mismatch"
 
+DEV_FLAGS = []
+
 def execute(command, expected_code):
+    if command[1] in ("run", "replay"):
+        command = [*command, *DEV_FLAGS]
     result = checked_run(command)
     print(result.stdout, end="", flush=True)
     if result.stderr:
@@ -199,7 +203,10 @@ def main():
     p.add_argument("--delayed-guest-init", help="supervisor compiled with -DSEEDBOX_TEST_READY_DELAY_NS=4000000000ULL for readiness and cutoff checks")
     p.add_argument("--seed", type=int, default=1009)
     p.add_argument("--margin", default="98304")
+    p.add_argument("--allow-dev-engine", action="store_true", help="pass --allow-dev-engine to every run and replay (unpinned engine or kernel)")
     a = p.parse_args()
+    if a.allow_dev_engine:
+        DEV_FLAGS.append("--allow-dev-engine")
     OUTPUT = reserve_output(a.output,[a.guest_init,a.negative_guest_init,a.rejecting_guest_init,a.delayed_guest_init])
     def interrupt(_signal, _frame):
         raise KeyboardInterrupt
@@ -219,14 +226,9 @@ def main():
         run = execute([a.seedbox, "run", str(projects / variant / "compose.yaml"), *common], 0 if status == "PASS" else 1)
         evidence.append(verify(run, status, faulted))
         persist_evidence()
-        replay = execute([a.seedbox, "replay", str(run), "--cpu", str(a.cpu), "--state", a.state, "--undo", "0", "--margin", a.margin], 0)
+        replay = execute([a.seedbox, "replay", str(run), "--cpu", str(a.cpu), "--state", a.state], 0)
         evidence.append(verify(replay, status, faulted))
         persist_evidence()
-        if variant == "fixed":
-            comparison_margin = "131072" if a.margin != "131072" else "98304"
-            varied = execute([a.seedbox, "replay", str(run), "--cpu", str(a.cpu), "--state", a.state, "--undo", "16", "--margin", comparison_margin], 0)
-            evidence.append(dict(verify(varied, status, faulted), performance_variant="changed margin and undo"))
-            persist_evidence()
     for control, init, expected_error in [("missing_effect",a.negative_guest_init,"deadline"),("rejected_effect",a.rejecting_guest_init,"guest rejected fault")]:
         if not init:
             continue
@@ -248,27 +250,29 @@ def main():
             evidence.append(verifier(run))
             persist_evidence()
             replay = execute([a.seedbox, "replay", str(run), "--cpu", str(a.cpu),
-                              "--state", a.state, "--undo", "0", "--margin", a.margin], 0)
+                              "--state", a.state], 0)
             evidence.append(verifier(replay))
             persist_evidence()
     control_run = execute([a.seedbox, "run", str(projects / "control-cases/compose.yaml"), *common], 1)
     evidence.append(verify_control_cases(control_run))
     persist_evidence()
     control_replay = execute([a.seedbox, "replay", str(control_run), "--cpu", str(a.cpu),
-                              "--state", a.state, "--undo", "0", "--margin", a.margin], 0)
+                              "--state", a.state], 0)
     evidence.append(verify_control_cases(control_replay))
     persist_evidence()
     lifecycle_run = execute([a.seedbox, "run", str(projects / "lifecycle-cases/compose.yaml"), *common], 0)
     evidence.append(verify_lifecycle_cases(lifecycle_run))
     persist_evidence()
     lifecycle_replay = execute([a.seedbox, "replay", str(lifecycle_run), "--cpu", str(a.cpu),
-                                "--state", a.state, "--undo", "0", "--margin", a.margin], 0)
+                                "--state", a.state], 0)
     evidence.append(verify_lifecycle_cases(lifecycle_replay))
     persist_evidence()
-    comparison_margin = "131072" if a.margin != "131072" else "98304"
+    # One performance variant, where machine replacement meets stepping: undo off
+    # (no checkpoint across a crash or reboot) with a fixed margin, which is only
+    # read with undo off. Other replays use the default settings.
     lifecycle_varied = execute([a.seedbox, "replay", str(lifecycle_run), "--cpu", str(a.cpu), "--state", a.state,
-                                "--undo", "16", "--margin", comparison_margin], 0)
-    evidence.append(dict(verify_lifecycle_cases(lifecycle_varied), performance_variant="changed margin and undo"))
+                                "--undo", "0", "--margin", "16384"], 0)
+    evidence.append(dict(verify_lifecycle_cases(lifecycle_varied), performance_variant="undo off, margin 16384"))
     persist_evidence()
     STATUS = "passed"
     persist_evidence()

@@ -5,14 +5,15 @@ use std::{
 };
 
 /// Run the CLI with a scrubbed environment: no `SEEDBOX_*`, `CARGO*` or
-/// `SUDO_USER` variables, `HOME` at `cwd`, and `PATH` set to `path` (empty if
-/// `None`), so no default can come from the developer's machine.
+/// `SUDO_USER` variables, `HOME` and scratch storage at `cwd`, and `PATH` set to
+/// `path` (empty if `None`), so no default can come from the developer's machine.
 fn seedbox_with(args: &[&str], cwd: &Path, path: Option<&Path>) -> Output {
     Command::new(env!("CARGO_BIN_EXE_seedbox"))
         .args(args)
         .current_dir(cwd)
         .env_clear()
         .env("HOME", cwd)
+        .env("TMPDIR", cwd)
         .env("PATH", path.map(Path::as_os_str).unwrap_or_default())
         .output()
         .unwrap()
@@ -327,6 +328,28 @@ fn explore_bounds_and_help_are_public_before_runtime_inputs_or_state() {
     );
     assert_eq!(stderr(&overflow),"error: --seed/--count: range is empty or overflows u64; use a positive --count and reduce the range\n");
     assert!(!project.join(".seedbox").exists());
+    for workers in ["0", "33", "nope"] {
+        let output = seedbox(&["explore", "--workers", workers], &project);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).contains("--workers"));
+        assert!(!project.join(".seedbox").exists());
+    }
+    let pinned = seedbox(&["explore", "--workers", "2", "--cpu", "4"], &project);
+    assert_eq!(pinned.status.code(), Some(2));
+    assert_eq!(stderr(&pinned), "error: --workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU\n");
+    assert!(!project.join(".seedbox").exists());
+    let env_pinned = Command::new(env!("CARGO_BIN_EXE_seedbox"))
+        .args(["explore", "--workers", "2"])
+        .current_dir(&project)
+        .env_clear()
+        .env("HOME", &project)
+        .env("PATH", "")
+        .env("SEEDBOX_CPU", "4")
+        .output()
+        .unwrap();
+    assert_eq!(env_pinned.status.code(), Some(2));
+    assert_eq!(stderr(&env_pinned), stderr(&pinned));
+    assert!(!project.join(".seedbox").exists());
     let boundary = seedbox(
         &["explore", "--seed", "18446744073709551615", "--count", "1"],
         &project,
@@ -342,7 +365,7 @@ fn explore_bounds_and_help_are_public_before_runtime_inputs_or_state() {
             && text.contains("--json")
             && text.contains("Exit status:")
     );
-    assert!(!text.contains("--workers"));
+    assert!(text.contains("--workers"));
     fs::write(project.join("compose.yaml"),"services:\n  a: {image: example/a}\nx-seedbox:\n  version: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: a}\n").unwrap();
     let missing = seedbox(&["explore"], &project);
     assert_eq!(
@@ -706,5 +729,234 @@ fn doctor_dev_opt_in_keeps_host_refusal_and_creates_no_state() {
         );
         assert!(output.stdout.is_empty());
         assert!(!dir.path().join(".seedbox").exists());
+    }
+}
+
+mod diff_tests {
+    use super::*;
+    use seedbox as sb;
+    include!("support/diff_fixture.rs");
+
+    #[test]
+    fn diff_plain_and_json_status_and_trace_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_fixture(
+            &root.join("a"),
+            &mut fixture(),
+            Some(&raw_report()),
+            Some(b"I 1 2 3 4\nH 5 6 7 8\n"),
+        );
+        write_fixture(
+            &root.join("b"),
+            &mut fixture(),
+            Some(&raw_report()),
+            Some(b"I 1 2 3 4\nP 5 9 7 8\n"),
+        );
+        let output = seedbox(&["diff", "a", "a"], root);
+        assert_eq!(output.status.code(), Some(0));
+        assert!(stderr(&output).is_empty());
+        let plain = String::from_utf8(output.stdout).unwrap();
+        assert!(plain.starts_with("MATCH: a <> a\nworld witness: "));
+        assert_eq!(
+            plain
+                .lines()
+                .filter(|line| line.chars().next().unwrap().is_ascii_uppercase())
+                .count(),
+            1
+        );
+        let output = seedbox(&["diff", "a", "b", "--json"], root);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(stderr(&output).is_empty());
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["status"], "DIFFERENT");
+        assert_eq!(value["first_record"]["machine"], "workload");
+        assert_eq!(value["first_record"]["record"], 2);
+        assert_eq!(value["first_record"]["a"]["kind"], "H");
+        assert_eq!(value["first_record"]["b"]["time_ns"], 9);
+        assert!(!root.join(".seedbox").exists());
+        let output = seedbox(&["diff", "a", "b"], root);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.starts_with(b"DIFFERENT: a <> b\n"));
+    }
+
+    #[test]
+    fn diff_arguments_and_help() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = seedbox(&["diff", "a"], dir.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).contains("<RUN_B>"));
+        let output = seedbox(&["help", "diff"], dir.path());
+        assert!(output.status.success());
+        let help = String::from_utf8(output.stdout).unwrap();
+        assert!(help.contains("<RUN_A> <RUN_B>"));
+        assert!(help.contains("--json"));
+        assert!(help.contains("diff DIFFERENT"));
+    }
+
+    #[test]
+    fn diff_rejects_corrupt_and_missing_declared_evidence_with_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_fixture(&root.join("a"), &mut fixture(), Some(&raw_report()), None);
+        fs::write(root.join("a/output/vmm.json"), "corrupt").unwrap();
+        let output = seedbox(&["diff", "a", "a", "--json"], root);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert_eq!(stderr(&output), "error: diff a/output/vmm.json: evidence checksum mismatch; use an intact retained run directory (import bundles first)\n");
+        fs::remove_file(root.join("a/output/vmm.json")).unwrap();
+        let cause = fs::symlink_metadata(root.join("a/output/vmm.json")).unwrap_err();
+        let output = seedbox(&["diff", "a", "a"], root);
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(stderr(&output), format!("error: diff a/output/vmm.json: {cause}; use an intact retained run directory (import bundles first)\n"));
+    }
+
+    #[test]
+    fn diff_rejects_missing_or_corrupt_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cause = fs::read(root.join("missing/manifest.json")).unwrap_err();
+        let output = seedbox(&["diff", "missing", "missing"], root);
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(stderr(&output), format!("error: diff missing/manifest.json: {cause}; use an intact retained run directory (import bundles first)\n"));
+        write_fixture(&root.join("a"), &mut fixture(), None, None);
+        let path = root.join("a/manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        manifest["record"]["identity"]["seed"] = 99.into();
+        fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let output = seedbox(&["diff", "a", "a"], root);
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(stderr(&output), "error: diff a/manifest.json: input integrity: manifest checksum mismatch; use an intact retained run directory (import bundles first)\n");
+    }
+
+    #[test]
+    fn diff_retained_metadata_changes_and_missing_trace_are_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut b = fixture();
+        b.identity.seed = 77;
+        write_fixture(&root.join("a"), &mut fixture(), None, Some(b"I 1 2 3 4\n"));
+        write_fixture(&root.join("b"), &mut b, None, None);
+        let output = seedbox(&["diff", "a", "b", "--json"], root);
+        assert_eq!(output.status.code(), Some(1));
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["identity_differences"][0]["field"], "/seed");
+        assert_eq!(
+            result["evidence_differences"][0]["b"],
+            serde_json::Value::Null
+        );
+        assert!(result["first_record"].is_null());
+    }
+    #[test]
+    fn diff_rejects_invalid_retained_reports_and_traces() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut wrong_version = raw_report();
+        wrong_version["report_version"] = 2.into();
+        let mut duplicate = raw_report();
+        let machine = duplicate["machines"][0].clone();
+        duplicate["machines"].as_array_mut().unwrap().push(machine);
+        let mut wrong_world = raw_report();
+        wrong_world["world_witness"] =
+            serde_json::to_value(sb::store::ContentDigest::of(b"wrong")).unwrap();
+        for (raw, message) in [
+            (wrong_version, "unsupported VMM report version"),
+            (duplicate, "duplicate machine name"),
+            (wrong_world, "world witness disagrees with manifest"),
+        ] {
+            write_fixture(&root.join("a"), &mut fixture(), Some(&raw), None);
+            let output = seedbox(&["diff", "a", "a"], root);
+            assert_eq!(output.status.code(), Some(2));
+            assert_eq!(stderr(&output), format!("error: diff a/output/vmm.json: {message}; use an intact retained run directory (import bundles first)\n"));
+        }
+        let mut record = fixture();
+        let path = root.join("a/output/vmm.json");
+        fs::write(&path, b"bad").unwrap();
+        record
+            .logs
+            .insert("vmm.json".into(), sb::store::ContentDigest::of(b"bad"));
+        write_fixture(&root.join("a"), &mut record, None, None);
+        let output = seedbox(&["diff", "a", "a"], root);
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(stderr(&output), "error: diff a/output/vmm.json: expected value at line 1 column 1; use an intact retained run directory (import bundles first)\n");
+        write_fixture(&root.join("a"), &mut fixture(), None, Some(b"bad\n"));
+        let output = seedbox(&["diff", "a", "a"], root);
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(stderr(&output), "error: diff a: machines/workload.trace compared with a: input integrity: invalid trace record: expected kind branches time_ns extra(hex) rip(hex); use an intact retained run directory (import bundles first)\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diff_rejects_symlinked_evidence_and_unsafe_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_fixture(&root.join("a"), &mut fixture(), Some(&raw_report()), None);
+        let path = root.join("a/output/vmm.json");
+        fs::rename(&path, root.join("raw.json")).unwrap();
+        std::os::unix::fs::symlink(root.join("raw.json"), &path).unwrap();
+        let output = seedbox(&["diff", "a", "a"], root);
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(stderr(&output), "error: diff a/output/vmm.json: evidence must be a regular file under real directories; use an intact retained run directory (import bundles first)\n");
+        let mut record = fixture();
+        record.identity.inputs.guests.insert(
+            "../../escape".into(),
+            sb::store::ContentDigest::of(b"guest"),
+        );
+        record.logs.insert(
+            "machines/../../escape.trace".into(),
+            sb::store::ContentDigest::of(b"trace"),
+        );
+        write_fixture(&root.join("b"), &mut record, None, None);
+        let output = seedbox(&["diff", "b", "b"], root);
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(stderr(&output), "error: diff b: unsafe evidence path; use an intact retained run directory (import bundles first)\n");
+    }
+
+    #[test]
+    fn diff_compares_imported_bundle_without_original_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let store = sb::store::ContentStore::new(root.join("objects"));
+        store.put(b"fixture").unwrap();
+        let mut record = fixture();
+        write_fixture(
+            &root.join("original"),
+            &mut record,
+            Some(&raw_report()),
+            Some(b"I 1 2 3 4\n"),
+        );
+        store
+            .put(&serde_json::to_vec(&record.identity).unwrap())
+            .unwrap();
+        for name in record.logs.keys() {
+            store
+                .put_file(&root.join("original/output").join(name))
+                .unwrap();
+        }
+        let options = sb::bundle::Options::default();
+        sb::bundle::export(
+            &root.join("original"),
+            &store,
+            &root.join("run.tar"),
+            &options,
+        )
+        .unwrap();
+        let imported =
+            sb::bundle::import(&root.join("run.tar"), &root.join("imported"), &options).unwrap();
+        fs::remove_dir_all(root.join("objects")).unwrap();
+        let output = seedbox(
+            &[
+                "diff",
+                "original",
+                imported.directory.to_str().unwrap(),
+                "--json",
+            ],
+            root,
+        );
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["status"], "MATCH");
+        assert_eq!(result["machines"][0]["witness"]["matches"], true);
     }
 }

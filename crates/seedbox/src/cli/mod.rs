@@ -7,6 +7,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use seedbox::{
     bundle, config,
     counter::CounterProfile,
+    diff,
     execution::{
         CancellationToken, ExecutionBackend, ExecutionProfile, PreparationBackend, WitnessMode,
     },
@@ -27,8 +28,8 @@ use std::{
 
 const EXIT_CODES: &str = "\
 Exit status:
-  0    PASS, or a replay MATCH
-  1    FAIL, or a replay MISMATCH
+  0    PASS, or a replay/diff MATCH
+  1    FAIL, replay MISMATCH, or diff DIFFERENT
   2    ERROR, a replay that is NOT_COMPARABLE, or a usage or setup error
   3    INCOMPLETE (wall-time limit or cancelled)
   124  TIMEOUT (simulated-time limit)";
@@ -118,9 +119,12 @@ enum Command {
         /// First simulation seed [default: x-seedbox.seed from the Compose file].
         #[arg(long)]
         seed: Option<u64>,
-        /// Number of consecutive seeds to execute sequentially.
+        /// Number of consecutive seeds to execute.
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..))]
         count: u64,
+        /// Maximum active attempts; omit --cpu for parallel execution.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=32))]
+        workers: u32,
         /// Print exactly one exploration report as JSON.
         #[arg(long)]
         json: bool,
@@ -174,6 +178,17 @@ enum Command {
         state: StateArg,
         #[command(flatten)]
         transfer: Transfer,
+    },
+    /// Compare retained run evidence without executing guests.
+    #[command(after_help = EXIT_CODES)]
+    Diff {
+        /// First retained run directory.
+        run_a: PathBuf,
+        /// Second retained run directory.
+        run_b: PathBuf,
+        /// Print exactly one comparison report as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Show a recorded run after verifying its manifest.
     Inspect {
@@ -546,6 +561,7 @@ fn run(cli: Cli) -> Result<u8> {
             compose,
             seed,
             count,
+            workers,
             json,
             cpu,
             state,
@@ -560,9 +576,13 @@ fn run(cli: Cli) -> Result<u8> {
             let options = ExploreOptions {
                 seed,
                 count,
+                workers,
                 cancellation: cancellation.clone(),
             };
             exploration::bounds(&simulation, &options)?;
+            if workers > 1 && cpu.cpu.is_some() {
+                return Err(Error::Setup("--workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU".into()));
+            }
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
             let detected = CounterProfile::host();
@@ -597,6 +617,12 @@ fn run(cli: Cli) -> Result<u8> {
             } else {
                 println!("{}: {}", word(&result.outcome), result.directory.display());
                 println!("seeds: {}..={}", result.first_seed, result.last_seed);
+                println!("workers: {}", result.workers);
+                println!("peak-running: {}", result.peak_running);
+                println!(
+                    "active-attempt-seconds: {:.3}",
+                    result.active_attempt_seconds
+                );
                 println!("attempted: {}", result.attempts.len());
                 println!("pass: {}", result.counts.pass);
                 println!("fail: {}", result.counts.fail);
@@ -756,6 +782,46 @@ fn run(cli: Cli) -> Result<u8> {
             println!("IMPORTED: {}", run.directory.display());
             print_omissions(&run.record);
             Ok(0)
+        }
+        Command::Diff { run_a, run_b, json } => {
+            let comparison = diff::diff(&run_a, &run_b)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&comparison)?);
+            } else {
+                println!(
+                    "{}: {} <> {}",
+                    word(&comparison.status),
+                    run_a.display(),
+                    run_b.display()
+                );
+                println!(
+                    "world witness: {}",
+                    serde_json::to_string(&comparison.world_witness)?
+                );
+                for machine in &comparison.machines {
+                    println!("machine: {}", serde_json::to_string(machine)?);
+                }
+                println!(
+                    "first record: {}",
+                    serde_json::to_string(&comparison.first_record)?
+                );
+                for (label, differences) in [
+                    ("identity", &comparison.identity_differences),
+                    ("result", &comparison.result_differences),
+                    ("evidence", &comparison.evidence_differences),
+                ] {
+                    for difference in differences {
+                        println!("{label}: {}", serde_json::to_string(difference)?);
+                    }
+                }
+                for limitation in &comparison.limitations {
+                    println!("limitation: {limitation}");
+                }
+            }
+            Ok(match comparison.status {
+                diff::Status::Match => 0,
+                diff::Status::Different => 1,
+            })
         }
         Command::Inspect { run, json } => {
             let run = defaults::run_directory(run)?;
