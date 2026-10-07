@@ -32,6 +32,7 @@ directory. Every runtime input has a default, so no flags are required:
 | --- | --- | --- |
 | Compose file | `compose.yaml` in the given directory (default `.`) | positional path |
 | Directed link baselines | no overrides; global latency/jitter and zero loss | `x-seedbox.network.links` |
+| Connection selectors | disabled; discover and select through the guest control API | `world.connections`, `world.drop_connection` |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
 | Exploration count | `1` | `--count` |
 | Exploration workers | `1`, sequential execution | `--workers` (1..32; automatic CPU selection for parallel execution) |
@@ -66,6 +67,14 @@ preparation. Guest controllers can temporarily override links with
 `world.shape(["server"], ["client"], latency=20_000_000, jitter=2_000_000, loss_ppm=50000)`
 and release the returned handle with `world.heal(handle)`; see
 [network policy](docs/runtime.md#directed-link-policy).
+
+For one TCP direction, use `world.connections("server", "client")`, select an
+exact returned record with `world.drop_connection(record)`, then
+`world.heal(handle)` and require its `dropped` count to be positive. Discovery is
+paginated and selectors bind an observed incarnation, so tuple reuse does not
+inherit the old fault. See [connection selectors](docs/runtime.md#connection-selectors)
+for lifecycle and unsupported-traffic behavior, and the
+[AMD validation procedure](docs/connection-selectors-amd.md).
 
 For development artifacts, pass `--allow-dev-engine` to `run`, `explore`, `replay`
 or `doctor`. Unpinned engine or guest-kernel bytes record the semantic parameter

@@ -50,6 +50,7 @@ enum Event {
 pub struct Faults {
     pub log: Vec<Value>,
     pub links: Links,
+    pub connections: crate::connections::Connections,
     entries: Vec<Entry>,
     boundaries: BTreeSet<(u64, u32, Event)>,
     waiting_ready: Vec<BTreeSet<u32>>,
@@ -78,6 +79,7 @@ impl Faults {
         let mut f = Self {
             log: vec![],
             links,
+            connections: crate::connections::Connections::default(),
             entries: vec![],
             boundaries: BTreeSet::new(),
             waiting_ready: vec![BTreeSet::new(); count],
@@ -175,6 +177,9 @@ impl Faults {
                 }
                 for &a in &sides[0] { for &b in &sides[1] { pairs.insert((a,b)); } }
             }
+            Action::DropConnection {handle,connection} => {
+                if handle.is_empty() || connection.incarnation==0 || connection.src_port==0 || connection.dst_port==0 || connection.from==connection.to || !self.names.contains(&connection.from) || !self.names.contains(&connection.to) { return Err("invalid connection selector".into()); }
+            }
             Action::Heal { handle } => {
                 if handle.is_empty() {
                     return Err("empty fault handle".into());
@@ -246,6 +251,7 @@ impl Faults {
     }
     pub fn active_handles(&self) -> Vec<String> {
         let mut handles: Vec<_> = self.handles.keys().cloned().chain(self.links.layers.values().map(|l|l.handle.clone())).collect();
+        handles.extend(self.connections.selections.keys().cloned());
         handles.sort(); handles
     }
     pub fn process_state(&self, machine: usize) -> &'static str {
@@ -257,6 +263,10 @@ impl Faults {
         }
     }
     pub fn admission_error(&self, action: &Action) -> Option<&'static str> {
+        if let Action::DropConnection {connection,..}=action {
+            if self.connections.selections.len()==crate::connections::CAPACITY { return Some("connection selector capacity exhausted"); }
+            return (!self.connections.available(connection,&self.names)).then_some("connection incarnation unavailable");
+        }
         let machine = action.machine()?;
         let index = self.names.iter().position(|name|name==machine)?;
         match action {
@@ -275,12 +285,25 @@ impl Faults {
     }
     pub fn network_witness(&self, h: &mut Sha256) {
         self.links.witness(h);
+        self.connections.witness(h);
         h.update((self.handles.len() as u64).to_le_bytes());
         for (handle,pairs) in &self.handles {
             crate::links::string_hash(h,handle);
             h.update((pairs.len() as u64).to_le_bytes());
             for &pair in pairs { crate::links::pair_hash(h,pair); }
         }
+    }
+    pub fn connections(&self, from: &str, to: &str, after: u64) -> Vec<seedbox_control::Connection> {
+        self.connections.list(from,to,after,&self.names)
+    }
+    pub fn route(&mut self, src: usize, dst: usize, send: u64, frame: &[u8], legacy_cut: bool) -> crate::links::Outcome {
+        let c=self.connections.observe(src,dst,frame);
+        let cut=legacy_cut || self.blocked(src,dst);
+        // Only selector rows grow selection evidence; legacy logs stay identical.
+        let drop=self.connections.drops(c,cut,|s| {
+            self.log[s.fault_id as usize-1]["selection_counts"]=json!({"matched":s.matched,"dropped":s.dropped});
+        });
+        if drop {self.links.selected_drop(src,dst);crate::links::Outcome::Lost} else {self.links.decide(src,dst,send,cut)}
     }
     pub fn blocked(&self, from: usize, to: usize) -> bool {
         self.cuts.contains_key(&(from, to))
@@ -449,7 +472,18 @@ impl Faults {
                             self.applied(i,now,format!("handle={handle}; in-flight frames retained"));
                             self.changed_network.push(i);
                         }
+                        Action::DropConnection {handle,connection} => {
+                            if self.active_handles().contains(&handle) { self.fail(i,"duplicate active handle".into()); continue; }
+                            if let Err(error)=self.connections.select(id,handle.clone(),connection,&self.names) {self.fail(i,error);continue;}
+                            self.log[i]["selection_counts"]=json!({"matched":0,"dropped":0});
+                            self.applied(i,now,format!("handle={handle}; armed; in-flight frames retained"));
+                        }
                         Action::Heal { handle } => {
+                            if let Some(selection)=self.connections.selections.remove(&handle) {
+                                self.log[i]["selection_counts"]=json!({"matched":selection.matched,"dropped":selection.dropped});
+                                self.applied(i,now,format!("handle={handle}; selected packets dropped={}",selection.dropped));
+                                continue;
+                            }
                             if self.links.heal(&handle) {
                                 self.applied(i,now,format!("handle={handle}; prior policy revealed"));
                                 self.changed_network.push(i);

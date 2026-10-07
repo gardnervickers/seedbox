@@ -855,6 +855,31 @@ fn validate_control_history(
                     loss_ppm,
                 }
             }
+            Operation::DropConnection { connection } => {
+                let handle = if response {
+                    &metadata["result"]["handle"]
+                } else {
+                    &row["plan"]["handle"]
+                };
+                let handle = handle.as_str().ok_or_else(bad)?.to_owned();
+                if handle.is_empty()
+                    || (response && e != Some(a))
+                    || connection.incarnation == 0
+                    || connection.src_port == 0
+                    || connection.dst_port == 0
+                    || resolve(&seedbox_control::Target::Machine(connection.from.clone()))?
+                        == resolve(&seedbox_control::Target::Machine(connection.to.clone()))?
+                {
+                    return Err(bad());
+                }
+                Action::DropConnection { handle, connection }
+            }
+            Operation::Connections { from, to, .. } => {
+                if e != Some(a) || resolve(&from)? == resolve(&to)? {
+                    return Err(bad());
+                }
+                continue;
+            }
             Operation::Heal { handle } => {
                 if response && e != Some(a) {
                     return Err(bad());
