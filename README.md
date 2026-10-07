@@ -370,6 +370,11 @@ YAML without starting guests. It has no hardware tiers. The low-level batch
 runner remains available for the distinct fixtures below. Hardware results and known runtime failures
 are recorded in [docs/acceptance.md](docs/acceptance.md).
 
+`bash harness/host-check.sh --plan SHA` shows change-scoped host checks from the
+merge-base diff without executing anything. On the qualified Linux host,
+`--pairs N` runs the selected checks concurrently; SHA lists and `--train BRANCH`
+union coverage. See [the host-check map and execution instructions](harness/smoke/README.md#change-scoped-host-checks).
+
 The focused race comparison records a fixed `SOURCE_DATE_EPOCH=0` for Podman image
 build metadata and requires two public preparations to have identical complete
 inputs before execution. Every run must retain that same input closure. It runs four seeds, requires distinct lost-update counts

@@ -411,3 +411,16 @@ single-member etcd fixture is preserved.
 The direct KVM results above retain their recorded engine identities; hardware
 execution was not repeated for this merge. The seed-4004 clock-bound failure is
 tracked in [issue #33](https://github.com/gardnervickers/seedbox/issues/33).
+
+
+## Change-scoped host-check source staging
+
+The [host-check planner and smoke tier](../harness/smoke/README.md#change-scoped-host-checks)
+select a minimal core for engine changes and add only the affected disk, link,
+Compose, timebase or stepping checks. `--plan` prints matching paths from
+merge-base diffs; SHA lists and train branches union their coverage. `--pairs N`
+allocates free reciprocal SMT pairs and excludes CPU 0/16. Portable controls
+exercise the map, Git planning, real disposable flock contention and harmless
+concurrent workers. These controls do not execute a guest or qualify a candidate.
+Parallel dispatch and its host cleanup behavior have not been accepted on Linux;
+no new hardware result, release pin or qualification is recorded here.

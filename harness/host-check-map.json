@@ -1,0 +1,313 @@
+{
+  "version": 1,
+  "engine_roots": [
+    "crates/seedbox-vmm/",
+    "kernel/",
+    "guest/"
+  ],
+  "core": [
+    "fixed",
+    "default-replay",
+    "test-vmm"
+  ],
+  "checks": {
+    "fixed": {
+      "kind": "smoke",
+      "description": "examples/faults fixed seed 1009, full state"
+    },
+    "default-replay": {
+      "kind": "smoke",
+      "description": "default retained replay of fixed"
+    },
+    "test-vmm": {
+      "kind": "unit",
+      "description": "cargo test-vmm (default tests; no ignored diagnostics)"
+    },
+    "undo-margin": {
+      "kind": "smoke",
+      "description": "retained replay --undo 0 --margin 16384"
+    },
+    "disk-nocrash": {
+      "kind": "fixture",
+      "world": "disk-nocrash"
+    },
+    "disk-crash": {
+      "kind": "fixture",
+      "world": "disk-crash"
+    },
+    "disk-crash-fork": {
+      "kind": "fixture",
+      "world": "disk-crash-fork"
+    },
+    "disk-ext4-crash": {
+      "kind": "fixture",
+      "world": "disk-ext4-crash"
+    },
+    "net": {
+      "kind": "fixture",
+      "world": "net"
+    },
+    "net-pause": {
+      "kind": "fixture",
+      "world": "net-pause"
+    },
+    "net-crash": {
+      "kind": "fixture",
+      "world": "net-crash"
+    },
+    "net-crash-fork": {
+      "kind": "fixture",
+      "world": "net-crash-fork"
+    },
+    "compose-redis": {
+      "kind": "compose",
+      "project": "examples/redis"
+    },
+    "compose-etcd": {
+      "kind": "compose",
+      "project": "examples/etcd"
+    },
+    "compose-race": {
+      "kind": "compose",
+      "project": "harness/acceptance/workloads/race.yaml"
+    },
+    "pv-abi1": {
+      "kind": "fixture",
+      "world": "smoke",
+      "kernel_variant": "abi1"
+    },
+    "pv-abi2": {
+      "kind": "fixture",
+      "world": "smoke",
+      "kernel_variant": "abi2"
+    }
+  },
+  "rules": [
+    {
+      "category": "portable",
+      "paths": [
+        "docs/**",
+        "/*.md",
+        "harness/**",
+        "tools/mac-tcg/**",
+        "python/**",
+        "crates/seedbox/tests/**",
+        "crates/seedbox/templates/**",
+        "crates/seedbox/src/cli/**",
+        "crates/seedbox/src/main.rs",
+        "crates/seedbox/src/diff.rs",
+        "crates/seedbox/src/bundle.rs",
+        "crates/seedbox/src/store.rs",
+        "crates/seedbox/src/templates.rs",
+        "**/*.md",
+        ".github/**",
+        ".cargo/**",
+        ".gitignore",
+        "Cargo.toml",
+        "Cargo.lock",
+        "flake.nix",
+        "flake.lock",
+        ".envrc"
+      ],
+      "checks": []
+    },
+    {
+      "category": "engine-common",
+      "paths": [
+        "crates/seedbox-vmm/Cargo.*",
+        "crates/seedbox-vmm/rustfmt.toml",
+        "crates/seedbox-vmm/src/main.rs",
+        "crates/seedbox-vmm/src/machine.rs",
+        "crates/seedbox-vmm/src/control.rs",
+        "crates/seedbox-vmm/src/rng.rs",
+        "crates/seedbox-vmm/src/events.rs",
+        "crates/seedbox-vmm/src/devices.rs",
+        "crates/seedbox-vmm/src/virtio_console.rs",
+        "kernel/build.sh",
+        "kernel/config.options",
+        "guest/rdrand*",
+        "guest/stop-boundary.c",
+        "guest/sbx.c",
+        "guest/smoke.init",
+        "guest/build-initramfs.sh"
+      ],
+      "checks": [
+        "fixed",
+        "default-replay",
+        "test-vmm"
+      ]
+    },
+    {
+      "category": "stepping-counter-undo",
+      "paths": [
+        "crates/seedbox-vmm/src/stepper.rs",
+        "crates/seedbox-vmm/src/counter.rs",
+        "crates/seedbox-vmm/src/undo.rs",
+        "crates/seedbox-vmm/src/boundary.rs",
+        "crates/seedbox-vmm/src/profile.rs",
+        "crates/seedbox-vmm/src/machine/counted.rs",
+        "crates/seedbox/src/counter.rs"
+      ],
+      "checks": [
+        "fixed",
+        "default-replay",
+        "test-vmm",
+        "undo-margin"
+      ]
+    },
+    {
+      "category": "disk",
+      "paths": [
+        "crates/seedbox-vmm/src/disk.rs",
+        "crates/seedbox-vmm/src/virtio_blk.rs",
+        "guest/blkprobe.c",
+        "guest/fsledger.c",
+        "guest/disk.init",
+        "guest/build-disk.sh"
+      ],
+      "checks": [
+        "disk-nocrash",
+        "disk-crash",
+        "disk-crash-fork",
+        "disk-ext4-crash"
+      ]
+    },
+    {
+      "category": "network",
+      "paths": [
+        "crates/seedbox-vmm/src/virtio_net.rs",
+        "crates/seedbox-vmm/src/network_counters.rs",
+        "crates/seedbox-vmm/src/faults.rs",
+        "guest/net*",
+        "guest/network.sh",
+        "guest/cluster.init",
+        "guest/single.init",
+        "guest/members.sh",
+        "guest/build-netns.sh",
+        "guest/build-client.sh"
+      ],
+      "checks": [
+        "net",
+        "net-pause",
+        "net-crash",
+        "net-crash-fork"
+      ]
+    },
+    {
+      "category": "compose-supervisor-init",
+      "paths": [
+        "guest/compose-init.c",
+        "guest/build-compose.sh",
+        "guest/control.h",
+        "guest/control-test.c",
+        "guest/barrier.h",
+        "guest/supervisor-test.c",
+        "guest/race.c",
+        "guest/acceptance-race.Dockerfile",
+        "crates/seedbox/build.rs",
+        "crates/seedbox/src/guest.rs"
+      ],
+      "checks": [
+        "fixed",
+        "default-replay",
+        "test-vmm",
+        "compose-redis",
+        "compose-etcd",
+        "compose-race"
+      ]
+    },
+    {
+      "category": "timebase",
+      "paths": [
+        "crates/seedbox-vmm/src/timebase.rs",
+        "crates/seedbox-vmm/src/machine/counted.rs",
+        "kernel/seedbox.c",
+        "kernel/seedbox.h",
+        "kernel/apply.py"
+      ],
+      "checks": [
+        "pv-abi1",
+        "pv-abi2"
+      ]
+    },
+    {
+      "category": "runtime",
+      "paths": [
+        "crates/seedbox/src/host.rs",
+        "crates/seedbox/src/admission.rs",
+        "crates/seedbox/src/admission/**",
+        "crates/seedbox/src/vmm.rs",
+        "crates/seedbox/src/execution.rs",
+        "crates/seedbox/src/oci.rs",
+        "crates/seedbox/src/preparation*",
+        "crates/seedbox/src/image.rs",
+        "crates/seedbox/src/config.rs",
+        "crates/seedbox/src/orchestration.rs",
+        "crates/seedbox/src/exploration.rs"
+      ],
+      "checks": [
+        "fixed",
+        "default-replay",
+        "test-vmm"
+      ]
+    },
+    {
+      "category": "stepping-counter-undo-shared",
+      "paths": [
+        "crates/seedbox-vmm/src/machine.rs",
+        "crates/seedbox-vmm/src/main.rs",
+        "crates/seedbox-vmm/src/devices.rs"
+      ],
+      "diff_regex": "\\b(?:undo|checkpoint|rollback|counter|counted|stepper|stepping|set_stepping|step_ns|step_until|single_step|branches|margin|armed_wake|fm)\\b",
+      "checks": [
+        "fixed",
+        "default-replay",
+        "test-vmm",
+        "undo-margin"
+      ]
+    },
+    {
+      "category": "disk-shared",
+      "paths": [
+        "crates/seedbox-vmm/src/machine.rs",
+        "crates/seedbox-vmm/src/main.rs",
+        "crates/seedbox-vmm/src/devices.rs"
+      ],
+      "diff_regex": "\\b(?:disk|blk|virtio_blk|Disk|VirtioBlk|BLK_[A-Z_]+)\\b",
+      "checks": [
+        "disk-nocrash",
+        "disk-crash",
+        "disk-crash-fork",
+        "disk-ext4-crash"
+      ]
+    },
+    {
+      "category": "network-shared",
+      "paths": [
+        "crates/seedbox-vmm/src/machine.rs",
+        "crates/seedbox-vmm/src/main.rs",
+        "crates/seedbox-vmm/src/devices.rs"
+      ],
+      "diff_regex": "\\b(?:net|network|link|link_counts|virtio_net|NetworkCounters|VirtioNet|frames_[a-z_]+|NET_[A-Z_]+)\\b",
+      "checks": [
+        "net",
+        "net-pause",
+        "net-crash",
+        "net-crash-fork"
+      ]
+    },
+    {
+      "category": "timebase-shared",
+      "paths": [
+        "crates/seedbox-vmm/src/machine.rs",
+        "crates/seedbox-vmm/src/main.rs",
+        "crates/seedbox-vmm/src/devices.rs"
+      ],
+      "diff_regex": "\\b(?:timebase|Timebase|TIME_[A-Z_]+|time_page|pv|tsc|rdtsc|pit|PIT_[A-Z_]+|pic|timer|armed_wake)\\b",
+      "checks": [
+        "pv-abi1",
+        "pv-abi2"
+      ]
+    }
+  ]
+}

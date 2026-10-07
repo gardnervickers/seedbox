@@ -50,6 +50,15 @@ class SmokeTests(unittest.TestCase):
     def verify(self):
         return smoke.verify_record(self.record, self.run, self.state)
 
+    def test_host_reserved_pair_refuses_before_other_probes(self):
+        for cpu in (0, 16):
+            with patch.object(Path, 'read_text', return_value='0,16') as read, \
+                 patch.object(smoke.os, 'sched_getaffinity', create=True) as affinity:
+                with self.assertRaisesRegex(RuntimeError, 'reserved for the host'):
+                    smoke.pair(cpu)
+                self.assertEqual(read.call_count, 1)
+                affinity.assert_not_called()
+
     def test_qualification_marker_and_report_must_match_mode(self):
         smoke.verify_qualification(self.record, False)
         with self.assertRaisesRegex(RuntimeError, 'qualification marker'):
@@ -76,10 +85,10 @@ class SmokeTests(unittest.TestCase):
         self.assertEqual(command[command.index('--vmm') + 1], 'pinned-engine')
         self.assertNotEqual(command[command.index('--kernel') + 1], 'dev-kernel')
 
-    def test_dev_success_forwards_flag_and_checks_all_replay_markers(self):
+    def exercise_dev_success(self, performance):
         args = type('Args', (), dict(kernel='kernel', engine='engine', guest_init='init',
             busybox='busybox', cpu=8, cli='cli', tool_path='', allow_dev_engine=True,
-            pinned_engine='pinned-engine'))()
+            pinned_engine='pinned-engine', performance_replay=performance))()
         campaign = smoke.Campaign(args, self.root, 1e100)
         self.record['identity']['inputs']['profile']['semantic_parameters'] = {'engine_qualification': 'dev-unpinned'}
         self.record['report']['engine_qualification'] = 'dev-unpinned'
@@ -117,8 +126,20 @@ class SmokeTests(unittest.TestCase):
              patch.object(smoke, 'snapshot', return_value={}), \
              patch.object(smoke, 'pinned_workloads'):
             campaign.run()
-        self.assertEqual(inspected, ['fixed-inspect', 'default-inspect', 'undo-margin-inspect'])
-        self.assertEqual(commands['undo-margin'][-4:], ['--undo', '0', '--margin', '16384'])
+        self.assertEqual(inspected, ['fixed-inspect', 'default-inspect'] +
+                         (['undo-margin-inspect'] if performance else []))
+        if performance:
+            self.assertEqual(commands['undo-margin'][-4:], ['--undo', '0', '--margin', '16384'])
+        else:
+            self.assertNotIn('undo-margin', commands)
+            self.assertNotIn('--undo', commands['default'])
+            self.assertNotIn('--margin', commands['default'])
+
+    def test_dev_success_forwards_flag_and_checks_all_replay_markers(self):
+        self.exercise_dev_success(True)
+
+    def test_core_success_omits_unrelated_performance_combination(self):
+        self.exercise_dev_success(False)
 
     def test_dev_doctor_cannot_claim_qualified_readiness(self):
         args = type('Args', (), dict(kernel='kernel', engine='engine', guest_init='init',

@@ -56,6 +56,8 @@ def pair(cpu):
     cpus = cpulist(Path(f'/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list').read_text())
     if len(cpus) != 2 or cpu not in cpus:
         raise RuntimeError('smoke requires one SMT pair')
+    if cpus & {0, 16}:
+        raise RuntimeError('cpu 0 and its sibling 16 are reserved for the host')
     online = cpulist(Path('/sys/devices/system/cpu/online').read_text())
     if not cpus <= online or not cpus <= os.sched_getaffinity(0):
         raise RuntimeError('both siblings must be online and allowed')
@@ -264,7 +266,7 @@ class Campaign:
         a = self.args
         runtime = ['--kernel', str(a.kernel), '--vmm', str(a.engine), '--guest-init', str(a.guest_init),
                    '--busybox', str(a.busybox), '--cpu', str(a.cpu), '--state', str(self.state), '--memory-mb', '512']
-        project = str(faults_project(self.root / 'project'))
+        project = str(getattr(a, 'project', None) or faults_project(self.root / 'project'))
         wrong = self.root / 'wrong-kernel-input'
         wrong.write_bytes(b'private wrong kernel; real kernel unchanged\n')
         invalid = runtime.copy()
@@ -308,9 +310,11 @@ class Campaign:
         # counter's final approach uses the undo margin and never reads --margin.
         # Undo-off stepping dominates the tier, so the margin is the profile's
         # smallest adaptive margin rather than a larger, slower one.
-        for name, flags, changes in [
-                ('default', [], None),
-                ('undo-margin', ['--undo', '0', '--margin', '16384'], {'SEEDBOX_UNDO': '0', 'SEEDBOX_MARGIN': '16384'})]:
+        replays = [('default', [], None)]
+        if getattr(a, 'performance_replay', False):
+            replays.append(('undo-margin', ['--undo', '0', '--margin', '16384'],
+                            {'SEEDBOX_UNDO': '0', 'SEEDBOX_MARGIN': '16384'}))
+        for name, flags, changes in replays:
             code, stdout, _ = self.invoke(name, [str(a.cli), 'replay', str(baseline_run), '--cpu', str(a.cpu), '--state', str(self.state), *dev_flags, *flags], True)
             if code != 0:
                 raise RuntimeError('retained replay failed')
@@ -337,6 +341,10 @@ def main():
     for name in ('cli', 'engine', 'kernel', 'guest-init', 'busybox', 'output'):
         parser.add_argument('--' + name, required=True, type=Path)
     parser.add_argument('--cpu', required=True, type=int)
+    parser.add_argument('--performance-replay', action='store_true',
+                        help='Add the undo-off/margin replay for stepping, counter or undo changes.')
+    parser.add_argument('--project', type=Path,
+                        help='Compose workload instead of the generated fixed faults project.')
     parser.add_argument('--allow-dev-engine', action='store_true', help='Exercise unpinned artifacts, visibly unqualified.')
     parser.add_argument('--pinned-engine', type=Path, help='Pinned engine for the unflagged wrong-kernel control; required in dev mode.')
     parser.add_argument('--tool-path', required=True, help='Explicit admitted preparation-tool PATH; no build is performed by this wrapper.')
@@ -354,6 +362,8 @@ def main():
         args.pinned_engine = args.pinned_engine.resolve(strict=True)
         if not args.pinned_engine.is_file():
             parser.error('--pinned-engine must name an existing frozen file')
+    if args.project is not None:
+        args.project = args.project.resolve(strict=True)
     root = args.output.absolute()
     root.mkdir(mode=0o700)  # Never reuse or write failure receipts into an existing directory.
     (root / 'home').mkdir()
