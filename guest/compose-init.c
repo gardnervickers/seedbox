@@ -1,7 +1,9 @@
 /* Generic per-machine OCI application supervisor. Compile statically for amd64.
  * No shell parses image arguments, environment or configuration values.
  * Filesystems are fresh RAM-backed initramfs images for each machine boot;
- * process stop/start preserves their writable contents within that run. */
+ * process stop/start preserves their writable contents within that run.
+ * Named volumes are the exception: they live on the machine's retained disk
+ * (/dev/vda, ext4) and keep what was flushed across a machine crash. */
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <errno.h>
@@ -278,6 +280,76 @@ static void busybox(char *const args[]) {
     while (waitpid(pid, &status, 0) < 0) { if (errno != EINTR) die("wait network setup"); }
     if (!WIFEXITED(status) || WEXITSTATUS(status)) { errno = EIO; die("network setup failed"); }
 }
+/* ext4 on the retained disk, formatted on the machine's first boot. Fixed
+ * UUID and hash seed; the disk starts zeroed, so inode tables and the journal
+ * need no initialization. */
+static void format_disk(const char *device) {
+    int fd = open(device, O_RDONLY|O_CLOEXEC);
+    if (fd < 0) die("open retained disk");
+    unsigned char magic[2];
+    if (pread(fd, magic, 2, 1024 + 56) != 2) die("read retained disk superblock");
+    close(fd);
+    if (magic[0] == 0x53 && magic[1] == 0xef) return;
+    pid_t pid = fork();
+    if (pid < 0) die("fork mke2fs");
+    if (!pid) {
+        execv("/seedbox/mke2fs", (char *const[]){"mke2fs", "-q", "-F", "-t", "ext4",
+            "-U", "5eedb0c5-0000-4000-8000-000000000001",
+            "-E", "hash_seed=5eedb0c5-0000-4000-8000-000000000002,lazy_itable_init=1,lazy_journal_init=1,nodiscard",
+            (char *)device, NULL});
+        _exit(127);
+    }
+    int status;
+    while (waitpid(pid, &status, 0) < 0) { if (errno != EINTR) die("wait mke2fs"); }
+    if (!WIFEXITED(status) || WEXITSTATUS(status)) { errno = EIO; die("format retained disk"); }
+}
+/* Refuse a target reached through a symlink in the image: resolved here,
+ * before the chroot, it could point outside the image root. */
+static void plain_path(const char *path) {
+    char *copy = strdup(path);
+    if (!copy) die("volume path");
+    for (char *p = copy + 1; ; p++) {
+        if (*p != '/' && *p) continue;
+        char save = *p; *p = 0;
+        struct stat st;
+        if (!lstat(copy, &st) && S_ISLNK(st.st_mode)) { errno = ELOOP; die(copy); }
+        *p = save;
+        if (!save) break;
+    }
+    free(copy);
+}
+/* Mount each named volume (name, target pairs) from the retained disk onto
+ * its target in the image root. A new volume directory takes the mode and
+ * owner of the image's target directory, if there is one; its contents are
+ * not copied in. */
+static void mount_volumes(char **volumes) {
+    if (!*volumes) return;
+    directories("/proc", 0755);
+    if (mount("proc", "/proc", "proc", 0, NULL)) die("mount bootstrap proc");
+    format_disk("/dev/vda");
+    directories("/seedbox/disk", 0700);
+    if (mount("/dev/vda", "/seedbox/disk", "ext4", 0, "noinit_itable")) die("mount retained disk");
+    int created = 0;
+    for (char **volume = volumes; volume[0] && volume[1]; volume += 2) {
+        char source[PATH_MAX], target[PATH_MAX];
+        if (snprintf(source, sizeof source, "/seedbox/disk/%s", volume[0]) >= (int)sizeof source
+            || snprintf(target, sizeof target, "/rootfs%s", volume[1]) >= (int)sizeof target) { errno = ENAMETOOLONG; die("volume path"); }
+        plain_path(target);
+        struct stat image = {.st_mode = S_IFDIR|0755};
+        if (stat(target, &image) == 0 && !S_ISDIR(image.st_mode)) { errno = ENOTDIR; die(target); }
+        if (mkdir(source, image.st_mode & 07777) == 0) {
+            if (chown(source, image.st_uid, image.st_gid) || chmod(source, image.st_mode & 07777)) die(source);
+            created = 1;
+        } else if (errno != EEXIST) die(source);
+        directories(target, 0755);
+        if (mount(source, target, NULL, MS_BIND, NULL)) die("bind volume");
+    }
+    if (created) {
+        int root = open("/seedbox/disk", O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+        if (root < 0 || fsync(root)) die("sync volume directories");
+        close(root);
+    }
+}
 static void credentials(void) {
     if (!*user) return;
     char *copy = strdup(user), *group;
@@ -455,13 +527,14 @@ int main(void) {
     recipe_fd = open("/seedbox/launch.bin", O_RDONLY|O_CLOEXEC);
     if (recipe_fd < 0) die("launch recipe");
     char magic[10]; read_exact(magic, sizeof(magic));
-    if (memcmp(magic, "SBXLAUNCH1", 10)) { errno = EINVAL; die("launch version"); }
+    if (memcmp(magic, "SBXLAUNCH2", 10)) { errno = EINVAL; die("launch version"); }
     char *ip = text(), *hosts = text(); user = text(); working_dir = text();
-    arguments = list(); environment = list(); char **volumes = list();
+    arguments = list(); environment = list(); char **volumes = list(); char **disk_volumes = list();
     if (!arguments[0] || !*arguments[0]) { errno = EINVAL; die("empty executable"); }
     busybox((char *const[]){"busybox", "ip", "link", "set", "lo", "up", NULL});
     busybox((char *const[]){"busybox", "ip", "addr", "add", ip, "dev", "eth0", NULL});
     busybox((char *const[]){"busybox", "ip", "link", "set", "eth0", "up", NULL});
+    mount_volumes(disk_volumes);
     if (chdir("/rootfs") || chroot(".") || chdir("/")) die("enter image root");
     directories("/dev", 0755); directories("/proc", 0755); directories("/sys", 0755); directories("/tmp", 01777);
     if (mount("devtmpfs", "/dev", "devtmpfs", 0, NULL) || mount("proc", "/proc", "proc", 0, NULL) || mount("sysfs", "/sys", "sysfs", 0, NULL)) die("mount guest filesystems");

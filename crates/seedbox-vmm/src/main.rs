@@ -8,6 +8,7 @@ mod devices;
 mod disk;
 mod events;
 mod faults;
+mod host_control;
 mod machine;
 mod network_counters;
 mod profile;
@@ -338,15 +339,16 @@ impl World {
         let mut old = std::mem::replace(&mut self.machines[m], fresh);
         let discarded: usize = self.strict_events[m].values().map(Vec::len).sum();
         self.strict_events[m].clear();
-        self.incarnations[m].push(json!({
+        let mut summary = json!({
             "incarnation": old.incarnation, "booted_at_ns": old.booted_at, "crashed_at_ns": t,
             "time_ns": old.time, "branches": old.branches, "exits": old.stats.exits,
             "state": format!("{:?}", old.state), "paused": old.paused,
             "discarded_pending_io": old.pending_io.is_some(), "discarded_management_bytes": discarded,
-            "disk_lost_sectors": old.blk.as_ref().map(|b| b.disk.volatile_sectors()),
             "witness": old.exit_witness(),
-        }));
-        self.machines[m].succeed(&mut old, t)
+        });
+        summary["disk_lost_sectors"] = json!(self.machines[m].succeed(&mut old, t, self.run_seed)?);
+        self.incarnations[m].push(summary);
+        Ok(())
     }
 
     /// Boot machine m's next incarnation at `t`. Frames that reached it
@@ -410,10 +412,18 @@ fn run() -> Result<Value, String> {
         Ok(m) => m.parse().map_err(|e| format!("SEEDBOX_UNDO: {e}"))?,
     };
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+    let mut host_control=arg(&args,"--host-control")
+        .map(|path|host_control::HostControl::bind(std::path::Path::new(&path)))
+        .transpose().map_err(|e|format!("host control: {e}"))?;
     let cfg: Value = serde_json::from_slice(
         &std::fs::read(&config_path).map_err(|e| format!("{config_path}: {e}"))?,
     )
     .map_err(|e| format!("config: {e}"))?;
+    let torn_writes = match &cfg["disk_loss"] {
+        Value::Null => false,
+        Value::String(model) if model == disk::TORN_MODEL => true,
+        _ => return Err("unknown disk_loss model".into()),
+    };
     let base = std::path::Path::new(&config_path)
         .parent()
         .unwrap()
@@ -493,7 +503,7 @@ fn run() -> Result<Value, String> {
             cmdline += &format!(" virtio_mmio.device=4K@{NET_MMIO:#x}:{NET_IRQ}");
         }
         if control_channel {cmdline+=&format!(" virtio_mmio.device=4K@{CHANNEL_MMIO:#x}:{CHANNEL_IRQ}");}
-        let disk = machine_disk(&mc["disk"], &path)?;
+        let disk = machine_disk(&mc["disk"], &path)?.map(|d| d.with_torn_writes(torn_writes));
         if disk.is_some() {
             cmdline += &format!(" virtio_mmio.device=4K@{BLK_MMIO:#x}:{BLK_IRQ}");
         }
@@ -590,13 +600,13 @@ fn run() -> Result<Value, String> {
     if !forked {
         let kills = arm_seed(&mut world, &cfg, &names, seed, 0)?;
         let started = Instant::now();
-        let outcome = simulate(&mut world, &cfg, duration, &end_on, None)?;
+        let outcome = simulate(&mut world, &cfg, duration, &end_on, None, &mut host_control)?;
         let host_seconds = started.elapsed().as_secs_f64();
         return report(&mut world, outcome, seed, &kills, host_seconds, digest, &out, duration, &end_on);
     }
 
     let started = Instant::now();
-    simulate(&mut world, &cfg, duration, &end_on, Some(fork_at))?;
+    simulate(&mut world, &cfg, duration, &end_on, Some(fork_at), &mut host_control)?;
     let barrier_ns = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
     let boot_host_seconds = started.elapsed().as_secs_f64();
     let started = Instant::now();
@@ -635,7 +645,7 @@ fn run() -> Result<Value, String> {
         }
         let started = Instant::now();
         let kills = release(&mut world, &cfg, &names, seed, release_skew)?;
-        let outcome = simulate(&mut world, &cfg, duration, &end_on, None)?;
+        let outcome = simulate(&mut world, &cfg, duration, &end_on, None, &mut host_control)?;
         let host_seconds = started.elapsed().as_secs_f64();
         let mut r = report(&mut world, outcome, seed, &kills, host_seconds, digest, &dir, duration, &end_on)?;
         r["boot"] = json!({
@@ -876,6 +886,7 @@ fn simulate(
     duration: u64,
     end_on: &Option<String>,
     fork: Option<Option<u64>>,
+    host_control: &mut Option<host_control::HostControl>,
 ) -> Result<&'static str, String> {
     let until_barrier = fork.is_some();
     let fork_at = fork.flatten();
@@ -884,6 +895,7 @@ fn simulate(
     let mut frames = Vec::new();
     let outcome;
     loop {
+        if let Some(control)=host_control {control.boundary().map_err(|e|format!("host control: {e}"))?;}
         let keys: Vec<u64> = (0..n).map(|m| world.key(m)).collect();
         let (m, &key) = keys
             .iter()
@@ -1153,7 +1165,7 @@ fn report(
             "net": mach.net.as_ref().map(|n| json!({"tx": n.tx_frames, "rx": n.rx_frames, "rx_dropped": n.rx_dropped})),
         });
         row["disk"] = json!(mach.blk.as_ref().map(|b| json!({
-                "model": disk::MODEL, "capacity_sectors": b.disk.capacity(), "base_sha256": b.disk.base_sha256(),
+                "model": b.disk.model(), "capacity_sectors": b.disk.capacity(), "base_sha256": b.disk.base_sha256(),
                 "digest": b.disk.digest(), "stable_sectors": b.disk.stable_sectors(), "volatile_sectors": b.disk.volatile_sectors(),
                 "reads": b.stats.reads, "writes": b.stats.writes, "flushes": b.stats.flushes,
                 "sectors_read": b.stats.sectors_read, "sectors_written": b.stats.sectors_written,

@@ -569,7 +569,8 @@ impl Machine {
     /// and their sinks, the trace, and the event witness, so the final
     /// witness covers every incarnation. Nothing else crosses: RAM, device
     /// queues, KVM's I/O state and the undo checkpoint die with the VM.
-    pub fn succeed(&mut self, old: &mut Machine, at: u64) -> Result<(), String> {
+    /// Returns the number of volatile sectors lost, or None without a disk.
+    pub fn succeed(&mut self, old: &mut Machine, at: u64, seed: u64) -> Result<Option<u64>, String> {
         self.incarnation = old.incarnation.checked_add(1).ok_or("incarnation overflow")?;
         self.down = true;
         self.time = at;
@@ -581,13 +582,15 @@ impl Machine {
         }
         self.log_order = old.log_order;
         self.trace = old.trace.take();
-        // The disk keeps what was flushed; unflushed writes die with the VM.
-        if let (Some(new), Some(old)) = (self.blk.as_mut(), old.blk.as_ref()) {
-            *new = VirtioBlk::new(old.disk.crashed().0);
-        }
+        // Flushed data survives; the disk policy chooses unflushed survivors.
+        let lost = if let (Some(new), Some(blk)) = (self.blk.as_mut(), old.blk.as_ref()) {
+            let (disk, lost) = blk.disk.crashed_seeded(seed, &old.name, old.incarnation);
+            *new = VirtioBlk::new(disk);
+            Some(lost)
+        } else { None };
         self.witness.update(old.exit_witness().as_bytes());
         self.record(b'C', at);
-        Ok(())
+        Ok(lost)
     }
 
     /// Park the machine at a fork point the world chose (a simulated time),
@@ -2035,7 +2038,7 @@ mod fork_tests {
             old.com1.out.extend_from_slice(b"first boot\n");
             let crash=old.time+100;
             let mut new=probe_machine(&kvm,undo,false);
-            new.succeed(&mut old,crash).unwrap();
+            new.succeed(&mut old,crash,1009).unwrap();
             assert!(new.down && !new.paused);
             assert_eq!((new.incarnation,new.time),(1,crash));
             assert_eq!(&new.memory()[0x80000..0x80004],&[0,0,0,0]);
@@ -2055,6 +2058,46 @@ mod fork_tests {
             assert_ne!(new.exit_witness(),first.1,"the witness covers both incarnations");
             let evidence=(first,new.time,new.exit_witness(),new.state_digest().0);
             if let Some(want)=&want {assert_eq!(&evidence,want,"undo={undo}");} else {want=Some(evidence);}
+        }
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn a_reboot_applies_seeded_sector_survival_and_keeps_the_default_witness() {
+        let kvm=Kvm::new().unwrap();
+        for enabled in [false,true] {
+            let run=|seed| {
+                let mut old=probe_machine(&kvm,256,false);
+                let mut disk=Disk::new(None,Some(32)).unwrap().with_torn_writes(enabled);
+                disk.write(0,&[b'A';32*512]).unwrap();
+                disk.flush();
+                disk.write(0,&[b'B';32*512]).unwrap();
+                let expected=disk.crashed_seeded(seed,&old.name,old.incarnation);
+                old.blk=Some(VirtioBlk::new(disk));
+                let mut new=probe_machine(&kvm,256,false);
+                new.blk=Some(VirtioBlk::new(Disk::new(None,Some(32)).unwrap().with_torn_writes(enabled)));
+                // The pre-policy successor witness: old witness followed by C.
+                let mut witness=new.witness.clone();
+                witness.update(old.exit_witness().as_bytes());
+                witness.update([b'C']);
+                witness.update(new.branches.to_le_bytes());
+                witness.update(1000u64.to_le_bytes());
+                witness.update(1000u64.to_le_bytes());
+                witness.update(b"pending_io");
+                witness.update(new.pending_io_bytes());
+                assert_eq!(new.succeed(&mut old,1000,seed).unwrap(),Some(expected.1));
+                assert_eq!(new.exit_witness(),format!("{:x}",witness.finalize()));
+                let disk=&new.blk.as_ref().unwrap().disk;
+                assert_eq!(disk.digest(),expected.0.digest());
+                assert_eq!(disk.volatile_sectors(),0);
+                assert_eq!(new.blk.as_ref().unwrap().stats.writes,0);
+                (new.exit_witness(),disk.digest())
+            };
+            let a=run(1009);
+            assert_eq!(a,run(1009));
+            let b=run(1010);
+            assert_eq!(a.0,b.0);
+            if enabled {assert_ne!(a.1,b.1);} else {assert_eq!(a.1,b.1);}
         }
     }
 
@@ -2078,7 +2121,7 @@ mod fork_tests {
         disk.write(1,&[b'C';512]).unwrap();
         let mut new=probe_machine(&kvm,256,false);
         with_disk(&mut new);
-        new.succeed(&mut old,1000).unwrap();
+        assert_eq!(new.succeed(&mut old,1000,1009).unwrap(),Some(2));
         let disk=&new.blk.as_ref().unwrap().disk;
         let mut buf=[0u8;1024];
         disk.read(0,&mut buf).unwrap();
@@ -2139,7 +2182,7 @@ mod timed_log_tests {
         let kvm=Kvm::new().unwrap();let mut counter=Counter::new().unwrap();
         let mut old=output_machine(&kvm,256);let mut frames=Vec::new();
         assert_eq!(old.run_until(&mut counter,2000,0,&mut frames).unwrap(),Stop::Exited);
-        let mut new=output_machine(&kvm,256);new.succeed(&mut old,5000).unwrap();new.boot_at(5000).unwrap();
+        let mut new=output_machine(&kvm,256);new.succeed(&mut old,5000,1009).unwrap();new.boot_at(5000).unwrap();
         assert_eq!(new.run_until(&mut counter,7000,0,&mut frames).unwrap(),Stop::Exited);
         assert_eq!(new.com1.out,b"\0AB\0AB");assert_eq!(new.com2.out,b"\xff\xff");
         assert_eq!(new.com1.chunks.records,vec![[0,0,0,0,1],[0,0,2,1,2],[5000,1,3,3,1],[5000,1,5,4,2]]);

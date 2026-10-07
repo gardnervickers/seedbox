@@ -28,6 +28,12 @@ seedbox replay .seedbox/runs/ATTEMPT
 seedbox diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
 ```
 
+On a VMM failure, text output from `run`, `replay`, `explore` and `inspect`
+prints up to five non-empty lines from the final 8 KiB of the attempt's
+`output/vmm.stderr` to stderr, prefixed with `vmm stderr:`. Missing or unreadable
+logs do not change the outcome; retained records and `--json` output are unchanged.
+`inspect` keeps the recorded `error:` line on stdout alongside the run status.
+
 Preparation unpacks images with root ownership and runs before the execution CPU
 lease. Admission briefly checks an eligible core first and releases all temporary
 resources before preparation.
@@ -35,8 +41,21 @@ resources before preparation.
 `seedbox help run`. Run/replay must be invoked with the required KVM/MSR access;
 see the repository's `docs/runtime.md` for setup and limits. `--margin` and
 `--undo` control PMU approach and stepping performance without changing results.
+`--torn-writes` opts into seeded partial survival of unflushed 512-byte disk
+sectors on machine crash (off by default). It is part of run identity and replay
+restores it automatically. It applies only to retained disks; this template
+currently uses RAM-backed storage. See `docs/runtime.md` for the disk contract.
 Charged timer I/O retains its full cost across scheduler boundaries; pending
 operations are included in terminal witnesses.
+
+From another terminal, `seedbox pause RUN` pauses the host's entire world at a
+slice boundary and `seedbox resume RUN` continues it. Use the executing attempt
+directory, identifiable by `RUN/output/host-control`, with the same privileges as
+execution. Replay has a new attempt directory. Both commands wait for an engine
+acknowledgement; guest time, state and witnesses remain fixed while paused.
+Wall-time limits and cancellation remain active, and pause time counts against
+the wall limit. CPU leases remain held until execution ends. This requires a
+host-control-capable engine; see the repository's `docs/runtime.md` for details.
 
 For optional build timestamp control, `prepare`, `run` and `explore` accept
 `--build-epoch SECONDS` (0..=4294967295; default absent, no environment backing).
@@ -61,12 +80,24 @@ is FAIL; a fresh replay must reproduce that FAIL with MATCH. Nonempty fault
 schedules remain unsupported until their guest effect timing is verified.
 
 `explore` validates runtime inputs and host admission before its one preparation,
-then executes a finite consecutive seed sequence sequentially. Admission refusal
+then executes a finite consecutive seed sequence with one worker by default.
+`--workers N` (1..32) bounds parallel attempts and requires automatic CPU selection
+(omit `--cpu` and `SEEDBOX_CPU`); all N eligible physical cores and siblings must be
+available and admitted before preparation. Admission refusal
 retains batch ERROR without preparation or seed dispatch; each seed rechecks its host.
 Each run retains its ordinary manifest and replay inputs under the printed batch
 path. FAIL and witnessed simulated TIMEOUT continue; infrastructure errors and
 cancellation stop. Count defaults to 1 and seed to the Compose seed. `--json` prints
-one report with separate outcomes and undispatched seeds. Build exploration requires
+one report with separate outcomes and undispatched seeds. Version 2 batch
+checkpoints preserve seed/index dispatch ordering independently of completion order,
+with unfinished/running attribution and a pending suffix. Earlier batch bytes need
+their prior reader; ordinary run inspection/replay is unchanged. Infrastructure
+uncertainty stops new dispatch, cancels only owned work and waits for cleanup.
+Reports separate measured process-family CPU, elapsed wall, peak active attempts
+and summed completed-attempt wall (a conservative guest-core charge once all
+owned attempts return, not exact lease time). Partial sums omit running intervals.
+Real serial/parallel and core invariance still require runtime qualification.
+Build exploration requires
 the inspected local project-Nix Podman closure; cancelled builds remain
 cleanup-unverified ERROR with their private tag retained until cessation is verified.
 See the repository's `docs/runtime.md` for bounded preparation evidence and limits.

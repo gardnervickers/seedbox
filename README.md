@@ -33,12 +33,15 @@ directory. Every runtime input has a default, so no flags are required:
 | --- | --- | --- |
 | Compose file | `compose.yaml` in the given directory (default `.`) | positional path |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
-| Exploration count | `1`, sequential execution | `--count` |
+| Exploration count | `1` | `--count` |
+| Exploration workers | `1`, sequential execution | `--workers` (1..32; automatic CPU selection for parallel execution) |
+| Torn disk writes | off (drop all unflushed sectors on crash) | `--torn-writes` |
 | CPU | first free core other than CPU 0's, under the shared lease | `--cpu`, `SEEDBOX_CPU` |
 | Guest kernel | `bzImage` in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`, `./artifacts`, then `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | `seedbox-vmm` next to an installed `seedbox`, then this checkout's `cargo build-vmm` output, then on `PATH`; `cargo run` builds it if missing | `--vmm`, `SEEDBOX_VMM` |
 | Guest supervisor | built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | BusyBox | `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
+| mke2fs (only for named volumes) | `SEEDBOX_MKE2FS` (set by `nix develop`), then a static `mke2fs` on `PATH` | `--mke2fs` |
 | Build epoch | absent; preserve the builder's ordinary timestamp policy | `--build-epoch` (prepare/run/explore; no environment backing) |
 | Engine qualification | pinned engine and guest kernel; dev artifacts require explicit opt-in | `--allow-dev-engine` (run/explore/replay/doctor; no environment backing) |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
@@ -53,10 +56,28 @@ engine. Replay requires this flag and the exact retained engine/kernel hashes;
 bundles preserve the marker. Passing the flag with both pinned artifacts adds no
 marker. All host, CPU, PMU, MSR, lease, ABI and control-channel checks still apply.
 
+`seedbox run --torn-writes` enables seeded partial survival of unflushed
+512-byte disk sectors on crash. It is recorded in run identity and replayed
+automatically. It applies to retained disks; Compose storage is still RAM-backed
+until named-volume disk support lands. See [disk semantics](docs/runtime.md#disk-crash-policy).
+
 `seedbox help run` lists every option. A run prints `OUTCOME: run-directory`;
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
 INCOMPLETE and 124 TIMEOUT. Offline `diff` exits 0 for MATCH, 1 for DIFFERENT,
 and 2 for usage/setup or invalid retained evidence.
+
+Pause a running world from another terminal with `sudo seedbox pause RUN`, then
+continue it with `sudo seedbox resume RUN`. Use the executing attempt directory
+(for replay, its new attempt), identifiable by `RUN/output/host-control`. Both
+commands wait for a boundary acknowledgement. All guests and virtual time freeze;
+wall-time limits and cancellation remain active. See [host pause](docs/runtime.md#host-pause)
+for the mechanism and development-engine verification requirements.
+
+On a VMM failure, text output from `run`, `replay`, `explore` and `inspect`
+also prints up to five non-empty lines from the final 8 KiB of that attempt's
+`output/vmm.stderr` to stderr, prefixed with `vmm stderr:`. Missing or unreadable
+logs do not change the outcome. Retained records and `--json` output are unchanged.
+`inspect` keeps the recorded `error:` line on stdout alongside the run status.
 
 [Draft format and runtime scope](docs/compatibility.md) distinguishes inspection
 and transfer from qualified execution. Same software versions, seed and exact
@@ -66,8 +87,15 @@ may change execution. Release compatibility remains a V0 qualification gate.
 ## Finite exploration
 
 `seedbox explore [COMPOSE] --seed FIRST --count COUNT` runs consecutive seeds
-sequentially, preparing the complete input closure once. Compose defaults to `.`,
-the first seed to the Compose seed, and count to 1. Empty/overflowing ranges fail
+with one worker by default, preparing the complete input closure once. Compose
+defaults to `.`, the first seed to the Compose seed, and count to 1.
+`--workers N` (1..32) permits at most N owned attempts at once; parallel exploration
+requires automatic CPU selection, so omit `--cpu` and `SEEDBOX_CPU`. Before
+preparation, the executor must be able to reserve and admit N distinct eligible
+physical cores together, including their SMT siblings; insufficient capacity is
+ERROR. Those transient reservations are released before OCI work. Each running
+world still owns its ordinary core/sibling lease. Contention afterward is an
+infrastructure error, with no retry or waiting-for-capacity policy. Empty/overflowing ranges fail
 before state creation or preparation. Immutable runtime inputs and host admission are
 checked before the sole preparation; refusal retains batch ERROR without dispatch.
 Each seed uses the ordinary retained-input and leased host rechecks. Application FAIL
@@ -80,7 +108,24 @@ with the existing commands. An unfinished checkpoint remains INCOMPLETE, includi
 when a process dies after committing a run but before updating the batch. The final
 exit precedence is ERROR (2), INCOMPLETE (3), TIMEOUT (124), FAIL (1), PASS (0). `--json` emits one
 report with per-attempt outcomes, undispatched count, elapsed time and CLI process-family
-resource measurements; application logs remain arbitrary bytes.
+resource measurements; application logs remain arbitrary bytes. Checkpoint version 2
+records seed indexes in ascending dispatch order regardless of completion order,
+with `finished: false` for dispatched attempts whose terminal result is not yet
+checkpointed. The pending suffix remains undispatched. Infrastructure or retention
+uncertainty cancels only the batch's owned attempts and joins them before returning;
+a backend blocked in cleanup prevents a prompt completion claim. Version 1 batch
+checkpoints need their prior reader; their bytes and ordinary run manifests remain
+unchanged.
+
+`peak_running` counts active orchestration attempts. `active_attempt_seconds` sums
+their whole wall intervals, including admission, materialization and cleanup; it is
+not exact lease time or measured CPU time. Once all owned attempts return, this
+one-world-per-worker backend can use the sum as a conservative guest-core charge.
+An unfinished checkpoint omits still-running/uncheckpointed intervals and is not
+a complete cumulative charge. CLI process-family CPU totals include
+preparation and reaped children. Parallel scheduling and chosen cores are performance
+choices excluded from run identity; actual serial/parallel and per-core equality
+remain runtime qualification gates.
 
 Exploration `build:` admission currently accepts only the inspected immutable
 project-Nix Linux Podman launcher/native closure in explicit local mode. Unknown
@@ -113,6 +158,59 @@ rebuilt OCI images to have identical bytes.
 | `docs/` | [Vision](docs/vision.md), [runtime instructions](docs/runtime.md), [backends](docs/backends.md), [acceptance record](docs/acceptance.md) |
 | `harness/` | YAML acceptance scenarios, portable checks, low-level world fixtures and their batch runner ([migration map](harness/worlds/README.md)), `msr54.py` |
 | [`tools/mac-tcg/`](tools/mac-tcg/README.md) | Experimental local Mac TCG runner and tests; separate from the production KVM backend |
+
+## Contributor checks
+
+Portable checks must pass at the PR or merge-train head before spending AMD
+host time. Use the fast pre-check on a Mac or any other non-KVM machine:
+
+```sh
+bash harness/mac-check.sh main     # any local revision or branch
+bash harness/mac-check.sh          # current checkout, including local changes
+```
+
+Run from within the checkout on any host inside the project's Nix dev shell.
+With a revision, the script creates a detached worktree under `$TMPDIR` (or `/tmp` if unset) and
+deletes it on a pass; on failure it keeps the worktree and prints its path.
+Without a revision, it checks the existing checkout, including local changes.
+Its first stdout line is `revision: FULL_SHA`. It uses the caller's development
+shell to run, in order:
+
+- `cargo fmt -p seedbox --check`
+- `cargo clippy -p seedbox --all-targets --locked -- -D warnings`
+- `bash harness/acceptance.sh portable`
+
+The portable suite includes workspace tests, both Python unittest suites and
+YAML validation. Workspace builds share a persistent target directory at
+`$XDG_CACHE_HOME/seedbox/precheck-target` when set, otherwise
+`~/Library/Caches/seedbox/precheck-target` on macOS or
+`~/.cache/seedbox/precheck-target` elsewhere. `SEEDBOX_PRECHECK_TARGET` overrides
+that path; an existing `CARGO_TARGET_DIR` is respected when the override is unset.
+Relative overrides resolve from the invoking directory, before entering a
+revision worktree. Cargo fingerprints determine which build outputs can be reused.
+
+All steps run even if an earlier step fails. Command output goes to stderr;
+stdout ends with timed step/phase lines in `harness/host-check.sh`'s exact format:
+`printf '%-8s %s %4ss\n' STEP pass|FAIL SECONDS`, with `phase ` lines preserved.
+The gate exits 0 only if every step passes, and 1 if any step fails; setup errors
+also exit nonzero. The runner comes from the invoking checkout, so it can check
+revisions that predate the script.
+
+On macOS, the pre-check skips the Linux-only VMM tests and batch supervisor
+lifecycle tests. On Linux, the portable suite includes those tests; VMM tests
+keep their standalone target directory instead of using the workspace cache.
+The pre-check does not execute guests. VMM builds and KVM acceptance remain
+Linux host checks. After the pre-check passes a committed revision, run:
+
+```sh
+bash harness/host-check.sh --skip-portable REV CPU
+```
+
+This skips fmt, clippy and the portable suite (including workspace tests), while
+keeping the CLI build, VMM build (unless `SEEDBOX_VMM` selects a stored engine),
+VMM tests and AMD smoke checks. Both gates print the full SHA; match them before
+using the skip option. A pre-check with local changes only verifies those local
+bytes and does not establish a pass for the committed SHA.
 
 ## How execution is controlled
 
@@ -331,6 +429,7 @@ seedbox run harness/acceptance/workloads/short-kill-3.5.2.yaml
 seedbox run harness/acceptance/workloads/sanity.yaml
 seedbox run harness/acceptance/workloads/race.yaml
 seedbox run harness/acceptance/workloads/kill-3.5.3.yaml
+seedbox run harness/acceptance/workloads/volume-crash.yaml
 ```
 
 The YAML references the existing Go/C workload build contexts and loads the
@@ -347,7 +446,10 @@ etcd 3.5.3 scenario performs twenty. The sanity scenario requires detection of i
 planted missing acknowledgement and uses `check.exit_code: 1`, so the acceptance
 command succeeds when that negative control behaves correctly. The race driver
 checks its output and atomic control inside the guest; it does not require a
-particular seed to lose a fixed number of updates.
+particular seed to lose a fixed number of updates. The volume scenario puts
+keys into a single etcd node whose data directory is a named volume, crashes and
+reboots that machine through the control API, and requires every acknowledged
+key to be read back.
 
 Each command uses normal CLI outcomes and exit codes. There is no host-side
 console parsing, scenario verdict, seed pin, automatic retry, or acceptance-only

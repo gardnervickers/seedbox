@@ -16,6 +16,7 @@ pub mod exploration;
 pub mod guest;
 #[cfg(any(target_os = "linux", test))]
 mod host;
+pub mod host_control;
 pub mod image;
 pub mod logs;
 pub mod oci;

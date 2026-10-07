@@ -5,14 +5,15 @@ use std::{
 };
 
 /// Run the CLI with a scrubbed environment: no `SEEDBOX_*`, `CARGO*` or
-/// `SUDO_USER` variables, `HOME` at `cwd`, and `PATH` set to `path` (empty if
-/// `None`), so no default can come from the developer's machine.
+/// `SUDO_USER` variables, `HOME` and scratch storage at `cwd`, and `PATH` set to
+/// `path` (empty if `None`), so no default can come from the developer's machine.
 fn seedbox_with(args: &[&str], cwd: &Path, path: Option<&Path>) -> Output {
     Command::new(env!("CARGO_BIN_EXE_seedbox"))
         .args(args)
         .current_dir(cwd)
         .env_clear()
         .env("HOME", cwd)
+        .env("TMPDIR", cwd)
         .env("PATH", path.map(Path::as_os_str).unwrap_or_default())
         .output()
         .unwrap()
@@ -24,6 +25,95 @@ fn seedbox(args: &[&str], cwd: &Path) -> Output {
 
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn host_pause_commands_acknowledge_boundaries_and_reject_inactive_runs() {
+    let directory = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+    let cwd = directory.path();
+    for command in ["pause", "resume"] {
+        let help = seedbox(&["help", command], cwd);
+        assert!(help.status.success());
+        assert!(String::from_utf8_lossy(&help.stdout).contains("<RUN>"));
+        let missing = seedbox(&[command], cwd);
+        assert_eq!(missing.status.code(), Some(2));
+        assert!(stderr(&missing).contains("<RUN>"));
+        let inactive = seedbox(&[command, "old-run"], cwd);
+        assert_eq!(inactive.status.code(), Some(2));
+        assert_eq!(stderr(&inactive), "error: host control old-run: not available; use an executing run/replay with a host-control engine and the same user (or root)\n");
+    }
+    fs::create_dir_all(cwd.join("run/output")).unwrap();
+    let socket = cwd.join("socket");
+    fs::write(
+        cwd.join("run/output/host-control"),
+        socket.as_os_str().as_encoded_bytes(),
+    )
+    .unwrap();
+    let server = std::os::unix::net::UnixDatagram::bind(&socket).unwrap();
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            for (request, response) in [
+                (b"pause".as_slice(), b"paused".as_slice()),
+                (b"resume", b"running"),
+            ] {
+                let mut bytes = [0; 32];
+                let (n, peer) = server.recv_from(&mut bytes).unwrap();
+                assert_eq!(&bytes[..n], request);
+                server
+                    .send_to(response, peer.as_pathname().unwrap())
+                    .unwrap();
+            }
+        });
+        for (command, status) in [("pause", "PAUSED"), ("resume", "RESUMED")] {
+            let output = seedbox(&[command, "run"], cwd);
+            assert!(output.status.success(), "{}", stderr(&output));
+            assert!(output.stderr.is_empty());
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                format!("{status}: run\n")
+            );
+        }
+        worker.join().unwrap();
+    });
+    drop(server);
+    fs::remove_file(socket).unwrap();
+    let stale = seedbox(&["pause", "run"], cwd);
+    assert_eq!(stale.status.code(), Some(2));
+    assert!(stderr(&stale).contains("not available"));
+}
+
+#[test]
+fn host_pause_rejects_invalid_acknowledgements_and_bounds_missing_replies() {
+    let directory = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+    let cwd = directory.path();
+    fs::create_dir_all(cwd.join("run/output")).unwrap();
+    let socket = cwd.join("socket");
+    fs::write(
+        cwd.join("run/output/host-control"),
+        socket.as_os_str().as_encoded_bytes(),
+    )
+    .unwrap();
+    let server = std::os::unix::net::UnixDatagram::bind(socket).unwrap();
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            let mut bytes = [0; 32];
+            let (_, peer) = server.recv_from(&mut bytes).unwrap();
+            server
+                .send_to(b"invalid", peer.as_pathname().unwrap())
+                .unwrap();
+            // Receive the second request but deliberately never acknowledge it.
+            server.recv_from(&mut bytes).unwrap();
+        });
+        let invalid = seedbox(&["resume", "run"], cwd);
+        assert_eq!(invalid.status.code(), Some(2));
+        assert!(invalid.stdout.is_empty());
+        assert_eq!(stderr(&invalid), "error: host control run: invalid boundary acknowledgement; use an executing run/replay with a host-control engine and the same user (or root)\n");
+        let unanswered = seedbox(&["pause", "run"], cwd);
+        assert_eq!(unanswered.status.code(), Some(2));
+        assert!(unanswered.stdout.is_empty());
+        assert_eq!(stderr(&unanswered), "error: host control run: no boundary acknowledgement within 5s (request may still take effect); use an executing run/replay with a host-control engine and the same user (or root)\n");
+        worker.join().unwrap();
+    });
 }
 
 #[test]
@@ -291,6 +381,23 @@ fn busybox_default_requires_a_static_busybox_on_path() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn an_explicit_mke2fs_must_exist() {
+    let (directory, mut args) = runtime_project();
+    let busybox = directory.path().join("busybox");
+    fs::write(&busybox, b"").unwrap();
+    args.extend(["--busybox".into(), busybox.to_str().unwrap().to_owned()]);
+    args.extend(["--mke2fs".into(), "/nonexistent/mke2fs".into()]);
+    let args: Vec<_> = args.iter().map(String::as_str).collect();
+    let output = seedbox(&args, directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        "error: --mke2fs /nonexistent/mke2fs: not found\n"
+    );
+}
+
 #[test]
 fn explore_bounds_and_help_are_public_before_runtime_inputs_or_state() {
     let directory = tempfile::tempdir().unwrap();
@@ -310,6 +417,28 @@ fn explore_bounds_and_help_are_public_before_runtime_inputs_or_state() {
     );
     assert_eq!(stderr(&overflow),"error: --seed/--count: range is empty or overflows u64; use a positive --count and reduce the range\n");
     assert!(!project.join(".seedbox").exists());
+    for workers in ["0", "33", "nope"] {
+        let output = seedbox(&["explore", "--workers", workers], &project);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).contains("--workers"));
+        assert!(!project.join(".seedbox").exists());
+    }
+    let pinned = seedbox(&["explore", "--workers", "2", "--cpu", "4"], &project);
+    assert_eq!(pinned.status.code(), Some(2));
+    assert_eq!(stderr(&pinned), "error: --workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU\n");
+    assert!(!project.join(".seedbox").exists());
+    let env_pinned = Command::new(env!("CARGO_BIN_EXE_seedbox"))
+        .args(["explore", "--workers", "2"])
+        .current_dir(&project)
+        .env_clear()
+        .env("HOME", &project)
+        .env("PATH", "")
+        .env("SEEDBOX_CPU", "4")
+        .output()
+        .unwrap();
+    assert_eq!(env_pinned.status.code(), Some(2));
+    assert_eq!(stderr(&env_pinned), stderr(&pinned));
+    assert!(!project.join(".seedbox").exists());
     let boundary = seedbox(
         &["explore", "--seed", "18446744073709551615", "--count", "1"],
         &project,
@@ -325,7 +454,7 @@ fn explore_bounds_and_help_are_public_before_runtime_inputs_or_state() {
             && text.contains("--json")
             && text.contains("Exit status:")
     );
-    assert!(!text.contains("--workers"));
+    assert!(text.contains("--workers"));
     fs::write(project.join("compose.yaml"),"services:\n  a: {image: example/a}\nx-seedbox:\n  version: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: a}\n").unwrap();
     let missing = seedbox(&["explore"], &project);
     assert_eq!(
@@ -457,6 +586,7 @@ fn old_host_proof_replay_is_not_comparable_while_inspection_and_transfer_stay_av
                     user: "".into(),
                     working_dir: "/".into(),
                     volumes: vec![],
+                    disk_volumes: vec![],
                 },
             },
         )]),
@@ -695,6 +825,72 @@ mod diff_tests {
     use super::*;
     use seedbox as sb;
     include!("support/diff_fixture.rs");
+
+    #[test]
+    fn inspect_vmm_failure_shows_bounded_diagnostics_only_on_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run = root.join("failed");
+        let mut record = fixture();
+        record.outcome = sb::orchestration::Outcome::Error;
+        record.report = None;
+        let error = sb::Error::Execution(sb::vmm::VMM_FAILURE_MESSAGE.into()).to_string();
+        record.error = Some(error.clone());
+        write_fixture(&run, &mut record, None, None);
+        let manifest = fs::read(run.join("manifest.json")).unwrap();
+        let diagnostic = run.join("output/vmm.stderr");
+        let overshoot = "overshoot on client: 17 branches past stop target 100";
+        // The old prefix exceeds the read cap; blanks do not consume line slots.
+        fs::write(
+            &diagnostic,
+            format!(
+                "{}\nold\nfirst\n\nsecond\n \t\r\nthird\nERROR: misleading status\n{overshoot}\n\n",
+                "x".repeat(32 * 1024)
+            ),
+        )
+        .unwrap();
+        let expected_stdout = format!("ERROR: fixture (seed 0)\nerror: {error}\n");
+        let output = seedbox(&["inspect", "failed"], root);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
+        assert_eq!(
+            stderr(&output),
+            format!("vmm stderr: first\nvmm stderr: second\nvmm stderr: third\nvmm stderr: ERROR: misleading status\nvmm stderr: {overshoot}\n")
+        );
+        let statuses = output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .chain(output.stderr.split(|byte| *byte == b'\n'))
+            .filter(|line| line.starts_with(b"ERROR: "))
+            .count();
+        assert_eq!(statuses, 1);
+        let json = seedbox(&["inspect", "failed", "--json"], root);
+        assert!(json.status.success());
+        assert!(json.stderr.is_empty());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&json.stdout).unwrap(),
+            serde_json::to_value(&record).unwrap()
+        );
+        assert_eq!(fs::read(run.join("manifest.json")).unwrap(), manifest);
+
+        for bytes in [b"".as_slice(), b"\n \t\r\n"] {
+            fs::write(&diagnostic, bytes).unwrap();
+            let output = seedbox(&["inspect", "failed"], root);
+            assert!(output.status.success());
+            assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
+            assert!(output.stderr.is_empty());
+        }
+        fs::remove_file(&diagnostic).unwrap();
+        let output = seedbox(&["inspect", "failed"], root);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
+        assert!(output.stderr.is_empty());
+        fs::create_dir(&diagnostic).unwrap();
+        let output = seedbox(&["inspect", "failed"], root);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
+        assert!(output.stderr.is_empty());
+    }
 
     #[test]
     fn diff_plain_and_json_status_and_trace_details() {
@@ -1083,4 +1279,30 @@ fn logs_help_is_portable_and_has_no_runtime_options() {
     let out = seedbox(&["logs"], tmp.path());
     assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("<RUN>"));
+}
+
+#[test]
+fn torn_writes_is_opt_in_presence_only_and_replay_uses_the_recorded_policy() {
+    let directory = tempfile::tempdir().unwrap();
+    for command in ["run", "prepare"] {
+        let help = seedbox(&["help", command], directory.path());
+        assert!(help.status.success());
+        let help = String::from_utf8_lossy(&help.stdout);
+        assert!(help.contains("--torn-writes"));
+        assert!(help.contains("off by default"));
+        assert!(!help.contains("SEEDBOX_TORN_WRITES"));
+        let mut args = vec![command, "--torn-writes"];
+        if command == "prepare" {
+            args.extend(["--output", "out.json"]);
+        }
+        let output = seedbox(&args, directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(stderr(&output), "error: no Compose file found; searched:\n  ./compose.yaml\n  ./compose.yml\n  ./docker-compose.yaml\n  ./docker-compose.yml\npass the file path directly\n");
+        let output = seedbox(&[command, "--torn-writes=false"], directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).contains("--torn-writes"));
+    }
+    let output = seedbox(&["replay", "run", "--torn-writes"], directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("unexpected argument '--torn-writes'"));
 }

@@ -1,6 +1,7 @@
 //! The `seedbox` command line. Style rules for changes: `AGENTS.md`, "CLI".
 
 mod defaults;
+mod diagnostics;
 mod signals;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -18,7 +19,7 @@ use seedbox::{
     preparation::OciPreparer,
     store::ContentStore,
     templates::Template,
-    vmm::{recorded_counter, VmmExecutor},
+    vmm::{recorded_counter, recorded_torn_writes, VmmExecutor},
     Error, Result,
 };
 use signals::Signals;
@@ -34,6 +35,14 @@ Exit status:
   2    ERROR, a replay that is NOT_COMPARABLE, or a usage or setup error
   3    INCOMPLETE (wall-time limit or cancelled)
   124  TIMEOUT (simulated-time limit)";
+
+const HOST_CONTROL_HELP: &str = "\
+Host execution control:
+  seedbox pause RUN     Wait for a host slice-boundary pause
+  seedbox resume RUN    Resume the same live world
+Pause preserves guest time and witnesses. Wall-time limits and cancellation remain active.
+The executing attempt has an output/host-control locator; replay uses its new attempt.";
+const VMM_FAILURE_HELP: &str = "Text VMM failures also show up to 5 non-empty lines from the final 8 KiB of output/vmm.stderr on stderr; JSON output is unchanged.";
 
 #[derive(Parser)]
 #[command(
@@ -94,7 +103,7 @@ enum Command {
         build: BuildOptions,
     },
     /// Prepare images and run a simulation (Linux KVM host, root).
-    #[command(after_help = EXIT_CODES)]
+    #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
     Run {
         #[command(flatten)]
         compose: ComposeArg,
@@ -113,16 +122,19 @@ enum Command {
         performance: Performance,
     },
     /// Explore a finite seed sequence with one frozen preparation (Linux KVM host, root).
-    #[command(after_help = EXIT_CODES)]
+    #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
     Explore {
         #[command(flatten)]
         compose: ComposeArg,
         /// First simulation seed [default: x-seedbox.seed from the Compose file].
         #[arg(long)]
         seed: Option<u64>,
-        /// Number of consecutive seeds to execute sequentially.
+        /// Number of consecutive seeds to execute.
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..))]
         count: u64,
+        /// Maximum active attempts; omit --cpu for parallel execution.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=32))]
+        workers: u32,
         /// Print exactly one exploration report as JSON.
         #[arg(long)]
         json: bool,
@@ -138,7 +150,7 @@ enum Command {
         performance: Performance,
     },
     /// Re-execute a recorded run from its retained inputs and compare (Linux KVM host, root).
-    #[command(after_help = EXIT_CODES)]
+    #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
     Replay {
         /// Run directory, as printed by `run`.
         run: PathBuf,
@@ -155,6 +167,18 @@ enum Command {
         // Last: its help heading applies to every flag declared after it.
         #[command(flatten)]
         performance: Performance,
+    },
+    /// Pause host execution at a slice boundary (Linux KVM host, same user or root).
+    #[command(after_help = HOST_CONTROL_HELP)]
+    Pause {
+        /// Directory of the executing run or replay attempt.
+        run: PathBuf,
+    },
+    /// Resume host execution from a paused slice boundary (Linux KVM host, same user or root).
+    #[command(after_help = HOST_CONTROL_HELP)]
+    Resume {
+        /// Directory of the executing run or replay attempt.
+        run: PathBuf,
     },
     /// Export a recorded run and its retained inputs and logs.
     Export {
@@ -208,7 +232,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show a recorded run after verifying its manifest.
+    /// Show a recorded run, including its error on stdout, after verifying its manifest.
+    #[command(after_help = VMM_FAILURE_HELP)]
     Inspect {
         /// Run directory, as printed by `run` or `replay`.
         run: PathBuf,
@@ -334,6 +359,9 @@ struct RuntimeInputs {
     /// Static Linux amd64 BusyBox [default: busybox on PATH, if static].
     #[arg(long, env = "SEEDBOX_BUSYBOX")]
     busybox: Option<PathBuf>,
+    /// Static Linux amd64 mke2fs, for named volumes [default: mke2fs on PATH, if static].
+    #[arg(long, env = "SEEDBOX_MKE2FS")]
+    mke2fs: Option<PathBuf>,
     /// Docker-compatible client for `build:` services.
     #[arg(long, default_value = "podman")]
     builder: PathBuf,
@@ -343,6 +371,9 @@ struct RuntimeInputs {
     /// Also record and compare every machine's RAM and registers.
     #[arg(long)]
     full_state: bool,
+    /// Keep a seeded subset of unflushed disk sectors on crash (512-byte atomicity; off by default).
+    #[arg(long)]
+    torn_writes: bool,
 }
 
 impl RuntimeInputs {
@@ -360,7 +391,8 @@ impl RuntimeInputs {
         } else {
             WitnessMode::Exits
         };
-        let executor = VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?;
+        let executor = VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?
+            .with_torn_writes(self.torn_writes);
         let preparer = self.preparer(engine, store, scratch, executor.profile())?;
         Ok((preparer, executor))
     }
@@ -387,6 +419,7 @@ impl RuntimeInputs {
             engine,
             init: defaults::guest_init(self.guest_init.clone(), store, scratch)?,
             busybox: defaults::busybox(self.busybox.clone())?,
+            mke2fs: defaults::mke2fs(self.mke2fs.clone())?,
             profile,
         })
     }
@@ -461,6 +494,16 @@ pub fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<u8> {
     match cli.command {
+        Command::Pause { run } => {
+            let status = seedbox::host_control::set_paused(&run, true)?;
+            println!("{}: {}", word(&status), run.display());
+            Ok(0)
+        }
+        Command::Resume { run } => {
+            let status = seedbox::host_control::set_paused(&run, false)?;
+            println!("{}: {}", word(&status), run.display());
+            Ok(0)
+        }
         Command::Init {
             directory,
             template,
@@ -591,6 +634,7 @@ fn run(cli: Cli) -> Result<u8> {
             compose,
             seed,
             count,
+            workers,
             json,
             cpu,
             state,
@@ -605,9 +649,13 @@ fn run(cli: Cli) -> Result<u8> {
             let options = ExploreOptions {
                 seed,
                 count,
+                workers,
                 cancellation: cancellation.clone(),
             };
             exploration::bounds(&simulation, &options)?;
+            if workers > 1 && cpu.cpu.is_some() {
+                return Err(Error::Setup("--workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU".into()));
+            }
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
             let detected = CounterProfile::host();
@@ -642,6 +690,12 @@ fn run(cli: Cli) -> Result<u8> {
             } else {
                 println!("{}: {}", word(&result.outcome), result.directory.display());
                 println!("seeds: {}..={}", result.first_seed, result.last_seed);
+                println!("workers: {}", result.workers);
+                println!("peak-running: {}", result.peak_running);
+                println!(
+                    "active-attempt-seconds: {:.3}",
+                    result.active_attempt_seconds
+                );
                 println!("attempted: {}", result.attempts.len());
                 println!("pass: {}", result.counts.pass);
                 println!("fail: {}", result.counts.fail);
@@ -662,6 +716,7 @@ fn run(cli: Cli) -> Result<u8> {
                         );
                         if let Some(error) = &attempt.error {
                             eprintln!("error: seed {}: {error}", attempt.seed);
+                            diagnostics::vmm_failure(directory, error);
                         }
                     }
                 }
@@ -720,6 +775,7 @@ fn run(cli: Cli) -> Result<u8> {
                     profile.witness_mode.clone(),
                     counter,
                 )?
+                .with_torn_writes(recorded_torn_writes(profile)?)
                 .with_unqualified_cpu(cpu.allow_unqualified_cpu)
                 .with_dev_engine(cpu.allow_dev_engine, &previous.identity.inputs.kernel),
             )?;
@@ -921,6 +977,7 @@ fn run(cli: Cli) -> Result<u8> {
             }
             if let Some(error) = record.error {
                 println!("error: {error}");
+                diagnostics::vmm_failure(&run, &error);
             }
             Ok(0)
         }
@@ -970,6 +1027,7 @@ fn report(run: &orchestration::Run) -> u8 {
     }
     if let Some(error) = &run.record.error {
         eprintln!("{error}");
+        diagnostics::vmm_failure(&run.directory, error);
     }
     if let Some(replay) = &run.record.replay {
         let label = if seedbox::admission::is_dev_engine(&run.record.identity.inputs.profile) {
