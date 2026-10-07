@@ -738,6 +738,72 @@ mod diff_tests {
     include!("support/diff_fixture.rs");
 
     #[test]
+    fn inspect_vmm_failure_shows_bounded_diagnostics_only_on_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run = root.join("failed");
+        let mut record = fixture();
+        record.outcome = sb::orchestration::Outcome::Error;
+        record.report = None;
+        let error = sb::Error::Execution(sb::vmm::VMM_FAILURE_MESSAGE.into()).to_string();
+        record.error = Some(error.clone());
+        write_fixture(&run, &mut record, None, None);
+        let manifest = fs::read(run.join("manifest.json")).unwrap();
+        let diagnostic = run.join("output/vmm.stderr");
+        let overshoot = "overshoot on client: 17 branches past stop target 100";
+        // The old prefix exceeds the read cap; blanks do not consume line slots.
+        fs::write(
+            &diagnostic,
+            format!(
+                "{}\nold\nfirst\n\nsecond\n \t\r\nthird\nERROR: misleading status\n{overshoot}\n\n",
+                "x".repeat(32 * 1024)
+            ),
+        )
+        .unwrap();
+        let expected_stdout = format!("ERROR: fixture (seed 0)\nerror: {error}\n");
+        let output = seedbox(&["inspect", "failed"], root);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
+        assert_eq!(
+            stderr(&output),
+            format!("vmm stderr: first\nvmm stderr: second\nvmm stderr: third\nvmm stderr: ERROR: misleading status\nvmm stderr: {overshoot}\n")
+        );
+        let statuses = output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .chain(output.stderr.split(|byte| *byte == b'\n'))
+            .filter(|line| line.starts_with(b"ERROR: "))
+            .count();
+        assert_eq!(statuses, 1);
+        let json = seedbox(&["inspect", "failed", "--json"], root);
+        assert!(json.status.success());
+        assert!(json.stderr.is_empty());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&json.stdout).unwrap(),
+            serde_json::to_value(&record).unwrap()
+        );
+        assert_eq!(fs::read(run.join("manifest.json")).unwrap(), manifest);
+
+        for bytes in [b"".as_slice(), b"\n \t\r\n"] {
+            fs::write(&diagnostic, bytes).unwrap();
+            let output = seedbox(&["inspect", "failed"], root);
+            assert!(output.status.success());
+            assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
+            assert!(output.stderr.is_empty());
+        }
+        fs::remove_file(&diagnostic).unwrap();
+        let output = seedbox(&["inspect", "failed"], root);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
+        assert!(output.stderr.is_empty());
+        fs::create_dir(&diagnostic).unwrap();
+        let output = seedbox(&["inspect", "failed"], root);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
     fn diff_plain_and_json_status_and_trace_details() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
