@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import subprocess
@@ -157,6 +158,11 @@ class SmokeTests(unittest.TestCase):
             pair.assert_called_once()
             snapshot.assert_not_called()
         self.assertTrue((root / 'wrong-kernel-input').is_file())
+        # The template is generated into the campaign, with the control API copied in.
+        project = root / 'project/fixed'
+        self.assertEqual(json.loads((root / 'wrong-kernel/command.json').read_text())[2], str(project))
+        self.assertTrue((project / 'compose.yaml').is_file())
+        self.assertTrue((project / 'workload/seedbox').is_dir())
         self.assertTrue((root / 'wrong-kernel').is_dir())
         self.assertEqual((root / 'wrong-kernel/stdout').read_bytes(), b'')
         self.assertTrue((root / 'wrong-kernel/wall.json').is_file())
