@@ -2,6 +2,7 @@
 import argparse
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -178,6 +179,15 @@ def verify_performance(base, replay, parameter=None, value=None):
         raise RuntimeError('recorded performance parameters differ from the requested change')
 
 
+def faults_project(destination):
+    """The fixed examples/faults project, generated self-contained: the
+    template's build contexts need python/seedbox copied in."""
+    spec = importlib.util.spec_from_file_location('faults_generate', REPO / 'examples/faults/generate.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.generate(destination) / 'fixed'
+
+
 class Campaign:
     def __init__(self, args, root, deadline):
         self.args, self.root, self.deadline = args, root, deadline
@@ -253,6 +263,7 @@ class Campaign:
         a = self.args
         runtime = ['--kernel', str(a.kernel), '--vmm', str(a.engine), '--guest-init', str(a.guest_init),
                    '--busybox', str(a.busybox), '--cpu', str(a.cpu), '--state', str(self.state), '--memory-mb', '512']
+        project = str(faults_project(self.root / 'project'))
         wrong = self.root / 'wrong-kernel-input'
         wrong.write_bytes(b'private wrong kernel; real kernel unchanged\n')
         invalid = runtime.copy()
@@ -260,7 +271,7 @@ class Campaign:
         # This refusal control always uses the pinned engine without dev permission.
         if getattr(a, 'pinned_engine', None) is not None:
             invalid[invalid.index('--vmm') + 1] = str(a.pinned_engine)
-        code, stdout, stderr = self.invoke('wrong-kernel', [str(a.cli), 'run', str(REPO / 'examples/faults'), *invalid])
+        code, stdout, stderr = self.invoke('wrong-kernel', [str(a.cli), 'run', project, *invalid])
         if code != 2 or stdout or 'guest kernel is outside the admitted host policy' not in stderr:
             raise RuntimeError('wrong kernel did not receive the required policy refusal; stop')
         if self.state.exists() and any(self.state.rglob('manifest.json')):
@@ -281,7 +292,7 @@ class Campaign:
         code, stdout, _ = self.invoke('doctor-json', [*doctor_args, '--json'])
         if code != 0 or json.loads(stdout).get('engine_qualification') != ('dev-unpinned' if dev_engine else None):
             raise RuntimeError('doctor JSON qualification differs from smoke mode')
-        code, stdout, _ = self.invoke('fixed', [str(a.cli), 'run', str(REPO / 'examples/faults'), '--seed', '1009', '--full-state', *runtime], True)
+        code, stdout, _ = self.invoke('fixed', [str(a.cli), 'run', project, '--seed', '1009', '--full-state', *runtime], True)
         if code != 0:
             raise RuntimeError('fixed baseline failed')
         baseline_run = result_directory(stdout, self.state, self.last_run)

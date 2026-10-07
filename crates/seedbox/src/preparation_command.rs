@@ -52,9 +52,9 @@ pub(crate) fn inspect_native_builder(requested: &Path) -> Result<NativeBuilder> 
     let native_hash = fs::read(&native).map(|b| ContentDigest::of(&b)).ok();
     let admitted = cfg!(target_os = "linux")
         && launcher.starts_with("/nix/store")
-        && launch_hash.hex() == "e08e27ef8cbb231dd85f8f343d7af0428c7b996ace2f17ee78bd6c4391a3aa06"
+        && launch_hash.hex() == "e6af7244c45039a6e91ab6b3800c66115516fefeba325503b756856c10d62e84"
         && native_hash.as_ref().is_some_and(|h| {
-            h.hex() == "94a99b74250736f3f89426be43870d499aa6a03a53c02fe9ca6753e324255344"
+            h.hex() == "678a185b5553ef52c0e8b0b5adbc240c99202600a328f25ddeae71cbbcac0de2"
         });
     Ok(NativeBuilder {
         launcher,

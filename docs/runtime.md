@@ -304,6 +304,17 @@ arrival times strictly before admission. A packet physically delivered in an
 early scheduler window is excluded until its nominal arrival precedes that
 boundary. Final report counters still record physical NIC acceptance totals.
 
+Faults and control requests that take effect at the same simulated time T are
+ordered against sends as follows. The world applies a boundary at T only once
+every machine has reached T, so a machine that is still running before T keeps
+sending under the earlier network state, even when another machine is already
+waiting at T. At T, control admission and effects come first, then faults in
+ID order, and only then does any machine run, so every frame sent at T or
+later sees the new state. A frame's partition decision and arrival time are
+fixed when it is sent; a later partition or heal never changes a frame already
+in flight. A slice that runs up to a boundary always ends before the guest can
+send at the boundary itself, so no frame is ever stamped at or after a boundary
+that hasn't been applied yet.
 
 ## Exploration preparation
 

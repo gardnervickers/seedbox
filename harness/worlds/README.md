@@ -79,6 +79,14 @@ no jitter and no faults therefore runs identically for every seed after a
 time fork, which is why `cluster-fork-late.json` adds jitter. Run it the same
 way, with `fork-late-cold` and `fork-late-loop` prefixes.
 
+The `scenario` partitions these fixtures use are older than the runtime fault
+API and don't follow its same-time ordering (see
+[docs/runtime.md](../../docs/runtime.md)). Each is queued at the sending machine
+and turns on or off when that machine's next slice starts, which can be up to
+the early-delivery window (half the link latency, at most `stop_tolerance_ns`)
+before its `at_ns`. Frames sent in that window already see the new state. New
+scenarios should use `faults` or the runtime fault API instead.
+
 Times in a forked world's plan (`faults[].at_ns`, `scenario[].at_ns`,
 `kill_restart.start_ns`) must be at or after the release, the fork point plus
 `boot.release_skew_ns`; an earlier time is an error, checked before boot for a

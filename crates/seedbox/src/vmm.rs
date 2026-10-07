@@ -336,8 +336,8 @@ impl ExecutionBackend for VmmExecutor {
         })
     }
     fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {
-        self.validate_execution_mode()?;
         crate::admission::admit_artifacts(&inputs.profile, &inputs.kernel, self.allow_dev_engine)?;
+        self.validate_execution_mode()?;
         if recorded_counter(&inputs.profile)? != self.counter {
             return Err(Error::Integrity(
                 "recorded branch counter differs from executor".into(),
