@@ -95,3 +95,10 @@ of different commits can run at once on different pairs; builds run niced and
 unpinned, and only the smoke tier uses the pair. A pass deletes the worktree
 and evidence and keeps `~/host-check-SHA-cpuN-XXXX.txt` with step and phase times; a failure keeps everything
 and prints its path.
+
+After `bash harness/mac-check.sh REV` passes on any host in the project Nix shell,
+use `harness/host-check.sh --skip-portable REV CPU` to skip fmt, clippy and the
+portable suite's workspace/Python checks and YAML validation. VMM tests still
+run explicitly, and the CLI build, conditional VMM build and smoke tier remain.
+Both scripts print the full checked SHA so the pre-check and host results can be
+matched. The pre-check retains failed worktrees and deletes passing ones.
