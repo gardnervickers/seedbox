@@ -141,7 +141,7 @@ fn query(file: &File, command: libc::c_ulong, argument: libc::c_ulong) -> Result
     Ok(result)
 }
 
-// Matches engine168ad counter.rs::PerfAttr exactly; no enable/fcntl/mmap follows.
+// Matches frozen engineff96 counter.rs::PerfAttr; no enable/fcntl/mmap follows.
 #[repr(C)]
 #[derive(Default)]
 struct PerfAttr {
@@ -155,21 +155,24 @@ struct PerfAttr {
     rest: [u64; 10],
 }
 fn disabled_perf() -> Result<File> {
-    let policy = required_policy()?;
+    open_disabled_perf(disabled_counter_spec(crate::counter::CounterProfile::Zen))
+}
+fn open_disabled_perf(spec: DisabledCounterSpec) -> Result<File> {
     let attr = PerfAttr {
-        kind: policy.perf_type,
+        kind: spec.kind,
         size: std::mem::size_of::<PerfAttr>() as u32,
-        config: policy.perf_config,
-        period: policy.perf_period,
-        read_format: policy.perf_read_format,
-        flags: policy.perf_flags,
+        config: spec.config,
+        period: spec.period,
+        read_format: spec.read_format,
+        flags: spec.flags,
         ..Default::default()
     };
-    let fd = unsafe { libc::syscall(libc::SYS_perf_event_open, &attr, 0, -1, -1, PERF_OPEN_FLAGS) }
+    let fd = unsafe { libc::syscall(libc::SYS_perf_event_open, &attr, 0, -1, -1, spec.open_flags) }
         as i32;
     if fd < 0 {
         return Err(Error::Setup(format!(
-            "disabled exact-event perf admission: {}; run as root on the admitted host",
+            "disabled exact-event perf admission {:#x}: {}; run as root on a supported KVM host",
+            spec.config,
             std::io::Error::last_os_error()
         )));
     }
@@ -325,7 +328,7 @@ pub(super) fn check_unqualified(cpu: u32, counter: crate::counter::CounterProfil
                     "CPU {cpu}: required KVM capabilities unavailable for experimental execution"
                 )));
             }
-            Ok(())
+            probe_selected_event(counter, open_disabled_perf)
         },
         Affinity::restore,
     )

@@ -150,12 +150,13 @@ path is experimental: it retains the counter in identity, validates exact
 supported release inputs and applicable KVM capabilities, and holds every SMT
 lease through child cleanup. It carries no qualified AMD host-policy proof and
 never opens AMD workaround MSRs. `doctor` refuses an unqualified counter rather
-than reporting qualified compatibility. The current source integration still
-pins engine168ad and its guest kernel; the incoming counter-aware engine requires
-a separately reviewed release-policy update and runtime acceptance before this
-staged path is usable. It does not establish Intel determinism.
+than reporting qualified compatibility. The source policy now pins the frozen engineff96 and accepted guest kernel.
+The artifact is built but unqualified: this staged release still requires fresh
+runtime acceptance before use. Disabled selected-event readiness is checked
+before preparation and again under held leases; no guest counter is enabled by
+admission. Intel determinism is not established.
 
-The versioned `amd-zen3-engine168ad-v1` admission policy checks AMD family 25,
+The versioned `amd-zen3-engineff96-v1` admission policy checks AMD family 25,
 model 33, stepping 0 and microcode 0xa20102e, exact booted/current host kernel and
 controlled guest-kernel bytes, accepted engine bytes, KVM capabilities and the
 engine's complete existing CPUID policy. Before image preparation, it temporarily

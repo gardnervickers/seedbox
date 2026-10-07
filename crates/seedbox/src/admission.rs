@@ -1,11 +1,11 @@
-//! Versioned host readiness for the unchanged engine168ad CPUID/PMU policy.
+//! Versioned host readiness for the frozen engineff96 CPUID/PMU policy.
 //! Matching another machine admits compatibility; it is not replay qualification.
 use crate::{execution::ExecutionProfile, store::ContentDigest, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, io::Read, path::Path};
 
-pub const POLICY_VERSION: &str = "amd-zen3-engine168ad-v1";
-pub const ENGINE: &str = "168ad5db0e63919a3c04dbfed6c22f133aa14600747db4f64ebc3f3dc2c37c7d";
+pub const POLICY_VERSION: &str = "amd-zen3-engineff96-v1";
+pub const ENGINE: &str = "ff96f8e2bc4a0643a5d5ec17e4efffdf5caed140ff48400fcfbb7226f511c772";
 pub const GUEST_KERNEL: &str = "e8ece7cba2d5fc4924da83e39cc672ae2516c117f8f76ecfa04aeaa98e697847";
 const HOST_KERNEL: &str = "66111c2888091bd64e96e71a6a9e831ab5496d6c6272add5d81490396bfa3cdc";
 
@@ -50,7 +50,7 @@ pub struct CpuidEntry {
     pub padding: [u32; 3],
 }
 
-/// Exact engine168ad machine.rs::guest_cpuid filter, without sorting or omissions.
+/// Frozen engineff96 guest_cpuid filter, unchanged from engine168ad; no sorting or omissions.
 pub fn effective_cpuid(raw: &[CpuidEntry]) -> Vec<CpuidEntry> {
     let mut entries = raw.to_vec();
     for e in &mut entries {
@@ -351,6 +351,41 @@ pub(crate) fn finish_admission(
     }
 }
 
+/// Disabled readiness attributes. Counting fields match frozen VMM Counter::new;
+/// admission alone sets CLOEXEC atomically, protecting descriptor inheritance.
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DisabledCounterSpec {
+    pub kind: u32,
+    pub config: u64,
+    pub period: u64,
+    pub read_format: u64,
+    pub flags: u64,
+    pub open_flags: u64,
+}
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
+pub(crate) fn disabled_counter_spec(
+    counter: crate::counter::CounterProfile,
+) -> DisabledCounterSpec {
+    DisabledCounterSpec {
+        kind: 4,
+        config: counter.branch_event(),
+        period: 1 << 62,
+        read_format: 3,
+        flags: 1 | (1 << 2) | (1 << 19),
+        open_flags: PERF_OPEN_FLAGS,
+    }
+}
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
+fn probe_selected_event<T>(
+    counter: crate::counter::CounterProfile,
+    open: impl FnOnce(DisabledCounterSpec) -> Result<T>,
+) -> Result<()> {
+    let descriptor = open(disabled_counter_spec(counter))?;
+    drop(descriptor); // No enable, map, read or descriptor survives affinity restore.
+    Ok(())
+}
+
 // PERF_FLAG_FD_CLOEXEC: set atomically by perf_event_open, never by later fcntl.
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
 const PERF_OPEN_FLAGS: u64 = 1 << 3;
@@ -605,6 +640,162 @@ mod cleanup_tests {
         assert!(bounded.len() < 8400);
         assert!(bounded.contains("[truncated]"));
     }
+    #[test]
+    fn selected_disabled_events_match_frozen_counting_fields_and_close_before_restore() {
+        use crate::counter::CounterProfile;
+        use std::{io::Read, os::unix::net::UnixStream, time::Duration};
+        let policy = required_policy().unwrap();
+        let vmm = include_str!("../../seedbox-vmm/src/counter.rs");
+        assert!(vmm.contains("&attr, 0, -1, -1, 0")); // Sole deliberate syscall difference is CLOEXEC8.
+        for (counter, event) in [
+            (CounterProfile::Zen, 0x5100d1),
+            (CounterProfile::IntelSkylake, 0x5101c4),
+            (CounterProfile::IntelIceLake, 0x5111c4),
+        ] {
+            let spec = disabled_counter_spec(counter);
+            assert_eq!(
+                (
+                    spec.kind,
+                    spec.config,
+                    spec.period,
+                    spec.read_format,
+                    spec.flags,
+                    spec.open_flags
+                ),
+                (4, event, 1 << 62, 3, 1 | (1 << 2) | (1 << 19), 8)
+            );
+            if counter == CounterProfile::Zen {
+                assert_eq!(
+                    (
+                        spec.kind,
+                        spec.config,
+                        spec.period,
+                        spec.read_format,
+                        spec.flags
+                    ),
+                    (
+                        policy.perf_type,
+                        policy.perf_config,
+                        policy.perf_period,
+                        policy.perf_read_format,
+                        policy.perf_flags
+                    )
+                );
+            }
+            let (mut reader, writer) = UnixStream::pair().unwrap();
+            reader
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            scoped_probe(
+                (),
+                || {
+                    probe_selected_event(counter, |actual| {
+                        assert_eq!(actual, spec);
+                        Ok(writer)
+                    })
+                },
+                |_| {
+                    let mut byte = [0];
+                    assert_eq!(
+                        reader.read(&mut byte).unwrap(),
+                        0,
+                        "probe descriptor must close before restoring affinity"
+                    );
+                    Ok(())
+                },
+            )
+            .unwrap();
+            for restore_fails in [false, true] {
+                let mut restored = false;
+                let error = scoped_probe(
+                    (),
+                    || {
+                        probe_selected_event::<()>(counter, |actual| {
+                            assert_eq!(actual.config, event);
+                            Err(Error::Setup(
+                                "perf_event_open: Permission denied (os error 13)".into(),
+                            ))
+                        })
+                    },
+                    |_| {
+                        restored = true;
+                        if restore_fails {
+                            Err(Error::Execution("affinity readback mismatch".into()))
+                        } else {
+                            Ok(())
+                        }
+                    },
+                )
+                .unwrap_err()
+                .to_string();
+                assert!(restored);
+                assert!(error.contains("os error 13"));
+                assert_eq!(
+                    error.contains("host preflight cleanup failed"),
+                    restore_fails
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn selected_perf_refusal_is_before_application_preparation_or_execution() {
+        use crate::{
+            config,
+            counter::CounterProfile,
+            execution::*,
+            orchestration::{Orchestrator, RunOptions},
+            store::ContentStore,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Refused;
+        impl ExecutionBackend for Refused {
+            fn profile(&self) -> ExecutionProfile {
+                ExecutionProfile {
+                    backend: "fixture".into(),
+                    engine: ContentDigest::of(b"synthetic"),
+                    witness_mode: WitnessMode::Exits,
+                    semantic_parameters: BTreeMap::new(),
+                }
+            }
+            fn preflight(&self, _: Option<&Path>) -> Result<()> {
+                scoped_probe(
+                    (),
+                    || {
+                        probe_selected_event::<()>(CounterProfile::IntelIceLake, |spec| {
+                            assert_eq!(spec.config, 0x5111c4);
+                            Err(Error::Setup("selected event refused: EACCES (13)".into()))
+                        })
+                    },
+                    |_| Ok(()),
+                )
+            }
+            fn execute(&self, _: ExecutionRequest<'_>) -> Result<ExecutionReport> {
+                panic!("must not execute after event refusal")
+            }
+        }
+        struct Prepare(AtomicUsize);
+        impl PreparationBackend for Prepare {
+            fn prepare(&self, _: &config::Simulation, _: &ContentStore) -> Result<PreparedInputs> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                panic!("must not prepare after event refusal")
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let prepare = Prepare(AtomicUsize::new(0));
+        let simulation=config::parse("name: event-refusal\nservices:\n  app: {image: fixture:synthetic}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n",&root.path().join("compose.yaml"),&BTreeMap::new()).unwrap();
+        let orchestrator = Orchestrator::new(
+            ContentStore::new(root.path().join("objects")),
+            root.path().join("runs"),
+        );
+        let error = orchestrator
+            .run(&simulation, RunOptions::default(), &prepare, &Refused)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("EACCES (13)"));
+        assert_eq!(prepare.0.load(Ordering::SeqCst), 0);
+    }
+
     #[test]
     fn perf_open_requires_atomic_close_on_exec() {
         // Linux UAPI PERF_FLAG_FD_CLOEXEC, independent of perf event attributes.

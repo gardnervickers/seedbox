@@ -174,6 +174,8 @@ fn previous_full_sorted_policy_proof_remains_not_comparable_and_immutable() {
     )
     .unwrap();
     let mut previous = required_policy().unwrap();
+    previous.version = "amd-zen3-engine168ad-v1".into();
+    previous.engine = "168ad5db0e63919a3c04dbfed6c22f133aa14600747db4f64ebc3f3dc2c37c7d".into();
     // Reconstruct the old recorded proof only; production never sorts observations.
     previous
         .effective_cpuid
@@ -184,7 +186,7 @@ fn previous_full_sorted_policy_proof_remains_not_comparable_and_immutable() {
         old_fingerprint.hex(),
         "411dc2b0286a7d8d96b142d95363500388c37f8e417e0e5483e48b2beb98c3d3"
     );
-    assert_eq!(
+    assert_ne!(
         bindings().unwrap()["host_policy_fingerprint"],
         "8da34a9c7dfdd133bf4a93cf5b5cc7046ad30985e2352e9d21212ec8333024a5"
     );
@@ -198,7 +200,7 @@ fn previous_full_sorted_policy_proof_remains_not_comparable_and_immutable() {
         .profile
         .semantic_parameters
         .extend(BTreeMap::from([
-            ("host_policy".into(), POLICY_VERSION.into()),
+            ("host_policy".into(), previous.version.clone()),
             ("host_policy_fields".into(), old_fields),
             (
                 "host_policy_fingerprint".into(),
@@ -334,4 +336,26 @@ fn unchanged_actual_and_synthetic_historical_records_are_readable_but_not_admitt
             assert_eq!(fs::read(original.join("manifest.json")).unwrap(), manifest);
         }
     }
+}
+
+#[test]
+fn successor_release_rejects_previous_exact_engine_and_policy_without_migration() {
+    let mut previous = profile();
+    previous.engine = ContentDigest::try_from(
+        "168ad5db0e63919a3c04dbfed6c22f133aa14600747db4f64ebc3f3dc2c37c7d".to_owned(),
+    )
+    .unwrap();
+    assert!(validate_profile(&previous).is_err());
+    previous = profile();
+    previous
+        .semantic_parameters
+        .insert("host_policy".into(), "amd-zen3-engine168ad-v1".into());
+    assert!(validate_profile(&previous)
+        .unwrap_err()
+        .to_string()
+        .contains("host admission proof incompatible"));
+    assert_eq!(
+        ENGINE,
+        "ff96f8e2bc4a0643a5d5ec17e4efffdf5caed140ff48400fcfbb7226f511c772"
+    );
 }
