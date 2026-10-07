@@ -580,6 +580,30 @@ fn performance_changes_are_recorded_without_changing_identity_or_bypassing_compa
 }
 
 #[test]
+fn yield_filter_is_a_recorded_performance_parameter_only_when_on() {
+    let directory = tempfile::tempdir().unwrap();
+    let engine = directory.path().join("engine");
+    fs::write(&engine, b"engine").unwrap();
+    let store = ContentStore::new(directory.path().join("store"));
+    let executor =
+        seedbox::vmm::VmmExecutor::new(&engine, &store, None, 1024, WitnessMode::Exits).unwrap();
+    let off = executor.clone().with_yield_filter(false);
+    assert_eq!(
+        off.performance_parameters().get("SEEDBOX_YIELD_FILTER"),
+        None
+    );
+    assert_eq!(off.profile(), executor.profile());
+    let on = executor.clone().with_yield_filter(true);
+    assert_eq!(
+        on.performance_parameters()
+            .get("SEEDBOX_YIELD_FILTER")
+            .map(String::as_str),
+        Some("on")
+    );
+    assert_eq!(on.profile(), executor.profile());
+}
+
+#[test]
 fn cross_engine_replay_is_explicit_retained_and_still_checks_semantics_and_witness() {
     let mut fixture = Fixture::new();
     let first = fixture.run();

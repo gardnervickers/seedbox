@@ -48,23 +48,25 @@ pub const PAGE_FIELDS: usize = 6;
 /// Shared with the host KVM's yield filter (`host/kvm-yield-filter.patch`):
 /// a guest write to the yield port is consumed in the kernel, without an exit
 /// to userspace, while the branch count is below `target`.
+/// Atomics because the kernel writes `consumed` behind Rust's back.
 #[repr(C)]
 #[derive(Default)]
 struct YieldShared {
-    target: u64,
-    consumed: u64,
+    target: std::sync::atomic::AtomicU64,
+    consumed: std::sync::atomic::AtomicU64,
 }
 
 #[repr(C)]
 struct YieldFilterArgs {
     perf_fd: i32,
     port: u16,
-    pad: u16,
+    version: u16,
     shared: u64,
 }
 
 /// _IOW(KVMIO, 0xf0, struct kvm_seedbox_yield_filter); not in mainline KVM.
 const KVM_SEEDBOX_YIELD_FILTER: libc::c_ulong = 0x4010_aef0;
+const YIELD_FILTER_VERSION: u16 = 1;
 const YIELD_PORT: u16 = 0x52c;
 
 pub struct BootSpec<'a> {
@@ -425,16 +427,19 @@ impl Machine {
         let args = YieldFilterArgs {
             perf_fd,
             port: YIELD_PORT,
-            pad: 0,
+            version: YIELD_FILTER_VERSION,
             shared: &*shared as *const YieldShared as u64,
         };
         let rc = unsafe { libc::ioctl(self.vcpu.as_raw_fd(), KVM_SEEDBOX_YIELD_FILTER, &args) };
         if rc != 0 {
-            return Err(format!(
-                "{}: host KVM has no yield filter ({}); load the patched kvm module or turn the filter off",
-                self.name,
-                std::io::Error::last_os_error()
-            ));
+            let error = std::io::Error::last_os_error();
+            let why = match error.raw_os_error() {
+                Some(libc::EPROTO) => "the host's yield filter is a different version; rebuild it from host/kvm-yield-filter.patch",
+                // Stock KVM answers an unknown vCPU ioctl with EINVAL too.
+                Some(libc::EINVAL) | Some(libc::ENOTTY) => "host KVM has no yield filter, or it rejected the branch counter; load the patched kernel or turn the filter off",
+                _ => "enabling the host yield filter failed",
+            };
+            return Err(format!("{}: {why} ({error})", self.name));
         }
         self.yield_filter = Some(shared);
         Ok(())
@@ -444,7 +449,7 @@ impl Machine {
     pub fn yields_filtered(&self) -> Option<u64> {
         self.yield_filter
             .as_ref()
-            .map(|s| unsafe { std::ptr::read_volatile(&s.consumed) })
+            .map(|s| s.consumed.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     pub fn memory(&mut self) -> &mut [u8] {
@@ -879,9 +884,9 @@ impl Machine {
             // Yields before `soft` are transparent (see IoOut(0x52c) below), so
             // the host may consume them. Never while stepping: the breakpoint
             // plan is rebuilt after every exit.
-            if let Some(shared) = self.yield_filter.as_mut() {
+            if let Some(shared) = self.yield_filter.as_ref() {
                 let target = yield_target(c0, self.time, soft, window && !self.stepping);
-                unsafe { std::ptr::write_volatile(&mut shared.target, target) };
+                shared.target.store(target, std::sync::atomic::Ordering::Relaxed);
             }
             let t_run = Instant::now();
             let run_ptr = self.vcpu.get_kvm_run() as *mut kvm_run;

@@ -1,7 +1,7 @@
 # Host kernel patches
 
 These patches are for the simulation host's kernel, not the guest's. They are
-performance only: a run's results are the same with or without them.
+meant to be performance only: a run's results are the same with or without them.
 
 ## `kvm-yield-filter.patch`: in-kernel yield filter (#13)
 
@@ -30,19 +30,23 @@ same decision, so the guest, witnesses and digests don't change.
 ### Building
 
 The patch is against Linux 6.18.54 (`gregkh/linux` tag `v6.18.54`). It
-changes `struct kvm_vcpu_arch`, so rebuild **both** `kvm.ko` and `kvm-amd.ko`
-from a tree configured exactly like the running kernel. It needs no core kernel
-symbols beyond what KVM already uses.
+exports `perf_get_event` from the core kernel, so KVM can confirm the fd really
+is a perf event (`f_op == &perf_fops`) rather than trusting its name. That
+means a full kernel build, not just the KVM modules.
 
 - NixOS: add it to `boot.kernelPatches`
   (`{ name = "seedbox-kvm-yield-filter"; patch = ./host/kvm-yield-filter.patch; }`)
   and reboot into the new generation.
-- Elsewhere: apply it to the matching source with `patch -p1`, build with
-  `make M=arch/x86/kvm modules`, then with no VMs running,
-  `modprobe -r kvm_amd kvm` and `insmod` the two new modules.
+- Elsewhere: apply it with `patch -p1` to the source of the running kernel's
+  version and config, then build and install the kernel as usual.
 
-It has not been compiled or run yet. The first build on the host is the first
-test.
+The ioctl number (0xf0) is out of tree. `version` must be 1 or the ioctl fails
+with `EPROTO`, but a future upstream ioctl with the same encoding would still
+be mistaken for it, so rebase deliberately.
+
+An independent review applied it to v6.18.54 and built `x86.o` and `svm.o`
+warning-free (before the `perf_get_event` change). It has not been linked,
+loaded or run.
 
 ### Using and qualifying it
 
@@ -52,7 +56,15 @@ at start with "host KVM has no yield filter". `vmm.json` reports
 `yields_filtered` per machine, and `yields` counts only the yields that still
 reached the VMM.
 
-Qualification is the same as for undo: run a few seeds without the flag, then
-`seedbox replay RUN --yield-filter` each one. Every replay must report `MATCH`
-(world witness, per-machine witnesses and, with `--full-state`, digests), with
-`yields_filtered` in the millions and lower host time.
+The VMM change itself makes a new engine (any `crates/seedbox-vmm` change
+does), so this is a performance-only engine change, not a performance setting
+on the accepted engine. Qualify it across engines: replay runs recorded on the
+accepted engine with `--vmm <new seedbox-vmm> --allow-engine-change`, once
+without and once with `--yield-filter`. All must report `MATCH` (world
+witness, per-machine witnesses and, with `--full-state`, digests), and the
+filtered replays must show `yields_filtered` in the millions and lower host
+time.
+
+Trap: a plain `seedbox replay RUN --yield-filter` uses the run's retained old
+engine, which ignores `SEEDBOX_YIELD_FILTER` and reports a vacuous `MATCH`.
+`yields_filtered` is then missing or null.

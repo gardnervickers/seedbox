@@ -357,15 +357,16 @@ fn run() -> Result<Value, String> {
     };
     world.faults.require_readiness();
     // In-kernel yield filter (performance only, needs the patched host KVM).
-    match std::env::var("SEEDBOX_YIELD_FILTER").as_deref() {
-        Ok("off") | Err(_) => {}
-        Ok("on") => {
+    match std::env::var_os("SEEDBOX_YIELD_FILTER") {
+        None => {}
+        Some(v) if v == "off" => {}
+        Some(v) if v == "on" => {
             let fd = world.counter.fd();
             for m in world.machines.iter_mut() {
                 m.enable_yield_filter(fd)?;
             }
         }
-        Ok(v) => return Err(format!("SEEDBOX_YIELD_FILTER: expected on or off, got {v}")),
+        Some(v) => return Err(format!("SEEDBOX_YIELD_FILTER: expected on or off, got {v:?}")),
     }
     for a in 0..n {
         for b in 0..n {

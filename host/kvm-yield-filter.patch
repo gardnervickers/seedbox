@@ -17,7 +17,7 @@ index 03866683a..8a9c12295 100644
  	s8  pvclock_tsc_shift;
  	u32 pvclock_tsc_mul;
 diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
-index f08a34d3f..82a814376 100644
+index f08a34d3f..2b277fad9 100644
 --- a/arch/x86/kvm/x86.c
 +++ b/arch/x86/kvm/x86.c
 @@ -49,6 +49,7 @@
@@ -28,7 +28,7 @@ index f08a34d3f..82a814376 100644
  #include <linux/uaccess.h>
  #include <linux/hash.h>
  #include <linux/pci.h>
-@@ -5807,6 +5808,91 @@ static int kvm_get_reg_list(struct kvm_vcpu *vcpu,
+@@ -5807,6 +5808,87 @@ static int kvm_get_reg_list(struct kvm_vcpu *vcpu,
  	return 0;
  }
  
@@ -91,8 +91,8 @@ index f08a34d3f..82a814376 100644
 +	struct perf_event *event;
 +	struct file *file;
 +
-+	if (f->pad)
-+		return -EINVAL;
++	if (f->version != KVM_SEEDBOX_YIELD_FILTER_VERSION)
++		return -EPROTO;
 +	if (f->perf_fd < 0) {
 +		seedbox_yield_release(vcpu);
 +		return 0;
@@ -100,13 +100,9 @@ index f08a34d3f..82a814376 100644
 +	file = fget(f->perf_fd);
 +	if (!file)
 +		return -EBADF;
-+	/* perf event files are anonymous inodes named "[perf_event]". */
-+	if (strcmp(file->f_path.dentry->d_name.name, "[perf_event]")) {
-+		fput(file);
-+		return -EINVAL;
-+	}
-+	event = file->private_data;
-+	if (!event->attr.exclude_host || event->attr.inherit) {
++	/* Checks f_op == &perf_fops; the file reference keeps the event alive. */
++	event = (struct perf_event *)perf_get_event(file);
++	if (IS_ERR(event) || !event->attr.exclude_host || event->attr.inherit) {
 +		fput(file);
 +		return -EINVAL;
 +	}
@@ -120,7 +116,7 @@ index f08a34d3f..82a814376 100644
  long kvm_arch_vcpu_ioctl(struct file *filp,
  			 unsigned int ioctl, unsigned long arg)
  {
-@@ -6251,6 +6337,15 @@ long kvm_arch_vcpu_ioctl(struct file *filp,
+@@ -6251,6 +6333,15 @@ long kvm_arch_vcpu_ioctl(struct file *filp,
  		r = 0;
  		break;
  	}
@@ -136,7 +132,7 @@ index f08a34d3f..82a814376 100644
  	case KVM_SET_SREGS2: {
  		r = -EINVAL;
  		if (vcpu->kvm->arch.has_protected_state &&
-@@ -9267,8 +9362,15 @@ static int complete_fast_pio_out(struct kvm_vcpu *vcpu)
+@@ -9267,8 +9358,15 @@ static int complete_fast_pio_out(struct kvm_vcpu *vcpu)
  static int kvm_fast_pio_out(struct kvm_vcpu *vcpu, int size,
  			    unsigned short port)
  {
@@ -154,7 +150,7 @@ index f08a34d3f..82a814376 100644
  
  	if (ret)
  		return ret;
-@@ -12044,6 +12146,7 @@ void kvm_arch_vcpu_destroy(struct kvm_vcpu *vcpu)
+@@ -12044,6 +12142,7 @@ void kvm_arch_vcpu_destroy(struct kvm_vcpu *vcpu)
  	kvm_mmu_unload(vcpu);
  
  	kvmclock_reset(vcpu);
@@ -163,10 +159,10 @@ index f08a34d3f..82a814376 100644
  	for_each_possible_cpu(cpu)
  		cmpxchg(per_cpu_ptr(&last_vcpu, cpu), vcpu, NULL);
 diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
-index 954e0511c..1c6d0e18e 100644
+index 954e0511c..cb9a18ddc 100644
 --- a/include/uapi/linux/kvm.h
 +++ b/include/uapi/linux/kvm.h
-@@ -1617,6 +1617,26 @@ struct kvm_create_guest_memfd {
+@@ -1617,6 +1617,29 @@ struct kvm_create_guest_memfd {
  	__u64 reserved[6];
  };
  
@@ -175,11 +171,14 @@ index 954e0511c..1c6d0e18e 100644
 + * consumed in the kernel, without an exit to userspace, while the count of
 + * the perf event `perf_fd` (a counter of the calling thread) is below
 + * `shared->target`. A target of 0, or a perf_fd of -1, disables it.
++ * A `version` other than KVM_SEEDBOX_YIELD_FILTER_VERSION fails with EPROTO.
 + */
++#define KVM_SEEDBOX_YIELD_FILTER_VERSION 1
++
 +struct kvm_seedbox_yield_filter {
 +	__s32 perf_fd;
 +	__u16 port;
-+	__u16 pad;
++	__u16 version;
 +	__u64 shared;	/* user address of struct kvm_seedbox_yield_shared */
 +};
 +
@@ -193,3 +192,15 @@ index 954e0511c..1c6d0e18e 100644
  #define KVM_PRE_FAULT_MEMORY	_IOWR(KVMIO, 0xd5, struct kvm_pre_fault_memory)
  
  struct kvm_pre_fault_memory {
+diff --git a/kernel/events/core.c b/kernel/events/core.c
+index ad52e4bda..1c04c03f9 100644
+--- a/kernel/events/core.c
++++ b/kernel/events/core.c
+@@ -14375,6 +14375,7 @@ const struct perf_event *perf_get_event(struct file *file)
+ 
+ 	return file->private_data;
+ }
++EXPORT_SYMBOL_GPL(perf_get_event);	/* Seedbox KVM yield filter */
+ 
+ const struct perf_event_attr *perf_event_attrs(struct perf_event *event)
+ {
