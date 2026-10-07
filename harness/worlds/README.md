@@ -30,6 +30,7 @@ and identities.
 | `cluster-fork.json` | `cluster-fixed.json` booted once and forked per seed (see below) |
 | `cluster-fork-late.json` | The same cluster forked at 1.4 simulated seconds, after etcd has started, with timer and link jitter (see below) |
 | `cluster-fork-skew.json` | `cluster-fork.json` released with up to 50 ms of seeded skew, jitter, and a timed partition after the release (see below) |
+| `net-pause.json`, `net-crash.json`, `net-crash-fork.json` | `net.json` with machine `b` paused, or crashed and rebooted, while `a` pings it (see below) |
 
 `batch.sh`, `batch.py` and `msr54.py` still run these fixtures with shared CPU/SMT
 leases and verified MSR restoration. Runtime lifecycle tests also use their CPU
@@ -97,3 +98,66 @@ CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/cluster-fork-skew.js
 The second command's `seed-1010` report must carry the first command's world
 witness. Each seed report's `boot` object records the barrier time, the boot's
 host seconds, and for forked seeds the restored page count and restore time.
+
+## Machine pause, crash and reboot
+
+Four fault actions act on a whole machine at an exact world time. Each is a
+`faults` entry like a partition, applied by the engine at `at_ns` with no
+guest involvement (`deadline_ns` must equal or follow `at_ns` and is not
+otherwise used):
+
+| Action | Allowed from | Effect |
+| --- | --- | --- |
+| `pause` | running | The vCPU and its devices stop. RAM, registers, device state and any unpaid I/O cost are kept as they are. |
+| `resume` | paused | The machine continues at `at_ns`. Timer ticks that fell due while it was paused fire once, late, keeping their phase, and its held frames are delivered before it runs. |
+| `crash` | running or paused | The VM is destroyed: RAM, devices and their queues, KVM's I/O state, management commands queued for it and the undo checkpoint. |
+| `reboot` | down | A new incarnation boots at `at_ns` from the same kernel, initrd and command line, with entropy and timer jitter drawn from the run seed for that incarnation. It never waits at a launch barrier. |
+
+Any other transition (resuming a running machine, rebooting one that is not
+down) fails the run with a fault error, as a duplicate partition does.
+
+Lifecycle actions apply before anything else at their time, in plan order.
+A machine never receives early a frame that arrives at or after its next
+pause or crash. Other machines keep running and sending throughout. A frame
+that arrives while its receiver is paused waits for the resume; at most 256
+such frames wait per pause, and later ones are dropped at the receiver. A
+frame that arrives while its receiver is down is dropped, and so is anything
+the dead incarnation was holding. Frames already in flight when the receiver
+reboots, and everything sent to it afterwards, reach the new incarnation's
+network device like any other frame. The engine sends nothing on a machine's
+behalf: peers learn about a crash only from silence, as with a power cut.
+When every machine is paused or down with no resume or reboot planned, the
+run idles to `duration_ns`.
+
+Process faults belong to an incarnation. A crash makes the machine's waiting
+`stop` and `restart` faults unavailable, a process fault for a machine that is
+down is unavailable at once, and a rebooted machine must report management
+readiness again before it is sent anything. Guest time does not restart: a
+new incarnation's clock reads world time from its first instruction, and its
+uptime counts from its boot.
+
+The report gives each machine's `incarnation` (0 for the first boot),
+`booted_at_ns` and `crashed_incarnations`, one summary per incarnation that
+crashed, with its exit witness. Its console and management logs continue
+across incarnations, and its exit witness covers all of them. A machine's
+`state` is `Paused` or `Down` while it is. With `--fork-seeds`, a seed that
+crashed a machine leaves no trace in the next: the engine boots a first
+incarnation again to restore into.
+
+This is RAM-only crash and reboot. Nothing persists across a crash, so the
+new incarnation starts from its initramfs. Retained disks (#58, #59) will
+add the one thing that survives: the crash path is where the engine decides
+what the next incarnation inherits, and today that is only the logs.
+
+`net-pause.json` pauses `b` from 2 s to 3.5 s while `a` pings it, and
+`net-crash.json` crashes `b` at 2 s and reboots it at 2.5 s. Check that a run
+repeats exactly, and that `SEEDBOX_UNDO=0` and a fixed `SEEDBOX_MARGIN` give
+the same witnesses. `net-crash-fork.json` adds a time fork, so a crash in one
+seed is followed by a restore for the next:
+
+```sh
+CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/net-crash.json crash "1009 1009" --digest
+CPU0=14 SEEDBOX_UNDO=0 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/net-crash.json crash-undo0 "1009" --digest
+for s in 1010 1011; do CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/net-crash-fork.json crash-fork-cold "$s" --digest; done
+CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/net-crash-fork.json crash-fork-loop "1009" --digest --fork-seeds 1010,1011
+```

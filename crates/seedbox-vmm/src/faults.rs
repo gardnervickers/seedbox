@@ -20,6 +20,23 @@ struct Entry {
     dispatched: bool,
     dispatch_at: Option<u64>,
 }
+/// Whole-machine lifecycle. A paused machine keeps its VM and executes
+/// nothing; a down machine has no VM until it reboots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Life {
+    Up,
+    Paused,
+    Down,
+}
+/// A lifecycle transition applied at a fault boundary, for the world to carry
+/// out on the machine before anything else happens at that time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lifecycle {
+    Pause,
+    Resume,
+    Crash,
+    Reboot,
+}
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Event {
     Apply,
@@ -33,6 +50,11 @@ pub struct Faults {
     waiting_ready: Vec<BTreeSet<u32>>,
     ready: Vec<bool>,
     stopped: Vec<bool>,
+    life: Vec<Life>,
+    /// Outstanding lifecycle requests per machine, by time: nothing may be
+    /// delivered early to a machine across one of these.
+    lifecycle_at: Vec<BTreeSet<(u64, u32)>>,
+    lifecycle: Vec<(usize, Lifecycle)>,
     pub readiness: Vec<Value>,
     handles: BTreeMap<String, BTreeSet<(usize, usize)>>,
     cuts: BTreeMap<(usize, usize), usize>,
@@ -51,6 +73,9 @@ impl Faults {
             waiting_ready: vec![BTreeSet::new(); count],
             ready: vec![true; count],
             stopped: vec![false; count],
+            life: vec![Life::Up; count],
+            lifecycle_at: vec![BTreeSet::new(); count],
+            lifecycle: vec![],
             readiness: vec![],
             handles: BTreeMap::new(),
             cuts: BTreeMap::new(),
@@ -79,7 +104,12 @@ impl Faults {
         let mut target = None;
         let mut pairs = BTreeSet::new();
         match &plan.action {
-            Action::Stop { machine } | Action::Restart { machine } => {
+            Action::Stop { machine }
+            | Action::Restart { machine }
+            | Action::Pause { machine }
+            | Action::Resume { machine }
+            | Action::Crash { machine }
+            | Action::Reboot { machine } => {
                 target = Some(
                     self.names
                         .iter()
@@ -147,11 +177,25 @@ impl Faults {
         let entry = self.compile(plan)?;
         self.log.push(json!({"request":entry.plan,"id":id,"requested_at_ns":entry.plan.at_ns,"action":entry.plan.action.name(),"machine":entry.plan.action.machine(),"applied_at_ns":null,"status":"unrequested","detail":"scheduled"}));
         self.boundaries.insert((entry.plan.at_ns, id, Event::Apply));
+        if let (Some(m), Some(_)) = (entry.target, lifecycle(&entry.plan.action)) {
+            self.lifecycle_at[m].insert((entry.plan.at_ns, id));
+        }
         self.entries.push(entry);
         Ok(id)
     }
     pub fn next_boundary(&self) -> u64 {
         self.boundaries.first().map(|e| e.0).unwrap_or(u64::MAX)
+    }
+    /// The earliest outstanding lifecycle request for machine `m`.
+    pub fn next_lifecycle(&self, m: usize) -> u64 {
+        self.lifecycle_at[m].first().map(|e| e.0).unwrap_or(u64::MAX)
+    }
+    pub fn life(&self, m: usize) -> Life {
+        self.life[m]
+    }
+    /// Lifecycle transitions applied since the last call, in order.
+    pub fn take_lifecycle(&mut self) -> Vec<(usize, Lifecycle)> {
+        std::mem::take(&mut self.lifecycle)
     }
     pub fn pending_boundaries(&self) -> usize {
         self.boundaries.len()
@@ -177,7 +221,12 @@ impl Faults {
         self.handles.keys().cloned().collect()
     }
     pub fn process_state(&self, machine: usize) -> &'static str {
-        if self.stopped[machine] {"Stopped"} else {"Running"}
+        match self.life[machine] {
+            Life::Paused => "Paused",
+            Life::Down => "Down",
+            Life::Up if self.stopped[machine] => "Stopped",
+            Life::Up => "Running",
+        }
     }
     pub fn admission_error(&self, action: &Action) -> Option<&'static str> {
         let machine = action.machine()?;
@@ -205,6 +254,7 @@ impl Faults {
         }
         if let Some(m) = e.target {
             self.waiting_ready[m].remove(&id);
+            self.lifecycle_at[m].remove(&(e.plan.at_ns, id));
         }
     }
     fn fail(&mut self, i: usize, message: String) {
@@ -228,6 +278,29 @@ impl Faults {
         if self.entries[i].status!=Status::Waiting || self.entries[i].target!=Some(machine) || time<self.entries[i].plan.at_ns || time>self.entries[i].plan.deadline_ns {return}
         self.clear_pending(i);self.entries[i].status=Status::Unavailable(time);
         self.log[i]["status"]=json!("unavailable");self.log[i]["applied_at_ns"]=Value::Null;self.log[i]["detail"]=json!("target VM exited before the process effect");
+    }
+    fn unavailable(&mut self, i: usize, time: u64, detail: &str) {
+        self.clear_pending(i);
+        self.entries[i].status = Status::Unavailable(time);
+        self.log[i]["status"] = json!("unavailable");
+        self.log[i]["applied_at_ns"] = Value::Null;
+        self.log[i]["detail"] = json!(detail);
+    }
+    /// The machine's incarnation is gone. Its process faults can no longer
+    /// take effect, and the next incarnation reports readiness afresh, so
+    /// nothing the old one was sent or acknowledged carries over.
+    fn machine_down(&mut self, m: usize, time: u64) {
+        for i in 0..self.entries.len() {
+            let e = &self.entries[i];
+            if e.target == Some(m)
+                && e.status == Status::Waiting
+                && lifecycle(&e.plan.action).is_none()
+            {
+                self.unavailable(i, time, "target machine crashed before the process effect");
+            }
+        }
+        self.ready[m] = false;
+        self.stopped[m] = false;
     }
     /// Readiness is the reserved success id0; process commands wait for it.
     pub fn management_ready(&mut self, m: usize, time: u64, latency: u64) -> Result<(), String> {
@@ -280,6 +353,11 @@ impl Faults {
                     self.entries[i].status = Status::Waiting;
                     self.log[i]["status"] = json!("requested");
                     match self.entries[i].plan.action.clone() {
+                        Action::Stop { .. } | Action::Restart { .. }
+                            if self.entries[i].target.is_some_and(|m| self.life[m] == Life::Down) =>
+                        {
+                            self.unavailable(i, now, "target machine is down");
+                        }
                         Action::Stop { .. } | Action::Restart { .. } => {
                             self.boundaries.insert((
                                 self.entries[i].plan.deadline_ns,
@@ -340,6 +418,30 @@ impl Faults {
                             );
                             self.changed_network.push(i);
                         }
+                        action @ (Action::Pause { .. }
+                        | Action::Resume { .. }
+                        | Action::Crash { .. }
+                        | Action::Reboot { .. }) => {
+                            let op = lifecycle(&action).unwrap();
+                            let m = self.entries[i].target.unwrap();
+                            let life = self.life[m];
+                            let to = match (op, life) {
+                                (Lifecycle::Pause, Life::Up) => Life::Paused,
+                                (Lifecycle::Resume, Life::Paused) => Life::Up,
+                                (Lifecycle::Crash, Life::Up | Life::Paused) => Life::Down,
+                                (Lifecycle::Reboot, Life::Down) => Life::Up,
+                                _ => {
+                                    self.fail(i, format!("{} of a {} machine", action.name(), life_name(life)));
+                                    continue;
+                                }
+                            };
+                            self.life[m] = to;
+                            if op == Lifecycle::Crash {
+                                self.machine_down(m, now);
+                            }
+                            self.applied(i, now, format!("machine {}", life_name(to)));
+                            self.lifecycle.push((m, op));
+                        }
                     }
                 }
             }
@@ -380,5 +482,23 @@ impl Faults {
         } else {
             self.fail(i, format!("guest rejected fault {id}"));
         }
+    }
+}
+
+fn lifecycle(action: &Action) -> Option<Lifecycle> {
+    match action {
+        Action::Pause { .. } => Some(Lifecycle::Pause),
+        Action::Resume { .. } => Some(Lifecycle::Resume),
+        Action::Crash { .. } => Some(Lifecycle::Crash),
+        Action::Reboot { .. } => Some(Lifecycle::Reboot),
+        _ => None,
+    }
+}
+
+fn life_name(life: Life) -> &'static str {
+    match life {
+        Life::Up => "running",
+        Life::Paused => "paused",
+        Life::Down => "down",
     }
 }
