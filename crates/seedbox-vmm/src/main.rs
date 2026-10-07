@@ -255,6 +255,12 @@ fn run() -> Result<Value, String> {
     let forked = boot.is_object();
     let boot_seed = if forked { boot["seed"].as_u64().ok_or("boot.seed required")? } else { seed };
     let release_skew = boot["release_skew_ns"].as_u64().unwrap_or(0);
+    // Fork at a simulated time instead of the guests' launch barrier: every
+    // machine parks at its first deterministic point at or after it.
+    let fork_at = boot["fork_at_ns"].as_u64();
+    if fork_at.is_some_and(|t| t >= duration) {
+        return Err("boot.fork_at_ns must be before duration_ns".into());
+    }
     if seeds.len() > 1 && !forked {
         return Err("--fork-seeds requires boot.seed in the config".into());
     }
@@ -290,7 +296,7 @@ fn run() -> Result<Value, String> {
             cmdline += &format!(" virtio_mmio.device=4K@{NET_MMIO:#x}:{NET_IRQ}");
         }
         if control_channel {cmdline+=&format!(" virtio_mmio.device=4K@{CHANNEL_MMIO:#x}:{CHANNEL_IRQ}");}
-        if forked {
+        if forked && fork_at.is_none() {
             cmdline += " seedbox.barrier=1";
         }
         if names.get(i).is_some_and(|name|cfg["control"]["machine"].as_str()==Some(name.as_str())) {cmdline+=" seedbox.control=1";}
@@ -307,7 +313,7 @@ fn run() -> Result<Value, String> {
             mac: networked.then_some(mac),
             control_channel,
             undo_margin,
-            barrier: forked,
+            barrier: forked && fork_at.is_none(),
         };
         let mut mach = Machine::new(&kvm, &names[i], &spec)?;
         if args.iter().any(|arg| arg == "--stream-console") {
@@ -383,13 +389,13 @@ fn run() -> Result<Value, String> {
     if !forked {
         let kills = arm_seed(&mut world, &cfg, &names, seed)?;
         let started = Instant::now();
-        let outcome = simulate(&mut world, &cfg, duration, &end_on, false)?;
+        let outcome = simulate(&mut world, &cfg, duration, &end_on, None)?;
         let host_seconds = started.elapsed().as_secs_f64();
         return report(&mut world, outcome, seed, &kills, host_seconds, digest, &out, duration, &end_on);
     }
 
     let started = Instant::now();
-    simulate(&mut world, &cfg, duration, &end_on, true)?;
+    simulate(&mut world, &cfg, duration, &end_on, Some(fork_at))?;
     let barrier_ns = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
     let boot_host_seconds = started.elapsed().as_secs_f64();
     let started = Instant::now();
@@ -421,11 +427,11 @@ fn run() -> Result<Value, String> {
         }
         let started = Instant::now();
         let kills = release(&mut world, &cfg, &names, seed, release_skew)?;
-        let outcome = simulate(&mut world, &cfg, duration, &end_on, false)?;
+        let outcome = simulate(&mut world, &cfg, duration, &end_on, None)?;
         let host_seconds = started.elapsed().as_secs_f64();
         let mut r = report(&mut world, outcome, seed, &kills, host_seconds, digest, &dir, duration, &end_on)?;
         r["boot"] = json!({
-            "seed": boot_seed, "barrier_ns": barrier_ns, "release_skew_ns": release_skew,
+            "seed": boot_seed, "barrier_ns": barrier_ns, "fork_at_ns": fork_at, "release_skew_ns": release_skew,
             "boot_host_seconds": boot_host_seconds, "forked": i > 0,
             "restored_pages": restored_pages, "restore_host_seconds": restore_host_seconds,
         });
@@ -589,15 +595,19 @@ impl WorldSnapshot {
     }
 }
 
-/// Run the world until it ends, or with `until_barrier` until every machine
-/// is parked at its launch barrier. Returns the outcome.
+/// Run the world until it ends, or with `fork` until every machine is parked
+/// at its fork point: the guest's launch barrier, or with `Some(Some(t))` its
+/// first deterministic point at or after simulated time `t`. Returns the
+/// outcome.
 fn simulate(
     world: &mut World,
     cfg: &Value,
     duration: u64,
     end_on: &Option<String>,
-    until_barrier: bool,
+    fork: Option<Option<u64>>,
 ) -> Result<&'static str, String> {
+    let until_barrier = fork.is_some();
+    let fork_at = fork.flatten();
     let n = world.machines.len();
     let mut stalled_plan = None;
     let mut frames = Vec::new();
@@ -613,10 +623,14 @@ fn simulate(
             && world.machines.iter().all(|m| m.parked || matches!(m.state, State::Exited(_)))
         {
             if let Some(m) = world.machines.iter().find(|m| !m.parked) {
-                return Err(format!("{} exited before its launch barrier", m.name));
+                return Err(format!("{} exited before the fork point", m.name));
             }
             outcome = "barrier";
             break;
+        }
+        if fork_at.is_some_and(|t| key >= t) && world.machines[m].pending_io.is_none() {
+            world.machines[m].park()?;
+            continue;
         }
         let control_boundary = world.control.boundary();
         world.semantic_counts.advance(key.min(control_boundary).min(world.faults.next_boundary()).min(duration));
@@ -686,15 +700,22 @@ fn simulate(
             .map(|(_, &k)| k.saturating_add(world.lookahead))
             .min()
             .unwrap_or(u64::MAX);
-        let limit = horizon
+        let mut limit = horizon
             .min(world.next_event(m))
             .min(duration)
             .min(fault_boundary)
             .min(control_boundary);
+        if let Some(t) = fork_at {
+            // Stop exactly at the fork time, or as soon after it as owed I/O
+            // cost allows.
+            let owed = world.machines[m].pending_io.as_ref().map_or(0, |p| p.remaining_ns);
+            limit = limit.min(t.max(world.machines[m].time.saturating_add(owed)));
+        }
         world.slices += 1;
         // A slice ending at the horizon or an event may stop a little early
         // (at a cheap deterministic point); the run's end is exact.
         let early = if limit == duration
+            || fork_at == Some(limit)
             || limit == fault_boundary
             || limit == control_boundary
             || world.strict_events[m]

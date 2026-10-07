@@ -502,6 +502,21 @@ impl Machine {
         Ok(())
     }
 
+    /// Park the machine at a fork point the world chose (a simulated time),
+    /// rather than one the guest announced. It must owe no I/O cost.
+    pub fn park(&mut self) -> Result<(), String> {
+        if self.parked || self.pending_io.is_some() {
+            return Err(format!("{}: cannot park here", self.name));
+        }
+        self.set_stepping(false)?;
+        // As at the launch barrier: finish any exit KVM still owes, so a cold
+        // run and a restored fork resume from identical vCPU state.
+        self.complete_io()?;
+        self.parked = true;
+        self.record(b'P', 0);
+        Ok(())
+    }
+
     /// Capture this machine at the world's fork point: parked, no I/O owed.
     pub fn snapshot(&mut self) -> Result<MachineSnapshot, String> {
         if self.pending_io.is_some() || self.stepping || !self.fault_effects.is_empty() || !self.control_requests.is_empty() {
@@ -1660,11 +1675,15 @@ mod fork_tests {
     /// barrier, read one entropy word into a marker, spin 1000 counted
     /// branches, write a second page, halt.
     fn barrier_machine(kvm: &Kvm, undo: u64) -> Machine {
+        probe_machine(kvm, undo, true)
+    }
+
+    fn probe_machine(kvm: &Kvm, undo: u64, barrier: bool) -> Machine {
         let mut code=vec![0xb8,1,0,0,0, 0xba,0xf8,0,0,0, 0xef, 0xed, 0xa3,0x00,0x00,0x08,0x00];
         code.extend_from_slice(&[0xb9,0xe8,0x03,0,0, 0x49, 0x75,0xfd]);
         code.extend_from_slice(&[0xc7,0x05,0x00,0x10,0x08,0x00,0xad,0xde,0,0, 0xf4]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo,barrier:true};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo,barrier};
         Machine::new(kvm,"fork-probe",&spec).unwrap()
     }
 
@@ -1713,6 +1732,39 @@ mod fork_tests {
             assert_ne!(other.0,want.0);assert_ne!(other.1,want.1);
             m.restore(&snapshot).unwrap();
             assert_eq!(released(&mut m,&mut counter,7),want,"seed restored from the fork, undo={undo}");
+        }
+    }
+
+    /// Fork at a simulated time inside the spin loop instead of at the guest's
+    /// barrier (the port write and read are then ordinary unknown ports).
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn a_fork_at_a_simulated_time_matches_a_cold_run() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        let finish=|m: &mut Machine, counter: &mut Counter| {
+            let at=m.time+10;
+            m.release(at,[0;ENTROPY_WORDS]).unwrap();
+            let mut frames=Vec::new();
+            while !matches!(m.run_until(counter,10_000_000,0,&mut frames).unwrap(),Stop::Exited|Stop::Halted) {}
+            (m.exit_witness(),m.state_digest().0,m.time,m.branches)
+        };
+        for undo in [0,256] {
+            let mut cold=probe_machine(&kvm,undo,false);
+            let mut frames=Vec::new();
+            assert_eq!(cold.run_until(&mut counter,500,0,&mut frames).unwrap(),Stop::Reached);
+            assert_eq!(cold.time,500);
+            cold.park().unwrap();
+            let want=finish(&mut cold,&mut counter);
+
+            let mut m=probe_machine(&kvm,undo,false);
+            assert_eq!(m.run_until(&mut counter,500,0,&mut frames).unwrap(),Stop::Reached);
+            m.park().unwrap();
+            let snapshot=m.snapshot().unwrap();
+            assert_eq!(finish(&mut m,&mut counter),want,"first run after a snapshot, undo={undo}");
+            m.restore(&snapshot).unwrap();
+            assert_eq!(m.time,500);
+            assert_eq!(finish(&mut m,&mut counter),want,"restored fork, undo={undo}");
         }
     }
 }

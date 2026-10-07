@@ -28,6 +28,7 @@ and identities.
 | `smoke.json`, `net.json` | Raw kernel boot/timer/entropy and virtual NIC checks |
 | `cluster-fixed.json`, `single-vm*.json` | Matched multi-VM versus one-VM network-namespace experiments; Compose uses one service per VM |
 | `cluster-fork.json` | `cluster-fixed.json` booted once and forked per seed (see below) |
+| `cluster-fork-late.json` | The same cluster forked at 1.4 simulated seconds, after etcd has started, with timer and link jitter (see below) |
 
 `batch.sh`, `batch.py` and `msr54.py` still run these fixtures with shared CPU/SMT
 leases and verified MSR restoration. Runtime lifecycle tests also use their CPU
@@ -66,6 +67,16 @@ each machine's `state_digest`.
 CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/cluster-fork.json fork-cold "1010" --digest
 CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/cluster-fork.json fork-loop "1009" --digest --fork-seeds 1010,1011
 ```
+
+With `boot.fork_at_ns` instead, the world forks at a simulated time rather
+than at the guests' barrier: every machine parks at its first deterministic
+point at or after that time, so boot and application startup are both shared.
+No guest cooperation is needed, but nothing reseeds the guest kernels either:
+seeds differ only through what the run seed drives after the fork (timer and
+link jitter, release skew, faults, control and scenario events). A world with
+no jitter and no faults therefore runs identically for every seed after a
+time fork, which is why `cluster-fork-late.json` adds jitter. Run it the same
+way, with `fork-late-cold` and `fork-late-loop` prefixes.
 
 The second command's `seed-1010` report must carry the first command's world
 witness. Each seed report's `boot` object records the barrier time, the boot's
