@@ -488,3 +488,33 @@ fn typed_network_plan_preserves_targets_without_attributing_check_service() {
         assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
     });
 }
+
+#[test]
+fn counter_identity_requires_an_attributable_matching_engine_report() {
+    fixture(|base| {
+        let mut inputs = base.prepared.clone();
+        inputs
+            .profile
+            .semantic_parameters
+            .insert("counter".into(), "intel-0x5111c4".into());
+        let request = ExecutionRequest {
+            prepared: &inputs,
+            ..*base
+        };
+        assert!(vmm::report(&serde_json::to_vec(&report()).unwrap(), &request).is_err());
+        let mut raw = report();
+        raw["counter_profile"] = json!("amd-zen");
+        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
+        raw["counter_profile"] = json!("intel-0x5111c4");
+        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
+        inputs
+            .profile
+            .semantic_parameters
+            .insert("counter".into(), "unknown".into());
+        let request = ExecutionRequest {
+            prepared: &inputs,
+            ..*base
+        };
+        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
+    });
+}

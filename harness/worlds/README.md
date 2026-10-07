@@ -30,6 +30,7 @@ and identities.
 | `cluster-fork.json` | `cluster-fixed.json` booted once and forked per seed (see below) |
 | `cluster-fork-late.json` | The same cluster forked at 1.4 simulated seconds, after etcd has started, with timer and link jitter (see below) |
 | `cluster-fork-skew.json` | `cluster-fork.json` released with up to 50 ms of seeded skew, jitter, and a timed partition after the release (see below) |
+| `rdrand.json`, `rdrand-raw.json` | RDRAND/RDSEED as a guest sees them: hidden from CPUID and, with `-raw`, executed anyway (see below) |
 | `net-pause.json`, `net-crash.json`, `net-crash-fork.json` | `net.json` with machine `b` paused, or crashed and rebooted, while `a` pings it (see below) |
 | `disk-nocrash.json`, `disk-crash.json`, `disk-crash-fork.json`, `disk-ext4-crash.json` | One machine with a retained disk: raw-block FLUSH/FUA probe with and without a crash, and an fsync ledger on ext4 across a crash (see below) |
 
@@ -81,6 +82,14 @@ no jitter and no faults therefore runs identically for every seed after a
 time fork, which is why `cluster-fork-late.json` adds jitter. Run it the same
 way, with `fork-late-cold` and `fork-late-loop` prefixes.
 
+The `scenario` partitions these fixtures use are older than the runtime fault
+API and don't follow its same-time ordering (see
+[docs/runtime.md](../../docs/runtime.md)). Each is queued at the sending machine
+and turns on or off when that machine's next slice starts, which can be up to
+the early-delivery window (half the link latency, at most `stop_tolerance_ns`)
+before its `at_ns`. Frames sent in that window already see the new state. New
+scenarios should use `faults` or the runtime fault API instead.
+
 Times in a forked world's plan (`faults[].at_ns`, `scenario[].at_ns`,
 `kill_restart.start_ns`) must be at or after the release, the fork point plus
 `boot.release_skew_ns`; an earlier time is an error, checked before boot for a
@@ -99,6 +108,18 @@ CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/cluster-fork-skew.js
 The second command's `seed-1010` report must carry the first command's world
 witness. Each seed report's `boot` object records the barrier time, the boot's
 host seconds, and for forked seeds the restored page count and restore time.
+
+## RDRAND and RDSEED
+
+The engine hides both from CPUID, but AMD SVM cannot intercept them
+([backends.md](../../docs/backends.md#qualification-and-capability-limits)).
+Build `rdrand.cpio` from `guest/rdrand.init` with `guest/rdrandprobe.c` at
+`bin/rdrandprobe`. `rdrand.json` must print `cpuid: rdrand=0 rdseed=0` and
+`not offered` for both, and two runs of one seed must give the same
+`world_witness`. `rdrand-raw.json` also executes both instructions without
+asking CPUID: `#UD` means the CPU refused them (Intel), and differing values
+across runs of one seed mean they reached the hardware (AMD), which only code
+that ignores CPUID can do.
 
 ## Machine pause, crash and reboot
 

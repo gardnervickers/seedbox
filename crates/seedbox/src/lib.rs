@@ -6,10 +6,12 @@
 
 #![doc = include_str!("../README.md")]
 
+pub mod admission;
 pub mod bundle;
 pub mod config;
 pub mod counter;
 pub mod execution;
+pub mod exploration;
 pub mod guest;
 #[cfg(any(target_os = "linux", test))]
 mod host;
@@ -17,6 +19,7 @@ pub mod image;
 pub mod oci;
 pub mod orchestration;
 pub mod preparation;
+mod preparation_command;
 pub mod store;
 pub mod templates;
 pub mod vmm;
@@ -33,6 +36,10 @@ pub enum Error {
     Yaml(#[from] serde_yaml_ng::Error),
     #[error("input integrity: {0}")]
     Integrity(String),
+    #[error("preparation cancelled after owned process cleanup")]
+    PreparationCancelled,
+    #[error("preparation cleanup-unverified: {0}")]
+    PreparationCleanupUnverified(String),
     #[error("execution: {0}")]
     Execution(String),
     /// A missing or unusable input or host tool the caller can fix; the
