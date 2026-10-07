@@ -12,6 +12,8 @@ use crate::devices::{rtc_read, Pic, Pit, Uart};
 use crate::stepper::Planner;
 use crate::undo::{Undo, UndoStats, VcpuState};
 use crate::virtio_net::{ReceiveOutcome, VirtioNet};
+use crate::virtio_blk::VirtioBlk;
+use crate::disk::Disk;
 use kvm_bindings::*;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 use sha2::{Digest, Sha256};
@@ -25,6 +27,8 @@ pub const NET_MMIO: u64 = 0xd000_1000;
 pub const NET_IRQ: u8 = 5;
 pub const CHANNEL_MMIO: u64 = 0xd1000000;
 pub const CHANNEL_IRQ: u8 = 6;
+pub const BLK_MMIO: u64 = 0xd000_2000;
+pub const BLK_IRQ: u8 = 7;
 const INITRD_ADDR: usize = 0x0800_0000;
 /// Pending interrupts are injected only when the next stop is further away
 /// than this. Part of the execution semantics: changing it changes runs.
@@ -43,6 +47,8 @@ pub struct BootSpec<'a> {
     pub rng_seed: [u8; 32],
     pub mac: Option<[u8; 6]>,
     pub control_channel: bool,
+    /// The retained disk this incarnation boots with, as virtio-blk.
+    pub disk: Option<Disk>,
     /// Final overflow margin for undo-able precise stops; 0 disables them.
     pub undo_margin: u64,
     /// The guest parks at its launch barrier until the world releases it.
@@ -73,6 +79,7 @@ pub struct MachineSnapshot {
     management_framer: crate::control::ManagementFramer,
     net: Option<VirtioNet>,
     channel: Option<VirtioConsole>,
+    blk: Option<VirtioBlk>,
     control_dma_bytes: u64,
     control_tx_bytes: u64,
     pv: bool,
@@ -172,6 +179,7 @@ pub struct Machine {
     management_framer: crate::control::ManagementFramer,
     pub net: Option<VirtioNet>,
     pub channel: Option<VirtioConsole>,
+    pub blk: Option<VirtioBlk>,
     pub control_dma_bytes: u64,
     pub control_tx_bytes: u64,
     stepping: bool,
@@ -430,6 +438,7 @@ impl Machine {
             management_framer: crate::control::ManagementFramer::default(),
             net,
             channel: spec.control_channel.then(VirtioConsole::new),
+            blk: spec.disk.clone().map(VirtioBlk::new),
             control_dma_bytes:0,
             control_tx_bytes:0,
             stepping: false,
@@ -567,6 +576,10 @@ impl Machine {
             new.output_limit = old.output_limit;
         }
         self.trace = old.trace.take();
+        // The disk keeps what was flushed; unflushed writes die with the VM.
+        if let (Some(new), Some(old)) = (self.blk.as_mut(), old.blk.as_ref()) {
+            *new = VirtioBlk::new(old.disk.crashed().0);
+        }
         self.witness.update(old.exit_witness().as_bytes());
         self.record(b'C', at);
         Ok(())
@@ -610,7 +623,7 @@ impl Machine {
             pic: self.pic.clone(), pit: self.pit.clone(), rtc_index: self.rtc_index,
             com1: self.com1.snapshot(), com2: self.com2.snapshot(),
             management_framer: self.management_framer.clone(),
-            net: self.net.clone(), channel: self.channel.clone(),
+            net: self.net.clone(), channel: self.channel.clone(), blk: self.blk.clone(),
             control_dma_bytes: self.control_dma_bytes, control_tx_bytes: self.control_tx_bytes,
             pv: self.pv, armed_wake: self.armed_wake, pit_exact: self.pit_exact, exit_req: self.exit_req,
             margin: self.margin, fm: self.fm, parked: self.parked,
@@ -676,6 +689,7 @@ impl Machine {
         self.management_framer = s.management_framer.clone();
         self.net = s.net.clone();
         self.channel = s.channel.clone();
+        self.blk = s.blk.clone();
         self.control_dma_bytes = s.control_dma_bytes;
         self.control_tx_bytes = s.control_tx_bytes;
         self.pv = s.pv;
@@ -781,6 +795,16 @@ impl Machine {
         }
         if let Some(channel)=self.channel.as_mut() {
             match self.undo.as_mut() {Some(undo)=>{for (address,length) in channel.dirty.drain(..){undo.mark(address,length);}},None=>channel.dirty.clear()}
+        }
+        if let Some(blk) = self.blk.as_mut() {
+            match self.undo.as_mut() {
+                Some(u) => {
+                    for (a, l) in blk.dirty.drain(..) {
+                        u.mark(a, l);
+                    }
+                }
+                None => blk.dirty.clear(),
+            }
         }
     }
 
@@ -1329,6 +1353,8 @@ impl Machine {
                     self.stats.mmio += 1;
                     let v = if (CHANNEL_MMIO..CHANNEL_MMIO+0x1000).contains(&addr) {
                         self.channel.as_mut().map(|channel|channel.read(addr-CHANNEL_MMIO)).unwrap_or(0)
+                    } else if (BLK_MMIO..BLK_MMIO + 0x1000).contains(&addr) {
+                        self.blk.as_mut().map(|b| b.read(addr - BLK_MMIO)).unwrap_or(0)
                     } else {match self.net.as_mut() {
                         Some(n) if (NET_MMIO..NET_MMIO + 0x1000).contains(&addr) => {
                             n.read(addr - NET_MMIO)
@@ -1353,6 +1379,26 @@ impl Machine {
                             let output=channel.write(memory,addr-CHANNEL_MMIO,v)?;
                             self.take_dma();if output.irq {self.pic.raise(CHANNEL_IRQ);}
                             if self.channel_output(&output.bytes)? {self.set_stepping(false)?;return Ok(Stop::Control);}
+                        }
+                    }
+                    if (BLK_MMIO..BLK_MMIO + 0x1000).contains(&addr) {
+                        let m = unsafe { std::slice::from_raw_parts_mut(self.mem, self.mem_size) };
+                        if let Some(b) = self.blk.as_mut() {
+                            let done = b.write(m, addr - BLK_MMIO, v)?;
+                            self.take_dma();
+                            if done.completed > 0 {
+                                // The disk changed outside guest RAM: no rollback
+                                // may cross this point.
+                                if let Some(u) = self.undo.as_mut() { u.valid = false; }
+                            }
+                            // Each request, in completion order: the trace shows
+                            // where every FLUSH falls among the writes.
+                            for (kind, sector, status) in done.log {
+                                self.record(b'd', (kind as u64) << 56 | (status as u64) << 48 | sector);
+                            }
+                            if done.irq {
+                                self.pic.raise(BLK_IRQ);
+                            }
                         }
                     }
                     if (NET_MMIO..NET_MMIO + 0x1000).contains(&addr) {
@@ -1403,8 +1449,8 @@ impl Machine {
     /// Hashes of guest RAM and the vCPU state a checkpoint restores, by part:
     /// general and control registers with segment bases, FPU/XSAVE, XCRs,
     /// pending exception/interrupt/NMI state, syscall/TLS MSRs, the shared time
-    /// page and RAM. The digest is the hash of the parts. Not covered: other
-    /// MSRs, debug registers and VMM device models.
+    /// page, RAM and any retained disk. The digest is the hash of the parts.
+    /// Not covered: other MSRs, debug registers and other VMM device models.
     pub fn state_digest(&mut self) -> (String, Vec<(&'static str, String)>) {
         let hex = |h: Sha256| format!("{:x}", h.finalize());
         let mut parts = Vec::new();
@@ -1498,6 +1544,9 @@ impl Machine {
         let mut h = Sha256::new();
         h.update(self.pending_io_bytes());
         parts.push(("pending_io", hex(h)));
+        if let Some(b) = &self.blk {
+            parts.push(("disk", b.disk.digest()));
+        }
         let mut all = Sha256::new();
         for (_, d) in &parts {
             all.update(d.as_bytes());
@@ -1531,7 +1580,7 @@ mod io_boundary_tests {
         else {code.push(if write {0xee} else {0xec});}
         code.extend_from_slice(&[0x85,0xc0,0x74,0x00,0xc7,0x05,0x00,0x00,0x08,0x00,0x78,0x56,0x34,0x12,0xf4]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo,barrier:false};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false};
         let mut machine=Machine::new(kvm,"io-probe",&spec).unwrap();
         let mut r=machine.vcpu.get_regs().unwrap();r.rflags=0x202;machine.vcpu.set_regs(&r).unwrap();
         machine.pit.write(0x43,0x34,0);
@@ -1649,7 +1698,7 @@ mod io_boundary_tests {
         let back=-(code.len() as i8+2);
         code.extend_from_slice(&[0xeb,back as u8]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo,barrier:false};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false};
         let mut machine=Machine::new(kvm,"stop-probe",&spec).unwrap();
         let mut r=machine.vcpu.get_regs().unwrap();r.rflags=0x2;machine.vcpu.set_regs(&r).unwrap();
         machine.pic.set_masks(0xffff);
@@ -1803,7 +1852,7 @@ mod fork_tests {
         code.extend_from_slice(&[0xb9,0xe8,0x03,0,0, 0x49, 0x75,0xfd]);
         code.extend_from_slice(&[0xc7,0x05,0x00,0x10,0x08,0x00,0xad,0xde,0,0, 0xf4]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo,barrier};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier};
         Machine::new(kvm,"fork-probe",&spec).unwrap()
     }
 
@@ -1992,5 +2041,37 @@ mod fork_tests {
             let evidence=(first,new.time,new.exit_witness(),new.state_digest().0);
             if let Some(want)=&want {assert_eq!(&evidence,want,"undo={undo}");} else {want=Some(evidence);}
         }
+    }
+
+    /// A crash keeps exactly the flushed disk writes: the next incarnation
+    /// boots with the stable layer, a fresh virtio-blk transport, and none of
+    /// the volatile writes. A fork restore puts the whole disk back.
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn a_reboot_keeps_flushed_disk_writes_only() {
+        let kvm=Kvm::new().unwrap();
+        let with_disk=|m: &mut Machine| m.blk=Some(VirtioBlk::new(Disk::new(None,Some(8)).unwrap()));
+        let mut counter=Counter::new().unwrap();
+        let mut old=probe_machine(&kvm,256,false);
+        with_disk(&mut old);
+        to_halt(&mut old,&mut counter,1_000_000);
+        let snap=old.snapshot().unwrap();
+        let disk=&mut old.blk.as_mut().unwrap().disk;
+        disk.write(0,&[b'A';512]).unwrap();
+        disk.flush();
+        disk.write(0,&[b'B';512]).unwrap();
+        disk.write(1,&[b'C';512]).unwrap();
+        let mut new=probe_machine(&kvm,256,false);
+        with_disk(&mut new);
+        new.succeed(&mut old,1000).unwrap();
+        let disk=&new.blk.as_ref().unwrap().disk;
+        let mut buf=[0u8;1024];
+        disk.read(0,&mut buf).unwrap();
+        assert_eq!((buf[0],buf[512]),(b'A',0));
+        assert_eq!((disk.stable_sectors(),disk.volatile_sectors()),(1,0));
+        assert_eq!(new.blk.as_ref().unwrap().stats.writes,0,"a fresh transport");
+        assert_eq!(old.blk.as_ref().unwrap().disk.volatile_sectors(),2,"the old incarnation is untouched");
+        old.restore(&snap).unwrap();
+        assert_eq!(old.blk.as_ref().unwrap().disk.digest(),Disk::new(None,Some(8)).unwrap().digest());
     }
 }
