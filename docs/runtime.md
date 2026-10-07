@@ -202,6 +202,19 @@ arrival times strictly before admission. A packet physically delivered in an
 early scheduler window is excluded until its nominal arrival precedes that
 boundary. Final report counters still record physical NIC acceptance totals.
 
+### Machine pause, crash and reboot
+
+Compose guest drivers can call `World.pause(target)`, `resume(target)`,
+`crash(target)` and `reboot(target)` through the [runtime control API](../python/README.md).
+Each acts on the target's whole machine at admission and returns an `Effect`;
+the transcript and service-attributed fault events are validated during run and
+replay. Illegal transitions return recoverable `invalid_state`; pause/resume
+of an exited VM and process faults whose machine exits or crashes return
+`target_unavailable`. Inspection shows `Paused` and `Down`. After reboot, the
+scenario checks application readiness itself. See
+[Machine pause, crash and reboot](../harness/worlds/README.md#machine-pause-crash-and-reboot)
+for CPU, timer, network, incarnation and static-plan semantics.
+
 ## Bundles
 
 `seedbox export RUN [-o FILE] [--state STATE]` writes one uncompressed

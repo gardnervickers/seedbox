@@ -145,6 +145,18 @@ impl Control {
             Operation::Restart { target } => Some(Action::Restart {
                 machine: self.target(target)?,
             }),
+            Operation::Pause { target } => Some(Action::Pause {
+                machine: self.target(target)?,
+            }),
+            Operation::Resume { target } => Some(Action::Resume {
+                machine: self.target(target)?,
+            }),
+            Operation::Crash { target } => Some(Action::Crash {
+                machine: self.target(target)?,
+            }),
+            Operation::Reboot { target } => Some(Action::Reboot {
+                machine: self.target(target)?,
+            }),
             Operation::Partition { left, right } => {
                 if left.is_empty() || right.is_empty() {
                     return Err("partition sides must be nonempty".into());
@@ -296,7 +308,7 @@ impl Control {
     /// Validate target VM existence at the admission barrier, never at request observation.
     pub fn reject_unavailable(&mut self, exited: &[String]) {
         if let Some(p)=self.pending.as_mut() {
-            if !p.admitted_done && p.plan.as_ref().and_then(|plan|plan.action.machine()).is_some_and(|name|exited.iter().any(|n|n==name)) {
+            if !p.admitted_done && p.plan.as_ref().is_some_and(|plan|matches!(plan.action,Action::Stop{..}|Action::Restart{..}|Action::Pause{..}|Action::Resume{..}) && plan.action.machine().is_some_and(|name|exited.iter().any(|n|n==name))) {
                 p.plan=None;p.effect=Some(p.admitted);p.error=Some("target VM has exited; restart only starts a stopped process".into());p.error_code=Some("target_unavailable");
             }
         }

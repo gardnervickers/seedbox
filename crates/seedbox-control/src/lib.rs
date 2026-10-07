@@ -25,6 +25,18 @@ pub enum Operation {
     Restart {
         target: Target,
     },
+    Pause {
+        target: Target,
+    },
+    Resume {
+        target: Target,
+    },
+    Crash {
+        target: Target,
+    },
+    Reboot {
+        target: Target,
+    },
     Partition {
         left: Vec<Target>,
         right: Vec<Target>,
@@ -134,5 +146,24 @@ mod tests {
         }
         let r:Request=serde_json::from_str(r#"{"version":1,"id":1,"op":"partition","left":[{"service":"c"}],"right":[{"machine":"s"}]}"#).unwrap();
         assert!(matches!(r.operation, Operation::Partition { .. }));
+        for op in ["pause", "resume", "crash", "reboot"] {
+            for target in [Target::Service("s".into()), Target::Machine("m".into())] {
+                let wire = serde_json::json!({"version":1,"id":1,"op":op,"target":target});
+                let request: Request = serde_json::from_value(wire.clone()).unwrap();
+                assert_eq!(serde_json::to_value(request).unwrap(), wire);
+            }
+            for arguments in [
+                serde_json::json!({}),
+                serde_json::json!({"target":"s"}),
+                serde_json::json!({"target":{"service":"s","machine":"m"}}),
+                serde_json::json!({"target":{"service":"s"},"extra":1}),
+            ] {
+                let mut wire = serde_json::json!({"version":1,"id":1,"op":op});
+                wire.as_object_mut()
+                    .unwrap()
+                    .extend(arguments.as_object().unwrap().clone());
+                assert!(serde_json::from_value::<Request>(wire).is_err());
+            }
+        }
     }
 }
