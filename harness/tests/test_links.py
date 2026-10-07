@@ -42,23 +42,63 @@ class LinkTests(unittest.TestCase):
         self.assertEqual(short['faults'][0]['at_ns'], 300_000_000)
         self.assertEqual(short['faults'][-1]['at_ns'], 1_000_000_000)
         for old, new in zip(full['faults'], short['faults']):
-            self.assertEqual({k: v for k, v in old.items() if k not in ('at_ns', 'deadline_ns')},
+            expected = {k: v for k, v in old.items() if k not in ('at_ns', 'deadline_ns')}
+            if 'latency_ns' in expected:
+                expected['latency_ns'] += 9_000_000
+            self.assertEqual(expected,
                              {k: v for k, v in new.items() if k not in ('at_ns', 'deadline_ns')})
             self.assertEqual(new['deadline_ns'], new['at_ns'])
-        self.assertEqual(short['network'], full['network'])
-        self.assertEqual(short['stop_tolerance_ns'], 200_000)
+        self.assertEqual(short['network'], {
+            'latency_ns': 10_000_000, 'jitter_ns': 0,
+            'links': [{'from': 'a', 'to': 'b', 'latency_ns': 12_000_000}],
+        })
+        self.assertEqual(short['stop_tolerance_ns'], 5_000_000)
         self.assertEqual(short['duration_ns'], 2_500_000_000)
+        self.assertEqual([m['cmdline'] for m in short['machines']],
+                         ['seedbox.link_gap_ns=1000000'] * 3)
         self.assertEqual(links.policy_at(short, 'c', 'a', 600_000_000),
-                         (1_000_000, 500_000, 500_000))
+                         (10_000_000, 500_000, 500_000))
         # Only uncut sends consume lossmid draws. Estimate at the configured
         # probe gap, not 50% receipts, and exclude the c|a cut's whole interval.
         exposed = sum(links.policy_at(short, 'c', 'a', t) ==
-                      (1_000_000, 500_000, 500_000)
-                      for t in range(0, 1_100_000_000, 4_000_000))
-        self.assertEqual(exposed, 85)
-        self.assertGreaterEqual(exposed, 80)
+                      (10_000_000, 500_000, 500_000)
+                      for t in range(0, 1_100_000_000, 1_000_000))
+        self.assertEqual(exposed, 340)
+        self.assertGreaterEqual(exposed, 300)
         init = (REPO / 'harness/fixtures/links/link-short.init').read_text()
-        self.assertIn('link-probe "$name" 4000000 1100000000', init)
+        self.assertIn('seedbox.link_gap_ns=', init)
+        self.assertIn('link-probe "$name" "${gap:-4000000}" 1100000000', init)
+        # World early is capped at half the global latency. Both the horizon
+        # and timer windows must cover a whole probe gap; changing tolerance
+        # alone with the old 1 ms floor would still force counted slice ends.
+        early = min(short['network']['latency_ns'] // 2, short['stop_tolerance_ns'])
+        self.assertGreaterEqual(early, 1_000_000)
+        self.assertGreaterEqual(short['stop_tolerance_ns'], 1_000_000)
+        # Final fault traffic has 100 ms to drain before reports, longer than
+        # every shaped latency+jitter. The reporting grace stays in the cap.
+        max_delay = max(f.get('latency_ns', 0) + f.get('jitter_ns', 0)
+                        for f in short['faults'])
+        self.assertLess(max_delay, 1_100_000_000 - short['faults'][-1]['at_ns'])
+        self.assertGreater(short['duration_ns'], 1_100_000_000 + 100_000_000)
+
+    def test_short_probe_reads_world_gap_and_preserves_default(self):
+        init = (REPO / 'harness/fixtures/links/link-short.init').read_text().splitlines()
+        commands = '\n'.join(line for line in init
+                             if line.startswith(('gap=', 'link-probe ')))
+        commands = commands.replace('/proc/cmdline', '"$LINK_TEST_CMDLINE"')
+        with tempfile.TemporaryDirectory() as temp:
+            cmdline = Path(temp) / 'cmdline'
+            for argument, gap in [('', '4000000'), ('seedbox.link_gap_ns=1000000', '1000000')]:
+                cmdline.write_text(f'console=ttyS0 seedbox.name=a {argument} panic=-1\n')
+                result = subprocess.run(
+                    # bash, not sh: dash rejects the hyphenated function name.
+                    ['bash', '-eu', '-c',
+                     'link-probe() { printf "%s\\n" "$*"; }; name=a\n' + commands],
+                    env={**os.environ, 'LINK_TEST_CMDLINE': str(cmdline)},
+                    text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), f'a {gap} 1100000000')
+
     def test_full_world_plan_preserves_every_direction_and_fifo_transition(self):
         plan = links.window_plan(world('shaped'))
         def windows(parts):
@@ -201,6 +241,50 @@ echo "joined:$rc:$(find "$RESULTS" -name '*.finished' | wc -l)"
             for lane, args in expected.items():
                 self.assertEqual((Path(temp) / f'{lane}.args').read_text().strip(), args)
 
+    def analyze_undo_pair(self, rollbacks):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            short = world('shaped-tol-short')
+            (root / 'shaped.json').write_text(json.dumps(world('shaped')))
+            (root / 'shaped-tol-short.json').write_text(json.dumps(short))
+            for run in ('U1', 'U2'):
+                report = {
+                    'outcome': 'end_machine_exited',
+                    'world_witness': 'short',
+                    'machines': [dict(name=name, undo={'rollbacks': count} if run == 'U1' else None)
+                                 for name, count in zip('abc', rollbacks)],
+                    'faults': [dict(id=f['id'], status='applied', applied_at_ns=f['at_ns'])
+                               for f in short['faults']],
+                    'network_counters': {'c->a': {'loss_dropped': 10, 'partition_dropped': 10},
+                                         'c->b': {'loss_dropped': 10},
+                                         'a->c': {'partition_dropped': 10}},
+                }
+                (root / f'{run}.json').write_text(json.dumps(report))
+                (root / run).mkdir()
+                (root / run / 'all.console').write_text('\n'.join(
+                    f'LINK-SRC {dst}<-{src} reorders=0'
+                    for dst in 'abc' for src in 'abc' if dst != src))
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                result = links.analyze(root, ['U1', 'U2'])
+            return result, output.getvalue()
+
+    def test_undo_pair_passes_with_positive_u1_rollbacks(self):
+        result, output = self.analyze_undo_pair((0, 2, 3))
+        self.assertEqual(result, 0, output)
+        self.assertIn('PASS U1: exercised rollback (rollbacks=5)', output)
+        self.assertRegex(output, r'U1: outcome=.* rollbacks=5\n')
+        self.assertRegex(output, r'U2: outcome=.* rollbacks=0\n')
+        self.assertIn('RESULT: ALL PASS', output)
+
+    def test_undo_pair_fails_with_zero_u1_rollbacks(self):
+        result, output = self.analyze_undo_pair((0, 0, 0))
+        self.assertEqual(result, 1, output)
+        self.assertIn('FAIL U1: exercised rollback (rollbacks=0)', output)
+        self.assertRegex(output, r'U1: outcome=.* rollbacks=0\n')
+        self.assertIn('PASS short shaped undo on/off MATCH (U1 == U2)', output)
+        self.assertEqual(output.count('FAIL '), 1, output)
+        self.assertIn('RESULT: SOME CHECKS FAILED', output)
+
     def test_host_checker_returns_failure_for_broken_lane_evidence(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -212,6 +296,7 @@ echo "joined:$rc:$(find "$RESULTS" -name '*.finished' | wc -l)"
                 report = {
                     'outcome': 'end_machine_exited',
                     'world_witness': 'short' if run[0] == 'U' else 'shaped' if shaped else 'plain',
+                    'machines': [dict(name='a', undo={'rollbacks': 1 if run == 'U1' else 0})],
                     'faults': [dict(id=f['id'], status='applied', applied_at_ns=f['at_ns'])
                                for f in (short if run[0] == 'U' else full)['faults']] if shaped else [],
                     'network_counters': {'c->a': {'loss_dropped': 10, 'partition_dropped': 10},

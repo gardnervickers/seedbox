@@ -4,10 +4,9 @@ use crate::{execution::ExecutionProfile, store::ContentDigest, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, io::Read, path::Path};
 
-pub const POLICY_VERSION: &str = "amd-zen3-engine52eb-v1";
+pub const POLICY_VERSION: &str = "amd-zen3-engine52eb-v2";
 pub const ENGINE: &str = "52eb41490f521a0104ea4ab06297cbdbdd7bc9a68261febf6c5cc19854bacdcf";
 pub const GUEST_KERNEL: &str = "e8ece7cba2d5fc4924da83e39cc672ae2516c117f8f76ecfa04aeaa98e697847";
-const HOST_KERNEL: &str = "66111c2888091bd64e96e71a6a9e831ab5496d6c6272add5d81490396bfa3cdc";
 
 /// Bound input hashing before any OCI preparation or host state changes.
 pub fn file_digest(path: &Path) -> Result<ContentDigest> {
@@ -99,7 +98,6 @@ pub struct RequiredPolicy {
     pub model: u32,
     pub stepping: u32,
     pub microcode: u64,
-    pub host_kernel: String,
     pub engine: String,
     pub guest_kernel: String,
     pub guest_abi: String,
@@ -126,7 +124,6 @@ pub fn required_policy() -> Result<RequiredPolicy> {
         model: 33,
         stepping: 0,
         microcode: 0xa20102e,
-        host_kernel: HOST_KERNEL.into(),
         engine: ENGINE.into(),
         guest_kernel: GUEST_KERNEL.into(),
         guest_abi: "oci-init-v1".into(),
@@ -278,8 +275,6 @@ pub struct CoreObservation {
     pub model: u32,
     pub stepping: u32,
     pub microcode: u64,
-    pub booted_kernel: String,
-    pub current_kernel: String,
     pub kvm_api: i32,
     pub immediate_exit: i32,
     pub guest_debug: i32,
@@ -304,10 +299,6 @@ fn validate_fields(o: &CoreObservation, require_perf: bool) -> Result<()> {
         (o.model == p.model, "CPU model"),
         (o.stepping == p.stepping, "CPU stepping"),
         (o.microcode == p.microcode, "microcode"),
-        (
-            o.booted_kernel == p.host_kernel && o.current_kernel == p.host_kernel,
-            "host kernel bytes",
-        ),
         (o.kvm_api == p.kvm_api, "KVM API"),
         (
             o.immediate_exit == p.immediate_exit,
@@ -533,8 +524,6 @@ mod cleanup_tests {
             model: p.model,
             stepping: p.stepping,
             microcode: p.microcode,
-            booted_kernel: p.host_kernel.clone(),
-            current_kernel: p.host_kernel,
             kvm_api: p.kvm_api,
             immediate_exit: p.immediate_exit,
             guest_debug: p.guest_debug,
