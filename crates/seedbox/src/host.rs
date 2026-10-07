@@ -411,6 +411,22 @@ mod tests {
     const ZEN: Option<MsrWorkaround> = CounterProfile::Zen.workaround();
     const MSR: u64 = 0xc0011020;
     const WORKAROUND: u64 = 1 << 54;
+
+    /// Whether the leases on `cpus` can be taken again. A process another
+    /// test spawns in parallel holds copies of these lock descriptors until
+    /// it execs, so wait that out; a lease this process leaked stays held.
+    fn released(cpus: &BTreeSet<u32>, directory: &Path) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if locks(cpus, directory).is_ok() {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
     #[test]
     fn leased_recheck_failure_releases_locks_without_msr_write_or_snapshot() {
         let dir = tempfile::tempdir().unwrap();
@@ -450,7 +466,7 @@ mod tests {
                 17
             );
         }
-        assert!(locks(&cpus, dir.path()).is_ok());
+        assert!(released(&cpus, dir.path()));
     }
     #[test]
     fn topology_and_eligibility_drift_under_locks_refuse_before_msr_mutation() {
@@ -514,7 +530,7 @@ mod tests {
                     17
                 );
             }
-            assert!(locks(&cpus, dir.path()).is_ok());
+            assert!(released(&cpus, dir.path()));
         }
     }
     #[test]
@@ -561,7 +577,7 @@ mod tests {
                 *cpu as u64 + 9
             );
         }
-        assert!(locks(&cpus, dir.path()).is_ok());
+        assert!(released(&cpus, dir.path()));
     }
     #[test]
     fn missing_sibling_register_does_not_mutate_first_cpu() {
@@ -612,7 +628,7 @@ mod tests {
         lease.restore().unwrap();
         assert!(locks(&cpus, root.path()).is_err());
         drop(lease);
-        assert!(locks(&cpus, root.path()).is_ok());
+        assert!(released(&cpus, root.path()));
     }
 
     #[test]
@@ -626,7 +642,7 @@ mod tests {
             assert!(!dir.path().join("msr-original.json").exists());
             lease.restore().unwrap();
         }
-        assert!(locks(&cpus, dir.path()).is_ok());
+        assert!(released(&cpus, dir.path()));
     }
     #[test]
     fn busy_core_is_skipped_rather_than_failing_selection() {
