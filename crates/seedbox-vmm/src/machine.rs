@@ -744,9 +744,12 @@ impl Machine {
             // point, much cheaper than counting our way to `hard`. Earlier yield
             // exits are transparent.
             //
+            // Keep the transparent syscall window open for the entire soft
+            // interval. Host skid and a performance margin cannot decide
+            // whether a syscall at the semantic stop is offered as an exit.
             let rem_soft = soft.saturating_sub(self.time);
             let windowed = soft < hard;
-            let window = windowed && rem_soft <= self.margin;
+            let window = windowed;
             if window != self.exit_req {
                 unsafe { std::ptr::write_volatile(self.page.add(2), window as u64) };
                 self.exit_req = window;

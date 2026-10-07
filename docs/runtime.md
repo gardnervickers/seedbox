@@ -83,7 +83,19 @@ a CPU lease. Application memory can require a larger value; the etcd image faile
 to unpack at 512 MiB and passed at 1024 MiB. `--margin` and `--undo` are recorded per attempt and do not change identity.
 `--undo` defaults to 256 branches; zero disables undo and 16 exercises a smaller
 margin. The accepted range is 0..262144. Both settings are passed explicitly to
-the retained engine, without inheriting VMM environment variables.
+the retained engine, without inheriting VMM environment variables. `--margin`
+controls PMU approach and stepping distance; syscall exits remain available
+throughout a soft stop interval independently of that setting. Earlier yields
+do not publish a stop, inject an interrupt, or invalidate a checkpoint.
+
+Charged timer-port accesses conserve their full 1000 ns cost across world and
+timer boundaries. Their device effect and read response occur once; the guest
+cannot resume while a charged operation remains pending. Due timers latch before
+the next portion of the cost is paid. A duration cutoff can retain the pending
+operation, including its remaining cost and transferred bytes, in the exit
+witness and the full-state `pending_io` part. Other clock advances retain the
+strict hard-stop check.
+
 Replay defaults to the retained engine. An explicit `--vmm NEW_BINARY
 --allow-engine-change` permits a fresh identity and witness comparison with it.
 Replay does not require registry access, a builder, or the original Compose files.

@@ -140,15 +140,20 @@ Stop placement settings affect speed only, never results:
   of guest RAM synced from the KVM dirty log). It then aims the overflow
   interrupt this many branches short of the stop. If the interrupt skids past,
   the VMM rolls back and retries from twice as far. `0` disables this.
-- `SEEDBOX_MARGIN` (`adaptive` or a branch count): how early before a soft stop
-  the VMM asks for syscall exits, and the stepping distance when undo is off.
+- `SEEDBOX_MARGIN` (`adaptive` or a branch count): PMU approach and stepping
+  distance when undo is off. Syscall exits remain available throughout a soft
+  stop interval; earlier yields do not publish a stop or inject an interrupt.
   An overshoot that cannot be undone aborts the run; `campaign.sh` reruns it
   with a larger margin for the identical result.
 
-Deterministic clock advances (timer-port I/O charges and guest time reads)
-must also fit in the hard stop. Crossing it fails with `clock bound exceeded`;
-no device I/O cost is clamped away, and a larger PMU margin does not fix or
-retry this error.
+Charged timer-port I/O applies its device effect once and conserves its full
+1000 ns cost. If that cost meets a world boundary or timer deadline, the VMM
+retains the unconsumed cost and pending KVM I/O response while the world
+processes the boundary. The guest resumes only after the cost is paid and KVM
+completes the instruction. Terminal witnesses include that pending operation.
+Guest time reads and other clock advances still must fit the hard stop; crossing
+it fails with `clock bound exceeded`. A larger PMU margin does not fix or retry
+that error.
 
 ## Engine acceptance suite
 
