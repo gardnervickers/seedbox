@@ -1,0 +1,67 @@
+name: short-kill-3-5-2
+services:
+  n1:
+    image: quay.io/coreos/etcd:v3.5.2
+    entrypoint: [/usr/local/bin/etcd]
+    command:
+      - --name=n1
+      - --data-dir=/data/n1
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://n1:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://n1:2380
+      - --initial-cluster=n1=http://n1:2380,n2=http://n2:2380,n3=http://n3:2380
+      - --initial-cluster-state=new
+      - --logger=zap
+      - --log-level=error
+    environment: {GOMAXPROCS: "4"}
+  n2:
+    image: quay.io/coreos/etcd:v3.5.2
+    entrypoint: [/usr/local/bin/etcd]
+    command:
+      - --name=n2
+      - --data-dir=/data/n2
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://n2:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://n2:2380
+      - --initial-cluster=n1=http://n1:2380,n2=http://n2:2380,n3=http://n3:2380
+      - --initial-cluster-state=new
+      - --logger=zap
+      - --log-level=error
+    environment: {GOMAXPROCS: "4"}
+  n3:
+    image: quay.io/coreos/etcd:v3.5.2
+    entrypoint: [/usr/local/bin/etcd]
+    command:
+      - --name=n3
+      - --data-dir=/data/n3
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://n3:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://n3:2380
+      - --initial-cluster=n1=http://n1:2380,n2=http://n2:2380,n3=http://n3:2380
+      - --initial-cluster-state=new
+      - --logger=zap
+      - --log-level=error
+    environment: {GOMAXPROCS: "4"}
+  client:
+    build: {context: ../../../examples/etcd/workload, dockerfile: acceptance.Dockerfile}
+    configs:
+      - {source: driver, target: /scenario/etcd.py}
+      - {source: api-package, target: /scenario/seedbox/__init__.py}
+      - {source: api-control, target: /scenario/seedbox/control.py}
+    command: [--endpoints, "n1:2379,n2:2379,n3:2379", --duration, 10s, --rounds, "2"]
+    environment: {GOMAXPROCS: "4"}
+configs:
+  driver: {file: ../driver/etcd.py}
+  api-package: {file: ../../../python/seedbox/__init__.py}
+  api-control: {file: ../../../python/seedbox/control.py}
+x-seedbox:
+  version: 1
+  seed: 4000
+  limits: {simulated_time: 120s, wall_time: 30m}
+  network: {latency: 1ms, jitter: 200us}
+  schedule: {timer_jitter: 1ms, stop_tolerance: 2ms}
+  control: {service: client}
+  check: {service: client, exit_code: 0}

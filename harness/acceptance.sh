@@ -1,9 +1,20 @@
 #!/usr/bin/env bash
-# Usage: acceptance.sh portable|smoke|full|pin [options]   (see --help)
-# Tiers and checks: issue #4 and the "Acceptance suite" section of README.md.
+# Portable source checks only. Hardware scenarios are ordinary seedbox run commands.
 set -euo pipefail
-here=$(cd "$(dirname "$0")" && pwd)
-# Import this checkout's package regardless of the caller's working directory.
-exec "${SEEDBOX_PYTHON:-python3}" -c \
-  'import sys; sys.path.insert(0, sys.argv.pop(1)); from acceptance.__main__ import main; sys.exit(main())' \
-  "$here" "$@"
+if [[ ${1:-portable} != portable || $# -gt 1 ]]; then
+  echo 'Usage: harness/acceptance.sh portable; see README.md for seedbox run commands' >&2
+  exit 2
+fi
+cd "$(dirname "$0")/.."
+while IFS= read -r script; do
+  bash -n "$script"
+done < <(git ls-files '*.sh' ':!:research/**')
+tests=(test_msr54 test_scenarios test_race_acceptance)
+if [[ $(uname -s) == Linux ]]; then tests+=(test_batch); fi
+(cd harness/tests && python3 -m unittest -q "${tests[@]}")
+(cd python && python3 -m unittest discover -s tests -q)
+if [[ $(uname -s) == Linux ]]; then cargo test-vmm; fi
+cargo test --workspace --locked
+for scenario in harness/acceptance/workloads/*.yaml; do
+  cargo run --quiet --locked -p seedbox -- validate "$scenario"
+done
