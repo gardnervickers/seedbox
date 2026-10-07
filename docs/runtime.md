@@ -97,6 +97,66 @@ time-page publication, paused/down guests and repeated/divergent guest
 usual exclusive CPU/SMT lease and Zen MSR workaround. These tests have not been
 run on KVM for this change. These changes require Linux KVM qualification;
 portable tests cannot establish restored execution or no-option witness equivalence.
+### Integration with current main
+
+Checkpoint capture includes the state introduced by the merged runtime features:
+
+| Feature | Captured state and branch behavior |
+| --- | --- |
+| Torn writes (#100) | `MachineSnapshot.blk` clones the complete virtio-blk transport, counters, disk policy, stable sectors and latest volatile sectors. Crash selection is atomic and creates its RNG from the seed, machine and crashed incarnation; there is no persistent survival cursor. Changed-seed runtime branches additionally key this stream on the full branch identity. Parent continuations retain the original stream. A snapshot of a down machine already contains the selected stable survivors; branching cannot resample that earlier crash. |
+| Compose lifecycle control (#91) | `WorldSnapshot` clones the complete `Control` and `Faults`, including pending operation/plan/reply, request/session counters, lifecycle state, readiness, logs and queued lifecycle effects. Machine snapshots retain paused/down flags, incarnation, boot time, pending I/O and device queues. World snapshots retain incarnation history, pending management deliveries and paused ingress accounting. Guest supervisor/relay state is captured in guest RAM. |
+| Named volumes (#96) | Filesystem/page-cache state is in guest RAM; durable and volatile block contents and queues are in the captured virtio-blk device. Mount declarations and placement are immutable retained inputs; disk attachments enter the parent world identity. Restore does not rerun guest formatting or mounting. |
+| Parallel exploration (#76) | Worker coordination, CPU leases and batch records belong to the host orchestrator, outside the single captured world. The public checkpoint flags remain `run`-only; runtime checkpoints do not snapshot a worker pool. |
+| Offline diff (#102), host checks (#99), merge trains (#107), error tail (#111) | These add offline readers, host checks/workflows or failure diagnostics, with no new guest/world semantic state. Their behavior and tests remain present. |
+
+The world JSON includes `disk_loss` before computing checkpoint identities, so the
+CLI and VMM agree on the policy-bound parent. Portable regression tests cover that
+agreement, named-volume attachments, repeated disk snapshot restoration and
+identity-derived survival. Ignored KVM tests additionally cover pending Compose
+pause/resume/crash/reboot requests and snapshots on both sides of a torn-write
+crash. They require operator execution on the qualified Linux host, along with
+`cargo build-vmm`, `cargo test-vmm`, the existing checkpoint/entropy tests and
+run/replay acceptance combining checkpoints, named volumes and `--torn-writes`.
+The Mac checks do not compile or execute the Linux-only VMM. No ABI field
+renumbering from #93, kernel pin change or release-policy change is part of this
+merge.
+
+## Disk crash policy
+
+`run` and `prepare` accept `--torn-writes` (off by default). Off retains the
+`flush-stable/drop-all-unflushed/v1` model: crashes drop all unflushed sectors.
+The omitted setting adds no profile or world JSON field and leaves the existing
+disk digest and witness inputs unchanged. Building the modified VMM still changes
+the engine binary hash, as every VMM source change does.
+
+When enabled, the profile's semantic parameter `disk_loss` and each disk report's
+`model` are
+`flush-stable/seeded-latest-sector-512-half/disk-loss-machine-incarnation/v1`.
+Replay restores this policy from the retained profile; there is no replay override
+or environment variable. The low-level world JSON uses the same `disk_loss` key
+and model string. Unknown model strings are rejected.
+
+At each crash, the latest unflushed version of each sector independently has a
+50% chance of surviving. The atomic unit is 512 bytes: multi-sector writes can
+survive as any subset, but a single sector's bytes are never torn. A later sector
+write can survive while an earlier one is lost. Overwritten historical versions
+are not candidates; there is no write log. Lost sectors fall back to their last
+flushed contents or the base image. Every completed FLUSH stabilizes all preceding
+completed writes, so it never loses coverage under this policy.
+
+Selection visits volatile sectors in ascending sector order, using `below(2) == 1`
+from the versioned SHA-256 RNG domain `disk-loss/<machine>/<incarnation>` and the
+run seed. Changed-seed runtime checkpoints prefix that domain with
+`checkpoint/<branch-identity>/`; plain continuations keep the original domain.
+Incarnation identifies the machine that crashed (initially 0). No other RNG
+stream is consumed. Survivors become stable in the next incarnation;
+snapshot/fork restore carries the policy and both disk layers. Reports count
+only actually lost volatile sectors in `disk_lost_sectors`.
+
+This policy applies to retained virtio-blk disks, including the disks backing
+Compose named volumes. Unmounted application paths remain RAM-backed. Low-level
+disk fixtures, including the ext4 fsync ledger, are documented in
+[`harness/worlds/README.md`](../harness/worlds/README.md#retained-disk).
 
 ## Build on the qualified Linux host
 
@@ -275,6 +335,56 @@ Replay does not require registry access, a builder, or the original Compose file
 Run exits are 0 for PASS, 1 for FAIL, 2 for ERROR, 3 for INCOMPLETE, and 124 for
 simulated TIMEOUT. Replay exits are 0 for MATCH (including a reproduced FAIL),
 1 for MISMATCH, and 2 for NOT_COMPARABLE. Results print the attempt path.
+Offline diff exits 0 for MATCH, 1 for DIFFERENT, and 2 for usage/setup or invalid evidence.
+
+## Compare retained runs
+
+```sh
+seedbox diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
+seedbox diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY --json
+```
+
+Both positional inputs are retained run directories, including directories printed
+by `seedbox import`. Import exported bundles first. Diff runs on macOS or Linux,
+requires no root, runtime inputs, content store, host admission or registry access,
+and creates no state. Manifests are verified with the existing v2 reader. Selected
+materialized evidence under `output/` must match the manifest's recorded digest;
+missing declared files, corrupt bytes and unsupported reports produce setup exit 2.
+Unregistered and policy-omitted files are never interpreted, even if left on disk.
+
+Plain output starts with exactly one `MATCH: RUN_A <> RUN_B` or `DIFFERENT: ...`
+line, followed by lowercase fields. `--json` prints exactly one pretty library
+`DiffReport`. MATCH exits 0; DIFFERENT exits 1. This is evidence comparison, not
+replay admission: equal incomplete records can MATCH while witness equality is
+unknown (`matches: null`). Differing evidence availability is DIFFERENT. Omissions
+and unavailable detail are listed in `limitations`.
+
+The report presents the world witness first, then machines by name with exit
+witnesses, optional full-state digests/parts and selected terminal fields. The
+manifest's full-state digests remain usable when the raw engine report was omitted.
+All changed identity fields are listed as JSON pointers with both values, including
+configuration, seed, engine, kernel, images/layers, guest archives, provenance and
+semantic parameters. Missing values are null. Arrays are compared as whole values.
+Execution outcome, report, errors and omission metadata are also compared.
+Attempt names, replay ancestry, performance parameters, engine performance counters,
+host timings and arbitrary console/log contents do not determine MATCH.
+
+When both runs retain `machines/NAME.trace`, diff compares the existing engine
+records (`kind branches time_ns extra(hex) rip(hex)`) in order for each machine.
+An inserted/deleted record is reported at the first positional mismatch, including
+EOF on either side; there is no guessed realignment. Of those first mismatches,
+the lowest available simulated time on either side wins, with machine name as a
+stable tie-breaker. Each side retains its own time, kind and values; `record` is
+one-based. Traces are streamed and fully checked, including after the first mismatch.
+Trace lines are limited to 64 KiB and engine report metadata to 256 MiB.
+
+The production adapter does not enable tracing. Without a differing trace record,
+`first_record` reports the earliest differing terminal observation available in
+`vmm.json`, with source/kind `terminal`, machine and each side's time. Final hashes
+alone give no exit/time localization, so `first_record` can be null even when
+witnesses differ. Terminal time is only when the differing final state was observed;
+it is not a claim about the first divergent instruction or exit. Full-state digests
+are hashes, not snapshots. No new execution evidence is collected by diff.
 
 ## Check the execution profile
 
@@ -313,7 +423,15 @@ issue #5's hardware qualification; Darwin source tests do not establish it.
 Each service currently gets one machine and one OCI-root chroot. Its complete
 filesystem is writable RAM-backed initramfs storage, freshly instantiated for
 each run/replay; image volume paths have the same per-run lifetime. Process
-stop/start retains that filesystem. No state persists between fresh machine boots.
+stop/start retains that filesystem. A machine crash loses it.
+
+Named Compose volumes are the exception. A machine whose service mounts one gets
+a 1 GiB virtio-blk disk, zeroed at the start of each run/replay. The supervisor
+formats it as ext4 on first boot (with a static `mke2fs` packaged into the guest),
+mounts it, and bind mounts each volume's directory onto its target. The disk has a
+write cache: data the application flushed (fsync, fdatasync, `O_DSYNC`) survives a
+machine crash and reboot, and every write since the last flush is lost. A new volume
+takes the mode and owner of the image's target directory and starts empty.
 The generic static supervisor is a guest bootstrap alongside the existing C guest
 helpers; configuration, preparation, orchestration, and execution are Rust.
 
@@ -336,6 +454,15 @@ and unsupported guest syscalls are compatibility failures, never workload PASS.
 and timeouts. Serial output is capped at 1 GiB total divided equally between the
 two ports of all machines; exceeding that cap fails execution. Trace recording
 is not enabled by this adapter.
+
+When text output reports `execution: VMM failed; see vmm.stderr`, `run`, `replay`,
+`explore` and `inspect` also print up to five non-empty lines from the final 8 KiB
+of the attempt's `output/vmm.stderr` to stderr. Each line starts with `vmm stderr:`;
+terminal control characters are removed and invalid UTF-8 is replaced. A line
+cut by the byte limit starts with `...`. Missing or unreadable logs are skipped
+without changing the outcome. This excerpt is local diagnostic output only:
+retained records, serde field names, status lines and `--json` output are unchanged.
+`inspect` keeps the recorded `error:` line on stdout alongside the run status.
 
 ## Reproduce acceptance
 
@@ -406,10 +533,33 @@ in flight. A slice that runs up to a boundary always ends before the guest can
 send at the boundary itself, so no frame is ever stamped at or after a boundary
 that hasn't been applied yet.
 
+### Machine pause, crash and reboot
+
+Compose guest drivers can call `World.pause(target)`, `resume(target)`,
+`crash(target)` and `reboot(target)` through the [runtime control API](../python/README.md).
+Each acts on the target's whole machine at admission and returns an `Effect`;
+the transcript and service-attributed fault events are validated during run and
+replay. Illegal transitions, and stop or restart of a paused machine, return
+recoverable `invalid_state`; pause/resume
+of an exited VM and process faults whose machine exits or crashes return
+`target_unavailable`. Inspection shows `Paused` and `Down`. After reboot, the
+scenario checks application readiness itself. The check service is the
+controller, which can't be a target, so a lifecycle operation never ends the run
+by itself: a crashed service is not an exited one. See
+[Machine pause, crash and reboot](../harness/worlds/README.md#machine-pause-crash-and-reboot)
+for CPU, timer, network, incarnation and static-plan semantics.
+
 ## Exploration preparation
 
-`seedbox explore [COMPOSE] --seed FIRST --count COUNT` has one sequential worker.
-Count defaults to 1; seed defaults to the resolved Compose seed. Bounds are finite,
+`seedbox explore [COMPOSE] --seed FIRST --count COUNT` has one worker by default.
+`--workers N` (1..32) permits N simultaneous owned attempts; count defaults to 1
+and seed to the resolved Compose seed. Parallel execution rejects an explicit
+`--cpu` or `SEEDBOX_CPU` before preparation. Automatic selection must reserve N
+eligible physical cores with all SMT siblings together during preflight, verify
+each core's admission and release every transient resource before preparation.
+Insufficient capacity is ERROR; there is no queue/retry on host contention. A
+library execution backend supports only one worker unless it explicitly overrides
+`preflight_workers`. Per-attempt admission and leases remain unchanged. Bounds are finite,
 positive and checked for inclusive u64 overflow before slow work. Runtime inputs and
 backend host admission are checked before the sole preparation; refusal retains
 batch ERROR with no prepared inputs or seed attempts. Transient admission resources
@@ -421,13 +571,24 @@ missing/corrupt bytes cause ERROR without re-preparation or repair.
 
 The owned batch directory contains atomic `exploration.json` checkpoints,
 `preparation/` and `attempts/SEED/ORDINARY-RUN/`. Attempted means entering orchestration,
-not proof that a guest started. Counts distinguish PASS/FAIL, TIMEOUT, ERROR,
-INCOMPLETE and unfinished attempts; remaining seeds are undispatched. A killed process
+not proof that a guest started. Version 2 records explicit indexes (`seed = FIRST +
+index`) in dispatch order, independent of completion order. Each attempt's
+`finished` flag means the coordinator retained its terminal result; false includes
+a result that may already exist in an independently committed run manifest.
+Counts distinguish PASS/FAIL, TIMEOUT, ERROR, INCOMPLETE and unfinished attempts;
+remaining seeds are an undispatched suffix. Unsupported checkpoint versions are
+refused clearly without defaults or migration; version 1 bytes require their prior
+reader, while ordinary run inspection/replay is unchanged. A killed process
 leaves an unfinished INCOMPLETE checkpoint and independently inspectable ordinary
 manifests. There is no resume operation. Checkpoint/evidence failures stop dispatch.
 The final aggregate uses ERROR, INCOMPLETE, TIMEOUT, FAIL, PASS precedence and the
 existing exit codes 2, 3, 124, 1, 0. Application FAIL and witnessed simulated TIMEOUT may
-continue; infrastructure errors, wall expiry and cancellation stop.
+continue; infrastructure errors, wall expiry and cancellation stop new dispatch
+and cancel only owned running attempts. The caller's library token is not modified
+by an internal failure. Scoped workers are joined even if checkpoint retention
+fails. A backend that cannot complete owned cleanup prevents a prompt return; no
+unrelated process or service is stopped. Cancellation races may leave an already
+finished PASS/FAIL beside cancelled INCOMPLETE attempts and undispatched seeds.
 
 Preparation diagnostics belong to the caller, surviving preparer/scratch destruction.
 Raw phase output is capped at 4 MiB per file and 64 MiB total. Bounded prefixes are retained
@@ -457,7 +618,17 @@ shared daemon, unrelated image/container, host service or cache is changed.
 CLI resource fields report self/reaped-child user/system CPU deltas and separate
 self/child RSS high-water readings in bytes, including preparation. They are not
 simultaneous aggregate memory, guest peak memory, simulated time or CPU lease duration.
-Unavailable measurements are null and do not affect run identity.
+Unavailable measurements are null and do not affect run identity. `peak_running`
+is the maximum number of active orchestration attempts. `active_attempt_seconds`
+is the sum of whole attempt wall intervals, including materialization, admission
+and cleanup, for attempts whose terminal results reached the coordinator. Once
+all owned attempts return, it is a conservative guest-core charge for one world
+per worker, not exact lease duration or CPU measurement. Unfinished checkpoints
+omit still-running/uncheckpointed intervals and cannot supply a complete charge. No exact lease telemetry API
+is added. Worker count and core selection are operational choices, absent from
+semantic run identity. Synthetic serial/parallel lifecycle controls do not qualify
+real per-core/witness invariance; that and staggered hardware cancellation remain
+required runtime gates.
 
 Required tool-version provenance uses stdout only, independently of diagnostic
 truncation. Its raw `.stdout` evidence is bounded to 8192 bytes per value and

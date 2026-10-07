@@ -339,15 +339,16 @@ impl World {
         let mut old = std::mem::replace(&mut self.machines[m], fresh);
         let discarded: usize = self.strict_events[m].values().map(Vec::len).sum();
         self.strict_events[m].clear();
-        self.incarnations[m].push(json!({
+        let mut summary = json!({
             "incarnation": old.incarnation, "booted_at_ns": old.booted_at, "crashed_at_ns": t,
             "time_ns": old.time, "branches": old.branches, "exits": old.stats.exits,
             "state": format!("{:?}", old.state), "paused": old.paused,
             "discarded_pending_io": old.pending_io.is_some(), "discarded_management_bytes": discarded,
-            "disk_lost_sectors": old.blk.as_ref().map(|b| b.disk.volatile_sectors()),
             "witness": old.exit_witness(),
-        }));
-        self.machines[m].succeed(&mut old, t)
+        });
+        summary["disk_lost_sectors"] = json!(self.machines[m].succeed(&mut old, t, self.run_seed, self.branch_identity.as_deref())?);
+        self.incarnations[m].push(summary);
+        Ok(())
     }
 
     /// Boot machine m's next incarnation at `t`. Frames that reached it
@@ -415,6 +416,11 @@ fn run() -> Result<Value, String> {
         &std::fs::read(&config_path).map_err(|e| format!("{config_path}: {e}"))?,
     )
     .map_err(|e| format!("config: {e}"))?;
+    let torn_writes = match &cfg["disk_loss"] {
+        Value::Null => false,
+        Value::String(model) if model == disk::TORN_MODEL => true,
+        _ => return Err("unknown disk_loss model".into()),
+    };
     let base = std::path::Path::new(&config_path)
         .parent()
         .unwrap()
@@ -513,7 +519,7 @@ fn run() -> Result<Value, String> {
             cmdline += &format!(" virtio_mmio.device=4K@{NET_MMIO:#x}:{NET_IRQ}");
         }
         if control_channel {cmdline+=&format!(" virtio_mmio.device=4K@{CHANNEL_MMIO:#x}:{CHANNEL_IRQ}");}
-        let disk = machine_disk(&mc["disk"], &path)?;
+        let disk = machine_disk(&mc["disk"], &path)?.map(|d| d.with_torn_writes(torn_writes));
         if disk.is_some() {
             cmdline += &format!(" virtio_mmio.device=4K@{BLK_MMIO:#x}:{BLK_IRQ}");
         }
@@ -1301,7 +1307,7 @@ fn report(
             "net": mach.net.as_ref().map(|n| json!({"tx": n.tx_frames, "rx": n.rx_frames, "rx_dropped": n.rx_dropped})),
         });
         row["disk"] = json!(mach.blk.as_ref().map(|b| json!({
-                "model": disk::MODEL, "capacity_sectors": b.disk.capacity(), "base_sha256": b.disk.base_sha256(),
+                "model": b.disk.model(), "capacity_sectors": b.disk.capacity(), "base_sha256": b.disk.base_sha256(),
                 "digest": b.disk.digest(), "stable_sectors": b.disk.stable_sectors(), "volatile_sectors": b.disk.volatile_sectors(),
                 "reads": b.stats.reads, "writes": b.stats.writes, "flushes": b.stats.flushes,
                 "sectors_read": b.stats.sectors_read, "sectors_written": b.stats.sectors_written,
@@ -1504,6 +1510,68 @@ mod checkpoint_tests {
             assert_ne!(w.link_rng.get_mut(&(0,1)).unwrap().next(),link_draw);
         }
     }
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn checkpoint_branches_disk_survival_and_restores_down_survivors() {
+        let mut w=world(0);
+        let names=vec!["a".to_string(),"b".to_string()];
+        let mut disk=disk::Disk::new(None,Some(64)).unwrap().with_torn_writes(true);
+        disk.write(0,&[b'A';64*512]).unwrap();disk.flush();disk.write(0,&[b'B';64*512]).unwrap();
+        w.machines[0].blk=Some(virtio_blk::VirtioBlk::new(disk.clone()));
+        let saved=WorldSnapshot::take_checkpoint(&mut w).unwrap();
+        let mut results=Vec::new();
+        for (at,seed) in [(100,7),(100,42),(200,42),(100,42)] {
+            saved.restore_checkpoint(&mut w).unwrap();
+            let identity=checkpoint::branch_identity("parent",at,seed);
+            reseed_checkpoint(&mut w,&names,7,seed,&identity).unwrap();
+            let expected=disk.crashed_branch(seed,w.branch_identity.as_deref(),"a",0);
+            w.lifecycle(0,faults::Lifecycle::Crash,0).unwrap();
+            assert_eq!(w.machines[0].blk.as_ref().unwrap().disk.digest(),expected.0.digest());
+            assert_eq!(w.incarnations[0][0]["disk_lost_sectors"],expected.1);
+            results.push((expected.0.digest(),w.incarnations[0].clone()));
+            let down=WorldSnapshot::take_checkpoint(&mut w).unwrap();
+            w.lifecycle(0,faults::Lifecycle::Reboot,0).unwrap();
+            down.restore_checkpoint(&mut w).unwrap();
+            assert!(w.machines[0].down);assert_eq!(w.machines[0].incarnation,1);
+            reseed_checkpoint(&mut w,&names,seed,99,&checkpoint::branch_identity("child",at,99)).unwrap();
+            assert_eq!(w.machines[0].blk.as_ref().unwrap().disk.digest(),expected.0.digest());
+        }
+        assert_eq!(results[1],results[3]);
+        assert_ne!(results[0].0,results[1].0);
+        assert_ne!(results[1].0,results[2].0);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn checkpoint_restores_pending_compose_lifecycle_calls() {
+        for op in ["pause","resume","crash","reboot"] {
+            let mut w=world(0);
+            let names=vec!["a".to_string(),"b".to_string()];
+            w.control=control::Control::new(&json!({"machine":"a","latency_ns":1000,"placement":{"a":"a","b":"b"}}),names,100,0).unwrap();
+            let prerequisite=match op {"resume"=>Some(seedbox_control::Action::Pause{machine:"b".into()}),
+                "reboot"=>Some(seedbox_control::Action::Crash{machine:"b".into()}),_=>None};
+            if let Some(action)=prerequisite {
+                w.faults.append(seedbox_control::Plan{id:0,at_ns:0,deadline_ns:100,action}).unwrap();
+            }
+            simulate_to(&mut w,&json!({}),20_000,&None,None,Some(500)).unwrap();
+            let request=format!("SBX_RPC1 1 1 {}",json!({"version":1,"id":1,"op":op,"target":{"service":"b"}}));
+            w.control.request(0,500,request.as_bytes(),500).unwrap();
+            simulate_to(&mut w,&json!({}),20_000,&None,None,Some(1000)).unwrap();
+            let saved=WorldSnapshot::take_checkpoint(&mut w).unwrap();
+            let mut results=Vec::new();
+            for _ in 0..2 {
+                saved.restore_checkpoint(&mut w).unwrap();
+                assert_eq!(w.control.boundary(),1500);
+                simulate_to(&mut w,&json!({}),20_000,&None,None,Some(1600)).unwrap();
+                assert!(w.control.pending.as_ref().unwrap().error.is_none());
+                let m=&w.machines[1];
+                assert_eq!(m.paused,op=="pause");assert_eq!(m.down,op=="crash");
+                results.push((w.faults.log.clone(),w.incarnations.clone(),m.exit_witness(),w.control.boundary()));
+            }
+            assert_eq!(results[0],results[1],"{op}");
+        }
+    }
+
     #[test]
     #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
     fn boot_snapshots_require_every_machine_parked() {

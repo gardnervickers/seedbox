@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Exit contract: run 0 PASS / 1 FAIL / 2 ERROR / 3 INCOMPLETE / 124 TIMEOUT;
+# replay 0 MATCH / 1 MISMATCH / 2 NOT_COMPARABLE; diff 0 MATCH / 1 DIFFERENT / 2 setup.
 # Portable source checks only. Hardware scenarios are ordinary seedbox run commands.
 set -euo pipefail
 if [[ ${1:-portable} != portable || $# -gt 1 ]]; then

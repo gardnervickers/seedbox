@@ -57,7 +57,7 @@ mod checkpoint_tests {
             let mut rng = Rng::branch(42, Some(id), domain);
             std::array::from_fn::<_, 8, _>(|_|rng.next())
         };
-        for domain in ["link/a/b", "timer-jitter/a/0", "guest-entropy/a/0", "reboot-entropy/a/1"] {
+        for domain in ["link/a/b", "timer-jitter/a/0", "guest-entropy/a/0", "reboot-entropy/a/1", "disk-loss/a/0"] {
             let want = draws(&id, domain);
             assert_eq!(want, draws(&id, domain));
             assert_ne!(want, draws(&crate::checkpoint::branch_identity("parent", 101, 42), domain));

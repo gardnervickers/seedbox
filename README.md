@@ -8,7 +8,7 @@ interrupt timing.
 
 ## Quick start
 
-`validate`, `init`, `inspect`, `export` and `import` run on Linux or macOS. `run`,
+`validate`, `init`, `inspect`, `diff`, `export` and `import` run on Linux or macOS. `run`,
 `explore` and `replay` need the
 qualified host (see [host requirements](#host-requirements)) and root.
 
@@ -22,6 +22,7 @@ cargo run -- validate examples/etcd
 sudo -E env PATH="$PATH" target/release/seedbox run examples/etcd
 sudo -E env PATH="$PATH" target/release/seedbox replay .seedbox/runs/ATTEMPT
 cargo run -- inspect .seedbox/runs/ATTEMPT
+cargo run -- diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
 ```
 
 `seedbox run` with no arguments runs the Compose project in the current
@@ -32,15 +33,19 @@ directory. Every runtime input has a default, so no flags are required:
 | Compose file | `compose.yaml` in the given directory (default `.`) | positional path |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
 | Runtime checkpoint | absent; ordinary execution | `--checkpoint-at-ns T --branch-seed B` (run only; B=P continues without reseeding; no environment backing) |
-| Exploration count | `1`, sequential execution | `--count` |
+| Exploration count | `1` | `--count` |
+| Exploration workers | `1`, sequential execution | `--workers` (1..32; automatic CPU selection for parallel execution) |
+| Torn disk writes | off (drop all unflushed sectors on crash) | `--torn-writes` |
 | CPU | first free core other than CPU 0's, under the shared lease | `--cpu`, `SEEDBOX_CPU` |
 | Guest kernel | `bzImage` in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`, `./artifacts`, then `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | `seedbox-vmm` next to an installed `seedbox`, then this checkout's `cargo build-vmm` output, then on `PATH`; `cargo run` builds it if missing | `--vmm`, `SEEDBOX_VMM` |
 | Guest supervisor | built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | BusyBox | `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
+| mke2fs (only for named volumes) | `SEEDBOX_MKE2FS` (set by `nix develop`), then a static `mke2fs` on `PATH` | `--mke2fs` |
 | Build epoch | absent; preserve the builder's ordinary timestamp policy | `--build-epoch` (prepare/run/explore; no environment backing) |
 | Engine qualification | pinned engine and guest kernel; dev artifacts require explicit opt-in | `--allow-dev-engine` (run/explore/replay/doctor; no environment backing) |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
+| Diff inputs | Two required retained run directories; no runtime inputs or state lookup | positional `RUN_A RUN_B` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
 
 For development artifacts, pass `--allow-dev-engine` to `run`, `explore`, `replay`
@@ -50,9 +55,21 @@ engine. Replay requires this flag and the exact retained engine/kernel hashes;
 bundles preserve the marker. Passing the flag with both pinned artifacts adds no
 marker. All host, CPU, PMU, MSR, lease, ABI and control-channel checks still apply.
 
+`seedbox run --torn-writes` enables seeded partial survival of unflushed
+512-byte disk sectors on crash. It is recorded in run identity and replayed
+automatically. It applies to retained disks; Compose storage is still RAM-backed
+until named-volume disk support lands. See [disk semantics](docs/runtime.md#disk-crash-policy).
+
 `seedbox help run` lists every option. A run prints `OUTCOME: run-directory`;
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
-INCOMPLETE and 124 TIMEOUT.
+INCOMPLETE and 124 TIMEOUT. Offline `diff` exits 0 for MATCH, 1 for DIFFERENT,
+and 2 for usage/setup or invalid retained evidence.
+
+On a VMM failure, text output from `run`, `replay`, `explore` and `inspect`
+also prints up to five non-empty lines from the final 8 KiB of that attempt's
+`output/vmm.stderr` to stderr, prefixed with `vmm stderr:`. Missing or unreadable
+logs do not change the outcome. Retained records and `--json` output are unchanged.
+`inspect` keeps the recorded `error:` line on stdout alongside the run status.
 
 [Draft format and runtime scope](docs/compatibility.md) distinguishes inspection
 and transfer from qualified execution. Same software versions, seed and exact
@@ -72,8 +89,15 @@ for state coverage, engine-only multiple checkpoints/branches and unverified KVM
 ## Finite exploration
 
 `seedbox explore [COMPOSE] --seed FIRST --count COUNT` runs consecutive seeds
-sequentially, preparing the complete input closure once. Compose defaults to `.`,
-the first seed to the Compose seed, and count to 1. Empty/overflowing ranges fail
+with one worker by default, preparing the complete input closure once. Compose
+defaults to `.`, the first seed to the Compose seed, and count to 1.
+`--workers N` (1..32) permits at most N owned attempts at once; parallel exploration
+requires automatic CPU selection, so omit `--cpu` and `SEEDBOX_CPU`. Before
+preparation, the executor must be able to reserve and admit N distinct eligible
+physical cores together, including their SMT siblings; insufficient capacity is
+ERROR. Those transient reservations are released before OCI work. Each running
+world still owns its ordinary core/sibling lease. Contention afterward is an
+infrastructure error, with no retry or waiting-for-capacity policy. Empty/overflowing ranges fail
 before state creation or preparation. Immutable runtime inputs and host admission are
 checked before the sole preparation; refusal retains batch ERROR without dispatch.
 Each seed uses the ordinary retained-input and leased host rechecks. Application FAIL
@@ -86,7 +110,24 @@ with the existing commands. An unfinished checkpoint remains INCOMPLETE, includi
 when a process dies after committing a run but before updating the batch. The final
 exit precedence is ERROR (2), INCOMPLETE (3), TIMEOUT (124), FAIL (1), PASS (0). `--json` emits one
 report with per-attempt outcomes, undispatched count, elapsed time and CLI process-family
-resource measurements; application logs remain arbitrary bytes.
+resource measurements; application logs remain arbitrary bytes. Checkpoint version 2
+records seed indexes in ascending dispatch order regardless of completion order,
+with `finished: false` for dispatched attempts whose terminal result is not yet
+checkpointed. The pending suffix remains undispatched. Infrastructure or retention
+uncertainty cancels only the batch's owned attempts and joins them before returning;
+a backend blocked in cleanup prevents a prompt completion claim. Version 1 batch
+checkpoints need their prior reader; their bytes and ordinary run manifests remain
+unchanged.
+
+`peak_running` counts active orchestration attempts. `active_attempt_seconds` sums
+their whole wall intervals, including admission, materialization and cleanup; it is
+not exact lease time or measured CPU time. Once all owned attempts return, this
+one-world-per-worker backend can use the sum as a conservative guest-core charge.
+An unfinished checkpoint omits still-running/uncheckpointed intervals and is not
+a complete cumulative charge. CLI process-family CPU totals include
+preparation and reaped children. Parallel scheduling and chosen cores are performance
+choices excluded from run identity; actual serial/parallel and per-core equality
+remain runtime qualification gates.
 
 Exploration `build:` admission currently accepts only the inspected immutable
 project-Nix Linux Podman launcher/native closure in explicit local mode. Unknown
@@ -231,6 +272,22 @@ The [acceptance record](docs/acceptance.md) includes real etcd/Redis passes,
 intentional failures, exact replays, full-state comparisons, timeout/cancellation,
 lease contention and exact MSR restoration on the workstation.
 
+## Compare retained runs
+
+`seedbox diff RUN_A RUN_B [--json]` compares two retained directories on Linux or
+macOS without executing guests. It reports the world witness, each machine's
+exit/full-state witnesses, the first differing retained trace record (or terminal
+record), and changed identity fields including seed, engine, kernel, images and
+semantic parameters. Import bundles first, then pass their printed run paths.
+
+Only manifest-declared, checksum-verified evidence is read. The adapter does not
+record traces by default: terminal times cannot identify an earlier exit where
+execution diverged. Missing witnesses, traces and capture omissions are explicit.
+MATCH means equality of the compared evidence, even if incomplete; it does not
+qualify replay or prove equality of unrecorded state. Performance counters,
+margin/undo, attempt metadata and arbitrary console output are excluded.
+See [comparison details](docs/runtime.md#compare-retained-runs).
+
 ## Sharing a retained run
 
 Export a run with its exact retained inputs and logs, then import it into fresh
@@ -295,6 +352,7 @@ seedbox run harness/acceptance/workloads/short-kill-3.5.2.yaml
 seedbox run harness/acceptance/workloads/sanity.yaml
 seedbox run harness/acceptance/workloads/race.yaml
 seedbox run harness/acceptance/workloads/kill-3.5.3.yaml
+seedbox run harness/acceptance/workloads/volume-crash.yaml
 ```
 
 The YAML references the existing Go/C workload build contexts and loads the
@@ -311,7 +369,10 @@ etcd 3.5.3 scenario performs twenty. The sanity scenario requires detection of i
 planted missing acknowledgement and uses `check.exit_code: 1`, so the acceptance
 command succeeds when that negative control behaves correctly. The race driver
 checks its output and atomic control inside the guest; it does not require a
-particular seed to lose a fixed number of updates.
+particular seed to lose a fixed number of updates. The volume scenario puts
+keys into a single etcd node whose data directory is a named volume, crashes and
+reboots that machine through the control API, and requires every acknowledged
+key to be read back.
 
 Each command uses normal CLI outcomes and exit codes. There is no host-side
 console parsing, scenario verdict, seed pin, automatic retry, or acceptance-only
