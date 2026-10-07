@@ -191,37 +191,21 @@ impl PvClock {
         self.probe = Some(next);
         Ok(Some(Prepared::Run))
     }
-}
 
-fn key(r: &kvm_bindings::kvm_regs) -> Key {
-    let rflags = r.rflags & !(1 << 16); // RF is ours
-    (
-        r.rip,
-        [
-            r.rax, r.rbx, r.rcx, r.rdx, r.rsi, r.rdi, r.rsp, r.rbp, r.r8, r.r9, r.r10, r.r11, r.r12,
-            r.r13, r.r14, r.r15, rflags,
-        ],
-    )
-}
-
-impl Timebase for PvClock {
-    const BRANCHES: bool = false;
-
-    fn prepare(&mut self, m: &mut Machine, remaining: u64, soft: u64) -> Result<Prepared, String> {
+    /// The work of `prepare` (see there).
+    fn plan(&mut self, m: &mut Machine, remaining: u64, soft: u64) -> Result<Prepared, String> {
         self.remaining = remaining;
         self.syscall_ns = m.syscall_ns;
         if self.probe.is_some() {
             let step = if std::mem::take(&mut self.landed) {
                 self.probe_step(m)?
-            } else if m.arm_step()? {
-                // A watchdog tick interrupted the step, and planning it again
-                // from here ends at a cap (see `probe_step`).
+            } else {
+                // Some other signal interrupted the step. Where the vCPU
+                // stopped may be a landing it did not report (see `prepare`),
+                // so give the check up: the next one starts afresh.
                 self.probe = None;
                 m.stats.spin_false += 1;
                 None
-            } else {
-                // A watchdog tick interrupted the step: planned again from here.
-                return Ok(Prepared::Run);
             };
             match step {
                 Some(Prepared::Idle) => {
@@ -250,7 +234,31 @@ impl Timebase for PvClock {
         m.page_set(PAGE_SYSCALL_TARGET, syscalls + left);
         Ok(Prepared::Run)
     }
+}
 
+fn key(r: &kvm_bindings::kvm_regs) -> Key {
+    let rflags = r.rflags & !(1 << 16); // RF is ours
+    (
+        r.rip,
+        [
+            r.rax, r.rbx, r.rcx, r.rdx, r.rsi, r.rdi, r.rsp, r.rbp, r.r8, r.r9, r.r10, r.r11, r.r12,
+            r.r13, r.r14, r.r15, rflags,
+        ],
+    )
+}
+
+impl Timebase for PvClock {
+    const BRANCHES: bool = false;
+
+    fn prepare(&mut self, m: &mut Machine, remaining: u64, soft: u64) -> Result<Prepared, String> {
+        let prepared = self.plan(m, remaining, soft);
+        // No tick may interrupt a probe step: an interrupt is taken before a
+        // code breakpoint at the same instruction, so a tick there stops the
+        // vCPU on a landing without reporting it, and stepping on past it
+        // would miscount the cycle. Ticks wait until the check ends.
+        self._watchdog.hold(self.probe.is_some())?;
+        prepared
+    }
     fn start(&mut self, syscalls: u64) -> u64 {
         self.syscalls0 = syscalls;
         0
@@ -396,9 +404,26 @@ impl Watchdog {
     }
 }
 
+impl Watchdog {
+    /// Hold back ticks on this thread (they stay pending), or let them in.
+    fn hold(&self, on: bool) -> Result<(), String> {
+        unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGUSR2);
+            let how = if on { libc::SIG_BLOCK } else { libc::SIG_UNBLOCK };
+            match libc::pthread_sigmask(how, &set, std::ptr::null_mut()) {
+                0 => Ok(()),
+                e => Err(format!("pv watchdog mask: {}", std::io::Error::from_raw_os_error(e))),
+            }
+        }
+    }
+}
+
 impl Drop for Watchdog {
     fn drop(&mut self) {
         unsafe { libc::timer_delete(self.0) };
+        let _ = self.hold(false);
     }
 }
 
@@ -472,6 +497,41 @@ mod tests {
         // The least landing: inner head, with ecx at its least there.
         assert_eq!((rip, rcx as u32), (0x100005, 1));
         assert_eq!(m.stats.spin_idles, 1);
+    }
+
+    #[test]
+    fn ticks_wait_while_held() {
+        let pending = || unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigpending(&mut set);
+            libc::sigismember(&set, libc::SIGUSR2) == 1
+        };
+        let w = Watchdog::new(Duration::from_millis(1)).unwrap();
+        w.hold(true).unwrap();
+        let t = std::time::Instant::now();
+        while !pending() {
+            assert!(t.elapsed() < Duration::from_secs(5), "no tick arrived");
+        }
+        w.hold(false).unwrap();
+        assert!(!pending(), "the held tick is delivered once let in");
+    }
+
+    /// Ticks far more often than a check lasts: every check still counts
+    /// each landing, so all runs idle at the same point after one check.
+    #[test]
+    #[ignore = "requires KVM"]
+    fn frequent_ticks_do_not_disturb_a_spin_check() {
+        let kvm = Kvm::new().unwrap();
+        let code = [0xb9, 5, 0, 0, 0, 0x49, 0x75, 0xfd, 0xeb, 0xf6];
+        for _ in 0..20 {
+            let mut clock = PvClock::new(Duration::from_micros(200)).unwrap();
+            clock.max_false_alarms = 10;
+            let mut m = machine(&kvm, &code, 0);
+            assert_eq!(m.run_until(&mut clock, 1_000_000_000, 0, &mut Vec::new()).unwrap(), Stop::Halted);
+            let r = m.vcpu.get_regs().unwrap();
+            assert_eq!((r.rip, r.rcx as u32, m.time), (0x100005, 1, 0));
+            assert_eq!(m.stats.spin_idles, 1);
+        }
     }
 
     #[test]
