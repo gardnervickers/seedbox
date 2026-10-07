@@ -656,6 +656,9 @@ impl Machine {
             new.output_limit = old.output_limit;
         }
         self.trace = old.trace.take();
+        // The same machine: under the PV clock it keeps its speed, or members
+        // restarted together would run in lockstep again.
+        self.syscall_ns = old.syscall_ns;
         // Flushed data survives; the disk policy chooses unflushed survivors.
         let lost = if let (Some(new), Some(blk)) = (self.blk.as_mut(), old.blk.as_ref()) {
             let (disk, lost) = blk.disk.crashed_seeded(seed, &old.name, old.incarnation);
@@ -2211,10 +2214,12 @@ mod fork_tests {
             assert_eq!(&old.memory()[0x81000..0x81004],&[0xad,0xde,0,0]);
             let first=(old.branches,old.exit_witness());
             old.com1.out.extend_from_slice(b"first boot\n");
+            old.syscall_ns=937;
             let crash=old.time+100;
             let mut new=probe_machine(&kvm,undo,false);
             new.succeed(&mut old,crash,1009).unwrap();
             assert!(new.down && !new.paused);
+            assert_eq!(new.syscall_ns,937,"the next incarnation keeps the PV syscall cost");
             assert_eq!((new.incarnation,new.time),(1,crash));
             assert_eq!(&new.memory()[0x80000..0x80004],&[0,0,0,0]);
             assert_eq!(&new.memory()[0x81000..0x81004],&[0,0,0,0]);

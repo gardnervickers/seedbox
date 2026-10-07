@@ -351,8 +351,6 @@ impl World {
         let seed = entropy_seed(self.run_seed, &format!("reboot-entropy/{name}/{next}"));
         let mut fresh = boot_machine(&self.kvm, &name, &self.boot[m], false, seed)?;
         fresh.timer_rng = Some(Rng::new(self.run_seed, &format!("timer-jitter/{name}/{next}")));
-        // A reboot keeps the machine's speed.
-        fresh.syscall_ns = self.machines[m].syscall_ns;
         let mut old = std::mem::replace(&mut self.machines[m], fresh);
         let discarded: usize = self.strict_events[m].values().map(Vec::len).sum();
         self.strict_events[m].clear();
