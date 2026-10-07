@@ -28,6 +28,95 @@ fn stderr(output: &Output) -> String {
 }
 
 #[test]
+fn host_pause_commands_acknowledge_boundaries_and_reject_inactive_runs() {
+    let directory = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+    let cwd = directory.path();
+    for command in ["pause", "resume"] {
+        let help = seedbox(&["help", command], cwd);
+        assert!(help.status.success());
+        assert!(String::from_utf8_lossy(&help.stdout).contains("<RUN>"));
+        let missing = seedbox(&[command], cwd);
+        assert_eq!(missing.status.code(), Some(2));
+        assert!(stderr(&missing).contains("<RUN>"));
+        let inactive = seedbox(&[command, "old-run"], cwd);
+        assert_eq!(inactive.status.code(), Some(2));
+        assert_eq!(stderr(&inactive), "error: host control old-run: not available; use an executing run/replay with a host-control engine and the same user (or root)\n");
+    }
+    fs::create_dir_all(cwd.join("run/output")).unwrap();
+    let socket = cwd.join("socket");
+    fs::write(
+        cwd.join("run/output/host-control"),
+        socket.as_os_str().as_encoded_bytes(),
+    )
+    .unwrap();
+    let server = std::os::unix::net::UnixDatagram::bind(&socket).unwrap();
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            for (request, response) in [
+                (b"pause".as_slice(), b"paused".as_slice()),
+                (b"resume", b"running"),
+            ] {
+                let mut bytes = [0; 32];
+                let (n, peer) = server.recv_from(&mut bytes).unwrap();
+                assert_eq!(&bytes[..n], request);
+                server
+                    .send_to(response, peer.as_pathname().unwrap())
+                    .unwrap();
+            }
+        });
+        for (command, status) in [("pause", "PAUSED"), ("resume", "RESUMED")] {
+            let output = seedbox(&[command, "run"], cwd);
+            assert!(output.status.success(), "{}", stderr(&output));
+            assert!(output.stderr.is_empty());
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                format!("{status}: run\n")
+            );
+        }
+        worker.join().unwrap();
+    });
+    drop(server);
+    fs::remove_file(socket).unwrap();
+    let stale = seedbox(&["pause", "run"], cwd);
+    assert_eq!(stale.status.code(), Some(2));
+    assert!(stderr(&stale).contains("not available"));
+}
+
+#[test]
+fn host_pause_rejects_invalid_acknowledgements_and_bounds_missing_replies() {
+    let directory = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+    let cwd = directory.path();
+    fs::create_dir_all(cwd.join("run/output")).unwrap();
+    let socket = cwd.join("socket");
+    fs::write(
+        cwd.join("run/output/host-control"),
+        socket.as_os_str().as_encoded_bytes(),
+    )
+    .unwrap();
+    let server = std::os::unix::net::UnixDatagram::bind(socket).unwrap();
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            let mut bytes = [0; 32];
+            let (_, peer) = server.recv_from(&mut bytes).unwrap();
+            server
+                .send_to(b"invalid", peer.as_pathname().unwrap())
+                .unwrap();
+            // Receive the second request but deliberately never acknowledge it.
+            server.recv_from(&mut bytes).unwrap();
+        });
+        let invalid = seedbox(&["resume", "run"], cwd);
+        assert_eq!(invalid.status.code(), Some(2));
+        assert!(invalid.stdout.is_empty());
+        assert_eq!(stderr(&invalid), "error: host control run: invalid boundary acknowledgement; use an executing run/replay with a host-control engine and the same user (or root)\n");
+        let unanswered = seedbox(&["pause", "run"], cwd);
+        assert_eq!(unanswered.status.code(), Some(2));
+        assert!(unanswered.stdout.is_empty());
+        assert_eq!(stderr(&unanswered), "error: host control run: no boundary acknowledgement within 5s (request may still take effect); use an executing run/replay with a host-control engine and the same user (or root)\n");
+        worker.join().unwrap();
+    });
+}
+
+#[test]
 fn validation_cli_reports_structured_output_and_nonzero_errors() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("compose.yaml");

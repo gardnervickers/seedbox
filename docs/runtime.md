@@ -177,6 +177,64 @@ profiles are unqualified and run only with `--allow-unqualified-cpu`. An unsucce
 Library cancellation and CLI SIGINT/SIGTERM/SIGHUP cause cleanup through the same
 path. SIGKILL and host loss cannot guarantee cleanup.
 
+## Host pause
+
+From a second terminal, pause or resume the host's entire executing world:
+
+```sh
+sudo seedbox pause .seedbox/runs/ATTEMPT
+sudo seedbox resume .seedbox/runs/ATTEMPT
+```
+
+The attempt directory exists before execution finishes. Find live attempts with
+`find .seedbox/runs -path '*/output/host-control'`; remove the `/output/host-control`
+suffix to get RUN. A replay creates a new attempt: control that directory, not
+the completed source run. Use the execution user's privileges (normally root).
+`PAUSED: RUN` means the VMM acknowledged a slice boundary; `RESUMED: RUN` means
+it released the host gate. Requests are idempotent and concurrent requests take
+effect in receive order. A request waits at most five seconds for acknowledgement;
+a timeout does not retract a queued request, so send resume if its state is uncertain.
+During initial machine construction, acknowledgement waits until the first boundary.
+
+The executor creates a private short-path Unix datagram endpoint under `/tmp` and
+writes its locator to `RUN/output/host-control`. It passes the socket path explicitly
+as `--host-control` to the retained VMM. The VMM receives and acknowledges requests
+only between world slices, before any scheduling, device processing or guest entry.
+While paused it polls for resume every 10 ms. It never changes guest state, clocks,
+RNG, pending I/O, event order, slice count, control transcripts or witness inputs.
+Elapsed host time and performance measurements can change. This is separate from
+Compose's in-guest fault/control API and never pauses just one simulated machine.
+
+The CLI executor continues checking wall-time limits and SIGINT/SIGTERM/SIGHUP
+cancellation while the VMM waits. Pause time counts against the configured wall
+limit: a run that expires while paused is INCOMPLETE, just like any other wall
+expiry. CPU/SMT leases and the MSR workaround remain held throughout pause; cleanup
+reaps the VMM before restoring them. Normal completion/cancellation removes the
+locator and private endpoint. Host loss or SIGKILL may leave stale paths, which
+cannot acknowledge commands; completed, unavailable and older engines return a
+setup error. Pause is not a snapshot and cannot survive process exit or host reboot.
+
+The VMM source change produces a new engine identity. The accepted frozen engine,
+kernel pins and admission policy are unchanged; build the new engine with
+`cargo build-vmm` on Linux and use `--allow-dev-engine` until separately qualified.
+Portable tests exercise the actual socket gate and CLI acknowledgements. The ignored
+KVM comparison needs a completed full-state run made with this new engine and enough
+wall-time headroom; it exports/imports exact retained inputs into private scratch
+state, compares an unpaused replay with two pause/resume cycles, and checks MATCH,
+outcome, identity, witness and all full-state digests:
+
+```sh
+sudo -E env SEEDBOX_HOST_PAUSE_RUN=/path/to/full-state-run \
+  SEEDBOX_HOST_PAUSE_STATE=/path/to/source-state \
+  cargo test -p seedbox --locked --test host_pause -- --ignored
+```
+
+An optional `SEEDBOX_CPU` selects the usual leased core. This test starts real guests
+and requires the ordinary admitted Linux KVM host and root. Source-test success
+does not establish hardware witness invariance or qualify the new engine.
+
+## Execution settings
+
 `--state` chooses the content store and attempts root (default `.seedbox`).
 `--memory-mb` defaults to 1024 MiB per service and is a semantic parameter; `--full-state` requests RAM/register
 digests. Preparation checks a conservative archive boot-memory floor before acquiring
