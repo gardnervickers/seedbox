@@ -37,11 +37,7 @@ recover 32 records on its second start and 96 on its third. The broken case lose
 without faults and must PASS, demonstrating that the failure depends on restart.
 
 The per-PR [AMD smoke tier](../../harness/smoke/README.md#work-per-host-check)
-uses the generator's explicit `batch=4` option. It places `--batch 4` on both
-client and scenario commands: 16 acknowledgements, recovery counts 4 and 12,
-and 12 missing values for the broken restart control. All faults, probes and
-per-acknowledgement checks remain. The generator CLI and this example's full
-acceptance matrix retain the default batch of 32.
+uses `batch=4`; this example and its full acceptance matrix keep `batch=32`.
 
 Generate the self-contained projects before using the Compose files:
 

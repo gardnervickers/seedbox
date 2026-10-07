@@ -99,52 +99,8 @@ and prints its path.
 
 ## Work per host check
 
-The baseline is the [PR #99 host receipt at 1e442c6](https://github.com/gardnervickers/seedbox/pull/99#issuecomment-6042505104),
-read before this reduction. It reports a 5950X development-tier check with the
-stored 52eb pinned reference and e8ece7cb kernel. Its step times are build 20 s,
-VMM 11 s, fmt 0 s, clippy 9 s, portable suite 23 s, smoke 108 s: **171 s total**
-(rounded steps). Smoke phases are fixed 13.7 s, default replay 9.5 s and
-undo-margin replay 84.1 s. The latter is 78% of smoke and 49% of the whole check.
-The older 119.8 s total in the PR description predates the final phase receipt.
-The 768.6/334.9/1119.4 s records in `docs/acceptance.md` describe superseded
-matrices; they are not timings for this three-execution tier.
-
-| Candidate | Expected saving and evidence | Decision |
-| --- | --- | --- |
-| Reuse prepared OCI/initramfs across phases by digest | **0 additional preparations saved** in this tier: only `fixed` prepares; both replays already resolve the retained content-addressed closure. The wrong-kernel control refuses before preparation. The 13.7 minus 9.5 s difference is not a preparation timer. | Keep the public run/replay path. Native Podman already shares the three services' identical build/import/unpack source within one preparation. Their launch recipes include distinct IPs/commands, so guest archives are not interchangeable. No new cache. |
-| Boot-fork / launch barrier | [PR #73](https://github.com/gardnervickers/seedbox/pull/73) measured 7.37 s cold versus 2.29 s forked for a historical four-machine fixture: **5.08 s per additional seed**, with 0.016 s restore. That is a lead, not a saving measured on this smoke fixture or its undo-off replay. **0 s claimed here.** | Defer: `--fork-seeds` is an in-process low-level VMM path, without public Compose run/replay wiring or cross-process snapshots. Adding a boot object changes seed/release semantics; substituting it would stop checking the current cold-boot path. |
-| Shorter repeated workload | **224 fewer successful PUT/GET exchanges per execution, 672 across the three executions**: 128 PUTs + 128 GETs become 16 + 16, an 87.5% reduction of this repeated work. This also removes 112 sync-on-PUT operations per execution. | Implement four writes per batch in smoke only; keep the general example at 32. |
-| Drop duplicate executions / source phases | **0 further executions safely removed.** PR #99 already combined undo and margin into one 16384 replay. Its earlier 32768 replay alone cost 165.3 s; plain undo-off exceeded the allocation. Default replay, doctor text/JSON, wrong-kernel refusal, and source checks each cover a different contract. Workspace tests occur once inside the portable step. | Keep all phases, `--undo 0 --margin 16384`, full state and witness comparisons. Do not skip retained-object hashing: it checks evidence integrity after each execution. |
-
-For the shorter workload, the planning estimate is **7/8 of the time spent on
-those repeated write/read cycles**, not 7/8 of the whole tier. If their original
-combined cost across the three executions is W seconds, the first-order saving
-is 0.875 W seconds. Neither #99 nor the existing phase timers isolates W; there
-is no defensible point estimate in host seconds yet. Booting three machines,
-Python startup, eight failed probes, fault delivery, timed waits, hashing and
-cleanup remain. The undo-off phase is the likely largest beneficiary because
-it accounts for most execution time, but the receipt does not distinguish boot
-stepping from workload stepping. The extra portable controls also add a small
-source-suite cost. No KVM host was contacted or run for this change.
-
-The reduced fixture keeps four separately acknowledged batches across generations
-1, 2, 2, 3, both stop/restart cycles, both overlapping partition handles, both
-four-attempt failure probes, partial/final healing, readiness checks, and GET
-verification of **every** acknowledgement. Healthy recovery reloads 4 then 12
-records; the broken-server control loses 12 of 16, while broken-without-restarts
-still passes. Portable tests run real TCP server/client processes for these three
-cases and exercise the actual scenario with a fake World, including an ineffective
-partition rejection. They do not establish KVM fault delivery or replay equality.
-This preserves path coverage, not the old repeated-load volume or exact old
-fixture witnesses: new workload arguments are retained in the input identity;
-comparison rules, engine witness generation and full-state checks are unchanged.
-The existing larger example and its acceptance matrix remain available for load
-coverage.
-
-On the next separately authorized host check, compare `fixed`, `default`,
-`undo-margin`, total `smoke`, and `suite` against the above receipt with the same
-engine, kernel, core and cache conditions. Require all existing outcomes,
-full-state/opaque-stream comparisons and restoration/lease checks without retries.
-Keep the new receipt even if it fails or is slower. Boot-fork equivalence, guest
-execution of this shorter fixture, its actual saving, and five-minute fit remain
-unverified until that check.
+Smoke now uses `batch=4`: 16 acknowledgements, healthy recovery of 4 then 12
+records, and 12 lost values in the broken restart control. All faults, probes
+and per-acknowledgement checks remain; the full example stays at `batch=32`.
+[PR #110](https://github.com/gardnervickers/seedbox/pull/110) records the portable
+evidence and tracks the pending host timing and replay evidence against PR #99.
