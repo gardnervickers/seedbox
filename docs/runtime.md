@@ -141,7 +141,7 @@ The guest supervisor is built into `seedbox`, and BusyBox comes from
 `SEEDBOX_BUSYBOX`. A missing input fails before preparation starts and names
 every location searched.
 
-Qualified Zen execution requires the versioned `amd-zen3-engine52eb-v1` host policy in
+Qualified Zen execution requires the versioned `amd-zen3-engine52eb-v2` host policy in
 [host requirements](../README.md#host-requirements). Run validates immutable
 engine/guest-kernel inputs and performs host admission before OCI work; host-kernel
 bytes are not checked. Temporary core reservations, affinity and disabled

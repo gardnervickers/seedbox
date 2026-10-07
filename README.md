@@ -287,7 +287,7 @@ runtime acceptance before use. Disabled selected-event readiness is checked
 before preparation and again under held leases; no guest counter is enabled by
 admission. Intel determinism is not established.
 
-The versioned `amd-zen3-engine52eb-v1` admission policy checks AMD family 25,
+The versioned `amd-zen3-engine52eb-v2` admission policy checks AMD family 25,
 model 33, stepping 0 and microcode 0xa20102e, controlled guest-kernel bytes,
 accepted engine bytes, KVM capabilities and the engine's complete existing CPUID
 policy. Host-kernel bytes are not checked. Before image preparation, it temporarily
