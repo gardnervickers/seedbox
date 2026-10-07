@@ -183,12 +183,14 @@ pub struct Undo {
 
 /// Counters that move while the guest runs whatever it does: APERF/MPERF,
 /// AMD's read-only copies and IRPERF, the legacy and core perf counters, and
-/// the Hyper-V reference counter.
+/// the Hyper-V synthetic MSRs.
 fn is_free_running(i: u32) -> bool {
     matches!(
         i,
         0xe7 | 0xe8 | 0xc000_00e7..=0xc000_00e9 | 0xc001_0004..=0xc001_0007 | 0xc001_0200..=0xc001_020b
-            | 0x4000_0020 // Hyper-V reference time count (no Hyper-V CPUID is exposed)
+            // Hyper-V synthetic MSRs, time counters among them. KVM lists them,
+            // but the guest sees no Hyper-V CPUID and so cannot use them.
+            | 0x4000_0000..=0x4000_ffff
     )
 }
 
