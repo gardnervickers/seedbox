@@ -26,10 +26,12 @@ def client(address, command):
             time.sleep(0.02)
 
 
-def run(address, no_faults=False):
+def run(address, no_faults=False, batch=BATCH):
+    if not 1 <= batch <= BATCH:
+        raise ValueError("batch must be between 1 and 32")
     def load(generation):
         result = client(address, f"LOAD {generation}")
-        assert result["generation"] == generation and result["acked"] == BATCH, result
+        assert result["generation"] == generation and result["acked"] == batch, result
         return result
 
     def probe(label):
@@ -44,7 +46,7 @@ def run(address, no_faults=False):
         if no_faults:
             for _ in range(3):
                 load(1)
-        elif progress["acked"] >= BATCH:
+        elif progress["acked"] >= batch:
             world.stop("server")
             world.sleep(0.1)
             world.restart("server")
@@ -65,7 +67,7 @@ def run(address, no_faults=False):
             world.restart("server")
             load(3)
         result = client(address, "VERIFY")
-        assert result["acked"] == 4 * BATCH and result["generation"] == (1 if no_faults else 3), result
+        assert result["acked"] == 4 * batch and result["generation"] == (1 if no_faults else 3), result
         print(f"SCENARIO_TIME start_ns={started_ns} finish_ns={world.now_ns()}", flush=True)
         print("SCENARIO_RESULT " + json.dumps(result, sort_keys=True), flush=True)
         return 0 if result["status"] == "pass" else 1

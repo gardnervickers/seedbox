@@ -72,7 +72,9 @@ impl ExecutionBackend for Backend {
             ),
         )?;
         for (name, bytes) in &self.extra_logs {
-            fs::write(request.output.join(name), bytes)?;
+            let path = request.output.join(name);
+            fs::create_dir_all(path.parent().unwrap())?;
+            fs::write(path, bytes)?;
         }
         if self.cancel {
             request.cancellation.cancel();
@@ -768,6 +770,10 @@ fn network_effects_have_no_single_service_target() {
         detail: "partition applied".into(),
     });
     assert_eq!(fixture.run().record.outcome, Outcome::Pass);
+    for action in ["shape", "drop_connection", "heal"] {
+        fixture.backend.report.faults[0].action = action.into();
+        assert_eq!(fixture.run().record.outcome, Outcome::Pass, "{action}");
+    }
     fixture.backend.report.faults[0].action = "stop".into();
     assert_eq!(fixture.run().record.outcome, Outcome::Error);
 }
@@ -1430,8 +1436,80 @@ fn exploration_checks_inputs_first_and_releases_preflight_scope_before_preparing
     }
 }
 
+#[test]
+fn timed_indexes_survive_success_backend_error_cancellation_and_retention_omissions() {
+    for (fail, cancel, omit) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+    ] {
+        let mut f = Fixture::new();
+        f.backend.fail = fail;
+        f.backend.cancel = cancel;
+        let mut index = b"SBLOG001".to_vec();
+        for v in [10u64, 0, 0, 0, 3] {
+            index.extend_from_slice(&v.to_le_bytes());
+        }
+        f.backend
+            .extra_logs
+            .insert("machines/workload.console".into(), vec![0, 255, 10]);
+        f.backend
+            .extra_logs
+            .insert("machines/workload.console.chunks".into(), index.clone());
+        if omit {
+            f.orchestrator = f.orchestrator.with_log_policy(LogPolicy {
+                max_file_bytes: 4,
+                max_total_bytes: 100,
+            });
+        }
+        let run = f.run();
+        assert_eq!(
+            run.record.outcome,
+            if fail {
+                Outcome::Error
+            } else if cancel {
+                Outcome::Incomplete
+            } else {
+                Outcome::Pass
+            }
+        );
+        let mut reader = seedbox::logs::Reader::open(&run.directory, &Default::default()).unwrap();
+        if omit {
+            assert!(run
+                .record
+                .omitted_logs
+                .contains_key("machines/workload.console.chunks"));
+            assert!(reader.report.chunks.is_empty());
+            assert!(reader
+                .report
+                .omissions
+                .contains_key("machines/workload.console.chunks"));
+        } else {
+            assert_eq!(
+                run.record.logs["machines/workload.console.chunks"],
+                ContentDigest::of(&index)
+            );
+            let mut bytes = Vec::new();
+            reader.copy_chunk(0, &mut bytes).unwrap();
+            assert_eq!(bytes, [0, 255, 10]);
+        }
+    }
+}
+
 // Controlled completions exercise the real coordinator and retained lifecycle.
 // Channels, rather than host sleep ordering, determine which attempt finishes.
+// Allow loaded portable hosts time to schedule threads and retain artifacts.
+const WORKER_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn worker_fixture() -> Fixture {
+    let mut fixture = Fixture::new();
+    // A worker may wait through several control exchanges. The fixture's
+    // execution limit must not turn a slow test handshake into INCOMPLETE.
+    fixture.simulation.limits.wall_time_ns = 600_000_000_000;
+    fixture
+}
+
 #[derive(Clone, Copy)]
 enum WorkerControl {
     Complete,
@@ -1483,14 +1561,14 @@ impl ExecutionBackend for ControlledWorkers<'_> {
         let command = self.controls[&request.seed]
             .lock()
             .unwrap()
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(WORKER_WAIT)
             .expect("test control deadline");
         match command {
             WorkerControl::CleanupUnverified => {
                 return Err(Error::Execution("owned cleanup-unverified".into()))
             }
             WorkerControl::WaitForCancellation => {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                let deadline = std::time::Instant::now() + WORKER_WAIT;
                 while !request.cancellation.is_cancelled() {
                     assert!(
                         std::time::Instant::now() < deadline,
@@ -1558,7 +1636,7 @@ fn worker_ready(
     receiver: &std::sync::mpsc::Receiver<(u64, std::path::PathBuf)>,
 ) -> (u64, std::path::PathBuf) {
     receiver
-        .recv_timeout(std::time::Duration::from_secs(5))
+        .recv_timeout(WORKER_WAIT)
         .expect("worker did not start")
 }
 fn batch_of(run: &std::path::Path) -> &std::path::Path {
@@ -1568,7 +1646,7 @@ fn batch_of(run: &std::path::Path) -> &std::path::Path {
 #[test]
 fn parallel_completion_keeps_seed_indexes_and_one_full_closure_with_serial_equivalence() {
     use seedbox::exploration::ExploreOptions;
-    let fixture = Fixture::new();
+    let fixture = worker_fixture();
     let (backend, ready, senders) = controlled_workers(&fixture, 10, 6, 3);
     let batch = std::thread::scope(|scope| {
         let task = scope.spawn(|| {
@@ -1673,7 +1751,7 @@ fn parallel_completion_keeps_seed_indexes_and_one_full_closure_with_serial_equiv
 #[test]
 fn parallel_cleanup_uncertainty_cancels_owned_sibling_without_dispatching_pending_seeds() {
     use seedbox::exploration::ExploreOptions;
-    let fixture = Fixture::new();
+    let fixture = worker_fixture();
     let caller = CancellationToken::default();
     let (backend, ready, senders) = controlled_workers(&fixture, 10, 5, 2);
     let batch = std::thread::scope(|scope| {
@@ -1730,7 +1808,7 @@ fn parallel_cleanup_uncertainty_cancels_owned_sibling_without_dispatching_pendin
 #[test]
 fn parallel_staggered_external_cancellation_keeps_completed_running_and_pending_attribution() {
     use seedbox::exploration::ExploreOptions;
-    let fixture = Fixture::new();
+    let fixture = worker_fixture();
     let caller = CancellationToken::default();
     let (backend, ready, senders) = controlled_workers(&fixture, 10, 6, 2);
     let batch = std::thread::scope(|scope| {
@@ -1788,7 +1866,7 @@ fn parallel_staggered_external_cancellation_keeps_completed_running_and_pending_
 #[test]
 fn parallel_checkpoint_failure_unwinds_owned_work_and_preserves_independent_manifests() {
     use seedbox::exploration::ExploreOptions;
-    let fixture = Fixture::new();
+    let fixture = worker_fixture();
     let (backend, ready, senders) = controlled_workers(&fixture, 10, 5, 2);
     let paths = std::thread::scope(|scope| {
         let task = scope.spawn(|| {

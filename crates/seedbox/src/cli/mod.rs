@@ -1,6 +1,7 @@
 //! The `seedbox` command line. Style rules for changes: `AGENTS.md`, "CLI".
 
 mod defaults;
+mod diagnostics;
 mod signals;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -12,6 +13,7 @@ use seedbox::{
         CancellationToken, ExecutionBackend, ExecutionProfile, PreparationBackend, WitnessMode,
     },
     exploration::{self, ExploreOptions},
+    logs,
     oci::OciTools,
     orchestration::{self, Orchestrator, Outcome, ReplayOptions, ReplayStatus, RunOptions},
     preparation::OciPreparer,
@@ -32,7 +34,16 @@ Exit status:
   1    FAIL, replay MISMATCH, or diff DIFFERENT
   2    ERROR, a replay that is NOT_COMPARABLE, or a usage or setup error
   3    INCOMPLETE (wall-time limit or cancelled)
+       A cancelled or incomplete replay reports 2 (NOT_COMPARABLE)
   124  TIMEOUT (simulated-time limit)";
+
+const HOST_CONTROL_HELP: &str = "\
+Host execution control:
+  seedbox pause RUN     Wait for a host slice-boundary pause
+  seedbox resume RUN    Resume the same live world
+Pause preserves guest time and witnesses. Wall-time limits and cancellation remain active.
+The executing attempt has an output/host-control locator; replay uses its new attempt.";
+const VMM_FAILURE_HELP: &str = "Text VMM failures also show up to 5 non-empty lines from the final 8 KiB of output/vmm.stderr on stderr; JSON output is unchanged.";
 
 #[derive(Parser)]
 #[command(
@@ -57,7 +68,7 @@ enum Command {
         #[arg(long, value_enum, default_value_t = TemplateArg::Etcd)]
         template: TemplateArg,
     },
-    /// Check a Compose file against the supported subset, without images or guests.
+    /// Check Compose services and directed network policies, without images or guests.
     Validate {
         #[command(flatten)]
         compose: ComposeArg,
@@ -93,7 +104,7 @@ enum Command {
         build: BuildOptions,
     },
     /// Prepare images and run a simulation (Linux KVM host, root).
-    #[command(after_help = EXIT_CODES)]
+    #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
     Run {
         #[command(flatten)]
         compose: ComposeArg,
@@ -112,7 +123,7 @@ enum Command {
         performance: Performance,
     },
     /// Explore a finite seed sequence with one frozen preparation (Linux KVM host, root).
-    #[command(after_help = EXIT_CODES)]
+    #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
     Explore {
         #[command(flatten)]
         compose: ComposeArg,
@@ -140,7 +151,7 @@ enum Command {
         performance: Performance,
     },
     /// Re-execute a recorded run from its retained inputs and compare (Linux KVM host, root).
-    #[command(after_help = EXIT_CODES)]
+    #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
     Replay {
         /// Run directory, as printed by `run`.
         run: PathBuf,
@@ -157,6 +168,18 @@ enum Command {
         // Last: its help heading applies to every flag declared after it.
         #[command(flatten)]
         performance: Performance,
+    },
+    /// Pause host execution at a slice boundary (Linux KVM host, same user or root).
+    #[command(after_help = HOST_CONTROL_HELP)]
+    Pause {
+        /// Directory of the executing run or replay attempt.
+        run: PathBuf,
+    },
+    /// Resume host execution from a paused slice boundary (Linux KVM host, same user or root).
+    #[command(after_help = HOST_CONTROL_HELP)]
+    Resume {
+        /// Directory of the executing run or replay attempt.
+        run: PathBuf,
     },
     /// Export a recorded run and its retained inputs and logs.
     Export {
@@ -179,7 +202,7 @@ enum Command {
         #[command(flatten)]
         transfer: Transfer,
     },
-    /// Compare retained run evidence without executing guests.
+    /// Compare retained run evidence, including terminal state parts, without executing guests.
     #[command(after_help = EXIT_CODES)]
     Diff {
         /// First retained run directory.
@@ -190,7 +213,28 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Show a recorded run after verifying its manifest.
+    /// Show committed-time logs as raw bytes without executing guests.
+    Logs {
+        /// Retained run directory.
+        run: PathBuf,
+        /// Select one machine from the retained run.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Select the console or management stream [default: both].
+        #[arg(long, value_enum)]
+        stream: Option<LogStream>,
+        /// Include chunks whose first byte commits at or after this simulated nanosecond.
+        #[arg(long)]
+        since_ns: Option<u64>,
+        /// Include chunks whose first byte commits before this simulated nanosecond.
+        #[arg(long)]
+        until_ns: Option<u64>,
+        /// Print one JSON document with lossless hexadecimal payloads.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a recorded run, including its error on stdout, after verifying its manifest.
+    #[command(after_help = VMM_FAILURE_HELP)]
     Inspect {
         /// Run directory, as printed by `run` or `replay`.
         run: PathBuf,
@@ -198,6 +242,22 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum LogStream {
+    /// Raw COM1 console bytes.
+    Console,
+    /// Raw management transport bytes.
+    Mgmt,
+}
+impl From<LogStream> for logs::Stream {
+    fn from(value: LogStream) -> Self {
+        match value {
+            LogStream::Console => Self::Console,
+            LogStream::Mgmt => Self::Mgmt,
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -435,6 +495,16 @@ pub fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<u8> {
     match cli.command {
+        Command::Pause { run } => {
+            let status = seedbox::host_control::set_paused(&run, true)?;
+            println!("{}: {}", word(&status), run.display());
+            Ok(0)
+        }
+        Command::Resume { run } => {
+            let status = seedbox::host_control::set_paused(&run, false)?;
+            println!("{}: {}", word(&status), run.display());
+            Ok(0)
+        }
         Command::Init {
             directory,
             template,
@@ -647,6 +717,7 @@ fn run(cli: Cli) -> Result<u8> {
                         );
                         if let Some(error) = &attempt.error {
                             eprintln!("error: seed {}: {error}", attempt.seed);
+                            diagnostics::vmm_failure(directory, error);
                         }
                     }
                 }
@@ -828,6 +899,62 @@ fn run(cli: Cli) -> Result<u8> {
                 diff::Status::Different => 1,
             })
         }
+        Command::Logs {
+            run,
+            machine,
+            stream,
+            since_ns,
+            until_ns,
+            json,
+        } => {
+            let run = defaults::run_directory(run)?;
+            let mut reader = logs::Reader::open(
+                &run,
+                &logs::Filter {
+                    machine,
+                    stream: stream.map(Into::into),
+                    since_ns,
+                    until_ns,
+                },
+            )?;
+            use std::io::Write;
+            let mut output = std::io::BufWriter::new(std::io::stdout().lock());
+            if json {
+                writeln!(
+                    output,
+                    "{{\n  \"status\": {},\n  \"omissions\": {},\n  \"chunks\": [",
+                    serde_json::to_string(&reader.report.status)?,
+                    serde_json::to_string_pretty(&reader.report.omissions)?
+                )?;
+            } else {
+                let mut diagnostics = std::io::stderr().lock();
+                writeln!(diagnostics, "logs: {}", run.display())?;
+                for (name, reason) in &reader.report.omissions {
+                    writeln!(
+                        diagnostics,
+                        "omission: {}",
+                        serde_json::to_string(&(name, reason))?
+                    )?;
+                }
+            }
+            for index in 0..reader.report.chunks.len() {
+                if json {
+                    output.write_all(b"    ")?;
+                    reader.write_chunk_json(index, &mut output)?;
+                    if index + 1 < reader.report.chunks.len() {
+                        output.write_all(b",")?;
+                    }
+                    output.write_all(b"\n")?;
+                } else {
+                    reader.copy_chunk(index, &mut output)?;
+                }
+            }
+            if json {
+                writeln!(output, "  ]\n}}")?;
+            }
+            output.flush()?;
+            Ok(0)
+        }
         Command::Inspect { run, json } => {
             let run = defaults::run_directory(run)?;
             let record = orchestration::inspect(&run)?;
@@ -851,6 +978,7 @@ fn run(cli: Cli) -> Result<u8> {
             }
             if let Some(error) = record.error {
                 println!("error: {error}");
+                diagnostics::vmm_failure(&run, &error);
             }
             Ok(0)
         }
@@ -900,6 +1028,7 @@ fn report(run: &orchestration::Run) -> u8 {
     }
     if let Some(error) = &run.record.error {
         eprintln!("{error}");
+        diagnostics::vmm_failure(&run.directory, error);
     }
     if let Some(replay) = &run.record.replay {
         let label = if seedbox::admission::is_dev_engine(&run.record.identity.inputs.profile) {
