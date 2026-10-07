@@ -960,3 +960,29 @@ mod diff_tests {
         assert_eq!(result["machines"][0]["witness"]["matches"], true);
     }
 }
+
+#[test]
+fn torn_writes_is_opt_in_presence_only_and_replay_uses_the_recorded_policy() {
+    let directory = tempfile::tempdir().unwrap();
+    for command in ["run", "prepare"] {
+        let help = seedbox(&["help", command], directory.path());
+        assert!(help.status.success());
+        let help = String::from_utf8_lossy(&help.stdout);
+        assert!(help.contains("--torn-writes"));
+        assert!(help.contains("off by default"));
+        assert!(!help.contains("SEEDBOX_TORN_WRITES"));
+        let mut args = vec![command, "--torn-writes"];
+        if command == "prepare" {
+            args.extend(["--output", "out.json"]);
+        }
+        let output = seedbox(&args, directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(stderr(&output), "error: no Compose file found; searched:\n  ./compose.yaml\n  ./compose.yml\n  ./docker-compose.yaml\n  ./docker-compose.yml\npass the file path directly\n");
+        let output = seedbox(&[command, "--torn-writes=false"], directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).contains("--torn-writes"));
+    }
+    let output = seedbox(&["replay", "run", "--torn-writes"], directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("unexpected argument '--torn-writes'"));
+}

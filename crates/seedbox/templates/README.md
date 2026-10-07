@@ -35,6 +35,10 @@ resources before preparation.
 `seedbox help run`. Run/replay must be invoked with the required KVM/MSR access;
 see the repository's `docs/runtime.md` for setup and limits. `--margin` and
 `--undo` control PMU approach and stepping performance without changing results.
+`--torn-writes` opts into seeded partial survival of unflushed 512-byte disk
+sectors on machine crash (off by default). It is part of run identity and replay
+restores it automatically. It applies only to retained disks; this template
+currently uses RAM-backed storage. See `docs/runtime.md` for the disk contract.
 Charged timer I/O retains its full cost across scheduler boundaries; pending
 operations are included in terminal witnesses.
 
