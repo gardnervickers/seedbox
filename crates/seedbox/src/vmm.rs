@@ -1786,8 +1786,6 @@ mod doctor_tests {
             model: p.model,
             stepping: p.stepping,
             microcode: p.microcode,
-            booted_kernel: p.host_kernel.clone(),
-            current_kernel: p.host_kernel,
             kvm_api: p.kvm_api,
             immediate_exit: p.immediate_exit,
             guest_debug: p.guest_debug,

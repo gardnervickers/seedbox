@@ -2,11 +2,14 @@
 # Directed-link policy controls (PR #97). Six runs on the AMD host:
 #   L1 shaped world, L2 its replay,
 #   P1 plain world on the PR engine, M1 the same plain world on main's engine,
-#   U1 the short shaped world with a 200 us stop tolerance, U2 with undo off.
+#   U1 the short shaped world with a 5 ms stop tolerance, U2 with undo off.
 # Undo off steps up to the whole margin (~16k branches) at every precise stop,
 # about 60x the stepping of undo on in the zero-tolerance world (L1: 166k
 # precise stops, 400 s), so the undo-off pair uses a stop tolerance to make
-# most slices end at natural exits. U1/U2 use a 600 s timeout.
+# most slices end at natural exits. The short world's 10 ms lookahead and
+# 5 ms early window cover its 1 ms probe gap; worlds/README.md has the measured
+# stops and seconds (U2 118.5 s). U1/U2 retain a 600 s timeout, with an undo-off
+# target below 300 s.
 # Run as the normal user on distinct free physical cores with idle SMT siblings:
 #   CPUS="2 3 4 5 6 7" SHA=<PR head> MAIN=<main sha> bash harness/run-links.sh
 # Subsets: RUNS="L1 U1" CPUS="14 15" (default: all six lanes).

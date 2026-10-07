@@ -160,14 +160,12 @@ fn cargo_run_here() -> Option<std::ffi::OsString> {
         .flatten()
 }
 
-/// Build the VMM with the same arguments as the `cargo build-vmm` alias.
+/// Build the VMM through its alias, including its isolated compiler wrapper.
 fn build_engine(cargo: &std::ffi::OsStr, vmm: &Path) -> Result<()> {
     eprintln!("seedbox-vmm not built; building it with `cargo build-vmm`");
     let status = Command::new(cargo)
-        .args(["build", "--release", "--locked", "--manifest-path"])
-        .arg(vmm.join("Cargo.toml"))
-        .arg("--target-dir")
-        .arg(vmm.join("target"))
+        .arg("build-vmm")
+        .current_dir(vmm.join("../.."))
         .status()
         .map_err(|error| Error::Setup(format!("running cargo to build seedbox-vmm: {error}")))?;
     if !status.success() {
@@ -329,6 +327,36 @@ pub fn preparation_tool(path: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn auto_build_uses_the_vmm_alias_from_the_checkout_root() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let vmm = root.join("crates/seedbox-vmm");
+        std::fs::create_dir_all(&vmm).unwrap();
+        let cargo = root.join("fake-cargo");
+        std::fs::write(
+            &cargo,
+            "#!/bin/sh\npwd -P > build-command\nprintf '%s\\n' \"$@\" >> build-command\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        super::build_engine(cargo.as_os_str(), &vmm).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("build-command")).unwrap(),
+            format!("{}\nbuild-vmm\n", root.display())
+        );
+        std::fs::write(&cargo, "#!/bin/sh\nexit 1\n").unwrap();
+        assert_eq!(
+            super::build_engine(cargo.as_os_str(), &vmm)
+                .unwrap_err()
+                .to_string(),
+            "building seedbox-vmm failed (see cargo output above)"
+        );
+    }
+
     #[test]
     fn lookup_only_never_invokes_the_missing_engine_builder() {
         let invoked = std::cell::Cell::new(false);
