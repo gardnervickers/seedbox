@@ -240,6 +240,50 @@ echo "joined:$rc:$(find "$RESULTS" -name '*.finished' | wc -l)"
             for lane, args in expected.items():
                 self.assertEqual((Path(temp) / f'{lane}.args').read_text().strip(), args)
 
+    def analyze_undo_pair(self, rollbacks):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            short = world('shaped-tol-short')
+            (root / 'shaped.json').write_text(json.dumps(world('shaped')))
+            (root / 'shaped-tol-short.json').write_text(json.dumps(short))
+            for run in ('U1', 'U2'):
+                report = {
+                    'outcome': 'end_machine_exited',
+                    'world_witness': 'short',
+                    'machines': [dict(name=name, undo={'rollbacks': count} if run == 'U1' else None)
+                                 for name, count in zip('abc', rollbacks)],
+                    'faults': [dict(id=f['id'], status='applied', applied_at_ns=f['at_ns'])
+                               for f in short['faults']],
+                    'network_counters': {'c->a': {'loss_dropped': 10, 'partition_dropped': 10},
+                                         'c->b': {'loss_dropped': 10},
+                                         'a->c': {'partition_dropped': 10}},
+                }
+                (root / f'{run}.json').write_text(json.dumps(report))
+                (root / run).mkdir()
+                (root / run / 'all.console').write_text('\n'.join(
+                    f'LINK-SRC {dst}<-{src} reorders=0'
+                    for dst in 'abc' for src in 'abc' if dst != src))
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                result = links.analyze(root, ['U1', 'U2'])
+            return result, output.getvalue()
+
+    def test_undo_pair_passes_with_positive_u1_rollbacks(self):
+        result, output = self.analyze_undo_pair((0, 2, 3))
+        self.assertEqual(result, 0, output)
+        self.assertIn('PASS U1: exercised rollback (rollbacks=5)', output)
+        self.assertRegex(output, r'U1: outcome=.* rollbacks=5\n')
+        self.assertRegex(output, r'U2: outcome=.* rollbacks=0\n')
+        self.assertIn('RESULT: ALL PASS', output)
+
+    def test_undo_pair_fails_with_zero_u1_rollbacks(self):
+        result, output = self.analyze_undo_pair((0, 0, 0))
+        self.assertEqual(result, 1, output)
+        self.assertIn('FAIL U1: exercised rollback (rollbacks=0)', output)
+        self.assertRegex(output, r'U1: outcome=.* rollbacks=0\n')
+        self.assertIn('PASS short shaped undo on/off MATCH (U1 == U2)', output)
+        self.assertEqual(output.count('FAIL '), 1, output)
+        self.assertIn('RESULT: SOME CHECKS FAILED', output)
+
     def test_host_checker_returns_failure_for_broken_lane_evidence(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -251,6 +295,7 @@ echo "joined:$rc:$(find "$RESULTS" -name '*.finished' | wc -l)"
                 report = {
                     'outcome': 'end_machine_exited',
                     'world_witness': 'short' if run[0] == 'U' else 'shaped' if shaped else 'plain',
+                    'machines': [dict(name='a', undo={'rollbacks': 1 if run == 'U1' else 0})],
                     'faults': [dict(id=f['id'], status='applied', applied_at_ns=f['at_ns'])
                                for f in (short if run[0] == 'U' else full)['faults']] if shaped else [],
                     'network_counters': {'c->a': {'loss_dropped': 10, 'partition_dropped': 10},
