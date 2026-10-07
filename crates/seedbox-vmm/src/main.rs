@@ -12,6 +12,7 @@ mod network_counters;
 mod profile;
 mod rng;
 mod stepper;
+mod timebase;
 mod undo;
 mod virtio_net;
 mod virtio_console;
