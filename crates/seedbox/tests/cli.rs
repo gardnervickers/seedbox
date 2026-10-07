@@ -292,6 +292,23 @@ fn busybox_default_requires_a_static_busybox_on_path() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn an_explicit_mke2fs_must_exist() {
+    let (directory, mut args) = runtime_project();
+    let busybox = directory.path().join("busybox");
+    fs::write(&busybox, b"").unwrap();
+    args.extend(["--busybox".into(), busybox.to_str().unwrap().to_owned()]);
+    args.extend(["--mke2fs".into(), "/nonexistent/mke2fs".into()]);
+    let args: Vec<_> = args.iter().map(String::as_str).collect();
+    let output = seedbox(&args, directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        "error: --mke2fs /nonexistent/mke2fs: not found\n"
+    );
+}
+
 #[test]
 fn explore_bounds_and_help_are_public_before_runtime_inputs_or_state() {
     let directory = tempfile::tempdir().unwrap();
@@ -480,6 +497,7 @@ fn old_host_proof_replay_is_not_comparable_while_inspection_and_transfer_stay_av
                     user: "".into(),
                     working_dir: "/".into(),
                     volumes: vec![],
+                    disk_volumes: vec![],
                 },
             },
         )]),

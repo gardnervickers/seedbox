@@ -273,7 +273,15 @@ issue #5's hardware qualification; Darwin source tests do not establish it.
 Each service currently gets one machine and one OCI-root chroot. Its complete
 filesystem is writable RAM-backed initramfs storage, freshly instantiated for
 each run/replay; image volume paths have the same per-run lifetime. Process
-stop/start retains that filesystem. No state persists between fresh machine boots.
+stop/start retains that filesystem. A machine crash loses it.
+
+Named Compose volumes are the exception. A machine whose service mounts one gets
+a 1 GiB virtio-blk disk, zeroed at the start of each run/replay. The supervisor
+formats it as ext4 on first boot (with a static `mke2fs` packaged into the guest),
+mounts it, and bind mounts each volume's directory onto its target. The disk has a
+write cache: data the application flushed (fsync, fdatasync, `O_DSYNC`) survives a
+machine crash and reboot, and every write since the last flush is lost. A new volume
+takes the mode and owner of the image's target directory and starts empty.
 The generic static supervisor is a guest bootstrap alongside the existing C guest
 helpers; configuration, preparation, orchestration, and execution are Rust.
 
