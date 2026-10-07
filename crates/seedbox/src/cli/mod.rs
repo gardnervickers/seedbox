@@ -182,7 +182,7 @@ enum Command {
         #[command(flatten)]
         transfer: Transfer,
     },
-    /// Compare retained run evidence without executing guests.
+    /// Compare retained run evidence, including terminal state parts, without executing guests.
     #[command(after_help = EXIT_CODES)]
     Diff {
         /// First retained run directory.

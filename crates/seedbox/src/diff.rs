@@ -3,9 +3,10 @@
 use crate::{
     orchestration::{self, RunRecord},
     store::ContentDigest,
+    vmm::{MachineReport, StateDigestParts, VmmReport},
     Error, Result,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -84,11 +85,11 @@ pub struct DiffReport {
 
 // Select semantic machine fields explicitly: scheduling/performance counters and
 // host timings in vmm.json are deliberately excluded.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 struct Machine {
     witness: Option<ContentDigest>,
     state_digest: Option<ContentDigest>,
-    state_digest_parts: Option<BTreeMap<String, ContentDigest>>,
+    state_digest_parts: Option<StateDigestParts>,
     state: Option<String>,
     time_ns: Option<u64>,
     branches: Option<u64>,
@@ -98,17 +99,21 @@ struct Machine {
     pending_io: Option<Value>,
 }
 
-#[derive(Deserialize)]
-struct RawReport {
-    report_version: u32,
-    world_witness: ContentDigest,
-    machines: Vec<NamedMachine>,
-}
-#[derive(Deserialize)]
-struct NamedMachine {
-    name: String,
-    #[serde(flatten)]
-    machine: Machine,
+impl From<MachineReport> for Machine {
+    fn from(report: MachineReport) -> Self {
+        Self {
+            witness: report.witness,
+            state_digest: report.state_digest,
+            state_digest_parts: report.state_digest_parts,
+            state: report.state,
+            time_ns: report.time_ns,
+            branches: report.branches,
+            guest_exit_code: report.guest_exit_code,
+            guest_init_error: report.guest_init_error,
+            infrastructure_error: Some(report.infrastructure_error),
+            pending_io: report.pending_io,
+        }
+    }
 }
 struct Evidence {
     record: RunRecord,
@@ -184,7 +189,7 @@ fn load(directory: &Path) -> Result<Evidence> {
         if bytes.len() > 256 * 1024 * 1024 {
             return Err(bad(&path, "report exceeds 256 MiB"));
         }
-        let raw: RawReport = serde_json::from_slice(&bytes).map_err(|e| bad(&path, e))?;
+        let raw: VmmReport = serde_json::from_slice(&bytes).map_err(|e| bad(&path, e))?;
         if raw.report_version != 1 {
             return Err(bad(&path, "unsupported VMM report version"));
         }
@@ -193,7 +198,8 @@ fn load(directory: &Path) -> Result<Evidence> {
         }
         world = Some(raw.world_witness);
         for entry in raw.machines {
-            if machines.insert(entry.name, entry.machine).is_some() {
+            let name = entry.name.clone();
+            if machines.insert(name, Machine::from(entry)).is_some() {
                 return Err(bad(&path, "duplicate machine name"));
             }
         }
@@ -255,6 +261,7 @@ fn terminal(machine: &Machine) -> Option<Record> {
         && machine.guest_init_error.is_none()
         && machine.infrastructure_error.is_none()
         && machine.pending_io.is_none()
+        && machine.state_digest_parts.is_none()
     {
         return None;
     }
@@ -265,6 +272,7 @@ fn terminal(machine: &Machine) -> Option<Record> {
             "state": machine.state, "time_ns": machine.time_ns, "branches": machine.branches,
             "guest_exit_code": machine.guest_exit_code, "guest_init_error": machine.guest_init_error,
             "infrastructure_error": machine.infrastructure_error, "pending_io": machine.pending_io,
+            "state_digest_parts": machine.state_digest_parts,
         }),
     })
 }
@@ -494,6 +502,69 @@ mod tests {
         write_fixture(&dir.path().join("b"), &mut fixture(), Some(b), None);
         let result = diff(&dir.path().join("a"), &dir.path().join("b")).unwrap();
         (dir, result)
+    }
+
+    #[test]
+    fn current_reports_without_full_state_preserve_witnesses_and_determinism() {
+        let a = current_report(false);
+        let mut b = a.clone();
+        b["machines"][0]["run_ms"] = 999.into();
+        b["machines"][1]["undo"] = serde_json::json!({"rollbacks": 999});
+        b["machines"].as_array_mut().unwrap().reverse();
+        let (_, result) = pair(&a, &b);
+        assert_eq!(result.status, Status::Match);
+        assert_eq!(result.world_witness.matches, Some(true));
+        assert!(result.first_record.is_none());
+        for machine in result.machines {
+            assert_eq!(machine.witness.matches, Some(true));
+            assert_eq!(machine.full_state.matches, None);
+            assert!(machine.differences.is_empty());
+        }
+    }
+
+    #[test]
+    fn current_parts_report_ram_and_text_events_with_trace_precedence() {
+        for part in ["ram", "events"] {
+            let a = current_report(true);
+            let mut b = a.clone();
+            b["machines"][0]["state_digest_parts"][part] = if part == "events" {
+                "exc:none int:none shadow:1 nmi:0/0/0".into()
+            } else {
+                serde_json::to_value(ContentDigest::of(b"changed ram")).unwrap()
+            };
+            let (_, result) = pair(&a, &b);
+            let first = result.first_record.unwrap();
+            assert_eq!(first.machine, "workload");
+            assert_eq!(first.source, "terminal");
+            assert_eq!(
+                first.a.unwrap().value["state_digest_parts"][part],
+                a["machines"][0]["state_digest_parts"][part]
+            );
+            assert!(result.machines[1]
+                .differences
+                .iter()
+                .any(|d| d.field == format!("/state_digest_parts/{part}")));
+
+            let dir = tempfile::tempdir().unwrap();
+            write_fixture(
+                &dir.path().join("a"),
+                &mut fixture(),
+                Some(&a),
+                Some(b"I 1 2 3 4\n"),
+            );
+            write_fixture(
+                &dir.path().join("b"),
+                &mut fixture(),
+                Some(&b),
+                Some(b"H 1 2 3 4\n"),
+            );
+            let first = diff(&dir.path().join("a"), &dir.path().join("b"))
+                .unwrap()
+                .first_record
+                .unwrap();
+            assert_eq!(first.source, "trace");
+            assert_eq!(first.record, Some(1));
+        }
     }
 
     #[test]

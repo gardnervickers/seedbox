@@ -318,8 +318,9 @@ lease contention and exact MSR restoration on the workstation.
 
 `seedbox diff RUN_A RUN_B [--json]` compares two retained directories on Linux or
 macOS without executing guests. It reports the world witness, each machine's
-exit/full-state witnesses, the first differing retained trace record (or terminal
-record), and changed identity fields including seed, engine, kernel, images and
+exit/full-state witnesses and state parts (such as RAM and disk), the first
+differing retained trace record (or terminal record with state parts), and changed
+identity fields including seed, engine, kernel, images and
 semantic parameters. Import bundles first, then pass their printed run paths.
 
 Only manifest-declared, checksum-verified evidence is read. The adapter does not

@@ -247,6 +247,9 @@ and unavailable detail are listed in `limitations`.
 The report presents the world witness first, then machines by name with exit
 witnesses, optional full-state digests/parts and selected terminal fields. The
 manifest's full-state digests remain usable when the raw engine report was omitted.
+State parts such as `ram`, `disk` and `pending_io` are compared separately;
+`events` is the engine's descriptive event state, while the other parts are
+validated lowercase SHA-256 digests.
 All changed identity fields are listed as JSON pointers with both values, including
 configuration, seed, engine, kernel, images/layers, guest archives, provenance and
 semantic parameters. Missing values are null. Arrays are compared as whole values.
@@ -265,8 +268,9 @@ Trace lines are limited to 64 KiB and engine report metadata to 256 MiB.
 
 The production adapter does not enable tracing. Without a differing trace record,
 `first_record` reports the earliest differing terminal observation available in
-`vmm.json`, with source/kind `terminal`, machine and each side's time. Final hashes
-alone give no exit/time localization, so `first_record` can be null even when
+`vmm.json`, with source/kind `terminal`, machine and each side's time. This includes
+state-part differences and their before/after values at the terminal observation.
+Aggregate witnesses alone give no exit/time localization, so `first_record` can be null even when
 witnesses differ. Terminal time is only when the differing final state was observed;
 it is not a claim about the first divergent instruction or exit. Full-state digests
 are hashes, not snapshots. No new execution evidence is collected by diff.
