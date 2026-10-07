@@ -8,6 +8,7 @@
 
 pub mod bundle;
 pub mod config;
+pub mod counter;
 pub mod execution;
 pub mod guest;
 #[cfg(any(target_os = "linux", test))]

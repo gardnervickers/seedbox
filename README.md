@@ -90,6 +90,13 @@ may change execution. Release compatibility remains a V0 qualification gate.
 ## Host requirements
 
 - x86-64 AMD Zen host with KVM, run as root (guest-only perf counting).
+  Seedbox picks a branch counter profile from CPUID at startup
+  (`crates/seedbox/src/counter.rs`, `crates/seedbox-vmm/src/profile.rs`) and
+  records it in each run's identity, so a run replays only with the counter
+  that made it. Only Zen is qualified. Non-hybrid Intel cores have profiles
+  (`intel-0x5101c4` up to Comet Lake, `intel-0x5111c4` from Ice Lake) that
+  have never run on hardware; `run` and `replay` refuse them unless given
+  `--allow-unqualified-cpu`, and then warn that results are unverified.
 - **The Zen SpeculativeLockMap workaround must be on** for the cores running
   simulations (MSR 0xC0011020 bit 54, rr's workaround). Without it, branch
   counts drift on lock-heavy code (e.g. Go) and runs diverge. The Rust executor

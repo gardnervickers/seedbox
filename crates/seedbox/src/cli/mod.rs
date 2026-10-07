@@ -6,6 +6,7 @@ mod signals;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use seedbox::{
     bundle, config,
+    counter::CounterProfile,
     execution::{
         CancellationToken, ExecutionBackend, ExecutionProfile, PreparationBackend, WitnessMode,
     },
@@ -14,7 +15,7 @@ use seedbox::{
     preparation::OciPreparer,
     store::ContentStore,
     templates::Template,
-    vmm::VmmExecutor,
+    vmm::{recorded_counter, VmmExecutor},
     Error, Result,
 };
 use signals::Signals;
@@ -177,6 +178,17 @@ struct CpuArg {
     /// Host CPU to pin the VMM to [default: first free core other than CPU 0's].
     #[arg(long, env = "SEEDBOX_CPU", value_parser = clap::value_parser!(u32).range(0..1024))]
     cpu: Option<u32>,
+    /// Run even when this CPU's branch counter profile is unqualified; its results are unverified.
+    #[arg(long)]
+    allow_unqualified_cpu: bool,
+}
+
+impl CpuArg {
+    /// The host's branch counter profile, refused when unqualified unless allowed.
+    fn admit(&self, counter: CounterProfile) -> Result<CounterProfile> {
+        admit_counter(counter, self.allow_unqualified_cpu)?;
+        Ok(counter)
+    }
 }
 
 #[derive(Args)]
@@ -237,6 +249,7 @@ impl RuntimeInputs {
         &self,
         store: &ContentStore,
         cpu: Option<u32>,
+        counter: CounterProfile,
         scratch: &Path,
     ) -> Result<(OciPreparer, VmmExecutor)> {
         let engine = defaults::engine(self.vmm.clone())?;
@@ -245,7 +258,7 @@ impl RuntimeInputs {
         } else {
             WitnessMode::Exits
         };
-        let executor = VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness)?;
+        let executor = VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?;
         let preparer = self.preparer(engine, store, scratch, executor.profile())?;
         Ok((preparer, executor))
     }
@@ -351,7 +364,10 @@ fn run(cli: Cli) -> Result<u8> {
             let simulation = compose.load()?;
             let (store, _) = state.open()?;
             let scratch = tempfile::tempdir()?;
-            let (preparer, _) = inputs.backends(&store, None, scratch.path())?;
+            // Preparation runs no guest, so it may run on any machine; off a
+            // supported CPU it prepares for the qualified Zen profile.
+            let counter = CounterProfile::host().unwrap_or(CounterProfile::Zen);
+            let (preparer, _) = inputs.backends(&store, None, counter, scratch.path())?;
             let prepared = preparer.prepare(&simulation, &store)?;
             let file = std::fs::OpenOptions::new()
                 .write(true)
@@ -372,10 +388,15 @@ fn run(cli: Cli) -> Result<u8> {
             let simulation = compose.load()?;
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
-            let (preparer, executor) = inputs.backends(&store, cpu.cpu, scratch.path())?;
+            // Report a CPU without a usable profile only after the input
+            // checks; until then, Zen stands in.
+            let detected = CounterProfile::host();
+            let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
+            let (preparer, executor) = inputs.backends(&store, cpu.cpu, counter, scratch.path())?;
             let executor = performance.apply(executor)?;
             // After the fast input checks, before slow image preparation.
-            require_kvm_host()?;
+            let counter = cpu.admit(detected?)?;
+            require_kvm_host(counter)?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
             let result = orchestrator.run(
@@ -396,7 +417,13 @@ fn run(cli: Cli) -> Result<u8> {
         } => {
             let run = defaults::run_directory(run)?;
             let previous = orchestration::inspect(&run)?;
-            require_kvm_host()?;
+            let counter = cpu.admit(CounterProfile::host()?)?;
+            same_counter(
+                &run,
+                recorded_counter(&previous.identity.inputs.profile)?,
+                counter,
+            )?;
+            require_kvm_host(counter)?;
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
             let profile = &previous.identity.inputs.profile;
@@ -415,6 +442,7 @@ fn run(cli: Cli) -> Result<u8> {
                 cpu.cpu,
                 memory,
                 profile.witness_mode.clone(),
+                counter,
             )?)?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
@@ -519,23 +547,15 @@ fn run(cli: Cli) -> Result<u8> {
     }
 }
 
-/// Fail fast when this host cannot execute: no KVM, or no MSR access.
-fn require_kvm_host() -> Result<()> {
+/// Fail fast when this host cannot execute: no KVM, or no MSR access when the
+/// counter profile needs a workaround.
+fn require_kvm_host(counter: CounterProfile) -> Result<()> {
     if !cfg!(target_os = "linux") {
         return Err(Error::Setup(
             "run and replay require the qualified Linux KVM host".into(),
         ));
     }
-    for (path, fix) in [
-        (
-            "/dev/kvm",
-            "enable KVM and run as root (e.g. sudo -E env PATH=\"$PATH\" seedbox ...)",
-        ),
-        (
-            "/dev/cpu/0/msr",
-            "run as root (e.g. sudo -E env PATH=\"$PATH\" seedbox ...) with the msr module loaded",
-        ),
-    ] {
+    for (path, fix) in host_devices(counter) {
         std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -543,6 +563,56 @@ fn require_kvm_host() -> Result<()> {
             .map_err(|error| Error::Setup(format!("{path}: {error}; {fix}")))?;
     }
     Ok(())
+}
+
+/// Devices `run` and `replay` need: KVM, plus MSR access only when the
+/// counter profile has a host workaround.
+fn host_devices(counter: CounterProfile) -> Vec<(&'static str, &'static str)> {
+    let mut devices = vec![(
+        "/dev/kvm",
+        "enable KVM and run as root (e.g. sudo -E env PATH=\"$PATH\" seedbox ...)",
+    )];
+    if counter.workaround().is_some() {
+        devices.push((
+            "/dev/cpu/0/msr",
+            "run as root (e.g. sudo -E env PATH=\"$PATH\" seedbox ...) with the msr module loaded",
+        ));
+    }
+    devices
+}
+
+/// Refuse an unqualified counter profile unless the caller allowed it, and
+/// then say that its results are unverified.
+fn admit_counter(counter: CounterProfile, allow_unqualified: bool) -> Result<()> {
+    if counter.qualified() {
+        return Ok(());
+    }
+    if !allow_unqualified {
+        return Err(Error::Setup(format!(
+            "this host's branch counter profile {} is unqualified, so its results are \
+             unverified; pass --allow-unqualified-cpu to run anyway",
+            counter.name()
+        )));
+    }
+    eprintln!(
+        "warning: branch counter profile {} is unqualified; results are unverified",
+        counter.name()
+    );
+    Ok(())
+}
+
+/// A run replays only with the branch counter it was recorded with.
+fn same_counter(run: &Path, recorded: CounterProfile, host: CounterProfile) -> Result<()> {
+    if recorded == host {
+        return Ok(());
+    }
+    Err(Error::Setup(format!(
+        "{}: recorded with the {} branch counter, but this host has {}; \
+         replay it on a host with the same counter",
+        run.display(),
+        recorded.name(),
+        host.name()
+    )))
 }
 
 /// Print a finished run and return its exit status (see `EXIT_CODES`).
@@ -580,5 +650,48 @@ fn word(value: &impl serde::Serialize) -> String {
 fn print_omissions(record: &orchestration::RunRecord) {
     if !record.omitted_logs.is_empty() {
         println!("omitted files: {}", record.omitted_logs.len());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_profiles_with_a_workaround_need_msr_access() {
+        let paths = |counter| {
+            host_devices(counter)
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(paths(CounterProfile::Zen), ["/dev/kvm", "/dev/cpu/0/msr"]);
+        assert_eq!(paths(CounterProfile::IntelIceLake), ["/dev/kvm"]);
+    }
+
+    #[test]
+    fn replay_on_another_vendor_names_both_counters() {
+        let run = Path::new("/runs/abc");
+        assert!(same_counter(run, CounterProfile::Zen, CounterProfile::Zen).is_ok());
+        let error =
+            same_counter(run, CounterProfile::Zen, CounterProfile::IntelIceLake).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "/runs/abc: recorded with the amd-zen branch counter, but this host has \
+             intel-0x5111c4; replay it on a host with the same counter"
+        );
+    }
+
+    #[test]
+    fn unqualified_counters_need_explicit_permission() {
+        assert!(admit_counter(CounterProfile::Zen, false).is_ok());
+        assert_eq!(
+            admit_counter(CounterProfile::IntelSkylake, false)
+                .unwrap_err()
+                .to_string(),
+            "this host's branch counter profile intel-0x5101c4 is unqualified, so its \
+             results are unverified; pass --allow-unqualified-cpu to run anyway"
+        );
+        assert!(admit_counter(CounterProfile::IntelSkylake, true).is_ok());
     }
 }

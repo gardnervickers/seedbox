@@ -1,5 +1,5 @@
-//! Host perf counter of retired guest conditional branches (AMD Zen raw event
-//! 0x5100d1, rr's choice), counting guest kernel and user, excluding the host.
+//! Host perf counter of retired guest conditional branches (the raw event of
+//! the host's counter profile), counting guest kernel and user, excluding the host.
 //! Overflow signals the world thread so KVM_RUN returns with EINTR.
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,7 +24,6 @@ struct PerfAttr {
 }
 
 const PERF_TYPE_RAW: u32 = 4;
-const ZEN_RETIRED_CONDITIONAL_BRANCHES: u64 = 0x5100d1;
 const FLAG_DISABLED: u64 = 1;
 const FLAG_PINNED: u64 = 1 << 2;
 const FLAG_EXCLUDE_HOST: u64 = 1 << 19;
@@ -46,7 +45,7 @@ impl Counter {
         let attr = PerfAttr {
             kind: PERF_TYPE_RAW,
             size: std::mem::size_of::<PerfAttr>() as u32,
-            config: ZEN_RETIRED_CONDITIONAL_BRANCHES,
+            config: crate::profile::host()?.branch_event,
             period: NEVER,
             read_format: 3,
             flags: FLAG_DISABLED | FLAG_PINNED | FLAG_EXCLUDE_HOST,

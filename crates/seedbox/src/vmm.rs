@@ -2,6 +2,7 @@
 //! execution artifact generated from verified inputs, not the authoring format.
 
 use crate::{
+    counter::CounterProfile,
     execution::*,
     store::{ContentDigest, ContentStore},
     Error, Result,
@@ -17,6 +18,7 @@ use std::{
 pub struct VmmExecutor {
     /// Host CPU to pin the VMM to; `None` leases the first free eligible core.
     pub cpu: Option<u32>,
+    counter: CounterProfile,
     profile: ExecutionProfile,
     performance: BTreeMap<String, String>,
 }
@@ -28,23 +30,31 @@ impl VmmExecutor {
         cpu: Option<u32>,
         memory_mb: u32,
         witness_mode: WitnessMode,
+        counter: CounterProfile,
     ) -> Result<Self> {
         if !(64..=65536).contains(&memory_mb) {
             return Err(Error::Execution(
                 "guest memory must be 64..65536 MiB".into(),
             ));
         }
+        let mut semantic_parameters = BTreeMap::from([
+            ("guest_abi".into(), "oci-init-v1".into()),
+            ("control_channel".into(), "virtio-console-v1".into()),
+            ("memory_mb".into(), memory_mb.to_string()),
+        ]);
+        // The counter decides what a branch is, so it is part of identity. Zen
+        // is recorded by omission, which keeps existing Zen runs comparable.
+        if counter != CounterProfile::Zen {
+            semantic_parameters.insert(COUNTER.into(), counter.name().into());
+        }
         Ok(Self {
             cpu,
+            counter,
             profile: ExecutionProfile {
                 backend: "seedbox-kvm".into(),
                 engine: store.put_file(engine)?,
                 witness_mode,
-                semantic_parameters: BTreeMap::from([
-                    ("guest_abi".into(), "oci-init-v1".into()),
-                    ("control_channel".into(), "virtio-console-v1".into()),
-                    ("memory_mb".into(), memory_mb.to_string()),
-                ]),
+                semantic_parameters,
             },
             performance: BTreeMap::from([
                 ("SEEDBOX_MARGIN".into(), "adaptive".into()),
@@ -72,6 +82,17 @@ impl VmmExecutor {
         self.performance
             .insert("SEEDBOX_UNDO".into(), branches.to_string());
         Ok(self)
+    }
+}
+
+const COUNTER: &str = "counter";
+
+/// The branch counter profile a recorded run was made with.
+pub fn recorded_counter(profile: &ExecutionProfile) -> Result<CounterProfile> {
+    match profile.semantic_parameters.get(COUNTER) {
+        None => Ok(CounterProfile::Zen),
+        Some(name) => CounterProfile::from_name(name)
+            .ok_or_else(|| Error::Integrity(format!("unknown counter profile {name}"))),
     }
 }
 
@@ -201,6 +222,8 @@ struct MachineReport {
 struct VmmReport {
     report_version: u32,
     seed: u64,
+    /// Absent from engines older than counter profiles, which are all Zen.
+    counter_profile: Option<String>,
     outcome: String,
     world_witness: ContentDigest,
     machines: Vec<MachineReport>,
@@ -439,6 +462,16 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
     let raw: VmmReport = serde_json::from_slice(bytes)?;
     if raw.report_version != 1 || raw.seed != request.seed {
         return Err(Error::Integrity("VMM report version/seed mismatch".into()));
+    }
+    let expected = recorded_counter(&request.prepared.profile)?.name();
+    if raw
+        .counter_profile
+        .as_deref()
+        .is_some_and(|name| name != expected)
+    {
+        return Err(Error::Integrity(format!(
+            "VMM counted with a different branch counter profile than the recorded {expected}"
+        )));
     }
     let names: BTreeSet<_> = raw.machines.iter().map(|machine| &machine.name).collect();
     if names.len() != raw.machines.len() || names != request.prepared.guests.keys().collect() {
@@ -720,8 +753,11 @@ mod linux {
             return Ok(incomplete(StopReason::Cancelled));
         }
         let (cpu, mut lease) = match backend.cpu {
-            Some(cpu) => (cpu, HostLease::acquire(cpu, request.output)?),
-            None => HostLease::acquire_any(request.output)?,
+            Some(cpu) => (
+                cpu,
+                HostLease::acquire(cpu, backend.counter.workaround(), request.output)?,
+            ),
+            None => HostLease::acquire_any(backend.counter.workaround(), request.output)?,
         };
         unsafe {
             command.pre_exec(move || {
