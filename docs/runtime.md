@@ -91,6 +91,24 @@ The guest supervisor is built into `seedbox`, and BusyBox comes from
 `SEEDBOX_BUSYBOX`. A missing input fails before preparation starts and names
 every location searched.
 
+Execution now requires the versioned `amd-zen3-engine168ad-v1` host policy in
+[host requirements](../README.md#host-requirements). Run validates immutable
+engine/kernel inputs and performs host admission before OCI work. Temporary
+core reservations, affinity and disabled exact-event perf descriptors are released
+before preparation on success/error; cleanup failure refuses admission. The actual
+leased core/siblings are rechecked before any workaround MSR write or VMM spawn.
+Complete raw static/leased CPUID observations and workaround/restore diagnostics
+are retained as Seedbox-owned output. The expected filtered table is source-derived;
+it is not an actual guest-visible CPUID observation.
+
+Inspect, export and import keep old manifests unchanged. Missing or drifted proof
+in an old replay produces a retained ERROR/NOT_COMPARABLE rejection with a specific
+host-admission reason and exit 2 before host execution. `--allow-engine-change`
+cannot bypass the policy. Historical use of a previous retained CLI remains
+possible and has its own evidence boundary. A second machine matching every
+required field receives compatibility admission, not cross-host qualification.
+No host-ID enrollment or application-specific output schema is added.
+
 Without `--cpu`, the executor leases the first free core, in ascending order,
 among the CPUs the process may run on, skipping CPU 0's core. With `--cpu N` it
 leases exactly that core and fails if another run holds it. The executor reserves
@@ -220,7 +238,11 @@ boundary. Final report counters still record physical NIC acceptance totals.
 
 `seedbox explore [COMPOSE] --seed FIRST --count COUNT` has one sequential worker.
 Count defaults to 1; seed defaults to the resolved Compose seed. Bounds are finite,
-positive and checked for inclusive u64 overflow before slow work. The complete
+positive and checked for inclusive u64 overflow before slow work. Runtime inputs and
+backend host admission are checked before the sole preparation; refusal retains
+batch ERROR with no prepared inputs or seed attempts. Transient admission resources
+are released before preparation, and each seed retains the ordinary leased recheck.
+The complete
 configuration, PreparedInputs and performance parameters are frozen once. Every
 attempt verifies the full retained closure through the ordinary run lifecycle;
 missing/corrupt bytes cause ERROR without re-preparation or repair.
@@ -309,5 +331,6 @@ state uses the retained engine/guest/kernel inputs and preserves existing
 PASS/FAIL, ERROR, INCOMPLETE, TIMEOUT and MATCH/MISMATCH meanings. It requires the
 compatible installed Seedbox release and qualified host runtime/profile. Exporting
 engine bytes does not establish cross-host or cross-backend compatibility; full
-host drift admission remains issue #5. Portable fixture replay verifies the bundle
+host drift is refused by the versioned admission policy; focused guest/profile
+acceptance remains a separate gate. Portable fixture replay verifies the bundle
 mechanism; offline application replay requires separate hardware acceptance.

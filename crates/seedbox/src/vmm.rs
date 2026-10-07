@@ -19,6 +19,7 @@ pub struct VmmExecutor {
     pub cpu: Option<u32>,
     profile: ExecutionProfile,
     performance: BTreeMap<String, String>,
+    admission: std::sync::Arc<std::sync::Mutex<Vec<Vec<crate::admission::CoreObservation>>>>,
 }
 
 impl VmmExecutor {
@@ -34,17 +35,20 @@ impl VmmExecutor {
                 "guest memory must be 64..65536 MiB".into(),
             ));
         }
+        let mut semantic_parameters = BTreeMap::from([
+            ("guest_abi".into(), "oci-init-v1".into()),
+            ("control_channel".into(), "virtio-console-v1".into()),
+            ("memory_mb".into(), memory_mb.to_string()),
+        ]);
+        semantic_parameters.extend(crate::admission::bindings()?);
         Ok(Self {
             cpu,
+            admission: Default::default(),
             profile: ExecutionProfile {
                 backend: "seedbox-kvm".into(),
                 engine: store.put_file(engine)?,
                 witness_mode,
-                semantic_parameters: BTreeMap::from([
-                    ("guest_abi".into(), "oci-init-v1".into()),
-                    ("control_channel".into(), "virtio-console-v1".into()),
-                    ("memory_mb".into(), memory_mb.to_string()),
-                ]),
+                semantic_parameters,
             },
             performance: BTreeMap::from([
                 ("SEEDBOX_MARGIN".into(), "adaptive".into()),
@@ -76,6 +80,53 @@ impl VmmExecutor {
 }
 
 impl ExecutionBackend for VmmExecutor {
+    fn preflight(&self, output: Option<&Path>) -> Result<()> {
+        crate::admission::validate_profile(&self.profile)?;
+        let mut observations = Vec::new();
+        let collection = (|| -> Result<()> {
+            #[cfg(target_os = "linux")]
+            {
+                let reservation = crate::host::CpuReservation::acquire(self.cpu)?;
+                for cpu in &reservation.cpus {
+                    observations.push(crate::admission::observe(*cpu)?);
+                }
+                drop(reservation); // No reservation/perf/affinity spans OCI or diagnostic publication.
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                observations.push(crate::admission::observe(0)?);
+            }
+            Ok(())
+        })();
+        let mut saved = self
+            .admission
+            .lock()
+            .map_err(|_| Error::Execution("host admission evidence lock poisoned".into()))?;
+        if saved.len() == 4 {
+            saved.remove(0);
+        }
+        saved.push(observations.clone());
+        if let Some(output) = output {
+            std::fs::write(
+                output.join("host-static.json"),
+                serde_json::to_vec_pretty(&*saved)?,
+            )?;
+            if let Err(error) = &collection {
+                std::fs::write(output.join("host-static-error.txt"), error.to_string())?;
+            }
+        }
+        drop(saved);
+        collection?;
+        for observation in &observations {
+            crate::admission::validate_observation(observation)?;
+        }
+        Ok(())
+    }
+    fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {
+        crate::admission::validate_profile(&inputs.profile)?;
+        crate::admission::validate_kernel(&inputs.kernel)
+    }
+
     fn profile(&self) -> ExecutionProfile {
         self.profile.clone()
     }
@@ -190,6 +241,12 @@ struct MachineReport {
     guest_exit_code: Option<u8>,
     guest_init_error: Option<u8>,
     state_digest: Option<ContentDigest>,
+    /// Final machine state, `Exited(code)` once the VM has exited.
+    #[serde(default)]
+    state: Option<String>,
+    /// Final simulated time; an exited VM's clock stops at its exit.
+    #[serde(default)]
+    time_ns: Option<u64>,
 }
 #[derive(Deserialize)]
 struct VmmReport {
@@ -212,8 +269,9 @@ struct VmmReport {
 struct ValidatedControlHistory {
     plans: Vec<seedbox_control::Plan>,
     effects: BTreeMap<u32, u64>,
-    /// Process faults whose target VM exited after admission, before an effect.
-    unavailable: BTreeSet<u32>,
+    /// Process faults whose target VM exited after admission, before an effect,
+    /// with the exit time the call resolved at.
+    unavailable: BTreeMap<u32, u64>,
 }
 
 /// Correlate guest-originated requests to responses and applied engine actions.
@@ -417,7 +475,7 @@ fn validate_control_history(
             {
                 return Err(bad());
             }
-            expected.unavailable.insert(plan.id);
+            expected.unavailable.insert(plan.id, e.ok_or_else(bad)?);
         } else if response {
             expected.effects.insert(plan.id, e.ok_or_else(bad)?);
         }
@@ -523,9 +581,23 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
             ));
         }
         match (fault.status.as_str(), fault.applied_at_ns) {
-            // A target VM exit after admission resolves the call with no effect.
-            ("unavailable", None) if expected.unavailable.contains(&fault.id) => {}
-            _ if expected.unavailable.contains(&fault.id) => {
+            // A target VM exit after admission resolves the call with no effect,
+            // at the time the target's reported clock stopped.
+            ("unavailable", None)
+                if expected.unavailable.get(&fault.id).is_some_and(|exit| {
+                    raw.machines.iter().any(|machine| {
+                        Some(&machine.name) == fault.machine.as_ref()
+                            && machine.state.as_deref().is_some_and(|state| {
+                                state
+                                    .strip_prefix("Exited(")
+                                    .and_then(|code| code.strip_suffix(')'))
+                                    .and_then(|code| code.parse::<u8>().ok())
+                                    .is_some_and(|code| state == format!("Exited({code})"))
+                            })
+                            && machine.time_ns == Some(*exit)
+                    })
+                }) => {}
+            _ if expected.unavailable.contains_key(&fault.id) => {
                 return Err(Error::Integrity("invalid fault effect status/time".into()))
             }
             ("applied", Some(at))
@@ -649,6 +721,8 @@ mod linux {
         backend: &VmmExecutor,
         request: ExecutionRequest<'_>,
     ) -> Result<ExecutionReport> {
+        backend.validate_retained(request.prepared)?;
+        backend.preflight(Some(request.output))?;
         if request.prepared.profile != backend.profile {
             return Err(Error::Integrity("execution profile mismatch".into()));
         }
@@ -698,10 +772,48 @@ mod linux {
         if request.cancellation.is_cancelled() {
             return Ok(incomplete(StopReason::Cancelled));
         }
-        let (cpu, mut lease) = match backend.cpu {
-            Some(cpu) => (cpu, HostLease::acquire(cpu, request.output)?),
-            None => HostLease::acquire_any(request.output)?,
-        };
+        let static_evidence = backend
+            .admission
+            .lock()
+            .map_err(|_| Error::Execution("host admission evidence lock poisoned".into()))?
+            .clone();
+        fs::write(
+            request.output.join("host-static.json"),
+            serde_json::to_vec_pretty(&static_evidence)?,
+        )?;
+        let (cpu, mut lease) =
+            HostLease::acquire_checked(backend.cpu, request.output, |reservation| {
+                let mut observed = Vec::new();
+                for cpu in &reservation.cpus {
+                    match crate::admission::observe(*cpu) {
+                        Ok(observation) => observed.push(observation),
+                        Err(error) => {
+                            fs::write(
+                                request.output.join("host-leased.json"),
+                                serde_json::to_vec_pretty(&observed)?,
+                            )?;
+                            fs::write(
+                                request.output.join("host-leased-error.txt"),
+                                error.to_string(),
+                            )?;
+                            return Err(error);
+                        }
+                    }
+                }
+                fs::write(
+                    request.output.join("host-leased.json"),
+                    serde_json::to_vec_pretty(&observed)?,
+                )?;
+                for observation in &observed {
+                    crate::admission::validate_observation(observation)?;
+                }
+                Ok(())
+            })?;
+        let originals = lease.original_registers();
+        fs::write(
+            request.output.join("host-workaround.json"),
+            serde_json::to_vec_pretty(&lease.enabled_registers()?)?,
+        )?;
         unsafe {
             command.pre_exec(move || {
                 if libc::setpgid(0, 0) != 0 {
@@ -736,6 +848,10 @@ mod linux {
         };
         child.stop()?;
         lease.restore()?;
+        fs::write(
+            request.output.join("host-restored.json"),
+            serde_json::to_vec_pretty(&originals)?,
+        )?;
         completion
     }
 }

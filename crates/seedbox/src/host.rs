@@ -41,6 +41,7 @@ pub(crate) fn cpu_list(value: &str) -> Result<BTreeSet<u32>> {
     Ok(result)
 }
 
+#[cfg(test)]
 fn locks(cpus: &BTreeSet<u32>, directory: &Path) -> Result<Vec<File>> {
     try_locks(cpus, directory)?.ok_or_else(|| {
         Error::Execution(format!(
@@ -143,41 +144,113 @@ fn candidates(
     Ok(result)
 }
 
+#[cfg(any(target_os = "linux", test))]
+pub(crate) struct CpuReservation {
+    pub(crate) cpu: u32,
+    pub(crate) cpus: BTreeSet<u32>,
+    locks: Vec<File>,
+}
+impl CpuReservation {
+    fn validate_topology(
+        &self,
+        online: &BTreeSet<u32>,
+        allowed: &BTreeSet<u32>,
+        mut siblings: impl FnMut(u32) -> Result<BTreeSet<u32>>,
+    ) -> Result<()> {
+        if !self.cpus.contains(&self.cpu)
+            || !self.cpus.is_subset(online)
+            || !self.cpus.is_subset(allowed)
+        {
+            return Err(Error::Setup(
+                "reserved CPU core is no longer online and allowed; stop before execution".into(),
+            ));
+        }
+        for &cpu in &self.cpus {
+            if siblings(cpu)? != self.cpus {
+                return Err(Error::Setup("reserved CPU core has changed or nonreciprocal SMT topology; stop before execution".into()));
+            }
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    fn revalidate(&self) -> Result<()> {
+        self.validate_topology(
+            &cpu_list(&sysfs("/sys/devices/system/cpu/online")?)?,
+            &allowed_cpus()?,
+            siblings,
+        )
+    }
+}
+#[cfg(target_os = "linux")]
+impl CpuReservation {
+    pub(crate) fn acquire(selected: Option<u32>) -> Result<Self> {
+        let online = cpu_list(&sysfs("/sys/devices/system/cpu/online")?)?;
+        let allowed = &online & &allowed_cpus()?;
+        let choices = match selected {
+            Some(cpu) => vec![(cpu, siblings(cpu)?)],
+            None => candidates(&allowed, siblings)?,
+        };
+        for (cpu, core) in choices {
+            if !core.is_subset(&allowed) || !core.contains(&cpu) {
+                if selected.is_none() {
+                    continue;
+                }
+                return Err(Error::Setup(format!("CPU {cpu}: all SMT siblings must be online and allowed; choose an eligible core")));
+            }
+            for sibling in &core {
+                if siblings(*sibling)? != core {
+                    return Err(Error::Setup("inconsistent SMT topology".into()));
+                }
+            }
+            if let Some(locks) = try_locks(&core, Path::new("/tmp"))? {
+                let reservation = Self {
+                    cpu,
+                    cpus: core,
+                    locks,
+                };
+                reservation.revalidate()?; // Fresh eligibility/topology while every lease is held.
+                return Ok(reservation);
+            }
+        }
+        Err(Error::Setup(
+            "no free eligible CPU core; release an existing lease or select an admitted --cpu"
+                .into(),
+        ))
+    }
+}
+
 impl HostLease {
     #[cfg(target_os = "linux")]
-    pub(crate) fn acquire(cpu: u32, output: &Path) -> Result<Self> {
-        Self::acquire_at(
-            &siblings(cpu)?,
-            Path::new("/tmp"),
+    pub(crate) fn acquire_checked(
+        cpu: Option<u32>,
+        output: &Path,
+        check: impl FnOnce(&CpuReservation) -> Result<()>,
+    ) -> Result<(u32, Self)> {
+        let reservation = CpuReservation::acquire(cpu)?;
+        Self::with_reservation(
+            reservation,
             Path::new("/dev/cpu"),
             output,
+            check,
+            CpuReservation::revalidate,
         )
     }
 
-    /// Lease the first free candidate CPU and return it with the lease.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn acquire_any(output: &Path) -> Result<(u32, Self)> {
-        let online = cpu_list(&sysfs("/sys/devices/system/cpu/online")?)?;
-        let allowed = &online & &allowed_cpus()?;
-        let candidates = candidates(&allowed, siblings)?;
-        if candidates.is_empty() {
-            return Err(Error::Setup(format!(
-                "no eligible CPU: the allowed CPUs {allowed:?} are all on CPU 0's core; \
-                 pass --cpu to use one anyway"
-            )));
-        }
-        for (cpu, core) in candidates {
-            if let Some(lease) =
-                Self::try_acquire_at(&core, Path::new("/tmp"), Path::new("/dev/cpu"), output)?
-            {
-                return Ok((cpu, lease));
-            }
-        }
-        Err(Error::Execution(
-            "no free CPU: every eligible core is leased by another run".into(),
-        ))
+    fn with_reservation(
+        reservation: CpuReservation,
+        devices: &Path,
+        output: &Path,
+        check: impl FnOnce(&CpuReservation) -> Result<()>,
+        recheck: impl FnOnce(&CpuReservation) -> Result<()>,
+    ) -> Result<(u32, Self)> {
+        check(&reservation)?; // Shared portable/Linux path, before any MSR write.
+        recheck(&reservation)?; // After capability collection/affinity restore, before MSR access.
+        let selected = reservation.cpu;
+        let lease = Self::with_locks(reservation.locks, &reservation.cpus, devices, output)?;
+        Ok((selected, lease))
     }
 
+    #[cfg(test)]
     fn acquire_at(
         cpus: &BTreeSet<u32>,
         lock_directory: &Path,
@@ -186,19 +259,6 @@ impl HostLease {
     ) -> Result<Self> {
         let locks = locks(cpus, lock_directory)?;
         Self::with_locks(locks, cpus, devices, output)
-    }
-
-    #[cfg(target_os = "linux")]
-    fn try_acquire_at(
-        cpus: &BTreeSet<u32>,
-        lock_directory: &Path,
-        devices: &Path,
-        output: &Path,
-    ) -> Result<Option<Self>> {
-        match try_locks(cpus, lock_directory)? {
-            Some(locks) => Self::with_locks(locks, cpus, devices, output).map(Some),
-            None => Ok(None),
-        }
     }
 
     fn with_locks(
@@ -242,6 +302,27 @@ impl HostLease {
             write_verified(file, *original | WORKAROUND)?;
         }
         Ok(lease)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn original_registers(&self) -> std::collections::BTreeMap<u32, u64> {
+        self.registers
+            .iter()
+            .map(|(cpu, _, original)| (*cpu, *original))
+            .collect()
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn enabled_registers(&self) -> Result<std::collections::BTreeMap<u32, u64>> {
+        self.registers
+            .iter()
+            .map(|(cpu, file, original)| {
+                let value = read(file)?;
+                if value != (*original | WORKAROUND) {
+                    return Err(Error::Execution("MSR workaround readback drifted".into()));
+                }
+                Ok((*cpu, value))
+            })
+            .collect()
     }
 
     pub(crate) fn restore(&mut self) -> Result<()> {
@@ -301,6 +382,103 @@ fn write_verified(file: &File, value: u64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn leased_recheck_failure_releases_locks_without_msr_write_or_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let cpus = BTreeSet::from([2, 18]);
+        for cpu in &cpus {
+            fs::create_dir(dir.path().join(cpu.to_string())).unwrap();
+            File::create(dir.path().join(cpu.to_string()).join("msr"))
+                .unwrap()
+                .write_at(&17u64.to_le_bytes(), MSR)
+                .unwrap();
+        }
+        let reservation = CpuReservation {
+            cpu: 2,
+            cpus: cpus.clone(),
+            locks: locks(&cpus, dir.path()).unwrap(),
+        };
+        let result = HostLease::with_reservation(
+            reservation,
+            dir.path(),
+            dir.path(),
+            |_| {
+                assert!(locks(&cpus, dir.path()).is_err());
+                Err(Error::Setup("microcode changed under reservation".into()))
+            },
+            |_| Ok(()),
+        );
+        assert!(result.is_err());
+        assert!(!dir.path().join("msr-original.json").exists());
+        for cpu in &cpus {
+            assert_eq!(
+                read(&File::open(dir.path().join(cpu.to_string()).join("msr")).unwrap()).unwrap(),
+                17
+            );
+        }
+        assert!(locks(&cpus, dir.path()).is_ok());
+    }
+    #[test]
+    fn topology_and_eligibility_drift_under_locks_refuse_before_msr_mutation() {
+        for drift in 0..4 {
+            let dir = tempfile::tempdir().unwrap();
+            let cpus = BTreeSet::from([2, 18]);
+            for cpu in &cpus {
+                fs::create_dir(dir.path().join(cpu.to_string())).unwrap();
+                File::create(dir.path().join(cpu.to_string()).join("msr"))
+                    .unwrap()
+                    .write_at(&17u64.to_le_bytes(), MSR)
+                    .unwrap();
+            }
+            let reservation = CpuReservation {
+                cpu: 2,
+                cpus: cpus.clone(),
+                locks: locks(&cpus, dir.path()).unwrap(),
+            };
+            reservation
+                .validate_topology(&cpus, &cpus, |_| Ok(cpus.clone()))
+                .unwrap();
+            // Inject a change after discovery, with all original locks still held.
+            let result = HostLease::with_reservation(
+                reservation,
+                dir.path(),
+                dir.path(),
+                |_| Ok(()),
+                |reserved| {
+                    assert!(locks(&cpus, dir.path()).is_err());
+                    let online = if drift == 0 {
+                        BTreeSet::from([2])
+                    } else {
+                        cpus.clone()
+                    };
+                    let allowed = if drift == 1 {
+                        BTreeSet::from([18])
+                    } else {
+                        cpus.clone()
+                    };
+                    reserved.validate_topology(&online, &allowed, |cpu| {
+                        Ok(if drift == 2 {
+                            BTreeSet::from([2, 18, 34])
+                        } else if drift == 3 && cpu == 18 {
+                            BTreeSet::from([18])
+                        } else {
+                            cpus.clone()
+                        })
+                    })
+                },
+            );
+            assert!(result.is_err());
+            assert!(!dir.path().join("msr-original.json").exists());
+            for cpu in &cpus {
+                assert_eq!(
+                    read(&File::open(dir.path().join(cpu.to_string()).join("msr")).unwrap())
+                        .unwrap(),
+                    17
+                );
+            }
+            assert!(locks(&cpus, dir.path()).is_ok());
+        }
+    }
     #[test]
     fn shared_lease_and_original_register_values_survive_cleanup() {
         let _process_creation = crate::preparation_command::PROCESS_TEST_LOCK

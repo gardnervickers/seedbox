@@ -2,18 +2,24 @@
 import json
 import time
 from seedbox import World
-from main import BATCH, PROBES, exchange
+from main import BATCH, PROBES, CONTROL_TIMEOUT, exchange, resolve
 
 
 def client(address, command):
+    endpoints = resolve(address)
+    def request():
+        return json.loads(exchange(address, command, timeout=CONTROL_TIMEOUT,
+                                   deadline=time.monotonic() + CONTROL_TIMEOUT,
+                                   endpoints=endpoints))
+
     # Wait for the client's listener without retrying submitted workload commands.
     if command != "STATUS":
-        return json.loads(exchange(address, command, timeout=12))
+        return request()
     deadline = time.monotonic() + 10
     while True:
         try:
             # LOAD and VERIFY execute finite work before their reply.
-            return json.loads(exchange(address, command, timeout=12))
+            return request()
         except OSError:
             if time.monotonic() >= deadline:
                 raise

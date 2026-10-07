@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 """Test actual Python processes and TCP responses without KVM or the fault SDK."""
 import json
+import importlib.util
 from pathlib import Path
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
+from contextlib import contextmanager
+from unittest import mock
 import time
 
 WORKLOAD = Path(__file__).resolve().parent / "workload" / "main.py"
+spec = importlib.util.spec_from_file_location("fault_workload", WORKLOAD)
+workload = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(workload)
 
 
 def address():
@@ -18,14 +25,10 @@ def address():
 
 
 def wire(destination, command):
-    host, port = destination.rsplit(":", 1)
-    with socket.create_connection((host, int(port)), timeout=3) as channel:
-        channel.settimeout(5)
-        channel.sendall(command.encode() + b"\n")
-        with channel.makefile("rb") as reader:
-            reply = reader.readline(8193)
-            assert reply.endswith(b"\n") and len(reply) <= 8192, reply
-            return reply.decode().strip()
+    endpoints = workload.resolve(destination)
+    return workload.exchange(destination, command, timeout=workload.CONTROL_TIMEOUT,
+                             deadline=time.monotonic() + workload.CONTROL_TIMEOUT,
+                             endpoints=endpoints)
 
 
 def start(mode, listen, log, *arguments):
@@ -104,8 +107,151 @@ def check_case(root, broken, restart):
     print(f"broken={broken} restart={restart} {result['status']} acknowledged={result['acked']} missing={result['missing']}")
 
 
+@contextmanager
+def responder(reply):
+    """A bounded real TCP peer; surface thread failures to the test caller."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.settimeout(0.05)
+    destination = f"127.0.0.1:{listener.getsockname()[1]}"
+    done = threading.Event()
+    requests, errors = [], []
+
+    def run():
+        try:
+            while not done.is_set():
+                try:
+                    channel, _ = listener.accept()
+                except socket.timeout:
+                    continue
+                with channel:
+                    channel.settimeout(1)
+                    with channel.makefile("rb") as reader:
+                        request = reader.readline(8193).decode().strip()
+                    requests.append(request)
+                    response = reply(request, channel, requests)
+                    if response is not None:
+                        channel.sendall(response.encode() + b"\n")
+        except BaseException as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        yield destination, requests
+    finally:
+        done.set()
+        worker.join(timeout=2)
+        listener.close()
+        assert not worker.is_alive(), "test responder did not stop"
+        if errors:
+            raise errors[0]
+
+
+def expires(action):
+    try:
+        action()
+    except TimeoutError:
+        return
+    raise AssertionError("operation did not expire")
+
+
+def check_retry_controls(root):
+    state = root / "lost-reply.log"
+    store = workload.Store(state, broken=False)
+    client = None
+
+    def lose_first(request, channel, requests):
+        response = store.reply(request)  # Real flush/fsync happens before the lost reply.
+        if len(requests) == 1:
+            assert client.sequence == 0 and client.acks == []
+            return None
+        if len(requests) == 2:
+            assert requests[0] == requests[1]
+            assert client.sequence == 0 and client.acks == []
+        return response
+
+    try:
+        with responder(lose_first) as (destination, requests):
+            client = workload.Client(destination)
+            assert json.loads(client.reply("LOAD 1")) == dict(generation=1, acked=32, total=32)
+            assert len(requests) == 33 and requests[0] == requests[1]
+            assert client.sequence == 32 and len(client.acks) == 32
+            assert sum(ack[0] == "k/000000" for ack in client.acks) == 1
+            assert len(store.values) == 32
+    finally:
+        store.log.close()
+    reopened = workload.Store(state, broken=False)
+    try:
+        assert len(reopened.values) == 32 and reopened.values["k/000000"] == "v000000"
+    finally:
+        reopened.log.close()
+
+    for invalid in ("NO 1", "OK", "OK one", "OK 2"):
+        def reject_first(request, channel, requests):
+            return invalid if len(requests) == 1 else "OK 1"
+        with responder(reject_first) as (destination, requests):
+            client = workload.Client(destination)
+            try:
+                client.reply("LOAD 1")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"invalid reply accepted: {invalid}")
+            assert client.sequence == 0 and client.acks == [] and len(requests) == 1
+            client.put(expected=1, deadline=time.monotonic() + 1)
+            assert requests == ["PUT k/000000 v000000"] * 2
+            assert client.sequence == 1 and client.acks == [("k/000000", "v000000", 1)]
+
+    # Deterministic success timing: one valid ACK, then a reply at the exact deadline.
+    clock, dispatched = [0.0], []
+    client = workload.Client("127.0.0.1:1")
+    def slow_success(address, command, **kwargs):
+        dispatched.append(command)
+        clock[0] += 5
+        return "OK 1"
+    with mock.patch.object(workload.time, "monotonic", side_effect=lambda: clock[0]), \
+         mock.patch.object(workload, "exchange", side_effect=slow_success):
+        expires(lambda: client.reply("LOAD 1"))
+    assert dispatched == ["PUT k/000000 v000000", "PUT k/000001 v000001"]
+    assert client.sequence == 1 and client.acks == [("k/000000", "v000000", 1)]
+
+    # Expiry before another dispatch, even when the previous reply was successful.
+    reads = iter([0.0, 0.0, 0.0, 0.0, 10.0])
+    client = workload.Client("127.0.0.1:1")
+    with mock.patch.object(workload.time, "monotonic", side_effect=lambda: next(reads)), \
+         mock.patch.object(workload, "exchange", return_value="OK 1") as transport:
+        expires(lambda: client.reply("LOAD 1"))
+    assert transport.call_count == 1 and client.sequence == 1 and len(client.acks) == 1
+
+    def unanswered(request, channel, requests):
+        time.sleep(0.25)
+        return None
+    def trickle(request, channel, requests):
+        for _ in range(30):
+            try:
+                channel.sendall(b"O")
+            except OSError:
+                return None
+            time.sleep(0.01)
+        return None
+    for peer in (unanswered, trickle):
+        with responder(peer) as (destination, requests), \
+             mock.patch.object(workload, "LOAD_TIMEOUT", 0.12):
+            client = workload.Client(destination)
+            started = time.monotonic()
+            expires(lambda: client.reply("LOAD 1"))
+            elapsed = time.monotonic() - started
+            assert elapsed < 1, (peer.__name__, elapsed)
+            assert client.sequence == 0 and client.acks == []
+            assert requests == ["PUT k/000000 v000000"], requests
+    print("pending PUT, invalid reply, successful-progress and I/O deadline controls passed")
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="seedbox-python-workload-") as directory:
+        check_retry_controls(Path(directory))
         for broken, restart in [(False, True), (True, True), (True, False)]:
             check_case(Path(directory) / f"case-{broken}-{restart}", broken, restart)
     print("portable Python workload checks passed")

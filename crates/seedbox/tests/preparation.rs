@@ -177,3 +177,84 @@ fn cancelled_copy_retains_command_and_cleanup_receipts_after_drop() {
     assert_eq!(receipt["cancelled"], true);
     assert_eq!(receipt["reaped"], true);
 }
+
+#[test]
+fn direct_oci_preparation_refuses_invalid_profile_before_builder_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let sentinel = root.path().join("tool-invoked");
+    let tool = script(
+        root.path(),
+        "sentinel",
+        &format!("touch '{}'; exit 9", sentinel.display()),
+    );
+    let (mut preparer, mut simulation, store) = fixture(root.path(), tool.clone(), tool.clone());
+    preparer.tools.docker = tool;
+    preparer.profile.backend = "seedbox-kvm".into();
+    simulation.services.get_mut("app").unwrap().source = seedbox::config::ImageSource::Build {
+        context: root.path().to_path_buf(),
+        dockerfile: root.path().join("Dockerfile"),
+    };
+    let context =
+        PreparationContext::new(root.path().join("evidence"), CancellationToken::default())
+            .unwrap();
+    for epoch in [None, Some(0)] {
+        preparer.tools.build_epoch = epoch;
+        for result in [
+            preparer.prepare(&simulation, &store),
+            preparer.prepare_cancellable(&simulation, &store, &context),
+        ] {
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("host admission proof missing"));
+        }
+    }
+    assert!(!sentinel.exists());
+    assert!(!root.path().join("evidence/builder.json").exists());
+    assert!(!root.path().join("evidence/setup.json").exists());
+}
+
+#[test]
+fn preparation_retains_one_frozen_kernel_when_transport_changes_the_source_path() {
+    let root = tempfile::tempdir().unwrap();
+    let raw = root.path().join("raw");
+    fs::create_dir(&raw).unwrap();
+    let config = br#"{"os":"linux","architecture":"amd64","config":{"Cmd":["/app"]}}"#;
+    let digest = ContentDigest::of(config);
+    fs::write(raw.join(digest.hex()), config).unwrap();
+    fs::write(
+        raw.join("manifest.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion":2,"config":{"mediaType":"application/vnd.oci.image.config.v1+json",
+            "digest":format!("sha256:{}",digest.hex()),"size":config.len()},"layers":[]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    // Fake transport/extraction commands, not a builder or guest execution.
+    let skopeo = script(root.path(), "skopeo", &format!(
+        "for arg do last=$arg; done; case \"$last\" in dir:*) out=${{last#dir:}}; mkdir -p \"$out\"; cp '{}'/manifest.json '{}'/{} \"$out\";; esac",
+        raw.display(), raw.display(), digest.hex()));
+    let umoci = script(root.path(), "umoci", &format!(
+        "for arg do last=$arg; done; mkdir -p \"$last/rootfs\"; printf application > \"$last/rootfs/app\"; printf changed-after-freeze > '{}'",
+        root.path().join("kernel").display()));
+    let (preparer, simulation, store) = fixture(root.path(), skopeo, umoci);
+    let context =
+        PreparationContext::new(root.path().join("evidence"), CancellationToken::default())
+            .unwrap();
+    let inputs = preparer
+        .prepare_cancellable(&simulation, &store, &context)
+        .unwrap();
+    assert_eq!(fs::read(&preparer.kernel).unwrap(), b"changed-after-freeze");
+    assert_eq!(inputs.kernel, ContentDigest::of(b"kernel"));
+    assert_eq!(store.read(&inputs.kernel).unwrap(), b"kernel");
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.path().join("evidence/setup.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        receipt["kernel"],
+        serde_json::to_value(&inputs.kernel).unwrap()
+    );
+    assert_eq!(inputs.placement["app"], "app");
+    assert!(!root.path().join("evidence/builder.json").exists());
+}

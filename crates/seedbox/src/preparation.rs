@@ -29,7 +29,20 @@ pub struct OciPreparer {
 pub use crate::preparation_command::PreparationContext;
 
 impl PreparationBackend for OciPreparer {
+    fn validate_runtime_inputs(&self) -> Result<()> {
+        if self.profile.backend == "seedbox-kvm" {
+            crate::admission::validate_profile(&self.profile)?;
+            crate::admission::validate_kernel(&crate::admission::file_digest(&self.kernel)?)?;
+            if crate::admission::file_digest(&self.engine)? != self.profile.engine {
+                return Err(Error::Integrity(
+                    "VMM changed after profile construction".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
     fn prepare(&self, simulation: &Simulation, store: &ContentStore) -> Result<PreparedInputs> {
+        self.validate_runtime_inputs()?;
         self.prepare_inner(simulation, store, None)
     }
     fn prepare_cancellable(
@@ -39,6 +52,7 @@ impl PreparationBackend for OciPreparer {
         context: &PreparationContext,
     ) -> Result<PreparedInputs> {
         context.check()?;
+        self.validate_runtime_inputs()?;
         if simulation
             .services
             .values()
@@ -60,6 +74,16 @@ impl OciPreparer {
         if let Some(context) = context {
             context.check()?;
         }
+        let kernel = store.put_file(&self.kernel)?;
+        if self.profile.backend == "seedbox-kvm" {
+            crate::admission::validate_kernel(&kernel)?;
+        }
+        let engine = store.put_file(&self.engine)?;
+        if engine != self.profile.engine {
+            return Err(Error::Integrity(
+                "VMM changed after profile construction".into(),
+            ));
+        }
         let has_builds = simulation
             .services
             .values()
@@ -72,12 +96,6 @@ impl OciPreparer {
         } else {
             None
         };
-        let engine = store.put_file(&self.engine)?;
-        if engine != self.profile.engine {
-            return Err(Error::Integrity(
-                "VMM changed after profile construction".into(),
-            ));
-        }
         for path in [&self.init, &self.busybox] {
             amd64_elf(path)?;
         }
@@ -97,13 +115,9 @@ impl OciPreparer {
             auxiliary.insert(format!("config/{name}"), store.put(&data)?);
             configs.insert(name, data);
         }
-        let frozen_kernel = if let Some(context) = context {
-            let kernel = store.put_file(&self.kernel)?;
+        if let Some(context) = context {
             context.setup_inputs(&auxiliary, &engine, &kernel)?;
-            Some(kernel)
-        } else {
-            None
-        };
+        }
         let addresses: BTreeMap<_, _> = simulation
             .services
             .keys()
@@ -264,10 +278,7 @@ impl OciPreparer {
             );
         }
         Ok(PreparedInputs {
-            kernel: match frozen_kernel {
-                Some(kernel) => kernel,
-                None => store.put_file(&self.kernel)?,
-            },
+            kernel,
             images,
             guests,
             placement: simulation
@@ -474,12 +485,18 @@ mod source_tests {
         assert_eq!(calls, 8);
         for error in [
             Error::Execution("import failed".into()),
+            Error::PreparationCancelled,
             Error::PreparationCleanupUnverified("cancelled builder; tag retained".into()),
         ] {
             let mut fresh = BTreeMap::<BuildKey, i32>::new();
             let result = successful_source(&mut fresh, key.clone(), || Err(error));
             assert!(result.is_err());
             assert!(fresh.is_empty());
+            assert_eq!(
+                successful_source(&mut fresh, key.clone(), || Ok(29)).unwrap(),
+                29
+            );
+            assert_eq!(fresh.len(), 1);
         }
         assert!(reuse_closure(&OciTools::default()).unwrap().is_none());
     }
