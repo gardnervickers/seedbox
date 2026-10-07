@@ -973,6 +973,16 @@ fn report(
             .zip(&s.skew)
             .map(|(k, v)| (k.to_string(), json!({"n": v.n, "ahead": v.ahead, "ahead_max_ns": v.ahead_max_ns, "behind": v.behind, "behind_max_ns": v.behind_max_ns})))
             .collect();
+        let top = |m: &std::collections::BTreeMap<u64, u64>| {
+            let mut v: Vec<_> = m.iter().collect();
+            v.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+            v.iter().take(15).map(|(r, n)| json!([format!("{r:#x}"), n])).collect::<Vec<_>>()
+        };
+        report.last_mut().unwrap()["hot"] = json!({
+            "tick_rips": top(&s.tick_rips),
+            "idle_rips": top(&s.idle_rips),
+            "pio_ports": s.pio_ports.iter().map(|(p, n)| (format!("{p:#x}"), json!(n))).collect::<serde_json::Map<_, _>>(),
+        });
         report.last_mut().unwrap()["timer"] = json!({"writes": s.timer_writes, "overdue": s.timer_overdue, "overdue_max_ns": s.timer_overdue_max_ns, "overdue_syscalls_max": s.timer_write_syscalls_max, "guest_clock_skew": skew});
         if let Clock::Pv(_) = world.clock {
             report.last_mut().unwrap()["spin"] = json!({"probes": s.spin_probes, "idles": s.spin_idles, "false_alarms": s.spin_false, "mismatch": s.spin_mismatch});

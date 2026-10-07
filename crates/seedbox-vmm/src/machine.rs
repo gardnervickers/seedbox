@@ -171,6 +171,11 @@ pub struct Stats {
     /// Guest clock (`page.last`) against VMM time at timer writes, sends
     /// and halts (`Site`).
     pub skew: [Skew; 3],
+    /// Report-only: guest RIP at each watchdog interrupt (a run with no
+    /// exit for a while), at each spin idle, and PIO exits by port.
+    pub tick_rips: std::collections::BTreeMap<u64, u64>,
+    pub idle_rips: std::collections::BTreeMap<u64, u64>,
+    pub pio_ports: std::collections::BTreeMap<u16, u64>,
 }
 
 /// Where `Stats::skew` was sampled.
@@ -974,6 +979,7 @@ impl Machine {
         };
         self.set_stepping(false)?;
         self.stats.spin_idles += 1;
+        *self.stats.idle_rips.entry(rip).or_default() += 1;
         self.record(b'S', rip);
         if if_flag == 0 {
             return Err(format!(
@@ -1206,6 +1212,8 @@ impl Machine {
             match exit {
                 Err(e) if e.errno() == libc::EINTR => {
                     self.stats.eintr += 1;
+                    let rip = unsafe { self.vcpu.get_kvm_run().s.regs.regs.rip };
+                    *self.stats.tick_rips.entry(rip).or_default() += 1;
                 }
                 Ok(VcpuExit::Debug(_)) => {}
                 Ok(VcpuExit::IoOut(0x52c, data)) => {
@@ -1228,6 +1236,7 @@ impl Machine {
                 }
                 Ok(VcpuExit::IoOut(port, data)) => {
                     self.stats.pio += 1;
+                    *self.stats.pio_ports.entry(port).or_default() += 1;
                     let v = data[0];
                     let charge = io_charge(port, true);
                     // Reserve the full cost arithmetically, without requiring
@@ -1386,6 +1395,7 @@ impl Machine {
                 }
                 Ok(VcpuExit::IoIn(port, data)) => {
                     self.stats.pio += 1;
+                    *self.stats.pio_ports.entry(port).or_default() += 1;
                     let charge = io_charge(port, false);
                     advance_time(self.time, charge, u64::MAX)?;
                     let descriptor = unsafe { (*run_ptr).__bindgen_anon_1.io };
