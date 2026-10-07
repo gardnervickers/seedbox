@@ -1,0 +1,58 @@
+{
+  "name": "minio-cas-qualification",
+  "services": {
+    "minio": {
+      "build": "./minio",
+      "platform": "linux/amd64",
+      "command": [
+        "server",
+        "--address",
+        ":9000",
+        "--console-address",
+        ":9001",
+        "/data"
+      ],
+      "environment": {
+        "MINIO_ROOT_USER": "fixture-access",
+        "MINIO_ROOT_PASSWORD": "fixture-secret-only",
+        "MINIO_CI_CD": "1",
+        "MINIO_API_REQUESTS_MAX": "4",
+        "MINIO_BROWSER": "off",
+        "GOMAXPROCS": "2"
+      }
+    },
+    "client": {
+      "build": "./client",
+      "platform": "linux/amd64",
+      "command": [
+        "qualification",
+        "--endpoint",
+        "http://minio:9000",
+        "--access-key",
+        "fixture-access",
+        "--secret-key",
+        "fixture-secret-only"
+      ]
+    }
+  },
+  "x-seedbox": {
+    "version": 1,
+    "seed": 0,
+    "limits": {
+      "simulated_time": "120s",
+      "wall_time": "90s"
+    },
+    "network": {
+      "latency": "1ms",
+      "jitter": "200us"
+    },
+    "schedule": {
+      "timer_jitter": "1ms",
+      "stop_tolerance": "2ms"
+    },
+    "check": {
+      "service": "client",
+      "exit_code": 0
+    }
+  }
+}

@@ -47,6 +47,24 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 Engine PRs that need host evidence go through a merge train
 ([docs/merge-train.md](docs/merge-train.md)).
 
+Portable checks must pass at the PR or merge-train head before spending AMD
+host time. `bash harness/mac-check.sh REV` is the fast pre-check for a Mac or
+any other non-KVM machine; it also works on the host. Run inside the project's
+Nix dev shell. Omit `REV` to check the current checkout, including local changes.
+The steps are fmt, clippy and `harness/acceptance.sh portable`, which includes
+workspace tests and both Python unittest suites (plus VMM tests on Linux).
+The first stdout line is `revision: FULL_SHA`, followed by the host check's
+timed step/phase summary format. Workspace builds use a persistent cache under
+`$XDG_CACHE_HOME`, or `~/Library/Caches` on macOS and `~/.cache` elsewhere;
+override it with `SEEDBOX_PRECHECK_TARGET` or `CARGO_TARGET_DIR`. A revision uses
+a temporary detached worktree under `$TMPDIR`, deleted on a pass; a failure keeps it and prints
+its path. Any failed step makes the gate exit nonzero; all steps still run.
+After a Linux pre-check pass, `bash harness/host-check.sh --skip-portable REV CPU` skips fmt,
+clippy and the portable suite (including workspace tests), while retaining VMM
+build/tests and host-specific checks. A Mac pass alone does not justify the skip.
+Match the full SHA printed by both gates.
+See [contributor checks](README.md#contributor-checks).
+
 Run these before committing:
 
 ```sh
@@ -134,6 +152,9 @@ deliberately change one.
   `WORD: detail`, where `WORD` is the SCREAMING_SNAKE_CASE serde name
   produced by `word()` (`PASS`, `MATCH`, `VALID`, `CREATED`, ...). Any
   further lines are lowercase `key: value` (`replay: MATCH`, `error: ...`).
+- `logs` without `--json` writes only the selected raw bytes to stdout, with no
+  decoration or added newlines. Its lowercase `logs:` status and `omission:`
+  diagnostics go to stderr; `--json` includes chunk metadata and `bytes_hex`.
 - Scripts find the run directory with `sed -n 's/^[A-Z]*: //p'` over both
   output streams of `run` and `replay`. Exactly one line may match
   `^[A-Z]*: `, and it must be `OUTCOME: run-directory`.

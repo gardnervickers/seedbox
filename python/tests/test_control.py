@@ -9,7 +9,7 @@ import threading
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from seedbox import FaultError, Machine, Partition, ProtocolError, World
+from seedbox import Controller, FaultError, Machine, Partition, ProtocolError, Shape, World
 
 
 def reply(request_id=1, result=None, **changes):
@@ -110,6 +110,41 @@ class ControlTests(unittest.TestCase):
         ])
         self.assertTrue(peer.closed)
 
+    def test_shape_sends_absolute_nanosecond_policy_and_returns_healable_handle(self):
+        self.assertIs(Controller, World)
+        peer = Peer(reply(result={"handle": "p1"}) + reply(2))
+        with World(peer) as world:
+            shaped = world.shape(["client"], [Machine("server-vm")], latency=20_000_000, jitter=1_000_000, loss_ppm=500_000)
+            self.assertIsInstance(shaped, Shape)
+            world.heal(shaped)
+        self.assertEqual(peer.requests[0], {"version": 1, "id": 1, "op": "shape", "from": [{"service": "client"}], "to": [{"machine": "server-vm"}], "latency_ns": 20_000_000, "jitter_ns": 1_000_000, "loss_ppm": 500_000})
+        self.assertEqual(peer.requests[1]["handle"], "p1")
+
+    def test_connection_discovery_drop_and_heal_preserve_explicit_zero_evidence(self):
+        connection = {"from": "server-vm", "to": "client-vm", "src_addr": "10.0.0.2",
+                      "dst_addr": "10.0.0.1", "src_port": 80, "dst_port": 4000, "incarnation": 7}
+        page = {"connections": [connection], "next_after": 7}
+        peer = Peer(reply(result=page) + reply(2, {"handle": "p1"}) + reply(3, {"matched": 0, "dropped": 0}))
+        with World(peer) as world:
+            self.assertEqual(world.connections("server", Machine("client-vm"), after=3), page)
+            handle = world.drop_connection(connection)
+            self.assertEqual(world.heal(handle), {"matched": 0, "dropped": 0})
+        self.assertEqual(peer.requests[0], {"version": 1, "id": 1, "op": "connections",
+                         "from": {"service": "server"}, "to": {"machine": "client-vm"}, "after": 3})
+        self.assertEqual(peer.requests[1]["connection"], connection)
+        self.assertEqual(peer.requests[2]["handle"], "p1")
+
+    def test_shape_defaults_and_invalid_local_values(self):
+        peer = Peer(reply(result={"handle": "p1"}))
+        with World(peer) as world:
+            for kwargs in [{"latency": True}, {"latency": 1.5}, {"latency": -1}, {"latency": 10, "jitter": 10}, {"latency": 10, "loss_ppm": 1_000_001}, {"latency": 3_600_000_000_000, "jitter": 1}]:
+                with self.assertRaises(ValueError):
+                    world.shape(["client"], ["server"], **kwargs)
+            self.assertEqual(peer.requests, [])
+            world.shape(["client"], ["server"], latency=10)
+        self.assertEqual(peer.requests[0]["jitter_ns"], 0)
+        self.assertEqual(peer.requests[0]["loss_ppm"], 0)
+
     def test_graceful_reconnect_starts_new_ids_and_preserves_explicit_handles(self):
         # Use actual Unix streams and independent literal peer messages. The
         # public client never sees the broker's private session/relay counters.
@@ -201,6 +236,35 @@ class ControlTests(unittest.TestCase):
         with World(peer) as world:
             self.assertEqual(world.inspect()["services"], {"server": "vm-1"})
         self.assertEqual(peer.requests[0]["op"], "inspect")
+
+
+
+class TriggerTests(unittest.TestCase):
+    def test_arm_and_cancel_literal_wire_and_partition_handle(self):
+        from seedbox import Trigger
+        peer = Peer(reply(result={"trigger_id": 1}) + reply(2) + reply(3, {"trigger_id": 2, "handle": "p1"}) + reply(4))
+        with World(peer) as world:
+            stop = world.arm_console_stop("server", b"A\x00B", Machine("server-vm"), match_timeout=1)
+            self.assertIsInstance(stop, Trigger)
+            world.cancel_trigger(stop)
+            cut = world.arm_console_partition(Machine("server-vm"), b"DONE", ["server"], ["client"], match_timeout=2)
+            world.heal(cut.partition)
+        self.assertEqual(peer.requests[0], {"version": 1, "id": 1, "op": "arm_trigger", "source": {"service": "server"}, "marker": [65, 0, 66], "match_timeout_ns": 1_000_000_000, "fault": {"action": "stop", "target": {"machine": "server-vm"}}})
+        self.assertEqual(peer.requests[1], {"version": 1, "id": 2, "op": "cancel_trigger", "trigger_id": 1})
+        self.assertEqual(peer.requests[2]["fault"], {"action": "partition", "left": [{"service": "server"}], "right": [{"service": "client"}]})
+        self.assertEqual(peer.requests[3]["handle"], "p1")
+
+    def test_invalid_markers_timeouts_and_reply_identity(self):
+        for marker, timeout in [(b"", 1), (b"x" * 257, 1), ("text", 1), (b"x", 0), (b"x", -1)]:
+            peer = Peer(b"")
+            with World(peer) as world:
+                with self.assertRaises(ValueError):
+                    world.arm_console_stop("server", marker, "server", match_timeout=timeout)
+            self.assertEqual(peer.requests, [])
+        for result in [{}, {"trigger_id": True}, {"trigger_id": 0}, {"trigger_id": 65}]:
+            with World(Peer(reply(result=result))) as world:
+                with self.assertRaises(ProtocolError):
+                    world.arm_console_stop("server", b"x", "server", match_timeout=1)
 
 
 if __name__ == "__main__":

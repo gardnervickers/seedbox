@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 default-members = ["crates/seedbox"]
 # The VMM is its own workspace (see its Cargo.toml).
-exclude = ["crates/seedbox-vmm"]
+exclude = ["crates/seedbox-vmm", "crates/seedbox-arm64"]
 
 [workspace.package]
 version = "0.1.0"
