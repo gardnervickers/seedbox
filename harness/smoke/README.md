@@ -19,10 +19,14 @@ python3 harness/smoke/amd.py --cli /absolute/seedbox \
   --cpu CPU --tool-path "$PATH" --output /absolute/FRESH-EVIDENCE
 ```
 
-The wrapper never builds the CLI, engine, kernel or supervisor. The public `run`
-command prepares the existing fixed `examples/faults` application, so OCI
-preparation is part of that command's measured wall time. Build/pull costs are
-separate prerequisites; do not describe a warm execution receipt as a fresh install.
+The wrapper does not build Seedbox CLI, VMM, kernel, supervisor or toolchain
+artifacts; those frozen artifacts are prerequisites. The baseline public `run`
+prepares the fixed `examples/faults` application and may build its workload images
+or pull missing base images. All of that preparation is charged within the
+baseline command's wall-time budget and the five-minute campaign allocation.
+The baseline timer includes preparation and execution; there is no separate
+preparation-only or execution-only timer. Replays are timed separately. These
+measurements do not establish cold-install performance.
 `prepare` JSON cannot be fed into `run`; this tier adds no prepared-input adapter.
 
 The finite normal tier refuses a private wrong-content kernel before its good-input
