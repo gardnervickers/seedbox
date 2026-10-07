@@ -199,7 +199,7 @@ The disk's digest feeds the world witness, and with `--digest` it is the
 whose value is `type << 56 | status << 48 | sector` (type 1 write, 4 flush).
 
 `guest/build-disk.sh artifacts/disk.cpio artifacts/ext4.img` builds the
-probes' initramfs and a fixed ext4 image (with the flake's pinned `SEEDBOX_MKE2FS`, so the image hash depends only on `flake.lock`). Disks need
+probes' initramfs and a fixed ext4 image (with the flake's pinned `SEEDBOX_MKE2FS`; a run records the image's hash as `base_sha256`). Disks need
 a kernel with `VIRTIO_BLK` and `EXT4_FS` (`kernel/config.options`).
 
 - `disk-nocrash.json`: `guest/blkprobe.c` writes a header and `A` with an

@@ -15,8 +15,9 @@ if [ -n "${2:-}" ]; then
   # its hash is reported as the disk's base_sha256. Defaults differ between
   # e2fsprogs versions and distributions' mke2fs.conf, so use the flake's
   # pinned mke2fs (SEEDBOX_MKE2FS, also the Compose volume formatter) with its
-  # built-in profile; the image is then the same on every host for one
-  # flake.lock.
+  # built-in profile. Runs pin the resulting image by hash; whether it is
+  # byte-identical across hosts is not yet established.
+  echo "mke2fs: ${SEEDBOX_MKE2FS:?enter nix develop} ($("$SEEDBOX_MKE2FS" -V 2>&1 | head -1))" >&2
   rm -f "$2"
   truncate -s 32M "$2"
   MKE2FS_CONFIG=/nonexistent E2FSPROGS_FAKE_TIME=1 "${SEEDBOX_MKE2FS:?enter nix develop}" -t ext4 -q -F -U 5eedb0c5-0000-4000-8000-000000000001 \
