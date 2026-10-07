@@ -175,7 +175,11 @@ def checked_run(command):
         persist_evidence()
         assert before == after, "host MSR restoration mismatch"
 
+DEV_FLAGS = []
+
 def execute(command, expected_code):
+    if command[1] in ("run", "replay"):
+        command = [*command, *DEV_FLAGS]
     result = checked_run(command)
     print(result.stdout, end="", flush=True)
     if result.stderr:
@@ -199,7 +203,10 @@ def main():
     p.add_argument("--delayed-guest-init", help="supervisor compiled with -DSEEDBOX_TEST_READY_DELAY_NS=4000000000ULL for readiness and cutoff checks")
     p.add_argument("--seed", type=int, default=1009)
     p.add_argument("--margin", default="98304")
+    p.add_argument("--allow-dev-engine", action="store_true", help="pass --allow-dev-engine to every run and replay (unpinned engine or kernel)")
     a = p.parse_args()
+    if a.allow_dev_engine:
+        DEV_FLAGS.append("--allow-dev-engine")
     OUTPUT = reserve_output(a.output,[a.guest_init,a.negative_guest_init,a.rejecting_guest_init,a.delayed_guest_init])
     def interrupt(_signal, _frame):
         raise KeyboardInterrupt
