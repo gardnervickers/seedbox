@@ -164,6 +164,20 @@ operation, including its remaining cost and transferred bytes, in the exit
 witness and the full-state `pending_io` part. Other clock advances retain the
 strict hard-stop check.
 
+`--allow-dev-engine` on run, explore, replay and doctor explicitly admits an
+unpinned VMM or guest kernel. It has no environment or configuration backing.
+Such runs bind `engine_qualification = "dev-unpinned"` in their semantic identity,
+and their run report and inspect JSON carry the marker through export/import.
+Both pinned artifacts remain ordinary runs even when the flag is supplied.
+Unknown markers, a dev marker with both artifacts pinned, and unpinned artifacts
+without the marker are rejected. All other admission checks remain in force.
+
+Replaying a marked dev run requires `--allow-dev-engine` and the same retained
+engine/kernel hashes. MATCH and MISMATCH output is labelled `unqualified dev
+engine`; omitting the flag retains NOT_COMPARABLE (exit 2) naming the flag before
+live host admission. `--allow-engine-change` cannot change a dev run's engine.
+This opt-in does not qualify development artifacts or change release pins.
+
 Replay defaults to the retained engine. An explicit `--vmm NEW_BINARY
 --allow-engine-change` permits a fresh identity and witness comparison with it.
 Replay does not require registry access, a builder, or the original Compose files.
@@ -192,6 +206,11 @@ exact observations admitted by that probe; there is no second read or cached
 host inventory. No content store, run directory, image preparation or guest is
 created. Missing inputs, unsupported capabilities, busy leases and profile drift
 retain the same actionable errors as execution; no repair or fallback occurs.
+
+For unpinned artifacts, `seedbox doctor --allow-dev-engine` uses the same host
+probe and prints `dev engine: unqualified`; its JSON includes
+`engine_qualification: "dev-unpinned"`. This is unqualified development readiness.
+Passing the flag with both pinned artifacts adds no marker.
 
 Exit 0 means the reported policy is compatible. It does not prove repeatability
 on an unqualified machine. Plain output has one `VALID` status line and lowercase

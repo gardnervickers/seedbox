@@ -20,6 +20,7 @@ pub struct VmmExecutor {
     pub cpu: Option<u32>,
     counter: CounterProfile,
     allow_unqualified: bool,
+    allow_dev_engine: bool,
     profile: ExecutionProfile,
     performance: BTreeMap<String, String>,
     admission: std::sync::Arc<std::sync::Mutex<Vec<Vec<crate::admission::CoreObservation>>>>,
@@ -35,6 +36,8 @@ pub struct DoctorReport {
     pub engine: ContentDigest,
     pub kernel: ContentDigest,
     pub observations: Vec<crate::admission::CoreObservation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine_qualification: Option<String>,
 }
 
 struct AdmissionProbe {
@@ -92,6 +95,7 @@ impl VmmExecutor {
             cpu,
             counter,
             allow_unqualified: false,
+            allow_dev_engine: false,
             admission: Default::default(),
             profile: ExecutionProfile {
                 backend: "seedbox-kvm".into(),
@@ -109,6 +113,16 @@ impl VmmExecutor {
     /// Check the existing execution policy without storing inputs or starting guests.
     /// Host observations are the same bounded probe used by execution preflight.
     pub fn doctor(engine: &Path, kernel: &Path, cpu: Option<u32>) -> Result<DoctorReport> {
+        Self::doctor_with_dev_engine(engine, kernel, cpu, false)
+    }
+
+    /// Opt in to unpinned artifacts while keeping every host readiness check.
+    pub fn doctor_with_dev_engine(
+        engine: &Path,
+        kernel: &Path,
+        cpu: Option<u32>,
+        allow: bool,
+    ) -> Result<DoctorReport> {
         let executor = Self::from_engine_digest(
             crate::admission::file_digest(engine)?,
             cpu,
@@ -116,9 +130,12 @@ impl VmmExecutor {
             WitnessMode::Exits,
             CounterProfile::Zen,
         )?;
-        crate::admission::validate_profile(&executor.profile)?;
+        if !allow {
+            crate::admission::validate_profile(&executor.profile)?;
+        }
         let kernel = crate::admission::file_digest(kernel)?;
-        crate::admission::validate_kernel(&kernel)?;
+        let executor = executor.with_dev_engine(allow, &kernel);
+        crate::admission::admit_artifacts(&executor.profile, &kernel, allow)?;
         Self::doctor_counter(crate::counter::CounterProfile::host()?)?;
         let probe = executor.probe();
         executor.doctor_report(kernel, probe)
@@ -137,7 +154,27 @@ impl VmmExecutor {
         self
     }
 
+    /// Mark only genuinely unpinned artifact pairs; permission is not identity.
+    pub fn with_dev_engine(mut self, allow: bool, kernel: &ContentDigest) -> Self {
+        self.allow_dev_engine = allow;
+        self.profile
+            .semantic_parameters
+            .remove(crate::admission::ENGINE_QUALIFICATION);
+        if allow && crate::admission::artifacts_unpinned(&self.profile, kernel) {
+            self.profile.semantic_parameters.insert(
+                crate::admission::ENGINE_QUALIFICATION.into(),
+                crate::admission::DEV_UNPINNED.into(),
+            );
+        }
+        self
+    }
+
     fn validate_execution_mode(&self) -> Result<()> {
+        if crate::admission::is_dev_engine(&self.profile) && !self.allow_dev_engine {
+            return Err(Error::Setup(
+                "unqualified dev engine; pass --allow-dev-engine to execute".into(),
+            ));
+        }
         if !self.counter.qualified() && !self.allow_unqualified {
             return Err(Error::Setup(format!(
                 "{} is unqualified; explicitly allow unqualified CPU execution",
@@ -149,6 +186,7 @@ impl VmmExecutor {
 
     fn doctor_report(&self, kernel: ContentDigest, probe: AdmissionProbe) -> Result<DoctorReport> {
         probe.result?;
+        crate::admission::admit_artifacts(&self.profile, &kernel, self.allow_dev_engine)?;
         for observation in &probe.observations {
             crate::admission::validate_observation(observation)?;
         }
@@ -166,6 +204,11 @@ impl VmmExecutor {
             engine: self.profile.engine.clone(),
             kernel,
             observations: probe.observations,
+            engine_qualification: self
+                .profile
+                .semantic_parameters
+                .get(crate::admission::ENGINE_QUALIFICATION)
+                .cloned(),
         })
     }
 
@@ -293,14 +336,14 @@ impl ExecutionBackend for VmmExecutor {
         })
     }
     fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {
-        crate::admission::validate_profile(&inputs.profile)?;
+        crate::admission::admit_artifacts(&inputs.profile, &inputs.kernel, self.allow_dev_engine)?;
         self.validate_execution_mode()?;
         if recorded_counter(&inputs.profile)? != self.counter {
             return Err(Error::Integrity(
                 "recorded branch counter differs from executor".into(),
             ));
         }
-        crate::admission::validate_kernel(&inputs.kernel)
+        Ok(())
     }
 
     fn profile(&self) -> ExecutionProfile {
@@ -839,6 +882,7 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
         witness: Some(raw.world_witness),
         full_state,
         faults,
+        engine_qualification: None,
         detail: fault_failure.or_else(|| {
             infrastructure_error
                 .map(|machine| format!("machine {} failed in guest bootstrap or VMM", machine.name))
@@ -962,6 +1006,7 @@ mod linux {
             full_state: None,
             faults: vec![],
             detail: None,
+            engine_qualification: None,
         };
         if request.cancellation.is_cancelled() {
             return Ok(incomplete(StopReason::Cancelled));
@@ -1096,6 +1141,75 @@ mod doctor_tests {
             raw_cpuid: p.effective_cpuid,
         }
     }
+    #[test]
+    fn dev_artifact_pairs_require_permission_and_consistent_markers() {
+        let pinned_engine = ContentDigest::try_from(ENGINE.to_owned()).unwrap();
+        let pinned_kernel = ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap();
+        for (engine, kernel, expected_error) in [
+            (ContentDigest::of(b"dev engine"), pinned_kernel.clone(),
+             "input integrity: engine is outside the admitted host policy; no engine-change override bypass is available"),
+            (pinned_engine.clone(), ContentDigest::of(b"dev kernel"),
+             "input integrity: guest kernel is outside the admitted host policy"),
+            (ContentDigest::of(b"dev engine"), ContentDigest::of(b"dev kernel"),
+             "input integrity: engine is outside the admitted host policy; no engine-change override bypass is available"),
+        ] {
+            let backend = VmmExecutor::from_engine_digest(engine, None, 512, WitnessMode::Exits, CounterProfile::Zen).unwrap();
+            let mut inputs = PreparedInputs {
+                profile: backend.profile(), kernel: kernel.clone(), images: BTreeMap::new(),
+                placement: BTreeMap::new(), guests: BTreeMap::new(), auxiliary: BTreeMap::new(), provenance: BTreeMap::new(),
+            };
+            assert_eq!(backend.validate_retained(&inputs).unwrap_err().to_string(), expected_error);
+            let dev = backend.clone().with_dev_engine(true, &kernel);
+            inputs.profile = dev.profile();
+            assert_eq!(inputs.profile.semantic_parameters[crate::admission::ENGINE_QUALIFICATION], "dev-unpinned");
+            dev.validate_retained(&inputs).unwrap();
+            assert!(backend.validate_retained(&inputs).unwrap_err().to_string().contains("--allow-dev-engine"));
+            let mut stripped = inputs.clone();
+            stripped.profile.semantic_parameters.remove(crate::admission::ENGINE_QUALIFICATION);
+            assert!(dev.validate_retained(&stripped).is_err());
+            for key in ["host_policy", "guest_abi", "control_channel", "memory_mb"] {
+                let mut wrong = inputs.clone();
+                wrong.profile.semantic_parameters.insert(key.into(), "wrong".into());
+                assert!(dev.validate_retained(&wrong).is_err());
+            }
+            let report = dev.doctor_report(kernel, AdmissionProbe { cpu: Some(8), observations: vec![observed(8)], result: Ok(()) }).unwrap();
+            let json = serde_json::to_value(report).unwrap();
+            assert_eq!(json["engine_qualification"], "dev-unpinned");
+            assert!(json.get("qualified").is_none());
+        }
+        let pinned = VmmExecutor::from_engine_digest(
+            pinned_engine,
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap();
+        assert_eq!(
+            pinned.profile(),
+            pinned
+                .clone()
+                .with_dev_engine(true, &pinned_kernel)
+                .profile()
+        );
+        let mut forged = pinned.profile();
+        forged.semantic_parameters.insert(
+            crate::admission::ENGINE_QUALIFICATION.into(),
+            "dev-unpinned".into(),
+        );
+        assert!(
+            crate::admission::validate_artifacts(&forged, &pinned_kernel)
+                .unwrap_err()
+                .to_string()
+                .contains("requires an unpinned")
+        );
+        forged.semantic_parameters.insert(
+            crate::admission::ENGINE_QUALIFICATION.into(),
+            "qualified".into(),
+        );
+        assert!(crate::admission::validate_profile(&forged).is_err());
+    }
+
     #[test]
     fn experimental_mode_never_carries_amd_proof_and_cannot_relax_release_or_counter_checks() {
         let make = |counter| {

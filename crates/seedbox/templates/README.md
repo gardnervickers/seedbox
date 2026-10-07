@@ -97,3 +97,12 @@ checks and SMT ownership but carry no qualified AMD proof or AMD MSR writes.
 `doctor` refuses those counters. The source policy pins built-but-unqualified engine52eb; fresh runtime acceptance
 is still required. Disabled selected-event readiness precedes preparation and
 is rechecked under leases; it never enables a guest counter. Intel is not qualified.
+
+For unpinned development engines or guest kernels, pass `--allow-dev-engine` to
+run, explore, replay or doctor. These runs bind `engine_qualification =
+"dev-unpinned"` in identity and report, preserved by inspect and bundles. Replay
+requires the flag and the exact retained artifact hashes and labels comparisons
+`unqualified dev engine`; without it replay retains NOT_COMPARABLE naming the
+flag. Doctor prints `dev engine: unqualified` for dev artifacts. The flag with
+both pinned artifacts adds no marker. Every host/CPU/PMU/MSR/lease/ABI check
+still applies, and release qualification still requires its own acceptance.

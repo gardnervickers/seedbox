@@ -50,6 +50,93 @@ class SmokeTests(unittest.TestCase):
     def verify(self):
         return smoke.verify_record(self.record, self.run, self.state)
 
+    def test_qualification_marker_and_report_must_match_mode(self):
+        smoke.verify_qualification(self.record, False)
+        with self.assertRaisesRegex(RuntimeError, 'qualification marker'):
+            smoke.verify_qualification(self.record, True)
+        self.record['identity']['inputs']['profile']['semantic_parameters'] = {'engine_qualification': 'dev-unpinned'}
+        with self.assertRaisesRegex(RuntimeError, 'missing from run report'):
+            smoke.verify_qualification(self.record, True)
+        self.record['report']['engine_qualification'] = 'dev-unpinned'
+        smoke.verify_qualification(self.record, True)
+        with self.assertRaisesRegex(RuntimeError, 'qualification marker'):
+            smoke.verify_qualification(self.record, False)
+
+    def test_dev_mode_wrong_kernel_control_uses_pinned_engine_without_flag(self):
+        args = type('Args', (), dict(kernel='dev-kernel', engine='dev-engine', guest_init='init',
+            busybox='busybox', cpu=8, cli='cli', tool_path='', allow_dev_engine=True,
+            pinned_engine='pinned-engine'))()
+        campaign = smoke.Campaign(args, self.root, 1e100)
+        with patch.object(campaign, 'invoke', return_value=(2, '', 'guest kernel is outside the admitted host policy')) as invoke, \
+             patch.object(smoke, 'pair', side_effect=RuntimeError('stop before hardware')):
+            with self.assertRaisesRegex(RuntimeError, 'stop before hardware'):
+                campaign.run()
+        command = invoke.call_args.args[1]
+        self.assertNotIn('--allow-dev-engine', command)
+        self.assertEqual(command[command.index('--vmm') + 1], 'pinned-engine')
+        self.assertNotEqual(command[command.index('--kernel') + 1], 'dev-kernel')
+
+    def test_dev_success_forwards_flag_and_checks_all_replay_markers(self):
+        args = type('Args', (), dict(kernel='kernel', engine='engine', guest_init='init',
+            busybox='busybox', cpu=8, cli='cli', tool_path='', allow_dev_engine=True,
+            pinned_engine='pinned-engine'))()
+        campaign = smoke.Campaign(args, self.root, 1e100)
+        self.record['identity']['inputs']['profile']['semantic_parameters'] = {'engine_qualification': 'dev-unpinned'}
+        self.record['report']['engine_qualification'] = 'dev-unpinned'
+        self.record['performance_parameters'] = {'SEEDBOX_MARGIN': 'adaptive', 'SEEDBOX_UNDO': '256'}
+        inspected = []
+        def invoke(name, command, execution=False):
+            if name == 'wrong-kernel':
+                self.assertNotIn('--allow-dev-engine', command)
+                return 2, '', 'guest kernel is outside the admitted host policy'
+            self.assertIn('--allow-dev-engine', command)
+            if name == 'doctor':
+                return 0, 'VALID: compatible execution profile\ndev engine: unqualified\n', ''
+            if name == 'doctor-json':
+                return 0, '{"engine_qualification": "dev-unpinned"}', ''
+            campaign.last_run = self.run
+            if name == 'fixed':
+                (self.root / 'fixed').mkdir()
+                (self.root / 'fixed/stdout').write_text('engine_qualification: dev-unpinned (unqualified dev engine)')
+            return 0, f'PASS: {self.run}\nreplay: MATCH (unqualified dev engine)\n', ''
+        def inspect(name, run):
+            inspected.append(name)
+            record = copy.deepcopy(self.record)
+            if name == 'margin-inspect':
+                record['performance_parameters']['SEEDBOX_MARGIN'] = '32768'
+            if name == 'undo-inspect':
+                record['performance_parameters']['SEEDBOX_UNDO'] = '0'
+            return record
+        item = self.record['identity']['inputs']['kernel']
+        actual_digest = smoke.digest
+        with patch.object(campaign, 'invoke', side_effect=invoke), \
+             patch.object(campaign, 'inspect', side_effect=inspect), \
+             patch.object(smoke, 'digest', side_effect=lambda path: item if path in ('kernel', 'engine') else actual_digest(path)), \
+             patch.object(smoke, 'pair', return_value=[8, 24]), \
+             patch.object(smoke, 'lock_free', return_value={}), \
+             patch.object(smoke, 'snapshot', return_value={}), \
+             patch.object(smoke, 'pinned_workloads'):
+            campaign.run()
+        self.assertEqual(inspected, ['fixed-inspect', 'default-inspect', 'margin-inspect', 'undo-inspect'])
+
+    def test_dev_doctor_cannot_claim_qualified_readiness(self):
+        args = type('Args', (), dict(kernel='kernel', engine='engine', guest_init='init',
+            busybox='busybox', cpu=8, cli='cli', tool_path='', allow_dev_engine=True,
+            pinned_engine='pinned-engine'))()
+        campaign = smoke.Campaign(args, self.root, 1e100)
+        def invoke(name, command, *args):
+            if name == 'wrong-kernel':
+                return 2, '', 'guest kernel is outside the admitted host policy'
+            self.assertEqual(name, 'doctor')
+            self.assertIn('--allow-dev-engine', command)
+            return 0, 'VALID: qualified\ndev engine: unqualified\n', ''
+        with patch.object(campaign, 'invoke', side_effect=invoke), \
+             patch.object(smoke, 'pair', return_value=[8, 24]), \
+             patch.object(smoke, 'lock_free', return_value={}), \
+             patch.object(smoke, 'pinned_workloads'):
+            with self.assertRaisesRegex(RuntimeError, 'claimed qualification'):
+                campaign.run()
+
     def test_opaque_bytes_preserved_without_application_parser(self):
         streams = self.verify()
         smoke.compare(self.record, copy.deepcopy(self.record), streams, streams)

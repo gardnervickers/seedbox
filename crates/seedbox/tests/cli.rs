@@ -489,6 +489,7 @@ fn old_host_proof_replay_is_not_comparable_while_inspection_and_transfer_stay_av
             full_state: None,
             faults: vec![],
             detail: None,
+            engine_qualification: None,
         }),
         error: None,
         logs: BTreeMap::new(),
@@ -632,4 +633,60 @@ fn doctor_bad_inputs_execute_no_tools_and_create_no_state_even_with_cargo_enviro
     assert_eq!(stderr(&output),"error: input integrity: engine is outside the admitted host policy; no engine-change override bypass is available\n");
     assert!(!marker.exists());
     assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn dev_engine_opt_in_is_available_only_on_execution_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    for command in ["run", "explore", "replay", "doctor"] {
+        let help = seedbox(&["help", command], dir.path());
+        assert!(help.status.success());
+        assert!(String::from_utf8_lossy(&help.stdout).contains("--allow-dev-engine"));
+        let output = seedbox(
+            &[command, "--allow-dev-engine", "--cpu", "1024"],
+            dir.path(),
+        );
+        assert_eq!(output.status.code(), Some(2));
+        assert!(!stderr(&output).contains("unexpected argument '--allow-dev-engine'"));
+    }
+    for command in ["prepare", "inspect", "export", "import"] {
+        let help = seedbox(&["help", command], dir.path());
+        assert!(!String::from_utf8_lossy(&help.stdout).contains("--allow-dev-engine"));
+    }
+    let output = seedbox(
+        &["doctor", "--allow-dev-engine", "--vmm", "missing"],
+        dir.path(),
+    );
+    assert_eq!(stderr(&output), "error: --vmm missing: not found\n");
+    assert!(output.stdout.is_empty());
+    assert!(!dir.path().join(".seedbox").exists());
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn doctor_dev_opt_in_keeps_host_refusal_and_creates_no_state() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("engine"), b"dev engine").unwrap();
+    fs::write(dir.path().join("kernel"), b"dev kernel").unwrap();
+    for json in [false, true] {
+        let mut args = vec![
+            "doctor",
+            "--allow-dev-engine",
+            "--vmm",
+            "engine",
+            "--kernel",
+            "kernel",
+        ];
+        if json {
+            args.push("--json");
+        }
+        let output = seedbox(&args, dir.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(
+            stderr(&output),
+            "error: run and replay require the qualified Linux KVM host\n"
+        );
+        assert!(output.stdout.is_empty());
+        assert!(!dir.path().join(".seedbox").exists());
+    }
 }

@@ -38,8 +38,16 @@ directory. Every runtime input has a default, so no flags are required:
 | Guest supervisor | built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | BusyBox | `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
 | Build epoch | absent; preserve the builder's ordinary timestamp policy | `--build-epoch` (prepare/run/explore; no environment backing) |
+| Engine qualification | pinned engine and guest kernel; dev artifacts require explicit opt-in | `--allow-dev-engine` (run/explore/replay/doctor; no environment backing) |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
+
+For development artifacts, pass `--allow-dev-engine` to `run`, `explore`, `replay`
+or `doctor`. Unpinned engine or guest-kernel bytes record the semantic parameter
+`engine_qualification = "dev-unpinned"` and are reported as an unqualified dev
+engine. Replay requires this flag and the exact retained engine/kernel hashes;
+bundles preserve the marker. Passing the flag with both pinned artifacts adds no
+marker. All host, CPU, PMU, MSR, lease, ABI and control-channel checks still apply.
 
 `seedbox help run` lists every option. A run prints `OUTCOME: run-directory`;
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
@@ -172,7 +180,9 @@ remain inspectable and transferable, but replay through this CLI rejects missing
 or drifted host-policy proof as ERROR/NOT_COMPARABLE (exit 2), even with
 `--allow-engine-change`. A retained previous CLI can still be used for explicitly
 historical evidence; its execution does not establish new-policy admission.
-A new engine/kernel/policy requires its own acceptance. Admission source checks
+A new engine/kernel/policy requires its own acceptance for qualification.
+`--allow-dev-engine` admits unpinned engine/kernel bytes for development with a
+retained unqualified marker; it never bypasses missing or drifted host proof. Admission source checks
 are separate from the still-required focused Linux guest/profile acceptance.
 
 ## Check execution compatibility
@@ -181,7 +191,9 @@ are separate from the still-required focused Linux guest/profile acceptance.
 against the same versioned admission policy used by execution. It needs a Linux
 KVM host and root, uses the normal `--cpu`, `--kernel` and `--vmm` defaults, and
 never builds a missing VMM, prepares images or starts guests. `--json` prints the
-exact admitted observations. Success prints `VALID` after probe resources and
+exact admitted observations, plus `engine_qualification: "dev-unpinned"` for dev
+artifacts. With `--allow-dev-engine`, unpinned artifacts print `dev engine:
+unqualified` and receive no qualification claim. Success prints `VALID` after probe resources and
 thread affinity are verified cleaned up; problems use the ordinary error and
 exit status 2. This is compatibility readiness, not cross-host replay qualification.
 

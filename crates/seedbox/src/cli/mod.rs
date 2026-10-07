@@ -224,6 +224,9 @@ struct CpuArg {
     /// Run even when this CPU's branch counter profile is unqualified; its results are unverified.
     #[arg(long)]
     allow_unqualified_cpu: bool,
+    /// Allow unpinned engines or guest kernels; their results are unqualified.
+    #[arg(long)]
+    allow_dev_engine: bool,
 }
 
 impl CpuArg {
@@ -439,11 +442,19 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Doctor { cpu, inputs, json } => {
             let engine = defaults::engine_lookup(inputs.vmm)?;
             let kernel = defaults::kernel(inputs.kernel)?;
-            let report = VmmExecutor::doctor(&engine, &kernel, cpu.cpu)?;
+            let report = VmmExecutor::doctor_with_dev_engine(
+                &engine,
+                &kernel,
+                cpu.cpu,
+                cpu.allow_dev_engine,
+            )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!("VALID: compatible execution profile");
+                if report.engine_qualification.is_some() {
+                    println!("dev engine: unqualified");
+                }
                 println!("policy: {}", report.policy_version);
                 println!("cpu: {}", report.cpu);
                 println!(
@@ -508,6 +519,12 @@ fn run(cli: Cli) -> Result<u8> {
                 inputs.backends(&store, cpu.cpu, counter, scratch.path())?;
             cpu.admit(detected?)?;
             let executor = executor.with_unqualified_cpu(cpu.allow_unqualified_cpu);
+            let executor = if cpu.allow_dev_engine {
+                executor.with_dev_engine(true, &seedbox::admission::file_digest(&preparer.kernel)?)
+            } else {
+                executor
+            };
+            preparer.profile = executor.profile();
             preparer.tools.build_epoch = build.build_epoch;
             let executor = performance.apply(executor)?;
             // Backend admission checks the selected core before preparation.
@@ -560,6 +577,12 @@ fn run(cli: Cli) -> Result<u8> {
             }
             cpu.admit(detected?)?;
             let executor = executor.with_unqualified_cpu(cpu.allow_unqualified_cpu);
+            let executor = if cpu.allow_dev_engine {
+                executor.with_dev_engine(true, &seedbox::admission::file_digest(&preparer.kernel)?)
+            } else {
+                executor
+            };
+            preparer.profile = executor.profile();
             let executor = performance.apply(executor)?;
             // Exploration retains any backend admission refusal in its batch checkpoint.
             let _signals = Signals::register(&cancellation)?;
@@ -613,8 +636,12 @@ fn run(cli: Cli) -> Result<u8> {
             let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
             // Historical/incompatible records must reach the retained-proof gate
             // and remain captured as NOT_COMPARABLE before querying this host.
-            if seedbox::admission::validate_profile(&previous.identity.inputs.profile).is_ok()
-                && seedbox::admission::validate_kernel(&previous.identity.inputs.kernel).is_ok()
+            if seedbox::admission::admit_artifacts(
+                &previous.identity.inputs.profile,
+                &previous.identity.inputs.kernel,
+                cpu.allow_dev_engine,
+            )
+            .is_ok()
             {
                 cpu.admit(detected?)?;
                 same_counter(
@@ -644,7 +671,8 @@ fn run(cli: Cli) -> Result<u8> {
                     profile.witness_mode.clone(),
                     counter,
                 )?
-                .with_unqualified_cpu(cpu.allow_unqualified_cpu),
+                .with_unqualified_cpu(cpu.allow_unqualified_cpu)
+                .with_dev_engine(cpu.allow_dev_engine, &previous.identity.inputs.kernel),
             )?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
@@ -739,7 +767,12 @@ fn run(cli: Cli) -> Result<u8> {
                 record.identity.seed
             );
             if let Some(replay) = record.replay {
-                println!("replay: {}", word(&replay.status));
+                let label = if seedbox::admission::is_dev_engine(&record.identity.inputs.profile) {
+                    " (unqualified dev engine)"
+                } else {
+                    ""
+                };
+                println!("replay: {}{label}", word(&replay.status));
             }
             if let Some(error) = record.error {
                 println!("error: {error}");
@@ -787,11 +820,19 @@ fn same_counter(run: &Path, recorded: CounterProfile, host: CounterProfile) -> R
 fn report(run: &orchestration::Run) -> u8 {
     // Scripts parse the run directory from this one `OUTCOME: path` line.
     println!("{}: {}", word(&run.record.outcome), run.directory.display());
+    if seedbox::admission::is_dev_engine(&run.record.identity.inputs.profile) {
+        println!("engine_qualification: dev-unpinned (unqualified dev engine)");
+    }
     if let Some(error) = &run.record.error {
         eprintln!("{error}");
     }
     if let Some(replay) = &run.record.replay {
-        println!("replay: {}", word(&replay.status));
+        let label = if seedbox::admission::is_dev_engine(&run.record.identity.inputs.profile) {
+            " (unqualified dev engine)"
+        } else {
+            ""
+        };
+        println!("replay: {}{label}", word(&replay.status));
         return match replay.status {
             ReplayStatus::Match => 0,
             ReplayStatus::Mismatch => 1,

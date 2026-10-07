@@ -221,7 +221,9 @@ impl Orchestrator {
     ) -> Result<Run> {
         let baseline = inspect(directory)?;
         let mut identity = baseline.identity.clone();
-        if options.allow_engine_change {
+        // Development replay always compares the exact retained artifact pair.
+        if options.allow_engine_change && !crate::admission::is_dev_engine(&identity.inputs.profile)
+        {
             identity.inputs.profile.engine = executor.profile().engine;
         }
         self.execute(
@@ -291,6 +293,7 @@ impl Orchestrator {
                     full_state: None,
                     faults: vec![],
                     detail: Some("cancelled before execution".into()),
+                    engine_qualification: None,
                 });
             }
             let start = Instant::now();
@@ -319,7 +322,14 @@ impl Orchestrator {
             Ok(report)
         })();
         match execution {
-            Ok(report) => {
+            Ok(mut report) => {
+                report.engine_qualification = record
+                    .identity
+                    .inputs
+                    .profile
+                    .semantic_parameters
+                    .get(crate::admission::ENGINE_QUALIFICATION)
+                    .cloned();
                 match classify(&record.identity, &report) {
                     Ok(outcome) => record.outcome = outcome,
                     Err(error) => {
