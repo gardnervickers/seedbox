@@ -1,0 +1,348 @@
+   Compiling libc v0.2.190
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+   Compiling version_check v0.9.5
+   Compiling generic-array v0.14.7
+   Compiling syn v3.0.6
+    Checking errno v0.3.14
+   Compiling serde_core v1.0.229
+    Checking typenum v1.20.1
+    Checking cfg-if v1.0.5
+   Compiling rustix v1.1.5
+   Compiling serde v1.0.229
+    Checking utf8parse v0.2.2
+    Checking bitflags v2.13.2
+   Compiling zmij v1.0.23
+    Checking anstyle-parse v1.0.0
+   Compiling serde_derive v1.0.229
+    Checking anstyle-query v1.1.5
+    Checking is_terminal_polyfill v1.70.2
+    Checking itoa v1.0.18
+    Checking colorchoice v1.0.5
+    Checking anstyle v1.0.14
+   Compiling getrandom v0.4.3
+   Compiling serde_json v1.0.151
+    Checking anstream v1.0.0
+    Checking block-buffer v0.10.4
+    Checking crypto-common v0.1.7
+    Checking clap_lex v1.1.1
+   Compiling heck v0.5.0
+   Compiling signal-hook v0.3.18
+    Checking memchr v2.8.3
+    Checking equivalent v1.0.2
+   Compiling thiserror v2.0.21
+    Checking hashbrown v0.17.1
+    Checking strsim v0.11.1
+    Checking clap_builder v4.6.7
+    Checking indexmap v2.14.2
+   Compiling clap_derive v4.6.7
+    Checking digest v0.10.7
+    Checking xattr v1.6.1
+   Compiling thiserror-impl v2.0.21
+    Checking filetime v0.2.29
+    Checking signal-hook-registry v1.4.8
+    Checking cpufeatures v0.2.17
+    Checking unsafe-libyaml v0.2.11
+    Checking once_cell v1.21.4
+    Checking same-file v1.0.6
+    Checking fastrand v2.5.0
+   Compiling seedbox v0.1.0 (/Users/gardnervickers/.codex/worktrees/backend-qualification-research/seedbox/crates/seedbox)
+    Checking ryu v1.0.23
+    Checking serde_yaml_ng v0.10.0
+    Checking tempfile v3.27.0
+    Checking walkdir v2.5.0
+    Checking sha2 v0.10.9
+    Checking tar v0.4.46
+    Checking clap v4.6.7
+    Checking seedbox-control v0.1.0 (/Users/gardnervickers/.codex/worktrees/backend-qualification-research/seedbox/crates/seedbox-control)
+    Checking shell-words v1.1.1
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.00s
+   Compiling libc v0.2.190
+   Compiling serde_core v1.0.229
+   Compiling errno v0.3.14
+   Compiling cfg-if v1.0.5
+   Compiling typenum v1.20.1
+   Compiling itoa v1.0.18
+   Compiling generic-array v0.14.7
+   Compiling serde v1.0.229
+   Compiling zmij v1.0.23
+   Compiling utf8parse v0.2.2
+   Compiling bitflags v2.13.2
+   Compiling memchr v2.8.3
+   Compiling rustix v1.1.5
+   Compiling serde_json v1.0.151
+   Compiling anstyle-parse v1.0.0
+   Compiling colorchoice v1.0.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anstyle v1.0.14
+   Compiling anstyle-query v1.1.5
+   Compiling crypto-common v0.1.7
+   Compiling anstream v1.0.0
+   Compiling block-buffer v0.10.4
+   Compiling equivalent v1.0.2
+   Compiling strsim v0.11.1
+   Compiling clap_lex v1.1.1
+   Compiling hashbrown v0.17.1
+   Compiling clap_builder v4.6.7
+   Compiling indexmap v2.14.2
+   Compiling digest v0.10.7
+   Compiling getrandom v0.4.3
+   Compiling seedbox-control v0.1.0 (/Users/gardnervickers/.codex/worktrees/backend-qualification-research/seedbox/crates/seedbox-control)
+   Compiling xattr v1.6.1
+   Compiling filetime v0.2.29
+   Compiling signal-hook-registry v1.4.8
+   Compiling cpufeatures v0.2.17
+   Compiling seedbox v0.1.0 (/Users/gardnervickers/.codex/worktrees/backend-qualification-research/seedbox/crates/seedbox)
+   Compiling unsafe-libyaml v0.2.11
+   Compiling ryu v1.0.23
+   Compiling once_cell v1.21.4
+   Compiling fastrand v2.5.0
+   Compiling same-file v1.0.6
+   Compiling walkdir v2.5.0
+   Compiling tempfile v3.27.0
+   Compiling serde_yaml_ng v0.10.0
+   Compiling thiserror v2.0.21
+   Compiling sha2 v0.10.9
+   Compiling signal-hook v0.3.18
+   Compiling tar v0.4.46
+   Compiling clap v4.6.7
+   Compiling shell-words v1.1.1
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.98s
+     Running unittests src/lib.rs (target/debug/deps/seedbox-a1f2d638c6f0a2c2)
+
+running 5 tests
+test host::tests::candidates_take_one_cpu_per_core_and_skip_cpu_zero_core ... ok
+test host::tests::parses_cpu_topology_ranges_and_rejects_bad_bounds ... ok
+test host::tests::busy_core_is_skipped_rather_than_failing_selection ... ok
+test host::tests::missing_sibling_register_does_not_mutate_first_cpu ... ok
+test host::tests::shared_lease_and_original_register_values_survive_cleanup ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/main.rs (target/debug/deps/seedbox-1515c315276445e9)
+
+running 4 tests
+test cli::defaults::tests::static_elf_detection ... ok
+test cli::defaults::tests::explicit_inputs_are_checked_but_never_searched ... ok
+test cli::defaults::tests::compose_directory_resolves_to_its_compose_file ... ok
+test cli::defaults::tests::installed_vmm_wins_but_cargo_profile_dirs_are_skipped ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli.rs (target/debug/deps/cli-2a86b49b16c0ba6d)
+
+running 4 tests
+test validation_cli_reports_structured_output_and_nonzero_errors ... ok
+test bad_values_are_usage_errors ... ok
+test compose_argument_defaults_to_the_project_directory ... ok
+test setup_errors_name_the_missing_input_and_the_fix ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running tests/configuration.rs (target/debug/deps/configuration-b91fbf6f33431b14)
+
+running 13 tests
+test validates_and_normalizes_the_authoring_subset ... ok
+test launch_merges_environment_and_preserves_image_user_workdir_and_volumes ... ok
+test command_strings_split_without_implicitly_invoking_a_shell ... ok
+test image_metadata_accepts_absent_or_null_optional_collections ... ok
+test environment_uses_only_explicit_input_and_preserves_empty_and_unset ... ok
+test schedule_controls_are_explicit_semantic_durations ... ok
+test runtime_control_selects_known_service_and_static_schedules_are_rejected ... ok
+test network_options_and_unimplemented_config_permissions_are_not_ignored ... ok
+test rejects_duplicate_keys_tags_merges_and_ambiguous_environment_scalars ... ok
+test build_and_config_paths_are_relative_to_compose_not_cwd ... ok
+test durations_are_exact_and_checked_without_floating_point ... ok
+test image_entrypoint_and_cmd_follow_compose_override_rules ... ok
+test unknown_and_unsupported_fields_are_errors_at_their_paths ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/control.rs (target/debug/deps/control-7dd8981e40ea3655)
+
+running 14 tests
+test sessions_reset_public_ids_but_cannot_repeat_relays_or_old_sessions ... ok
+test sleep_admission_invalid_handle_and_public_ids_use_real_transitions ... ok
+test typed_argument_rejections_are_correlated_and_recoverable ... ok
+test actual_uart_divisor_bytes_do_not_contaminate_committed_request_frames ... ok
+test target_exit_between_request_and_admission_is_recoverable ... ok
+test fixed_causal_admission_and_exact_reply_are_independent_of_progress ... ok
+test framing_authority_and_errors_fail_closed ... ok
+test target_exit_after_admission_is_recoverable_only_while_effect_is_outstanding ... ok
+test bulk_shared_memory_frames_preserve_fragments_and_multiple_messages ... ok
+test pending_sleep_admission_and_effect_at_world_cutoff_are_retained_without_error ... ok
+test rejected_or_missing_real_process_effect_is_fatal ... ok
+test effects_must_finish_before_reply_and_overlapping_handles_survive_partial_heal ... ok
+test process_lifecycle_rejections_are_admission_errors_without_new_faults ... ok
+test oversized_inspection_is_a_bounded_recoverable_reply ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fault_examples.rs (target/debug/deps/fault_examples-721530246a83b84d)
+
+running 4 tests
+/tmp/nix-shell.2exikj/.tmpppmJ2f/projects
+test output_reservation_allows_supplied_init_binaries_and_retains_subsequent_failure ... ok
+test refusing_reused_evidence_output_keeps_the_previous_report_and_logs_unchanged ... ok
+test python_projects_share_client_and_use_a_dedicated_runtime_controller ... ok
+test actual_python_services_and_independent_client_verify_two_restarts ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
+
+     Running tests/faults.rs (target/debug/deps/faults-2f939e8909d09ddc)
+
+running 7 tests
+test malformed_world_faults_return_errors_instead_of_panicking ... ok
+test same_time_partition_then_heal_completes_in_author_order_before_new_sends ... ok
+test process_commands_wait_for_ready_and_undispatched_acks_cannot_fulfill_them ... ok
+test already_routed_frames_survive_same_time_partition_and_events_keep_sequence ... ok
+test overlapping_handles_only_heal_their_own_links_and_order_is_stable ... ok
+test ack_identity_machine_effect_time_deadline_and_state_fail_closed ... ok
+test scheduling_cost_tracks_only_outstanding_work_not_completed_history ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/guest.rs (target/debug/deps/guest-0c009e0f17eb8568)
+
+running 4 tests
+test large_image_boot_floor_accounts_for_resident_archive_and_root_tmpfs ... ok
+test binary_recipe_keeps_arguments_and_config_bytes_literal ... ok
+test unsupported_image_capabilities_are_not_silently_dropped ... ok
+test initramfs_round_trip_preserves_image_files_modes_and_hardlinks ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/guest_control.rs (target/debug/deps/guest_control-a77704ef621c6f9c)
+
+running 1 test
+test actual_guest_command_parser_rejects_ambiguous_and_uncorrelated_ids ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+     Running tests/network_sampling.rs (target/debug/deps/network_sampling-32fa957fccad631a)
+
+running 1 test
+test inspection_excludes_future_and_equal_time_events_regardless_of_early_dma ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/oci.rs (target/debug/deps/oci-bb857bd7d318551f)
+
+running 4 tests
+test dockerfile_layers_apply_whiteouts_and_preserve_launch_metadata ... ignored, requires Linux root, Podman, skopeo and umoci from the Nix shell
+test real_registry_images_use_the_verified_import_path ... ignored, requires Linux root, registry access, skopeo and umoci from the Nix shell
+test foreign_platform_and_image_lifecycle_hooks_fail_before_execution ... ok
+test metadata_verifies_platform_descriptors_and_retains_original_manifest ... ok
+
+test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/orchestration.rs (target/debug/deps/orchestration-da1f2d2539f15145)
+
+running 23 tests
+test content_store_never_silently_repairs_corruption_or_accepts_path_digests ... ok
+test backend_cannot_report_success_after_wall_deadline ... ok
+test manifest_corruption_is_rejected_before_a_fresh_attempt ... ok
+test concurrent_runs_share_content_but_never_output_directories ... ok
+test network_effects_have_no_single_service_target ... ok
+test co_located_services_use_one_machine_state_digest_and_complete_placement ... ok
+test oversized_logs_are_explicitly_omitted_from_store_and_preserved_in_attempt ... ok
+test fault_comparison_uses_acknowledged_effect_time_and_rejects_invalid_acknowledgements ... ok
+test performance_changes_are_recorded_without_changing_identity_or_bypassing_comparison ... ok
+test reproduced_application_failure_is_separate_from_replay_mismatch ... ok
+test cross_engine_replay_is_explicit_retained_and_still_checks_semantics_and_witness ... ok
+test run_retains_inputs_result_logs_and_replay_does_not_prepare_again ... ok
+test early_termination_preserves_reason_and_specific_fault_error ... ok
+test unexpected_panic_leaves_an_inspectable_incomplete_attempt ... ok
+test schedule_controls_reach_executor_and_change_identity ... ok
+test corruption_missing_artifacts_and_profile_drift_prevent_execution ... ok
+test requested_full_state_requires_a_digest_for_every_machine ... ok
+test unexpected_backend_failure_and_cancellation_retain_logs ... ok
+test seed_kernel_build_and_configuration_changes_create_new_identities ... ok
+test wall_limit_is_infrastructure_but_simulated_limit_can_reproduce ... ok
+test large_artifacts_stream_with_bounded_reads_and_corrupt_copies_are_not_published ... ok
+test witness_fault_history_and_full_state_comparisons_are_distinct ... ok
+test limits_cancellation_and_missing_completion_cannot_pass ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.07s
+
+     Running tests/templates.rs (target/debug/deps/templates-d7cfcf92bc26dc5c)
+
+running 5 tests
+test redis_workload::tests::request_encoding_preserves_argument_boundaries ... ok
+test redis_workload::tests::bulk_values_keep_binary_contents_and_nil_is_distinct ... ok
+test redis_workload::tests::invalid_and_error_responses_fail ... ok
+test generated_templates_are_self_contained_and_preserve_the_existing_etcd_checker ... ok
+test init_cli_refuses_to_overwrite_an_existing_project ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/vmm.rs (target/debug/deps/vmm-acb4a201da771915)
+
+running 10 tests
+test world_uses_verified_artifacts_and_explicit_placement ... ok
+test application_exit_255_remains_distinct_from_infrastructure_failure ... ok
+test reports_reject_wrong_seed_missing_state_and_duplicate_machines ... ok
+test in_flight_reply_at_world_cutoff_keeps_outcome_even_when_other_clock_is_later ... ok
+test transcript_correlates_global_relay_and_connection_local_ids ... ok
+test runtime_report_rejects_impossible_sleep_and_now_metadata ... ok
+test pending_rpc_at_world_cutoff_preserves_timeout_and_workload_failure ... ok
+test typed_network_plan_preserves_targets_without_attributing_check_service ... ok
+test runtime_requests_resolve_placement_and_reports_validate_rpc_causality ... ok
+test process_target_exit_after_admission_is_a_recoverable_unavailable_fault ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/vmm_console.rs (target/debug/deps/vmm_console-04504e996d000e03)
+
+running 6 tests
+test queue_configuration_rejects_bad_sizes_selectors_and_unnegotiated_features ... ok
+test standard_non_console_port_handshake_names_port_and_signals_dma ... ok
+test transmit_is_bulk_stream_across_chains_and_fragmented_notifications ... ok
+test receive_backpressure_is_bounded_and_reset_preserves_uncollected_dirty_ranges ... ok
+test descriptor_validation_rejects_bounds_cycles_direction_and_ring_overrun_before_dma ... ok
+test receive_retains_partial_bytes_and_journals_every_dma_write ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/vmm_devices.rs (target/debug/deps/vmm_devices-cf72643dfaf11e5d)
+
+running 4 tests
+test uart_baud_register_writes_do_not_enter_console_output ... ok
+test receiver_not_ready_drops_and_ready_dma_reports_acceptance_with_irq ... ok
+test accepted_backlog_has_no_irq_until_dma_and_full_backlog_drops ... ok
+test uart_output_is_persisted_before_completion_and_limited_without_truncation ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/seedbox_control-fe52254485698337)
+
+running 1 test
+test tests::strict_wire_rejects_unknown_fields_bad_targets_and_duplicate_identity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests seedbox
+
+running 1 test
+test crates/seedbox/src/lib.rs - (line 102) - compile ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+   Doc-tests seedbox_control
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[20:48:29] portable: bash -n
+[20:48:29] portable: runner unit tests
+[20:48:32] portable: Python control API
+[20:48:32] portable: seedbox crate tests
+ok [PASS] portable: bash -n: 13 command(s) passed
+ok [PASS] portable: runner unit tests: 1 command(s) passed
+ok [PASS] portable: Python control API: 1 command(s) passed
+-- [SKIPPED] portable: VMM cargo test: kvm-ioctls builds only on Linux
+ok [PASS] portable: seedbox crate tests: 1 command(s) passed
+
+PASS (portable, 7.0 s wall)

@@ -1,0 +1,1002 @@
+{
+  "active_processes": {
+    "argv": [
+      "ps",
+      "-eo",
+      "pid,ppid,psr,pcpu,pmem,etime,comm",
+      "--sort=-pcpu"
+    ],
+    "returncode": 0,
+    "stderr": "",
+    "stdout": "    PID    PPID PSR %CPU %MEM     ELAPSED COMMAND\n3137925 3137924  16 92.6  0.0       00:00 baseline-seedbo\n3137886 3137885   9 79.1  0.0       00:01 python3\n   1676       1   5  0.9  0.0  7-05:03:52 .coolercontrold\n   1683       1   6  0.2  0.0  7-05:03:52 node_exporter\n   1672       1  16  0.2  0.1  7-05:03:52 alloy\n    222       2  21  0.1  0.0  7-05:05:05 kcompactd0\n   2066    1676   6  0.1  0.0  7-05:03:49 coolercontrol-l\n   1168       1  20  0.1  0.0  7-05:03:52 avahi-daemon\n2776200 2774960  31  0.1  0.1    03:22:01 .xdg-desktop-po\n2775277 2774960   1  0.1  0.3    03:22:04 .gnome-shell-wr\n    902       2  19  0.1  0.0  7-05:03:55 mt76-usb-rx phy0\n   2284       1   6  0.1  0.0  7-05:03:46 .tailscaled-wra\n      1       0   6  0.0  0.0  7-05:05:05 systemd\n2774960       1   9  0.0  0.0    03:22:06 systemd\n2775046       1   5  0.0  0.0    03:22:06 systemd\n    238       2   5  0.0  0.0  7-05:05:05 kswapd0\n    525       2   6  0.0  0.0  7-05:03:58 jbd2/nvme1n1p2-8\n   1162    1161  18  0.0  0.0  7-05:03:52 dbus-broker\n2775112 2775046  20  0.0  0.1    03:22:05 codex\n2296730       2  18  0.0  0.0    11:15:50 kworker/u128:1-phy0\n2895095       2  23  0.0  0.0    02:36:58 kworker/u128:0-phy0\n    668       1  22  0.0  0.1  7-05:03:56 systemd-journal\n2301144       1  27  0.0  0.0    11:12:01 polkitd\n2774884    1723  30  0.0  0.0    03:22:15 gdm-session-wor\n1300955       1   0  0.0  0.0  5-08:46:03 adb\n   1139       2   7  0.0  0.0  7-05:03:54 mt76-tx phy0\n   1689       1  13  0.0  0.0  7-05:03:52 nvidia_gpu_expo\n     16       2  14  0.0  0.0  7-05:05:05 rcu_preempt\n3136057       2  21  0.0  0.0       01:46 kworker/u129:8-events_unbound\n3127341       2   0  0.0  0.0       04:51 kworker/u129:3-ext4-rsv-conversion\n3126460       2   7  0.0  0.0       10:45 kworker/u129:2-ext4-rsv-conversion\n   1690       1   5  0.0  0.0  7-05:03:52 smartctl_export\n    903       2  22  0.0  0.0  7-05:03:55 mt76-usb-status phy0\n   1157       1   2  0.0  0.0  7-05:03:53 systemd-resolve\n2609338       2   9  0.0  0.0    05:42:41 kworker/9:2-events\n   1174       1  12  0.0  0.0  7-05:03:52 nsncd\n   2281       1   6  0.0  0.0  7-05:03:46 beszel-agent\n   1165       1   2  0.0  0.0  7-05:03:52 NetworkManager\n3121635       2  17  0.0  0.0       52:51 kworker/u129:0-flush-259:1\n    670       1  20  0.0  0.0  7-05:03:56 systemd-oomd\n2810407       1  24  0.0  0.0    02:57:40 zsh\n3047004       2   0  0.0  0.0    01:30:31 kworker/0:2-mm_percpu_wq\n   1222       1   0  0.0  0.0  7-05:03:52 systemd-logind\n   1241       1   1  0.0  0.0  7-05:03:52 cups-browsed\n2794510       2  25  0.0  0.0    03:12:17 kworker/25:1-mm_percpu_wq\n3125476       2   7  0.0  0.0       19:24 kworker/u129:1-flush-259:1\n2731766       2   2  0.0  0.0    03:29:22 kworker/2:0-events\n3123331       2  22  0.0  0.0       37:49 kworker/u129:4-writeback\n2790759       2  24  0.0  0.0    03:14:05 kworker/24:2-mm_percpu_wq\n2791180       2  31  0.0  0.0    03:14:03 kworker/31:0-mm_percpu_wq\n    704       1   7  0.0  0.0  7-05:03:56 systemd-udevd\n2992312       1   1  0.0  0.0    02:06:18 zsh\n2775101 2775098  25  0.0  0.0    03:22:05 dbus-broker\n2925481       1  15  0.0  0.0    02:22:11 zsh\n2795503       2  10  0.0  0.0    03:11:35 kworker/10:2-mm_percpu_wq\n2791206       2  30  0.0  0.0    03:14:03 kworker/30:1-mm_percpu_wq\n2928710       2   1  0.0  0.0    02:22:07 kworker/1:0-mm_percpu_wq\n3047283       2  15  0.0  0.0    01:30:30 kworker/15:0-mm_percpu_wq\n2775102 2775099  17  0.0  0.0    03:22:05 dbus-broker\n2702080       2  28  0.0  0.0    03:58:26 kworker/28:0-mm_percpu_wq\n2810098       2   4  0.0  0.0    02:57:41 kworker/4:1-mm_percpu_wq\n3126878       2   6  0.0  0.0       07:15 kworker/6:0-mm_percpu_wq\n2854424       2   8  0.0  0.0    02:46:52 kworker/8:0-mm_percpu_wq\n2548956       2   6  0.0  0.0    06:36:17 kworker/6:2-events\n     24       2   1  0.0  0.0  7-05:05:05 migration/1\n2774908       2  18  0.0  0.0    03:22:10 usb-storage\n2776112 2774960  23  0.0  0.0    03:22:02 wireplumber\n2776002 2774960  20  0.0  0.0    03:22:02 .gsd-sharing-wr\n3046995       2  12  0.0  0.0    01:30:31 kworker/12:2-mm_percpu_wq\n2629341       2  26  0.0  0.0    05:20:12 kworker/26:0-mm_percpu_wq\n2554996       2   3  0.0  0.0    06:31:38 kworker/3:0-mm_percpu_wq\n     30       2   2  0.0  0.0  7-05:05:05 migration/2\n2846992       2  16  0.0  0.0    02:51:57 kworker/16:1-events\n2962143 2962142   0  0.0  0.0    02:17:07 zsh\n2855186 2855185   9  0.0  0.0    02:45:59 zsh\n2934868       2  14  0.0  0.0    02:20:41 kworker/14:0-mm_percpu_wq\n2895538       2  15  0.0  0.0    02:36:54 kworker/15:1-cgroup_release\n2618957       2  18  0.0  0.0    05:24:58 kworker/18:0-mm_percpu_wq\n2504076       2  29  0.0  0.0    07:46:17 kworker/29:0-mm_percpu_wq\n    121       2  17  0.0  0.0  7-05:05:05 migration/17\n     60       2   7  0.0  0.0  7-05:05:05 migration/7\n     36       2   3  0.0  0.0  7-05:05:05 migration/3\n2546349       2   7  0.0  0.0    06:39:06 kworker/7:1-mm_percpu_wq\n2373195       2  12  0.0  0.0    09:55:58 kworker/12:0-events\n     15       2   0  0.0  0.0  7-05:05:05 ksoftirqd/0\n     42       2   4  0.0  0.0  7-05:05:05 migration/4\n     54       2   6  0.0  0.0  7-05:05:05 migration/6\n2927351       2  11  0.0  0.0    02:22:09 kworker/11:2-mm_percpu_wq\n2795493       2  21  0.0  0.0    03:11:35 kworker/21:2-mm_percpu_wq\n   1179       1   7  0.0  0.0  7-05:03:52 systemd-machine\n2326490       2  20  0.0  0.0    10:07:33 psimon\n2774790       2  19  0.0  0.0    03:22:19 kworker/19:1-mm_percpu_wq\n2301145       1  17  0.0  0.0    11:12:01 accounts-daemon\n3123277       2   5  0.0  0.0       38:12 kworker/5:2-mm_percpu_wq\n2774782       2  17  0.0  0.0    03:22:19 kworker/17:1-mm_percpu_wq\n     66       2   8  0.0  0.0  7-05:05:05 migration/8\n2626644       2  13  0.0  0.0    05:20:16 kworker/13:2-events\n    133       2  19  0.0  0.0  7-05:05:05 migration/19\n     19       2   0  0.0  0.0  7-05:05:05 migration/0\n     78       2  10  0.0  0.0  7-05:05:05 migration/10\n2776156 2774960   3  0.0  0.0    03:22:01 .xdg-desktop-po\n2302686 2302683  21  0.0  0.0    11:05:56 sshd-session\n2496756       2  20  0.0  0.0    07:56:39 kworker/20:1-events\n2927449       2  22  0.0  0.0    02:22:09 kworker/22:0-mm_percpu_wq\n2776337 2774960   6  0.0  0.0    03:22:01 .xdg-desktop-po\n2776283       1   2  0.0  0.0    03:22:01 ModemManager\n2776101 2774960   2  0.0  0.0    03:22:02 pipewire\n     72       2   9  0.0  0.0  7-05:05:05 migration/9\n    127       2  18  0.0  0.0  7-05:05:05 migration/18\n2302687 2302686  19  0.0  0.0    11:05:56 zsh\n   1293       1  18  0.0  0.0  7-05:03:52 wpa_supplicant\n     49       2   5  0.0  0.0  7-05:05:05 ksoftirqd/5\n2776317 2775277  25  0.0  0.0    03:22:01 .mutter-x11-fra\n     84       2  11  0.0  0.0  7-05:05:05 migration/11\n2776180 2775277  15  0.0  0.1    03:22:01 Xwayland\n     90       2  12  0.0  0.0  7-05:05:05 migration/12\n     96       2  13  0.0  0.0  7-05:05:05 migration/13\n2776305 2774960  31  0.0  0.0    03:22:01 .gsd-xsettings-\n    115       2  16  0.0  0.0  7-05:05:05 ksoftirqd/16\n     48       2   5  0.0  0.0  7-05:05:05 migration/5\n    175       2  26  0.0  0.0  7-05:05:05 migration/26\n    102       2  14  0.0  0.0  7-05:05:05 migration/14\n2933455       2  27  0.0  0.0    02:20:50 kworker/27:1-events\n    108       2  15  0.0  0.0  7-05:05:05 migration/15\n2775208 2774960  23  0.0  0.0    03:22:05 .gnome-session-\n3083686       2  23  0.0  0.0    01:15:23 kworker/23:2-mm_percpu_wq\n    146       2  21  0.0  0.0  7-05:05:05 ksoftirqd/21\n2539215       2  31  0.0  0.0    07:12:20 kworker/31:1-events\n    163       2  24  0.0  0.0  7-05:05:05 migration/24\n    193       2  29  0.0  0.0  7-05:05:05 migration/29\n    234       2   6  0.0  0.0  7-05:05:05 kworker/6:1H-kblockd\n    288       2   7  0.0  0.0  7-05:05:04 kworker/7:1H-kblockd\n   1693       1   1  0.0  0.0  7-05:03:52 sshd\n    289       2   5  0.0  0.0  7-05:05:04 kworker/5:1H-kblockd\n2220004       2  24  0.0  0.0    13:06:26 kworker/24:0-events\n    248       2   0  0.0  0.0  7-05:05:04 kworker/0:1H-kblockd\n    139       2  20  0.0  0.0  7-05:05:05 migration/20\n     55       2   6  0.0  0.0  7-05:05:05 ksoftirqd/6\n2775999 2774960   0  0.0  0.0    03:22:02 .gsd-media-keys\n     25       2   1  0.0  0.0  7-05:05:05 ksoftirqd/1\n    254       2  16  0.0  0.0  7-05:05:04 kworker/16:1H-kblockd\n   1169       1  14  0.0  0.0  7-05:03:52 bluetoothd\n2775987 2774960  23  0.0  0.0    03:22:02 .org.gnome.Shel\n    157       2  23  0.0  0.0  7-05:05:05 migration/23\n    253       2   1  0.0  0.0  7-05:05:04 kworker/1:1H-kblockd\n    187       2  28  0.0  0.0  7-05:05:05 migration/28\n    276       2   4  0.0  0.0  7-05:05:04 kworker/4:1H-kblockd\n2776000 2774960   0  0.0  0.0    03:22:02 .gsd-power-wrap\n    283       2  17  0.0  0.0  7-05:05:04 kworker/17:1H-kblockd\n    295       2   2  0.0  0.0  7-05:05:04 kworker/2:1H-kblockd\n     61       2   7  0.0  0.0  7-05:05:05 ksoftirqd/7\n2776324 2774960  23  0.0  0.0    03:22:01 .ibus-x11-wrapp\n2776070 2774960  24  0.0  0.0    03:22:02 .org.gnome.Scre\n    151       2  22  0.0  0.0  7-05:05:05 migration/22\n    205       2  31  0.0  0.0  7-05:05:05 migration/31\n    281       2  18  0.0  0.0  7-05:05:04 kworker/18:1H-kblockd\n   1937       1   6  0.0  0.0  7-05:03:49 upowerd\n2776091 2774960  17  0.0  0.0    03:22:02 .sunshine-wrapp\n2775778 2774960  16  0.0  0.0    03:22:02 at-spi2-registr\n    405       2  21  0.0  0.0  7-05:05:04 kworker/21:1H-kblockd\n    181       2  27  0.0  0.0  7-05:05:05 migration/27\n    407       2  22  0.0  0.0  7-05:05:04 kworker/22:1H-kblockd\n    169       2  25  0.0  0.0  7-05:05:05 migration/25\n    199       2  30  0.0  0.0  7-05:05:05 migration/30\n    403       2  23  0.0  0.0  7-05:05:04 kworker/23:1H-kblockd\n    224       2  27  0.0  0.0  7-05:05:05 khugepaged\n    284       2   3  0.0  0.0  7-05:05:04 kworker/3:1H-kblockd\n    278       2  19  0.0  0.0  7-05:05:04 kworker/19:1H-kblockd\n    404       2  20  0.0  0.0  7-05:05:04 kworker/20:1H-kblockd\n     31       2   2  0.0  0.0  7-05:05:05 ksoftirqd/2\n2775996 2774960  30  0.0  0.0    03:22:02 .ibus-daemon-wr\n     43       2   4  0.0  0.0  7-05:05:05 ksoftirqd/4\n   1883       1  23  0.0  0.0  7-05:03:51 rtkit-daemon\n2775724 2775723   5  0.0  0.0    03:22:02 dbus-broker\n3122826       2   9  0.0  0.0       42:15 kworker/u130:1-flush-259:1\n    410       2   9  0.0  0.0  7-05:05:04 kworker/9:1H-kblockd\n    122       2  17  0.0  0.0  7-05:05:05 ksoftirqd/17\n    152       2  22  0.0  0.0  7-05:05:05 ksoftirqd/22\n    128       2  18  0.0  0.0  7-05:05:05 ksoftirqd/18\n    158       2  23  0.0  0.0  7-05:05:05 ksoftirqd/23\n2776108 2774960   6  0.0  0.0    03:22:02 pipewire-pulse\n    353       2  11  0.0  0.0  7-05:05:04 kworker/11:1H-kblockd\n     73       2   9  0.0  0.0  7-05:05:05 ksoftirqd/9\n   1723       1  20  0.0  0.0  7-05:03:52 gdm\n   1371       1   1  0.0  0.0  7-05:03:52 nix-daemon\n     37       2   3  0.0  0.0  7-05:05:05 ksoftirqd/3\n    114       2  16  0.0  0.0  7-05:05:05 migration/16\n     85       2  11  0.0  0.0  7-05:05:05 ksoftirqd/11\n    145       2  21  0.0  0.0  7-05:05:05 migration/21\n    408       2  10  0.0  0.0  7-05:05:04 kworker/10:1H-kblockd\n    140       2  20  0.0  0.0  7-05:05:05 ksoftirqd/20\n     18       2  19  0.0  0.0  7-05:05:05 rcu_exp_gp_kthread_worker\n     91       2  12  0.0  0.0  7-05:05:05 ksoftirqd/12\n    256       2  12  0.0  0.0  7-05:05:04 kworker/12:1H-kblockd\n    287       2  15  0.0  0.0  7-05:05:04 kworker/15:1H-kblockd\n    275       2  14  0.0  0.0  7-05:05:04 kworker/14:1H-kblockd\n     79       2  10  0.0  0.0  7-05:05:05 ksoftirqd/10\n    417       2   8  0.0  0.0  7-05:05:04 kworker/8:1H-kblockd\n    103       2  14  0.0  0.0  7-05:05:05 ksoftirqd/14\n    109       2  15  0.0  0.0  7-05:05:05 ksoftirqd/15\n    134       2  19  0.0  0.0  7-05:05:05 ksoftirqd/19\n    406       2  13  0.0  0.0  7-05:05:04 kworker/13:1H-kblockd\n    293       2  25  0.0  0.0  7-05:05:04 kworker/25:1H-kblockd\n    170       2  25  0.0  0.0  7-05:05:05 ksoftirqd/25\n    409       2  24  0.0  0.0  7-05:05:04 kworker/24:1H-kblockd\n    411       2  27  0.0  0.0  7-05:05:04 kworker/27:1H-kblockd\n2776001 2774960  16  0.0  0.0    03:22:02 .gsd-rfkill-wra\n2775098 2774960  30  0.0  0.0    03:22:05 dbus-broker-lau\n    699       1   6  0.0  0.0  7-05:03:56 systemd-timesyn\n    164       2  24  0.0  0.0  7-05:05:05 ksoftirqd/24\n     17       2   3  0.0  0.0  7-05:05:05 rcu_exp_par_gp_kthread_worker/1\n    298       2  26  0.0  0.0  7-05:05:04 kworker/26:1H-kblockd\n     97       2  13  0.0  0.0  7-05:05:05 ksoftirqd/13\n    413       2  28  0.0  0.0  7-05:05:04 kworker/28:1H-kblockd\n     67       2   8  0.0  0.0  7-05:05:05 ksoftirqd/8\n    217       2   6  0.0  0.0  7-05:05:05 khungtaskd\n    415       2  31  0.0  0.0  7-05:05:04 kworker/31:1H-kblockd\n    206       2  31  0.0  0.0  7-05:05:05 ksoftirqd/31\n    412       2  29  0.0  0.0  7-05:05:04 kworker/29:1H-kblockd\n    414       2  30  0.0  0.0  7-05:05:04 kworker/30:1H-kblockd\n    182       2  27  0.0  0.0  7-05:05:05 ksoftirqd/27\n2927497       2   8  0.0  0.0    02:22:09 kworker/8:1-events\n      2       0  18  0.0  0.0  7-05:05:05 kthreadd\n    188       2  28  0.0  0.0  7-05:05:05 ksoftirqd/28\n    200       2  30  0.0  0.0  7-05:05:05 ksoftirqd/30\n    176       2  26  0.0  0.0  7-05:05:05 ksoftirqd/26\n    194       2  29  0.0  0.0  7-05:05:05 ksoftirqd/29\n2776349 2774960   8  0.0  0.0    03:22:01 .gnome-keyring-\n2776099 2774960  23  0.0  0.0    03:22:02 .ibus-portal-wr\n2775997 2774960  30  0.0  0.0    03:22:02 .gsd-a11y-setti\n2775998 2774960  30  0.0  0.0    03:22:02 .gsd-keyboard-w\n2776003 2774960  31  0.0  0.0    03:22:02 .gsd-smartcard-\n2776004 2774960  22  0.0  0.0    03:22:02 .gsd-usb-protec\n2775717 2774960  23  0.0  0.0    03:22:02 .at-spi-bus-lau\n2775122 2775113  18  0.0  0.0    03:22:05 .gnome-session-\n2775103 2774960   0  0.0  0.0    03:22:05 gcr-ssh-agent\n2775104 2775046  17  0.0  0.0    03:22:05 auto-fix-vscode\n2775108 2775046  19  0.0  0.0    03:22:05 gcr-ssh-agent\n2775099 2775046   0  0.0  0.0    03:22:05 dbus-broker-lau\n   1161       1  27  0.0  0.0  7-05:03:53 dbus-broker-lau\n   1132       2  27  0.0  0.0  7-05:03:55 nvidia-modeset/kthread_q\n   1746       1  14  0.0  0.0  7-05:03:51 .colord-wrapped\n   1083       2   5  0.0  0.0  7-05:03:55 UVM global queue\n   1085       2   1  0.0  0.0  7-05:03:55 UVM Tools Event Queue\n   1166       1  17  0.0  0.0  7-05:03:52 acpid\n   1719       1  17  0.0  0.0  7-05:03:52 cupsd\n   1163       1   0  0.0  0.0  7-05:03:52 udevmon\n      3       2   1  0.0  0.0  7-05:05:05 pool_workqueue_release\n      4       2   0  0.0  0.0  7-05:05:05 kworker/R-rcu_gp\n      5       2   0  0.0  0.0  7-05:05:05 kworker/R-sync_wq\n      6       2   0  0.0  0.0  7-05:05:05 kworker/R-kvfree_rcu_reclaim\n      7       2   0  0.0  0.0  7-05:05:05 kworker/R-slub_flushwq\n      8       2   0  0.0  0.0  7-05:05:05 kworker/R-netns\n     10       2   0  0.0  0.0  7-05:05:05 kworker/0:0H-events_highpri\n     13       2   0  0.0  0.0  7-05:05:05 kworker/R-mm_percpu_wq\n     20       2   0  0.0  0.0  7-05:05:05 idle_inject/0\n     21       2   0  0.0  0.0  7-05:05:05 cpuhp/0\n     22       2   1  0.0  0.0  7-05:05:05 cpuhp/1\n     23       2   1  0.0  0.0  7-05:05:05 idle_inject/1\n     27       2   1  0.0  0.0  7-05:05:05 kworker/1:0H-events_highpri\n     28       2   2  0.0  0.0  7-05:05:05 cpuhp/2\n     29       2   2  0.0  0.0  7-05:05:05 idle_inject/2\n     33       2   2  0.0  0.0  7-05:05:05 kworker/2:0H-events_highpri\n     34       2   3  0.0  0.0  7-05:05:05 cpuhp/3\n     35       2   3  0.0  0.0  7-05:05:05 idle_inject/3\n     39       2   3  0.0  0.0  7-05:05:05 kworker/3:0H-events_highpri\n     40       2   4  0.0  0.0  7-05:05:05 cpuhp/4\n     41       2   4  0.0  0.0  7-05:05:05 idle_inject/4\n     45       2   4  0.0  0.0  7-05:05:05 kworker/4:0H-events_highpri\n     46       2   5  0.0  0.0  7-05:05:05 cpuhp/5\n     47       2   5  0.0  0.0  7-05:05:05 idle_inject/5\n     51       2   5  0.0  0.0  7-05:05:05 kworker/5:0H-events_highpri\n     52       2   6  0.0  0.0  7-05:05:05 cpuhp/6\n     53       2   6  0.0  0.0  7-05:05:05 idle_inject/6\n     57       2   6  0.0  0.0  7-05:05:05 kworker/6:0H-events_highpri\n     58       2   7  0.0  0.0  7-05:05:05 cpuhp/7\n     59       2   7  0.0  0.0  7-05:05:05 idle_inject/7\n     63       2   7  0.0  0.0  7-05:05:05 kworker/7:0H-events_highpri\n     64       2   8  0.0  0.0  7-05:05:05 cpuhp/8\n     65       2   8  0.0  0.0  7-05:05:05 idle_inject/8\n     69       2   8  0.0  0.0  7-05:05:05 kworker/8:0H-events_highpri\n     70       2   9  0.0  0.0  7-05:05:05 cpuhp/9\n     71       2   9  0.0  0.0  7-05:05:05 idle_inject/9\n     75       2   9  0.0  0.0  7-05:05:05 kworker/9:0H-events_highpri\n     76       2  10  0.0  0.0  7-05:05:05 cpuhp/10\n     77       2  10  0.0  0.0  7-05:05:05 idle_inject/10\n     81       2  10  0.0  0.0  7-05:05:05 kworker/10:0H-events_highpri\n     82       2  11  0.0  0.0  7-05:05:05 cpuhp/11\n     83       2  11  0.0  0.0  7-05:05:05 idle_inject/11\n     87       2  11  0.0  0.0  7-05:05:05 kworker/11:0H-events_highpri\n     88       2  12  0.0  0.0  7-05:05:05 cpuhp/12\n     89       2  12  0.0  0.0  7-05:05:05 idle_inject/12\n     93       2  12  0.0  0.0  7-05:05:05 kworker/12:0H-events_highpri\n     94       2  13  0.0  0.0  7-05:05:05 cpuhp/13\n     95       2  13  0.0  0.0  7-05:05:05 idle_inject/13\n     99       2  13  0.0  0.0  7-05:05:05 kworker/13:0H-events_highpri\n    100       2  14  0.0  0.0  7-05:05:05 cpuhp/14\n    101       2  14  0.0  0.0  7-05:05:05 idle_inject/14\n    105       2  14  0.0  0.0  7-05:05:05 kworker/14:0H-events_highpri\n    106       2  15  0.0  0.0  7-05:05:05 cpuhp/15\n    107       2  15  0.0  0.0  7-05:05:05 idle_inject/15\n    111       2  15  0.0  0.0  7-05:05:05 kworker/15:0H-events_highpri\n    112       2  16  0.0  0.0  7-05:05:05 cpuhp/16\n    113       2  16  0.0  0.0  7-05:05:05 idle_inject/16\n    117       2  16  0.0  0.0  7-05:05:05 kworker/16:0H-events_highpri\n    118       2   0  0.0  0.0  7-05:05:05 rcu_exp_par_gp_kthread_worker/2\n    119       2  17  0.0  0.0  7-05:05:05 cpuhp/17\n    120       2  17  0.0  0.0  7-05:05:05 idle_inject/17\n    124       2  17  0.0  0.0  7-05:05:05 kworker/17:0H-events_highpri\n    125       2  18  0.0  0.0  7-05:05:05 cpuhp/18\n    126       2  18  0.0  0.0  7-05:05:05 idle_inject/18\n    130       2  18  0.0  0.0  7-05:05:05 kworker/18:0H-events_highpri\n    131       2  19  0.0  0.0  7-05:05:05 cpuhp/19\n    132       2  19  0.0  0.0  7-05:05:05 idle_inject/19\n    136       2  19  0.0  0.0  7-05:05:05 kworker/19:0H-events_highpri\n    137       2  20  0.0  0.0  7-05:05:05 cpuhp/20\n    138       2  20  0.0  0.0  7-05:05:05 idle_inject/20\n    142       2  20  0.0  0.0  7-05:05:05 kworker/20:0H-events_highpri\n    143       2  21  0.0  0.0  7-05:05:05 cpuhp/21\n    144       2  21  0.0  0.0  7-05:05:05 idle_inject/21\n    148       2  21  0.0  0.0  7-05:05:05 kworker/21:0H-events_highpri\n    149       2  22  0.0  0.0  7-05:05:05 cpuhp/22\n    150       2  22  0.0  0.0  7-05:05:05 idle_inject/22\n    154       2  22  0.0  0.0  7-05:05:05 kworker/22:0H-events_highpri\n    155       2  23  0.0  0.0  7-05:05:05 cpuhp/23\n    156       2  23  0.0  0.0  7-05:05:05 idle_inject/23\n    160       2  23  0.0  0.0  7-05:05:05 kworker/23:0H-events_highpri\n    161       2  24  0.0  0.0  7-05:05:05 cpuhp/24\n    162       2  24  0.0  0.0  7-05:05:05 idle_inject/24\n    166       2  24  0.0  0.0  7-05:05:05 kworker/24:0H-events_highpri\n    167       2  25  0.0  0.0  7-05:05:05 cpuhp/25\n    168       2  25  0.0  0.0  7-05:05:05 idle_inject/25\n    172       2  25  0.0  0.0  7-05:05:05 kworker/25:0H-events_highpri\n    173       2  26  0.0  0.0  7-05:05:05 cpuhp/26\n    174       2  26  0.0  0.0  7-05:05:05 idle_inject/26\n    178       2  26  0.0  0.0  7-05:05:05 kworker/26:0H-events_highpri\n    179       2  27  0.0  0.0  7-05:05:05 cpuhp/27\n    180       2  27  0.0  0.0  7-05:05:05 idle_inject/27\n    184       2  27  0.0  0.0  7-05:05:05 kworker/27:0H-events_highpri\n    185       2  28  0.0  0.0  7-05:05:05 cpuhp/28\n    186       2  28  0.0  0.0  7-05:05:05 idle_inject/28\n    190       2  28  0.0  0.0  7-05:05:05 kworker/28:0H-events_highpri\n    191       2  29  0.0  0.0  7-05:05:05 cpuhp/29\n    192       2  29  0.0  0.0  7-05:05:05 idle_inject/29\n    196       2  29  0.0  0.0  7-05:05:05 kworker/29:0H-events_highpri\n    197       2  30  0.0  0.0  7-05:05:05 cpuhp/30\n    198       2  30  0.0  0.0  7-05:05:05 idle_inject/30\n    202       2  30  0.0  0.0  7-05:05:05 kworker/30:0H-events_highpri\n    203       2  31  0.0  0.0  7-05:05:05 cpuhp/31\n    204       2  31  0.0  0.0  7-05:05:05 idle_inject/31\n    208       2  31  0.0  0.0  7-05:05:05 kworker/31:0H-events_highpri\n    211       2  30  0.0  0.0  7-05:05:05 kdevtmpfs\n    212       2  12  0.0  0.0  7-05:05:05 kworker/R-inet_frag_wq\n    213       2  29  0.0  0.0  7-05:05:05 rcu_tasks_kthread\n    214       2  12  0.0  0.0  7-05:05:05 rcu_tasks_rude_kthread\n    215       2  12  0.0  0.0  7-05:05:05 rcu_tasks_trace_kthread\n    216       2  12  0.0  0.0  7-05:05:05 kauditd\n    219       2   9  0.0  0.0  7-05:05:05 oom_reaper\n    221       2   8  0.0  0.0  7-05:05:05 kworker/R-writeback\n    223       2   8  0.0  0.0  7-05:05:05 ksmd\n    225       2   8  0.0  0.0  7-05:05:05 kworker/R-kblockd\n    226       2   8  0.0  0.0  7-05:05:05 kworker/R-blkcg_punt_bio\n    227       2   8  0.0  0.0  7-05:05:05 kworker/R-kintegrityd\n    229       2   1  0.0  0.0  7-05:05:05 irq/9-acpi\n    230       2   8  0.0  0.0  7-05:05:05 kworker/R-tpm_dev_wq\n    231       2   8  0.0  0.0  7-05:05:05 kworker/R-devfreq_wq\n    232       2  31  0.0  0.0  7-05:05:05 kworker/R-quota_events_unbound\n    237       2   2  0.0  0.0  7-05:05:05 irq/26-AMD-Vi\n    239       2  12  0.0  0.0  7-05:05:05 kworker/R-kthrotld\n    240       2  16  0.0  0.0  7-05:05:05 kworker/u131:0-hci0\n    241       2   4  0.0  0.0  7-05:05:05 irq/28-aerdrv\n    242       2   5  0.0  0.0  7-05:05:05 irq/29-aerdrv\n    243       2   6  0.0  0.0  7-05:05:05 irq/30-aerdrv\n    244       2   7  0.0  0.0  7-05:05:05 irq/32-aerdrv\n    245       2   8  0.0  0.0  7-05:05:05 irq/33-aerdrv\n    246       2  12  0.0  0.0  7-05:05:04 kworker/R-mld\n    247       2  12  0.0  0.0  7-05:05:04 kworker/R-ipv6_addrconf\n    249       2  12  0.0  0.0  7-05:05:04 kworker/R-kstrp\n    250       2   0  0.0  0.0  7-05:05:04 kworker/u132:0\n    251       2  12  0.0  0.0  7-05:05:04 kworker/u133:0\n    252       2  12  0.0  0.0  7-05:05:04 irq/27-ACPI:Event\n    429       2   2  0.0  0.0  7-05:05:04 kworker/R-nvme-wq\n    430       2  30  0.0  0.0  7-05:05:04 kworker/R-nvme-reset-wq\n    431       2  26  0.0  0.0  7-05:05:04 kworker/R-nvme-delete-wq\n    432       2   5  0.0  0.0  7-05:05:04 kworker/R-nvme-auth-wq\n    443       2  25  0.0  0.0  7-05:05:04 kworker/R-ata_sff\n    444       2  29  0.0  0.0  7-05:05:03 scsi_eh_0\n    445       2  29  0.0  0.0  7-05:05:03 kworker/R-scsi_tmf_0\n    446       2   4  0.0  0.0  7-05:05:03 scsi_eh_1\n    447       2  29  0.0  0.0  7-05:05:03 kworker/R-scsi_tmf_1\n    526       2   7  0.0  0.0  7-05:03:58 kworker/R-ext4-rsv-conversion\n    708       2  24  0.0  0.0  7-05:03:56 psimon\n    781       2  10  0.0  0.0  7-05:03:56 kworker/R-led_workqueue\n    817       2  22  0.0  0.0  7-05:03:56 watchdogd\n    848       2  24  0.0  0.0  7-05:03:56 kworker/R-uas\n    857       2  28  0.0  0.0  7-05:03:56 kworker/R-cfg80211\n    877       2  25  0.0  0.0  7-05:03:56 kworker/R-edac-poller\n    879       2   7  0.0  0.0  7-05:03:56 kworker/u131:1-hci0\n   1013       2   8  0.0  0.0  7-05:03:55 nv_queue\n   1014       2   8  0.0  0.0  7-05:03:55 nv_queue\n   1015       2   8  0.0  0.0  7-05:03:55 nv_open_q\n   1084       2   3  0.0  0.0  7-05:03:55 UVM deferred release queue\n   1133       2  27  0.0  0.0  7-05:03:55 nvidia-modeset/deferred_close_kthread_q\n   1135       2  25  0.0  0.0  7-05:03:55 irq/143-nvidia\n   1136       2  25  0.0  0.0  7-05:03:55 nvidia\n   1137       2  30  0.0  0.0  7-05:03:55 nv_queue\n   2256       2   8  0.0  0.0  7-05:03:48 krfcommd\n   2519    1719   0  0.0  0.0  7-05:03:44 dbus\n2302683    1693  17  0.0  0.0    11:05:56 sshd-session\n2774726       2  28  0.0  0.0    03:22:42 kworker/28:1-cgroup_release\n2774889       2  20  0.0  0.0    03:22:15 kworker/20:0-events\n2774906       2  26  0.0  0.0    03:22:10 scsi_eh_2\n2774907       2   2  0.0  0.0    03:22:10 kworker/R-scsi_tmf_2\n2774969 2774960  21  0.0  0.0    03:22:06 (sd-pam)\n2775024    1163  25  0.0  0.0    03:22:06 sh\n2775025    1163  24  0.0  0.0    03:22:06 sh\n2775026 2775024  22  0.0  0.0    03:22:06 intercept\n2775027 2775024  25  0.0  0.0    03:22:06 dual-function-k\n2775028 2775024  23  0.0  0.0    03:22:06 uinput\n2775030 2775025  16  0.0  0.0    03:22:06 intercept\n2775031 2775025  22  0.0  0.0    03:22:06 dual-function-k\n2775032 2775025  30  0.0  0.0    03:22:06 uinput\n2775042    1163  17  0.0  0.0    03:22:06 sh\n2775043 2775042  23  0.0  0.0    03:22:06 intercept\n2775044 2775042  16  0.0  0.0    03:22:06 dual-function-k\n2775045 2775042  17  0.0  0.0    03:22:06 uinput\n2775050 2775046   1  0.0  0.0    03:22:06 (sd-pam)\n2775113 2774884   0  0.0  0.0    03:22:05 gdm-wayland-ses\n2775146 2775104   0  0.0  0.0    03:22:05 inotifywait\n2775203 2774960   0  0.0  0.0    03:22:05 .gnome-session-\n2775558       2   9  0.0  0.0    03:22:03 nvidia-drm/timeline-7d\n2775723 2775717  17  0.0  0.0    03:22:02 dbus-broker-lau\n2775957 2774960  25  0.0  0.0    03:22:02 .xdg-permission\n2776088 2775996   0  0.0  0.0    03:22:02 .ibus-dconf-wra\n2776190 2774960  10  0.0  0.0    03:22:01 .xdg-document-p\n2776196 2776190   7  0.0  0.0    03:22:01 fusermount3\n2776219 2775996  23  0.0  0.0    03:22:01 .ibus-engine-si\n2776251       2  30  0.0  0.0    03:22:01 nvidia-drm/timeline-7e\n2776358       2  15  0.0  0.0    03:22:00 nvidia-drm/timeline-7f\n2776361       2  31  0.0  0.0    03:22:00 nvidia-drm/timeline-80\n2776364       2  26  0.0  0.0    03:22:00 nvidia-drm/timeline-81\n2790223 2774960  24  0.0  0.0    03:14:32 dconf-service\n2795943       2  26  0.0  0.0    03:11:25 kworker/26:1\n2810674       2  19  0.0  0.0    02:57:25 kworker/19:2\n2810846       1  18  0.0  0.0    02:57:24 tail\n2810847       1  19  0.0  0.0    02:57:24 grep\n2855182    1693   1  0.0  0.0    02:45:59 sshd-session\n2855185 2855182   1  0.0  0.0    02:45:59 sshd-session\n2923571       2   3  0.0  0.0    02:24:15 kworker/3:2-events\n2924631       2  18  0.0  0.0    02:23:38 kworker/18:1\n2925482 2925481  26  0.0  0.0    02:22:11 tail\n2925483 2925481  15  0.0  0.0    02:22:11 grep\n2927357       2  23  0.0  0.0    02:22:09 kworker/23:1\n2955495       2  30  0.0  0.0    02:17:49 kworker/30:2\n2962092    1693  27  0.0  0.0    02:17:07 sshd-session\n2962142 2962092  16  0.0  0.0    02:17:07 sshd-session\n2992313 2992312  29  0.0  0.0    02:06:18 tail\n2992314 2992312  28  0.0  0.0    02:06:18 grep\n3033741       2   2  0.0  0.0    01:43:50 kworker/2:1\n3034252       2  22  0.0  0.0    01:39:49 kworker/22:2-events\n3035254       2  21  0.0  0.0    01:33:14 kworker/21:1\n3047000       2  13  0.0  0.0    01:30:31 kworker/13:1\n3065038       2   1  0.0  0.0    01:21:21 kworker/1:1\n3082495       2  25  0.0  0.0    01:15:31 kworker/25:2\n3083338       2   7  0.0  0.0    01:15:25 kworker/7:0-mm_percpu_wq\n3089198       2   9  0.0  0.0    01:14:32 kworker/9:0\n3104308       2  29  0.0  0.0    01:08:52 kworker/29:2-cgroup_free\n3111393       2  10  0.0  0.0    01:05:45 kworker/10:0\n3113950       2  14  0.0  0.0    01:04:37 kworker/14:2-cgroup_free\n3115080       2  17  0.0  0.0    01:03:43 kworker/17:2-cgroup_free\n3115355       2  16  0.0  0.0    01:03:24 kworker/16:0-events\n3122818       2  27  0.0  0.0       42:24 kworker/27:2\n3123307       2  11  0.0  0.0       37:55 kworker/11:1\n3123871       2   0  0.0  0.0       32:57 kworker/0:1\n3123910       2   5  0.0  0.0       32:46 kworker/5:1\n3125695       2  11  0.0  0.0       17:36 kworker/u130:0-kvfree_rcu_reclaim\n3126925       2   4  0.0  0.0       06:58 kworker/4:0\n3126979       2  31  0.0  0.0       06:50 kworker/u130:4-kvfree_rcu_reclaim\n3135648       2   7  0.0  0.0       03:43 kworker/7:2-events\n3135702       2  31  0.0  0.0       03:33 kworker/u128:2\n3136049       2  14  0.0  0.0       01:49 kworker/14:1\n3136054       2   4  0.0  0.0       01:46 kworker/u129:5-flush-259:1\n3136055       2  23  0.0  0.0       01:46 kworker/u129:6-flush-259:1\n3136056       2   1  0.0  0.0       01:46 kworker/u129:7-flush-259:1\n3136183       2  15  0.0  0.0       01:08 kworker/u130:2-kvfree_rcu_reclaim\n3137812 2855186   8  0.0  0.0       00:12 sleep\n3137858 2925481  14  0.0  0.0       00:09 sleep\n3137860 2992312   0  0.0  0.0       00:08 sleep\n3137862 2962143   7  0.0  0.0       00:08 sleep\n3137882    1693  25  0.0  0.0       00:01 sshd-session\n3137885 3137882  20  0.0  0.0       00:01 sshd-session\n3137917       1   1  0.0  0.0       00:00 sudo\n3137922 3137917  29  0.0  0.0       00:00 bash\n3137924 3137922  28  0.0  0.0       00:00 timeout\n3137926       2  18  0.0  0.0       00:00 kworker/u129:9\n3137927       2  21  0.0  0.0       00:00 kworker/u129:10-ext4-rsv-conversion\n3137930 2810407   9  0.0  0.0       00:00 sleep\n3137940 3137886   9  0.0  0.0       00:00 ps\n"
+  },
+  "booted_system": "/nix/store/wkkj6wwsskkbb5ls1d1nvv8xwv5naqqq-nixos-system-nixos-26.11.20260928.f45c6f0",
+  "captured_at_utc": "2026-10-07T00:43:51.498622+00:00",
+  "cpu_topology": {
+    "argv": [
+      "lscpu",
+      "--json",
+      "--extended=CPU,CORE,SOCKET,NODE,ONLINE"
+    ],
+    "returncode": 0,
+    "stderr": "",
+    "stdout": "{\n   \"cpus\": [\n      {\n         \"cpu\": 0,\n         \"core\": 0,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 1,\n         \"core\": 1,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 2,\n         \"core\": 2,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 3,\n         \"core\": 3,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 4,\n         \"core\": 4,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 5,\n         \"core\": 5,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 6,\n         \"core\": 6,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 7,\n         \"core\": 7,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 8,\n         \"core\": 8,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 9,\n         \"core\": 9,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 10,\n         \"core\": 10,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 11,\n         \"core\": 11,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 12,\n         \"core\": 12,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 13,\n         \"core\": 13,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 14,\n         \"core\": 14,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 15,\n         \"core\": 15,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 16,\n         \"core\": 0,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 17,\n         \"core\": 1,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 18,\n         \"core\": 2,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 19,\n         \"core\": 3,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 20,\n         \"core\": 4,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 21,\n         \"core\": 5,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 22,\n         \"core\": 6,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 23,\n         \"core\": 7,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 24,\n         \"core\": 8,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 25,\n         \"core\": 9,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 26,\n         \"core\": 10,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 27,\n         \"core\": 11,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 28,\n         \"core\": 12,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 29,\n         \"core\": 13,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 30,\n         \"core\": 14,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      },{\n         \"cpu\": 31,\n         \"core\": 15,\n         \"socket\": 0,\n         \"node\": 0,\n         \"online\": true\n      }\n   ]\n}\n"
+  },
+  "cpuinfo": {
+    "value": "processor\t: 0\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 0\ncpu cores\t: 16\napicid\t\t: 0\ninitial apicid\t: 0\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 1\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 4757.429\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 1\ncpu cores\t: 16\napicid\t\t: 2\ninitial apicid\t: 2\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 2\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 2\ncpu cores\t: 16\napicid\t\t: 4\ninitial apicid\t: 4\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 3\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 3\ncpu cores\t: 16\napicid\t\t: 6\ninitial apicid\t: 6\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 4\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 4\ncpu cores\t: 16\napicid\t\t: 8\ninitial apicid\t: 8\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 5\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 5\ncpu cores\t: 16\napicid\t\t: 10\ninitial apicid\t: 10\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 6\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 6\ncpu cores\t: 16\napicid\t\t: 12\ninitial apicid\t: 12\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 7\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 7\ncpu cores\t: 16\napicid\t\t: 14\ninitial apicid\t: 14\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 8\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 8\ncpu cores\t: 16\napicid\t\t: 16\ninitial apicid\t: 16\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 9\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 3733.915\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 9\ncpu cores\t: 16\napicid\t\t: 18\ninitial apicid\t: 18\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 10\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 3747.400\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 10\ncpu cores\t: 16\napicid\t\t: 20\ninitial apicid\t: 20\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 11\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 11\ncpu cores\t: 16\napicid\t\t: 22\ninitial apicid\t: 22\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 12\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 12\ncpu cores\t: 16\napicid\t\t: 24\ninitial apicid\t: 24\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 13\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 13\ncpu cores\t: 16\napicid\t\t: 26\ninitial apicid\t: 26\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 14\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 4761.571\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 14\ncpu cores\t: 16\napicid\t\t: 28\ninitial apicid\t: 28\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 15\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 3763.874\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 15\ncpu cores\t: 16\napicid\t\t: 30\ninitial apicid\t: 30\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 16\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 4757.467\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 0\ncpu cores\t: 16\napicid\t\t: 1\ninitial apicid\t: 1\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 17\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 1\ncpu cores\t: 16\napicid\t\t: 3\ninitial apicid\t: 3\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 18\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 2\ncpu cores\t: 16\napicid\t\t: 5\ninitial apicid\t: 5\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 19\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 3\ncpu cores\t: 16\napicid\t\t: 7\ninitial apicid\t: 7\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 20\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 4\ncpu cores\t: 16\napicid\t\t: 9\ninitial apicid\t: 9\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 21\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 5\ncpu cores\t: 16\napicid\t\t: 11\ninitial apicid\t: 11\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 22\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 6\ncpu cores\t: 16\napicid\t\t: 13\ninitial apicid\t: 13\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 23\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 3788.699\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 7\ncpu cores\t: 16\napicid\t\t: 15\ninitial apicid\t: 15\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 24\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 8\ncpu cores\t: 16\napicid\t\t: 17\ninitial apicid\t: 17\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 25\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 9\ncpu cores\t: 16\napicid\t\t: 19\ninitial apicid\t: 19\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 26\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 10\ncpu cores\t: 16\napicid\t\t: 21\ninitial apicid\t: 21\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 27\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 3768.684\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 11\ncpu cores\t: 16\napicid\t\t: 23\ninitial apicid\t: 23\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 28\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 3754.734\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 12\ncpu cores\t: 16\napicid\t\t: 25\ninitial apicid\t: 25\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 29\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 13\ncpu cores\t: 16\napicid\t\t: 27\ninitial apicid\t: 27\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 30\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 14\ncpu cores\t: 16\napicid\t\t: 29\ninitial apicid\t: 29\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\nprocessor\t: 31\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel\t\t: 33\nmodel name\t: AMD Ryzen 9 5950X 16-Core Processor\nstepping\t: 0\nmicrocode\t: 0xa20102e\ncpu MHz\t\t: 1746.460\ncache size\t: 512 KB\nphysical id\t: 0\nsiblings\t: 32\ncore id\t\t: 15\ncpu cores\t: 16\napicid\t\t: 31\ninitial apicid\t: 31\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 16\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso ibpb_no_ret spectre_v2_user tsa vmscape\nbogomips\t: 6787.14\nTLB size\t: 2560 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]"
+  },
+  "current_system": "/nix/store/qh2glnl79zr1dsr21r101nz9l9vybj9s-nixos-system-nixos-26.11.20260928.f45c6f0",
+  "effective_uid": 1000,
+  "kernel_command_line": {
+    "value": "initrd=\\EFI\\nixos\\jb930q5z5p1nxcc986zixkq329b47q6h-initrd-linux-6.18.54-initrd.efi init=/nix/store/wkkj6wwsskkbb5ls1d1nvv8xwv5naqqq-nixos-system-nixos-26.11.20260928.f45c6f0/init root=fstab loglevel=4 lsm=landlock,yama,bpf"
+  },
+  "kernel_inputs": {
+    "/proc/config.gz": {
+      "resolved_path": "/proc/config.gz",
+      "sha256": "f933c56fa0760007f7e64563e6427fac07907f60fe6720af028f8f66d2e096c3"
+    },
+    "/run/booted-system/kernel": {
+      "resolved_path": "/nix/store/wj7k7ng3vb1zfhs4k4wbv1l1sixk292f-linux-6.18.54/bzImage",
+      "sha256": "66111c2888091bd64e96e71a6a9e831ab5496d6c6272add5d81490396bfa3cdc"
+    },
+    "/run/current-system/kernel": {
+      "resolved_path": "/nix/store/wj7k7ng3vb1zfhs4k4wbv1l1sixk292f-linux-6.18.54/bzImage",
+      "sha256": "66111c2888091bd64e96e71a6a9e831ab5496d6c6272add5d81490396bfa3cdc"
+    }
+  },
+  "kvm": {
+    "actual_guest_cpuid": "NOT_OBSERVED",
+    "api_version": 12,
+    "supported_cpuid": [
+      {
+        "eax": 16,
+        "ebx": 1752462657,
+        "ecx": 1145913699,
+        "edx": 1769238117,
+        "flags": 0,
+        "function": 0,
+        "index": 0
+      },
+      {
+        "eax": 10620688,
+        "ebx": 337643520,
+        "ecx": 4160238083,
+        "edx": 126614527,
+        "flags": 0,
+        "function": 1,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 3,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 1,
+        "function": 4,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 5,
+        "index": 0
+      },
+      {
+        "eax": 4,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 6,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 563873707,
+        "ecx": 4195980,
+        "edx": 2818572304,
+        "flags": 1,
+        "function": 7,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 8,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 9,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 10,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 20,
+        "flags": 1,
+        "function": 11,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 12,
+        "index": 0
+      },
+      {
+        "eax": 519,
+        "ebx": 2440,
+        "ecx": 2440,
+        "edx": 0,
+        "flags": 1,
+        "function": 13,
+        "index": 0
+      },
+      {
+        "eax": 15,
+        "ebx": 880,
+        "ecx": 6144,
+        "edx": 0,
+        "flags": 1,
+        "function": 13,
+        "index": 1
+      },
+      {
+        "eax": 256,
+        "ebx": 576,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 1,
+        "function": 13,
+        "index": 2
+      },
+      {
+        "eax": 8,
+        "ebx": 2432,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 1,
+        "function": 13,
+        "index": 9
+      },
+      {
+        "eax": 16,
+        "ebx": 0,
+        "ecx": 1,
+        "edx": 0,
+        "flags": 1,
+        "function": 13,
+        "index": 11
+      },
+      {
+        "eax": 24,
+        "ebx": 0,
+        "ecx": 1,
+        "edx": 0,
+        "flags": 1,
+        "function": 13,
+        "index": 12
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 14,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 1,
+        "function": 15,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 1,
+        "function": 16,
+        "index": 0
+      },
+      {
+        "eax": 1073741825,
+        "ebx": 1263359563,
+        "ecx": 1447775574,
+        "edx": 77,
+        "flags": 0,
+        "function": 1073741824,
+        "index": 0
+      },
+      {
+        "eax": 16809723,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 1073741825,
+        "index": 0
+      },
+      {
+        "eax": 2147483682,
+        "ebx": 1752462657,
+        "ecx": 1145913699,
+        "edx": 1769238117,
+        "flags": 0,
+        "function": 2147483648,
+        "index": 0
+      },
+      {
+        "eax": 10620688,
+        "ebx": 536870912,
+        "ecx": 12583927,
+        "edx": 802421759,
+        "flags": 0,
+        "function": 2147483649,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483650,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483651,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483652,
+        "index": 0
+      },
+      {
+        "eax": 4282449728,
+        "ebx": 4282449728,
+        "ecx": 537395520,
+        "edx": 537395520,
+        "flags": 0,
+        "function": 2147483653,
+        "index": 0
+      },
+      {
+        "eax": 1207968256,
+        "ebx": 1744847360,
+        "ecx": 33579328,
+        "edx": 33591616,
+        "flags": 0,
+        "function": 2147483654,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 256,
+        "flags": 0,
+        "function": 2147483655,
+        "index": 0
+      },
+      {
+        "eax": 3158064,
+        "ebx": 319476229,
+        "ecx": 20511,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483656,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483657,
+        "index": 0
+      },
+      {
+        "eax": 1,
+        "ebx": 8,
+        "ecx": 0,
+        "edx": 268539003,
+        "flags": 0,
+        "function": 2147483658,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483659,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483660,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483661,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483662,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483663,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483664,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483665,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483666,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483667,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483668,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483669,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483670,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483671,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483672,
+        "index": 0
+      },
+      {
+        "eax": 4030787648,
+        "ebx": 4030726144,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483673,
+        "index": 0
+      },
+      {
+        "eax": 6,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483674,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483675,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483676,
+        "index": 0
+      },
+      {
+        "eax": 16673,
+        "ebx": 29360191,
+        "ecx": 63,
+        "edx": 0,
+        "flags": 1,
+        "function": 2147483677,
+        "index": 0
+      },
+      {
+        "eax": 16674,
+        "ebx": 29360191,
+        "ecx": 63,
+        "edx": 0,
+        "flags": 1,
+        "function": 2147483677,
+        "index": 1
+      },
+      {
+        "eax": 16707,
+        "ebx": 29360191,
+        "ecx": 1023,
+        "edx": 2,
+        "flags": 1,
+        "function": 2147483677,
+        "index": 2
+      },
+      {
+        "eax": 246115,
+        "ebx": 62914623,
+        "ecx": 32767,
+        "edx": 1,
+        "flags": 1,
+        "function": 2147483677,
+        "index": 3
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 1,
+        "function": 2147483677,
+        "index": 4
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483678,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483679,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483680,
+        "index": 0
+      },
+      {
+        "eax": 402653797,
+        "ebx": 0,
+        "ecx": 6,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483681,
+        "index": 0
+      },
+      {
+        "eax": 0,
+        "ebx": 0,
+        "ecx": 0,
+        "edx": 0,
+        "flags": 0,
+        "function": 2147483682,
+        "index": 0
+      }
+    ],
+    "supported_cpuid_sha256": "e50b530be46c6276d080b7727f01bae9d9dcb6ba7d627c2f56e1e3e77cdf89a9",
+    "vm_created": false
+  },
+  "kvm_module_parameters": {
+    "/sys/module/kvm/parameters/allow_unsafe_mappings": {
+      "value": "N"
+    },
+    "/sys/module/kvm/parameters/eager_page_split": {
+      "value": "Y"
+    },
+    "/sys/module/kvm/parameters/enable_pmu": {
+      "value": "Y"
+    },
+    "/sys/module/kvm/parameters/enable_virt_at_load": {
+      "value": "Y"
+    },
+    "/sys/module/kvm/parameters/enable_vmware_backdoor": {
+      "value": "N"
+    },
+    "/sys/module/kvm/parameters/flush_on_reuse": {
+      "value": "N"
+    },
+    "/sys/module/kvm/parameters/force_emulation_prefix": {
+      "value": "0"
+    },
+    "/sys/module/kvm/parameters/halt_poll_ns": {
+      "value": "200000"
+    },
+    "/sys/module/kvm/parameters/halt_poll_ns_grow": {
+      "value": "2"
+    },
+    "/sys/module/kvm/parameters/halt_poll_ns_grow_start": {
+      "value": "10000"
+    },
+    "/sys/module/kvm/parameters/halt_poll_ns_shrink": {
+      "value": "2"
+    },
+    "/sys/module/kvm/parameters/ignore_msrs": {
+      "value": "N"
+    },
+    "/sys/module/kvm/parameters/kvmclock_periodic_sync": {
+      "value": "Y"
+    },
+    "/sys/module/kvm/parameters/lapic_timer_advance": {
+      "value": "Y"
+    },
+    "/sys/module/kvm/parameters/min_timer_period_us": {
+      "value": "200"
+    },
+    "/sys/module/kvm/parameters/mitigate_smt_rsb": {
+      "value": "N"
+    },
+    "/sys/module/kvm/parameters/mmio_caching": {
+      "value": "Y"
+    },
+    "/sys/module/kvm/parameters/nx_huge_pages": {
+      "value": "N"
+    },
+    "/sys/module/kvm/parameters/nx_huge_pages_recovery_period_ms": {
+      "value": "0"
+    },
+    "/sys/module/kvm/parameters/nx_huge_pages_recovery_ratio": {
+      "value": "60"
+    },
+    "/sys/module/kvm/parameters/pi_inject_timer": {
+      "value": "0"
+    },
+    "/sys/module/kvm/parameters/report_ignored_msrs": {
+      "value": "Y"
+    },
+    "/sys/module/kvm/parameters/tdp_mmu": {
+      "value": "Y"
+    },
+    "/sys/module/kvm/parameters/tsc_tolerance_ppm": {
+      "value": "250"
+    },
+    "/sys/module/kvm/parameters/vector_hashing": {
+      "value": "Y"
+    },
+    "/sys/module/kvm_amd/parameters/avic": {
+      "value": "N"
+    },
+    "/sys/module/kvm_amd/parameters/ciphertext_hiding_asids": {
+      "value": "0"
+    },
+    "/sys/module/kvm_amd/parameters/debug_swap": {
+      "value": "N"
+    },
+    "/sys/module/kvm_amd/parameters/dump_invalid_vmcb": {
+      "value": "N"
+    },
+    "/sys/module/kvm_amd/parameters/enable_device_posted_irqs": {
+      "value": "N"
+    },
+    "/sys/module/kvm_amd/parameters/enable_ipiv": {
+      "value": "N"
+    },
+    "/sys/module/kvm_amd/parameters/force_avic": {
+      "value": "N"
+    },
+    "/sys/module/kvm_amd/parameters/intercept_smi": {
+      "value": "Y"
+    },
+    "/sys/module/kvm_amd/parameters/lbrv": {
+      "value": "1"
+    },
+    "/sys/module/kvm_amd/parameters/nested": {
+      "value": "1"
+    },
+    "/sys/module/kvm_amd/parameters/npt": {
+      "value": "Y"
+    },
+    "/sys/module/kvm_amd/parameters/nrips": {
+      "value": "1"
+    },
+    "/sys/module/kvm_amd/parameters/pause_filter_count": {
+      "value": "3000"
+    },
+    "/sys/module/kvm_amd/parameters/pause_filter_count_grow": {
+      "value": "2"
+    },
+    "/sys/module/kvm_amd/parameters/pause_filter_count_max": {
+      "value": "65535"
+    },
+    "/sys/module/kvm_amd/parameters/pause_filter_count_shrink": {
+      "value": "0"
+    },
+    "/sys/module/kvm_amd/parameters/pause_filter_thresh": {
+      "value": "128"
+    },
+    "/sys/module/kvm_amd/parameters/sev": {
+      "value": "N"
+    },
+    "/sys/module/kvm_amd/parameters/sev_es": {
+      "value": "N"
+    },
+    "/sys/module/kvm_amd/parameters/sev_snp": {
+      "value": "N"
+    },
+    "/sys/module/kvm_amd/parameters/tsc_scaling": {
+      "value": "1"
+    },
+    "/sys/module/kvm_amd/parameters/vgif": {
+      "value": "1"
+    },
+    "/sys/module/kvm_amd/parameters/vls": {
+      "value": "1"
+    },
+    "/sys/module/kvm_amd/parameters/vnmi": {
+      "value": "N"
+    }
+  },
+  "lease_snapshot": {
+    "argv": [
+      "lslocks",
+      "--json",
+      "--notruncate",
+      "-o",
+      "PID,COMMAND,TYPE,MODE,PATH"
+    ],
+    "returncode": 0,
+    "seedbox_locks": [],
+    "stderr": ""
+  },
+  "lscpu": {
+    "argv": [
+      "lscpu",
+      "--json"
+    ],
+    "returncode": 0,
+    "stderr": "",
+    "stdout": "{\n   \"lscpu\": [\n      {\n         \"field\": \"Architecture:\",\n         \"data\": \"x86_64\"\n      },{\n         \"field\": \"CPU op-mode(s):\",\n         \"data\": \"32-bit, 64-bit\"\n      },{\n         \"field\": \"Address sizes:\",\n         \"data\": \"48 bits physical, 48 bits virtual\"\n      },{\n         \"field\": \"Byte Order:\",\n         \"data\": \"Little Endian\"\n      },{\n         \"field\": \"CPU(s):\",\n         \"data\": \"32\"\n      },{\n         \"field\": \"On-line CPU(s) list:\",\n         \"data\": \"0-31\"\n      },{\n         \"field\": \"Vendor ID:\",\n         \"data\": \"AuthenticAMD\"\n      },{\n         \"field\": \"Model name:\",\n         \"data\": \"AMD Ryzen 9 5950X 16-Core Processor\"\n      },{\n         \"field\": \"CPU family:\",\n         \"data\": \"25\"\n      },{\n         \"field\": \"Model:\",\n         \"data\": \"33\"\n      },{\n         \"field\": \"Thread(s) per core:\",\n         \"data\": \"2\"\n      },{\n         \"field\": \"Core(s) per socket:\",\n         \"data\": \"16\"\n      },{\n         \"field\": \"Socket(s):\",\n         \"data\": \"1\"\n      },{\n         \"field\": \"Stepping:\",\n         \"data\": \"0\"\n      },{\n         \"field\": \"Microcode version:\",\n         \"data\": \"0xa20102e\"\n      },{\n         \"field\": \"Frequency boost:\",\n         \"data\": \"enabled\"\n      },{\n         \"field\": \"CPU(s) scaling MHz:\",\n         \"data\": \"44%\"\n      },{\n         \"field\": \"CPU max MHz:\",\n         \"data\": \"5086.1812\"\n      },{\n         \"field\": \"CPU min MHz:\",\n         \"data\": \"582.1540\"\n      },{\n         \"field\": \"BogoMIPS:\",\n         \"data\": \"6787.14\"\n      },{\n         \"field\": \"Flags:\",\n         \"data\": \"fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk clzero irperf xsaveerptr rdpru wbnoinvd arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl umip pku ospke vaes vpclmulqdq rdpid overflow_recov succor smca fsrm debug_swap\"\n      },{\n         \"field\": \"Virtualization:\",\n         \"data\": \"AMD-V\"\n      },{\n         \"field\": \"L1d cache:\",\n         \"data\": \"512 KiB (16 instances)\"\n      },{\n         \"field\": \"L1i cache:\",\n         \"data\": \"512 KiB (16 instances)\"\n      },{\n         \"field\": \"L2 cache:\",\n         \"data\": \"8 MiB (16 instances)\"\n      },{\n         \"field\": \"L3 cache:\",\n         \"data\": \"64 MiB (2 instances)\"\n      },{\n         \"field\": \"NUMA node(s):\",\n         \"data\": \"1\"\n      },{\n         \"field\": \"NUMA node0 CPU(s):\",\n         \"data\": \"0-31\"\n      },{\n         \"field\": \"Vulnerability Gather data sampling:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Ghostwrite:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Indirect target selection:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Itlb multihit:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability L1tf:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Mds:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Meltdown:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Mmio stale data:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Old microcode:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Reg file data sampling:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Retbleed:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Spec rstack overflow:\",\n         \"data\": \"Mitigation; Safe RET\"\n      },{\n         \"field\": \"Vulnerability Spec store bypass:\",\n         \"data\": \"Mitigation; Speculative Store Bypass disabled via prctl\"\n      },{\n         \"field\": \"Vulnerability Spectre v1:\",\n         \"data\": \"Mitigation; usercopy/swapgs barriers and __user pointer sanitization\"\n      },{\n         \"field\": \"Vulnerability Spectre v2:\",\n         \"data\": \"Mitigation; Retpolines; IBPB conditional; IBRS_FW; STIBP always-on; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected\"\n      },{\n         \"field\": \"Vulnerability Srbds:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Tsa:\",\n         \"data\": \"Mitigation; Clear CPU buffers\"\n      },{\n         \"field\": \"Vulnerability Tsx async abort:\",\n         \"data\": \"Not affected\"\n      },{\n         \"field\": \"Vulnerability Vmscape:\",\n         \"data\": \"Mitigation; IBPB before exit to userspace\"\n      }\n   ]\n}\n"
+  },
+  "memory": {
+    "value": "MemTotal:       65747460 kB\nMemFree:         1632244 kB\nMemAvailable:   41123400 kB\nBuffers:          890788 kB\nCached:         58895448 kB\nSwapCached:            0 kB\nActive:         13100464 kB\nInactive:       47463640 kB\nActive(anon):   12795920 kB\nInactive(anon):  9032884 kB\nActive(file):     304544 kB\nInactive(file): 38430756 kB\nUnevictable:           0 kB\nMlocked:               0 kB\nSwapTotal:             0 kB\nSwapFree:              0 kB\nZswap:                 0 kB\nZswapped:              0 kB\nDirty:            917400 kB\nWriteback:           800 kB\nAnonPages:        778000 kB\nMapped:           360736 kB\nShmem:          21050644 kB\nKReclaimable:    1481060 kB\nSlab:            2830888 kB\nSReclaimable:    1481060 kB\nSUnreclaim:      1349828 kB\nKernelStack:       15824 kB\nPageTables:        50460 kB\nSecPageTables:      6628 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:    32873728 kB\nCommitted_AS:   26843812 kB\nVmallocTotal:   34359738367 kB\nVmallocUsed:      216396 kB\nVmallocChunk:          0 kB\nPercpu:            47360 kB\nHardwareCorrupted:     0 kB\nAnonHugePages:         0 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:      8192 kB\nFilePmdMapped:      2048 kB\nCmaTotal:              0 kB\nCmaFree:               0 kB\nUnaccepted:            0 kB\nBalloon:               0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:    13001824 kB\nDirectMap2M:    45627392 kB\nDirectMap1G:     8388608 kB"
+  },
+  "platform": {
+    "machine": "x86_64",
+    "node": "nixos",
+    "release": "6.18.54",
+    "system": "Linux"
+  },
+  "pmu_sysfs": {
+    "/sys/bus/event_source/devices/cpu/caps/max_precise": {
+      "value": "0"
+    },
+    "/sys/bus/event_source/devices/cpu/format/cmask": {
+      "value": "config:24-31"
+    },
+    "/sys/bus/event_source/devices/cpu/format/edge": {
+      "value": "config:18"
+    },
+    "/sys/bus/event_source/devices/cpu/format/event": {
+      "value": "config:0-7,32-35"
+    },
+    "/sys/bus/event_source/devices/cpu/format/inv": {
+      "value": "config:23"
+    },
+    "/sys/bus/event_source/devices/cpu/format/umask": {
+      "value": "config:8-15"
+    },
+    "/sys/bus/event_source/devices/cpu/type": {
+      "value": "4"
+    }
+  },
+  "schema": "seedbox.research.host-inventory.v1",
+  "scope": "read-only inventory; never host qualification",
+  "settings": {
+    "/proc/sys/kernel/nmi_watchdog": {
+      "value": "1"
+    },
+    "/proc/sys/kernel/perf_event_max_sample_rate": {
+      "value": "100000"
+    },
+    "/proc/sys/kernel/perf_event_paranoid": {
+      "value": "2"
+    },
+    "/sys/devices/system/cpu/online": {
+      "value": "0-31"
+    },
+    "/sys/devices/system/cpu/smt/active": {
+      "value": "1"
+    }
+  },
+  "smt_siblings": {
+    "cpu0": {
+      "value": "0,16"
+    },
+    "cpu1": {
+      "value": "1,17"
+    },
+    "cpu10": {
+      "value": "10,26"
+    },
+    "cpu11": {
+      "value": "11,27"
+    },
+    "cpu12": {
+      "value": "12,28"
+    },
+    "cpu13": {
+      "value": "13,29"
+    },
+    "cpu14": {
+      "value": "14,30"
+    },
+    "cpu15": {
+      "value": "15,31"
+    },
+    "cpu16": {
+      "value": "0,16"
+    },
+    "cpu17": {
+      "value": "1,17"
+    },
+    "cpu18": {
+      "value": "2,18"
+    },
+    "cpu19": {
+      "value": "3,19"
+    },
+    "cpu2": {
+      "value": "2,18"
+    },
+    "cpu20": {
+      "value": "4,20"
+    },
+    "cpu21": {
+      "value": "5,21"
+    },
+    "cpu22": {
+      "value": "6,22"
+    },
+    "cpu23": {
+      "value": "7,23"
+    },
+    "cpu24": {
+      "value": "8,24"
+    },
+    "cpu25": {
+      "value": "9,25"
+    },
+    "cpu26": {
+      "value": "10,26"
+    },
+    "cpu27": {
+      "value": "11,27"
+    },
+    "cpu28": {
+      "value": "12,28"
+    },
+    "cpu29": {
+      "value": "13,29"
+    },
+    "cpu3": {
+      "value": "3,19"
+    },
+    "cpu30": {
+      "value": "14,30"
+    },
+    "cpu31": {
+      "value": "15,31"
+    },
+    "cpu4": {
+      "value": "4,20"
+    },
+    "cpu5": {
+      "value": "5,21"
+    },
+    "cpu6": {
+      "value": "6,22"
+    },
+    "cpu7": {
+      "value": "7,23"
+    },
+    "cpu8": {
+      "value": "8,24"
+    },
+    "cpu9": {
+      "value": "9,25"
+    }
+  },
+  "source": {
+    "checkout": "/home/gvickers/seedbox-qualification37-20261006",
+    "files": {
+      "Cargo.lock": {
+        "resolved_path": "/home/gvickers/seedbox-qualification37-20261006/Cargo.lock",
+        "sha256": "bb643f88bd0770e4ad2e3350d61a18d46ea7cffcd379baa34d408aba90879c5c"
+      },
+      "crates/seedbox-vmm/Cargo.lock": {
+        "resolved_path": "/home/gvickers/seedbox-qualification37-20261006/crates/seedbox-vmm/Cargo.lock",
+        "sha256": "c6e4a866e742b69ccebaa7da798f9ec7bf23ca6197204c12fb00c46e90c5e952"
+      },
+      "crates/seedbox-vmm/Cargo.toml": {
+        "resolved_path": "/home/gvickers/seedbox-qualification37-20261006/crates/seedbox-vmm/Cargo.toml",
+        "sha256": "d8851a3bc63135d39a9774c1ac68d74b0cd67e0c9dbe26ce4f23896cdc9ca9a5"
+      },
+      "crates/seedbox-vmm/src/counter.rs": {
+        "resolved_path": "/home/gvickers/seedbox-qualification37-20261006/crates/seedbox-vmm/src/counter.rs",
+        "sha256": "b7eb3da8a1f039df47b52f67b47e6324fb41e2a5f0451e4294d286ea10d71c1e"
+      },
+      "crates/seedbox-vmm/src/machine.rs": {
+        "resolved_path": "/home/gvickers/seedbox-qualification37-20261006/crates/seedbox-vmm/src/machine.rs",
+        "sha256": "c892b6f72cce366fffcd32ad196234f8a2ee1222400fdfc82a9972a23c5da373"
+      },
+      "crates/seedbox/src/host.rs": {
+        "resolved_path": "/home/gvickers/seedbox-qualification37-20261006/crates/seedbox/src/host.rs",
+        "sha256": "8b46b14378e70ff3c8af9ecdceae22069804515f8148284191e3a0ede0c4ccdc"
+      },
+      "flake.lock": {
+        "resolved_path": "/home/gvickers/seedbox-qualification37-20261006/flake.lock",
+        "sha256": "006e9266b7335db3ddd2fd306d7034260c6bcf7cf94c73cecc949d5ad6b83499"
+      },
+      "flake.nix": {
+        "resolved_path": "/home/gvickers/seedbox-qualification37-20261006/flake.nix",
+        "sha256": "a997290f2980ab8112a83c8269e00f92ba1b298b697345451bc02f7cf024f24a"
+      },
+      "guest/compose-init.c": {
+        "resolved_path": "/home/gvickers/seedbox-qualification37-20261006/guest/compose-init.c",
+        "sha256": "e3a57e6e85f29db761d841fd9fa6301c183d74ce0d15c3267a65d1f84a5dffc6"
+      },
+      "harness/msr54.py": {
+        "resolved_path": "/home/gvickers/seedbox-qualification37-20261006/harness/msr54.py",
+        "sha256": "05230687b5b160a3292c9a087403060c26d56cd3336cc6627dc7c40542d89163"
+      },
+      "kernel/config.options": {
+        "resolved_path": "/home/gvickers/seedbox-qualification37-20261006/kernel/config.options",
+        "sha256": "66068856fa6cebaab2f682d9a856e45594f26d513fb50cc3b7aef6de4942524a"
+      }
+    },
+    "git": {
+      "argv": [
+        "git",
+        "-C",
+        "/home/gvickers/seedbox-qualification37-20261006",
+        "rev-parse",
+        "HEAD"
+      ],
+      "returncode": 128,
+      "stderr": "fatal: not a git repository (or any of the parent directories): .git\n",
+      "stdout": ""
+    }
+  }
+}

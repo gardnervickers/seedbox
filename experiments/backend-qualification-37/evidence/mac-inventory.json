@@ -1,0 +1,85 @@
+{
+  "captured_at_utc": "2026-10-07T00:47:11.791377+00:00",
+  "effective_uid": 501,
+  "kvm": {
+    "reason": "not Linux x86_64",
+    "status": "NOT_APPLICABLE"
+  },
+  "os_build": {
+    "argv": [
+      "sw_vers"
+    ],
+    "returncode": 0,
+    "stderr": "",
+    "stdout": "ProductName:\t\tmacOS\nProductVersion:\t\t27.0.1\nBuildVersion:\t\t26A434\n"
+  },
+  "platform": {
+    "machine": "arm64",
+    "node": "gardners-mbp",
+    "release": "27.0.0",
+    "system": "Darwin"
+  },
+  "schema": "seedbox.research.host-inventory.v1",
+  "scope": "read-only inventory; never host qualification",
+  "source": {
+    "checkout": "/Users/gardnervickers/.codex/worktrees/backend-qualification-research/seedbox",
+    "files": {
+      "Cargo.lock": {
+        "resolved_path": "/Users/gardnervickers/.codex/worktrees/backend-qualification-research/seedbox/Cargo.lock",
+        "sha256": "bb643f88bd0770e4ad2e3350d61a18d46ea7cffcd379baa34d408aba90879c5c"
+      },
+      "crates/seedbox-vmm/Cargo.lock": {
+        "resolved_path": "/Users/gardnervickers/.codex/worktrees/backend-qualification-research/seedbox/crates/seedbox-vmm/Cargo.lock",
+        "sha256": "c6e4a866e742b69ccebaa7da798f9ec7bf23ca6197204c12fb00c46e90c5e952"
+      },
+      "crates/seedbox-vmm/Cargo.toml": {
+        "resolved_path": "/Users/gardnervickers/.codex/worktrees/backend-qualification-research/seedbox/crates/seedbox-vmm/Cargo.toml",
+        "sha256": "d8851a3bc63135d39a9774c1ac68d74b0cd67e0c9dbe26ce4f23896cdc9ca9a5"
+      },
+      "crates/seedbox-vmm/src/counter.rs": {
+        "resolved_path": "/Users/gardnervickers/.codex/worktrees/backend-qualification-research/seedbox/crates/seedbox-vmm/src/counter.rs",
+        "sha256": "b7eb3da8a1f039df47b52f67b47e6324fb41e2a5f0451e4294d286ea10d71c1e"
+      },
+      "crates/seedbox-vmm/src/machine.rs": {
+        "resolved_path": "/Users/gardnervickers/.codex/worktrees/backend-qualification-research/seedbox/crates/seedbox-vmm/src/machine.rs",
+        "sha256": "c892b6f72cce366fffcd32ad196234f8a2ee1222400fdfc82a9972a23c5da373"
+      },
+      "crates/seedbox/src/host.rs": {
+        "resolved_path": "/Users/gardnervickers/.codex/worktrees/backend-qualification-research/seedbox/crates/seedbox/src/host.rs",
+        "sha256": "8b46b14378e70ff3c8af9ecdceae22069804515f8148284191e3a0ede0c4ccdc"
+      },
+      "flake.lock": {
+        "resolved_path": "/Users/gardnervickers/.codex/worktrees/backend-qualification-research/seedbox/flake.lock",
+        "sha256": "006e9266b7335db3ddd2fd306d7034260c6bcf7cf94c73cecc949d5ad6b83499"
+      },
+      "flake.nix": {
+        "resolved_path": "/Users/gardnervickers/.codex/worktrees/backend-qualification-research/seedbox/flake.nix",
+        "sha256": "a997290f2980ab8112a83c8269e00f92ba1b298b697345451bc02f7cf024f24a"
+      },
+      "guest/compose-init.c": {
+        "resolved_path": "/Users/gardnervickers/.codex/worktrees/backend-qualification-research/seedbox/guest/compose-init.c",
+        "sha256": "e3a57e6e85f29db761d841fd9fa6301c183d74ce0d15c3267a65d1f84a5dffc6"
+      },
+      "harness/msr54.py": {
+        "resolved_path": "/Users/gardnervickers/.codex/worktrees/backend-qualification-research/seedbox/harness/msr54.py",
+        "sha256": "05230687b5b160a3292c9a087403060c26d56cd3336cc6627dc7c40542d89163"
+      },
+      "kernel/config.options": {
+        "resolved_path": "/Users/gardnervickers/.codex/worktrees/backend-qualification-research/seedbox/kernel/config.options",
+        "sha256": "66068856fa6cebaab2f682d9a856e45594f26d513fb50cc3b7aef6de4942524a"
+      }
+    },
+    "git": {
+      "argv": [
+        "git",
+        "-C",
+        "/Users/gardnervickers/.codex/worktrees/backend-qualification-research/seedbox",
+        "rev-parse",
+        "HEAD"
+      ],
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "8a3e14ab2d9ded39082e1bc6c0f5ac531a454ce4\n"
+    }
+  }
+}

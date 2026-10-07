@@ -1,0 +1,94 @@
+{
+  "schema": "seedbox.research.capability-matrix.v1",
+  "qualification_decision": "No new host admitted",
+  "production_changes": false,
+  "capabilities": [
+    {
+      "capability": "Existing AMD profile inventory",
+      "status": "DEMONSTRATED_WITHIN_SCOPE",
+      "evidence_level": "PROCEDURE_VALIDATED",
+      "evidence": "evidence/workstation-inventory.json",
+      "scope": "5950X/kernel6.18.54/microcode0xa20102e; KVM API and supported CPUID; no guest",
+      "next_probe": "Current accepted candidate defaults/full-state/application/fault and observation matrix, owned by #33/#5",
+      "decision": "Inventory supports candidate admission research only"
+    },
+    {
+      "capability": "Existing AMD replay",
+      "status": "UNRESOLVED",
+      "historical_status": "DEMONSTRATED_WITHIN_SCOPE",
+      "evidence_level": "KVM_STATE_MATCH_FOR_LISTED_HISTORICAL_CASES",
+      "evidence": "docs/acceptance.md historical retained cases",
+      "scope": "Listed historical engine/kernel/application/lifecycle cases only",
+      "current_candidate_status": "NOT_EXECUTED_BY_THIS_LANE",
+      "next_probe": "Integrated current engine qualification without margin retries or witness repins",
+      "decision": "No extension to current default reliability or arbitrary OCI/JVM programs"
+    },
+    {
+      "capability": "Second-Zen same-artifact replay",
+      "status": "UNRESOLVED",
+      "blocker": "HARDWARE_BLOCKED",
+      "execution": "NOT_EXECUTED",
+      "next_probe": "Two concrete qualified profiles; self-replay plus A-to-B/B-to-A full-state and performance/observation matrix",
+      "decision": "Park; cannot advertise fleet-wide or cross-host replay"
+    },
+    {
+      "capability": "Intel raw event, guest filter and overflow",
+      "status": "UNRESOLVED",
+      "blocker": "HARDWARE_BLOCKED",
+      "execution": "NOT_EXECUTED",
+      "evidence_level": "DOCUMENTED_HYPOTHESIS",
+      "next_probe": "Identified Intel model/core-specific event; exact branch loops, host-only zero control, guest-kernel/user coverage, KVM_RUN overflow/skid recovery",
+      "decision": "Intel unsupported pending actual evidence; current Zen VMM is not an Intel probe"
+    },
+    {
+      "capability": "Rootless Intel",
+      "status": "UNRESOLVED",
+      "blocker": "HARDWARE_BLOCKED",
+      "execution": "NOT_EXECUTED",
+      "next_probe": "Repeat raw/filter/overflow tests under actual unprivileged and authorized privileged contexts without changing policy",
+      "decision": "No rootless product promise"
+    },
+    {
+      "capability": "Nested-vPMU and L2 exact stops",
+      "status": "UNRESOLVED",
+      "execution": "NOT_EXECUTED",
+      "evidence": "AMD inventory reports enable_pmu=Y and nested=1 only",
+      "next_probe": "Separate L0/L1 inventories and L1 perf/L2 guest filtering, overflow and exact-stop evidence",
+      "decision": "Flags, a boot or a regular cloud VM do not establish compatibility"
+    },
+    {
+      "capability": "Mac small input-control probe",
+      "status": "DEMONSTRATED_WITHIN_SCOPE",
+      "evidence_level": "OBSERVATIONS_MATCH",
+      "evidence": "788fc43:research/mac-tcg/README.md and evidence/2026-10-06",
+      "scope": "M4 Max/macOS27.0.1/QEMU11.1.1/Linux6.18.54, 256MiB, one vCPU; nine runs over three seeds",
+      "next_probe": "Current cached-input probe repeats and negative controls",
+      "decision": "Preserve experiment; no execution/full-state or service admission from these hashes"
+    },
+    {
+      "capability": "Mac single-kernel etcd faults/recovery",
+      "status": "DEMONSTRATED_WITHIN_SCOPE",
+      "evidence_level": "SCOPED_EXECUTION_MATCH",
+      "evidence": "788fc43:research/mac-tcg/SERVICE_REPORT.md and review-fixes evidence",
+      "scope": "Selected instruction-boundary/discontinuity witness; two corrected seed1009 runs; fixed delay, shared kernel/clock/tmpfs",
+      "next_probe": "Full corrected witness/control matrix and declared RAM/register/device coverage",
+      "decision": "Does not establish whole-world determinism or bug-discovery rate"
+    },
+    {
+      "capability": "Mac independent machines / private KVM PV ABI / production run-replay",
+      "status": "UNRESOLVED",
+      "execution": "NOT_EXECUTED",
+      "scope": "Existing stock-QEMU profile lacks current KVM private ABI implementation, multi-machine coordinator and production integration",
+      "next_probe": "After separate design gate: two-machine causal execution, time ABI, actual state evidence and clean retained-input setup",
+      "decision": "No backend abstraction or implementation commitment"
+    },
+    {
+      "capability": "Cross-backend equality and common progress model",
+      "status": "UNRESOLVED",
+      "execution": "NOT_EXECUTED",
+      "scope": "KVM uses conditional branches/private ABI; TCG uses instructions/stock kernel and separate witness schema",
+      "next_probe": "Separate future common-reference research, if requested",
+      "decision": "Not a V0 prerequisite or current guarantee"
+    }
+  ]
+}

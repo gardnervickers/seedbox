@@ -1,0 +1,12 @@
+{
+  "source_revision": "8a3e14ab2d9ded39082e1bc6c0f5ac531a454ce4",
+  "transfer": "git archive 8a3e14a | ssh gvickers@nixos.local tar -x -C /home/gvickers/seedbox-qualification37-20261006",
+  "collector_sha256": "d97e154359d40729f94f2bbd5564a927eef94f5f2cf90057763de843b34b24a2",
+  "linux_command": "CARGO_BUILD_JOBS=1 nix develop --offline --command python3 inventory.py --checkout /home/gvickers/seedbox-qualification37-20261006",
+  "linux_scope": "Linux source archive of baseline, collector copied unchanged; no VM or MSR operation",
+  "files_sha256": {
+    "evidence/workstation-inventory.json": "5eff10a13ed64de4fe84f1b1d1f1ed044b4ade11ed3f744994648f896f6f1e37",
+    "evidence/mac-inventory.json": "264fadd9ceeab4e3a5e4c4175a6fc569712bdfbf9b64f3a978004e3d76a290e0",
+    "evidence/inventory-validation.json": "791e456c03f5f185f2d871d7945d07ca5f45eb8e532baaf530f1a92ef27c000e"
+  }
+}

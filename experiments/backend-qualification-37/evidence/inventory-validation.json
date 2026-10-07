@@ -1,0 +1,12 @@
+{
+  "status": "PASS",
+  "scope": "inventory collector and transfer only",
+  "cpuid_vendor": "AuthenticAMD",
+  "family": 25,
+  "model": 33,
+  "stepping": 0,
+  "smt_siblings": [2, 18],
+  "source_file_hashes_verified": 11,
+  "mac_kvm_status": "NOT_APPLICABLE",
+  "guest_tests": "NOT_EXECUTED"
+}

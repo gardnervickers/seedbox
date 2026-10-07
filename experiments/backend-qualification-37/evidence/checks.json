@@ -1,0 +1,83 @@
+{
+  "schema": "seedbox.research.qualification-checkpoint.v1",
+  "source_baseline": "8a3e14ab2d9ded39082e1bc6c0f5ac531a454ce4",
+  "guest_seconds": 0,
+  "remote_builds": 0,
+  "cpu_reservations": [],
+  "host_mutations": [],
+  "checks": [
+    {
+      "name": "linux_inventory",
+      "status": "PASS",
+      "scope": "read-only collector, not guest qualification",
+      "evidence": "workstation-inventory.json"
+    },
+    {
+      "name": "mac_inventory",
+      "status": "PASS",
+      "scope": "non-Linux handling, not TCG guest execution",
+      "evidence": "mac-inventory.json"
+    },
+    {
+      "name": "inventory_decode_and_transfer",
+      "status": "PASS",
+      "scope": "CPUID vendor/family/model/stepping independently matches lscpu; sibling 2/18; eleven transferred source hashes match; Mac marks KVM NOT_APPLICABLE",
+      "evidence": "inventory-validation.json"
+    },
+    {
+      "name": "cargo_fmt_seedbox",
+      "status": "PASS",
+      "evidence": "repository-checks.log"
+    },
+    {
+      "name": "cargo_clippy_seedbox_all_targets_locked",
+      "status": "PASS",
+      "evidence": "repository-checks.log"
+    },
+    {
+      "name": "cargo_test_workspace_locked",
+      "status": "PASS",
+      "evidence": "repository-checks.log"
+    },
+    {
+      "name": "acceptance_portable",
+      "status": "PASS",
+      "evidence": "repository-checks.log"
+    },
+    {
+      "name": "cargo_test_vmm",
+      "status": "NOT_EXECUTED",
+      "reason": "Linux-only; portable checks ran on Mac; remote guest/build capacity belongs to engine #33"
+    },
+    {
+      "name": "mac_tcg_offline_shell_attempt",
+      "status": "ENVIRONMENT_FAILED_BEFORE_TESTS",
+      "command": "nix develop --offline --command python3 -m unittest discover -p test_*.py",
+      "exit_status": 1,
+      "reason": "Separate pinned shell dependencies were not present offline; Nix failed dependency realization. Raw tool output remains in the research chat. The retry hypothesis was that binary substitution could provide the missing pinned closure without source builds."
+    },
+    {
+      "name": "mac_tcg_binary_only_shell_attempt",
+      "status": "ENVIRONMENT_FAILED_BEFORE_TESTS",
+      "exit_status": 1,
+      "command": "nix develop --max-jobs 0 --command python3 -m unittest discover -p 'test_*.py'",
+      "reason": "Dependencies were substituted successfully, but max-jobs=0 forbade the local shell-environment derivation; the subsequent retry hypothesis was to allow that small derivation with one local build slot using the cached closure.",
+      "evidence": "mac-portable-tests-attempt2.log"
+    },
+    {
+      "name": "mac_tcg_pinned_portable_tests",
+      "status": "PASS",
+      "command": "nix develop --offline --max-jobs 1 --cores 1 --command python3 -m unittest discover -p 'test_*.py'",
+      "evidence": "mac-portable-tests.log",
+      "scope": "runner/classifier/evidence tests only, no guest execution",
+      "tests": 21
+    }
+  ],
+  "guest_execution": {
+    "current_amd_candidate": "NOT_EXECUTED: integrated qualification owned by engine #33",
+    "second_zen": "HARDWARE_BLOCKED: no identified second physical host",
+    "intel": "HARDWARE_BLOCKED: user confirmed additional Intel machine unavailable",
+    "nested_vpmu": "NOT_EXECUTED: configuration readings only",
+    "mac_tcg": "NOT_EXECUTED: no cached guest inputs or new campaign budget"
+  }
+}
