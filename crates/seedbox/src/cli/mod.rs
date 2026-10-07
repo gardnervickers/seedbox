@@ -17,7 +17,7 @@ use seedbox::{
     preparation::OciPreparer,
     store::ContentStore,
     templates::Template,
-    vmm::{recorded_counter, VmmExecutor},
+    vmm::{recorded_counter, recorded_torn_writes, VmmExecutor},
     Error, Result,
 };
 use signals::Signals;
@@ -57,7 +57,7 @@ enum Command {
         #[arg(long, value_enum, default_value_t = TemplateArg::Etcd)]
         template: TemplateArg,
     },
-    /// Check a Compose file against the supported subset, without images or guests.
+    /// Check Compose services and directed network policies, without images or guests.
     Validate {
         #[command(flatten)]
         compose: ComposeArg,
@@ -119,9 +119,12 @@ enum Command {
         /// First simulation seed [default: x-seedbox.seed from the Compose file].
         #[arg(long)]
         seed: Option<u64>,
-        /// Number of consecutive seeds to execute sequentially.
+        /// Number of consecutive seeds to execute.
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..))]
         count: u64,
+        /// Maximum active attempts; omit --cpu for parallel execution.
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=32))]
+        workers: u32,
         /// Print exactly one exploration report as JSON.
         #[arg(long)]
         json: bool,
@@ -297,6 +300,9 @@ struct RuntimeInputs {
     /// Static Linux amd64 BusyBox [default: busybox on PATH, if static].
     #[arg(long, env = "SEEDBOX_BUSYBOX")]
     busybox: Option<PathBuf>,
+    /// Static Linux amd64 mke2fs, for named volumes [default: mke2fs on PATH, if static].
+    #[arg(long, env = "SEEDBOX_MKE2FS")]
+    mke2fs: Option<PathBuf>,
     /// Docker-compatible client for `build:` services.
     #[arg(long, default_value = "podman")]
     builder: PathBuf,
@@ -306,6 +312,9 @@ struct RuntimeInputs {
     /// Also record and compare every machine's RAM and registers.
     #[arg(long)]
     full_state: bool,
+    /// Keep a seeded subset of unflushed disk sectors on crash (512-byte atomicity; off by default).
+    #[arg(long)]
+    torn_writes: bool,
 }
 
 impl RuntimeInputs {
@@ -323,7 +332,8 @@ impl RuntimeInputs {
         } else {
             WitnessMode::Exits
         };
-        let executor = VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?;
+        let executor = VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?
+            .with_torn_writes(self.torn_writes);
         let preparer = self.preparer(engine, store, scratch, executor.profile())?;
         Ok((preparer, executor))
     }
@@ -350,6 +360,7 @@ impl RuntimeInputs {
             engine,
             init: defaults::guest_init(self.guest_init.clone(), store, scratch)?,
             busybox: defaults::busybox(self.busybox.clone())?,
+            mke2fs: defaults::mke2fs(self.mke2fs.clone())?,
             profile,
         })
     }
@@ -554,6 +565,7 @@ fn run(cli: Cli) -> Result<u8> {
             compose,
             seed,
             count,
+            workers,
             json,
             cpu,
             state,
@@ -568,9 +580,13 @@ fn run(cli: Cli) -> Result<u8> {
             let options = ExploreOptions {
                 seed,
                 count,
+                workers,
                 cancellation: cancellation.clone(),
             };
             exploration::bounds(&simulation, &options)?;
+            if workers > 1 && cpu.cpu.is_some() {
+                return Err(Error::Setup("--workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU".into()));
+            }
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
             let detected = CounterProfile::host();
@@ -605,6 +621,12 @@ fn run(cli: Cli) -> Result<u8> {
             } else {
                 println!("{}: {}", word(&result.outcome), result.directory.display());
                 println!("seeds: {}..={}", result.first_seed, result.last_seed);
+                println!("workers: {}", result.workers);
+                println!("peak-running: {}", result.peak_running);
+                println!(
+                    "active-attempt-seconds: {:.3}",
+                    result.active_attempt_seconds
+                );
                 println!("attempted: {}", result.attempts.len());
                 println!("pass: {}", result.counts.pass);
                 println!("fail: {}", result.counts.fail);
@@ -683,6 +705,7 @@ fn run(cli: Cli) -> Result<u8> {
                     profile.witness_mode.clone(),
                     counter,
                 )?
+                .with_torn_writes(recorded_torn_writes(profile)?)
                 .with_unqualified_cpu(cpu.allow_unqualified_cpu)
                 .with_dev_engine(cpu.allow_dev_engine, &previous.identity.inputs.kernel),
             )?;

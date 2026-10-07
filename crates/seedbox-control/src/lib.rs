@@ -25,9 +25,28 @@ pub enum Operation {
     Restart {
         target: Target,
     },
+    Pause {
+        target: Target,
+    },
+    Resume {
+        target: Target,
+    },
+    Crash {
+        target: Target,
+    },
+    Reboot {
+        target: Target,
+    },
     Partition {
         left: Vec<Target>,
         right: Vec<Target>,
+    },
+    Shape {
+        from: Vec<Target>,
+        to: Vec<Target>,
+        latency_ns: u64,
+        jitter_ns: u64,
+        loss_ppm: u64,
     },
     Heal {
         handle: String,
@@ -124,6 +143,14 @@ pub enum Action {
         left: Vec<String>,
         right: Vec<String>,
     },
+    Shape {
+        handle: String,
+        from: Vec<String>,
+        to: Vec<String>,
+        latency_ns: u64,
+        jitter_ns: u64,
+        loss_ppm: u64,
+    },
     Heal {
         handle: String,
     },
@@ -150,6 +177,7 @@ impl Action {
             Self::Stop { .. } => "stop",
             Self::Restart { .. } => "restart",
             Self::Partition { .. } => "partition",
+            Self::Shape { .. } => "shape",
             Self::Heal { .. } => "heal",
             Self::Pause { .. } => "pause",
             Self::Resume { .. } => "resume",
@@ -195,5 +223,24 @@ mod tests {
         }
         let r:Request=serde_json::from_str(r#"{"version":1,"id":1,"op":"partition","left":[{"service":"c"}],"right":[{"machine":"s"}]}"#).unwrap();
         assert!(matches!(r.operation, Operation::Partition { .. }));
+        for op in ["pause", "resume", "crash", "reboot"] {
+            for target in [Target::Service("s".into()), Target::Machine("m".into())] {
+                let wire = serde_json::json!({"version":1,"id":1,"op":op,"target":target});
+                let request: Request = serde_json::from_value(wire.clone()).unwrap();
+                assert_eq!(serde_json::to_value(request).unwrap(), wire);
+            }
+            for arguments in [
+                serde_json::json!({}),
+                serde_json::json!({"target":"s"}),
+                serde_json::json!({"target":{"service":"s","machine":"m"}}),
+                serde_json::json!({"target":{"service":"s"},"extra":1}),
+            ] {
+                let mut wire = serde_json::json!({"version":1,"id":1,"op":op});
+                wire.as_object_mut()
+                    .unwrap()
+                    .extend(arguments.as_object().unwrap().clone());
+                assert!(serde_json::from_value::<Request>(wire).is_err());
+            }
+        }
     }
 }

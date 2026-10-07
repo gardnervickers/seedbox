@@ -14,7 +14,7 @@ fn world(undo:u64,reverse:bool)->World {
     let names:Vec<String>=if reverse {vec!["b".into(),"a".into()]} else {vec!["a".into(),"b".into()]};
     let boot:Vec<_>=names.iter().map(|n|boot(n.as_bytes()[0],undo)).collect();
     let machines=names.iter().zip(&boot).map(|(n,b)|boot_machine(&kvm,n,b,false,[0;32]).unwrap()).collect();
-    World {machines,kvm,boot,barrier:false,boot_seed:1009,run_seed:1009,incarnations:vec![vec![],vec![]],paused_ingress:vec![0;2],counter:Counter::new().unwrap(),events:vec![BTreeMap::new();2],seq:0,lookahead:50,early:0,latency:50,jitter:0,link_rng:link_rngs(1009,&names),link_last:BTreeMap::new(),partitioned:BTreeMap::new(),faults:faults::Faults::new(vec![],names.clone()).unwrap(),control:control::Control::new(&json!({"machine":"a","latency_ns":50,"placement":{}}),names,50,0).unwrap(),strict_events:vec![BTreeMap::new();2],macs:vec![[0,0,0,0,0,1],[0,0,0,0,0,2]],dropped:0,delivered:0,link_counts:BTreeMap::new(),semantic_counts:network_counters::NetworkCounters::default(),slices:0}
+    World {machines,kvm,boot,barrier:false,boot_seed:1009,run_seed:1009,incarnations:vec![vec![],vec![]],paused_ingress:vec![0;2],counter:Counter::new().unwrap(),events:vec![BTreeMap::new();2],seq:0,lookahead:50,early:0,latency:50,partitioned:BTreeMap::new(),faults:faults::Faults::with_links(vec![],names.clone(),links::Links::from_config(1009,&names,&json!({"latency_ns":50})).unwrap()).unwrap(),control:control::Control::new(&json!({"machine":"a","latency_ns":50,"placement":{}}),names,50,0).unwrap(),strict_events:vec![BTreeMap::new();2],macs:vec![[0,0,0,0,0,1],[0,0,0,0,0,2]],dropped:0,delivered:0,link_counts:BTreeMap::new(),semantic_counts:network_counters::NetworkCounters::default(),slices:0}
 }
 fn partition(handle:&str)->Action {Action::Partition {handle:handle.into(),left:vec!["a".into()],right:vec!["b".into()]}}
 
@@ -50,6 +50,7 @@ fn committed_trigger_world_retains_already_routed_response_and_lagging_peer() {
     w.machines[1]=boot_machine(&w.kvm,"b",&peer_boot,false,[0;32]).unwrap();
     // A delayed, already-routed response stays queued beyond the future cut.
     w.latency=1000;
+    w.faults.links.global.latency_ns=1000;
     let mut response=vec![0;14];response[..6].copy_from_slice(&w.macs[1]);
     w.route(0,0,response.clone());
     let queued=w.events[1].clone();

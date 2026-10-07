@@ -5,14 +5,15 @@ use std::{
 };
 
 /// Run the CLI with a scrubbed environment: no `SEEDBOX_*`, `CARGO*` or
-/// `SUDO_USER` variables, `HOME` at `cwd`, and `PATH` set to `path` (empty if
-/// `None`), so no default can come from the developer's machine.
+/// `SUDO_USER` variables, `HOME` and scratch storage at `cwd`, and `PATH` set to
+/// `path` (empty if `None`), so no default can come from the developer's machine.
 fn seedbox_with(args: &[&str], cwd: &Path, path: Option<&Path>) -> Output {
     Command::new(env!("CARGO_BIN_EXE_seedbox"))
         .args(args)
         .current_dir(cwd)
         .env_clear()
         .env("HOME", cwd)
+        .env("TMPDIR", cwd)
         .env("PATH", path.map(Path::as_os_str).unwrap_or_default())
         .output()
         .unwrap()
@@ -291,6 +292,23 @@ fn busybox_default_requires_a_static_busybox_on_path() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn an_explicit_mke2fs_must_exist() {
+    let (directory, mut args) = runtime_project();
+    let busybox = directory.path().join("busybox");
+    fs::write(&busybox, b"").unwrap();
+    args.extend(["--busybox".into(), busybox.to_str().unwrap().to_owned()]);
+    args.extend(["--mke2fs".into(), "/nonexistent/mke2fs".into()]);
+    let args: Vec<_> = args.iter().map(String::as_str).collect();
+    let output = seedbox(&args, directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        "error: --mke2fs /nonexistent/mke2fs: not found\n"
+    );
+}
+
 #[test]
 fn explore_bounds_and_help_are_public_before_runtime_inputs_or_state() {
     let directory = tempfile::tempdir().unwrap();
@@ -310,6 +328,28 @@ fn explore_bounds_and_help_are_public_before_runtime_inputs_or_state() {
     );
     assert_eq!(stderr(&overflow),"error: --seed/--count: range is empty or overflows u64; use a positive --count and reduce the range\n");
     assert!(!project.join(".seedbox").exists());
+    for workers in ["0", "33", "nope"] {
+        let output = seedbox(&["explore", "--workers", workers], &project);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).contains("--workers"));
+        assert!(!project.join(".seedbox").exists());
+    }
+    let pinned = seedbox(&["explore", "--workers", "2", "--cpu", "4"], &project);
+    assert_eq!(pinned.status.code(), Some(2));
+    assert_eq!(stderr(&pinned), "error: --workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU\n");
+    assert!(!project.join(".seedbox").exists());
+    let env_pinned = Command::new(env!("CARGO_BIN_EXE_seedbox"))
+        .args(["explore", "--workers", "2"])
+        .current_dir(&project)
+        .env_clear()
+        .env("HOME", &project)
+        .env("PATH", "")
+        .env("SEEDBOX_CPU", "4")
+        .output()
+        .unwrap();
+    assert_eq!(env_pinned.status.code(), Some(2));
+    assert_eq!(stderr(&env_pinned), stderr(&pinned));
+    assert!(!project.join(".seedbox").exists());
     let boundary = seedbox(
         &["explore", "--seed", "18446744073709551615", "--count", "1"],
         &project,
@@ -325,7 +365,7 @@ fn explore_bounds_and_help_are_public_before_runtime_inputs_or_state() {
             && text.contains("--json")
             && text.contains("Exit status:")
     );
-    assert!(!text.contains("--workers"));
+    assert!(text.contains("--workers"));
     fs::write(project.join("compose.yaml"),"services:\n  a: {image: example/a}\nx-seedbox:\n  version: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: a}\n").unwrap();
     let missing = seedbox(&["explore"], &project);
     assert_eq!(
@@ -396,6 +436,45 @@ fn bundle_cli_validates_paths_limits_and_positional_inputs() {
 }
 
 #[test]
+fn validate_cli_resolves_directed_baselines_and_reports_each_policy_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("compose.yaml");
+    let yaml = "name: cli-links\nservices:\n  server: {image: example/server:v1}\n  client: {image: example/client:v1}\nx-seedbox:\n  version: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  network: {latency: 1ms, links: [LINKS]}\n  check: {service: client}\n";
+    let good = "{from: server, to: client, latency: 1ms}";
+    fs::write(&source, yaml.replace("LINKS", good)).unwrap();
+    let output = seedbox(&["validate", "--json"], directory.path());
+    assert!(output.status.success(), "{}", stderr(&output));
+    let resolved: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        resolved["network"]["links"][0],
+        serde_json::json!({"from":"server","to":"client","latency_ns":1_000_000,"jitter_ns":0,"loss_ppm":0})
+    );
+    for (entry, path) in [
+        (format!("{good},{good}"), "links[1]"),
+        (
+            good.replace("from: server", "from: unknown"),
+            "links[0].from",
+        ),
+        (good.replace("1ms", "999us"), "links[0].latency"),
+        (good.replace("1ms}", "1ms, jitter: 1ms}"), "links[0].jitter"),
+        (
+            good.replace("1ms}", "1ms, loss_ppm: 1000001}"),
+            "links[0].loss_ppm",
+        ),
+    ] {
+        fs::write(&source, yaml.replace("LINKS", &entry)).unwrap();
+        let output = seedbox(&["validate"], directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(
+            stderr(&output).contains(&format!("$.x-seedbox.network.{path}")),
+            "{}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
 fn build_epoch_custom_builder_fails_before_runtime_resolution_or_state_creation() {
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("Dockerfile"), "FROM scratch\n").unwrap();
@@ -457,6 +536,7 @@ fn old_host_proof_replay_is_not_comparable_while_inspection_and_transfer_stay_av
                     user: "".into(),
                     working_dir: "/".into(),
                     volumes: vec![],
+                    disk_volumes: vec![],
                 },
             },
         )]),
@@ -918,4 +998,30 @@ mod diff_tests {
         assert_eq!(result["status"], "MATCH");
         assert_eq!(result["machines"][0]["witness"]["matches"], true);
     }
+}
+
+#[test]
+fn torn_writes_is_opt_in_presence_only_and_replay_uses_the_recorded_policy() {
+    let directory = tempfile::tempdir().unwrap();
+    for command in ["run", "prepare"] {
+        let help = seedbox(&["help", command], directory.path());
+        assert!(help.status.success());
+        let help = String::from_utf8_lossy(&help.stdout);
+        assert!(help.contains("--torn-writes"));
+        assert!(help.contains("off by default"));
+        assert!(!help.contains("SEEDBOX_TORN_WRITES"));
+        let mut args = vec![command, "--torn-writes"];
+        if command == "prepare" {
+            args.extend(["--output", "out.json"]);
+        }
+        let output = seedbox(&args, directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(stderr(&output), "error: no Compose file found; searched:\n  ./compose.yaml\n  ./compose.yml\n  ./docker-compose.yaml\n  ./docker-compose.yml\npass the file path directly\n");
+        let output = seedbox(&[command, "--torn-writes=false"], directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).contains("--torn-writes"));
+    }
+    let output = seedbox(&["replay", "run", "--torn-writes"], directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("unexpected argument '--torn-writes'"));
 }

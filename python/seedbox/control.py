@@ -48,6 +48,12 @@ class Trigger:
     partition: Optional[Partition] = None
 
 
+@dataclass(frozen=True)
+class Shape:
+    handle: str
+    effect: Effect
+
+
 def _target(value):
     kind, name = ("machine", value.name) if isinstance(value, Machine) else ("service", value)
     if not isinstance(name, str) or not name:
@@ -172,6 +178,22 @@ class World:
         """Return after successful exec; application readiness remains its own check."""
         return self._call("restart", target=_target(target))[1]
 
+    def pause(self, target):
+        """Freeze the target's whole machine; other machines keep running."""
+        return self._call("pause", target=_target(target))[1]
+
+    def resume(self, target):
+        """Continue a paused machine; missed timer ticks fire once, late."""
+        return self._call("resume", target=_target(target))[1]
+
+    def crash(self, target):
+        """Destroy the machine: RAM, sockets and queued I/O are lost; nothing is sent on its behalf."""
+        return self._call("crash", target=_target(target))[1]
+
+    def reboot(self, target):
+        """Boot a crashed machine again from its image; readiness is the application's own check."""
+        return self._call("reboot", target=_target(target))[1]
+
     def partition(self, left, right):
         """Cut traffic in both directions and return an independent handle."""
         if isinstance(left, str) or isinstance(right, str):
@@ -182,10 +204,25 @@ class World:
             raise ProtocolError("partition response lacks an opaque handle")
         return Partition(result["handle"], effect)
 
+    def shape(self, from_, to, *, latency, jitter=0, loss_ppm=0):
+        """Apply an absolute directed policy; latency and jitter are nanoseconds."""
+        if isinstance(from_, str) or isinstance(to, str):
+            raise ValueError("shape sides must be sequences of targets")
+        for name, value, maximum in [("latency", latency, 2**64 - 1), ("jitter", jitter, 2**64 - 1), ("loss_ppm", loss_ppm, 1_000_000)]:
+            if type(value) is not int or not 0 <= value <= maximum:
+                raise ValueError(f"{name} must be an integer in [0, {maximum}]")
+        if jitter >= latency or latency + jitter > 3_600_000_000_000:
+            raise ValueError("jitter must be less than latency; their sum must not exceed one hour")
+        result, effect = self._call("shape", **{"from": [_target(t) for t in from_], "to": [_target(t) for t in to], "latency_ns": latency, "jitter_ns": jitter, "loss_ppm": loss_ppm})
+        if not isinstance(result.get("handle"), str) or not result["handle"]:
+            self.close()
+            raise ProtocolError("shape response lacks an opaque handle")
+        return Shape(result["handle"], effect)
+
     def heal(self, partition):
-        """Release this handle only; overlapping cuts remain active."""
-        if not isinstance(partition, Partition):
-            raise TypeError("heal expects the Partition returned by partition()")
+        """Release this handle only; prior shape layers or overlapping cuts remain."""
+        if not isinstance(partition, (Partition, Shape)):
+            raise TypeError("heal expects the Partition or Shape returned by this API")
         return self._call("heal", handle=partition.handle)[1]
 
 
@@ -228,3 +265,7 @@ class World:
         if not isinstance(trigger, Trigger):
             raise TypeError("cancel expects the Trigger returned by arm_console_*()")
         return self._call("cancel_trigger", trigger_id=trigger.id)[1]
+
+
+# Descriptive controller name; retain World for existing scenarios.
+Controller = World

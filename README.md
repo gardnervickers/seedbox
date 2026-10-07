@@ -31,18 +31,41 @@ directory. Every runtime input has a default, so no flags are required:
 | Input | Default | Override |
 | --- | --- | --- |
 | Compose file | `compose.yaml` in the given directory (default `.`) | positional path |
+| Directed link baselines | no overrides; global latency/jitter and zero loss | `x-seedbox.network.links` |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
-| Exploration count | `1`, sequential execution | `--count` |
+| Exploration count | `1` | `--count` |
+| Exploration workers | `1`, sequential execution | `--workers` (1..32; automatic CPU selection for parallel execution) |
+| Torn disk writes | off (drop all unflushed sectors on crash) | `--torn-writes` |
 | CPU | first free core other than CPU 0's, under the shared lease | `--cpu`, `SEEDBOX_CPU` |
 | Guest kernel | `bzImage` in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`, `./artifacts`, then `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | `seedbox-vmm` next to an installed `seedbox`, then this checkout's `cargo build-vmm` output, then on `PATH`; `cargo run` builds it if missing | `--vmm`, `SEEDBOX_VMM` |
 | Guest supervisor | built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | BusyBox | `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
+| mke2fs (only for named volumes) | `SEEDBOX_MKE2FS` (set by `nix develop`), then a static `mke2fs` on `PATH` | `--mke2fs` |
 | Build epoch | absent; preserve the builder's ordinary timestamp policy | `--build-epoch` (prepare/run/explore; no environment backing) |
 | Engine qualification | pinned engine and guest kernel; dev artifacts require explicit opt-in | `--allow-dev-engine` (run/explore/replay/doctor; no environment backing) |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
 | Diff inputs | Two required retained run directories; no runtime inputs or state lookup | positional `RUN_A RUN_B` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
+
+Directed baselines are optional Compose settings. For example, with `server` and
+`client` services:
+
+```yaml
+x-seedbox:
+  network:
+    latency: 1ms
+    links:
+      - {from: server, to: client, latency: 20ms, jitter: 2ms, loss_ppm: 50000}
+```
+
+Each entry affects one direction. Latency is required; jitter and loss default to
+zero. Global latency remains the fixed scheduling lower bound for every link.
+`seedbox validate` checks the services, duplicate pairs, and policy bounds before
+preparation. Guest controllers can temporarily override links with
+`world.shape(["server"], ["client"], latency=20_000_000, jitter=2_000_000, loss_ppm=50000)`
+and release the returned handle with `world.heal(handle)`; see
+[network policy](docs/runtime.md#directed-link-policy).
 
 For development artifacts, pass `--allow-dev-engine` to `run`, `explore`, `replay`
 or `doctor`. Unpinned engine or guest-kernel bytes record the semantic parameter
@@ -50,6 +73,11 @@ or `doctor`. Unpinned engine or guest-kernel bytes record the semantic parameter
 engine. Replay requires this flag and the exact retained engine/kernel hashes;
 bundles preserve the marker. Passing the flag with both pinned artifacts adds no
 marker. All host, CPU, PMU, MSR, lease, ABI and control-channel checks still apply.
+
+`seedbox run --torn-writes` enables seeded partial survival of unflushed
+512-byte disk sectors on crash. It is recorded in run identity and replayed
+automatically. It applies to retained disks; Compose storage is still RAM-backed
+until named-volume disk support lands. See [disk semantics](docs/runtime.md#disk-crash-policy).
 
 `seedbox help run` lists every option. The guest Python API supports
 [bounded committed console triggers](docs/triggers.md) for future stop/partition
@@ -66,8 +94,15 @@ may change execution. Release compatibility remains a V0 qualification gate.
 ## Finite exploration
 
 `seedbox explore [COMPOSE] --seed FIRST --count COUNT` runs consecutive seeds
-sequentially, preparing the complete input closure once. Compose defaults to `.`,
-the first seed to the Compose seed, and count to 1. Empty/overflowing ranges fail
+with one worker by default, preparing the complete input closure once. Compose
+defaults to `.`, the first seed to the Compose seed, and count to 1.
+`--workers N` (1..32) permits at most N owned attempts at once; parallel exploration
+requires automatic CPU selection, so omit `--cpu` and `SEEDBOX_CPU`. Before
+preparation, the executor must be able to reserve and admit N distinct eligible
+physical cores together, including their SMT siblings; insufficient capacity is
+ERROR. Those transient reservations are released before OCI work. Each running
+world still owns its ordinary core/sibling lease. Contention afterward is an
+infrastructure error, with no retry or waiting-for-capacity policy. Empty/overflowing ranges fail
 before state creation or preparation. Immutable runtime inputs and host admission are
 checked before the sole preparation; refusal retains batch ERROR without dispatch.
 Each seed uses the ordinary retained-input and leased host rechecks. Application FAIL
@@ -80,7 +115,24 @@ with the existing commands. An unfinished checkpoint remains INCOMPLETE, includi
 when a process dies after committing a run but before updating the batch. The final
 exit precedence is ERROR (2), INCOMPLETE (3), TIMEOUT (124), FAIL (1), PASS (0). `--json` emits one
 report with per-attempt outcomes, undispatched count, elapsed time and CLI process-family
-resource measurements; application logs remain arbitrary bytes.
+resource measurements; application logs remain arbitrary bytes. Checkpoint version 2
+records seed indexes in ascending dispatch order regardless of completion order,
+with `finished: false` for dispatched attempts whose terminal result is not yet
+checkpointed. The pending suffix remains undispatched. Infrastructure or retention
+uncertainty cancels only the batch's owned attempts and joins them before returning;
+a backend blocked in cleanup prevents a prompt completion claim. Version 1 batch
+checkpoints need their prior reader; their bytes and ordinary run manifests remain
+unchanged.
+
+`peak_running` counts active orchestration attempts. `active_attempt_seconds` sums
+their whole wall intervals, including admission, materialization and cleanup; it is
+not exact lease time or measured CPU time. Once all owned attempts return, this
+one-world-per-worker backend can use the sum as a conservative guest-core charge.
+An unfinished checkpoint omits still-running/uncheckpointed intervals and is not
+a complete cumulative charge. CLI process-family CPU totals include
+preparation and reaped children. Parallel scheduling and chosen cores are performance
+choices excluded from run identity; actual serial/parallel and per-core equality
+remain runtime qualification gates.
 
 Exploration `build:` admission currently accepts only the inspected immutable
 project-Nix Linux Podman launcher/native closure in explicit local mode. Unknown
@@ -131,14 +183,15 @@ rebuilt OCI images to have identical bytes.
   virtual time; user RDTSC/RDTSCP trap via CR4.TSD and are emulated. The
   kernel's syscall yield hook remains, but the engine never requests it.
 - **Network and scheduling.** virtio-net over virtio-mmio into an in-memory
-  fabric with seeded latency/jitter and directed partitions. The world runs the
+  fabric with per-direction latency, jitter, loss and partitions. The world runs the
   machine furthest behind in slices that never pass its causal horizon (the
   other machines' times plus link latency) or its next event. A slice may end
   at the first deterministic point in the last half-latency before that
   boundary (capped by `stop_tolerance_ns`), and events are delivered at the
   first stop up to that long before they are due: early by a bounded amount,
   never late, and never before they were sent.
-- **Witness.** Each machine hashes every deterministic exit; `--digest` adds
+- **Witness.** A network hash covers pending frames, link streams and active policies.
+  Each machine hashes every deterministic exit; `--digest` adds
   a hash of registers and all guest RAM; `--trace` writes every exit.
 
 ## Host requirements
@@ -305,6 +358,7 @@ seedbox run harness/acceptance/workloads/short-kill-3.5.2.yaml
 seedbox run harness/acceptance/workloads/sanity.yaml
 seedbox run harness/acceptance/workloads/race.yaml
 seedbox run harness/acceptance/workloads/kill-3.5.3.yaml
+seedbox run harness/acceptance/workloads/volume-crash.yaml
 ```
 
 The YAML references the existing Go/C workload build contexts and loads the
@@ -321,7 +375,10 @@ etcd 3.5.3 scenario performs twenty. The sanity scenario requires detection of i
 planted missing acknowledgement and uses `check.exit_code: 1`, so the acceptance
 command succeeds when that negative control behaves correctly. The race driver
 checks its output and atomic control inside the guest; it does not require a
-particular seed to lose a fixed number of updates.
+particular seed to lose a fixed number of updates. The volume scenario puts
+keys into a single etcd node whose data directory is a named volume, crashes and
+reboots that machine through the control API, and requires every acknowledged
+key to be read back.
 
 Each command uses normal CLI outcomes and exit codes. There is no host-side
 console parsing, scenario verdict, seed pin, automatic retry, or acceptance-only

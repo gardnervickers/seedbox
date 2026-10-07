@@ -1,5 +1,13 @@
 #[allow(dead_code)]
 #[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/links.rs"]
+mod links;
+#[allow(dead_code)]
+#[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/rng.rs"]
+mod rng;
+#[allow(dead_code)]
+#[rustfmt::skip]
 #[path = "../../seedbox-vmm/src/triggers.rs"]
 mod triggers;
 #[allow(dead_code)]
@@ -220,4 +228,93 @@ fn witness_omits_unused_state_and_covers_prefix_cutoff_and_future_effect() {
     cutoff.cut_off(112);
     assert_ne!(hash(&cutoff), partial);
     assert_eq!(hash(&snapshot), partial);
+}
+
+#[test]
+fn stop_trigger_checks_paused_and_down_machine_admission() {
+    use serde_json::json;
+    for (op, status) in [("pause", "rejected"), ("crash", "fired")] {
+        let mut f = faults::Faults::new(
+            vec![json!({"id":1,"at_ns":100,"deadline_ns":100,"action":op,"machine":"b"})],
+            vec!["a".into(), "b".into()],
+        )
+        .unwrap();
+        f.apply_due(100);
+        let mut t = Triggers::default();
+        t.arm(
+            "a".into(),
+            vec![1],
+            100,
+            100,
+            Action::Stop {
+                machine: "b".into(),
+            },
+        )
+        .unwrap();
+        bytes(&mut t, "a", 110, &[1]);
+        t.apply_boundary(&mut f, 130).unwrap();
+        assert_eq!(t.records[0].status, status);
+        if op == "pause" {
+            assert_eq!(
+                t.records[0].rejection_reason.as_deref(),
+                Some("target machine is paused")
+            );
+            assert_eq!(t.records[0].fault_id, None);
+            assert_eq!(f.log.len(), 1);
+        } else {
+            assert_eq!(t.records[0].fault_id, Some(2));
+            assert!(f.apply_due(130).is_empty());
+            assert_eq!(f.outcome(2).unwrap().0, faults::Status::Unavailable(130));
+        }
+        assert!(f.error.is_none());
+    }
+}
+
+#[test]
+fn triggered_partition_dominates_live_shape_and_heal_reveals_it() {
+    use seedbox_control::Plan;
+    let mut f = faults();
+    f.append(Plan {
+        id: 0,
+        at_ns: 100,
+        deadline_ns: 100,
+        action: Action::Shape {
+            handle: "shape".into(),
+            from: vec!["a".into()],
+            to: vec!["b".into()],
+            latency_ns: 30,
+            jitter_ns: 0,
+            loss_ppm: 0,
+        },
+    })
+    .unwrap();
+    f.apply_due(100);
+    let mut t = Triggers::default();
+    t.arm("a".into(), vec![1], 100, 100, action("cut")).unwrap();
+    bytes(&mut t, "a", 110, &[1]);
+    t.apply_boundary(&mut f, 130).unwrap();
+    f.apply_due(130);
+    assert_eq!(t.records[0].fault_id, Some(2));
+    let mut reference = f.links.clone();
+    assert_eq!(
+        f.links.decide(0, 1, 130, f.blocked(0, 1)),
+        links::Outcome::Cut
+    );
+    f.append(Plan {
+        id: 0,
+        at_ns: 140,
+        deadline_ns: 140,
+        action: Action::Heal {
+            handle: "cut".into(),
+        },
+    })
+    .unwrap();
+    f.apply_due(140);
+    assert_eq!(f.active_handles(), vec!["shape"]);
+    assert_eq!(
+        f.links.decide(0, 1, 140, f.blocked(0, 1)),
+        reference.decide(0, 1, 140, false)
+    );
+    assert_eq!(f.links.policy((0, 1)).latency_ns, 30);
+    assert!(f.error.is_none());
 }

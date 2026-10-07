@@ -44,6 +44,9 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 
 ## Checks
 
+Engine PRs that need host evidence go through a merge train
+([docs/merge-train.md](docs/merge-train.md)).
+
 Run these before committing:
 
 ```sh

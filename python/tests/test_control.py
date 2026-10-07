@@ -9,7 +9,7 @@ import threading
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from seedbox import FaultError, Machine, Partition, ProtocolError, World
+from seedbox import Controller, FaultError, Machine, Partition, ProtocolError, Shape, World
 
 
 def reply(request_id=1, result=None, **changes):
@@ -37,6 +37,45 @@ class Peer:
 
 
 class ControlTests(unittest.TestCase):
+    def test_machine_lifecycle_targets_and_admission_effects(self):
+        for op in ("pause", "resume", "crash", "reboot"):
+            for target, wire in (("server", {"service": "server"}),
+                                 (Machine("server-vm"), {"machine": "server-vm"})):
+                with self.subTest(op=op, target=target):
+                    peer = Peer(reply(effect_at_ns=20, replied_at_ns=30))
+                    with World(peer) as world:
+                        effect = getattr(world, op)(target)
+                        self.assertEqual(effect.effect_at_ns, effect.admitted_at_ns)
+                        self.assertEqual(effect.replied_at_ns, 30)
+                        self.assertEqual(world.last_effect, effect)
+                    self.assertEqual(peer.requests, [
+                        {"version": 1, "id": 1, "op": op, "target": wire}])
+
+    def test_machine_lifecycle_errors_preserve_timing_and_connection(self):
+        for op in ("pause", "resume", "crash", "reboot"):
+            for code in ("invalid_state", "target_unavailable"):
+                with self.subTest(op=op, code=code):
+                    peer = Peer(reply(ok=False, effect_at_ns=20,
+                                      error={"code": code, "message": "unavailable transition"})
+                                + reply(2, {"now_ns": 30}))
+                    with World(peer) as world:
+                        with self.assertRaises(FaultError) as failure:
+                            getattr(world, op)("server")
+                        self.assertEqual(failure.exception.code, code)
+                        self.assertEqual(failure.exception.response["effect_at_ns"], 20)
+                        self.assertEqual(world.now_ns(), 30)
+                    self.assertEqual(len(peer.requests), 2)
+
+    def test_machine_lifecycle_invalid_targets_do_not_send(self):
+        peer = Peer(b"")
+        with World(peer) as world:
+            for op in ("pause", "resume", "crash", "reboot"):
+                for target in ("", Machine(""), None, "x" * 16384):
+                    with self.subTest(op=op, target=target):
+                        with self.assertRaises(ValueError):
+                            getattr(world, op)(target)
+        self.assertEqual(peer.requests, [])
+
     def test_optional_response_details_do_not_relax_required_version(self):
         peer = Peer(reply(result={"now_ns": 30, "extra_result_detail": "opaque"},
                           extra_response_detail={"arbitrary": [1, None]}))
@@ -70,6 +109,27 @@ class ControlTests(unittest.TestCase):
             {"version": 1, "id": 6, "op": "now"},
         ])
         self.assertTrue(peer.closed)
+
+    def test_shape_sends_absolute_nanosecond_policy_and_returns_healable_handle(self):
+        self.assertIs(Controller, World)
+        peer = Peer(reply(result={"handle": "p1"}) + reply(2))
+        with World(peer) as world:
+            shaped = world.shape(["client"], [Machine("server-vm")], latency=20_000_000, jitter=1_000_000, loss_ppm=500_000)
+            self.assertIsInstance(shaped, Shape)
+            world.heal(shaped)
+        self.assertEqual(peer.requests[0], {"version": 1, "id": 1, "op": "shape", "from": [{"service": "client"}], "to": [{"machine": "server-vm"}], "latency_ns": 20_000_000, "jitter_ns": 1_000_000, "loss_ppm": 500_000})
+        self.assertEqual(peer.requests[1]["handle"], "p1")
+
+    def test_shape_defaults_and_invalid_local_values(self):
+        peer = Peer(reply(result={"handle": "p1"}))
+        with World(peer) as world:
+            for kwargs in [{"latency": True}, {"latency": 1.5}, {"latency": -1}, {"latency": 10, "jitter": 10}, {"latency": 10, "loss_ppm": 1_000_001}, {"latency": 3_600_000_000_000, "jitter": 1}]:
+                with self.assertRaises(ValueError):
+                    world.shape(["client"], ["server"], **kwargs)
+            self.assertEqual(peer.requests, [])
+            world.shape(["client"], ["server"], latency=10)
+        self.assertEqual(peer.requests[0]["jitter_ns"], 0)
+        self.assertEqual(peer.requests[0]["loss_ppm"], 0)
 
     def test_graceful_reconnect_starts_new_ids_and_preserves_explicit_handles(self):
         # Use actual Unix streams and independent literal peer messages. The

@@ -35,6 +35,10 @@ resources before preparation.
 `seedbox help run`. Run/replay must be invoked with the required KVM/MSR access;
 see the repository's `docs/runtime.md` for setup and limits. `--margin` and
 `--undo` control PMU approach and stepping performance without changing results.
+`--torn-writes` opts into seeded partial survival of unflushed 512-byte disk
+sectors on machine crash (off by default). It is part of run identity and replay
+restores it automatically. It applies only to retained disks; this template
+currently uses RAM-backed storage. See `docs/runtime.md` for the disk contract.
 Charged timer I/O retains its full cost across scheduler boundaries; pending
 operations are included in terminal witnesses.
 
@@ -61,12 +65,24 @@ is FAIL; a fresh replay must reproduce that FAIL with MATCH. Nonempty fault
 schedules remain unsupported until their guest effect timing is verified.
 
 `explore` validates runtime inputs and host admission before its one preparation,
-then executes a finite consecutive seed sequence sequentially. Admission refusal
+then executes a finite consecutive seed sequence with one worker by default.
+`--workers N` (1..32) bounds parallel attempts and requires automatic CPU selection
+(omit `--cpu` and `SEEDBOX_CPU`); all N eligible physical cores and siblings must be
+available and admitted before preparation. Admission refusal
 retains batch ERROR without preparation or seed dispatch; each seed rechecks its host.
 Each run retains its ordinary manifest and replay inputs under the printed batch
 path. FAIL and witnessed simulated TIMEOUT continue; infrastructure errors and
 cancellation stop. Count defaults to 1 and seed to the Compose seed. `--json` prints
-one report with separate outcomes and undispatched seeds. Build exploration requires
+one report with separate outcomes and undispatched seeds. Version 2 batch
+checkpoints preserve seed/index dispatch ordering independently of completion order,
+with unfinished/running attribution and a pending suffix. Earlier batch bytes need
+their prior reader; ordinary run inspection/replay is unchanged. Infrastructure
+uncertainty stops new dispatch, cancels only owned work and waits for cleanup.
+Reports separate measured process-family CPU, elapsed wall, peak active attempts
+and summed completed-attempt wall (a conservative guest-core charge once all
+owned attempts return, not exact lease time). Partial sums omit running intervals.
+Real serial/parallel and core invariance still require runtime qualification.
+Build exploration requires
 the inspected local project-Nix Podman closure; cancelled builds remain
 cleanup-unverified ERROR with their private tag retained until cessation is verified.
 See the repository's `docs/runtime.md` for bounded preparation evidence and limits.
@@ -80,6 +96,20 @@ image rebuild is needed. Bundles preserve retained logs and visible omissions;
 output omitted by the original capture policy is not transferred. Export/import
 never replace existing data; the default transfer cap is 32 GiB for unique objects
 and separately for materialized log bytes (`--max-bytes` overrides it).
+
+Directed network baselines belong in `x-seedbox.network.links`, for example
+`[{from: server, to: client, latency: 20ms, jitter: 2ms, loss_ppm: 50000}]`
+using this project's service names. Each pair is unique; latency is required,
+jitter and loss default to zero. Latency cannot be below global network latency,
+jitter must be less than latency, their sum is at most one hour, and loss is an
+integer from 0 to 1000000. `seedbox validate` checks these bounds.
+
+Guest controllers can call `world.shape(["server"], ["client"], latency=20_000_000,
+jitter=2_000_000, loss_ppm=50000)` and `world.heal(handle)`. Shapes apply only in
+the requested direction. The latest live layer wins; healing reveals the prior
+policy. Partitions dominate shapes, and already routed frames retain their
+send-time decisions. Inspection includes shape handles and `loss_dropped` counters.
+Network state contributes a `network_witness` to the final world witness.
 
 Run/replay enforce the versioned admitted host/engine/kernel policy. Matching a
 second machine is compatibility admission, not cross-host qualification. Old

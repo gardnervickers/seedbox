@@ -67,6 +67,7 @@ pub struct Control {
     last_session: u32,
     last_public: u32,
     handles: u32,
+    lookahead: u64,
     undelivered_reply: bool,
 }
 impl Control {
@@ -117,6 +118,7 @@ impl Control {
             last_session: 0,
             last_public: 0,
             handles: 0,
+            lookahead,
             undelivered_reply: false,
         })
     }
@@ -145,6 +147,18 @@ impl Control {
                 machine: self.target(target)?,
             }),
             Operation::Restart { target } => Some(Action::Restart {
+                machine: self.target(target)?,
+            }),
+            Operation::Pause { target } => Some(Action::Pause {
+                machine: self.target(target)?,
+            }),
+            Operation::Resume { target } => Some(Action::Resume {
+                machine: self.target(target)?,
+            }),
+            Operation::Crash { target } => Some(Action::Crash {
+                machine: self.target(target)?,
+            }),
+            Operation::Reboot { target } => Some(Action::Reboot {
                 machine: self.target(target)?,
             }),
             Operation::Partition { left, right } => {
@@ -177,6 +191,25 @@ impl Control {
                     left: sides.remove(0),
                     right: sides.remove(0),
                 })
+            }
+            Operation::Shape {from,to,latency_ns,jitter_ns,loss_ppm} => {
+                crate::links::Policy {latency_ns:*latency_ns,jitter_ns:*jitter_ns,loss_ppm:*loss_ppm}.validate(self.lookahead)?;
+                if from.is_empty() || to.is_empty() { return Err("shape sides must be nonempty".into()); }
+                let mut members = BTreeSet::new();
+                let mut sides = Vec::new();
+                for side in [from,to] {
+                    let mut names = Vec::new();
+                    for target in side {
+                        let name = self.target(target)?;
+                        if !members.insert(name.clone()) { return Err("shape sides must be disjoint with unique machines".into()); }
+                        names.push(name);
+                    }
+                    sides.push(names);
+                }
+                self.handles = self.handles.checked_add(1).ok_or("fault handles exhausted")?;
+                let handle = format!("p{}",self.handles);
+                result = json!({"handle":handle});
+                Some(Action::Shape {handle,from:sides.remove(0),to:sides.remove(0),latency_ns:*latency_ns,jitter_ns:*jitter_ns,loss_ppm:*loss_ppm})
             }
             Operation::Heal { handle } => {
                 if handle.is_empty() {
@@ -309,8 +342,9 @@ impl Control {
     /// Validate target VM existence at the admission barrier, never at request observation.
     pub fn reject_unavailable(&mut self, exited: &[String]) {
         if let Some(p)=self.pending.as_mut() {
-            if !p.admitted_done && p.plan.as_ref().and_then(|plan|plan.action.machine()).is_some_and(|name|exited.iter().any(|n|n==name)) {
-                p.plan=None;p.effect=Some(p.admitted);p.error=Some("target VM has exited; restart only starts a stopped process".into());p.error_code=Some("target_unavailable");
+            if !p.admitted_done && p.plan.as_ref().is_some_and(|plan|matches!(plan.action,Action::Stop{..}|Action::Restart{..}|Action::Pause{..}|Action::Resume{..}) && plan.action.machine().is_some_and(|name|exited.iter().any(|n|n==name))) {
+                let message=if matches!(p.plan.as_ref().map(|plan|&plan.action),Some(Action::Pause{..}|Action::Resume{..})) {"target VM has exited; crash and reboot it instead"} else {"target VM has exited; restart only starts a stopped process"};
+                p.plan=None;p.effect=Some(p.admitted);p.error=Some(message.into());p.error_code=Some("target_unavailable");
             }
         }
     }
@@ -359,7 +393,7 @@ impl Control {
                     p.error=Some(error.into());p.error_code=Some("invalid_state");p.effect=Some(now);
                 } else if matches!(&plan.action,Action::Heal{handle} if !faults.active_handles().contains(handle))
                 {
-                    p.error = Some("heal of inactive partition handle".into());
+                    p.error = Some("heal of inactive handle".into());
                     p.effect = Some(now);
                 } else {
                     p.fault = Some(faults.append(plan)?);
