@@ -39,11 +39,14 @@ python3 "$here/apply.py" "$src"
 export ARCH=arm64
 export KBUILD_BUILD_USER=seedbox KBUILD_BUILD_HOST=seedbox KBUILD_BUILD_VERSION=1
 export KBUILD_BUILD_TIMESTAMP='Thu Jan 1 00:00:00 UTC 1970' SOURCE_DATE_EPOCH=0
-make -s -C "$src" O="$out" allnoconfig
+# This C-only guest does not use Rust. Kconfig probes rustc even with RUST=n;
+# pin it absent so installing host Cargo cannot change the resolved config.
+# Use a make command-line override: the kernel Makefile overrides the environment.
+make -s -C "$src" O="$out" RUSTC=false allnoconfig
 (cd "$run" && "$src/scripts/kconfig/merge_config.sh" -m -O "$out" "$out/.config" "$here/config.fragment")
-make -s -C "$src" O="$out" olddefconfig
+make -s -C "$src" O="$out" RUSTC=false olddefconfig
 python3 "$here/check-config.py" "$src" "$here/config.fragment" "$out/.config"
-make -s -C "$src" O="$out" -j"${BUILD_JOBS:-4}" Image
+make -s -C "$src" O="$out" RUSTC=false -j"${BUILD_JOBS:-4}" Image
 # Audit executable code, including the vDSO, before publishing runnable inputs.
 python3 "$here/audit.py" "$out/vmlinux" "$out/arch/arm64/kernel/vdso/vdso.so.dbg" | tee "$artifacts/counter-audit.txt"
 cp "$out/arch/arm64/boot/Image" "$artifacts/Image"

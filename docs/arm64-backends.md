@@ -125,9 +125,9 @@ RAM and the shared page; no backend-specific bytes are filtered out.
 
 ## Operator steps
 
-### Rebuild handoff after the review fix
+### Review-fix guest build
 
-Rebuild **both** the Linux Image and initramfs from the updated `kernel-arm64/`
+Build **both** the Linux Image and initramfs from the updated `kernel-arm64/`
 directory. `seedbox.c` changes polling-yield IRQ handling; `init.c` adds a 20 ms
 CLOCK_MONOTONIC busy-wait across at least one HZ=100 tick. Copy the entire updated
 directory to the existing arm64 Linux build VM, replacing its old source copy.
@@ -145,13 +145,11 @@ and the vDSO for counter/RNG leaks before exporting runnable inputs.
 
 Copy back `Image`, `init.cpio`, `kernel.config`, `counter-audit.txt`, `SHA256SUMS`
 and `build-directory.txt` into a fresh `artifacts/arm64-review-yield/` on the Mac.
-Retain the old inputs separately. The operator must review the new input hashes,
-complete acceptance, and fill both placeholders in
-`kernel-arm64/expected-hashes.sha256`. Do not use the old witness as the expected
-result of the changed fixture. Build-generated `SHA256SUMS` is only a copy check.
-
-The review-fix handoff intentionally stops before this rebuild and new-guest
-HVF/KVM boots. The old-input regression checks only unchanged behavior:
+Retain the old inputs separately. The checked-in expected hashes now contain the
+operator-supplied values for the accepted `90fb080` guest. Verify them with
+`python3 kernel-arm64/check-hashes.py artifacts/arm64-review-yield`.
+Build-generated `SHA256SUMS` is only a copy check. The old-input regression checks
+only unchanged behavior:
 
 | Seed | Old-fixture HVF witness |
 | --- | --- |
@@ -164,6 +162,83 @@ and init.cpio SHA-256
 `9b952991625d7603e2db03e5ccdb87f78f1f7a16e6c664062505b7ddc75d8649`.
 The ignored `hvf_old_fixture_regression` CLI test checks these input hashes,
 both witnesses and trace hashes, exit code 0 and exact one-line stdout.
+
+### Rebuilt guest acceptance (2026-10-07)
+
+Inputs rebuilt by the operator from `90fb080` and independently hash-checked:
+
+| Input | SHA-256 |
+| --- | --- |
+| Image | `4f2846f027b03fcfd859bb222456779be1967b21b4e4dc0c0e59b978ec3a9be5` |
+| init.cpio | `4f7dcbcb7b3705799913dd16fcdf4297216f514476837a7062cda48b740f22d4` |
+| kernel.config | `85f8af523f252b63298a7943b2f5cd57ecbfb7c040cc1d3146b44da05a9caf0a` |
+
+The config differs from the previous
+`facb82e4dbad040a19a553304413975b72e6c8eeb8b511414729a7c21a71a822`
+only in host Rust detection: `CONFIG_RUSTC_VERSION` changes from `109900` to
+`0`, `CONFIG_RUSTC_LLVM_VERSION` from `230101` to `0`, and
+`CONFIG_RUSTC_HAS_UNNECESSARY_TRANSMUTES=y` and
+`CONFIG_RUSTC_HAS_SUSPICIOUS_RUNTIME_SYMBOL_DEFINITIONS=y` disappear. No guest
+feature selection changed. Linux 6.12.112's `init/Kconfig` probes the Rust
+compiler independently of `CONFIG_RUST`; neither config enables Rust or embeds
+its config (`CONFIG_IKCONFIG=n`). This was environment-dependent config drift,
+not an intended config change. The build script now passes `RUSTC=false` to
+**every** make invocation to pin absent Rust for this C-only guest, including
+when `$HOME/.cargo/bin` is on PATH. The pinned source archive's version probes
+were checked to return zero for that override. A complete Linux rebuild with
+the script change has not been run here; the accepted artifacts remain exactly
+those supplied by the operator. GCC/binutils and cloud-image pinning remain open.
+
+Native signed CLI results on arm64 macOS 27.0.1 (26A434), with full RAM and the
+shared page included:
+
+- Seed 1 witness: `4b7408386842bbaf2c705475af2502a6c294b0a418c70107c1b9582b4abb3505`.
+- Seed 2 witness: `12ab4033745c10261da3c518cf103a47c2c8bf0ba1a5863e1e23536ea1465cb5`.
+
+| Boot | Witness | Exit status | Semantic exits | Wall seconds |
+| --- | --- | --- | --- | --- |
+| Seed 1 A | Seed 1 above | 0 | 2359 | 2.083875 |
+| Seed 1 B | Seed 1 above | 0 | 2359 | 2.019816 |
+| Seed 1 with host CPU load | Seed 1 above | 0 | 2359 | 1.980087 |
+| Seed 2 A | Seed 2 above | 0 | 2359 | 1.902880 |
+| Seed 2 B | Seed 2 above | 0 | 2359 | 1.935355 |
+
+All five print exactly one witness line, `busy-wait elapsed=20000000` and
+`SEEDBOX_INIT_PASS`, record three event+24 polling yields, and reach PSCI
+SYSTEM_OFF at virtual time 1,030,100,924 ns. The 10 ms and 1 s sleep checks
+report 10,050,007 ns and 1,000,050,007 ns respectively. Same-seed report
+comparisons pass, including the CPU-load boot, and seed 2 differs.
+
+Evidence is retained under `artifacts/arm64-review-yield/hvf-cli/` and
+`artifacts/arm64-review-yield/hvf-acceptance/` (ignored local artifacts).
+The first signed `hvf_determinism` run matched all witnesses, including its
+CPU-load plus randomized pre-entry-sleep run, and passed busy-wait/yield checks,
+but exited 101 on the old one-second baseline timing gate: 2.175578 seconds.
+The other boots were 2.144574, 2.257381 and 10.122795 seconds (jitter), all with
+2359 exits. That failure is retained in `hvf-determinism.log`.
+
+After updating only the expanded fixture's wall-time budget to five seconds,
+the rebuilt and re-signed `hvf_determinism` test exits 0 (1 passed). Complete
+witnesses match the CLI results above; every boot has 2359 semantic exits:
+
+| Signed hardware-suite boot | Wall seconds |
+| --- | --- |
+| Seed 1 A | 1.884785 |
+| Seed 1 B | 1.911778 |
+| Seed 2 | 1.886465 |
+| Seed 1 with CPU load and randomized pre-entry sleeps | 9.267590 |
+
+The noisy boot is outside the undisturbed timing gate. Its witness comparison
+is unchanged. Final reports and the passing log are in `hvf-acceptance-final/`
+and `hvf-determinism-final.log` under the same artifact directory.
+
+The three `review_yield_masked` regressions and the actual guest polling-helper
+C test pass: masked assertions are deferred, cancellation removes pending IRQs,
+transparent debug completions cannot flush them, and the next unmasked semantic
+exit delivers each retained timer/UART assertion once. Deterministic comparison
+and masked-IRQ rules are unchanged. Root portable acceptance, workspace tests,
+arm64 tests, both fmt/clippy checks and input/comparison Python tests pass.
+Linux-only VMM tests and rebuilt-guest KVM execution remain operator work.
 
 ### Portable checks and Mac build
 
@@ -198,8 +273,11 @@ export SEEDBOX_ARM64_REPORT_DIR="$PWD/artifacts/arm64-review-yield/hvf-acceptanc
 Use a fresh report directory. The suite runs seeds 1, 1, 2 and seed 1 with host
 CPU load and randomized pre-entry sleeps. It compares complete witnesses,
 checks seed sensitivity, guest sleep checks, the busy-wait marker and at least
-one event+24 yield. The existing under-one-second undisturbed HVF timing gate
-also remains to be re-evaluated against the new busy-wait fixture after rebuild.
+one event+24 yield. The undisturbed HVF timing budget is five seconds for this
+expanded fixture. Its 20 ms PV busy-wait advances through 1 ns clock reads and
+takes about two seconds of host CPU time; the former one-second sleep-only
+budget no longer fits. This is a performance budget change only; no witness,
+RAM, seed-sensitivity, guest sleep or IRQ assertion is relaxed.
 The guest must print `SEEDBOX_INIT_PASS` and reach PSCI SYSTEM_OFF.
 
 Then perform the README's two CLI runs with these rebuilt inputs: both must
@@ -210,20 +288,52 @@ writes a new JSON report; compare same-backend reports with:
 python3 crates/seedbox-arm64/compare.py LEFT.json RIGHT.json
 ```
 
-Linux arm64 KVM needs `/dev/kvm`, vGICv3 and the Linux 6.4+ SMCCC filter. Build the
-isolated crate with `cargo build-arm64`, use `--backend kvm` with the same retained
-inputs, and run `cargo test-arm64 --test hardware -- --ignored --exact kvm_determinism --nocapture`.
-Export the same three `SEEDBOX_ARM64_*` variables with VM-local paths first.
-No signing is required on Linux. Nested virtualization is needed only when
-running KVM inside a VM, not when using a VM to build guest inputs.
+### Linux VM KVM handoff (existing Cargo, no Nix)
+
+Linux arm64 KVM needs `/dev/kvm`, vGICv3 and the Linux 6.4+ SMCCC filter.
+Transfer the updated checkout to the VM and retain the **same** accepted Image
+and init.cpio. From the checkout root, using the VM's existing Cargo:
+
+```sh
+set -eu
+export PATH="$HOME/.cargo/bin:$PATH"
+python3 kernel-arm64/check-hashes.py artifacts/arm64-review-yield
+cargo build-arm64
+cargo test-arm64 --test review_yield_masked
+export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-review-yield/Image"
+export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-review-yield/init.cpio"
+export SEEDBOX_ARM64_REPORT_DIR="$(mktemp -d "$PWD/artifacts/arm64-review-yield/kvm-acceptance.XXXXXX")"
+cargo test-arm64 --test hardware -- --ignored --exact kvm_determinism --nocapture --test-threads=1
+
+for run in 1-a 1-b 2-a 2-b; do
+  crates/seedbox-arm64/target/release/seedbox-arm64 run \
+    --backend kvm --kernel "$SEEDBOX_ARM64_KERNEL" \
+    --initrd "$SEEDBOX_ARM64_INITRD" --seed "${run%%-*}" \
+    --witness "$SEEDBOX_ARM64_REPORT_DIR/cli-$run.json" \
+    > "$SEEDBOX_ARM64_REPORT_DIR/cli-$run.stdout" \
+    2> "$SEEDBOX_ARM64_REPORT_DIR/cli-$run.stderr" || exit "$?"
+done
+python3 crates/seedbox-arm64/compare.py \
+  "$SEEDBOX_ARM64_REPORT_DIR/cli-1-a.json" "$SEEDBOX_ARM64_REPORT_DIR/cli-1-b.json"
+python3 crates/seedbox-arm64/compare.py \
+  "$SEEDBOX_ARM64_REPORT_DIR/cli-2-a.json" "$SEEDBOX_ARM64_REPORT_DIR/cli-2-b.json"
+```
+
+The hardware suite adds CPU load and randomized pre-entry sleeps. If the VM
+user lacks `/dev/kvm` access, run the hardware test and CLI via `sudo env`,
+passing the three exported paths and the user's Cargo PATH explicitly; do not
+install another toolchain as root. No signing is required on Linux. Nested
+virtualization is needed only when running KVM inside a VM, not when using a VM
+to build guest inputs. Compare KVM reports with KVM reports: cross-backend full
+RAM equality remains open.
 
 Optional `--ram-pages FILE` writes final 4 KiB page hashes without changing the
 witness. `compare-pages.py` locates divergent pages for diagnostics.
 
 ## Open items
 
-- The new polling-yield kernel and busy-wait fixture require operator rebuild
-  and native HVF/KVM acceptance. Portable tests do not establish that result.
+- The rebuilt polling-yield kernel and busy-wait fixture still require native
+  Linux arm64 KVM acceptance. HVF results do not establish KVM behavior.
 - Full RAM witnesses are backend-specific. Earlier inputs had identical traces
   and console across HVF/KVM but 296 differing RAM pages. HVF advertises 1024 GIC
   IDs; the Linux 6.8 KVM limit is 992. Guest GIC count policy, MIDR and other CPU

@@ -1,5 +1,5 @@
-# Operator: replace BOTH placeholders after rebuilding the review-fix guest
-# and completing HVF acceptance. Review these values independently of a user's
-# local build. build.sh must never generate or update this file.
-REBUILD_REQUIRED_IMAGE_SHA256  Image
-REBUILD_REQUIRED_INIT_CPIO_SHA256  init.cpio
+# Independently supplied operator hashes for the 90fb080 review-fix guest.
+# Native HVF acceptance is recorded in docs/arm64-backends.md.
+# build.sh must never generate or update this file.
+4f2846f027b03fcfd859bb222456779be1967b21b4e4dc0c0e59b978ec3a9be5  Image
+4f7dcbcb7b3705799913dd16fcdf4297216f514476837a7062cda48b740f22d4  init.cpio

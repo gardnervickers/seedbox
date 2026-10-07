@@ -322,12 +322,10 @@ and must not be attributed to these revised sources.
 The isolated `seedbox-arm64` crate runs a single-CPU PV fixture on native Mac
 HVF or Linux arm64 KVM. It is separate from the Compose/x86 CLI above.
 
-**Rebuild pending:** the review fix changes both the kernel and `/init`.
-`kernel-arm64/expected-hashes.sha256` deliberately contains `REBUILD_REQUIRED_*`
-placeholders. The operator must fill both with independently reviewed SHA-256
-values after rebuilding and accepting the new guest. The check below fails
-until then. Do not derive expected hashes from the local files being checked.
-The build-generated `SHA256SUMS` only checks transfer integrity.
+`kernel-arm64/expected-hashes.sha256` records the independently supplied hashes
+of the rebuilt review-fix guest used for native HVF acceptance. Do not derive
+expected hashes from the local files being checked. The build-generated
+`SHA256SUMS` only checks transfer integrity.
 
 Requires an M-series Mac, macOS 15+, Xcode Command Line Tools, and Nix with
 flakes enabled. This runs the experimental single-CPU PV fixture. The Linux VM
@@ -383,9 +381,16 @@ cmp artifacts/arm64-mac/run-1.stdout artifacts/arm64-mac/run-2.stdout
 ```
 
 The acceptance test is that both runs exit 0 and print **identical** stdout
-lines, `WITNESS: <hex>`; `cmp` checks equality. A witness line alone does not
-compare against a known result. Console and timing go to stderr; setup/runtime
-errors exit 2. Sign again after Cargo relinks the executable.
+lines; `cmp` checks equality. With the accepted inputs on the reviewed Mac HVF
+profile, the expected seed-1 line is:
+
+```text
+WITNESS: 4b7408386842bbaf2c705475af2502a6c294b0a418c70107c1b9582b4abb3505
+```
+
+Console and timing go to stderr; setup/runtime errors exit 2. Sign again after
+Cargo relinks the executable. A different host CPU profile can change guest RAM
+and the witness; this result does not establish cross-host or KVM equality.
 
 The hash checker explicitly compares `Image` and `init.cpio` with the checked-in
 expected values. A mismatch means different inputs, often from a changed source
