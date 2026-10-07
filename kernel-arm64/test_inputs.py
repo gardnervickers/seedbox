@@ -3,6 +3,9 @@
 import importlib.util
 from pathlib import Path
 import stat
+import os
+import shlex
+import subprocess
 import tempfile
 import unittest
 
@@ -71,6 +74,50 @@ class Inputs(unittest.TestCase):
         self.assertEqual(apply.body("int f(void) { if (a) { b(); } return 0; }", "f", "return 1;"), "int f(void) {\nreturn 1;\n}")
         with self.assertRaises(ValueError): apply.body("int f(void);", "f", "")
         with self.assertRaises(ValueError): apply.replace("xx", "x", "y")
+
+    def test_idle_rendezvous_unmasks_and_restores_irq_state(self):
+        # Compile the actual helper against a small IRQ/MMIO model. Check both
+        # incoming mask states, not just the normal masked cpu_do_idle caller.
+        source = (HERE / "seedbox.c").read_text()
+        idle = source[source.index("void seedbox_idle(void)"):
+                      source.index("void __init seedbox_time_init(void)")]
+        fixture = r"""
+#include <assert.h>
+#include <stdlib.h>
+static unsigned long irq_flags;
+static int synchronized, writes;
+static char registers[64];
+static void *event = registers;
+#define unlikely(x) (x)
+#define panic(...) abort()
+#define local_irq_save(saved) do { (saved) = irq_flags; irq_flags |= 128; } while (0)
+#define local_irq_enable() do { irq_flags &= ~128UL; synchronized = 0; } while (0)
+#define local_irq_restore(saved) do { irq_flags = (saved); } while (0)
+#define dsb(scope) ((void)0)
+#define isb() do { synchronized = 1; } while (0)
+static void writeq(unsigned long value, void *address) {
+    assert(value == 1 && address == registers + 16);
+    assert(!(irq_flags & 128) && synchronized);
+    ++writes;
+}
+""" + idle + r"""
+int main(void) {
+    irq_flags = 0x3c0;
+    seedbox_idle();
+    assert(irq_flags == 0x3c0 && writes == 1);
+    irq_flags = 0x340;
+    seedbox_idle();
+    assert(irq_flags == 0x340 && writes == 2);
+}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            c = Path(directory) / "idle.c"
+            exe = Path(directory) / "idle"
+            c.write_text(fixture)
+            subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
+                "-Wall", "-Wextra", "-Werror", str(c), "-o", str(exe)
+            ], check=True, capture_output=True)
+            subprocess.run([str(exe)], check=True, capture_output=True)
 
     def test_exec_cannot_reenable_hardware_counter(self):
         source = """static void update_cntkctl_el1(struct task_struct *next)

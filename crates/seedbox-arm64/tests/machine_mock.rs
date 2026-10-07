@@ -4,6 +4,7 @@ struct Fake<
     const DEBUG_VALUE: u64 = 0,
     const COUNTER_CONTROL: u64 = 0,
     const TIMER_CONTROL: u64 = 0,
+    const MASKED_IDLE: bool = false,
 > {
     step: usize,
     regs: [u64; 34],
@@ -11,7 +12,7 @@ struct Fake<
     held: bool,
     irq: bool,
 }
-impl<const D: u64, const C: u64, const T: u64> Backend for Fake<D, C, T> {
+impl<const D: u64, const C: u64, const T: u64, const I: bool> Backend for Fake<D, C, T, I> {
     fn create() -> Result<Self> {
         Ok(Self {
             step: 0,
@@ -90,7 +91,12 @@ impl<const D: u64, const C: u64, const T: u64> Backend for Fake<D, C, T> {
                     assert_eq!(unsafe { self.mapped[&1].word(0)? }, 7);
                     mmio(EVENT_ADDR, 1_000_000_000)
                 }
-                2 => mmio(EVENT_ADDR + 16, 1),
+                2 => {
+                    if !I {
+                        self.regs[33] &= !(1 << 7);
+                    }
+                    mmio(EVENT_ADDR + 16, 1)
+                }
                 3 => {
                     assert!(self.irq);
                     assert_eq!(unsafe { self.mapped[&1].word(0)? }, 1_000_000_000);
@@ -182,5 +188,20 @@ fn rejects_debug_locking_and_hardware_time_leaks() {
     assert!(
         timer.contains("architectural virtual timer enabled"),
         "{timer}"
+    );
+}
+
+#[test]
+fn rejects_masked_interrupt_admission() {
+    let mut kernel = [0; 64];
+    kernel[56..60].copy_from_slice(b"ARM\x64");
+    kernel[16..24].copy_from_slice(&4096u64.to_le_bytes());
+    let error = Machine::<Fake<0, 0, 0, true>>::new(&kernel, b"cpio", 1)
+        .unwrap()
+        .run(|| {})
+        .unwrap_err();
+    assert!(
+        error.contains("SPI 40 asserted with PSTATE.I masked"),
+        "{error}"
     );
 }

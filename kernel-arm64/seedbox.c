@@ -79,11 +79,25 @@ static irqreturn_t timer_irq(int irq, void *dev)
 }
 void seedbox_idle(void)
 {
+	unsigned long flags;
+
 	if (unlikely(!event))
 		panic("seedbox: idle before PV initialization");
-	/* KVM handles native WFI internally. Both backends use this MMIO idle. */
+	/*
+	 * cpu_do_idle() enters with DAIF.I masked. If the VMM asserts the
+	 * timer there, the IRQ can skid after the later DAIFClr instruction;
+	 * its interrupted PC then contaminates the stack and entropy pool.
+	 * Reach the PV idle exit with IRQs unmasked, before the VMM asserts
+	 * the line. No host interrupt is queued while executing this unmask.
+	 * Preserve the caller's mask on return, as native cpu_do_idle does.
+	 * Both backends use this rendezvous; native KVM WFI is not exposed.
+	 */
+	local_irq_save(flags);
 	dsb(sy);
+	local_irq_enable();
+	isb();
 	writeq(1, event + 16);
+	local_irq_restore(flags);
 }
 void __init seedbox_time_init(void)
 {

@@ -197,11 +197,11 @@ impl<B: Backend> Machine<B> {
             }
             let uart_irq = self.uart.irq_level();
             if uart_irq != self.uart_irq {
-                self.backend.inject_spi(UART_SPI, uart_irq)?;
+                self.inject_spi(UART_SPI, uart_irq)?;
                 self.uart_irq = uart_irq;
             }
             if self.clock.judge(idle)? {
-                self.backend.inject_spi(TIMER_SPI, true)?;
+                self.inject_spi(TIMER_SPI, true)?;
             }
             self.trace
                 .push(Record::new(&stop.exit, self.clock.now(), stop.pc, response));
@@ -246,6 +246,18 @@ impl<B: Backend> Machine<B> {
             self.backend.complete(response)?;
         }
         Err("exit budget exhausted (5,000,000); no successful power-off".into())
+    }
+    fn inject_spi(&mut self, intid: u32, level: bool) -> Result<()> {
+        // A pending hardware IRQ can skid across instructions when the guest
+        // later unmasks DAIF.I. Linux records the interrupted PC in its stack
+        // and interrupt entropy pool. Require an unmasked admission boundary;
+        // never clear the guest's mask here or normalize the resulting RAM.
+        if level && self.backend.get_reg(CoreReg::Pstate)? & (1 << 7) != 0 {
+            return Err(format!(
+                "SPI {intid} asserted with PSTATE.I masked: nondeterministic interrupt admission; rebuild kernel-arm64 with the unmasked PV idle rendezvous"
+            ));
+        }
+        self.backend.inject_spi(intid, level)
     }
     fn publish(&mut self) -> Result<()> {
         let last = unsafe { self.page.word(8)? };

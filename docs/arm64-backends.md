@@ -5,16 +5,21 @@ main `4a89dce`. It does not change the production x86 engine or its guest inputs
 The crate has its own workspace, lockfile and target directory. The only changes
 to existing build files are the root workspace exclusion and the two aliases.
 
-**Status: native HVF boots to init, but acceptance is blocked on a guest
-kernel rebuild.** The 2026-10-07 native run exposed an EL0 counter-access leak
-at exec. The shared machine now rejects it. No successful hardware witness,
-noise invariance, or cross-backend equality is claimed. See the retained
-failure and rebuild instructions below. Linux/KVM execution is still untested.
+**Status: native HVF reaches init success and PSCI SYSTEM_OFF with the
+counter-fixed Image, but full acceptance FAILS on interrupt-delivery drift.**
+The first two seed-1 witnesses match and seed 2 differs. Host noise changes
+RAM despite identical exposed exits and console bytes. IRQ-PC diagnostics
+identify delivery skid after IRQ unmasking; an additional diagnostic repeat
+also diverges without deliberate noise. The shared machine now rejects masked
+IRQ admission. The next guest rebuild must include the unmasked idle rendezvous
+described in the latest acceptance record below. No hardware determinism or
+cross-backend equality is claimed. Linux/KVM execution remains untested.
 
-Current Mac checks: `cargo test-arm64` passes 14 portable tests; the hardware
+Current Mac checks: `cargo test-arm64` passes 15 portable tests; the hardware
 test remains ignored by default. Crate formatting and clippy with warnings
-denied pass, as do six Python input tests. The explicitly signed and executed
-`hvf_determinism` test fails on the counter-access guard with the old Image.
+denied pass, as do seven Python input tests and the root portable acceptance
+checks. The explicitly signed `hvf_determinism` test fails with the supplied
+counter-fixed Image: first on RAM mismatch, then on the new IRQ admission guard.
 
 ## Abstraction boundaries
 
@@ -103,8 +108,12 @@ only at the next exit, matching the shape of the x86 PV design.
 Clockevent u64 writes: offset 0 arms an absolute deadline (zero cancels); 8
 acknowledges and lowers the IRQ; 16 declares idle; 24 yields at the published
 clock bound; 32 performs the ABI-1 handshake. Idle with an armed deadline jumps
-to it and raises SPI 40 while stopped. Idle without a deadline or a pending
-interrupt is an error. Crossing a polling bound yields, expires the timer and
+to it and raises SPI 40 while stopped. New IRQ assertions require PSTATE.I to
+be clear; masked admission fails without changing the guest mask. The updated
+guest idle helper unmasks IRQs and executes ISB before the MMIO rendezvous, then
+restores its incoming mask. This change awaits a guest rebuild and hardware
+validation; unmasked admission alone is not yet qualified as deterministic.
+Idle without a deadline or a pending interrupt is an error. Crossing a polling bound yields, expires the timer and
 republishes, so a clock poll cannot run past a deadline without an exit.
 UART accesses and firmware calls have no extra time charge. PL011 transmission
 is synchronous; its empty TX FIFO asserts a level IRQ when enabled, and guest
@@ -168,6 +177,9 @@ the 2026-10-07 continuation. Do not rebuild the guest on the Mac.
 
 ### 1. Build guest inputs in the Ubuntu 24.04 arm64 VM
 
+These commands target the **next**, not-yet-built idle-rendezvous Image. Preserve
+the verified `artifacts/arm64-counter-fix/` inputs and their failing evidence.
+
 Use the operator's `vz`, nestedVirtualization-enabled VM with 4 CPUs and 8 GiB.
 If creating one, put `LIMA_HOME` under a fresh short `/tmp/lima.XXXX` directory
 so `ssh.sock` stays below the 104-character limit. Check `/dev/kvm` inside the VM.
@@ -181,8 +193,8 @@ sudo apt-get update
 sudo apt-get install -y build-essential musl-tools flex bison bc libssl-dev libelf-dev curl xz-utils python3
 export SEEDBOX_ARM64_BUILD=/var/tmp/seedbox-arm64-build
 export BUILD_JOBS=4
-bash kernel-arm64/build.sh "$PWD/artifacts/arm64"
-cat artifacts/arm64/SHA256SUMS
+bash kernel-arm64/build.sh "$PWD/artifacts/arm64-irq-rendezvous"
+cat artifacts/arm64-irq-rendezvous/SHA256SUMS
 ```
 
 The output path may be on the Mac mount; all source extraction, object files and
@@ -214,18 +226,18 @@ already-signed test executable directly after signing, avoiding a rebuild.
 ### 3. Native HVF test and CLI runs
 
 ```sh
-export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64/Image"
-export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64/init.cpio"
-export SEEDBOX_ARM64_REPORT_DIR="$PWD/artifacts/arm64/hvf-acceptance"
+export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-irq-rendezvous/Image"
+export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-irq-rendezvous/init.cpio"
+export SEEDBOX_ARM64_REPORT_DIR="$PWD/artifacts/arm64-irq-rendezvous/hvf-acceptance"
 "$arm64_test_binary" --ignored --exact hvf_determinism --nocapture --test-threads=1
 
 for case in 1a 1b 2; do
   seed="${case%[ab]}"
   crates/seedbox-arm64/target/release/seedbox-arm64 run \
     --kernel "$SEEDBOX_ARM64_KERNEL" --initrd "$SEEDBOX_ARM64_INITRD" \
-    --seed "$seed" --backend hvf --witness "artifacts/arm64/hvf-cli-$case.json"
+    --seed "$seed" --backend hvf --witness "artifacts/arm64-irq-rendezvous/hvf-cli-$case.json"
 done
-python3 crates/seedbox-arm64/compare.py artifacts/arm64/hvf-cli-1a.json artifacts/arm64/hvf-cli-1b.json
+python3 crates/seedbox-arm64/compare.py artifacts/arm64-irq-rendezvous/hvf-cli-1a.json artifacts/arm64-irq-rendezvous/hvf-cli-1b.json
 ```
 
 The ignored test runs seeds 1, 1, 2 and then 1 with a CPU burner and random
@@ -258,19 +270,19 @@ operator-provided KVM access rather than changing permissions on the Mac.
 test -r /dev/kvm && test -w /dev/kvm
 cargo test-arm64 --target aarch64-unknown-linux-gnu
 cargo build-arm64 --target aarch64-unknown-linux-gnu
-export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64/Image"
-export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64/init.cpio"
-export SEEDBOX_ARM64_REPORT_DIR="$PWD/artifacts/arm64/kvm-acceptance"
+export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-irq-rendezvous/Image"
+export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-irq-rendezvous/init.cpio"
+export SEEDBOX_ARM64_REPORT_DIR="$PWD/artifacts/arm64-irq-rendezvous/kvm-acceptance"
 cargo test-arm64 --target aarch64-unknown-linux-gnu --test hardware \
   -- --ignored --exact kvm_determinism --nocapture --test-threads=1
 for case in 1a 1b 2; do
   seed="${case%[ab]}"
   crates/seedbox-arm64/target/aarch64-unknown-linux-gnu/release/seedbox-arm64 run \
     --kernel "$SEEDBOX_ARM64_KERNEL" --initrd "$SEEDBOX_ARM64_INITRD" \
-    --seed "$seed" --backend kvm --witness "artifacts/arm64/kvm-cli-$case.json"
+    --seed "$seed" --backend kvm --witness "artifacts/arm64-irq-rendezvous/kvm-cli-$case.json"
 done
-python3 crates/seedbox-arm64/compare.py artifacts/arm64/kvm-cli-1a.json artifacts/arm64/kvm-cli-1b.json
-python3 crates/seedbox-arm64/compare.py artifacts/arm64/hvf-cli-1a.json artifacts/arm64/kvm-cli-1a.json
+python3 crates/seedbox-arm64/compare.py artifacts/arm64-irq-rendezvous/kvm-cli-1a.json artifacts/arm64-irq-rendezvous/kvm-cli-1b.json
+python3 crates/seedbox-arm64/compare.py artifacts/arm64-irq-rendezvous/hvf-cli-1a.json artifacts/arm64-irq-rendezvous/kvm-cli-1a.json
 ```
 
 The KVM suite performs the same four determinism runs but does not impose the
@@ -308,7 +320,7 @@ SHA-256s, full kernel config, compiler versions, macOS/VM kernel versions, exit
 counts and run times. Draft PR creation is deferred by the operator's current
 instruction; no push or PR is part of this implementation phase.
 
-## Native HVF failure and required rebuild (2026-10-07)
+## Historical counter-access failure and rebuild (2026-10-07)
 
 Host: macOS 27.0.1 (26A434), arm64; Nix rustc 1.98.1, cargo 1.98.0.
 Retained inputs under ignored `artifacts/arm64/`:
@@ -380,6 +392,155 @@ Only the kernel source patch changed; the normal builder also regenerates the
 unchanged init fixture. Resume native acceptance with those inputs and fresh
 report paths. No artifacts were committed, and no changes were made to the
 four frozen production paths.
+
+## Counter-fixed HVF acceptance and IRQ rebuild requirement (2026-10-07)
+
+**Full HVF acceptance: FAIL.** Host: macOS 27.0.1 (26A434), arm64;
+Nix rustc 1.98.1 and cargo 1.98.0. The operator built the guest from `131b88f`
+with GCC 13.3.0 / GNU ld 2.42 inside the Ubuntu arm64 VM. All three entries in
+`artifacts/arm64-counter-fix/SHA256SUMS` were independently verified here:
+
+- Image: `689e875fdff5abbfd0db9a897d767408d81fc906640f565259ca7a030f4ee194`.
+- init.cpio: `9b952991625d7603e2db03e5ccdb87f78f1f7a16e6c664062505b7ddc75d8649`.
+- kernel.config: `facb82e4dbad040a19a553304413975b72e6c8eeb8b511414729a7c21a71a822`.
+
+The full config and passing vmlinux/vDSO counter audit remain beside the Image.
+No guest rebuild or VM management was performed on the Mac.
+
+The signed CLI reached `SEEDBOX_INIT_PASS` and PSCI SYSTEM_OFF in 0.278166 s,
+with 2,293 exits and witness
+`d404557f65c5c40cd844b91bd1d2fbbd95d80b0a9abaaa76bdb4c1d548eaac13`.
+The independently signed hardware test then produced these four reports under
+`artifacts/arm64-counter-fix/hvf-acceptance/` (wall duration includes final RAM
+hashing; the noise boot includes the deliberate sleeps and CPU burner):
+
+| Boot | Witness | Wall seconds | Exits |
+| --- | --- | ---: | ---: |
+| Seed 1 first | `d404557f65c5c40cd844b91bd1d2fbbd95d80b0a9abaaa76bdb4c1d548eaac13` | 0.248102917 | 2,293 |
+| Seed 1 repeat | `d404557f65c5c40cd844b91bd1d2fbbd95d80b0a9abaaa76bdb4c1d548eaac13` | 0.249114625 | 2,293 |
+| Seed 1 with host noise | `34c3a6aee8a625e1fbe43ef7bc1373e6ed79a1a34c52727616c4f7c0569de8da` | 8.502266333 | 2,293 |
+| Seed 2 | `26432352c9f2cc0905f75cd8da2665be8773ea55a8302ba2d2a2cf7c8e2c8165` | 0.245261667 | 2,293 |
+
+All four boots powered off after init success; virtual time was 1,010,051,041 ns.
+Both sleeps passed init's independent check: 10,000,124 ns for 10 ms and
+1,000,050,007 ns for 1 s. The undisturbed full boot was below one wall second.
+The seed-1 console, identical under noise, was:
+
+```text
+Booting Linux on physical CPU 0x0000000000 [0x610f0000]
+Linux version 6.12.112-seedbox-arm64-pv1 (seedbox@seedbox) (gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, GNU ld (GNU Binutils for Ubuntu) 2.42) #1 SMP Thu Jan 1 00:00:00 UTC 1970
+random: crng init done
+Machine model: Seedbox arm64 PV ABI 1
+earlycon: pl11 at MMIO 0x0000000009000000 (options '')
+printk: legacy bootconsole [pl11] enabled
+clock mono=485 real=486
+clock mono=487 real=488
+clock mono=489 real=490
+sleep requested=10000000 elapsed=10000124
+sleep requested=1000000000 elapsed=1000050007
+cntvct first=1010051036 second=1010051037
+getrandom d2626d690cce59bd6c7efc9146cc2973429249c4a64ba13b251b1913aef10e6f
+SEEDBOX_INIT_PASS
+reboot: Power down
+```
+
+The signed test exited 101: the noise witness differed. Trace hash and console
+hash matched exactly, but RAM hashes were
+`b84ee58a81d38fb7726a7616571fca5a848314951987d39f4332896f49c8ba48`
+and `54a1785003901ba8c64fa3e8a57b8b6f5c4e4804a2a0cc6639c7f1613ed9eb30`.
+The complete log is `artifacts/arm64-counter-fix/hvf-acceptance.log`.
+
+### Diagnosis and retained failed experiments
+
+Temporary RAM captures found six differing 64-bit words between two additional
+seed-1 boots: the initial kernel stack at GPAs `0x404b3c00`/`0x404b3c08` and the
+four-word interrupt entropy pool at `0x47fd7ab0..0x47fd7acf`. The stack retained
+a `ct_irq_enter` return address. The adjacent timer callback points to
+`mix_interrupt_randomness`, identifying the pool independently of its bytes.
+`ram-difference.json` retains those exact words and surrounding pool state.
+Symbols were decoded from this Image's kallsyms and relocated using its runtime
+base; no different kernel's symbol map was substituted.
+
+Temporary ELR_EL1 readback at timer acknowledgements identified the cause. In a
+noisy boot, the IRQ at virtual time 890,000,413 ns interrupted at
+`0xffff800080319b84`, immediately after `DAIFClr`, rather than the usual
+`0xffff80008005d964`, after returning from the idle helper. Linux 6.12.112's
+`add_interrupt_randomness()` mixes this interrupted PC into its four-word pool.
+The exposed MMIO trace therefore matched while the stack and RAM did not.
+The readback log is `hvf-irq-diagnostic.log` beside the inputs.
+
+For completeness, the diagnostic boots below all had 2,293 exits. RAM capture
+and register logging add overhead, so these durations are not performance
+qualification. `D` denotes the full seed-1 witness above and `S2` the full seed-2
+witness above.
+
+| Evidence path relative to the input directory | Witness | Wall seconds |
+| --- | --- | ---: |
+| `hvf-diagnostic/hvf-seed1-a.json` | `aa74435a0bffdf9e8aa5b044404c15e8d98c75e3583e1db36fab3f2d53fb33ed` | 0.371258417 |
+| `hvf-diagnostic/hvf-seed1-b.json` | D | 0.383035750 |
+| `hvf-irq-diagnostic/hvf-seed1-a.json` | D | 0.359943291 |
+| `hvf-irq-diagnostic/hvf-seed1-b.json` | D | 0.354223125 |
+| `hvf-irq-diagnostic/hvf-seed2.json` | S2 | 0.381134042 |
+| `hvf-irq-diagnostic/hvf-seed1-jitter.json` | `5429da8e0e96b5fb8d94d5798fece393963f7eb8d9ddcad0ca7919887185ec3d` | 7.421001625 |
+| `hvf-irq-diagnostic-0.log` | D | 0.331993 |
+| `hvf-irq-diagnostic-1.log` | D | 0.349387 |
+
+The first diagnostic suite failed on its second ordinary seed-1 boot, establishing
+that deliberate noise is not necessary for the drift. A subsequent diagnostic
+suite again failed on its noise boot. No retry was treated as qualification.
+
+A temporary shared-machine single-step experiment deferred IRQ assertion until
+unmasking, but stepping disrupted an exclusive-access loop. It failed at the
+5,000,000-exit limit in 9.122925 s; its log is `hvf-step-diagnostic.log`. All
+stepping changes and diagnostic instrumentation were removed. A separate CLI
+launch after Cargo relinked the executable failed at VM creation with HV_DENIED
+(`hvf-cli-1b.stderr`); it produced no boot or witness. Signing again resolved
+that setup error.
+
+### Changes requiring the next guest rebuild
+
+- `kernel-arm64/seedbox.c`: `seedbox_idle()` now saves the incoming IRQ mask,
+  enables IRQs, executes ISB, writes the PV idle register, and restores the
+  original mask. Thus the shared machine can assert the timer at an already
+  unmasked exit instead of queuing it across the later guest DAIFClr.
+- `crates/seedbox-arm64/src/machine.rs`: every new timer/UART SPI assertion
+  requires PSTATE.I clear. Masked admission fails without rewriting PSTATE or
+  invoking the backend injection API. Deassertions remain allowed while masked.
+- Regression tests exercise rejection of masked admission and compile the actual
+  guest idle helper against an IRQ/MMIO model, checking unmasked/synchronized
+  MMIO and preservation of both incoming mask states.
+
+This is a candidate fix awaiting a rebuilt guest, **not** a demonstrated
+interrupt-placement solution. If drift persists with unmasked admission, exact
+IRQ-entry control needs further work. No witness bytes, guest RAM, entropy,
+trace entries, host-noise settings, or comparison checks were removed or masked.
+VTIMER_ACTIVATED and counter leaks remain hard errors.
+
+With the final guard and the supplied counter-fixed Image, the signed CLI exits
+2 after 1,400 completed exits in 0.006535 s; the signed `hvf_determinism` test
+exits 101 after 1,400 completed exits in 0.006161 s. Both fail at the first idle:
+
+```text
+SPI 40 asserted with PSTATE.I masked: nondeterministic interrupt admission; rebuild kernel-arm64 with the unmasked PV idle rendezvous
+```
+
+Logs: `hvf-irq-guard.log` and `hvf-acceptance-irq-guard.log` beside the inputs.
+No final-code successful witnesses exist yet. The earlier table records the
+actual pre-guard observations, not qualification of the committed code.
+
+Stop here for the operator's guest rebuild inside the Ubuntu arm64 VM, from
+this updated checkout, into a fresh directory:
+
+```sh
+export SEEDBOX_ARM64_BUILD=/var/tmp/seedbox-arm64-build
+BUILD_JOBS=4 bash kernel-arm64/build.sh "$PWD/artifacts/arm64-irq-rendezvous"
+```
+
+Return Image, init.cpio, kernel.config, SHA256SUMS and counter-audit.txt. Init and
+config sources are unchanged; the builder regenerates and audits the complete
+input set. Resume signed native acceptance with those inputs and new report
+paths. KVM/cross-backend acceptance remains untested. No frozen production path
+was modified, and no push or PR was performed.
 
 ## Cleanup and portable checks
 
