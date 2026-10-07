@@ -146,7 +146,10 @@ def serve(address, reply):
 
 class Client:
     """The ledger contains only PUT replies actually received from the server."""
-    def __init__(self, address):
+    def __init__(self, address, batch=BATCH):
+        if not 1 <= batch <= BATCH:
+            raise ValueError("batch must be between 1 and 32")
+        self.batch = batch
         self.address = address
         # Resolve before admitting commands; LOAD never performs name resolution.
         self.endpoints = resolve(address)
@@ -195,7 +198,7 @@ class Client:
             expected = int(command.split()[1])
             before = len(self.acks)
             deadline = time.monotonic() + LOAD_TIMEOUT
-            while len(self.acks) - before < BATCH:
+            while len(self.acks) - before < self.batch:
                 remaining(deadline)
                 try:
                     self.put(expected, deadline)
@@ -203,8 +206,8 @@ class Client:
                     self.failed += 1
                     time.sleep(min(RETRY_DELAY, remaining(deadline)))
                 remaining(deadline)
-            print(f"ACK_PHASE generation={expected} acked={BATCH} total={len(self.acks)}", flush=True)
-            return json.dumps({"generation": expected, "acked": BATCH, "total": len(self.acks)})
+            print(f"ACK_PHASE generation={expected} acked={self.batch} total={len(self.acks)}", flush=True)
+            return json.dumps({"generation": expected, "acked": self.batch, "total": len(self.acks)})
         if command == "PROBE":
             before, failed = len(self.acks), 0
             for _ in range(PROBES):
@@ -252,16 +255,18 @@ def main():
     parser.add_argument("--control-address", default="client:7001")
     parser.add_argument("--broken", action="store_true")
     parser.add_argument("--no-faults", action="store_true")
+    parser.add_argument("--batch", type=int, choices=range(1, BATCH + 1), default=BATCH,
+                        help="Acknowledged writes per LOAD (default: 32).")
     args = parser.parse_args()
     if args.mode == "server":
         store = Store(args.state, args.broken)
         serve(args.listen, store.reply)
     elif args.mode == "client":
-        client = Client(args.address)
+        client = Client(args.address, args.batch)
         serve(args.listen, client.reply)
     else:
         from scenario import run
-        return run(args.control_address, args.no_faults)
+        return run(args.control_address, args.no_faults, args.batch)
     return 0
 
 

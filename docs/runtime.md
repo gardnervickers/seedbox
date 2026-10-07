@@ -459,18 +459,78 @@ run-wide relay IDs and connection-local request IDs. Redundant lifecycle command
 and commands targeting exited VMs return recoverable RPC errors. The controller
 can inspect the application exit and choose PASS or FAIL.
 
-Inspection and partition/heal counter snapshots count nominal send, drop and
+Inspection and partition/shape/heal counter snapshots count nominal send, drop and
 arrival times strictly before admission. A packet physically delivered in an
 early scheduler window is excluded until its nominal arrival precedes that
 boundary. Final report counters still record physical NIC acceptance totals.
 
-Faults and control requests that take effect at the same simulated time T are
-ordered against sends as follows. The world applies a boundary at T only once
-every machine has reached T, so a machine that is still running before T keeps
-sending under the earlier network state, even when another machine is already
-waiting at T. At T, control admission and effects come first, then faults in
-ID order, and only then does any machine run, so every frame sent at T or
-later sees the new state. A frame's partition decision and arrival time are
+### Directed-link policy
+
+`x-seedbox.network.links` accepts a list of directed service pairs:
+
+```yaml
+network:
+  latency: 1ms
+  jitter: 100us
+  links:
+    - {from: server, to: client, latency: 20ms, jitter: 2ms, loss_ppm: 50000}
+```
+
+Within `x-seedbox`, each pair must be unique and name existing services. An entry
+requires `latency`; `jitter` and `loss_ppm` default to zero. Policies are absolute:
+a missing jitter or loss does not inherit the global value. Every baseline and
+runtime shape requires latency at least the global latency, jitter less than its
+latency, latency plus jitter at most one hour, and integer loss in `[0, 1000000]`.
+The global latency remains the whole-run lookahead; it cannot be lowered by a shape.
+
+`world.shape(from_, to, latency=..., jitter=0, loss_ppm=0)` uses nanosecond integers
+and returns a healable handle. Its nonempty sides must name distinct machines.
+It shapes only `from_ × to`; partitions still cut both directions. Among live
+shape layers the highest fault ID wins. Healing removes exactly one handle and
+reveals the previous layer, then the baseline, then global latency/jitter with zero
+loss where no baseline exists. Any active partition covering a pair dominates
+all shapes. Inspect includes both kinds in `active_handles`.
+
+At a boundary T every machine reaches T before control admission, trigger effects
+in arm order, and faults in ID order, followed by sends at T or later. Routing fixes each candidate's loss
+and arrival at send time; later shaping or healing retains in-flight decisions.
+Broadcast expands to other machines in ascending index order. Cuts consume no
+randomness; every other candidate consumes one independent per-pair loss draw
+then one jitter draw, including zero and total loss. Exact scaled multiplication
+maps jitter inclusively into `[0, jitter_ns]` and loss onto its ppm threshold.
+A lost frame increments `loss_dropped` and does not move the pair's last arrival.
+A delivered frame arrives at `max(send + latency + jitter, last_arrival + 1)`;
+a delay decrease preserves FIFO and head-of-line waiting. The scheduler's global
+early-delivery window remains unchanged.
+
+Counters distinguish `delivered`, `partition_dropped`, `receiver_dropped`, and
+`loss_dropped`; `loss_dropped` includes selector drops and is omitted for a link
+that has lost nothing.
+The report's `network_witness` hashes in-flight frames, per-link last
+arrivals, stream positions, live layers, cuts and baselines. It is folded into
+`world_witness` only when the run has baseline overrides, applied a shape or used a connection selector, so
+a run without link policy keeps its previous world witness. Shape/heal evidence follows the same strict-before-admission
+counter boundary as partitions. Fork snapshots retain baselines, last arrivals,
+and both RNG streams; arming a run seed reseeds those streams as before.
+
+Every final report includes `network_witness`; runs using link policy fold it into
+`world_witness` as described above. Its
+versioned, little-endian, length-prefixed encoding hashes pending frame arrival,
+sequence, directed indices and SHA-256 of frame bytes; last arrivals; loss/jitter
+stream counters; layers ordered by fault ID with handle, pairs and policy; active
+cuts; and baselines. Counts delimit collections and strings. It retains bounded
+infrastructure state without packet contents or application schemas. This VMM
+change creates a new engine identity; hardware/replay qualification is separate
+from portable policy tests.
+
+Faults, triggers and control requests that take effect at the same simulated
+time T are ordered against sends as follows. The world applies a boundary at T
+only once every machine has reached T, so a machine that is still running before
+T keeps sending under the earlier network state, even when another machine is already
+waiting at T. At T, control admission and effects come first, then trigger
+effects in arm ID order (taking the next fault IDs), then faults in ID order,
+and only then does any machine run, so every frame sent at T or later sees the
+new state. A frame's partition decision and arrival time are
 fixed when it is sent; a later partition or heal never changes a frame already
 in flight. A slice that runs up to a boundary always ends before the guest can
 send at the boundary itself, so no frame is ever stamped at or after a boundary
@@ -578,6 +638,84 @@ truncation. Its raw `.stdout` evidence is bounded to 8192 bytes per value and
 4 MiB per preparation; an oversized or incomplete value fails preparation.
 Version stderr remains quota-limited `.log` diagnostics with omission receipts.
 
+## Connection selectors
+
+Guest controllers can discover an IPv4 TCP direction and arm a scoped loss:
+
+```python
+page = world.connections("server", "client")
+connection = next(c for c in page["connections"] if c["dst_port"] == 4000)
+handle = world.drop_connection(connection)
+# Run the workload phase that must encounter loss.
+evidence = world.heal(handle)
+assert evidence["dropped"] > 0
+```
+
+Discovery returns at most 32 records per live page in incarnation order. Use
+`after=page["next_after"]` for the next page. Selection binds the complete
+machine/address/port/direction/incarnation record at the globally committed
+admission boundary. A connection that disappears between discovery and admission
+is rejected with `invalid_state`. The controller cannot select itself.
+
+The bounded classifier observes candidate Ethernet sends before partition/link
+loss decisions. An unfragmented IPv4 TCP SYN without ACK admits both directions
+of a tuple and assigns a monotonically increasing run-local incarnation. A SYN
+retransmission with the same initial sequence number retains it. A different
+initial sequence number replaces it, even without a close. Simultaneous open
+joins the same incarnation; SYN-ACK must acknowledge the opposite initial sequence
+number plus one (wrapping u32). A SYN-ACK alone or midstream traffic without an
+observed opening SYN does not create a connection. A same-ISN opening SYN after
+observed closure creates a new incarnation. There is no idle timeout.
+
+FIN half-closes one direction; both observed FINs or either RST close admission.
+FIN/RST and subsequent retransmissions still classify under that incarnation until
+a replacement SYN. Tracking describes observed sends, including dropped packets,
+not a kernel's confirmed TCP state. Process stop/restart does not reset the NIC or
+classifier. Restart/reuse without a close and with an identical opening ISN is
+indistinguishable from a SYN retransmission and deliberately retains identity.
+After replacement, newly sent non-SYN packets on the tuple classify under the
+latest incarnation; TCP sequence-window validation is not implemented. Already
+routed frames retain their old drop/arrival decisions regardless of later reuse.
+
+Only untagged unicast Ethernet carrying structurally valid IPv4/TCP is classified.
+IPv4/TCP options are bounded by their header lengths; checksum validation is left
+to the guest (including checksum offload). All IPv4 fragments, including first
+fragments with MF, malformed/truncated headers, VLAN, IPv6, ARP, UDP, multicast
+and broadcast bypass connection selection and retain ordinary link policies.
+There is no reassembly or application-protocol decoding.
+
+At most 1024 bidirectional tuples and 1024 active selector handles are retained.
+A new tuple at capacity evicts the oldest unselected closed incarnation first,
+then the oldest unselected open incarnation. An incarnation named by a live
+selector is never evicted, even after closure; if all retained incarnations are
+selected, the new tuple is not tracked. Stale handles keep their counts but cannot
+attach to a replacement. Evicted or untracked midstream traffic is unclassified
+until a fresh opening SYN can be admitted.
+Selector capacity exhaustion is an explicit admission error. Counters and IDs do
+not reset on discovery, process restart or healing. Fork snapshots preserve the
+classifier and selector state, and reseeding does not reset their identities.
+
+Partitions dominate selected loss, which dominates directed link shapes.
+Selected loss drops every matching candidate after consuming exactly one loss
+draw and one jitter draw for its pair, without updating the pair's last arrival;
+unselected traffic uses the existing link policy and global causal floor. No
+additional selector RNG is used, and cuts remain draw-free. Broadcast candidate
+ordering remains ascending machine index.
+Overlapping handles each retain their matched/dropped counts, and healing only
+releases its own handle. Arming is not evidence of injection: require a positive
+`dropped` count from heal or retained `selection_counts`. Pending frames are never
+reclassified by a fault, healing or tuple reuse.
+
+Once a selector is applied, the network witness includes a tagged encoding of
+classifier tuples, incarnation counter, eviction count, SYN/FIN/RST state, active
+selectors and their counters. The world witness then includes that network
+witness even after healing. Without selector use, tracking contributes no witness
+bytes or report fields and leaves legacy RNG, frame decisions and results intact.
+This changes the engine identity. Portable tests exercise the production modules;
+AMD execution, replay and observation/performance qualification remain separate.
+The finite [AMD procedure](connection-selectors-amd.md) uses the guest-owned
+`harness/acceptance/workloads/connections.yaml` fixture.
+
 ## Bundles
 
 `seedbox export RUN [-o FILE] [--state STATE]` writes one uncompressed
@@ -674,3 +812,12 @@ to be substituted. Filtering cannot change execution or witness identity.
 Indexes share the existing retention limits and bundle transfer path; missing
 raw streams and indexes stay explicit after import. See [timed logs](timed-logs.md)
 for format bounds, a portable demo and the pending AMD validation commands.
+
+## Committed console triggers
+
+The development engine implements bounded, exactly-once console marker triggers
+through the guest control API. Arm/cancel admission, match deadlines, future
+causal effect barriers, snapshot state and witness evidence are specified in
+[the trigger contract](triggers.md). No trigger ever armed adds no report fields,
+witness bytes or console stopping points. This changes the engine and requires
+`--allow-dev-engine`; AMD KVM validation remains outstanding.
