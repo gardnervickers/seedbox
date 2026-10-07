@@ -44,6 +44,9 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 
 ## Checks
 
+Engine PRs that need host evidence go through a merge train
+([docs/merge-train.md](docs/merge-train.md)).
+
 Portable checks must pass at the PR or merge-train head before spending AMD
 host time. `bash harness/mac-check.sh REV` is the fast pre-check for a Mac or
 any other non-KVM machine; it also works on the host. Run inside the project's

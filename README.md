@@ -34,11 +34,13 @@ directory. Every runtime input has a default, so no flags are required:
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
 | Exploration count | `1` | `--count` |
 | Exploration workers | `1`, sequential execution | `--workers` (1..32; automatic CPU selection for parallel execution) |
+| Torn disk writes | off (drop all unflushed sectors on crash) | `--torn-writes` |
 | CPU | first free core other than CPU 0's, under the shared lease | `--cpu`, `SEEDBOX_CPU` |
 | Guest kernel | `bzImage` in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`, `./artifacts`, then `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | `seedbox-vmm` next to an installed `seedbox`, then this checkout's `cargo build-vmm` output, then on `PATH`; `cargo run` builds it if missing | `--vmm`, `SEEDBOX_VMM` |
 | Guest supervisor | built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | BusyBox | `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
+| mke2fs (only for named volumes) | `SEEDBOX_MKE2FS` (set by `nix develop`), then a static `mke2fs` on `PATH` | `--mke2fs` |
 | Build epoch | absent; preserve the builder's ordinary timestamp policy | `--build-epoch` (prepare/run/explore; no environment backing) |
 | Engine qualification | pinned engine and guest kernel; dev artifacts require explicit opt-in | `--allow-dev-engine` (run/explore/replay/doctor; no environment backing) |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
@@ -52,10 +54,21 @@ engine. Replay requires this flag and the exact retained engine/kernel hashes;
 bundles preserve the marker. Passing the flag with both pinned artifacts adds no
 marker. All host, CPU, PMU, MSR, lease, ABI and control-channel checks still apply.
 
+`seedbox run --torn-writes` enables seeded partial survival of unflushed
+512-byte disk sectors on crash. It is recorded in run identity and replayed
+automatically. It applies to retained disks; Compose storage is still RAM-backed
+until named-volume disk support lands. See [disk semantics](docs/runtime.md#disk-crash-policy).
+
 `seedbox help run` lists every option. A run prints `OUTCOME: run-directory`;
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
 INCOMPLETE and 124 TIMEOUT. Offline `diff` exits 0 for MATCH, 1 for DIFFERENT,
 and 2 for usage/setup or invalid retained evidence.
+
+On a VMM failure, text output from `run`, `replay`, `explore` and `inspect`
+also prints up to five non-empty lines from the final 8 KiB of that attempt's
+`output/vmm.stderr` to stderr, prefixed with `vmm stderr:`. Missing or unreadable
+logs do not change the outcome. Retained records and `--json` output are unchanged.
+`inspect` keeps the recorded `error:` line on stdout alongside the run status.
 
 [Draft format and runtime scope](docs/compatibility.md) distinguishes inspection
 and transfer from qualified execution. Same software versions, seed and exact
@@ -381,6 +394,7 @@ seedbox run harness/acceptance/workloads/short-kill-3.5.2.yaml
 seedbox run harness/acceptance/workloads/sanity.yaml
 seedbox run harness/acceptance/workloads/race.yaml
 seedbox run harness/acceptance/workloads/kill-3.5.3.yaml
+seedbox run harness/acceptance/workloads/volume-crash.yaml
 ```
 
 The YAML references the existing Go/C workload build contexts and loads the
@@ -397,7 +411,10 @@ etcd 3.5.3 scenario performs twenty. The sanity scenario requires detection of i
 planted missing acknowledgement and uses `check.exit_code: 1`, so the acceptance
 command succeeds when that negative control behaves correctly. The race driver
 checks its output and atomic control inside the guest; it does not require a
-particular seed to lose a fixed number of updates.
+particular seed to lose a fixed number of updates. The volume scenario puts
+keys into a single etcd node whose data directory is a named volume, crashes and
+reboots that machine through the control API, and requires every acknowledged
+key to be read back.
 
 Each command uses normal CLI outcomes and exit codes. There is no host-side
 console parsing, scenario verdict, seed pin, automatic retry, or acceptance-only

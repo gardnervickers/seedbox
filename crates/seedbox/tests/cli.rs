@@ -292,6 +292,23 @@ fn busybox_default_requires_a_static_busybox_on_path() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn an_explicit_mke2fs_must_exist() {
+    let (directory, mut args) = runtime_project();
+    let busybox = directory.path().join("busybox");
+    fs::write(&busybox, b"").unwrap();
+    args.extend(["--busybox".into(), busybox.to_str().unwrap().to_owned()]);
+    args.extend(["--mke2fs".into(), "/nonexistent/mke2fs".into()]);
+    let args: Vec<_> = args.iter().map(String::as_str).collect();
+    let output = seedbox(&args, directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        "error: --mke2fs /nonexistent/mke2fs: not found\n"
+    );
+}
+
 #[test]
 fn explore_bounds_and_help_are_public_before_runtime_inputs_or_state() {
     let directory = tempfile::tempdir().unwrap();
@@ -480,6 +497,7 @@ fn old_host_proof_replay_is_not_comparable_while_inspection_and_transfer_stay_av
                     user: "".into(),
                     working_dir: "/".into(),
                     volumes: vec![],
+                    disk_volumes: vec![],
                 },
             },
         )]),
@@ -720,6 +738,72 @@ mod diff_tests {
     include!("support/diff_fixture.rs");
 
     #[test]
+    fn inspect_vmm_failure_shows_bounded_diagnostics_only_on_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run = root.join("failed");
+        let mut record = fixture();
+        record.outcome = sb::orchestration::Outcome::Error;
+        record.report = None;
+        let error = sb::Error::Execution(sb::vmm::VMM_FAILURE_MESSAGE.into()).to_string();
+        record.error = Some(error.clone());
+        write_fixture(&run, &mut record, None, None);
+        let manifest = fs::read(run.join("manifest.json")).unwrap();
+        let diagnostic = run.join("output/vmm.stderr");
+        let overshoot = "overshoot on client: 17 branches past stop target 100";
+        // The old prefix exceeds the read cap; blanks do not consume line slots.
+        fs::write(
+            &diagnostic,
+            format!(
+                "{}\nold\nfirst\n\nsecond\n \t\r\nthird\nERROR: misleading status\n{overshoot}\n\n",
+                "x".repeat(32 * 1024)
+            ),
+        )
+        .unwrap();
+        let expected_stdout = format!("ERROR: fixture (seed 0)\nerror: {error}\n");
+        let output = seedbox(&["inspect", "failed"], root);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
+        assert_eq!(
+            stderr(&output),
+            format!("vmm stderr: first\nvmm stderr: second\nvmm stderr: third\nvmm stderr: ERROR: misleading status\nvmm stderr: {overshoot}\n")
+        );
+        let statuses = output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .chain(output.stderr.split(|byte| *byte == b'\n'))
+            .filter(|line| line.starts_with(b"ERROR: "))
+            .count();
+        assert_eq!(statuses, 1);
+        let json = seedbox(&["inspect", "failed", "--json"], root);
+        assert!(json.status.success());
+        assert!(json.stderr.is_empty());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&json.stdout).unwrap(),
+            serde_json::to_value(&record).unwrap()
+        );
+        assert_eq!(fs::read(run.join("manifest.json")).unwrap(), manifest);
+
+        for bytes in [b"".as_slice(), b"\n \t\r\n"] {
+            fs::write(&diagnostic, bytes).unwrap();
+            let output = seedbox(&["inspect", "failed"], root);
+            assert!(output.status.success());
+            assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
+            assert!(output.stderr.is_empty());
+        }
+        fs::remove_file(&diagnostic).unwrap();
+        let output = seedbox(&["inspect", "failed"], root);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
+        assert!(output.stderr.is_empty());
+        fs::create_dir(&diagnostic).unwrap();
+        let output = seedbox(&["inspect", "failed"], root);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
     fn diff_plain_and_json_status_and_trace_details() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -941,4 +1025,30 @@ mod diff_tests {
         assert_eq!(result["status"], "MATCH");
         assert_eq!(result["machines"][0]["witness"]["matches"], true);
     }
+}
+
+#[test]
+fn torn_writes_is_opt_in_presence_only_and_replay_uses_the_recorded_policy() {
+    let directory = tempfile::tempdir().unwrap();
+    for command in ["run", "prepare"] {
+        let help = seedbox(&["help", command], directory.path());
+        assert!(help.status.success());
+        let help = String::from_utf8_lossy(&help.stdout);
+        assert!(help.contains("--torn-writes"));
+        assert!(help.contains("off by default"));
+        assert!(!help.contains("SEEDBOX_TORN_WRITES"));
+        let mut args = vec![command, "--torn-writes"];
+        if command == "prepare" {
+            args.extend(["--output", "out.json"]);
+        }
+        let output = seedbox(&args, directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(stderr(&output), "error: no Compose file found; searched:\n  ./compose.yaml\n  ./compose.yml\n  ./docker-compose.yaml\n  ./docker-compose.yml\npass the file path directly\n");
+        let output = seedbox(&[command, "--torn-writes=false"], directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).contains("--torn-writes"));
+    }
+    let output = seedbox(&["replay", "run", "--torn-writes"], directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("unexpected argument '--torn-writes'"));
 }

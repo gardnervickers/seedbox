@@ -2,7 +2,7 @@
 //! This module does not fetch images or unpack layers.
 
 use crate::{
-    config::{guest_path, Service},
+    config::{guest_path, Service, VolumeMount},
     invalid, Result,
 };
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,9 @@ pub struct Launch {
     /// Image-declared anonymous volumes need explicit per-run lifetime handling
     /// in the guest preparer. They cannot silently be discarded.
     pub volumes: Vec<String>,
+    /// Named volumes on the machine's retained disk, which survive a crash.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disk_volumes: Vec<VolumeMount>,
 }
 
 pub fn resolve_launch(service: &Service, image: &ImageDefaults) -> Result<Launch> {
@@ -110,5 +113,6 @@ pub fn resolve_launch(service: &Service, image: &ImageDefaults) -> Result<Launch
         working_dir,
         user,
         volumes,
+        disk_volumes: service.volumes.clone(),
     })
 }

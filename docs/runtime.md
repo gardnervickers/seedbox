@@ -8,6 +8,41 @@ These are version-bound results, not qualification of arbitrary OCI runtimes or
 the latest changed example inputs. See [draft formats and runtime scope](compatibility.md)
 for current readers/writers, exit meanings and remaining release gates.
 
+## Disk crash policy
+
+`run` and `prepare` accept `--torn-writes` (off by default). Off retains the
+`flush-stable/drop-all-unflushed/v1` model: crashes drop all unflushed sectors.
+The omitted setting adds no profile or world JSON field and leaves the existing
+disk digest and witness inputs unchanged. Building the modified VMM still changes
+the engine binary hash, as every VMM source change does.
+
+When enabled, the profile's semantic parameter `disk_loss` and each disk report's
+`model` are
+`flush-stable/seeded-latest-sector-512-half/disk-loss-machine-incarnation/v1`.
+Replay restores this policy from the retained profile; there is no replay override
+or environment variable. The low-level world JSON uses the same `disk_loss` key
+and model string. Unknown model strings are rejected.
+
+At each crash, the latest unflushed version of each sector independently has a
+50% chance of surviving. The atomic unit is 512 bytes: multi-sector writes can
+survive as any subset, but a single sector's bytes are never torn. A later sector
+write can survive while an earlier one is lost. Overwritten historical versions
+are not candidates; there is no write log. Lost sectors fall back to their last
+flushed contents or the base image. Every completed FLUSH stabilizes all preceding
+completed writes, so it never loses coverage under this policy.
+
+Selection visits volatile sectors in ascending sector order, using `below(2) == 1`
+from the versioned SHA-256 RNG domain `disk-loss/<machine>/<incarnation>` and the
+run seed. Incarnation identifies the machine that crashed (initially 0). No
+other RNG stream is consumed. Survivors become stable in the next incarnation;
+snapshot/fork restore carries the policy and both disk layers. Reports count
+only actually lost volatile sectors in `disk_lost_sectors`.
+
+This policy applies to retained virtio-blk disks. Current Compose application
+storage remains RAM-backed; attaching named volumes to retained disks is separate
+work. Low-level disk fixtures, including the ext4 fsync ledger, are documented in
+[`harness/worlds/README.md`](../harness/worlds/README.md#retained-disk).
+
 ## Build on the qualified Linux host
 
 From the repository root:
@@ -273,7 +308,15 @@ issue #5's hardware qualification; Darwin source tests do not establish it.
 Each service currently gets one machine and one OCI-root chroot. Its complete
 filesystem is writable RAM-backed initramfs storage, freshly instantiated for
 each run/replay; image volume paths have the same per-run lifetime. Process
-stop/start retains that filesystem. No state persists between fresh machine boots.
+stop/start retains that filesystem. A machine crash loses it.
+
+Named Compose volumes are the exception. A machine whose service mounts one gets
+a 1 GiB virtio-blk disk, zeroed at the start of each run/replay. The supervisor
+formats it as ext4 on first boot (with a static `mke2fs` packaged into the guest),
+mounts it, and bind mounts each volume's directory onto its target. The disk has a
+write cache: data the application flushed (fsync, fdatasync, `O_DSYNC`) survives a
+machine crash and reboot, and every write since the last flush is lost. A new volume
+takes the mode and owner of the image's target directory and starts empty.
 The generic static supervisor is a guest bootstrap alongside the existing C guest
 helpers; configuration, preparation, orchestration, and execution are Rust.
 
@@ -296,6 +339,15 @@ and unsupported guest syscalls are compatibility failures, never workload PASS.
 and timeouts. Serial output is capped at 1 GiB total divided equally between the
 two ports of all machines; exceeding that cap fails execution. Trace recording
 is not enabled by this adapter.
+
+When text output reports `execution: VMM failed; see vmm.stderr`, `run`, `replay`,
+`explore` and `inspect` also print up to five non-empty lines from the final 8 KiB
+of the attempt's `output/vmm.stderr` to stderr. Each line starts with `vmm stderr:`;
+terminal control characters are removed and invalid UTF-8 is replaced. A line
+cut by the byte limit starts with `...`. Missing or unreadable logs are skipped
+without changing the outcome. This excerpt is local diagnostic output only:
+retained records, serde field names, status lines and `--json` output are unchanged.
+`inspect` keeps the recorded `error:` line on stdout alongside the run status.
 
 ## Reproduce acceptance
 
@@ -365,6 +417,22 @@ fixed when it is sent; a later partition or heal never changes a frame already
 in flight. A slice that runs up to a boundary always ends before the guest can
 send at the boundary itself, so no frame is ever stamped at or after a boundary
 that hasn't been applied yet.
+
+### Machine pause, crash and reboot
+
+Compose guest drivers can call `World.pause(target)`, `resume(target)`,
+`crash(target)` and `reboot(target)` through the [runtime control API](../python/README.md).
+Each acts on the target's whole machine at admission and returns an `Effect`;
+the transcript and service-attributed fault events are validated during run and
+replay. Illegal transitions, and stop or restart of a paused machine, return
+recoverable `invalid_state`; pause/resume
+of an exited VM and process faults whose machine exits or crashes return
+`target_unavailable`. Inspection shows `Paused` and `Down`. After reboot, the
+scenario checks application readiness itself. The check service is the
+controller, which can't be a target, so a lifecycle operation never ends the run
+by itself: a crashed service is not an exited one. See
+[Machine pause, crash and reboot](../harness/worlds/README.md#machine-pause-crash-and-reboot)
+for CPU, timer, network, incarnation and static-plan semantics.
 
 ## Exploration preparation
 

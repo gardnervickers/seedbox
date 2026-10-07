@@ -28,6 +28,12 @@ seedbox replay .seedbox/runs/ATTEMPT
 seedbox diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
 ```
 
+On a VMM failure, text output from `run`, `replay`, `explore` and `inspect`
+prints up to five non-empty lines from the final 8 KiB of the attempt's
+`output/vmm.stderr` to stderr, prefixed with `vmm stderr:`. Missing or unreadable
+logs do not change the outcome; retained records and `--json` output are unchanged.
+`inspect` keeps the recorded `error:` line on stdout alongside the run status.
+
 Preparation unpacks images with root ownership and runs before the execution CPU
 lease. Admission briefly checks an eligible core first and releases all temporary
 resources before preparation.
@@ -35,6 +41,10 @@ resources before preparation.
 `seedbox help run`. Run/replay must be invoked with the required KVM/MSR access;
 see the repository's `docs/runtime.md` for setup and limits. `--margin` and
 `--undo` control PMU approach and stepping performance without changing results.
+`--torn-writes` opts into seeded partial survival of unflushed 512-byte disk
+sectors on machine crash (off by default). It is part of run identity and replay
+restores it automatically. It applies only to retained disks; this template
+currently uses RAM-backed storage. See `docs/runtime.md` for the disk contract.
 Charged timer I/O retains its full cost across scheduler boundaries; pending
 operations are included in terminal witnesses.
 
