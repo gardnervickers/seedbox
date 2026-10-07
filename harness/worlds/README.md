@@ -294,14 +294,50 @@ does not heal lossmid until 4.7 s. A packet's arrival cannot shift its reported
 window, since the probe indexes receipts by the sender's stamp.
 
 The prior checker already expected 50% receipts there. Train/3's 207/400 receipts,
-1.004 ms minimum and 1.25 ms mean satisfy that plan. Its 1.64 ms maximum violated
-an unrelated 1.6 ms cap, which assumed at most 100 us of guest overhead. The
-probe stamps before `sendto` and reads time after `recv`; it does not measure
-nominal engine arrival and does not bound that overhead. The receipt maximum
-is now reported as a diagnostic, while the original count, floor and mean
-checks remain. Negative controls reject incorrect loss, latency floor and mean.
-`crates/seedbox/tests/link_worlds.rs` applies the JSON through production
-`Faults`/`Links`, checks all six directions' policies and cuts throughout the
-full windows, and enforces the exact 1.0–1.5 ms nominal arrival range and FIFO
-for delivered c->a frames in window 45. These portable checks do not establish
-the cause of the observed guest receipt tail or qualify actual AMD delivery.
+1.004 ms minimum and 1.25 ms mean satisfy that plan; #97 alone reproduced the
+same tuple (world witness `ca9a7f6d`, network witness `bf975406`). Its 1.64 ms
+maximum exceeded the old 1.6 ms cap because sender stamping precedes `sendto`
+and receiver timing follows `recv`, including both kernels and concurrent bursts.
+Jittered windows now keep a loose 200 us receipt allowance (1.7 ms for window 45).
+Count, floor and mean checks remain; fixed-delay receipt tails stay diagnostic.
+
+The analyzer requires actual routed-frame records in each selected full shaped
+lane's `network.jsonl`. Each line is a JSON object with machine names `src` and
+`dst`, and integer `send_ns` and `arrival_ns`. Include **every queued frame**,
+including boot/ARP traffic, in routing order, not receipt order; omit cut/lost
+frames, which reserve no FIFO arrival. The bound is
+`max(send_ns + latency_ns + jitter_ns, link_last + 1)`, with a lower bound of
+`max(send_ns + latency_ns, link_last + 1)`. Thus delay decreases can preserve an
+old FIFO tail, but a FIFO extension is exactly one nanosecond. At least one c->a
+arrival must be present in routed-time window 45. Missing, empty, invalid or
+out-of-bound evidence fails the analyzer. Synthetic portable tests cover both
+inclusive boundaries and one-nanosecond violations; the Rust fixture tests still
+exercise production `Faults`/`Links` directly.
+
+**Capture limitation:** this engine's `--trace` emits machine/device exits, not
+routed send/arrival pairs. Its network report retains only a witness digest,
+not the inputs needed to recover those times. The runner retains the device
+traces and copies `network.jsonl` if an external capture supplies it in the run
+output. `NETWORK_TRACE_ROOT` can instead point to same-run captures under
+`L1/network.jsonl` and `L2/network.jsonl`. Such captures must come from the exact
+runs being analyzed; a model-generated trace or a different run is not engine
+evidence. No route capture is implemented here, since changing the engine is
+outside this follow-up's scope. Consequently L1/L2 cannot pass the new exact
+check with the current engine's output alone. AMD capture integration and actual
+arrival qualification remain unresolved.
+
+Run selected lanes concurrently, one distinct physical core per lane:
+
+```sh
+RUNS="L1 U1" CPUS="14 15" SHA=<fixture-commit> MAIN=<base-commit> bash harness/run-links.sh
+```
+
+Omit `RUNS` to select L1 L2 P1 M1 U1 U2, and supply six `CPUS` in that order.
+Unknown/duplicate lane names, duplicate CPUs and missing cores are errors before
+host work. Each lane keeps the existing CPU/SMT lease and MSR restoration in
+`batch.py`; SMT siblings must be idle. A subset checks its own lane evidence and
+prints SKIP for pair comparisons whose partner was not selected. All children
+are joined, including after failure, before analysis and cleanup. Interruption
+waits for bounded lane completion before deleting temporary builds. Each
+invocation owns fresh temporary build and results directories. Results are kept
+under `~/seedbox-link60-results/run.*`; shared results are never removed.

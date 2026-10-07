@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Directed-link host controls. Usage: links.py RESULTS_DIR.
 
-The nominal arrival bound is checked against production links.rs portably in
-crates/seedbox/tests/link_worlds.rs. LINK-WIN instead observes userspace receipt:
-its maximum includes sendto, guest network processing and time until recv drains
-that packet. No fixed 100 us bound on those costs exists in this probe.
+Engine arrivals come from retained routed-frame records (network.jsonl), not
+LINK-WIN receipt times. Each JSON line has src, dst, send_ns and arrival_ns;
+records must include every queued frame in routing order, including boot traffic.
+The VMM's current machine/device --trace alone cannot supply these records.
 """
 import json
 import re
@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 WIN = 100_000_000
+RUNS = ('L1', 'L2', 'P1', 'M1', 'U1', 'U2')
 
 
 def policy_at(world, src, dst, at):
@@ -70,7 +71,7 @@ def window_plan(world):
 
 def window_matches(expected, observed, sent):
     lat, jitter, frac = expected
-    n, lo, _hi, mean = observed  # milliseconds from the guest probe
+    n, lo, hi, mean = observed  # milliseconds from the guest probe
     if frac == .5:  # unchanged binomial, four sigma
         good = sent > 0 and abs(n - sent / 2) <= 4 * (sent / 4) ** .5 + 1
     elif frac == 1:  # a pre-edge stamp can be routed after the edge
@@ -81,15 +82,62 @@ def window_matches(expected, observed, sent):
         floor = lat / 1e6
         if jitter:
             center = floor + jitter / 2e6
-            good &= floor <= lo <= floor + .05 and center - .1 <= mean <= center + .15
+            good &= (floor <= lo <= floor + .05 and center - .1 <= mean <= center + .15
+                     and hi <= floor + jitter / 1e6 + .2)
         else:
             good &= floor <= lo <= floor + .05 and mean <= floor + .1
-    # hi is diagnostic, not a nominal-arrival measurement. The strict floor,
-    # mean, count and FIFO checks remain; exact arrival bounds live in Rust.
+    # Fixed-delay receipt tails remain diagnostic; jittered windows keep only
+    # a loose 200 us sanity allowance. Exact bounds use routed engine arrivals.
     return good
 
 
-def analyze(directory):
+def arrival_bounds(world, records):
+    """Check actual queued arrivals: max(send + latency + jitter, link_last + 1).
+
+    Loss/cut frames reserve no FIFO slot. This fixture has no lifecycle faults,
+    so every routed delivery reserves its arrival even if the NIC later drops it.
+    Do not sort: routing order is part of the evidence.
+    """
+    names = {m['name'] for m in world['machines']}
+    last = {}
+    previous_send = {}
+    counts = {}
+    for index, record in enumerate(records):
+        src, dst = record['src'], record['dst']
+        send, arrival = record['send_ns'], record['arrival_ns']
+        pair = (src, dst)
+        if (src not in names or dst not in names or src == dst or
+                type(send) is not int or type(arrival) is not int or
+                send < previous_send.get(pair, -1) or send < 0):
+            raise ValueError(f'route {index}: invalid pair, time or routing order')
+        previous_send[pair] = send
+        policy = policy_at(world, src, dst, send)
+        if policy is None or policy[2] == 1_000_000:
+            raise ValueError(f'route {index}: arrival on a cut or 100% loss link')
+        latency, jitter, _ = policy
+        fifo = last.get(pair, 0) + 1
+        lower = max(send + latency, fifo)
+        upper = max(send + latency + jitter, fifo)
+        if not lower <= arrival <= upper:
+            raise ValueError(f'route {index} {src}->{dst}: arrival {arrival} outside '
+                             f'[{lower}, {upper}] (send={send}, link_last={last.get(pair, 0)})')
+        last[pair] = arrival
+        key = (src, dst, send // WIN)
+        counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        raise ValueError('no routed arrivals')
+    return counts
+
+
+def selected_runs(runs):
+    runs = tuple(runs)
+    if not runs or len(set(runs)) != len(runs) or any(r not in RUNS for r in runs):
+        raise ValueError('select unique lanes from ' + ' '.join(RUNS))
+    return runs
+
+
+def analyze(directory, runs=RUNS):
+    runs = selected_runs(runs)
     r = Path(directory)
     ok = True
     def check(cond, what):
@@ -101,8 +149,7 @@ def analyze(directory):
         try: return json.loads((r / f'{run}.json').read_text())
         except Exception as e: print(f'{run}: no report ({e})'); return {}
 
-    RUNS = ['L1', 'L2', 'P1', 'M1', 'U1', 'U2']
-    reps = {k: report(k) for k in RUNS}
+    reps = {k: report(k) for k in runs}
     for k, v in reps.items():
         stops = sum(m.get('precise_stops', 0) for m in v.get('machines', []))
         steps = sum(m.get('steps', 0) for m in v.get('machines', []))
@@ -110,22 +157,30 @@ def analyze(directory):
               f'network_witness={str(v.get("network_witness"))[:16]} host_s={v.get("host_seconds", 0):.0f} '
               f'precise_stops={stops} steps={steps}')
     w = {k: v.get('world_witness') for k, v in reps.items()}
-    check(w['L1'] and w['L1'] == w['L2'], 'shaped replay MATCH (L1 == L2)')
-    check(w['U1'] and w['U1'] == w['U2'], 'shaped world with a stop tolerance: undo off MATCH (U1 == U2)')
-    check(w['P1'] and w['P1'] == w['M1'], 'plain world: PR engine witness == main engine witness')
-    check(all(v.get('outcome') == 'end_machine_exited' for v in reps.values()), 'every run ended on a')
-    nc = reps['L1'].get('network_counters', {})
-    print('L1 counters:', json.dumps(nc, sort_keys=True))
-    check(nc.get('c->a', {}).get('loss_dropped', 0) > 0 and nc.get('c->b', {}).get('loss_dropped', 0) > 0, 'loss_dropped on c->a and c->b')
-    check(nc.get('c->a', {}).get('partition_dropped', 0) > 0 and nc.get('a->c', {}).get('partition_dropped', 0) > 0, 'cut c|a (over a lossy shape on c->a) counted as partition_dropped both ways')
-    check(all('loss_dropped' not in v for k, v in nc.items() if k not in ('c->a', 'c->b')), 'no loss elsewhere')
-    check(all(v.get('partition_dropped', 0) == 0 for k, v in nc.items() if k not in ('c->a', 'a->c')), 'no cuts elsewhere')
-    for run in ('P1', 'M1'):
-        check(not any('loss_dropped' in v for v in reps[run].get('network_counters', {}).values()),
-              f'{run}: plain run has no loss_dropped keys')
+    for a, b, label in [('L1', 'L2', 'shaped replay'),
+                        ('U1', 'U2', 'short shaped undo on/off'),
+                        ('P1', 'M1', 'plain PR/main engine')]:
+        if a in reps and b in reps:
+            check(w[a] and w[a] == w[b], f'{label} MATCH ({a} == {b})')
+        else:
+            print(f'SKIP {label} comparison: requires {a} and {b}')
+    check(all(v.get('outcome') == 'end_machine_exited' for v in reps.values()), 'every selected run ended on a')
+    for run in runs:
+        nc = reps[run].get('network_counters', {})
+        print(f'{run} counters:', json.dumps(nc, sort_keys=True))
+        if run in ('P1', 'M1'):
+            check(not any('loss_dropped' in v for v in nc.values()),
+                  f'{run}: plain run has no loss_dropped keys')
+            continue
+        check(nc.get('c->a', {}).get('loss_dropped', 0) > 0 and nc.get('c->b', {}).get('loss_dropped', 0) > 0,
+              f'{run}: loss_dropped on c->a and c->b')
+        check(nc.get('c->a', {}).get('partition_dropped', 0) > 0 and nc.get('a->c', {}).get('partition_dropped', 0) > 0,
+              f'{run}: cut c|a counted both ways')
+        check(all('loss_dropped' not in v for k, v in nc.items() if k not in ('c->a', 'c->b')), f'{run}: no loss elsewhere')
+        check(all(v.get('partition_dropped', 0) == 0 for k, v in nc.items() if k not in ('c->a', 'a->c')), f'{run}: no cuts elsewhere')
     world = json.loads((r / 'shaped.json').read_text())
     short = json.loads((r / 'shaped-tol-short.json').read_text())
-    for run in ('L1', 'L2', 'U1', 'U2'):
+    for run in (r for r in runs if r[0] in 'LU'):
         planned = (short if run.startswith('U') else world)['faults']
         faults = reps[run].get('faults', [])
         check([f.get('id') for f in faults] == list(range(1, 17)) and
@@ -133,7 +188,7 @@ def analyze(directory):
               [f.get('applied_at_ns') for f in faults] == [f['at_ns'] for f in planned],
               f'{run}: all 16 faults applied in order')
 
-    for run in RUNS:
+    for run in runs:
         wins = {}
         reorders = {}
         sent = {}
@@ -148,8 +203,18 @@ def analyze(directory):
                 m = re.search(r'LINK-SRC (\w)<-(\w) reorders=(\d+)', l)
                 if m: reorders[(m.group(1), m.group(2))] = int(m.group(3))
         check(len(reorders) == 6 and all(v == 0 for v in reorders.values()), f'{run}: no out-of-order receipts {reorders}')
-        if run != 'L1':
+        if run not in ('L1', 'L2'):
             continue
+        try:
+            with (r / run / 'network.jsonl').open() as trace:
+                counts = arrival_bounds(world, (json.loads(line) for line in trace))
+            # Require observations in the disputed routed-time window; never let
+            # an empty/unrelated trace stand in for engine evidence.
+            check(counts.get(('c', 'a', 45), 0) > 0,
+                  f'{run}: routed c->a arrivals present in window 45')
+            check(True, f'{run}: exact latency/jitter/FIFO bounds from routed arrivals')
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            check(False, f'{run}: exact routed-arrival evidence: {error}')
         for (dst, src), spec in window_plan(world).items():
             bad = []
             for wi, expected in spec.items():
@@ -172,4 +237,8 @@ def analyze(directory):
 
 
 if __name__ == '__main__':
-    sys.exit(analyze(sys.argv[1]))
+    try:
+        sys.exit(analyze(sys.argv[1], sys.argv[2:] or RUNS))
+    except (IndexError, ValueError) as error:
+        print(f'error: {error}; usage: links.py RESULTS_DIR [LANE ...]', file=sys.stderr)
+        sys.exit(2)
