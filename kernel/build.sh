@@ -39,4 +39,6 @@ make -s -C "$src" O="$out" -j"${BUILD_JOBS:-16}" bzImage
 mkdir -p "$artifacts"
 cp "$out/arch/x86/boot/bzImage" "$artifacts/bzImage"
 cp "$out/.config" "$artifacts/kernel.config"
-sha256sum "$artifacts/bzImage" "$artifacts/kernel.config"
+# Keep the symbol map: the bzImage carries no data symbols.
+cp "$out/System.map" "$artifacts/System.map"
+sha256sum "$artifacts/bzImage" "$artifacts/kernel.config" "$artifacts/System.map"

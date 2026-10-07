@@ -9,7 +9,7 @@
 #define SEEDBOX_PORT_YIELD	0x52c	/* write: requested exit (0: syscall, 1: clock bound) */
 #define SEEDBOX_PORT_TIMER	0x530	/* write: arm PIT channel 0 for N ticks */
 #define SEEDBOX_TIME_PAGE_PHYS	0xd0000000UL
-#define SEEDBOX_ABI		2
+#define SEEDBOX_ABI		3
 #define SEEDBOX_TSC_KHZ		1000000
 /* PV clock: virtual time one guest clock read costs (ns; 1 in the counter timebase). */
 #define SEEDBOX_PV_READ_NS	100
@@ -31,6 +31,8 @@ struct seedbox_time_page {
 	u64 syscalls;	/* syscalls entered */
 	u64 pic_imr;	/* 8259 masks, master | slave << 8 */
 	u64 net_isr;	/* virtio-mmio interrupt status: VMM sets, guest clears */
+	u64 entropy_gen;	/* VMM bumps after writing entropy at a time fork */
+	u64 entropy[4];	/* 32 bytes the kernel mixes in before reseeding */
 	/*
 	 * PV clock timebase only (pv_clock set by the VMM before boot). Guest
 	 * progress is not counted: virtual time moves only at exits. The
@@ -52,6 +54,8 @@ unsigned long long seedbox_rdtsc(void);
 bool seedbox_emulate_user_tsc(struct pt_regs *regs);
 unsigned long seedbox_tsc_khz(void);
 void __init seedbox_time_init(void);
+/* Mix in fork entropy and reseed if the VMM published new (drivers/char/random.c). */
+void seedbox_take_entropy(void);
 
 /*
  * Offer the VMM a deterministic stopping point. The executed conditional
