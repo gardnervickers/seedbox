@@ -7,14 +7,23 @@ fn boot(marker:u8,undo:u64)->BootInputs {
     // One counted branch, console marker, 1000 counted branches, exit 0.
     let mut code=vec![0x31,0xc0,0x74,0x00,0xb0,marker,0xe6,0xe9,0xb9,0xe8,0x03,0,0,0x49,0x75,0xfd,0xb0,0,0xe6,0xf4];
     let mut kernel=vec![0;1024];kernel[0x1f1]=1;kernel.append(&mut code);
-    BootInputs {kernel:kernel.into(),initrd:Rc::from([]),cmdline:(String::new(),String::new()),mem:0x1000000,mac:None,control_channel:false,disk:None,undo_margin:undo,tolerance:0,timer_jitter:0,exact_timer_ppm:0,margin:None,console_limit:None}
+    // RAM must cover the fixed 128 MiB initrd address even with an empty initrd.
+    BootInputs {kernel:kernel.into(),initrd:Rc::from([]),cmdline:(String::new(),String::new()),mem:0x0900_0000,mac:None,control_channel:false,disk:None,undo_margin:undo,tolerance:0,timer_jitter:0,exact_timer_ppm:0,margin:None,console_limit:None}
 }
 fn world(undo:u64,reverse:bool)->World {
+    world_with_counter(undo,reverse,Counter::new().unwrap())
+}
+fn world_with_counter(undo:u64,reverse:bool,mut counter:Counter)->World {
+    // main.rs reuses one counter across forks. Counter has process-lifetime
+    // ownership (no Drop); opening one per variant exhausts pinned PMU slots.
+    // Disarm the previous world's overflow; counts are cumulative and each
+    // KVM_RUN measures its own delta, so the counter needs no count reset.
+    counter.disarm();
     let kvm=kvm_ioctls::Kvm::new().unwrap();
     let names:Vec<String>=if reverse {vec!["b".into(),"a".into()]} else {vec!["a".into(),"b".into()]};
     let boot:Vec<_>=names.iter().map(|n|boot(n.as_bytes()[0],undo)).collect();
     let machines=names.iter().zip(&boot).map(|(n,b)|boot_machine(&kvm,n,b,false,[0;32]).unwrap()).collect();
-    World {machines,kvm,boot,barrier:false,boot_seed:1009,run_seed:1009,incarnations:vec![vec![],vec![]],paused_ingress:vec![0;2],counter:Counter::new().unwrap(),events:vec![BTreeMap::new();2],seq:0,lookahead:50,early:0,latency:50,partitioned:BTreeMap::new(),faults:faults::Faults::with_links(vec![],names.clone(),links::Links::from_config(1009,&names,&json!({"latency_ns":50})).unwrap()).unwrap(),control:control::Control::new(&json!({"machine":"a","latency_ns":50,"placement":{}}),names,50,0).unwrap(),strict_events:vec![BTreeMap::new();2],macs:vec![[0,0,0,0,0,1],[0,0,0,0,0,2]],dropped:0,delivered:0,link_counts:BTreeMap::new(),semantic_counts:network_counters::NetworkCounters::default(),slices:0}
+    World {machines,kvm,boot,barrier:false,boot_seed:1009,run_seed:1009,incarnations:vec![vec![],vec![]],paused_ingress:vec![0;2],counter,events:vec![BTreeMap::new();2],seq:0,lookahead:50,early:0,latency:50,partitioned:BTreeMap::new(),faults:faults::Faults::with_links(vec![],names.clone(),links::Links::from_config(1009,&names,&json!({"latency_ns":50})).unwrap()).unwrap(),control:control::Control::new(&json!({"machine":"a","latency_ns":50,"placement":{}}),names,50,0).unwrap(),strict_events:vec![BTreeMap::new();2],macs:vec![[0,0,0,0,0,1],[0,0,0,0,0,2]],dropped:0,delivered:0,link_counts:BTreeMap::new(),semantic_counts:network_counters::NetworkCounters::default(),slices:0}
 }
 fn partition(handle:&str)->Action {Action::Partition {handle:handle.into(),left:vec!["a".into()],right:vec!["b".into()]}}
 
@@ -22,8 +31,9 @@ fn partition(handle:&str)->Action {Action::Partition {handle:handle.into(),left:
 #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
 fn committed_trigger_world_effects_follow_arm_order_across_reversed_machine_ties() {
     let mut want=None;
+    let mut counter=Counter::new().unwrap();
     for reverse in [false,true] {for undo in [0,16,256] {
-        let mut w=world(undo,reverse);
+        let mut w=world_with_counter(undo,reverse,counter);
         w.control.triggers.arm("a".into(),vec![b'a'],0,5000,partition("first")).unwrap();
         w.control.triggers.arm("b".into(),vec![b'b'],0,5000,partition("second")).unwrap();
         let outcome=simulate(&mut w,&json!({}),2000,&None,None).unwrap();
@@ -34,6 +44,7 @@ fn committed_trigger_world_effects_follow_arm_order_across_reversed_machine_ties
         assert!(w.control.triggers.records.iter().all(|r|r.matched_at_ns==Some(1) && r.effect_at_ns==Some(51) && r.status=="fired"));
         let evidence=w.control.triggers.evidence().unwrap();
         if let Some(want)=&want {assert_eq!(&evidence,want);} else {want=Some(evidence);}
+        counter=w.counter;
     }}
 }
 
@@ -76,8 +87,9 @@ fn committed_trigger_world_retains_already_routed_response_and_lagging_peer() {
 #[test]
 #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
 fn committed_trigger_world_snapshot_keeps_partial_match_and_scheduled_effect() {
+    let mut counter=Counter::new().unwrap();
     for pending in [false,true] {
-        let mut w=world(256,false);
+        let mut w=world_with_counter(256,false,counter);
         w.control.triggers.arm("a".into(),b"ab".to_vec(),0,5000,partition("p")).unwrap();
         w.control.triggers.committed("a",1,b'a',50,1).unwrap();
         if pending {w.control.triggers.committed("a",1,b'b',50,1).unwrap();}
@@ -93,6 +105,7 @@ fn committed_trigger_world_snapshot_keeps_partial_match_and_scheduled_effect() {
         snapshot.restore(&mut w).unwrap();
         assert_eq!(w.control.triggers.evidence().unwrap(),want);
         assert!(w.faults.log.is_empty());
+        counter=w.counter;
     }
 }
 
