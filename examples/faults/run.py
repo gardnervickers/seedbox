@@ -265,6 +265,11 @@ def main():
                                 "--state", a.state, "--undo", "0", "--margin", a.margin], 0)
     evidence.append(verify_lifecycle_cases(lifecycle_replay))
     persist_evidence()
+    comparison_margin = "131072" if a.margin != "131072" else "98304"
+    lifecycle_varied = execute([a.seedbox, "replay", str(lifecycle_run), "--cpu", str(a.cpu), "--state", a.state,
+                                "--undo", "16", "--margin", comparison_margin], 0)
+    evidence.append(dict(verify_lifecycle_cases(lifecycle_varied), performance_variant="changed margin and undo"))
+    persist_evidence()
     STATUS = "passed"
     persist_evidence()
 

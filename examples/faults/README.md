@@ -125,7 +125,8 @@ query and classifies that workload exit as FAIL. The verifier checks both sessio
 all four recoverable errors and the absence of an infrastructure ERROR.
 Use `verify.py RUN --focused control-cases` to inspect this evidence separately.
 
-The lifecycle-cases scenario runs next and is also replayed once. It pauses the
+The lifecycle-cases scenario runs next. It is replayed with `--undo 0` and again
+with a changed undo depth and margin; both must MATCH. It pauses the
 whole server machine while an established connection sends a request: nothing
 answers until resume, and then the held request is answered on the same
 connection. It crashes the server with another connection open: the peer sees
@@ -135,7 +136,7 @@ scenario also checks six `invalid_state` transitions, stop of a down machine
 returning `target_unavailable`, and `inspect()` reporting `Paused` and `Down`.
 The verifier checks the applied effect times, the crashed incarnation record and
 the second boot in the server console. With all optional supervisors supplied,
-the complete matrix contains seventeen executions. Use
+the complete matrix contains eighteen executions. Use
 `verify.py RUN --focused lifecycle-cases` to inspect this evidence separately.
 
 Portable tests require no KVM. Run `python3 examples/faults/portable.py` to

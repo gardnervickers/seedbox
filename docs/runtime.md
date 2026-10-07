@@ -212,7 +212,9 @@ replay. Illegal transitions, and stop or restart of a paused machine, return
 recoverable `invalid_state`; pause/resume
 of an exited VM and process faults whose machine exits or crashes return
 `target_unavailable`. Inspection shows `Paused` and `Down`. After reboot, the
-scenario checks application readiness itself. See
+scenario checks application readiness itself. The check service is the
+controller, which can't be a target, so a lifecycle operation never ends the run
+by itself: a crashed service is not an exited one. See
 [Machine pause, crash and reboot](../harness/worlds/README.md#machine-pause-crash-and-reboot)
 for CPU, timer, network, incarnation and static-plan semantics.
 
