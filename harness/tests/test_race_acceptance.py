@@ -60,6 +60,16 @@ class RaceAcceptanceTests(unittest.TestCase):
         changed = copy.deepcopy(baseline); changed['identity']['configuration']['schedule'] = 2
         with self.assertRaises(race.Unresolved): race.same_inputs(baseline, changed)
 
+    def test_preflight_rejects_every_prepared_input_change(self):
+        baseline = fixture()[0]['identity']['inputs']
+        baseline.update(kernel='k', auxiliary={'context': 'c'}, provenance={'builder': 'v'})
+        race.same_prepared(baseline, copy.deepcopy(baseline))
+        for field in baseline:
+            changed = copy.deepcopy(baseline); changed[field] = {}
+            with self.assertRaises(race.Unresolved): race.same_prepared(baseline, changed)
+        changed = copy.deepcopy(baseline); changed['unexpected'] = True
+        with self.assertRaises(race.Unresolved): race.same_prepared(baseline, changed)
+
     def test_replay_requires_match_and_each_comparison(self):
         record = fixture()[0]
         record['replay'] = {'status': 'MATCH', **{k: True for k in

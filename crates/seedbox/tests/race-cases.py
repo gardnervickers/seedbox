@@ -1,6 +1,7 @@
 """Focused public-CLI qualification of Seedbox's own race workload."""
 import copy
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -57,6 +58,11 @@ def evidence(record, raw, console, seed):
     return {'loss': int(found[0][3]), 'witnesses': (world, machine, state)}
 
 
+def same_prepared(reference, prepared):
+    if reference != prepared:
+        raise Unresolved('complete PreparedInputs drifted from preparation preflight')
+
+
 def same_inputs(reference, record):
     a, b = copy.deepcopy(reference['identity']), copy.deepcopy(record['identity'])
     a.pop('seed'); b.pop('seed')
@@ -83,6 +89,9 @@ def reproduced(original, repeated, record):
 def main():
     cli, vmm, kernel, cpu, output_arg = sys.argv[1:]
     output = Path(output_arg).resolve()
+    # Podman's existing control fixes build metadata for this campaign only.
+    os.environ['SOURCE_DATE_EPOCH'] = '0'
+    (output / 'build-environment.txt').write_text('SOURCE_DATE_EPOCH=0\n')
     repo = Path(__file__).resolve().parents[3]
     state = output / 'state'
     for source, name in ((cli, 'seedbox'), (vmm, 'seedbox-vmm'), (kernel, 'bzImage')):
@@ -127,7 +136,15 @@ def main():
     compose.write_text(yaml)
     common = ['--cpu', cpu, '--state', str(state)]
     runtime = ['--vmm', vmm, '--kernel', kernel, '--guest-init', str(output / 'compose-init'),
-               '--busybox', __import__('os').environ['SEEDBOX_BUSYBOX']]
+               '--busybox', os.environ['SEEDBOX_BUSYBOX']]
+    command(['podman', '--version'], 'builder-version.txt')
+    prepared = []
+    for index in (1, 2):
+        path = output / f'prepare-{index}.json'
+        command([cli, 'prepare', str(compose), '--output', str(path), '--state', str(state),
+                 '--full-state', *runtime], f'prepare-{index}.log')
+        prepared.append(json.loads(path.read_text()))
+    same_prepared(prepared[0], prepared[1])
     before = command(['python3', str(repo / 'harness/msr54.py'), 'show',
                       ','.join(map(str, sorted(__import__('batch').siblings(int(cpu)))))], 'msr-before.txt')
     attempts, records, results = [], [], []
@@ -139,6 +156,7 @@ def main():
                 raise ValueError('missing unique run path')
             attempt = Path(paths[0])
             record = json.loads(command([cli, 'inspect', str(attempt), '--json'], f'seed-{seed}.json'))
+            same_prepared(prepared[0], record['identity']['inputs'])
             if records:
                 same_inputs(records[0], record)
             result = evidence(record, json.loads((attempt / 'output/vmm.json').read_text()),
