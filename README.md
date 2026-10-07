@@ -111,6 +111,16 @@ historical evidence; its execution does not establish new-policy admission.
 A new engine/kernel/policy requires its own acceptance. Admission source checks
 are separate from the still-required focused Linux guest/profile acceptance.
 
+## Check execution compatibility
+
+`seedbox doctor` checks the installed engine, guest kernel and selected host core
+against the same versioned admission policy used by execution. It needs a Linux
+KVM host and root, uses the normal `--cpu`, `--kernel` and `--vmm` defaults, and
+never builds a missing VMM, prepares images or starts guests. `--json` prints the
+exact admitted observations. Success prints `VALID` after probe resources and
+thread affinity are verified cleaned up; problems use the ordinary error and
+exit status 2. This is compatibility readiness, not cross-host replay qualification.
+
 ## Applications
 
 `seedbox init my-app --template etcd` (or `redis`) creates a self-contained

@@ -122,6 +122,33 @@ Run exits are 0 for PASS, 1 for FAIL, 2 for ERROR, 3 for INCOMPLETE, and 124 for
 simulated TIMEOUT. Replay exits are 0 for MATCH (including a reproduced FAIL),
 1 for MISMATCH, and 2 for NOT_COMPARABLE. Results print the attempt path.
 
+## Check the execution profile
+
+On the supported Linux KVM host, as root:
+
+```sh
+seedbox doctor
+seedbox doctor --cpu 15 --json
+```
+
+Doctor resolves the ordinary engine/kernel defaults without building missing
+inputs. It hashes those inputs and invokes the same bounded host probe used by
+execution admission. It opens KVM and the disabled exact-event perf descriptor,
+reads/permission-checks the selected core and siblings' MSRs without changing
+their values, and verifies restoration of temporary affinity and release of all
+probe descriptors and reservations. Any uncertainty prevents `VALID` or success
+JSON. The report names the actual selected CPU and siblings and preserves the
+exact observations admitted by that probe; there is no second read or cached
+host inventory. No content store, run directory, image preparation or guest is
+created. Missing inputs, unsupported capabilities, busy leases and profile drift
+retain the same actionable errors as execution; no repair or fallback occurs.
+
+Exit 0 means the reported policy is compatible. It does not prove repeatability
+on an unqualified machine. Plain output has one `VALID` status line and lowercase
+fields; `--json` emits one pretty JSON document on success. Errors go to stderr
+with exit 2 in either mode. Actual Linux doctor acceptance remains dependent on
+issue #5's hardware qualification; Darwin source tests do not establish it.
+
 ## Guest semantics and limits
 
 Each service currently gets one machine and one OCI-root chroot. Its complete

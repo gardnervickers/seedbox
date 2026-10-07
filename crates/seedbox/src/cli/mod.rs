@@ -62,6 +62,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Check execution-profile compatibility without images or guests (Linux KVM host, root).
+    #[command(
+        after_help = "Success means profile compatibility, not cross-host replay qualification. Doctor never builds missing runtime inputs."
+    )]
+    Doctor {
+        #[command(flatten)]
+        cpu: CpuArg,
+        /// Print the admitted observations as JSON.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        inputs: KvmInputs,
+    },
     /// Resolve images and build guest artifacts, without running.
     Prepare {
         #[command(flatten)]
@@ -205,15 +218,22 @@ impl StateArg {
 
 #[derive(Args)]
 #[command(next_help_heading = "Runtime inputs")]
-struct RuntimeInputs {
+struct KvmInputs {
     /// Guest kernel bzImage [default: bzImage in $SEEDBOX_ARTIFACTS, $SEEDBOX_WORK/artifacts,
     /// ./artifacts, then ~/seedbox-sim/artifacts for the user and any sudo caller].
     #[arg(long, env = "SEEDBOX_KERNEL")]
     kernel: Option<PathBuf>,
     /// VMM binary [default: next to an installed seedbox, then this checkout's `cargo build-vmm`
-    /// output (built by `cargo run` if missing), then PATH].
+    /// output (built by `cargo run` for run/prepare if missing), then PATH].
     #[arg(long, env = "SEEDBOX_VMM")]
     vmm: Option<PathBuf>,
+}
+
+#[derive(Args)]
+#[command(next_help_heading = "Runtime inputs")]
+struct RuntimeInputs {
+    #[command(flatten)]
+    kvm: KvmInputs,
     /// Static guest supervisor [default: the copy built into this binary].
     #[arg(long, env = "SEEDBOX_GUEST_INIT")]
     guest_init: Option<PathBuf>,
@@ -239,7 +259,7 @@ impl RuntimeInputs {
         cpu: Option<u32>,
         scratch: &Path,
     ) -> Result<(OciPreparer, VmmExecutor)> {
-        let engine = defaults::engine(self.vmm.clone())?;
+        let engine = defaults::engine(self.kvm.vmm.clone())?;
         let witness = if self.full_state {
             WitnessMode::FullState
         } else {
@@ -262,7 +282,7 @@ impl RuntimeInputs {
                 docker: self.builder.clone(),
                 ..OciTools::default()
             },
-            kernel: defaults::kernel(self.kernel.clone())?,
+            kernel: defaults::kernel(self.kvm.kernel.clone())?,
             engine,
             init: defaults::guest_init(self.guest_init.clone(), store, scratch)?,
             busybox: defaults::busybox(self.busybox.clone())?,
@@ -333,6 +353,30 @@ fn run(cli: Cli) -> Result<u8> {
                     simulation.name,
                     simulation.services.len()
                 );
+            }
+            Ok(0)
+        }
+        Command::Doctor { cpu, inputs, json } => {
+            let engine = defaults::engine_lookup(inputs.vmm)?;
+            let kernel = defaults::kernel(inputs.kernel)?;
+            let report = VmmExecutor::doctor(&engine, &kernel, cpu.cpu)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("VALID: compatible execution profile");
+                println!("policy: {}", report.policy_version);
+                println!("cpu: {}", report.cpu);
+                println!(
+                    "cpus: {}",
+                    report
+                        .cpus
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+                println!("engine: {}", report.engine.hex());
+                println!("kernel: {}", report.kernel.hex());
             }
             Ok(0)
         }
