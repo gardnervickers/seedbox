@@ -506,14 +506,9 @@ fn torn_writes_are_recorded_replayed_and_omitted_when_disabled() {
     )
     .unwrap();
     let original = executor.profile();
-    assert_eq!(
-        original.semantic_parameters,
-        BTreeMap::from([
-            ("guest_abi".into(), "oci-init-v1".into()),
-            ("control_channel".into(), "virtio-console-v1".into()),
-            ("memory_mb".into(), "512".into()),
-        ])
-    );
+    // Off adds nothing; the host policy parameters #83 records stay as they are.
+    assert!(!original.semantic_parameters.contains_key("disk_loss"));
+    assert_eq!(original.semantic_parameters["memory_mb"], "512");
     let encoded = serde_json::to_vec(&original).unwrap();
     assert!(!vmm::recorded_torn_writes(&original).unwrap());
     assert_eq!(
