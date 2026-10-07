@@ -9,6 +9,9 @@
 # most slices end at natural exits. U1/U2 run last with a 3600 s timeout.
 # Run as the normal user on a free core whose SMT sibling is idle:
 #   CPU=15 SHA=<exp/60-link-controls head> MAIN=<main sha> bash run-links.sh
+# To test another engine (a train head), add ENGINE=<commit> and FETCH="<refs>":
+# the PR side is then ENGINE's tree plus this fixture directory from SHA, and
+# MAIN should be the engine's base (the run compares P1 against it).
 set -euo pipefail
 CPU="${CPU:?set CPU to a free core (its SMT sibling is leased too)}"
 SHA="${SHA:?set SHA to the exp/60-link-controls head}"
@@ -26,12 +29,18 @@ rm -rf "$RESULTS"; mkdir -p "$S" "$RESULTS"
 echo "${ACCEPTED_SHA}  ${ACCEPTED_KERNEL}" | sha256sum -c
 
 # Sources: the host checkout fetches over SSH; clones are local.
-git -C "$CHECKOUT" fetch -q origin exp/60-link-controls main
+ENGINE="${ENGINE:-$SHA}"
+git -C "$CHECKOUT" fetch -q origin exp/60-link-controls main ${FETCH:-}
 for w in pr main; do git clone -q "$CHECKOUT" "$S/$w"; done
-git -C "$S/pr" checkout -q "$SHA"
+git -C "$S/pr" checkout -q "$ENGINE"
 git -C "$S/main" checkout -q "$MAIN"
-test "$(git -C "$S/pr" rev-parse HEAD)" = "$SHA"
+test "$(git -C "$S/pr" rev-parse HEAD)" = "$(git -C "$CHECKOUT" rev-parse "$ENGINE^{commit}")"
 test "$(git -C "$S/main" rev-parse HEAD)" = "$MAIN"
+if [ "$ENGINE" != "$SHA" ]; then
+  git -C "$S/pr" checkout -q "$SHA" -- harness/experiments/link-60
+  git -C "$S/pr" diff --cached --stat
+fi
+echo "engine=$(git -C "$S/pr" rev-parse HEAD) fixture=$SHA main=$MAIN" | tee "$RESULTS/engine.txt"
 E="$S/pr/harness/experiments/link-60"
 
 cd "$S/pr"
