@@ -707,6 +707,9 @@ impl Machine {
             .max(self.time.saturating_add(1))
             .min(limit);
         let mut legal = true;
+        // Exact stop target, chosen at each deterministic point and kept
+        // across the overflow landings, steps and rollbacks that approach it.
+        let mut target = 0;
         loop {
             if self.pending_io.is_some() {
                 if !self.drain_io(limit)? {
@@ -736,14 +739,29 @@ impl Machine {
                 }
                 self.publish();
             }
-            // Stop by an exact counted stop at `soft`: the slice ends at
-            // `slice_end` and a timer due at `pit` fires exactly at `pit`.
-            // Neither passes `limit`, the world's causal boundary. Stopping at
-            // a count rather than at the guest's next syscall needs no yield
-            // window, so syscalls before the stop cost no exit.
-            let pit = self.pit.deadline.unwrap_or(u64::MAX);
-            let soft = slice_end.min(pit);
-            let hard = soft;
+            // Stop by an exact counted stop. The slice ends in
+            // [slice_end, limit] and a timer due at `pit` fires in
+            // [pit, pit + tolerance]; neither passes `limit`, the world's
+            // causal boundary. Stopping at a count rather than at the guest's
+            // next syscall needs no yield window, so syscalls before the stop
+            // cost no exit.
+            //
+            // The target is the earliest allowed point, `soft`, unless an
+            // interrupt is pending and `soft` is too close to inject it: then
+            // it is the latest allowed point, so a run of short slices or
+            // short timers cannot starve interrupt delivery.
+            if legal {
+                let pit = self.pit.deadline.unwrap_or(u64::MAX);
+                let soft = slice_end.min(pit);
+                let latest = hard_limit(limit, self.pit.deadline, self.pit_exact, self.tolerance);
+                target = if self.pic.pending().is_some() && soft.saturating_sub(self.time) <= INJECT_GUARD {
+                    latest
+                } else {
+                    soft
+                };
+            }
+            let soft = target;
+            let hard = target;
             let remaining = hard - self.time;
             // Interrupt injection depends only on the distance to the stop, never
             // on the stepping margin, so it is deterministic.
