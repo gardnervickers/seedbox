@@ -137,6 +137,39 @@ rebuilt OCI images to have identical bytes.
 | `harness/` | YAML acceptance scenarios, portable checks, low-level world fixtures and their batch runner ([migration map](harness/worlds/README.md)), `msr54.py` |
 | [`tools/mac-tcg/`](tools/mac-tcg/README.md) | Experimental local Mac TCG runner and tests; separate from the production KVM backend |
 
+## Contributor checks
+
+Every PR and merge train runs the Mac precheck before going to the AMD host:
+
+```sh
+bash harness/mac-precheck.sh main     # any local revision or branch
+bash harness/mac-precheck.sh          # current checkout, including local changes
+```
+
+Run from within the checkout on macOS with Git and Nix available. With a revision,
+the script creates a detached worktree under `$TMPDIR` (or `/tmp` if unset) and
+removes it on exit, including failed checks. Without a revision, it checks the
+existing checkout. It enters the selected checkout's project Nix dev shell and
+runs, in order:
+
+- `cargo fmt -p seedbox --check`
+- `cargo clippy -p seedbox --all-targets --locked -- -D warnings`
+- `cargo test --workspace --locked`
+- `bash harness/acceptance.sh portable`
+- `python3 -m unittest discover harness/tests`
+- `python3 -m unittest discover python/tests`
+
+All steps run even if an earlier step fails. Command output goes to stderr;
+stdout ends with one `PASS` or `FAIL` line per step and its elapsed whole seconds.
+The gate exits 0 only if every step passes, and 1 if any step fails; setup errors
+also exit nonzero. The runner comes from the invoking checkout, so it can check
+revisions that predate the script.
+
+The Mac gate does not build or test the Linux-only VMM or execute guests.
+Python discovery skips the batch supervisor's Linux-only lifecycle tests.
+`cargo build-vmm`, `cargo test-vmm`, and KVM acceptance remain AMD Linux host
+checks; a passing Mac precheck is the prerequisite for that host work.
+
 ## How execution is controlled
 
 - **Progress and time.** Guest progress is the host perf count of retired

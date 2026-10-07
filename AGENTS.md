@@ -44,6 +44,14 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 
 ## Checks
 
+Every PR and merge train runs `bash harness/mac-precheck.sh REV` on the Mac
+before going to the AMD host. Omit `REV` to check the current checkout, including
+local changes. The gate enters the selected checkout's Nix dev shell, runs all
+portable checks below plus both Python unittest suites, and prints a timed
+PASS/FAIL summary. A revision uses a temporary detached worktree under `$TMPDIR`,
+removed on exit even if checks fail. Any failed step makes the gate exit nonzero;
+all steps still run. See [contributor checks](README.md#contributor-checks).
+
 Run these before committing:
 
 ```sh
