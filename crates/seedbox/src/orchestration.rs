@@ -73,6 +73,8 @@ pub struct ReplayComparison {
     pub witness_matches: Option<bool>,
     pub full_state_matches: Option<bool>,
     pub fault_history_matches: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ram_pages: Option<crate::diff::RamPageReport>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,13 +228,30 @@ impl Orchestrator {
         {
             identity.inputs.profile.engine = executor.profile().engine;
         }
-        self.execute(
+        let mut run = self.execute(
             identity,
             executor,
             &options.cancellation,
             Some(&baseline),
             options.allow_engine_change,
-        )
+        )?;
+        if let Some(comparison) = &mut run.record.replay {
+            if comparison.status == ReplayStatus::Mismatch
+                && comparison.full_state_matches == Some(false)
+            {
+                // Optional evidence must never replace the execution verdict.
+                comparison.ram_pages = Some(
+                    crate::diff::replay_ram_pages(directory, &run.directory).unwrap_or_else(
+                        |error| crate::diff::RamPageReport {
+                            machines: BTreeMap::new(),
+                            limitations: vec![error.to_string()],
+                        },
+                    ),
+                );
+                write_record(&run.directory, &run.record)?;
+            }
+        }
+        Ok(run)
     }
 
     fn execute(
@@ -525,6 +544,7 @@ fn compare(baseline: &RunRecord, fresh: &RunRecord) -> ReplayComparison {
         witness_matches,
         full_state_matches,
         fault_history_matches,
+        ram_pages: None,
     }
 }
 

@@ -36,3 +36,34 @@ fn offline_diff_preserves_rng_domains_and_exact_draw_order() {
         assert_eq!(timer.next(), timer_draw);
     }
 }
+
+#[test]
+fn ram_page_comparison_preserves_runtime_rng_streams_and_draw_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = ram_pair();
+    for (name, raw, pfns) in [("a", &a, vec![]), ("b", &b, vec![5, 9])] {
+        let path = dir.path().join(name);
+        let mut record = fixture();
+        write_fixture(&path, &mut record, Some(raw), None);
+        write_pages(&path, &mut record, &pfns);
+        write_fixture(&path, &mut record, Some(raw), None);
+    }
+    for domain in [
+        "disk-loss/server/0",
+        "timer-jitter/server",
+        "schedule",
+        "network",
+    ] {
+        let mut stream = rng::Rng::new(1009, domain);
+        let mut control = stream.clone();
+        for _ in 0..4 {
+            assert_eq!(stream.next(), control.next());
+            let report = sb::diff::diff(&dir.path().join("a"), &dir.path().join("b")).unwrap();
+            assert_eq!(
+                report.machines[0].ram_pages.as_ref().unwrap().first_pfns,
+                [5, 9]
+            );
+            assert_eq!(stream.next(), control.next());
+        }
+    }
+}

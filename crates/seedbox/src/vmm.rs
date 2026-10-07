@@ -584,6 +584,20 @@ struct RawFault {
 #[serde(try_from = "BTreeMap<String, String>")]
 pub(crate) struct StateDigestParts(BTreeMap<String, String>);
 
+impl StateDigestParts {
+    pub(crate) fn ram_only_difference(&self, other: &Self) -> bool {
+        self.0
+            .get("ram")
+            .zip(other.0.get("ram"))
+            .is_some_and(|(a, b)| a != b)
+            && self
+                .0
+                .iter()
+                .filter(|(k, _)| k.as_str() != "ram")
+                .eq(other.0.iter().filter(|(k, _)| k.as_str() != "ram"))
+    }
+}
+
 impl TryFrom<BTreeMap<String, String>> for StateDigestParts {
     type Error = Error;
 

@@ -45,6 +45,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Engine qualification | pinned engine and guest kernel; dev artifacts require explicit opt-in | `--allow-dev-engine` (run/explore/replay/doctor; no environment backing) |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
 | Diff inputs | Two required retained run directories; no runtime inputs or state lookup | positional `RUN_A RUN_B` |
+| Per-page RAM evidence | off; under `--full-state`, retain `output/NAME.pages` with eight bytes per 4 KiB page | existing `--full-state` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
 
 For development artifacts, pass `--allow-dev-engine` to `run`, `explore`, `replay`
@@ -63,6 +64,13 @@ until named-volume disk support lands. See [disk semantics](docs/runtime.md#disk
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
 INCOMPLETE and 124 TIMEOUT. Offline `diff` exits 0 for MATCH, 1 for DIFFERENT,
 and 2 for usage/setup or invalid retained evidence.
+
+`seedbox run --full-state` also retains per-page RAM hashes with each machine's
+final state. Replay inherits that mode. On RAM-only state-digest differences,
+plain `diff` and MISMATCH replay print the differing PFN count and first eight
+PFNs on stderr. The files travel in bundles under the ordinary retention policy
+and are excluded from run identity, witnesses and replay verdicts. See the
+[binary format and diagnostic fields](docs/runtime.md#compare-retained-runs).
 
 On a VMM failure, text output from `run`, `replay`, `explore` and `inspect`
 also prints up to five non-empty lines from the final 8 KiB of that attempt's

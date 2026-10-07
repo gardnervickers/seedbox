@@ -313,7 +313,7 @@ struct RuntimeInputs {
     /// Guest RAM per service, in MiB.
     #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(64..=65536))]
     memory_mb: u32,
-    /// Also record and compare every machine's RAM and registers.
+    /// Also record and compare every machine's RAM and registers, retaining per-page RAM hashes.
     #[arg(long)]
     full_state: bool,
     /// Keep a seeded subset of unflushed disk sectors on crash (512-byte atomicity; off by default).
@@ -810,6 +810,9 @@ fn run(cli: Cli) -> Result<u8> {
                 );
                 for machine in &comparison.machines {
                     println!("machine: {}", serde_json::to_string(machine)?);
+                    if let Some(pages) = &machine.ram_pages {
+                        diagnostics::ram_pages(&machine.machine, pages);
+                    }
                 }
                 println!(
                     "first record: {}",
@@ -915,6 +918,7 @@ fn report(run: &orchestration::Run) -> u8 {
             ""
         };
         println!("replay: {}{label}", word(&replay.status));
+        diagnostics::replay_pages(replay);
         return match replay.status {
             ReplayStatus::Match => 0,
             ReplayStatus::Mismatch => 1,

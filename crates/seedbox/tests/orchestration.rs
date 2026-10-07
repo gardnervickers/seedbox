@@ -249,6 +249,132 @@ fn witness_fault_history_and_full_state_comparisons_are_distinct() {
     assert_eq!(replay.status, ReplayStatus::Mismatch);
 }
 
+mod page_evidence_tests {
+    use super::*;
+
+    fn full_state_fixture() -> (Fixture, serde_json::Value) {
+        let mut f = Fixture::new();
+        f.backend.profile.witness_mode = WitnessMode::FullState;
+        f.backend
+            .profile
+            .semantic_parameters
+            .insert("memory_mb".into(), "512".into());
+        f.preparer.inputs.profile = f.backend.profile.clone();
+        let raw = serde_json::json!({
+            "report_version": 1, "seed": 1009, "outcome": "end_machine_exited",
+            "world_witness": ContentDigest::of(b"world"),
+            "machines": [{"name": "workload", "infrastructure_error": false,
+                "guest_exit_code": 0, "witness": ContentDigest::of(b"machine"),
+                "state_digest": ContentDigest::of(b"state"),
+                "state_digest_parts": {"ram": ContentDigest::of(b"RAM"), "regs": ContentDigest::of(b"regs"), "events": "none"}}]
+        });
+        update(&mut f, &raw, vec![0; 1024 * 1024]);
+        (f, raw)
+    }
+
+    fn update(f: &mut Fixture, raw: &serde_json::Value, pages: Vec<u8>) {
+        let digest: ContentDigest =
+            serde_json::from_value(raw["machines"][0]["state_digest"].clone()).unwrap();
+        f.backend.report.full_state = Some(BTreeMap::from([("workload".into(), digest)]));
+        f.backend.report.witness =
+            Some(serde_json::from_value(raw["world_witness"].clone()).unwrap());
+        f.backend
+            .extra_logs
+            .insert("vmm.json".into(), serde_json::to_vec(raw).unwrap());
+        f.backend.extra_logs.insert("workload.pages".into(), pages);
+    }
+
+    #[test]
+    fn full_state_replay_adds_page_evidence_without_changing_verdicts_or_old_json_fields() {
+        let (mut f, mut raw) = full_state_fixture();
+        let first = f.run();
+        let matched = f.replay(&first);
+        let old = serde_json::to_value(matched.record.replay.unwrap()).unwrap();
+        assert_eq!(old["status"], "MATCH");
+        assert!(old.get("ram_pages").is_none());
+        raw["world_witness"] = serde_json::to_value(ContentDigest::of(b"new world")).unwrap();
+        raw["machines"][0]["state_digest"] =
+            serde_json::to_value(ContentDigest::of(b"new state")).unwrap();
+        raw["machines"][0]["state_digest_parts"]["ram"] =
+            serde_json::to_value(ContentDigest::of(b"new RAM")).unwrap();
+        let mut pages = vec![0; 1024 * 1024];
+        pages[24..32].copy_from_slice(&42u64.to_le_bytes());
+        update(&mut f, &raw, pages);
+        let replay = f.replay(&first);
+        assert_eq!(first.record.run_id, replay.record.run_id);
+        assert_eq!(inspect(&replay.directory).unwrap(), replay.record);
+        let comparison = replay.record.replay.unwrap();
+        assert_eq!(comparison.status, ReplayStatus::Mismatch);
+        assert_eq!(comparison.full_state_matches, Some(false));
+        let report = comparison.ram_pages.as_ref().unwrap();
+        assert!(report.limitations.is_empty());
+        assert_eq!(report.machines["workload"].differing_pfns, 1);
+        assert_eq!(report.machines["workload"].first_pfns, [3]);
+        let new = serde_json::to_value(comparison).unwrap();
+        for field in old.as_object().unwrap().keys() {
+            assert!(new.get(field).is_some());
+        }
+        // Malformed optional evidence keeps the same semantic MISMATCH.
+        update(&mut f, &raw, vec![0; 7]);
+        let comparison = f.replay(&first).record.replay.unwrap();
+        assert_eq!(comparison.status, ReplayStatus::Mismatch);
+        assert_eq!(comparison.full_state_matches, Some(false));
+        assert!(comparison.ram_pages.unwrap().limitations[0].contains("page hash length"));
+    }
+
+    #[test]
+    fn full_state_page_capture_keeps_direct_run_and_replay_admission_gates() {
+        let (mut f, _) = full_state_fixture();
+        let backend = AdmissionBackend {
+            backend: &f.backend,
+            checks: AtomicUsize::new(0),
+            fail_at: 1,
+        };
+        assert!(f
+            .orchestrator
+            .run(&f.simulation, RunOptions::default(), &f.preparer, &backend)
+            .is_err());
+        assert_eq!(f.preparer.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(f.backend.calls.load(Ordering::SeqCst), 0);
+        let first = f.run();
+        let backend = AdmissionBackend {
+            backend: &f.backend,
+            checks: AtomicUsize::new(0),
+            fail_at: 1,
+        };
+        let rejected = f
+            .orchestrator
+            .replay(&first.directory, &backend, &CancellationToken::default())
+            .unwrap();
+        assert_eq!(rejected.record.outcome, Outcome::Error);
+        assert_eq!(
+            rejected.record.replay.unwrap().status,
+            ReplayStatus::NotComparable
+        );
+        assert_eq!(f.preparer.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(f.backend.calls.load(Ordering::SeqCst), 1);
+        // Profile validation still refuses direct requests before execution.
+        f.backend
+            .profile
+            .semantic_parameters
+            .insert("memory_mb".into(), "256".into());
+        let rejected = f.replay(&first);
+        assert_eq!(rejected.record.outcome, Outcome::Error);
+        assert_eq!(
+            rejected.record.replay.unwrap().status,
+            ReplayStatus::NotComparable
+        );
+        assert!(rejected
+            .record
+            .error
+            .unwrap()
+            .contains("profile does not match"));
+        let rejected = f.run();
+        assert_eq!(rejected.record.outcome, Outcome::Error);
+        assert_eq!(f.backend.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
 #[test]
 fn requested_full_state_requires_a_digest_for_every_machine() {
     let mut fixture = Fixture::new();

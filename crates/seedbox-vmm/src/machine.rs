@@ -1557,12 +1557,14 @@ impl Machine {
         (hex(all), parts)
     }
 
-    /// First 8 bytes of SHA-256 of each 4 KiB guest RAM page, for locating
-    /// differences between runs.
+    /// Headerless little-endian u64 per 4 KiB guest RAM page, in PFN order.
+    /// Each u64 is the first 8 SHA-256 bytes interpreted little-endian.
+    /// Evidence only: reads RAM without changing it or consuming RNG draws.
     pub fn page_hashes(&mut self) -> Vec<u8> {
         let mut out = Vec::new();
         for page in self.memory().chunks(4096) {
-            out.extend_from_slice(&Sha256::digest(page)[..8]);
+            let hash=u64::from_le_bytes(Sha256::digest(page)[..8].try_into().unwrap());
+            out.extend_from_slice(&hash.to_le_bytes());
         }
         out
     }
@@ -1591,6 +1593,26 @@ mod io_boundary_tests {
         machine.pit.write(0x43,0,0);
         machine.pic.set_masks(0);
         machine
+    }
+
+    #[test]
+    #[ignore = "requires KVM on the qualified Linux host"]
+    fn page_capture_preserves_ram_witness_state_and_rng_draw_order() {
+        let kvm=Kvm::new().unwrap();
+        let mut m=probe(&kvm,0x530,true,0);
+        m.timer_rng=Some(crate::rng::Rng::new(1009,"timer/io-probe"));
+        m.timer_rng.as_mut().unwrap().next();
+        let mut expected_rng=m.timer_rng.clone().unwrap();
+        let before=(m.exit_witness(),m.state_digest(),m.memory().to_vec());
+        let pages=m.page_hashes();
+        assert_eq!(pages.len(),m.mem_size/4096*8);
+        for (pfn,page) in before.2.chunks(4096).enumerate() {
+            let hash=u64::from_le_bytes(Sha256::digest(page)[..8].try_into().unwrap());
+            assert_eq!(&pages[pfn*8..pfn*8+8],&hash.to_le_bytes());
+        }
+        assert_eq!((m.exit_witness(),m.state_digest(),m.memory().to_vec()),before);
+        // Compare a suffix, so either extra or skipped draws are detected.
+        for _ in 0..16 {assert_eq!(m.timer_rng.as_mut().unwrap().next(),expected_rng.next());}
     }
 
     fn check_port(kvm: &Kvm, counter: &mut Counter, port: u16, write: bool) {
