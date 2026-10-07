@@ -10,7 +10,7 @@ pub const GUEST_KERNEL: &str = "e8ece7cba2d5fc4924da83e39cc672ae2516c117f8f76ecf
 const HOST_KERNEL: &str = "66111c2888091bd64e96e71a6a9e831ab5496d6c6272add5d81490396bfa3cdc";
 
 /// Bound input hashing before any OCI preparation or host state changes.
-pub(crate) fn file_digest(path: &Path) -> Result<ContentDigest> {
+pub fn file_digest(path: &Path) -> Result<ContentDigest> {
     use sha2::{Digest, Sha256};
     let mut file = std::fs::File::open(path)
         .map_err(|e| Error::Setup(format!("runtime input {}: {e}", path.display())))?;
@@ -156,6 +156,53 @@ pub fn bindings() -> Result<BTreeMap<String, String>> {
     ]))
 }
 
+pub const ENGINE_QUALIFICATION: &str = "engine_qualification";
+pub const DEV_UNPINNED: &str = "dev-unpinned";
+
+pub fn is_dev_engine(profile: &ExecutionProfile) -> bool {
+    profile
+        .semantic_parameters
+        .get(ENGINE_QUALIFICATION)
+        .map(String::as_str)
+        == Some(DEV_UNPINNED)
+}
+
+pub fn artifacts_unpinned(profile: &ExecutionProfile, kernel: &ContentDigest) -> bool {
+    profile.engine.hex() != ENGINE || kernel.hex() != GUEST_KERNEL
+}
+
+/// Validate the complete artifact pair, including kernel-only development runs.
+/// The profile-only validator cannot establish whether both artifacts are pinned.
+pub fn validate_artifacts(profile: &ExecutionProfile, kernel: &ContentDigest) -> Result<()> {
+    validate_profile(profile)?;
+    if is_dev_engine(profile) {
+        if !artifacts_unpinned(profile, kernel) {
+            return Err(Error::Integrity(
+                "dev-unpinned marker requires an unpinned engine or guest kernel".into(),
+            ));
+        }
+        Ok(())
+    } else {
+        validate_kernel(kernel)
+    }
+}
+
+/// Retained development runs require explicit permission on every replay.
+pub fn admit_artifacts(
+    profile: &ExecutionProfile,
+    kernel: &ContentDigest,
+    allow_dev_engine: bool,
+) -> Result<()> {
+    validate_artifacts(profile, kernel)?;
+    if is_dev_engine(profile) && !allow_dev_engine {
+        return Err(Error::Setup(
+            "unqualified dev engine; pass --allow-dev-engine to replay these retained artifacts"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
     let counter = crate::vmm::recorded_counter(profile)?;
     if counter != crate::counter::CounterProfile::Zen
@@ -200,7 +247,14 @@ pub fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
             "admitted profile requires memory_mb in 64..65536".into(),
         ));
     }
-    if profile.engine.hex() != ENGINE {
+    if let Some(marker) = profile.semantic_parameters.get(ENGINE_QUALIFICATION) {
+        if marker != DEV_UNPINNED {
+            return Err(Error::Integrity(format!(
+                "unknown engine_qualification {marker}"
+            )));
+        }
+    }
+    if profile.engine.hex() != ENGINE && !is_dev_engine(profile) {
         return Err(Error::Integrity("engine is outside the admitted host policy; no engine-change override bypass is available".into()));
     }
     Ok(())

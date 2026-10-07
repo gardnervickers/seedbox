@@ -64,3 +64,14 @@ normal tier does not close68, prove cross-host/version behavior, qualify boot
 fork/vDSO/new kernel features, or replace StageB. No workflow or privileged host
 service is installed. Portable controls run through `harness/acceptance.sh portable`;
 they test the harness's refusal logic, not guest correctness.
+
+For the optional development tier, add `--allow-dev-engine --pinned-engine
+/absolute/PINNED-seedbox-vmm` to the invocation above. `--engine` and `--kernel`
+select the frozen development artifacts; at least one must be unpinned. The
+separate pinned engine is required so the wrong-kernel control still runs without
+`--allow-dev-engine` and receives the existing guest-kernel refusal. Successful
+run/replay phases receive the flag, and the wrapper requires `dev-unpinned` in
+identity, the run report and doctor JSON, `dev engine: unqualified` in doctor
+text, and labelled unqualified MATCH output. The default tier keeps pinned
+admission and rejects development markers. Both tiers retain doctor receipts.
+The development tier is unqualified evidence and does not change release policy.
