@@ -8,7 +8,8 @@ interrupt timing.
 
 ## Quick start
 
-`validate`, `init`, `inspect`, `export` and `import` run on Linux or macOS. `run` and `replay` need the
+`validate`, `init`, `inspect`, `export` and `import` run on Linux or macOS. `run`,
+`explore` and `replay` need the
 qualified host (see [host requirements](#host-requirements)) and root.
 
 ```sh
@@ -30,13 +31,23 @@ directory. Every runtime input has a default, so no flags are required:
 | --- | --- | --- |
 | Compose file | `compose.yaml` in the given directory (default `.`) | positional path |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
+| Exploration count | `1`, sequential execution | `--count` |
 | CPU | first free core other than CPU 0's, under the shared lease | `--cpu`, `SEEDBOX_CPU` |
 | Guest kernel | `bzImage` in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`, `./artifacts`, then `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | `seedbox-vmm` next to an installed `seedbox`, then this checkout's `cargo build-vmm` output, then on `PATH`; `cargo run` builds it if missing | `--vmm`, `SEEDBOX_VMM` |
 | Guest supervisor | built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | BusyBox | `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
+| Build epoch | absent; preserve the builder's ordinary timestamp policy | `--build-epoch` (prepare/run/explore; no environment backing) |
+| Engine qualification | pinned engine and guest kernel; dev artifacts require explicit opt-in | `--allow-dev-engine` (run/explore/replay/doctor; no environment backing) |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
+
+For development artifacts, pass `--allow-dev-engine` to `run`, `explore`, `replay`
+or `doctor`. Unpinned engine or guest-kernel bytes record the semantic parameter
+`engine_qualification = "dev-unpinned"` and are reported as an unqualified dev
+engine. Replay requires this flag and the exact retained engine/kernel hashes;
+bundles preserve the marker. Passing the flag with both pinned artifacts adds no
+marker. All host, CPU, PMU, MSR, lease, ABI and control-channel checks still apply.
 
 `seedbox help run` lists every option. A run prints `OUTCOME: run-directory`;
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
@@ -46,6 +57,44 @@ INCOMPLETE and 124 TIMEOUT.
 and transfer from qualified execution. Same software versions, seed and exact
 retained inputs must replay on a qualified compatible profile; changing versions
 may change execution. Release compatibility remains a V0 qualification gate.
+
+## Finite exploration
+
+`seedbox explore [COMPOSE] --seed FIRST --count COUNT` runs consecutive seeds
+sequentially, preparing the complete input closure once. Compose defaults to `.`,
+the first seed to the Compose seed, and count to 1. Empty/overflowing ranges fail
+before state creation or preparation. Immutable runtime inputs and host admission are
+checked before the sole preparation; refusal retains batch ERROR without dispatch.
+Each seed uses the ordinary retained-input and leased host rechecks. Application FAIL
+and witnessed simulated TIMEOUT continue; ERROR, INCOMPLETE and cancellation stop
+dispatch. No seed is retried.
+
+Each exploration retains `exploration.json`, preparation diagnostics and ordinary
+per-seed run directories under `attempts/SEED/`. Inspect and replay those run paths
+with the existing commands. An unfinished checkpoint remains INCOMPLETE, including
+when a process dies after committing a run but before updating the batch. The final
+exit precedence is ERROR (2), INCOMPLETE (3), TIMEOUT (124), FAIL (1), PASS (0). `--json` emits one
+report with per-attempt outcomes, undispatched count, elapsed time and CLI process-family
+resource measurements; application logs remain arbitrary bytes.
+
+Exploration `build:` admission currently accepts only the inspected immutable
+project-Nix Linux Podman launcher/native closure in explicit local mode. Unknown
+wrappers and daemon/remote delegation are rejected. Cancelled builds produce
+ERROR / cleanup-unverified and retain their unique private tag; process-group
+cleanup alone does not prove builder cessation. Ordinary run/prepare continue
+supporting custom builders; the optional native timestamp policy below has a
+narrower admission requirement. See [preparation evidence and cancellation](docs/runtime.md#exploration-preparation).
+
+For optional build timestamp control, `--build-epoch 0` selects the admitted
+project-Nix native Podman's creation-time and new-layer timestamp policy.
+It changes guest-visible new-layer file and directory timestamps, so it is
+optional and never applied to registry or base layers. The range is
+0..=4294967295 Unix seconds; custom builders are unsupported with this option.
+Moving base tags, network downloads and arbitrary build programs can still
+change inputs. Replay uses the complete retained application release closure
+without this option; deterministic execution does not require independently
+rebuilt OCI images to have identical bytes.
+
 
 ## Layout
 
@@ -103,6 +152,50 @@ may change execution. Release compatibility remains a V0 qualification gate.
   acquires the shared CPU/SMT leases, sets
   it with readback, then restores the exact originals after reaping its child.
   The legacy `batch.sh` runner uses the same lease protocol.
+
+`--allow-unqualified-cpu` also applies to `explore`. This explicit non-Zen
+path is experimental: it retains the counter in identity, validates exact
+supported release inputs and applicable KVM capabilities, and holds every SMT
+lease through child cleanup. It carries no qualified AMD host-policy proof and
+never opens AMD workaround MSRs. `doctor` refuses an unqualified counter rather
+than reporting qualified compatibility. The source policy now pins the frozen engine52eb and accepted guest kernel.
+The artifact is built but unqualified: this staged release still requires fresh
+runtime acceptance before use. Disabled selected-event readiness is checked
+before preparation and again under held leases; no guest counter is enabled by
+admission. Intel determinism is not established.
+
+The versioned `amd-zen3-engine52eb-v1` admission policy checks AMD family 25,
+model 33, stepping 0 and microcode 0xa20102e, exact booted/current host kernel and
+controlled guest-kernel bytes, accepted engine bytes, KVM capabilities and the
+engine's complete existing CPUID policy. Before image preparation, it temporarily
+reserves an eligible core, checks each online/allowed SMT sibling and opens the
+exact perf event disabled. Descriptors close and affinity/reservations restore
+before preparation. The leased execution core is checked again before MSR writes.
+This is readiness admission; it does not prove guest counting, overflow behavior
+or cross-host determinism. Matching a second machine admits compatibility without
+host-ID enrollment. Support evidence remains the tested host and inputs.
+
+Qualified Zen run identities bind the full policy and its fingerprint. Existing records
+remain inspectable and transferable, but replay through this CLI rejects missing
+or drifted host-policy proof as ERROR/NOT_COMPARABLE (exit 2), even with
+`--allow-engine-change`. A retained previous CLI can still be used for explicitly
+historical evidence; its execution does not establish new-policy admission.
+A new engine/kernel/policy requires its own acceptance for qualification.
+`--allow-dev-engine` admits unpinned engine/kernel bytes for development with a
+retained unqualified marker; it never bypasses missing or drifted host proof. Admission source checks
+are separate from the still-required focused Linux guest/profile acceptance.
+
+## Check execution compatibility
+
+`seedbox doctor` checks the installed engine, guest kernel and selected host core
+against the same versioned admission policy used by execution. It needs a Linux
+KVM host and root, uses the normal `--cpu`, `--kernel` and `--vmm` defaults, and
+never builds a missing VMM, prepares images or starts guests. `--json` prints the
+exact admitted observations, plus `engine_qualification: "dev-unpinned"` for dev
+artifacts. With `--allow-dev-engine`, unpinned artifacts print `dev engine:
+unqualified` and receive no qualification claim. Success prints `VALID` after probe resources and
+thread affinity are verified cleaned up; problems use the ordinary error and
+exit status 2. This is compatibility readiness, not cross-host replay qualification.
 
 ## Applications
 
@@ -220,11 +313,7 @@ seedbox replay /path/to/retained/run --undo 0
 seedbox replay /path/to/retained/run --undo 16
 seedbox replay /path/to/retained/run --margin 32768
 
-(
-  for seed in {4000..4010}; do
-    seedbox run harness/acceptance/workloads/kill-3.5.3.yaml --seed "$seed" || exit "$?"
-  done
-)
+seedbox explore harness/acceptance/workloads/kill-3.5.3.yaml --seed 4000 --count 11
 ```
 
 The CLI owns image preparation, CPU leases, restoration, retained evidence and

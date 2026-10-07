@@ -29,11 +29,16 @@ checks detect corruption, not authenticity against someone rewriting the store.
 
 Inspection and transfer of an accepted format need no guest execution. Execution
 additionally requires verified input bytes and a matching qualified profile.
-[Issue #5](https://github.com/gardnervickers/seedbox/issues/5) and pending
-[PR #55](https://github.com/gardnervickers/seedbox/pull/55) add explicit host-proof
-admission; its proposed historical missing-proof refusal is not current-main
-behavior or completed Linux qualification. A readable historical v2 record is
-distinct from a rejected v1 record. Neither is rewritten to obtain admission.
+[Issue #5](https://github.com/gardnervickers/seedbox/issues/5) and
+[PR #55](https://github.com/gardnervickers/seedbox/pull/55) implement versioned
+host-proof admission in this source. Historical v2 records without that proof
+remain readable and transferable, but execution through this CLI retains
+ERROR/NOT_COMPARABLE (exit 2) before host probing or guest execution. An engine-change
+override cannot bypass missing proof. Use the retained previous CLI only for
+historical execution evidence; records are never rewritten to obtain admission.
+This implementation has source-only checks: Linux collection and the new profile
+are not yet qualified. A readable historical v2 record is distinct from a
+rejected v1 record. Draft formats and release compatibility remain undecided.
 
 ## Exit meanings and user data
 
