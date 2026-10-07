@@ -188,6 +188,34 @@ rebuilt OCI images to have identical bytes.
 
 ## Contributor checks
 
+`cargo build-vmm` and `cargo test-vmm` select `harness/vmm-rustc.py` only for
+the standalone VMM build and its dependencies. It remaps checkout, home/Cargo
+registry and rustc sysroot source paths, keeps release `debug = 1`, and removes
+the Nix dev shell's synthetic `outputs/out/lib` RPATH. Nix stdenv adds that
+entry through `_addRpathPrefix`; real library and Nix store paths remain intact.
+Other Cargo builds and their target directories are unaffected.
+The wrapper's content hash is included in Cargo's compiler fingerprint, so
+enabling or editing it invalidates cached VMM artifacts and dependencies.
+The shared `seedbox-control` source is reached through
+`crates/seedbox-vmm/seedbox-control`, a symlink inside the VMM workspace. Cargo
+then hashes its path relative to that workspace instead of the checkout's
+absolute path when computing crate metadata. The VMM's inherited workspace
+package and dependency keys match the root workspace.
+
+On Linux in the project dev shell, run
+`bash harness/check-vmm-reproducible.sh [REV]` (default `HEAD`). It builds two
+fresh archives of the same commit at different temporary paths, compares SHA-256,
+rejects embedded checkout, HOME, CARGO_HOME and rustc sysroot paths, prints
+per-crate `-C metadata` and differing embedded paths on mismatch,
+and removes both checkouts on success or failure. It needs neither KVM nor root.
+Equality assumes the same pinned toolchain, libraries and build options; this
+does not establish reproducibility across different toolchains.
+
+These flags change every engine hash. Existing pinned/accepted engine hashes
+cannot be reproduced from source with the new flags; the next engine re-pin
+must use the new build and complete host qualification. Retained old engine
+bytes remain the inputs for their existing runs. This change updates no pins.
+
 Portable checks must pass at the PR or merge-train head before spending AMD
 host time. Use the fast pre-check on a Mac or any other non-KVM machine:
 
@@ -296,10 +324,10 @@ runtime acceptance before use. Disabled selected-event readiness is checked
 before preparation and again under held leases; no guest counter is enabled by
 admission. Intel determinism is not established.
 
-The versioned `amd-zen3-engine52eb-v1` admission policy checks AMD family 25,
-model 33, stepping 0 and microcode 0xa20102e, exact booted/current host kernel and
-controlled guest-kernel bytes, accepted engine bytes, KVM capabilities and the
-engine's complete existing CPUID policy. Before image preparation, it temporarily
+The versioned `amd-zen3-engine52eb-v2` admission policy checks AMD family 25,
+model 33, stepping 0 and microcode 0xa20102e, controlled guest-kernel bytes,
+accepted engine bytes, KVM capabilities and the engine's complete existing CPUID
+policy. Host-kernel bytes are not checked. Before image preparation, it temporarily
 reserves an eligible core, checks each online/allowed SMT sibling and opens the
 exact perf event disabled. Descriptors close and affinity/reservations restore
 before preparation. The leased execution core is checked again before MSR writes.

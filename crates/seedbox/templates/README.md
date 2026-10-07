@@ -134,8 +134,9 @@ when checking that a fault occurred. Reused tuples do not inherit a stale select
 See the repository's `docs/runtime.md` connection selector section for pagination,
 SYN/FIN/RST semantics, bounded tracking and unsupported/fragmented traffic.
 
-Run/replay enforce the versioned admitted host/engine/kernel policy. Matching a
-second machine is compatibility admission, not cross-host qualification. Old
+Run/replay enforce the versioned admitted host/engine/guest-kernel policy;
+host-kernel bytes are not checked. Matching a second machine is compatibility
+admission, not cross-host qualification. Old
 records stay inspectable/exportable/importable, but absent or drifted host proof
 is NOT_COMPARABLE (exit 2) in this CLI and cannot be bypassed with
 `--allow-engine-change`. A retained previous CLI is only historical evidence.

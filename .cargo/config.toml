@@ -2,7 +2,9 @@
 # crates/seedbox-vmm/Cargo.toml) and builds into crates/seedbox-vmm/target,
 # where a `seedbox` run from this checkout finds it.
 [alias]
-build-vmm = "build --release --locked --manifest-path crates/seedbox-vmm/Cargo.toml --target-dir crates/seedbox-vmm/target"
-test-vmm = "test --release --locked --manifest-path crates/seedbox-vmm/Cargo.toml --target-dir crates/seedbox-vmm/target"
+# Apply the wrapper to these invocations and their dependencies only.
+# Do not move it (or target-dir) into [build]: other engines have separate identities.
+build-vmm = "build --release --locked --manifest-path crates/seedbox-vmm/Cargo.toml --target-dir crates/seedbox-vmm/target --config build.rustc-wrapper='harness/vmm-rustc.py'"
+test-vmm = "test --release --locked --manifest-path crates/seedbox-vmm/Cargo.toml --target-dir crates/seedbox-vmm/target --config build.rustc-wrapper='harness/vmm-rustc.py'"
 build-arm64 = "build --release --locked --manifest-path crates/seedbox-arm64/Cargo.toml --target-dir crates/seedbox-arm64/target"
 test-arm64 = "test --release --locked --manifest-path crates/seedbox-arm64/Cargo.toml --target-dir crates/seedbox-arm64/target"
