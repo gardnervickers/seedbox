@@ -1,33 +1,36 @@
 {
-  "_comment": "Short undo-invariance control only; same policies and ordered faults as shaped-tol.json. run-links.sh supplies the 4 ms / 1.1 s probe initrd.",
+  "_comment": "Short undo-invariance control only; same ordered faults as shaped-tol.json, with every latency raised by 9 ms. A 10 ms horizon and 5 ms stop tolerance avoid forced stops between probe sends. Both U lanes use this world.",
   "kernel": "KERNEL",
   "mem_mb": 256,
   "duration_ns": 2500000000,
-  "stop_tolerance_ns": 200000,
+  "stop_tolerance_ns": 5000000,
   "end_on_exit": "a",
   "network": {
-    "latency_ns": 1000000,
+    "latency_ns": 10000000,
     "jitter_ns": 0,
     "links": [
       {
         "from": "a",
         "to": "b",
-        "latency_ns": 3000000
+        "latency_ns": 12000000
       }
     ]
   },
   "machines": [
     {
       "name": "a",
-      "initrd": "INITRD"
+      "initrd": "INITRD",
+      "cmdline": "seedbox.link_gap_ns=1000000"
     },
     {
       "name": "b",
-      "initrd": "INITRD"
+      "initrd": "INITRD",
+      "cmdline": "seedbox.link_gap_ns=1000000"
     },
     {
       "name": "c",
-      "initrd": "INITRD"
+      "initrd": "INITRD",
+      "cmdline": "seedbox.link_gap_ns=1000000"
     }
   ],
   "faults": [
@@ -43,7 +46,7 @@
       "to": [
         "c"
       ],
-      "latency_ns": 5000000,
+      "latency_ns": 14000000,
       "jitter_ns": 0,
       "loss_ppm": 0
     },
@@ -59,7 +62,7 @@
       "to": [
         "c"
       ],
-      "latency_ns": 5000000,
+      "latency_ns": 14000000,
       "jitter_ns": 0,
       "loss_ppm": 0
     },
@@ -75,7 +78,7 @@
       "to": [
         "c"
       ],
-      "latency_ns": 8000000,
+      "latency_ns": 17000000,
       "jitter_ns": 0,
       "loss_ppm": 0
     },
@@ -91,7 +94,7 @@
       "to": [
         "c"
       ],
-      "latency_ns": 8000000,
+      "latency_ns": 17000000,
       "jitter_ns": 0,
       "loss_ppm": 0
     },
@@ -135,7 +138,7 @@
       "to": [
         "a"
       ],
-      "latency_ns": 1000000,
+      "latency_ns": 10000000,
       "jitter_ns": 500000,
       "loss_ppm": 500000
     },
@@ -151,7 +154,7 @@
       "to": [
         "b"
       ],
-      "latency_ns": 1000000,
+      "latency_ns": 10000000,
       "jitter_ns": 0,
       "loss_ppm": 1000000
     },
@@ -167,7 +170,7 @@
       "to": [
         "a"
       ],
-      "latency_ns": 1000000,
+      "latency_ns": 10000000,
       "jitter_ns": 0,
       "loss_ppm": 0
     },
