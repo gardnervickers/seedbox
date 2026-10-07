@@ -43,8 +43,9 @@ train: one branch, one host job, then ordinary merges with no further host time.
    its own lane on its own core, and splits one PR's list across cores when
    its runs are independent (a run and its replays stay together; separate
    worlds don't). Trains use cores 2-13, one lane per core with its SMT
-   sibling leased. Cores 14-15 are for side jobs and builds outside a train;
-   core 1 runs the train's own builds and bookkeeping. Lane cores are a
+   sibling leased. Cores 14-15 are for side jobs and builds outside a train.
+   Builds that finish before any lane starts may use the idle lane cores;
+   builds that overlap running lanes use core 1. Lane cores are a
    parameter of the train script, so a train can start beside a straggler on
    whatever cores are free. Any undo-off or margin check uses a short world
    and a timeout of 600 s or less.
@@ -72,12 +73,15 @@ train: one branch, one host job, then ordinary merges with no further host time.
    bisect the train by halves. Drop the culprit, rebuild the train from the
    rest, and rerun. The culprit goes back to its author with the evidence.
    PRs stacked on the culprit leave with it. A PR that doesn't contain the
-   culprit keeps its passing evidence only if the culprit couldn't have
-   changed what that evidence ran: the culprit is feature-off neutral for
-   every world or project in that PR's checks. If the culprit deliberately
-   changes some worlds (for example #97 and any world with network jitter),
-   the PR's own checks that use such worlds rerun on main plus the PR, even
-   when the PR touches no engine code. If the culprit's fix changes only its own
+   culprit and doesn't touch `crates/seedbox-vmm/`, `kernel/` or `guest/`
+   keeps its evidence only if its checks ran on main's engine (no engine PR
+   ahead of it in the train), or the train showed feature-off witness
+   equality for the worlds its checks ran. Otherwise rerun just its scoped
+   checks (`host-check.sh --plan`) on main plus the PR. Its engine equals
+   main's, so `cluster-fixed` is skipped and this is usually one core tier
+   on a side core. For example, #97 deliberately changes worlds with network
+   jitter, so when it left train/3 the MinIO runs of #104 and the faults
+   smoke tier of #110 reran on main. If the culprit's fix changes only its own
    fixtures or checker, the engine is unchanged: the rest of the train's
    evidence for it and the PRs stacked on it stands, and only the failed
    check reruns.
