@@ -18,6 +18,10 @@ fn main() {
         "cargo::rerun-if-changed={}",
         source.with_file_name("control.h").display()
     );
+    println!(
+        "cargo::rerun-if-changed={}",
+        source.with_file_name("barrier.h").display()
+    );
     println!("cargo::rerun-if-env-changed=SEEDBOX_STATIC_CC");
     println!("cargo::rerun-if-env-changed=PATH");
 
