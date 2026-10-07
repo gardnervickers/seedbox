@@ -5,6 +5,7 @@ mod boundary;
 mod control;
 mod counter;
 mod devices;
+mod disk;
 mod events;
 mod faults;
 mod machine;
@@ -14,11 +15,12 @@ mod rng;
 mod stepper;
 mod timebase;
 mod undo;
+mod virtio_blk;
 mod virtio_net;
 mod virtio_console;
 
 use counter::Counter;
-use machine::{BootSpec, Machine, MachineSnapshot, State, Stop, NET_IRQ, NET_MMIO, CHANNEL_IRQ, CHANNEL_MMIO};
+use machine::{BootSpec, Machine, MachineSnapshot, State, Stop, NET_IRQ, NET_MMIO, CHANNEL_IRQ, CHANNEL_MMIO, BLK_IRQ, BLK_MMIO};
 use rng::Rng;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -53,6 +55,9 @@ struct BootInputs {
     mem: usize,
     mac: Option<[u8; 6]>,
     control_channel: bool,
+    /// The disk as configured, with nothing written. Only the first
+    /// incarnation boots from it; a reboot inherits its predecessor's.
+    disk: Option<disk::Disk>,
     undo_margin: u64,
     tolerance: u64,
     timer_jitter: u64,
@@ -71,6 +76,31 @@ fn entropy_seed(seed: u64, domain: &str) -> [u8; 32] {
     out
 }
 
+/// A machine's `disk`: `{"size_mib": N}` for a zeroed disk, or
+/// `{"image": PATH}` for a raw image (with `size_mib`, it must be that size).
+fn machine_disk(cfg: &Value, path: &dyn Fn(&Value) -> std::path::PathBuf) -> Result<Option<disk::Disk>, String> {
+    if cfg.is_null() {
+        return Ok(None);
+    }
+    let fields = cfg.as_object().ok_or("disk must be an object")?;
+    if let Some(key) = fields.keys().find(|k| !matches!(k.as_str(), "size_mib" | "image")) {
+        return Err(format!("disk: unknown field {key}"));
+    }
+    let sectors = match &cfg["size_mib"] {
+        Value::Null => None,
+        v => Some(v.as_u64().filter(|&m| m > 0 && m <= 1 << 20).ok_or("disk.size_mib must be 1..=1048576")? * 2048),
+    };
+    let image = match &cfg["image"] {
+        Value::Null => None,
+        v if v.is_string() => {
+            let p = path(v);
+            Some(std::fs::read(&p).map_err(|e| format!("disk image {}: {e}", p.display()))?)
+        }
+        _ => return Err("disk.image must be a path".into()),
+    };
+    disk::Disk::new(image, sectors).map(Some)
+}
+
 fn boot_machine(kvm: &kvm_ioctls::Kvm, name: &str, b: &BootInputs, barrier: bool, rng_seed: [u8; 32]) -> Result<Machine, String> {
     let mut cmdline = b.cmdline.0.clone();
     if barrier {
@@ -85,6 +115,7 @@ fn boot_machine(kvm: &kvm_ioctls::Kvm, name: &str, b: &BootInputs, barrier: bool
         rng_seed,
         mac: b.mac,
         control_channel: b.control_channel,
+        disk: b.disk.clone(),
         undo_margin: b.undo_margin,
         barrier,
     };
@@ -309,6 +340,7 @@ impl World {
             "time_ns": old.time, "branches": old.branches, "exits": old.stats.exits,
             "state": format!("{:?}", old.state), "paused": old.paused,
             "discarded_pending_io": old.pending_io.is_some(), "discarded_management_bytes": discarded,
+            "disk_lost_sectors": old.blk.as_ref().map(|b| b.disk.volatile_sectors()),
             "witness": old.exit_witness(),
         }));
         self.machines[m].succeed(&mut old, t)
@@ -458,6 +490,10 @@ fn run() -> Result<Value, String> {
             cmdline += &format!(" virtio_mmio.device=4K@{NET_MMIO:#x}:{NET_IRQ}");
         }
         if control_channel {cmdline+=&format!(" virtio_mmio.device=4K@{CHANNEL_MMIO:#x}:{CHANNEL_IRQ}");}
+        let disk = machine_disk(&mc["disk"], &path)?;
+        if disk.is_some() {
+            cmdline += &format!(" virtio_mmio.device=4K@{BLK_MMIO:#x}:{BLK_IRQ}");
+        }
         let mut after = String::new();
         if names.get(i).is_some_and(|name|cfg["control"]["machine"].as_str()==Some(name.as_str())) {after+=" seedbox.control=1";}
         if let Some(extra) = mc["cmdline"].as_str() {
@@ -471,6 +507,7 @@ fn run() -> Result<Value, String> {
             mem,
             mac: networked.then_some(mac),
             control_channel,
+            disk,
             undo_margin,
             tolerance: cfg["stop_tolerance_ns"].as_u64().unwrap_or(0),
             timer_jitter: cfg["timer_jitter_ns"].as_u64().unwrap_or(0),
@@ -1058,6 +1095,11 @@ fn report(
         if let Some(d) = &state_digest {
             world_witness.update(d.as_bytes());
         }
+        // A disk outlives its machine's crashes: what it holds is part of
+        // the outcome even without --digest.
+        if let Some(b) = &mach.blk {
+            world_witness.update(b.disk.digest().as_bytes());
+        }
         std::fs::write(format!("{out}/{}.console", mach.name), &mach.com1.out)
             .map_err(|e| e.to_string())?;
         std::fs::write(format!("{out}/{}.mgmt", mach.name), &mach.com2.out)
@@ -1097,6 +1139,13 @@ fn report(
             "control_channel":mach.channel.as_ref().map(|_|json!({"transport":"virtio-console-v1","tx_bytes":mach.control_tx_bytes,"rx_dma_bytes":mach.control_dma_bytes})),
             "net": mach.net.as_ref().map(|n| json!({"tx": n.tx_frames, "rx": n.rx_frames, "rx_dropped": n.rx_dropped})),
         });
+        row["disk"] = json!(mach.blk.as_ref().map(|b| json!({
+                "model": disk::MODEL, "capacity_sectors": b.disk.capacity(), "base_sha256": b.disk.base_sha256(),
+                "digest": b.disk.digest(), "stable_sectors": b.disk.stable_sectors(), "volatile_sectors": b.disk.volatile_sectors(),
+                "reads": b.stats.reads, "writes": b.stats.writes, "flushes": b.stats.flushes,
+                "sectors_read": b.stats.sectors_read, "sectors_written": b.stats.sectors_written,
+                "sectors_flushed": b.stats.sectors_flushed, "errors": b.stats.errors,
+            })));
         row["incarnation"] = json!(mach.incarnation);
         row["booted_at_ns"] = json!(mach.booted_at);
         row["crashed_incarnations"] = json!(world.incarnations[index]);

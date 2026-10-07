@@ -185,6 +185,56 @@ Replay does not require registry access, a builder, or the original Compose file
 Run exits are 0 for PASS, 1 for FAIL, 2 for ERROR, 3 for INCOMPLETE, and 124 for
 simulated TIMEOUT. Replay exits are 0 for MATCH (including a reproduced FAIL),
 1 for MISMATCH, and 2 for NOT_COMPARABLE. Results print the attempt path.
+Offline diff exits 0 for MATCH, 1 for DIFFERENT, and 2 for usage/setup or invalid evidence.
+
+## Compare retained runs
+
+```sh
+seedbox diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
+seedbox diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY --json
+```
+
+Both positional inputs are retained run directories, including directories printed
+by `seedbox import`. Import exported bundles first. Diff runs on macOS or Linux,
+requires no root, runtime inputs, content store, host admission or registry access,
+and creates no state. Manifests are verified with the existing v2 reader. Selected
+materialized evidence under `output/` must match the manifest's recorded digest;
+missing declared files, corrupt bytes and unsupported reports produce setup exit 2.
+Unregistered and policy-omitted files are never interpreted, even if left on disk.
+
+Plain output starts with exactly one `MATCH: RUN_A <> RUN_B` or `DIFFERENT: ...`
+line, followed by lowercase fields. `--json` prints exactly one pretty library
+`DiffReport`. MATCH exits 0; DIFFERENT exits 1. This is evidence comparison, not
+replay admission: equal incomplete records can MATCH while witness equality is
+unknown (`matches: null`). Differing evidence availability is DIFFERENT. Omissions
+and unavailable detail are listed in `limitations`.
+
+The report presents the world witness first, then machines by name with exit
+witnesses, optional full-state digests/parts and selected terminal fields. The
+manifest's full-state digests remain usable when the raw engine report was omitted.
+All changed identity fields are listed as JSON pointers with both values, including
+configuration, seed, engine, kernel, images/layers, guest archives, provenance and
+semantic parameters. Missing values are null. Arrays are compared as whole values.
+Execution outcome, report, errors and omission metadata are also compared.
+Attempt names, replay ancestry, performance parameters, engine performance counters,
+host timings and arbitrary console/log contents do not determine MATCH.
+
+When both runs retain `machines/NAME.trace`, diff compares the existing engine
+records (`kind branches time_ns extra(hex) rip(hex)`) in order for each machine.
+An inserted/deleted record is reported at the first positional mismatch, including
+EOF on either side; there is no guessed realignment. Of those first mismatches,
+the lowest available simulated time on either side wins, with machine name as a
+stable tie-breaker. Each side retains its own time, kind and values; `record` is
+one-based. Traces are streamed and fully checked, including after the first mismatch.
+Trace lines are limited to 64 KiB and engine report metadata to 256 MiB.
+
+The production adapter does not enable tracing. Without a differing trace record,
+`first_record` reports the earliest differing terminal observation available in
+`vmm.json`, with source/kind `terminal`, machine and each side's time. Final hashes
+alone give no exit/time localization, so `first_record` can be null even when
+witnesses differ. Terminal time is only when the differing final state was observed;
+it is not a claim about the first divergent instruction or exit. Full-state digests
+are hashes, not snapshots. No new execution evidence is collected by diff.
 
 ## Check the execution profile
 
@@ -333,8 +383,15 @@ that hasn't been applied yet.
 
 ## Exploration preparation
 
-`seedbox explore [COMPOSE] --seed FIRST --count COUNT` has one sequential worker.
-Count defaults to 1; seed defaults to the resolved Compose seed. Bounds are finite,
+`seedbox explore [COMPOSE] --seed FIRST --count COUNT` has one worker by default.
+`--workers N` (1..32) permits N simultaneous owned attempts; count defaults to 1
+and seed to the resolved Compose seed. Parallel execution rejects an explicit
+`--cpu` or `SEEDBOX_CPU` before preparation. Automatic selection must reserve N
+eligible physical cores with all SMT siblings together during preflight, verify
+each core's admission and release every transient resource before preparation.
+Insufficient capacity is ERROR; there is no queue/retry on host contention. A
+library execution backend supports only one worker unless it explicitly overrides
+`preflight_workers`. Per-attempt admission and leases remain unchanged. Bounds are finite,
 positive and checked for inclusive u64 overflow before slow work. Runtime inputs and
 backend host admission are checked before the sole preparation; refusal retains
 batch ERROR with no prepared inputs or seed attempts. Transient admission resources
@@ -346,13 +403,24 @@ missing/corrupt bytes cause ERROR without re-preparation or repair.
 
 The owned batch directory contains atomic `exploration.json` checkpoints,
 `preparation/` and `attempts/SEED/ORDINARY-RUN/`. Attempted means entering orchestration,
-not proof that a guest started. Counts distinguish PASS/FAIL, TIMEOUT, ERROR,
-INCOMPLETE and unfinished attempts; remaining seeds are undispatched. A killed process
+not proof that a guest started. Version 2 records explicit indexes (`seed = FIRST +
+index`) in dispatch order, independent of completion order. Each attempt's
+`finished` flag means the coordinator retained its terminal result; false includes
+a result that may already exist in an independently committed run manifest.
+Counts distinguish PASS/FAIL, TIMEOUT, ERROR, INCOMPLETE and unfinished attempts;
+remaining seeds are an undispatched suffix. Unsupported checkpoint versions are
+refused clearly without defaults or migration; version 1 bytes require their prior
+reader, while ordinary run inspection/replay is unchanged. A killed process
 leaves an unfinished INCOMPLETE checkpoint and independently inspectable ordinary
 manifests. There is no resume operation. Checkpoint/evidence failures stop dispatch.
 The final aggregate uses ERROR, INCOMPLETE, TIMEOUT, FAIL, PASS precedence and the
 existing exit codes 2, 3, 124, 1, 0. Application FAIL and witnessed simulated TIMEOUT may
-continue; infrastructure errors, wall expiry and cancellation stop.
+continue; infrastructure errors, wall expiry and cancellation stop new dispatch
+and cancel only owned running attempts. The caller's library token is not modified
+by an internal failure. Scoped workers are joined even if checkpoint retention
+fails. A backend that cannot complete owned cleanup prevents a prompt return; no
+unrelated process or service is stopped. Cancellation races may leave an already
+finished PASS/FAIL beside cancelled INCOMPLETE attempts and undispatched seeds.
 
 Preparation diagnostics belong to the caller, surviving preparer/scratch destruction.
 Raw phase output is capped at 4 MiB per file and 64 MiB total. Bounded prefixes are retained
@@ -382,7 +450,17 @@ shared daemon, unrelated image/container, host service or cache is changed.
 CLI resource fields report self/reaped-child user/system CPU deltas and separate
 self/child RSS high-water readings in bytes, including preparation. They are not
 simultaneous aggregate memory, guest peak memory, simulated time or CPU lease duration.
-Unavailable measurements are null and do not affect run identity.
+Unavailable measurements are null and do not affect run identity. `peak_running`
+is the maximum number of active orchestration attempts. `active_attempt_seconds`
+is the sum of whole attempt wall intervals, including materialization, admission
+and cleanup, for attempts whose terminal results reached the coordinator. Once
+all owned attempts return, it is a conservative guest-core charge for one world
+per worker, not exact lease duration or CPU measurement. Unfinished checkpoints
+omit still-running/uncheckpointed intervals and cannot supply a complete charge. No exact lease telemetry API
+is added. Worker count and core selection are operational choices, absent from
+semantic run identity. Synthetic serial/parallel lifecycle controls do not qualify
+real per-core/witness invariance; that and staggered hardware cancellation remain
+required runtime gates.
 
 Required tool-version provenance uses stdout only, independently of diagnostic
 truncation. Its raw `.stdout` evidence is bounded to 8192 bytes per value and

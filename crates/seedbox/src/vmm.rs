@@ -242,23 +242,34 @@ impl VmmExecutor {
     }
 
     fn probe(&self) -> AdmissionProbe {
+        self.probe_capacity(1)
+    }
+
+    fn probe_capacity(&self, workers: u32) -> AdmissionProbe {
         let mut selected = None;
         let mut observations = Vec::new();
         let result = (|| -> Result<()> {
             #[cfg(target_os = "linux")]
             {
-                let reservation = crate::host::CpuReservation::acquire(self.cpu)?;
-                selected = Some(reservation.cpu);
-                crate::admission::collect_admitted(
-                    reservation.cpus.iter().copied(),
-                    &mut observations,
-                    crate::admission::observe,
-                )?;
-                drop(reservation); // No reservation/perf/affinity spans later work or publication.
+                with_capacity(
+                    workers,
+                    || crate::host::CpuReservation::acquire(self.cpu),
+                    |reservations| {
+                        selected = reservations.first().map(|reservation| reservation.cpu);
+                        for reservation in reservations {
+                            crate::admission::collect_admitted(
+                                reservation.cpus.iter().copied(),
+                                &mut observations,
+                                crate::admission::observe,
+                            )?;
+                        }
+                        Ok(())
+                    },
+                )?; // All reservations/perf/affinity close before publication or OCI work.
             }
             #[cfg(not(target_os = "linux"))]
             {
-                let _ = &mut selected;
+                let _ = (&mut selected, workers);
                 observations.push(crate::admission::observe(0)?);
             }
             Ok(())
@@ -303,14 +314,36 @@ pub fn recorded_counter(profile: &ExecutionProfile) -> Result<CounterProfile> {
     }
 }
 
-impl ExecutionBackend for VmmExecutor {
-    fn preflight(&self, output: Option<&Path>) -> Result<()> {
+impl VmmExecutor {
+    fn preflight_capacity(&self, workers: u32, output: Option<&Path>) -> Result<()> {
         crate::admission::validate_profile(&self.profile)?;
         self.validate_execution_mode()?;
         if !self.counter.qualified() {
-            return self.unqualified_preflight(output);
+            if workers == 1 {
+                return self.unqualified_preflight(output);
+            }
+            #[cfg(target_os = "linux")]
+            {
+                return with_capacity(
+                    workers,
+                    || crate::host::CpuReservation::acquire(self.cpu),
+                    |reservations| {
+                        for reservation in reservations {
+                            crate::admission::check_unqualified(
+                                reservation.cpus.iter().copied(),
+                                self.counter,
+                            )?;
+                        }
+                        Ok(())
+                    },
+                );
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                return self.unqualified_preflight(output);
+            }
         }
-        let probe = self.probe();
+        let probe = self.probe_capacity(workers);
         let observations = probe.observations;
         let collection = probe.result;
         crate::admission::finish_admission(collection, |collection| {
@@ -334,6 +367,45 @@ impl ExecutionBackend for VmmExecutor {
             drop(saved);
             Ok(())
         })
+    }
+}
+
+/// Keep the entire capacity reserved during admission, then release it before
+/// returning on either success or failure. The reservation enforces disjoint cores.
+#[cfg(any(target_os = "linux", test))]
+fn with_capacity<T>(
+    workers: u32,
+    mut reserve: impl FnMut() -> Result<T>,
+    check: impl FnOnce(&[T]) -> Result<()>,
+) -> Result<()> {
+    let mut reservations = Vec::new();
+    for _ in 0..workers {
+        reservations.push(reserve().map_err(|error| {
+            if workers > 1 {
+                Error::Setup(format!("--workers {workers}: cannot reserve {workers} distinct eligible physical cores: {error}"))
+            } else {
+                error
+            }
+        })?);
+    }
+    check(&reservations)
+}
+
+impl ExecutionBackend for VmmExecutor {
+    fn preflight_workers(&self, workers: u32) -> Result<()> {
+        if !(1..=32).contains(&workers) {
+            return Err(Error::Setup("--workers: use 1..32".into()));
+        }
+        if workers > 1 && self.cpu.is_some() {
+            return Err(Error::Setup(
+                "--workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU".into(),
+            ));
+        }
+        self.preflight_capacity(workers, None)
+    }
+
+    fn preflight(&self, output: Option<&Path>) -> Result<()> {
+        self.preflight_capacity(1, output)
     }
     fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {
         crate::admission::admit_artifacts(&inputs.profile, &inputs.kernel, self.allow_dev_engine)?;
@@ -1181,6 +1253,93 @@ mod linux {
 mod doctor_tests {
     use super::*;
     use crate::admission::{required_policy, CoreObservation, ENGINE, GUEST_KERNEL};
+
+    #[test]
+    fn capacity_admission_holds_all_reservations_and_releases_them_on_every_exit() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Reservation<'a>(&'a AtomicUsize);
+        impl Drop for Reservation<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        for (available, refuse) in [(3, false), (2, false), (3, true)] {
+            // An unrelated owner must survive both capacity and admission errors.
+            let held = AtomicUsize::new(1);
+            let mut checked = false;
+            let result = with_capacity(
+                3,
+                || {
+                    if held.load(Ordering::SeqCst) > available {
+                        return Err(Error::Setup("fixture capacity unavailable".into()));
+                    }
+                    held.fetch_add(1, Ordering::SeqCst);
+                    Ok(Reservation(&held))
+                },
+                |reservations| {
+                    checked = true;
+                    assert_eq!(reservations.len(), 3);
+                    assert_eq!(held.load(Ordering::SeqCst), 4);
+                    if refuse {
+                        Err(Error::Setup("fixture core admission refused".into()))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert_eq!(held.load(Ordering::SeqCst), 1);
+            assert_eq!(checked, available == 3);
+            assert_eq!(result.is_ok(), available == 3 && !refuse);
+            if available == 2 {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("--workers 3: cannot reserve 3 distinct eligible physical cores"));
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_preflight_preserves_development_and_experimental_admission_gates() {
+        let pinned = VmmExecutor::from_engine_digest(
+            ContentDigest::try_from(ENGINE.to_owned()).unwrap(),
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap();
+        for workers in [0, 33] {
+            assert!(pinned
+                .preflight_workers(workers)
+                .unwrap_err()
+                .to_string()
+                .contains("--workers: use 1..32"));
+        }
+        let mut dev = pinned
+            .clone()
+            .with_dev_engine(true, &ContentDigest::of(b"dev kernel"));
+        dev.allow_dev_engine = false;
+        assert!(dev
+            .preflight_workers(2)
+            .unwrap_err()
+            .to_string()
+            .contains("--allow-dev-engine"));
+        let experimental = VmmExecutor::from_engine_digest(
+            pinned.profile.engine,
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::IntelIceLake,
+        )
+        .unwrap();
+        assert!(experimental
+            .preflight_workers(2)
+            .unwrap_err()
+            .to_string()
+            .contains("explicitly allow unqualified CPU execution"));
+    }
+
     fn observed(cpu: u32) -> CoreObservation {
         let p = required_policy().unwrap();
         CoreObservation {
