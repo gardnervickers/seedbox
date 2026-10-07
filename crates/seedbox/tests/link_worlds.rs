@@ -116,21 +116,29 @@ fn full_world_window_45_reveals_lossmid_after_cut_heal_and_bounds_nominal_arriva
 }
 
 #[test]
-fn short_world_applies_the_same_ordered_faults_and_exposes_at_least_80_lossmid_sends() {
+fn short_world_applies_the_same_ordered_faults_and_exposes_at_least_300_lossmid_sends() {
     let mut f = fixture(include_str!(
         "../../../harness/worlds/shaped-tol-short.json"
     ));
     let mut exposed = 0;
-    // link-short.init: 4 ms probe gap, 1.1 s probe end.
-    for send in (0..1_100_000_000).step_by(4_000_000) {
+    // World cmdline selects link-short.init's 1 ms gap; probe end is 1.1 s.
+    // These are scheduled candidates, not measured guest sends or receipts.
+    for send in (0..1_100_000_000).step_by(1_000_000) {
         f.apply_due(send);
         if !f.blocked(2, 0) && f.links.policy((2, 0)).loss_ppm == 500_000 {
-            assert_eq!(f.links.policy((2, 0)).jitter_ns, 500_000);
+            assert_eq!(
+                f.links.policy((2, 0)),
+                Policy {
+                    latency_ns: 10_000_000,
+                    jitter_ns: 500_000,
+                    loss_ppm: 500_000,
+                }
+            );
             exposed += 1;
         }
     }
-    assert_eq!(exposed, 85);
-    assert!(exposed >= 80);
+    assert_eq!(exposed, 340);
+    assert!(exposed >= 300);
     assert!(f.error.is_none());
     assert_eq!(f.log.len(), 16);
     for (i, log) in f.log.iter().enumerate() {

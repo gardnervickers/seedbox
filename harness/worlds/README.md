@@ -277,18 +277,109 @@ P1/M1 compare the full plain world on the PR and base engines. Prior train/3
 witness prefixes were `ca9a7f6d` and `b66611d2`, respectively; a new train must
 verify equality again, since its engine bytes determine identity.
 
-Only U1/U2 use `shaped-tol-short.json`, with undo on/off and 600-second host
-timeouts. It keeps the 200 us stop tolerance and the same 16 fault IDs, actions,
-handles and policies in the same order. Faults run from 0.3 to 1.0 s; the short
-init uses a 4 ms probe gap and a 1.1 s probe end, exits after a 0.1 s reporting grace,
-and the world has a 2.5 s duration cap. Undo off costs about one margin of
-single-stepping (~16k branches, ~0.1 s on the AMD host) per precise stop, so the
-probe sets the U2 budget: a 1 ms gap to 1.5 s gave U1 5,800 precise stops and U2
-timed out at 600 s. The 4 ms gap to 1.1 s sends about 5.5x fewer frames. Compression
-is nonuniform: the fixture preserves 340 ms of uncut lossmid exposure (0.6–0.7 and
-0.76–1.0 s), an estimated 85 sends at the 4 ms gap, with 500 us jitter and 50% loss,
-so losing none has probability about 2^-85. Actual guest send counts remain host
-evidence.
+Only U1/U2 use `shaped-tol-short.json`, with default undo (U1) and undo off
+(U2), identical world/initrd/seed, and retained 600-second safety timeouts. The
+performance target is **U2 below 300 seconds**, with U1 == U2. The previous
+1 ms global latency, 200 us tolerance and 4 ms probe gap produced 2,845 U1
+precise stops and a 564-second U2 run. Shortening the 2.5 s duration cap alone
+would not help: `end_on_exit: a` normally ends execution near 1.2 s.
+
+The short world now raises **every latency by 9 ms**: global 10 ms, a->b baseline
+12 ms, old/new shape layers 14/17 ms, and loss layers 10 ms. This preserves
+relative delays and keeps every policy above the global scheduling floor. Its
+5 ms `stop_tolerance_ns` gives both a 5 ms early world window
+(`min(global_latency / 2, tolerance)`) and a 5 ms late timer window. These
+are semantic world inputs, applied identically to U1 and U2; undo remains a
+performance-only variant. No engine or full L/P fixture bytes change.
+
+All 16 fault IDs, actions, handles, jitter/loss settings and times stay in order
+from 0.3 to 1.0 s. Each machine's world `cmdline` sets
+`seedbox.link_gap_ns=1000000`; `link-short.init` reads it, retaining its old 4 ms
+default when absent. The 1.1 s end and a's 0.1 s reporting grace stay fixed.
+This restores an estimated
+**340 uncut lossmid sends** over 0.6–0.7 and 0.76–1.0 s, with 500 us jitter and
+50% loss (the old 4 ms gap allowed only 85). The 100 ms after the final heal
+exceeds the longest shaped delay, 17 ms. The unchanged 2.5 s cap leaves reporting
+headroom. Actual send counts and completed reports remain host evidence; a
+scheduled candidate count is not a measured guest send count.
+
+### Short-world stop budget (source estimate)
+
+The dominant non-probe source is the **cross-machine horizon**, not idle ticks.
+In `crates/seedbox-vmm/src/main.rs`, a slice is capped by the earliest other
+machine's key plus global latency, the receiver's next delivery, duration, faults
+and control boundaries. `machine.rs` then combines that cap with its PIT deadline
+via `boundary::hard_limit`. `machine/counted.rs` enters stepping near the hard
+count. `precise_stops` counts entries into stepping, including approaches that
+subsequently end at a natural exit; it is not a count of completed hard boundaries.
+
+The probe's busy polling uses syscalls and trapped user RDTSC, but the latter is
+emulated inside the guest kernel and neither supplies a natural KVM exit. Sends
+are natural virtio exits. With a 4 ms gap and a 1 ms horizon, there can be several
+forced slice ends between sends. The 200 us early window rarely reaches the next
+send. The new 10 ms horizon and 5 ms windows cover several 1 ms send gaps, so the
+first natural send/device exit can satisfy most soft targets before stepping.
+
+| Source | Old opportunities over about 1.2 s | Expected contribution after widening |
+| --- | --- | --- |
+| Cross-machine horizon / slice ends | roughly 3,300–4,100 over 1.1 s of active probes; dominant share of the observed 2,845 stepping entries | roughly 400–700 conservative allowance, largely boot or near-boundary approaches; active probes usually exit naturally |
+| Network deliveries | up to about 1,480 delivered probe candidates at a 4 ms gap, plus boot traffic; overlaps horizon and timer stops | up to about 5,910 at a 1 ms gap, but the 5 ms early window coalesces due deliveries and covers natural exits; allow about 100–200 residual approaches |
+| PIT / scheduler timers | HZ=100: about 330 active-probe deadlines plus 30 in reporting grace, with possible extra boot/oneshot timers | usually natural exits within the 5 ms timer window; halted machines jump to the deadline without counted stepping; allow about 0–100 residual approaches |
+| Scheduled faults / scenario / control | 16 faults at 8 distinct exact times: about 24 machine boundary approaches; no guest controller/scenario in this fixture | same roughly 24; tolerance does not relax these exact boundaries |
+| Duration and reporting end | duration cap normally unused; a exits naturally after reports and sleep | 0 expected duration stops; retain cap/grace rather than truncate reports |
+
+Opportunity counts overlap and must not be added as precise-stop counts. The
+post-change allowances suggest **roughly 600–1,000 U1 stepping entries**, below
+the roughly 1,400 budget. At the supplied 0.2 seconds per undo-off entry, this
+means roughly 120–200 seconds of U2 stepping cost, leaving headroom for boot and
+other execution. This is a code/world estimate, not an AMD measurement. The
+configured kernel uses HZ=100 and NO_HZ_IDLE (`kernel/config.options`); traces
+should check the accepted host kernel's actual timer behavior.
+
+### Verify the U pair and inspect timer traffic on the host
+
+Run `RUNS="U1 U2"` on the next train through `harness/run-links.sh`, using two
+free physical cores with idle SMT siblings. U2 is a fresh same-seed performance
+variant, not the retained-run replay command. The existing analyzer derives fault
+times from retained JSON, checks all 16 applications, loss/cut counters, FIFO
+receipts and U1 == U2. Its full-world receipt window expectations are unchanged.
+
+After the runner prints its retained results directory, use:
+
+```sh
+RESULTS=path/to/retained-results-directory
+python3 harness/links.py "$RESULTS" U1 U2
+jq '{host_seconds, precise_stops: ([.machines[].precise_stops] | add),
+     machines: [.machines[] | {name, time_ns, precise_stops, step_ms}]}' "$RESULTS/U1.json"
+jq -e '([.machines[].precise_stops] | add) < 1400' "$RESULTS/U1.json"
+jq -e '.host_seconds < 300' "$RESULTS/U2.json"
+python3 - "$RESULTS/U1" <<'PYTRACE'
+from collections import Counter
+from pathlib import Path
+import sys
+for path in sorted(Path(sys.argv[1]).glob('*.trace')):
+    events = Counter()
+    timer_by_100ms = Counter()
+    for line in path.read_text().splitlines():
+        kind, branches, time, extra, rip = line.split()
+        events[kind] += 1
+        if kind == 'I' and int(extra, 16) == 0x20:
+            timer_by_100ms[int(time) // 100_000_000] += 1
+    print(path.name, 'natural records:', dict(sorted(events.items())))
+    print('  IRQ0 injections by 100 ms:', dict(sorted(timer_by_100ms.items())))
+PYTRACE
+```
+
+**Exact precise-stop attribution cannot be recovered from this engine's
+`--trace`.** `Machine::record` writes only kind/branches/time/extra/RIP for
+observable machine/device events. `set_stepping(true)` increments the report
+counter without writing a record, and neither the world slice plan nor PIT
+expiry is traced. Even the 16-bit timer reload at port 0x530 retains only its
+first byte in the `O` record. Counting `I`/IRQ0 records counts timer injections,
+not precise stops, and omits coalesced/masked expiries. The commands above give
+exact report totals and timer diagnostics, not exact causes. Cause-level counts
+would require separate engine instrumentation of stepping entry and its active
+hard-limit source; that is outside this world-only engine scope.
 
 `harness/links.py` derives full-world sender-stamp window expectations from the
 retained world JSON, using cut precedence, highest live shape ID and heal by
