@@ -156,9 +156,12 @@ def analyze(directory, runs=RUNS):
     for k, v in reps.items():
         stops = sum(m.get('precise_stops', 0) for m in v.get('machines', []))
         steps = sum(m.get('steps', 0) for m in v.get('machines', []))
+        rollbacks = sum((m.get('undo') or {}).get('rollbacks', 0) for m in v.get('machines', []))
         print(f'{k}: outcome={v.get("outcome")} witness={str(v.get("world_witness"))[:16]} '
               f'network_witness={str(v.get("network_witness"))[:16]} host_s={v.get("host_seconds", 0):.0f} '
-              f'precise_stops={stops} steps={steps}')
+              f'precise_stops={stops} steps={steps} rollbacks={rollbacks}')
+        if k == 'U1':
+            check(rollbacks > 0, f'U1: exercised rollback (rollbacks={rollbacks})')
     w = {k: v.get('world_witness') for k, v in reps.items()}
     for a, b, label in [('L1', 'L2', 'shaped replay'),
                         ('U1', 'U2', 'short shaped undo on/off'),
