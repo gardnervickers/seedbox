@@ -32,6 +32,7 @@ pub struct WriteOutcome {
     pub frames: Vec<Vec<u8>>,
 }
 
+#[derive(Clone)]
 pub struct VirtioNet {
     mac: [u8; 6],
     dev_sel: u32,

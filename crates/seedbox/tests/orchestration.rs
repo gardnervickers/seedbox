@@ -140,6 +140,7 @@ impl Fixture {
                 full_state: None,
                 faults: vec![],
                 detail: None,
+                engine_qualification: None,
             },
             calls: AtomicUsize::new(0),
             fail: false,
@@ -1145,8 +1146,15 @@ fn actual_vmm_admission_rejects_old_proof_before_execution_and_engine_override()
     let engine = fixture.directory.path().join("retained-engine");
     fs::write(&engine, b"fixture engine").unwrap();
     let store = ContentStore::new(fixture.directory.path().join("store"));
-    let executor =
-        seedbox::vmm::VmmExecutor::new(&engine, &store, None, 512, WitnessMode::Exits).unwrap();
+    let executor = seedbox::vmm::VmmExecutor::new(
+        &engine,
+        &store,
+        None,
+        512,
+        WitnessMode::Exits,
+        seedbox::counter::CounterProfile::Zen,
+    )
+    .unwrap();
     for allow_engine_change in [false, true] {
         let rejected = fixture
             .orchestrator
@@ -1184,8 +1192,15 @@ fn exploration_actual_unsupported_profile_refuses_before_all_preparation() {
     let engine = fixture.directory.path().join("unadmitted-engine");
     fs::write(&engine, b"fixture engine").unwrap();
     let store = ContentStore::new(fixture.directory.path().join("store"));
-    let executor =
-        seedbox::vmm::VmmExecutor::new(&engine, &store, None, 512, WitnessMode::Exits).unwrap();
+    let executor = seedbox::vmm::VmmExecutor::new(
+        &engine,
+        &store,
+        None,
+        512,
+        WitnessMode::Exits,
+        seedbox::counter::CounterProfile::Zen,
+    )
+    .unwrap();
     let batch = fixture
         .orchestrator
         .explore(
@@ -1859,6 +1874,7 @@ fn worker_capacity_and_serial_default_refuse_before_preparation_and_bounds_are_l
         Some(4),
         512,
         WitnessMode::Exits,
+        seedbox::counter::CounterProfile::Zen,
     )
     .unwrap();
     assert!(executor

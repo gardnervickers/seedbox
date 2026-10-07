@@ -2,12 +2,15 @@
 //! thread. Guest progress is measured in retired conditional branches; the
 //! machine can be stopped at an exact branch count (precise preemption).
 
-use crate::boundary::{advance_time, hard_limit, io_charge, missed_soft_stop, PendingIo};
+use crate::boundary::{advance_time, hard_limit, io_charge, PendingIo};
+use crate::timebase::{Judge, Run, Timebase, Verdict};
+#[cfg(test)]
 use crate::counter::Counter;
+use crate::profile::CounterProfile;
 use crate::virtio_console::VirtioConsole;
 use crate::devices::{rtc_read, Pic, Pit, Uart};
 use crate::stepper::Planner;
-use crate::undo::Undo;
+use crate::undo::{Undo, UndoStats, VcpuState};
 use crate::virtio_net::{ReceiveOutcome, VirtioNet};
 use kvm_bindings::*;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
@@ -15,27 +18,14 @@ use sha2::{Digest, Sha256};
 use std::os::fd::AsRawFd;
 use std::time::Instant;
 
+mod counted;
+
 pub const TIME_PAGE: u64 = 0xd000_0000;
 pub const NET_MMIO: u64 = 0xd000_1000;
 pub const NET_IRQ: u8 = 5;
 pub const CHANNEL_MMIO: u64 = 0xd1000000;
 pub const CHANNEL_IRQ: u8 = 6;
 const INITRD_ADDR: usize = 0x0800_0000;
-/// Default distance (in branches) before a stop target at which we stop
-/// trusting the overflow interrupt and advance by breakpoints. It must exceed
-/// the PMU interrupt skid; it affects only speed, never where a stop lands.
-/// An overshoot aborts the run, which can be rerun with a larger margin.
-pub const MARGIN: u64 = 12288;
-/// Host-time allowance for overflow-interrupt skid used to size an adaptive
-/// margin (observed tail ~10 us, with headroom).
-const SKID_NS: f64 = 18_000.0;
-/// Distance of the first, rate-measuring overflow before a hard stop.
-const APPROACH: u64 = 65536;
-/// Floor of the adaptive margin. Skids of 5-14k branches occur in dense code,
-/// and the syscall-exit window before a soft stop must outlast them.
-const MARGIN_MIN: u64 = 16384;
-/// With undo-able stops, the largest final margin tried after rollbacks.
-const UNDO_MAX: u64 = 1 << 18;
 /// Pending interrupts are injected only when the next stop is further away
 /// than this. Part of the execution semantics: changing it changes runs.
 pub const INJECT_GUARD: u64 = 65536;
@@ -55,6 +45,57 @@ pub struct BootSpec<'a> {
     pub control_channel: bool,
     /// Final overflow margin for undo-able precise stops; 0 disables them.
     pub undo_margin: u64,
+    /// The guest parks at its launch barrier until the world releases it.
+    pub barrier: bool,
+}
+
+/// Port of the launch barrier, see guest/barrier.h.
+const BARRIER_PORT: u16 = 0xf8;
+pub const ENTROPY_WORDS: usize = 8;
+
+/// Everything about one machine that a world fork puts back: vCPU, RAM, the
+/// shared page, device models and the VMM's per-machine scalars.
+pub struct MachineSnapshot {
+    ram: Mapping,
+    page: Box<[u8; 4096]>,
+    cpu: VcpuState,
+    time: u64,
+    branches: u64,
+    tsc_latch: u64,
+    state: State,
+    guest_exit_code: Option<u8>,
+    guest_init_error: Option<u8>,
+    pic: Pic,
+    pit: Pit,
+    rtc_index: u8,
+    com1: Uart,
+    com2: Uart,
+    management_framer: crate::control::ManagementFramer,
+    net: Option<VirtioNet>,
+    channel: Option<VirtioConsole>,
+    control_dma_bytes: u64,
+    control_tx_bytes: u64,
+    pv: bool,
+    armed_wake: u64,
+    pit_exact: bool,
+    exit_req: bool,
+    margin: u64,
+    fm: u64,
+    parked: bool,
+    stats: Stats,
+    witness: Sha256,
+    undo_stats: Option<UndoStats>,
+}
+
+/// An anonymous private mapping, unmapped on drop.
+struct Mapping {
+    ptr: *mut u8,
+    size: usize,
+}
+impl Drop for Mapping {
+    fn drop(&mut self) {
+        unsafe { libc::munmap(self.ptr.cast(), self.size) };
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -71,11 +112,13 @@ pub enum Stop {
     Exited,
     /// The guest produced frames; the world must re-plan before continuing.
     Sent,
+    /// The guest reached its launch barrier and is parked until released.
+    Barrier,
     /// A committed management request/effect requires global causal replanning.
     Control,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct Stats {
     pub exits: u64,
     pub pio: u64,
@@ -104,6 +147,7 @@ pub struct Stats {
 
 pub struct Machine {
     pub name: String,
+    profile: &'static CounterProfile,
     _vm: VmFd,
     vcpu: VcpuFd,
     mem: *mut u8,
@@ -158,6 +202,24 @@ pub struct Machine {
     pub undo: Option<Box<Undo>>,
     undo_margin: u64,
     fm: u64,
+    /// Parked at the launch barrier: the world does not run this machine.
+    pub parked: bool,
+    /// Paused by a lifecycle fault: CPU and devices are frozen, any unpaid
+    /// I/O cost stays owed, and the world does not run this machine.
+    pub paused: bool,
+    /// Built for a reboot that has not happened yet: the world does not run
+    /// this machine. Its predecessor's VM is already gone.
+    pub down: bool,
+    /// Boots of this machine before this one: 0 for the first.
+    pub incarnation: u32,
+    /// Virtual time at which this incarnation started executing.
+    pub booted_at: u64,
+    barrier: bool,
+    /// Per-seed words the guest reads after its release.
+    entropy: [u32; ENTROPY_WORDS],
+    entropy_read: usize,
+    /// The MSR list a fork snapshot saves.
+    msrs: Msrs,
     pub stats: Stats,
     pub witness: Sha256,
     pub trace: Option<std::io::BufWriter<std::fs::File>>,
@@ -228,6 +290,7 @@ fn guest_cpuid(kvm: &Kvm) -> Result<CpuId, String> {
 
 impl Machine {
     pub fn new(kvm: &Kvm, name: &str, spec: &BootSpec) -> Result<Self, String> {
+        let profile = crate::profile::host()?;
         if !kvm.check_extension(kvm_ioctls::Cap::ImmediateExit) {
             return Err("KVM immediate-exit capability required for I/O completion".into());
         }
@@ -331,6 +394,7 @@ impl Machine {
         })
         .map_err(|e| e.to_string())?;
         let net = spec.mac.map(VirtioNet::new);
+        let msrs = crate::undo::msr_list(kvm, &vcpu)?;
         let undo = if spec.undo_margin > 0 {
             let mut u = Undo::new(kvm, &vcpu, mem_size)?;
             // Everything loaded so far was written by the VMM.
@@ -343,6 +407,7 @@ impl Machine {
         };
         Ok(Self {
             name: name.to_string(),
+            profile,
             _vm: vm,
             vcpu,
             mem,
@@ -381,12 +446,21 @@ impl Machine {
             tolerance: 0,
             timer_jitter: 0,
             timer_rng: None,
-            margin: MARGIN,
+            margin: profile.margin,
             adaptive_margin: false,
             step_started: None,
             undo,
             undo_margin: spec.undo_margin,
             fm: spec.undo_margin,
+            parked: false,
+            paused: false,
+            down: false,
+            incarnation: 0,
+            booted_at: 0,
+            barrier: spec.barrier,
+            entropy: [0; ENTROPY_WORDS],
+            entropy_read: 0,
+            msrs,
             stats: Stats::default(),
             witness: Sha256::new(),
             trace: None,
@@ -420,6 +494,206 @@ impl Machine {
 
     pub fn has_pending_irq(&self) -> bool {
         self.pic.pending().is_some()
+    }
+
+    /// Take the machine off its launch barrier at virtual time `at`, with the
+    /// seed's entropy for the guest to read.
+    pub fn release(&mut self, at: u64, entropy: [u32; ENTROPY_WORDS]) -> Result<(), String> {
+        if !self.parked {
+            return Err(format!("{}: released without reaching the launch barrier", self.name));
+        }
+        self.parked = false;
+        // The parked interval passes like idle time: a timer that fell due
+        // meanwhile fires now, late, so the armed deadline is ahead of the
+        // clock again before the next slice computes its hard stop.
+        self.time = self.time.max(at);
+        self.expire_timers()?;
+        self.entropy = entropy;
+        self.entropy_read = 0;
+        self.record(b'R', self.time);
+        Ok(())
+    }
+
+    /// Freeze the machine at a world boundary. Nothing about the vCPU changes:
+    /// an exit KVM still has to complete, and the I/O cost owed for it, stay
+    /// exactly as they are until the machine resumes.
+    pub fn pause(&mut self) -> Result<(), String> {
+        if self.paused || self.down || self.parked {
+            return Err(format!("{}: cannot pause here", self.name));
+        }
+        self.paused = true;
+        self.record(b'Z', 0);
+        Ok(())
+    }
+
+    /// Continue a paused machine at virtual time `at`. The paused interval
+    /// passes like idle time, as at a release: timers that fell due fire now,
+    /// late and coalesced, keeping their phase.
+    pub fn resume(&mut self, at: u64) -> Result<(), String> {
+        if !self.paused {
+            return Err(format!("{}: resumed without being paused", self.name));
+        }
+        self.paused = false;
+        self.time = self.time.max(at);
+        self.expire_timers()?;
+        self.record(b'U', self.time);
+        Ok(())
+    }
+
+    /// Take a machine built for a reboot to its first instruction at `at`.
+    pub fn boot_at(&mut self, at: u64) -> Result<(), String> {
+        if !self.down || at < self.time {
+            return Err(format!("{}: cannot boot here", self.name));
+        }
+        self.down = false;
+        self.time = at;
+        self.booted_at = at;
+        self.record(b'N', self.incarnation as u64);
+        Ok(())
+    }
+
+    /// Carry what outlives a crash from the previous incarnation into this
+    /// one, which is built but not booted: the console and management logs
+    /// and their sinks, the trace, and the event witness, so the final
+    /// witness covers every incarnation. Nothing else crosses: RAM, device
+    /// queues, KVM's I/O state and the undo checkpoint die with the VM.
+    pub fn succeed(&mut self, old: &mut Machine, at: u64) -> Result<(), String> {
+        self.incarnation = old.incarnation.checked_add(1).ok_or("incarnation overflow")?;
+        self.down = true;
+        self.time = at;
+        for (new, old) in [(&mut self.com1, &mut old.com1), (&mut self.com2, &mut old.com2)] {
+            new.out = std::mem::take(&mut old.out);
+            new.output_file = old.output_file.take();
+            new.output_limit = old.output_limit;
+        }
+        self.trace = old.trace.take();
+        self.witness.update(old.exit_witness().as_bytes());
+        self.record(b'C', at);
+        Ok(())
+    }
+
+    /// Park the machine at a fork point the world chose (a simulated time),
+    /// rather than one the guest announced. It must owe no I/O cost.
+    pub fn park(&mut self) -> Result<(), String> {
+        if self.parked || self.pending_io.is_some() {
+            return Err(format!("{}: cannot park here", self.name));
+        }
+        self.set_stepping(false)?;
+        // As at the launch barrier: finish any exit KVM still owes, so a cold
+        // run and a restored fork resume from identical vCPU state.
+        self.complete_io()?;
+        self.parked = true;
+        self.record(b'P', 0);
+        Ok(())
+    }
+
+    /// Capture this machine at the world's fork point: parked, no I/O owed.
+    pub fn snapshot(&mut self) -> Result<MachineSnapshot, String> {
+        if self.pending_io.is_some() || self.stepping || !self.fault_effects.is_empty() || !self.control_requests.is_empty() {
+            return Err(format!("{}: not at a fork point", self.name));
+        }
+        self.complete_io()?;
+        let mut cpu = VcpuState::new(self.msrs.clone());
+        cpu.save(&self.vcpu, "fork")?;
+        let undo_stats = self.undo.as_ref().map(|u| u.stats.clone());
+        let ram = Mapping { ptr: map(self.mem_size)?, size: self.mem_size };
+        unsafe { std::ptr::copy_nonoverlapping(self.mem, ram.ptr, self.mem_size) };
+        if let Some(u) = self.undo.as_mut() {
+            u.fork_point(&self._vm, self.mem)?;
+        }
+        let mut page = Box::new([0u8; 4096]);
+        unsafe { std::ptr::copy_nonoverlapping(self.page as *const u8, page.as_mut_ptr(), 4096) };
+        Ok(MachineSnapshot {
+            ram, page, cpu,
+            time: self.time, branches: self.branches, tsc_latch: self.tsc_latch, state: self.state,
+            guest_exit_code: self.guest_exit_code, guest_init_error: self.guest_init_error,
+            pic: self.pic.clone(), pit: self.pit.clone(), rtc_index: self.rtc_index,
+            com1: self.com1.snapshot(), com2: self.com2.snapshot(),
+            management_framer: self.management_framer.clone(),
+            net: self.net.clone(), channel: self.channel.clone(),
+            control_dma_bytes: self.control_dma_bytes, control_tx_bytes: self.control_tx_bytes,
+            pv: self.pv, armed_wake: self.armed_wake, pit_exact: self.pit_exact, exit_req: self.exit_req,
+            margin: self.margin, fm: self.fm, parked: self.parked,
+            stats: self.stats.clone(), witness: self.witness.clone(), undo_stats,
+        })
+    }
+
+    /// Put the machine back to a snapshot taken by `snapshot`, from wherever
+    /// the last run left it. Returns the number of RAM pages copied back.
+    pub fn restore(&mut self, s: &MachineSnapshot) -> Result<u64, String> {
+        // The last exit may still owe KVM its completion (an exit port write,
+        // say); complete it so the vCPU accepts new state. Its effect is
+        // overwritten below, and a vCPU that cannot run any more (shutdown)
+        // is overwritten just the same.
+        let _ = self.complete_io();
+        self.set_stepping(false)?;
+        let pages = match self.undo.as_mut() {
+            // A machine rebuilt for this restore (the run rebooted it) has
+            // held no fork point yet: copy everything, then hold one here.
+            Some(u) if !u.holds_fork_point() => {
+                unsafe { std::ptr::copy_nonoverlapping(s.ram.ptr, self.mem, self.mem_size) };
+                u.mark(0, self.mem_size);
+                u.fork_point(&self._vm, self.mem)?;
+                u.stats = s.undo_stats.clone().unwrap_or_default();
+                (self.mem_size / 4096) as u64
+            }
+            Some(u) => {
+                let pages = u.return_to_fork(&self._vm, self.mem, s.ram.ptr)?;
+                // Each seed reports its own undo work on top of the boot's.
+                u.stats = s.undo_stats.clone().unwrap_or_default();
+                pages
+            }
+            None => {
+                unsafe { std::ptr::copy_nonoverlapping(s.ram.ptr, self.mem, self.mem_size) };
+                (self.mem_size / 4096) as u64
+            }
+        };
+        unsafe { std::ptr::copy_nonoverlapping(s.page.as_ptr(), self.page as *mut u8, 4096) };
+        let (regs, sregs) = s.cpu.restore(&self.vcpu, "fork restore")?;
+        // Refresh KVM's exit outputs (interrupt flag, injection readiness and
+        // the synchronized registers) from the restored state, exactly as the
+        // completion at the barrier did when the snapshot was taken.
+        self.complete_io()?;
+        let run = self.vcpu.get_kvm_run();
+        run.request_interrupt_window = 0;
+        run.s.regs.regs = regs;
+        run.s.regs.sregs = sregs;
+        self.sync_regs_ready = true;
+        self.time = s.time;
+        self.branches = s.branches;
+        self.tsc_latch = s.tsc_latch;
+        self.state = s.state;
+        self.pending_io = None;
+        self.guest_exit_code = s.guest_exit_code;
+        self.guest_init_error = s.guest_init_error;
+        self.pic = s.pic.clone();
+        self.pit = s.pit.clone();
+        self.rtc_index = s.rtc_index;
+        self.com1.restore(&s.com1);
+        self.com2.restore(&s.com2);
+        self.fault_effects.clear();
+        self.control_requests.clear();
+        self.management_framer = s.management_framer.clone();
+        self.net = s.net.clone();
+        self.channel = s.channel.clone();
+        self.control_dma_bytes = s.control_dma_bytes;
+        self.control_tx_bytes = s.control_tx_bytes;
+        self.pv = s.pv;
+        self.armed_wake = s.armed_wake;
+        self.pit_exact = s.pit_exact;
+        self.exit_req = s.exit_req;
+        self.margin = s.margin;
+        self.fm = s.fm;
+        self.parked = s.parked;
+        self.paused = false;
+        self.down = false;
+        self.incarnation = 0;
+        self.booted_at = 0;
+        self.entropy = [0; ENTROPY_WORDS];
+        self.entropy_read = 0;
+        self.stats = s.stats.clone();
+        self.witness = s.witness.clone();
+        Ok(pages)
     }
 
     /// Resume a halted machine at virtual time `t`.
@@ -535,7 +809,7 @@ impl Machine {
     }
 
     fn expire_timers(&mut self) -> Result<(), String> {
-        while self.pit.expire(self.time)? {
+        if self.pit.expire_through(self.time)? > 0 {
             self.pic.raise(0);
         }
         Ok(())
@@ -678,29 +952,29 @@ impl Machine {
     /// Run to the first deterministic point at or after `limit - early` (at
     /// the latest an exact stop at `limit`), or until the guest halts, exits or
     /// sends frames. Never runs past `limit`.
-    pub fn run_until(
+    pub fn run_until<T: Timebase>(
         &mut self,
-        counter: &mut Counter,
+        tb: &mut T,
         limit: u64,
         early: u64,
         frames: &mut Vec<Vec<u8>>,
     ) -> Result<Stop, String> {
         let started = Instant::now();
-        let r = self.run_inner(counter, limit, early, frames);
+        let r = self.run_inner(tb, limit, early, frames);
         self.stats.run_ns += started.elapsed().as_nanos();
         r
     }
 
-    fn run_inner(
+    fn run_inner<T: Timebase>(
         &mut self,
-        counter: &mut Counter,
+        tb: &mut T,
         limit: u64,
         early: u64,
         frames: &mut Vec<Vec<u8>>,
     ) -> Result<Stop, String> {
         // Invariant: entered at a deterministic point. Guest-visible state (time
         // page, interrupts, timer expiry) changes only at deterministic points:
-        // natural exits, requested syscall exits and exact counted stops, never
+        // natural exits and exact counted stops, never
         // at overflow landings or intermediate single steps.
         let slice_end = limit
             .saturating_sub(early)
@@ -736,11 +1010,13 @@ impl Machine {
                 }
                 self.publish();
             }
-            // Stop at the first deterministic point at or after `soft`, at the
-            // latest by an exact counted stop at `hard`. Two rules combine: the
-            // slice ends in [slice_end, limit], and a timer due at `pit` fires
-            // in [pit, pit + tolerance] (exactly at `pit` if so drawn). Neither
-            // passes `limit`, the world's causal boundary.
+            // Stop at the first natural exit at or after `soft` and below
+            // `hard`, otherwise by an exact counted stop at `hard`. Two rules combine: the slice
+            // ends in [slice_end, limit], and a timer due at `pit` fires in
+            // [pit, pit + tolerance] (exactly at `pit` if so drawn). Neither
+            // passes `limit`, the world's causal boundary. Syscalls are not
+            // stopping points, so no yield window is requested: a natural exit
+            // is never skipped, whatever the overflow skid.
             let pit = self.pit.deadline.unwrap_or(u64::MAX);
             let soft = slice_end.min(pit);
             let hard = hard_limit(limit, self.pit.deadline, self.pit_exact, self.tolerance);
@@ -754,74 +1030,18 @@ impl Machine {
                     self.vcpu.get_kvm_run().request_interrupt_window = 0;
                 }
             }
-            // Near a soft stop, ask the guest kernel to exit at its next syscall:
-            // the first such exit at or after `soft` is a deterministic stopping
-            // point, much cheaper than counting our way to `hard`. Earlier yield
-            // exits are transparent.
-            //
-            // Keep the transparent syscall window open for the entire soft
-            // interval. Host skid and a performance margin cannot decide
-            // whether a syscall at the semantic stop is offered as an exit.
             let rem_soft = soft.saturating_sub(self.time);
-            let windowed = soft < hard;
-            let window = windowed;
+            let windowed = false;
+            let window = false;
             if window != self.exit_req {
                 unsafe { std::ptr::write_volatile(self.page.add(2), window as u64) };
                 self.exit_req = window;
             }
-            let undo = self.undo.is_some();
-            let threshold = if undo { self.fm } else { self.margin };
-            if remaining > threshold {
-                self.set_stepping(false)?;
-                let wake = if rem_soft > self.margin {
-                    rem_soft - self.margin
-                } else if (self.adaptive_margin || undo) && remaining > APPROACH {
-                    // Approach a hard stop in two overflows: the first measures
-                    // the branch rate of the code actually running near it.
-                    remaining - APPROACH
-                } else {
-                    // Final approach. With a checkpoint, aim close and undo an
-                    // overshoot rather than step through a worst-case skid.
-                    if undo && !self.undo.as_ref().unwrap().valid {
-                        self.checkpoint()?;
-                    }
-                    remaining - threshold
-                };
-                let now = counter.last();
-                if wake >= crate::counter::NEVER {
-                    counter.disarm();
-                    self.armed_wake = 0;
-                } else {
-                    counter.arm(now, now + wake);
-                    self.armed_wake = wake;
-                }
-            } else {
-                if !self.stepping {
-                    counter.disarm();
-                }
-                self.set_stepping(true)?;
-                let (r, sr) = {
-                    let run = self.vcpu.get_kvm_run();
-                    unsafe { (run.s.regs.regs, run.s.regs.sregs) }
-                };
-                let mem = unsafe { std::slice::from_raw_parts(self.mem, self.mem_size) };
-                let planner = self.planner.as_mut().unwrap();
-                planner.refresh_from(&sr);
-                let targets = planner
-                    .plan(mem, &r)
-                    .map_err(|e| format!("{}: step plan: {e}", self.name))?;
-                Planner::arm(&self.vcpu, &targets)?;
-                self.last_plan = (r.rip, targets.clone());
-                if targets.contains(&r.rip) {
-                    let mut resumed = r;
-                    resumed.rflags |= 1 << 16; // RF: do not re-trigger at the current instruction
-                    self.vcpu.set_regs(&resumed).map_err(|e| e.to_string())?;
-                }
-            }
+            tb.prepare(self, remaining)?;
             self.vcpu.get_kvm_run().kvm_valid_regs =
                 (KVM_SYNC_X86_REGS | KVM_SYNC_X86_SREGS) as u64;
             let syscalls0 = self.page_get(PAGE_SYSCALLS);
-            let c0 = counter.last();
+            let c0 = tb.start();
             let t_run = Instant::now();
             let run_ptr = self.vcpu.get_kvm_run() as *mut kvm_run;
             let exit = self.vcpu.run();
@@ -840,88 +1060,59 @@ impl Machine {
             };
             self.stats.kvm_ns[kind] += run_ns;
             self.stats.kvm_n[kind] += 1;
-            let c1 = counter.read_fast();
+            let c1 = tb.read();
             let delta = c1 - c0;
             let interrupted = matches!(&exit, Err(e) if e.errno() == libc::EINTR);
-            let overshoot =
-                delta > remaining || (interrupted && !self.stepping && delta == remaining);
-            // With the yield window closed, a run must not pass `soft`: a
-            // syscall there would have been the stop.
-            let soft_miss = missed_soft_stop(
+            let syscalled =
+                unsafe { std::ptr::read_volatile(self.page.add(PAGE_SYSCALLS)) } != syscalls0;
+            let run = Run {
+                delta,
+                remaining,
+                rem_soft,
                 windowed,
                 window,
-                delta,
-                rem_soft,
                 interrupted,
-                self.stepping,
-            );
-            if (overshoot || soft_miss) && self.undo.as_ref().is_some_and(|u| u.valid) {
-                if overshoot && self.fm >= UNDO_MAX {
+                debug: matches!(exit, Ok(VcpuExit::Debug(_))),
+                run_ns,
+                syscalled,
+            };
+            let judge = Judge {
+                name: &self.name,
+                stepping: self.stepping,
+                pv: self.pv,
+                undo_valid: self.undo.as_ref().is_some_and(|u| u.valid),
+                fm: &mut self.fm,
+                margin: &mut self.margin,
+                adaptive_margin: self.adaptive_margin,
+                armed_wake: self.armed_wake,
+                profile: self.profile,
+                stats: &mut self.stats,
+            };
+            match tb.judge(judge, &run)? {
+                Verdict::Advance { legal: l } => legal = l,
+                Verdict::Rollback => {
+                    drop(exit);
+                    self.rollback()?;
+                    legal = false;
+                    continue;
+                }
+                Verdict::Overshoot => {
+                    let what = exit
+                        .as_ref()
+                        .map(|e| format!("{e:?}"))
+                        .unwrap_or_else(|e| e.to_string());
+                    drop(exit);
+                    let r = self.vcpu.get_regs().ok();
                     return Err(format!(
-                        "overshoot on {}: {} branches past stop target at final margin {}",
+                        "overshoot on {}: {} branches past stop target (stepping={} exit={} rip={:#x?} last_plan={:x?})",
                         self.name,
                         delta - remaining,
-                        self.fm
+                        self.stepping,
+                        what,
+                        r.map(|r| r.rip),
+                        self.last_plan,
                     ));
                 }
-                drop(exit);
-                self.rollback()?;
-                // A rollback costs far less than stepping, so grow slowly.
-                self.fm = (self.fm * 2).min(UNDO_MAX);
-                if !overshoot {
-                    self.stats.soft_undos += 1;
-                }
-                legal = false;
-                continue;
-            }
-            // Changing the margin must never change where a stop lands. A
-            // paravirtual guest counts syscalls: a run without one skipped no
-            // stop. Otherwise the run fails.
-            if soft_miss && !overshoot {
-                self.stats.soft_misses += 1;
-                let syscalls = unsafe { std::ptr::read_volatile(self.page.add(PAGE_SYSCALLS)) };
-                if !self.pv || syscalls != syscalls0 {
-                    return Err(format!(
-                        "soft overshoot on {}: {} branches past (or an ambiguous overflow at) a soft stop before its syscall window opened",
-                        self.name,
-                        delta - rem_soft
-                    ));
-                }
-                self.stats.soft_misses_clean += 1;
-            }
-            if overshoot {
-                let what = exit
-                    .as_ref()
-                    .map(|e| format!("{e:?}"))
-                    .unwrap_or_else(|e| e.to_string());
-                drop(exit);
-                let r = self.vcpu.get_regs().ok();
-                return Err(format!(
-                    "overshoot on {}: {} branches past stop target (stepping={} exit={} rip={:#x?} last_plan={:x?})",
-                    self.name,
-                    delta - remaining,
-                    self.stepping,
-                    what,
-                    r.map(|r| r.rip),
-                    self.last_plan,
-                ));
-            }
-            if interrupted && !self.stepping {
-                let skid = delta.saturating_sub(self.armed_wake);
-                self.stats.skid_max = self.stats.skid_max.max(skid);
-                self.stats.skids.push(skid);
-            }
-            // Overflow skid is roughly constant in host time, so its size in
-            // branches follows the guest's recent branch rate (Go's GC scan loop
-            // is several times denser than ordinary code). Size the margin from
-            // that rate. Performance only: stops land on the same count.
-            if self.adaptive_margin && !self.stepping && run_ns > 20_000 && delta > 0 {
-                let rate = delta as f64 / run_ns as f64; // branches per host ns
-                self.margin = ((rate * SKID_NS) as u64).clamp(MARGIN_MIN, APPROACH);
-            }
-            legal = !interrupted;
-            if matches!(exit, Ok(VcpuExit::Debug(_))) {
-                legal = delta == remaining;
             }
             self.branches += delta;
             self.time += delta;
@@ -1059,6 +1250,18 @@ impl Machine {
                             self.set_stepping(false)?;
                             return Ok(Stop::Exited);
                         }
+                        BARRIER_PORT if self.barrier => {
+                            if self.parked || self.entropy_read != 0 {
+                                return Err(format!("{}: launch barrier reached twice", self.name));
+                            }
+                            self.parked = true;
+                            self.record(b'B', 0);
+                            self.set_stepping(false)?;
+                            // Finish the port write now, so the machine is
+                            // parked in a state a fork can save and restore.
+                            self.complete_io()?;
+                            return Ok(Stop::Barrier);
+                        }
                         0xf5 => {
                             self.guest_init_error = Some(v);
                             self.state = State::Exited(v);
@@ -1094,6 +1297,12 @@ impl Machine {
                         0x524 => data.copy_from_slice(
                             &((self.tsc_latch >> 32) as u32).to_le_bytes()[..data.len()],
                         ),
+                        BARRIER_PORT if self.barrier => {
+                            let word = self.entropy.get(self.entropy_read).copied().unwrap_or(0);
+                            self.entropy_read += 1;
+                            let len = data.len().min(4);
+                            data[..len].copy_from_slice(&word.to_le_bytes()[..len]);
+                        }
                         _ => {
                             let v = match port {
                                 0x3f8..=0x3ff => self.com1.read(port - 0x3f8),
@@ -1322,7 +1531,7 @@ mod io_boundary_tests {
         else {code.push(if write {0xee} else {0xec});}
         code.extend_from_slice(&[0x85,0xc0,0x74,0x00,0xc7,0x05,0x00,0x00,0x08,0x00,0x78,0x56,0x34,0x12,0xf4]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo,barrier:false};
         let mut machine=Machine::new(kvm,"io-probe",&spec).unwrap();
         let mut r=machine.vcpu.get_regs().unwrap();r.rflags=0x202;machine.vcpu.set_regs(&r).unwrap();
         machine.pit.write(0x43,0x34,0);
@@ -1431,6 +1640,61 @@ mod io_boundary_tests {
         }
     }
 
+    /// A 32-bit loop of 1000 conditional branches, optionally followed by an
+    /// uncharged OUT to port 0x80 (a natural exit), with interrupts masked.
+    fn loop_probe(kvm: &Kvm, natural_exit: bool, undo: u64) -> Machine {
+        // outer: mov ebx,1000; inner: dec ebx; jnz inner; [out 0x80,al]; jmp outer
+        let mut code=vec![0xbb,0xe8,0x03,0x00,0x00,0x4b,0x75,0xfd];
+        if natural_exit {code.extend_from_slice(&[0xe6,0x80]);}
+        let back=-(code.len() as i8+2);
+        code.extend_from_slice(&[0xeb,back as u8]);
+        let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo,barrier:false};
+        let mut machine=Machine::new(kvm,"stop-probe",&spec).unwrap();
+        let mut r=machine.vcpu.get_regs().unwrap();r.rflags=0x2;machine.vcpu.set_regs(&r).unwrap();
+        machine.pic.set_masks(0xffff);
+        machine
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn stops_at_natural_exits_or_exact_hard_counts_without_yields() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        // (exits, limit, early): no natural exit, so an exact counted stop at
+        // the hard target; an exit every 1000 branches with soft below hard,
+        // so the first exit at or after soft; and soft == hard with an exit
+        // exactly on the hard count, which must stop before that exit.
+        let cases=[(false,300_000,150_000),(true,300_000,150_000),(true,150_000,0)];
+        for (exits,limit,early) in cases {
+            let mut want=None;
+            for undo in [0,16,256] {
+                let mut m=loop_probe(&kvm,exits,undo);
+                // The fixed margin can be shorter than a skid in this loop.
+                m.adaptive_margin=true;
+                let mut frames=Vec::new();
+                assert_eq!(m.run_until(&mut counter,limit,early,&mut frames).unwrap(),Stop::Reached);
+                let what=format!("exits={exits} limit={limit} early={early} undo={undo}");
+                assert_eq!(m.page_get(2),0,"{what}: a yield window was requested");
+                assert_eq!(m.stats.yields,0);
+                match (exits,early) {
+                    (false,_) => assert_eq!(m.time,limit,"{what}"),
+                    (true,0) => {
+                        assert_eq!(m.time,limit,"{what}");
+                        assert_eq!(m.stats.pio,limit/1000-1,"{what}: ran the exit at the hard count");
+                    }
+                    (true,_) => {
+                        assert!(m.time>=limit-early && m.time<limit-early+1001,"{what} time={}",m.time);
+                        assert_eq!(m.stats.precise_stops,0,"{what}: counted stop despite a natural exit");
+                    }
+                }
+                let rip=m.vcpu.get_regs().unwrap().rip;
+                let evidence=(m.time,rip,m.exit_witness(),m.state_digest().0);
+                if let Some(want)=&want {assert_eq!(&evidence,want,"{what}");} else {want=Some(evidence);}
+            }
+        }
+    }
+
     fn halt_snapshot(m: &mut Machine, stage: &str) {
         let regs=m.vcpu.get_regs().unwrap();
         let sregs=m.vcpu.get_sregs().unwrap();
@@ -1462,4 +1726,271 @@ mod io_boundary_tests {
         assert_eq!(stop.unwrap(),Stop::Halted);
     }
 
+    /// Pause with 161 ns of I/O cost owed and a periodic timer armed: while
+    /// paused nothing runs and nothing is paid. Resumed later, the missed
+    /// ticks fire once, late, in phase, and the debt is paid from the resume.
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn a_pause_keeps_owed_io_cost_and_resumes_in_timer_phase() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        let mut want=None;
+        for undo in [0,16,256] {
+            let mut m=probe(&kvm,0x530,true,undo);
+            let mut frames=Vec::new();
+            assert_eq!(m.run_until(&mut counter,839,0,&mut frames).unwrap(),Stop::Reached);
+            assert_eq!(m.pending_io.as_ref().unwrap().remaining_ns,161);
+            assert_eq!(m.pit.deadline,Some(1678));
+            m.pause().unwrap();
+            assert!(m.pause().is_err());
+            let rip=m.vcpu.get_regs().unwrap().rip;
+            m.resume(5000).unwrap();
+            assert!(m.resume(5000).is_err());
+            assert_eq!(m.time,5000);
+            assert_eq!(m.pit.deadline,Some(1678+4*839),"undo={undo}");
+            assert_eq!(m.pending_io.as_ref().unwrap().remaining_ns,161,"debt kept while paused");
+            assert_eq!((m.branches,m.vcpu.get_regs().unwrap().rip,m.stats.irqs),(0,rip,0));
+            assert_eq!(m.run_until(&mut counter,5100,0,&mut frames).unwrap(),Stop::Reached);
+            assert_eq!(m.pending_io.as_ref().unwrap().remaining_ns,61);
+            assert_eq!(m.run_until(&mut counter,5161,0,&mut frames).unwrap(),Stop::Reached);
+            assert!(m.pending_io.is_none());assert_eq!(m.branches,0);
+            assert_eq!(m.run_until(&mut counter,7000,0,&mut frames).unwrap(),Stop::Halted);
+            assert_eq!(m.branches,1);
+            assert_eq!(&m.memory()[0x80000..0x80004],&[0x78,0x56,0x34,0x12]);
+            let evidence=(m.time,m.exit_witness(),m.state_digest().0);
+            if let Some(want)=&want {assert_eq!(&evidence,want,"undo={undo}");} else {want=Some(evidence);}
+        }
+    }
+
+    /// Pause once the debt is paid but before the guest runs on: resuming
+    /// later runs exactly what an unpaused machine runs, just later.
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn a_pause_with_no_debt_runs_on_unchanged_after_resume() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        for undo in [0,256] {
+            let mut m=probe(&kvm,0x61,false,undo);
+            let mut frames=Vec::new();
+            assert_eq!(m.run_until(&mut counter,1000,0,&mut frames).unwrap(),Stop::Reached);
+            assert!(m.pending_io.is_none());
+            let rax=m.vcpu.get_regs().unwrap().rax;
+            m.pause().unwrap();
+            m.resume(3000).unwrap();
+            assert_eq!(m.vcpu.get_regs().unwrap().rax,rax);
+            assert_eq!(m.run_until(&mut counter,5000,0,&mut frames).unwrap(),Stop::Halted);
+            assert_eq!(m.branches,1);
+            assert!(m.time>=3000 && m.time<5000);
+            assert_eq!(&m.memory()[0x80000..0x80004],&[0x78,0x56,0x34,0x12]);
+        }
+    }
+
+}
+
+#[cfg(test)]
+mod fork_tests {
+    use super::*;
+
+    /// 32-bit payload through the real boot handoff: announce the launch
+    /// barrier, read one entropy word into a marker, spin 1000 counted
+    /// branches, write a second page, halt.
+    fn barrier_machine(kvm: &Kvm, undo: u64) -> Machine {
+        probe_machine(kvm, undo, true)
+    }
+
+    fn probe_machine(kvm: &Kvm, undo: u64, barrier: bool) -> Machine {
+        let mut code=vec![0xb8,1,0,0,0, 0xba,0xf8,0,0,0, 0xef, 0xed, 0xa3,0x00,0x00,0x08,0x00];
+        code.extend_from_slice(&[0xb9,0xe8,0x03,0,0, 0x49, 0x75,0xfd]);
+        code.extend_from_slice(&[0xc7,0x05,0x00,0x10,0x08,0x00,0xad,0xde,0,0, 0xf4]);
+        let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo,barrier};
+        Machine::new(kvm,"fork-probe",&spec).unwrap()
+    }
+
+    fn to_barrier(m: &mut Machine, counter: &mut Counter) {
+        let mut frames=Vec::new();
+        assert_eq!(m.run_until(counter,1_000_000,0,&mut frames).unwrap(),Stop::Barrier);
+        assert!(m.parked);
+    }
+
+    fn released(m: &mut Machine, counter: &mut Counter, word: u32) -> (String, String, u64, u64, Vec<u8>) {
+        let at=m.time+10;
+        m.release(at,[word;ENTROPY_WORDS]).unwrap();
+        let mut frames=Vec::new();
+        loop {
+            match m.run_until(counter,10_000_000,0,&mut frames).unwrap() {
+                Stop::Exited|Stop::Halted => break,
+                Stop::Reached => {},
+                other => panic!("unexpected stop {other:?}"),
+            }
+        }
+        assert_eq!(&m.memory()[0x80000..0x80004],&word.to_le_bytes());
+        assert_eq!(&m.memory()[0x81000..0x81004],&[0xad,0xde,0,0]);
+        (m.exit_witness(),m.state_digest().0,m.time,m.branches,m.memory()[0x80000..0x80004].to_vec())
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn a_restored_fork_matches_a_cold_run_and_seeds_differ() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        for undo in [0,256] {
+            let mut cold=barrier_machine(&kvm,undo);
+            to_barrier(&mut cold,&mut counter);
+            let want=released(&mut cold,&mut counter,7);
+            assert!(want.3>=1000,"spin loop branches counted");
+
+            let mut m=barrier_machine(&kvm,undo);
+            to_barrier(&mut m,&mut counter);
+            let snapshot=m.snapshot().unwrap();
+            assert_eq!(released(&mut m,&mut counter,7),want,"first seed after taking a snapshot, undo={undo}");
+            let pages=m.restore(&snapshot).unwrap();
+            assert!(pages>=2,"marker pages copied back, undo={undo}");
+            assert!(m.parked);
+            assert_eq!(&m.memory()[0x80000..0x80004],&[0,0,0,0]);
+            let other=released(&mut m,&mut counter,9);
+            // Both seeds take the same path, and the event witness records
+            // port reads without their values, so only the state differs.
+            assert_eq!(other.0,want.0);assert_ne!(other.1,want.1);
+            assert_eq!(other.4,9u32.to_le_bytes());
+            m.restore(&snapshot).unwrap();
+            assert_eq!(released(&mut m,&mut counter,7),want,"seed restored from the fork, undo={undo}");
+        }
+    }
+
+    /// A machine released later than it parked (another machine parked
+    /// later, or a release skew), with its timer due in between: the timer
+    /// fires late at the release instead of leaving the next slice a hard
+    /// stop behind its clock.
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn a_release_past_an_armed_timer_fires_it_and_runs_on() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        for undo in [0,256] {
+            let mut m=barrier_machine(&kvm,undo);
+            to_barrier(&mut m,&mut counter);
+            let parked=m.time;
+            // Periodic channel 0 armed at the barrier, as a guest's tick is.
+            m.pit.write(0x43,0x34,parked);
+            m.pit.program(12,parked);
+            let period=m.pit.deadline.unwrap()-parked;
+            m.release(parked+4*period+period/2,[7;ENTROPY_WORDS]).unwrap();
+            // Four ticks fell due while parked; they fire as one late IRQ0
+            // (masked in this probe) and the next is armed past the release.
+            assert_eq!(m.pit.deadline,Some(parked+5*period),"undo={undo}");
+            let mut frames=Vec::new();
+            while !matches!(m.run_until(&mut counter,parked+10_000_000,0,&mut frames).unwrap(),Stop::Exited|Stop::Halted) {}
+            assert_eq!(&m.memory()[0x81000..0x81004],&[0xad,0xde,0,0]);
+        }
+    }
+
+    /// Fork at a simulated time inside the spin loop instead of at the guest's
+    /// barrier (the port write and read are then ordinary unknown ports).
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn a_fork_at_a_simulated_time_matches_a_cold_run() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        let finish=|m: &mut Machine, counter: &mut Counter| {
+            let at=m.time+10;
+            m.release(at,[0;ENTROPY_WORDS]).unwrap();
+            let mut frames=Vec::new();
+            while !matches!(m.run_until(counter,10_000_000,0,&mut frames).unwrap(),Stop::Exited|Stop::Halted) {}
+            (m.exit_witness(),m.state_digest().0,m.time,m.branches)
+        };
+        for undo in [0,256] {
+            let mut cold=probe_machine(&kvm,undo,false);
+            let mut frames=Vec::new();
+            assert_eq!(cold.run_until(&mut counter,500,0,&mut frames).unwrap(),Stop::Reached);
+            assert_eq!(cold.time,500);
+            cold.park().unwrap();
+            let want=finish(&mut cold,&mut counter);
+
+            let mut m=probe_machine(&kvm,undo,false);
+            assert_eq!(m.run_until(&mut counter,500,0,&mut frames).unwrap(),Stop::Reached);
+            m.park().unwrap();
+            let snapshot=m.snapshot().unwrap();
+            assert_eq!(finish(&mut m,&mut counter),want,"first run after a snapshot, undo={undo}");
+            m.restore(&snapshot).unwrap();
+            assert_eq!(m.time,500);
+            assert_eq!(finish(&mut m,&mut counter),want,"restored fork, undo={undo}");
+        }
+    }
+
+    /// A seed that crashed a machine leaves a later incarnation in a new VM,
+    /// so the next seed restores into a freshly built machine that holds no
+    /// fork point: a full copy, after which it holds one and later restores
+    /// take the cheap path again. Every restore must match the cold run.
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn a_fork_restores_into_a_freshly_built_machine() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        for undo in [0,256] {
+            let mut cold=barrier_machine(&kvm,undo);
+            to_barrier(&mut cold,&mut counter);
+            let want=released(&mut cold,&mut counter,7);
+
+            let mut m=barrier_machine(&kvm,undo);
+            to_barrier(&mut m,&mut counter);
+            let snapshot=m.snapshot().unwrap();
+            drop(m);
+            let mut fresh=barrier_machine(&kvm,undo);
+            if undo>0 {assert!(!fresh.undo.as_ref().unwrap().holds_fork_point());}
+            let pages=fresh.restore(&snapshot).unwrap();
+            assert_eq!(pages,(fresh.mem_size/4096) as u64,"full copy, undo={undo}");
+            assert!(fresh.parked);
+            assert_eq!(released(&mut fresh,&mut counter,7),want,"restored into a fresh machine, undo={undo}");
+            if undo>0 {assert!(fresh.undo.as_ref().unwrap().holds_fork_point());}
+            let pages=fresh.restore(&snapshot).unwrap();
+            if undo>0 {assert!(pages<(fresh.mem_size/4096) as u64,"only written pages copied back");}
+            assert_eq!(released(&mut fresh,&mut counter,7),want,"second restore, undo={undo}");
+        }
+    }
+
+    fn to_halt(m: &mut Machine, counter: &mut Counter, limit: u64) {
+        let mut frames=Vec::new();
+        while !matches!(m.run_until(counter,limit,0,&mut frames).unwrap(),Stop::Exited|Stop::Halted) {}
+    }
+
+    /// Crash a machine and boot its next incarnation from the same inputs:
+    /// fresh RAM, the program runs again from its first instruction at the
+    /// reboot time, and the logs and witness carry across.
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn a_crashed_machine_reboots_fresh_from_its_boot_inputs() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        let mut want=None;
+        for undo in [0,256] {
+            let mut old=probe_machine(&kvm,undo,false);
+            to_halt(&mut old,&mut counter,1_000_000);
+            assert_eq!(&old.memory()[0x81000..0x81004],&[0xad,0xde,0,0]);
+            let first=(old.branches,old.exit_witness());
+            old.com1.out.extend_from_slice(b"first boot\n");
+            let crash=old.time+100;
+            let mut new=probe_machine(&kvm,undo,false);
+            new.succeed(&mut old,crash).unwrap();
+            assert!(new.down && !new.paused);
+            assert_eq!((new.incarnation,new.time),(1,crash));
+            assert_eq!(&new.memory()[0x80000..0x80004],&[0,0,0,0]);
+            assert_eq!(&new.memory()[0x81000..0x81004],&[0,0,0,0]);
+            assert_eq!(new.com1.out,b"first boot\n");
+            assert!(old.com1.out.is_empty());
+            drop(old);
+            assert!(new.boot_at(crash-1).is_err());
+            new.boot_at(crash+1000).unwrap();
+            assert!(new.boot_at(crash+1000).is_err());
+            let rip=new.vcpu.get_regs().unwrap().rip;
+            assert_eq!(rip,0x100000,"the new incarnation starts at the kernel entry");
+            to_halt(&mut new,&mut counter,crash+1_000_000);
+            assert_eq!(&new.memory()[0x81000..0x81004],&[0xad,0xde,0,0]);
+            assert_eq!(new.branches,first.0,"same program, counted from zero");
+            assert!(new.time>crash+1000);
+            assert_ne!(new.exit_witness(),first.1,"the witness covers both incarnations");
+            let evidence=(first,new.time,new.exit_witness(),new.state_digest().0);
+            if let Some(want)=&want {assert_eq!(&evidence,want,"undo={undo}");} else {want=Some(evidence);}
+        }
+    }
 }

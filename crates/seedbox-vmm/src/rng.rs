@@ -2,6 +2,7 @@
 
 use sha2::{Digest, Sha256};
 
+#[derive(Clone)]
 pub struct Rng {
     key: [u8; 32],
     counter: u64,

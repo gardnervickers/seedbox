@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const MAX_FRAME: usize = 16384;
 pub const MAX_TRANSPORT_FRAME: usize = MAX_FRAME + 64;
 /// Frame only actual UART transmissions, excluding divisor-register writes.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ManagementFramer {
     line: Vec<u8>,
 }
@@ -53,6 +53,7 @@ pub struct Call {
     pub error_code: Option<&'static str>,
     pub fatal: bool,
 }
+#[derive(Clone)]
 pub struct Control {
     pub controller: Option<usize>,
     pub latency: u64,

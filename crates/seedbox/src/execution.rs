@@ -213,6 +213,9 @@ pub struct ExecutionReport {
     pub full_state: Option<BTreeMap<String, ContentDigest>>,
     pub faults: Vec<FaultEvent>,
     pub detail: Option<String>,
+    /// Development artifact qualification, copied from the semantic identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_qualification: Option<String>,
 }
 
 #[cfg(test)]

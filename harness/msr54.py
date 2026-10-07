@@ -1,4 +1,7 @@
-"""Scoped Zen counter workaround; exclusive snapshots survive failed restoration."""
+"""Scoped Zen counter workaround; exclusive snapshots survive failed restoration.
+
+Only the Zen counter profile needs it (crates/seedbox/src/counter.rs).
+"""
 import json
 import os
 from pathlib import Path
@@ -7,6 +10,19 @@ import sys
 
 MSR = 0xc0011020
 BIT = 1 << 54
+
+
+def required(cpuinfo="/proc/cpuinfo"):
+    """False only for a host positively identified as not AMD. Unidentifiable
+    hosts raise rather than silently skip the workaround."""
+    fields = {}
+    for line in Path(cpuinfo).read_text().splitlines():
+        key, _, value = line.partition(":")
+        fields.setdefault(key.strip(), value.strip())
+    vendor = fields.get("vendor_id")
+    if not vendor:
+        raise OSError(f"{cpuinfo}: no vendor_id; cannot tell whether the Zen workaround is needed")
+    return vendor == "AuthenticAMD"
 
 
 def rd(cpu):

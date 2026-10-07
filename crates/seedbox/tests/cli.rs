@@ -5,14 +5,15 @@ use std::{
 };
 
 /// Run the CLI with a scrubbed environment: no `SEEDBOX_*`, `CARGO*` or
-/// `SUDO_USER` variables, `HOME` at `cwd`, and `PATH` set to `path` (empty if
-/// `None`), so no default can come from the developer's machine.
+/// `SUDO_USER` variables, `HOME` and scratch storage at `cwd`, and `PATH` set to
+/// `path` (empty if `None`), so no default can come from the developer's machine.
 fn seedbox_with(args: &[&str], cwd: &Path, path: Option<&Path>) -> Output {
     Command::new(env!("CARGO_BIN_EXE_seedbox"))
         .args(args)
         .current_dir(cwd)
         .env_clear()
         .env("HOME", cwd)
+        .env("TMPDIR", cwd)
         .env("PATH", path.map(Path::as_os_str).unwrap_or_default())
         .output()
         .unwrap()
@@ -244,6 +245,24 @@ fn explicit_inputs_must_exist() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn unqualified_cpu_permission_is_checked_after_the_inputs() {
+    // Whatever this host's CPU, input errors come first, with or without the flag.
+    let (directory, mut args) = runtime_project();
+    let bin = directory.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    for allow in [false, true] {
+        if allow {
+            args.push("--allow-unqualified-cpu".into());
+        }
+        let args: Vec<_> = args.iter().map(String::as_str).collect();
+        let output = seedbox_with(&args, directory.path(), Some(&bin));
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).starts_with("error: no static BusyBox found;"));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn busybox_default_requires_a_static_busybox_on_path() {
     let (directory, args) = runtime_project();
     let args: Vec<_> = args.iter().map(String::as_str).collect();
@@ -301,6 +320,18 @@ fn explore_bounds_and_help_are_public_before_runtime_inputs_or_state() {
     let pinned = seedbox(&["explore", "--workers", "2", "--cpu", "4"], &project);
     assert_eq!(pinned.status.code(), Some(2));
     assert_eq!(stderr(&pinned), "error: --workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU\n");
+    assert!(!project.join(".seedbox").exists());
+    let env_pinned = Command::new(env!("CARGO_BIN_EXE_seedbox"))
+        .args(["explore", "--workers", "2"])
+        .current_dir(&project)
+        .env_clear()
+        .env("HOME", &project)
+        .env("PATH", "")
+        .env("SEEDBOX_CPU", "4")
+        .output()
+        .unwrap();
+    assert_eq!(env_pinned.status.code(), Some(2));
+    assert_eq!(stderr(&env_pinned), stderr(&pinned));
     assert!(!project.join(".seedbox").exists());
     let boundary = seedbox(
         &["explore", "--seed", "18446744073709551615", "--count", "1"],
@@ -481,6 +512,7 @@ fn old_host_proof_replay_is_not_comparable_while_inspection_and_transfer_stay_av
             full_state: None,
             faults: vec![],
             detail: None,
+            engine_qualification: None,
         }),
         error: None,
         logs: BTreeMap::new(),
@@ -527,4 +559,157 @@ fn old_host_proof_replay_is_not_comparable_while_inspection_and_transfer_stay_av
         fs::read(root.join("state/runs/old/manifest.json")).unwrap(),
         manifest
     );
+}
+
+#[test]
+fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let help = seedbox(&["help", "doctor"], root);
+    assert!(help.status.success());
+    let text = String::from_utf8(help.stdout).unwrap();
+    assert!(text.contains("Linux KVM host, root"));
+    for flag in ["--cpu", "--kernel", "--vmm", "--json"] {
+        assert!(text.contains(flag), "{text}");
+    }
+    for flag in [
+        "--state",
+        "--builder",
+        "--undo",
+        "--memory-mb",
+        "--guest-init",
+    ] {
+        assert!(!text.contains(flag), "{text}");
+    }
+    assert!(text.contains("Doctor never builds"));
+    let invalid = seedbox(&["doctor", "--cpu", "1024"], root);
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(stderr(&invalid).contains("--cpu"));
+    for json in [false, true] {
+        let mut args = vec!["doctor", "--vmm", "missing"];
+        if json {
+            args.push("--json");
+        }
+        let output = seedbox(&args, root);
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(stderr(&output), "error: --vmm missing: not found\n");
+        assert!(output.stdout.is_empty());
+    }
+    fs::write(root.join("engine"), b"unsupported engine").unwrap();
+    let missing_kernel = seedbox(&["doctor", "--vmm", "engine", "--kernel", "missing"], root);
+    assert_eq!(
+        stderr(&missing_kernel),
+        "error: --kernel missing: not found\n"
+    );
+    assert!(!root.join(".seedbox").exists());
+}
+
+#[test]
+fn doctor_bad_inputs_execute_no_tools_and_create_no_state_even_with_cargo_environment() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let tools = root.join("tools");
+    fs::create_dir(&tools).unwrap();
+    let marker = root.join("tool-called");
+    for name in ["cargo", "podman", "skopeo", "umoci"] {
+        let tool = tools.join(name);
+        fs::write(
+            &tool,
+            format!(
+                "#!/bin/sh\necho invoked >> '{}'\nexit 0\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    fs::write(root.join("kernel"), b"unqualified fixture kernel").unwrap();
+    for json in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_seedbox"));
+        command.args(["doctor", "--kernel", "kernel"]);
+        if json {
+            command.arg("--json");
+        }
+        let output = command
+            .current_dir(root)
+            .env_clear()
+            .env("HOME", root)
+            .env("PATH", &tools)
+            .env("CARGO_MANIFEST_DIR", env!("CARGO_MANIFEST_DIR"))
+            .env("CARGO", tools.join("cargo"))
+            .env("SEEDBOX_STATE", root.join("unwanted-state"))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        assert!(output.stdout.is_empty());
+        assert!(
+            !marker.exists(),
+            "doctor invoked a runtime/build/preparation program"
+        );
+        assert!(!root.join("unwanted-state").exists());
+        assert!(!root.join(".seedbox").exists());
+        assert!(!root.join("output").exists());
+    }
+    fs::write(root.join("engine"), b"unsupported engine").unwrap();
+    let output = seedbox(&["doctor", "--vmm", "engine", "--kernel", "kernel"], root);
+    assert_eq!(stderr(&output),"error: input integrity: engine is outside the admitted host policy; no engine-change override bypass is available\n");
+    assert!(!marker.exists());
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn dev_engine_opt_in_is_available_only_on_execution_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    for command in ["run", "explore", "replay", "doctor"] {
+        let help = seedbox(&["help", command], dir.path());
+        assert!(help.status.success());
+        assert!(String::from_utf8_lossy(&help.stdout).contains("--allow-dev-engine"));
+        let output = seedbox(
+            &[command, "--allow-dev-engine", "--cpu", "1024"],
+            dir.path(),
+        );
+        assert_eq!(output.status.code(), Some(2));
+        assert!(!stderr(&output).contains("unexpected argument '--allow-dev-engine'"));
+    }
+    for command in ["prepare", "inspect", "export", "import"] {
+        let help = seedbox(&["help", command], dir.path());
+        assert!(!String::from_utf8_lossy(&help.stdout).contains("--allow-dev-engine"));
+    }
+    let output = seedbox(
+        &["doctor", "--allow-dev-engine", "--vmm", "missing"],
+        dir.path(),
+    );
+    assert_eq!(stderr(&output), "error: --vmm missing: not found\n");
+    assert!(output.stdout.is_empty());
+    assert!(!dir.path().join(".seedbox").exists());
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn doctor_dev_opt_in_keeps_host_refusal_and_creates_no_state() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("engine"), b"dev engine").unwrap();
+    fs::write(dir.path().join("kernel"), b"dev kernel").unwrap();
+    for json in [false, true] {
+        let mut args = vec![
+            "doctor",
+            "--allow-dev-engine",
+            "--vmm",
+            "engine",
+            "--kernel",
+            "kernel",
+        ];
+        if json {
+            args.push("--json");
+        }
+        let output = seedbox(&args, dir.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(
+            stderr(&output),
+            "error: run and replay require the qualified Linux KVM host\n"
+        );
+        assert!(output.stdout.is_empty());
+        assert!(!dir.path().join(".seedbox").exists());
+    }
 }

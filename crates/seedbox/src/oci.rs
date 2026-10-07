@@ -221,8 +221,9 @@ impl OciTools {
                     );
                 }
                 let archive = directory.join("build.tar");
-                // A unique tag avoids deleting any pre-existing user image. The
-                // Docker cache is preserved; only this private tag is removed.
+                // A unique tag avoids deleting any pre-existing user image. Only
+                // this private tag is removed; --no-prune keeps its untagged
+                // parent layers, which are the build cache for the next run.
                 let tag_directory = tempfile::Builder::new()
                     .prefix("image-")
                     .tempdir_in(directory)?;
@@ -279,7 +280,7 @@ impl OciTools {
                             .and_then(|_| Err(Error::Execution("unreachable build state".into())));
                     }
                     let mut cleanup = Command::new(&self.docker);
-                    cleanup.args(["--remote=false", "image", "rm", &tag]);
+                    cleanup.args(["--remote=false", "image", "rm", "--no-prune", &tag]);
                     run(&mut cleanup, "tag-cleanup", Some(&tag), false, true)?;
                     build?;
                     evidence.check()?;
@@ -289,7 +290,7 @@ impl OciTools {
                         cleanup.arg("--remote=false");
                     }
                     let cleanup = cleanup
-                        .args(["image", "rm", &tag])
+                        .args(["image", "rm", "--no-prune", &tag])
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
                         .status();
@@ -540,6 +541,69 @@ pub(crate) fn checked(command: &mut Command, log: &Path) -> Result<()> {
 mod context_tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[test]
+    fn failed_build_cleans_only_its_private_tag_without_pruning_in_both_paths() {
+        // These are recorded host-process fixtures, never a native image build.
+        for owned in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let context = root.path().join("context");
+            fs::create_dir(&context).unwrap();
+            fs::write(context.join("Dockerfile"), "FROM scratch\n").unwrap();
+            let argv = root.path().join("cleanup-argv");
+            let builder = root.path().join("builder");
+            fs::write(&builder, format!(
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo fixture-v1; exit 0; fi\nif [ \"$1\" = --remote=false ]; then shift; fi\ncase \"$1\" in build) exit 7;; image) printf '%s\\n' \"$@\" > '{}'; exit 0;; *) exit 9;; esac\n", argv.display())).unwrap();
+            fs::set_permissions(&builder, fs::Permissions::from_mode(0o755)).unwrap();
+            let transport = root.path().join("transport");
+            fs::write(
+                &transport,
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then echo fixture-v1; exit 0; fi\nexit 9\n",
+            )
+            .unwrap();
+            fs::set_permissions(&transport, fs::Permissions::from_mode(0o755)).unwrap();
+            let simulation = crate::config::parse(
+                "name: cleanup\nservices:\n  app: {build: ./context}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n",
+                &root.path().join("compose.yaml"), &BTreeMap::new()).unwrap();
+            let tools = OciTools {
+                docker: builder,
+                skopeo: transport.clone(),
+                umoci: transport,
+                build_epoch: None,
+            };
+            let evidence = crate::preparation::PreparationContext::new(
+                root.path().join("evidence"),
+                crate::execution::CancellationToken::default(),
+            )
+            .unwrap();
+            let result = tools.import_with_context(
+                &simulation.services["app"],
+                &root.path().join("import"),
+                &ContentStore::new(root.path().join("store")),
+                owned.then_some((&evidence, "app")),
+            );
+            let error = result.err().unwrap();
+            assert!(matches!(error, Error::Execution(_)));
+            assert!(error.to_string().contains('7'));
+            let actual = fs::read_to_string(&argv).unwrap();
+            let args: Vec<_> = actual.lines().collect();
+            assert_eq!(&args[..3], ["image", "rm", "--no-prune"]);
+            assert_eq!(args.len(), 4);
+            assert!(args[3].starts_with("seedbox-build:image-"));
+            if owned {
+                let receipt: serde_json::Value = serde_json::from_slice(
+                    &fs::read(root.path().join("evidence/app-tag-cleanup.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    receipt["argv"],
+                    serde_json::json!(["--remote=false", "image", "rm", "--no-prune", args[3]])
+                );
+                assert_eq!(receipt["private_tag"], args[3]);
+                assert_eq!(receipt["reaped"], true);
+            }
+        }
+    }
 
     #[test]
     fn explicit_epoch_rejects_custom_builder_before_creating_import_directory() {

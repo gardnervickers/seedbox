@@ -76,6 +76,7 @@ class BatchTests(unittest.TestCase):
                 sender.start()
             with patch.object(batch, 'siblings', side_effect=lambda cpu:{cpu,cpu+16}), \
                  patch.object(batch.subprocess, 'Popen', side_effect=launch), \
+                 patch.object(batch.msr54, 'required', return_value=True), \
                  patch.object(batch.msr54, 'show'), \
                  patch.object(batch.msr54, 'set_workaround', side_effect=set_msr), \
                  patch.object(batch.msr54, 'restore_snapshot', side_effect=restore):
@@ -106,7 +107,9 @@ class BatchTests(unittest.TestCase):
             pid_file = Path(tmp)/'descendant'
             child = subprocess.Popen([sys.executable,'-c',
                 'import os,signal,time,sys; p=os.fork(); '
-                'open(sys.argv[1],"w").write(str(p)) if p else None; '
+                # Publish the pid atomically so the wait below never reads an empty file.
+                'open(sys.argv[1]+".tmp","w").write(str(p)) if p else None; '
+                'os.replace(sys.argv[1]+".tmp",sys.argv[1]) if p else None; '
                 'signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(60)',str(pid_file)],
                 start_new_session=True)
             try:

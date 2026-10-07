@@ -1,0 +1,69 @@
+{
+  "kernel": "../../artifacts/bzImage",
+  "mem_mb": 1024,
+  "duration_ns": 20000000000,
+  "stop_tolerance_ns": 2000000,
+  "timer_jitter_ns": 1000000,
+  "end_on_exit": "client",
+  "boot": {
+    "seed": 1,
+    "release_skew_ns": 50000000
+  },
+  "machines": [
+    {
+      "name": "n1",
+      "initrd": "../../artifacts/multi.cpio"
+    },
+    {
+      "name": "n2",
+      "initrd": "../../artifacts/multi.cpio"
+    },
+    {
+      "name": "n3",
+      "initrd": "../../artifacts/multi.cpio"
+    },
+    {
+      "name": "client",
+      "initrd": "../../artifacts/multi.cpio",
+      "cmdline": "seedbox.delay=1.5 seedbox.load=10s seedbox.concurrency=2 seedbox.writes=64 seedbox.net_delay=1ms"
+    }
+  ],
+  "network": {
+    "latency_ns": 1000000,
+    "jitter_ns": 200000
+  },
+  "scenario": [
+    {
+      "at_ns": 2500000000,
+      "partition": [
+        "n1",
+        "n2"
+      ],
+      "on": true
+    },
+    {
+      "at_ns": 2500000000,
+      "partition": [
+        "n2",
+        "n1"
+      ],
+      "on": true
+    },
+    {
+      "at_ns": 3500000000,
+      "partition": [
+        "n1",
+        "n2"
+      ],
+      "on": false
+    },
+    {
+      "at_ns": 3500000000,
+      "partition": [
+        "n2",
+        "n1"
+      ],
+      "on": false
+    }
+  ]
+}

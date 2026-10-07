@@ -14,7 +14,7 @@ use std::os::fd::AsRawFd;
 const KVM_GET_DIRTY_LOG: libc::c_ulong = 0x4010_ae42;
 const PAGE: usize = 4096;
 
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct UndoStats {
     pub checkpoints: u64,
     pub rollbacks: u64,
@@ -24,16 +24,8 @@ pub struct UndoStats {
     pub rollback_ns: u128,
 }
 
-pub struct Undo {
-    shadow: *mut u8,
-    size: usize,
-    /// Dirty bitmap buffer for KVM_GET_DIRTY_LOG.
-    log: Vec<u64>,
-    /// Pages written by the VMM since the last sync.
-    vmm: Vec<u64>,
-    msr_index: Vec<u32>,
-    /// A checkpoint is held and nothing observable happened since.
-    pub valid: bool,
+/// Architectural vCPU state that a checkpoint or a world fork puts back.
+pub struct VcpuState {
     regs: kvm_regs,
     sregs: kvm_sregs,
     xsave: Box<kvm_xsave>,
@@ -42,6 +34,113 @@ pub struct Undo {
     debugregs: kvm_debugregs,
     events: kvm_vcpu_events,
     mp: kvm_mp_state,
+}
+
+/// MSRs the guest may change, minus the TSC and paravirt ones; keep those KVM
+/// lets the VMM read.
+pub fn msr_list(kvm: &Kvm, vcpu: &VcpuFd) -> Result<Msrs, String> {
+    let list = kvm.get_msr_index_list().map_err(|e| format!("msr list: {e}"))?;
+    let mut msr_index = Vec::new();
+    for &i in list.as_slice() {
+        if is_tsc_or_pv(i) {
+            continue;
+        }
+        let mut one = Msrs::from_entries(&[kvm_msr_entry { index: i, ..Default::default() }])
+            .map_err(|e| format!("msrs: {e:?}"))?;
+        if matches!(vcpu.get_msrs(&mut one), Ok(1)) {
+            msr_index.push(i);
+        }
+    }
+    let entries: Vec<kvm_msr_entry> = msr_index
+        .iter()
+        .map(|&index| kvm_msr_entry { index, ..Default::default() })
+        .collect();
+    Msrs::from_entries(&entries).map_err(|e| format!("msrs: {e:?}"))
+}
+
+impl VcpuState {
+    pub fn new(msrs: Msrs) -> Self {
+        Self {
+            regs: Default::default(),
+            sregs: Default::default(),
+            xsave: Box::default(),
+            xcrs: Default::default(),
+            msrs,
+            debugregs: Default::default(),
+            events: Default::default(),
+            mp: Default::default(),
+        }
+    }
+
+    /// Read the vCPU. It must have no I/O pending completion.
+    pub fn save(&mut self, vcpu: &VcpuFd, what: &str) -> Result<(), String> {
+        let e = |part: &str, err: kvm_ioctls::Error| format!("{what} {part}: {err}");
+        self.regs = vcpu.get_regs().map_err(|x| e("regs", x))?;
+        self.sregs = vcpu.get_sregs().map_err(|x| e("sregs", x))?;
+        *self.xsave = vcpu.get_xsave().map_err(|x| e("xsave", x))?;
+        self.xcrs = vcpu.get_xcrs().map_err(|x| e("xcrs", x))?;
+        let want = self.msrs.as_slice().len();
+        let n = vcpu.get_msrs(&mut self.msrs).map_err(|x| e("msrs", x))?;
+        if n != want {
+            return Err(format!("{what} msrs: read {n} of {want}"));
+        }
+        self.debugregs = vcpu.get_debug_regs().map_err(|x| e("debugregs", x))?;
+        self.events = vcpu.get_vcpu_events().map_err(|x| e("events", x))?;
+        self.mp = vcpu.get_mp_state().map_err(|x| e("mp_state", x))?;
+        Ok(())
+    }
+
+    /// Write the state back. The vCPU must have no I/O pending completion.
+    /// Returns the restored registers.
+    pub fn restore(&self, vcpu: &VcpuFd, what: &str) -> Result<(kvm_regs, kvm_sregs), String> {
+        let e = |part: &str, err: kvm_ioctls::Error| format!("{what} {part}: {err}");
+        vcpu.set_regs(&self.regs).map_err(|x| e("regs", x))?;
+        unsafe { vcpu.set_xsave(&self.xsave) }.map_err(|x| e("xsave", x))?;
+        vcpu.set_xcrs(&self.xcrs).map_err(|x| e("xcrs", x))?;
+        vcpu.set_sregs(&self.sregs).map_err(|x| e("sregs", x))?;
+        // Write back only the MSRs that changed.
+        let mut now = self.msrs.clone();
+        vcpu.get_msrs(&mut now).map_err(|x| e("msrs", x))?;
+        let changed: Vec<kvm_msr_entry> = self
+            .msrs
+            .as_slice()
+            .iter()
+            .zip(now.as_slice())
+            .filter(|(a, b)| a.data != b.data)
+            .map(|(a, _)| *a)
+            .collect();
+        if !changed.is_empty() {
+            let m = Msrs::from_entries(&changed).map_err(|x| format!("msrs: {x:?}"))?;
+            let n = vcpu.set_msrs(&m).map_err(|x| e("msrs", x))?;
+            if n != changed.len() {
+                return Err(format!(
+                    "{what} msrs: wrote {n} of {} ({:#x})",
+                    changed.len(),
+                    changed[n].index
+                ));
+            }
+        }
+        let mut ev = self.events;
+        ev.flags |= KVM_VCPUEVENT_VALID_NMI_PENDING;
+        vcpu.set_vcpu_events(&ev).map_err(|x| e("events", x))?;
+        vcpu.set_mp_state(self.mp).map_err(|x| e("mp_state", x))?;
+        vcpu.set_debug_regs(&self.debugregs).map_err(|x| e("debugregs", x))?;
+        Ok((self.regs, self.sregs))
+    }
+}
+
+pub struct Undo {
+    shadow: *mut u8,
+    size: usize,
+    /// Dirty bitmap buffer for KVM_GET_DIRTY_LOG.
+    log: Vec<u64>,
+    /// Pages written by the VMM since the last sync.
+    vmm: Vec<u64>,
+    /// Pages written by anyone since the world's fork point, when one is held.
+    since_fork: Option<Vec<u64>>,
+    /// A checkpoint is held and nothing observable happened since.
+    pub valid: bool,
+    cpu: VcpuState,
     /// Machine-level state restored with the vCPU.
     pub page: [u64; crate::machine::PAGE_FIELDS],
     pub time: u64,
@@ -57,40 +156,15 @@ fn is_tsc_or_pv(i: u32) -> bool {
 impl Undo {
     pub fn new(kvm: &Kvm, vcpu: &VcpuFd, size: usize) -> Result<Self, String> {
         let shadow = crate::machine::map(size)?;
-        // MSRs the guest may change, minus the TSC and paravirt ones; keep
-        // those KVM lets the VMM read.
-        let list = kvm.get_msr_index_list().map_err(|e| format!("msr list: {e}"))?;
-        let mut msr_index = Vec::new();
-        for &i in list.as_slice() {
-            if is_tsc_or_pv(i) {
-                continue;
-            }
-            let mut one = Msrs::from_entries(&[kvm_msr_entry { index: i, ..Default::default() }])
-                .map_err(|e| format!("msrs: {e:?}"))?;
-            if matches!(vcpu.get_msrs(&mut one), Ok(1)) {
-                msr_index.push(i);
-            }
-        }
-        let entries: Vec<kvm_msr_entry> = msr_index
-            .iter()
-            .map(|&index| kvm_msr_entry { index, ..Default::default() })
-            .collect();
         let pages = size / PAGE;
         Ok(Self {
             shadow,
             size,
             log: vec![0; pages.div_ceil(64)],
             vmm: vec![0; pages.div_ceil(64)],
-            msrs: Msrs::from_entries(&entries).map_err(|e| format!("msrs: {e:?}"))?,
-            msr_index,
+            since_fork: None,
             valid: false,
-            regs: Default::default(),
-            sregs: Default::default(),
-            xsave: Box::default(),
-            xcrs: Default::default(),
-            debugregs: Default::default(),
-            events: Default::default(),
-            mp: Default::default(),
+            cpu: VcpuState::new(msr_list(kvm, vcpu)?),
             page: [0; crate::machine::PAGE_FIELDS],
             time: 0,
             branches: 0,
@@ -126,6 +200,11 @@ impl Undo {
         for (l, v) in self.log.iter_mut().zip(self.vmm.iter_mut()) {
             *l |= std::mem::take(v);
         }
+        if let Some(fork) = self.since_fork.as_mut() {
+            for (f, l) in fork.iter_mut().zip(self.log.iter()) {
+                *f |= *l;
+            }
+        }
         Ok(())
     }
 
@@ -149,20 +228,9 @@ impl Undo {
 
     /// Save guest state. The vCPU must have no I/O pending completion.
     pub fn save(&mut self, vm: &VmFd, vcpu: &VcpuFd, mem: *mut u8) -> Result<(), String> {
-        let e = |what: &str, err: kvm_ioctls::Error| format!("checkpoint {what}: {err}");
         self.fetch(vm)?;
         self.stats.synced_pages += self.copy_logged(mem, self.shadow);
-        self.regs = vcpu.get_regs().map_err(|x| e("regs", x))?;
-        self.sregs = vcpu.get_sregs().map_err(|x| e("sregs", x))?;
-        *self.xsave = vcpu.get_xsave().map_err(|x| e("xsave", x))?;
-        self.xcrs = vcpu.get_xcrs().map_err(|x| e("xcrs", x))?;
-        let n = vcpu.get_msrs(&mut self.msrs).map_err(|x| e("msrs", x))?;
-        if n != self.msr_index.len() {
-            return Err(format!("checkpoint msrs: read {n} of {}", self.msr_index.len()));
-        }
-        self.debugregs = vcpu.get_debug_regs().map_err(|x| e("debugregs", x))?;
-        self.events = vcpu.get_vcpu_events().map_err(|x| e("events", x))?;
-        self.mp = vcpu.get_mp_state().map_err(|x| e("mp_state", x))?;
+        self.cpu.save(vcpu, "checkpoint")?;
         self.valid = true;
         self.stats.checkpoints += 1;
         Ok(())
@@ -176,41 +244,41 @@ impl Undo {
         vcpu: &VcpuFd,
         mem: *mut u8,
     ) -> Result<(kvm_regs, kvm_sregs), String> {
-        let e = |what: &str, err: kvm_ioctls::Error| format!("rollback {what}: {err}");
         self.fetch(vm)?;
         self.stats.restored_pages += self.copy_logged(self.shadow, mem);
-        vcpu.set_regs(&self.regs).map_err(|x| e("regs", x))?;
-        unsafe { vcpu.set_xsave(&self.xsave) }.map_err(|x| e("xsave", x))?;
-        vcpu.set_xcrs(&self.xcrs).map_err(|x| e("xcrs", x))?;
-        vcpu.set_sregs(&self.sregs).map_err(|x| e("sregs", x))?;
-        // Write back only the MSRs that changed.
-        let mut now = self.msrs.clone();
-        vcpu.get_msrs(&mut now).map_err(|x| e("msrs", x))?;
-        let changed: Vec<kvm_msr_entry> = self
-            .msrs
-            .as_slice()
-            .iter()
-            .zip(now.as_slice())
-            .filter(|(a, b)| a.data != b.data)
-            .map(|(a, _)| *a)
-            .collect();
-        if !changed.is_empty() {
-            let m = Msrs::from_entries(&changed).map_err(|x| format!("msrs: {x:?}"))?;
-            let n = vcpu.set_msrs(&m).map_err(|x| e("msrs", x))?;
-            if n != changed.len() {
-                return Err(format!(
-                    "rollback msrs: wrote {n} of {} ({:#x})",
-                    changed.len(),
-                    changed[n].index
-                ));
-            }
-        }
-        let mut ev = self.events;
-        ev.flags |= KVM_VCPUEVENT_VALID_NMI_PENDING;
-        vcpu.set_vcpu_events(&ev).map_err(|x| e("events", x))?;
-        vcpu.set_mp_state(self.mp).map_err(|x| e("mp_state", x))?;
-        vcpu.set_debug_regs(&self.debugregs).map_err(|x| e("debugregs", x))?;
+        let restored = self.cpu.restore(vcpu, "rollback")?;
         self.stats.rollbacks += 1;
-        Ok((self.regs, self.sregs))
+        Ok(restored)
+    }
+
+    /// Bring the shadow up to RAM and start tracking every page written from
+    /// here on, so a fork can later be put back by copying only those pages.
+    pub fn fork_point(&mut self, vm: &VmFd, mem: *mut u8) -> Result<(), String> {
+        self.fetch(vm)?;
+        self.stats.synced_pages += self.copy_logged(mem, self.shadow);
+        self.since_fork = Some(vec![0; self.log.len()]);
+        self.valid = false;
+        Ok(())
+    }
+
+    pub fn holds_fork_point(&self) -> bool {
+        self.since_fork.is_some()
+    }
+
+    /// Put RAM and the shadow back to `image`, the RAM saved at the fork point,
+    /// on every page written since. Returns the page count.
+    pub fn return_to_fork(&mut self, vm: &VmFd, mem: *mut u8, image: *const u8) -> Result<u64, String> {
+        if self.since_fork.is_none() {
+            return Err("no fork point held".into());
+        }
+        self.fetch(vm)?;
+        let fork = self.since_fork.as_mut().unwrap();
+        std::mem::swap(&mut self.log, fork);
+        let n = self.copy_logged(image, mem);
+        self.copy_logged(image, self.shadow);
+        self.log.fill(0);
+        self.since_fork.as_mut().unwrap().fill(0);
+        self.valid = false;
+        Ok(n)
     }
 }

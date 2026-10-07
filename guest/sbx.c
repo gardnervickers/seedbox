@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <stdint.h>
+#include "barrier.h"
 
 int main(int argc, char **argv) {
 	if (argc == 2 && !strcmp(argv[1], "time")) {
@@ -19,6 +20,10 @@ int main(int argc, char **argv) {
 		outb(atoi(argv[2]), 0xf4);
 		for (;;) pause();
 	}
-	fprintf(stderr, "usage: sbx exit CODE | time\n");
+	if (argc == 2 && !strcmp(argv[1], "barrier")) {
+		if (seedbox_launch_barrier("/proc/cmdline", "/dev/urandom")) { perror("barrier"); return 1; }
+		return 0;
+	}
+	fprintf(stderr, "usage: sbx exit CODE | time | barrier\n");
 	return 2;
 }

@@ -2,7 +2,7 @@
 
 This Rust crate implements [issue #2](https://github.com/gardnervickers/seedbox/issues/2)'s
 Compose-shaped application configuration and OCI run/replay path. The CLI exposes
-`init`, `validate`, `prepare`, `run`, `explore`, `inspect`, `replay`, `export`, and `import`. `OciPreparer` and
+`init`, `validate`, `doctor`, `prepare`, `run`, `explore`, `inspect`, `replay`, `export`, and `import`. `OciPreparer` and
 `VmmExecutor` implement separate programmatic preparation/execution interfaces;
 the orchestration API can be called directly by future simulation schedulers.
 

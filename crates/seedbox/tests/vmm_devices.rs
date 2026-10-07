@@ -127,3 +127,77 @@ fn accepted_backlog_has_no_irq_until_dma_and_full_backlog_drops() {
         }
     );
 }
+
+fn tx_descriptor(memory: &mut [u8], index: usize, address: u64, bytes: &[u8], next: Option<u16>) {
+    let descriptor = 0x100 + 16 * index;
+    memory[descriptor..descriptor + 8].copy_from_slice(&address.to_le_bytes());
+    memory[descriptor + 8..descriptor + 12].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+    memory[descriptor + 12..descriptor + 14]
+        .copy_from_slice(&u16::from(next.is_some()).to_le_bytes());
+    memory[descriptor + 14..descriptor + 16].copy_from_slice(&next.unwrap_or(0).to_le_bytes());
+    let address = address as usize;
+    memory[address..address + bytes.len()].copy_from_slice(bytes);
+}
+
+#[test]
+fn tx_chains_preserve_opaque_bytes_and_complete_each_available_head_once() {
+    let mut net = virtio_net::VirtioNet::new([2, 0, 0, 0, 0, 1]);
+    let mut memory = vec![0; 4096];
+    let frame = b"\xff\x00\x80\xfe\x01\x02\x00\x03\x04\x05\x06\x07\x88\xb5\x00\xff\n\r\x80payload";
+    let second = b"\x00\xff\x80\x00second\n";
+    let mut packet = vec![0x5a; 12]; // Nonzero virtio header must be stripped, not interpreted as payload.
+    packet.extend_from_slice(frame);
+    // Follow descriptor links 2 -> 0 -> 3, not descriptor or guest-address order.
+    // The header itself crosses a descriptor boundary.
+    tx_descriptor(&mut memory, 2, 0x700, &packet[..8], Some(0));
+    tx_descriptor(&mut memory, 0, 0x500, &packet[8..19], Some(3));
+    tx_descriptor(&mut memory, 3, 0x600, &packet[19..], None);
+    let mut packet_two = vec![0xa5; 12];
+    packet_two.extend_from_slice(second);
+    tx_descriptor(&mut memory, 1, 0x800, &packet_two, None);
+    memory[0x204..0x206].copy_from_slice(&2u16.to_le_bytes());
+    memory[0x206..0x208].copy_from_slice(&1u16.to_le_bytes());
+    for (offset, value) in [
+        (0x030, 1),
+        (0x038, 4),
+        (0x080, 0x100),
+        (0x090, 0x200),
+        (0x0a0, 0x300),
+        (0x044, 1),
+    ] {
+        net.write(&mut memory, offset, value);
+    }
+    let empty = net.write(&mut memory, 0x050, 1);
+    assert!(empty.frames.is_empty());
+    assert!(!empty.irq);
+    assert!(net.dirty.is_empty());
+    memory[0x202..0x204].copy_from_slice(&2u16.to_le_bytes());
+    let output = net.write(&mut memory, 0x050, 1);
+    assert_eq!(output.frames, vec![frame.to_vec(), second.to_vec()]);
+    assert!(output.irq);
+    assert_eq!(net.read(0x060), 1);
+    assert_eq!(net.tx_frames, 2);
+    assert_eq!(
+        &memory[0x302..0x314],
+        &[
+            2, 0, // used index
+            2, 0, 0, 0, 0, 0, 0, 0, // first head, length zero
+            1, 0, 0, 0, 0, 0, 0, 0, // second head, length zero
+        ]
+    );
+    assert_eq!(
+        net.dirty,
+        vec![(0x304, 8), (0x302, 2), (0x30c, 8), (0x302, 2)]
+    );
+    // The returned frames own their bytes; subsequent guest writes cannot change them.
+    memory[0x500..0x900].fill(0);
+    assert_eq!(output.frames, vec![frame.to_vec(), second.to_vec()]);
+    net.dirty.clear();
+    net.write(&mut memory, 0x064, 1);
+    let duplicate = net.write(&mut memory, 0x050, 1);
+    assert!(duplicate.frames.is_empty());
+    assert!(!duplicate.irq);
+    assert_eq!(net.read(0x060), 0);
+    assert_eq!(net.tx_frames, 2);
+    assert!(net.dirty.is_empty());
+}

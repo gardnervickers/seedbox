@@ -39,8 +39,16 @@ directory. Every runtime input has a default, so no flags are required:
 | Guest supervisor | built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | BusyBox | `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
 | Build epoch | absent; preserve the builder's ordinary timestamp policy | `--build-epoch` (prepare/run/explore; no environment backing) |
+| Engine qualification | pinned engine and guest kernel; dev artifacts require explicit opt-in | `--allow-dev-engine` (run/explore/replay/doctor; no environment backing) |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
+
+For development artifacts, pass `--allow-dev-engine` to `run`, `explore`, `replay`
+or `doctor`. Unpinned engine or guest-kernel bytes record the semantic parameter
+`engine_qualification = "dev-unpinned"` and are reported as an unqualified dev
+engine. Replay requires this flag and the exact retained engine/kernel hashes;
+bundles preserve the marker. Passing the flag with both pinned artifacts adds no
+marker. All host, CPU, PMU, MSR, lease, ABI and control-channel checks still apply.
 
 `seedbox help run` lists every option. A run prints `OUTCOME: run-directory`;
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
@@ -132,16 +140,16 @@ rebuilt OCI images to have identical bytes.
   conditional branches (guest only, kernel and user). Virtual time advances
   1 ns per branch; idle machines jump to their next event.
 - **Stops.** Events (timer deadlines, frames, scenario commands) are delivered
-  at deterministic points only: a natural VM exit, the guest's next syscall
-  (a small kernel hook offers that exit), or an exact branch count reached by
-  overflow interrupt plus hardware-breakpoint stepping (no TF). A timer
-  interrupt fires at the first such point at or after its deadline, at most
-  `stop_tolerance_ns` late. An overflow interrupt that skids past a stop, or
-  past a syscall that would have been one, fails the run rather than moving
+  at deterministic points only: a natural VM exit, or an exact branch count
+  reached by overflow interrupt plus hardware-breakpoint stepping (no TF).
+  Syscalls are not stopping points. A timer interrupt fires at the first
+  natural exit at or after its deadline, at most `stop_tolerance_ns` late, and
+  then by an exact count. An overflow interrupt that skids past a counted
+  stop is rolled back and retried closer, or fails the run, rather than moving
   the stop.
 - **Guest kernel changes** (`kernel/`): kernel TSC reads return VMM-published
-  virtual time; user RDTSC/RDTSCP trap via CR4.TSD and are emulated; a syscall
-  hook offers yield exits.
+  virtual time; user RDTSC/RDTSCP trap via CR4.TSD and are emulated. The
+  kernel's syscall yield hook remains, but the engine never requests it.
 - **Network and scheduling.** virtio-net over virtio-mmio into an in-memory
   fabric with seeded latency/jitter and directed partitions. The world runs the
   machine furthest behind in slices that never pass its causal horizon (the
@@ -156,6 +164,13 @@ rebuilt OCI images to have identical bytes.
 ## Host requirements
 
 - x86-64 AMD Zen host with KVM, run as root (guest-only perf counting).
+  Seedbox picks a branch counter profile from CPUID at startup
+  (`crates/seedbox/src/counter.rs`, `crates/seedbox-vmm/src/profile.rs`) and
+  records it in each run's identity, so a run replays only with the counter
+  that made it. Only Zen is qualified. Non-hybrid Intel cores have profiles
+  (`intel-0x5101c4` up to Comet Lake, `intel-0x5111c4` from Ice Lake) that
+  have never run on hardware; `run` and `replay` refuse them unless given
+  `--allow-unqualified-cpu`, and then warn that results are unverified.
 - **The Zen SpeculativeLockMap workaround must be on** for the cores running
   simulations (MSR 0xC0011020 bit 54, rr's workaround). Without it, branch
   counts drift on lock-heavy code (e.g. Go) and runs diverge. The Rust executor
@@ -163,7 +178,18 @@ rebuilt OCI images to have identical bytes.
   it with readback, then restores the exact originals after reaping its child.
   The legacy `batch.sh` runner uses the same lease protocol.
 
-The versioned `amd-zen3-engine168ad-v1` admission policy checks AMD family 25,
+`--allow-unqualified-cpu` also applies to `explore`. This explicit non-Zen
+path is experimental: it retains the counter in identity, validates exact
+supported release inputs and applicable KVM capabilities, and holds every SMT
+lease through child cleanup. It carries no qualified AMD host-policy proof and
+never opens AMD workaround MSRs. `doctor` refuses an unqualified counter rather
+than reporting qualified compatibility. The source policy now pins the frozen engine52eb and accepted guest kernel.
+The artifact is built but unqualified: this staged release still requires fresh
+runtime acceptance before use. Disabled selected-event readiness is checked
+before preparation and again under held leases; no guest counter is enabled by
+admission. Intel determinism is not established.
+
+The versioned `amd-zen3-engine52eb-v1` admission policy checks AMD family 25,
 model 33, stepping 0 and microcode 0xa20102e, exact booted/current host kernel and
 controlled guest-kernel bytes, accepted engine bytes, KVM capabilities and the
 engine's complete existing CPUID policy. Before image preparation, it temporarily
@@ -174,13 +200,27 @@ This is readiness admission; it does not prove guest counting, overflow behavior
 or cross-host determinism. Matching a second machine admits compatibility without
 host-ID enrollment. Support evidence remains the tested host and inputs.
 
-New run identities bind the full policy and its fingerprint. Existing records
+Qualified Zen run identities bind the full policy and its fingerprint. Existing records
 remain inspectable and transferable, but replay through this CLI rejects missing
 or drifted host-policy proof as ERROR/NOT_COMPARABLE (exit 2), even with
 `--allow-engine-change`. A retained previous CLI can still be used for explicitly
 historical evidence; its execution does not establish new-policy admission.
-A new engine/kernel/policy requires its own acceptance. Admission source checks
+A new engine/kernel/policy requires its own acceptance for qualification.
+`--allow-dev-engine` admits unpinned engine/kernel bytes for development with a
+retained unqualified marker; it never bypasses missing or drifted host proof. Admission source checks
 are separate from the still-required focused Linux guest/profile acceptance.
+
+## Check execution compatibility
+
+`seedbox doctor` checks the installed engine, guest kernel and selected host core
+against the same versioned admission policy used by execution. It needs a Linux
+KVM host and root, uses the normal `--cpu`, `--kernel` and `--vmm` defaults, and
+never builds a missing VMM, prepares images or starts guests. `--json` prints the
+exact admitted observations, plus `engine_qualification: "dev-unpinned"` for dev
+artifacts. With `--allow-dev-engine`, unpinned artifacts print `dev engine:
+unqualified` and receive no qualification claim. Success prints `VALID` after probe resources and
+thread affinity are verified cleaned up; problems use the ordinary error and
+exit status 2. This is compatibility readiness, not cross-host replay qualification.
 
 ## Applications
 
@@ -243,9 +283,9 @@ MSR restoration. See [the fixture map](harness/worlds/README.md).
 
 Stop placement settings affect speed only, never results. `--undo` controls the
 precise-stop rollback window (default 256; 0 disables it). `--margin` selects the
-PMU approach and stepping distance when undo is off (default `adaptive`). Syscall
-exits remain available throughout a soft stop interval independently of that
-setting; earlier yields do not publish a stop or inject an interrupt. The
+PMU approach and stepping distance when undo is off (default `adaptive`). Neither
+setting decides where a stop lands: the first natural exit at or after the soft
+target and below the hard target, otherwise an exact count at the hard target. The
 low-level batch runner uses `SEEDBOX_UNDO` and `SEEDBOX_MARGIN` for the same settings.
 
 A PMU overshoot aborts an execution. A separate invocation can use a larger

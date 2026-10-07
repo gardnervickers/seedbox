@@ -97,3 +97,24 @@ second machine is compatibility admission, not cross-host qualification. Old
 records stay inspectable/exportable/importable, but absent or drifted host proof
 is NOT_COMPARABLE (exit 2) in this CLI and cannot be bypassed with
 `--allow-engine-change`. A retained previous CLI is only historical evidence.
+
+Check the host and installed engine/kernel with `seedbox doctor` (Linux KVM,
+root) before running. It uses the normal CPU/runtime defaults without building,
+preparing images or starting guests. `VALID` means execution-profile compatibility,
+not cross-host replay qualification; `--json` shows the admitted observations.
+
+Known non-Zen counters require explicit `--allow-unqualified-cpu` for run,
+explore and replay and remain unverified. They retain exact release/counter/input
+checks and SMT ownership but carry no qualified AMD proof or AMD MSR writes.
+`doctor` refuses those counters. The source policy pins built-but-unqualified engine52eb; fresh runtime acceptance
+is still required. Disabled selected-event readiness precedes preparation and
+is rechecked under leases; it never enables a guest counter. Intel is not qualified.
+
+For unpinned development engines or guest kernels, pass `--allow-dev-engine` to
+run, explore, replay or doctor. These runs bind `engine_qualification =
+"dev-unpinned"` in identity and report, preserved by inspect and bundles. Replay
+requires the flag and the exact retained artifact hashes and labels comparisons
+`unqualified dev engine`; without it replay retains NOT_COMPARABLE naming the
+flag. Doctor prints `dev engine: unqualified` for dev artifacts. The flag with
+both pinned artifacts adds no marker. Every host/CPU/PMU/MSR/lease/ABI check
+still applies, and release qualification still requires its own acceptance.
