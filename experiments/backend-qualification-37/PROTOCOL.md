@@ -1,4 +1,4 @@
-# Qualification proposal for #37
+# AMD admission checkpoint and deferred portability for #37
 
 Research revision based on Seedbox `8a3e14ab2d9ded39082e1bc6c0f5ac531a454ce4`.
 This branch contains procedures and observations; it changes no production code
@@ -25,6 +25,42 @@ its own pinned shell after two environment-only failures: missing offline
 dependencies, then `--max-jobs 0` preventing the local shell derivation. Cached
 dependencies plus one bounded shell build resolved that prerequisite; neither
 failed attempt reached a test or guest execution.
+
+## Smallest current-platform admission recommendation
+
+Use #33's reviewed integrated candidate/matrix and #36's retained coverage map;
+do not start another AMD campaign for this lane. Cross-host and Intel work are
+parked and cannot become prerequisites for useful single-host qualification.
+The additional evidence needed now is limited to:
+
+1. Resolve the known clock-bound and default PMU failures with causal evidence;
+   qualify the exact corrected candidate at the ordinary default settings.
+   An original ERROR followed by PASS/NOT_COMPARABLE is diagnostic evidence,
+   not a qualified replay.
+2. Fresh-process replay of the exact retained candidate/input/seed on this
+   concrete AMD host, including the available full-state and margin/undo/
+   observation comparisons. Preserve any default failure or unexplained drift.
+3. The already agreed genuine application/fault/race and checker-control cases:
+   use existing user-owned checkers and designated expected exit status, verify
+   actual fault effects/recovery, and retain errors/incomplete attempts. A
+   planted failure does not replace a genuinely discovered application failure.
+4. Existing lifecycle/content-retention/lease tests plus exact MSR restoration.
+   To claim the workaround was enabled during execution, capture a valid
+   read-only sample while the executor's original-value snapshot and CPU/SMT
+   leases are still held. External before/after values alone prove restoration,
+   not the enabled interval. #33 owns this capture; its sampling proposal is
+   not already implemented/tested evidence. Discard absent or racy samples.
+5. Bind that receipt to this actual CPU/kernel/microcode, exact binaries/guest
+   inputs and existing guest CPU/clock/entropy policy. State the tested runtime
+   and instruction/clock paths; do not infer arbitrary Linux/JVM admission from
+   the inventory. Supported CPUID is observed here; actual guest CPUID is not.
+
+These checks protect deterministic replay, real application/fault behavior and
+resource ownership on the first platform. They do not require a new output
+schema, generalized admission product or backend abstraction. Any additional
+#5 tooling needs a separately justified concrete gap in this existing matrix.
+Collect boot/RSS/host-cost evidence opportunistically in candidate runs; it is
+not a new correctness gate and configured RAM is not a residency measurement.
 
 ## Evidence scope
 
@@ -69,7 +105,12 @@ values, the transfer command and this exact archive revision identify it.
   not a reservation or proof that all locks are visible. Before any future guest,
   inspect live jobs and acquire the actual shared locks. Engine reserves 2/18.
 
-## Candidate and compatibility record
+## Already-prepared record/procedure reference (parked portability)
+
+The remaining procedure was prepared before the scope reduction. Preserve it
+for future access; it is **not the current V0 gate or a framework backlog**.
+The current recommendation above takes priority. Do not implement new collectors,
+formats, CPU-model abstractions or provider probes to complete this checkpoint.
 
 The engine owner must provide an accepted, exact candidate and retained case set.
 Do not select an older passing build to bypass an unresolved default-setting bug.
@@ -128,7 +169,7 @@ external schemas, SDK conventions or production API proposals. They impose no
 application-output/signature format, checker logic or workload coordination.
 Application payloads, artifacts and their meanings remain user-owned.
 
-## Minimum cross-host admission matrix
+## Parked cross-host admission procedure
 
 Prerequisites: engine #33's integrated candidate passes default/performance tests;
 the public-CLI case migration has a reviewed coverage inventory; A and B are two
@@ -358,8 +399,9 @@ the design-only final gate, use the issue-comment URL and exact branch SHA; the
 reviewer requests the manager's independent expectations before giving final OK.
 Do not merge the branch or implement backend abstractions from this proposal.
 
-Immediate follow-up belongs to engine #33 and #5: complete the existing AMD
-default/performance/observation and substantive application/fault qualification,
-then implement reviewed profile admission/drift rejection. Park the cross-host,
+Immediate follow-up belongs to engine #33's existing integrated matrix: complete
+the AMD default/performance/observation and substantive application/fault evidence.
+Further #5 enforcement gets a separate scope only for a concrete current gap.
+Park the cross-host,
 Intel and independent-machine Mac probes until their access and decision gates
 are reopened. New access alone does not authorize spending or change the matrix.
