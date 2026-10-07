@@ -33,8 +33,15 @@ Exit status:
   1    FAIL, replay MISMATCH, or diff DIFFERENT
   2    ERROR, a replay that is NOT_COMPARABLE, or a usage or setup error
   3    INCOMPLETE (wall-time limit or cancelled)
+       A cancelled or incomplete replay reports 2 (NOT_COMPARABLE)
   124  TIMEOUT (simulated-time limit)";
 
+const HOST_CONTROL_HELP: &str = "\
+Host execution control:
+  seedbox pause RUN     Wait for a host slice-boundary pause
+  seedbox resume RUN    Resume the same live world
+Pause preserves guest time and witnesses. Wall-time limits and cancellation remain active.
+The executing attempt has an output/host-control locator; replay uses its new attempt.";
 const VMM_FAILURE_HELP: &str = "Text VMM failures also show up to 5 non-empty lines from the final 8 KiB of output/vmm.stderr on stderr; JSON output is unchanged.";
 
 #[derive(Parser)]
@@ -161,6 +168,18 @@ enum Command {
         #[command(flatten)]
         performance: Performance,
     },
+    /// Pause host execution at a slice boundary (Linux KVM host, same user or root).
+    #[command(after_help = HOST_CONTROL_HELP)]
+    Pause {
+        /// Directory of the executing run or replay attempt.
+        run: PathBuf,
+    },
+    /// Resume host execution from a paused slice boundary (Linux KVM host, same user or root).
+    #[command(after_help = HOST_CONTROL_HELP)]
+    Resume {
+        /// Directory of the executing run or replay attempt.
+        run: PathBuf,
+    },
     /// Export a recorded run and its retained inputs and logs.
     Export {
         /// Run directory, as printed by run or replay.
@@ -182,7 +201,7 @@ enum Command {
         #[command(flatten)]
         transfer: Transfer,
     },
-    /// Compare retained run evidence without executing guests.
+    /// Compare retained run evidence, including terminal state parts, without executing guests.
     #[command(after_help = EXIT_CODES)]
     Diff {
         /// First retained run directory.
@@ -439,6 +458,16 @@ pub fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<u8> {
     match cli.command {
+        Command::Pause { run } => {
+            let status = seedbox::host_control::set_paused(&run, true)?;
+            println!("{}: {}", word(&status), run.display());
+            Ok(0)
+        }
+        Command::Resume { run } => {
+            let status = seedbox::host_control::set_paused(&run, false)?;
+            println!("{}: {}", word(&status), run.display());
+            Ok(0)
+        }
         Command::Init {
             directory,
             template,

@@ -11,11 +11,13 @@ cd "$(dirname "$0")/.."
 while IFS= read -r script; do
   bash -n "$script"
 done < <(git ls-files '*.sh' ':!:research/**')
-tests=(test_msr54 test_scenarios test_race_acceptance test_smoke test_links)
+tests=(test_msr54 test_scenarios test_race_acceptance test_smoke test_smoke_fixture test_mac_check test_host_plan test_host_pairs test_host_check test_links)
 if [[ $(uname -s) == Linux ]]; then tests+=(test_batch); fi
 (cd harness/tests && python3 -m unittest -q "${tests[@]}")
 (cd python && python3 -m unittest discover -s tests -q)
-if [[ $(uname -s) == Linux ]]; then cargo test-vmm; fi
+# The portable pre-check may share a workspace cache. Keep the standalone VMM
+# in its prescribed crates/seedbox-vmm/target directory.
+if [[ $(uname -s) == Linux ]]; then env -u CARGO_TARGET_DIR cargo test-vmm; fi
 cargo test --workspace --locked
 for scenario in harness/acceptance/workloads/*.yaml; do
   cargo run --quiet --locked -p seedbox -- validate "$scenario"
