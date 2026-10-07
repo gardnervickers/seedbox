@@ -2,7 +2,9 @@
 //! no virtual time (the infinite-CPU model); time moves only at
 //!
 //! - exits the guest makes anyway (I/O, MMIO, HLT), with their usual costs,
-//! - guest clock reads, 1 ns each as in every timebase (`seedbox_rdtsc`),
+//! - guest clock reads, `SEEDBOX_PV_READ_NS` (100 ns) each, against 1 ns in
+//!   the counter timebase, where branches move time between reads
+//!   (`seedbox_rdtsc`),
 //! - syscalls, counted by the guest in the time page, each costing the
 //!   machine's `Machine::syscall_ns`: `SYSCALL_NS` scaled by a seeded
 //!   per-machine speed (see `syscall_ns`).

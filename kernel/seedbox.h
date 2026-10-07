@@ -11,6 +11,8 @@
 #define SEEDBOX_TIME_PAGE_PHYS	0xd0000000UL
 #define SEEDBOX_ABI		2
 #define SEEDBOX_TSC_KHZ		1000000
+/* PV clock: virtual time one guest clock read costs (ns; 1 in the counter timebase). */
+#define SEEDBOX_PV_READ_NS	100
 
 #ifndef __ASSEMBLY__
 #include <linux/types.h>

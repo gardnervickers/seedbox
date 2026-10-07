@@ -5,7 +5,8 @@
  * Every kernel TSC read (rdtsc/rdtsc_ordered) returns virtual time published
  * by the VMM, never the hardware counter. Before the shared page is mapped,
  * reads use two port reads. Repeated reads with no new publication advance
- * by one tick, so polling loops make progress deterministically. User-mode
+ * by one tick (SEEDBOX_PV_READ_NS under the PV clock), so polling loops make
+ * progress deterministically. User-mode
  * RDTSC/RDTSCP trap through CR4.TSD and are emulated here.
  *
  * Once the page is active, interrupt masking (8259) and virtio-mmio interrupt
@@ -41,6 +42,14 @@ noinstr unsigned long long seedbox_rdtsc(void)
 again:
 		v = READ_ONCE(p->tsc);
 		last = READ_ONCE(p->last);
+		/*
+		 * A read costs 1 ns, or SEEDBOX_PV_READ_NS under the PV clock,
+		 * where compute is free and a loop polling the clock would
+		 * otherwise need a read per nanosecond it waits. The static key
+		 * retires no conditional branch in the counter timebase.
+		 */
+		if (static_branch_unlikely(&seedbox_pv_clock))
+			last += SEEDBOX_PV_READ_NS - 1;
 		if (v <= last)
 			v = last + 1;
 		/*
