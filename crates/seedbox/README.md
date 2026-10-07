@@ -2,7 +2,7 @@
 
 This Rust crate implements [issue #2](https://github.com/gardnervickers/seedbox/issues/2)'s
 Compose-shaped application configuration and OCI run/replay path. The CLI exposes
-`init`, `validate`, `prepare`, `run`, `inspect`, `replay`, `export`, and `import`. `OciPreparer` and
+`init`, `validate`, `doctor`, `prepare`, `run`, `explore`, `inspect`, `replay`, `export`, and `import`. `OciPreparer` and
 `VmmExecutor` implement separate programmatic preparation/execution interfaces;
 the orchestration API can be called directly by future simulation schedulers.
 
@@ -131,6 +131,16 @@ The caller supplies the executor's CPU selection. Core reservations, process
 lifecycle and restoration belong to the executor. Multi-core scheduling is not
 implemented by this crate yet. Signal handlers exist only at the CLI boundary;
 programmatic callers control the cancellation token.
+
+`Orchestrator::run_prepared` executes a supplied complete retained closure through
+the same verification and manifest lifecycle as run. `Orchestrator::explore` accepts
+`exploration::ExploreOptions`, prepares once through `PreparationBackend::prepare_cancellable`,
+and executes a finite sequential range. Backends must explicitly implement that
+preparation entrypoint; its default rejects exploration before work. The caller-owned
+`PreparationContext` supplies cancellation and bounded process diagnostics. Ordinary
+`prepare` remains unchanged. Batch checkpoints and ordinary manifests have separate
+lifetimes; unfinished batches cannot report PASS. See the runtime documentation for
+builder admission, cleanup uncertainty and evidence bounds.
 
 ## Retained inputs and results
 

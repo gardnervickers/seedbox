@@ -50,6 +50,38 @@ Use fully qualified Dockerfile `FROM` references such as
 unqualified registry search list. `--builder docker` selects a Docker client
 instead when the host provides one.
 
+`prepare`, `run` and `explore` accept optional `--build-epoch SECONDS`
+(0..=4294967295; no environment backing). It requires the inspected project-Nix
+local Podman executable; custom wrappers, Docker and remote clients fail before
+image preparation when the option affects a build service. Seedbox passes
+`--source-date-epoch=SECONDS --rewrite-timestamp` to that native executable.
+The selected epoch and policy are retained in built-image provenance. Without
+the option, the builder's existing timestamp behavior remains unchanged.
+Inherited `SOURCE_DATE_EPOCH` alone controls image creation/history metadata;
+it does not make generated layer directories reproducible.
+
+This explicit policy clamps all newly committed file and directory timestamps
+later than the epoch, including otherwise stable copied-file timestamps. It
+preserves base and registry image metadata. It does not guarantee reproducible
+arbitrary builds: pin base resolution and control external build inputs yourself.
+Every original manifest, config and layer remains retained; changing a merged
+rootfs in a later layer cannot remove earlier varying input bytes.
+
+Within one preparation call, services declaring the same frozen build source
+on the admitted native Podman path share build/import/unpack work. Each service
+still resolves its own launch overrides and packages its own guest recipe.
+Contexts include retained bytes, modes, symlinks, Dockerfile selection and ignore
+rules. There is no cross-call cache; custom builders and registry imports keep
+their existing preparation behavior. Failed, cancelled or cleanup-unverified
+sources are never reused as successful preparation.
+
+Each prepared application release is a captured input closure. Same-version
+deterministic execution and replay use its exact retained bytes, seed and
+qualified profile; they do not rebuild the application. Independently rebuilding
+an OCI image need not produce identical bytes for V0. The optional timestamp
+policy is user-selected metadata control, not a prerequisite for this execution
+guarantee or an image reproducibility guarantee.
+
 ## Preparation, execution, and replay
 
 After building the binaries above, as root with the Nix tools on PATH
@@ -73,6 +105,30 @@ checkout's `cargo build-vmm` output, then on `PATH`. A `seedbox` inside cargo's
 The guest supervisor is built into `seedbox`, and BusyBox comes from
 `SEEDBOX_BUSYBOX`. A missing input fails before preparation starts and names
 every location searched.
+
+Qualified Zen execution requires the versioned `amd-zen3-engine52eb-v1` host policy in
+[host requirements](../README.md#host-requirements). Run validates immutable
+engine/kernel inputs and performs host admission before OCI work. Temporary
+core reservations, affinity and disabled exact-event perf descriptors are released
+before preparation on success/error; cleanup failure refuses admission. The actual
+leased core/siblings are rechecked before any workaround MSR write or VMM spawn.
+Complete raw static/leased CPUID observations and workaround/restore diagnostics
+are retained as Seedbox-owned output. The expected filtered table is source-derived;
+it is not an actual guest-visible CPUID observation. The complete table retains
+KVM's entry order, as the unchanged engine does; live observations are never
+sorted or repaired. Correcting the earlier sorted expected table changes the full
+policy fingerprint and run identity. A prior full proof of that table remains
+NOT_COMPARABLE, with the original manifest preserved. Zero padding remains a
+strict expectation; decoded syscall traces do not measure those padding bytes.
+A static field refusal is reported before unattempted perf readiness.
+
+Inspect, export and import keep old manifests unchanged. Missing or drifted proof
+in an old replay produces a retained ERROR/NOT_COMPARABLE rejection with a specific
+host-admission reason and exit 2 before host execution. `--allow-engine-change`
+cannot bypass the policy. Historical use of a previous retained CLI remains
+possible and has its own evidence boundary. A second machine matching every
+required field receives compatibility admission, not cross-host qualification.
+No host-ID enrollment or application-specific output schema is added.
 
 Without `--cpu`, the executor leases the first free core, in ascending order,
 among the CPUs the process may run on, skipping CPU 0's core. With `--cpu N` it
@@ -108,6 +164,20 @@ operation, including its remaining cost and transferred bytes, in the exit
 witness and the full-state `pending_io` part. Other clock advances retain the
 strict hard-stop check.
 
+`--allow-dev-engine` on run, explore, replay and doctor explicitly admits an
+unpinned VMM or guest kernel. It has no environment or configuration backing.
+Such runs bind `engine_qualification = "dev-unpinned"` in their semantic identity,
+and their run report and inspect JSON carry the marker through export/import.
+Both pinned artifacts remain ordinary runs even when the flag is supplied.
+Unknown markers, a dev marker with both artifacts pinned, and unpinned artifacts
+without the marker are rejected. All other admission checks remain in force.
+
+Replaying a marked dev run requires `--allow-dev-engine` and the same retained
+engine/kernel hashes. MATCH and MISMATCH output is labelled `unqualified dev
+engine`; omitting the flag retains NOT_COMPARABLE (exit 2) naming the flag before
+live host admission. `--allow-engine-change` cannot change a dev run's engine.
+This opt-in does not qualify development artifacts or change release pins.
+
 Replay defaults to the retained engine. An explicit `--vmm NEW_BINARY
 --allow-engine-change` permits a fresh identity and witness comparison with it.
 Replay does not require registry access, a builder, or the original Compose files.
@@ -115,6 +185,38 @@ Replay does not require registry access, a builder, or the original Compose file
 Run exits are 0 for PASS, 1 for FAIL, 2 for ERROR, 3 for INCOMPLETE, and 124 for
 simulated TIMEOUT. Replay exits are 0 for MATCH (including a reproduced FAIL),
 1 for MISMATCH, and 2 for NOT_COMPARABLE. Results print the attempt path.
+
+## Check the execution profile
+
+On the supported Linux KVM host, as root:
+
+```sh
+seedbox doctor
+seedbox doctor --cpu 15 --json
+```
+
+Doctor resolves the ordinary engine/kernel defaults without building missing
+inputs. It hashes those inputs and invokes the same bounded host probe used by
+execution admission. It opens KVM and the disabled exact-event perf descriptor,
+reads/permission-checks the selected core and siblings' MSRs without changing
+their values, and verifies restoration of temporary affinity and release of all
+probe descriptors and reservations. Any uncertainty prevents `VALID` or success
+JSON. The report names the actual selected CPU and siblings and preserves the
+exact observations admitted by that probe; there is no second read or cached
+host inventory. No content store, run directory, image preparation or guest is
+created. Missing inputs, unsupported capabilities, busy leases and profile drift
+retain the same actionable errors as execution; no repair or fallback occurs.
+
+For unpinned artifacts, `seedbox doctor --allow-dev-engine` uses the same host
+probe and prints `dev engine: unqualified`; its JSON includes
+`engine_qualification: "dev-unpinned"`. This is unqualified development readiness.
+Passing the flag with both pinned artifacts adds no marker.
+
+Exit 0 means the reported policy is compatible. It does not prove repeatability
+on an unqualified machine. Plain output has one `VALID` status line and lowercase
+fields; `--json` emits one pretty JSON document on success. Errors go to stderr
+with exit 2 in either mode. Actual Linux doctor acceptance remains dependent on
+issue #5's hardware qualification; Darwin source tests do not establish it.
 
 ## Guest semantics and limits
 
@@ -210,6 +312,18 @@ arrival times strictly before admission. A packet physically delivered in an
 early scheduler window is excluded until its nominal arrival precedes that
 boundary. Final report counters still record physical NIC acceptance totals.
 
+Faults and control requests that take effect at the same simulated time T are
+ordered against sends as follows. The world applies a boundary at T only once
+every machine has reached T, so a machine that is still running before T keeps
+sending under the earlier network state, even when another machine is already
+waiting at T. At T, control admission and effects come first, then faults in
+ID order, and only then does any machine run, so every frame sent at T or
+later sees the new state. A frame's partition decision and arrival time are
+fixed when it is sent; a later partition or heal never changes a frame already
+in flight. A slice that runs up to a boundary always ends before the guest can
+send at the boundary itself, so no frame is ever stamped at or after a boundary
+that hasn't been applied yet.
+
 ### Machine pause, crash and reboot
 
 Compose guest drivers can call `World.pause(target)`, `resume(target)`,
@@ -225,6 +339,64 @@ controller, which can't be a target, so a lifecycle operation never ends the run
 by itself: a crashed service is not an exited one. See
 [Machine pause, crash and reboot](../harness/worlds/README.md#machine-pause-crash-and-reboot)
 for CPU, timer, network, incarnation and static-plan semantics.
+
+## Exploration preparation
+
+`seedbox explore [COMPOSE] --seed FIRST --count COUNT` has one sequential worker.
+Count defaults to 1; seed defaults to the resolved Compose seed. Bounds are finite,
+positive and checked for inclusive u64 overflow before slow work. Runtime inputs and
+backend host admission are checked before the sole preparation; refusal retains
+batch ERROR with no prepared inputs or seed attempts. Transient admission resources
+are released before preparation, and each seed retains the ordinary leased recheck.
+The complete
+configuration, PreparedInputs and performance parameters are frozen once. Every
+attempt verifies the full retained closure through the ordinary run lifecycle;
+missing/corrupt bytes cause ERROR without re-preparation or repair.
+
+The owned batch directory contains atomic `exploration.json` checkpoints,
+`preparation/` and `attempts/SEED/ORDINARY-RUN/`. Attempted means entering orchestration,
+not proof that a guest started. Counts distinguish PASS/FAIL, TIMEOUT, ERROR,
+INCOMPLETE and unfinished attempts; remaining seeds are undispatched. A killed process
+leaves an unfinished INCOMPLETE checkpoint and independently inspectable ordinary
+manifests. There is no resume operation. Checkpoint/evidence failures stop dispatch.
+The final aggregate uses ERROR, INCOMPLETE, TIMEOUT, FAIL, PASS precedence and the
+existing exit codes 2, 3, 124, 1, 0. Application FAIL and witnessed simulated TIMEOUT may
+continue; infrastructure errors, wall expiry and cancellation stop.
+
+Preparation diagnostics belong to the caller, surviving preparer/scratch destruction.
+Raw phase output is capped at 4 MiB per file and 64 MiB total. Bounded prefixes are retained
+while the rest is drained, with exact observed omission counts/reasons. An output
+stream still open after owned cleanup is incomplete evidence with an explicitly
+unknown further byte count and cleanup-unverified ERROR. Compact command/cleanup
+receipts have a separate 4 MiB budget; version text is capped at 8 KiB. Required evidence
+write failure is ERROR. Receipts record program/hash/arguments/cwd, local mode,
+private tag and build-input digests, process status, cancellation/escalation/reap,
+elapsed time and cleanup disposition. Application stdout is never parsed for verdicts.
+
+Initial build admission is the inspected project-Nix Linux Podman launcher and
+native binary closure, invoked through the launcher with `--remote=false`. Its
+local storage/runtime information is retained. Unknown opaque wrappers, remote-only
+clients, Docker daemon builders and unverified delegation are unsupported. Registry
+projects do not acquire a builder requirement. Existing run/prepare semantics remain.
+
+Cancellation signals only an owned process group, preserving the unreaped leader
+identity until final group signalling, then reaps it. Graceful termination escalates
+after 250 ms; an unconfirmed exit after 5 s is cleanup-unverified ERROR. This cannot
+promise cleanup for a process blocked indefinitely in the kernel or delegated
+builder work. Cancelled builds remain cleanup-unverified and keep their unique tag;
+no image-rm races a potentially running build. After a completed build, private-tag
+cleanup is separately bounded; cleanup failure outranks clean cancellation. No
+shared daemon, unrelated image/container, host service or cache is changed.
+
+CLI resource fields report self/reaped-child user/system CPU deltas and separate
+self/child RSS high-water readings in bytes, including preparation. They are not
+simultaneous aggregate memory, guest peak memory, simulated time or CPU lease duration.
+Unavailable measurements are null and do not affect run identity.
+
+Required tool-version provenance uses stdout only, independently of diagnostic
+truncation. Its raw `.stdout` evidence is bounded to 8192 bytes per value and
+4 MiB per preparation; an oversized or incomplete value fails preparation.
+Version stderr remains quota-limited `.log` diagnostics with omission receipts.
 
 ## Bundles
 
@@ -265,5 +437,35 @@ state uses the retained engine/guest/kernel inputs and preserves existing
 PASS/FAIL, ERROR, INCOMPLETE, TIMEOUT and MATCH/MISMATCH meanings. It requires the
 compatible installed Seedbox release and qualified host runtime/profile. Exporting
 engine bytes does not establish cross-host or cross-backend compatibility; full
-host drift admission remains issue #5. Portable fixture replay verifies the bundle
+host drift is refused by the versioned admission policy; focused guest/profile
+acceptance remains a separate gate. Portable fixture replay verifies the bundle
 mechanism; offline application replay requires separate hardware acceptance.
+
+### Explicit unqualified counters
+
+`--allow-unqualified-cpu` applies consistently to run, explore and replay. It
+permits only an explicitly selected known non-Zen counter, with a warning that
+results are unverified. Its `counter` semantic parameter identifies the
+experimental profile; qualified AMD `host_policy` fields are absent and a mixed
+profile is refused. Replay still requires the recorded counter and exact
+supported release/input bytes. The flag cannot bypass release pins, checksums,
+retained-profile checks or CPU ownership. This encoding is intentional; old
+records are not silently upgraded or relabeled.
+
+The experimental path checks the counter on each selected SMT sibling and
+applicable KVM capabilities under a scoped affinity guard, then rechecks while
+all canonical leases are held. A counter without a workaround does not open,
+write or claim restoration of AMD MSRs. Every child is reaped before applicable
+restoration and lease release. `doctor` returns a setup refusal for unqualified
+counters, including when the experimental flag is present, so it never emits an
+AMD `VALID` success for Intel. Exit meanings remain unchanged.
+
+The current staged source pins frozen engine52eb and accepted kernele8ece.
+The artifact has build provenance but is not runtime qualified. Fresh ordinary
+full-state run/replay acceptance remains required. Experimental readiness opens
+the selected raw perf event disabled before preparation and under each held
+sibling lease, then closes it before restoring affinity. Counting attributes
+match the engine; admission adds PERF_FLAG_FD_CLOEXEC8 rather than engineopen0
+solely to protect descriptor inheritance. It never enables, maps or reads the
+guest event. Source tests and warned Intel opt-in are not Intel qualification or
+a determinism guarantee.
