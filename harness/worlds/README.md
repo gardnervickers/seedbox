@@ -180,9 +180,9 @@ semantics (`disk.rs`, model `flush-stable/drop-all-unflushed/v1`):
   completed request.
 - A completed write is volatile; reads see it at once. A completed FLUSH
   makes every write completed before it stable before it is acknowledged.
-- A crash drops every volatile write and keeps every stable one. The next
-  incarnation boots with that disk and a fresh device. No torn writes and no
-  seeded surviving subsets (tracked in #94). This models a machine crash, not host power loss:
+- By default a crash drops every volatile write and keeps every stable one.
+  The next incarnation boots with that disk and a fresh device. Opt-in seeded
+  survival is described below. This models a machine crash, not host power loss:
   nothing is written to host storage.
 - A fork restore puts the whole disk back, both layers.
 
@@ -218,3 +218,26 @@ CPU0=14 SEEDBOX_UNDO=0 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/disk-
 for s in 1010 1011; do CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/disk-crash-fork.json disk-fork-cold "$s" --digest; done
 CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/disk-crash-fork.json disk-fork-loop "1009" --digest --fork-seeds 1010,1011
 ```
+
+For seeded torn writes, set the world's top-level `disk_loss` to
+`flush-stable/seeded-latest-sector-512-half/disk-loss-machine-incarnation/v1`.
+[`disk-ext4-torn.json`](disk-ext4-torn.json) enables it for the same fsync ledger.
+Each latest unflushed 512-byte sector survives with probability 1/2, with its own
+machine/incarnation RNG domain. Stable data remains unless overwritten by a
+surviving sector; older overwritten volatile versions are not candidates. See
+[the full contract](../../docs/runtime.md#disk-crash-policy).
+
+On the qualified Linux host, run the fixture with repeated and distinct seeds:
+
+```sh
+CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/disk-ext4-torn.json disk-ext4-torn "1009 1009 1010 1011" --digest --trace
+```
+
+Check the recovered ledger retains all 50 acknowledged records and repeated-seed
+witnesses match. Inspect the crashed incarnation's `disk_lost_sectors` and recovered
+unacknowledged records across seeds. Variation requires unflushed writes to have
+reached the device at the crash: data still in Linux's page cache cannot survive,
+and a filesystem journal commit can already have flushed it. This fixture's
+seed variation and ext4 recovery under the new policy remain hardware acceptance
+checks; portable disk-model tests do not establish them. The raw `blkprobe` crash
+fixture explicitly expects drop-all loss and is not an oracle for this policy.

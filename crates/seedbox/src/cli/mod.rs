@@ -15,7 +15,7 @@ use seedbox::{
     preparation::OciPreparer,
     store::ContentStore,
     templates::Template,
-    vmm::{recorded_counter, VmmExecutor},
+    vmm::{recorded_counter, recorded_torn_writes, VmmExecutor},
     Error, Result,
 };
 use signals::Signals;
@@ -241,6 +241,9 @@ struct RuntimeInputs {
     /// Also record and compare every machine's RAM and registers.
     #[arg(long)]
     full_state: bool,
+    /// Keep a seeded subset of unflushed disk sectors on crash (512-byte atomicity; off by default).
+    #[arg(long)]
+    torn_writes: bool,
 }
 
 impl RuntimeInputs {
@@ -258,7 +261,8 @@ impl RuntimeInputs {
         } else {
             WitnessMode::Exits
         };
-        let executor = VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?;
+        let executor = VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?
+            .with_torn_writes(self.torn_writes);
         let preparer = self.preparer(engine, store, scratch, executor.profile())?;
         Ok((preparer, executor))
     }
@@ -436,14 +440,17 @@ fn run(cli: Cli) -> Result<u8> {
                 .get("memory_mb")
                 .and_then(|value| value.parse().ok())
                 .ok_or_else(|| Error::Integrity("recorded profile missing memory_mb".into()))?;
-            let executor = performance.apply(VmmExecutor::new(
-                &engine,
-                &store,
-                cpu.cpu,
-                memory,
-                profile.witness_mode.clone(),
-                counter,
-            )?)?;
+            let executor = performance.apply(
+                VmmExecutor::new(
+                    &engine,
+                    &store,
+                    cpu.cpu,
+                    memory,
+                    profile.witness_mode.clone(),
+                    counter,
+                )?
+                .with_torn_writes(recorded_torn_writes(profile)?),
+            )?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
             let result = orchestrator.replay_with_options(

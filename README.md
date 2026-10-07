@@ -30,6 +30,7 @@ directory. Every runtime input has a default, so no flags are required:
 | --- | --- | --- |
 | Compose file | `compose.yaml` in the given directory (default `.`) | positional path |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
+| Torn disk writes | off (drop all unflushed sectors on crash) | `--torn-writes` |
 | CPU | first free core other than CPU 0's, under the shared lease | `--cpu`, `SEEDBOX_CPU` |
 | Guest kernel | `bzImage` in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`, `./artifacts`, then `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | `seedbox-vmm` next to an installed `seedbox`, then this checkout's `cargo build-vmm` output, then on `PATH`; `cargo run` builds it if missing | `--vmm`, `SEEDBOX_VMM` |
@@ -37,6 +38,11 @@ directory. Every runtime input has a default, so no flags are required:
 | BusyBox | `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
+
+`seedbox run --torn-writes` enables seeded partial survival of unflushed
+512-byte disk sectors on crash. It is recorded in run identity and replayed
+automatically. It applies to retained disks; Compose storage is still RAM-backed
+until named-volume disk support lands. See [disk semantics](docs/runtime.md#disk-crash-policy).
 
 `seedbox help run` lists every option. A run prints `OUTCOME: run-directory`;
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3

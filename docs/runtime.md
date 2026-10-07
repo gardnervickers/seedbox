@@ -8,6 +8,41 @@ These are version-bound results, not qualification of arbitrary OCI runtimes or
 the latest changed example inputs. See [draft formats and runtime scope](compatibility.md)
 for current readers/writers, exit meanings and remaining release gates.
 
+## Disk crash policy
+
+`run` and `prepare` accept `--torn-writes` (off by default). Off retains the
+`flush-stable/drop-all-unflushed/v1` model: crashes drop all unflushed sectors.
+The omitted setting adds no profile or world JSON field and leaves the existing
+disk digest and witness inputs unchanged. Building the modified VMM still changes
+the engine binary hash, as every VMM source change does.
+
+When enabled, the profile's semantic parameter `disk_loss` and each disk report's
+`model` are
+`flush-stable/seeded-latest-sector-512-half/disk-loss-machine-incarnation/v1`.
+Replay restores this policy from the retained profile; there is no replay override
+or environment variable. The low-level world JSON uses the same `disk_loss` key
+and model string. Unknown model strings are rejected.
+
+At each crash, the latest unflushed version of each sector independently has a
+50% chance of surviving. The atomic unit is 512 bytes: multi-sector writes can
+survive as any subset, but a single sector's bytes are never torn. A later sector
+write can survive while an earlier one is lost. Overwritten historical versions
+are not candidates; there is no write log. Lost sectors fall back to their last
+flushed contents or the base image. Every completed FLUSH stabilizes all preceding
+completed writes, so it never loses coverage under this policy.
+
+Selection visits volatile sectors in ascending sector order, using `below(2) == 1`
+from the versioned SHA-256 RNG domain `disk-loss/<machine>/<incarnation>` and the
+run seed. Incarnation identifies the machine that crashed (initially 0). No
+other RNG stream is consumed. Survivors become stable in the next incarnation;
+snapshot/fork restore carries the policy and both disk layers. Reports count
+only actually lost volatile sectors in `disk_lost_sectors`.
+
+This policy applies to retained virtio-blk disks. Current Compose application
+storage remains RAM-backed; attaching named volumes to retained disks is separate
+work. Low-level disk fixtures, including the ext4 fsync ledger, are documented in
+[`harness/worlds/README.md`](../harness/worlds/README.md#retained-disk).
+
 ## Build on the qualified Linux host
 
 From the repository root:

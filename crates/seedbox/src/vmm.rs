@@ -65,6 +65,19 @@ impl VmmExecutor {
         })
     }
 
+    /// Seeded survival of the latest unflushed 512-byte sectors on crash.
+    /// Off is represented by omission to preserve existing profile bytes.
+    pub fn with_torn_writes(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.profile
+                .semantic_parameters
+                .insert(DISK_LOSS.into(), TORN_DISK_MODEL.into());
+        } else {
+            self.profile.semantic_parameters.remove(DISK_LOSS);
+        }
+        self
+    }
+
     pub fn with_margin(mut self, margin: &str) -> Result<Self> {
         if margin != "adaptive" && margin.parse::<u64>().ok().is_none_or(|value| value == 0) {
             return Err(Error::Execution(
@@ -88,6 +101,19 @@ impl VmmExecutor {
 }
 
 const COUNTER: &str = "counter";
+const DISK_LOSS: &str = "disk_loss";
+/// Declares the loss policy, atomic unit, probability and dedicated RNG domain.
+pub const TORN_DISK_MODEL: &str =
+    "flush-stable/seeded-latest-sector-512-half/disk-loss-machine-incarnation/v1";
+
+/// Recover the disk policy from a retained profile, rejecting unknown semantics.
+pub fn recorded_torn_writes(profile: &ExecutionProfile) -> Result<bool> {
+    match profile.semantic_parameters.get(DISK_LOSS) {
+        None => Ok(false),
+        Some(model) if model == TORN_DISK_MODEL => Ok(true),
+        Some(model) => Err(Error::Integrity(format!("unknown disk loss model {model}"))),
+    }
+}
 
 /// The branch counter profile a recorded run was made with.
 pub fn recorded_counter(profile: &ExecutionProfile) -> Result<CounterProfile> {
@@ -184,14 +210,18 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
         .iter()
         .map(|(name, digest)| Ok(json!({"name":name,"initrd":artifact(digest)?})))
         .collect::<Result<Vec<_>>>()?;
-    Ok(json!({
+    let mut world = json!({
         "kernel":artifact(&request.prepared.kernel)?, "mem_mb":memory,
         "duration_ns":request.limits.simulated_time_ns,"end_on_exit":workload_machine,
         "timer_jitter_ns":request.schedule.timer_jitter_ns,"stop_tolerance_ns":request.schedule.stop_tolerance_ns,
         "network":{"latency_ns":request.network.latency_ns,"jitter_ns":request.network.jitter_ns},
         "machines":machines,"control":control,
         "control_channel":"virtio-console-v1",
-    }))
+    });
+    if recorded_torn_writes(&request.prepared.profile)? {
+        world[DISK_LOSS] = json!(TORN_DISK_MODEL);
+    }
+    Ok(world)
 }
 
 #[derive(Deserialize)]

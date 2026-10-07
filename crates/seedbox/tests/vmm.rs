@@ -488,3 +488,86 @@ fn typed_network_plan_preserves_targets_without_attributing_check_service() {
         assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
     });
 }
+
+#[test]
+fn torn_writes_are_recorded_replayed_and_omitted_when_disabled() {
+    use seedbox::{counter::CounterProfile, store::ContentStore};
+    let dir = tempfile::tempdir().unwrap();
+    let engine = dir.path().join("engine");
+    std::fs::write(&engine, b"engine").unwrap();
+    let store = ContentStore::new(dir.path().join("objects"));
+    let executor = vmm::VmmExecutor::new(
+        &engine,
+        &store,
+        None,
+        512,
+        WitnessMode::Exits,
+        CounterProfile::Zen,
+    )
+    .unwrap();
+    let original = executor.profile();
+    assert_eq!(
+        original.semantic_parameters,
+        BTreeMap::from([
+            ("guest_abi".into(), "oci-init-v1".into()),
+            ("control_channel".into(), "virtio-console-v1".into()),
+            ("memory_mb".into(), "512".into()),
+        ])
+    );
+    let encoded = serde_json::to_vec(&original).unwrap();
+    assert!(!vmm::recorded_torn_writes(&original).unwrap());
+    assert_eq!(
+        serde_json::to_vec(&executor.clone().with_torn_writes(false).profile()).unwrap(),
+        encoded
+    );
+    let enabled = executor.clone().with_torn_writes(true);
+    let recorded: ExecutionProfile =
+        serde_json::from_slice(&serde_json::to_vec(&enabled.profile()).unwrap()).unwrap();
+    assert_eq!(
+        recorded.semantic_parameters["disk_loss"],
+        vmm::TORN_DISK_MODEL
+    );
+    assert_ne!(serde_json::to_vec(&recorded).unwrap(), encoded);
+    let replay = executor
+        .clone()
+        .with_torn_writes(vmm::recorded_torn_writes(&recorded).unwrap());
+    assert_eq!(replay.profile(), recorded);
+    assert_eq!(
+        replay.performance_parameters(),
+        executor.performance_parameters()
+    );
+    assert_eq!(enabled.with_torn_writes(false).profile(), original);
+
+    fixture(|base| {
+        let original_world = vmm::world(base).unwrap();
+        assert!(original_world.get("disk_loss").is_none());
+        let mut prepared = base.prepared.clone();
+        prepared.profile = recorded;
+        let request = ExecutionRequest {
+            prepared: &prepared,
+            ..*base
+        };
+        let mut world = vmm::world(&request).unwrap();
+        assert_eq!(
+            world.as_object_mut().unwrap().remove("disk_loss"),
+            Some(json!(vmm::TORN_DISK_MODEL))
+        );
+        assert_eq!(
+            serde_json::to_vec(&world).unwrap(),
+            serde_json::to_vec(&original_world).unwrap()
+        );
+        prepared
+            .profile
+            .semantic_parameters
+            .insert("disk_loss".into(), "unknown".into());
+        assert!(vmm::recorded_torn_writes(&prepared.profile)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown disk loss model unknown"));
+        let request = ExecutionRequest {
+            prepared: &prepared,
+            ..*base
+        };
+        assert!(vmm::world(&request).is_err());
+    });
+}

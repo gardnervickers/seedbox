@@ -760,3 +760,32 @@ fn network_effects_have_no_single_service_target() {
     fixture.backend.report.faults[0].action = "stop".into();
     assert_eq!(fixture.run().record.outcome, Outcome::Error);
 }
+
+#[test]
+fn torn_write_policy_changes_identity_and_replay_requires_the_recorded_policy() {
+    let mut fixture = Fixture::new();
+    let off = fixture.run();
+    fixture
+        .backend
+        .profile
+        .semantic_parameters
+        .insert("disk_loss".into(), seedbox::vmm::TORN_DISK_MODEL.into());
+    fixture.preparer.inputs.profile = fixture.backend.profile.clone();
+    let on = fixture.run();
+    assert_ne!(on.record.run_id, off.record.run_id);
+    assert_eq!(
+        fixture.replay(&on).record.replay.unwrap().status,
+        ReplayStatus::Match
+    );
+    assert_eq!(fixture.replay(&off).record.outcome, Outcome::Error);
+    fixture
+        .backend
+        .profile
+        .semantic_parameters
+        .remove("disk_loss");
+    assert_eq!(fixture.replay(&on).record.outcome, Outcome::Error);
+    assert_eq!(
+        fixture.replay(&off).record.replay.unwrap().status,
+        ReplayStatus::Match
+    );
+}
