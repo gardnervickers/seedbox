@@ -1918,6 +1918,37 @@ mod fork_tests {
         }
     }
 
+    /// A seed that crashed a machine leaves a later incarnation in a new VM,
+    /// so the next seed restores into a freshly built machine that holds no
+    /// fork point: a full copy, after which it holds one and later restores
+    /// take the cheap path again. Every restore must match the cold run.
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn a_fork_restores_into_a_freshly_built_machine() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        for undo in [0,256] {
+            let mut cold=barrier_machine(&kvm,undo);
+            to_barrier(&mut cold,&mut counter);
+            let want=released(&mut cold,&mut counter,7);
+
+            let mut m=barrier_machine(&kvm,undo);
+            to_barrier(&mut m,&mut counter);
+            let snapshot=m.snapshot().unwrap();
+            drop(m);
+            let mut fresh=barrier_machine(&kvm,undo);
+            if undo>0 {assert!(!fresh.undo.as_ref().unwrap().holds_fork_point());}
+            let pages=fresh.restore(&snapshot).unwrap();
+            assert_eq!(pages,(fresh.mem_size/4096) as u64,"full copy, undo={undo}");
+            assert!(fresh.parked);
+            assert_eq!(released(&mut fresh,&mut counter,7),want,"restored into a fresh machine, undo={undo}");
+            if undo>0 {assert!(fresh.undo.as_ref().unwrap().holds_fork_point());}
+            let pages=fresh.restore(&snapshot).unwrap();
+            if undo>0 {assert!(pages<(fresh.mem_size/4096) as u64,"only written pages copied back");}
+            assert_eq!(released(&mut fresh,&mut counter,7),want,"second restore, undo={undo}");
+        }
+    }
+
     fn to_halt(m: &mut Machine, counter: &mut Counter, limit: u64) {
         let mut frames=Vec::new();
         while !matches!(m.run_until(counter,limit,0,&mut frames).unwrap(),Stop::Exited|Stop::Halted) {}

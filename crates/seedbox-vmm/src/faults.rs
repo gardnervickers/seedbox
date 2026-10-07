@@ -192,6 +192,7 @@ impl Faults {
     pub fn next_lifecycle(&self, m: usize) -> u64 {
         self.lifecycle_at[m].first().map(|e| e.0).unwrap_or(u64::MAX)
     }
+    #[allow(dead_code)] // The world reads Machine::paused/down; tests read this.
     pub fn life(&self, m: usize) -> Life {
         self.life[m]
     }
