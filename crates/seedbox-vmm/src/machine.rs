@@ -45,6 +45,13 @@ const PAGE_PIC_IMR: usize = 4;
 const PAGE_NET_ISR: usize = 5;
 pub const PAGE_FIELDS: usize = 6;
 
+fn exit_ok_or_eintr(e: &Result<VcpuExit, kvm_ioctls::Error>) -> bool {
+    match e {
+        Ok(_) => true,
+        Err(e) => e.errno() == libc::EINTR,
+    }
+}
+
 pub struct BootSpec<'a> {
     pub kernel: &'a [u8],
     pub initrd: &'a [u8],
@@ -100,6 +107,7 @@ pub struct Stats {
     pub soft_undos: u64,
     /// Of the soft misses, those with no syscall in the run (provably harmless).
     pub soft_misses_clean: u64,
+    pub spin: crate::spin::SpinDiag,
 }
 
 pub struct Machine {
@@ -933,6 +941,20 @@ impl Machine {
                 // and clock fields until its payload has been consumed.
                 let last = unsafe { std::ptr::read_volatile(self.page.add(1)) };
                 advance_time(self.time, last.saturating_sub(self.time), hard)?;
+            }
+            {
+                let (r, sr) = unsafe { ((*run_ptr).s.regs.regs, (*run_ptr).s.regs.sregs) };
+                let syscalled = unsafe { std::ptr::read_volatile(self.page.add(PAGE_SYSCALLS)) } != syscalls0;
+                let end = self.branches;
+                let irqs = self.stats.irqs;
+                if syscalled {
+                    self.stats.spin.yield_point(end - delta, end, "syscall", irqs, &sr);
+                } else if matches!(kind, 2 | 3 | 4) {
+                    self.stats.spin.yield_point(end, end, ["", "", "pio", "mmio", "hlt"][kind], irqs, &sr);
+                } else if kind != 1 && exit_ok_or_eintr(&exit) {
+                    let mem = unsafe { std::slice::from_raw_parts(self.mem, self.mem_size) };
+                    self.stats.spin.sample(end, &r, &sr, mem);
+                }
             }
             self.stats.exits += 1;
             if self.stepping {

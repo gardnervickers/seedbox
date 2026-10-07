@@ -42,7 +42,7 @@ impl Paging {
         }
     }
 
-    fn translate(&self, mem: &[u8], gva: u64) -> Option<u64> {
+    pub fn translate(&self, mem: &[u8], gva: u64) -> Option<u64> {
         if !self.pg {
             return Some(gva & 0xffff_ffff);
         }

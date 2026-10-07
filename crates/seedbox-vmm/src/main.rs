@@ -10,6 +10,7 @@ mod faults;
 mod machine;
 mod network_counters;
 mod rng;
+mod spin;
 mod stepper;
 mod undo;
 mod virtio_net;
@@ -633,6 +634,7 @@ fn run() -> Result<Value, String> {
             "control_channel":mach.channel.as_ref().map(|_|json!({"transport":"virtio-console-v1","tx_bytes":mach.control_tx_bytes,"rx_dma_bytes":mach.control_dma_bytes})),
             "net": mach.net.as_ref().map(|n| json!({"tx": n.tx_frames, "rx": n.rx_frames, "rx_dropped": n.rx_dropped})),
         }));
+        report.last_mut().unwrap()["spin"] = s.spin.report();
     }
     let sim_ns = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
     Ok(json!({
