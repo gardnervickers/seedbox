@@ -19,6 +19,7 @@ and possession of engine bytes do not qualify another host or backend.
 | Run manifest | Draft `identity.version: 2`; checksummed metadata and identity. Version 1 is rejected, not migrated. Fixed metadata structures reject unknown fields; defined dictionaries and opaque bytes are not fixed-field schemas. |
 | `inspect --json` | One pretty JSON `RunRecord`, without the manifest checksum envelope. Its version is nested at `identity.version`; there is no separate inspect JSON version. Field/status spelling comes from the library's serde types. Whitespace and key order are not a script contract. |
 | Bundle | Container version 1 carries the existing v2 manifest and complete declared object closure. Unknown versions/metadata fields and corrupt, missing, unsafe or extra entries are rejected. Import preserves original manifest and retained opaque bytes, without migration, installation or execution. See [bounds and omissions](runtime.md#bundles). |
+| Exploration checkpoint | Draft version 2 records bounded worker capacity, stable seed/index dispatch order and completed/unfinished attribution. Unsupported versions are rejected without migration. Version 1 batch bytes require the prior reader; ordinary run manifests/identity and retained replay are unchanged. |
 | Guest RPC | [Public version 1](../python/PROTOCOL.md); operation arguments are strict. The Python binding checks required response fields, version, correlation and timing, and tolerates unrelated response detail keys. New operations are not automatically supported by an older peer. Private relay framing is not a public binding contract. |
 
 An added structural field is not automatically compatible with a strict older
@@ -29,17 +30,27 @@ checks detect corruption, not authenticity against someone rewriting the store.
 
 Inspection and transfer of an accepted format need no guest execution. Execution
 additionally requires verified input bytes and a matching qualified profile.
-[Issue #5](https://github.com/gardnervickers/seedbox/issues/5) and pending
-[PR #55](https://github.com/gardnervickers/seedbox/pull/55) add explicit host-proof
-admission; its proposed historical missing-proof refusal is not current-main
-behavior or completed Linux qualification. A readable historical v2 record is
-distinct from a rejected v1 record. Neither is rewritten to obtain admission.
+[Issue #5](https://github.com/gardnervickers/seedbox/issues/5) and
+[PR #55](https://github.com/gardnervickers/seedbox/pull/55) implement versioned
+host-proof admission in this source. Historical v2 records without that proof
+remain readable and transferable, but execution through this CLI retains
+ERROR/NOT_COMPARABLE (exit 2) before host probing or guest execution. An engine-change
+override cannot bypass missing proof. Use the retained previous CLI only for
+historical execution evidence; records are never rewritten to obtain admission.
+This implementation has source-only checks: Linux collection and the new profile
+are not yet qualified. A readable historical v2 record is distinct from a
+rejected v1 record. Draft formats and release compatibility remain undecided.
+
+`diff --json` emits a library `DiffReport` for two retained directories. It does
+not change manifest or bundle formats. See [retained comparison](runtime.md#compare-retained-runs)
+for evidence scope and missing-data semantics.
 
 ## Exit meanings and user data
 
 `run` exits: 0 PASS, 1 FAIL, 2 ERROR/usage/setup, 3 INCOMPLETE and 124 simulated
 TIMEOUT. `replay` exits: 0 MATCH (including reproduced FAIL), 1 MISMATCH and
-2 NOT_COMPARABLE. Application outcome and replay equality are separate. Wall-time
+2 NOT_COMPARABLE. Offline `diff` exits 0 MATCH, 1 DIFFERENT, and 2 for
+usage/setup or invalid evidence. Application outcome and replay equality are separate. Wall-time
 expiry/cancellation are INCOMPLETE, not simulated TIMEOUT. Successful inspect,
 export and import return 0 even for a recorded FAIL; success means the command
 completed, not that execution is admitted. Their validation/setup errors return 2.

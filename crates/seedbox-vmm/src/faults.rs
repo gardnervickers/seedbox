@@ -235,8 +235,16 @@ impl Faults {
         let machine = action.machine()?;
         let index = self.names.iter().position(|name|name==machine)?;
         match action {
+            // Down targets are admitted so process faults resolve as unavailable.
+            Action::Stop{..} | Action::Restart{..} if self.life[index]==Life::Down => None,
+            // A paused guest cannot acknowledge; its deadline would fail the run.
+            Action::Stop{..} | Action::Restart{..} if self.life[index]==Life::Paused => Some("target machine is paused"),
             Action::Stop{..} if self.stopped[index] => Some("target process is already stopped"),
             Action::Restart{..} if !self.stopped[index] => Some("restart requires a stopped target process"),
+            Action::Pause{..} if self.life[index]!=Life::Up => Some("target machine is not running"),
+            Action::Resume{..} if self.life[index]!=Life::Paused => Some("target machine is not paused"),
+            Action::Crash{..} if self.life[index]==Life::Down => Some("target machine is already down"),
+            Action::Reboot{..} if self.life[index]!=Life::Down => Some("target machine is not down"),
             _ => None,
         }
     }

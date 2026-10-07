@@ -44,6 +44,9 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 
 ## Checks
 
+Engine PRs that need host evidence go through a merge train
+([docs/merge-train.md](docs/merge-train.md)).
+
 Run these before committing:
 
 ```sh
@@ -77,7 +80,7 @@ deliberately change one.
 - Required flags are a last resort. Every runtime input needs a sensible
   default or a search, so `seedbox run` works with no arguments on a set-up
   host. The only required inputs are those with no possible default (`init
-  DIRECTORY`, `prepare --output`).
+  DIRECTORY`, `prepare --output`, `diff RUN_A RUN_B`).
 - A command's main object is positional: the Compose path (default `.`,
   and a directory resolves to its `compose.yaml`) or the run directory.
 - Flags are long kebab-case. Don't add short flags except `-o`/`-h`/`-V`.
@@ -103,8 +106,11 @@ deliberately change one.
 3. On failure, return `missing(what, &searched, fix)`, which lists every
    location tried and one way to fix it.
 4. Resolve it in `RuntimeInputs::backends` or earlier, before any slow work
-   (image pulls, builds, CPU leases). Fail fast. `run` and `replay` then check
-   the host (`require_kvm_host`: KVM and MSR access) before preparing anything.
+   (image pulls, builds, CPU leases). Fail fast. `run` and `explore` check immutable runtime
+   inputs and backend host admission before
+   preparation; no transient perf descriptor, affinity or CPU reservation survives
+   that check. Replay validates retained host-policy proof before live admission,
+   so old/missing proof is a retained NOT_COMPARABLE rejection before execution.
 5. Add it to the defaults table in README.md's quick start.
 
 ### Help text
@@ -119,7 +125,7 @@ deliberately change one.
   options, "Runtime inputs", and "Performance (never changes results)". A flag
   takes the heading of the group declared before it, so flatten
   general-purpose groups (`CpuArg`, `StateArg`) before `RuntimeInputs`.
-- `run` and `replay` show `EXIT_CODES` in `after_help`.
+- `run`, `replay` and `diff` show `EXIT_CODES` in `after_help`.
 - Check the result with `cargo run -- help <command>`.
 
 ### Output
@@ -150,7 +156,7 @@ deliberately change one.
   reach the user. Check the path first (`existing`), or add context as
   `oci::spawn_error` does.
 - Exit codes are a fixed contract (`EXIT_CODES`, README.md, docs/runtime.md,
-  and the acceptance scripts): 0 PASS/MATCH, 1 FAIL/MISMATCH, 2
+  and the acceptance scripts): 0 PASS/MATCH, 1 FAIL/MISMATCH/DIFFERENT, 2
   ERROR/NOT_COMPARABLE/usage/setup, 3 INCOMPLETE, 124 TIMEOUT. Don't change
   what a code means. A new code must be added to all four places.
 
@@ -166,3 +172,9 @@ deliberately change one.
 - When behaviour changes, update `seedbox help`, README.md (quick start and
   defaults table), docs/runtime.md, and `crates/seedbox/templates/README.md`.
   The last one is copied into every project `seedbox init` creates.
+
+`doctor` shares execution admission and kernel/VMM defaults, with lookup-only VMM
+resolution: it must never trigger the cargo auto-build fallback. Success reports
+only the exact cleaned-up probe observations and selected core; the library does
+not read arguments/environment or print. It creates no state/run and never prepares
+images or executes guests. Compatibility readiness is not replay qualification.
