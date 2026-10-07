@@ -38,6 +38,15 @@ The retained `artifacts/arm64-abi2/kernel.config` already has `CONFIG_TIMERFD=y`
 This pins an existing selection; the next Linux build will recheck all fragment
 requests through `check-config.py`. No new Kconfig build is claimed here.
 
+The operator's `23c619e` rebuild retains those selections in
+`artifacts/arm64-hres/kernel.config` (SHA-256
+`85f8af523f252b63298a7943b2f5cd57ecbfb7c040cc1d3146b44da05a9caf0a`).
+The checker now also requires `CONFIG_HIGH_RES_TIMERS=y` and `CONFIG_TIMERFD=y`
+directly in the resolved config, independently of fragment requests. Portable
+regressions reject missing, disabled and modular values for either prerequisite.
+Signed HVF execution confirms 1 ns clock resolution and an observed timerfd
+expiration during a 200,009 ns spin; see `docs/arm64-backends.md`.
+
 Key dependency chains checked:
 
 - ARM64 selects ARM_AMBA, ARM_GIC_V3, ARM_PSCI_FW, COMMON_CLK, OF,

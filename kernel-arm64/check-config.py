@@ -52,9 +52,9 @@ def errors(requested, actual, defined):
 
 def fixture_errors(actual):
     # The spin fixture must observe an hrtimer expiry through timerfd.
-    if actual.get("CONFIG_TIMERFD") != "y":
-        return ["CONFIG_TIMERFD: timerfd spin fixture requires y"]
-    return []
+    return [f"{key}: timerfd spin fixture requires y"
+            for key in ("CONFIG_HIGH_RES_TIMERS", "CONFIG_TIMERFD")
+            if actual.get(key) != "y"]
 
 
 def main():

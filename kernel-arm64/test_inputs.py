@@ -75,11 +75,19 @@ int main(int argc, char **argv) {
                 self.assertEqual(result.returncode, status, result.stderr)
                 self.assertIn(diagnostic, result.stderr)
 
-    def test_fixture_requires_timerfd_even_if_fragment_omits_it(self):
-        self.assertEqual(config.fixture_errors({'CONFIG_TIMERFD': 'y'}), [])
-        for actual in [{}, {'CONFIG_TIMERFD': 'n'}, {'CONFIG_TIMERFD': 'm'}]:
-            self.assertEqual(config.fixture_errors(actual), [
-                'CONFIG_TIMERFD: timerfd spin fixture requires y'])
+    def test_fixture_requires_hrtimers_and_timerfd_even_if_fragment_omits_them(self):
+        required = {'CONFIG_HIGH_RES_TIMERS': 'y', 'CONFIG_TIMERFD': 'y'}
+        self.assertEqual(config.fixture_errors(required), [])
+        for key in required:
+            for value in [None, 'n', 'm']:
+                actual = required.copy()
+                if value is None:
+                    del actual[key]
+                else:
+                    actual[key] = value
+                self.assertEqual(config.fixture_errors(actual), [
+                    f'{key}: timerfd spin fixture requires y'])
+        self.assertEqual(len(config.fixture_errors({})), 2)
 
     def test_hashes_require_independent_expected_values(self):
         import hashlib
