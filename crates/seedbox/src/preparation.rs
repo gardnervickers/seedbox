@@ -30,6 +30,7 @@ pub struct OciPreparer {
 }
 
 pub use crate::preparation_command::PreparationContext;
+pub mod native;
 
 impl PreparationBackend for OciPreparer {
     fn validate_runtime_inputs(&self) -> Result<()> {

@@ -42,6 +42,24 @@ Validation errors include the affected path, for example
 `$.services.workload.volumes: unsupported field`. Accepted authoring syntax does
 not establish image/kernel compatibility; preparation must check that separately.
 
+`oci::native::NativeOci` and `preparation::native::NativePreparer` import completed
+registry images, OCI layouts/archives, Docker-save archives and finished local
+Docker/Podman images. They verify manifests/configs/layers and uncompressed layer
+hashes, apply Linux metadata in a virtual filesystem, and write guest CPIO
+directly. Registry/archive imports need no container tools, privileged unpacking
+or host ownership changes. Explicit guest-platform selection supports AMD64 and
+ARM64; it never follows the host implicitly. `config::parse_native` and
+`config::load_native` select the same explicit platform when loading Compose.
+They consume `image:` when external tooling also has `build:` instructions,
+and reject build-only services with an explanation to build externally and
+supply an image. Native preparation refuses builds.
+
+This is library groundwork; the current CLI still uses the legacy `OciPreparer`
+with skopeo/umoci and Linux amd64. It does not enable ARM64 Compose execution.
+See [native image import](../../docs/image-import.md) and the
+[one-binary identity contract](../../docs/identity.md) for integration scope.
+The table below describes the current CLI authoring mode.
+
 | Field | Accepted form and meaning |
 | --- | --- |
 | `name` | Lowercase Compose project name; defaults to the source directory name. |

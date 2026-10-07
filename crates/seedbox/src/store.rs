@@ -63,19 +63,31 @@ impl ContentStore {
 
     /// Retain arbitrarily large artifacts with a bounded 64 KiB transfer buffer.
     pub fn put_reader(&self, mut reader: impl Read) -> Result<ContentDigest> {
+        self.put_reader_checked(&mut reader, &|| Ok(()))
+    }
+
+    /// As `put_reader`, checking cancellation during both capture and the final
+    /// existing-object verification. Published complete bytes remain immutable.
+    pub fn put_reader_checked(
+        &self,
+        mut reader: impl Read,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<ContentDigest> {
+        check()?;
         let directory = self.root.join("sha256");
         fs::create_dir_all(&directory)?;
         let mut temp = tempfile::NamedTempFile::new_in(&directory)?;
-        let digest = transfer(&mut reader, &mut temp)?;
+        let digest = transfer(&mut reader, &mut temp, check)?;
         let path = self.path(&digest);
         temp.as_file().sync_all()?;
+        check()?;
         match temp.persist_noclobber(&path) {
             Ok(_) => {}
             Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e.error.into()),
         }
         // Verify an existing entry too; never repair corruption implicitly.
-        self.verify(&digest)?;
+        self.verify_checked(&digest, check)?;
         Ok(digest)
     }
 
@@ -83,18 +95,36 @@ impl ContentStore {
         self.put_reader(fs::File::open(path)?)
     }
 
+    pub fn put_file_checked(
+        &self,
+        path: &Path,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<ContentDigest> {
+        check()?;
+        self.put_reader_checked(fs::File::open(path)?, check)
+    }
+
     pub fn read(&self, digest: &ContentDigest) -> Result<Vec<u8>> {
+        self.read_checked(digest, &|| Ok(()))
+    }
+
+    pub fn read_checked(
+        &self,
+        digest: &ContentDigest,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Vec<u8>> {
         // Convenience for small metadata only. File artifacts must use copy_to
         // or materialize; don't accidentally allocate a guest image in RAM.
         const LIMIT: u64 = 8 * 1024 * 1024;
         let mut bytes = Vec::new();
-        self.open(digest)?.take(LIMIT + 1).read_to_end(&mut bytes)?;
+        check()?;
+        let actual = transfer(&mut self.open(digest)?.take(LIMIT + 1), &mut bytes, check)?;
         if bytes.len() as u64 > LIMIT {
             return Err(Error::Integrity(
                 "artifact exceeds 8 MiB metadata read limit; use copy_to/materialize".into(),
             ));
         }
-        if ContentDigest::of(&bytes) != *digest {
+        if actual != *digest {
             return Err(Error::Integrity(format!("hash mismatch: {}", digest.hex())));
         }
         Ok(bytes)
@@ -122,10 +152,28 @@ impl ContentStore {
         self.copy_to(digest, &mut io::sink())
     }
 
+    pub fn verify_checked(
+        &self,
+        digest: &ContentDigest,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        self.copy_to_checked(digest, &mut io::sink(), check)
+    }
+
     /// Streams into a caller-owned destination. Publish that destination only
     /// after this returns Ok: corruption is detected after the final byte.
     pub fn copy_to(&self, digest: &ContentDigest, output: &mut impl Write) -> Result<()> {
-        let actual = transfer(&mut self.open(digest)?, output)?;
+        self.copy_to_checked(digest, output, &|| Ok(()))
+    }
+
+    pub fn copy_to_checked(
+        &self,
+        digest: &ContentDigest,
+        output: &mut impl Write,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        check()?;
+        let actual = transfer(&mut self.open(digest)?, output, check)?;
         if actual != *digest {
             return Err(Error::Integrity(format!("hash mismatch: {}", digest.hex())));
         }
@@ -135,24 +183,41 @@ impl ContentStore {
     /// Copy verified bytes into the run's private input directory. Never hardlink
     /// the content store into a backend's writable execution workspace.
     pub fn materialize(&self, digest: &ContentDigest, directory: &Path) -> Result<PathBuf> {
+        self.materialize_checked(digest, directory, &|| Ok(()))
+    }
+
+    pub fn materialize_checked(
+        &self,
+        digest: &ContentDigest,
+        directory: &Path,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<PathBuf> {
+        check()?;
         fs::create_dir_all(directory)?;
         let path = directory.join(digest.hex());
         let mut temp = tempfile::NamedTempFile::new_in(directory)?;
-        self.copy_to(digest, &mut temp)?;
+        self.copy_to_checked(digest, &mut temp, check)?;
         temp.as_file().sync_all()?;
+        check()?;
         temp.persist_noclobber(&path).map_err(|e| e.error)?;
         Ok(path)
     }
 }
 
-fn transfer(input: &mut impl Read, output: &mut impl Write) -> Result<ContentDigest> {
+fn transfer(
+    input: &mut impl Read,
+    output: &mut impl Write,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<ContentDigest> {
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
+        check()?;
         let count = match input.read(&mut buffer) {
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             result => result?,
         };
+        check()?;
         if count == 0 {
             break;
         }

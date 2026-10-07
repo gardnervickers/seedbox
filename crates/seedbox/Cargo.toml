@@ -20,3 +20,7 @@ walkdir = "2"
 xattr = "1"
 libc.workspace = true
 signal-hook = "0.3"
+flate2 = "1"
+zstd = "0.13"
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+url = "2"

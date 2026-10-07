@@ -1,7 +1,7 @@
 //! Minimal flattened device tree writer: big-endian cells, explicit phandles.
+use crate::boot::{BootLayout, DEFAULT_COMMAND_LINE, DTB_RESERVATION};
 use crate::*;
 use sha2::{Digest, Sha256};
-const BOOTARGS: &str = "console=ttyAMA0 earlycon=pl011,0x09000000 rdinit=/init nokaslr nosmp maxcpus=1 random.trust_cpu=off random.trust_bootloader=on mitigations=off panic=-1 loglevel=4";
 struct Tree {
     structure: Vec<u8>,
     strings: Vec<u8>,
@@ -86,6 +86,40 @@ pub fn build(seed: u64, initrd_len: usize) -> Result<Vec<u8>> {
     if initrd_len == 0 || initrd_len > (DTB_ADDR - INITRD_ADDR) as usize {
         return Err("initrd is empty or overlaps the device tree".into());
     }
+    Ok(build_tree(
+        seed,
+        RAM_SIZE as u64,
+        INITRD_ADDR,
+        INITRD_ADDR + initrd_len as u64,
+        DEFAULT_COMMAND_LINE,
+    ))
+}
+
+/// Serialize only validated boot parameters and check the actual byte length
+/// against the placement reservation before any guest memory is allocated.
+pub fn build_for_layout(layout: &BootLayout<'_>) -> Result<Vec<u8>> {
+    let initrd = layout.initrd_range();
+    let bytes = build_tree(
+        layout.seed(),
+        layout.memory_bytes() as u64,
+        initrd.start,
+        initrd.end,
+        layout.command_line(),
+    );
+    if bytes.len() as u64 > DTB_RESERVATION {
+        return Err("generated device tree exceeds boot layout reservation".into());
+    }
+    layout.ram_offset(layout.dtb_range().start, bytes.len())?;
+    Ok(bytes)
+}
+
+fn build_tree(
+    seed: u64,
+    memory_bytes: u64,
+    initrd_start: u64,
+    initrd_end: u64,
+    command_line: &str,
+) -> Vec<u8> {
     let mut t = Tree {
         structure: vec![],
         strings: vec![],
@@ -97,13 +131,10 @@ pub fn build(seed: u64, initrd_len: usize) -> Result<Vec<u8>> {
     t.cells("#size-cells", &[2]);
     t.cells("interrupt-parent", &[1]);
     t.node("chosen");
-    t.string("bootargs", BOOTARGS);
+    t.string("bootargs", command_line);
     t.string("stdout-path", "/pl011@9000000");
-    t.prop("linux,initrd-start", &INITRD_ADDR.to_be_bytes());
-    t.prop(
-        "linux,initrd-end",
-        &(INITRD_ADDR + initrd_len as u64).to_be_bytes(),
-    );
+    t.prop("linux,initrd-start", &initrd_start.to_be_bytes());
+    t.prop("linux,initrd-end", &initrd_end.to_be_bytes());
     let mut seed_hash = Sha256::new();
     seed_hash.update(b"seedbox arm64 rng v1\0");
     seed_hash.update(seed.to_le_bytes());
@@ -113,7 +144,7 @@ pub fn build(seed: u64, initrd_len: usize) -> Result<Vec<u8>> {
     t.end();
     t.node("memory@40000000");
     t.string("device_type", "memory");
-    t.reg(RAM_BASE, RAM_SIZE as u64);
+    t.reg(RAM_BASE, memory_bytes);
     t.end();
     t.node("cpus");
     t.cells("#address-cells", &[1]);
@@ -180,7 +211,7 @@ pub fn build(seed: u64, initrd_len: usize) -> Result<Vec<u8>> {
     t.cells("interrupts", &[0, TIMER_SPI - 32, 4]);
     t.end();
     t.end();
-    Ok(t.finish())
+    t.finish()
 }
 #[cfg(test)]
 mod tests {

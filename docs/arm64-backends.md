@@ -5,6 +5,38 @@ engine. The [quickstart below](#experimental-arm64-quickstart)
 contains Mac setup and input verification. This is a single-CPU fixture backend,
 not Compose application support.
 
+## Application groundwork
+
+The library now has `boot::BootSpec::for_application` to place a prepared
+archive automatically for a caller-selected RAM size and command line.
+`validate` produces an immutable `BootLayout` with checked guest-physical
+spans and RAM-offset translation. `Machine::from_spec` checks the complete
+layout and generated FDT before allocating RAM or creating a VM. It accepts
+archives larger than the fixture's former 16 MiB gap. The current conservative
+layout remains below 4 GiB guest physical address space; larger layouts need
+an explicit backend/CPU address-width contract. These are memory-placement
+checks, not a guest readiness claim. Placement follows the
+[Linux ARM64 boot protocol](https://www.kernel.org/doc/html/latest/arch/arm64/booting.html).
+
+`BootSpec::fixture`, `Machine::new` and `fdt::build` retain the historical
+fixture addresses, command line and FDT bytes. Portable tests freeze those
+bytes, reject overlapping or out-of-range inputs before VM creation, and
+check an automatically placed 20 MiB archive with a mock backend.
+
+`PvClock::set_horizon` provides the clock primitive for a future world
+scheduler. A finite horizon limits publication, yields and idle jumps;
+reaching it leaves future timers armed and produces no timer interrupt.
+Invalid updates or guest timestamps beyond that horizon fail without
+changing the clock. `None` retains the fixture's original policy. Callers
+must stop the guest before changing its horizon.
+
+The machine run loop does not yet accept world horizons. Initial PV-handshake
+clock reconciliation, cooperative machine stops, network/control/disk devices,
+multi-process HVF workers, guest supervisor support and retained-run integration
+remain work for Compose execution. The CLI still runs only the isolated
+fixture. The new APIs have portable coverage; same-input guest execution with
+the changed executable must also be checked before claiming runtime acceptance.
+
 ## Experimental arm64 quickstart
 
 The isolated `seedbox-arm64` crate runs a single-CPU PV fixture on native Mac
@@ -158,12 +190,16 @@ from the power-off hash.
 
 ## Guest layout and PV ABI 2
 
-The FDT describes 128 MiB RAM, one CPU, GICv3, a PL011 with fixed 24 MHz input
+The CLI fixture's FDT describes 128 MiB RAM, one CPU, GICv3, a PL011 with fixed 24 MHz input
 clocks, PSCI/HVC, chosen/initrd/bootargs, and the PV node. It has no architectural
 timer node. A domain-separated SHA-256 of the run seed supplies `rng-seed` and
 `kaslr-seed`. KASLR is disabled for this first fixture, but the FDT retains the
 seed property. NR_CPUS is 2 because that is Linux arm64's configuration minimum;
 only CPU 0 exists in the FDT and `nosmp maxcpus=1` is supplied.
+
+The following addresses are the historical fixture layout. The library's
+application boot layout can select RAM size and relocate initrd/FDT within RAM;
+device and PV addresses remain fixed.
 
 | Guest physical address | Purpose |
 | --- | --- |
