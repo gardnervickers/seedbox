@@ -35,6 +35,15 @@ let
   wrapper = pkgs.writeShellScriptBin "seedbox-host-cpu-lease" ''
     exec ${pkgs.python3}/bin/python3 -I ${./host-cpu-lease.py} ${finalConfig} "$@"
   '';
+  jobStarted = pkgs.writeShellScript "seedbox-host-job-started.sh" ''
+    if ! ${pkgs.bash}/bin/bash ${./host-job-started.sh}; then
+      # A failed hook alone can still permit steps with if: always(). Kill this
+      # job's Runner.Worker parent before it can evaluate any workflow steps.
+      # The listener survives to accept the next job; no smoke has started yet.
+      kill -KILL "$PPID"
+      exit 1
+    fi
+  '';
   instances = lib.genList (i: "seedbox-host-${toString (i + 1)}") cfg.maxParallel;
 in {
   options.services.seedbox-host-runner = {
@@ -89,7 +98,6 @@ in {
       users = [ user ];
       commands = [
         { command = "${wrapper}/bin/seedbox-host-cpu-lease"; options = [ "NOPASSWD" ]; }
-        { command = cfg.pinnedEngine; options = [ "NOPASSWD" ]; }
       ];
     }];
     systemd.services = lib.genAttrs (map (name: "github-runner-${name}") instances) (unit:
@@ -109,6 +117,7 @@ in {
       workDir = "${root}/runners/${name}";
       extraPackages = tools ++ [ pkgs.nix pkgs.sudo wrapper ];
       extraEnvironment = {
+        ACTIONS_RUNNER_HOOK_JOB_STARTED = "${jobStarted}";
         HOST_RUNNER_JOBS = "${root}/jobs/${name}";
         HOST_RUNNER_LOCKS = "${root}/locks";
         HOST_RUNNER_CAP = toString cfg.maxParallel;

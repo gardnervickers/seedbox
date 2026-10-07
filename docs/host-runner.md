@@ -64,11 +64,22 @@ Gardner runs his normal `nix-switch` for `nixos`. There will be services
 label `seedbox-amd`. Check their local systemd journals and GitHub's runner list.
 Create the `needs-host` repository label. Merge the workflow onto the default
 branch before trying the comment trigger. No additional workflow secret is
-required: reporting uses that workflow's short-lived `GITHUB_TOKEN`.
+required: label consumption and reporting use short-lived job `GITHUB_TOKEN`s
+only on GitHub-hosted runners.
 
 Before treating the installation as accepted, exercise an owner label, an owner
 comment, a rejected nonowner/fork request, overlapping checks on distinct pairs,
 a failing fixture, a new head while smoke runs, and runner service restart.
+Check that authenticated checkout can obtain a head from this private repository,
+that the local commit-presence check succeeds without a second fetch, and that a
+missing commit fails before the coordinator runs. Confirm `needs-host` disappears
+as the hosted gate accepts the request, including when host setup fails, and that
+a push only cancels: the next head requires a new label or command request.
+As a negative control, add a branch workflow targeting `seedbox-amd` with an
+`if: always()` step; the runner must reject it before that step or any other step
+runs. Also test the wrong job name and repository/ref identities. Inspect the
+effective sudo rules: only the
+installed lease wrapper is allowed, and direct sudo of the stored VMM is denied.
 Confirm that root smoke units are gone, canonical locks are free, MSR restoration
 receipts pass, and both worktrees and evidence disappear. The portable tests
 cannot establish those hardware/systemd/GitHub properties.
@@ -85,9 +96,16 @@ text are never interpolated into a shell command.
 
 The candidate is the PR's full head SHA, not GitHub's synthetic merge commit.
 The host rechecks that the PR is still open, same-repository, and on that SHA
-before fetching it. Control scripts and the flake are checked out at the trusted
-workflow SHA; `harness/host-check.sh SHA CPU` then creates a detached candidate
+before executing it. `actions/checkout` uses its default job token to fetch all
+same-repository branch heads (`fetch-depth: 0`) from this private repository,
+without retaining credentials (`persist-credentials: false`). The host uses
+`git cat-file -e "$SHA^{commit}"` to require the candidate locally and fails
+closed if it is absent; it performs no unauthenticated follow-up fetch.
+Control scripts and the flake are checked out at the trusted workflow SHA;
+`harness/host-check.sh SHA CPU` then creates a detached candidate
 worktree and performs its existing build, fmt, clippy, portable and smoke steps.
+Candidate `flake.nix`/`flake.lock` changes still need separate validation in the
+candidate shell; this runner continues using the trusted revision's tools.
 
 `maxParallel` controls both the number of runner services and shared capacity
 locks. Changing it requires Gardner's host rebuild. Other PRs queue in Actions
@@ -103,14 +121,18 @@ unprivileged coordinator dies. Lock files are never unlinked. External
 non-runner workloads can still race for a canonical lease after selection; a
 campaign refuses contention rather than retrying a guest run.
 
-A push cancels stale work using one concurrency group per PR. If `needs-host`
-still exists and its latest label event belongs to Gardner, the new head is
-checked automatically. A command request without a label is a single-head
-request; a push cancels it, and Gardner must request the next head. Closing the
-PR also cancels its check. Unrelated labels and nonowner comments cannot cancel
-a running check. After a result is posted for the still-current head, the
-workflow removes `needs-host`. Cancelled/stale results leave the label for the
-replacement check and do not post a misleading current-head verdict.
+Each request authorizes one head. The GitHub-hosted gate consumes `needs-host`
+before dispatching the host job, keeping the self-hosted token read-only. A label
+request fails closed if its label disappeared or the head changed since the label
+event. A command works without a label and consumes it if present. Host setup
+failure or cancellation does not preserve an accepted request for later heads.
+A push cancels stale work using one concurrency group per PR and never dispatches
+a replacement, even if a label remains. Gardner must re-add the label or comment
+`/host-check` for the next head; if a request was cancelled before the gate
+consumed its label, remove and re-add it. Closing the PR also cancels its check.
+Unrelated labels and nonowner comments cannot cancel a running check. Reporting
+checks the current head and never removes labels, so a late result cannot consume
+a new request or post a misleading current-head verdict.
 
 Normal PRs use `PINNED_ENGINE` from the module's stored path and build a candidate
 VMM, enabling `--allow-dev-engine` in smoke. The unflagged wrong-kernel control
@@ -133,8 +155,9 @@ for sudo, shared `/tmp` leases, process readback and builders; the runner keeps
 its scoped writable state. It has no blanket sudo, `sudo env`, `sudo python3`,
 `sudo rm`, or `sudo systemctl` permission.
 
-The two passwordless sudo entries are the immutable installed
-`seedbox-host-cpu-lease` wrapper and the configured stored pinned VMM executable.
+The only passwordless sudo entry is the immutable installed
+`seedbox-host-cpu-lease` wrapper. Direct sudo of the stored VMM is not allowed;
+every privileged smoke run must go through the wrapper's CPU and path checks.
 Development VMMs are executed by the privileged CLI inside smoke; no wildcard
 sudo permission for runner-writable binaries is installed. The wrapper accepts
 only `smoke WORK CPU INIT dev|pinned`, `clean JOB` and `reap RUNNER-JOBS`. It
@@ -157,20 +180,40 @@ and [Buildah isolation setting](https://github.com/podman-container-tools/builda
 It does not import the candidate's Python smoke or
 fixture code as root. The candidate CLI and, in dev mode, candidate VMM still
 execute as root. Consequently this is a trusted-code runner, not a sandbox for
-hostile PRs: those binaries could exercise root authority, and the allowed pinned
-VMM is also a privileged program. The restricted sudo command surface prevents
-routine accidental general sudo use; it does not make malicious candidate code
-safe. Owner authorization, same-repository branches and review of privileged
-code are mandatory. Anyone allowed to push code to a requested same-repository
-branch can affect later labelled-head checks. The runner can persist changes in
-its own account across jobs; it cannot provide adversarial job isolation.
+hostile PRs: those binaries could exercise root authority. The restricted sudo
+command surface prevents routine accidental general sudo use; it does not make
+malicious candidate code safe. Owner authorization, same-repository branches and review of privileged
+code are mandatory. Every new head needs a fresh owner request. The runner can
+persist changes in its own account across jobs; it cannot provide adversarial
+job isolation.
 
-The workflow's comment-write token exists only in the GitHub-hosted reporting
-job. The self-hosted job gets read permissions and checkout does not retain Git
-credentials. Runner registration state necessarily remains available to the
-runner service; do not use this machine/account for untrusted Actions workflows
-elsewhere in the repository. Restrict other workflows' use of this runner label
-and review workflow changes as privileged infrastructure changes.
+Tokens with issue-write permissions exist only in the GitHub-hosted gate and
+reporting jobs. The self-hosted job gets read permissions and checkout does not
+retain Git credentials. Runner registration state necessarily remains available to the
+runner service. The module installs an immutable `.sh` pre-job hook in the Nix
+store and sets `ACTIONS_RUNNER_HOOK_JOB_STARTED` on every runner service. Before
+any workflow step, it requires all of:
+
+- `GITHUB_REPOSITORY=gardnervickers/seedbox`.
+- `GITHUB_WORKFLOW_REF=gardnervickers/seedbox/.github/workflows/host-check.yml@refs/heads/main`.
+- `GITHUB_JOB=host`.
+- `GITHUB_EVENT_NAME=pull_request_target` or `issue_comment`.
+
+Missing or mismatched values cause the validator to exit nonzero. The installed
+hook then kills its immediate `Runner.Worker` parent, terminating this job before
+any workflow steps can run. The listener survives to accept the next job. This
+also blocks `if: always()` steps: a failed hook by itself leaves those steps
+eligible in the [runner's condition loop](https://github.com/actions/runner/blob/main/src/Runner.Worker/StepsRunner.cs).
+Only refused jobs take this path, before any coordinator or privileged smoke
+starts; authorized jobs retain their ordinary cancellation and cleanup behavior.
+GitHub documents the hook's placement in its [pre-job hook contract](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/run-scripts).
+This restriction lives on the runner rather than in branch-editable workflows;
+using the runner label in another workflow or in a branch copy of this workflow
+does not authorize a job. The allowed main workflow still supplies owner and
+same-repository request checks. Hook changes require Gardner's host rebuild;
+workflow changes on main remain privileged infrastructure changes. This is
+admission control, not isolation from previously authorized malicious code in a
+persistent runner account.
 
 The coordinator forwards catchable cancellation to the host-check process,
 then invokes bounded root cleanup. Cleanup stops the job's systemd unit, waits
@@ -196,7 +239,11 @@ Cancelled jobs can have an uploaded summary but do not post a current verdict.
 Keep portable checks in `harness/tests/` and add their test module to
 `harness/acceptance.sh`. Those run for every candidate and must not access devices
 or sudo. `test_host_runner` covers allocation/capacity, lock identity, process
-death, comment quoting and root cleanup path validation.
+death, comment quoting, root cleanup path validation, runner-hook admission and
+the sole sudo entry. Run `node harness/tests/test_host_workflow.js` separately to
+exercise the workflow's actual JavaScript with a fake API, including one-shot
+label consumption, stale heads, cancellation events and late reports. Node is
+provided by Actions; it is not required by the portable project dev shell.
 
 For additional hardware fixtures, add a finite public-CLI phase to the reviewed
 smoke campaign with explicit inputs, wall budget, owned process cleanup,

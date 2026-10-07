@@ -4,6 +4,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -264,6 +266,15 @@ class CommentTests(unittest.TestCase):
 
 
 class WrapperTests(unittest.TestCase):
+    def test_module_installs_job_filter_and_only_lease_wrapper_sudo(self):
+        module = (HERE.parent / 'nix/host-runner.nix').read_text()
+        self.assertIn('${pkgs.bash}/bin/bash ${./host-job-started.sh}', module)
+        self.assertIn('ACTIONS_RUNNER_HOOK_JOB_STARTED = "${jobStarted}";', module)
+        rules = module.split('security.sudo.extraRules =', 1)[1].split('systemd.services =', 1)[0]
+        self.assertEqual(rules.count('command ='), 1)
+        self.assertIn('command = "${wrapper}/bin/seedbox-host-cpu-lease"', rules)
+        self.assertNotIn('cfg.pinnedEngine', rules)
+
     def test_builder_storage_and_runtime_are_owned_by_the_job_unit(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -304,6 +315,100 @@ class WrapperTests(unittest.TestCase):
             path.write_bytes(b'engine')
             with self.assertRaisesRegex(ValueError, 'not root-owned'):
                 wrapper.owned_input(path)
+
+
+class JobHookTests(unittest.TestCase):
+    allowed = dict(
+        GITHUB_REPOSITORY='gardnervickers/seedbox',
+        GITHUB_WORKFLOW_REF='gardnervickers/seedbox/.github/workflows/host-check.yml@refs/heads/main',
+        GITHUB_JOB='host', GITHUB_EVENT_NAME='pull_request_target')
+
+    def hook(self, environment):
+        return subprocess.run(['bash', str(HERE.parent / 'nix/host-job-started.sh')],
+                              env=environment, capture_output=True, text=True)
+
+    def test_only_main_host_job_for_both_request_events_is_allowed(self):
+        for event in ('pull_request_target', 'issue_comment'):
+            result = self.hook(dict(self.allowed, GITHUB_EVENT_NAME=event))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout + result.stderr, '')
+
+    def test_other_repositories_workflows_refs_jobs_and_events_refuse(self):
+        cases = {
+            'GITHUB_REPOSITORY': ['other/seedbox'],
+            'GITHUB_WORKFLOW_REF': [
+                'gardnervickers/seedbox/.github/workflows/x.yml@refs/heads/main',
+                'gardnervickers/seedbox/.github/workflows/host-check.yml@refs/heads/attack',
+                'gardnervickers/seedbox/.github/workflows/host-check.yml@refs/pull/112/merge',
+                'other/seedbox/.github/workflows/host-check.yml@refs/heads/main'],
+            'GITHUB_JOB': ['gate', 'report', 'host-extra'],
+            'GITHUB_EVENT_NAME': ['push', 'pull_request', 'workflow_dispatch'],
+        }
+        for key, values in cases.items():
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    result = self.hook(dict(self.allowed, **{key: value}))
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('host runner refused job:', result.stderr)
+                    self.assertEqual(result.stdout, '')
+                    self.assertNotIn(value, result.stderr)
+
+    def test_missing_or_empty_identity_fails_closed(self):
+        for key in self.allowed:
+            for value in (None, ''):
+                environment = self.allowed.copy()
+                if value is None:
+                    del environment[key]
+                else:
+                    environment[key] = value
+                with self.subTest(key=key, value=value):
+                    self.assertNotEqual(self.hook(environment).returncode, 0)
+        self.assertNotEqual(self.hook({}).returncode, 0)
+
+    def test_installed_hook_rejection_stops_worker_before_an_always_step(self):
+        module = (HERE.parent / 'nix/host-runner.nix').read_text()
+        launcher = module.split('jobStarted = pkgs.writeShellScript "seedbox-host-job-started.sh" \'\'\n', 1)[1]
+        launcher = launcher.split("  '';", 1)[0]
+        launcher = launcher.replace('${pkgs.bash}/bin/bash', shlex.quote(shutil.which('bash')))
+        launcher = launcher.replace('${./host-job-started.sh}', shlex.quote(str(HERE.parent / 'nix/host-job-started.sh')))
+        # A disposable process stands in for Runner.Worker. It tries to run an
+        # unconditional step after the hook, even if the hook failed.
+        worker = '''
+import subprocess, sys
+subprocess.run(['bash', '-c', sys.argv[1]])
+print('always step reached', flush=True)
+'''
+        for allowed in (True, False):
+            environment = dict(os.environ, **self.allowed)
+            if not allowed:
+                environment['GITHUB_WORKFLOW_REF'] = 'gardnervickers/seedbox/.github/workflows/x.yml@refs/heads/attack'
+            result = subprocess.run([sys.executable, '-c', worker, launcher], env=environment,
+                                    capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0 if allowed else -9)
+            self.assertEqual('always step reached' in result.stdout, allowed)
+            self.assertEqual('host runner refused job:' in result.stderr, not allowed)
+
+
+class WorkflowCheckoutTests(unittest.TestCase):
+    def test_missing_commit_stops_before_candidate_execution_without_fetching(self):
+        workflow = (HERE.parent / '.github/workflows/host-check.yml').read_text()
+        host = workflow.split('\n  host:\n', 1)[1].split('\n  report:\n', 1)[0]
+        check = next(line.strip() for line in host.splitlines() if line.strip().startswith('git cat-file'))
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run(['git', 'init', '-q', directory], check=True)
+            subprocess.run(['git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                            '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null',
+                            'commit', '-q', '--allow-empty', '-m', 'fixture'], cwd=directory, check=True)
+            sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=directory, text=True).strip()
+            for candidate, present in ((sha, True), ('0' * 40, False)):
+                result = subprocess.run(['bash', '-e', '-c', check + '\nprintf "coordinator reached\\n"'],
+                                        cwd=directory, env=dict(os.environ, SHA=candidate),
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, present)
+                self.assertEqual('coordinator reached' in result.stdout, present)
+        self.assertNotIn('git fetch', host)
+        self.assertIn('fetch-depth: 0', host)
+        self.assertIn('persist-credentials: false', host)
 
 
 if __name__ == '__main__':
