@@ -31,6 +31,7 @@ and identities.
 | `cluster-fork-late.json` | The same cluster forked at 1.4 simulated seconds, after etcd has started, with timer and link jitter (see below) |
 | `cluster-fork-skew.json` | `cluster-fork.json` released with up to 50 ms of seeded skew, jitter, and a timed partition after the release (see below) |
 | `entropy-fork.json` | One machine printing `getrandom` and `/dev/urandom` bytes before and after a time fork (see below) |
+| `entropy-barrier.json` | The same guest forked at its launch barrier instead (see below) |
 | `rdrand.json` | One machine executing RDRAND without consulting CPUID, which hides it (see below) |
 
 `batch.sh`, `batch.py` and `msr54.py` still run these fixtures with shared CPU/SMT
@@ -87,7 +88,9 @@ seed. Each seed's report records the delivery per machine in `boot.reseed`
 (`barrier`, `time_page` or `unsupported`). `cluster-fork-late.json` adds jitter;
 run it the same way, with `fork-late-cold` and `fork-late-loop` prefixes.
 `entropy-fork.json` prints random bytes on either side of a time fork at 2
-simulated seconds; build its initramfs with `guest/rngprobe.c` at `bin/rngprobe`.
+simulated seconds, and `entropy-barrier.json` on either side of the launch
+barrier; build their initramfs from `guest/entropy-fork.init` with
+`guest/rngprobe.c` at `bin/rngprobe`.
 `rdrand.json` checks whether RDRAND, hidden from CPUID, still reaches the
 hardware: `rdrand: #UD` is safe, and differing values across runs of one seed
 are a determinism hole.

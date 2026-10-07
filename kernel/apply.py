@@ -152,12 +152,18 @@ append(
     "drivers/char/random.c",
     "\nstatic void seedbox_take_entropy(void)\n{\n"
     "\tstruct seedbox_time_page *p = READ_ONCE(seedbox_page);\n"
-    "\tstatic u64 seen;\n\tu64 gen;\n\n"
-    "\tif (!p)\n\t\treturn;\n"
+    "\tstatic u64 seen;\n\tunsigned long flags;\n\tu64 gen;\n\n"
+    "\tif (!p || likely(READ_ONCE(p->entropy_gen) == seen))\n\t\treturn;\n"
+    "\t/* No interrupt may draw from the old key mid-reseed. */\n"
+    "\tlocal_irq_save(flags);\n"
     "\tgen = READ_ONCE(p->entropy_gen);\n"
-    "\tif (likely(gen == seen))\n\t\treturn;\n"
-    "\tseen = gen;\n"
-    "\tmix_pool_bytes(p->entropy, sizeof(p->entropy));\n"
-    "\tcrng_reseed(NULL);\n}\n",
+    "\tif (gen != seen) {\n"
+    "\t\tmix_pool_bytes(p->entropy, sizeof(p->entropy));\n"
+    "\t\t/* Before the CRNG is ready, mixing is enough: the boot path\n"
+    "\t\t * seeds it, and reseeding here would mark it ready early. */\n"
+    "\t\tif (crng_ready())\n\t\t\tcrng_reseed(NULL);\n"
+    "\t\tseen = gen;\n"
+    "\t}\n"
+    "\tlocal_irq_restore(flags);\n}\n",
 )
 print("seedbox guest changes applied")
