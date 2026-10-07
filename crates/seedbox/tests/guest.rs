@@ -113,6 +113,7 @@ fn binary_recipe_keeps_arguments_and_config_bytes_literal() {
         working_dir: "/".into(),
         user: "123:456".into(),
         volumes: vec!["/data".into()],
+        disk_volumes: vec![],
     };
     let recipe = launch_recipe(
         &launch,
@@ -133,7 +134,7 @@ fn binary_recipe_keeps_arguments_and_config_bytes_literal() {
         *cursor += n;
         data
     }
-    assert_eq!(&recipe[..10], b"SBXLAUNCH1");
+    assert_eq!(&recipe[..10], b"SBXLAUNCH2");
     for expected in ["10.0.0.1/24", "10.0.0.1 app\n", "123:456", "/"] {
         assert_eq!(field(&recipe, &mut cursor), expected.as_bytes());
     }

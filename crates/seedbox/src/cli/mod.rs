@@ -232,6 +232,9 @@ struct RuntimeInputs {
     /// Static Linux amd64 BusyBox [default: busybox on PATH, if static].
     #[arg(long, env = "SEEDBOX_BUSYBOX")]
     busybox: Option<PathBuf>,
+    /// Static Linux amd64 mke2fs, for named volumes [default: mke2fs on PATH, if static].
+    #[arg(long, env = "SEEDBOX_MKE2FS")]
+    mke2fs: Option<PathBuf>,
     /// Docker-compatible client for `build:` services.
     #[arg(long, default_value = "podman")]
     builder: PathBuf,
@@ -279,6 +282,7 @@ impl RuntimeInputs {
             engine,
             init: defaults::guest_init(self.guest_init.clone(), store, scratch)?,
             busybox: defaults::busybox(self.busybox.clone())?,
+            mke2fs: defaults::mke2fs(self.mke2fs.clone())?,
             profile,
         })
     }

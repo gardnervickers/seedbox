@@ -111,6 +111,7 @@ impl Fixture {
                         user: "".into(),
                         working_dir: "/".into(),
                         volumes: vec![],
+                        disk_volumes: vec![],
                     },
                 },
             )]),

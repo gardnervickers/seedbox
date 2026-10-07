@@ -202,6 +202,17 @@ pub fn busybox(explicit: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
+/// A static Linux amd64 mke2fs, if there is one: an explicit path, else
+/// `mke2fs` on `PATH` when it is statically linked (the Nix shell sets
+/// SEEDBOX_MKE2FS). Only Compose files with named volumes need it, so
+/// preparation reports its absence then.
+pub fn mke2fs(explicit: Option<PathBuf>) -> Result<Option<PathBuf>> {
+    if let Some(path) = explicit {
+        return existing("--mke2fs", path).map(Some);
+    }
+    Ok(on_path("mke2fs").filter(|path| is_static_elf(path)))
+}
+
 /// A recorded run: a directory holding `manifest.json`.
 pub fn run_directory(path: PathBuf) -> Result<PathBuf> {
     let path = existing("run directory", path)?;

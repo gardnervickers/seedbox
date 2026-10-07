@@ -20,6 +20,7 @@
             SEEDBOX_IP = "${pkgs.iproute2}/bin/ip";
             SEEDBOX_TC = "${pkgs.iproute2}/bin/tc";
             SEEDBOX_BUSYBOX = "${pkgs.pkgsStatic.busybox}/bin/busybox";
+            SEEDBOX_MKE2FS = "${pkgs.pkgsStatic.e2fsprogs.bin}/bin/mke2fs";
           });
         };
     in {
