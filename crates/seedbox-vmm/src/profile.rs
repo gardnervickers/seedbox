@@ -21,8 +21,7 @@ pub struct CounterProfile {
     pub skid_ns: f64,
     /// Distance of the first, rate-measuring overflow before a hard stop.
     pub approach: u64,
-    /// Floor of the adaptive margin. The syscall-exit window before a soft
-    /// stop must outlast the skid.
+    /// Floor of the adaptive margin.
     pub margin_min: u64,
     /// With undo-able stops, the largest final margin tried after rollbacks.
     pub undo_max: u64,

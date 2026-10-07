@@ -3,7 +3,7 @@
 //! directly. Pending deltas are drained at every global frontier, not retained as
 //! packet history. The receiver's actual acceptance outcome remains authoritative.
 use std::collections::BTreeMap;
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct NetworkCounters {
     totals:BTreeMap<(usize,usize),[u64;3]>,
     pending:BTreeMap<u64,Vec<(usize,usize,usize)>>,

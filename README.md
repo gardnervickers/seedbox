@@ -66,16 +66,16 @@ may change execution. Release compatibility remains a V0 qualification gate.
   conditional branches (guest only, kernel and user). Virtual time advances
   1 ns per branch; idle machines jump to their next event.
 - **Stops.** Events (timer deadlines, frames, scenario commands) are delivered
-  at deterministic points only: a natural VM exit, the guest's next syscall
-  (a small kernel hook offers that exit), or an exact branch count reached by
-  overflow interrupt plus hardware-breakpoint stepping (no TF). A timer
-  interrupt fires at the first such point at or after its deadline, at most
-  `stop_tolerance_ns` late. An overflow interrupt that skids past a stop, or
-  past a syscall that would have been one, fails the run rather than moving
+  at deterministic points only: a natural VM exit, or an exact branch count
+  reached by overflow interrupt plus hardware-breakpoint stepping (no TF).
+  Syscalls are not stopping points. A timer interrupt fires at the first
+  natural exit at or after its deadline, at most `stop_tolerance_ns` late, and
+  then by an exact count. An overflow interrupt that skids past a counted
+  stop is rolled back and retried closer, or fails the run, rather than moving
   the stop.
 - **Guest kernel changes** (`kernel/`): kernel TSC reads return VMM-published
-  virtual time; user RDTSC/RDTSCP trap via CR4.TSD and are emulated; a syscall
-  hook offers yield exits.
+  virtual time; user RDTSC/RDTSCP trap via CR4.TSD and are emulated. The
+  kernel's syscall yield hook remains, but the engine never requests it.
 - **Network and scheduling.** virtio-net over virtio-mmio into an in-memory
   fabric with seeded latency/jitter and directed partitions. The world runs the
   machine furthest behind in slices that never pass its causal horizon (the
@@ -165,9 +165,9 @@ MSR restoration. See [the fixture map](harness/worlds/README.md).
 
 Stop placement settings affect speed only, never results. `--undo` controls the
 precise-stop rollback window (default 256; 0 disables it). `--margin` selects the
-PMU approach and stepping distance when undo is off (default `adaptive`). Syscall
-exits remain available throughout a soft stop interval independently of that
-setting; earlier yields do not publish a stop or inject an interrupt. The
+PMU approach and stepping distance when undo is off (default `adaptive`). Neither
+setting decides where a stop lands: the first natural exit at or after the soft
+target and below the hard target, otherwise an exact count at the hard target. The
 low-level batch runner uses `SEEDBOX_UNDO` and `SEEDBOX_MARGIN` for the same settings.
 
 A PMU overshoot aborts an execution. A separate invocation can use a larger
