@@ -33,7 +33,7 @@ pub fn launch_recipe(
     hosts: &str,
     configs: &BTreeMap<String, Vec<u8>>,
 ) -> Result<Vec<u8>> {
-    let mut bytes = b"SBXLAUNCH1".to_vec();
+    let mut bytes = b"SBXLAUNCH2".to_vec();
     for value in [ip, hosts, &launch.user, &launch.working_dir] {
         field(&mut bytes, value.as_bytes())?;
     }
@@ -47,6 +47,14 @@ pub fn launch_recipe(
             .collect::<Vec<_>>(),
     )?;
     list(&mut bytes, &launch.volumes)?;
+    // Named volumes as name, target pairs, for the supervisor to mount from
+    // the retained disk before it enters the image root.
+    let mut volumes = Vec::new();
+    for mount in &launch.disk_volumes {
+        volumes.push(mount.source.clone());
+        volumes.push(mount.target.clone());
+    }
+    list(&mut bytes, &volumes)?;
     if configs.len() > 65536 {
         return Err(Error::Execution("too many config mounts".into()));
     }
@@ -84,10 +92,26 @@ pub fn build_initramfs(
     recipe: &[u8],
     output: &Path,
 ) -> Result<()> {
+    build_initramfs_with(rootfs, init, busybox, None, recipe, output)
+}
+
+/// As `build_initramfs`, also packaging `mke2fs` for a machine whose
+/// services keep named volumes on its retained disk.
+pub fn build_initramfs_with(
+    rootfs: &Path,
+    init: &Path,
+    busybox: &Path,
+    mke2fs: Option<&Path>,
+    recipe: &[u8],
+    output: &Path,
+) -> Result<()> {
     let mut archive = Newc::new(fs::File::create(output)?);
     archive.owned("seedbox", 0o040755, &[])?;
     archive.owned("init", 0o100755, &fs::read(init)?)?;
     archive.owned("seedbox/busybox", 0o100755, &fs::read(busybox)?)?;
+    if let Some(mke2fs) = mke2fs {
+        archive.owned("seedbox/mke2fs", 0o100755, &fs::read(mke2fs)?)?;
+    }
     archive.owned("seedbox/launch.bin", 0o100400, recipe)?;
     archive.tree(rootfs, "rootfs")?;
     archive.finish()

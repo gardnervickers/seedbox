@@ -34,11 +34,13 @@ directory. Every runtime input has a default, so no flags are required:
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
 | Exploration count | `1` | `--count` |
 | Exploration workers | `1`, sequential execution | `--workers` (1..32; automatic CPU selection for parallel execution) |
+| Torn disk writes | off (drop all unflushed sectors on crash) | `--torn-writes` |
 | CPU | first free core other than CPU 0's, under the shared lease | `--cpu`, `SEEDBOX_CPU` |
 | Guest kernel | `bzImage` in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`, `./artifacts`, then `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | `seedbox-vmm` next to an installed `seedbox`, then this checkout's `cargo build-vmm` output, then on `PATH`; `cargo run` builds it if missing | `--vmm`, `SEEDBOX_VMM` |
 | Guest supervisor | built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | BusyBox | `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
+| mke2fs (only for named volumes) | `SEEDBOX_MKE2FS` (set by `nix develop`), then a static `mke2fs` on `PATH` | `--mke2fs` |
 | Build epoch | absent; preserve the builder's ordinary timestamp policy | `--build-epoch` (prepare/run/explore; no environment backing) |
 | Engine qualification | pinned engine and guest kernel; dev artifacts require explicit opt-in | `--allow-dev-engine` (run/explore/replay/doctor; no environment backing) |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
@@ -52,10 +54,27 @@ engine. Replay requires this flag and the exact retained engine/kernel hashes;
 bundles preserve the marker. Passing the flag with both pinned artifacts adds no
 marker. All host, CPU, PMU, MSR, lease, ABI and control-channel checks still apply.
 
+`seedbox run --torn-writes` enables seeded partial survival of unflushed
+512-byte disk sectors on crash. It is recorded in run identity and replayed
+automatically. It applies to retained disks, including Compose named volumes. See [disk semantics](docs/runtime.md#disk-crash-policy).
+
 `seedbox help run` lists every option. A run prints `OUTCOME: run-directory`;
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
 INCOMPLETE and 124 TIMEOUT. Offline `diff` exits 0 for MATCH, 1 for DIFFERENT,
 and 2 for usage/setup or invalid retained evidence.
+
+Pause a running world from another terminal with `sudo seedbox pause RUN`, then
+continue it with `sudo seedbox resume RUN`. Use the executing attempt directory
+(for replay, its new attempt), identifiable by `RUN/output/host-control`. Both
+commands wait for a boundary acknowledgement. All guests and virtual time freeze;
+wall-time limits and cancellation remain active. See [host pause](docs/runtime.md#host-pause)
+for the mechanism and development-engine verification requirements.
+
+On a VMM failure, text output from `run`, `replay`, `explore` and `inspect`
+also prints up to five non-empty lines from the final 8 KiB of that attempt's
+`output/vmm.stderr` to stderr, prefixed with `vmm stderr:`. Missing or unreadable
+logs do not change the outcome. Retained records and `--json` output are unchanged.
+`inspect` keeps the recorded `error:` line on stdout alongside the run status.
 
 [Draft format and runtime scope](docs/compatibility.md) distinguishes inspection
 and transfer from qualified execution. Same software versions, seed and exact
@@ -136,6 +155,60 @@ rebuilt OCI images to have identical bytes.
 | `docs/` | [Vision](docs/vision.md), [runtime instructions](docs/runtime.md), [backends](docs/backends.md), [acceptance record](docs/acceptance.md) |
 | `harness/` | YAML acceptance scenarios, portable checks, low-level world fixtures and their batch runner ([migration map](harness/worlds/README.md)), `msr54.py` |
 | [`tools/mac-tcg/`](tools/mac-tcg/README.md) | Experimental local Mac TCG runner and tests; separate from the production KVM backend |
+
+## Contributor checks
+
+Portable checks must pass at the PR or merge-train head before spending AMD
+host time. Use the fast pre-check on a Mac or any other non-KVM machine:
+
+```sh
+bash harness/mac-check.sh main     # any local revision or branch
+bash harness/mac-check.sh          # current checkout, including local changes
+```
+
+Run from within the checkout on any host inside the project's Nix dev shell.
+With a revision, the script creates a detached worktree under `$TMPDIR` (or `/tmp` if unset) and
+deletes it on a pass; on failure it keeps the worktree and prints its path.
+Without a revision, it checks the existing checkout, including local changes.
+Its first stdout line is `revision: FULL_SHA`. It uses the caller's development
+shell to run, in order:
+
+- `cargo fmt -p seedbox --check`
+- `cargo clippy -p seedbox --all-targets --locked -- -D warnings`
+- `bash harness/acceptance.sh portable`
+
+The portable suite includes workspace tests, both Python unittest suites and
+YAML validation. Workspace builds share a persistent target directory at
+`$XDG_CACHE_HOME/seedbox/precheck-target` when set, otherwise
+`~/Library/Caches/seedbox/precheck-target` on macOS or
+`~/.cache/seedbox/precheck-target` elsewhere. `SEEDBOX_PRECHECK_TARGET` overrides
+that path; an existing `CARGO_TARGET_DIR` is respected when the override is unset.
+Relative overrides resolve from the invoking directory, before entering a
+revision worktree. Cargo fingerprints determine which build outputs can be reused.
+
+All steps run even if an earlier step fails. Command output goes to stderr;
+stdout ends with timed step/phase lines in `harness/host-check.sh`'s exact format:
+`printf '%-8s %s %4ss\n' STEP pass|FAIL SECONDS`, with `phase ` lines preserved.
+The gate exits 0 only if every step passes, and 1 if any step fails; setup errors
+also exit nonzero. The runner comes from the invoking checkout, so it can check
+revisions that predate the script.
+
+On macOS, the pre-check skips the Linux-only VMM tests and batch supervisor
+lifecycle tests. On Linux, the portable suite includes those tests; VMM tests
+keep their standalone target directory instead of using the workspace cache.
+The pre-check does not execute guests. VMM builds and KVM acceptance remain
+Linux host checks. After a Linux pre-check passes a committed revision, run:
+
+```sh
+bash harness/host-check.sh --skip-portable REV CPU
+```
+
+This skips fmt, clippy and the portable suite (including workspace tests), while
+keeping the CLI build, VMM build (unless `SEEDBOX_VMM` selects a stored engine),
+VMM tests and AMD smoke checks. Both gates print the full SHA; match them before
+using the skip option. A Mac pass alone does not justify skipping the Linux
+portable checks. A pre-check with local changes only verifies those local
+bytes and does not establish a pass for the committed SHA.
 
 ## How execution is controlled
 
@@ -240,8 +313,9 @@ configuration, engine, logs and result. Replay uses the retained content store
 without registry pulls or builds. PASS, FAIL, ERROR, TIMEOUT and INCOMPLETE are
 separate results; a reproduced FAIL is a successful MATCH. `--full-state` adds
 per-machine RAM/register comparisons. `--margin` and `--undo` change performance without
-changing semantic identity. Application storage is private RAM-backed state for
-each run; the default is 1024 MiB per service. See [runtime instructions](docs/runtime.md)
+changing semantic identity. Each run has private application storage: image filesystems are RAM-backed,
+and named volumes use retained ext4 disks that survive guest crash/reboot.
+The default RAM allocation is 1024 MiB per service. See [runtime instructions](docs/runtime.md)
 for compatibility, memory sizing, root access, cancellation and the supported subset.
 
 The [acceptance record](docs/acceptance.md) includes real etcd/Redis passes,
@@ -252,8 +326,9 @@ lease contention and exact MSR restoration on the workstation.
 
 `seedbox diff RUN_A RUN_B [--json]` compares two retained directories on Linux or
 macOS without executing guests. It reports the world witness, each machine's
-exit/full-state witnesses, the first differing retained trace record (or terminal
-record), and changed identity fields including seed, engine, kernel, images and
+exit/full-state witnesses and state parts (such as RAM and disk), the first
+differing retained trace record (or terminal record with state parts), and changed
+identity fields including seed, engine, kernel, images and
 semantic parameters. Import bundles first, then pass their printed run paths.
 
 Only manifest-declared, checksum-verified evidence is read. The adapter does not
@@ -328,6 +403,7 @@ seedbox run harness/acceptance/workloads/short-kill-3.5.2.yaml
 seedbox run harness/acceptance/workloads/sanity.yaml
 seedbox run harness/acceptance/workloads/race.yaml
 seedbox run harness/acceptance/workloads/kill-3.5.3.yaml
+seedbox run harness/acceptance/workloads/volume-crash.yaml
 ```
 
 The YAML references the existing Go/C workload build contexts and loads the
@@ -344,7 +420,10 @@ etcd 3.5.3 scenario performs twenty. The sanity scenario requires detection of i
 planted missing acknowledgement and uses `check.exit_code: 1`, so the acceptance
 command succeeds when that negative control behaves correctly. The race driver
 checks its output and atomic control inside the guest; it does not require a
-particular seed to lose a fixed number of updates.
+particular seed to lose a fixed number of updates. The volume scenario puts
+keys into a single etcd node whose data directory is a named volume, crashes and
+reboots that machine through the control API, and requires every acknowledged
+key to be read back.
 
 Each command uses normal CLI outcomes and exit codes. There is no host-side
 console parsing, scenario verdict, seed pin, automatic retry, or acceptance-only
@@ -369,6 +448,18 @@ etcd scenario runs four guests.
 YAML without starting guests. It has no hardware tiers. The low-level batch
 runner remains available for the distinct fixtures below. Hardware results and known runtime failures
 are recorded in [docs/acceptance.md](docs/acceptance.md).
+
+`bash harness/host-check.sh --plan SHA` shows change-scoped host checks from the
+merge-base diff without executing anything. On the qualified Linux host,
+`--lanes 1,2,3` spreads the selected checks over SMT pairs `(N, N+16)`.
+Host-free selection uses an explicit allow-list; unknown paths select core.
+Other examples also require their reviewer's run list, and kernel changes keep
+the campaign warning while selecting core. Execution runs portable checks by
+default; `REV CPU` remains shorthand for `REV --lanes CPU` (1..15).
+Disk and Compose-volume rows require `SEEDBOX_DISK_KERNEL` until K2 is accepted.
+Automatic `cluster-fixed` runs only when engine inputs differ from local main;
+reviewer requirements repeat on the final status and in retained summaries.
+Use repeatable `--extra CHECK` to add reviewer checks. See [the host-check map and execution instructions](harness/smoke/README.md#change-scoped-host-checks).
 
 The focused race comparison records a fixed `SOURCE_DATE_EPOCH=0` for Podman image
 build metadata and requires two public preparations to have identical complete

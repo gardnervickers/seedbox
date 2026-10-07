@@ -57,6 +57,7 @@ fn fixture(
         engine,
         init: helper.clone(),
         busybox: helper,
+        mke2fs: None,
         profile,
     };
     let simulation=config::parse("name: preparation-test\nservices:\n  app: {image: example/app}\nx-seedbox:\n  version: 1\n  seed: 10\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n",&root.join("compose.yaml"),&BTreeMap::new()).unwrap();
