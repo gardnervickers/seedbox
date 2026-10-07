@@ -79,23 +79,33 @@ impl VmmExecutor {
     }
 }
 
-impl ExecutionBackend for VmmExecutor {
-    fn preflight(&self, output: Option<&Path>) -> Result<()> {
+impl VmmExecutor {
+    fn preflight_capacity(&self, workers: u32, output: Option<&Path>) -> Result<()> {
         crate::admission::validate_profile(&self.profile)?;
         let mut observations = Vec::new();
         let collection = (|| -> Result<()> {
             #[cfg(target_os = "linux")]
             {
-                let reservation = crate::host::CpuReservation::acquire(self.cpu)?;
-                crate::admission::collect_admitted(
-                    reservation.cpus.iter().copied(),
-                    &mut observations,
-                    crate::admission::observe,
-                )?;
-                drop(reservation); // No reservation/perf/affinity spans OCI or diagnostic publication.
+                let mut reservations = Vec::new();
+                for _ in 0..workers {
+                    let reservation = crate::host::CpuReservation::acquire(self.cpu)
+                        .map_err(|error| if workers > 1 {
+                            Error::Setup(format!("--workers {workers}: cannot reserve {workers} distinct eligible physical cores: {error}"))
+                        } else { error })?;
+                    reservations.push(reservation);
+                }
+                for reservation in &reservations {
+                    crate::admission::collect_admitted(
+                        reservation.cpus.iter().copied(),
+                        &mut observations,
+                        crate::admission::observe,
+                    )?;
+                }
+                drop(reservations); // No reservation/perf/affinity spans OCI or diagnostic publication.
             }
             #[cfg(not(target_os = "linux"))]
             {
+                let _ = workers;
                 observations.push(crate::admission::observe(0)?);
             }
             Ok(())
@@ -121,6 +131,23 @@ impl ExecutionBackend for VmmExecutor {
             drop(saved);
             Ok(())
         })
+    }
+}
+
+impl ExecutionBackend for VmmExecutor {
+    fn preflight_workers(&self, workers: u32) -> Result<()> {
+        if workers == 0 || workers > 32 {
+            return Err(Error::Setup("--workers: use 1..32".into()));
+        }
+        if workers > 1 && self.cpu.is_some() {
+            return Err(Error::Setup(
+                "--workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU".into(),
+            ));
+        }
+        self.preflight_capacity(workers, None)
+    }
+    fn preflight(&self, output: Option<&Path>) -> Result<()> {
+        self.preflight_capacity(1, output)
     }
     fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {
         crate::admission::validate_profile(&inputs.profile)?;

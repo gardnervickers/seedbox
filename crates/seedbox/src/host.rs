@@ -384,6 +384,9 @@ mod tests {
     use super::*;
     #[test]
     fn leased_recheck_failure_releases_locks_without_msr_write_or_snapshot() {
+        let _process_creation = crate::preparation_command::PROCESS_TEST_LOCK
+            .lock()
+            .unwrap();
         let dir = tempfile::tempdir().unwrap();
         let cpus = BTreeSet::from([2, 18]);
         for cpu in &cpus {
@@ -420,6 +423,9 @@ mod tests {
     }
     #[test]
     fn topology_and_eligibility_drift_under_locks_refuse_before_msr_mutation() {
+        let _process_creation = crate::preparation_command::PROCESS_TEST_LOCK
+            .lock()
+            .unwrap();
         for drift in 0..4 {
             let dir = tempfile::tempdir().unwrap();
             let cpus = BTreeSet::from([2, 18]);

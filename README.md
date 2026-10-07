@@ -31,7 +31,8 @@ directory. Every runtime input has a default, so no flags are required:
 | --- | --- | --- |
 | Compose file | `compose.yaml` in the given directory (default `.`) | positional path |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
-| Exploration count | `1`, sequential execution | `--count` |
+| Exploration count | `1` | `--count` |
+| Exploration workers | `1`, sequential execution | `--workers` (1..32; automatic CPU selection for parallel execution) |
 | CPU | first free core other than CPU 0's, under the shared lease | `--cpu`, `SEEDBOX_CPU` |
 | Guest kernel | `bzImage` in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`, `./artifacts`, then `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | `seedbox-vmm` next to an installed `seedbox`, then this checkout's `cargo build-vmm` output, then on `PATH`; `cargo run` builds it if missing | `--vmm`, `SEEDBOX_VMM` |
@@ -53,8 +54,15 @@ may change execution. Release compatibility remains a V0 qualification gate.
 ## Finite exploration
 
 `seedbox explore [COMPOSE] --seed FIRST --count COUNT` runs consecutive seeds
-sequentially, preparing the complete input closure once. Compose defaults to `.`,
-the first seed to the Compose seed, and count to 1. Empty/overflowing ranges fail
+with one worker by default, preparing the complete input closure once. Compose
+defaults to `.`, the first seed to the Compose seed, and count to 1.
+`--workers N` (1..32) permits at most N owned attempts at once; parallel exploration
+requires automatic CPU selection, so omit `--cpu` and `SEEDBOX_CPU`. Before
+preparation, the executor must be able to reserve and admit N distinct eligible
+physical cores together, including their SMT siblings; insufficient capacity is
+ERROR. Those transient reservations are released before OCI work. Each running
+world still owns its ordinary core/sibling lease. Contention afterward is an
+infrastructure error, with no retry or waiting-for-capacity policy. Empty/overflowing ranges fail
 before state creation or preparation. Immutable runtime inputs and host admission are
 checked before the sole preparation; refusal retains batch ERROR without dispatch.
 Each seed uses the ordinary retained-input and leased host rechecks. Application FAIL
@@ -67,7 +75,24 @@ with the existing commands. An unfinished checkpoint remains INCOMPLETE, includi
 when a process dies after committing a run but before updating the batch. The final
 exit precedence is ERROR (2), INCOMPLETE (3), TIMEOUT (124), FAIL (1), PASS (0). `--json` emits one
 report with per-attempt outcomes, undispatched count, elapsed time and CLI process-family
-resource measurements; application logs remain arbitrary bytes.
+resource measurements; application logs remain arbitrary bytes. Checkpoint version 2
+records seed indexes in ascending dispatch order regardless of completion order,
+with `finished: false` for dispatched attempts whose terminal result is not yet
+checkpointed. The pending suffix remains undispatched. Infrastructure or retention
+uncertainty cancels only the batch's owned attempts and joins them before returning;
+a backend blocked in cleanup prevents a prompt completion claim. Version 1 batch
+checkpoints need their prior reader; their bytes and ordinary run manifests remain
+unchanged.
+
+`peak_running` counts active orchestration attempts. `active_attempt_seconds` sums
+their whole wall intervals, including admission, materialization and cleanup; it is
+not exact lease time or measured CPU time. Once all owned attempts return, this
+one-world-per-worker backend can use the sum as a conservative guest-core charge.
+An unfinished checkpoint omits still-running/uncheckpointed intervals and is not
+a complete cumulative charge. CLI process-family CPU totals include
+preparation and reaped children. Parallel scheduling and chosen cores are performance
+choices excluded from run identity; actual serial/parallel and per-core equality
+remain runtime qualification gates.
 
 Exploration `build:` admission currently accepts only the inspected immutable
 project-Nix Linux Podman launcher/native closure in explicit local mode. Unknown
