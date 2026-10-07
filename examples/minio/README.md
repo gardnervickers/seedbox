@@ -18,6 +18,8 @@ Seedbox uses only the configured client exit status. `MINIO_HTTP`, `MINIO_GET` a
 
 The MinIO image is scratch plus the exact binary and `/data`, `/tmp`, `/root`. The client installs only staged wheels using `--no-index --require-hashes`; its Dockerfile does not download dependencies. Binary and wheel bytes remain outside tracked source. The Python base's layers/config and complete built OCI closure are captured by ordinary `seedbox run` preparation, not by these source locks alone. Independently rebuilt OCI images need not be byte-identical; replay consumes captured inputs.
 
+The shared MinIO image sets `HOME=/root` and `MC_CONFIG_DIR=/root/.mc`. This release imports Console and its pinned mc package even with the browser disabled. mc's [global flag initializer](https://github.com/minio/mc/blob/cf909e1063a9/cmd/flags.go) calls `mustGetMcConfigDir()` before parsing `MC_CONFIG_DIR`; [go-homedir v1.1.0](https://github.com/mitchellh/go-homedir/blob/v1.1.0/homedir.go) invokes `getent passwd <uid>` when `HOME` is absent. `HOME` is therefore essential; `MC_CONFIG_DIR` alone cannot bypass that initializer. MinIO and Console's default certificate directories use the same home helper. The remaining server `user.Current()` call only formats a disk-permission error, and mc's user/group lookups describe local filesystem objects. These inspected paths introduce no other startup requirement for `getent`, so the image keeps no shell, BusyBox or `getent`.
+
 Use the project's Python from its development shell. Acquire once into a fresh directory, or reuse the already acquired #48 inputs with the same verification:
 
 ```sh
