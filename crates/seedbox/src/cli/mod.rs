@@ -1,6 +1,7 @@
 //! The `seedbox` command line. Style rules for changes: `AGENTS.md`, "CLI".
 
 mod defaults;
+mod diagnostics;
 mod signals;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -33,6 +34,8 @@ Exit status:
   2    ERROR, a replay that is NOT_COMPARABLE, or a usage or setup error
   3    INCOMPLETE (wall-time limit or cancelled)
   124  TIMEOUT (simulated-time limit)";
+
+const VMM_FAILURE_HELP: &str = "Text VMM failures also show up to 5 non-empty lines from the final 8 KiB of output/vmm.stderr on stderr; JSON output is unchanged.";
 
 #[derive(Parser)]
 #[command(
@@ -93,7 +96,7 @@ enum Command {
         build: BuildOptions,
     },
     /// Prepare images and run a simulation (Linux KVM host, root).
-    #[command(after_help = EXIT_CODES)]
+    #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
     Run {
         #[command(flatten)]
         compose: ComposeArg,
@@ -112,7 +115,7 @@ enum Command {
         performance: Performance,
     },
     /// Explore a finite seed sequence with one frozen preparation (Linux KVM host, root).
-    #[command(after_help = EXIT_CODES)]
+    #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
     Explore {
         #[command(flatten)]
         compose: ComposeArg,
@@ -140,7 +143,7 @@ enum Command {
         performance: Performance,
     },
     /// Re-execute a recorded run from its retained inputs and compare (Linux KVM host, root).
-    #[command(after_help = EXIT_CODES)]
+    #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
     Replay {
         /// Run directory, as printed by `run`.
         run: PathBuf,
@@ -191,6 +194,7 @@ enum Command {
         json: bool,
     },
     /// Show a recorded run after verifying its manifest.
+    #[command(after_help = VMM_FAILURE_HELP)]
     Inspect {
         /// Run directory, as printed by `run` or `replay`.
         run: PathBuf,
@@ -639,6 +643,7 @@ fn run(cli: Cli) -> Result<u8> {
                         );
                         if let Some(error) = &attempt.error {
                             eprintln!("error: seed {}: {error}", attempt.seed);
+                            diagnostics::vmm_failure(directory, error);
                         }
                     }
                 }
@@ -841,7 +846,8 @@ fn run(cli: Cli) -> Result<u8> {
                 println!("replay: {}{label}", word(&replay.status));
             }
             if let Some(error) = record.error {
-                println!("error: {error}");
+                eprintln!("error: {error}");
+                diagnostics::vmm_failure(&run, &error);
             }
             Ok(0)
         }
@@ -891,6 +897,7 @@ fn report(run: &orchestration::Run) -> u8 {
     }
     if let Some(error) = &run.record.error {
         eprintln!("{error}");
+        diagnostics::vmm_failure(&run.directory, error);
     }
     if let Some(replay) = &run.record.replay {
         let label = if seedbox::admission::is_dev_engine(&run.record.identity.inputs.profile) {
