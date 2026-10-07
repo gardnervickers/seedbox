@@ -10,11 +10,10 @@ not Compose application support.
 The isolated `seedbox-arm64` crate runs a single-CPU PV fixture on native Mac
 HVF or Linux arm64 KVM. It is separate from the Compose/x86 CLI.
 
-ABI-2 input hashes and witnesses are pending the operator rebuild. The
-checked-in `kernel-arm64/expected-hashes.sha256` records historical ABI-1 inputs.
-Before running the hash check below, obtain independently reviewed ABI-2 hashes
-in `artifacts/arm64-abi2-expected.sha256`; do not derive expected hashes from the
-files being checked. Build-generated `SHA256SUMS` only checks transfer integrity.
+The checked-in `kernel-arm64/expected-hashes.sha256` records independently
+supplied operator hashes for the ABI-2 guest rebuilt from `f9d7e6a`. Do not
+derive expected hashes from the files being checked. Build-generated
+`SHA256SUMS` only checks transfer integrity.
 
 Requires an M-series Mac, macOS 15+, Xcode Command Line Tools, and Nix with
 flakes enabled. This runs the experimental single-CPU PV fixture. The Linux VM
@@ -54,8 +53,7 @@ limactl shell --workdir /tmp seedbox-build env BUILD_JOBS=4 \
   bash /tmp/kernel-arm64/build.sh /tmp/seedbox-arm64-inputs
 mkdir -p artifacts/arm64-mac
 limactl copy -r seedbox-build:/tmp/seedbox-arm64-inputs/. artifacts/arm64-mac/
-python3 kernel-arm64/check-hashes.py artifacts/arm64-mac \
-  --expected artifacts/arm64-abi2-expected.sha256 || exit "$?"
+python3 kernel-arm64/check-hashes.py artifacts/arm64-mac || exit "$?"
 # Preserve the inputs on the Mac, then remove only this task's VM.
 limactl stop seedbox-build
 limactl delete --force seedbox-build
@@ -71,8 +69,15 @@ cmp artifacts/arm64-mac/run-1.stdout artifacts/arm64-mac/run-2.stdout
 ```
 
 The acceptance test is that both runs exit 0 and print **identical** stdout
-lines; `cmp` checks equality. The ABI-1 witness recorded below is historical;
-ABI-2 witnesses must be recorded after the rebuild.
+lines; `cmp` checks equality. With the accepted ABI-2 inputs on the Mac profile
+recorded below, the expected line is:
+
+```text
+WITNESS: 028d2b7c14c1e6786c38cb78013f51707e5fc23400ac9d9ed95b2b491dec26a1
+```
+
+The full hardware suite currently fails its one-second timing gate; see the
+[ABI-2 acceptance record](#abi-2-guest-acceptance-2026-10-07).
 
 Console and timing go to stderr; setup/runtime errors exit 2. Sign again after
 Cargo relinks the executable. A different host CPU profile can change guest RAM
@@ -214,45 +219,79 @@ RAM and the shared page; no backend-specific bytes are filtered out.
 
 ## Operator steps
 
-### Round-2 guest rebuild (ABI 2; operator required)
+### ABI-2 guest acceptance (2026-10-07)
 
-Build **both** the Linux `Image` and `init.cpio` from the updated `kernel-arm64/`
-directory. `seedbox.c` adds the ABI-2 deferred-IRQ word and unmasked read
-rendezvous; `init.c` replaces the 20 ms busy-wait with a 200 us
-`setitimer(ITIMER_REAL)` and a `clock_gettime` spin until SIGALRM arrives.
-Copy the entire updated directory to the existing arm64 Linux build VM,
-replacing its old source copy. From its parent directory, with output on the
-VM's Linux disk, run:
+The operator rebuilt **both** `Image` and `init.cpio` from `f9d7e6a` in the
+Linux VM. The Mac independently checked the supplied hashes before execution:
 
-```sh
-BUILD_JOBS=4 bash kernel-arm64/build.sh artifacts/arm64-review-deferred
-```
+| Input | SHA-256 |
+| --- | --- |
+| Image | `141289b842d3a42ca13a634598372a7e66605da70d36c2f2c1cd5a2806bfb01f` |
+| init.cpio | `7f73307576b5ff352ccc9920bd3cb7178ed6dc60d42e2f9360f39e2efbf539df` |
+| kernel.config | `85f8af523f252b63298a7943b2f5cd57ecbfb7c040cc1d3146b44da05a9caf0a` (unchanged) |
 
-The build requires GCC, binutils, musl-tools, flex, bison, bc, libssl-dev,
-libelf-dev, curl, xz-utils and Python 3. It verifies the Linux 6.12.112 archive,
-uses a fresh source/object tree, checks the resolved config and audits vmlinux
-and the vDSO for counter/RNG leaks before exporting runnable inputs.
+The checked-in expected hashes now identify these ABI-2 inputs. The supplied
+counter audit reports no hardware counter/RNG reads in vmlinux or the vDSO.
+For subsequent rebuilds, copy the entire updated `kernel-arm64/` directory to
+the Linux VM and run `BUILD_JOBS=4 bash kernel-arm64/build.sh OUTPUT_DIRECTORY`.
+Retain `Image`, `init.cpio`, `kernel.config`, `counter-audit.txt`, `SHA256SUMS`
+and `build-directory.txt`. Build-generated hashes check transfer integrity;
+new expected hashes still require independent review.
 
-Copy back `Image`, `init.cpio`, `kernel.config`, `counter-audit.txt`, `SHA256SUMS`
-and `build-directory.txt` into a fresh `artifacts/arm64-review-deferred/` on the
-Mac. Retain the old inputs separately. The checked-in
-`kernel-arm64/expected-hashes.sha256` and the acceptance record below describe
-**ABI 1**, not these new inputs. Keep those historical hashes until new hashes
-are independently reviewed; do not copy build-generated hashes over them to
-make the check pass. For ABI-2 verification, obtain an independently reviewed
-two-entry hash file at `artifacts/arm64-abi2-expected.sha256` and run:
+Native ad-hoc-signed CLI and hardware-test binaries were built from `f9d7e6a`
+and run on arm64 macOS 27.0.1 (26A434). Witnesses include all RAM and the shared
+page:
 
-```sh
-python3 kernel-arm64/check-hashes.py artifacts/arm64-review-deferred \
-  --expected artifacts/arm64-abi2-expected.sha256
-```
+- Seed 1 witness: `028d2b7c14c1e6786c38cb78013f51707e5fc23400ac9d9ed95b2b491dec26a1`.
+- Seed 2 witness: `8f3fb1946a6768643beb67e5fb503fc5be9c1748d2779d754fedcbe07631b40c`.
+- Seed 1 trace_hash: `5bee9936c5a598d4fbcb930967e493e9ca2cc7ad4df89c26aeb00c68ff51dfda`.
+- Seed 1 console_hash: `fb767b035bfe2d3f282e0910c070221c37723e140ce3a2a0841b4f4e04afdf07`.
 
-Build-generated `SHA256SUMS` checks transfer integrity only. ABI-2 hardware
-acceptance and the restored one-second HVF timing gate are pending this rebuild.
-Old-input witness tests require the ABI-1 VMM at `66cf845`; current guest/VMM
-inputs must use ABI 2 together.
+| CLI boot | Witness | Exit status | Semantic exits | Wall seconds |
+| --- | --- | --- | --- | --- |
+| Seed 1 A | Seed 1 above | 0 | 2355 | 1.065410 |
+| Seed 1 B | Seed 1 above | 0 | 2355 | 1.068000 |
+| Seed 1 with host CPU load | Seed 1 above | 0 | 2355 | 1.114860 |
+| Seed 2 A | Seed 2 above | 0 | 2355 | 1.059422 |
+| Seed 2 B | Seed 2 above | 0 | 2355 | 1.063885 |
+
+All five print one witness line and `SEEDBOX_INIT_PASS`, record two event+24
+polling yields, and reach PSCI SYSTEM_OFF at virtual time 1,020,101,052 ns.
+The new 200 us `setitimer(ITIMER_REAL)` / SIGALRM spin completes with
+`busy-wait elapsed=10000128` (10.000128 ms of guest time). The 10 ms and 1 s
+sleep checks report 10,050,007 ns and 1,000,050,007 ns. The spin's requested
+alarm interval is 200 us; its measured completion is not 200 us. Same-seed
+complete report comparisons pass, including the CPU-load boot; seed 2 differs.
+
+The signed `hvf_determinism` suite passes its complete-witness, seed-sensitivity,
+guest sleep and polling-yield assertions, then **fails the unchanged one-second
+wall gate**, exiting 101 (0 passed, 1 failed): baseline 1.067484 seconds.
+No retry or timing-budget change was made.
+
+| Signed hardware-suite boot | Witness | Semantic exits | Wall seconds |
+| --- | --- | --- | --- |
+| Seed 1 A | Seed 1 above | 2355 | 1.067484 |
+| Seed 1 B | Seed 1 above | 2355 | 1.065437 |
+| Seed 2 | Seed 2 above | 2355 | 1.067610 |
+| Seed 1 with CPU load and randomized pre-entry sleeps | Seed 1 above | 2355 | 9.733929 |
+
+Every hardware-suite guest powers off successfully. The jitter boot is outside
+the baseline timing gate. All seed-1 CLI and suite trace/console hashes match
+the values above. Evidence is retained under `artifacts/arm64-abi2/hvf-cli/`,
+`artifacts/arm64-abi2/hvf-acceptance/` and
+`artifacts/arm64-abi2/hvf-determinism.log` (ignored local artifacts).
+
+All three `review_yield_masked` and all three `review_deferred_bound` tests
+pass. The actual guest polling-helper C checks, arm64 tests, input/comparison
+Python tests, arm64 and seedbox fmt/clippy, and root portable acceptance
+(including workspace tests) pass. Linux-only VMM tests and ABI-2 KVM acceptance
+remain operator work. HVF determinism is demonstrated; the one-second
+performance acceptance remains unmet.
 
 ### Historical ABI-1 guest acceptance (2026-10-07)
+
+Old-input witness tests require the ABI-1 VMM at `66cf845`; current guest/VMM
+inputs must use ABI 2 together.
 
 Inputs rebuilt by the operator from `90fb080` and independently hash-checked:
 
@@ -274,9 +313,11 @@ its config (`CONFIG_IKCONFIG=n`). This was environment-dependent config drift,
 not an intended config change. The build script now passes `RUSTC=false` to
 **every** make invocation to pin absent Rust for this C-only guest, including
 when `$HOME/.cargo/bin` is on PATH. The pinned source archive's version probes
-were checked to return zero for that override. A complete Linux rebuild with
-the script change has not been run here; the accepted artifacts remain exactly
-those supplied by the operator. GCC/binutils and cloud-image pinning remain open.
+were checked to return zero for that override. At this historical acceptance,
+a complete Linux rebuild with the script change had not been run here;
+these ABI-1 artifacts remain exactly
+those supplied by the operator. The ABI-2 rebuild above subsequently retained
+the same config hash. GCC/binutils and cloud-image pinning remain open.
 
 Native signed CLI results on arm64 macOS 27.0.1 (26A434), with full RAM and the
 shared page included:
@@ -350,18 +391,18 @@ bash crates/seedbox-arm64/codesign.sh "$arm64_test_binary"
 Finish all Cargo builds before signing the CLI and test executable. Relinking
 invalidates the entitlement signature; invoke signed tests directly.
 
-### Acceptance after the rebuild
+### Run hardware acceptance
 
 ```sh
-export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-review-deferred/Image"
-export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-review-deferred/init.cpio"
-export SEEDBOX_ARM64_REPORT_DIR="$PWD/artifacts/arm64-review-deferred/hvf-acceptance"
+export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-abi2/Image"
+export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-abi2/init.cpio"
+export SEEDBOX_ARM64_REPORT_DIR="$(mktemp -d "$PWD/artifacts/arm64-abi2/hvf-acceptance.XXXXXX")"
 "$arm64_test_binary" --ignored --exact hvf_determinism --nocapture --test-threads=1
 ```
 
 Use a fresh report directory. The suite runs seeds 1, 1, 2 and seed 1 with host
 CPU load and randomized pre-entry sleeps. It compares complete witnesses,
-checks seed sensitivity, guest sleep checks, the busy-wait marker and at least
+checks seed sensitivity, guest sleep checks, the SIGALRM spin marker and at least
 one event+24 yield. The undisturbed HVF timing budget is one second, including
 the 200 us alarm spin. No witness, RAM, seed-sensitivity, guest sleep or IRQ assertion is relaxed.
 The guest must print `SEEDBOX_INIT_PASS` and reach PSCI SYSTEM_OFF.
@@ -383,13 +424,12 @@ and init.cpio. From the checkout root, using the VM's existing Cargo:
 ```sh
 set -eu
 export PATH="$HOME/.cargo/bin:$PATH"
-python3 kernel-arm64/check-hashes.py artifacts/arm64-review-deferred \
-  --expected artifacts/arm64-abi2-expected.sha256
+python3 kernel-arm64/check-hashes.py artifacts/arm64-abi2
 cargo build-arm64
 cargo test-arm64 --test review_yield_masked --test review_deferred_bound
-export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-review-deferred/Image"
-export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-review-deferred/init.cpio"
-export SEEDBOX_ARM64_REPORT_DIR="$(mktemp -d "$PWD/artifacts/arm64-review-deferred/kvm-acceptance.XXXXXX")"
+export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-abi2/Image"
+export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-abi2/init.cpio"
+export SEEDBOX_ARM64_REPORT_DIR="$(mktemp -d "$PWD/artifacts/arm64-abi2/kvm-acceptance.XXXXXX")"
 cargo test-arm64 --test hardware -- --ignored --exact kvm_determinism --nocapture --test-threads=1
 
 for run in 1-a 1-b 2-a 2-b; do
@@ -404,6 +444,18 @@ python3 crates/seedbox-arm64/compare.py \
   "$SEEDBOX_ARM64_REPORT_DIR/cli-1-a.json" "$SEEDBOX_ARM64_REPORT_DIR/cli-1-b.json"
 python3 crates/seedbox-arm64/compare.py \
   "$SEEDBOX_ARM64_REPORT_DIR/cli-2-a.json" "$SEEDBOX_ARM64_REPORT_DIR/cli-2-b.json"
+
+python3 - <<'PYREPORT'
+import json, os
+from pathlib import Path
+for path in sorted(Path(os.environ["SEEDBOX_ARM64_REPORT_DIR"]).glob("*.json")):
+    report = json.loads(path.read_text())
+    print(f"{path.name}: witness={report['witness']} exits={report['exits']} "
+          f"wall_seconds={report['wall_seconds']:.6f}")
+    if report["seed"] == 1:
+        print(f"  trace_hash={report['trace_hash']}")
+        print(f"  console_hash={report['console_hash']}")
+PYREPORT
 ```
 
 The hardware suite adds CPU load and randomized pre-entry sleeps. If the VM
@@ -419,10 +471,11 @@ witness. `compare-pages.py` locates divergent pages for diagnostics.
 
 ## Open items
 
-- The ABI-2 kernel and alarm-spin fixture require a Linux VM rebuild and fresh
-  HVF and Linux arm64 KVM acceptance. Historical ABI-1 results do not validate
-  these inputs. Record seed-1 trace_hash and console_hash for both backends
-  alongside same-backend repeats; equal exit counts alone do not show equality.
+- ABI-2 HVF witnesses match across repeats and host noise, but the unchanged
+  one-second wall gate fails at 1.067484 seconds. ABI-2 Linux arm64 KVM acceptance
+  remains pending. Record KVM seed-1 trace_hash and console_hash alongside
+  same-backend repeats and compare them with the HVF values above; equal exit
+  counts alone do not show equality.
 - Full RAM witnesses are backend-specific. Earlier inputs had identical traces
   and console across HVF/KVM but 296 differing RAM pages. HVF advertises 1024 GIC
   IDs; the Linux 6.8 KVM limit is 992. Guest GIC count policy, MIDR and other CPU

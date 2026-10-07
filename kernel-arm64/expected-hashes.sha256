@@ -1,5 +1,5 @@
-# Independently supplied operator hashes for the 90fb080 review-fix guest.
+# Independently supplied operator hashes for the f9d7e6a ABI-2 guest.
 # Native HVF acceptance is recorded in docs/arm64-backends.md.
 # build.sh must never generate or update this file.
-4f2846f027b03fcfd859bb222456779be1967b21b4e4dc0c0e59b978ec3a9be5  Image
-4f7dcbcb7b3705799913dd16fcdf4297216f514476837a7062cda48b740f22d4  init.cpio
+141289b842d3a42ca13a634598372a7e66605da70d36c2f2c1cd5a2806bfb01f  Image
+7f73307576b5ff352ccc9920bd3cb7178ed6dc60d42e2f9360f39e2efbf539df  init.cpio
