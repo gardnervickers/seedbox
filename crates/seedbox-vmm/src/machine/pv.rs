@@ -19,11 +19,14 @@
 //! for a while and steps it branch by branch. If the whole machine state
 //! repeats, the loop provably never ends by itself: the machine steps to a
 //! canonical point of the cycle and is idle there, like HLT, until an
-//! interrupt. Any other long run resumes untouched (stepping changes no guest
-//! state), so the watchdog changes how fast a spin is noticed, never where it
-//! lands. Not every endless loop is caught: one whose state changes on every
-//! pass (`while (!flag) n++;`), a cycle longer than `PROBE_STEPS` landings,
-//! or one with a run of straight-line code longer than the planner's cap
+//! interrupt. A change to the time page's `last` since the probe started
+//! proves clock progress, so the probe gives up immediately. Any other long
+//! run resumes untouched (probing changes no guest-visible state; giving up
+//! only resumes the run), so the watchdog changes how fast a spin is noticed,
+//! never where it lands. Not every endless loop is caught: one whose state
+//! changes on every pass (`while (!flag) n++;`), a cycle longer than
+//! `PROBE_STEPS` landings, or one with a run of straight-line code longer
+//! than the planner's cap
 //! never goes idle, so virtual time stops and the world stalls until its
 //! wall-time limit. That follows from the model: such a loop waits on
 //! something only virtual time could bring.
@@ -77,7 +80,30 @@ pub struct PvClock {
 /// A step landing: RIP, then the general registers and flags.
 type Key = (u64, [u64; 17]);
 
-enum Probe {
+struct Probe {
+    /// Captured before the first step, kept across candidate cycles.
+    last: Option<u64>,
+    phase: Phase,
+}
+
+impl Probe {
+    fn new() -> Self {
+        Self { last: None, phase: Phase::Find { landings: Vec::new(), min_period: 0, steps: 0 } }
+    }
+
+    fn clock_progress(probe: &mut Option<Self>, last: u64, stats: &mut super::Stats) -> bool {
+        let Some(p) = probe.as_mut() else { return false; };
+        if last == *p.last.get_or_insert(last) {
+            return false;
+        }
+        *probe = None;
+        stats.spin_false += 1;
+        stats.spin_clock_progress += 1;
+        true
+    }
+}
+
+enum Phase {
     /// Step and look for a landing RIP seen more than `min_period` steps ago.
     Find { landings: Vec<u64>, min_period: usize, steps: usize },
     /// Step `period` times from `saved` and compare. `last`: the cycle is
@@ -109,15 +135,16 @@ impl PvClock {
     fn probe_step(&mut self, m: &mut Machine) -> Result<Option<Prepared>, String> {
         let regs = unsafe { m.vcpu.get_kvm_run().s.regs.regs };
         let key = key(&regs);
-        let next = match self.probe.take().unwrap() {
-            Probe::Find { mut landings, min_period, steps } => {
+        let mut probe = self.probe.take().unwrap();
+        let next = match probe.phase {
+            Phase::Find { mut landings, min_period, steps } => {
                 if steps >= PROBE_STEPS || min_period >= PROBE_STEPS {
                     m.stats.spin_false += 1;
                     return Ok(None);
                 }
                 let older = landings.len().saturating_sub(min_period);
                 match landings[..older].iter().rposition(|&r| r == key.0) {
-                    Some(i) => Probe::Verify {
+                    Some(i) => Phase::Verify {
                         saved: Box::new(Saved::take(m)?),
                         period: landings.len() - i,
                         keys: Vec::new(),
@@ -126,15 +153,15 @@ impl PvClock {
                     },
                     None => {
                         landings.push(key.0);
-                        Probe::Find { landings, min_period, steps: steps + 1 }
+                        Phase::Find { landings, min_period, steps: steps + 1 }
                     }
                 }
             }
-            Probe::Verify { saved, period, mut keys, steps, last } => {
+            Phase::Verify { saved, period, mut keys, steps, last } => {
                 keys.push(key);
                 let steps = steps + 1;
                 if keys.len() < period {
-                    Probe::Verify { saved, period, keys, steps, last }
+                    Phase::Verify { saved, period, keys, steps, last }
                 } else if saved.same(m)? {
                     // The state after `period` steps is the state before them:
                     // the guest repeats this cycle forever. Find its least
@@ -144,7 +171,7 @@ impl PvClock {
                         .find(|&d| period % d == 0 && (d..period).all(|i| keys[i] == keys[i - d]))
                         .unwrap_or(period);
                     if least < period {
-                        Probe::Verify { saved: Box::new(Saved::take(m)?), period: least, keys: Vec::new(), steps, last: true }
+                        Phase::Verify { saved: Box::new(Saved::take(m)?), period: least, keys: Vec::new(), steps, last: true }
                     } else {
                         // Its landings are the same on every pass, so the
                         // least one is a point we reach whichever pass we
@@ -159,7 +186,7 @@ impl PvClock {
                         if key == target {
                             return Ok(Some(Prepared::Idle));
                         }
-                        Probe::Canon { target, left: period }
+                        Phase::Canon { target, left: period }
                     }
                 } else if last {
                     return Err(format!(
@@ -169,17 +196,17 @@ impl PvClock {
                 } else {
                     // Not a cycle of this length (or not yet one): look for a
                     // longer one from here. Doubling bounds the cost.
-                    Probe::Find { landings: vec![key.0], min_period: period * 2, steps }
+                    Phase::Find { landings: vec![key.0], min_period: period * 2, steps }
                 }
             }
-            Probe::Canon { target, left } => {
+            Phase::Canon { target, left } => {
                 if key == target {
                     return Ok(Some(Prepared::Idle));
                 }
                 if left == 0 {
                     return Err(format!("{}: lost the spin cycle at rip {:#x}", m.name, target.0));
                 }
-                Probe::Canon { target, left: left - 1 }
+                Phase::Canon { target, left: left - 1 }
             }
         };
         if m.arm_step()? {
@@ -188,7 +215,8 @@ impl PvClock {
             m.stats.spin_false += 1;
             return Ok(None);
         }
-        self.probe = Some(next);
+        probe.phase = next;
+        self.probe = Some(probe);
         Ok(Some(Prepared::Run))
     }
 }
@@ -211,7 +239,10 @@ impl Timebase for PvClock {
         self.remaining = remaining;
         self.syscall_ns = m.syscall_ns;
         if self.probe.is_some() {
-            let step = if std::mem::take(&mut self.landed) {
+            let step = if Probe::clock_progress(&mut self.probe, m.page_get(1), &mut m.stats) {
+                self.landed = false;
+                None
+            } else if std::mem::take(&mut self.landed) {
                 self.probe_step(m)?
             } else if m.arm_step()? {
                 // A watchdog tick interrupted the step, and planning it again
@@ -271,7 +302,7 @@ impl Timebase for PvClock {
                 self.skip -= 1;
             } else if self.probe.is_none() && !std::mem::take(&mut self.progressed) {
                 j.stats.spin_probes += 1;
-                self.probe = Some(Probe::Find { landings: Vec::new(), min_period: 0, steps: 0 });
+                self.probe = Some(Probe::new());
                 self.landed = true;
             }
             return Ok(Verdict::Advance { legal: false });
@@ -407,6 +438,49 @@ mod tests {
     use super::super::{BootSpec, Stop, INITRD_ADDR};
     use super::*;
     use kvm_ioctls::Kvm;
+
+    /// Candidate verification needs no live vCPU for clock-progress checks.
+    fn verify() -> Phase {
+        let saved = Saved {
+            cpu: VcpuState::new(kvm_bindings::Msrs::from_entries(&[]).unwrap()),
+            page: Box::new([0; 4096]),
+            ram: None,
+        };
+        Phase::Verify { saved: Box::new(saved), period: 2, keys: Vec::new(), steps: 2, last: false }
+    }
+
+    #[test]
+    fn clock_progress_abandons_find_and_verify_before_the_step_limit() {
+        for phase in [Phase::Find { landings: Vec::new(), min_period: 0, steps: 1 }, verify()] {
+            let mut stats = super::super::Stats::default();
+            let mut probe = Some(Probe::new());
+            assert!(!Probe::clock_progress(&mut probe, 100, &mut stats));
+            probe.as_mut().unwrap().phase = phase;
+            assert!(!Probe::clock_progress(&mut probe, 100, &mut stats), "an unchanged clock must allow probing");
+            assert_eq!((stats.spin_false, stats.spin_clock_progress), (0, 0));
+            assert!(Probe::clock_progress(&mut probe, 200, &mut stats), "a clock read must abandon even an incomplete candidate");
+            assert!(probe.is_none());
+            assert_eq!((stats.spin_false, stats.spin_clock_progress), (1, 1));
+            assert!(!Probe::clock_progress(&mut probe, 200, &mut stats));
+            assert_eq!((stats.spin_false, stats.spin_clock_progress), (1, 1), "count each abandoned probe once");
+        }
+    }
+
+    #[test]
+    fn clock_baseline_survives_candidate_changes_and_resets_for_a_new_probe() {
+        let mut stats = super::super::Stats::default();
+        let mut probe = Some(Probe::new());
+        assert!(!Probe::clock_progress(&mut probe, 200, &mut stats));
+        probe.as_mut().unwrap().phase = verify();
+        assert!(!Probe::clock_progress(&mut probe, 200, &mut stats));
+        probe.as_mut().unwrap().phase = Phase::Find { landings: vec![0x100000], min_period: 4, steps: 4 };
+        assert!(!Probe::clock_progress(&mut probe, 200, &mut stats));
+        assert_eq!(probe.as_ref().unwrap().last, Some(200));
+        assert!(Probe::clock_progress(&mut probe, 100, &mut stats), "any difference from the start must give up");
+        probe = Some(Probe::new());
+        assert!(!Probe::clock_progress(&mut probe, 100, &mut stats), "a later probe captures its own baseline");
+        assert_eq!((stats.spin_false, stats.spin_clock_progress), (1, 1));
+    }
 
     /// A 32-bit payload at the kernel entry, interrupts enabled and unmasked.
     fn machine(kvm: &Kvm, code: &[u8], undo: u64) -> Machine {
