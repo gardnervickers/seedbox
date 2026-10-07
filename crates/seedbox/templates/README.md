@@ -169,6 +169,18 @@ earlier divergence. Missing evidence and omissions stay explicit. Exit 0 MATCH
 means equality of compared evidence, not replay qualification; DIFFERENT exits 1,
 and usage/setup or invalid evidence exits 2. No guests execute and no state is created.
 
+Read committed-time chunks with `seedbox logs RUN --machine NAME --since-ns N
+--until-ns N`. Consecutive bytes from the same machine/incarnation/stream within
+one world slice coalesce until another stream writes. Times are the first byte's
+simulated commit time, inclusive at the start and exclusive at the end. Filters
+select whole chunks, so a selected chunk can contain later bytes beyond the
+upper bound. Omit filters to read all indexed output. Stdout contains raw bytes
+in time, machine name and per-machine output order, without prefixes or added
+newlines; status and omissions go to stderr. Add `--json` for metadata and
+lossless hexadecimal (`bytes_hex`). No application log format is required.
+Check stderr or JSON `omissions` for old engines without indexes, capture bounds
+or retention limits. Indexes travel with retained logs in export/import bundles. Reading logs needs no KVM or root.
+
 For a scenario using the guest control API, the development engine supports
 `world.arm_console_stop(source, b"MARKER", target, match_timeout=1)` and
 `world.arm_console_partition(source, b"MARKER", left, right, match_timeout=1)`.

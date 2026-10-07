@@ -1536,6 +1536,13 @@ mod linux {
         command.arg("--host-control").arg(endpoint.socket());
         command
             .arg("--stream-console")
+            // Bound observation metadata to at most 40 MiB across all streams.
+            .arg("--log-chunk-limit")
+            .arg(
+                (1_048_576 / (2 * request.prepared.guests.len()))
+                    .min(65_536)
+                    .to_string(),
+            )
             .arg("--console-limit")
             .arg((1024 * 1024 * 1024 / (2 * request.prepared.guests.len())).to_string());
         if backend.profile.witness_mode == WitnessMode::FullState {
