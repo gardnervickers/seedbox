@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 import json
 import socket
+from typing import Optional
 
 MAX_FRAME = 16_384
 DEFAULT_SOCKET = "/run/seedbox/control.sock"
@@ -38,6 +39,13 @@ class Effect:
 class Partition:
     handle: str
     effect: Effect
+
+
+@dataclass(frozen=True)
+class Trigger:
+    id: int
+    effect: Effect
+    partition: Optional[Partition] = None
 
 
 def _target(value):
@@ -179,3 +187,44 @@ class World:
         if not isinstance(partition, Partition):
             raise TypeError("heal expects the Partition returned by partition()")
         return self._call("heal", handle=partition.handle)[1]
+
+
+    def _arm_console(self, source, marker, match_timeout, fault):
+        if not isinstance(marker, bytes) or not 1 <= len(marker) <= 256:
+            raise ValueError("marker must contain 1..=256 bytes")
+        timeout = _nanoseconds(match_timeout)
+        if timeout == 0:
+            raise ValueError("match timeout must be positive")
+        result, effect = self._call("arm_trigger", source=_target(source),
+                                    marker=list(marker), match_timeout_ns=timeout, fault=fault)
+        trigger_id = result.get("trigger_id")
+        if type(trigger_id) is not int or not 1 <= trigger_id <= 64:
+            self.close()
+            raise ProtocolError("arm response lacks a bounded trigger ID")
+        partition = None
+        if fault["action"] == "partition":
+            handle = result.get("handle")
+            if not isinstance(handle, str) or not handle:
+                self.close()
+                raise ProtocolError("arm response lacks a partition handle")
+            partition = Partition(handle, effect)
+        return Trigger(trigger_id, effect, partition)
+
+    def arm_console_stop(self, source, marker, target, *, match_timeout):
+        """Arm once on future console bytes; confirmation means armed, not stopped."""
+        return self._arm_console(source, marker, match_timeout,
+                                 {"action": "stop", "target": _target(target)})
+
+    def arm_console_partition(self, source, marker, left, right, *, match_timeout):
+        """Arm a future partition. Its handle can be healed after the effect."""
+        if isinstance(left, str) or isinstance(right, str):
+            raise ValueError("partition sides must be sequences of targets")
+        return self._arm_console(source, marker, match_timeout,
+                                 {"action": "partition", "left": [_target(t) for t in left],
+                                  "right": [_target(t) for t in right]})
+
+    def cancel_trigger(self, trigger):
+        """Cancel at admission; a matched, fired, or expired trigger cannot cancel."""
+        if not isinstance(trigger, Trigger):
+            raise TypeError("cancel expects the Trigger returned by arm_console_*()")
+        return self._call("cancel_trigger", trigger_id=trigger.id)[1]

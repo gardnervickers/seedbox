@@ -115,3 +115,12 @@ record. Ordinary runs do not retain exit traces; terminal times cannot locate an
 earlier divergence. Missing evidence and omissions stay explicit. Exit 0 MATCH
 means equality of compared evidence, not replay qualification; DIFFERENT exits 1,
 and usage/setup or invalid evidence exits 2. No guests execute and no state is created.
+
+For a scenario using the guest control API, the development engine supports
+`world.arm_console_stop(source, b"MARKER", target, match_timeout=1)` and
+`world.arm_console_partition(source, b"MARKER", left, right, match_timeout=1)`.
+Arm confirmation means armed; inspect the trigger and target state for the
+actual effect. `world.cancel_trigger(trigger)` cancels an unmatched trigger.
+Markers use only future committed console bytes, and effects occur at a safe
+future world barrier. See [the trigger contract](https://github.com/gardnervickers/seedbox/blob/main/docs/triggers.md)
+for bounds, deadlines and the outstanding development-engine AMD checks.

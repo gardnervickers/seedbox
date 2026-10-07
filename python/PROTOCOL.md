@@ -92,7 +92,9 @@ Common fields are `version: 1`, `id`, and `op`. Targets are typed objects:
 | `restart` | `target`: a typed target | `{}` after successful exec of its retained launch recipe |
 | `partition` | `left`, `right`: nonempty, disjoint arrays of typed targets | `{"handle":"opaque value"}` |
 | `heal` | `handle`: a previously returned handle | `{}` after releasing that handle |
-| `inspect` | None | `services`, `machines`, `active_handles`, `network_counters` |
+| `inspect` | None | `services`, `machines`, `active_handles`, `network_counters`; `triggers` only after an arm |
+| `arm_trigger` | `source`: typed target; `marker`: 1..=256 byte integers; `match_timeout_ns`: positive u64; `fault`: typed trigger fault below | `{"trigger_id": N}`; also `handle` for a partition |
+| `cancel_trigger` | `trigger_id`: previously returned positive ID | `{}` after cancellation at admission |
 
 Partitions cut both directions between their two groups. Each handle is
 independent: a link remains cut while any applicable handle exists. Already
@@ -178,3 +180,28 @@ Request order, handles, effects, replies and packet counters are retained in the
 execution evidence. Performance settings such as undo margin must not change this
 history. The controller's Python source, its binding, and its image are retained
 with the run so replay executes the same inputs.
+
+## Committed console trigger extension (development engine)
+
+`fault` is either `{"action":"stop","target":{"service":"server"}}` or
+`{"action":"partition","left":[{"service":"client"}],"right":[{"service":"server"}]}`.
+Arguments and nested faults reject unknown fields. Sources may include the
+controller; fault targets may not. Stop and partition are the only trigger
+actions in this initial extension. No network/control-event selectors are
+exposed. Arm replies confirm admission, not firing. Cancellation rejects any
+trigger no longer armed. A partition handle can be healed after its effect.
+
+A run admits at most 64 triggers total. Each marker uses bounded streaming
+matching of future COM1/debug-port transmitted bytes, including split writes.
+Matching is once per trigger in `[admission, admission + match_timeout_ns)`.
+The final byte supplies the committed match timestamp; its effect is scheduled
+at that time plus the fixed control latency. Same-time effects follow arm ID.
+Existing in-flight retention and five-second process effect deadlines apply.
+Expiry is retained without a fault; cutoff retains unmatched prefixes or pending
+effects. `inspect.triggers` and terminal `vmm.json.triggers` contain the same
+canonical matcher/effect records, with cutoff added at termination. The world
+witness includes those records only when triggers have been used.
+
+The full [time/commitment contract and AMD controls](../docs/triggers.md) define
+tie order, snapshots, discarded candidates and charged-I/O boundaries. Plain
+console bytes do not establish an accepted PUT or any application commit.

@@ -51,7 +51,9 @@ engine. Replay requires this flag and the exact retained engine/kernel hashes;
 bundles preserve the marker. Passing the flag with both pinned artifacts adds no
 marker. All host, CPU, PMU, MSR, lease, ABI and control-channel checks still apply.
 
-`seedbox help run` lists every option. A run prints `OUTCOME: run-directory`;
+`seedbox help run` lists every option. The guest Python API supports
+[bounded committed console triggers](docs/triggers.md) for future stop/partition
+faults in the development engine; see that contract and AMD validation handoff. A run prints `OUTCOME: run-directory`;
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
 INCOMPLETE and 124 TIMEOUT. Offline `diff` exits 0 for MATCH, 1 for DIFFERENT,
 and 2 for usage/setup or invalid retained evidence.

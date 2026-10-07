@@ -55,3 +55,15 @@ The scenario chooses how those errors affect its result.
 Other languages can implement the same [versioned RPC protocol](PROTOCOL.md).
 There are no Python-specific objects on the wire, and future declarative frontends
 can be clients of this API.
+
+Committed console triggers are available in the development engine:
+
+```python
+trigger = world.arm_console_partition("server", b"READY_TO_CUT", ["server"], ["client"], match_timeout=1)
+# Scenario-owned readiness/effect checks use world.inspect().
+world.heal(trigger.partition)  # After its effect; inactive handles are rejected.
+```
+
+Use `arm_console_stop()` for a future process stop and `cancel_trigger()` for
+an unmatched arm. These consume only future committed plain console bytes;
+confirmation means armed. See [the contract and AMD handoff](../docs/triggers.md).

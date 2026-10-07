@@ -32,7 +32,66 @@ pub enum Operation {
     Heal {
         handle: String,
     },
+    ArmTrigger {
+        source: Target,
+        marker: Vec<u8>,
+        match_timeout_ns: u64,
+        fault: TriggerFault,
+    },
+    CancelTrigger {
+        trigger_id: u32,
+    },
 }
+pub const MAX_TRIGGERS: usize = 64;
+pub const MAX_TRIGGER_MARKER: usize = 256;
+
+/// The initial trigger surface intentionally has only process stop and partition.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TriggerFault {
+    Stop {
+        target: Target,
+    },
+    Partition {
+        left: Vec<Target>,
+        right: Vec<Target>,
+    },
+}
+impl TriggerFault {
+    pub fn operation(&self) -> Operation {
+        match self {
+            Self::Stop { target } => Operation::Stop {
+                target: target.clone(),
+            },
+            Self::Partition { left, right } => Operation::Partition {
+                left: left.clone(),
+                right: right.clone(),
+            },
+        }
+    }
+}
+
+/// Canonical matcher and scheduled-effect state, retained only when used.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerRecord {
+    pub id: u32,
+    pub source: String,
+    pub marker: Vec<u8>,
+    pub armed_at_ns: u64,
+    pub match_deadline_ns: u64,
+    pub action: Action,
+    pub prefix: usize,
+    pub seen: u64,
+    pub resets: u64,
+    pub matched_at_ns: Option<u64>,
+    pub effect_at_ns: Option<u64>,
+    pub fault_id: Option<u32>,
+    pub cancelled_at_ns: Option<u64>,
+    pub cut_off_at_ns: Option<u64>,
+    pub status: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
     pub version: u32,

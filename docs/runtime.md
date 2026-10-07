@@ -495,3 +495,12 @@ match the engine; admission adds PERF_FLAG_FD_CLOEXEC8 rather than engineopen0
 solely to protect descriptor inheritance. It never enables, maps or reads the
 guest event. Source tests and warned Intel opt-in are not Intel qualification or
 a determinism guarantee.
+
+## Committed console triggers
+
+The development engine implements bounded, exactly-once console marker triggers
+through the guest control API. Arm/cancel admission, match deadlines, future
+causal effect barriers, snapshot state and witness evidence are specified in
+[the trigger contract](triggers.md). No trigger ever armed adds no report fields,
+witness bytes or console stopping points. This changes the engine and requires
+`--allow-dev-engine`; AMD KVM validation remains outstanding.
