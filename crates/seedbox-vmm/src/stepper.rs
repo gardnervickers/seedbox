@@ -92,10 +92,12 @@ fn read_virt(p: &Paging, mem: &[u8], gva: u64, buf: &mut [u8]) -> usize {
     done
 }
 
+const UNMAPPED: &str = "unmapped data at";
+
 fn read_word(p: &Paging, mem: &[u8], gva: u64, bytes: usize) -> Result<u64, String> {
     let mut b = [0u8; 8];
     if read_virt(p, mem, gva, &mut b[..bytes]) != bytes {
-        return Err(format!("unmapped data at {gva:#x}"));
+        return Err(format!("{UNMAPPED} {gva:#x}"));
     }
     Ok(u64::from_le_bytes(b))
 }
@@ -338,7 +340,15 @@ impl Planner {
                 )
             {
                 if at_rip {
-                    let (t, rf) = self.successor(mem, r, &ins)?;
+                    let (t, rf) = match self.successor(mem, r, &ins) {
+                        Ok(s) => s,
+                        // The target is read from a page that is not present
+                        // (a return address, jump table or IRET frame not yet
+                        // faulted in): the instruction raises #PF before it
+                        // transfers control, and that handler is armed below.
+                        Err(e) if e.starts_with(UNMAPPED) => break,
+                        Err(e) => return Err(e),
+                    };
                     if rf {
                         let mut r2 = *r;
                         r2.rip = t;
@@ -363,7 +373,12 @@ impl Planner {
                             "control transfer {mnemonic:?} at RF-resumed {ip:#x}"
                         ));
                     }
-                    targets.push(self.plain_successor(mem, &r2, &ins)?);
+                    match self.plain_successor(mem, &r2, &ins) {
+                        Ok(t) => targets.push(t),
+                        // As above: it faults into the armed #PF handler.
+                        Err(e) if e.starts_with(UNMAPPED) => {}
+                        Err(e) => return Err(e),
+                    }
                 } else {
                     targets.push(ip); // stop before it; evaluate with real state
                 }
@@ -464,6 +479,19 @@ mod tests {
         let r = kvm_regs { rip: 0x1000, rsp: 0x2000, ..Default::default() };
         let targets = planner(64).plan(&mem, &r).unwrap();
         assert_eq!(targets[0], 0x3000);
+    }
+
+    #[test]
+    fn unmapped_branch_operands_fault_into_the_page_fault_handler() {
+        let mut mem = vec![0u8; 0x4000];
+        mem[0x1000] = 0xc3; // ret, with the stack not present
+        mem[0x1100..0x1102].copy_from_slice(&[0xff, 0x20]); // jmp [rax], table not present
+        mem[0x1200..0x1202].copy_from_slice(&[0x48, 0xcf]); // iretq, frame not present
+        for rip in [0x1000, 0x1100, 0x1200] {
+            let r = kvm_regs { rip, rsp: 0x10_0000, rax: 0x20_0000, ..Default::default() };
+            let targets = planner(64).plan(&mem, &r).unwrap();
+            assert_eq!(targets, [0xf000, 0xf100, 0xf200], "rip {rip:#x}");
+        }
     }
 
     #[test]
