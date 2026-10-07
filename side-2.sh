@@ -19,7 +19,8 @@ done
 if [[ -z ${TRAIN_INNER:-} ]]; then
   test ! -e "$OUT" || { echo "$OUT exists"; exit 2; }
   mkdir -p "$OUT"
-  git -C "$REPO" fetch -q origin codex/lighter-runs codex/63-timed-logs
+  git -C "$REPO" fetch -q origin main codex/lighter-runs codex/63-timed-logs
+  git -C "$REPO" worktree add --detach -q "$OUT/pr110" "$S110"
   git -C "$REPO" worktree add --detach -q "$W" "$S105"
   cp "$0" "$OUT/side.sh"
   exec env TRAIN_INNER=1 REPO="$REPO" nix develop "$W" --command bash "$OUT/side.sh" "$@"
@@ -31,8 +32,8 @@ attempt() { sed -n 's/^[A-Z_]*: //p' "$1" | tail -n 1; }
 note "#110 $S110 #105 $S105 $(date -u +%FT%TZ)"
 lane_hc() {
   local hc=$OUT/hc; mkdir -p "$hc"
-  (cd "$REPO" && git show "$S110:harness/host-check.sh" > "$hc/host-check.sh" \
-    && SEEDBOX_KERNEL=$A PINNED_ENGINE=$PINNED HOST_CHECK_DIR=$hc bash "$hc/host-check.sh" --skip-portable "$S110" "$C_HC") > "$OUT/host-check.log" 2>&1
+  (cd "$REPO" && SEEDBOX_KERNEL=$A PINNED_ENGINE=$PINNED HOST_CHECK_DIR=$hc \
+    bash "$OUT/pr110/harness/host-check.sh" --skip-portable "$S110" "$C_HC") > "$OUT/host-check.log" 2>&1
   note "#110 host-check: exit $? $(tail -n 1 "$OUT/host-check.log")"
   local r; r=$(sed -n 's/^[A-Z]*: \([^;]*\).*/\1/p' "$OUT/host-check.log" | tail -n 1); [[ -f $r ]] && sed 's/^/  /' "$r" | tee -a "$SUM"
 }
@@ -58,4 +59,4 @@ lane_hc & P1=$!; lane_cancel & P2=$!; wait $P1 $P2
 note "vmm processes left: $(pgrep -c seedbox-vmm || true)"
 for c in $C_HC $C_CANCEL; do f=/tmp/seedbox-msr-cpu-$c.lock; [[ -e $f ]] && ! flock -n "$f" true && note "lease $c still HELD"; done
 note "done $(date -u +%FT%TZ)"; cp "$SUM" "$OUT.txt"; echo "summary: $OUT.txt"
-echo "after posting: git -C $REPO worktree remove --force $W; sudo rm -rf $OUT $OUT.txt; git -C $REPO worktree prune"
+echo "after posting: git -C $REPO worktree remove --force $W; git -C $REPO worktree remove --force $OUT/pr110; sudo rm -rf $OUT $OUT.txt; git -C $REPO worktree prune"
