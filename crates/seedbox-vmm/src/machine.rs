@@ -131,6 +131,12 @@ pub struct Stats {
     pub yields: u64,
     pub yield_stops: u64,
     pub skids: Vec<u64>,
+    /// Stepping cost outside KVM_RUN: planning, breakpoint arming and RF
+    /// resumes by ioctl, for profiling.
+    pub step_plan_ns: u128,
+    pub step_arm_ns: u128,
+    pub rf_resumes: u64,
+    pub rf_ns: u128,
     pub kvm_ns: [u128; 8],
     pub kvm_n: [u64; 8],
     /// Runs that passed a soft stop with the yield window closed and could
@@ -173,6 +179,12 @@ pub struct Machine {
     stepping: bool,
     /// Seeded from authoritative ioctls or a successful synchronized KVM exit.
     sync_regs_ready: bool,
+    /// Synchronize system registers on every stepping exit (otherwise the
+    /// planner keeps those from the stepping start). Performance only.
+    pub step_sregs: bool,
+    /// Resume past a breakpoint by setting RF through the synchronized
+    /// registers instead of KVM_SET_REGS. Performance only.
+    pub rf_sync: bool,
     #[cfg(test)]
     require_io_checkpoint: bool,
     planner: Option<Planner>,
@@ -420,6 +432,8 @@ impl Machine {
             control_tx_bytes:0,
             stepping: false,
             sync_regs_ready: false,
+            step_sregs: true,
+            rf_sync: false,
             #[cfg(test)]
             require_io_checkpoint: false,
             planner: None,
@@ -982,21 +996,39 @@ impl Machine {
                     unsafe { (run.s.regs.regs, run.s.regs.sregs) }
                 };
                 let mem = unsafe { std::slice::from_raw_parts(self.mem, self.mem_size) };
+                let t = Instant::now();
                 let planner = self.planner.as_mut().unwrap();
                 planner.refresh_from(&sr);
                 let targets = planner
                     .plan(mem, &r)
                     .map_err(|e| format!("{}: step plan: {e}", self.name))?;
+                let t_arm = Instant::now();
+                self.stats.step_plan_ns += (t_arm - t).as_nanos();
                 Planner::arm(&self.vcpu, &targets)?;
+                let t_rf = Instant::now();
+                self.stats.step_arm_ns += (t_rf - t_arm).as_nanos();
                 self.last_plan = (r.rip, targets.clone());
                 if targets.contains(&r.rip) {
-                    let mut resumed = r;
-                    resumed.rflags |= 1 << 16; // RF: do not re-trigger at the current instruction
-                    self.vcpu.set_regs(&resumed).map_err(|e| e.to_string())?;
+                    self.stats.rf_resumes += 1;
+                    if self.rf_sync {
+                        // KVM loads the synchronized registers on entry and
+                        // clears the dirty bit.
+                        let run = self.vcpu.get_kvm_run();
+                        unsafe { run.s.regs.regs.rflags |= 1 << 16 };
+                        run.kvm_dirty_regs |= KVM_SYNC_X86_REGS as u64;
+                    } else {
+                        let mut resumed = r;
+                        resumed.rflags |= 1 << 16; // RF: do not re-trigger at the current instruction
+                        self.vcpu.set_regs(&resumed).map_err(|e| e.to_string())?;
+                    }
+                    self.stats.rf_ns += t_rf.elapsed().as_nanos();
                 }
             }
-            self.vcpu.get_kvm_run().kvm_valid_regs =
-                (KVM_SYNC_X86_REGS | KVM_SYNC_X86_SREGS) as u64;
+            self.vcpu.get_kvm_run().kvm_valid_regs = if self.stepping && !self.step_sregs {
+                KVM_SYNC_X86_REGS as u64
+            } else {
+                (KVM_SYNC_X86_REGS | KVM_SYNC_X86_SREGS) as u64
+            };
             let syscalls0 = self.page_get(PAGE_SYSCALLS);
             let c0 = counter.last();
             let t_run = Instant::now();

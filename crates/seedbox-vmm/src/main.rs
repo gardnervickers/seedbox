@@ -340,6 +340,9 @@ fn run() -> Result<Value, String> {
             mach.com2.output_limit = Some(limit);
         }
         mach.tolerance = cfg["stop_tolerance_ns"].as_u64().unwrap_or(0);
+        // Performance-only experiment knobs for single stepping.
+        mach.step_sregs = std::env::var("SEEDBOX_STEP_SREGS").map_or(true, |v| v != "0");
+        mach.rf_sync = std::env::var("SEEDBOX_RF_SYNC").is_ok_and(|v| v == "1");
         mach.timer_jitter = cfg["timer_jitter_ns"].as_u64().unwrap_or(0);
         mach.exact_timer_ppm = cfg["exact_timer_ppm"].as_u64().unwrap_or(0);
         mach.timer_rng = Some(Rng::new(boot_seed, &format!("timer-jitter/{}", names[i])));
@@ -898,7 +901,13 @@ fn report(
         sk.sort();
         let skid_p50 = sk.get(sk.len() / 2).copied();
         let skid_p99 = sk.get(sk.len() * 99 / 100).copied();
-        report.push(json!({
+        let stepping = json!({
+            "step_sregs": mach.step_sregs, "rf_sync": mach.rf_sync,
+            "plan_ms": s.step_plan_ns as f64 / 1e6, "arm_ms": s.step_arm_ns as f64 / 1e6,
+            "rf_resumes": s.rf_resumes, "rf_ms": s.rf_ns as f64 / 1e6,
+            "debug_kvm_ms": s.kvm_ns[1] as f64 / 1e6, "debug_exits": s.kvm_n[1],
+        });
+        let mut entry = json!({
             "name": mach.name,
             "state": format!("{:?}", mach.state),
             "guest_exit_code": mach.guest_exit_code,
@@ -927,7 +936,9 @@ fn report(
             "kvm_n_by_exit": s.kvm_n,
             "control_channel":mach.channel.as_ref().map(|_|json!({"transport":"virtio-console-v1","tx_bytes":mach.control_tx_bytes,"rx_dma_bytes":mach.control_dma_bytes})),
             "net": mach.net.as_ref().map(|n| json!({"tx": n.tx_frames, "rx": n.rx_frames, "rx_dropped": n.rx_dropped})),
-        }));
+        });
+        entry["stepping"] = stepping;
+        report.push(entry);
     }
     let sim_ns = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
     Ok(json!({
