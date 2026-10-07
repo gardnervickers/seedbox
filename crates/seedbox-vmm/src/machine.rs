@@ -7,7 +7,7 @@ use crate::counter::Counter;
 use crate::virtio_console::VirtioConsole;
 use crate::devices::{rtc_read, Pic, Pit, Uart};
 use crate::stepper::Planner;
-use crate::undo::Undo;
+use crate::undo::{Undo, UndoStats, VcpuState};
 use crate::virtio_net::{ReceiveOutcome, VirtioNet};
 use kvm_bindings::*;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
@@ -54,6 +54,57 @@ pub struct BootSpec<'a> {
     pub control_channel: bool,
     /// Final overflow margin for undo-able precise stops; 0 disables them.
     pub undo_margin: u64,
+    /// The guest parks at its launch barrier until the world releases it.
+    pub barrier: bool,
+}
+
+/// Port of the launch barrier, see guest/barrier.h.
+const BARRIER_PORT: u16 = 0xf8;
+pub const ENTROPY_WORDS: usize = 8;
+
+/// Everything about one machine that a world fork puts back: vCPU, RAM, the
+/// shared page, device models and the VMM's per-machine scalars.
+pub struct MachineSnapshot {
+    ram: Mapping,
+    page: Box<[u8; 4096]>,
+    cpu: VcpuState,
+    time: u64,
+    branches: u64,
+    tsc_latch: u64,
+    state: State,
+    guest_exit_code: Option<u8>,
+    guest_init_error: Option<u8>,
+    pic: Pic,
+    pit: Pit,
+    rtc_index: u8,
+    com1: Uart,
+    com2: Uart,
+    management_framer: crate::control::ManagementFramer,
+    net: Option<VirtioNet>,
+    channel: Option<VirtioConsole>,
+    control_dma_bytes: u64,
+    control_tx_bytes: u64,
+    pv: bool,
+    armed_wake: u64,
+    pit_exact: bool,
+    exit_req: bool,
+    margin: u64,
+    fm: u64,
+    parked: bool,
+    stats: Stats,
+    witness: Sha256,
+    undo_stats: Option<UndoStats>,
+}
+
+/// An anonymous private mapping, unmapped on drop.
+struct Mapping {
+    ptr: *mut u8,
+    size: usize,
+}
+impl Drop for Mapping {
+    fn drop(&mut self) {
+        unsafe { libc::munmap(self.ptr.cast(), self.size) };
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -70,11 +121,13 @@ pub enum Stop {
     Exited,
     /// The guest produced frames; the world must re-plan before continuing.
     Sent,
+    /// The guest reached its launch barrier and is parked until released.
+    Barrier,
     /// A committed management request/effect requires global causal replanning.
     Control,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct Stats {
     pub exits: u64,
     pub pio: u64,
@@ -157,6 +210,14 @@ pub struct Machine {
     pub undo: Option<Box<Undo>>,
     undo_margin: u64,
     fm: u64,
+    /// Parked at the launch barrier: the world does not run this machine.
+    pub parked: bool,
+    barrier: bool,
+    /// Per-seed words the guest reads after its release.
+    entropy: [u32; ENTROPY_WORDS],
+    entropy_read: usize,
+    /// The MSR list a fork snapshot saves.
+    msrs: Msrs,
     pub stats: Stats,
     pub witness: Sha256,
     pub trace: Option<std::io::BufWriter<std::fs::File>>,
@@ -330,6 +391,7 @@ impl Machine {
         })
         .map_err(|e| e.to_string())?;
         let net = spec.mac.map(VirtioNet::new);
+        let msrs = crate::undo::msr_list(kvm, &vcpu)?;
         let undo = if spec.undo_margin > 0 {
             let mut u = Undo::new(kvm, &vcpu, mem_size)?;
             // Everything loaded so far was written by the VMM.
@@ -386,6 +448,11 @@ impl Machine {
             undo,
             undo_margin: spec.undo_margin,
             fm: spec.undo_margin,
+            parked: false,
+            barrier: spec.barrier,
+            entropy: [0; ENTROPY_WORDS],
+            entropy_read: 0,
+            msrs,
             stats: Stats::default(),
             witness: Sha256::new(),
             trace: None,
@@ -419,6 +486,135 @@ impl Machine {
 
     pub fn has_pending_irq(&self) -> bool {
         self.pic.pending().is_some()
+    }
+
+    /// Take the machine off its launch barrier at virtual time `at`, with the
+    /// seed's entropy for the guest to read.
+    pub fn release(&mut self, at: u64, entropy: [u32; ENTROPY_WORDS]) -> Result<(), String> {
+        if !self.parked {
+            return Err(format!("{}: released without reaching the launch barrier", self.name));
+        }
+        self.parked = false;
+        // The parked interval passes like idle time: a timer that fell due
+        // meanwhile fires now, late, so the armed deadline is ahead of the
+        // clock again before the next slice computes its hard stop.
+        self.time = self.time.max(at);
+        self.expire_timers()?;
+        self.entropy = entropy;
+        self.entropy_read = 0;
+        self.record(b'R', self.time);
+        Ok(())
+    }
+
+    /// Park the machine at a fork point the world chose (a simulated time),
+    /// rather than one the guest announced. It must owe no I/O cost.
+    pub fn park(&mut self) -> Result<(), String> {
+        if self.parked || self.pending_io.is_some() {
+            return Err(format!("{}: cannot park here", self.name));
+        }
+        self.set_stepping(false)?;
+        // As at the launch barrier: finish any exit KVM still owes, so a cold
+        // run and a restored fork resume from identical vCPU state.
+        self.complete_io()?;
+        self.parked = true;
+        self.record(b'P', 0);
+        Ok(())
+    }
+
+    /// Capture this machine at the world's fork point: parked, no I/O owed.
+    pub fn snapshot(&mut self) -> Result<MachineSnapshot, String> {
+        if self.pending_io.is_some() || self.stepping || !self.fault_effects.is_empty() || !self.control_requests.is_empty() {
+            return Err(format!("{}: not at a fork point", self.name));
+        }
+        self.complete_io()?;
+        let mut cpu = VcpuState::new(self.msrs.clone());
+        cpu.save(&self.vcpu, "fork")?;
+        let undo_stats = self.undo.as_ref().map(|u| u.stats.clone());
+        let ram = Mapping { ptr: map(self.mem_size)?, size: self.mem_size };
+        unsafe { std::ptr::copy_nonoverlapping(self.mem, ram.ptr, self.mem_size) };
+        if let Some(u) = self.undo.as_mut() {
+            u.fork_point(&self._vm, self.mem)?;
+        }
+        let mut page = Box::new([0u8; 4096]);
+        unsafe { std::ptr::copy_nonoverlapping(self.page as *const u8, page.as_mut_ptr(), 4096) };
+        Ok(MachineSnapshot {
+            ram, page, cpu,
+            time: self.time, branches: self.branches, tsc_latch: self.tsc_latch, state: self.state,
+            guest_exit_code: self.guest_exit_code, guest_init_error: self.guest_init_error,
+            pic: self.pic.clone(), pit: self.pit.clone(), rtc_index: self.rtc_index,
+            com1: self.com1.snapshot(), com2: self.com2.snapshot(),
+            management_framer: self.management_framer.clone(),
+            net: self.net.clone(), channel: self.channel.clone(),
+            control_dma_bytes: self.control_dma_bytes, control_tx_bytes: self.control_tx_bytes,
+            pv: self.pv, armed_wake: self.armed_wake, pit_exact: self.pit_exact, exit_req: self.exit_req,
+            margin: self.margin, fm: self.fm, parked: self.parked,
+            stats: self.stats.clone(), witness: self.witness.clone(), undo_stats,
+        })
+    }
+
+    /// Put the machine back to a snapshot taken by `snapshot`, from wherever
+    /// the last run left it. Returns the number of RAM pages copied back.
+    pub fn restore(&mut self, s: &MachineSnapshot) -> Result<u64, String> {
+        // The last exit may still owe KVM its completion (an exit port write,
+        // say); complete it so the vCPU accepts new state. Its effect is
+        // overwritten below, and a vCPU that cannot run any more (shutdown)
+        // is overwritten just the same.
+        let _ = self.complete_io();
+        self.set_stepping(false)?;
+        let pages = match self.undo.as_mut() {
+            Some(u) => {
+                let pages = u.return_to_fork(&self._vm, self.mem, s.ram.ptr)?;
+                // Each seed reports its own undo work on top of the boot's.
+                u.stats = s.undo_stats.clone().unwrap_or_default();
+                pages
+            }
+            None => {
+                unsafe { std::ptr::copy_nonoverlapping(s.ram.ptr, self.mem, self.mem_size) };
+                (self.mem_size / 4096) as u64
+            }
+        };
+        unsafe { std::ptr::copy_nonoverlapping(s.page.as_ptr(), self.page as *mut u8, 4096) };
+        let (regs, sregs) = s.cpu.restore(&self.vcpu, "fork restore")?;
+        // Refresh KVM's exit outputs (interrupt flag, injection readiness and
+        // the synchronized registers) from the restored state, exactly as the
+        // completion at the barrier did when the snapshot was taken.
+        self.complete_io()?;
+        let run = self.vcpu.get_kvm_run();
+        run.request_interrupt_window = 0;
+        run.s.regs.regs = regs;
+        run.s.regs.sregs = sregs;
+        self.sync_regs_ready = true;
+        self.time = s.time;
+        self.branches = s.branches;
+        self.tsc_latch = s.tsc_latch;
+        self.state = s.state;
+        self.pending_io = None;
+        self.guest_exit_code = s.guest_exit_code;
+        self.guest_init_error = s.guest_init_error;
+        self.pic = s.pic.clone();
+        self.pit = s.pit.clone();
+        self.rtc_index = s.rtc_index;
+        self.com1.restore(&s.com1);
+        self.com2.restore(&s.com2);
+        self.fault_effects.clear();
+        self.control_requests.clear();
+        self.management_framer = s.management_framer.clone();
+        self.net = s.net.clone();
+        self.channel = s.channel.clone();
+        self.control_dma_bytes = s.control_dma_bytes;
+        self.control_tx_bytes = s.control_tx_bytes;
+        self.pv = s.pv;
+        self.armed_wake = s.armed_wake;
+        self.pit_exact = s.pit_exact;
+        self.exit_req = s.exit_req;
+        self.margin = s.margin;
+        self.fm = s.fm;
+        self.parked = s.parked;
+        self.entropy = [0; ENTROPY_WORDS];
+        self.entropy_read = 0;
+        self.stats = s.stats.clone();
+        self.witness = s.witness.clone();
+        Ok(pages)
     }
 
     /// Resume a halted machine at virtual time `t`.
@@ -534,7 +730,7 @@ impl Machine {
     }
 
     fn expire_timers(&mut self) -> Result<(), String> {
-        while self.pit.expire(self.time)? {
+        if self.pit.expire_through(self.time)? > 0 {
             self.pic.raise(0);
         }
         Ok(())
@@ -1052,6 +1248,18 @@ impl Machine {
                             self.set_stepping(false)?;
                             return Ok(Stop::Exited);
                         }
+                        BARRIER_PORT if self.barrier => {
+                            if self.parked || self.entropy_read != 0 {
+                                return Err(format!("{}: launch barrier reached twice", self.name));
+                            }
+                            self.parked = true;
+                            self.record(b'B', 0);
+                            self.set_stepping(false)?;
+                            // Finish the port write now, so the machine is
+                            // parked in a state a fork can save and restore.
+                            self.complete_io()?;
+                            return Ok(Stop::Barrier);
+                        }
                         0xf5 => {
                             self.guest_init_error = Some(v);
                             self.state = State::Exited(v);
@@ -1087,6 +1295,12 @@ impl Machine {
                         0x524 => data.copy_from_slice(
                             &((self.tsc_latch >> 32) as u32).to_le_bytes()[..data.len()],
                         ),
+                        BARRIER_PORT if self.barrier => {
+                            let word = self.entropy.get(self.entropy_read).copied().unwrap_or(0);
+                            self.entropy_read += 1;
+                            let len = data.len().min(4);
+                            data[..len].copy_from_slice(&word.to_le_bytes()[..len]);
+                        }
                         _ => {
                             let v = match port {
                                 0x3f8..=0x3ff => self.com1.read(port - 0x3f8),
@@ -1315,7 +1529,7 @@ mod io_boundary_tests {
         else {code.push(if write {0xee} else {0xec});}
         code.extend_from_slice(&[0x85,0xc0,0x74,0x00,0xc7,0x05,0x00,0x00,0x08,0x00,0x78,0x56,0x34,0x12,0xf4]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo,barrier:false};
         let mut machine=Machine::new(kvm,"io-probe",&spec).unwrap();
         let mut r=machine.vcpu.get_regs().unwrap();r.rflags=0x202;machine.vcpu.set_regs(&r).unwrap();
         machine.pit.write(0x43,0x34,0);
@@ -1433,7 +1647,7 @@ mod io_boundary_tests {
         let back=-(code.len() as i8+2);
         code.extend_from_slice(&[0xeb,back as u8]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo,barrier:false};
         let mut machine=Machine::new(kvm,"stop-probe",&spec).unwrap();
         let mut r=machine.vcpu.get_regs().unwrap();r.rflags=0x2;machine.vcpu.set_regs(&r).unwrap();
         machine.pic.set_masks(0xffff);
@@ -1510,4 +1724,136 @@ mod io_boundary_tests {
         assert_eq!(stop.unwrap(),Stop::Halted);
     }
 
+}
+
+#[cfg(test)]
+mod fork_tests {
+    use super::*;
+
+    /// 32-bit payload through the real boot handoff: announce the launch
+    /// barrier, read one entropy word into a marker, spin 1000 counted
+    /// branches, write a second page, halt.
+    fn barrier_machine(kvm: &Kvm, undo: u64) -> Machine {
+        probe_machine(kvm, undo, true)
+    }
+
+    fn probe_machine(kvm: &Kvm, undo: u64, barrier: bool) -> Machine {
+        let mut code=vec![0xb8,1,0,0,0, 0xba,0xf8,0,0,0, 0xef, 0xed, 0xa3,0x00,0x00,0x08,0x00];
+        code.extend_from_slice(&[0xb9,0xe8,0x03,0,0, 0x49, 0x75,0xfd]);
+        code.extend_from_slice(&[0xc7,0x05,0x00,0x10,0x08,0x00,0xad,0xde,0,0, 0xf4]);
+        let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,undo_margin:undo,barrier};
+        Machine::new(kvm,"fork-probe",&spec).unwrap()
+    }
+
+    fn to_barrier(m: &mut Machine, counter: &mut Counter) {
+        let mut frames=Vec::new();
+        assert_eq!(m.run_until(counter,1_000_000,0,&mut frames).unwrap(),Stop::Barrier);
+        assert!(m.parked);
+    }
+
+    fn released(m: &mut Machine, counter: &mut Counter, word: u32) -> (String, String, u64, u64, Vec<u8>) {
+        let at=m.time+10;
+        m.release(at,[word;ENTROPY_WORDS]).unwrap();
+        let mut frames=Vec::new();
+        loop {
+            match m.run_until(counter,10_000_000,0,&mut frames).unwrap() {
+                Stop::Exited|Stop::Halted => break,
+                Stop::Reached => {},
+                other => panic!("unexpected stop {other:?}"),
+            }
+        }
+        assert_eq!(&m.memory()[0x80000..0x80004],&word.to_le_bytes());
+        assert_eq!(&m.memory()[0x81000..0x81004],&[0xad,0xde,0,0]);
+        (m.exit_witness(),m.state_digest().0,m.time,m.branches,m.memory()[0x80000..0x80004].to_vec())
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn a_restored_fork_matches_a_cold_run_and_seeds_differ() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        for undo in [0,256] {
+            let mut cold=barrier_machine(&kvm,undo);
+            to_barrier(&mut cold,&mut counter);
+            let want=released(&mut cold,&mut counter,7);
+            assert!(want.3>=1000,"spin loop branches counted");
+
+            let mut m=barrier_machine(&kvm,undo);
+            to_barrier(&mut m,&mut counter);
+            let snapshot=m.snapshot().unwrap();
+            assert_eq!(released(&mut m,&mut counter,7),want,"first seed after taking a snapshot, undo={undo}");
+            let pages=m.restore(&snapshot).unwrap();
+            assert!(pages>=2,"marker pages copied back, undo={undo}");
+            assert!(m.parked);
+            assert_eq!(&m.memory()[0x80000..0x80004],&[0,0,0,0]);
+            let other=released(&mut m,&mut counter,9);
+            // Both seeds take the same path, and the event witness records
+            // port reads without their values, so only the state differs.
+            assert_eq!(other.0,want.0);assert_ne!(other.1,want.1);
+            assert_eq!(other.4,9u32.to_le_bytes());
+            m.restore(&snapshot).unwrap();
+            assert_eq!(released(&mut m,&mut counter,7),want,"seed restored from the fork, undo={undo}");
+        }
+    }
+
+    /// A machine released later than it parked (another machine parked
+    /// later, or a release skew), with its timer due in between: the timer
+    /// fires late at the release instead of leaving the next slice a hard
+    /// stop behind its clock.
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn a_release_past_an_armed_timer_fires_it_and_runs_on() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        for undo in [0,256] {
+            let mut m=barrier_machine(&kvm,undo);
+            to_barrier(&mut m,&mut counter);
+            let parked=m.time;
+            // Periodic channel 0 armed at the barrier, as a guest's tick is.
+            m.pit.write(0x43,0x34,parked);
+            m.pit.program(12,parked);
+            let period=m.pit.deadline.unwrap()-parked;
+            m.release(parked+4*period+period/2,[7;ENTROPY_WORDS]).unwrap();
+            // Four ticks fell due while parked; they fire as one late IRQ0
+            // (masked in this probe) and the next is armed past the release.
+            assert_eq!(m.pit.deadline,Some(parked+5*period),"undo={undo}");
+            let mut frames=Vec::new();
+            while !matches!(m.run_until(&mut counter,parked+10_000_000,0,&mut frames).unwrap(),Stop::Exited|Stop::Halted) {}
+            assert_eq!(&m.memory()[0x81000..0x81004],&[0xad,0xde,0,0]);
+        }
+    }
+
+    /// Fork at a simulated time inside the spin loop instead of at the guest's
+    /// barrier (the port write and read are then ordinary unknown ports).
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn a_fork_at_a_simulated_time_matches_a_cold_run() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        let finish=|m: &mut Machine, counter: &mut Counter| {
+            let at=m.time+10;
+            m.release(at,[0;ENTROPY_WORDS]).unwrap();
+            let mut frames=Vec::new();
+            while !matches!(m.run_until(counter,10_000_000,0,&mut frames).unwrap(),Stop::Exited|Stop::Halted) {}
+            (m.exit_witness(),m.state_digest().0,m.time,m.branches)
+        };
+        for undo in [0,256] {
+            let mut cold=probe_machine(&kvm,undo,false);
+            let mut frames=Vec::new();
+            assert_eq!(cold.run_until(&mut counter,500,0,&mut frames).unwrap(),Stop::Reached);
+            assert_eq!(cold.time,500);
+            cold.park().unwrap();
+            let want=finish(&mut cold,&mut counter);
+
+            let mut m=probe_machine(&kvm,undo,false);
+            assert_eq!(m.run_until(&mut counter,500,0,&mut frames).unwrap(),Stop::Reached);
+            m.park().unwrap();
+            let snapshot=m.snapshot().unwrap();
+            assert_eq!(finish(&mut m,&mut counter),want,"first run after a snapshot, undo={undo}");
+            m.restore(&snapshot).unwrap();
+            assert_eq!(m.time,500);
+            assert_eq!(finish(&mut m,&mut counter),want,"restored fork, undo={undo}");
+        }
+    }
 }
