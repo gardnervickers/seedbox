@@ -35,6 +35,7 @@ and identities.
 | `disk-nocrash.json`, `disk-crash.json`, `disk-crash-fork.json`, `disk-ext4-crash.json` | One machine with a retained disk: raw-block FLUSH/FUA probe with and without a crash, and an fsync ledger on ext4 across a crash (see below) |
 | `entropy-fork.json` | One machine printing `getrandom` and `/dev/urandom` bytes before and after a time fork (see below) |
 | `entropy-barrier.json` | The same guest forked at its launch barrier instead (see below) |
+| `window2.json`, `window4.json` | Windowed-scheduler evidence: guests hash memory while pinging a neighbour; run by `harness/windowed-matrix.sh` ([design](../../docs/windowed-scheduler.md)) |
 
 `batch.sh`, `batch.py` and `msr54.py` still run these fixtures with shared CPU/SMT
 leases and verified MSR restoration. Runtime lifecycle tests also use their CPU

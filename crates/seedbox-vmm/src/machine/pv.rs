@@ -59,29 +59,33 @@ pub fn syscall_ns(rng: &mut crate::rng::Rng) -> u64 {
 }
 use seedbox_engine_core::pv_progress::{PvProgress, ProbeMachine, ProgressContext, Accounting, Comparison, LandingPlan, Decision, Exit as ProgressExit};
 
+/// Per-thread PV execution context: the watchdog timer and per-run scratch.
+/// Progress state belongs to each machine (`Machine::pv_progress`), so a
+/// clock may serve any machine without carrying one machine's watchdog or
+/// probe decisions into another's run.
 pub struct PvClock {
     _watchdog: Watchdog,
-    progress: PvProgress<Key, Saved>,
     syscalls0: u64,
     remaining: u64,
     syscall_ns: u64,
     pub max_false_alarms: u64,
 }
-type Key = (u64, [u64; 17]);
+pub(crate) type Key = (u64, [u64; 17]);
+/// A machine's spin-watchdog and probe state.
+pub(crate) type Progress = PvProgress<Key, Saved>;
 impl PvClock {
     pub fn new(watchdog: Duration) -> Result<Self, String> {
-        Ok(Self { _watchdog: Watchdog::new(watchdog)?, progress: PvProgress::new(), syscalls0: 0, remaining: 0, syscall_ns: SYSCALL_NS, max_false_alarms: u64::MAX })
+        Ok(Self { _watchdog: Watchdog::new(watchdog)?, syscalls0: 0, remaining: 0, syscall_ns: SYSCALL_NS, max_false_alarms: u64::MAX })
     }
 
-    /// No architecture probe may survive a committed checkpoint boundary.
+    /// Probes are per machine: `Machine::snapshot` refuses one inside a probe.
     pub fn checkpoint_boundary(&self) -> Result<(), String> {
-        if self.progress.hold_watchdog() { return Err("PV checkpoint inside a spin probe".into()); }
         Ok(())
     }
 
-    /// Recreate host-only watchdog and probe scratch after restoring a machine.
+    /// Recreate host-only watchdog scratch after restoring a machine;
+    /// `Machine::restore` resets the machine's own progress state.
     pub fn restore_boundary(&mut self) -> Result<(), String> {
-        self.progress = PvProgress::new();
         self.syscalls0 = 0; self.remaining = 0; self.syscall_ns = SYSCALL_NS;
         self._watchdog.hold(false)
     }
@@ -89,7 +93,10 @@ impl PvClock {
     fn plan(&mut self, m: &mut Machine, remaining: u64, soft: u64, legal: bool) -> Result<Prepared, String> {
         self.remaining = remaining;
         self.syscall_ns = m.syscall_ns;
-        match self.progress.prepare(m, self.max_false_alarms)? {
+        let mut progress = std::mem::take(&mut m.pv_progress);
+        let decision = progress.prepare(m, self.max_false_alarms);
+        m.pv_progress = progress;
+        match decision? {
             Decision::Idle => return Ok(Prepared::Idle),
             Decision::Step => return Ok(Prepared::Run),
             Decision::Resume => (),
@@ -156,7 +163,7 @@ impl Timebase for PvClock {
         // code breakpoint at the same instruction, so a tick there stops the
         // vCPU on a landing without reporting it, and stepping on past it
         // would miscount the cycle. Ticks wait until the check ends.
-        self._watchdog.hold(self.progress.hold_watchdog())?;
+        self._watchdog.hold(m.pv_progress.hold_watchdog())?;
         prepared
     }
     fn start(&mut self, syscalls: u64) -> u64 {
@@ -174,7 +181,7 @@ impl Timebase for PvClock {
 
     fn judge(&mut self, j: Judge<'_>, run: &Run) -> Result<Verdict, String> {
         let exit = if run.interrupted { ProgressExit::Watchdog } else if run.debug { ProgressExit::Landing } else { ProgressExit::Natural };
-        let legal = self.progress.judge(exit, &mut JudgeContext { name: j.name, stats: j.stats })?;
+        let legal = j.pv_progress.judge(exit, &mut JudgeContext { name: j.name, stats: j.stats })?;
         Ok(Verdict::Advance { legal })
     }
 }
@@ -195,12 +202,12 @@ impl Saved {
         cpu.save(&m.vcpu, "spin check")?;
         let ram = match m.undo.as_mut() {
             Some(u) => {
-                u.sync(&m._vm, m.mem)?;
+                u.sync(&m._vm, m.mem.0)?;
                 None
             }
             None => {
-                let ram = Mapping { ptr: map(m.mem_size)?, size: m.mem_size };
-                unsafe { std::ptr::copy_nonoverlapping(m.mem, ram.ptr, m.mem_size) };
+                let ram = Mapping { ptr: super::SendPtr(map(m.mem_size)?), size: m.mem_size };
+                unsafe { std::ptr::copy_nonoverlapping(m.mem.0, ram.ptr.0, m.mem_size) };
                 Some(ram)
             }
         };
@@ -219,10 +226,10 @@ impl Saved {
                 Some(at) => Some(format!("time page word {}", at / 8)),
                 None => {
                     let ram = match (&self.ram, m.undo.as_mut()) {
-                        (None, Some(u)) => u.unchanged_since_sync(&m._vm, m.mem, &mut self.written)?,
+                        (None, Some(u)) => u.unchanged_since_sync(&m._vm, m.mem.0, &mut self.written)?,
                         (Some(ram), _) => unsafe {
-                            std::slice::from_raw_parts(ram.ptr, ram.size)
-                                == std::slice::from_raw_parts(m.mem, m.mem_size)
+                            std::slice::from_raw_parts(ram.ptr.0, ram.size)
+                                == std::slice::from_raw_parts(m.mem.0, m.mem_size)
                         },
                         (None, None) => return Err("spin check: RAM not saved".into()),
                     };
@@ -236,7 +243,7 @@ impl Saved {
 
 fn page_copy(m: &Machine) -> Box<[u8; 4096]> {
     let mut page = Box::new([0u8; 4096]);
-    unsafe { std::ptr::copy_nonoverlapping(m.page as *const u8, page.as_mut_ptr(), 4096) };
+    unsafe { std::ptr::copy_nonoverlapping(m.page.0 as *const u8, page.as_mut_ptr(), 4096) };
     page
 }
 

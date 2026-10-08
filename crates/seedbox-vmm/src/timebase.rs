@@ -48,6 +48,8 @@ pub struct Judge<'a> {
     pub armed_wake: u64,
     pub profile: &'static CounterProfile,
     pub stats: &'a mut crate::machine::Stats,
+    /// The machine's PV watchdog and probe state.
+    pub pv_progress: &'a mut crate::machine::pv::Progress,
 }
 
 pub enum Verdict {
