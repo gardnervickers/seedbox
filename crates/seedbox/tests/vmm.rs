@@ -1263,3 +1263,98 @@ fn torn_writes_are_recorded_replayed_and_omitted_when_disabled() {
         assert!(vmm::world(&request).is_err());
     });
 }
+
+#[test]
+fn timebase_reports_validate_recorded_semantics_and_accept_legacy_counter_reports() {
+    fixture(|base| {
+        let legacy = vmm::report(&serde_json::to_vec(&report()).unwrap(), base).unwrap();
+        assert_eq!(legacy.timebase, Some(Timebase::Counter));
+        for timebase in [Timebase::Counter, Timebase::Pv] {
+            let mut prepared = base.prepared.clone();
+            if timebase == Timebase::Pv {
+                prepared
+                    .profile
+                    .semantic_parameters
+                    .insert("timebase".into(), "pv".into());
+            }
+            let request = ExecutionRequest {
+                prepared: &prepared,
+                ..*base
+            };
+            let mut raw = report();
+            raw["timebase"] = json!(timebase.name());
+            raw["counter_profile"] = json!(null);
+            let parsed = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
+            assert_eq!(parsed.timebase, Some(timebase));
+            assert_eq!(
+                serde_json::to_value(parsed).unwrap()["timebase"],
+                timebase.name()
+            );
+            for other in ["counter", "pv", "unknown"] {
+                if other == timebase.name() {
+                    continue;
+                }
+                raw["timebase"] = json!(other);
+                let error = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request)
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains(&format!("--timebase {other}")), "{error}");
+            }
+            raw.as_object_mut().unwrap().remove("timebase");
+            assert_eq!(
+                vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok(),
+                timebase == Timebase::Counter
+            );
+        }
+        let mut prepared = base.prepared.clone();
+        prepared
+            .profile
+            .semantic_parameters
+            .insert("timebase".into(), "future".into());
+        let error = vmm::recorded_timebase(&prepared.profile)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("recorded --timebase future: expected counter or pv"));
+    });
+}
+
+#[test]
+fn pv_reports_may_omit_unqualified_counter_profile_but_counter_reports_must_not() {
+    use seedbox::counter::CounterProfile;
+    fixture(|base| {
+        let mut prepared = base.prepared.clone();
+        prepared
+            .profile
+            .semantic_parameters
+            .insert("counter".into(), CounterProfile::IntelSkylake.name().into());
+        for timebase in [Timebase::Counter, Timebase::Pv] {
+            prepared
+                .profile
+                .semantic_parameters
+                .insert("timebase".into(), timebase.name().into());
+            let request = ExecutionRequest {
+                prepared: &prepared,
+                ..*base
+            };
+            let mut raw = report();
+            raw["timebase"] = json!(timebase.name());
+            raw["counter_profile"] = json!(null);
+            let parsed = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request);
+            if timebase == Timebase::Counter {
+                assert!(parsed
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unqualified VMM report is missing its counter profile"));
+            } else {
+                assert_eq!(parsed.unwrap().timebase, Some(Timebase::Pv));
+            }
+            raw["counter_profile"] = json!(CounterProfile::IntelSkylake.name());
+            assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
+            raw["counter_profile"] = json!(CounterProfile::Zen.name());
+            assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request)
+                .unwrap_err()
+                .to_string()
+                .contains("different branch counter profile"));
+        }
+    });
+}

@@ -36,6 +36,7 @@ fn fixture() -> sb::orchestration::RunRecord {
         omitted_logs: BTreeMap::new(),
         outcome: Outcome::Pass,
         report: Some(ExecutionReport {
+            timebase: None,
             reason: StopReason::Completed,
             workload_exit: Some(WorkloadExit {
                 service: "workload".into(),

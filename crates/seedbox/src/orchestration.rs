@@ -222,6 +222,17 @@ impl Orchestrator {
         options: ReplayOptions,
     ) -> Result<Run> {
         let baseline = inspect(directory)?;
+        // Refuse timebase drift before creating an attempt or executing anything.
+        if baseline.identity.inputs.profile.backend == "seedbox-kvm" {
+            let recorded = crate::vmm::recorded_timebase(&baseline.identity.inputs.profile)?;
+            let requested = crate::vmm::recorded_timebase(&executor.profile())?;
+            if recorded != requested {
+                return Err(Error::Integrity(format!(
+                    "executor timebase {} does not match the recorded --timebase {}; use an executor with the recorded timebase",
+                    requested.name(), recorded.name()
+                )));
+            }
+        }
         let mut identity = baseline.identity.clone();
         // Development replay always compares the exact retained artifact pair.
         if options.allow_engine_change && !crate::admission::is_dev_engine(&identity.inputs.profile)
@@ -306,6 +317,7 @@ impl Orchestrator {
             }
             if cancellation.is_cancelled() {
                 return Ok(ExecutionReport {
+                    timebase: None,
                     reason: StopReason::Cancelled,
                     workload_exit: None,
                     witness: None,
