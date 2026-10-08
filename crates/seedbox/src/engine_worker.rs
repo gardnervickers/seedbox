@@ -11,7 +11,7 @@ pub fn dispatch(args: impl IntoIterator<Item = OsString>) -> Option<ExitCode> {
     Some(match args.next().as_deref().and_then(|arg| arg.to_str()) {
         Some(seedbox::engine::INTERNAL_WORKER_V1) => world_worker(executable, args.collect()),
         Some("arm64-fixture-v1") => arm_fixture(executable, args.collect()),
-        Some("arm64-machine-v1") => arm_machine(args.collect()),
+        Some("arm64-machine-v2") => arm_machine(args.collect()),
         Some("arm64-preparation-v1") => arm_prepare(args.collect()),
         Some("arm64-world-v1") => arm_world(executable, args.collect()),
         _ => error("unsupported internal engine contract; use the CLI retained with this run"),

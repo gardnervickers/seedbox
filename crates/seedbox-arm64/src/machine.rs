@@ -16,6 +16,7 @@ pub enum MachineStop {
     Horizon { time_ns: u64 },
     PoweredOff,
     Device { time_ns: u64 },
+    Console { time_ns: u64 },
     ApplicationExit { code: u8, setup_error: bool },
     Barrier,
 }
@@ -184,9 +185,96 @@ impl<B: Backend> Machine<B> {
             return Ok(MachineStop::PoweredOff);
         }
         self.clock.set_horizon(Some(horizon))?;
-        self.advance(before_run)
+        self.advance(before_run, false)
     }
 
+    /// Slack permits an earlier stop; this cooperative backend uses the exact limit.
+    pub fn run_slice(
+        &mut self,
+        hard_limit: u64,
+        _early_slack: u64,
+        observe_console: bool,
+    ) -> Result<MachineStop> {
+        self.clock.set_horizon(Some(hard_limit))?;
+        self.advance(|| {}, observe_console)
+    }
+    pub fn stopped_observation(&self) -> application::worker::StoppedObservation {
+        application::worker::StoppedObservation {
+            time_ns: self.clock.now(),
+            pending_irq: self.clock.is_pending()
+                || !self.deferred_spis.is_empty()
+                || !self.asserted_spis.is_empty(),
+            next_deadline: self.clock.deadline().unwrap_or(u64::MAX),
+            owed_io: None,
+            abi: if self.ready { ABI } else { 0 },
+            exits: self.trace.len() as u64,
+            powered_off: self.powered_off,
+            exit: self.application.as_ref().and_then(|d| d.exit),
+            barrier: self.application.as_ref().is_some_and(|d| d.barrier),
+            has_control: self.application.is_some(),
+        }
+    }
+    pub fn park(&self) -> Result<()> {
+        if self.powered_off
+            || self
+                .application
+                .as_ref()
+                .is_some_and(|d| !d.events.is_empty())
+        {
+            return Err("machine cannot park with terminal or undrained physical work".into());
+        }
+        // Every nonterminal return has completed its held backend operation.
+        Ok(())
+    }
+    pub fn seed_timer(&mut self, seed: u64, domain: &str) -> Result<()> {
+        if domain.is_empty() {
+            return Err("empty application timer domain".into());
+        }
+        let (policy, rng) = self
+            .timer_policy
+            .as_mut()
+            .ok_or("application timer policy unavailable")?;
+        policy.seed = seed;
+        policy.domain = domain.into();
+        *rng = crate::rng::Rng::new(seed, domain);
+        Ok(())
+    }
+    pub fn install_crash_disk(
+        &mut self,
+        input: &mut impl std::io::Read,
+        digest: Option<&str>,
+    ) -> Result<()> {
+        if self.raw_exits != 0 {
+            return Err("successor guest has already entered".into());
+        }
+        let devices = self
+            .application
+            .as_mut()
+            .ok_or("fixture has no application disk")?;
+        let disk = match (devices.block.as_ref().and_then(|d| d.disk()), digest) {
+            (Some(base), Some(digest)) => {
+                let disk = crate::disk::Disk::read_crash_transfer(base.clone(), &mut *input)?;
+                if disk.digest() != digest {
+                    return Err("successor disk digest mismatch".into());
+                }
+                Some(disk)
+            }
+            (None, None) => {
+                let mut byte = [0];
+                if input
+                    .read(&mut byte)
+                    .map_err(|e| format!("disk transfer: {e}"))?
+                    != 0
+                {
+                    return Err("unexpected diskless transfer payload".into());
+                }
+                None
+            }
+            _ => return Err("successor disk topology mismatch".into()),
+        };
+        devices.block = disk.map(application::virtio::Virtio::block);
+        Ok(())
+    }
     pub fn time_ns(&self) -> u64 {
         self.clock.now()
     }
@@ -395,7 +483,7 @@ impl<B: Backend> Machine<B> {
         }
         let start = Instant::now();
         self.clock.set_horizon(None)?;
-        if self.advance(before_run)? != MachineStop::PoweredOff {
+        if self.advance(before_run, false)? != MachineStop::PoweredOff {
             return Err("fixture stopped before power-off".into());
         }
         let console = String::from_utf8_lossy(&self.uart.console).into_owned();
@@ -435,7 +523,12 @@ impl<B: Backend> Machine<B> {
         })
     }
 
-    fn advance(&mut self, mut before_run: impl FnMut()) -> Result<MachineStop> {
+    fn advance(
+        &mut self,
+        mut before_run: impl FnMut(),
+        observe_console: bool,
+    ) -> Result<MachineStop> {
+        let console_start = self.uart.console.len();
         if self.powered_off {
             return Ok(MachineStop::PoweredOff);
         }
@@ -627,6 +720,11 @@ impl<B: Backend> Machine<B> {
                         time_ns: self.clock.now(),
                     });
                 }
+            }
+            if observe_console && self.uart.console.len() > console_start {
+                return Ok(MachineStop::Console {
+                    time_ns: self.clock.now(),
+                });
             }
             if self.clock.at_horizon() {
                 return Ok(MachineStop::Horizon {
@@ -931,6 +1029,74 @@ mod spi_regression {
         assert_eq!(m.raw_exits, 5_000_000);
         assert_eq!(m.trace.len(), 1);
         assert!(m.backend.injected.is_empty());
+    }
+    #[test]
+    fn observed_console_stops_on_first_committed_byte_before_next_entry() {
+        let mut m = machine();
+        m.ready = true;
+        for byte in *b"ab" {
+            m.backend.stops.push_back(
+                backend::Stop {
+                    pc: RAM_BASE,
+                    exit: Exit::Mmio {
+                        addr: UART_ADDR,
+                        len: 1,
+                        write: true,
+                        data: byte as u64,
+                        reg: None,
+                    },
+                }
+                .into(),
+            );
+        }
+        assert_eq!(
+            m.run_slice(10, 9, true).unwrap(),
+            MachineStop::Console { time_ns: 0 }
+        );
+        assert_eq!(m.console(), b"a");
+        assert_eq!(m.backend.stops.len(), 1);
+        assert_eq!(m.stopped_observation().exits, 1);
+        assert_eq!(
+            m.run_slice(10, 0, true).unwrap(),
+            MachineStop::Console { time_ns: 0 }
+        );
+        assert_eq!(m.console(), b"ab");
+    }
+    #[test]
+    fn stopped_observation_keeps_timer_deadline_beyond_exact_horizon() {
+        let mut m = machine();
+        m.ready = true;
+        m.clock.arm(30).unwrap();
+        m.backend.stops.push_back(
+            backend::Stop {
+                pc: RAM_BASE,
+                exit: Exit::Wfi,
+            }
+            .into(),
+        );
+        assert_eq!(
+            m.run_slice(20, 19, false).unwrap(),
+            MachineStop::Horizon { time_ns: 20 }
+        );
+        let observation = m.stopped_observation();
+        assert_eq!((observation.time_ns, observation.next_deadline), (20, 30));
+        assert!(!observation.pending_irq);
+        assert_eq!(observation.owed_io, None);
+        m.park().unwrap();
+        m.resume_at(30).unwrap();
+        assert!(m.stopped_observation().pending_irq);
+        assert_eq!(m.stopped_observation().next_deadline, u64::MAX);
+    }
+    #[test]
+    fn disk_install_rejects_entered_guest_before_consuming_input() {
+        let mut m = machine();
+        m.raw_exits = 1;
+        let mut input = b"unread".as_slice();
+        assert!(m
+            .install_crash_disk(&mut input, None)
+            .unwrap_err()
+            .contains("already entered"));
+        assert_eq!(input, b"unread");
     }
     #[test]
     fn overlapping_sources_cannot_queue_a_second_hardware_irq() {

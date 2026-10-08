@@ -448,6 +448,7 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
         Clock::Counter(Counter::new()?)
     };
     let mut world = World {
+        failure: None,
         factory: kvm,
         boot: boots,
         barrier,

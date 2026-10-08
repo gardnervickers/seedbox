@@ -15,6 +15,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::io::{Read, Write};
 
 pub const SECTOR: usize = 512;
 
@@ -145,6 +146,80 @@ impl Disk {
             return self.crashed();
         };
         self.crashed_keeping(|sector, data| sector_survives(self.fault_model, &mut rng, sector, data))
+    }
+
+    /// Stream a crash survivor overlay without rebasing its immutable image.
+    /// Only a disk whose crash policy has already been applied can be exported.
+    pub fn write_crash_transfer(&self, mut out: impl Write) -> Result<(), String> {
+        if !self.volatile.is_empty() {
+            return Err("crash transfer contains volatile sectors".into());
+        }
+        validate_disk_fault_model(self.fault_model).map_err(str::to_owned)?;
+        let mut write = |bytes: &[u8]| out.write_all(bytes)
+            .map_err(|e| format!("write crash transfer: {e}"));
+        write(b"SBXDISK1")?;
+        write(&self.capacity.to_le_bytes())?;
+        write(&self.fault_model.survival_probability.to_bits().to_le_bytes())?;
+        write(&[u8::from(self.base_sha256.is_some())])?;
+        write(self.base_sha256.as_deref().unwrap_or(&"0".repeat(64)).as_bytes())?;
+        write(&(self.stable.len() as u64).to_le_bytes())?;
+        for (sector, data) in &self.stable {
+            write(&sector.to_le_bytes())?;
+            write(&data[..])?;
+        }
+        write(self.digest().as_bytes())?;
+        out.flush().map_err(|e| format!("flush crash transfer: {e}"))
+    }
+
+    /// Validate a survivor overlay against an unmodified configured base.
+    /// The returned disk preserves the source digest and future crash behavior.
+    /// Malformed input never changes the supplied base or publishes partial data.
+    pub fn read_crash_transfer(mut base: Disk, mut input: impl Read) -> Result<Disk, String> {
+        fn read<const N: usize>(input: &mut impl Read) -> Result<[u8; N], String> {
+            let mut bytes = [0; N];
+            input.read_exact(&mut bytes).map_err(|e| format!("read crash transfer: {e}"))?;
+            Ok(bytes)
+        }
+        if !base.stable.is_empty() || !base.volatile.is_empty() {
+            return Err("crash transfer destination is not a fresh base".into());
+        }
+        if read::<8>(&mut input)? != *b"SBXDISK1" {
+            return Err("invalid crash transfer version".into());
+        }
+        let capacity = u64::from_le_bytes(read(&mut input)?);
+        let survival = u64::from_le_bytes(read(&mut input)?);
+        let has_base = read::<1>(&mut input)?[0];
+        let base_hash = read::<64>(&mut input)?;
+        if capacity != base.capacity
+            || survival != base.fault_model.survival_probability.to_bits()
+            || has_base != u8::from(base.base_sha256.is_some())
+            || base_hash.as_slice() != base.base_sha256.as_deref().unwrap_or(&"0".repeat(64)).as_bytes()
+        {
+            return Err("crash transfer base, capacity or fault model mismatch".into());
+        }
+        validate_disk_fault_model(base.fault_model).map_err(str::to_owned)?;
+        let count = u64::from_le_bytes(read(&mut input)?);
+        if count > capacity {
+            return Err("crash transfer sector count exceeds capacity".into());
+        }
+        let mut previous = None;
+        for _ in 0..count {
+            let sector = u64::from_le_bytes(read(&mut input)?);
+            if sector >= capacity || previous.is_some_and(|p| sector <= p) {
+                return Err("crash transfer sectors are unordered or out of range".into());
+            }
+            base.stable.insert(sector, Box::new(read::<SECTOR>(&mut input)?));
+            previous = Some(sector);
+        }
+        let digest = read::<64>(&mut input)?;
+        if digest.as_slice() != base.digest().as_bytes() {
+            return Err("crash transfer digest mismatch".into());
+        }
+        let mut trailing = [0];
+        if input.read(&mut trailing).map_err(|e| format!("read crash transfer trailer: {e}"))? != 0 {
+            return Err("crash transfer has trailing data".into());
+        }
+        Ok(base)
     }
 
     pub fn capacity(&self) -> u64 {

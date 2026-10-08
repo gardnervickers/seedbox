@@ -83,7 +83,10 @@ ordering, lifecycle policy and world snapshots. Machine adapters embed its singl
 `MachineState` and supply stopped execution and physical lifecycle operations.
 Keep hard limits exact, including owed I/O; preserve the lifecycle commit sites
 relative to fallible architecture actions. See `docs/world-coordinator.md`.
-ARM still uses its existing world loop until its separate coordinator adapter stage.
+ARM uses this same coordinator through stopped, stamped worker primitives; no
+second world scheduler belongs in the worker. Cold run/replay require no snapshot.
+A failed crash transaction poisons the retained World and terminates owned worker
+transports; retries must fail before any worker activity.
 
 The standalone backends compile the canonical sources through their in-workspace
 `engine-core` packages, with distinct package names just like their control

@@ -4,13 +4,16 @@
 routing, network counters, control and trigger admission, fault ordering,
 incarnation orchestration, launch/time forks and world snapshot restoration.
 KVM calls this coordinator through `seedbox-vmm/src/world_adapter.rs`; its former
-world loop is removed. ARM still uses its existing loop at this stage. Its worker
-adapter is a separate change, rather than a claim implied by portable tests.
+world loop is removed. ARM also calls it through `application/world_adapter.rs`;
+its worker owns physical CPU/PV execution and device state, with no second
+scheduler inside the worker.
 
 `WorldMachine` supplies physical boot, stopped execution, delivery, CPU/RAM
 capture and restoration, and architecture consequences of lifecycle operations.
 The clock, factory, boot inputs and snapshot types are opaque to the coordinator.
-No shared coordinator operation assumes a PMU.
+No shared coordinator operation assumes a PMU. Transport-facing primitives are
+fallible. Timer reseeding uses the same explicit seed/domain as KVM, while ARM
+declares fixed PV cost rather than inventing randomized syscall-speed support.
 
 ## One machine record
 
@@ -27,6 +30,12 @@ IPC workers must validate generation/incarnation and stopped observations before
 updating the proxy. Shared validation also rejects changed identity/lifecycle,
 backwards time, time past the requested hard limit, inconsistent stop/state and
 out-of-slice or reordered effect timestamps before consuming returned effects.
+A worker binds its immutable process generation and initial machine identity at
+Boot. Every request carries a sequence and expected identity; every response
+carries before/after identity and a physical stopped observation. A malformed,
+stale or unexpected response poisons the transport before effects are published.
+Poisoning closes, kills and reaps the process; later calls send no requests.
+
 World admission rejects empty machine sets, mismatched parallel inputs, duplicate
 names/MACs and early slack greater than or equal to lookahead.
 
@@ -50,7 +59,39 @@ Equal-time coordinator boundaries retain control, then trigger, then fault
 precedence. Strict replies are never delivered early, including a reply owed
 before a fatal control failure terminates execution. A crash discards the dead
 incarnation's owed I/O and management queue while retaining world-transit frames;
-reboot drops frames that arrived before the new NIC existed.
+reboot drops frames that arrived before the new NIC existed. Pause/resume at a
+stopped boundary preserves any pending completion and remaining I/O cost; it does
+not impose the no-owed-I/O requirement of parking.
+
+ARM crash succession uses an owned temporary transfer artifact. The old worker
+captures evidence and applies seeded disk survival exactly once, then exports the
+stable overlay with its original base identity and destroys its VM. The fresh
+worker has entered no guest instructions. It validates the configured base,
+capacity, fault policy, ordered in-range sectors, digest and complete artifact
+before installing it. The transfer binds predecessor, intended successor and
+transaction identities; installation is a one-shot transition. The artifact is
+removed on success or failure. Raw image rebasing is avoided because it would
+change the retained disk identity.
+
+Any crash-transaction failure immediately terminates owned worker transports,
+preserves the original error with cleanup context, and marks World terminal.
+Retaining World after that error does not permit execution or another replacement.
+In-process KVM explicitly has no worker transport to terminate; its VM resources
+remain governed by normal ownership. Partial worker boot owns its own cleanup.
+
+## ARM capabilities
+
+Cold run/replay use no launch barrier or snapshot. Explicit launch release requires
+the real `seedbox.barrier=1` handshake and physical time/entropy reconciliation.
+Deterministic time parking requires a completed stopped boundary without owed I/O.
+Release from arbitrary time parking and full snapshot capture/restore/fork reuse
+remain unsupported and return errors; empty snapshots or metadata-only restoration
+are never successful substitutes. General asynchronous ARM cycle proof remains
+disabled because debugger intervention changes the exclusive monitor.
+
+ARM report rows for a machine currently down describe the retired predecessor's
+evidence, incarnation and time. The sole scheduler record describes the successor
+waiting to reboot; report projection never rewrites that state.
 
 ## Forks and validation
 

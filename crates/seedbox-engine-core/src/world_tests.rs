@@ -74,7 +74,18 @@ impl WorldMachine for Mock {
     type Clock = ();
     type Snapshot = Saved;
     fn boot(trace: &Trace, name: &str, _: &(), _: bool, _: [u8; 32]) -> Result<Self, String> {
-        Ok(Self::new(name, trace.clone()))
+        if trace.borrow().iter().any(|x| x == "fail/boot") {
+            trace.borrow_mut().push("partial-boot-cleanup".into());
+            return Err("boot failed".into());
+        }
+        let mut machine = Self::new(name, trace.clone());
+        if trace.borrow().iter().any(|x| x == "fail/timer") {
+            machine.bad = Some("timer");
+        }
+        if trace.borrow().iter().any(|x| x == "fail/install") {
+            machine.bad = Some("install");
+        }
+        Ok(machine)
     }
     fn has_pending_irq(&self) -> bool {
         self.irq
@@ -92,8 +103,9 @@ impl WorldMachine for Mock {
         self.record(&format!("control/{}", String::from_utf8_lossy(bytes)));
         Ok(())
     }
-    fn deliver_serial(&mut self, bytes: &[u8]) {
+    fn deliver_serial(&mut self, bytes: &[u8]) -> Result<(), String> {
         self.record(&format!("serial/{}", String::from_utf8_lossy(bytes)));
+        Ok(())
     }
     fn deliver_frame(&mut self, _: &[u8]) -> Result<bool, String> {
         self.record("frame");
@@ -114,6 +126,9 @@ impl WorldMachine for Mock {
         Ok(())
     }
     fn succeed(&mut self, old: &mut Self, at: u64, _: u64) -> Result<Option<u64>, String> {
+        if self.bad == Some("install") {
+            return Err("install ACK lost".into());
+        }
         self.common.succeed(&old.common, at)?;
         Ok(Some(0))
     }
@@ -123,10 +138,11 @@ impl WorldMachine for Mock {
         self.record("park");
         Ok(())
     }
-    fn wake(&mut self, at: u64) {
+    fn wake(&mut self, at: u64) -> Result<(), String> {
         self.common.time = self.common.time.max(at);
         self.common.wake();
         self.record("wake");
+        Ok(())
     }
     fn release(&mut self, at: u64, _: [u32; 8]) -> Result<Reseed, String> {
         self.common.begin_release()?;
@@ -137,16 +153,34 @@ impl WorldMachine for Mock {
     fn abi(&self) -> u64 {
         3
     }
-    fn seed_timer(&mut self, _: Rng) {}
-    fn seed_speed(&mut self, _: Rng) {}
+    fn seed_timer(&mut self, _: u64, _: &str) -> Result<(), String> {
+        if self.bad == Some("timer") {
+            Err("timer ACK lost".into())
+        } else {
+            Ok(())
+        }
+    }
+    fn supports_speed_reseed(&self) -> bool {
+        true
+    }
+    fn seed_speed(&mut self, _: u64, _: &str) -> Result<(), String> {
+        Ok(())
+    }
     fn branches(&self) -> u64 {
         0
     }
     fn exits(&self) -> u64 {
         0
     }
-    fn exit_witness(&self) -> String {
-        String::new()
+    fn exit_witness(&mut self) -> Result<String, String> {
+        if self.bad == Some("witness") {
+            return Err("witness ACK lost".into());
+        }
+        Ok(String::new())
+    }
+    fn terminate_worker(&mut self) -> Result<(), String> {
+        self.record("terminate");
+        Ok(())
     }
     fn snapshot(&mut self) -> Result<Saved, String> {
         if self.owed.is_some() {
@@ -240,6 +274,7 @@ fn world(names: &[&str]) -> World<Mock> {
     let trace = Trace::default();
     let n = names.len();
     World {
+        failure: None,
         machines: names
             .iter()
             .map(|name| Mock::new(name, trace.clone()))
@@ -311,6 +346,76 @@ fn strict_delivery_is_never_early_and_equal_time_keeps_insertion_order() {
     w.machines[0].common.time = 11;
     w.deliver_due(0).unwrap();
     assert_eq!(w.factory.borrow().last().unwrap(), "a:control/strict:11");
+}
+#[test]
+fn failed_crash_immediately_terminates_workers_and_retained_world_cannot_retry() {
+    for phase in ["boot", "timer", "witness", "install"] {
+        let mut w = world(&["a", "b"]);
+        if phase == "witness" {
+            w.machines[0].bad = Some("witness");
+        } else {
+            w.factory.borrow_mut().push(format!("fail/{phase}"));
+        }
+        let error = w.crash(0, 5).unwrap_err();
+        assert!(error.contains(phase), "{phase}: {error}");
+        assert!(w.failure.is_some());
+        let trace = w.factory.borrow().clone();
+        let terminations = trace.iter().filter(|x| x.contains(":terminate:")).count();
+        assert_eq!(
+            terminations,
+            if phase == "boot" { 2 } else { 3 },
+            "{phase}: {trace:?}"
+        );
+        if phase == "boot" {
+            assert!(trace.iter().any(|x| x == "partial-boot-cleanup"));
+        }
+        assert!(w.crash(0, 6).unwrap_err().contains("terminal"));
+        assert!(w.lifecycle(0, faults::Lifecycle::Pause, 6).is_err());
+        assert!(w.reboot(0, 6).is_err());
+        assert!(w.deliver_due(0).is_err());
+        assert!(WorldSnapshot::take(&mut w).is_err());
+        assert!(simulate(&mut w, &Value::Null, 10, &None, None, &mut || {
+            panic!("terminal world reached host boundary")
+        })
+        .is_err());
+        assert_eq!(
+            *w.factory.borrow(),
+            trace,
+            "terminal reuse performed activity"
+        );
+    }
+}
+#[test]
+fn pause_resume_preserves_owed_io_and_pays_it_once_after_resume() {
+    let mut w = world(&["a"]);
+    w.machines[0].time = 5;
+    w.machines[0].owed = Some(7);
+    w.lifecycle(0, faults::Lifecycle::Pause, 5).unwrap();
+    assert!(w.machines[0].paused);
+    assert_eq!(w.machines[0].owed, Some(7));
+    w.lifecycle(0, faults::Lifecycle::Resume, 20).unwrap();
+    assert!(!w.machines[0].paused);
+    assert_eq!(w.machines[0].time, 20);
+    assert_eq!(w.machines[0].owed, Some(7));
+    let request = SliceRequest {
+        hard_limit: 23,
+        early_slack: 0,
+        observe_console: false,
+    };
+    w.machines[0]
+        .advance(&mut (), request, &mut vec![])
+        .unwrap();
+    assert_eq!(w.machines[0].owed, Some(4));
+    let request = SliceRequest {
+        hard_limit: 27,
+        early_slack: 0,
+        observe_console: false,
+    };
+    w.machines[0]
+        .advance(&mut (), request, &mut vec![])
+        .unwrap();
+    assert_eq!(w.machines[0].owed, None);
+    assert_eq!(w.machines[0].time, 27);
 }
 #[test]
 fn crash_discards_held_io_and_management_but_keeps_transit_frames() {

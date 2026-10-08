@@ -2,6 +2,7 @@
 pub mod virtio;
 pub mod worker;
 pub mod world;
+pub mod world_adapter;
 use crate::Result;
 use serde::{Deserialize, Serialize};
 

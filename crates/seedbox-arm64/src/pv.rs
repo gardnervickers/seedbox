@@ -39,6 +39,9 @@ impl PvClock {
     pub fn ack(&mut self) {
         self.pending = false;
     }
+    pub fn deadline(&self) -> Option<u64> {
+        self.deadline
+    }
     pub fn is_pending(&self) -> bool {
         self.pending
     }

@@ -3,8 +3,9 @@
 `crates/seedbox-arm64` and `kernel-arm64` are isolated from the production x86
 engine. The [quickstart below](#experimental-arm64-quickstart)
 contains Mac fixture setup and input verification. The library also provides
-an application personality and world coordinator; public Compose CLI integration
-is a separate layer. The standalone quickstart continues to run the fixture.
+an application personality connected to the shared world coordinator. The public
+Compose CLI selects this native backend on Apple Silicon; the standalone
+quickstart below continues to run the isolated fixture.
 
 ## Application groundwork
 
@@ -34,8 +35,10 @@ must stop the guest before changing its horizon.
 `Machine::run_until` reconciles the initial handshake, republishes clock bounds
 and returns a cooperative stop at the horizon without consuming a future timer.
 The application personality adds virtio network, control console and optional
-block devices. Its world coordinator serializes one native worker per machine,
-using the existing network, control, fault and disk policies verbatim. Crash and
+block devices. The shared coordinator serializes one native worker per machine
+through stamped, validated stopped observations; no ARM scheduler loop is duplicated.
+The [coordinator contract](world-coordinator.md) defines effect ordering, process
+cleanup and unsupported snapshot/fork operations. Crash and
 reboot retain the disk's surviving sectors and give each incarnation its own
 seeded entropy. Host process scheduling never advances virtual time.
 

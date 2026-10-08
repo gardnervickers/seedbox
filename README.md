@@ -119,7 +119,9 @@ VMM contract. The combined executable has its own engine identity and needs
 separate runtime evidence. Every built engine and guest kernel is admitted;
 `--allow-dev-engine` remains a compatibility no-op.
 
-The ARM application engine is linked into the Mac CLI. Its PV world identity,
+The ARM application engine is linked into the Mac CLI. Both platform adapters
+use the shared world coordinator, including connection selectors and committed
+console triggers; ARM arbitrary snapshot/fork reuse remains unsupported. Its PV world identity,
 boot-layout evidence and HVF host admission are distinct from the existing ARM
 fixture and x86 KVM profiles. Mac defaults use packaged Image, supervisor,
 BusyBox and mke2fs, with `linux/arm64` as the image platform. `--cpu`, `--vmm`

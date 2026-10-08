@@ -181,21 +181,25 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
     fn owed_io(&self) -> Option<u64>;
     fn has_control(&self) -> bool;
     fn deliver_control(&mut self, bytes: &[u8]) -> Result<(), String>;
-    fn deliver_serial(&mut self, bytes: &[u8]);
+    fn deliver_serial(&mut self, bytes: &[u8]) -> Result<(), String>;
     fn deliver_frame(&mut self, bytes: &[u8]) -> Result<bool, String>;
     fn pause(&mut self) -> Result<(), String>;
     fn resume(&mut self, at: u64) -> Result<(), String>;
     fn boot_at(&mut self, at: u64) -> Result<(), String>;
     fn succeed(&mut self, old: &mut Self, at: u64, seed: u64) -> Result<Option<u64>, String>;
     fn park(&mut self) -> Result<(), String>;
-    fn wake(&mut self, at: u64);
+    fn wake(&mut self, at: u64) -> Result<(), String>;
     fn release(&mut self, at: u64, entropy: [u32; 8]) -> Result<Reseed, String>;
     fn abi(&self) -> u64;
-    fn seed_timer(&mut self, rng: Rng);
-    fn seed_speed(&mut self, rng: Rng);
+    fn seed_timer(&mut self, seed: u64, domain: &str) -> Result<(), String>;
+    fn supports_speed_reseed(&self) -> bool;
+    fn seed_speed(&mut self, seed: u64, domain: &str) -> Result<(), String>;
     fn branches(&self) -> u64;
     fn exits(&self) -> u64;
-    fn exit_witness(&self) -> String;
+    fn exit_witness(&mut self) -> Result<String, String>;
+    /// Idempotently poison, close and reap owned worker transport without another
+    /// guest request. In-process adapters explicitly succeed without a child.
+    fn terminate_worker(&mut self) -> Result<(), String>;
     fn snapshot(&mut self) -> Result<Self::Snapshot, String>;
     fn restore(&mut self, snapshot: &Self::Snapshot) -> Result<u64, String>;
     /// Return at the first causal effect. Frames share this stop's committed
@@ -312,6 +316,8 @@ pub fn entropy_seed(seed: u64, domain: &str) -> [u8; 32] {
 }
 
 pub struct World<M: WorldMachine> {
+    /// A failed crash transaction is terminal even if a direct caller retains World.
+    pub failure: Option<String>,
     pub machines: Vec<M>,
     pub factory: M::Factory,
     pub boot: Vec<M::Boot>,
@@ -346,8 +352,15 @@ pub struct World<M: WorldMachine> {
 }
 
 impl<M: WorldMachine> World<M> {
+    pub fn check_active(&self) -> Result<(), String> {
+        match &self.failure {
+            Some(reason) => Err(format!("world is terminal after failed crash: {reason}")),
+            None => Ok(()),
+        }
+    }
     /// Common admission for direct and IPC adapters, before any execution.
     pub fn validate(&self) -> Result<(), String> {
+        self.check_active()?;
         let n = self.machines.len();
         if n == 0 {
             return Err("world requires at least one machine".into());
@@ -441,11 +454,12 @@ impl<M: WorldMachine> World<M> {
 
     /// Deliver events due by the end of the machine's early window.
     pub fn deliver_due(&mut self, m: usize) -> Result<(), String> {
+        self.check_active()?;
         while let Some(bytes) = events::pop_due(&mut self.strict_events[m], self.machines[m].time) {
             if self.machines[m].has_control() {
                 self.machines[m].deliver_control(&bytes)?;
             } else {
-                self.machines[m].deliver_serial(&bytes);
+                self.machines[m].deliver_serial(&bytes)?;
             }
             if bytes.starts_with(b"SBX_REPLY1 ") {
                 self.control.mark_delivered(self.machines[m].time)?;
@@ -470,7 +484,7 @@ impl<M: WorldMachine> World<M> {
                         self.count_link(at, from, m, 0);
                     }
                 }
-                Payload::Serial(b) => mach.deliver_serial(&b),
+                Payload::Serial(b) => mach.deliver_serial(&b)?,
                 Payload::Partition { from, to, on } => {
                     self.partitioned.insert((from, to), on);
                 }
@@ -543,6 +557,7 @@ impl<M: WorldMachine> World<M> {
     /// Carry out a lifecycle transition at world boundary `t`, before any
     /// machine runs at `t`.
     pub fn lifecycle(&mut self, m: usize, op: faults::Lifecycle, t: u64) -> Result<(), String> {
+        self.check_active()?;
         if self.machines[m].time > t {
             return Err("lifecycle boundary is in committed machine past".into());
         }
@@ -562,31 +577,56 @@ impl<M: WorldMachine> World<M> {
     /// commands queued for the dead incarnation go with it; frames in world
     /// transit stay queued for the reboot to sort out.
     pub fn crash(&mut self, m: usize, t: u64) -> Result<(), String> {
-        let name = self.machines[m].name.clone();
-        self.control.triggers.reset_source(&name);
-        let next = self.machines[m]
-            .incarnation
-            .checked_add(1)
-            .ok_or("incarnation overflow")?;
-        let seed = entropy_seed(self.run_seed, &format!("reboot-entropy/{name}/{next}"));
-        let mut fresh = M::boot(&self.factory, &name, &self.boot[m], false, seed)?;
-        fresh.seed_timer(Rng::new(
-            self.run_seed,
-            &format!("timer-jitter/{name}/{next}"),
-        ));
-        let mut old = std::mem::replace(&mut self.machines[m], fresh);
-        let discarded: usize = self.strict_events[m].values().map(Vec::len).sum();
-        self.strict_events[m].clear();
-        let mut summary = json!({
-            "incarnation": old.incarnation, "booted_at_ns": old.booted_at, "crashed_at_ns": t,
-            "time_ns": old.time, "branches": old.branches(), "exits": old.exits(),
-            "state": format!("{:?}", old.state), "paused": old.paused,
-            "discarded_pending_io": old.owed_io().is_some(), "discarded_management_bytes": discarded,
-            "witness": old.exit_witness(),
-        });
-        summary["disk_lost_sectors"] =
-            json!(self.machines[m].succeed(&mut old, t, self.run_seed)?);
-        self.incarnations[m].push(summary);
+        self.check_active()?;
+        let mut predecessor = None;
+        let result = (|| {
+            let name = self.machines[m].name.clone();
+            let next = self.machines[m]
+                .incarnation
+                .checked_add(1)
+                .ok_or("incarnation overflow")?;
+            let seed = entropy_seed(self.run_seed, &format!("reboot-entropy/{name}/{next}"));
+            // A failed constructor owns cleanup of any partially booted worker.
+            let mut fresh = M::boot(&self.factory, &name, &self.boot[m], false, seed)?;
+            if let Err(mut error) =
+                fresh.seed_timer(self.run_seed, &format!("timer-jitter/{name}/{next}"))
+            {
+                if let Err(cleanup) = fresh.terminate_worker() {
+                    error.push_str(&format!("; fresh worker cleanup: {cleanup}"));
+                }
+                return Err(error);
+            }
+            self.control.triggers.reset_source(&name);
+            let old = predecessor.insert(std::mem::replace(&mut self.machines[m], fresh));
+            let witness = old.exit_witness()?;
+            let discarded: usize = self.strict_events[m].values().map(Vec::len).sum();
+            self.strict_events[m].clear();
+            let mut summary = json!({
+                "incarnation": old.incarnation, "booted_at_ns": old.booted_at, "crashed_at_ns": t,
+                "time_ns": old.time, "branches": old.branches(), "exits": old.exits(),
+                "state": format!("{:?}", old.state), "paused": old.paused,
+                "discarded_pending_io": old.owed_io().is_some(), "discarded_management_bytes": discarded,
+                "witness": witness,
+            });
+            summary["disk_lost_sectors"] =
+                json!(self.machines[m].succeed(old, t, self.run_seed)?);
+            self.incarnations[m].push(summary);
+            Ok(())
+        })();
+        if let Err(mut error) = result {
+            if let Some(old) = &mut predecessor {
+                if let Err(cleanup) = old.terminate_worker() {
+                    error.push_str(&format!("; predecessor worker cleanup: {cleanup}"));
+                }
+            }
+            for machine in &mut self.machines {
+                if let Err(cleanup) = machine.terminate_worker() {
+                    error.push_str(&format!("; {} worker cleanup: {cleanup}", machine.name));
+                }
+            }
+            self.failure = Some(error.clone());
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -594,6 +634,7 @@ impl<M: WorldMachine> World<M> {
     /// before `t` (held while it was paused, or arriving while it was down)
     /// belonged to the dead NIC and are dropped; later ones arrive normally.
     pub fn reboot(&mut self, m: usize, t: u64) -> Result<(), String> {
+        self.check_active()?;
         while let Some((at, p)) = events::pop_before(&mut self.events[m], t) {
             match p {
                 Payload::Frame { from, .. } => {
@@ -700,6 +741,7 @@ pub fn arm_seed<M: WorldMachine>(
     seed: u64,
     from: u64,
 ) -> Result<Vec<Value>, String> {
+    world.check_active()?;
     check_plan_after(cfg, from)?;
     let booted = std::mem::take(&mut world.faults.readiness);
     let connections = world.faults.connections.clone();
@@ -780,6 +822,7 @@ pub fn release<M: WorldMachine>(
     skew: u64,
     diagnostic: &mut impl FnMut(&str, u64),
 ) -> Result<(Vec<Value>, Value), String> {
+    world.check_active()?;
     let at = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
     check_plan_after(cfg, at.saturating_add(skew))?;
     let mut reseed = serde_json::Map::new();
@@ -792,8 +835,10 @@ pub fn release<M: WorldMachine>(
             diagnostic(&names[i], mach.abi());
         }
         reseed.insert(names[i].clone(), json!(how.as_str()));
-        mach.seed_timer(Rng::new(seed, &format!("timer-jitter/{}", names[i])));
-        mach.seed_speed(Rng::new(seed, &format!("pv-speed/{}", names[i])));
+        mach.seed_timer(seed, &format!("timer-jitter/{}", names[i]))?;
+        if mach.supports_speed_reseed() {
+            mach.seed_speed(seed, &format!("pv-speed/{}", names[i]))?;
+        }
     }
     Ok((
         arm_seed(world, cfg, names, seed, at.saturating_add(skew))?,
@@ -825,6 +870,7 @@ pub struct WorldSnapshot<M: WorldMachine> {
 
 impl<M: WorldMachine> WorldSnapshot<M> {
     pub fn take(world: &mut World<M>) -> Result<Self, String> {
+        world.check_active()?;
         world.validate()?;
         if !world.machines.iter().all(|m| m.parked) {
             return Err("world fork requires every machine at its launch barrier".into());
@@ -854,6 +900,7 @@ impl<M: WorldMachine> WorldSnapshot<M> {
 
     /// Put the world back to the fork point. Returns RAM pages copied back.
     pub fn restore(&self, world: &mut World<M>) -> Result<u64, String> {
+        world.check_active()?;
         world.validate()?;
         if self.machines.len() != world.machines.len() {
             return Err("snapshot machine count differs from world".into());
@@ -999,7 +1046,7 @@ pub fn simulate<M: WorldMachine>(
             }
             for (target, command) in commands {
                 if world.machines[target].state == State::Halted && !world.machines[target].paused {
-                    world.machines[target].wake(fault_boundary);
+                    world.machines[target].wake(fault_boundary)?;
                 }
                 world.seq += 1;
                 world.strict_events[target].insert((fault_boundary, world.seq), command);
@@ -1033,7 +1080,7 @@ pub fn simulate<M: WorldMachine>(
             break;
         }
         if world.machines[m].state == State::Halted {
-            world.machines[m].wake(key);
+            world.machines[m].wake(key)?;
         }
         if let Err(error) = world.deliver_due(m) {
             world.control.error = Some(error);

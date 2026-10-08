@@ -158,9 +158,11 @@ PV entropy/timer policy, guest-kernel hash and HVF CPU/OS observations.
 Full-state capture includes native CPU/SIMD/GIC state and application devices.
 Old fixture reports cannot satisfy this application contract. A missing or
 incompatible retained proof fails replay before host execution.
-Connection selectors and committed console triggers are currently unsupported on
-Mac and return an explicit control error. Timed chunk indexes and per-page RAM
-evidence are still Linux features; Mac retains raw console and whole-state hashes.
+Connection discovery/selectors and committed console triggers use the shared
+coordinator on Mac. Console matching observes future bytes at their first
+committed stop. Timed chunk indexes and per-page RAM evidence are still Linux
+features; Mac retains raw console and whole-state hashes. Full arbitrary ARM
+snapshot/restore and release from a deterministic time park remain unsupported.
 
 This remains unqualified development evidence. ARM images, 64..3072 MiB per
 guest and one exploration worker are required; PMU/core options apply to Linux.

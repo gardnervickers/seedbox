@@ -16,7 +16,7 @@ use std::{
 };
 
 const MAX_MESSAGE: usize = 16 << 20;
-pub const CONTRACT: &str = "arm64-machine-v1";
+pub const CONTRACT: &str = "arm64-machine-v2";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -69,37 +69,94 @@ impl Boot {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Identity {
+    pub name: String,
+    pub generation: u64,
+    pub incarnation: u32,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransferDescriptor {
+    pub transaction: u64,
+    pub predecessor: Identity,
+    pub successor: Identity,
+    pub artifact: PathBuf,
+    pub at: u64,
+}
+impl TransferDescriptor {
+    pub fn validate(&self) -> Result<()> {
+        if self.predecessor.name != self.successor.name
+            || self.predecessor.generation == self.successor.generation
+            || self.predecessor.incarnation.checked_add(1) != Some(self.successor.incarnation)
+            || self.at == u64::MAX
+            || !self.artifact.is_absolute()
+        {
+            return Err("invalid succession transaction".into());
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportedTransfer {
+    pub descriptor: TransferDescriptor,
+    pub disk_digest: Option<String>,
+    pub artifact_sha256: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoppedObservation {
+    pub time_ns: u64,
+    pub pending_irq: bool,
+    pub next_deadline: u64,
+    pub owed_io: Option<u64>,
+    pub abi: u64,
+    pub exits: u64,
+    pub powered_off: bool,
+    pub exit: Option<(u8, bool)>,
+    pub barrier: bool,
+    pub has_control: bool,
+}
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Operation {
     Boot(Boot),
     Advance {
-        horizon_ns: u64,
+        hard_limit: u64,
+        early_slack: u64,
+        observe_console: bool,
     },
     Frame(Vec<u8>),
     Control(Vec<u8>),
-    Release([u32; 8]),
+    Release {
+        at: u64,
+        entropy: [u32; 8],
+    },
     ResumeAt(u64),
+    Park,
+    SeedTimer {
+        seed: u64,
+        domain: String,
+    },
     Evidence {
         full_state: bool,
     },
-    Crash {
+    CrashExport {
         run_seed: u64,
-        name: String,
-        incarnation: u32,
         full_state: bool,
+        transfer: TransferDescriptor,
     },
-    Reboot {
-        boot: Boot,
-        run_seed: u64,
-        name: String,
-        incarnation: u32,
-    },
+    InstallSuccession(ExportedTransfer),
+    Snapshot,
+    Restore,
     Quit,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub sequence: u64,
+    pub expected: Identity,
     pub operation: Operation,
 }
 #[derive(Debug, Serialize, Deserialize)]
@@ -113,13 +170,13 @@ pub enum Answer {
     },
     Accepted(bool),
     Evidence(Evidence),
-    Rebooted {
-        lost_sectors: u64,
-    },
     Crashed {
         evidence: Evidence,
         lost_sectors: u64,
-        surviving_disk: Option<String>,
+        transfer: ExportedTransfer,
+    },
+    Installed {
+        transfer: ExportedTransfer,
     },
     Error(String),
     Bye,
@@ -128,12 +185,20 @@ pub enum Answer {
 #[serde(deny_unknown_fields)]
 pub struct Response {
     pub sequence: u64,
+    pub before: Option<Identity>,
+    pub after: Option<Identity>,
+    pub observation: Option<StoppedObservation>,
     pub answer: Answer,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransferHeader {
+    descriptor: TransferDescriptor,
+    disk_digest: Option<String>,
 }
 
 pub fn read_message<T: serde::de::DeserializeOwned>(input: &mut impl Read) -> Result<Option<T>> {
     let mut length = [0u8; 4];
-    // EOF is legal only between messages. Short headers/bodies are failures.
     loop {
         match input.read(&mut length[..1]) {
             Ok(0) => return Ok(None),
@@ -169,115 +234,226 @@ pub fn write_message<T: Serialize>(output: &mut impl Write, value: &T) -> Result
         .and_then(|_| output.flush())
         .map_err(|e| format!("worker output: {e}"))
 }
+fn artifact_hash(file: &mut std::fs::File) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Seek, SeekFrom};
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("transfer seek: {e}"))?;
+    let mut hash = Sha256::new();
+    let mut bytes = [0; 64 << 10];
+    loop {
+        let count = file
+            .read(&mut bytes)
+            .map_err(|e| format!("transfer hash: {e}"))?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&bytes[..count]);
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("transfer seek: {e}"))?;
+    Ok(format!("{:x}", hash.finalize()))
+}
 
-/// The boundary supplies I/O; this library never reads arguments/environment
-/// or writes diagnostics. Each operation completes with the vCPU stopped.
+/// All requests complete stopped. Identity and sequence are checked before any
+/// physical action; errors terminate this worker rather than replaying mutation.
 pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Result<()> {
     let mut sequence = 0u64;
+    let mut identity: Option<Identity> = None;
     let mut machine: Option<Machine<B>> = None;
-    let mut retained_disk: Option<Disk> = None;
-    let mut has_crashed = false;
     let mut console_offset = 0usize;
+    let mut install_available = false;
     while let Some(request) = read_message::<Request>(input)? {
         if request.sequence != sequence {
             return Err("worker request sequence mismatch".into());
         }
-        let quit = matches!(request.operation, Operation::Quit);
+        let before = identity.clone();
+        match &identity {
+            Some(current) if current != &request.expected => {
+                return Err("worker request identity mismatch".into())
+            }
+            None if !matches!(request.operation, Operation::Boot(_)) => {
+                return Err("unbound worker requires boot".into())
+            }
+            _ => (),
+        }
+        if request.expected.name.is_empty() {
+            return Err("empty worker machine identity".into());
+        }
+        let terminal = matches!(
+            request.operation,
+            Operation::Quit | Operation::CrashExport { .. }
+        );
         let result = (|| -> Result<Answer> {
+            if let Operation::Boot(boot) = &request.operation {
+                if identity.is_some() || request.expected.incarnation != 0 {
+                    return Err("worker already bound or invalid initial incarnation".into());
+                }
+                machine = Some(boot.machine(boot.disk()?)?);
+                identity = Some(request.expected.clone());
+                install_available = true;
+                return Ok(Answer::Ready);
+            }
+            if matches!(request.operation, Operation::Quit) {
+                machine = None;
+                return Ok(Answer::Bye);
+            }
+            let vm = machine.as_mut().ok_or("worker has no live machine")?;
             match request.operation {
-                Operation::Boot(boot) => {
-                    if machine.is_some() {
-                        return Err("worker already owns a machine".into());
-                    }
-                    let disk = if has_crashed {
-                        retained_disk.take()
-                    } else {
-                        boot.disk()?
-                    };
-                    machine = Some(boot.machine(disk)?);
-                    has_crashed = false;
-                    console_offset = 0;
+                Operation::Advance {
+                    hard_limit,
+                    early_slack,
+                    observe_console,
+                } => {
+                    install_available = false;
+                    let stop = vm.run_slice(hard_limit, early_slack, observe_console)?;
+                    let console = vm.console()[console_offset..].to_vec();
+                    console_offset = vm.console().len();
+                    Ok(Answer::Advanced {
+                        stop,
+                        time_ns: vm.time_ns(),
+                        events: vm.take_events(),
+                        console,
+                    })
+                }
+                Operation::Frame(bytes) => {
+                    install_available = false;
+                    Ok(Answer::Accepted(vm.receive_frame(&bytes)?))
+                }
+                Operation::Control(bytes) => {
+                    install_available = false;
+                    vm.receive_control(&bytes)?;
                     Ok(Answer::Ready)
                 }
-                Operation::Quit => {
-                    machine = None;
-                    Ok(Answer::Bye)
-                }
-                operation => {
-                    let vm = machine.as_mut().ok_or("worker has no machine")?;
-                    match operation {
-                        Operation::Advance { horizon_ns } => {
-                            let stop = vm.run_until(horizon_ns, || {})?;
-                            let console = vm.console()[console_offset..].to_vec();
-                            console_offset = vm.console().len();
-                            Ok(Answer::Advanced {
-                                stop,
-                                time_ns: vm.time_ns(),
-                                events: vm.take_events(),
-                                console,
-                            })
-                        }
-                        Operation::Frame(bytes) => Ok(Answer::Accepted(vm.receive_frame(&bytes)?)),
-                        Operation::Control(bytes) => {
-                            vm.receive_control(&bytes)?;
-                            Ok(Answer::Ready)
-                        }
-                        Operation::Release(words) => {
-                            vm.release_barrier(words)?;
-                            Ok(Answer::Ready)
-                        }
-                        Operation::ResumeAt(time) => {
-                            vm.resume_at(time)?;
-                            Ok(Answer::Ready)
-                        }
-                        Operation::Evidence { full_state } => {
-                            Ok(Answer::Evidence(vm.application_evidence(full_state)?))
-                        }
-                        Operation::Crash {
-                            run_seed,
-                            name,
-                            incarnation,
-                            full_state,
-                        } => {
-                            let evidence = vm.application_evidence(full_state)?;
-                            let (disk, lost) = vm
-                                .crashed_disk(run_seed, &name, incarnation)
-                                .map(|(disk, lost)| (Some(disk), lost))
-                                .unwrap_or((None, 0));
-                            let surviving_disk = disk.as_ref().map(crate::disk::Disk::digest);
-                            retained_disk = disk;
-                            has_crashed = true;
-                            machine = None;
-                            Ok(Answer::Crashed {
-                                evidence,
-                                lost_sectors: lost,
-                                surviving_disk,
-                            })
-                        }
-                        Operation::Reboot {
-                            boot,
-                            run_seed,
-                            name,
-                            incarnation,
-                        } => {
-                            let (disk, lost) = vm
-                                .crashed_disk(run_seed, &name, incarnation)
-                                .map(|(disk, lost)| (Some(disk), lost))
-                                .unwrap_or((None, 0));
-                            // Destroy the previous HVF VM before creating its successor.
-                            machine = None;
-                            machine = Some(boot.machine(disk)?);
-                            console_offset = 0;
-                            Ok(Answer::Rebooted { lost_sectors: lost })
-                        }
-                        _ => Err("invalid worker operation".into()),
+                Operation::Release { at, entropy } => {
+                    install_available = false;
+                    if !vm.stopped_observation().barrier {
+                        return Err("ARM time-fork release/reseed is unsupported".into());
                     }
+                    vm.resume_at(at)?;
+                    vm.release_barrier(entropy)?;
+                    Ok(Answer::Ready)
                 }
+                Operation::ResumeAt(at) => {
+                    install_available = false;
+                    vm.resume_at(at)?;
+                    Ok(Answer::Ready)
+                }
+                Operation::Park => {
+                    install_available = false;
+                    vm.park()?;
+                    Ok(Answer::Ready)
+                }
+                Operation::SeedTimer { seed, domain } => {
+                    vm.seed_timer(seed, &domain)?;
+                    Ok(Answer::Ready)
+                }
+                Operation::Evidence { full_state } => {
+                    Ok(Answer::Evidence(vm.application_evidence(full_state)?))
+                }
+                Operation::CrashExport {
+                    run_seed,
+                    full_state,
+                    transfer,
+                } => {
+                    transfer.validate()?;
+                    if transfer.predecessor != request.expected || transfer.at < vm.time_ns() {
+                        return Err("crash transaction predecessor/time mismatch".into());
+                    }
+                    let evidence = vm.application_evidence(full_state)?;
+                    let (disk, lost_sectors) = vm
+                        .crashed_disk(
+                            run_seed,
+                            &request.expected.name,
+                            request.expected.incarnation,
+                        )
+                        .map(|(d, n)| (Some(d), n))
+                        .unwrap_or((None, 0));
+                    let disk_digest = disk.as_ref().map(Disk::digest);
+                    let mut file = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create_new(true)
+                        .open(&transfer.artifact)
+                        .map_err(|e| {
+                            format!("crash transfer {}: {e}", transfer.artifact.display())
+                        })?;
+                    write_message(
+                        &mut file,
+                        &TransferHeader {
+                            descriptor: transfer.clone(),
+                            disk_digest: disk_digest.clone(),
+                        },
+                    )?;
+                    if let Some(disk) = disk {
+                        disk.write_crash_transfer(&mut file)?;
+                    }
+                    file.flush()
+                        .map_err(|e| format!("crash transfer flush: {e}"))?;
+                    let artifact_sha256 = artifact_hash(&mut file)?;
+                    machine = None;
+                    Ok(Answer::Crashed {
+                        evidence,
+                        lost_sectors,
+                        transfer: ExportedTransfer {
+                            descriptor: transfer,
+                            disk_digest,
+                            artifact_sha256,
+                        },
+                    })
+                }
+                Operation::InstallSuccession(transfer) => {
+                    transfer.descriptor.validate()?;
+                    let next = &transfer.descriptor.successor;
+                    if !install_available
+                        || request.expected.incarnation != 0
+                        || next.name != request.expected.name
+                        || next.generation != request.expected.generation
+                    {
+                        return Err("successor is not a fresh uninstalled worker".into());
+                    }
+                    let mut file = std::fs::File::open(&transfer.descriptor.artifact)
+                        .map_err(|e| format!("successor transfer: {e}"))?;
+                    if artifact_hash(&mut file)? != transfer.artifact_sha256 {
+                        return Err("successor artifact hash mismatch".into());
+                    }
+                    let header = read_message::<TransferHeader>(&mut file)?
+                        .ok_or("missing successor transfer header")?;
+                    if header.descriptor != transfer.descriptor
+                        || header.disk_digest != transfer.disk_digest
+                    {
+                        return Err("successor transaction binding mismatch".into());
+                    }
+                    vm.install_crash_disk(&mut file, transfer.disk_digest.as_deref())?;
+                    vm.resume_at(transfer.descriptor.at)?;
+                    install_available = false;
+                    identity = Some(next.clone());
+                    Ok(Answer::Installed { transfer })
+                }
+                Operation::Snapshot | Operation::Restore => Err(
+                    "ARM arbitrary CPU/device snapshot capture and restore are unsupported".into(),
+                ),
+                _ => Err("invalid worker operation".into()),
             }
         })();
+        let failed = result.is_err();
         let answer = result.unwrap_or_else(Answer::Error);
-        write_message(output, &Response { sequence, answer })?;
-        if quit {
+        let observation = if failed {
+            None
+        } else {
+            machine.as_ref().map(Machine::stopped_observation)
+        };
+        write_message(
+            output,
+            &Response {
+                sequence,
+                before,
+                after: identity.clone(),
+                observation,
+                answer,
+            },
+        )?;
+        if terminal || failed {
             return Ok(());
         }
         sequence = sequence.checked_add(1).ok_or("worker sequence overflow")?;
@@ -285,16 +461,19 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
     Ok(())
 }
 
-/// A worker inherits the coordinator's process group. Public timeout/cancel
-/// therefore terminates every VM; ordinary cleanup kills and reaps this child.
+/// Owned process with sticky protocol failure. No uncertain mutation is retried.
 pub struct OwnedWorker {
     child: Child,
-    input: ChildStdin,
-    output: ChildStdout,
+    input: Option<ChildStdin>,
+    output: Option<ChildStdout>,
     sequence: u64,
+    identity: Identity,
+    bound: bool,
+    observation: Option<StoppedObservation>,
+    poison: Option<String>,
 }
 impl OwnedWorker {
-    pub fn spawn(executable: &std::path::Path) -> Result<Self> {
+    pub fn spawn(executable: &std::path::Path, identity: Identity) -> Result<Self> {
         let mut child = Command::new(executable)
             .args(["__engine", CONTRACT])
             .stdin(Stdio::piped())
@@ -306,9 +485,13 @@ impl OwnedWorker {
         match pipes {
             Some((input, output)) => Ok(Self {
                 child,
-                input,
-                output,
+                input: Some(input),
+                output: Some(output),
                 sequence: 0,
+                identity,
+                bound: false,
+                observation: None,
+                poison: None,
             }),
             None => {
                 let _ = child.kill();
@@ -317,83 +500,436 @@ impl OwnedWorker {
             }
         }
     }
-    pub fn call(&mut self, operation: Operation) -> Result<Answer> {
-        write_message(
-            &mut self.input,
-            &Request {
-                sequence: self.sequence,
-                operation,
-            },
-        )?;
-        let response = read_message::<Response>(&mut self.output)?
-            .ok_or("machine worker closed its output")?;
-        if response.sequence != self.sequence {
-            return Err("worker response sequence mismatch".into());
+    pub fn ensure_active(&self) -> Result<()> {
+        match &self.poison {
+            Some(error) => Err(format!("machine worker is terminal: {error}")),
+            None => Ok(()),
         }
+    }
+    pub fn identity(&self) -> &Identity {
+        &self.identity
+    }
+    pub fn observation(&self) -> Option<&StoppedObservation> {
+        self.observation.as_ref()
+    }
+    pub fn invalidate(&mut self, error: &str) {
+        self.poison.get_or_insert_with(|| error.into());
+        if let Err(cleanup) = self.terminate() {
+            self.poison = Some(format!("{error}; {cleanup}"));
+        }
+    }
+    /// Poison first, close both pipes, then kill and join the owned process.
+    /// Idempotent and never sends a protocol operation during uncertain cleanup.
+    pub fn terminate(&mut self) -> Result<()> {
+        self.poison
+            .get_or_insert_with(|| "worker terminated".into());
+        self.input = None;
+        self.output = None;
+        match self
+            .child
+            .try_wait()
+            .map_err(|e| format!("worker status: {e}"))?
+        {
+            Some(_) => Ok(()),
+            None => {
+                if let Err(kill) = self.child.kill() {
+                    if self
+                        .child
+                        .try_wait()
+                        .map_err(|e| format!("worker status after kill: {e}"))?
+                        .is_none()
+                    {
+                        return Err(format!("worker kill: {kill}"));
+                    }
+                }
+                self.child.wait().map_err(|e| format!("worker reap: {e}"))?;
+                Ok(())
+            }
+        }
+    }
+    pub fn call(&mut self, operation: Operation) -> Result<Answer> {
+        if let Some(error) = &self.poison {
+            return Err(format!("machine worker is terminal: {error}"));
+        }
+        match self.exchange(operation) {
+            Ok(answer) => Ok(answer),
+            Err(error) => {
+                self.invalidate(&error);
+                Err(self.poison.clone().unwrap_or(error))
+            }
+        }
+    }
+    fn exchange(&mut self, operation: Operation) -> Result<Answer> {
+        if !self.bound && !matches!(operation, Operation::Boot(_)) {
+            return Err("unbound worker requires boot".into());
+        }
+        if self.bound && matches!(operation, Operation::Boot(_)) {
+            return Err("worker is already bound".into());
+        }
+        if let Operation::InstallSuccession(transfer) = &operation {
+            transfer.descriptor.validate()?;
+            if self.identity.incarnation != 0
+                || transfer.descriptor.successor.name != self.identity.name
+                || transfer.descriptor.successor.generation != self.identity.generation
+            {
+                return Err("worker succession identity mismatch".into());
+            }
+        }
+        if let Operation::CrashExport { transfer, .. } = &operation {
+            transfer.validate()?;
+            if transfer.predecessor != self.identity {
+                return Err("worker crash predecessor mismatch".into());
+            }
+        }
+        if let Operation::Advance { hard_limit, .. } = &operation {
+            if *hard_limit == u64::MAX
+                || self
+                    .observation
+                    .as_ref()
+                    .is_some_and(|o| o.time_ns > *hard_limit)
+            {
+                return Err("invalid worker slice hard limit".into());
+            }
+        }
+        let request = Request {
+            sequence: self.sequence,
+            expected: self.identity.clone(),
+            operation,
+        };
+        write_message(self.input.as_mut().ok_or("worker input closed")?, &request)?;
+        let response =
+            read_message::<Response>(self.output.as_mut().ok_or("worker output closed")?)?
+                .ok_or("machine worker closed its output")?;
+        self.validate_response(&request, &response)?;
         self.sequence = self
             .sequence
             .checked_add(1)
             .ok_or("worker sequence overflow")?;
-        match response.answer {
-            Answer::Error(error) => Err(error),
-            answer => Ok(answer),
+        self.identity = response.after.clone().ok_or("missing worker identity")?;
+        self.bound = true;
+        self.observation = response.observation;
+        if matches!(response.answer, Answer::Crashed { .. } | Answer::Bye) {
+            self.terminate()
+                .map_err(|e| format!("acknowledged terminal operation; {e}"))?;
         }
+        Ok(response.answer)
     }
+    fn validate_response(&self, request: &Request, response: &Response) -> Result<()> {
+        let expected_before = self.bound.then_some(&self.identity);
+        let expected_after = match &request.operation {
+            Operation::InstallSuccession(t) => &t.descriptor.successor,
+            _ => &self.identity,
+        };
+        if response.sequence != request.sequence
+            || response.before.as_ref() != expected_before
+            || response.after.as_ref() != Some(expected_after)
+        {
+            return Err("worker response stamp mismatch".into());
+        }
+        if let Answer::Error(error) = &response.answer {
+            return Err(error.clone());
+        }
+        let kind_matches = matches!(
+            (&request.operation, &response.answer),
+            (
+                Operation::Boot(_)
+                    | Operation::Control(_)
+                    | Operation::Release { .. }
+                    | Operation::ResumeAt(_)
+                    | Operation::Park
+                    | Operation::SeedTimer { .. },
+                Answer::Ready
+            ) | (Operation::Advance { .. }, Answer::Advanced { .. })
+                | (Operation::Frame(_), Answer::Accepted(_))
+                | (Operation::Evidence { .. }, Answer::Evidence(_))
+                | (Operation::CrashExport { .. }, Answer::Crashed { .. })
+                | (Operation::InstallSuccession(_), Answer::Installed { .. })
+                | (Operation::Quit, Answer::Bye)
+        );
+        if !kind_matches {
+            return Err("unexpected worker answer kind".into());
+        }
+        let terminal = matches!(
+            request.operation,
+            Operation::CrashExport { .. } | Operation::Quit
+        );
+        if terminal != response.observation.is_none() {
+            return Err("worker stopped observation missing or unexpected".into());
+        }
+        if let Some(observation) = &response.observation {
+            if observation.time_ns == u64::MAX
+                || self.observation.as_ref().is_some_and(|old| {
+                    observation.time_ns < old.time_ns || observation.exits < old.exits
+                })
+            {
+                return Err("worker stopped observation moved backwards".into());
+            }
+            if observation.owed_io.is_some() {
+                return Err("ARM worker unexpectedly owes delayed I/O".into());
+            }
+            if observation.powered_off as u8
+                + observation.exit.is_some() as u8
+                + observation.barrier as u8
+                > 1
+            {
+                return Err("worker reported conflicting physical stop states".into());
+            }
+            match &request.operation {
+                Operation::Boot(_) => {
+                    if observation.time_ns != 0
+                        || observation.exits != 0
+                        || observation.abi != 0
+                        || observation.powered_off
+                        || observation.exit.is_some()
+                        || observation.barrier
+                    {
+                        return Err("invalid initial worker observation".into());
+                    }
+                }
+                Operation::InstallSuccession(transfer) => {
+                    if observation.time_ns != transfer.descriptor.at
+                        || observation.exits != 0
+                        || observation.abi != 0
+                        || observation.powered_off
+                        || observation.exit.is_some()
+                        || observation.barrier
+                    {
+                        return Err("invalid fresh successor observation".into());
+                    }
+                    if !matches!(&response.answer, Answer::Installed { transfer:ack } if ack == transfer)
+                    {
+                        return Err("successor acknowledgement transfer mismatch".into());
+                    }
+                }
+                Operation::Advance { .. } => {
+                    let old = self
+                        .observation
+                        .as_ref()
+                        .ok_or("missing previous worker observation")?;
+                    if observation.has_control != old.has_control
+                        || !(observation.abi == old.abi
+                            || (old.abi == 0 && observation.abi == crate::ABI))
+                    {
+                        return Err("worker slice changed control capability or invalid ABI".into());
+                    }
+                }
+                operation => {
+                    let old = self
+                        .observation
+                        .as_ref()
+                        .ok_or("missing previous worker observation")?;
+                    let expected_time = match operation {
+                        Operation::ResumeAt(at) | Operation::Release { at, .. } => *at,
+                        _ => old.time_ns,
+                    };
+                    let expected_barrier = if matches!(operation, Operation::Release { .. }) {
+                        false
+                    } else {
+                        old.barrier
+                    };
+                    let preserves_deadline = matches!(
+                        operation,
+                        Operation::Frame(_)
+                            | Operation::Control(_)
+                            | Operation::Park
+                            | Operation::SeedTimer { .. }
+                            | Operation::Evidence { .. }
+                    );
+                    let preserves_irq = matches!(
+                        operation,
+                        Operation::Park | Operation::SeedTimer { .. } | Operation::Evidence { .. }
+                    );
+                    if (preserves_deadline && observation.next_deadline != old.next_deadline)
+                        || (preserves_irq && observation.pending_irq != old.pending_irq)
+                    {
+                        return Err(
+                            "worker mutation changed unrelated interrupt observations".into()
+                        );
+                    }
+                    if observation.time_ns != expected_time
+                        || observation.exits != old.exits
+                        || observation.abi != old.abi
+                        || observation.powered_off != old.powered_off
+                        || observation.exit != old.exit
+                        || observation.barrier != expected_barrier
+                        || observation.has_control != old.has_control
+                    {
+                        return Err("worker mutation changed unrelated stopped facts".into());
+                    }
+                }
+            }
+            if let (Operation::Evidence { full_state }, Answer::Evidence(evidence)) =
+                (&request.operation, &response.answer)
+            {
+                validate_evidence(evidence, observation, *full_state)?;
+            }
+            if let Operation::Advance {
+                hard_limit,
+                observe_console,
+                ..
+            } = &request.operation
+            {
+                let Answer::Advanced {
+                    stop,
+                    time_ns,
+                    console,
+                    events,
+                } = &response.answer
+                else {
+                    unreachable!()
+                };
+                if observation.time_ns != *time_ns || *time_ns > *hard_limit {
+                    return Err(
+                        "worker slice exceeds hard limit or disagrees with observation".into(),
+                    );
+                }
+                let stop_valid = match stop {
+                    MachineStop::Horizon { time_ns: t } => {
+                        *t == *time_ns
+                            && *t == *hard_limit
+                            && !observation.powered_off
+                            && observation.exit.is_none()
+                            && !observation.barrier
+                    }
+                    MachineStop::Device { time_ns: t } => {
+                        *t == *time_ns
+                            && !events.is_empty()
+                            && !observation.powered_off
+                            && observation.exit.is_none()
+                            && !observation.barrier
+                    }
+                    MachineStop::Console { time_ns: t } => {
+                        *t == *time_ns
+                            && *observe_console
+                            && console.len() == 1
+                            && !observation.powered_off
+                            && observation.exit.is_none()
+                            && !observation.barrier
+                    }
+                    MachineStop::PoweredOff => observation.powered_off,
+                    MachineStop::ApplicationExit { code, setup_error } => {
+                        observation.exit == Some((*code, *setup_error))
+                    }
+                    MachineStop::Barrier => observation.barrier,
+                };
+                if !stop_valid {
+                    return Err("worker stop and physical observation disagree".into());
+                }
+            }
+        }
+        if let (
+            Operation::CrashExport {
+                transfer: expected, ..
+            },
+            Answer::Crashed { transfer, .. },
+        ) = (&request.operation, &response.answer)
+        {
+            expected.validate()?;
+            if &transfer.descriptor != expected
+                || expected.predecessor != self.identity
+                || !valid_hash(&transfer.artifact_sha256)
+                || transfer
+                    .disk_digest
+                    .as_ref()
+                    .is_some_and(|hash| !valid_hash(hash))
+            {
+                return Err("worker crash transfer binding mismatch".into());
+            }
+        }
+        if let (Operation::CrashExport { full_state, .. }, Answer::Crashed { evidence, .. }) =
+            (&request.operation, &response.answer)
+        {
+            validate_evidence(
+                evidence,
+                self.observation
+                    .as_ref()
+                    .ok_or("missing crash observation")?,
+                *full_state,
+            )?;
+        }
+        if let Operation::InstallSuccession(transfer) = &request.operation {
+            transfer.descriptor.validate()?;
+            if self.identity.incarnation != 0
+                || transfer.descriptor.successor.name != self.identity.name
+                || transfer.descriptor.successor.generation != self.identity.generation
+            {
+                return Err("worker succession identity mismatch".into());
+            }
+        }
+        Ok(())
+    }
+}
+fn validate_evidence(
+    evidence: &Evidence,
+    observation: &StoppedObservation,
+    full_state: bool,
+) -> Result<()> {
+    if evidence.time_ns != observation.time_ns
+        || evidence.exits != observation.exits
+        || evidence.format != 1
+        || evidence.state_digest.is_some() != full_state
+        || evidence.state_digest_parts.is_some() != full_state
+        || !valid_hash(&evidence.witness)
+        || !valid_hash(&evidence.trace_hash)
+        || !valid_hash(&evidence.console_hash)
+        || !valid_hash(&evidence.kernel_sha256)
+        || !valid_hash(&evidence.initrd_sha256)
+        || evidence
+            .disk_digest
+            .as_ref()
+            .is_some_and(|hash| !valid_hash(hash))
+        || evidence
+            .state_digest
+            .as_ref()
+            .is_some_and(|hash| !valid_hash(hash))
+        || evidence
+            .state_digest_parts
+            .as_ref()
+            .is_some_and(|parts| parts.values().any(|hash| !valid_hash(hash)))
+    {
+        return Err("worker evidence disagrees with acknowledged physical state".into());
+    }
+    Ok(())
+}
+fn valid_hash(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 impl Drop for OwnedWorker {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.invalidate("worker dropped");
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn worker_boot_retains_structured_disk_loss_through_crash() {
-        for survival_probability in [0.0, 0.5, 1.0] {
-            let model = crate::disk::parse_disk_fault_model(&serde_json::json!({
-                "sector_bytes": 512,
-                "survival_probability": survival_probability,
-            }))
-            .unwrap();
-            let boot = Boot {
-                kernel: "kernel".into(),
-                initrd: "initrd".into(),
-                seed: 7,
-                memory_bytes: 128 << 20,
-                command_line: String::new(),
-                mac: [2, 0, 0, 0, 0, 1],
-                disk_image: None,
-                disk_sectors: Some(2),
-                disk_fault_model: model,
-                timer_policy: None,
-            };
-            let bytes = serde_json::to_vec(&boot).unwrap();
-            let boot: Boot = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(boot.disk_fault_model, model);
-            let mut disk = boot.disk().unwrap().unwrap();
-            disk.write(0, &[1; 512]).unwrap();
-            disk.flush();
-            disk.write(1, &[2; 512]).unwrap();
-            let (crashed, _) = disk.crashed_seeded(1009, "machine", 1);
-            let (repeated, _) = disk.crashed_seeded(1009, "machine", 1);
-            let mut actual = [0; 1024];
-            let mut again = [0; 1024];
-            crashed.read(0, &mut actual).unwrap();
-            repeated.read(0, &mut again).unwrap();
-            assert_eq!(actual, again);
-            assert_eq!(&actual[..512], &[1; 512]);
-            if survival_probability == 0.0 {
-                assert_eq!(&actual[512..], &[0; 512]);
-            }
-            if survival_probability == 1.0 {
-                assert_eq!(&actual[512..], &[2; 512]);
-            }
+    fn identity(name: &str, generation: u64, incarnation: u32) -> Identity {
+        Identity {
+            name: name.into(),
+            generation,
+            incarnation,
         }
     }
-
+    #[test]
+    fn transfer_identity_requires_same_machine_distinct_generation_and_checked_successor() {
+        let mut descriptor = TransferDescriptor {
+            transaction: 1,
+            predecessor: identity("a", 1, 0),
+            successor: identity("a", 2, 1),
+            artifact: PathBuf::from("/tmp/owned-transfer"),
+            at: 10,
+        };
+        descriptor.validate().unwrap();
+        descriptor.successor.name = "b".into();
+        assert!(descriptor.validate().is_err());
+        descriptor.successor.name = "a".into();
+        descriptor.successor.generation = 1;
+        assert!(descriptor.validate().is_err());
+        descriptor.successor.generation = 2;
+        descriptor.predecessor.incarnation = u32::MAX;
+        descriptor.successor.incarnation = 0;
+        assert!(descriptor.validate().is_err());
+    }
     #[test]
     fn bounded_frames_reject_truncation_before_deserialization() {
         for bytes in [
@@ -412,16 +948,45 @@ mod tests {
             &mut bytes,
             &Request {
                 sequence: 3,
+                expected: identity("a", 2, 0),
                 operation: Operation::Quit,
             },
         )
         .unwrap();
-        assert_eq!(
-            read_message::<Request>(&mut bytes.as_slice())
-                .unwrap()
-                .unwrap()
-                .sequence,
-            3
-        );
+        let request = read_message::<Request>(&mut bytes.as_slice())
+            .unwrap()
+            .unwrap();
+        assert_eq!(request.sequence, 3);
+        assert_eq!(request.expected, identity("a", 2, 0));
+    }
+    #[test]
+    fn structured_disk_fault_policy_survives_worker_boot_serialization() {
+        for probability in [0.0, 0.5, 1.0] {
+            let model = crate::disk::parse_disk_fault_model(
+                &serde_json::json!({"sector_bytes":512,"survival_probability":probability}),
+            )
+            .unwrap();
+            let boot = Boot {
+                kernel: "kernel".into(),
+                initrd: "initrd".into(),
+                seed: 7,
+                memory_bytes: 128 << 20,
+                command_line: String::new(),
+                mac: [2, 0, 0, 0, 0, 1],
+                disk_image: None,
+                disk_sectors: Some(2),
+                disk_fault_model: model,
+                timer_policy: None,
+            };
+            let boot: Boot = serde_json::from_slice(&serde_json::to_vec(&boot).unwrap()).unwrap();
+            let mut disk = boot.disk().unwrap().unwrap();
+            disk.write(0, &[1; 512]).unwrap();
+            disk.flush();
+            disk.write(1, &[2; 512]).unwrap();
+            let (first, _) = disk.crashed_seeded(1009, "a", 0);
+            let (again, _) = disk.crashed_seeded(1009, "a", 0);
+            assert_eq!(first.digest(), again.digest());
+            assert_eq!(first.fault_model(), model);
+        }
     }
 }

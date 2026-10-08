@@ -47,7 +47,9 @@ executable for replay, so an installed CLI upgrade does not replace the recorded
 engine. No separate VMM build or runtime compiler invocation is needed. Every
 built engine and guest kernel is admitted; `--allow-dev-engine` remains a
 compatibility no-op. Native replay evidence remains separate.
-Apple Silicon builds also support native ARM Compose execution. Build once with
+Apple Silicon builds also support native ARM Compose execution through the shared
+world coordinator, including connection selectors and committed console triggers.
+Arbitrary ARM snapshot/fork reuse remains unsupported. Build once with
 `nix develop` and `bash tools/mac-runtime/build-cli.sh` from the Seedbox checkout.
 The signed CLI packages the ARM kernel and static helpers and automatically owns
 a Linux VM for preparation with Skopeo/umoci/Podman. That VM stops before native
