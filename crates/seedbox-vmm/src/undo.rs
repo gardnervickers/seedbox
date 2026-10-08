@@ -90,6 +90,38 @@ impl VcpuState {
         Ok(())
     }
 
+    /// The first part, if any, in which two saved states differ, among those
+    /// a checkpoint restores that the guest can change by running: registers,
+    /// FPU/XSAVE, XCRs, MSRs other than free-running counters, and pending
+    /// events (not KVM's bookkeeping flags).
+    pub fn differs(&self, o: &Self) -> Option<String> {
+        let (e, f) = (&self.events, &o.events);
+        let events = e.exception == f.exception
+            && e.interrupt == f.interrupt
+            && e.nmi == f.nmi
+            && e.smi == f.smi
+            && e.triple_fault == f.triple_fault
+            && e.exception_has_payload == f.exception_has_payload
+            && e.exception_payload == f.exception_payload;
+        let part = if self.regs != o.regs {
+            "regs"
+        } else if self.sregs != o.sregs {
+            "sregs"
+        } else if self.xsave.region != o.xsave.region {
+            "xsave"
+        } else if self.xcrs != o.xcrs {
+            "xcrs"
+        } else if !events {
+            "events"
+        } else {
+            let msr = self.msrs.as_slice().iter().zip(o.msrs.as_slice()).find(|(a, b)| {
+                (a.index != b.index || a.data != b.data) && !is_free_running(a.index)
+            });
+            return msr.map(|(a, _)| format!("msr {:#x}", a.index));
+        };
+        Some(part.into())
+    }
+
     /// Write the state back. The vCPU must have no I/O pending completion.
     /// Returns the restored registers.
     pub fn restore(&self, vcpu: &VcpuFd, what: &str) -> Result<(kvm_regs, kvm_sregs), String> {
@@ -147,6 +179,19 @@ pub struct Undo {
     pub branches: u64,
     pub exit_req: bool,
     pub stats: UndoStats,
+}
+
+/// Counters that move while the guest runs whatever it does: APERF/MPERF,
+/// AMD's read-only copies and IRPERF, the legacy and core perf counters, and
+/// the Hyper-V synthetic MSRs.
+fn is_free_running(i: u32) -> bool {
+    matches!(
+        i,
+        0xe7 | 0xe8 | 0xc000_00e7..=0xc000_00e9 | 0xc001_0004..=0xc001_0007 | 0xc001_0200..=0xc001_020b
+            // Hyper-V synthetic MSRs, time counters among them. KVM lists them,
+            // but the guest sees no Hyper-V CPUID and so cannot use them.
+            | 0x4000_0000..=0x4000_ffff
+    )
 }
 
 fn is_tsc_or_pv(i: u32) -> bool {
@@ -249,6 +294,49 @@ impl Undo {
         let restored = self.cpu.restore(vcpu, "rollback")?;
         self.stats.rollbacks += 1;
         Ok(restored)
+    }
+
+    /// Bring the shadow up to RAM. A held checkpoint no longer describes RAM.
+    pub fn sync(&mut self, vm: &VmFd, mem: *mut u8) -> Result<(), String> {
+        self.valid = false;
+        self.fetch(vm)?;
+        self.stats.synced_pages += self.copy_logged(mem, self.shadow);
+        Ok(())
+    }
+
+    /// Whether every page written since the last sync still holds what it
+    /// held then. `written` accumulates those pages across calls (start it
+    /// empty after each sync), so every call compares with the sync itself.
+    /// The shadow keeps the sync's contents; the pages stay marked, so the
+    /// next save, sync or fork point brings them up to RAM. Meaningful only
+    /// when nothing was restored or checkpointed since that sync.
+    pub fn unchanged_since_sync(&mut self, vm: &VmFd, mem: *mut u8, written: &mut Vec<u64>) -> Result<bool, String> {
+        self.valid = false;
+        self.fetch(vm)?;
+        written.resize(self.log.len(), 0);
+        for ((w, &l), v) in written.iter_mut().zip(self.log.iter()).zip(self.vmm.iter_mut()) {
+            *w |= l;
+            *v |= l;
+        }
+        for (i, &bits) in written.iter().enumerate() {
+            let mut b = bits;
+            while b != 0 {
+                let off = (i * 64 + b.trailing_zeros() as usize) * PAGE;
+                b &= b - 1;
+                if off + PAGE <= self.size {
+                    let (now, then) = unsafe {
+                        (
+                            std::slice::from_raw_parts(mem.add(off), PAGE),
+                            std::slice::from_raw_parts(self.shadow.add(off), PAGE),
+                        )
+                    };
+                    if now != then {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        Ok(true)
     }
 
     /// Bring the shadow up to RAM and start tracking every page written from

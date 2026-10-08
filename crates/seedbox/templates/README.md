@@ -22,7 +22,8 @@ from this directory:
 ```sh
 seedbox validate
 seedbox run
-seedbox explore --count 2
+seedbox run --timebase pv
+seedbox explore --count 2 --timebase pv
 seedbox inspect .seedbox/runs/ATTEMPT --json
 seedbox replay .seedbox/runs/ATTEMPT
 seedbox diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
@@ -43,15 +44,15 @@ see the repository's `docs/runtime.md` for setup and limits. `--margin` and
 `--undo` control PMU approach and stepping performance without changing results.
 `seedbox --version` reports the simulator version. New runs retain the whole
 executable for replay, so an installed CLI upgrade does not replace the recorded
-engine. No separate VMM build or runtime compiler invocation is needed. The
-combined development engine requires `--allow-dev-engine` until qualified;
-`prepare` records its development marker without granting execution permission.
+engine. No separate VMM build or runtime compiler invocation is needed. Every
+built engine and guest kernel is admitted; `--allow-dev-engine` remains a
+compatibility no-op. Native replay evidence remains separate.
 Apple Silicon builds also support native ARM Compose execution. Build once with
 `nix develop` and `bash tools/mac-runtime/build-cli.sh` from the Seedbox checkout.
 The signed CLI packages the ARM kernel and static helpers and automatically owns
 a Linux VM for preparation with Skopeo/umoci/Podman. That VM stops before native
 HVF execution; replay uses only retained bytes and never starts it. No runtime
-compiler or extra VMM path is needed. Use `--allow-dev-engine` on run/replay/doctor.
+compiler or extra VMM path is needed.
 Images must support `linux/arm64`, RAM is limited to 3072 MiB per guest, and
 exploration is serial. CPU/PMU flags apply to Linux. Mac profiles have distinct
 PV time, boot-layout, device and HVF host identities and remain unqualified.
@@ -62,6 +63,19 @@ stalled in the Mac example and are not validated.
 sectors on machine crash (off by default). It is part of run identity and replay
 restores it automatically. It applies only to retained disks; this template
 currently uses RAM-backed storage. See `docs/runtime.md` for the disk contract.
+
+`run`, `prepare` and `explore` accept `--timebase counter|pv` to choose
+semantic guest progress (default `counter` on Linux; Mac uses only PV), with no environment override. Counter counts retired guest branches; PV compute
+between exits costs no virtual time, and time advances at guest exits, syscalls
+and clock reads. The choice changes run identity and results. Counter is omitted
+from semantic parameters to preserve existing identities; PV is retained as
+`timebase: pv`. Replay uses the recorded choice and accepts no override; unknown
+or mismatched timebases are refused, even when an engine change is allowed.
+Run/replay and inspect print `timebase: VALUE`; `inspect --json` includes the
+semantic profile and the VMM's reported `report.timebase` when available.
+Bundles preserve the timebase. PV uses no PMU counter, but the CLI retains the
+same host admission, CPU/SMT lease and Zen MSR policy for both choices.
+
 Charged timer I/O retains its full cost across scheduler boundaries; pending
 operations are included in terminal witnesses.
 
@@ -143,6 +157,14 @@ policy. Partitions dominate shapes, and already routed frames retain their
 send-time decisions. Inspection includes shape handles and `loss_dropped` counters.
 Network state contributes a `network_witness` to the final world witness.
 
+Controllers can also discover directional TCP incarnations with
+`world.connections("server", "client")`, then pass an exact returned record to
+`world.drop_connection(record)`. The returned handle arms loss for that direction
+only; `world.heal(handle)` returns matched/dropped counts. Require `dropped > 0`
+when checking that a fault occurred. Reused tuples do not inherit a stale selector.
+See the repository's `docs/runtime.md` connection selector section for pagination,
+SYN/FIN/RST semantics, bounded tracking and unsupported/fragmented traffic.
+
 Run/replay enforce the versioned admitted host/engine/guest-kernel policy;
 host-kernel bytes are not checked. Matching a second machine is compatibility
 admission, not cross-host qualification. Old
@@ -158,24 +180,40 @@ not cross-host replay qualification; `--json` shows the admitted observations.
 Known non-Zen counters require explicit `--allow-unqualified-cpu` for run,
 explore and replay and remain unverified. They retain exact release/counter/input
 checks and SMT ownership but carry no qualified AMD proof or AMD MSR writes.
-`doctor` refuses those counters. The source policy pins built-but-unqualified engine52eb; fresh runtime acceptance
-is still required. Disabled selected-event readiness precedes preparation and
+`doctor` refuses those counters. Disabled selected-event readiness precedes preparation and
 is rechecked under leases; it never enables a guest counter. Intel is not qualified.
 
-For unpinned development engines or guest kernels, pass `--allow-dev-engine` to
-run, explore, replay or doctor. These runs bind `engine_qualification =
-"dev-unpinned"` in identity and report, preserved by inspect and bundles. Replay
-requires the flag and the exact retained artifact hashes and labels comparisons
-`unqualified dev engine`; without it replay retains NOT_COMPARABLE naming the
-flag. Doctor prints `dev engine: unqualified` for dev artifacts. The flag with
-both pinned artifacts adds no marker. Every host/CPU/PMU/MSR/lease/ABI check
-still applies, and release qualification still requires its own acceptance.
+Engines and guest kernels are not pinned: any built engine and kernel are
+admitted, and each run records their hashes. `--allow-dev-engine` is still accepted and has no effect.
+Every host/CPU/PMU/MSR/lease/ABI check still applies.
 
 Compare two retained run directories on Linux or macOS with `seedbox diff RUN_A
 RUN_B [--json]`. Import bundles first. Diff reports world and machine witnesses,
 changed identity/semantic fields, full-state parts such as RAM and disk, and the
 first differing retained trace or terminal record (including state parts).
+`seedbox run --full-state` retains per-page RAM evidence for diff and replay diagnostics; see [docs/runtime.md](https://github.com/gardnervickers/seedbox/blob/main/docs/runtime.md#compare-retained-runs).
 Ordinary runs do not retain exit traces; terminal times cannot locate an
 earlier divergence. Missing evidence and omissions stay explicit. Exit 0 MATCH
 means equality of compared evidence, not replay qualification; DIFFERENT exits 1,
 and usage/setup or invalid evidence exits 2. No guests execute and no state is created.
+
+Read committed-time chunks with `seedbox logs RUN --machine NAME --since-ns N
+--until-ns N`. Consecutive bytes from the same machine/incarnation/stream within
+one world slice coalesce until another stream writes. Times are the first byte's
+simulated commit time, inclusive at the start and exclusive at the end. Filters
+select whole chunks, so a selected chunk can contain later bytes beyond the
+upper bound. Omit filters to read all indexed output. Stdout contains raw bytes
+in time, machine name and per-machine output order, without prefixes or added
+newlines; status and omissions go to stderr. Add `--json` for metadata and
+lossless hexadecimal (`bytes_hex`). No application log format is required.
+Check stderr or JSON `omissions` for old engines without indexes, capture bounds
+or retention limits. Indexes travel with retained logs in export/import bundles. Reading logs needs no KVM or root.
+
+For a scenario using the guest control API, the development engine supports
+`world.arm_console_stop(source, b"MARKER", target, match_timeout=1)` and
+`world.arm_console_partition(source, b"MARKER", left, right, match_timeout=1)`.
+Arm confirmation means armed; inspect the trigger and target state for the
+actual effect. `world.cancel_trigger(trigger)` cancels an unmatched trigger.
+Markers use only future committed console bytes, and effects occur at a safe
+future world barrier. See [the trigger contract](https://github.com/gardnervickers/seedbox/blob/main/docs/triggers.md)
+for bounds, deadlines and the outstanding development-engine AMD checks.

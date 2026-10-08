@@ -3,8 +3,9 @@
 This is source staging for [issue68](https://github.com/gardnervickers/seedbox/issues/68).
 It has not qualified an engine or enabled a runner. Run only under a separately
 reviewed finite hardware release on the compatible qualified AMD host as root.
-The admission CLI must be bound to the exact frozen engine/guest-kernel candidate;
-there is no engine-change override. Host-kernel bytes are not checked. The source admission policy selects the accepted engine and guest kernel. Final combined admission/CPUID-selected profile integration
+Engines and guest kernels are not pinned; the smoke records the hashes it ran.
+Host-kernel bytes are not checked.
+Final combined admission/CPUID-selected profile integration
 is a compatibility prerequisite; this entrypoint never passes
 `--allow-unqualified-cpu` or `--allow-engine-change`. A merged engine PR does not update or qualify that policy.
 
@@ -73,16 +74,8 @@ fork/vDSO/new kernel features, or replace StageB. No workflow or privileged host
 service is installed. Portable controls run through `harness/acceptance.sh portable`;
 they test the harness's refusal logic, not guest correctness.
 
-For the optional development tier, add `--allow-dev-engine --pinned-engine
-/absolute/PINNED-seedbox-vmm` to the invocation above. `--engine` and `--kernel`
-select the frozen development artifacts; at least one must be unpinned. The
-separate pinned engine is required so the wrong-kernel control still runs without
-`--allow-dev-engine` and receives the existing guest-kernel refusal. Successful
-run/replay phases receive the flag, and the wrapper requires `dev-unpinned` in
-identity, the run report and doctor JSON, `dev engine: unqualified` in doctor
-text, and labelled unqualified MATCH output. The default tier keeps pinned
-admission and rejects development markers. Both tiers retain doctor receipts.
-The development tier is unqualified evidence and does not change release policy.
+The smoke requires that new runs carry no `engine_qualification` marker in
+identity, run report or doctor JSON. Doctor receipts are retained.
 
 ## Change-scoped host checks
 
@@ -97,7 +90,7 @@ The [checked-in map](../host-check-map.json) defines these rows:
 | Changed paths | Host checks |
 |---|---|
 | only *.md, docs/, crates/*/tests/, harness/tests/, python/tests/, templates/, crates/*/templates/, tools/mac-tcg/, or CLI help text | none (portable checks only) |
-| crates/seedbox-vmm/**, guest/**, or the CLI execution path (vmm.rs, host.rs, admission.rs, counter.rs, orchestration.rs) | core: wrong-kernel refusal, doctor, one fixed --full-state run, one default replay (MATCH) |
+| crates/seedbox-vmm/**, guest/**, or the CLI execution path (vmm.rs, host.rs, admission.rs, counter.rs, orchestration.rs) | core: doctor, one fixed --full-state run, one default replay (MATCH) |
 | stepper.rs, machine/counted.rs, timebase.rs, boundary.rs, counter.rs, undo/checkpoint code | core + one --undo 0 --margin 16384 replay |
 | disk.rs, virtio-blk, guest/disk*, build-disk.sh | core + disk-crash and disk-ext4-crash worlds |
 | network, link, faults routing | core + net, net-pause, net-crash worlds |
@@ -177,7 +170,6 @@ Execute in the project development shell on the qualified Linux AMD host:
 ```sh
 export SEEDBOX_KERNEL=/absolute/accepted-bzImage
 export SEEDBOX_DISK_KERNEL=/absolute/virtio-blk-bzImage # only when disk/volume rows are planned
-export PINNED_ENGINE=/absolute/stored-pinned-seedbox-vmm
 export SEEDBOX_ETCD=/absolute/static-etcd
 bash harness/host-check.sh --lanes 1,2,3 REV --extra control-cases
 ```
@@ -207,16 +199,14 @@ Until K2 is accepted, `disk-crash`, `disk-ext4-crash` and the Compose
 `volume-crash` check require a separate `SEEDBOX_DISK_KERNEL` with `VIRTIO_BLK`
 and `EXT4_FS`. Missing/invalid disk input refuses before reservations, builds or
 state creation, naming that variable. Every selected kernel goes through the
-existing doctor admission on each lane; development kernels require the existing
-`PINNED_ENGINE` opt-in path. The main engine is built from a detached worktree of local `origin/main`, even when
+existing doctor admission on each lane. The main engine is built from a detached worktree of local `origin/main`, even when
 `--base` selects another diff base. The summary records main's revision and
 MATCH/DIFFERENT evidence; a difference is reported without treating a changed
 engine as a replay mismatch. Failed fixture execution still fails the check.
-No kernel is built, and no engine/kernel pins or admission policy are changed.
+No kernel is built.
 
 `SEEDBOX_VMM` may select an already built candidate engine. Otherwise the target
-VMM is built with `cargo build-vmm`; `PINNED_ENGINE` supplies the unchanged
-wrong-kernel control and enables the public CLI's explicit unqualified dev mode.
+VMM is built with `cargo build-vmm`.
 Builds, including guest builders, run niced and without CPU pinning. Admission
 checks each assigned lane before raw guest dispatch. Host execution runs the
 selected public smoke, adds `--perf-replay` only if planned, and runs each

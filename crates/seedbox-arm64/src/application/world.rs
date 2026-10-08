@@ -48,7 +48,7 @@ struct Config {
     control: Value,
     control_channel: String,
     #[serde(default)]
-    disk_loss: Option<String>,
+    disk_loss: Value,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -437,7 +437,13 @@ impl World {
                             .map_err(|e| format!("management output: {e}"))?;
                         for frame in self.machines[m].framer.receive(&bytes)? {
                             let max = self.machines.iter().map(|m| m.time).max().unwrap_or(0);
-                            self.control.request(m, time_ns, &frame, max)?;
+                            self.control.request_with_support(
+                                m,
+                                time_ns,
+                                &frame,
+                                max,
+                                |operation| !unsupported_operation(operation),
+                            )?;
                         }
                     }
                     Event::Ready => {
@@ -476,6 +482,16 @@ impl World {
             }
         }
     }
+}
+
+fn unsupported_operation(operation: &seedbox_control::Operation) -> bool {
+    matches!(
+        operation,
+        seedbox_control::Operation::Connections { .. }
+            | seedbox_control::Operation::DropConnection { .. }
+            | seedbox_control::Operation::ArmTrigger { .. }
+            | seedbox_control::Operation::CancelTrigger { .. }
+    )
 }
 
 pub fn run(options: &Options) -> Result<Value> {
@@ -523,11 +539,7 @@ pub fn run(options: &Options) -> Result<Value> {
     let control = Control::new(&cfg.control, names.clone(), lookahead, 0)?;
     let mut faults = Faults::with_links(Vec::new(), names.clone(), links)?;
     faults.require_readiness();
-    let torn = match cfg.disk_loss.as_deref() {
-        None => false,
-        Some(crate::disk::TORN_MODEL) => true,
-        _ => return Err("unknown disk loss model".into()),
-    };
+    let disk_fault_model = crate::disk::parse_disk_fault_model(&cfg.disk_loss)?;
     let base = options.config.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(&options.output).map_err(|e| format!("world output: {e}"))?;
     let mut machines = Vec::new();
@@ -563,7 +575,7 @@ pub fn run(options: &Options) -> Result<Value> {
                 .and_then(|d| d.image.as_ref())
                 .map(|p| base.join(p)),
             disk_sectors,
-            torn_writes: torn,
+            disk_fault_model,
             timer_policy: Some(super::TimerPolicy {
                 seed: options.seed,
                 domain: format!("timer-jitter/{}", m.name),
@@ -694,6 +706,65 @@ pub fn run(options: &Options) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn backend_capabilities_reject_before_allocating_fault_state() {
+        let names = vec!["scenario".into(), "client".into(), "server".into()];
+        let mut control = Control::new(&json!({"machine":"scenario","latency_ns":20,"placement":{"scenario":"scenario","client":"client","server":"server"}}), names.clone(), 10, 5).unwrap();
+        let mut faults = Faults::new(vec![], names).unwrap();
+        let operations = [
+            json!({"op":"connections","from":{"service":"client"},"to":{"service":"server"}}),
+            json!({"op":"drop_connection","connection":{"from":"client","to":"server","src_addr":"10.0.0.1","dst_addr":"10.0.0.2","src_port":1000,"dst_port":2000,"incarnation":1}}),
+            json!({"op":"arm_trigger","source":{"service":"client"},"marker":[65],"match_timeout_ns":100,"fault":{"action":"partition","left":[{"service":"client"}],"right":[{"service":"server"}]}}),
+            json!({"op":"cancel_trigger","trigger_id":1}),
+        ];
+        for (index, mut body) in operations.into_iter().enumerate() {
+            let id = index + 1;
+            let time = 100 + 100 * index as u64;
+            body["version"] = 1.into();
+            body["id"] = id.into();
+            let request: seedbox_control::Request = serde_json::from_value(body.clone()).unwrap();
+            assert!(unsupported_operation(&request.operation));
+            control
+                .request_with_support(
+                    0,
+                    time,
+                    format!("SBX_RPC1 {id} 1 {body}").as_bytes(),
+                    time + 15,
+                    |op| !unsupported_operation(op),
+                )
+                .unwrap();
+            assert!(control.pending.as_ref().unwrap().plan.is_none());
+            assert!(control.triggers.records.is_empty());
+            assert!(control
+                .apply_boundary(&mut faults, time + 20)
+                .unwrap()
+                .is_none());
+            let bytes = control
+                .apply_boundary(&mut faults, time + 40)
+                .unwrap()
+                .unwrap();
+            let text = std::str::from_utf8(&bytes).unwrap();
+            let reply: Value = serde_json::from_str(text.splitn(4, ' ').nth(3).unwrap()).unwrap();
+            assert_eq!(reply["ok"], false);
+            assert_eq!(reply["error"]["code"], "unsupported");
+            assert!(reply.get("result").is_none());
+            control.mark_delivered(time + 40).unwrap();
+            assert!(faults.log.is_empty());
+        }
+        let body = json!({"version":1,"id":5,"op":"partition","left":[{"service":"client"}],"right":[{"service":"server"}]});
+        let request: seedbox_control::Request = serde_json::from_value(body.clone()).unwrap();
+        assert!(!unsupported_operation(&request.operation));
+        control
+            .request_with_support(
+                0,
+                500,
+                format!("SBX_RPC1 5 1 {body}").as_bytes(),
+                515,
+                |op| !unsupported_operation(op),
+            )
+            .unwrap();
+        assert_eq!(control.pending.as_ref().unwrap().result["handle"], "p1");
+    }
     #[test]
     fn capture_boundary_does_not_reject_or_retain_overflow() {
         let mut capture = Capture {

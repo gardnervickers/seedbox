@@ -108,12 +108,8 @@ def execute(plan, args):
             except (OSError, ValueError) as error:
                 raise ValueError(f'SEEDBOX_MKE2FS {value}: must name an existing static mke2fs from the project development shell') from error
     busybox = existing(os.environ['SEEDBOX_BUSYBOX'], 'SEEDBOX_BUSYBOX')
-    pinned = os.environ.get('PINNED_ENGINE')
+    # SEEDBOX_VMM supplies a stored engine; otherwise the target's engine is rebuilt.
     stored = os.environ.get('SEEDBOX_VMM')
-    if not pinned and not stored:
-        raise ValueError('set PINNED_ENGINE for a rebuilt development engine, or SEEDBOX_VMM for a stored engine')
-    if pinned:
-        pinned = existing(pinned, 'PINNED_ENGINE')
     if stored:
         stored = existing(stored, 'SEEDBOX_VMM')
     cluster = 'cluster-fixed' in plan['checks']
@@ -176,7 +172,7 @@ def execute(plan, args):
                 main_engine = str(main_src / 'crates/seedbox-vmm/target/release/seedbox-vmm')
                 source.src = src
             common = dict(src=str(src), cli=str(src / 'target/release/seedbox'), engine=engine,
-                          kernel=kernel, busybox=busybox, pinned_engine=pinned, guest_init=str(init),
+                          kernel=kernel, busybox=busybox, guest_init=str(init),
                           main_engine=main_engine, main_revision=main_sha, etcd=etcd, tool_path=env['PATH'])
             # Raw batch fixtures must not race a core smoke admission refusal.
             # Doctor admits every assigned lane before any guest is dispatched.
@@ -184,8 +180,6 @@ def execute(plan, args):
                 for kind, selected_kernel in kernels.items():
                     doctor = ['sudo', '-n', common['cli'], 'doctor', '--kernel', selected_kernel,
                               '--vmm', engine, '--cpu', str(pair[0])]
-                    if pinned:
-                        doctor += ['--allow-dev-engine']
                     name = f'doctor-cpu{pair[0]}' if kind == 'default' else f'doctor-{kind}-cpu{pair[0]}'
                     source.run(name, doctor)
 

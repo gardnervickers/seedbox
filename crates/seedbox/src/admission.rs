@@ -1,12 +1,12 @@
-//! Versioned host readiness for the frozen engine52eb CPUID/PMU policy.
+//! Versioned host readiness for the frozen engine391f CPUID/PMU policy.
 //! Matching another machine admits compatibility; it is not replay qualification.
 use crate::{execution::ExecutionProfile, store::ContentDigest, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, io::Read, path::Path};
 
-pub const POLICY_VERSION: &str = "amd-zen3-engine52eb-v2";
-pub const ENGINE: &str = "52eb41490f521a0104ea4ab06297cbdbdd7bc9a68261febf6c5cc19854bacdcf";
-pub const GUEST_KERNEL: &str = "e8ece7cba2d5fc4924da83e39cc672ae2516c117f8f76ecfa04aeaa98e697847";
+pub const POLICY_VERSION: &str = "amd-zen3-engine391f-v3";
+pub const ENGINE: &str = "391ff19696f1bfbad144892bcaa1f831ff19f06549561420b3d17060bf316938";
+pub const GUEST_KERNEL: &str = "68bf3f024fc6ec0c01399020b5c37e4b42d661c2604f3c87fc879ccf9280e166";
 
 /// Bound input hashing before any OCI preparation or host state changes.
 pub fn file_digest(path: &Path) -> Result<ContentDigest> {
@@ -49,7 +49,7 @@ pub struct CpuidEntry {
     pub padding: [u32; 3],
 }
 
-/// Frozen engine52eb guest_cpuid filter, unchanged from engine168ad; no sorting or omissions.
+/// Frozen engine391f guest_cpuid filter, unchanged from engine168ad/52eb; no sorting or omissions.
 pub fn effective_cpuid(raw: &[CpuidEntry]) -> Vec<CpuidEntry> {
     let mut entries = raw.to_vec();
     for e in &mut entries {
@@ -154,6 +154,7 @@ pub fn bindings() -> Result<BTreeMap<String, String>> {
 }
 
 pub const ENGINE_QUALIFICATION: &str = "engine_qualification";
+/// Written by runs from before engine pins were removed; still accepted on replay.
 pub const DEV_UNPINNED: &str = "dev-unpinned";
 
 pub fn is_dev_engine(profile: &ExecutionProfile) -> bool {
@@ -164,52 +165,8 @@ pub fn is_dev_engine(profile: &ExecutionProfile) -> bool {
         == Some(DEV_UNPINNED)
 }
 
-pub fn artifacts_unpinned(profile: &ExecutionProfile, kernel: &ContentDigest) -> bool {
-    profile.engine.hex() != ENGINE || kernel.hex() != GUEST_KERNEL
-}
-
-/// Validate the complete artifact pair, including kernel-only development runs.
-/// The profile-only validator cannot establish whether both artifacts are pinned.
-pub fn validate_artifacts(profile: &ExecutionProfile, kernel: &ContentDigest) -> Result<()> {
-    validate_profile(profile)?;
-    if is_dev_engine(profile) {
-        if !artifacts_unpinned(profile, kernel) {
-            return Err(Error::Integrity(
-                "dev-unpinned marker requires an unpinned engine or guest kernel".into(),
-            ));
-        }
-        Ok(())
-    } else {
-        validate_kernel(kernel)
-    }
-}
-
-/// Retained development runs require explicit permission on every replay.
-pub fn admit_artifacts(
-    profile: &ExecutionProfile,
-    kernel: &ContentDigest,
-    allow_dev_engine: bool,
-) -> Result<()> {
-    validate_artifacts(profile, kernel)?;
-    if is_dev_engine(profile) && !allow_dev_engine {
-        return Err(Error::Setup(
-            "unqualified dev engine; pass --allow-dev-engine to replay these retained artifacts"
-                .into(),
-        ));
-    }
-    Ok(())
-}
-
 pub fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
     crate::engine::validate_host(profile)?;
-    if crate::engine::recorded_launch(profile)? == crate::engine::ExecutableKind::InternalWorker
-        && !is_dev_engine(profile)
-    {
-        return Err(Error::Setup(
-            "internal worker is an unqualified dev engine; pass --allow-dev-engine to execute"
-                .into(),
-        ));
-    }
     let counter = crate::vmm::recorded_counter(profile)?;
     if counter != crate::counter::CounterProfile::Zen
         && profile
@@ -259,18 +216,6 @@ pub fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
                 "unknown engine_qualification {marker}"
             )));
         }
-    }
-    if profile.engine.hex() != ENGINE && !is_dev_engine(profile) {
-        return Err(Error::Integrity("engine is outside the admitted host policy; no engine-change override bypass is available".into()));
-    }
-    Ok(())
-}
-
-pub fn validate_kernel(kernel: &ContentDigest) -> Result<()> {
-    if kernel.hex() != GUEST_KERNEL {
-        return Err(Error::Integrity(
-            "guest kernel is outside the admitted host policy".into(),
-        ));
     }
     Ok(())
 }

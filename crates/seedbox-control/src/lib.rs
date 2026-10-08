@@ -11,11 +11,33 @@ pub enum Target {
     Machine(String),
 }
 
+/// One direction of an observed IPv4 TCP incarnation. Names are prepared machines.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Connection {
+    pub from: String,
+    pub to: String,
+    pub src_addr: std::net::Ipv4Addr,
+    pub dst_addr: std::net::Ipv4Addr,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub incarnation: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
     Now {},
     Inspect {},
+    Connections {
+        from: Target,
+        to: Target,
+        #[serde(default)]
+        after: u64,
+    },
+    DropConnection {
+        connection: Connection,
+    },
     Sleep {
         duration_ns: u64,
     },
@@ -51,7 +73,68 @@ pub enum Operation {
     Heal {
         handle: String,
     },
+    ArmTrigger {
+        source: Target,
+        marker: Vec<u8>,
+        match_timeout_ns: u64,
+        fault: TriggerFault,
+    },
+    CancelTrigger {
+        trigger_id: u32,
+    },
 }
+pub const MAX_TRIGGERS: usize = 64;
+pub const MAX_TRIGGER_MARKER: usize = 256;
+
+/// The initial trigger surface intentionally has only process stop and partition.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TriggerFault {
+    Stop {
+        target: Target,
+    },
+    Partition {
+        left: Vec<Target>,
+        right: Vec<Target>,
+    },
+}
+impl TriggerFault {
+    pub fn operation(&self) -> Operation {
+        match self {
+            Self::Stop { target } => Operation::Stop {
+                target: target.clone(),
+            },
+            Self::Partition { left, right } => Operation::Partition {
+                left: left.clone(),
+                right: right.clone(),
+            },
+        }
+    }
+}
+
+/// Canonical matcher and scheduled-effect state, retained only when used.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerRecord {
+    pub id: u32,
+    pub source: String,
+    pub marker: Vec<u8>,
+    pub armed_at_ns: u64,
+    pub match_deadline_ns: u64,
+    pub action: Action,
+    pub prefix: usize,
+    pub seen: u64,
+    pub resets: u64,
+    pub matched_at_ns: Option<u64>,
+    pub effect_at_ns: Option<u64>,
+    pub fault_id: Option<u32>,
+    pub cancelled_at_ns: Option<u64>,
+    pub cut_off_at_ns: Option<u64>,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection_reason: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
     pub version: u32,
@@ -71,6 +154,10 @@ pub struct Header {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
+    DropConnection {
+        handle: String,
+        connection: Connection,
+    },
     Stop {
         machine: String,
     },
@@ -113,6 +200,7 @@ pub enum Action {
 impl Action {
     pub fn name(&self) -> &'static str {
         match self {
+            Self::DropConnection { .. } => "drop_connection",
             Self::Stop { .. } => "stop",
             Self::Restart { .. } => "restart",
             Self::Partition { .. } => "partition",

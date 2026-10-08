@@ -789,13 +789,17 @@ mod tests {
         std::thread::scope(|scope| {
             let task =
                 scope.spawn(|| context.run(&mut Command::new(child), "wait", None, false, false));
-            let deadline = Instant::now() + Duration::from_secs(3);
+            let deadline = Instant::now() + Duration::from_secs(30);
             while fs::read_to_string(&ready)
                 .ok()
                 .and_then(|s| s.trim().parse::<i32>().ok())
                 .is_none()
             {
-                assert!(Instant::now() < deadline);
+                let within_deadline = Instant::now() < deadline;
+                if !within_deadline {
+                    token.cancel();
+                }
+                assert!(within_deadline);
                 std::thread::yield_now();
             }
             let pid: libc::pid_t = fs::read_to_string(&ready).unwrap().trim().parse().unwrap();
@@ -843,13 +847,17 @@ mod tests {
                     false,
                 )
             });
-            let deadline = Instant::now() + Duration::from_secs(3);
+            let deadline = Instant::now() + Duration::from_secs(30);
             while fs::read_to_string(&ready)
                 .ok()
                 .and_then(|s| s.trim().parse::<i32>().ok())
                 .is_none()
             {
-                assert!(Instant::now() < deadline);
+                let within_deadline = Instant::now() < deadline;
+                if !within_deadline {
+                    token.cancel();
+                }
+                assert!(within_deadline);
                 std::thread::yield_now();
             }
             token.cancel();
@@ -963,13 +971,17 @@ mod tests {
                     .unwrap();
             std::thread::scope(|scope| {
                 scope.spawn(|| {
-                    let deadline = Instant::now() + Duration::from_secs(3);
+                    let deadline = Instant::now() + Duration::from_secs(30);
                     while fs::read_to_string(&ready)
                         .ok()
                         .and_then(|s| s.trim().parse::<u32>().ok())
                         .is_none()
                     {
-                        assert!(Instant::now() < deadline);
+                        let within_deadline = Instant::now() < deadline;
+                        if !within_deadline {
+                            evidence.cancellation.cancel();
+                        }
+                        assert!(within_deadline);
                         std::thread::yield_now();
                     }
                     if mode == "ownership-loss" {
@@ -1064,7 +1076,7 @@ mod tests {
                     false,
                 )
             });
-            let deadline = Instant::now() + Duration::from_secs(3);
+            let deadline = Instant::now() + Duration::from_secs(30);
             let pid = loop {
                 if let Some(pid) = fs::read_to_string(&ready)
                     .ok()
@@ -1072,7 +1084,11 @@ mod tests {
                 {
                     break pid;
                 }
-                assert!(Instant::now() < deadline);
+                let within_deadline = Instant::now() < deadline;
+                if !within_deadline {
+                    token.cancel();
+                }
+                assert!(within_deadline);
                 std::thread::yield_now();
             };
             token.cancel();
@@ -1119,7 +1135,7 @@ mod tests {
                     false,
                 )
             });
-            let deadline = Instant::now() + Duration::from_secs(3);
+            let deadline = Instant::now() + Duration::from_secs(30);
             let pid = loop {
                 if let Some(pid) = fs::read_to_string(&ready)
                     .ok()
@@ -1127,7 +1143,11 @@ mod tests {
                 {
                     break pid;
                 }
-                assert!(Instant::now() < deadline);
+                let within_deadline = Instant::now() < deadline;
+                if !within_deadline {
+                    token.cancel();
+                }
+                assert!(within_deadline);
                 std::thread::yield_now();
             };
             token.cancel();

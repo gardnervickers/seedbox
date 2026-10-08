@@ -13,7 +13,7 @@ const FIELDS: [&str; 7] = [
     "host_arch",
     "guest_arch",
     "engine_backend",
-    "timebase",
+    "engine_timebase",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,7 +31,8 @@ pub fn arm_parameters() -> BTreeMap<String, String> {
         ("host_arch".into(), "aarch64".into()),
         ("guest_arch".into(), "aarch64".into()),
         ("engine_backend".into(), "hvf".into()),
-        ("timebase".into(), "arm64-pv-world-v1".into()),
+        ("engine_timebase".into(), "arm64-pv-world-v1".into()),
+        ("timebase".into(), "pv".into()),
     ])
 }
 
@@ -49,7 +50,7 @@ pub fn internal_parameters() -> Result<BTreeMap<String, String>> {
         ("host_arch".into(), std::env::consts::ARCH.into()),
         ("guest_arch".into(), std::env::consts::ARCH.into()),
         ("engine_backend".into(), "kvm".into()),
-        ("timebase".into(), "counted-branches-v1".into()),
+        ("engine_timebase".into(), "counter-pv-v1".into()),
     ]))
 }
 
@@ -70,7 +71,19 @@ pub fn recorded_launch(profile: &ExecutionProfile) -> Result<ExecutableKind> {
             "unknown engine executable kind {kind}"
         )));
     }
+    let legacy = !parameters.contains_key("engine_timebase")
+        && matches!(
+            (
+                kind.as_str(),
+                parameters.get("timebase").map(String::as_str)
+            ),
+            (INTERNAL_WORKER_V1, Some("counted-branches-v1"))
+                | ("arm64-world-v1", Some("arm64-pv-world-v1"))
+        );
     for key in FIELDS {
+        if key == "engine_timebase" && legacy {
+            continue;
+        }
         if parameters.get(key).is_none_or(|value| value.is_empty()) {
             return Err(Error::Integrity(format!(
                 "engine executable descriptor missing {key}"
@@ -90,11 +103,26 @@ pub fn recorded_launch(profile: &ExecutionProfile) -> Result<ExecutableKind> {
         parameters["host_arch"].as_str(),
         parameters["guest_arch"].as_str(),
         parameters["engine_backend"].as_str(),
-        parameters["timebase"].as_str(),
+        if legacy {
+            parameters["timebase"].as_str()
+        } else {
+            parameters["engine_timebase"].as_str()
+        },
     );
+    if !legacy
+        && !matches!(
+            parameters.get("timebase").map(String::as_str),
+            None | Some("counter" | "pv")
+        )
+    {
+        return Err(Error::Integrity(
+            "conflicting engine executable timebase fields".into(),
+        ));
+    }
     if kind == "arm64-world-v1" {
         if platform != ("macos", "aarch64", "aarch64", "hvf", "arm64-pv-world-v1")
             || profile.backend != "seedbox-hvf"
+            || (!legacy && parameters.get("timebase").map(String::as_str) != Some("pv"))
         {
             return Err(Error::Integrity(
                 "unsupported ARM application executable descriptor".into(),
@@ -104,10 +132,21 @@ pub fn recorded_launch(profile: &ExecutionProfile) -> Result<ExecutableKind> {
     }
     if !matches!(
         platform,
-        ("linux", "x86_64", "x86_64", "kvm", "counted-branches-v1")
+        (
+            "linux",
+            "x86_64",
+            "x86_64",
+            "kvm",
+            "counter-pv-v1" | "counted-branches-v1"
+        )
     ) {
         return Err(Error::Integrity(
             "unsupported engine executable platform/backend/timebase".into(),
+        ));
+    }
+    if !legacy && parameters["engine_timebase"] != "counter-pv-v1" {
+        return Err(Error::Integrity(
+            "unsupported engine executable clock capability".into(),
         ));
     }
     Ok(ExecutableKind::InternalWorker)
@@ -128,10 +167,10 @@ pub fn validate_host(profile: &ExecutionProfile) -> Result<()> {
                 std::env::consts::ARCH,
             )));
         }
-        // The production world adapter still uses the counted x86 KVM engine.
+        // The production world adapter uses the x86 KVM engine.
         if profile.backend == "seedbox-kvm" && parameters["guest_arch"] != "x86_64" {
             return Err(Error::Integrity(
-                "seedbox-kvm world execution requires the x86-64 counted engine".into(),
+                "seedbox-kvm world execution requires the x86-64 engine".into(),
             ));
         }
     }
@@ -167,7 +206,7 @@ mod tests {
             assert!(recorded_launch(&partial).is_err(), "{field}");
         }
         for (key, value) in [
-            ("timebase", "pv"),
+            ("timebase", "counter"),
             ("engine_backend", "kvm"),
             ("guest_arch", "x86_64"),
         ] {
@@ -177,6 +216,27 @@ mod tests {
         }
         recorded.backend = "seedbox-kvm".into();
         assert!(recorded_launch(&recorded).is_err());
+    }
+
+    #[test]
+    fn original_arm_descriptor_is_decoded_without_rewriting_it() {
+        let mut original = profile();
+        original.backend = "seedbox-hvf".into();
+        original.semantic_parameters = arm_parameters();
+        original.semantic_parameters.remove("engine_timebase");
+        original
+            .semantic_parameters
+            .insert("timebase".into(), "arm64-pv-world-v1".into());
+        let bytes = serde_json::to_vec(&original).unwrap();
+        assert_eq!(
+            recorded_launch(&original).unwrap(),
+            ExecutableKind::ArmWorld
+        );
+        assert_eq!(serde_json::to_vec(&original).unwrap(), bytes);
+        original
+            .semantic_parameters
+            .insert("engine_timebase".into(), "arm64-pv-world-v1".into());
+        assert!(recorded_launch(&original).is_err());
     }
 
     #[test]
@@ -203,7 +263,7 @@ mod tests {
             ("host_arch".into(), "x86_64".into()),
             ("guest_arch".into(), "x86_64".into()),
             ("engine_backend".into(), "kvm".into()),
-            ("timebase".into(), "counted-branches-v1".into()),
+            ("engine_timebase".into(), "counter-pv-v1".into()),
         ]);
         assert_eq!(
             recorded_launch(&recorded).unwrap(),
@@ -219,7 +279,7 @@ mod tests {
             ("host_arch", "aarch64"),
             ("guest_arch", "aarch64"),
             ("engine_backend", "hvf"),
-            ("timebase", "wall-clock"),
+            ("engine_timebase", "wall-clock"),
             ("simulator_version", "version with spaces"),
         ] {
             let mut incompatible = recorded.clone();
@@ -247,7 +307,7 @@ mod tests {
             ("host_arch", "x86_64"),
             ("guest_arch", "x86_64"),
             ("engine_backend", "kvm"),
-            ("timebase", "counted-branches-v1"),
+            ("engine_timebase", "counter-pv-v1"),
         ] {
             recorded
                 .semantic_parameters
@@ -274,7 +334,7 @@ mod tests {
                 ("host_arch".into(), "aarch64".into()),
                 ("guest_arch".into(), "aarch64".into()),
                 ("engine_backend".into(), backend.into()),
-                ("timebase".into(), "arm64-pv-v2".into()),
+                ("engine_timebase".into(), "arm64-pv-v2".into()),
             ]);
             assert!(recorded_launch(&recorded)
                 .unwrap_err()

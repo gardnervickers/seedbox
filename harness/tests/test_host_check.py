@@ -3,6 +3,7 @@ import copy
 import contextlib
 import io
 import json
+import os
 import shutil
 from pathlib import Path
 import subprocess
@@ -139,12 +140,12 @@ class DispatchTests(unittest.TestCase):
             root = Path(tmp)
             for name in ('kernel', 'busybox', 'pinned'):
                 (root / name).write_bytes(name.encode())
+            # main() runs git before planning, so keep PATH (git isn't in /usr/bin on NixOS).
             env = dict(SEEDBOX_KERNEL=str(root / 'kernel'), SEEDBOX_BUSYBOX=str(root / 'busybox'),
-                       PINNED_ENGINE=str(root / 'pinned'))
+                       PATH=os.environ['PATH'])
             plan = dict(target='a' * 40, base='b' * 40, checks={'cluster-fixed': []}, warnings=[])
             with patch.object(host_check.sys, 'platform', 'linux'), \
                  patch.dict(host_check.os.environ, env, clear=True), \
-                 patch.object(host_check.subprocess, 'check_output', return_value=str(root) + '\n'), \
                  patch.object(host_check, 'plan_revision', return_value=plan), \
                  patch.object(host_check, 'read_pairs', side_effect=AssertionError('host probe')), \
                  patch.object(host_check, 'allocate_pairs', side_effect=AssertionError('reservation')), \
@@ -176,7 +177,7 @@ class DispatchTests(unittest.TestCase):
             def reserved(*args, **kwargs):
                 yield [(1, 17), (2, 18)]
             env = dict(SEEDBOX_KERNEL=str(root / 'kernel'), SEEDBOX_BUSYBOX=str(root / 'busybox'),
-                       PINNED_ENGINE=str(root / 'pinned'), HOST_CHECK_DIR=str(root), PATH='/explicit')
+                       HOST_CHECK_DIR=str(root), PATH='/explicit')
             plan = dict(target='a' * 40, checks=dict(core=[]))
             args = SimpleNamespace(repo=root, lanes=[1,2], skip_portable=False)
             with patch.object(host_check.sys, 'platform', 'linux'), \
@@ -214,13 +215,12 @@ class DispatchTests(unittest.TestCase):
             def reserved(*args, **kwargs):
                 yield [(2, 18)]
             env = dict(SEEDBOX_KERNEL=str(root / 'kernel'), SEEDBOX_BUSYBOX=str(root / 'busybox'),
-                       PINNED_ENGINE=str(root / 'pinned'), HOST_CHECK_DIR=str(root), PATH='/explicit')
+                       HOST_CHECK_DIR=str(root), PATH='/explicit')
             if disk:
                 env['SEEDBOX_DISK_KERNEL'] = str(root / 'disk-kernel')
                 env['SEEDBOX_MKE2FS'] = str(root / 'mke2fs')
             if stored:
                 env['SEEDBOX_VMM'] = str(root / 'stored')
-                env.pop('PINNED_ENGINE')
             notes = ["example minio: its reviewer's run list is required"]
             plan = dict(target='a' * 40, checks=dict(core=[]), reviewer_notes=notes)
             if disk:
@@ -258,7 +258,7 @@ class DispatchTests(unittest.TestCase):
         for name, file in (('doctor-cpu2', 'kernel'), ('doctor-disk-cpu2', 'disk-kernel')):
             command = doctors[name]
             self.assertEqual(Path(command[command.index('--kernel') + 1]).name, file)
-            self.assertIn('--allow-dev-engine', command)
+            self.assertNotIn('--allow-dev-engine', command)
         calls = self.exercise_gate(disk=True, fail='doctor-disk-cpu2')
         self.assertEqual(calls[-1][0], 'doctor-disk-cpu2')
 
@@ -477,12 +477,12 @@ class DispatchTests(unittest.TestCase):
         campaign.inspect = lambda *args: dict(outcome='PASS', error=None, identity={'key': 'same'},
             replay=dict(status='MATCH', outcome_matches=True, witness_matches=True,
                         full_state_matches=True, fault_history_matches=True))
-        job = dict(pinned_engine='pinned', mke2fs='static-mke2fs', spec={'expected': 'PASS'})
+        job = dict(mke2fs='static-mke2fs', spec={'expected': 'PASS'})
         host_compose.run_pair(job, campaign, Path('harness/acceptance/workloads/volume-crash.yaml'))
         self.assertEqual(calls[0][calls[0].index('--kernel') + 1], 'disk-kernel')
         self.assertEqual(calls[0][calls[0].index('--mke2fs') + 1], 'static-mke2fs')
         self.assertEqual(calls[0][2], 'harness/acceptance/workloads/volume-crash.yaml')
-        self.assertIn('--allow-dev-engine', calls[0])
+        self.assertNotIn('--allow-dev-engine', calls[0])
         self.assertEqual(calls[1][1], 'replay')
 
     def test_unit_command_uses_existing_ownership_receipt(self):

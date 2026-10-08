@@ -157,6 +157,7 @@ dependencies = [
  "kvm-ioctls",
  "libc",
  "seedbox-vmm-control",
+ "serde",
  "serde_json",
  "sha2",
 ]

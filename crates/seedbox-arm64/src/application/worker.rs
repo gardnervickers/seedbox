@@ -4,7 +4,7 @@ use super::{Event, Evidence};
 use crate::{
     backend::Backend,
     boot::BootSpec,
-    disk::Disk,
+    disk::{Disk, DiskFaultModel},
     machine::{Machine, MachineStop},
     Result,
 };
@@ -29,7 +29,7 @@ pub struct Boot {
     pub mac: [u8; 6],
     pub disk_image: Option<PathBuf>,
     pub disk_sectors: Option<u64>,
-    pub torn_writes: bool,
+    pub disk_fault_model: DiskFaultModel,
     #[serde(default)]
     pub timer_policy: Option<super::TimerPolicy>,
 }
@@ -65,7 +65,7 @@ impl Boot {
             .map(|path| std::fs::read(path).map_err(|e| format!("disk {}: {e}", path.display())))
             .transpose()?;
         Disk::new(image, self.disk_sectors)
-            .map(|disk| Some(disk.with_torn_writes(self.torn_writes)))
+            .map(|disk| Some(disk.with_fault_model(self.disk_fault_model)))
     }
 }
 
@@ -350,6 +350,50 @@ impl Drop for OwnedWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn worker_boot_retains_structured_disk_loss_through_crash() {
+        for survival_probability in [0.0, 0.5, 1.0] {
+            let model = crate::disk::parse_disk_fault_model(&serde_json::json!({
+                "sector_bytes": 512,
+                "survival_probability": survival_probability,
+            }))
+            .unwrap();
+            let boot = Boot {
+                kernel: "kernel".into(),
+                initrd: "initrd".into(),
+                seed: 7,
+                memory_bytes: 128 << 20,
+                command_line: String::new(),
+                mac: [2, 0, 0, 0, 0, 1],
+                disk_image: None,
+                disk_sectors: Some(2),
+                disk_fault_model: model,
+                timer_policy: None,
+            };
+            let bytes = serde_json::to_vec(&boot).unwrap();
+            let boot: Boot = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(boot.disk_fault_model, model);
+            let mut disk = boot.disk().unwrap().unwrap();
+            disk.write(0, &[1; 512]).unwrap();
+            disk.flush();
+            disk.write(1, &[2; 512]).unwrap();
+            let (crashed, _) = disk.crashed_seeded(1009, "machine", 1);
+            let (repeated, _) = disk.crashed_seeded(1009, "machine", 1);
+            let mut actual = [0; 1024];
+            let mut again = [0; 1024];
+            crashed.read(0, &mut actual).unwrap();
+            repeated.read(0, &mut again).unwrap();
+            assert_eq!(actual, again);
+            assert_eq!(&actual[..512], &[1; 512]);
+            if survival_probability == 0.0 {
+                assert_eq!(&actual[512..], &[0; 512]);
+            }
+            if survival_probability == 1.0 {
+                assert_eq!(&actual[512..], &[2; 512]);
+            }
+        }
+    }
+
     #[test]
     fn bounded_frames_reject_truncation_before_deserialization() {
         for bytes in [

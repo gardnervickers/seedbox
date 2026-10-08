@@ -6,7 +6,7 @@ use seedbox::{
         PreparationBackend, PreparedInputs,
     },
     preparation::{OciPreparer, PreparationContext},
-    store::{ContentDigest, ContentStore},
+    store::ContentStore,
     vmm::VmmExecutor,
     Result,
 };
@@ -27,20 +27,6 @@ impl Executor {
             Self::Linux(e) => Self::Linux(e.with_unqualified_cpu(allow)),
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             Self::Mac(e) => Self::Mac(e),
-        }
-    }
-    pub fn with_dev_engine(self, allow: bool, kernel: &ContentDigest) -> Self {
-        match self {
-            Self::Linux(e) => Self::Linux(e.with_dev_engine(allow, kernel)),
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            Self::Mac(e) => Self::Mac(e.with_dev_engine(allow)),
-        }
-    }
-    pub fn with_retained_permissions(self, cpu: bool, engine: bool) -> Self {
-        match self {
-            Self::Linux(e) => Self::Linux(e.with_retained_permissions(cpu, engine)),
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            Self::Mac(e) => Self::Mac(e.with_dev_engine(engine)),
         }
     }
     pub fn performance(self, margin: &str, undo: u64) -> Result<Self> {

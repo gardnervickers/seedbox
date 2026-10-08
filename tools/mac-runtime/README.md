@@ -5,9 +5,9 @@ From an Apple Silicon checkout:
 ```sh
 nix develop
 bash tools/mac-runtime/build-cli.sh
-target/release/seedbox doctor --allow-dev-engine
-target/release/seedbox run PATH_TO_PROJECT --allow-dev-engine
-target/release/seedbox replay .seedbox/runs/ATTEMPT --allow-dev-engine
+target/release/seedbox doctor
+target/release/seedbox run PATH_TO_PROJECT
+target/release/seedbox replay .seedbox/runs/ATTEMPT
 ```
 
 The maintainer build owns a temporary ARM Linux Lima VM. It builds the audited
@@ -43,7 +43,7 @@ It records boot layout, seeded entropy/timer policy, devices, kernel and exact
 executable bytes. Full-state evidence covers RAM, CPU/SIMD/GIC, PV clock,
 UART and application devices. This profile cannot be substituted for the older
 ARM fixture or the qualified x86 KVM profile. Mac execution remains a development
-engine requiring `--allow-dev-engine`; matching evidence does not establish
+engine; matching evidence does not establish
 cross-host qualification.
 
 Images must provide Linux ARM64 releases. Mac parsing defaults to
@@ -51,3 +51,16 @@ Images must provide Linux ARM64 releases. Mac parsing defaults to
 Supported RAM is 64..3072 MiB per service. CPU pinning and unqualified PMU flags
 are Linux-only, and Mac exploration currently supports one worker. Kernel,
 supervisor, BusyBox and mke2fs overrides remain available for development.
+
+The initial Mac backend explicitly rejects connection selectors and console
+triggers before allocating fault handles. Exercise that guest-visible boundary
+and confirm ordinary control calls still work with:
+
+```sh
+target/release/seedbox run harness/acceptance/workloads/mac-capabilities.yaml
+target/release/seedbox replay .seedbox/runs/ATTEMPT
+```
+
+The scenario must pass only on a backend that reports those operations as
+unsupported. Timed log chunks and per-page RAM diagnostics are Linux features;
+Mac retains raw streams and whole-state evidence.

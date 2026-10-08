@@ -24,6 +24,14 @@ pub(crate) mod rng;
 
 // The portable world policies are shared verbatim with the existing engine.
 #[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/connections.rs"]
+#[allow(dead_code)] // Shared fault policy uses the connection table.
+pub(crate) mod connections;
+#[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/triggers.rs"]
+#[allow(dead_code)] // Shared control state includes the trigger matcher.
+pub(crate) mod triggers;
+#[rustfmt::skip]
 #[path = "../../seedbox-vmm/src/links.rs"]
 #[allow(dead_code)] // Shared module also exposes APIs used only by the x86 coordinator.
 pub(crate) mod links;

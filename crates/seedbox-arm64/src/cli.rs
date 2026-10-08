@@ -1,6 +1,6 @@
 //! CLI boundary for the experimental arm64 fixture engine.
-use clap::{Parser, Subcommand, ValueEnum};
 use crate::{machine::Machine, witness::Report, Result};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::{ffi::OsString, path::PathBuf, process::ExitCode};
 #[derive(Clone, Copy, ValueEnum)]
 enum Choice {

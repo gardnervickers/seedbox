@@ -7,14 +7,16 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 ## Workspace
 
 - `crates/seedbox` is the default package: `cargo run -- <command>` runs the CLI.
+  Use `cargo run --release -- <command>` or the release executable for guest runs;
+  the bundled engine uses the CLI build profile.
 - Apple Silicon application builds use `bash tools/mac-runtime/build-cli.sh`
   inside `nix develop`. It packages the audited ARM kernel, static helpers and
   Linux preparation tools into the signed CLI. Runtime preparation owns a
   private Lima VM and stops it before native HVF execution; replay must never
   start that VM or invoke Cargo. Mac application profiles use `arm64-world-v1`
-  and remain development engines requiring `--allow-dev-engine`. Do not reuse
-  fixture or x86 qualification for them. CLI platform selection lives in
-  `cli/backends.rs`; the library receives explicit inputs and cancellation.
+  and remain development engines. Do not reuse fixture or x86 qualification
+  for them. CLI platform selection lives in `cli/backends.rs`; the library
+  receives explicit inputs and cancellation.
 - `crates/seedbox-vmm` is Linux-only and deliberately **not** a workspace member.
   It is its own workspace with its own `Cargo.lock`, because cargo unifies
   dependency features across one build. The public CLI links its library only
@@ -178,6 +180,9 @@ deliberately change one.
   `WORD: detail`, where `WORD` is the SCREAMING_SNAKE_CASE serde name
   produced by `word()` (`PASS`, `MATCH`, `VALID`, `CREATED`, ...). Any
   further lines are lowercase `key: value` (`replay: MATCH`, `error: ...`).
+- `logs` without `--json` writes only the selected raw bytes to stdout, with no
+  decoration or added newlines. Its lowercase `logs:` status and `omission:`
+  diagnostics go to stderr; `--json` includes chunk metadata and `bytes_hex`.
 - Scripts find the run directory with `sed -n 's/^[A-Z]*: //p'` over both
   output streams of `run` and `replay`. Exactly one line may match
   `^[A-Z]*: `, and it must be `OUTCOME: run-directory`.

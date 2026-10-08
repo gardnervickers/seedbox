@@ -25,7 +25,6 @@ const CONTRACT: &str = "arm64-world-v1";
 #[derive(Clone, Debug)]
 pub struct MacExecutor {
     profile: ExecutionProfile,
-    allow_dev_engine: bool,
     performance: BTreeMap<String, String>,
 }
 #[derive(Debug, serde::Serialize)]
@@ -133,7 +132,8 @@ impl MacExecutor {
             ("hvf_guest_kernel".into(), kernel.hex().into()),
         ]));
         if torn_writes {
-            parameters.insert("disk_loss".into(), seedbox_arm64::disk::TORN_MODEL.into());
+            parameters.insert("disk_loss_sector_bytes".into(), "512".into());
+            parameters.insert("disk_loss_survival_probability".into(), "0.5".into());
         }
         Ok(Self {
             profile: ExecutionProfile {
@@ -142,7 +142,6 @@ impl MacExecutor {
                 witness_mode,
                 semantic_parameters: parameters,
             },
-            allow_dev_engine: false,
             performance: BTreeMap::new(),
         })
     }
@@ -154,13 +153,8 @@ impl MacExecutor {
         profile.engine = store.put_file(engine)?;
         Ok(Self {
             profile,
-            allow_dev_engine: false,
             performance: BTreeMap::new(),
         })
-    }
-    pub fn with_dev_engine(mut self, allow: bool) -> Self {
-        self.allow_dev_engine = allow;
-        self
     }
     pub fn with_performance(mut self, margin: &str, undo: u64) -> Self {
         self.performance = BTreeMap::from([
@@ -169,13 +163,7 @@ impl MacExecutor {
         ]);
         self
     }
-    pub fn doctor(engine: &Path, kernel: &Path, allow_dev_engine: bool) -> Result<DoctorReport> {
-        if !allow_dev_engine {
-            return Err(Error::Setup(
-                "native Mac application execution is a development engine; pass --allow-dev-engine"
-                    .into(),
-            ));
-        }
+    pub fn doctor(engine: &Path, kernel: &Path) -> Result<DoctorReport> {
         Ok(DoctorReport {
             policy_version: POLICY.into(),
             engine: crate::admission::file_digest(engine)?,
@@ -248,12 +236,6 @@ impl ExecutionBackend for MacExecutor {
     }
     fn preflight(&self, output: Option<&Path>) -> Result<()> {
         validate_profile(&self.profile)?;
-        if !self.allow_dev_engine {
-            return Err(Error::Setup(
-                "native Mac application execution is a development engine; pass --allow-dev-engine"
-                    .into(),
-            ));
-        }
         let observations = observe()?;
         for (key, value) in &observations {
             if self.profile.semantic_parameters.get(key) != Some(value) {
@@ -292,6 +274,7 @@ impl ExecutionBackend for MacExecutor {
         }
         self.preflight(Some(request.output))?;
         let incomplete = |reason| ExecutionReport {
+            timebase: Some(Timebase::Pv),
             reason,
             workload_exit: None,
             witness: None,

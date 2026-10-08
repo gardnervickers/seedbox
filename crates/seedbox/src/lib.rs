@@ -19,6 +19,7 @@ pub mod guest;
 mod host;
 pub mod host_control;
 pub mod image;
+pub mod logs;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod mac;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -27,6 +28,7 @@ pub mod oci;
 pub mod orchestration;
 pub mod preparation;
 mod preparation_command;
+mod retained;
 pub mod store;
 pub mod templates;
 pub mod vmm;
