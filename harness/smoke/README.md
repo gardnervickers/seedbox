@@ -101,7 +101,7 @@ The [checked-in map](../host-check-map.json) defines these rows:
 | harness/worlds/<name>.json | the named fixture's check when mapped, otherwise core; other matching rows can add checks |
 | harness/batch.*, harness/worlds/cluster-fixed.json, examples/etcd/workload/** | core + cluster-fixed, even with identical engine inputs |
 | examples/<other>/** | core + "example <name>: its reviewer's run list is required" |
-| flake.nix, flake.lock, rust-toolchain*, Cargo.lock, .cargo/**, harness/vmm-rustc.py, crates/seedbox-control/** | core (control source also keeps control-cases) |
+| flake.nix, flake.lock, rust-toolchain*, Cargo.lock, .cargo/**, crates/seedbox-control/** | core (control source also keeps control-cases) |
 | kernel/ | core + "kernel campaign needed"; execution refuses incomplete coverage |
 | anything else unmatched | core (fail closed) |
 

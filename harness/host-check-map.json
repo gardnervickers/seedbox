@@ -285,7 +285,6 @@
     {
       "category": "toolchain",
       "paths": [
-        "harness/vmm-rustc.py",
         "crates/seedbox-control/**",
         "flake.nix",
         "flake.lock",
