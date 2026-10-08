@@ -1,5 +1,5 @@
 # Guest assets and toolchains stay in this stage; no Seedbox/Rust is compiled.
-FROM nixos/nix:2.28.5 AS assets
+FROM docker.io/nixos/nix:2.28.5 AS assets
 WORKDIR /src
 ENV NIX_CONFIG="experimental-features = nix-command flakes"
 RUN printf '\nfilter-syscalls = false\n' >> /etc/nix/nix.conf
