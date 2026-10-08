@@ -3,6 +3,7 @@ import copy
 import contextlib
 import io
 import json
+import os
 import shutil
 from pathlib import Path
 import subprocess
@@ -139,8 +140,9 @@ class DispatchTests(unittest.TestCase):
             root = Path(tmp)
             for name in ('kernel', 'busybox', 'pinned'):
                 (root / name).write_bytes(name.encode())
+            # main() runs git before planning, so keep PATH (git isn't in /usr/bin on NixOS).
             env = dict(SEEDBOX_KERNEL=str(root / 'kernel'), SEEDBOX_BUSYBOX=str(root / 'busybox'),
-                       PINNED_ENGINE=str(root / 'pinned'))
+                       PINNED_ENGINE=str(root / 'pinned'), PATH=os.environ['PATH'])
             plan = dict(target='a' * 40, base='b' * 40, checks={'cluster-fixed': []}, warnings=[])
             with patch.object(host_check.sys, 'platform', 'linux'), \
                  patch.dict(host_check.os.environ, env, clear=True), \

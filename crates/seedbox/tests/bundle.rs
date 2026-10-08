@@ -129,6 +129,7 @@ impl Fixture {
             performance: BTreeMap::from([("SEEDBOX_UNDO".into(), "256".into())]),
             extra_logs: BTreeMap::new(),
             report: ExecutionReport {
+                timebase: None,
                 reason: StopReason::Completed,
                 workload_exit: Some(WorkloadExit {
                     service: "workload".into(),
@@ -979,4 +980,99 @@ fn dev_replay_permission_exact_hashes_and_bundle_marker_round_trip() {
         fs::read(imported.directory.join("manifest.json")).unwrap(),
         baseline_manifest
     );
+}
+
+#[test]
+fn timed_indexes_and_explicit_omissions_round_trip_without_original_output() {
+    for omit in [false, true] {
+        let mut f = Fixture::new();
+        let mut index = b"SBLOG001".to_vec();
+        for v in [10u64, 0, 0, 0, 3] {
+            index.extend_from_slice(&v.to_le_bytes());
+        }
+        f.backend
+            .extra_logs
+            .insert("machines/workload.console".into(), vec![0, 255, 10]);
+        f.backend
+            .extra_logs
+            .insert("machines/workload.console.chunks".into(), index.clone());
+        if omit {
+            f.orchestrator = f.orchestrator.with_log_policy(LogPolicy {
+                max_file_bytes: 4,
+                max_total_bytes: 100,
+            });
+        }
+        let run = f.run();
+        let archive = export(&f, &run);
+        fs::remove_dir_all(&run.directory).unwrap();
+        let imported = bundle::import(
+            &archive,
+            &f.directory.path().join("imported"),
+            &Options::default(),
+        )
+        .unwrap();
+        assert_eq!(imported.record.logs, run.record.logs);
+        assert_eq!(imported.record.omitted_logs, run.record.omitted_logs);
+        let mut reader =
+            seedbox::logs::Reader::open(&imported.directory, &Default::default()).unwrap();
+        if omit {
+            assert!(reader.report.chunks.is_empty());
+            assert!(reader
+                .report
+                .omissions
+                .contains_key("machines/workload.console.chunks"));
+            assert!(!imported
+                .directory
+                .join("output/machines/workload.console.chunks")
+                .exists());
+        } else {
+            assert_eq!(
+                fs::read(
+                    imported
+                        .directory
+                        .join("output/machines/workload.console.chunks")
+                )
+                .unwrap(),
+                index
+            );
+            let mut bytes = Vec::new();
+            reader.copy_chunk(0, &mut bytes).unwrap();
+            assert_eq!(bytes, [0, 255, 10]);
+        }
+    }
+}
+
+#[test]
+fn pv_timebase_round_trips_with_identity_and_report_then_replays() {
+    let mut f = Fixture::new();
+    f.backend.profile.backend = "seedbox-kvm".into();
+    f.backend
+        .profile
+        .semantic_parameters
+        .insert("timebase".into(), "pv".into());
+    f.preparer.inputs.profile = f.backend.profile.clone();
+    f.backend.report.timebase = Some(Timebase::Pv);
+    let run = f.run();
+    let archive = export(&f, &run);
+    let state = f.directory.path().join("imported");
+    let imported = bundle::import(&archive, &state, &Options::default()).unwrap();
+    assert_eq!(imported.record, run.record);
+    assert_eq!(
+        imported.record.identity.inputs.profile.semantic_parameters["timebase"],
+        "pv"
+    );
+    assert_eq!(
+        imported.record.report.as_ref().unwrap().timebase,
+        Some(Timebase::Pv)
+    );
+    let replay = Orchestrator::new(ContentStore::new(state.join("objects")), state.join("runs"))
+        .replay(
+            &imported.directory,
+            &f.backend,
+            &CancellationToken::default(),
+        )
+        .unwrap();
+    assert_eq!(replay.record.run_id, run.record.run_id);
+    assert_eq!(replay.record.replay.unwrap().status, ReplayStatus::Match);
+    assert_eq!(f.preparer.calls.load(Ordering::SeqCst), 1);
 }

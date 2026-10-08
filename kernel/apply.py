@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Apply the Seedbox guest changes to a clean Linux 6.12.112 tree (idempotent check)."""
 import pathlib
+import re
 import shutil
 import sys
 
@@ -14,6 +15,19 @@ def edit(rel, old, new, count=1):
     if text.count(old) != count:
         raise SystemExit(f"{rel}: expected {count} match(es) of patch anchor")
     path.write_text(text.replace(old, new))
+
+
+def edit_re(rel, pattern, repl, count=1):
+    path = src / rel
+    text, n = re.subn(pattern, repl, path.read_text())
+    if n != count:
+        raise SystemExit(f"{rel}: expected {count} match(es) of patch pattern, found {n}")
+    path.write_text(text)
+
+
+def append(rel, text):
+    path = src / rel
+    path.write_text(path.read_text() + text)
 
 
 shutil.copy(here / "seedbox.c", src / "arch/x86/kernel/seedbox.c")
@@ -61,6 +75,21 @@ edit(
 )
 edit("arch/x86/kernel/x86_init.c", "#include <asm/iommu.h>\n", "#include <asm/iommu.h>\n#include <asm/seedbox.h>\n")
 
+# Activate the time page before TSC-based delays and sched_clock start using
+# it. A permanent fixmap works before memremap/the allocator are available;
+# unlike an early_memremap slot, it needs no later unmap/remap handoff.
+edit(
+    "arch/x86/include/asm/fixmap.h",
+    "\tFIX_EARLYCON_MEM_BASE,\n",
+    "\tFIX_EARLYCON_MEM_BASE,\n\tFIX_SEEDBOX_TIME,\n",
+)
+edit("arch/x86/kernel/setup.c", "#include <asm/proto.h>\n", "#include <asm/proto.h>\n#include <asm/seedbox.h>\n")
+edit(
+    "arch/x86/kernel/setup.c",
+    "\ttsc_early_init();\n",
+    "\tseedbox_time_init();\n\ttsc_early_init();\n",
+)
+
 # Interrupt masking and acknowledgment through the shared page. The VMM's
 # 8259 keeps no in-service state, so masking a line is its acknowledgment.
 pic_ports = (
@@ -106,5 +135,58 @@ edit(
     "arch/x86/kernel/process.c",
     "int set_tsc_mode(unsigned int val)\n{\n",
     "int set_tsc_mode(unsigned int val)\n{\n\treturn -EINVAL;\n",
+)
+# Fork entropy (ABI 3). A world forked at a simulated time parks guests
+# without their cooperation, so the VMM writes the seed's entropy into the time
+# page and bumps a generation. The next random output mixes it into the input
+# pool and reseeds, so each seed draws its own stream from the fork on. Batched
+# get_random_u*() values check too, before they compare generations, and so
+# does the timer interrupt: a released machine takes its late tick at once,
+# and the reseed bumps the vDSO getrandom generation (glibc 2.41+, Go 1.24+),
+# which never enters the kernel CRNG on its own.
+edit(
+    "drivers/char/random.c",
+    "#include <linux/random.h>\n",
+    "#include <linux/random.h>\n#include <asm/seedbox.h>\n",
+)
+edit(
+    "drivers/char/random.c",
+    "static void crng_make_state(u32 chacha_state[CHACHA_STATE_WORDS],\n",
+    "static void __crng_make_state(u32 chacha_state[CHACHA_STATE_WORDS],\n"
+    "\t\t\t      u8 *random_data, size_t random_data_len);\n\n"
+    "static void crng_make_state(u32 chacha_state[CHACHA_STATE_WORDS],\n"
+    "\t\t\t    u8 *random_data, size_t random_data_len)\n{\n"
+    "\tseedbox_take_entropy();\n"
+    "\t__crng_make_state(chacha_state, random_data, random_data_len);\n}\n\n"
+    "static void __crng_make_state(u32 chacha_state[CHACHA_STATE_WORDS],\n",
+)
+edit_re(
+    "drivers/char/random.c",
+    r"\n(\tnext_gen = READ_ONCE\(base_crng\.generation\);[ \t]*\\\n)",
+    lambda m: "\n\tseedbox_take_entropy();\t\t\t\t\t\t\t\\\n" + m.group(1),
+)
+edit(
+    "arch/x86/kernel/time.c",
+    "static irqreturn_t timer_interrupt(int irq, void *dev_id)\n{\n",
+    "extern void seedbox_take_entropy(void);\n\n"
+    "static irqreturn_t timer_interrupt(int irq, void *dev_id)\n{\n\tseedbox_take_entropy();\n",
+)
+append(
+    "drivers/char/random.c",
+    "\nvoid seedbox_take_entropy(void)\n{\n"
+    "\tstruct seedbox_time_page *p = READ_ONCE(seedbox_page);\n"
+    "\tstatic u64 seen;\n\tunsigned long flags;\n\tu64 gen;\n\n"
+    "\tif (!p || likely(READ_ONCE(p->entropy_gen) == seen))\n\t\treturn;\n"
+    "\t/* No interrupt may draw from the old key mid-reseed. */\n"
+    "\tlocal_irq_save(flags);\n"
+    "\tgen = READ_ONCE(p->entropy_gen);\n"
+    "\tif (gen != seen) {\n"
+    "\t\tmix_pool_bytes(p->entropy, sizeof(p->entropy));\n"
+    "\t\t/* Before the CRNG is ready, mixing is enough: the boot path\n"
+    "\t\t * seeds it, and reseeding here would mark it ready early. */\n"
+    "\t\tif (crng_ready())\n\t\t\tcrng_reseed(NULL);\n"
+    "\t\tseen = gen;\n"
+    "\t}\n"
+    "\tlocal_irq_restore(flags);\n}\n",
 )
 print("seedbox guest changes applied")

@@ -131,6 +131,7 @@ seedbox=./target/release/seedbox
 
 "$seedbox" prepare examples/redis --output prepared.json
 "$seedbox" run examples/redis
+"$seedbox" run examples/redis --timebase pv
 "$seedbox" inspect .seedbox/runs/ATTEMPT --json
 "$seedbox" replay .seedbox/runs/ATTEMPT
 ```
@@ -145,7 +146,7 @@ The guest supervisor is built into `seedbox`, and BusyBox comes from
 `SEEDBOX_BUSYBOX`. A missing input fails before preparation starts and names
 every location searched.
 
-Qualified Zen execution requires the versioned `amd-zen3-engine52eb-v2` host policy in
+Qualified Zen execution requires the versioned `amd-zen3-engine391f-v3` host policy in
 [host requirements](../README.md#host-requirements). Run validates immutable
 engine/guest-kernel inputs and performs host admission before OCI work; host-kernel
 bytes are not checked. Temporary core reservations, affinity and disabled
@@ -240,9 +241,28 @@ does not establish hardware witness invariance or qualify the new engine.
 
 ## Execution settings
 
+`run`, `prepare` and `explore` accept `--timebase counter|pv`, defaulting to `counter`.
+This is a semantic choice with no environment override. Counter time advances
+with retired guest branches; PV compute between exits costs no virtual time,
+with progress charged at guest exits, syscalls and clock reads. The same seed
+under the two models produces different identities and retained manifests.
+The semantic profile records `timebase` only for PV, preserving existing counter
+identity bytes and hashes. Replay reads the recorded choice, accepts no timebase
+override, and refuses unknown recorded values or a backend with a different
+timebase, even with `--allow-engine-change`. Bundles preserve the choice.
+The VMM report is checked against it; reports from older engines without a
+timebase field mean counter. Run/replay and inspect print `timebase: VALUE`.
+`inspect --json` exposes the semantic profile and, when present, the VMM's
+reported `report.timebase` through the library's serialization.
+
+PV uses no host PMU counter, but the CLI currently retains the same CPU profile
+admission, CPU/SMT leases and Zen MSR workaround for both choices. This change
+does not qualify additional PV hosts. The counter stop-placement description
+below applies to the default counter model; PV uses its own exit-based progress.
+
 `--state` chooses the content store and attempts root (default `.seedbox`).
 `--memory-mb` defaults to 1024 MiB per service and is a semantic parameter; `--full-state` requests RAM/register
-digests. Preparation checks a conservative archive boot-memory floor before acquiring
+digests and retains per-page RAM hashes (format below). Preparation checks a conservative archive boot-memory floor before acquiring
 a CPU lease. Application memory can require a larger value; the etcd image failed
 to unpack at 512 MiB and passed at 1024 MiB. `--margin` and `--undo` are recorded per attempt and do not change identity.
 `--undo` defaults to 256 branches; zero disables undo and 16 exercises a smaller
@@ -314,6 +334,34 @@ manifest's full-state digests remain usable when the raw engine report was omitt
 State parts such as `ram`, `disk` and `pending_io` are compared separately;
 `events` is the engine's descriptive event state, while the other parts are
 validated lowercase SHA-256 digests.
+
+With `--full-state`, the VMM also writes `output/machines/NAME.pages` for each machine.
+Retention records the files as `logs["machines/NAME.pages"]` for diff and replay.
+The binary format has no header: entry PFN `p` occupies bytes `8*p..8*p+8` and is
+a little-endian `u64`, formed by interpreting the first eight SHA-256 bytes of
+guest RAM bytes `4096*p..4096*p+4096` as little-endian. Entries cover all guest
+RAM in ascending PFN order, including zero pages; 512 MiB RAM produces exactly
+1 MiB of hashes. These are truncated hashes, not RAM snapshots, and collisions
+can hide a page difference. Capture reads RAM without changing it or consuming
+random draws. It adds no witness or state-digest input. The former env-only
+page-capture switch has been removed; no new flag or environment setting is needed.
+
+Page files follow the ordinary log retention policy and travel in bundles when
+retained. They are excluded from run identity and never decide the replay verdict
+or offline diff status. When a machine's full-state digest differs and `ram` is
+the only differing state part, diff adds `machines[].ram_pages` with
+`differing_pfns` and `first_pfns` (up to eight, ascending). Plain diff prints the
+summary on stderr. A MISMATCH replay adds the same evidence under
+`replay.ram_pages.machines` and prints it on stderr. Existing JSON fields remain;
+`diff --json` still emits one document and no page-summary stderr.
+
+Both files must be manifest-declared, checksum-valid and exactly eight bytes per
+recorded 4 KiB page. Missing or omitted evidence cannot locate PFNs and is reported
+as a limitation. Invalid selected page evidence makes offline diff exit 2;
+replay keeps its MISMATCH/exit 1 and retains the diagnostic in
+`replay.ram_pages.limitations`. Old engines' runs remain readable without these
+files. PFNs locate final RAM differences, not the first divergent instruction.
+
 All changed identity fields are listed as JSON pointers with both values, including
 configuration, seed, engine, kernel, images/layers, guest archives, provenance and
 semantic parameters. Missing values are null. Arrays are compared as whole values.
@@ -501,8 +549,8 @@ reveals the previous layer, then the baseline, then global latency/jitter with z
 loss where no baseline exists. Any active partition covering a pair dominates
 all shapes. Inspect includes both kinds in `active_handles`.
 
-At a boundary T every machine reaches T before control admission and faults in
-ID order, followed by sends at T or later. Routing fixes each candidate's loss
+At a boundary T every machine reaches T before control admission, trigger effects
+in arm order, and faults in ID order, followed by sends at T or later. Routing fixes each candidate's loss
 and arrival at send time; later shaping or healing retains in-flight decisions.
 Broadcast expands to other machines in ascending index order. Cuts consume no
 randomness; every other candidate consumes one independent per-pair loss draw
@@ -514,10 +562,11 @@ a delay decrease preserves FIFO and head-of-line waiting. The scheduler's global
 early-delivery window remains unchanged.
 
 Counters distinguish `delivered`, `partition_dropped`, `receiver_dropped`, and
-`loss_dropped`; `loss_dropped` is omitted for a link that has lost nothing.
+`loss_dropped`; `loss_dropped` includes selector drops and is omitted for a link
+that has lost nothing.
 The report's `network_witness` hashes in-flight frames, per-link last
 arrivals, stream positions, live layers, cuts and baselines. It is folded into
-`world_witness` only when the run has baseline overrides or applied a shape, so
+`world_witness` only when the run has baseline overrides, applied a shape or used a connection selector, so
 a run without link policy keeps its previous world witness. Shape/heal evidence follows the same strict-before-admission
 counter boundary as partitions. Fork snapshots retain baselines, last arrivals,
 and both RNG streams; arming a run seed reseeds those streams as before.
@@ -532,13 +581,14 @@ infrastructure state without packet contents or application schemas. This VMM
 change creates a new engine identity; hardware/replay qualification is separate
 from portable policy tests.
 
-Faults and control requests that take effect at the same simulated time T are
-ordered against sends as follows. The world applies a boundary at T only once
-every machine has reached T, so a machine that is still running before T keeps
-sending under the earlier network state, even when another machine is already
-waiting at T. At T, control admission and effects come first, then faults in
-ID order, and only then does any machine run, so every frame sent at T or
-later sees the new state. A frame's partition decision and arrival time are
+Faults, triggers and control requests that take effect at the same simulated
+time T are ordered against sends as follows. The world applies a boundary at T
+only once every machine has reached T, so a machine that is still running before
+T keeps sending under the earlier network state, even when another machine is already
+waiting at T. At T, control admission and effects come first, then trigger
+effects in arm ID order (taking the next fault IDs), then faults in ID order,
+and only then does any machine run, so every frame sent at T or later sees the
+new state. A frame's partition decision and arrival time are
 fixed when it is sent; a later partition or heal never changes a frame already
 in flight. A slice that runs up to a boundary always ends before the guest can
 send at the boundary itself, so no frame is ever stamped at or after a boundary
@@ -646,6 +696,84 @@ truncation. Its raw `.stdout` evidence is bounded to 8192 bytes per value and
 4 MiB per preparation; an oversized or incomplete value fails preparation.
 Version stderr remains quota-limited `.log` diagnostics with omission receipts.
 
+## Connection selectors
+
+Guest controllers can discover an IPv4 TCP direction and arm a scoped loss:
+
+```python
+page = world.connections("server", "client")
+connection = next(c for c in page["connections"] if c["dst_port"] == 4000)
+handle = world.drop_connection(connection)
+# Run the workload phase that must encounter loss.
+evidence = world.heal(handle)
+assert evidence["dropped"] > 0
+```
+
+Discovery returns at most 32 records per live page in incarnation order. Use
+`after=page["next_after"]` for the next page. Selection binds the complete
+machine/address/port/direction/incarnation record at the globally committed
+admission boundary. A connection that disappears between discovery and admission
+is rejected with `invalid_state`. The controller cannot select itself.
+
+The bounded classifier observes candidate Ethernet sends before partition/link
+loss decisions. An unfragmented IPv4 TCP SYN without ACK admits both directions
+of a tuple and assigns a monotonically increasing run-local incarnation. A SYN
+retransmission with the same initial sequence number retains it. A different
+initial sequence number replaces it, even without a close. Simultaneous open
+joins the same incarnation; SYN-ACK must acknowledge the opposite initial sequence
+number plus one (wrapping u32). A SYN-ACK alone or midstream traffic without an
+observed opening SYN does not create a connection. A same-ISN opening SYN after
+observed closure creates a new incarnation. There is no idle timeout.
+
+FIN half-closes one direction; both observed FINs or either RST close admission.
+FIN/RST and subsequent retransmissions still classify under that incarnation until
+a replacement SYN. Tracking describes observed sends, including dropped packets,
+not a kernel's confirmed TCP state. Process stop/restart does not reset the NIC or
+classifier. Restart/reuse without a close and with an identical opening ISN is
+indistinguishable from a SYN retransmission and deliberately retains identity.
+After replacement, newly sent non-SYN packets on the tuple classify under the
+latest incarnation; TCP sequence-window validation is not implemented. Already
+routed frames retain their old drop/arrival decisions regardless of later reuse.
+
+Only untagged unicast Ethernet carrying structurally valid IPv4/TCP is classified.
+IPv4/TCP options are bounded by their header lengths; checksum validation is left
+to the guest (including checksum offload). All IPv4 fragments, including first
+fragments with MF, malformed/truncated headers, VLAN, IPv6, ARP, UDP, multicast
+and broadcast bypass connection selection and retain ordinary link policies.
+There is no reassembly or application-protocol decoding.
+
+At most 1024 bidirectional tuples and 1024 active selector handles are retained.
+A new tuple at capacity evicts the oldest unselected closed incarnation first,
+then the oldest unselected open incarnation. An incarnation named by a live
+selector is never evicted, even after closure; if all retained incarnations are
+selected, the new tuple is not tracked. Stale handles keep their counts but cannot
+attach to a replacement. Evicted or untracked midstream traffic is unclassified
+until a fresh opening SYN can be admitted.
+Selector capacity exhaustion is an explicit admission error. Counters and IDs do
+not reset on discovery, process restart or healing. Fork snapshots preserve the
+classifier and selector state, and reseeding does not reset their identities.
+
+Partitions dominate selected loss, which dominates directed link shapes.
+Selected loss drops every matching candidate after consuming exactly one loss
+draw and one jitter draw for its pair, without updating the pair's last arrival;
+unselected traffic uses the existing link policy and global causal floor. No
+additional selector RNG is used, and cuts remain draw-free. Broadcast candidate
+ordering remains ascending machine index.
+Overlapping handles each retain their matched/dropped counts, and healing only
+releases its own handle. Arming is not evidence of injection: require a positive
+`dropped` count from heal or retained `selection_counts`. Pending frames are never
+reclassified by a fault, healing or tuple reuse.
+
+Once a selector is applied, the network witness includes a tagged encoding of
+classifier tuples, incarnation counter, eviction count, SYN/FIN/RST state, active
+selectors and their counters. The world witness then includes that network
+witness even after healing. Without selector use, tracking contributes no witness
+bytes or report fields and leaves legacy RNG, frame decisions and results intact.
+This changes the engine identity. Portable tests exercise the production modules;
+AMD execution, replay and observation/performance qualification remain separate.
+The finite [AMD procedure](connection-selectors-amd.md) uses the guest-owned
+`harness/acceptance/workloads/connections.yaml` fixture.
+
 ## Bundles
 
 `seedbox export RUN [-o FILE] [--state STATE]` writes one uncompressed
@@ -708,7 +836,7 @@ restoration and lease release. `doctor` returns a setup refusal for unqualified
 counters, including when the experimental flag is present, so it never emits an
 AMD `VALID` success for Intel. Exit meanings remain unchanged.
 
-The current staged source pins frozen engine52eb and accepted kernele8ece.
+The current staged source pins frozen engine391f and accepted kernel68bf (K2).
 The artifact has build provenance but is not runtime qualified. Fresh ordinary
 full-state run/replay acceptance remains required. Experimental readiness opens
 the selected raw perf event disabled before preparation and under each held
@@ -717,3 +845,37 @@ match the engine; admission adds PERF_FLAG_FD_CLOEXEC8 rather than engineopen0
 solely to protect descriptor inheritance. It never enables, maps or reads the
 guest event. Source tests and warned Intel opt-in are not Intel qualification or
 a determinism guarantee.
+
+## Committed-time logs
+
+`seedbox logs RUN --machine NAME --stream console --since-ns 1000000000
+--until-ns 2000000000 --json` filters retained chunks in the half-open simulated
+nanosecond interval. All filters are optional; the run directory is positional.
+Consecutive bytes from the same machine/incarnation/stream coalesce within one
+world slice until another stream writes. Each chunk retains its first byte's
+commit time; filters select the whole chunk by that time, including later bytes
+that may commit beyond the upper bound.
+Without `--json`, stdout contains only the selected raw bytes in chunk order,
+with no prefixes, encoding changes or added newlines. Lowercase `logs:` status
+and `omission:` diagnostics go to stderr. Use `--machine` and `--stream` to
+recover one stream's indexed bytes exactly. `--json` includes chunk metadata and
+lossless hexadecimal payloads as `bytes_hex` in one report.
+Success exits 0, including explicitly incomplete capture; invalid inputs or
+corrupt evidence exit 2. No runtime inputs, images, host tools or KVM are needed.
+
+The library exposes `logs::Reader`, `Filter`, chunk metadata, omissions, and
+streaming byte access. Only manifest-declared, checksum-verified evidence is
+used. An absent index never causes host receipt order or application timestamps
+to be substituted. Filtering cannot change execution or witness identity.
+Indexes share the existing retention limits and bundle transfer path; missing
+raw streams and indexes stay explicit after import. See [timed logs](timed-logs.md)
+for format bounds, a portable demo and the pending AMD validation commands.
+
+## Committed console triggers
+
+The development engine implements bounded, exactly-once console marker triggers
+through the guest control API. Arm/cancel admission, match deadlines, future
+causal effect barriers, snapshot state and witness evidence are specified in
+[the trigger contract](triggers.md). No trigger ever armed adds no report fields,
+witness bytes or console stopping points. This changes the engine and requires
+`--allow-dev-engine`; AMD KVM validation remains outstanding.

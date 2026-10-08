@@ -649,6 +649,7 @@ fn old_host_proof_replay_is_not_comparable_while_inspection_and_transfer_stay_av
         omitted_logs: BTreeMap::new(),
         outcome: Outcome::Pass,
         report: Some(ExecutionReport {
+            timebase: None,
             reason: StopReason::Completed,
             workload_exit: Some(WorkloadExit {
                 service: "workload".into(),
@@ -705,6 +706,85 @@ fn old_host_proof_replay_is_not_comparable_while_inspection_and_transfer_stay_av
         fs::read(root.join("state/runs/old/manifest.json")).unwrap(),
         manifest
     );
+}
+
+#[test]
+fn engine52eb_v2_replay_retains_not_comparable_without_host_execution() {
+    use seedbox::{admission, orchestration::*, store::ContentDigest};
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let mut previous = admission::required_policy().unwrap();
+    previous.version = "amd-zen3-engine52eb-v2".into();
+    previous.engine = "52eb41490f521a0104ea4ab06297cbdbdd7bc9a68261febf6c5cc19854bacdcf".into();
+    previous.guest_kernel =
+        "e8ece7cba2d5fc4924da83e39cc672ae2516c117f8f76ecfa04aeaa98e697847".into();
+    let fields = serde_json::to_string(&previous).unwrap();
+    let fixture: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/formats/demo41-fail-v2.json")).unwrap();
+    let mut record: RunRecord = serde_json::from_value(fixture["record"].clone()).unwrap();
+    let inputs = &mut record.identity.inputs;
+    inputs.kernel = ContentDigest::try_from(previous.guest_kernel.clone()).unwrap();
+    inputs.profile.engine = ContentDigest::try_from(previous.engine.clone()).unwrap();
+    inputs.profile.semantic_parameters.extend([
+        ("host_policy".into(), previous.version),
+        (
+            "host_policy_fingerprint".into(),
+            ContentDigest::of(fields.as_bytes()).hex().into(),
+        ),
+        ("host_policy_fields".into(), fields),
+    ]);
+    record.run_id = ContentDigest::of(&serde_json::to_vec(&record.identity).unwrap());
+    let manifest = serde_json::to_vec(&serde_json::json!({
+        "sha256": ContentDigest::of(&serde_json::to_vec(&record).unwrap()),
+        "record": record,
+    }))
+    .unwrap();
+    fs::create_dir(root.join("old")).unwrap();
+    fs::write(root.join("old/manifest.json"), &manifest).unwrap();
+    fs::write(root.join("unused-engine"), b"never execute").unwrap();
+    for allow_dev_engine in [false, true] {
+        let mut args = vec![
+            "replay",
+            "old",
+            "--state",
+            "state",
+            "--vmm",
+            "unused-engine",
+            "--allow-engine-change",
+        ];
+        if allow_dev_engine {
+            args.push("--allow-dev-engine");
+        }
+        let output = seedbox(&args, root);
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.starts_with("ERROR: "),
+            "{stdout}; {}",
+            stderr(&output)
+        );
+        let attempt = stdout
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("ERROR: ")
+            .unwrap();
+        assert!(stdout.contains("replay: NOT_COMPARABLE"), "{stdout}");
+        assert_eq!(
+            stderr(&output),
+            "input integrity: host admission proof incompatible: host_policy\n"
+        );
+        let rejected = inspect(&root.join(attempt)).unwrap();
+        assert_eq!(rejected.outcome, Outcome::Error);
+        assert_eq!(rejected.replay.unwrap().status, ReplayStatus::NotComparable);
+        assert_eq!(
+            rejected.error.as_deref(),
+            Some("input integrity: host admission proof incompatible: host_policy")
+        );
+        assert!(!root.join(attempt).join("output").exists());
+        assert!(!root.join(attempt).join("inputs").exists());
+        assert_eq!(fs::read(root.join("old/manifest.json")).unwrap(), manifest);
+    }
 }
 
 #[test]
@@ -866,6 +946,93 @@ mod diff_tests {
     include!("support/diff_fixture.rs");
 
     #[test]
+    fn ram_only_page_diagnostics_preserve_stdout_json_and_exit_contracts() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (a, b) = ram_pair();
+        for (name, raw, pfns) in [("a", &a, vec![]), ("b", &b, vec![2, 5, 131071])] {
+            let path = root.join(name);
+            let mut record = fixture();
+            write_fixture(&path, &mut record, Some(raw), None);
+            write_pages(&path, &mut record, &pfns);
+            write_fixture(&path, &mut record, Some(raw), None);
+        }
+        let plain = seedbox(&["diff", "a", "b"], root);
+        assert_eq!(plain.status.code(), Some(1));
+        assert_eq!(
+            stderr(&plain),
+            "ram pages: server: differing pfns: 3; first pfns: [2, 5, 131071]\n"
+        );
+        let stdout = String::from_utf8(plain.stdout).unwrap();
+        assert!(stdout.starts_with("DIFFERENT: a <> b\n"));
+        assert_eq!(
+            stdout
+                .lines()
+                .filter(|l| l.starts_with("DIFFERENT: "))
+                .count(),
+            1
+        );
+        let json = seedbox(&["diff", "a", "b", "--json"], root);
+        assert_eq!(json.status.code(), Some(1));
+        assert!(json.stderr.is_empty());
+        let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+        assert_eq!(value["machines"][0]["ram_pages"]["differing_pfns"], 3);
+        assert_eq!(
+            value["machines"][0]["ram_pages"]["first_pfns"],
+            serde_json::json!([2, 5, 131071])
+        );
+        for field in [
+            "status",
+            "world_witness",
+            "machines",
+            "first_record",
+            "identity_differences",
+            "result_differences",
+            "evidence_differences",
+            "limitations",
+        ] {
+            assert!(value.get(field).is_some(), "lost {field}");
+        }
+        for field in ["machine", "witness", "full_state", "differences"] {
+            assert!(value["machines"][0].get(field).is_some(), "lost {field}");
+        }
+        let matched = seedbox(&["diff", "a", "a"], root);
+        assert_eq!(matched.status.code(), Some(0));
+        assert!(matched.stderr.is_empty());
+    }
+
+    #[test]
+    fn selected_page_file_errors_are_setup_errors_with_no_json_stdout() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (a, b) = ram_pair();
+        let mut left = fixture();
+        let mut right = fixture();
+        for (name, record, raw) in [("a", &mut left, &a), ("b", &mut right, &b)] {
+            let path = root.join(name);
+            write_fixture(&path, record, Some(raw), None);
+            write_pages(&path, record, &[]);
+            write_fixture(&path, record, Some(raw), None);
+        }
+        fs::write(root.join("b/output/machines/server.pages"), b"broken").unwrap();
+        for (error, update_digest, remove_memory) in [
+            ("diff b/output/machines/server.pages: evidence checksum mismatch", false, false),
+            ("diff b/output/machines/server.pages: page hash length must be 1048576 bytes for recorded RAM", true, false),
+            ("diff b: page hashes require recorded memory_mb", true, true),
+        ] {
+            if update_digest {
+                right.logs.insert("machines/server.pages".into(), sb::store::ContentDigest::of(b"broken"));
+            }
+            if remove_memory { right.identity.inputs.profile.semantic_parameters.remove("memory_mb"); }
+            write_fixture(&root.join("b"), &mut right, Some(&b), None);
+            let output = seedbox(&["diff", "a", "b", "--json"], root);
+            assert_eq!(output.status.code(), Some(2));
+            assert!(output.stdout.is_empty());
+            assert_eq!(stderr(&output), format!("error: {error}; use an intact retained run directory (import bundles first)\n"));
+        }
+    }
+
+    #[test]
     fn diff_current_multi_machine_parts_and_cli_contract() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -1015,7 +1182,8 @@ mod diff_tests {
             ),
         )
         .unwrap();
-        let expected_stdout = format!("ERROR: fixture (seed 0)\nerror: {error}\n");
+        let expected_stdout =
+            format!("ERROR: fixture (seed 0)\ntimebase: counter\nerror: {error}\n");
         let output = seedbox(&["inspect", "failed"], root);
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
@@ -1282,6 +1450,171 @@ mod diff_tests {
     }
 }
 
+#[allow(dead_code)]
+mod timed_logs {
+    use super::*;
+    use seedbox as sb;
+    include!("support/diff_fixture.rs");
+    include!("support/logs_fixture.rs");
+
+    #[test]
+    fn logs_defaults_filters_and_binary_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        timed_fixture(&root.join("run"));
+        let text = seedbox(&["logs", "run"], root);
+        assert!(text.status.success(), "{}", stderr(&text));
+        assert_eq!(stderr(&text), "logs: run\n");
+        assert_eq!(text.stdout, b"\0\xff\xfeA\nB");
+        let text = seedbox(
+            &[
+                "logs",
+                "run",
+                "--stream",
+                "console",
+                "--since-ns",
+                "10",
+                "--until-ns",
+                "20",
+            ],
+            root,
+        );
+        assert!(text.status.success());
+        assert_eq!(text.stdout, b"\0\xffA\n");
+        let text = seedbox(&["logs", "run", "--since-ns", "20"], root);
+        assert!(text.status.success());
+        assert_eq!(text.stdout, b"B"); // No added newline or chunk decoration.
+        let text = seedbox(&["logs", "run", "--until-ns", "10"], root);
+        assert!(text.status.success());
+        assert!(text.stdout.is_empty());
+        for (args, orders) in [
+            (vec!["logs", "run", "--json"], vec![0, 1, 2, 3]),
+            (
+                vec![
+                    "logs",
+                    "run",
+                    "--machine",
+                    "workload",
+                    "--stream",
+                    "console",
+                    "--since-ns",
+                    "10",
+                    "--until-ns",
+                    "20",
+                    "--json",
+                ],
+                vec![0, 2],
+            ),
+            (vec!["logs", "run", "--stream", "mgmt", "--json"], vec![1]),
+            (vec!["logs", "run", "--since-ns", "20", "--json"], vec![3]),
+            (vec!["logs", "run", "--until-ns", "10", "--json"], vec![]),
+        ] {
+            let output = seedbox(&args, root);
+            assert!(output.status.success(), "{}", stderr(&output));
+            assert!(output.stderr.is_empty());
+            let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                json["chunks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v["order"].as_u64().unwrap())
+                    .collect::<Vec<_>>(),
+                orders
+            );
+            assert_eq!(json["status"], "LOGS");
+            assert_eq!(json["omissions"], serde_json::json!({}));
+        }
+        let out = seedbox(&["logs", "run", "--json"], root);
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(json["chunks"][0]["bytes_hex"], "00ff");
+    }
+
+    #[test]
+    fn logs_errors_and_omissions_are_explicit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let path = root.join("run");
+        let mut record = timed_fixture(&path);
+        for (args, expected) in [
+            (
+                vec!["logs", "missing"],
+                "error: run directory missing: not found\n",
+            ),
+            (
+                vec!["logs", "run", "--machine", "unknown"],
+                "error: --machine unknown: unknown machine; use a machine from inspect --json\n",
+            ),
+            (
+                vec!["logs", "run", "--since-ns", "20", "--until-ns", "10"],
+                "error: --until-ns must be at least --since-ns\n",
+            ),
+        ] {
+            let out = seedbox(&args, root);
+            assert_eq!(out.status.code(), Some(2));
+            assert_eq!(stderr(&out), expected);
+            assert!(out.stdout.is_empty());
+        }
+        for (flag, value) in [
+            ("--stream", "stdout"),
+            ("--since-ns", "1s"),
+            ("--until-ns", "18446744073709551616"),
+        ] {
+            let out = seedbox(&["logs", "run", flag, value], root);
+            assert_eq!(out.status.code(), Some(2));
+            assert!(stderr(&out).contains(flag));
+        }
+        record.logs.remove("machines/workload.console.chunks");
+        write_fixture(&path, &mut record, None, None);
+        let out = seedbox(&["logs", "run", "--json"], root);
+        assert!(out.status.success());
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(json["omissions"]["machines/workload.console.chunks"]
+            .as_str()
+            .unwrap()
+            .contains("unavailable"));
+        let out = seedbox(&["logs", "run"], root);
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"\xfe");
+        assert_eq!(stderr(&out), "logs: run\nomission: [\"machines/workload.console.chunks\",\"committed-time index unavailable; raw bytes cannot be timed\"]\n");
+        add_log(
+            &path,
+            &mut record,
+            "machines/workload.console.chunks",
+            b"SBLOG001x",
+        );
+        write_fixture(&path, &mut record, None, None);
+        let out = seedbox(&["logs", "run"], root);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(out.stdout.is_empty());
+        assert_eq!(stderr(&out),"error: logs run: machines/workload.console.chunks: truncated or oversized chunk index; use an intact retained run directory (import bundles first)\n");
+    }
+}
+
+#[test]
+fn logs_help_is_portable_and_has_no_runtime_options() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = seedbox(&["help", "logs"], tmp.path());
+    assert!(out.status.success());
+    let help = String::from_utf8(out.stdout).unwrap();
+    for text in [
+        "<RUN>",
+        "--machine",
+        "--stream",
+        "--since-ns",
+        "--until-ns",
+        "--json",
+    ] {
+        assert!(help.contains(text));
+    }
+    for text in ["--kernel", "--seed", "--vmm", "--cpu", "--state"] {
+        assert!(!help.contains(text));
+    }
+    let out = seedbox(&["logs"], tmp.path());
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stderr(&out).contains("<RUN>"));
+}
+
 #[test]
 fn torn_writes_is_opt_in_presence_only_and_replay_uses_the_recorded_policy() {
     let directory = tempfile::tempdir().unwrap();
@@ -1306,4 +1639,119 @@ fn torn_writes_is_opt_in_presence_only_and_replay_uses_the_recorded_policy() {
     let output = seedbox(&["replay", "run", "--torn-writes"], directory.path());
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("unexpected argument '--torn-writes'"));
+}
+
+#[test]
+fn timebase_help_values_and_replay_uses_only_the_recorded_choice() {
+    let directory = tempfile::tempdir().unwrap();
+    for command in ["run", "prepare", "explore"] {
+        let help = seedbox(&["help", command], directory.path());
+        assert!(help.status.success());
+        let help = String::from_utf8_lossy(&help.stdout);
+        assert!(help.contains("--timebase <TIMEBASE>"));
+        assert!(help.contains("[default: counter]"));
+        assert!(help.contains("Count retired guest branches with the host PMU"));
+        assert!(help.contains("Advance time at guest exits, syscalls and clock reads"));
+        let bad = seedbox(&[command, "--timebase", "future"], directory.path());
+        assert_eq!(bad.status.code(), Some(2));
+        assert!(stderr(&bad).contains("--timebase <TIMEBASE>"));
+        assert!(stderr(&bad).contains("possible values: counter, pv"));
+    }
+    let help = seedbox(&["help", "replay"], directory.path());
+    assert!(help.status.success());
+    assert!(!String::from_utf8_lossy(&help.stdout).contains("--timebase"));
+    let override_attempt = seedbox(&["replay", ".", "--timebase", "pv"], directory.path());
+    assert_eq!(override_attempt.status.code(), Some(2));
+    assert!(stderr(&override_attempt).contains("unexpected argument '--timebase'"));
+    assert!(seedbox(&["init", "demo"], directory.path())
+        .status
+        .success());
+    for command in ["run", "explore"] {
+        for value in ["counter", "pv"] {
+            let output = seedbox(
+                &[command, "no-such.yaml", "--timebase", value],
+                directory.path(),
+            );
+            assert_eq!(output.status.code(), Some(2));
+            assert_eq!(
+                stderr(&output),
+                "error: Compose file no-such.yaml: not found\n"
+            );
+        }
+    }
+}
+
+fn timebase_record(directory: &Path, timebase: Option<&str>) {
+    use seedbox::{orchestration::RunRecord, store::ContentDigest};
+    let fixture: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/formats/synthetic-c84-v2.json")).unwrap();
+    let mut record: RunRecord = serde_json::from_value(fixture["record"].clone()).unwrap();
+    record.identity.inputs.profile.backend = "seedbox-kvm".into();
+    if let Some(value) = timebase {
+        record
+            .identity
+            .inputs
+            .profile
+            .semantic_parameters
+            .insert("timebase".into(), value.into());
+    }
+    if let Some(report) = &mut record.report {
+        report.timebase = match timebase {
+            Some("pv") => Some(seedbox::execution::Timebase::Pv),
+            None => Some(seedbox::execution::Timebase::Counter),
+            _ => None,
+        };
+    }
+    record.run_id = ContentDigest::of(&serde_json::to_vec(&record.identity).unwrap());
+    let checksum = ContentDigest::of(&serde_json::to_vec(&record).unwrap());
+    fs::write(
+        directory.join("manifest.json"),
+        serde_json::to_vec(&serde_json::json!({"sha256": checksum, "record": record})).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn inspect_shows_timebase_and_json_preserves_library_fields() {
+    let directory = tempfile::tempdir().unwrap();
+    for (parameter, value) in [(None, "counter"), (Some("pv"), "pv")] {
+        timebase_record(directory.path(), parameter);
+        let output = seedbox(&["inspect", "."], directory.path());
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert!(String::from_utf8_lossy(&output.stdout).contains(&format!("\ntimebase: {value}\n")));
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            text.lines()
+                .filter(|line| line
+                    .split_once(": ")
+                    .is_some_and(|(word, _)| !word.is_empty()
+                        && word.bytes().all(|byte| byte.is_ascii_uppercase())))
+                .count(),
+            1
+        );
+        let output = seedbox(&["inspect", ".", "--json"], directory.path());
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert!(output.stderr.is_empty());
+        let record: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(record["report"]["timebase"], value);
+        assert_eq!(
+            record["identity"]["inputs"]["profile"]["semantic_parameters"]["timebase"].as_str(),
+            parameter
+        );
+    }
+}
+
+#[test]
+fn replay_rejects_unknown_recorded_timebase_before_host_checks() {
+    let directory = tempfile::tempdir().unwrap();
+    timebase_record(directory.path(), Some("future"));
+    let output = seedbox(&["replay", "."], directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stderr(&output), "error: input integrity: recorded --timebase future: expected counter or pv; use a run recorded with a supported timebase\n");
+    assert!(output.stdout.is_empty());
+    assert!(!directory.path().join(".seedbox").exists());
+    // Inspection remains available for diagnosing unsupported recorded values.
+    let inspect = seedbox(&["inspect", "."], directory.path());
+    assert!(inspect.status.success(), "{}", stderr(&inspect));
+    assert!(String::from_utf8_lossy(&inspect.stdout).contains("timebase: future"));
 }
