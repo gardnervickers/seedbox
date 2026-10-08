@@ -965,7 +965,9 @@ fn torn_writes_are_recorded_replayed_and_omitted_when_disabled() {
     .unwrap();
     let original = executor.profile();
     // Off adds nothing; the host policy parameters #83 records stay as they are.
-    assert!(!original.semantic_parameters.contains_key("disk_loss"));
+    assert!(!original
+        .semantic_parameters
+        .contains_key("disk_loss_sector_bytes"));
     assert_eq!(original.semantic_parameters["memory_mb"], "512");
     let encoded = serde_json::to_vec(&original).unwrap();
     assert!(!vmm::recorded_torn_writes(&original).unwrap());
@@ -977,8 +979,12 @@ fn torn_writes_are_recorded_replayed_and_omitted_when_disabled() {
     let recorded: ExecutionProfile =
         serde_json::from_slice(&serde_json::to_vec(&enabled.profile()).unwrap()).unwrap();
     assert_eq!(
-        recorded.semantic_parameters["disk_loss"],
-        vmm::TORN_DISK_MODEL
+        recorded.semantic_parameters["disk_loss_sector_bytes"],
+        "512"
+    );
+    assert_eq!(
+        recorded.semantic_parameters["disk_loss_survival_probability"],
+        "0.5"
     );
     assert_ne!(serde_json::to_vec(&recorded).unwrap(), encoded);
     let replay = executor
@@ -1003,7 +1009,10 @@ fn torn_writes_are_recorded_replayed_and_omitted_when_disabled() {
         let mut world = vmm::world(&request).unwrap();
         assert_eq!(
             world.as_object_mut().unwrap().remove("disk_loss"),
-            Some(json!(vmm::TORN_DISK_MODEL))
+            Some(json!({
+                "sector_bytes": 512,
+                "survival_probability": 0.5,
+            }))
         );
         assert_eq!(
             serde_json::to_vec(&world).unwrap(),
@@ -1012,11 +1021,11 @@ fn torn_writes_are_recorded_replayed_and_omitted_when_disabled() {
         prepared
             .profile
             .semantic_parameters
-            .insert("disk_loss".into(), "unknown".into());
+            .insert("disk_loss_survival_probability".into(), "2.0".into());
         assert!(vmm::recorded_torn_writes(&prepared.profile)
             .unwrap_err()
             .to_string()
-            .contains("unknown disk loss model unknown"));
+            .contains("unknown disk loss parameters"));
         let request = ExecutionRequest {
             prepared: &prepared,
             ..*base

@@ -408,11 +408,7 @@ fn run() -> Result<Value, String> {
         &std::fs::read(&config_path).map_err(|e| format!("{config_path}: {e}"))?,
     )
     .map_err(|e| format!("config: {e}"))?;
-    let torn_writes = match &cfg["disk_loss"] {
-        Value::Null => false,
-        Value::String(model) if model == disk::TORN_MODEL => true,
-        _ => return Err("unknown disk_loss model".into()),
-    };
+    let disk_fault_model = disk::parse_disk_fault_model(&cfg["disk_loss"])?;
     let base = std::path::Path::new(&config_path)
         .parent()
         .unwrap()
@@ -492,7 +488,7 @@ fn run() -> Result<Value, String> {
             cmdline += &format!(" virtio_mmio.device=4K@{NET_MMIO:#x}:{NET_IRQ}");
         }
         if control_channel {cmdline+=&format!(" virtio_mmio.device=4K@{CHANNEL_MMIO:#x}:{CHANNEL_IRQ}");}
-        let disk = machine_disk(&mc["disk"], &path)?.map(|d| d.with_torn_writes(torn_writes));
+        let disk = machine_disk(&mc["disk"], &path)?.map(|d| d.with_fault_model(disk_fault_model));
         if disk.is_some() {
             cmdline += &format!(" virtio_mmio.device=4K@{BLK_MMIO:#x}:{BLK_IRQ}");
         }
@@ -1153,7 +1149,7 @@ fn report(
             "net": mach.net.as_ref().map(|n| json!({"tx": n.tx_frames, "rx": n.rx_frames, "rx_dropped": n.rx_dropped})),
         });
         row["disk"] = json!(mach.blk.as_ref().map(|b| json!({
-                "model": b.disk.model(), "capacity_sectors": b.disk.capacity(), "base_sha256": b.disk.base_sha256(),
+                "fault_model": disk::disk_fault_model_report(b.disk.fault_model()), "capacity_sectors": b.disk.capacity(), "base_sha256": b.disk.base_sha256(),
                 "digest": b.disk.digest(), "stable_sectors": b.disk.stable_sectors(), "volatile_sectors": b.disk.volatile_sectors(),
                 "reads": b.stats.reads, "writes": b.stats.writes, "flushes": b.stats.flushes,
                 "sectors_read": b.stats.sectors_read, "sectors_written": b.stats.sectors_written,

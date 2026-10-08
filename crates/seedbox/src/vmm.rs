@@ -290,9 +290,17 @@ impl VmmExecutor {
         if enabled {
             self.profile
                 .semantic_parameters
-                .insert(DISK_LOSS.into(), TORN_DISK_MODEL.into());
+                .insert(DISK_LOSS_SECTOR_BYTES.into(), "512".into());
+            self.profile
+                .semantic_parameters
+                .insert(DISK_LOSS_SURVIVAL_PROBABILITY.into(), "0.5".into());
         } else {
-            self.profile.semantic_parameters.remove(DISK_LOSS);
+            self.profile
+                .semantic_parameters
+                .remove(DISK_LOSS_SECTOR_BYTES);
+            self.profile
+                .semantic_parameters
+                .remove(DISK_LOSS_SURVIVAL_PROBABILITY);
         }
         self
     }
@@ -321,16 +329,25 @@ impl VmmExecutor {
 
 const COUNTER: &str = "counter";
 const DISK_LOSS: &str = "disk_loss";
-/// Declares the loss policy, atomic unit, probability and dedicated RNG domain.
-pub const TORN_DISK_MODEL: &str =
-    "flush-stable/seeded-latest-sector-512-half/disk-loss-machine-incarnation/v1";
+const DISK_LOSS_SECTOR_BYTES: &str = "disk_loss_sector_bytes";
+const DISK_LOSS_SURVIVAL_PROBABILITY: &str = "disk_loss_survival_probability";
 
 /// Recover the disk policy from a retained profile, rejecting unknown semantics.
 pub fn recorded_torn_writes(profile: &ExecutionProfile) -> Result<bool> {
-    match profile.semantic_parameters.get(DISK_LOSS) {
-        None => Ok(false),
-        Some(model) if model == TORN_DISK_MODEL => Ok(true),
-        Some(model) => Err(Error::Integrity(format!("unknown disk loss model {model}"))),
+    let sector_bytes = profile.semantic_parameters.get(DISK_LOSS_SECTOR_BYTES);
+    let survival_probability = profile
+        .semantic_parameters
+        .get(DISK_LOSS_SURVIVAL_PROBABILITY);
+    if sector_bytes.is_none() && survival_probability.is_none() {
+        return Ok(false);
+    }
+    match (sector_bytes, survival_probability) {
+        (Some(sector_bytes), Some(survival_probability))
+            if sector_bytes == "512" && survival_probability == "0.5" =>
+        {
+            Ok(true)
+        }
+        _ => Err(Error::Integrity("unknown disk loss parameters".into())),
     }
 }
 
@@ -570,7 +587,10 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
         "control_channel":"virtio-console-v1",
     });
     if recorded_torn_writes(&request.prepared.profile)? {
-        world[DISK_LOSS] = json!(TORN_DISK_MODEL);
+        world[DISK_LOSS] = json!({
+            "sector_bytes": 512,
+            "survival_probability": 0.5,
+        });
     }
     Ok(world)
 }

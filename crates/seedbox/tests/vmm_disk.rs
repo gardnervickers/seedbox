@@ -9,6 +9,17 @@ mod disk;
 mod rng;
 
 #[test]
-fn profile_and_engine_name_the_same_disk_semantics() {
-    assert_eq!(seedbox::vmm::TORN_DISK_MODEL, disk::TORN_MODEL);
+fn disk_fault_model_is_parameterized_without_a_wire_name() {
+    let model = disk::parse_disk_fault_model(&serde_json::json!({
+        "sector_bytes": 512,
+        "survival_probability": 0.5,
+    }))
+    .unwrap();
+    assert_eq!(
+        model,
+        disk::DiskFaultModel {
+            sector_bytes: disk::SECTOR,
+            survival_probability: 0.5
+        }
+    );
 }

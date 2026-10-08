@@ -2050,17 +2050,17 @@ mod fork_tests {
     #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
     fn a_reboot_applies_seeded_sector_survival_and_keeps_the_default_witness() {
         let kvm=Kvm::new().unwrap();
-        for enabled in [false,true] {
+        for fault_model in [crate::disk::DiskFaultModel { sector_bytes: crate::disk::SECTOR, survival_probability: 0.0 },crate::disk::DiskFaultModel { sector_bytes: crate::disk::SECTOR, survival_probability: 0.5 }] {
             let run=|seed| {
                 let mut old=probe_machine(&kvm,256,false);
-                let mut disk=Disk::new(None,Some(32)).unwrap().with_torn_writes(enabled);
+                let mut disk=Disk::new(None,Some(32)).unwrap().with_fault_model(fault_model);
                 disk.write(0,&[b'A';32*512]).unwrap();
                 disk.flush();
                 disk.write(0,&[b'B';32*512]).unwrap();
                 let expected=disk.crashed_seeded(seed,&old.name,old.incarnation);
                 old.blk=Some(VirtioBlk::new(disk));
                 let mut new=probe_machine(&kvm,256,false);
-                new.blk=Some(VirtioBlk::new(Disk::new(None,Some(32)).unwrap().with_torn_writes(enabled)));
+                new.blk=Some(VirtioBlk::new(Disk::new(None,Some(32)).unwrap().with_fault_model(fault_model)));
                 // The pre-policy successor witness: old witness followed by C.
                 let mut witness=new.witness.clone();
                 witness.update(old.exit_witness().as_bytes());

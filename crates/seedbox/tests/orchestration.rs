@@ -1973,7 +1973,12 @@ fn torn_write_policy_changes_identity_and_replay_requires_the_recorded_policy() 
         .backend
         .profile
         .semantic_parameters
-        .insert("disk_loss".into(), seedbox::vmm::TORN_DISK_MODEL.into());
+        .insert("disk_loss_sector_bytes".into(), "512".into());
+    fixture
+        .backend
+        .profile
+        .semantic_parameters
+        .insert("disk_loss_survival_probability".into(), "0.5".into());
     fixture.preparer.inputs.profile = fixture.backend.profile.clone();
     let on = fixture.run();
     assert_ne!(on.record.run_id, off.record.run_id);
@@ -1986,7 +1991,12 @@ fn torn_write_policy_changes_identity_and_replay_requires_the_recorded_policy() 
         .backend
         .profile
         .semantic_parameters
-        .remove("disk_loss");
+        .remove("disk_loss_sector_bytes");
+    fixture
+        .backend
+        .profile
+        .semantic_parameters
+        .remove("disk_loss_survival_probability");
     assert_eq!(fixture.replay(&on).record.outcome, Outcome::Error);
     assert_eq!(
         fixture.replay(&off).record.replay.unwrap().status,
