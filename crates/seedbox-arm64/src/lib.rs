@@ -1,5 +1,6 @@
 //! Experimental single-vCPU arm64 PV machine. No production x86 dependencies.
 pub mod backend;
+pub mod boot;
 pub mod devices;
 pub mod diagnostics;
 pub mod fdt;

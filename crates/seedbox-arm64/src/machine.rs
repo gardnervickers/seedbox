@@ -31,21 +31,34 @@ pub struct Machine<B: Backend> {
 }
 impl<B: Backend> Machine<B> {
     pub fn new(kernel: &[u8], initrd: &[u8], seed: u64) -> Result<Self> {
-        let (entry, image_size) = image_layout(kernel)?;
-        if entry
-            .checked_add(image_size)
-            .is_none_or(|end| end > INITRD_ADDR)
-        {
-            return Err("kernel overlaps initrd".into());
-        }
-        let dtb = fdt::build(seed, initrd.len())?;
-        let ram = Rc::new(Memory::new(RAM_SIZE)?);
+        Self::from_spec(boot::BootSpec::fixture(kernel, initrd, seed))
+    }
+
+    /// Construct a machine from checked boot inputs. Placement and generated
+    /// FDT size are validated before allocating RAM or creating a backend VM.
+    pub fn from_spec(spec: boot::BootSpec<'_>) -> Result<Self> {
+        let layout = spec.validate()?;
+        let dtb = fdt::build_for_layout(&layout)?;
+        let entry = layout.kernel_range().start;
+        let boot::BootSpec {
+            kernel,
+            initrd,
+            seed,
+            ..
+        } = spec;
+        let ram = Rc::new(Memory::new(layout.memory_bytes())?);
         let page = Rc::new(Memory::new(PAGE_SIZE)?);
         // No VM exists yet, so none of these copies race with a vCPU.
         unsafe {
-            ram.write((entry - RAM_BASE) as usize, kernel)?;
-            ram.write((INITRD_ADDR - RAM_BASE) as usize, initrd)?;
-            ram.write((DTB_ADDR - RAM_BASE) as usize, &dtb)?;
+            ram.write(layout.ram_offset(entry, kernel.len())?, kernel)?;
+            ram.write(
+                layout.ram_offset(layout.initrd_range().start, initrd.len())?,
+                initrd,
+            )?;
+            ram.write(
+                layout.ram_offset(layout.dtb_range().start, dtb.len())?,
+                &dtb,
+            )?;
             page.set_word(16, u64::MAX)?;
             page.set_word(24, ABI)?;
         }
@@ -58,7 +71,7 @@ impl<B: Backend> Machine<B> {
             backend.set_reg(CoreReg::X(n), 0)?;
         }
         backend.set_reg(CoreReg::Sp, 0)?;
-        backend.set_reg(CoreReg::X(0), DTB_ADDR)?;
+        backend.set_reg(CoreReg::X(0), layout.dtb_range().start)?;
         backend.set_reg(CoreReg::Pc, entry)?;
         backend.set_reg(CoreReg::Pstate, 0x3c5)?; // EL1h, DAIF masked
         backend.set_sys_reg(SysReg::SCTLR, 0x30d0_0800)?; // architectural RES1, MMU/caches off
