@@ -13,9 +13,8 @@ train: one branch, one host job, then ordinary merges with no further host time.
    Each PR enters as its own merge commit, so the train just before and just
    after any PR exists as a commit; a check that compares those prefixes
    builds an engine at each one.
-2. **Check it before host time.** On the train head: `cargo fmt -p seedbox --check`,
-   strict clippy, `cargo test --workspace --locked` and
-   `bash harness/acceptance.sh portable` (which runs `cargo test-vmm`).
+2. **Check it before host time.** On the train head, run
+   `bash harness/check.sh portable` in the project development shell.
 3. **Run one host job.** `bash harness/check.sh --require kvm --require counter` on the train head, plus the
    union of each PR's own host checks as its reviewer listed them, written as
    one script that runs independent checks at once on separate SMT pairs
@@ -75,12 +74,11 @@ train: one branch, one host job, then ordinary merges with no further host time.
    culprit and doesn't touch `crates/seedbox-vmm/`, `kernel/` or `guest/`
    keeps its evidence only if its checks ran on main's engine (no engine PR
    ahead of it in the train), or the train showed feature-off witness
-   equality for the worlds its checks ran. Otherwise rerun just its scoped
-   checks (`host-check.sh --plan`) on main plus the PR. Its engine equals
-   main's, so `cluster-fixed` is skipped and this is usually one core tier
-   on a side core. For example, #97 deliberately changes worlds with network
-   jitter, so when it left train/3 the MinIO runs of #104 and the faults
-   smoke tier of #110 reran on main. If the culprit's fix changes only its own
+   equality for the worlds its checks ran. Otherwise rerun the available platform
+   suite with
+   `bash harness/check.sh --require kvm --require counter` on main plus the PR,
+   followed by the reviewer's claim-specific fixture checks. If the culprit's fix
+   changes only its own
    fixtures or checker, the engine is unchanged: the rest of the train's
    evidence for it and the PRs stacked on it stands, and only the failed
    check reruns.

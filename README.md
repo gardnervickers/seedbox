@@ -361,9 +361,7 @@ tests within an existing capability need no runner changes. The portable suite
 includes ARM mock/policy tests on every development host and x86 backend unit
 tests on Linux x86-64. It never opens KVM or HVF.
 
-`harness/mac-check.sh [REV]` remains a portable compatibility wrapper with
-isolated revision worktrees and its existing persistent workspace cache. A
-platform suite pass includes only the capabilities printed for that invocation.
+A platform suite pass includes only the capabilities printed for that invocation.
 Engine changes still need the [merge train](docs/merge-train.md) and any
 claim-specific guest evidence.
 
@@ -653,9 +651,8 @@ are recorded in [docs/acceptance.md](docs/acceptance.md).
 
 `bash harness/check.sh` runs the full set of available platform suites,
 including application run/diff/replay checks when runtime inputs are present.
-Use `--require applications` when application coverage is required. The older
-change-scoped host planner remains available for low-level fixture campaigns;
-see its [execution instructions](harness/smoke/README.md#change-scoped-host-checks).
+Use `--require applications` when application coverage is required. Distinct
+low-level campaigns use the shared batch supervisor and documented world fixtures.
 
 The focused race comparison records a fixed `SOURCE_DATE_EPOCH=0` for Podman image
 build metadata and requires two public preparations to have identical complete

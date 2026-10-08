@@ -78,8 +78,10 @@ class SelectionTests(unittest.TestCase):
         with patch.object(check, "discover", return_value=unavailable), \
              patch.object(check, "root_prefix", return_value=None), \
              patch.object(check.platform, "system", return_value="Darwin"), \
-             contextlib.redirect_stdout(io.StringIO()):
+             patch.object(check.Checks, "run", side_effect=AssertionError("build before admission")), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(check.main(["--list", "--require", "kvm"]), 2)
+            self.assertEqual(check.main(["--require", "kvm"]), 2)
 
 
 class ExecutionTests(unittest.TestCase):

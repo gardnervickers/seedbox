@@ -112,7 +112,7 @@ mkdir -p artifacts
 guest/build-initramfs.sh artifacts/entropy-fork.cpio guest/entropy-fork.init artifacts/rngprobe:bin/rngprobe
 ```
 
-The ignored runtime-checkpoint entropy test also uses this initramfs, alongside
+The `guest-tests` runtime-checkpoint entropy test also uses this initramfs, alongside
 the current K2/ABI-3 kernel at `artifacts/bzImage`. Runtime checkpoints use
 main's reseed hook (PV fields 6–8, generation 9, entropy 10–13); see the
 [checkpoint design](../../docs/runtime.md#runtime-checkpoint-design-experimental).

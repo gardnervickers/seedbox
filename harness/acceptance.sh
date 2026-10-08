@@ -9,6 +9,7 @@ if [[ ${1:-portable} != portable || $# -gt 1 ]]; then
 fi
 cd "$(dirname "$0")/.."
 while IFS= read -r script; do
+  [[ -f $script ]] || continue
   bash -n "$script"
 done < <(git ls-files --cached --others --exclude-standard '*.sh' ':!:research/**' | sort -u)
 # New unittest modules are discovered without editing this runner.

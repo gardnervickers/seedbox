@@ -244,8 +244,11 @@ def main(argv=None):
     for name, reason in found.items():
         print(f"capability {name}: {'unavailable: ' + reason if reason else 'enabled'}")
     missing = [name for name in args.require if found[name]]
+    if missing:
+        print("error: required capabilities unavailable: " + ", ".join(missing), file=sys.stderr)
+        return 2
     if args.list:
-        return 2 if missing else 0
+        return 0
     checks = Checks(environment)
     checks.run("fmt", ["cargo", "fmt", "-p", "seedbox", "--check"])
     checks.run("clippy", ["cargo", "clippy", "-p", "seedbox", "--all-targets", "--locked", "--", "-D", "warnings"])
@@ -291,9 +294,7 @@ def main(argv=None):
             checks.cargo_tests(package, command, features, prefix,
                                counter=package == "seedbox-vmm" and "counter-tests" in features,
                                sign=package == "seedbox-arm64" and "hvf-tests" in features)
-    if missing:
-        print("error: required capabilities unavailable: " + ", ".join(missing), file=sys.stderr)
-    return 1 if checks.failed else 2 if missing else 0
+    return int(checks.failed)
 
 
 if __name__ == "__main__":

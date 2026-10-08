@@ -163,8 +163,8 @@ appropriate Cargo feature and target OS/architecture; do not add per-test lists
 or use `#[ignore]` for maintained hardware suites. The existing standalone aliases
 retain their wrappers, lockfiles, build profiles and target directories. The
 runner builds as the current user, signs disposable HVF test copies, and uses
-scoped CPU/SMT/MSR cleanup for counted tests. `mac-check.sh [REV]` remains a
-portable-only compatibility wrapper for revision worktrees.
+scoped CPU/SMT/MSR cleanup for counted tests. Check other revisions in a Git
+worktree with the same entrypoint; do not restore change-scoped test planners.
 
 The `seedbox-vmm` crate has existing clippy findings. Don't fix them in an
 unrelated change (see above).
