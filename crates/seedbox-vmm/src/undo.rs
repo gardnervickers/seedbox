@@ -305,16 +305,23 @@ impl Undo {
     }
 
     /// Whether every page written since the last sync still holds what it
-    /// held then; then bring the shadow up to RAM. Meaningful only when
-    /// nothing was restored or checkpointed since that sync.
-    pub fn unchanged_since_sync(&mut self, vm: &VmFd, mem: *mut u8) -> Result<bool, String> {
+    /// held then. `written` accumulates those pages across calls (start it
+    /// empty after each sync), so every call compares with the sync itself.
+    /// The shadow keeps the sync's contents; the pages stay marked, so the
+    /// next save, sync or fork point brings them up to RAM. Meaningful only
+    /// when nothing was restored or checkpointed since that sync.
+    pub fn unchanged_since_sync(&mut self, vm: &VmFd, mem: *mut u8, written: &mut Vec<u64>) -> Result<bool, String> {
         self.valid = false;
         self.fetch(vm)?;
-        let mut same = true;
-        for (w, &bits) in self.log.iter().enumerate() {
+        written.resize(self.log.len(), 0);
+        for ((w, &l), v) in written.iter_mut().zip(self.log.iter()).zip(self.vmm.iter_mut()) {
+            *w |= l;
+            *v |= l;
+        }
+        for (i, &bits) in written.iter().enumerate() {
             let mut b = bits;
-            while b != 0 && same {
-                let off = (w * 64 + b.trailing_zeros() as usize) * PAGE;
+            while b != 0 {
+                let off = (i * 64 + b.trailing_zeros() as usize) * PAGE;
                 b &= b - 1;
                 if off + PAGE <= self.size {
                     let (now, then) = unsafe {
@@ -323,12 +330,13 @@ impl Undo {
                             std::slice::from_raw_parts(self.shadow.add(off), PAGE),
                         )
                     };
-                    same = now == then;
+                    if now != then {
+                        return Ok(false);
+                    }
                 }
             }
         }
-        self.stats.synced_pages += self.copy_logged(mem, self.shadow);
-        Ok(same)
+        Ok(true)
     }
 
     /// Bring the shadow up to RAM and start tracking every page written from

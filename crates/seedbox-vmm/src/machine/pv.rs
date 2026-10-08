@@ -22,7 +22,7 @@
 //! interrupt. Any other long run resumes untouched (stepping changes no guest
 //! state), so the watchdog changes how fast a spin is noticed, never where it
 //! lands. Not every endless loop is caught: one whose state changes on every
-//! pass (`while (!flag) n++;`), a cycle longer than `PROBE_STEPS` landings,
+//! pass (`while (!flag) n++;`), a cycle of more than about a third of `PROBE_STEPS` landings,
 //! or one with a run of straight-line code longer than the planner's cap
 //! never goes idle, so virtual time stops and the world stalls until its
 //! wall-time limit. That follows from the model: such a loop waits on
@@ -78,11 +78,12 @@ pub struct PvClock {
 type Key = (u64, [u64; 17]);
 
 enum Probe {
-    /// Step and look for a landing RIP seen more than `min_period` steps ago.
-    Find { landings: Vec<u64>, min_period: usize, steps: usize },
-    /// Step `period` times from `saved` and compare. `last`: the cycle is
-    /// already proven, this pins down its least period.
-    Verify { saved: Box<Saved>, period: usize, keys: Vec<Key>, steps: usize, last: bool },
+    /// Brent's cycle search. `saved` is the reference state, taken at the
+    /// landing `keys[0]`; `keys` holds every landing since. The reference
+    /// moves to the current landing whenever `keys` reaches `power`
+    /// landings, and `power` doubles. A cycle of `n` landings is found once
+    /// the reference is in it and `power >= n`, wherever the search began.
+    Search { saved: Option<Box<Saved>>, keys: Vec<Key>, power: usize, steps: usize },
     /// A proven cycle: step to its canonical landing, `target`.
     Canon { target: Key, left: usize },
 }
@@ -110,66 +111,41 @@ impl PvClock {
         let regs = unsafe { m.vcpu.get_kvm_run().s.regs.regs };
         let key = key(&regs);
         let next = match self.probe.take().unwrap() {
-            Probe::Find { mut landings, min_period, steps } => {
-                if steps >= PROBE_STEPS || min_period >= PROBE_STEPS {
+            Probe::Search { mut saved, mut keys, power, steps } => {
+                if steps >= PROBE_STEPS {
                     m.stats.spin_false += 1;
                     return Ok(None);
                 }
-                let older = landings.len().saturating_sub(min_period);
-                match landings[..older].iter().rposition(|&r| r == key.0) {
-                    Some(i) => Probe::Verify {
-                        saved: Box::new(Saved::take(m)?),
-                        period: landings.len() - i,
-                        keys: Vec::new(),
-                        steps,
-                        last: false,
-                    },
-                    None => {
-                        landings.push(key.0);
-                        Probe::Find { landings, min_period, steps: steps + 1 }
-                    }
-                }
-            }
-            Probe::Verify { saved, period, mut keys, steps, last } => {
-                keys.push(key);
                 let steps = steps + 1;
-                if keys.len() < period {
-                    Probe::Verify { saved, period, keys, steps, last }
-                } else if saved.same(m)? {
-                    // The state after `period` steps is the state before them:
-                    // the guest repeats this cycle forever. Find its least
-                    // period: the landings repeat with it, and it must be
-                    // checked like any other.
-                    let least = (1..period)
-                        .find(|&d| period % d == 0 && (d..period).all(|i| keys[i] == keys[i - d]))
-                        .unwrap_or(period);
-                    if least < period {
-                        Probe::Verify { saved: Box::new(Saved::take(m)?), period: least, keys: Vec::new(), steps, last: true }
-                    } else {
-                        // Its landings are the same on every pass, so the
-                        // least one is a point we reach whichever pass we
-                        // noticed on.
-                        let target = *keys.iter().min().unwrap();
-                        if keys.iter().filter(|&&k| k == target).count() > 1 {
-                            return Err(format!(
-                                "{}: spin cycle at rip {:#x} has no unique canonical point (equal registers at two points of it)",
-                                m.name, target.0
-                            ));
-                        }
-                        if key == target {
-                            return Ok(Some(Prepared::Idle));
-                        }
-                        Probe::Canon { target, left: period }
+                // Equal keys are necessary for equal states; compare the
+                // whole state only then.
+                let back = match saved.as_mut() {
+                    Some(s) if key == keys[0] => s.same(m)?,
+                    _ => false,
+                };
+                if back {
+                    // The guest is back in the reference state: it repeats
+                    // this cycle forever, and `keys` is one pass of it, with
+                    // its least period (the first return). Its landings are
+                    // the same on every pass, so the least one is a point we
+                    // reach whichever pass we noticed on.
+                    let target = *keys.iter().min().unwrap();
+                    if keys.iter().filter(|&&k| k == target).count() > 1 {
+                        return Err(format!(
+                            "{}: spin cycle at rip {:#x} has no unique canonical point (equal registers at two points of it)",
+                            m.name, target.0
+                        ));
                     }
-                } else if last {
-                    return Err(format!(
-                        "{}: spin cycle at rip {:#x} has no unique canonical point (its registers repeat before its memory does)",
-                        m.name, key.0
-                    ));
+                    if key == target {
+                        return Ok(Some(Prepared::Idle));
+                    }
+                    Probe::Canon { target, left: keys.len() }
+                } else if saved.is_none() || keys.len() >= power {
+                    let power = if saved.is_none() { 1 } else { power * 2 };
+                    Probe::Search { saved: Some(Box::new(Saved::take(m)?)), keys: vec![key], power, steps }
                 } else {
-                    // Not a cycle of this length (or not yet one): look for a
-                    // longer one from here. Doubling bounds the cost.
-                    Probe::Find { landings: vec![key.0], min_period: period * 2, steps }
+                    keys.push(key);
+                    Probe::Search { saved, keys, power, steps }
                 }
             }
             Probe::Canon { target, left } => {
@@ -279,7 +255,7 @@ impl Timebase for PvClock {
                 self.skip -= 1;
             } else if self.probe.is_none() && !std::mem::take(&mut self.progressed) {
                 j.stats.spin_probes += 1;
-                self.probe = Some(Probe::Find { landings: Vec::new(), min_period: 0, steps: 0 });
+                self.probe = Some(Probe::Search { saved: None, keys: Vec::new(), power: 1, steps: 0 });
                 self.landed = true;
             }
             return Ok(Verdict::Advance { legal: false });
@@ -307,6 +283,8 @@ struct Saved {
     page: Box<[u8; 4096]>,
     /// A copy of RAM, when no dirty log tracks it.
     ram: Option<Mapping>,
+    /// With a dirty log: the pages written since this state was taken.
+    written: Vec<u64>,
 }
 
 impl Saved {
@@ -324,12 +302,12 @@ impl Saved {
                 Some(ram)
             }
         };
-        Ok(Self { cpu, page: page_copy(m), ram })
+        Ok(Self { cpu, page: page_copy(m), ram, written: Vec::new() })
     }
 
     /// Whether the machine is back in this state; if not, the first part
     /// that differs is counted in the machine's stats.
-    fn same(&self, m: &mut Machine) -> Result<bool, String> {
+    fn same(&mut self, m: &mut Machine) -> Result<bool, String> {
         let mut cpu = VcpuState::new(m.msrs.clone());
         cpu.save(&m.vcpu, "spin check")?;
         let page = page_copy(m);
@@ -339,7 +317,7 @@ impl Saved {
                 Some(at) => Some(format!("time page word {}", at / 8)),
                 None => {
                     let ram = match (&self.ram, m.undo.as_mut()) {
-                        (None, Some(u)) => u.unchanged_since_sync(&m._vm, m.mem)?,
+                        (None, Some(u)) => u.unchanged_since_sync(&m._vm, m.mem, &mut self.written)?,
                         (Some(ram), _) => unsafe {
                             std::slice::from_raw_parts(ram.ptr, ram.size)
                                 == std::slice::from_raw_parts(m.mem, m.mem_size)
