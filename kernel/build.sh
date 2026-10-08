@@ -4,13 +4,15 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 work="${SEEDBOX_WORK:-$HOME/seedbox-sim}"
 mkdir -p "$work/src"
-version=6.12.112
+read -r version want < <(python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); print(s["version"],s["sha256"])' "$here/../kernel/source.json")
 tarball="$work/src/linux-$version.tar.xz"
 # Separate build and output directories let a new kernel be built while
 # runs use the current one.
 build="${SEEDBOX_KBUILD:-$work/build}"
 artifacts="${SEEDBOX_ARTIFACTS:-$work/artifacts}"
-want=164dc9d1f6c93c61a15e1f071c48379b467f2b17c469cce7223471968208ed03
+if [ ! -f "$tarball" ] && [ -n "${SEEDBOX_KERNEL_SOURCE:-}" ]; then
+  cp "$SEEDBOX_KERNEL_SOURCE" "$tarball"
+fi
 [ -f "$tarball" ] || curl -sSL "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$version.tar.xz" -o "$tarball"
 echo "$want  $tarball" | sha256sum -c --quiet
 src="$build/linux-$version"
@@ -22,11 +24,11 @@ python3 "$here/apply.py" "$src"
 make -s -C "$src" O="$out" allnoconfig
 while read -r state option; do
   case "$state" in
-    y) "$src/scripts/config" --file "$out/.config" --enable "$option" ;;
-    n) "$src/scripts/config" --file "$out/.config" --disable "$option" ;;
+    y) bash "$src/scripts/config" --file "$out/.config" --enable "$option" ;;
+    n) bash "$src/scripts/config" --file "$out/.config" --disable "$option" ;;
   esac
 done < "$here/config.options"
-"$src/scripts/config" --file "$out/.config" --set-val SERIAL_8250_NR_UARTS 2 --set-val SERIAL_8250_RUNTIME_UARTS 2
+bash "$src/scripts/config" --file "$out/.config" --set-val SERIAL_8250_NR_UARTS 2 --set-val SERIAL_8250_RUNTIME_UARTS 2
 make -s -C "$src" O="$out" olddefconfig
 # Fail if a requested option did not survive dependency resolution.
 while read -r state option; do

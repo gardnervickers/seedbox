@@ -6,7 +6,9 @@ automatically and cached; Mac signing is automatic. Run the release executable
 with the Compose directory as its positional argument. On Linux use
 `--timebase pv` for KVM without performance-counter requirements and give your
 user read/write access to `/dev/kvm`. No Lima or manual packaging script is
-needed. Replay requires retained inputs, not the container engine.
+needed. Nix packages own the guest assets and the minimal filesystem-tools
+image; the normal Cargo release build embeds their outputs. Replay requires
+retained inputs, not the container engine.
 
 This project is self-contained. Use the same commands on Linux x86-64 KVM or
 Apple Silicon HVF after building the packaged CLI for that platform. Linux PV execution requires read/write access to `/dev/kvm`; Mac execution

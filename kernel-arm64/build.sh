@@ -20,9 +20,11 @@ done
 case "$(findmnt -n -o FSTYPE -T "$build")" in
   virtiofs|9p|nfs*|fuse*) echo "build dir must use a native Linux filesystem: $build" >&2; exit 2 ;;
 esac
-version=6.12.112
-want=164dc9d1f6c93c61a15e1f071c48379b467f2b17c469cce7223471968208ed03
+read -r version want < <(python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); print(s["version"],s["sha256"])' "$here/../kernel/source.json")
 tarball="$build/linux-$version.tar.xz"
+if [ ! -f "$tarball" ] && [ -n "${SEEDBOX_KERNEL_SOURCE:-}" ]; then
+  cp "$SEEDBOX_KERNEL_SOURCE" "$tarball"
+fi
 if [ ! -f "$tarball" ]; then
   curl --fail --location "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$version.tar.xz" -o "$tarball.part"
   mv "$tarball.part" "$tarball"

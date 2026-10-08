@@ -42,10 +42,8 @@
       packages = nixpkgs.lib.genAttrs systems (system:
         let pkgs = import nixpkgs { inherit system; }; in {
           networkTools = pkgs.iproute2;
-          preparationTools = pkgs.buildEnv {
-            name = "seedbox-preparation-tools";
-            paths = with pkgs; [ skopeo umoci python3 gnutar coreutils ];
-          };
-        });
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux
+          (import ./nix/runtime.nix { inherit pkgs; })
+        );
     };
 }

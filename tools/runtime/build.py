@@ -14,7 +14,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 BUILD_LOG = None
-INPUTS = ['flake.nix', 'flake.lock', 'guest', 'kernel', 'kernel-arm64', 'tools/runtime/Dockerfile', 'tools/runtime/build-assets.sh', 'tools/runtime/filesystem.py',
+INPUTS = ['flake.nix', 'flake.lock', 'nix', 'guest', 'kernel', 'kernel-arm64', 'tools/runtime/Dockerfile', 'tools/runtime/build-assets.sh', 'tools/runtime/filesystem.py',
           'tools/linux-runtime/package.py']
 
 
@@ -38,6 +38,63 @@ def write_package(assets, output):
                         header.mode = 0o755 if path.name in {'compose-init', 'busybox', 'mke2fs'} else 0o644
                         with path.open('rb') as source:
                             archive.addfile(header, source)
+
+
+def image_digest(path):
+    """Docker's image ID is the digest of the archive's single config object."""
+    with tarfile.open(path) as archive:
+        manifest = json.load(archive.extractfile('manifest.json'))
+        if len(manifest) != 1:
+            raise ValueError('filesystem-tools archive must contain one image')
+        config = archive.getmember(manifest[0]['Config'])
+        if not config.isfile() or config.size > 1 << 20:
+            raise ValueError('invalid filesystem-tools image config')
+        return 'sha256:' + hashlib.file_digest(archive.extractfile(config), 'sha256').hexdigest()
+
+
+def container_assets(stage, assets, files, key, architecture):
+    requested = os.environ.get('SEEDBOX_BUILDER')
+    candidates = [requested] if requested else ['docker', 'podman']
+    engine = None
+    found = []
+    for candidate in candidates:
+        client = shutil.which(candidate)
+        if not client:
+            continue
+        found.append(client)
+        try:
+            ready = subprocess.run([client, 'info'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15).returncode == 0
+        except subprocess.TimeoutExpired:
+            ready = False
+        if ready:
+            engine = client
+            break
+    if not engine:
+        if found:
+            raise RuntimeError('container engine unavailable; start Docker Desktop or your Podman machine and check DOCKER_HOST / CONTAINER_HOST; tried ' + ', '.join(found))
+        raise RuntimeError('no Docker/Podman client found; install Docker or Podman and start its Linux engine (or enter nix develop)')
+    info = json.loads(subprocess.check_output([engine, 'info', '--format', '{{json .}}'], text=True, timeout=15))
+    memory = info.get('MemTotal', info.get('host', {}).get('memTotal', 0))
+    if memory and memory < 3 * 1024**3:
+        raise RuntimeError('guest asset builds need at least 4 GiB assigned to the container engine; increase Docker Desktop memory in Settings, or stop your Podman machine and run podman machine set --memory 4096, then start it again')
+    context = stage / 'context'
+    context.mkdir()
+    for path in files:
+        dest = context / path.relative_to(ROOT)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, dest)
+    tag = 'seedbox-tools:' + key
+    version = subprocess.check_output([engine, '--version'], text=True, timeout=15)
+    build_options = ([] if 'podman' in version.lower() else ['--load']) + [
+        '--platform', 'linux/' + architecture, '--build-arg', 'SOURCE_DATE_EPOCH=0']
+    run([engine, 'build', *build_options, '--target', 'assets', '-t', tag + '-assets',
+         '-f', context / 'tools/runtime/Dockerfile', context])
+    container_image = tag + '-assets'
+    container = subprocess.check_output([engine, 'create', '--entrypoint', '/bin/sh', container_image], text=True).strip()
+    try:
+        run([engine, 'cp', container + ':/assets', assets])
+    finally:
+        run([engine, 'rm', '-f', container])
 
 
 def build(output, architecture):
@@ -64,63 +121,28 @@ def build(output, architecture):
         else:
             BUILD_LOG = (cache / 'build.log').open('w')
             print('cargo::warning=assets: build log ' + str(cache / 'build.log'), flush=True)
-            requested = os.environ.get('SEEDBOX_BUILDER')
-            candidates = [requested] if requested else ['docker', 'podman']
-            engine = None
-            found = []
-            for candidate in candidates:
-                client = shutil.which(candidate)
-                if not client:
-                    continue
-                found.append(client)
-                try:
-                    ready = subprocess.run([client, 'info'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15).returncode == 0
-                except subprocess.TimeoutExpired:
-                    ready = False
-                if ready:
-                    engine = client
-                    break
-            if not engine:
-                if found:
-                    raise RuntimeError('container engine unavailable; start Docker Desktop or your Podman machine and check DOCKER_HOST / CONTAINER_HOST; tried ' + ', '.join(found))
-                raise RuntimeError('no Docker/Podman client found; install Docker or Podman and start its Linux engine (or enter nix develop)')
-            info = json.loads(subprocess.check_output([engine, 'info', '--format', '{{json .}}'], text=True, timeout=15))
-            memory = info.get('MemTotal', info.get('host', {}).get('memTotal', 0))
-            if memory and memory < 3 * 1024**3:
-                raise RuntimeError('guest asset builds need at least 4 GiB assigned to the container engine; increase Docker Desktop memory in Settings, or stop your Podman machine and run podman machine set --memory 4096, then start it again')
             with tempfile.TemporaryDirectory(prefix='seedbox-assets-') as directory:
                 stage = Path(directory)
-                context = stage / 'context'
-                context.mkdir()
-                for path in files:
-                    dest = context / path.relative_to(ROOT)
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(path, dest)
-                tag = 'seedbox-tools:' + key
-                version = subprocess.check_output([engine, '--version'], text=True, timeout=15)
-                build_options = ([] if 'podman' in version.lower() else ['--load']) + [
-                    '--platform', 'linux/' + architecture, '--build-arg', 'SOURCE_DATE_EPOCH=0']
-                run([engine, 'build', *build_options, '--target', 'assets', '-t', tag + '-assets',
-                     '-f', context / 'tools/runtime/Dockerfile', context])
-                container_image = tag + '-assets'
-                container = subprocess.check_output([engine, 'create', '--entrypoint', '/bin/sh', container_image], text=True).strip()
                 assets = stage / 'assets'
-                try:
-                    run([engine, 'cp', container + ':/assets', assets])
-                finally:
-                    run([engine, 'rm', '-f', container])
+                native_arch = {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(os.uname().machine)
+                if sys.platform == 'linux' and architecture == native_arch and not os.environ.get('SEEDBOX_BUILDER'):
+                    # Linux already provides the required build environment.
+                    if not shutil.which('nix'):
+                        raise RuntimeError('nix not found; install Nix and enter nix develop')
+                    run(['nix', 'build', '.#runtimeAssets', '--out-link', stage / 'guest-assets'], cwd=ROOT)
+                    run(['nix', 'build', '.#preparationImage', '--out-link', stage / 'tools-image'], cwd=ROOT)
+                    shutil.copytree(stage / 'guest-assets', assets)
+                    assets.chmod(0o700)
+                    shutil.copyfile(stage / 'tools-image', assets / 'tools-image.tar')
+                else:
+                    container_assets(stage, assets, files, key, architecture)
                 # Store only ordinary files, never the image's /nix/store symlink.
                 for child in assets.iterdir():
                     if child.is_symlink():
                         child.unlink()
                 for name in ['tools.nar', 'tools.path', 'init.cpio', 'build-directory.txt', 'SHA256SUMS', 'bzImage']:
                     (assets / name).unlink(missing_ok=True)
-                run([engine, 'build', *build_options, '-t', tag,
-                     '-f', context / 'tools/runtime/Dockerfile', context])
-                image = subprocess.check_output([engine, 'image', 'inspect', '--format', '{{.Id}}', tag], text=True).strip()
-                if not image.startswith('sha256:'):
-                    image = 'sha256:' + image
-                run([engine, 'save', '-o', assets / 'tools-image.tar', tag])
+                image = image_digest(assets / 'tools-image.tar')
                 records = {p.name: hashlib.file_digest(p.open('rb'), 'sha256').hexdigest()
                            for p in sorted(assets.iterdir()) if p.is_file()}
                 (assets / 'runtime.json').write_text(json.dumps({'version': 1, 'image': image, 'files': records}, indent=2) + '\n')

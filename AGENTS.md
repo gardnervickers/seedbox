@@ -17,6 +17,9 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   Doctor extracts only the selected kernel and never creates state/prepares
   images. Replay must not substitute installed package bytes for retained inputs.
   Linux package execution/reproducibility requires the final merge train.
+  `nix/runtime.nix` owns `runtimeAssets` and `preparationImage`; Cargo invokes
+  Nix directly on Linux and copies its outputs from a Linux build container on
+  Mac. Kernel source metadata lives in `kernel/source.json`.
   Packaged runs use their bundled kernel unless `--kernel` or `SEEDBOX_KERNEL`
   is explicit; legacy artifact-directory searches apply only to unbundled builds.
   Explicit `--build-epoch` retains native project-Nix preparation using packaged

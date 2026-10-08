@@ -11,11 +11,14 @@ cargo build --release
 ```
 
 The release build prepares and embeds the patched x86 Linux kernel, static
-supervisor, BusyBox, mke2fs and a filesystem-tools container image. Kernel builds
-and their dependencies execute inside the container engine. No second Seedbox
-executable is built. Assign at least 4 GiB RAM to the container engine for guest asset builds.
-The first build needs network access and a running engine;
-unchanged guest inputs reuse `$XDG_CACHE_HOME/seedbox/assets` or
+supervisor, BusyBox, mke2fs and a filesystem-tools container image. No second
+Seedbox executable is built. The first asset build needs network access.
+Nix owns guest assets and the minimal filesystem-tools image through
+`runtimeAssets` and `preparationImage` in `nix/runtime.nix`. Linux builds use
+Nix directly; no container engine is needed until application preparation.
+An explicit `SEEDBOX_BUILDER` build override uses the same Linux container bridge
+as Mac, for checking a particular engine.
+Unchanged guest inputs reuse `$XDG_CACHE_HOME/seedbox/assets` or
 `~/.cache/seedbox/assets`. See the [shared workflow](../mac-runtime/README.md)
 for image preparation and cache behavior.
 

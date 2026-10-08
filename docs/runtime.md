@@ -929,7 +929,7 @@ unknown further byte count and cleanup-unverified ERROR. Compact command/cleanup
 receipts have a separate 4 MiB budget; version text is capped at 8 KiB. Required evidence
 write failure is ERROR. Receipts record program/hash/arguments/cwd, local mode,
 private tag and build-input digests, process status, cancellation/escalation/reap,
-elapsed time and cleanup disposition. Application stdout is never parsed for verdicts.
+elapsed time, deadline expiry and cleanup disposition. Application stdout is never parsed for verdicts.
 
 Initial build admission is the inspected project-Nix Linux Podman launcher and
 native binary closure, invoked through the launcher with `--remote=false`. Its
@@ -942,8 +942,11 @@ identity until final group signalling, then reaps it. Graceful termination escal
 after 250 ms; an unconfirmed exit after 5 s is cleanup-unverified ERROR. This cannot
 promise cleanup for a process blocked indefinitely in the kernel or delegated
 builder work. Cancelled builds remain cleanup-unverified and keep their unique tag;
-no image-rm races a potentially running build. After a completed build, private-tag
-cleanup is separately bounded; cleanup failure outranks clean cancellation. No
+no image-rm races a potentially running build. After a completed build, private-tag and helper-container
+cleanup have a 30-second daemon-operation deadline. Expiry starts the same
+250-ms termination grace and five-second reap bound; the receipt records the
+timeout, and daemon removal must still be verified. Slow filesystem removal is
+not treated as hung after only five seconds; cleanup failure outranks clean cancellation. No
 shared daemon, unrelated image/container, host service or cache is changed.
 
 CLI resource fields report self/reaped-child user/system CPU deltas and separate

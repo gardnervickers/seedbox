@@ -51,6 +51,7 @@ fn main() {
         for input in [
             "flake.nix",
             "flake.lock",
+            "nix",
             "guest",
             "kernel",
             "kernel-arm64",
@@ -77,12 +78,14 @@ fn main() {
             eprintln!("guest asset preparation failed; see build output above");
             std::process::exit(1);
         }
+        // Keep the large archive in static storage; a const expands at use sites
+        // and can make compiler constant evaluation consume excessive memory.
         format!(
-            "pub const RUNTIME: Option<&[u8]> = Some(include_bytes!({:?}));\n",
+            "pub static RUNTIME: Option<&[u8]> = Some(include_bytes!({:?}));\n",
             bundle
         )
     } else {
-        "pub const RUNTIME: Option<&[u8]> = None;\n".into()
+        "pub static RUNTIME: Option<&[u8]> = None;\n".into()
     };
     std::fs::write(output.join("container-runtime.rs"), declaration)
         .expect("write runtime declaration");
@@ -93,11 +96,11 @@ fn main() {
             std::fs::canonicalize(bundle).expect("Linux guest bundle must exist at CLI build time");
         println!("cargo::rerun-if-changed={}", bundle.display());
         format!(
-            "pub const LINUX_RUNTIME:Option<&[u8]>=Some(include_bytes!({:?}));\n",
+            "pub static LINUX_RUNTIME:Option<&[u8]>=Some(include_bytes!({:?}));\n",
             bundle
         )
     } else {
-        "pub const LINUX_RUNTIME:Option<&[u8]>=None;\n".into()
+        "pub static LINUX_RUNTIME:Option<&[u8]>=None;\n".into()
     };
     std::fs::write(
         PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("linux-runtime.rs"),

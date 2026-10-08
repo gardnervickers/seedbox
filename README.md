@@ -36,9 +36,13 @@ cargo build --release
 
 The release build automatically prepares and caches the patched guest kernel
 and static helpers, packages Linux filesystem tools, and signs the Mac executable.
-Guest asset builds need at least 4 GiB assigned to the container engine.
-The first build requires network access and a running container engine. There
-is no separate packaging script, Lima dependency or second Linux Seedbox executable.
+Nix packages in `nix/runtime.nix` own the guest assets and filesystem-tools image;
+Cargo invokes Nix directly on Linux and uses a Linux build container on Mac,
+then embeds the results. The helper uses
+minimal Python, and Nix's image builder includes its declared tool closure.
+Mac guest asset builds need at least 4 GiB assigned to the container engine.
+The first build requires network access; Mac asset builds also require a
+running container engine. There is no separate packaging script, Lima dependency or second Linux Seedbox executable.
 Runtime image builds/pulls use your Docker/Podman endpoint; helper containers
 unpack Linux filesystems without extracting them onto the host. Simulation runs
 directly through HVF on Mac or KVM on Linux. Replay uses retained bytes and needs

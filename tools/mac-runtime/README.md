@@ -16,8 +16,13 @@ cargo build --release
 The normal release build downloads and patches the ARM Linux kernel, builds the
 static guest supervisor and packages BusyBox and mke2fs. It also builds a Linux
 filesystem-tools image containing Skopeo, umoci, tar and Python. No second
-Seedbox executable or Rust compiler is shipped in that image. Cargo signs Mac
-executables with the Hypervisor entitlement automatically after linking.
+Seedbox executable or Rust compiler is shipped in that image. Cargo signs the
+Mac CLI with the Hypervisor entitlement automatically after linking.
+
+The Linux build uses the `runtimeAssets` and `preparationImage` Nix packages in
+`nix/runtime.nix`. The latter uses Nix's image builder and minimal Python;
+Cargo copies these artifacts from one Linux build container. It does not
+assemble Nix closures or export a second daemon-built image itself.
 
 Assign at least 4 GiB RAM to the container engine for guest asset builds.
 The first build needs network access and a running container engine. Unchanged
