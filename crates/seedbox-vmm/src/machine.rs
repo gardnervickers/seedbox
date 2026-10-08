@@ -1578,11 +1578,16 @@ impl Machine {
                 // The exit still borrows vcpu: use only the disjoint fields.
                 let last = unsafe { std::ptr::read_volatile(self.page.add(1)) };
                 let exit_time = advance_time(self.time, last.saturating_sub(self.time), hard)?;
-                if self.page_timer.enabled {
+                if self.pv_clock || self.page_timer.enabled {
                     // In particular HLT must adopt at its full exit time, not
-                    // at a watchdog landing's partial syscall-only time.
+                    // at a watchdog landing's partial syscall-only time. A
+                    // stop that left the guest's clock ahead of ours could be
+                    // given a next limit below time the guest already read;
+                    // a timer armed here must count from that clock too.
                     self.stats.time_by[Cause::ClockReads as usize] += exit_time - self.time;
                     self.time = exit_time;
+                }
+                if self.page_timer.enabled {
                     let word = unsafe { std::ptr::read_volatile(self.page.add(PAGE_TIMER_DEADLINE)) };
                     if self.page_timer.pickup(word, &mut self.pit, self.time)? { self.pic.raise(0); }
                     timer_latency(&mut self.pit, &mut self.pit_exact, self.timer_rng.as_mut(), self.timer_jitter, self.exact_timer_ppm);
