@@ -2211,7 +2211,7 @@ mod io_boundary_tests {
             let mut kernel = vec![0u8; 1024]; kernel[0x1f1] = 1; kernel.extend(&code);
             let spec = BootSpec { kernel: &kernel, initrd: &[], cmdline: String::new(), mem: INITRD_ADDR + 0x100000, rng_seed: [0; 32], mac: None, control_channel: false, disk: None, undo_margin: undo, barrier: false, pv_clock: false, page_timer: true };
             let mut m = Machine::new(&kvm, "page-rearm", &spec).unwrap();
-            let mut r = m.vcpu.get_regs().unwrap(); r.rflags = 0x2; m.vcpu.set_regs(&r).unwrap();
+            let mut r = m.vcpu.get_regs().unwrap(); r.rflags = 0x202; m.vcpu.set_regs(&r).unwrap();
             m.abi = ABI_PAGE_TIMER;
             m.enable_page_timer();
             m.tolerance = 200_000;
