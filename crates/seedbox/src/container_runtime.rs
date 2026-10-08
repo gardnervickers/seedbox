@@ -470,6 +470,8 @@ impl ImageTransport for ContainerPreparer {
                         &container,
                         "--network",
                         "none",
+                        "--stop-timeout",
+                        "0",
                         "--user",
                         "0",
                         &self.runtime.manifest.image,
@@ -542,22 +544,42 @@ impl ImageTransport for ContainerPreparer {
                     provenance: provenance.clone(),
                 })
             })();
-            self.remove_helper(
+            let cleanup = self.remove_helper(
                 context,
                 &container,
                 &format!("{service_name}-helper-cleanup"),
-            )?;
-            filesystem
+            );
+            finish_cleanup(filesystem, cleanup)
         })();
         if matches!(service.source, ImageSource::Build { .. }) {
-            self.run(
+            let cleanup = self.run(
                 context,
                 self.command().args(["image", "rm", "--no-prune", &tag]),
                 &format!("{service_name}-tag-cleanup"),
                 true,
-            )?;
+            );
+            return finish_cleanup(operation, cleanup);
         }
         operation
+    }
+}
+
+fn finish_cleanup<T>(operation: Result<T>, cleanup: Result<()>) -> Result<T> {
+    match cleanup {
+        Ok(()) => operation,
+        Err(error) => {
+            let detail = match error {
+                Error::PreparationCleanupUnverified(detail) => detail,
+                error => error.to_string(),
+            };
+            let cause = operation
+                .err()
+                .map(|error| format!("{error}; "))
+                .unwrap_or_default();
+            Err(Error::PreparationCleanupUnverified(format!(
+                "{cause}cleanup failed: {detail}"
+            )))
+        }
     }
 }
 
@@ -631,6 +653,22 @@ mod tests {
 mod cleanup_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn cleanup_failure_preserves_the_preparation_cause() {
+        let result: Result<()> = finish_cleanup(
+            Err(Error::Setup("image metadata unsupported".into())),
+            Err(Error::PreparationCleanupUnverified("helper remains".into())),
+        );
+        let error = result.unwrap_err();
+        assert!(matches!(error, Error::PreparationCleanupUnverified(_)));
+        let message = error.to_string();
+        assert!(message.contains("image metadata unsupported"));
+        assert!(message.contains("helper remains"));
+        assert!(matches!(
+            finish_cleanup::<()>(Err(Error::PreparationCancelled), Ok(())),
+            Err(Error::PreparationCancelled)
+        ));
+    }
     #[test]
     fn client_probe_checks_linux_and_preserves_cancellation() {
         let directory = tempfile::tempdir().unwrap();

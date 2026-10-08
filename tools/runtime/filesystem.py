@@ -24,10 +24,17 @@ def prepare(directory):
     # Match the existing newc contract: do not silently discard ACLs,
     # capabilities, device nodes, timestamps, or filenames it cannot represent.
     root = bundle / 'rootfs'
+    # SELinux container hosts label newly created files. That ambient backing-
+    # filesystem label is not image metadata; retain rejection of other labels
+    # and of all image capabilities, ACLs and user attributes.
+    ambient = {name: os.getxattr(directory, name) for name in os.listxattr(directory)
+               if name == 'security.selinux'}
     for parent, dirs, files in os.walk(root, followlinks=False):
         for path in [Path(parent), *(Path(parent) / name for name in dirs + files)]:
             info = path.lstat()
-            if os.listxattr(path, follow_symlinks=False):
+            unsupported = [name for name in os.listxattr(path, follow_symlinks=False)
+                           if name not in ambient or os.getxattr(path, name, follow_symlinks=False) != ambient[name]]
+            if unsupported:
                 raise ValueError('image extended attributes unsupported: ' + str(path))
             if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)):
                 raise ValueError('special image file unsupported: ' + str(path))
