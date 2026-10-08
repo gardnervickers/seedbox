@@ -3,6 +3,9 @@
 Install Nix and Apple's Command Line Tools. Install and start a Linux container
 engine: Docker Desktop or Podman with a running machine. The project shell
 provides Rust, Python and container clients; it does not start the engine.
+Assign at least 4 GiB of memory to the engine for the release build. For Podman,
+stop the machine, run `podman machine set --memory 4096`, and start it again.
+Seedbox checks this before building and reports the remedy if memory is too low.
 
 From the repository root:
 

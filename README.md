@@ -14,7 +14,8 @@ backend on an Apple Silicon Mac. Linux PV runs need KVM device permissions;
 counter mode also needs privileged performance-counter access.
 
 Install Nix and start a Linux Docker or Podman engine. On Mac, install Apple's
-Command Line Tools and use Docker Desktop or a running Podman machine. On Linux,
+Command Line Tools and use Docker Desktop or a running Podman machine with at
+least 4 GiB of memory assigned for the release build. On Linux,
 enable KVM and grant your user read/write access to `/dev/kvm`.
 
 From the repository root:
