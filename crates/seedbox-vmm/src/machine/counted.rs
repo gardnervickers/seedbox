@@ -19,7 +19,7 @@ impl Timebase for Counter {
         // time equals the held checkpoint, so the margin keeps growing and
         // this cannot restart the same failed approach indefinitely.
         if !legal && !m.stepping && remaining <= m.fm
-            && remaining > 128
+            && remaining > 32
             && m.undo.as_ref().is_some_and(|u| u.valid && m.world.time > u.time)
         {
             m.checkpoint()?;
