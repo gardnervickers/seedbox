@@ -33,7 +33,7 @@ fn mac_rejects_linux_cpu_options_before_preparation_or_state_creation() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("compose.yaml"), "name: mac-options\nservices:\n  app: {image: example/app}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n").unwrap();
     for command in ["run", "explore", "doctor"] {
-        for flags in [&["--cpu", "1"][..], &["--allow-unqualified-cpu"][..]] {
+        for flags in [&["--cpu", "1"][..]] {
             let mut args = vec![command];
             args.extend(flags);
             let output = seedbox(&args, directory.path());
@@ -41,7 +41,7 @@ fn mac_rejects_linux_cpu_options_before_preparation_or_state_creation() {
             assert!(output.stdout.is_empty(), "{args:?}");
             assert_eq!(
                 stderr(&output),
-                "error: --cpu and --allow-unqualified-cpu require Linux KVM; omit them on Mac\n",
+                "error: --cpu requires Linux KVM; omit it on Mac\n",
                 "{args:?}"
             );
             assert!(!directory.path().join(".seedbox").exists(), "{args:?}");
@@ -494,24 +494,6 @@ fn explicit_inputs_must_exist() {
         stderr(&output),
         "error: --vmm /nonexistent/seedbox-vmm: not found\n"
     );
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn unqualified_cpu_permission_is_checked_after_the_inputs() {
-    // Whatever this host's CPU, input errors come first, with or without the flag.
-    let (directory, mut args) = runtime_project();
-    let bin = directory.path().join("bin");
-    fs::create_dir(&bin).unwrap();
-    for allow in [false, true] {
-        if allow {
-            args.push("--allow-unqualified-cpu".into());
-        }
-        let args: Vec<_> = args.iter().map(String::as_str).collect();
-        let output = seedbox_with(&args, directory.path(), Some(&bin));
-        assert_eq!(output.status.code(), Some(2));
-        assert!(stderr(&output).starts_with("error: no static BusyBox found;"));
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1015,33 +997,6 @@ fn doctor_bad_inputs_execute_no_tools_and_create_no_state_even_with_cargo_enviro
     assert!(output.stdout.is_empty());
 }
 
-#[test]
-fn dev_engine_opt_in_is_available_only_on_execution_commands() {
-    let dir = tempfile::tempdir().unwrap();
-    for command in ["run", "explore", "replay", "doctor"] {
-        let help = seedbox(&["help", command], dir.path());
-        assert!(help.status.success());
-        assert!(String::from_utf8_lossy(&help.stdout).contains("--allow-dev-engine"));
-        let output = seedbox(
-            &[command, "--allow-dev-engine", "--cpu", "1024"],
-            dir.path(),
-        );
-        assert_eq!(output.status.code(), Some(2));
-        assert!(!stderr(&output).contains("unexpected argument '--allow-dev-engine'"));
-    }
-    for command in ["prepare", "inspect", "export", "import"] {
-        let help = seedbox(&["help", command], dir.path());
-        assert!(!String::from_utf8_lossy(&help.stdout).contains("--allow-dev-engine"));
-    }
-    let output = seedbox(
-        &["doctor", "--allow-dev-engine", "--vmm", "missing"],
-        dir.path(),
-    );
-    assert_eq!(stderr(&output), "error: --vmm missing: not found\n");
-    assert!(output.stdout.is_empty());
-    assert!(!dir.path().join(".seedbox").exists());
-}
-
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn doctor_dev_opt_in_keeps_host_refusal_and_creates_no_state() {
@@ -1049,14 +1004,7 @@ fn doctor_dev_opt_in_keeps_host_refusal_and_creates_no_state() {
     fs::write(dir.path().join("engine"), b"dev engine").unwrap();
     fs::write(dir.path().join("kernel"), b"dev kernel").unwrap();
     for json in [false, true] {
-        let mut args = vec![
-            "doctor",
-            "--allow-dev-engine",
-            "--vmm",
-            "engine",
-            "--kernel",
-            "kernel",
-        ];
+        let mut args = vec!["doctor", "--vmm", "engine", "--kernel", "kernel"];
         if json {
             args.push("--json");
         }

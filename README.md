@@ -135,7 +135,7 @@ for lifecycle and unsupported-traffic behavior, and the
 [AMD validation procedure](docs/connection-selectors-amd.md).
 
 Engines and guest kernels are not pinned: any built engine and kernel are
-admitted, and each run records their hashes. `--allow-dev-engine` is still accepted and has no effect.
+admitted, and each run records their hashes.
 The host checks are the KVM and perf capabilities the engine needs; CPU model,
 microcode and CPUID are not pinned.
 
@@ -150,16 +150,15 @@ retained bytes even after the installed CLI is upgraded. The executable hash is
 an internal integrity reference, so equal version labels never substitute for
 equal bytes. Existing runs without a worker descriptor retain the standalone
 VMM contract. The combined executable has its own engine identity and needs
-separate runtime evidence. Every built engine and guest kernel is admitted;
-`--allow-dev-engine` remains a compatibility no-op.
+separate runtime evidence. Every built engine and guest kernel is admitted.
 
 The ARM application engine is linked into the Mac CLI. Both platform adapters
 use the shared world coordinator, including connection selectors and committed
 console triggers; ARM arbitrary snapshot/fork reuse remains unsupported. Its PV world identity,
 boot-layout evidence and HVF host admission are distinct from the existing ARM
 fixture and x86 KVM profiles. Mac defaults use packaged Image, supervisor,
-BusyBox and mke2fs, with `linux/arm64` as the image platform. `--cpu`, `--vmm`
-and `--allow-unqualified-cpu` remain Linux-only; Mac exploration is serial.
+BusyBox and mke2fs, with `linux/arm64` as the image platform. `--cpu` and `--vmm`
+remain Linux-only; Mac exploration is serial.
 
 `seedbox run --torn-writes` enables seeded partial survival of unflushed
 512-byte disk sectors on crash. It is recorded in run identity and replayed
@@ -433,10 +432,10 @@ bytes and does not establish a pass for the committed SHA.
   records it in each run's identity, so a run replays only with the counter
   that made it. Only Zen is qualified. Non-hybrid Intel cores have profiles
   (`intel-0x5101c4` up to Comet Lake, `intel-0x5111c4` from Ice Lake) that
-  have never run on hardware; `run` and `replay` refuse them unless given
-  `--allow-unqualified-cpu`, and then warn that results are unverified.
+  have never run on hardware; `run`, `explore` and `replay` use them with a
+  warning that results are unverified.
 - `--timebase pv` reads no host perf counter, so it needs only KVM and a free
-  core: it skips the counter profile, `--allow-unqualified-cpu`, the perf event
+  core: it skips the counter profile, the perf event
   checks and the workaround MSR, and its identity records no counter profile.
   It runs on any x86-64 KVM host, including cloud VMs with nested KVM and no
   guest PMU. Hosts other than the workstation are not qualified for PV.
@@ -447,11 +446,9 @@ bytes and does not establish a pass for the committed SHA.
   it with readback, then restores the exact originals after reaping its child.
   The legacy `batch.sh` runner uses the same lease protocol.
 
-`--allow-unqualified-cpu` also applies to `explore`. This explicit non-Zen
-path is experimental: it retains the counter in identity, validates exact
+The non-Zen path is experimental: it retains the counter in identity, validates exact
 supported release inputs and applicable KVM capabilities, and holds every SMT
-lease through child cleanup. It never opens AMD workaround MSRs. `doctor` refuses an unqualified counter rather
-than reporting qualified compatibility. Disabled selected-event readiness is checked
+lease through child cleanup. It never opens AMD workaround MSRs. Disabled selected-event readiness is checked
 before preparation and again under held leases; no guest counter is enabled by
 admission. Intel determinism is not established.
 

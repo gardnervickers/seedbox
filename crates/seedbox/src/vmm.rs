@@ -31,7 +31,6 @@ pub struct VmmExecutor {
     /// Host CPU to pin the VMM to; `None` leases the first free eligible core.
     pub cpu: Option<u32>,
     counter: CounterProfile,
-    allow_unqualified: bool,
     profile: ExecutionProfile,
     performance: BTreeMap<String, String>,
     admission: std::sync::Arc<std::sync::Mutex<Vec<Vec<crate::admission::CoreObservation>>>>,
@@ -144,7 +143,6 @@ impl VmmExecutor {
         Ok(Self {
             cpu,
             counter,
-            allow_unqualified: false,
             profile,
             performance: BTreeMap::from([
                 ("SEEDBOX_MARGIN".into(), "adaptive".into()),
@@ -199,7 +197,6 @@ impl VmmExecutor {
         Ok(Self {
             cpu,
             counter,
-            allow_unqualified: false,
             admission: Default::default(),
             profile: ExecutionProfile {
                 backend: "seedbox-kvm".into(),
@@ -292,32 +289,8 @@ impl VmmExecutor {
     fn doctor_executor(executor: Self, kernel: &Path) -> Result<DoctorReport> {
         crate::admission::validate_profile(&executor.profile)?;
         let kernel = crate::admission::file_digest(kernel)?;
-        Self::doctor_counter(crate::counter::CounterProfile::host()?)?;
         let probe = executor.probe();
         executor.doctor_report(kernel, probe)
-    }
-
-    fn doctor_counter(counter: CounterProfile) -> Result<()> {
-        if !counter.qualified() {
-            return Err(Error::Setup(format!("doctor cannot qualify the unqualified {} counter; --allow-unqualified-cpu permits experimental execution only", counter.name())));
-        }
-        Ok(())
-    }
-
-    /// Explicitly permit an experimental counter; release and input checks still apply.
-    pub fn with_unqualified_cpu(mut self, allow: bool) -> Self {
-        self.allow_unqualified = allow;
-        self
-    }
-
-    fn validate_execution_mode(&self) -> Result<()> {
-        if self.counted() && !self.counter.qualified() && !self.allow_unqualified {
-            return Err(Error::Setup(format!(
-                "{} is unqualified; explicitly allow unqualified CPU execution",
-                self.counter.name()
-            )));
-        }
-        Ok(())
     }
 
     fn doctor_report(&self, kernel: ContentDigest, probe: AdmissionProbe) -> Result<DoctorReport> {
@@ -542,7 +515,6 @@ impl VmmExecutor {
     fn preflight_capacity(&self, workers: u32, output: Option<&Path>) -> Result<()> {
         recorded_checkpoint(&self.profile)?;
         crate::admission::validate_profile(&self.profile)?;
-        self.validate_execution_mode()?;
         if !self.counted() {
             return self.uncounted_preflight(workers);
         }
@@ -715,7 +687,6 @@ impl ExecutionBackend for VmmExecutor {
     }
     fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {
         crate::admission::validate_profile(&inputs.profile)?;
-        self.validate_execution_mode()?;
         if self.counted() && recorded_counter(&inputs.profile)? != self.counter {
             return Err(Error::Integrity(
                 "recorded branch counter differs from executor".into(),
@@ -2092,8 +2063,7 @@ mod doctor_tests {
         let before = serde_json::to_vec(&profile).unwrap();
         let executor =
             VmmExecutor::from_retained(&executable, &store, profile, None, CounterProfile::Zen)
-                .unwrap()
-                .with_unqualified_cpu(true);
+                .unwrap();
         assert_eq!(serde_json::to_vec(&executor.profile).unwrap(), before);
         crate::admission::validate_profile(&executor.profile).unwrap();
         assert_eq!(
@@ -2490,19 +2460,6 @@ mod doctor_tests {
                 .to_string()
                 .contains("--workers: use 1..32"));
         }
-        let experimental = VmmExecutor::from_engine_digest(
-            pinned.profile.engine,
-            None,
-            512,
-            WitnessMode::Exits,
-            CounterProfile::IntelIceLake,
-        )
-        .unwrap();
-        assert!(experimental
-            .preflight_workers(2)
-            .unwrap_err()
-            .to_string()
-            .contains("explicitly allow unqualified CPU execution"));
     }
 
     fn observed(cpu: u32) -> CoreObservation {
@@ -2647,7 +2604,6 @@ mod doctor_tests {
         let pv = intel.clone().with_timebase(Timebase::Pv);
         assert!(!pv.profile.semantic_parameters.contains_key(COUNTER));
         assert_eq!(recorded_counter(&pv.profile).unwrap(), CounterProfile::Zen);
-        assert!(pv.validate_execution_mode().is_ok());
         let zen_pv = VmmExecutor::from_engine_digest(
             ContentDigest::of(b"engine"),
             None,
@@ -2660,7 +2616,6 @@ mod doctor_tests {
         assert_eq!(pv.profile, zen_pv.profile);
         let counted = pv.with_timebase(Timebase::Counter);
         assert_eq!(counted.profile, intel.profile);
-        assert!(counted.validate_execution_mode().is_err());
     }
 
     #[test]
@@ -2676,12 +2631,6 @@ mod doctor_tests {
             .unwrap()
         };
         let experimental = make(CounterProfile::IntelIceLake);
-        assert!(experimental.validate_execution_mode().is_err());
-        assert!(experimental
-            .clone()
-            .with_unqualified_cpu(true)
-            .validate_execution_mode()
-            .is_ok());
         assert!(!experimental
             .profile
             .semantic_parameters
@@ -2692,10 +2641,6 @@ mod doctor_tests {
             CounterProfile::IntelIceLake
         );
         assert!(crate::admission::validate_profile(&experimental.profile).is_ok());
-        for counter in [CounterProfile::IntelIceLake, CounterProfile::IntelSkylake] {
-            assert!(VmmExecutor::doctor_counter(counter).is_err());
-        }
-        assert!(VmmExecutor::doctor_counter(CounterProfile::Zen).is_ok());
         let mut wrong = experimental.profile.clone();
         wrong
             .semantic_parameters
@@ -2710,14 +2655,8 @@ mod doctor_tests {
             auxiliary: BTreeMap::new(),
             provenance: BTreeMap::new(),
         };
-        assert!(experimental.validate_retained(&inputs).is_err());
-        assert!(experimental
-            .clone()
-            .with_unqualified_cpu(true)
-            .validate_retained(&inputs)
-            .is_ok());
+        assert!(experimental.validate_retained(&inputs).is_ok());
         assert!(make(CounterProfile::IntelSkylake)
-            .with_unqualified_cpu(true)
             .validate_retained(&inputs)
             .is_err());
     }

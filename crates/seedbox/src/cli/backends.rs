@@ -31,13 +31,6 @@ impl Executor {
             )),
         }
     }
-    pub fn with_unqualified_cpu(self, allow: bool) -> Self {
-        match self {
-            Self::Linux(e) => Self::Linux(e.with_unqualified_cpu(allow)),
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            Self::Mac(e) => Self::Mac(e),
-        }
-    }
     pub fn performance(self, margin: &str, undo: u64) -> Result<Self> {
         match self {
             Self::Linux(e) => Ok(Self::Linux(e.with_margin(margin)?.with_undo(undo)?)),

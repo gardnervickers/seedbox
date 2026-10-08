@@ -172,11 +172,8 @@ enum Command {
         #[command(flatten)]
         state: StateArg,
         /// Replay with this VMM instead of the recorded one.
-        #[arg(long, requires = "allow_engine_change")]
-        vmm: Option<PathBuf>,
-        /// Allow --vmm to differ from the recorded VMM.
         #[arg(long)]
-        allow_engine_change: bool,
+        vmm: Option<PathBuf>,
         // Last: its help heading applies to every flag declared after it.
         #[command(flatten)]
         performance: Performance,
@@ -332,28 +329,22 @@ struct CpuArg {
     /// Host CPU to pin the VMM to [default: first free core other than CPU 0's].
     #[arg(long, env = "SEEDBOX_CPU", value_parser = clap::value_parser!(u32).range(0..1024))]
     cpu: Option<u32>,
-    /// Run even when this CPU's branch counter profile is unqualified; its results are unverified.
-    #[arg(long)]
-    allow_unqualified_cpu: bool,
-    /// No effect: every built engine and guest kernel is admitted. Kept so existing scripts parse.
-    #[arg(long)]
-    allow_dev_engine: bool,
 }
 
 impl CpuArg {
-    /// Refuse a missing or unqualified host branch counter unless allowed.
+    /// Refuse a missing host branch counter and warn about an unqualified one.
     /// PV reads no counter, so it admits any KVM host.
     fn admit(&self, detected: Result<CounterProfile>, timebase: Timebase) -> Result<()> {
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        if self.cpu.is_some() || self.allow_unqualified_cpu {
+        if self.cpu.is_some() {
             return Err(Error::Setup(
-                "--cpu and --allow-unqualified-cpu require Linux KVM; omit them on Mac".into(),
+                "--cpu requires Linux KVM; omit it on Mac".into(),
             ));
         }
         if timebase == Timebase::Pv {
             return Ok(());
         }
-        admit_counter(detected?, self.allow_unqualified_cpu)
+        admit_counter(detected?)
     }
 }
 
@@ -889,7 +880,6 @@ fn run(cli: Cli) -> Result<u8> {
                 detected,
                 inputs.timebase.map(Into::into).unwrap_or(Timebase::Counter),
             )?;
-            let executor = executor.with_unqualified_cpu(cpu.allow_unqualified_cpu);
             let executor = match (checkpoint_at_ns, branch_seed) {
                 (Some(at), Some(branch)) => executor.with_checkpoint(at, branch)?,
                 _ => executor,
@@ -958,7 +948,6 @@ fn run(cli: Cli) -> Result<u8> {
                 detected,
                 inputs.timebase.map(Into::into).unwrap_or(Timebase::Counter),
             )?;
-            let executor = executor.with_unqualified_cpu(cpu.allow_unqualified_cpu);
             preparer.profile = executor.profile();
             let executor = performance.apply(executor)?;
             // Exploration retains any backend admission refusal in its batch checkpoint.
@@ -1011,8 +1000,8 @@ fn run(cli: Cli) -> Result<u8> {
             state,
             performance,
             vmm,
-            allow_engine_change,
         } => {
+            let allow_engine_change = vmm.is_some();
             let run = defaults::run_directory(run)?;
             let previous = orchestration::inspect(&run)?;
             let is_mac = previous.identity.inputs.profile.backend == "seedbox-hvf";
@@ -1077,12 +1066,10 @@ fn run(cli: Cli) -> Result<u8> {
                         .with_page_timer(recorded_page_timer(profile))
                         .with_deferred_tx(deferred_tx)
                         .with_torn_writes(recorded_torn_writes(profile)?)
-                        .with_unqualified_cpu(cpu.allow_unqualified_cpu)
                         .with_recorded_checkpoint(profile)?,
                 )
             };
-            let executor =
-                performance.apply(executor.with_unqualified_cpu(cpu.allow_unqualified_cpu))?;
+            let executor = performance.apply(executor)?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
             let result = orchestrator.replay_with_options(
@@ -1287,18 +1274,10 @@ fn run(cli: Cli) -> Result<u8> {
     }
 }
 
-/// Refuse an unqualified counter profile unless the caller allowed it, and
-/// then say that its results are unverified.
-fn admit_counter(counter: CounterProfile, allow_unqualified: bool) -> Result<()> {
+/// Say when the counter profile's results are unverified; never refuse it.
+fn admit_counter(counter: CounterProfile) -> Result<()> {
     if counter.qualified() {
         return Ok(());
-    }
-    if !allow_unqualified {
-        return Err(Error::Setup(format!(
-            "this host's branch counter profile {} is unqualified, so its results are \
-             unverified; pass --allow-unqualified-cpu to run anyway",
-            counter.name()
-        )));
     }
     eprintln!(
         "warning: branch counter profile {} is unqualified; results are unverified",
@@ -1508,21 +1487,10 @@ mod tests {
     }
 
     #[test]
-    fn unqualified_counters_need_explicit_permission() {
-        assert!(admit_counter(CounterProfile::Zen, false).is_ok());
-        assert_eq!(
-            admit_counter(CounterProfile::IntelSkylake, false)
-                .unwrap_err()
-                .to_string(),
-            "this host's branch counter profile intel-0x5101c4 is unqualified, so its \
-             results are unverified; pass --allow-unqualified-cpu to run anyway"
-        );
-        assert!(admit_counter(CounterProfile::IntelSkylake, true).is_ok());
-        let cpu = CpuArg {
-            cpu: None,
-            allow_unqualified_cpu: false,
-            allow_dev_engine: false,
-        };
+    fn unqualified_counters_run_with_a_warning() {
+        assert!(admit_counter(CounterProfile::Zen).is_ok());
+        assert!(admit_counter(CounterProfile::IntelSkylake).is_ok());
+        let cpu = CpuArg { cpu: None };
         let missing = || Err(Error::Setup("no branch counter profile".into()));
         assert!(cpu.admit(missing(), Timebase::Pv).is_ok());
         assert!(cpu
@@ -1531,6 +1499,6 @@ mod tests {
         assert!(cpu.admit(missing(), Timebase::Counter).is_err());
         assert!(cpu
             .admit(Ok(CounterProfile::IntelIceLake), Timebase::Counter)
-            .is_err());
+            .is_ok());
     }
 }
