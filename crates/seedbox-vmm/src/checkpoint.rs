@@ -27,6 +27,11 @@ pub fn branch_identity(parent: &str, at: u64, seed: u64) -> String {
     format!("{:x}", h.finalize())
 }
 
+/// Bind deferred TX to the parent while retaining the legacy timebase when off.
+pub fn identity_timebase(timebase: &str, deferred_tx: bool) -> String {
+    if deferred_tx { format!("{timebase}+deferred-tx") } else { timebase.to_owned() }
+}
+
 /// Replace artifact paths with their bytes' hashes: relocation is not semantic.
 /// Performance settings and output paths live outside the world config.
 pub fn parent_identity(
@@ -93,6 +98,17 @@ mod tests {
             parent_identity(&cfg, 7, "engine", "counter", |_| Ok("changed".into())).unwrap()
         );
         assert_ne!(parent, parent_identity(&cfg, 7, "engine", "pv", |_| Ok("content".into())).unwrap());
+        for timebase in ["counter", "pv"] {
+            let off = identity_timebase(timebase, false);
+            assert_eq!(off, timebase);
+            let on = identity_timebase(timebase, true);
+            assert_eq!(on, format!("{timebase}+deferred-tx"));
+            let ordinary = parent_identity(&cfg, 7, "engine", &off, |_| Ok("content".into())).unwrap();
+            let deferred = parent_identity(&cfg, 7, "engine", &on, |_| Ok("content".into())).unwrap();
+            assert_ne!(ordinary, deferred);
+            assert_ne!(branch_identity(&ordinary, 10, 20), branch_identity(&deferred, 10, 20));
+            assert_eq!(deferred, parent_identity(&moved, 7, "engine", &on, |_| Ok("content".into())).unwrap());
+        }
         let id = branch_identity(&parent, 10, 20);
         assert_eq!(id, branch_identity(&parent, 10, 20));
         assert_ne!(id, branch_identity(&parent, 11, 20));

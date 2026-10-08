@@ -37,7 +37,10 @@ metadata removed, kernel/initrd/disk paths replaced by content hashes, engine
 hash, timebase and parent seed. Branch identity binds this parent, T and B.
 The retained RunIdentity also binds T and B; it is not a second parent-identity
 scheme. Relocating inputs does not change the branch. Counter and PV parents
-have different identities. The engine recomputes the supplied CLI identity.
+have different identities. With deferred TX enabled, both sides hash
+`<timebase>+deferred-tx` in place of the timebase name, separating parent and
+branch identities and future branch RNG streams from the off mode. Off keeps
+the original timebase hash input. The engine recomputes the supplied CLI identity.
 
 Build the VMM and current K2/ABI-3 kernel from this checkout. #93 was closed;
 its reseed hook landed through #126 with PV fields at u64 indices 6–8,

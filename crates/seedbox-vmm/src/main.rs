@@ -659,7 +659,8 @@ fn run() -> Result<Value, String> {
         if !checkpoint_times.is_empty() {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let engine = format!("{:x}", Sha256::digest(std::fs::read(exe).map_err(|e| e.to_string())?));
-            let parent = checkpoint::parent_identity(&cfg, seed, &engine, world.clock.name(), |p| {
+            let identity_timebase = checkpoint::identity_timebase(world.clock.name(), deferred_tx);
+            let parent = checkpoint::parent_identity(&cfg, seed, &engine, &identity_timebase, |p| {
                 std::fs::read(base.join(p)).map(|bytes|format!("{:x}",Sha256::digest(bytes))).map_err(|e|format!("{p}: {e}"))
             })?;
             if let Some(expected) = cfg["checkpoint"]["parent_identity"].as_str() {

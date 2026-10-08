@@ -668,7 +668,10 @@ fn checkpoint_metadata(request: &ExecutionRequest<'_>, world: &Value) -> Result<
         world,
         request.seed,
         request.prepared.profile.engine.hex(),
-        recorded_timebase(&request.prepared.profile)?.name(),
+        &checkpoint::identity_timebase(
+            recorded_timebase(&request.prepared.profile)?.name(),
+            recorded_deferred_tx(&request.prepared.profile)?,
+        ),
         |path| {
             request
                 .artifacts
