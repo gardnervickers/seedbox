@@ -19,6 +19,8 @@ pub mod control;
 #[rustfmt::skip]
 pub mod network_counters;
 
+pub mod network_faults;
+
 pub mod virtqueue;
 
 pub mod virtio_mmio;

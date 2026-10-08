@@ -390,6 +390,7 @@ fn no_selectors_preserve_bytes_with_link_shapes_cuts_and_random_loss() {
                 loss_ppm: 500_000,
                 bandwidth_bps: None,
                 queue_bound_ns: None,
+                network_faults: Default::default(),
             },
             0,
         );
@@ -532,6 +533,7 @@ fn selected_drop_preserves_other_flow_jitter_and_does_not_advance_fifo() {
                 loss_ppm: 0,
                 bandwidth_bps: None,
                 queue_bound_ns: None,
+                network_faults: Default::default(),
             },
             0,
         );

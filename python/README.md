@@ -55,6 +55,12 @@ The bound uses nanoseconds and requires finite bandwidth. Healing a bandwidth
 shape returns `queue_counts` with `matched`, `queue_dropped`, and
 `delayed_max_ns`; require positive drop evidence when testing congestion. Omitted
 options preserve the existing unlimited policy and heal effect timestamp.
+Optional `reorder_ppm`/`reorder_delay`, `duplicate_ppm`,
+`burst_loss_ppm`/`burst_length`, `latency_spike_ppm`/`latency_spike`, and
+`tcp_reset_ppm` activate healable network impairments during execution.
+Each fault uses an independent seeded stream and healing returns
+`network_fault_counts`. See [parameters and draw order](PROTOCOL.md#dynamic-network-impairments)
+and `harness/acceptance/workloads/network-faults.yaml` for packet and socket checks.
 It changes only the directed pairs, with the highest live fault ID taking precedence.
 A partition dominates a shape, and in-flight decisions remain fixed. `Controller`
 is also exported as an alias for `World`. `now_ns()` reads simulated time; `inspect()` returns

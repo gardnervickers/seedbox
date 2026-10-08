@@ -180,8 +180,9 @@ impl Control {
                     right: sides.remove(0),
                 })
             }
-            Operation::Shape {from,to,latency_ns,jitter_ns,loss_ppm,bandwidth_bps,queue_bound_ns} => {
+            Operation::Shape {from,to,latency_ns,jitter_ns,loss_ppm,bandwidth_bps,queue_bound_ns,network_faults} => {
                 crate::links::Policy {latency_ns:*latency_ns,jitter_ns:*jitter_ns,loss_ppm:*loss_ppm,bandwidth_bps:*bandwidth_bps,queue_bound_ns:*queue_bound_ns}.validate(self.lookahead)?;
+                network_faults.validate(*latency_ns,*jitter_ns)?;
                 if from.is_empty() || to.is_empty() { return Err("shape sides must be nonempty".into()); }
                 let mut members = BTreeSet::new();
                 let mut sides = Vec::new();
@@ -197,7 +198,7 @@ impl Control {
                 self.handles = self.handles.checked_add(1).ok_or("fault handles exhausted")?;
                 let handle = format!("p{}",self.handles);
                 result = json!({"handle":handle});
-                Some(Action::Shape {handle,from:sides.remove(0),to:sides.remove(0),latency_ns:*latency_ns,jitter_ns:*jitter_ns,loss_ppm:*loss_ppm,bandwidth_bps:*bandwidth_bps,queue_bound_ns:*queue_bound_ns})
+                Some(Action::Shape {handle,from:sides.remove(0),to:sides.remove(0),latency_ns:*latency_ns,jitter_ns:*jitter_ns,loss_ppm:*loss_ppm,bandwidth_bps:*bandwidth_bps,queue_bound_ns:*queue_bound_ns,network_faults:*network_faults})
             }
             Operation::Connections {from,to,..} => {
                 if self.target(from)?==self.target(to)? {return Err("connection endpoints must differ".into());}
@@ -459,6 +460,9 @@ impl Control {
                         if matches!(p.operation, Some(Operation::Heal {..})) {
                             if let Some(counts) = faults.log[id as usize-1].get("queue_counts") {
                                 p.result["queue_counts"] = counts.clone();
+                            }
+                            if let Some(counts) = faults.log[id as usize-1].get("network_fault_counts") {
+                                p.result["network_fault_counts"] = counts.clone();
                             }
                         }
                         p.effect = Some(at);

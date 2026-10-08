@@ -744,6 +744,13 @@ fn shape_transcripts_validate_handle_timing_absolute_policy_and_directed_sides()
         assert!(vmm::report(&serde_json::to_vec(&finite).unwrap(), &request).is_ok());
         finite["faults"][0]["request"]["bandwidth_bps"] = json!(2_000_000);
         assert!(vmm::report(&serde_json::to_vec(&finite).unwrap(), &request).is_err());
+        let mut impaired = raw.clone();
+        let settings = json!({"duplicate_ppm":1_000_000,"tcp_reset_ppm":500_000});
+        impaired["control_history"][0]["request"]["network_faults"] = settings.clone();
+        impaired["faults"][0]["request"]["network_faults"] = settings;
+        assert!(vmm::report(&serde_json::to_vec(&impaired).unwrap(), &request).is_ok());
+        impaired["faults"][0]["request"]["network_faults"]["duplicate_ppm"] = json!(500_000);
+        assert!(vmm::report(&serde_json::to_vec(&impaired).unwrap(), &request).is_err());
         assert!(result.faults[0].service.is_empty());
         for (key, value) in [
             ("latency_ns", json!(99_999)),
@@ -751,6 +758,11 @@ fn shape_transcripts_validate_handle_timing_absolute_policy_and_directed_sides()
             ("loss_ppm", json!(1_000_001)),
             ("bandwidth_bps", json!(0)),
             ("queue_bound_ns", json!(12_000_000)),
+            (
+                "network_faults",
+                json!({"reorder_ppm":1,"reorder_delay_ns":0}),
+            ),
+            ("network_faults", json!({"tcp_reset_ppm":1_000_001})),
             ("from", json!([])),
             ("to", json!([{"service":"server"}])),
         ] {

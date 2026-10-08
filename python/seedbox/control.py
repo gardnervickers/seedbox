@@ -210,7 +210,9 @@ class World:
             raise ProtocolError("partition response lacks an opaque handle")
         return Partition(result["handle"], effect)
 
-    def shape(self, from_, to, *, latency, jitter=0, loss_ppm=0, bandwidth_bps=None, queue_bound=None):
+    def shape(self, from_, to, *, latency, jitter=0, loss_ppm=0, bandwidth_bps=None, queue_bound=None,
+              reorder_ppm=0, reorder_delay=0, duplicate_ppm=0, burst_loss_ppm=0, burst_length=0,
+              latency_spike_ppm=0, latency_spike=0, tcp_reset_ppm=0):
         """Apply an absolute directed policy; latency and jitter are nanoseconds."""
         if isinstance(from_, str) or isinstance(to, str):
             raise ValueError("shape sides must be sequences of targets")
@@ -228,6 +230,22 @@ class World:
             if bandwidth_bps is None or type(queue_bound) is not int or not 0 <= queue_bound <= 2**64 - 1:
                 raise ValueError("queue_bound must be a nonnegative u64 integer and requires bandwidth_bps")
             policy["queue_bound_ns"] = queue_bound
+        faults = dict(reorder_ppm=reorder_ppm, reorder_delay_ns=reorder_delay,
+                      duplicate_ppm=duplicate_ppm, burst_loss_ppm=burst_loss_ppm,
+                      burst_length=burst_length, latency_spike_ppm=latency_spike_ppm,
+                      latency_spike_ns=latency_spike, tcp_reset_ppm=tcp_reset_ppm)
+        for name, value in faults.items():
+            maximum = 1_000_000 if name.endswith("_ppm") else 2**64 - 1
+            if type(value) is not int or not 0 <= value <= maximum:
+                raise ValueError(f"{name} must be an integer in [0, {maximum}]")
+        for probability, amount in [(reorder_ppm, reorder_delay), (burst_loss_ppm, burst_length),
+                                    (latency_spike_ppm, latency_spike)]:
+            if probability and not amount:
+                raise ValueError("active reorder, burst loss and latency spikes require a positive delay or length")
+        if latency + jitter + (reorder_delay if reorder_ppm else 0) + (latency_spike if latency_spike_ppm else 0) > 3_600_000_000_000:
+            raise ValueError("latency, jitter and fault delays must not exceed one hour")
+        if any(value for name, value in faults.items() if name.endswith("_ppm")):
+            policy["network_faults"] = faults
         result, effect = self._call("shape", **policy)
         if not isinstance(result.get("handle"), str) or not result["handle"]:
             self.close()
@@ -262,7 +280,7 @@ class World:
         if not isinstance(partition, (Partition, Shape, ConnectionDrop)):
             raise TypeError("heal expects a fault handle returned by this API")
         result, effect = self._call("heal", handle=partition.handle)
-        return result if isinstance(partition, ConnectionDrop) or "queue_counts" in result else effect
+        return result if isinstance(partition, ConnectionDrop) or "queue_counts" in result or "network_fault_counts" in result else effect
 
 
     def _arm_console(self, source, marker, match_timeout, fault):

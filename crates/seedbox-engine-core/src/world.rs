@@ -580,42 +580,42 @@ impl<M: WorldMachine> World<M> {
                 }
                 links::Outcome::Deliver(t) => t,
             };
-            // A frame arriving while its receiver is down meets no NIC; one
-            // arriving while it is paused waits, up to a fixed backlog.
-            let to = &self.machines[dst];
-            match events::arrival(
-                t,
-                self.faults.next_lifecycle(dst),
-                to.down,
-                to.paused,
-                self.paused_ingress[dst],
-                PAUSED_INGRESS_FRAMES,
-            ) {
-                events::Arrival::Queue => {}
-                events::Arrival::Held => self.paused_ingress[dst] += 1,
-                events::Arrival::Drop => {
-                    // Receiver rejection consumes policy draws but reserves no FIFO arrival.
-                    match last {
-                        Some(last) => {
-                            self.faults.links.last.insert((src, dst), last);
-                        }
-                        None => {
-                            self.faults.links.last.remove(&(src, dst));
-                        }
+            let mut accepted = false;
+            for (t, bytes) in self.faults.deliveries(src, dst, t, &frame) {
+                // A frame arriving while its receiver is down meets no NIC; one
+                // arriving while it is paused waits, up to a fixed backlog.
+                let to = &self.machines[dst];
+                match events::arrival(
+                    t,
+                    self.faults.next_lifecycle(dst),
+                    to.down,
+                    to.paused,
+                    self.paused_ingress[dst],
+                    PAUSED_INGRESS_FRAMES,
+                ) {
+                    events::Arrival::Queue => {}
+                    events::Arrival::Held => self.paused_ingress[dst] += 1,
+                    events::Arrival::Drop => {
+                        self.dropped += 1;
+                        self.count_link(t, src, dst, 2);
+                        continue;
                     }
-                    self.dropped += 1;
-                    self.count_link(t, src, dst, 2);
-                    continue;
+                }
+                self.schedule(dst, t, Payload::Frame { from: src, bytes });
+                accepted = true;
+            }
+            // Restore the base FIFO reservation only when every copy was
+            // rejected. A rejected copy cannot undo an accepted original.
+            if !accepted {
+                match last {
+                    Some(last) => {
+                        self.faults.links.last.insert((src, dst), last);
+                    }
+                    None => {
+                        self.faults.links.last.remove(&(src, dst));
+                    }
                 }
             }
-            self.schedule(
-                dst,
-                t,
-                Payload::Frame {
-                    from: src,
-                    bytes: frame.clone(),
-                },
-            );
         }
     }
 
