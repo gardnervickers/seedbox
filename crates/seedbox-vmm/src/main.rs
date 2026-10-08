@@ -1,5 +1,6 @@
 //! Seedbox world: several Linux machines, a network fabric and a scenario,
 //! all executed by one host thread. A seed and the config fully determine the run.
+#![recursion_limit = "256"]
 
 mod boundary;
 mod control;
