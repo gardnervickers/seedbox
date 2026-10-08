@@ -137,8 +137,7 @@ deliberately change one.
    (image pulls, builds, CPU leases). Fail fast. `run` and `explore` check immutable runtime
    inputs and backend host admission before
    preparation; no transient perf descriptor, affinity or CPU reservation survives
-   that check. Replay validates retained host-policy proof before live admission,
-   so old/missing proof is a retained NOT_COMPARABLE rejection before execution.
+   that check.
 5. Add it to the defaults table in README.md's quick start.
 
 ### Help text
