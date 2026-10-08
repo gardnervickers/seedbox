@@ -54,6 +54,10 @@ const PAGE_BOUND: usize = 7;
 const PAGE_SYSCALL_TARGET: usize = 8;
 const PAGE_TIMER_DEADLINE: usize = 14;
 const PAGE_CAPABILITIES: usize = 15;
+// Rewritten at every plan, outside the checkpointed PAGE_FIELDS.
+const PAGE_SYSCALL_NS: usize = 16;
+const PAGE_SYSCALLS0: usize = 17;
+const PAGE_PLAN_TIME: usize = 18;
 pub const ABI_PAGE_TIMER: u64 = 4;
 const CAP_PAGE_TIMER: u64 = 1;
 const TIMER_DISARMED: u64 = u64::MAX;
@@ -116,6 +120,9 @@ const _: () = {
     assert!(ABI_PAGE_RESEED == 3);
     assert!(PAGE_TIMER_DEADLINE == 14);
     assert!(PAGE_CAPABILITIES == 15);
+    assert!(PAGE_SYSCALL_NS == 16);
+    assert!(PAGE_SYSCALLS0 == 17);
+    assert!(PAGE_PLAN_TIME == 18);
     assert!(ABI_PAGE_TIMER == 4);
     assert!(CAP_PAGE_TIMER == 1);
 };
@@ -1400,6 +1407,13 @@ impl Machine {
                 self.exit_req = window;
             }
             let syscalls0 = self.page_get(PAGE_SYSCALLS);
+            if self.page_timer.enabled {
+                self.page_set(PAGE_SYSCALL_NS, if self.pv_clock { self.syscall_ns } else { 0 });
+                self.page_set(PAGE_SYSCALLS0, syscalls0);
+                // PAGE_TSC is only published at legal exits. After a watchdog
+                // split it can lag the syscall time charged since that exit.
+                self.page_set(PAGE_PLAN_TIME, self.time);
+            }
             if let Prepared::Idle = tb.prepare(self, remaining, soft)? {
                 return self.spin_idle();
             }
@@ -1479,16 +1493,16 @@ impl Machine {
                     ));
                 }
             }
-            if legal && self.page_timer.enabled {
-                let word = unsafe { std::ptr::read_volatile(self.page.add(PAGE_TIMER_DEADLINE)) };
-                if self.page_timer.pickup(word, &mut self.pit, self.time)? { self.pic.raise(0); }
-                timer_latency(&mut self.pit, &mut self.pit_exact, self.timer_rng.as_mut(), self.timer_jitter, self.exact_timer_ppm);
-            }
             if T::BRANCHES {
                 self.branches += delta;
             }
             self.stats.time_by[Cause::Progress as usize] += delta;
             self.time += delta;
+            if legal && self.page_timer.enabled {
+                let word = unsafe { std::ptr::read_volatile(self.page.add(PAGE_TIMER_DEADLINE)) };
+                if self.page_timer.pickup(word, &mut self.pit, self.time)? { self.pic.raise(0); }
+                timer_latency(&mut self.pit, &mut self.pit_exact, self.timer_rng.as_mut(), self.timer_jitter, self.exact_timer_ppm);
+            }
             if legal {
                 // Sent/Hlt/Exited can return before the next loop synchronizes
                 // the page. Validate guest clock progress before any exit
@@ -1524,8 +1538,8 @@ impl Machine {
                         self.stats.yield_stops += 1;
                         self.record(b'Y', v as u64);
                     } else {
-                        // Page arms request a prompt syscall stop, before the
-                        // previous soft bound. It is a deterministic pickup.
+                        // A page arm can lower the clock/syscall budget below
+                        // the previous soft bound. This is a legal pickup.
                         legal = self.page_timer.enabled;
                     }
                 }
@@ -1601,6 +1615,9 @@ impl Machine {
                                     "{}: the guest kernel lacks PV clock support; rebuild it from kernel/ for the pv timebase",
                                     self.name
                                 ));
+                            }
+                            if self.page_timer_requested && self.abi < ABI_PAGE_TIMER {
+                                return Err("the guest kernel lacks page timer support; rebuild it from kernel/ or drop --page-timer".into());
                             }
                             self.enable_page_timer();
                             self.pv = v >= 2;
@@ -2111,6 +2128,37 @@ mod io_boundary_tests {
 
     #[test]
     #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn an_overdue_arm_replaced_by_a_page_store_does_not_depend_on_undo() {
+        let kvm = Kvm::new().unwrap();
+        let mut counter = Counter::new().unwrap();
+        // mov ecx,280000; dec ecx; jnz; store deadline 900000 to word 14; hlt
+        let mut code = vec![0xb9, 0xc0, 0x45, 0x04, 0x00, 0x49, 0x75, 0xfd];
+        for (address, value) in [(0xd0000070u32, 900_000u32), (0xd0000074, 0)] {
+            code.extend_from_slice(&[0xc7, 0x05]);
+            code.extend_from_slice(&address.to_le_bytes());
+            code.extend_from_slice(&value.to_le_bytes());
+        }
+        code.push(0xf4);
+        let mut want = None;
+        for undo in [0, 16, 256] {
+            let mut kernel = vec![0u8; 1024]; kernel[0x1f1] = 1; kernel.extend(&code);
+            let spec = BootSpec { kernel: &kernel, initrd: &[], cmdline: String::new(), mem: INITRD_ADDR + 0x100000, rng_seed: [0; 32], mac: None, control_channel: false, disk: None, undo_margin: undo, barrier: false, pv_clock: false, page_timer: true };
+            let mut m = Machine::new(&kvm, "page-rearm", &spec).unwrap();
+            let mut r = m.vcpu.get_regs().unwrap(); r.rflags = 0x2; m.vcpu.set_regs(&r).unwrap();
+            m.abi = ABI_PAGE_TIMER;
+            m.enable_page_timer();
+            m.tolerance = 200_000;
+            m.pit.program_deadline(Some(100_000)); // D = 100k, hard = 300k, exit at ~280k
+            m.pic.set_masks(0xffff);
+            assert_eq!(m.run_until(&mut counter, 1_000_000, 0, &mut Vec::new()).unwrap(), Stop::Halted);
+            m.pic.set_masks(0);
+            let got = (m.time, m.pic.pending(), m.pit.deadline, m.exit_witness());
+            if let Some(want) = &want { assert_eq!(&got, want, "undo={undo}"); } else { want = Some(got); }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
     fn stops_at_natural_exits_or_exact_hard_counts_without_yields() {
         let kvm=Kvm::new().unwrap();
         let mut counter=Counter::new().unwrap();
@@ -2279,7 +2327,10 @@ mod fork_tests {
         assert_eq!(fields["entropy"], (PAGE_ENTROPY, PAGE_ENTROPY_FIELDS));
         assert_eq!(fields["timer_deadline"], (PAGE_TIMER_DEADLINE, 1));
         assert_eq!(fields["capabilities"], (PAGE_CAPABILITIES, 1));
-        assert_eq!(index, 16);
+        assert_eq!(fields["syscall_ns"], (PAGE_SYSCALL_NS, 1));
+        assert_eq!(fields["syscalls0"], (PAGE_SYSCALLS0, 1));
+        assert_eq!(fields["plan_time"], (PAGE_PLAN_TIME, 1));
+        assert_eq!(index, 19);
         assert_eq!(PAGE_FIELDS, PAGE_PV_CLOCK);
         assert_eq!(PAGE_ENTROPY_FIELDS * 8, ENTROPY_WORDS * 4);
         let abi: u64 = header.lines().find_map(|l| l.strip_prefix("#define SEEDBOX_ABI\t")).unwrap().trim().parse().unwrap();

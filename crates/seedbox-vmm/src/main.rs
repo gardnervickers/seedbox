@@ -362,6 +362,7 @@ impl World {
             "discarded_pending_io": old.pending_io.is_some(), "discarded_management_bytes": discarded,
             "witness": old.exit_witness(),
         });
+        summary["pio_total"] = json!(old.stats.kvm_n[2]);
         summary["disk_lost_sectors"] = json!(self.machines[m].succeed(&mut old, t, self.run_seed)?);
         self.incarnations[m].push(summary);
         Ok(())
@@ -1243,6 +1244,10 @@ fn report(
             "control_channel":mach.channel.as_ref().map(|_|json!({"transport":"virtio-console-v1","tx_bytes":mach.control_tx_bytes,"rx_dma_bytes":mach.control_dma_bytes})),
             "net": mach.net.as_ref().map(|n| json!({"tx": n.tx_frames, "rx": n.rx_frames, "rx_dropped": n.rx_dropped})),
         });
+        // All ports and incarnations, including 0x52c and rolled-back exits;
+        // diagnostic only, outside the witness.
+        row["pio_total"] = json!(s.kvm_n[2] + world.incarnations[index].iter()
+            .filter_map(|old| old["pio_total"].as_u64()).sum::<u64>());
         row["disk"] = json!(mach.blk.as_ref().map(|b| json!({
                 "fault_model": disk::disk_fault_model_report(b.disk.fault_model()), "capacity_sectors": b.disk.capacity(), "base_sha256": b.disk.base_sha256(),
                 "digest": b.disk.digest(), "stable_sectors": b.disk.stable_sectors(), "volatile_sectors": b.disk.volatile_sectors(),

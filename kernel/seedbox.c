@@ -125,6 +125,9 @@ void __init seedbox_time_init(void)
 	BUILD_BUG_ON(offsetof(struct seedbox_time_page, entropy[3]) != 13 * sizeof(u64));
 	BUILD_BUG_ON(offsetof(struct seedbox_time_page, timer_deadline) != 14 * sizeof(u64));
 	BUILD_BUG_ON(offsetof(struct seedbox_time_page, capabilities) != 15 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, syscall_ns) != 16 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, syscalls0) != 17 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, plan_time) != 18 * sizeof(u64));
 	BUILD_BUG_ON(SEEDBOX_ABI != 4);
 	BUILD_BUG_ON(SEEDBOX_CAP_PAGE_TIMER != 1);
 
@@ -160,9 +163,17 @@ bool seedbox_set_next_event(unsigned long ticks)
 	deadline = now + DIV_ROUND_UP_ULL(reload * 1000000000ULL, PIT_TICK_RATE);
 	WRITE_ONCE(p->timer_deadline, deadline);
 	if (static_branch_unlikely(&seedbox_pv_clock)) {
-		/* The VMM cannot lower a running guest's bound until its next exit. */
-		WRITE_ONCE(p->bound, min(READ_ONCE(p->bound), deadline));
-		WRITE_ONCE(p->syscall_target, READ_ONCE(p->syscalls) + 1);
+		if (deadline < READ_ONCE(p->bound)) {
+			u64 t0 = READ_ONCE(p->plan_time);
+			u64 s0 = READ_ONCE(p->syscalls0);
+			u64 ns = READ_ONCE(p->syscall_ns);
+			u64 left = deadline > t0 ? deadline - t0 : 0;
+
+			/* Identical to PvClock::plan, including after a split. */
+			WRITE_ONCE(p->bound, deadline);
+			WRITE_ONCE(p->syscall_target,
+				   s0 + max(1ULL, DIV_ROUND_UP_ULL(left, ns)));
+		}
 	}
 	return true;
 }

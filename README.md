@@ -36,7 +36,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Connection selectors | disabled; discover and select through the guest control API | `world.connections`, `world.drop_connection` |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
 | Timebase | `counter` (retired guest branches) | `--timebase` (prepare/run/explore) |
-| Page timer | off; ABI-4 clockevent stores when enabled | `--page-timer` (prepare/run/explore) |
+| Page timer | off; ABI-4 clockevent stores, aimed at PV | `--page-timer` (prepare/run/explore) |
 | Exploration count | `1` | `--count` |
 | Exploration workers | `1`, sequential execution | `--workers` (1..32; automatic CPU selection for parallel execution) |
 | Torn disk writes | off (drop all unflushed sectors on crash) | `--torn-writes` |
@@ -462,7 +462,13 @@ for bounds and supported formats.
 no environment override). An ABI-4 kernel arms one-shot clockevents by writing
 an absolute deadline into the shared time page, avoiding port `0x530` exits.
 The VMM advertises the capability only after the guest announces ABI 4;
-older kernels keep the port path. The requested semantic parameter is retained
+with the flag enabled, older kernels fail at boot with a rebuild/drop-flag error.
+The flag is aimed at PV: an earlier arm lowers the clock bound and uses the same
+syscall budget as the VMM planner, without a prompt syscall exit. Watchdog splits
+reproduce that bound and budget. In the counter timebase, an earlier page arm
+waits for the next exit and may fire late by up to a slice. One-shot stop/restart
+uses page disarm and avoids PIT mode port writes.
+The requested semantic parameter is retained
 as `page_timer: true` only when enabled. Replay restores it without an override.
 Timer jitter uses the existing seeded stream. This changes enabled-run timing
 and witnesses; omission preserves the existing identity encoding for the same

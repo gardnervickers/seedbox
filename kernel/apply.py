@@ -130,10 +130,19 @@ edit(
 )
 edit(
     "drivers/clocksource/i8253.c",
+    "static int pit_set_oneshot(struct clock_event_device *evt)\n{\n",
+    "static int seedbox_pit_oneshot_stopped(struct clock_event_device *evt)\n{\n"
+    "\tseedbox_timer_disarm();\n\treturn 0;\n}\n\n"
+    "static int pit_set_oneshot(struct clock_event_device *evt)\n{\n"
+    "\tif (seedbox_page && (READ_ONCE(seedbox_page->capabilities) & SEEDBOX_CAP_PAGE_TIMER))\n"
+    "\t\treturn 0;\n",
+)
+edit(
+    "drivers/clocksource/i8253.c",
     "\ti8253_clockevent.cpumask = cpumask_of(smp_processor_id());\n",
     "\ti8253_clockevent.cpumask = cpumask_of(smp_processor_id());\n"
     "\tif (seedbox_page && (READ_ONCE(seedbox_page->capabilities) & SEEDBOX_CAP_PAGE_TIMER))\n"
-    "\t\ti8253_clockevent.set_state_oneshot_stopped = pit_shutdown;\n",
+    "\t\ti8253_clockevent.set_state_oneshot_stopped = seedbox_pit_oneshot_stopped;\n",
 )
 
 

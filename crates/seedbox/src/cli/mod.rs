@@ -392,7 +392,7 @@ struct RuntimeInputs {
     /// Timebase for guest progress; changes run identity and results.
     #[arg(long, value_enum, default_value_t = TimebaseArg::Counter)]
     timebase: TimebaseArg,
-    /// Arm clockevents through the time page when supported; changes run identity and results.
+    /// Arm clockevents through the time page (ABI 4, aimed at PV); changes run identity and results.
     #[arg(long)]
     page_timer: bool,
     /// Also record and compare every machine's RAM and registers, retaining per-page RAM hashes.

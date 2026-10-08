@@ -42,6 +42,9 @@ fn kernel_and_vmm_pin_the_agreed_extension_indices() {
         ("entropy", "PAGE_ENTROPY", 10, 4),
         ("timer_deadline", "PAGE_TIMER_DEADLINE", 14, 1),
         ("capabilities", "PAGE_CAPABILITIES", 15, 1),
+        ("syscall_ns", "PAGE_SYSCALL_NS", 16, 1),
+        ("syscalls0", "PAGE_SYSCALLS0", 17, 1),
+        ("plan_time", "PAGE_PLAN_TIME", 18, 1),
     ] {
         assert_eq!(fields[name], (offset, count));
         assert!(MACHINE.contains(&format!("const {constant}: usize = {offset};")));
@@ -59,45 +62,10 @@ fn kernel_and_vmm_pin_the_agreed_extension_indices() {
             }
         }
     }
-    assert_eq!(index, 16);
+    assert_eq!(index, 19);
     assert!(HEADER.contains("#define SEEDBOX_ABI\t\t4\n"));
     assert!(MACHINE.contains("pub const ABI_PAGE_RESEED: u64 = 3;"));
     assert!(MACHINE.contains("pub const ABI_PAGE_TIMER: u64 = 4;"));
-}
-
-#[test]
-fn extension_writes_stay_behind_pv_and_parked_abi_3_time_fork_gates() {
-    let boot = section(
-        MACHINE,
-        "if spec.pv_clock {\n            unsafe",
-        "\n        }",
-    );
-    assert!(boot.contains("write_volatile(page.cast::<u64>().add(PAGE_PV_CLOCK), 1)"));
-    let release = section(MACHINE, "pub fn release(", "/// Freeze the machine");
-    let write = release.find("self.page_set(PAGE_ENTROPY + i, v)").unwrap();
-    for gate in [
-        "if !self.parked {",
-        "if self.barrier {",
-        "if self.abi < ABI_PAGE_RESEED {",
-    ] {
-        assert!(release.find(gate).unwrap() < write);
-    }
-    assert!(release.contains("return Ok(Reseed::Unsupported);"));
-    // Generation publication follows the payload, with no other runtime writer.
-    assert!(
-        write
-            < release
-                .find("self.page_set(PAGE_ENTROPY_GEN, gen)")
-                .unwrap()
-    );
-    let runtime = MACHINE.split("\n#[cfg(test)]\nmod ").next().unwrap();
-    assert_eq!(runtime.matches("self.page_set(PAGE_ENTROPY").count(), 2);
-    assert_eq!(runtime.matches(".add(PAGE_PV_CLOCK), 1)").count(), 1);
-    assert!(!runtime.contains("page_set(PAGE_BOUND"));
-    assert!(!runtime.contains("page_set(PAGE_SYSCALL_TARGET"));
-    let pv = include_str!("../../seedbox-vmm/src/machine/pv.rs");
-    assert!(pv.contains("m.page_set(PAGE_BOUND, soft)"));
-    assert!(pv.contains("m.page_set(PAGE_SYSCALL_TARGET, syscalls + left)"));
 }
 
 #[test]

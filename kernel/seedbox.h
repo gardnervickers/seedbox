@@ -47,6 +47,9 @@ struct seedbox_time_page {
 	u64 entropy[4];	/* 32 bytes the kernel mixes in before reseeding */
 	u64 timer_deadline;	/* guest-written absolute 1 GHz deadline, or DISARMED */
 	u64 capabilities;	/* VMM feature bits (ABI 4) */
+	u64 syscall_ns;	/* VMM plan: per-syscall cost, zero in counter mode */
+	u64 syscalls0;	/* VMM plan: syscall count used for syscall_target */
+	u64 plan_time;	/* VMM plan: t0 (tsc can lag after a watchdog split) */
 };
 
 /* Enabled at boot in the PV clock timebase; a no-op (no branch) otherwise. */

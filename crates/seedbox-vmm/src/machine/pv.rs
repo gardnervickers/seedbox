@@ -31,7 +31,7 @@
 //! wall-time limit. That follows from the model: such a loop waits on
 //! something only virtual time could bring.
 
-use super::{map, Machine, Mapping, PAGE_BOUND, PAGE_SYSCALLS, PAGE_SYSCALL_TARGET};
+use super::{map, Machine, Mapping, PAGE_BOUND, PAGE_SYSCALLS, PAGE_SYSCALL_TARGET, PAGE_TIMER_DEADLINE};
 use crate::timebase::{Judge, Prepared, Run, Timebase, Verdict};
 use crate::undo::VcpuState;
 use std::time::Duration;
@@ -240,12 +240,23 @@ impl PvClock {
         m.set_stepping(false)?;
         // Exit when the guest clock would pass the soft stop, or at the
         // syscall whose cost reaches it.
-        m.page_set(PAGE_BOUND, soft);
         let syscalls = m.page_get(PAGE_SYSCALLS);
-        let left = soft.saturating_sub(m.time).div_ceil(self.syscall_ns).max(1);
-        m.page_set(PAGE_SYSCALL_TARGET, syscalls + left);
+        let timer = m.page_timer.enabled.then(|| (m.page_get(PAGE_TIMER_DEADLINE), m.page_timer.seen));
+        let (bound, target) = clock_stop(m.time, syscalls, self.syscall_ns, soft, timer);
+        m.page_set(PAGE_BOUND, bound);
+        m.page_set(PAGE_SYSCALL_TARGET, target);
         Ok(Prepared::Run)
     }
+}
+
+/// Reproduce a running guest's earlier arm after any watchdog split. Syscall
+/// charges move t0 and s0 together, leaving the absolute target unchanged.
+fn clock_stop(t0: u64, s0: u64, ns: u64, mut soft: u64, timer: Option<(u64, u64)>) -> (u64, u64) {
+    if let Some((word, seen)) = timer {
+        if word != seen && word < soft { soft = word; }
+    }
+    let left = soft.saturating_sub(t0).div_ceil(ns).max(1);
+    (soft, s0 + left)
 }
 
 fn key(r: &kvm_bindings::kvm_regs) -> Key {
@@ -491,6 +502,90 @@ mod tests {
         assert_eq!((stats.spin_false, stats.spin_clock_progress), (1, 1));
     }
 
+    // Mirror seedbox_set_next_event: only an earlier deadline changes the
+    // published bound/target; C rounds up with DIV_ROUND_UP_ULL and max(1).
+    fn guest_arm(t0: u64, s0: u64, ns: u64, deadline: u64, bound: u64, target: u64) -> (u64, u64) {
+        if deadline >= bound { return (bound, target); }
+        let left = deadline.saturating_sub(t0);
+        let rounded = (left / ns) + u64::from(left % ns != 0);
+        (deadline, s0 + rounded.max(1))
+    }
+
+    #[test]
+    fn guest_arm_and_plan_compute_identical_bounds_and_targets() {
+        for t0 in [0, 1, 999, 1000000, u64::MAX - 10000] {
+            for s0 in [0, 1, 123456] {
+                for ns in [1, 900, 937, 1000, 1100] {
+                    let mut deadlines = vec![0, t0.saturating_sub(1), t0];
+                    for offset in [1, ns - 1, ns, ns + 1, 2 * ns - 1, 2 * ns, 2 * ns + 1] {
+                        deadlines.push(t0 + offset);
+                    }
+                    for deadline in deadlines {
+                        for soft in [t0, deadline.saturating_sub(1), deadline, deadline + 1, t0 + 5000] {
+                            let (bound, target) = clock_stop(t0, s0, ns, soft, None);
+                            let guest = guest_arm(t0, s0, ns, deadline, bound, target);
+                            let plan = clock_stop(t0, s0, ns, soft, Some((deadline, u64::MAX)));
+                            assert_eq!(guest, plan, "t0={t0} s0={s0} ns={ns} deadline={deadline} soft={soft}");
+                            assert_eq!(clock_stop(t0, s0, ns, soft, Some((deadline, deadline))), (bound, target), "an adopted word must not change the plan");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_unadopted_page_arm_is_split_invariant() {
+        for t0 in [0, 987654] {
+            for s0 in [0, 54321] {
+                for ns in [900, 937, 1000, 1100] {
+                    for offset in [ns - 1, ns, ns + 1, 16 * ns - 1, 16 * ns, 16 * ns + 1] {
+                        let deadline = t0 + offset;
+                        let soft = deadline + 1000000;
+                        let want = clock_stop(t0, s0, ns, soft, Some((deadline, u64::MAX)));
+                        let initial = clock_stop(t0, s0, ns, soft, None);
+                        assert_eq!(guest_arm(t0, s0, ns, deadline, initial.0, initial.1), want);
+                        // Every possible split before the guest's budget exit.
+                        for charged in 0..(want.1 - s0) {
+                            let t1 = t0 + charged * ns;
+                            let s1 = s0 + charged;
+                            assert_eq!(clock_stop(t1, s1, ns, soft, Some((deadline, u64::MAX))), want);
+                            let initial = clock_stop(t1, s1, ns, soft, None);
+                            assert_eq!(guest_arm(t1, s1, ns, deadline, initial.0, initial.1), want);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires KVM"]
+    fn guest_without_page_timer_support_fails_at_boot() {
+        let kvm = Kvm::new().unwrap();
+        for requested in [false, true] {
+            for abi in 0..=super::super::ABI_PAGE_TIMER {
+                let mut code = vec![0xb8];
+                code.extend_from_slice(&(abi as u32).to_le_bytes());
+                code.extend_from_slice(&[0xba, 0x28, 0x05, 0, 0, 0xef, 0xf4]);
+                let mut m = machine(&kvm, &code, 0);
+                m.page_timer_requested = requested;
+                m.page_set(super::super::PAGE_PV_CLOCK, 2);
+                m.pic.set_masks(0xffff);
+                let mut clock = PvClock::new(Duration::from_secs(10)).unwrap();
+                let got = m.run_until(&mut clock, 1000000, 0, &mut Vec::new());
+                if requested && abi < super::super::ABI_PAGE_TIMER {
+                    assert_eq!(got.unwrap_err(), "the guest kernel lacks page timer support; rebuild it from kernel/ or drop --page-timer");
+                    assert!(!m.page_timer.enabled);
+                    assert_eq!(m.page_get(super::super::PAGE_CAPABILITIES), 0);
+                } else {
+                    assert_eq!(got.unwrap(), Stop::Halted);
+                    assert_eq!(m.page_timer.enabled, requested);
+                }
+            }
+        }
+    }
+
     /// A 32-bit payload at the kernel entry, interrupts enabled and unmasked.
     fn machine(kvm: &Kvm, code: &[u8], undo: u64) -> Machine {
         let mut kernel = vec![0u8; 1024];
@@ -520,18 +615,22 @@ mod tests {
             code.extend_from_slice(&address.to_le_bytes());
             code.extend_from_slice(&value.to_le_bytes());
         }
+        // Review repro: 2^24 branches between the stores and the yield.
+        code.extend_from_slice(&[0xb9, 0, 0, 0, 0x01, 0x49, 0x75, 0xfd]);
         code.extend_from_slice(&[0xba, 0x2c, 0x05, 0, 0, 0xb0, 1, 0xee, 0xf4]);
-        let mut m = machine(&kvm, &code, 0);
-        m.page_timer_requested = true;
-        m.abi = super::super::ABI_PAGE_TIMER;
-        m.enable_page_timer();
-        m.pic.set_masks(0xffff); // Retain IRQ0 rather than entering an absent IDT.
-        let mut clock = PvClock::new(Duration::from_millis(10)).unwrap();
-        assert_eq!(m.run_until(&mut clock, 1000000, 0, &mut Vec::new()).unwrap(), Stop::Halted);
-        assert_eq!(m.time, 20000, "yield must use the guest's lowered bound");
-        assert_eq!(m.pit.deadline, None);
-        m.pic.set_masks(0);
-        assert_eq!(m.pic.pending(), Some(0));
+        for watchdog in [Duration::from_secs(10), Duration::from_micros(100)] {
+            let mut m = machine(&kvm, &code, 0);
+            m.page_timer_requested = true;
+            m.abi = super::super::ABI_PAGE_TIMER;
+            m.enable_page_timer();
+            m.pic.set_masks(0xffff); // Retain IRQ0 rather than entering an absent IDT.
+            let mut clock = PvClock::new(watchdog).unwrap();
+            let stop = m.run_until(&mut clock, 1000000, 0, &mut Vec::new()).unwrap();
+            assert_eq!((stop, m.time), (Stop::Halted, 20000), "watchdog={watchdog:?}");
+            assert_eq!(m.pit.deadline, None);
+            m.pic.set_masks(0);
+            assert_eq!(m.pic.pending(), Some(0));
+        }
     }
 
     /// Run to the first stop under several watchdog periods and undo
