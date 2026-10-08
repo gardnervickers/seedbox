@@ -55,6 +55,9 @@ compiler or extra VMM path is needed. Use `--allow-dev-engine` on run/replay/doc
 Images must support `linux/arm64`, RAM is limited to 3072 MiB per guest, and
 exploration is serial. CPU/PMU flags apply to Linux. Mac profiles have distinct
 PV time, boot-layout, device and HVF host identities and remain unqualified.
+The etcd template uses one Go worker per single-vCPU guest (`GOMAXPROCS=1`).
+The native PV backend requires cooperative guest boundaries; four Go workers
+stalled in the Mac example and are not validated.
 `--torn-writes` opts into seeded partial survival of unflushed 512-byte disk
 sectors on machine crash (off by default). It is part of run identity and replay
 restores it automatically. It applies only to retained disks; this template

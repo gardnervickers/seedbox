@@ -14,7 +14,7 @@ services:
       - --initial-cluster-state=new
       - --logger=zap
       - --log-level=error
-    environment: {GOMAXPROCS: "4"}
+    environment: {GOMAXPROCS: "1"}
   n2:
     image: quay.io/coreos/etcd:v3.5.2
     entrypoint: [/usr/local/bin/etcd]
@@ -29,7 +29,7 @@ services:
       - --initial-cluster-state=new
       - --logger=zap
       - --log-level=error
-    environment: {GOMAXPROCS: "4"}
+    environment: {GOMAXPROCS: "1"}
   n3:
     image: quay.io/coreos/etcd:v3.5.2
     entrypoint: [/usr/local/bin/etcd]
@@ -44,11 +44,11 @@ services:
       - --initial-cluster-state=new
       - --logger=zap
       - --log-level=error
-    environment: {GOMAXPROCS: "4"}
+    environment: {GOMAXPROCS: "1"}
   client:
     build: ./workload
     command: [--endpoints, "n1:2379,n2:2379,n3:2379", --duration, 10s, --concurrency, "8", --writes, "20"]
-    environment: {GOMAXPROCS: "4"}
+    environment: {GOMAXPROCS: "1"}
 x-seedbox:
   version: 1
   seed: 1009

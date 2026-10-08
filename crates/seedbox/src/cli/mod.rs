@@ -52,7 +52,8 @@ const VMM_FAILURE_HELP: &str = "Text VMM failures also show up to 5 non-empty li
     about = "Deterministic simulation of Compose applications on real Linux machines",
     long_about = "Deterministic simulation of Compose applications on real Linux machines.\n\n\
                   A seed plus the retained inputs regenerate the same execution. \
-                  `run` and `replay` need a qualified Linux KVM host and root."
+                  `run` and `replay` support a qualified Linux KVM host with root, \
+                  or the development backend on Apple Silicon Mac."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -170,13 +171,13 @@ enum Command {
         #[command(flatten)]
         performance: Performance,
     },
-    /// Pause host execution at a slice boundary (Linux KVM host, same user or root).
+    /// Pause host execution at a slice boundary (same execution user or root).
     #[command(after_help = HOST_CONTROL_HELP)]
     Pause {
         /// Directory of the executing run or replay attempt.
         run: PathBuf,
     },
-    /// Resume host execution from a paused slice boundary (Linux KVM host, same user or root).
+    /// Resume host execution from a paused slice boundary (same execution user or root).
     #[command(after_help = HOST_CONTROL_HELP)]
     Resume {
         /// Directory of the executing run or replay attempt.

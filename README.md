@@ -40,6 +40,8 @@ and executes application machines natively under HVF. Replay uses retained bytes
 without starting that preparation VM. No runtime compiler or separate VMM path
 is needed. Images must support `linux/arm64`; memory is limited to 3072 MiB per
 service. Mac execution remains unqualified and requires `--allow-dev-engine`.
+The generated etcd example uses `GOMAXPROCS=1` for its single-vCPU guests;
+the four-worker variant stalled under the cooperative native PV backend.
 See [the Mac workflow](tools/mac-runtime/README.md).
 
 `seedbox run` with no arguments runs the Compose project in the current

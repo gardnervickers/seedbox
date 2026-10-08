@@ -69,8 +69,8 @@ standalone VMM directly. Partial, unknown or incompatible descriptors fail
 before host execution. The combined executable is a development engine under
 the existing explicit `--allow-dev-engine` gate; it has not received new release
 qualification. `prepare` records the development marker without authorizing
-execution. On ARM, only the experimental fixture is integrated; Compose worlds
-remain Linux x86-64.
+execution. Apple Silicon also supports the native development ARM Compose
+backend described below.
 
 The `seedbox` build embeds the static guest supervisor from `guest/compose-init.c`,
 compiled with the shell's musl compiler (`SEEDBOX_STATIC_CC`, or `musl-gcc`).
@@ -79,7 +79,7 @@ example the output of `bash guest/build-compose.sh FILE`.
 
 Preparation requires `skopeo`, `umoci`, and a Docker-compatible builder (the shell
 supplies Podman). Rootful unpacking preserves image ownership and modes. Run on
-the supported Linux amd64 host; Darwin is for configuration and portable tests.
+the supported Linux amd64 host, or use the packaged private preparation VM on Mac.
 
 `skopeo` selects Linux amd64 and copies the original platform-specific manifest
 and blobs with preserved digests. Seedbox verifies descriptor hashes and sizes,
@@ -147,6 +147,9 @@ Old fixture reports cannot satisfy this application contract. A missing or
 incompatible retained proof fails replay before host execution.
 This remains unqualified development evidence. ARM images, 64..3072 MiB per
 guest and one exploration worker are required; PMU/core options apply to Linux.
+The generated etcd example sets `GOMAXPROCS=1` for its single-vCPU guests. The
+native PV backend advances through cooperative guest boundaries; the example
+with four Go workers stalled in native guest execution and is not validated.
 
 After building the binaries above, as root with the Nix tools on PATH
 (`sudo -E env PATH="$PATH" ...` from the Nix shell):
