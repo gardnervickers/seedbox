@@ -29,6 +29,15 @@ seedbox replay .seedbox/runs/ATTEMPT
 seedbox diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
 ```
 
+The Linux maintainer build `bash tools/linux-runtime/build-cli.sh` from the
+Seedbox checkout includes the guest kernel, supervisor, BusyBox and mke2fs in
+one executable. Explicit runtime-input flags and their environment path overrides
+still win. Configured artifact directories precede the packaged kernel;
+packaged assets precede incidental checkout/home/PATH defaults. Skopeo, umoci
+and the image builder remain installed preparation tools. Unbundled developer
+builds keep the existing input search. Package execution on Linux remains a
+final merge-train check. Replay uses only retained inputs after an upgrade.
+
 On a VMM failure, text output from `run`, `replay`, `explore` and `inspect`
 prints up to five non-empty lines from the final 8 KiB of the attempt's
 `output/vmm.stderr` to stderr, prefixed with `vmm stderr:`. Missing or unreadable

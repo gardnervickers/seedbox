@@ -7,7 +7,7 @@ mod signals;
 use backends::{Executor, Preparer};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(any(test, not(all(target_os = "macos", target_arch = "aarch64"))))]
 use seedbox::execution::ExecutionProfile;
 use seedbox::{
     bundle, config,
@@ -377,8 +377,8 @@ impl StateArg {
 #[derive(Args)]
 #[command(next_help_heading = "Runtime inputs")]
 struct KvmInputs {
-    /// Guest kernel Image on Mac (packaged), or bzImage on Linux [default: packaged on Mac; bzImage in $SEEDBOX_ARTIFACTS, $SEEDBOX_WORK/artifacts,
-    /// ./artifacts, then ~/seedbox-sim/artifacts for the user and any sudo caller].
+    /// Guest kernel Image on Mac, or bzImage on Linux [default: packaged on Mac; Linux searches $SEEDBOX_ARTIFACTS, $SEEDBOX_WORK/artifacts,
+    /// packaged bzImage, ./artifacts, then ~/seedbox-sim/artifacts for the user and any sudo caller].
     #[arg(long, env = "SEEDBOX_KERNEL")]
     kernel: Option<PathBuf>,
     /// Override with a legacy standalone VMM [default: the engine built into seedbox].
@@ -391,13 +391,13 @@ struct KvmInputs {
 struct RuntimeInputs {
     #[command(flatten)]
     kvm: KvmInputs,
-    /// Static guest supervisor [default: the copy built into this binary].
+    /// Static guest supervisor [default: packaged helper, then the copy built into this binary].
     #[arg(long, env = "SEEDBOX_GUEST_INIT")]
     guest_init: Option<PathBuf>,
-    /// Static Linux BusyBox for the guest architecture [default: packaged on Mac; busybox on PATH on Linux, if static].
+    /// Static Linux BusyBox for the guest architecture [default: packaged helper, then busybox on PATH on Linux, if static].
     #[arg(long, env = "SEEDBOX_BUSYBOX")]
     busybox: Option<PathBuf>,
-    /// Static Linux mke2fs for named volumes [default: packaged on Mac; mke2fs on PATH on Linux, if static].
+    /// Static Linux mke2fs for named volumes [default: packaged helper, then mke2fs on PATH on Linux, if static].
     #[arg(long, env = "SEEDBOX_MKE2FS")]
     mke2fs: Option<PathBuf>,
     /// Docker-compatible client for `build:` services.
@@ -498,14 +498,25 @@ impl RuntimeInputs {
         }
     }
 
-    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(test, not(all(target_os = "macos", target_arch = "aarch64"))))]
     fn preparer(
         &self,
         engine: PathBuf,
         store: &ContentStore,
         scratch: &Path,
         profile: ExecutionProfile,
-    ) -> Result<OciPreparer> {
+    ) -> Result<backends::LinuxPreparer> {
+        let resolved = defaults::linux_runtime(
+            defaults::LinuxOverrides {
+                kernel: self.kvm.kernel.clone(),
+                init: self.guest_init.clone(),
+                busybox: self.busybox.clone(),
+                mke2fs: self.mke2fs.clone(),
+            },
+            scratch,
+            seedbox::runtime_assets::AssetSelection::All,
+            Some(store),
+        )?;
         let mut tools = OciTools {
             docker: self.builder.clone(),
             ..OciTools::default()
@@ -515,14 +526,21 @@ impl RuntimeInputs {
                 *tool = resolved;
             }
         }
-        Ok(OciPreparer {
-            tools,
-            kernel: defaults::kernel(self.kvm.kernel.clone())?,
-            engine,
-            init: defaults::guest_init(self.guest_init.clone(), store, scratch)?,
-            busybox: defaults::busybox(self.busybox.clone())?,
-            mke2fs: defaults::mke2fs(self.mke2fs.clone())?,
-            profile,
+        Ok(backends::LinuxPreparer {
+            inputs: OciPreparer {
+                tools,
+                kernel: resolved.kernel,
+                engine,
+                init: resolved
+                    .init
+                    .ok_or_else(|| Error::Integrity("missing resolved Linux supervisor".into()))?,
+                busybox: resolved
+                    .busybox
+                    .ok_or_else(|| Error::Integrity("missing resolved Linux BusyBox".into()))?,
+                mke2fs: resolved.mke2fs,
+                profile,
+            },
+            _assets: resolved.assets,
         })
     }
 }
@@ -663,6 +681,8 @@ fn run(cli: Cli) -> Result<u8> {
             Ok(0)
         }
         Command::Doctor { cpu, inputs, json } => {
+            let cancellation = CancellationToken::default();
+            let _signals = Signals::register(&cancellation)?;
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             {
                 cpu.admit(CounterProfile::Zen)?;
@@ -680,6 +700,9 @@ fn run(cli: Cli) -> Result<u8> {
                     Some(path) => defaults::existing("--kernel", path)?,
                     None => backends::mac_runtime()?.input("Image"),
                 };
+                if cancellation.is_cancelled() {
+                    return Err(Error::Setup("doctor cancelled".into()));
+                }
                 let report = seedbox::mac::MacExecutor::doctor(&engine, &kernel)?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -697,11 +720,24 @@ fn run(cli: Cli) -> Result<u8> {
             {
                 let internal = inputs.vmm.is_none();
                 let engine = defaults::engine(inputs.vmm)?;
-                let kernel = defaults::kernel(inputs.kernel)?;
+                let scratch = tempfile::tempdir()?;
+                let runtime = defaults::linux_runtime(
+                    defaults::LinuxOverrides {
+                        kernel: inputs.kernel,
+                        ..Default::default()
+                    },
+                    scratch.path(),
+                    seedbox::runtime_assets::AssetSelection::Kernel,
+                    None,
+                )?;
+                if cancellation.is_cancelled() {
+                    return Err(Error::Setup("doctor cancelled".into()));
+                }
+                let kernel = &runtime.kernel;
                 let report = if internal {
-                    VmmExecutor::doctor_internal(&engine, &kernel, cpu.cpu)?
+                    VmmExecutor::doctor_internal(&engine, kernel, cpu.cpu)?
                 } else {
-                    VmmExecutor::doctor(&engine, &kernel, cpu.cpu)?
+                    VmmExecutor::doctor(&engine, kernel, cpu.cpu)?
                 };
                 if json {
                     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -748,10 +784,13 @@ fn run(cli: Cli) -> Result<u8> {
             let (store, _) = state.open()?;
             let scratch = tempfile::tempdir()?;
             let counter = CounterProfile::host().unwrap_or(CounterProfile::Zen);
-            let (mut preparer, _) = inputs.backends(&store, None, counter, scratch.path())?;
-            preparer.tools.build_epoch = build.build_epoch;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
+            let (mut preparer, _) = inputs.backends(&store, None, counter, scratch.path())?;
+            if cancellation.is_cancelled() {
+                return Err(Error::PreparationCancelled);
+            }
+            preparer.tools.build_epoch = build.build_epoch;
             preparer.cancellation(cancellation);
             let prepared = preparer.prepare(&simulation, &store)?;
             let file = std::fs::OpenOptions::new()
@@ -779,16 +818,19 @@ fn run(cli: Cli) -> Result<u8> {
             let scratch = tempfile::tempdir()?;
             let detected = execution_counter();
             let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
+            let cancellation = CancellationToken::default();
+            let _signals = Signals::register(&cancellation)?;
             let (mut preparer, executor) =
                 inputs.backends(&store, cpu.cpu, counter, scratch.path())?;
+            if cancellation.is_cancelled() {
+                return Err(Error::PreparationCancelled);
+            }
             cpu.admit(detected?)?;
             let executor = executor.with_unqualified_cpu(cpu.allow_unqualified_cpu);
             preparer.profile = executor.profile();
             preparer.tools.build_epoch = build.build_epoch;
             let executor = performance.apply(executor)?;
             // Backend admission checks the selected core before preparation.
-            let cancellation = CancellationToken::default();
-            let _signals = Signals::register(&cancellation)?;
             preparer.cancellation(cancellation.clone());
             let result = orchestrator.run(
                 &simulation,
@@ -814,6 +856,7 @@ fn run(cli: Cli) -> Result<u8> {
             let simulation = compose.load()?;
             build.configure(&simulation, &mut inputs)?;
             let cancellation = CancellationToken::default();
+            let _signals = Signals::register(&cancellation)?;
             let options = ExploreOptions {
                 seed,
                 count,
@@ -832,6 +875,9 @@ fn run(cli: Cli) -> Result<u8> {
             let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
             let (mut preparer, executor) =
                 inputs.backends(&store, cpu.cpu, counter, scratch.path())?;
+            if cancellation.is_cancelled() {
+                return Err(Error::PreparationCancelled);
+            }
             preparer.tools.build_epoch = build.build_epoch;
             #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
             {
@@ -850,7 +896,6 @@ fn run(cli: Cli) -> Result<u8> {
             preparer.profile = executor.profile();
             let executor = performance.apply(executor)?;
             // Exploration retains any backend admission refusal in its batch checkpoint.
-            let _signals = Signals::register(&cancellation)?;
             let mut result = orchestrator.explore(&simulation, options, &preparer, &executor)?;
             result.record_resources(resources.finish())?;
             if json {
@@ -1334,6 +1379,50 @@ fn print_omissions(record: &orchestration::RunRecord) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_preparer_wiring_preserves_explicit_inputs_without_execution() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut args = vec![
+            "seedbox".into(),
+            "prepare".into(),
+            "--output".into(),
+            directory.path().join("prepared.json").into_os_string(),
+        ];
+        for flag in ["kernel", "guest-init", "busybox", "mke2fs"] {
+            let path = directory.path().join(flag);
+            std::fs::write(&path, b"synthetic input; never executed").unwrap();
+            args.extend([format!("--{flag}").into(), path.into_os_string()]);
+        }
+        let Command::Prepare { inputs, .. } = Cli::try_parse_from(args).unwrap().command else {
+            panic!("expected prepare arguments");
+        };
+        let store = ContentStore::new(directory.path().join("objects"));
+        let profile = ExecutionProfile {
+            backend: "portable-fixture".into(),
+            engine: seedbox::store::ContentDigest::of(b"engine"),
+            witness_mode: WitnessMode::Exits,
+            semantic_parameters: Default::default(),
+        };
+        let preparer = inputs
+            .preparer(
+                directory.path().join("engine"),
+                &store,
+                directory.path(),
+                profile.clone(),
+            )
+            .unwrap();
+        assert!(preparer._assets.is_none());
+        let preparer = Preparer::Linux(Box::new(preparer));
+        assert_eq!(preparer.kernel, directory.path().join("kernel"));
+        assert_eq!(preparer.init, directory.path().join("guest-init"));
+        assert_eq!(preparer.busybox, directory.path().join("busybox"));
+        assert_eq!(preparer.mke2fs, Some(directory.path().join("mke2fs")));
+        assert_eq!(preparer.engine, directory.path().join("engine"));
+        assert_eq!(preparer.profile, profile);
+        assert!(!directory.path().join("objects").exists());
+        assert!(!directory.path().join("prepared.json").exists());
+    }
 
     #[test]
     fn replay_on_another_vendor_names_both_counters() {

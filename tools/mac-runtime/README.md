@@ -26,7 +26,12 @@ requested inputs into that owned Linux filesystem, verifies returned content
 hashes, and stops the preparation VM before executing the world. Application
 machines run directly under macOS HVF, one worker process and one vCPU per
 service. Runtime commands never invoke Cargo and need no separate VMM path.
-Lima is provided by the project Nix development shell.
+The host Lima executable and its resources remain an installed dependency,
+provided by the project Nix development shell. The CLI embeds the guest inputs
+and Linux preparation closure; this maintainer workflow does not distribute
+Lima itself. The first preparation VM start downloads the pinned Ubuntu image
+and installs the pinned Nix bootstrap described in `lima.yaml`; initial setup
+requires network access. Replay needs neither Lima nor those downloads.
 
 Podman uses a separate VFS storage directory for each preparation job. This
 avoids reusing overlay mount state across VM stops; cleanup removes that job's
@@ -52,15 +57,17 @@ Supported RAM is 64..3072 MiB per service. CPU pinning and unqualified PMU flags
 are Linux-only, and Mac exploration currently supports one worker. Kernel,
 supervisor, BusyBox and mke2fs overrides remain available for development.
 
-The initial Mac backend explicitly rejects connection selectors and console
-triggers before allocating fault handles. Exercise that guest-visible boundary
-and confirm ordinary control calls still work with:
+Mac application worlds use the shared coordinator for connection discovery,
+selectors and committed console triggers. Exercise the guest control API with:
 
 ```sh
 target/release/seedbox run harness/acceptance/workloads/mac-capabilities.yaml
+target/release/seedbox run harness/acceptance/workloads/triggers.yaml
 target/release/seedbox replay .seedbox/runs/ATTEMPT
 ```
 
-The scenario must pass only on a backend that reports those operations as
-unsupported. Timed log chunks and per-page RAM diagnostics are Linux features;
-Mac retains raw streams and whole-state evidence.
+The capabilities scenario checks connection discovery, invalid-selector
+rejection, trigger arm/cancel and ordinary partition/heal operations. The trigger
+scenario checks committed matches and their scheduled effects. Arbitrary ARM
+snapshot/fork reuse remains unsupported. Timed log chunks and per-page RAM
+diagnostics are Linux features; Mac retains raw streams and whole-state evidence.

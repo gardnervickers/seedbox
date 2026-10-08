@@ -25,8 +25,14 @@ class BuildVersionTests(unittest.TestCase):
             '[package]\nname="version-probe"\nversion="0.1.0"\nedition="2021"\nbuild="build-runtime.rs"\n[workspace]\n')
         (crate / "src/main.rs").write_text(
             '''include!(concat!(env!("OUT_DIR"), "/mac-runtime.rs"));
+include!(concat!(env!("OUT_DIR"), "/linux-runtime.rs"));
 fn main() {
-    if std::env::args().any(|argument| argument == "--bundle") {
+    if std::env::args().any(|argument| argument == "--linux-bundle") {
+        match LINUX_RUNTIME {
+            Some(bytes) => print!("{}", std::str::from_utf8(bytes).unwrap()),
+            None => print!("<none>"),
+        }
+    } else if std::env::args().any(|argument| argument == "--bundle") {
         print!("{}", std::str::from_utf8(MAC_RUNTIME.unwrap()).unwrap());
     } else { println!("{}", env!("SEEDBOX_SIMULATOR_VERSION")); }
 }
@@ -45,7 +51,7 @@ fn main() {
     def exercise(self, root, target):
         environment = os.environ.copy()
         for name in ["SEEDBOX_SOURCE_REVISION", "SEEDBOX_SOURCE_DIRTY",
-                     "SEEDBOX_MAC_RUNTIME_BUNDLE", "CARGO_BUILD_TARGET", "SEEDBOX_BUILD_ROOT"]:
+                     "SEEDBOX_MAC_RUNTIME_BUNDLE", "SEEDBOX_LINUX_RUNTIME_BUNDLE", "CARGO_BUILD_TARGET", "SEEDBOX_BUILD_ROOT"]:
             environment.pop(name, None)
         environment["CARGO_TARGET_DIR"] = str(target)
         crate = root / "crates/seedbox"
@@ -149,7 +155,7 @@ fn main() {
 
             environment = os.environ.copy()
             for name in ["SEEDBOX_SOURCE_REVISION", "SEEDBOX_SOURCE_DIRTY",
-                         "SEEDBOX_BUILD_ROOT", "CARGO_BUILD_TARGET"]:
+                         "SEEDBOX_BUILD_ROOT", "CARGO_BUILD_TARGET", "SEEDBOX_LINUX_RUNTIME_BUNDLE"]:
                 environment.pop(name, None)
             target = temporary / "target"
             environment["CARGO_TARGET_DIR"] = str(target)
@@ -210,3 +216,67 @@ fn main() {
                 self.assertIn(f"{root}/guest/compose-init.c", result.stdout)
                 if root != first:
                     self.assertIn("seedbox-unconfigured-source-cache", result.stdout)
+
+
+    def test_linux_bundle_env_path_contents_and_unset_invalidate_actual_cargo_embedding(self):
+        with tempfile.TemporaryDirectory(prefix="seedbox-linux-bundle-probe-") as directory:
+            temporary = Path(directory).resolve()
+            root = temporary / "repository"
+            self.fixture(root)
+            target = temporary / "target"
+            environment = os.environ.copy()
+            for name in ["SEEDBOX_SOURCE_REVISION", "SEEDBOX_SOURCE_DIRTY", "SEEDBOX_BUILD_ROOT",
+                         "CARGO_BUILD_TARGET", "SEEDBOX_MAC_RUNTIME_BUNDLE", "SEEDBOX_LINUX_RUNTIME_BUNDLE"]:
+                environment.pop(name, None)
+            environment["CARGO_TARGET_DIR"] = str(target)
+            environment["SEEDBOX_STATIC_CC"] = str(temporary / "absent-compiler")
+            binary = str(target / "debug/version-probe")
+
+            def build(expected_linux, expected_mac=None, fresh=False):
+                result = subprocess.run(["cargo", "build", "--offline", "-vv"],
+                                        cwd=root / "crates/seedbox", env=environment, text=True,
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+                self.assertEqual(result.returncode, 0, result.stdout)
+                if fresh:
+                    self.assertIn("Fresh version-probe", result.stdout)
+                    self.assertNotIn("Compiling version-probe", result.stdout)
+                self.assertEqual(subprocess.check_output([binary, "--linux-bundle"], text=True),
+                                 expected_linux, result.stdout)
+                if expected_mac is not None:
+                    self.assertEqual(subprocess.check_output([binary, "--bundle"], text=True),
+                                     expected_mac, result.stdout)
+
+            build("<none>")
+            build("<none>", fresh=True)
+            first = temporary / "first-bundle"
+            second = temporary / "second-bundle"
+            first.write_text("linux-first")
+            second.write_text("linux-second")
+            environment["SEEDBOX_LINUX_RUNTIME_BUNDLE"] = str(first)
+            build("linux-first")
+            build("linux-first", fresh=True)
+            # Same path, new bytes: the file watcher must invalidate Cargo's
+            # include rather than merely tracking the environment string.
+            first.write_text("linux-first-replaced-in-place")
+            build("linux-first-replaced-in-place")
+            build("linux-first-replaced-in-place", fresh=True)
+            environment["SEEDBOX_LINUX_RUNTIME_BUNDLE"] = str(second)
+            build("linux-second")
+            mac = temporary / "mac-bundle"
+            mac.write_text("mac-independent")
+            environment["SEEDBOX_MAC_RUNTIME_BUNDLE"] = str(mac)
+            build("linux-second", "mac-independent")
+            environment.pop("SEEDBOX_LINUX_RUNTIME_BUNDLE")
+            build("<none>", "mac-independent")
+            build("<none>", "mac-independent", fresh=True)
+            environment["SEEDBOX_LINUX_RUNTIME_BUNDLE"] = str(first)
+            build("linux-first-replaced-in-place", "mac-independent")
+            environment.pop("SEEDBOX_LINUX_RUNTIME_BUNDLE")
+            environment.pop("SEEDBOX_MAC_RUNTIME_BUNDLE")
+            build("<none>")
+            build("<none>", fresh=True)
+            # The public generated constant is None and the new executable
+            # must also discard the old embedded payload bytes.
+            binary_bytes = Path(binary).read_bytes()
+            self.assertNotIn(b"linux-first-replaced-in-place", binary_bytes)
+            self.assertNotIn(b"linux-second", binary_bytes)

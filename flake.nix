@@ -23,6 +23,10 @@
             SEEDBOX_TC = "${pkgs.iproute2}/bin/tc";
             SEEDBOX_BUSYBOX = "${pkgs.pkgsStatic.busybox}/bin/busybox";
             SEEDBOX_MKE2FS = "${pkgs.pkgsStatic.e2fsprogs.bin}/bin/mke2fs";
+            # Source archives supply actual upstream notices and build provenance.
+            SEEDBOX_BUSYBOX_SOURCE = "${pkgs.pkgsStatic.busybox.src}";
+            SEEDBOX_E2FSPROGS_SOURCE = "${pkgs.pkgsStatic.e2fsprogs.src}";
+            SEEDBOX_MUSL_SOURCE = "${pkgs.pkgsStatic.stdenv.cc.libc.src}";
           });
         };
     in {

@@ -48,6 +48,24 @@ fn main() {
         declaration,
     )
     .unwrap();
+    println!("cargo::rerun-if-env-changed=SEEDBOX_LINUX_RUNTIME_BUNDLE");
+    let linux_bundle = env::var_os("SEEDBOX_LINUX_RUNTIME_BUNDLE").map(PathBuf::from);
+    let linux_declaration = if let Some(bundle) = linux_bundle {
+        let bundle =
+            std::fs::canonicalize(bundle).expect("Linux guest bundle must exist at CLI build time");
+        println!("cargo::rerun-if-changed={}", bundle.display());
+        format!(
+            "pub const LINUX_RUNTIME:Option<&[u8]>=Some(include_bytes!({:?}));\n",
+            bundle
+        )
+    } else {
+        "pub const LINUX_RUNTIME:Option<&[u8]>=None;\n".into()
+    };
+    std::fs::write(
+        PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("linux-runtime.rs"),
+        linux_declaration,
+    )
+    .unwrap();
     println!("cargo::rustc-check-cfg=cfg(seedbox_embedded_init)");
     let source = root.join("guest/compose-init.c");
     println!("cargo::rerun-if-changed={}", source.display());

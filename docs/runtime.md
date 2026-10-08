@@ -57,6 +57,15 @@ bash kernel/build.sh
 cargo build --release --locked
 ```
 
+A maintainer can instead run `bash tools/linux-runtime/build-cli.sh` in that
+shell to include the x86-64 guest kernel, supervisor, BusyBox and mke2fs in the
+release executable. The package includes license notices and source/build
+provenance. The existing pinned kernel/supervisor builders produce these assets;
+no compiler or guest-asset download is invoked at runtime. Skopeo, umoci and the
+Docker-compatible builder remain host preparation dependencies. See
+[the Linux package workflow](../tools/linux-runtime/README.md). Linux package
+execution and reproducibility remain final merge-train checks.
+
 The platform VMM is linked into `seedbox`; ordinary runtime commands do not
 compile or find a separate executable. `cargo build-vmm` and `cargo test-vmm`
 remain isolated standalone aliases for low-level fixtures. Their compiler
@@ -184,13 +193,27 @@ seedbox=./target/release/seedbox
 ```
 
 Every input has a default; `seedbox help run` lists them with their overrides.
-The kernel is found in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`,
-`./artifacts` or `~/seedbox-sim/artifacts` (also in the invoking user's home
-under sudo). The VMM defaults to the engine linked into `seedbox`; `--vmm`
-explicitly selects the legacy standalone contract.
-The guest supervisor is built into `seedbox`, and BusyBox comes from
-`SEEDBOX_BUSYBOX`. A missing input fails before preparation starts and names
-every location searched.
+On Linux, explicit flags and their `SEEDBOX_*` path overrides take precedence.
+The kernel then searches configured `$SEEDBOX_ARTIFACTS` and
+`$SEEDBOX_WORK/artifacts`, the packaged kernel, `./artifacts`, and
+`~/seedbox-sim/artifacts` (also in the invoking user's home under sudo).
+A missing configured directory preserves the development search; an explicit
+missing `--kernel` fails immediately. For the supervisor, BusyBox and mke2fs,
+packaged bytes precede the existing compiled-in supervisor or static tools on
+PATH. Unbundled development builds keep those existing fallbacks. A package
+integrity error is reported instead of silently selecting unrelated files.
+
+Package validation and extraction use a private temporary directory held through
+preparation and input retention, then removed on success, error or cancellation.
+Doctor uses the same kernel selection and validates the package while extracting
+only the kernel; it creates no state directory and performs no OCI preparation.
+Random temporary paths do not enter run identity: retained bytes do. Replay
+continues to use the recorded executable, kernel and initramfs exclusively;
+missing or corrupt retained inputs never fall back to the installed package.
+
+The VMM defaults to the engine linked into `seedbox`; `--vmm` explicitly selects
+the legacy standalone contract. A missing input fails before preparation starts
+and names every location searched.
 
 Qualified Zen execution requires the versioned `amd-zen3-engine391f-v3` host policy in
 [host requirements](../README.md#host-requirements). Run validates immutable

@@ -67,9 +67,14 @@ impl ExecutionBackend for Executor {
 
 pub enum Preparer {
     #[cfg_attr(all(target_os = "macos", target_arch = "aarch64"), allow(dead_code))]
-    Linux(Box<OciPreparer>),
+    Linux(Box<LinuxPreparer>),
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     Mac(Box<seedbox::mac_runtime::MacPreparer>),
+}
+pub struct LinuxPreparer {
+    pub inputs: OciPreparer,
+    // Package extraction must outlive preparation and retention of its bytes.
+    pub _assets: Option<seedbox::runtime_assets::RuntimeAssets>,
 }
 impl Preparer {
     pub fn cancellation(&mut self, token: CancellationToken) {
@@ -82,7 +87,7 @@ impl Preparer {
     }
     fn backend(&self) -> &dyn PreparationBackend {
         match self {
-            Self::Linux(e) => e.as_ref(),
+            Self::Linux(e) => &e.inputs,
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             Self::Mac(e) => e.as_ref(),
         }
@@ -92,7 +97,7 @@ impl Deref for Preparer {
     type Target = OciPreparer;
     fn deref(&self) -> &OciPreparer {
         match self {
-            Self::Linux(e) => e,
+            Self::Linux(e) => &e.inputs,
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             Self::Mac(e) => &e.inputs,
         }
@@ -101,7 +106,7 @@ impl Deref for Preparer {
 impl DerefMut for Preparer {
     fn deref_mut(&mut self) -> &mut OciPreparer {
         match self {
-            Self::Linux(e) => e,
+            Self::Linux(e) => &mut e.inputs,
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             Self::Mac(e) => &mut e.inputs,
         }

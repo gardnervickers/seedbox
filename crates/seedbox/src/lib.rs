@@ -29,6 +29,7 @@ pub mod orchestration;
 pub mod preparation;
 mod preparation_command;
 mod retained;
+pub mod runtime_assets;
 pub mod store;
 pub mod templates;
 pub mod vmm;

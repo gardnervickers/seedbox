@@ -9,6 +9,14 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 - `crates/seedbox` is the default package: `cargo run -- <command>` runs the CLI.
   Use `cargo run --release -- <command>` or the release executable for guest runs;
   the bundled engine uses the CLI build profile.
+- Linux x86-64 asset builds use `bash tools/linux-runtime/build-cli.sh` inside
+  `nix develop`. The optional `SEEDBOX_LINUX_RUNTIME_BUNDLE` build input embeds
+  only guest kernel/static helpers plus notices/provenance. Runtime extraction
+  stays bounded and private, with an owned lifetime through input retention.
+  CLI resolution owns environment lookup; the library receives explicit inputs.
+  Doctor extracts only the selected kernel and never creates state/prepares
+  images. Replay must not substitute installed package bytes for retained inputs.
+  Linux package execution/reproducibility requires the final merge train.
 - Apple Silicon application builds use `bash tools/mac-runtime/build-cli.sh`
   inside `nix develop`. It packages the audited ARM kernel, static helpers and
   Linux preparation tools into the signed CLI. Runtime preparation owns a

@@ -25,6 +25,13 @@ cargo run -- logs .seedbox/runs/ATTEMPT --machine client --stream console --sinc
 cargo run -- diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
 ```
 
+For a Linux x86-64 CLI with the guest kernel and static helpers included, use
+`bash tools/linux-runtime/build-cli.sh` inside the development shell. The resulting
+executable needs no guest-asset paths or runtime compiler. OCI preparation still
+uses the installed Skopeo, umoci and builder. This packaging path requires final
+Linux merge-train validation; the portable Mac tests validate its readers and
+resolution rules. See [Linux packaging](tools/linux-runtime/README.md).
+
 On Apple Silicon, build the signed CLI and its preparation payload once:
 
 ```sh
@@ -59,11 +66,11 @@ directory. Every runtime input has a default, so no flags are required:
 | Exploration workers | `1`, sequential execution; Mac currently requires `1` | `--workers` (1..32; Linux automatic CPU selection for parallel execution) |
 | Torn disk writes | off (drop all unflushed sectors on crash) | `--torn-writes` |
 | CPU | Linux: first free core other than CPU 0's, under the shared lease; Mac: automatic HVF scheduling | `--cpu`, `SEEDBOX_CPU` (Linux only) |
-| Guest kernel | Mac: packaged ARM64 `Image`; Linux: `bzImage` in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`, `./artifacts`, then `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
+| Guest kernel | Mac: packaged ARM64 `Image`; Linux: configured `$SEEDBOX_ARTIFACTS`/`$SEEDBOX_WORK/artifacts`, then packaged `bzImage`, then `./artifacts` and `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | the platform engine linked into `seedbox`; runtime commands never invoke Cargo | `--vmm`, `SEEDBOX_VMM` (Linux legacy standalone engine) |
-| Guest supervisor | packaged on Mac; built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl on Linux | `--guest-init`, `SEEDBOX_GUEST_INIT` |
-| BusyBox | packaged on Mac; Linux: `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
-| mke2fs (only for named volumes) | packaged on Mac; Linux: `SEEDBOX_MKE2FS` (set by `nix develop`), then a static `mke2fs` on `PATH` | `--mke2fs` |
+| Guest supervisor | packaged on Mac or in the Linux asset build; otherwise built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl on Linux | `--guest-init`, `SEEDBOX_GUEST_INIT` |
+| BusyBox | packaged on Mac; Linux: `SEEDBOX_BUSYBOX` (set by `nix develop`), then packaged BusyBox, then a static `busybox` on `PATH` | `--busybox` |
+| mke2fs (only for named volumes) | packaged on Mac; Linux: `SEEDBOX_MKE2FS` (set by `nix develop`), then packaged mke2fs, then a static `mke2fs` on `PATH` | `--mke2fs` |
 | Build epoch | absent; preserve the builder's ordinary timestamp policy | `--build-epoch` (prepare/run/explore; no environment backing) |
 | Engine and guest kernel | any built engine and kernel are admitted; the run records their hashes | `--vmm`, `--kernel` |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |

@@ -449,7 +449,7 @@ fn run_without_a_kernel_lists_where_it_looked() {
         stderr(&output),
         format!(
             "error: no guest kernel found; searched:\n  artifacts/bzImage\n  \
-             {home}/seedbox-sim/artifacts/bzImage\nbuild one with `bash kernel/build.sh`, \
+             {home}/seedbox-sim/artifacts/bzImage\ninstall a packaged seedbox, build one with `bash kernel/build.sh`, \
              or pass --kernel or set SEEDBOX_KERNEL\n"
         )
     );
