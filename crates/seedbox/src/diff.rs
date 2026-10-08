@@ -8,12 +8,11 @@ use crate::{
 };
 use serde::Serialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
-    io::{BufRead, BufReader, Read, Seek},
-    path::{Component, Path},
+    io::{BufRead, BufReader, Read},
+    path::Path,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -128,50 +127,8 @@ fn bad(path: &Path, error: impl std::fmt::Display) -> Error {
     ))
 }
 
-/// Open only manifest-declared evidence, checking its digest before interpreting
-/// it. Omitted/unregistered files are not evidence, even if still on disk.
 fn log(directory: &Path, record: &RunRecord, name: &str) -> Result<Option<File>> {
-    let Some(digest) = record.logs.get(name) else {
-        return Ok(None);
-    };
-    let relative = Path::new(name);
-    if relative
-        .components()
-        .any(|c| !matches!(c, Component::Normal(_)))
-    {
-        return Err(bad(directory, "unsafe evidence path"));
-    }
-    let mut path = directory.join("output");
-    for component in std::iter::once(None).chain(relative.components().map(Some)) {
-        if let Some(component) = component {
-            path.push(component);
-        }
-        let meta = path.symlink_metadata().map_err(|e| bad(&path, e))?;
-        if meta.file_type().is_symlink() || (!meta.is_file() && !meta.is_dir()) {
-            return Err(bad(
-                &path,
-                "evidence must be a regular file under real directories",
-            ));
-        }
-    }
-    let mut file = File::open(&path).map_err(|e| bad(&path, e))?;
-    if !file.metadata().map_err(|e| bad(&path, e))?.is_file() {
-        return Err(bad(&path, "evidence must be a regular file"));
-    }
-    let mut hash = Sha256::new();
-    let mut buffer = [0; 65536];
-    loop {
-        let n = file.read(&mut buffer).map_err(|e| bad(&path, e))?;
-        if n == 0 {
-            break;
-        }
-        hash.update(&buffer[..n]);
-    }
-    if format!("{:x}", hash.finalize()) != digest.hex() {
-        return Err(bad(&path, "evidence checksum mismatch"));
-    }
-    file.rewind().map_err(|e| bad(&path, e))?;
-    Ok(Some(file))
+    crate::retained::log(directory, record, name, "diff")
 }
 
 fn load(directory: &Path) -> Result<Evidence> {

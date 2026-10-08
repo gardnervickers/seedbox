@@ -794,6 +794,31 @@ solely to protect descriptor inheritance. It never enables, maps or reads the
 guest event. Source tests and warned Intel opt-in are not Intel qualification or
 a determinism guarantee.
 
+## Committed-time logs
+
+`seedbox logs RUN --machine NAME --stream console --since-ns 1000000000
+--until-ns 2000000000 --json` filters retained chunks in the half-open simulated
+nanosecond interval. All filters are optional; the run directory is positional.
+Consecutive bytes from the same machine/incarnation/stream coalesce within one
+world slice until another stream writes. Each chunk retains its first byte's
+commit time; filters select the whole chunk by that time, including later bytes
+that may commit beyond the upper bound.
+Without `--json`, stdout contains only the selected raw bytes in chunk order,
+with no prefixes, encoding changes or added newlines. Lowercase `logs:` status
+and `omission:` diagnostics go to stderr. Use `--machine` and `--stream` to
+recover one stream's indexed bytes exactly. `--json` includes chunk metadata and
+lossless hexadecimal payloads as `bytes_hex` in one report.
+Success exits 0, including explicitly incomplete capture; invalid inputs or
+corrupt evidence exit 2. No runtime inputs, images, host tools or KVM are needed.
+
+The library exposes `logs::Reader`, `Filter`, chunk metadata, omissions, and
+streaming byte access. Only manifest-declared, checksum-verified evidence is
+used. An absent index never causes host receipt order or application timestamps
+to be substituted. Filtering cannot change execution or witness identity.
+Indexes share the existing retention limits and bundle transfer path; missing
+raw streams and indexes stay explicit after import. See [timed logs](timed-logs.md)
+for format bounds, a portable demo and the pending AMD validation commands.
+
 ## Committed console triggers
 
 The development engine implements bounded, exactly-once console marker triggers
