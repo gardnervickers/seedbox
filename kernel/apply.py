@@ -52,11 +52,13 @@ edit(
     "\t\t\t:: \"ecx\");\n\n\treturn EAX_EDX_VAL(val, low, high);\n}\n#endif\n",
 )
 
+# Ahead of the UMIP fixup, which would fetch and fully decode every trapped
+# RDTSC looking for SGDT/SIDT/SMSW before giving up.
 edit(
     "arch/x86/kernel/traps.c",
-    "\tif (user_mode(regs)) {\n\t\tif (fixup_iopl_exception(regs))\n",
-    "\tif (user_mode(regs)) {\n\t\tif (seedbox_emulate_user_tsc(regs))\n\t\t\tgoto exit;\n\n"
-    "\t\tif (fixup_iopl_exception(regs))\n",
+    "\tcond_local_irq_enable(regs);\n\n\tif (static_cpu_has(X86_FEATURE_UMIP)) {\n",
+    "\tcond_local_irq_enable(regs);\n\n\tif (user_mode(regs) && seedbox_emulate_user_tsc(regs))\n\t\tgoto exit;\n\n"
+    "\tif (static_cpu_has(X86_FEATURE_UMIP)) {\n",
 )
 edit("arch/x86/kernel/traps.c", "#include <asm/traps.h>\n", "#include <asm/traps.h>\n#include <asm/seedbox.h>\n")
 

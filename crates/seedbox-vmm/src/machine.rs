@@ -2082,7 +2082,7 @@ mod net_poll_tests {
     }
 
     #[test]
-    #[ignore = "requires KVM on a Linux x86-64 host"]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM on a Linux x86-64 host")]
     fn event_idx_polls_on_entry_slice_boundary_and_halt_without_kicks() {
         let kvm = Kvm::new().unwrap();
         for site in ["entry", "slice", "bounded_slice", "halt", "charged_io"] {
@@ -2136,7 +2136,7 @@ mod net_poll_tests {
         }
     }
     #[test]
-    #[ignore = "requires KVM on a Linux x86-64 host"]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM on a Linux x86-64 host")]
     fn pv_stop_adopts_the_guest_clock() {
         let kvm = Kvm::new().unwrap();
         for arm in [false, true] {
@@ -2160,7 +2160,7 @@ mod net_poll_tests {
         }
     }
     #[test]
-    #[ignore = "requires KVM on a Linux x86-64 host"]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM on a Linux x86-64 host")]
     fn deferred_tx_completes_a_pv_spin_without_halt_kick_or_interrupts() {
         use std::time::Duration;
         use super::pv::PvClock;
@@ -2270,7 +2270,7 @@ mod io_boundary_tests {
     }
 
     #[test]
-    #[ignore = "requires KVM on the qualified Linux host"]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM on the qualified Linux host")]
     fn page_capture_has_documented_format_and_preserves_ram_witness_state() {
         let kvm=Kvm::new().unwrap();
         let mut m=probe(&kvm,0x530,true,0);
@@ -2611,7 +2611,7 @@ mod fork_tests {
     }
 
     #[test]
-    #[ignore = "requires Linux x86-64 KVM"]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
     fn page_timer_negotiation_and_undo_restore_the_separate_page_word() {
         let kvm = Kvm::new().unwrap();
         let mut m = probe_machine(&kvm, 256, false);
@@ -2650,7 +2650,7 @@ mod fork_tests {
 
     // These tests create a vCPU but never enter the guest or open a perf event.
     #[test]
-    #[ignore = "requires Linux x86-64 KVM"]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
     fn abi_below_3_time_forks_do_not_write_extensions_or_add_reseed_witnesses() {
         let kvm=Kvm::new().unwrap();
         for abi in 0..ABI_PAGE_RESEED {
@@ -2674,7 +2674,7 @@ mod fork_tests {
     }
 
     #[test]
-    #[ignore = "requires Linux x86-64 KVM"]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
     fn a_time_fork_writes_only_entropy_and_a_barrier_writes_none() {
         let kvm=Kvm::new().unwrap();
         for barrier in [false,true] {
@@ -2977,7 +2977,7 @@ mod fork_tests {
     }
 
     #[test]
-    #[ignore = "requires Linux x86-64 KVM"]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
     fn runtime_checkpoint_restores_pv_fields_and_seeded_syscall_cost() {
         let kvm=Kvm::new().unwrap();
         let mut m=probe_machine(&kvm,0,false);
@@ -2996,7 +2996,7 @@ mod fork_tests {
     }
 
     #[test]
-    #[ignore = "requires KVM"]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
     fn runtime_reseed_publishes_page_without_advancing_or_unpausing() {
         let kvm=Kvm::new().unwrap();
         let mut m=probe_machine(&kvm,0,false);
@@ -3158,7 +3158,7 @@ mod committed_trigger_tests {
         }
     }
     #[test]
-    #[ignore = "requires KVM"]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
     fn committed_console_discards_rolled_back_candidate_before_matcher_feed() {
         let kvm=Kvm::new().unwrap();
         let mut kernel=vec![0;1024];kernel[0x1f1]=1;kernel.extend_from_slice(&[0xb0,b'A',0xe6,0xe9,0xf4]);

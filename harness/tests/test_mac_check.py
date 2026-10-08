@@ -104,9 +104,10 @@ echo "$* target=${CARGO_TARGET_DIR-unset}" >> "$CHECK_TEST_LOG"
                                     cwd=root, env=env, capture_output=True,
                                     text=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(log.read_text().splitlines()[:2], [
-                'test-vmm target=unset', f'test --workspace --locked target={cache}',
-            ])
+            # The KVM-only tests are added only where /dev/kvm is usable.
+            vmm, workspace = log.read_text().splitlines()[:2]
+            self.assertIn(vmm, ['test-vmm target=unset', 'test-vmm --features kvm-tests target=unset'])
+            self.assertEqual(workspace, f'test --workspace --locked target={cache}')
 
 
 class WorktreeTests(unittest.TestCase):
