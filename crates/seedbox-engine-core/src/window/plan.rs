@@ -143,6 +143,10 @@ pub struct Report<P> {
     /// In send order.
     pub outputs: Vec<Output<P>>,
     pub exited: Option<Time>,
+    /// The machine parked or was suspended where it stopped: it can neither
+    /// act nor receive until the coordinator resumes it, so it may stop
+    /// short of its slice end.
+    pub suspended: bool,
 }
 
 /// A routed copy of an output.
@@ -166,6 +170,22 @@ pub struct MachineState {
     pub exited: Option<Time>,
     /// Outputs produced so far: the next output's source sequence.
     pub sent: u64,
+    /// Parked, paused or down: it neither acts nor receives until the
+    /// coordinator resumes it with [`World::sync`].
+    pub suspended: bool,
+}
+
+impl MachineState {
+    /// Runnable at `time` with nothing queued.
+    pub fn at(time: Time) -> Self {
+        Self {
+            time,
+            next: time,
+            exited: None,
+            sent: 0,
+            suspended: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,6 +201,8 @@ pub enum Outcome {
     },
     /// No machine can ever act again.
     Quiescent { committed: Time },
+    /// The coordinator's between-rounds hook stopped the run.
+    Stopped { committed: Time },
 }
 
 /// One committed round, for witnesses and window statistics.
@@ -274,25 +296,34 @@ pub struct World<P> {
 impl<P: Clone + Hash> World<P> {
     /// Every machine starts runnable at time 0.
     pub fn new(machines: usize, params: Params) -> Result<Self, Error> {
+        Self::with_machines(vec![MachineState::at(0); machines], params)
+    }
+
+    /// Start from committed machine states: a world resumed after a fork
+    /// release or a checkpoint. The committed time is the latest machine
+    /// time; nothing has been routed yet, so every `sent` starts at 0.
+    pub fn with_machines(machines: Vec<MachineState>, params: Params) -> Result<Self, Error> {
         params.check()?;
-        if params.end_on.is_some_and(|m| m >= machines) {
+        if params.end_on.is_some_and(|m| m >= machines.len()) {
             return Err(Error::Params("end_on names no machine".into()));
         }
+        for (m, s) in machines.iter().enumerate() {
+            if s.exited.is_none() && s.next < s.time {
+                return Err(Error::Params(format!(
+                    "machine {m}: next action {} is before its time {}",
+                    s.next, s.time
+                )));
+            }
+        }
+        let committed = machines.iter().map(|s| s.time).max().unwrap_or(0);
+        let n = machines.len();
         Ok(Self {
             params,
-            machines: vec![
-                MachineState {
-                    time: 0,
-                    next: 0,
-                    exited: None,
-                    sent: 0
-                };
-                machines
-            ],
-            queues: (0..machines).map(|_| BTreeMap::new()).collect(),
+            machines,
+            queues: (0..n).map(|_| BTreeMap::new()).collect(),
             boundaries: BTreeSet::new(),
             world_seq: 0,
-            committed: 0,
+            committed,
             round: 0,
             outcome: None,
             log: Vec::new(),
@@ -334,15 +365,62 @@ impl<P: Clone + Hash> World<P> {
             .flat_map(|(m, q)| q.iter().map(move |(k, p)| (m, k, p)))
     }
 
+    /// Replace machine `m`'s committed state between rounds, after a
+    /// lifecycle transition the coordinator carried out on it (a pause,
+    /// resume, crash, reboot or park). Its output sequence is kept.
+    pub fn sync(
+        &mut self,
+        m: usize,
+        time: Time,
+        next: Time,
+        exited: Option<Time>,
+        suspended: bool,
+    ) -> Result<(), Error> {
+        if m >= self.machines.len() {
+            return Err(Error::Params(format!("sync of unknown machine {m}")));
+        }
+        if exited.is_none() && next < time {
+            return Err(Error::Params(format!(
+                "machine {m}: next action {next} is before its time {time}"
+            )));
+        }
+        let s = &mut self.machines[m];
+        s.time = time;
+        s.next = if exited.is_some() { NEVER } else { next };
+        s.exited = exited;
+        s.suspended = suspended;
+        Ok(())
+    }
+
+    /// Take the queued events of machine `m` that `keep` rejects, in key
+    /// order. For the coordinator's lifecycle transitions, between rounds.
+    pub fn remove_queued(
+        &mut self,
+        m: usize,
+        mut keep: impl FnMut(&EventKey, &P) -> bool,
+    ) -> Vec<(EventKey, P)> {
+        let q = std::mem::take(&mut self.queues[m]);
+        let mut removed = Vec::new();
+        for (k, p) in q {
+            if keep(&k, &p) {
+                self.queues[m].insert(k, p);
+            } else {
+                removed.push((k, p));
+            }
+        }
+        removed
+    }
+
     /// Queue a coordinator event for machine `to`. Once rounds have run, it
-    /// must not be deliverable inside the committed past.
+    /// must not be due inside the committed past: every machine stands at
+    /// or before the committed time, so it still delivers on time.
     pub fn schedule(&mut self, to: usize, at: Time, payload: P) -> Result<(), Error> {
         if to >= self.machines.len() {
             return Err(Error::Params(format!(
                 "scheduled event for unknown machine {to}"
             )));
         }
-        if self.round > 0 && at < self.committed.saturating_add(self.params.early) {
+        if self.round > 0 && at < self.committed {
             return Err(Error::Params(format!(
                 "event at {at} ns is inside the committed past"
             )));
@@ -361,7 +439,7 @@ impl<P: Clone + Hash> World<P> {
     /// Every machine stops exactly at `at`, and nothing at or after it is
     /// delivered before it.
     pub fn add_boundary(&mut self, at: Time) -> Result<(), Error> {
-        if at <= self.committed && self.round > 0 {
+        if at < self.committed && self.round > 0 {
             return Err(Error::Params(format!(
                 "boundary {at} ns is in the committed past"
             )));
@@ -373,7 +451,7 @@ impl<P: Clone + Hash> World<P> {
     /// The earliest time machine `m` can next act.
     pub fn key(&self, m: usize) -> Time {
         let s = &self.machines[m];
-        if s.exited.is_some() {
+        if s.exited.is_some() || s.suspended {
             return NEVER;
         }
         let queued = self.queues[m].keys().next().map_or(NEVER, |k| k.at);
@@ -548,6 +626,7 @@ impl<P: Clone + Hash> World<P> {
             s.time = r.time;
             s.next = if r.exited.is_some() { NEVER } else { r.next };
             s.exited = r.exited;
+            s.suspended = r.suspended && r.exited.is_none();
             s.sent += r.outputs.len() as u64;
             output_count += r.outputs.len();
             if let (Some(at), Some(end_on)) = (r.exited, self.params.end_on) {
@@ -610,8 +689,10 @@ impl<P: Clone + Hash> World<P> {
                 return bad(format!("exited at {at} but stopped at {}", r.time))
             }
             // A machine may stop short only when idle: it cannot act, and
-            // no assigned event wakes it, before the slice end.
-            None if r.time < a.slice_end()
+            // no assigned event wakes it, before the slice end. A suspended
+            // one acts on nothing until the coordinator resumes it.
+            None if !r.suspended
+                && r.time < a.slice_end()
                 && (r.next < a.slice_end()
                     || a.incoming
                         .get(r.consumed)
@@ -639,7 +720,7 @@ impl<P: Clone + Hash> World<P> {
             ));
         }
         // An undelivered event must still be in the machine's future.
-        if r.exited.is_none() {
+        if r.exited.is_none() && !r.suspended {
             if let Some(e) = a.incoming.get(r.consumed) {
                 if e.key.at < r.time {
                     return bad(format!(
@@ -838,6 +919,7 @@ mod tests {
             consumed: 0,
             outputs,
             exited: None,
+            suspended: false,
         }
     }
 
@@ -992,6 +1074,7 @@ mod tests {
             consumed: 0,
             outputs: vec![],
             exited: Some(33),
+            suspended: false,
         };
         w.commit(&p, vec![report(80, vec![]), exit], &mut Fixed(100))
             .unwrap();

@@ -1,346 +1,6 @@
 use super::*;
-use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+use crate::world_mock::*;
 
-type Trace = Rc<RefCell<Vec<String>>>;
-#[derive(Default)]
-struct MockClock {
-    pv_backoff: u64,
-    watchdog_deadline: Option<u64>,
-    restore_calls: usize,
-}
-#[derive(Clone)]
-struct Step {
-    at: u64,
-    stop: Stop,
-    console: Option<u8>,
-    requests: Vec<Vec<u8>>,
-    effects: Vec<(u32, bool)>,
-    frames: Vec<Vec<u8>>,
-}
-impl Step {
-    fn new(at: u64, stop: Stop) -> Self {
-        Self {
-            at,
-            stop,
-            console: None,
-            requests: vec![],
-            effects: vec![],
-            frames: vec![],
-        }
-    }
-}
-struct Mock {
-    common: MachineState,
-    trace: Trace,
-    steps: VecDeque<Step>,
-    owed: Option<u64>,
-    irq: bool,
-    timer: u64,
-    bad: Option<&'static str>,
-}
-#[derive(Clone)]
-struct Saved {
-    common: MachineState,
-    steps: VecDeque<Step>,
-    irq: bool,
-    timer: u64,
-}
-impl Deref for Mock {
-    type Target = MachineState;
-    fn deref(&self) -> &MachineState {
-        &self.common
-    }
-}
-impl DerefMut for Mock {
-    fn deref_mut(&mut self) -> &mut MachineState {
-        &mut self.common
-    }
-}
-impl Mock {
-    fn new(name: &str, trace: Trace) -> Self {
-        Self {
-            common: MachineState::new(name.into()),
-            trace,
-            steps: VecDeque::new(),
-            owed: None,
-            irq: false,
-            timer: u64::MAX,
-            bad: None,
-        }
-    }
-    fn record(&self, kind: &str) {
-        self.trace
-            .borrow_mut()
-            .push(format!("{}:{kind}:{}", self.name, self.time));
-    }
-}
-impl WorldMachine for Mock {
-    type Factory = Trace;
-    type Boot = ();
-    type Clock = MockClock;
-    type Snapshot = Saved;
-    fn boot(trace: &Trace, name: &str, _: &(), _: bool, _: [u8; 32]) -> Result<Self, String> {
-        if trace.borrow().iter().any(|x| x == "fail/boot") {
-            trace.borrow_mut().push("partial-boot-cleanup".into());
-            return Err("boot failed".into());
-        }
-        let mut machine = Self::new(name, trace.clone());
-        if trace.borrow().iter().any(|x| x == "fail/timer") {
-            machine.bad = Some("timer");
-        }
-        if trace.borrow().iter().any(|x| x == "fail/install") {
-            machine.bad = Some("install");
-        }
-        Ok(machine)
-    }
-    fn has_pending_irq(&self) -> bool {
-        self.irq
-    }
-    fn next_deadline(&self) -> u64 {
-        self.timer
-    }
-    fn owed_io(&self) -> Option<u64> {
-        self.owed
-    }
-    fn has_control(&self) -> bool {
-        true
-    }
-    fn deliver_control(&mut self, bytes: &[u8]) -> Result<(), String> {
-        self.record(&format!("control/{}", String::from_utf8_lossy(bytes)));
-        Ok(())
-    }
-    fn deliver_serial(&mut self, bytes: &[u8]) -> Result<(), String> {
-        self.record(&format!("serial/{}", String::from_utf8_lossy(bytes)));
-        Ok(())
-    }
-    fn deliver_frame(&mut self, _: &[u8]) -> Result<bool, String> {
-        self.record("frame");
-        Ok(true)
-    }
-    fn pause(&mut self) -> Result<(), String> {
-        self.common.pause()?;
-        self.record("pause");
-        Ok(())
-    }
-    fn resume(&mut self, at: u64) -> Result<(), String> {
-        self.common.resume(at)?;
-        self.record("resume");
-        Ok(())
-    }
-    fn boot_at(&mut self, at: u64) -> Result<(), String> {
-        self.common.boot_at(at)?;
-        Ok(())
-    }
-    fn succeed(&mut self, old: &mut Self, at: u64, _: u64) -> Result<Option<u64>, String> {
-        if self.bad == Some("install") {
-            return Err("install ACK lost".into());
-        }
-        self.common.succeed(&old.common, at)?;
-        Ok(Some(0))
-    }
-    fn park(&mut self) -> Result<(), String> {
-        self.common.check_park(self.owed.is_some())?;
-        self.common.commit_park();
-        self.record("park");
-        Ok(())
-    }
-    fn wake(&mut self, at: u64) -> Result<(), String> {
-        self.common.time = self.common.time.max(at);
-        self.common.wake();
-        self.record("wake");
-        Ok(())
-    }
-    fn release(&mut self, at: u64, _: [u32; 8]) -> Result<Reseed, String> {
-        self.common.begin_release()?;
-        self.common.time = self.common.time.max(at);
-        self.record("release");
-        Ok(Reseed::Barrier)
-    }
-    fn abi(&self) -> u64 {
-        3
-    }
-    fn seed_timer(&mut self, _: u64, _: &str) -> Result<(), String> {
-        if self.bad == Some("timer") {
-            Err("timer ACK lost".into())
-        } else {
-            Ok(())
-        }
-    }
-    fn checkpoint_boundary(_: &MockClock) -> Result<(), String> {
-        Ok(())
-    }
-    fn restore_boundary(clock: &mut MockClock) -> Result<(), String> {
-        clock.restore_calls += 1;
-        clock.pv_backoff = 0;
-        clock.watchdog_deadline = None;
-        Ok(())
-    }
-    fn seed_timer_branch(
-        &mut self,
-        seed: u64,
-        identity: Option<&str>,
-        domain: &str,
-    ) -> Result<(), String> {
-        if let Some(identity) = identity {
-            self.record(&format!("branch/{seed}/{identity}/{domain}"));
-        }
-        self.seed_timer(seed, domain)
-    }
-    fn reseed_guest(&mut self, _: [u32; 8]) -> Result<(), String> {
-        self.record("reseed-guest");
-        Ok(())
-    }
-    fn supports_speed_reseed(&self) -> bool {
-        true
-    }
-    fn seed_speed(&mut self, _: u64, _: &str) -> Result<(), String> {
-        Ok(())
-    }
-    fn branches(&self) -> u64 {
-        0
-    }
-    fn exits(&self) -> u64 {
-        0
-    }
-    fn exit_witness(&mut self) -> Result<String, String> {
-        if self.bad == Some("witness") {
-            return Err("witness ACK lost".into());
-        }
-        Ok(String::new())
-    }
-    fn terminate_worker(&mut self) -> Result<(), String> {
-        self.record("terminate");
-        Ok(())
-    }
-    fn snapshot(&mut self) -> Result<Saved, String> {
-        if self.owed.is_some() {
-            return Err("owed I/O".into());
-        }
-        Ok(Saved {
-            common: self.common.clone(),
-            steps: self.steps.clone(),
-            irq: self.irq,
-            timer: self.timer,
-        })
-    }
-    fn restore(&mut self, s: &Saved) -> Result<u64, String> {
-        self.common = s.common.clone();
-        self.steps = s.steps.clone();
-        self.owed = None;
-        self.irq = s.irq;
-        self.timer = s.timer;
-        self.common.clear_effects();
-        Ok(1)
-    }
-    fn advance(
-        &mut self,
-        _: &mut MockClock,
-        request: SliceRequest,
-        frames: &mut Vec<Vec<u8>>,
-    ) -> Result<Stop, String> {
-        assert!(request.hard_limit >= self.time);
-        assert_eq!(request.observe_console, self.observe_console);
-        let step = if self
-            .steps
-            .front()
-            .is_some_and(|s| s.at <= request.hard_limit)
-        {
-            self.steps.pop_front().unwrap()
-        } else {
-            Step::new(request.hard_limit, Stop::Reached)
-        };
-        let paid = step.at.saturating_sub(self.time);
-        self.owed = self
-            .owed
-            .and_then(|owed| owed.checked_sub(paid))
-            .filter(|&owed| owed > 0);
-        self.common.time = step.at;
-        self.common.committed_console = step
-            .console
-            .filter(|_| request.observe_console)
-            .map(|byte| (step.at, byte));
-        self.common
-            .control_requests
-            .extend(step.requests.into_iter().map(|bytes| (step.at, bytes)));
-        self.common
-            .fault_effects
-            .extend(step.effects.into_iter().map(|(id, ok)| (id, step.at, ok)));
-        frames.extend(step.frames);
-        match self.bad.take() {
-            Some("past") => self.common.time = paid.saturating_sub(paid + 1),
-            Some("future") => self.common.time = request.hard_limit + 1,
-            Some("identity") => self.common.name = "wrong".into(),
-            Some("incarnation") => self.common.incarnation += 1,
-            Some("lifecycle") => self.common.paused = true,
-            Some("state") => self.common.state = State::Halted,
-            Some("console") => self.common.committed_console = Some((request.hard_limit + 1, b'X')),
-            Some("request") => self
-                .common
-                .control_requests
-                .push((request.hard_limit + 1, b"bad".to_vec())),
-            Some("effect") => self
-                .common
-                .fault_effects
-                .push((0, request.hard_limit + 1, true)),
-            Some("order") => self
-                .common
-                .fault_effects
-                .extend([(0, step.at, true), (0, 0, true)]),
-            None => (),
-            Some(other) => panic!("unknown test mutation {other}"),
-        }
-        match step.stop {
-            Stop::Exited => self.common.state = State::Exited(0),
-            Stop::Halted => self.common.state = State::Halted,
-            Stop::Barrier => self.common.commit_park(),
-            _ => (),
-        }
-        self.record("advance");
-        Ok(step.stop)
-    }
-}
-fn world(names: &[&str]) -> World<Mock> {
-    let names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
-    let trace = Trace::default();
-    let n = names.len();
-    World {
-        failure: None,
-        machines: names
-            .iter()
-            .map(|name| Mock::new(name, trace.clone()))
-            .collect(),
-        factory: trace,
-        boot: vec![(); n],
-        barrier: false,
-        boot_seed: 1,
-        run_seed: 2,
-        branch_identity: None,
-        incarnations: vec![vec![]; n],
-        paused_ingress: vec![0; n],
-        clock: MockClock::default(),
-        events: vec![BTreeMap::new(); n],
-        seq: 0,
-        lookahead: 10,
-        early: 3,
-        latency: 10,
-        partitioned: BTreeMap::new(),
-        faults: boot_faults(
-            &names,
-            &[],
-            10,
-            links::Links::from_config(1, &names, &json!({"latency_ns":10})).unwrap(),
-        )
-        .unwrap(),
-        control: control::Control::new(&Value::Null, names, 10, 3).unwrap(),
-        strict_events: vec![BTreeMap::new(); n],
-        macs: (0..n).map(|i| [0, 0, 0, 0, 0, i as u8]).collect(),
-        dropped: 0,
-        delivered: 0,
-        link_counts: BTreeMap::new(),
-        semantic_counts: network_counters::NetworkCounters::default(),
-        slices: 0,
-    }
-}
 #[test]
 fn tie_break_and_halted_wake_keys_use_one_coordinator() {
     let mut w = world(&["a", "b"]);
@@ -349,7 +9,7 @@ fn tie_break_and_halted_wake_keys_use_one_coordinator() {
         "duration"
     );
     assert_eq!(
-        &*w.factory.borrow(),
+        &*w.factory.lock().unwrap(),
         &["a:advance:10", "b:advance:20", "a:advance:20"]
     );
     w.machines[0].common.state = State::Halted;
@@ -370,13 +30,16 @@ fn strict_delivery_is_never_early_and_equal_time_keeps_insertion_order() {
     w.schedule(0, 12, Payload::Serial(b"second".to_vec()));
     w.deliver_due(0).unwrap();
     assert_eq!(
-        &*w.factory.borrow(),
+        &*w.factory.lock().unwrap(),
         &["a:serial/first:10", "a:serial/second:10"]
     );
     assert_eq!(w.strict_events[0].len(), 1);
     w.machines[0].common.time = 11;
     w.deliver_due(0).unwrap();
-    assert_eq!(w.factory.borrow().last().unwrap(), "a:control/strict:11");
+    assert_eq!(
+        w.factory.lock().unwrap().last().unwrap(),
+        "a:control/strict:11"
+    );
 }
 #[test]
 fn terminal_evidence_cuts_off_armed_and_matched_triggers_at_the_exiting_target() {
@@ -446,12 +109,12 @@ fn failed_crash_immediately_terminates_workers_and_retained_world_cannot_retry()
         if phase == "witness" {
             w.machines[0].bad = Some("witness");
         } else {
-            w.factory.borrow_mut().push(format!("fail/{phase}"));
+            w.factory.lock().unwrap().push(format!("fail/{phase}"));
         }
         let error = w.crash(0, 5).unwrap_err();
         assert!(error.contains(phase), "{phase}: {error}");
         assert!(w.failure.is_some());
-        let trace = w.factory.borrow().clone();
+        let trace = w.factory.lock().unwrap().clone();
         let terminations = trace.iter().filter(|x| x.contains(":terminate:")).count();
         assert_eq!(
             terminations,
@@ -471,7 +134,7 @@ fn failed_crash_immediately_terminates_workers_and_retained_world_cannot_retry()
         })
         .is_err());
         assert_eq!(
-            *w.factory.borrow(),
+            *w.factory.lock().unwrap(),
             trace,
             "terminal reuse performed activity"
         );
@@ -562,7 +225,7 @@ fn time_fork_settles_owed_io_before_parking_and_snapshotting() {
     );
     assert_eq!(w.machines[0].time, 20);
     assert!(w.machines[0].parked);
-    assert_eq!(&*w.factory.borrow(), &["a:advance:20", "a:park:20"]);
+    assert_eq!(&*w.factory.lock().unwrap(), &["a:advance:20", "a:park:20"]);
     let snapshot = WorldSnapshot::take(&mut w).unwrap();
     w.machines[0].common.time = 70;
     w.machines[0].common.parked = false;
@@ -633,7 +296,7 @@ fn admission_rejects_invalid_worlds_before_execution() {
     let mut w = world(&["a", "b"]);
     w.boot.pop();
     assert!(w.validate().unwrap_err().contains("lengths"));
-    assert!(w.factory.borrow().is_empty());
+    assert!(w.factory.lock().unwrap().is_empty());
     let w = world(&[""]);
     assert!(w.validate().is_ok());
     let w = world(&["a", "a"]);
@@ -695,7 +358,7 @@ fn adapter_observations_are_rejected_before_effects_are_consumed() {
             .unwrap_err()
             .contains("undrained effects")
     );
-    assert!(w.factory.borrow().is_empty());
+    assert!(w.factory.lock().unwrap().is_empty());
 }
 #[test]
 fn owed_io_is_split_at_strict_boundary_before_time_fork() {
@@ -715,7 +378,7 @@ fn owed_io_is_split_at_strict_boundary_before_time_fork() {
         "barrier"
     );
     assert_eq!(
-        &*w.factory.borrow(),
+        &*w.factory.lock().unwrap(),
         &[
             "a:advance:7",
             "a:control/strict:7",
@@ -822,7 +485,8 @@ fn pending_error_still_delivers_strict_reply_before_stopping() {
     assert!(!w.control.has_undelivered_reply());
     assert!(w
         .factory
-        .borrow()
+        .lock()
+        .unwrap()
         .iter()
         .any(|line| line.starts_with("a:control/SBX_REPLY1 ")));
 }
@@ -1061,7 +725,7 @@ fn original_coordinator_receipts() {
             .collect::<Vec<_>>();
         println!(
             "world-receipt:{}",
-            json!({"variant":variant,"outcome":outcome,"machines":machines,"trace":*w.factory.borrow(),"events":events,"strict":w.strict_events.iter().map(|e|e.iter().collect::<Vec<_>>()).collect::<Vec<_>>(),"faults":w.faults.log,"readiness":w.faults.readiness,"control":w.control.log,"triggers":w.control.triggers.evidence().unwrap(),"incarnations":w.incarnations,"network":w.network_snapshot(),"slices":w.slices,"seq":w.seq,"delivered":w.delivered,"dropped":w.dropped})
+            json!({"variant":variant,"outcome":outcome,"machines":machines,"trace":*w.factory.lock().unwrap(),"events":events,"strict":w.strict_events.iter().map(|e|e.iter().collect::<Vec<_>>()).collect::<Vec<_>>(),"faults":w.faults.log,"readiness":w.faults.readiness,"control":w.control.log,"triggers":w.control.triggers.evidence().unwrap(),"incarnations":w.incarnations,"network":w.network_snapshot(),"slices":w.slices,"seq":w.seq,"delivered":w.delivered,"dropped":w.dropped})
         );
     }
 }
@@ -1187,7 +851,12 @@ fn initial_launch_deadline_is_an_ordinary_outcome_but_fork_still_requires_barrie
     );
     assert!(w.machines[0].parked);
     assert_eq!(w.machines[1].time, 7);
-    assert!(w.factory.borrow().iter().all(|s| !s.contains(":release:")));
+    assert!(w
+        .factory
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|s| !s.contains(":release:")));
     assert_eq!(w.finish("duration", 7, &None).unwrap(), 7);
     let mut strict = world(&["a"]);
     assert!(
@@ -1208,7 +877,12 @@ fn initial_launch_preserves_end_machine_exit_and_cancellation() {
         "end_machine_exited"
     );
     assert_eq!(w.machines[0].state, State::Exited(0));
-    assert!(w.factory.borrow().iter().all(|s| !s.contains(":release:")));
+    assert!(w
+        .factory
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|s| !s.contains(":release:")));
     let mut cancelled = world(&["a"]);
     assert_eq!(
         simulate_launch(&mut cancelled, &Value::Null, 20, &None, &mut || Err(
@@ -1217,7 +891,7 @@ fn initial_launch_preserves_end_machine_exit_and_cancellation() {
         .unwrap_err(),
         "cancelled"
     );
-    assert!(cancelled.factory.borrow().is_empty());
+    assert!(cancelled.factory.lock().unwrap().is_empty());
 }
 
 #[test]

@@ -36,7 +36,7 @@
 mod exec;
 mod plan;
 
-pub use exec::{run_parallel, run_serial, Machine, Stats};
+pub use exec::{run_parallel, run_serial, Flow, Hook, Machine, NoHook, Stats};
 pub use plan::{
     Assignment, Class, Delivery, Error, Event, EventKey, MachineState, Outcome, Output, Params,
     Report, RoundPlan, RoundRecord, Router, Source, Step, Time, World, NEVER,

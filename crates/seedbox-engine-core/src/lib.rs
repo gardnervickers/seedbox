@@ -31,10 +31,12 @@ pub mod virtio_network;
 
 pub mod pv_progress;
 
+pub mod checkpoint;
 #[allow(clippy::drain_collect)] // Preserve reference delivery collection during extraction.
 pub mod world;
 pub mod world_events;
-pub mod checkpoint;
 
 pub mod window;
+#[cfg(test)]
+pub(crate) mod world_mock;
 pub mod world_windowed;

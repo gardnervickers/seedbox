@@ -1,16 +1,61 @@
-//! Experimental windowed scheduler over the shared world: rounds planned by
-//! [`crate::window`], machines executed serially or on a work-stealing pool.
-//! See docs/windowed-scheduler.md. Static worlds only: no control, faults,
-//! triggers, scenarios, forks or checkpoints.
+//! The windowed scheduler over the shared world: rounds planned by
+//! [`crate::window`], machines executed serially or on a work-stealing pool,
+//! and the world's policies (faults, runtime control, triggers, scenario
+//! input, lifecycle, forks and checkpoints) carried out by the coordinator
+//! between rounds. See docs/windowed-scheduler.md.
+//!
+//! Every decision is made on the coordinator thread from committed state in
+//! a fixed order: machine reports are absorbed sorted by (time, machine,
+//! channel order), world boundaries are applied when no live machine can act
+//! before them, and the events they produce are queued as exact boundaries.
+//! Worker count and host completion order never enter a decision.
 
 use crate::links;
 use crate::window as sw;
-use crate::world::{Payload, SliceRequest, State, Stop, World, WorldMachine};
+use crate::world::{self, Payload, SliceRequest, State, Stop, World, WorldMachine};
+use crate::world_events as events;
+use crate::{control, faults, network_counters};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-/// A frame on the wire. The sender is the event key's source.
-type Frame = Vec<u8>;
+/// What travels between the coordinator and a machine.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Msg {
+    /// A frame on the wire, sent by `from`.
+    Frame { from: usize, bytes: Vec<u8> },
+    /// Scenario serial input: delivered up to `early` ahead, like a frame.
+    Serial(Vec<u8>),
+    /// A management command or control reply. Never delivered early: its
+    /// time is an exact round boundary.
+    Control(Vec<u8>),
+    /// A scenario partition, applied when its sender delivers it, in order
+    /// with the frames the sender routes.
+    Partition { from: usize, to: usize, on: bool },
+}
+
+impl Msg {
+    fn strict(&self) -> bool {
+        matches!(self, Msg::Control(_))
+    }
+}
+
+/// One segment of a run: to its end, to a fork point, or to a checkpoint.
+pub struct Run<'a> {
+    /// The world's configuration, for runtime inspection results.
+    pub cfg: &'a Value,
+    pub duration: u64,
+    pub end_on: &'a Option<String>,
+    /// Stop with `barrier` once every machine is parked: at the guest's
+    /// launch barrier, or with `Some(Some(t))` at its first deterministic
+    /// point at or after `t`.
+    pub fork: Option<Option<u64>>,
+    /// Stop with `checkpoint` once every machine and world boundary is at
+    /// or after this time, before anything happens at it.
+    pub checkpoint: Option<u64>,
+    /// With `fork`, any other end is an error.
+    pub require_barrier: bool,
+}
 
 /// Performance settings. None of them changes a run's results.
 #[derive(Clone, Debug, Default)]
@@ -22,19 +67,60 @@ pub struct Workers {
     pub skew: Duration,
 }
 
-/// One machine as the window executor sees it.
+/// One machine as the window executor sees it. Effects it produces in a
+/// round are kept here, in channel order, for the coordinator to absorb.
 struct Guest<'a, M> {
+    index: usize,
     m: &'a mut M,
     skew: Duration,
+    /// Watch the console for an armed trigger this round.
+    observe: bool,
+    /// Park at the first deterministic point at or after this time.
+    fork_at: Option<u64>,
     /// Receiver outcomes: (nominal time, sender, accepted).
     received: Vec<(u64, usize, bool)>,
-    /// Management readiness reported during the run.
-    ready: Vec<u64>,
+    /// Fault effects: (time, id, success).
+    effects: Vec<(u64, u32, bool)>,
+    /// Runtime control requests: (time, frame).
+    requests: Vec<(u64, Vec<u8>)>,
+    /// Committed console bytes under observation: (time, byte).
+    console: Vec<(u64, u8)>,
+    /// Times a control reply reached the controller.
+    replies: Vec<u64>,
+    /// Exited in the last round.
+    exited_now: bool,
 }
 
-impl<M: WorldMachine> Guest<'_, M> {
+impl<'a, M: WorldMachine> Guest<'a, M> {
+    fn new(index: usize, m: &'a mut M, skew: Duration) -> Self {
+        Self {
+            index,
+            m,
+            skew,
+            observe: false,
+            fork_at: None,
+            received: Vec::new(),
+            effects: Vec::new(),
+            requests: Vec::new(),
+            console: Vec::new(),
+            replies: Vec::new(),
+            exited_now: false,
+        }
+    }
+
+    fn suspended(&self) -> bool {
+        self.m.parked || self.m.paused || self.m.down
+    }
+
+    fn exited_at(&self) -> Option<u64> {
+        matches!(self.m.state, State::Exited(_)).then_some(self.m.time)
+    }
+
     /// The machine's own next action, ignoring queued events.
     fn next(&self) -> u64 {
+        if self.suspended() {
+            return sw::NEVER;
+        }
         match self.m.state {
             State::Exited(_) => sw::NEVER,
             State::Running => self.m.time,
@@ -43,49 +129,73 @@ impl<M: WorldMachine> Guest<'_, M> {
         }
     }
 
-    fn drain(&mut self) -> Result<(), String> {
-        let name = self.m.name.clone();
-        if !self.m.control_requests.is_empty() {
-            return Err(format!(
-                "{name}: runtime control request under the windowed scheduler"
-            ));
+    fn state(&self) -> sw::MachineState {
+        sw::MachineState {
+            time: self.m.time,
+            next: self.next(),
+            exited: self.exited_at(),
+            sent: 0,
+            suspended: self.suspended() && self.exited_at().is_none(),
         }
-        if self.m.committed_console.take().is_some() {
-            return Err(format!(
-                "{name}: console trigger under the windowed scheduler"
-            ));
-        }
+    }
+
+    /// Move the slice's committed effects into the round's record.
+    fn drain(&mut self) {
         for (id, at, success) in std::mem::take(&mut self.m.fault_effects) {
-            if id == 0 && success {
-                self.ready.push(at);
-            } else {
-                return Err(format!(
-                    "{name}: fault effect {id} under the windowed scheduler"
-                ));
-            }
+            self.effects.push((at, id, success));
         }
-        Ok(())
+        for (at, line) in std::mem::take(&mut self.m.control_requests) {
+            self.requests.push((at, line));
+        }
+        if let Some((at, byte)) = self.m.committed_console.take() {
+            self.console.push((at, byte));
+        }
     }
 }
 
-impl<M: WorldMachine> sw::Machine<Frame> for Guest<'_, M> {
+impl<M: WorldMachine> sw::Machine<Msg> for Guest<'_, M> {
     type Context = M::Clock;
 
     fn run(
         &mut self,
         clock: &mut M::Clock,
-        a: &sw::Assignment<Frame>,
-    ) -> Result<sw::Report<Frame>, String> {
+        a: &sw::Assignment<Msg>,
+    ) -> Result<sw::Report<Msg>, String> {
         std::thread::sleep(self.skew);
         let slice_end = a.slice_end();
         let mut outputs = Vec::new();
         let mut frames = Vec::new();
         let mut i = 0;
         let mut exited = None;
+        let mut suspended = false;
         let mut stalled = None;
+        let push = |outputs: &mut Vec<sw::Output<Msg>>, at: u64, payload: Msg, name: &str| {
+            if outputs.len() == a.max_outputs {
+                return Err(format!(
+                    "{name}: more than {} outputs in one round",
+                    a.max_outputs
+                ));
+            }
+            outputs.push(sw::Output {
+                sent_at: at,
+                payload,
+            });
+            Ok(())
+        };
         loop {
             if matches!(self.m.state, State::Exited(_)) {
                 exited = Some(self.m.time);
+                break;
+            }
+            if self.suspended() {
+                suspended = true;
+                break;
+            }
+            // Park at the fork time, or as soon after it as owed I/O cost
+            // allows; the coordinator parks machines that cannot act before it.
+            if self.fork_at.is_some_and(|t| self.m.time >= t) && self.m.owed_io().is_none() {
+                self.m.park()?;
+                suspended = true;
                 break;
             }
             if self.m.state == State::Halted {
@@ -102,61 +212,95 @@ impl<M: WorldMachine> sw::Machine<Frame> for Guest<'_, M> {
             if self.m.time >= slice_end {
                 break;
             }
-            while let Some(e) = a
-                .incoming
-                .get(i)
-                .filter(|e| e.key.at <= self.m.time.saturating_add(a.delivery_early))
-            {
-                let sw::Source::Machine(from) = e.key.source else {
-                    return Err("world events are not supported".into());
+            while let Some(e) = a.incoming.get(i).filter(|e| {
+                let early = if e.payload.strict() {
+                    0
+                } else {
+                    a.delivery_early
                 };
-                let accepted = self.m.deliver_frame(&e.payload)?;
-                self.received.push((e.key.at, from, accepted));
+                e.key.at <= self.m.time.saturating_add(early)
+            }) {
+                let now = self.m.time;
+                match &e.payload {
+                    Msg::Frame { from, bytes } => {
+                        let accepted = self.m.deliver_frame(bytes)?;
+                        self.received.push((e.key.at, *from, accepted));
+                    }
+                    Msg::Serial(bytes) => self.m.deliver_serial(bytes)?,
+                    Msg::Control(bytes) => {
+                        if self.m.has_control() {
+                            self.m.deliver_control(bytes)?;
+                        } else {
+                            self.m.deliver_serial(bytes)?;
+                        }
+                        if bytes.starts_with(b"SBX_REPLY1 ") {
+                            self.replies.push(now);
+                        }
+                    }
+                    Msg::Partition { .. } => {
+                        // Partition state is consulted when the sender routes:
+                        // the coordinator applies it in order with the frames.
+                        push(&mut outputs, now, e.payload.clone(), &self.m.name)?;
+                    }
+                }
                 i += 1;
             }
-            let event = a.incoming.get(i).map_or(sw::NEVER, |e| e.key.at);
-            let limit = a.stop.min(event);
-            let early = if limit == a.stop {
+            let (event, strict) = a
+                .incoming
+                .get(i)
+                .map_or((sw::NEVER, false), |e| (e.key.at, e.payload.strict()));
+            let mut limit = a.stop.min(event);
+            let mut early = if limit == a.stop {
                 a.stop_early
+            } else if strict {
+                0
             } else {
                 a.delivery_early
             };
+            if self.fork_at.is_some_and(|t| self.m.time >= t) {
+                // Owed I/O is settled before parking, exactly.
+                let owed = self.m.owed_io().unwrap_or(0);
+                limit = limit.min(self.m.time.saturating_add(owed));
+                early = 0;
+            }
             let before = (self.m.time, i, outputs.len());
-            self.m.observe_console = false;
+            self.m.observe_console = self.observe;
             let request = SliceRequest {
                 hard_limit: limit,
                 early_slack: early,
-                observe_console: false,
+                observe_console: self.observe,
             };
+            let observation = world::SliceObservation::begin(self.m, request)?;
             let stop = self.m.advance(clock, request, &mut frames)?;
-            self.drain()?;
-            for f in frames.drain(..) {
-                if outputs.len() == a.max_outputs {
-                    return Err(format!(
-                        "{}: more than {} frames in one round",
-                        self.m.name, a.max_outputs
-                    ));
-                }
-                outputs.push(sw::Output {
-                    sent_at: self.m.time,
-                    payload: f,
-                });
+            observation.validate(self.m, request, stop)?;
+            self.drain();
+            let now = self.m.time;
+            for bytes in frames.drain(..) {
+                push(
+                    &mut outputs,
+                    now,
+                    Msg::Frame {
+                        from: self.index,
+                        bytes,
+                    },
+                    &self.m.name,
+                )?;
             }
             match stop {
                 Stop::Exited => {
                     exited = Some(self.m.time);
+                    self.exited_now = true;
                     break;
                 }
-                Stop::Barrier | Stop::Control => {
-                    return Err(format!(
-                        "{}: {stop:?} under the windowed scheduler",
-                        self.m.name
-                    ))
+                Stop::Barrier => {
+                    // Parked at the guest's launch barrier.
+                    suspended = true;
+                    break;
                 }
-                Stop::Reached | Stop::Halted | Stop::Sent => {}
+                Stop::Reached | Stop::Halted | Stop::Sent | Stop::Control => {}
             }
-            // Equal-time returns are legal (a send, an early event), but the
-            // identical stalled state twice is a scheduler bug.
+            // Equal-time returns are legal (a send, an early event, a control
+            // request), but the identical stalled state twice is a scheduler bug.
             if (self.m.time, i, outputs.len()) == before
                 && matches!(stop, Stop::Reached | Stop::Halted)
             {
@@ -181,100 +325,513 @@ impl<M: WorldMachine> sw::Machine<Frame> for Guest<'_, M> {
             consumed: i,
             outputs,
             exited,
+            suspended,
         })
     }
 }
 
-/// Link policy and its randomness, applied by the coordinator in commit
-/// order. Static worlds only: nothing is ever paused, down or cut.
-struct Net<'a> {
-    faults: &'a mut crate::faults::Faults,
+const PAUSED_INGRESS_FRAMES: u64 = 256;
+
+/// The coordinator: the world's policies and their randomness, applied on
+/// the calling thread in commit order, and the between-rounds hook.
+struct Coord<'a, M: WorldMachine> {
+    run: &'a Run<'a>,
+    names: Vec<String>,
+    faults: &'a mut faults::Faults,
+    control: &'a mut control::Control,
+    factory: &'a M::Factory,
+    boot: &'a [M::Boot],
+    run_seed: u64,
+    branch_identity: Option<String>,
+    incarnations: &'a mut [Vec<Value>],
+    paused_ingress: &'a mut [u64],
+    partitioned: &'a mut BTreeMap<(usize, usize), bool>,
     macs: &'a [[u8; 6]],
     dropped: &'a mut u64,
-    link_counts: &'a mut std::collections::BTreeMap<(usize, usize), [u64; 4]>,
-    semantic: &'a mut crate::network_counters::NetworkCounters,
+    delivered: &'a mut u64,
+    link_counts: &'a mut BTreeMap<(usize, usize), [u64; 4]>,
+    semantic: &'a mut network_counters::NetworkCounters,
+    latency: u64,
+    /// Each machine's committed lifecycle: (paused, down).
+    life: Vec<(bool, bool)>,
+    /// Why the hook stopped the run.
+    stopped: Option<&'static str>,
+    /// A failed crash transaction: the world is terminal.
+    failure: Option<String>,
+    host: &'a mut dyn FnMut() -> Result<(), String>,
 }
 
-impl Net<'_> {
+impl<M: WorldMachine> Coord<'_, M> {
     fn count(&mut self, at: u64, from: usize, to: usize, outcome: usize) {
         self.link_counts.entry((from, to)).or_default()[outcome] += 1;
         self.semantic.record(at, from, to, outcome);
     }
+
+    fn counter_snapshot(&self) -> Value {
+        let snapshot: BTreeMap<_, _> = self
+            .semantic
+            .counts()
+            .iter()
+            .map(|(&(from, to), counts)| {
+                (format!("{}->{}", self.names[from], self.names[to]), {
+                    let mut c = json!({"delivered":counts[0],"partition_dropped":counts[1],"receiver_dropped":counts[2]});
+                    if counts[3] > 0 {
+                        c["loss_dropped"] = json!(counts[3]);
+                    }
+                    c
+                })
+            })
+            .collect();
+        json!(snapshot)
+    }
+
+    fn fault_failed(&self) -> bool {
+        (self.control.error.is_some()
+            || (self.faults.error.is_some() && self.control.pending.is_none()))
+            && !self.control.has_undelivered_reply()
+    }
+
+    /// Absorb the last round's effects, in a fixed order: receiver outcomes,
+    /// fault effects, console bytes, exits, delivered replies, then requests.
+    fn absorb(&mut self, guests: &mut [Guest<'_, M>], committed: u64) -> Result<(), String> {
+        let mut received = Vec::new();
+        let mut effects = Vec::new();
+        let mut console = Vec::new();
+        let mut replies = Vec::new();
+        let mut requests = Vec::new();
+        for (m, g) in guests.iter_mut().enumerate() {
+            received.extend(g.received.drain(..).map(|(at, from, ok)| (at, from, m, ok)));
+            effects.extend(
+                g.effects
+                    .drain(..)
+                    .enumerate()
+                    .map(|(j, (at, id, ok))| (at, m, j, id, ok)),
+            );
+            console.extend(
+                g.console
+                    .drain(..)
+                    .enumerate()
+                    .map(|(j, (at, byte))| (at, m, j, byte)),
+            );
+            replies.extend(g.replies.drain(..).map(|at| (at, m)));
+            requests.extend(
+                g.requests
+                    .drain(..)
+                    .enumerate()
+                    .map(|(j, (at, line))| (at, m, j, line)),
+            );
+        }
+        received.sort();
+        for (at, from, to, accepted) in received {
+            if accepted {
+                *self.delivered += 1;
+                self.count(at, from, to, 0);
+            } else {
+                *self.dropped += 1;
+                self.count(at, from, to, 2);
+            }
+        }
+        effects.sort();
+        for (at, m, _, id, success) in effects {
+            if id == 0 && success {
+                if let Err(error) = self.faults.management_ready(m, at, self.latency) {
+                    self.faults.error = Some(error);
+                }
+            } else {
+                self.faults.effect(m, id, at, success);
+            }
+        }
+        console.sort();
+        for (at, m, _, byte) in console {
+            self.control.triggers.committed(
+                &self.names[m],
+                at,
+                byte,
+                self.control.latency,
+                committed,
+            )?;
+        }
+        for (m, g) in guests.iter_mut().enumerate() {
+            if !std::mem::take(&mut g.exited_now) {
+                continue;
+            }
+            let ids: Vec<u32> = self
+                .control
+                .triggers
+                .records
+                .iter()
+                .filter_map(|r| r.fault_id)
+                .collect();
+            for id in ids {
+                self.faults.target_exited(id, m, g.m.time);
+            }
+            if let Some(id) = self.control.pending.as_ref().and_then(|p| p.fault) {
+                self.faults.target_exited(id, m, g.m.time);
+            }
+        }
+        replies.sort();
+        for (at, _) in replies {
+            self.control.mark_delivered(at)?;
+        }
+        requests.sort();
+        for (at, m, _, line) in requests {
+            if self.run.fork.is_some() {
+                return Err(format!(
+                    "{}: runtime control request at {at} ns, before the fork point; fork earlier (boot.fork_at_ns)",
+                    self.names[m]
+                ));
+            }
+            if let Err(e) = self.control.request(m, at, &line, committed) {
+                self.control.log.push(json!({"status":"rejected","machine":self.names[m],"at_ns":at,"frame":String::from_utf8_lossy(&line),"error":e}));
+                self.control.error = Some(e);
+            }
+        }
+        self.control.observe_faults(self.faults, committed)?;
+        Ok(())
+    }
+
+    /// Carry out a lifecycle transition at world boundary `t`, before any
+    /// machine runs at `t`.
+    fn lifecycle(
+        &mut self,
+        plan: &mut sw::World<Msg>,
+        guests: &mut [Guest<'_, M>],
+        m: usize,
+        op: faults::Lifecycle,
+        t: u64,
+    ) -> Result<(), String> {
+        if guests[m].m.time > t {
+            return Err("lifecycle boundary is in committed machine past".into());
+        }
+        match op {
+            faults::Lifecycle::Pause => {
+                self.paused_ingress[m] = 0;
+                guests[m].m.pause()?;
+            }
+            faults::Lifecycle::Resume => guests[m].m.resume(t)?,
+            faults::Lifecycle::Crash => {
+                // Management commands queued for the dead incarnation go
+                // with it; frames in world transit stay queued for the
+                // reboot to sort out.
+                let discarded: usize = plan
+                    .remove_queued(m, |_, p| !p.strict())
+                    .iter()
+                    .map(|(_, p)| match p {
+                        Msg::Control(bytes) => bytes.len(),
+                        _ => 0,
+                    })
+                    .sum();
+                let result = world::crash_machine(
+                    guests[m].m,
+                    self.factory,
+                    &self.boot[m],
+                    self.run_seed,
+                    self.branch_identity.as_deref(),
+                    &mut self.control.triggers,
+                    discarded,
+                    &mut self.incarnations[m],
+                    t,
+                );
+                if let Err(mut error) = result {
+                    for g in guests.iter_mut() {
+                        if let Err(cleanup) = g.m.terminate_worker() {
+                            error.push_str(&format!("; {} worker cleanup: {cleanup}", g.m.name));
+                        }
+                    }
+                    self.failure = Some(error.clone());
+                    return Err(error);
+                }
+            }
+            faults::Lifecycle::Reboot => {
+                // Frames that reached it before `t` belonged to the dead
+                // NIC and are dropped; later ones arrive normally.
+                for (key, p) in plan.remove_queued(m, |k, p| p.strict() || k.at >= t) {
+                    match p {
+                        Msg::Frame { from, .. } => {
+                            *self.dropped += 1;
+                            self.count(key.at, from, m, 2);
+                        }
+                        Msg::Serial(_) | Msg::Control(_) => {}
+                        Msg::Partition { from, to, on } => {
+                            self.partitioned.insert((from, to), on);
+                        }
+                    }
+                }
+                guests[m].m.boot_at(t)?;
+            }
+        }
+        let g = &guests[m];
+        self.life[m] = (g.m.paused, g.m.down);
+        let s = g.state();
+        plan.sync(m, s.time, s.next, s.exited, s.suspended)
+            .map_err(|e| e.to_string())
+    }
+
+    /// The hook: absorb the last round, then apply every world boundary no
+    /// live machine can act before, in the reference order (control, then
+    /// triggers, then faults), and register the next ones as exact round
+    /// boundaries.
+    fn between_rounds(
+        &mut self,
+        plan: &mut sw::World<Msg>,
+        guests: &mut [Guest<'_, M>],
+    ) -> Result<sw::Flow, String> {
+        let committed = plan.committed();
+        let duration = self.run.duration;
+        let n = guests.len();
+        self.absorb(guests, committed)?;
+        if self.fault_failed() {
+            self.stopped = Some("fault_failed");
+            return Ok(sw::Flow::Stop);
+        }
+        (self.host)()?;
+        let until_barrier = self.run.fork.is_some();
+        let fork_at = self.run.fork.flatten();
+        loop {
+            let start = (0..n).map(|m| plan.key(m)).min().unwrap_or(sw::NEVER);
+            let control_boundary = self.control.boundary();
+            let trigger_boundary = self.control.triggers.boundary();
+            let fault_boundary = self.faults.next_boundary();
+            // A checkpoint precedes every action at T, including exact-time faults.
+            if self.run.checkpoint.is_some_and(|t| {
+                start >= t && control_boundary >= t && fault_boundary >= t && trigger_boundary >= t
+            }) {
+                self.stopped = Some("checkpoint");
+                return Ok(sw::Flow::Stop);
+            }
+            if let Some(t) = fork_at {
+                // A machine that cannot act before the fork time parks where
+                // it is; one owing I/O settles it first, in its own run.
+                for (m, g) in guests.iter_mut().enumerate() {
+                    if !g.m.parked
+                        && !g.m.paused
+                        && !g.m.down
+                        && g.exited_at().is_none()
+                        && plan.key(m) >= t
+                        && g.m.owed_io().is_none()
+                    {
+                        g.m.park()?;
+                        let s = g.state();
+                        plan.sync(m, s.time, s.next, s.exited, s.suspended)
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+            if until_barrier && guests.iter().all(|g| g.m.parked || g.exited_at().is_some()) {
+                if let Some(g) = guests.iter().find(|g| !g.m.parked) {
+                    return Err(format!("{} exited before the fork point", g.m.name));
+                }
+                self.stopped = Some("barrier");
+                return Ok(sw::Flow::Stop);
+            }
+            self.semantic.advance(
+                start
+                    .min(control_boundary)
+                    .min(trigger_boundary)
+                    .min(fault_boundary)
+                    .min(duration),
+            );
+            if control_boundary <= start
+                && control_boundary <= trigger_boundary
+                && control_boundary < duration
+            {
+                if guests.iter().any(|g| g.m.time > control_boundary) {
+                    return Err("control boundary is in committed machine past".into());
+                }
+                let exited: Vec<String> = guests
+                    .iter()
+                    .filter(|g| g.exited_at().is_some())
+                    .map(|g| g.m.name.clone())
+                    .collect();
+                self.control.reject_unavailable(&exited);
+                if self.control.pending.as_ref().is_some_and(|p| {
+                    !p.admitted_done
+                        && matches!(p.operation, Some(seedbox_control::Operation::Inspect {}))
+                }) {
+                    let machines: Vec<Value> = guests
+                        .iter()
+                        .enumerate()
+                        .map(|(i, g)| {
+                            json!({"name":g.m.name,"state":if g.exited_at().is_some() {format!("{:?}",g.m.state)} else {self.faults.process_state(i).to_owned()}})
+                        })
+                        .collect();
+                    let result = json!({"services":self.run.cfg["control"]["placement"],"machines":machines,"active_handles":self.faults.active_handles(),"network_counters":self.counter_snapshot()});
+                    let pending = self.control.pending.as_mut().unwrap();
+                    pending.result = result;
+                    if let Some(evidence) = self.control.triggers.evidence()? {
+                        self.control.pending.as_mut().unwrap().result["triggers"] = evidence;
+                    }
+                }
+                if let Some(bytes) = self.control.apply_boundary(self.faults, control_boundary)? {
+                    let target = self
+                        .control
+                        .controller
+                        .ok_or("control reply without a controller")?;
+                    plan.schedule(target, control_boundary, Msg::Control(bytes))
+                        .map_err(|e| e.to_string())?;
+                    plan.add_boundary(control_boundary)
+                        .map_err(|e| e.to_string())?;
+                }
+                continue;
+            }
+            if trigger_boundary <= start
+                && trigger_boundary < duration
+                && trigger_boundary <= fault_boundary
+            {
+                if guests.iter().any(|g| g.m.time > trigger_boundary) {
+                    return Err("trigger boundary is in committed machine past".into());
+                }
+                self.control
+                    .triggers
+                    .apply_boundary(self.faults, trigger_boundary)?;
+                continue;
+            }
+            if fault_boundary <= start && fault_boundary < duration {
+                if guests.iter().any(|g| g.m.time > fault_boundary) {
+                    return Err("fault boundary is in committed machine past".into());
+                }
+                let commands = self.faults.apply_due(fault_boundary);
+                for i in self.faults.take_changed_network() {
+                    let snapshot = self.counter_snapshot();
+                    self.faults.log[i]["network_counters"] = snapshot;
+                }
+                for (target, command) in commands {
+                    plan.schedule(target, fault_boundary, Msg::Control(command))
+                        .map_err(|e| e.to_string())?;
+                    plan.add_boundary(fault_boundary)
+                        .map_err(|e| e.to_string())?;
+                }
+                // After the commands, so a crash at this boundary discards
+                // those its machine was just sent.
+                for (target, op) in self.faults.take_lifecycle() {
+                    self.lifecycle(plan, guests, target, op, fault_boundary)?;
+                }
+                self.control.observe_faults(self.faults, fault_boundary)?;
+                if self.faults.error.is_some() && self.control.pending.is_none() {
+                    self.stopped = Some("fault_failed");
+                    return Ok(sw::Flow::Stop);
+                }
+                continue;
+            }
+            // Every boundary ahead ends a round exactly. One at the committed
+            // time has passed; nothing is ever due before it.
+            for b in [
+                control_boundary,
+                trigger_boundary,
+                fault_boundary,
+                self.run.checkpoint.unwrap_or(sw::NEVER),
+                fork_at.unwrap_or(sw::NEVER),
+            ] {
+                if b != sw::NEVER && b >= committed {
+                    plan.add_boundary(b).map_err(|e| e.to_string())?;
+                }
+            }
+            break;
+        }
+        for g in guests.iter_mut() {
+            g.observe = self.control.triggers.observes(&g.m.name);
+            g.fork_at = fork_at;
+        }
+        Ok(sw::Flow::Continue)
+    }
 }
 
-impl sw::Router<Frame> for Net<'_> {
-    fn route(
-        &mut self,
-        src: usize,
-        sent_at: u64,
-        frame: Frame,
-        out: &mut Vec<sw::Delivery<Frame>>,
-    ) {
+impl<M: WorldMachine> sw::Router<Msg> for Coord<'_, M> {
+    fn route(&mut self, src: usize, sent_at: u64, msg: Msg, out: &mut Vec<sw::Delivery<Msg>>) {
+        let frame = match msg {
+            Msg::Frame { bytes, .. } => bytes,
+            Msg::Partition { from, to, on } => {
+                self.partitioned.insert((from, to), on);
+                return;
+            }
+            Msg::Serial(_) | Msg::Control(_) => return,
+        };
         if frame.len() < 14 {
             return;
         }
         let dst_mac: [u8; 6] = frame[0..6].try_into().expect("a 14-byte header");
         for dst in links::candidates(src, dst_mac, self.macs) {
-            match self.faults.route(src, dst, sent_at, &frame, false) {
+            let last = self.faults.links.last.get(&(src, dst)).copied();
+            let cut = *self.partitioned.get(&(src, dst)).unwrap_or(&false);
+            let at = match self.faults.route(src, dst, sent_at, &frame, cut) {
                 links::Outcome::Cut => {
                     *self.dropped += 1;
                     self.count(sent_at, src, dst, 1);
+                    continue;
                 }
                 links::Outcome::Lost => {
                     *self.dropped += 1;
                     self.count(sent_at, src, dst, 3);
+                    continue;
                 }
-                links::Outcome::Deliver(at) => out.push(sw::Delivery {
-                    to: dst,
-                    at,
-                    payload: frame.clone(),
-                }),
+                links::Outcome::Deliver(at) => at,
+            };
+            // A frame arriving while its receiver is down meets no NIC; one
+            // arriving while it is paused waits, up to a fixed backlog.
+            let (paused, down) = self.life[dst];
+            match events::arrival(
+                at,
+                self.faults.next_lifecycle(dst),
+                down,
+                paused,
+                self.paused_ingress[dst],
+                PAUSED_INGRESS_FRAMES,
+            ) {
+                events::Arrival::Queue => {}
+                events::Arrival::Held => self.paused_ingress[dst] += 1,
+                events::Arrival::Drop => {
+                    // Receiver rejection consumes policy draws but reserves
+                    // no FIFO arrival.
+                    match last {
+                        Some(last) => {
+                            self.faults.links.last.insert((src, dst), last);
+                        }
+                        None => {
+                            self.faults.links.last.remove(&(src, dst));
+                        }
+                    }
+                    *self.dropped += 1;
+                    self.count(at, src, dst, 2);
+                    continue;
+                }
             }
+            out.push(sw::Delivery {
+                to: dst,
+                at,
+                payload: Msg::Frame {
+                    from: src,
+                    bytes: frame.clone(),
+                },
+            });
         }
     }
 }
 
-/// Reject what the windowed scheduler does not support, before booting.
-pub fn check_supported(cfg: &Value, forks_or_checkpoints: bool) -> Result<(), String> {
-    let unsupported = |what: &str| Err(format!("--scheduler windowed does not support {what}"));
-    if !cfg["control"].is_null() {
-        return unsupported("runtime control");
-    }
-    if cfg["faults"].as_array().is_some_and(|f| !f.is_empty()) {
-        return unsupported("faults");
-    }
-    if cfg["scenario"].as_array().is_some_and(|s| !s.is_empty()) {
-        return unsupported("scenario events");
-    }
-    if cfg["kill_restart"].is_object() {
-        return unsupported("kill_restart");
-    }
-    if cfg["boot"].is_object() {
-        return unsupported("boot forks");
-    }
-    if !cfg["checkpoint"].is_null() || forks_or_checkpoints {
-        return unsupported("checkpoints or forks");
-    }
-    Ok(())
+fn hook<M: WorldMachine>(
+    plan: &mut sw::World<Msg>,
+    guests: &mut [Guest<'_, M>],
+    coord: &mut Coord<'_, M>,
+) -> Result<sw::Flow, String> {
+    coord.between_rounds(plan, guests)
 }
 
-/// Run a static world to its end with every machine on the calling thread,
-/// using the world's clock. Returns the outcome word and the scheduler's
-/// report section; undelivered frames are left in `world.events`.
+/// Run one segment with every machine on the calling thread, using the
+/// world's clock. Returns the outcome word and the scheduler's report
+/// section; queued events are left in `world.events` and
+/// `world.strict_events`.
 pub fn simulate<M: WorldMachine>(
     world: &mut World<M>,
-    duration: u64,
-    end_on: &Option<String>,
+    run: &Run,
     skew: Duration,
     boundary: &mut dyn FnMut() -> Result<(), String>,
 ) -> Result<(&'static str, Value), String> {
     windowed(
         world,
-        duration,
-        end_on,
+        run,
         skew,
         1,
-        |plan, guests, clock, net| sw::run_serial(plan, guests, clock, net, boundary),
+        boundary,
+        |plan, guests, clock, coord| sw::run_serial(plan, guests, clock, coord, hook::<M>),
     )
 }
 
@@ -282,8 +839,7 @@ pub fn simulate<M: WorldMachine>(
 /// threads. Each thread opens its own clock with `make_clock`.
 pub fn simulate_parallel<M, F>(
     world: &mut World<M>,
-    duration: u64,
-    end_on: &Option<String>,
+    run: &Run,
     workers: Workers,
     make_clock: F,
     boundary: &mut dyn FnMut() -> Result<(), String>,
@@ -295,11 +851,13 @@ where
     let count = workers.count;
     windowed(
         world,
-        duration,
-        end_on,
+        run,
         workers.skew,
         count,
-        |plan, guests, _, net| sw::run_parallel(plan, guests, count, make_clock, net, boundary),
+        boundary,
+        |plan, guests, _, coord| {
+            sw::run_parallel(plan, guests, count, make_clock, coord, hook::<M>)
+        },
     )
 }
 
@@ -308,24 +866,27 @@ const MAX_OUTPUTS: usize = 1 << 16;
 
 fn windowed<M, X>(
     world: &mut World<M>,
-    duration: u64,
-    end_on: &Option<String>,
+    run: &Run,
     skew: Duration,
     workers: usize,
+    boundary: &mut dyn FnMut() -> Result<(), String>,
     execute: X,
 ) -> Result<(&'static str, Value), String>
 where
     M: WorldMachine,
     X: FnOnce(
-        &mut sw::World<Frame>,
+        &mut sw::World<Msg>,
         &mut [Guest<'_, M>],
         &mut M::Clock,
-        &mut Net<'_>,
+        &mut Coord<'_, M>,
     ) -> Result<(sw::Outcome, sw::Stats), sw::Error>,
 {
-    world.check_active()?;
+    world.validate()?;
+    if run.checkpoint.is_some() {
+        M::checkpoint_boundary(&world.clock)?;
+    }
     let n = world.machines.len();
-    let end_on = match end_on {
+    let end_on = match run.end_on {
         Some(name) => Some(
             world
                 .machines
@@ -338,98 +899,160 @@ where
     let params = sw::Params {
         latency: world.lookahead,
         early: world.early,
-        duration,
+        duration: run.duration,
         end_on,
         max_outputs: MAX_OUTPUTS,
     };
-    let mut plan = sw::World::<Frame>::new(n, params).map_err(|e| e.to_string())?;
     let World {
+        failure,
         machines,
+        factory,
+        boot,
+        run_seed,
+        branch_identity,
+        incarnations,
+        paused_ingress,
         clock,
+        events,
+        seq,
+        latency,
+        partitioned,
         faults,
+        control,
+        strict_events,
         macs,
         dropped,
+        delivered,
         link_counts,
         semantic_counts,
+        slices,
         ..
     } = world;
+    let names: Vec<String> = machines.iter().map(|m| m.name.clone()).collect();
     let mut guests: Vec<Guest<M>> = machines
         .iter_mut()
         .enumerate()
-        .map(|(i, m)| Guest {
-            m,
-            skew: skew * (n - i) as u32,
-            received: Vec::new(),
-            ready: Vec::new(),
-        })
+        .map(|(i, m)| Guest::new(i, m, skew * (n - i) as u32))
         .collect();
-    let mut net = Net {
+    // Effects committed before this segment are absorbed before anything runs.
+    for g in &mut guests {
+        g.drain();
+    }
+    let states = guests.iter().map(Guest::state).collect();
+    let mut plan = sw::World::<Msg>::with_machines(states, params).map_err(|e| e.to_string())?;
+    // Events queued by an earlier segment or the plan keep their order:
+    // management first at equal times, as strict delivery has it.
+    for (m, q) in strict_events.iter_mut().enumerate() {
+        for ((at, _), bytes) in std::mem::take(q) {
+            plan.schedule(m, at, Msg::Control(bytes))
+                .map_err(|e| e.to_string())?;
+            plan.add_boundary(at).map_err(|e| e.to_string())?;
+        }
+    }
+    for (m, q) in events.iter_mut().enumerate() {
+        for ((at, _), p) in std::mem::take(q) {
+            let msg = match p {
+                Payload::Frame { from, bytes } => Msg::Frame { from, bytes },
+                Payload::Serial(bytes) => Msg::Serial(bytes),
+                Payload::Partition { from, to, on } => Msg::Partition { from, to, on },
+            };
+            plan.schedule(m, at, msg).map_err(|e| e.to_string())?;
+        }
+    }
+    let life = guests.iter().map(|g| (g.m.paused, g.m.down)).collect();
+    let mut coord = Coord::<M> {
+        run,
+        names,
         faults,
+        control,
+        factory,
+        boot,
+        run_seed: *run_seed,
+        branch_identity: branch_identity.clone(),
+        incarnations,
+        paused_ingress,
+        partitioned,
         macs,
         dropped,
+        delivered,
         link_counts,
         semantic: semantic_counts,
+        latency: *latency,
+        life,
+        stopped: None,
+        failure: None,
+        host: boundary,
     };
     let started = Instant::now();
-    let (outcome, stats) =
-        execute(&mut plan, &mut guests, clock, &mut net).map_err(|e| e.to_string())?;
+    let result = execute(&mut plan, &mut guests, clock, &mut coord);
     let host_seconds = started.elapsed().as_secs_f64();
-
-    // Receiver outcomes and readiness, in a fixed order.
-    let mut received = Vec::new();
-    let mut ready = Vec::new();
-    for (to, g) in guests.iter_mut().enumerate() {
-        received.extend(
-            g.received
-                .drain(..)
-                .map(|(at, from, ok)| (at, from, to, ok)),
-        );
-        ready.extend(g.ready.drain(..).map(|at| (at, to)));
+    let stopped = coord.stopped;
+    if let Some(reason) = coord.failure.take() {
+        *failure = Some(reason);
     }
+    drop(coord);
     drop(guests);
-    received.sort();
-    for (at, from, to, accepted) in received {
-        if accepted {
-            world.delivered += 1;
-            world.count_link(at, from, to, 0);
-        } else {
-            world.dropped += 1;
-            world.count_link(at, from, to, 2);
+    // Leave queued events where the report and the next segment look for them.
+    for (to, key, msg) in plan.pending() {
+        *seq += 1;
+        match msg {
+            Msg::Control(bytes) => {
+                strict_events[to].insert((key.at, *seq), bytes.clone());
+            }
+            Msg::Frame { from, bytes } => {
+                events[to].insert(
+                    (key.at, *seq),
+                    Payload::Frame {
+                        from: *from,
+                        bytes: bytes.clone(),
+                    },
+                );
+            }
+            Msg::Serial(bytes) => {
+                events[to].insert((key.at, *seq), Payload::Serial(bytes.clone()));
+            }
+            Msg::Partition { from, to: b, on } => {
+                events[to].insert(
+                    (key.at, *seq),
+                    Payload::Partition {
+                        from: *from,
+                        to: *b,
+                        on: *on,
+                    },
+                );
+            }
         }
     }
-    ready.sort();
-    for (at, m) in ready {
-        if let Err(error) = world.faults.management_ready(m, at, world.latency) {
-            world.faults.error = Some(error);
-        }
-    }
-    // Leave undelivered frames where the report looks for them.
-    for (to, key, bytes) in plan.pending() {
-        let sw::Source::Machine(from) = key.source else {
-            continue;
-        };
-        world.seq += 1;
-        world.events[to].insert(
-            (key.at, world.seq),
-            Payload::Frame {
-                from,
-                bytes: bytes.clone(),
-            },
-        );
-    }
+    let (outcome, stats) = result.map_err(|e| match e {
+        // The host's own error, as it gave it.
+        sw::Error::Boundary(message) => message,
+        other => other.to_string(),
+    })?;
+    *slices += stats.rounds;
     let committed = plan.committed();
-    world.semantic_counts.advance(committed);
-    world.slices = stats.rounds;
     let (word, exit) = match outcome {
         sw::Outcome::Duration { .. } => ("duration", None),
-        sw::Outcome::Quiescent { .. } => ("quiescent", None),
+        // Paused or down machines with nothing left to resume or reboot
+        // them sit out the rest of the run.
+        sw::Outcome::Quiescent { .. } => (
+            if machines.iter().any(|m| m.paused || m.down) {
+                "duration"
+            } else {
+                "quiescent"
+            },
+            None,
+        ),
         sw::Outcome::Exited {
             machine, exit_at, ..
         } => (
             "end_machine_exited",
-            Some(json!({"machine": world.machines[machine].name, "exit_ns": exit_at})),
+            Some(json!({"machine": machines[machine].name, "exit_ns": exit_at})),
         ),
+        sw::Outcome::Stopped { .. } => (stopped.ok_or("stopped without a reason")?, None),
     };
+    if run.require_barrier && run.fork.is_some() && word != "barrier" {
+        return Err(format!("launch barrier not reached: {word}"));
+    }
     let rounds = plan.rounds();
     let evidence = json!({
         "name": "windowed",
@@ -455,3 +1078,7 @@ where
     });
     Ok((word, evidence))
 }
+
+#[cfg(test)]
+#[path = "world_windowed_tests.rs"]
+mod tests;

@@ -3,8 +3,8 @@
 //! for any worker count and any host completion order.
 
 use seedbox_engine_core::window::{
-    run_parallel, run_serial, Assignment, Delivery, Error, EventKey, Machine, Outcome, Output,
-    Params, Report, Router, Time, World, NEVER,
+    run_parallel, run_serial, Assignment, Delivery, Error, EventKey, Machine, NoHook, Outcome,
+    Output, Params, Report, Router, Time, World, NEVER,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
@@ -225,6 +225,7 @@ impl Machine<Msg> for Script {
             consumed: i,
             outputs,
             exited: self.exited,
+            suspended: false,
         })
     }
 }
@@ -347,15 +348,8 @@ fn execute(
     }
     let mut links = Links::new(seed, params.latency, 400, loss_ppm);
     let (outcome, _) = match workers {
-        None => run_serial(&mut world, &mut machines, &mut (), &mut links, || Ok(()))?,
-        Some(w) => run_parallel(
-            &mut world,
-            &mut machines,
-            w,
-            |_| Ok(()),
-            &mut links,
-            || Ok(()),
-        )?,
+        None => run_serial(&mut world, &mut machines, &mut (), &mut links, NoHook)?,
+        Some(w) => run_parallel(&mut world, &mut machines, w, |_| Ok(()), &mut links, NoHook)?,
     };
     for m in &mut machines {
         m.host_delay = Duration::ZERO;
@@ -472,16 +466,10 @@ fn simultaneous_sends_reach_a_receiver_in_machine_order() {
         machines[1].host_delay = Duration::from_millis(5);
         let mut links = Links::new(1, p.latency, 0, 0);
         match workers {
-            None => run_serial(&mut world, &mut machines, &mut (), &mut links, || Ok(())).unwrap(),
-            Some(w) => run_parallel(
-                &mut world,
-                &mut machines,
-                w,
-                |_| Ok(()),
-                &mut links,
-                || Ok(()),
-            )
-            .unwrap(),
+            None => run_serial(&mut world, &mut machines, &mut (), &mut links, NoHook).unwrap(),
+            Some(w) => {
+                run_parallel(&mut world, &mut machines, w, |_| Ok(()), &mut links, NoHook).unwrap()
+            }
         };
         let got: Vec<_> = machines[0]
             .trace
@@ -590,7 +578,7 @@ fn exact_boundaries_stop_every_machine_exactly() {
             &mut m2,
             &mut (),
             &mut Links::new(5, p.latency, 300, 0),
-            || Ok(()),
+            NoHook,
         )
         .unwrap();
         assert!(
@@ -599,16 +587,10 @@ fn exact_boundaries_stop_every_machine_exactly() {
             m2.iter().map(|m| m.time).collect::<Vec<_>>()
         );
         match workers {
-            None => run_serial(&mut world, &mut machines, &mut (), &mut links, || Ok(())).unwrap(),
-            Some(w) => run_parallel(
-                &mut world,
-                &mut machines,
-                w,
-                |_| Ok(()),
-                &mut links,
-                || Ok(()),
-            )
-            .unwrap(),
+            None => run_serial(&mut world, &mut machines, &mut (), &mut links, NoHook).unwrap(),
+            Some(w) => {
+                run_parallel(&mut world, &mut machines, w, |_| Ok(()), &mut links, NoHook).unwrap()
+            }
         };
         for b in [12_345, 40_000] {
             assert!(
@@ -674,15 +656,8 @@ fn negative_control_a_link_below_the_bound_is_detected() {
         // Latency less early, minus one: due inside the round that sent it.
         let mut short = Short(p.latency - p.early - 1);
         let e = match workers {
-            None => run_serial(&mut world, &mut machines, &mut (), &mut short, || Ok(())),
-            Some(w) => run_parallel(
-                &mut world,
-                &mut machines,
-                w,
-                |_| Ok(()),
-                &mut short,
-                || Ok(()),
-            ),
+            None => run_serial(&mut world, &mut machines, &mut (), &mut short, NoHook),
+            Some(w) => run_parallel(&mut world, &mut machines, w, |_| Ok(()), &mut short, NoHook),
         }
         .unwrap_err();
         assert!(matches!(e, Error::Causality { from: 0, to: 1, .. }), "{e}");
@@ -725,15 +700,10 @@ fn a_failing_machine_aborts_without_committing_and_the_lowest_failure_wins() {
             }
             let mut links = Links::new(1, 1_000, 0, 0);
             let e = match workers {
-                None => run_serial(&mut world, &mut machines, &mut (), &mut links, || Ok(())),
-                Some(w) => run_parallel(
-                    &mut world,
-                    &mut machines,
-                    w,
-                    |_| Ok(()),
-                    &mut links,
-                    || Ok(()),
-                ),
+                None => run_serial(&mut world, &mut machines, &mut (), &mut links, NoHook),
+                Some(w) => {
+                    run_parallel(&mut world, &mut machines, w, |_| Ok(()), &mut links, NoHook)
+                }
             }
             .unwrap_err();
             assert!(
@@ -769,7 +739,7 @@ fn a_worker_that_cannot_start_fails_admission() {
             }
         },
         &mut Links::new(1, 1_000, 0, 0),
-        || Ok(()),
+        NoHook,
     )
     .unwrap_err();
     assert_eq!(

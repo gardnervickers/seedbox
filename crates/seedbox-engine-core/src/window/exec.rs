@@ -9,6 +9,51 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+/// What the coordinator's between-rounds hook decides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flow {
+    Continue,
+    /// End the run here with [`Outcome::Stopped`].
+    Stop,
+}
+
+/// The coordinator's hook, called on the calling thread before every plan,
+/// so after every commit and once before the first round. It applies the
+/// previous round's effects, carries out world boundaries, queues events
+/// and suspends or resumes machines, all from committed state in a fixed
+/// order; nothing it decides may depend on host timing.
+pub trait Hook<P, M, R> {
+    fn between_rounds(
+        &mut self,
+        world: &mut World<P>,
+        machines: &mut [M],
+        router: &mut R,
+    ) -> Result<Flow, String>;
+}
+
+impl<P, M, R, F> Hook<P, M, R> for F
+where
+    F: FnMut(&mut World<P>, &mut [M], &mut R) -> Result<Flow, String>,
+{
+    fn between_rounds(
+        &mut self,
+        world: &mut World<P>,
+        machines: &mut [M],
+        router: &mut R,
+    ) -> Result<Flow, String> {
+        self(world, machines, router)
+    }
+}
+
+/// The hook of a world without coordinator policy: every round continues.
+pub struct NoHook;
+
+impl<P, M, R> Hook<P, M, R> for NoHook {
+    fn between_rounds(&mut self, _: &mut World<P>, _: &mut [M], _: &mut R) -> Result<Flow, String> {
+        Ok(Flow::Continue)
+    }
+}
+
 /// A machine the scheduler can run for one round.
 pub trait Machine<P> {
     /// Per-worker execution state created on the worker's own thread, such
@@ -56,13 +101,13 @@ impl Stats {
 }
 
 /// The reference executor: every machine on the calling thread, in order.
-/// `boundary` runs on the calling thread after every commit (host control).
+/// `hook` runs on the calling thread before every plan.
 pub fn run_serial<P, M, R>(
     world: &mut World<P>,
     machines: &mut [M],
     cx: &mut M::Context,
     router: &mut R,
-    mut boundary: impl FnMut() -> Result<(), String>,
+    mut hook: impl Hook<P, M, R>,
 ) -> Result<(Outcome, Stats), Error>
 where
     P: Clone + Hash,
@@ -74,7 +119,7 @@ where
     let mut stats = Stats::default();
     loop {
         let t = Instant::now();
-        let plan = match world.plan() {
+        let plan = match step(world, machines, router, &mut hook)? {
             Step::Done(o) => {
                 stats.coordinator += t.elapsed();
                 stats.wall = started.elapsed();
@@ -99,9 +144,29 @@ where
         stats.round_wall += t.elapsed();
         let t = Instant::now();
         world.commit(&plan, reports, router)?;
-        boundary().map_err(Error::Boundary)?;
         stats.round(&plan);
         stats.coordinator += t.elapsed();
+    }
+}
+
+/// Run the hook, then plan.
+fn step<P, M, R>(
+    world: &mut World<P>,
+    machines: &mut [M],
+    router: &mut R,
+    hook: &mut impl Hook<P, M, R>,
+) -> Result<Step<P>, Error>
+where
+    P: Clone + Hash,
+{
+    match hook
+        .between_rounds(world, machines, router)
+        .map_err(Error::Boundary)?
+    {
+        Flow::Continue => Ok(world.plan()),
+        Flow::Stop => Ok(Step::Done(Outcome::Stopped {
+            committed: world.committed(),
+        })),
     }
 }
 
@@ -128,7 +193,7 @@ pub fn run_parallel<P, M, R, F>(
     workers: usize,
     make_cx: F,
     router: &mut R,
-    mut boundary: impl FnMut() -> Result<(), String>,
+    mut hook: impl Hook<P, M, R>,
 ) -> Result<(Outcome, Stats), Error>
 where
     P: Clone + Hash + Send + Sync,
@@ -171,7 +236,7 @@ where
         );
     let result = match admitted.into_iter().find(Result::is_err) {
         Some(Err(e)) => Err(e),
-        _ => rounds(world, machines, &pool, &contexts, router, &mut boundary),
+        _ => rounds(world, machines, &pool, &contexts, router, &mut hook),
     };
     // Each context is dropped on the thread that created it.
     pool.broadcast(|b| {
@@ -192,7 +257,7 @@ fn rounds<P, M, R>(
     pool: &rayon::ThreadPool,
     contexts: &[Local<M::Context>],
     router: &mut R,
-    boundary: &mut impl FnMut() -> Result<(), String>,
+    hook: &mut impl Hook<P, M, R>,
 ) -> Result<(Outcome, Stats), Error>
 where
     P: Clone + Hash + Send + Sync,
@@ -200,16 +265,17 @@ where
     R: Router<P>,
 {
     use rayon::prelude::*;
-    // Uncontended: each assignment is taken by exactly one thread.
-    let slots: Vec<Mutex<&mut M>> = machines.iter_mut().map(Mutex::new).collect();
-    let last: Vec<AtomicUsize> = slots.iter().map(|_| AtomicUsize::new(usize::MAX)).collect();
+    let last: Vec<AtomicUsize> = machines
+        .iter()
+        .map(|_| AtomicUsize::new(usize::MAX))
+        .collect();
     let migrations = AtomicU64::new(0);
     let busy_ns = AtomicU64::new(0);
     let started = Instant::now();
     let mut stats = Stats::default();
     loop {
         let t = Instant::now();
-        let plan = match world.plan() {
+        let plan = match step(world, machines, router, hook)? {
             Step::Done(o) => {
                 stats.coordinator += t.elapsed();
                 stats.wall = started.elapsed();
@@ -221,6 +287,9 @@ where
         };
         stats.coordinator += t.elapsed();
         let t = Instant::now();
+        // Uncontended: each assignment is taken by exactly one thread. The
+        // hook borrows the machines between rounds, so the slots are per round.
+        let slots: Vec<Mutex<&mut M>> = machines.iter_mut().map(Mutex::new).collect();
         // The parallel collect is the round barrier.
         let results: Vec<Result<Report<P>, String>> = pool.install(|| {
             plan.assignments
@@ -256,9 +325,9 @@ where
                 message,
             })?);
         }
+        drop(slots);
         let t = Instant::now();
         world.commit(&plan, reports, router)?;
-        boundary().map_err(Error::Boundary)?;
         stats.round(&plan);
         stats.coordinator += t.elapsed();
     }

@@ -1,17 +1,16 @@
-# Windowed scheduler (experimental)
+# Windowed scheduler
 
-Status: the scheduler for static worlds, unqualified. `seedbox-engine-core`
-holds the planner and executors (`src/window/`) and the adapter over the
-shared world (`src/world_windowed.rs`), generic over `WorldMachine`. The
-x86 VMM runs every world the round model supports through it. A world it
-cannot run yet (faults, control, scenarios, `kill_restart`, boot forks,
-checkpoints) still takes the legacy loop, until those move into the round
-model and the loop goes; the choice depends only on the world's inputs, so
-a replay makes the same one, and `vmm.json` names the scheduler that ran
-under `scheduler.name`. There is no flag to choose. `--machine-workers N`
-and `--machine-cpus` set the thread count and pinning (performance only);
-the `seedbox` CLI does not pass them yet, so CLI runs are windowed on one
-thread.
+Status: the x86 world scheduler, unqualified. `seedbox-engine-core` holds
+the planner and executors (`src/window/`) and the adapter over the shared
+world (`src/world_windowed.rs`), generic over `WorldMachine`. The x86 VMM
+runs every world through it: static worlds, faults, runtime control,
+console triggers, scenario input, `kill_restart`, boot forks and runtime
+checkpoints. The legacy loop (`world::simulate`) remains in `engine-core`
+only because the arm64 backend still calls it; nothing on x86 does.
+`vmm.json` names the scheduler under `scheduler.name`. There is no flag to
+choose. `--machine-workers N` and `--machine-cpus` set the thread count and
+pinning (performance only); the `seedbox` CLI does not pass them yet, so
+CLI runs are windowed on one thread.
 
 The question this prototype answers: can several machines of one world run
 concurrently, with results identical for any worker count, and does that
@@ -70,6 +69,16 @@ implementation:
   simultaneous-send ordering, a frame due exactly at `B + early`, invalid
   reports, output limits, designated exit, and a negative control: a link one
   nanosecond under the bound must fail with nothing committed.
+- The shared mock machine (`src/world_mock.rs`) runs the legacy loop's
+  scenarios through the adapter (`src/world_windowed_tests.rs`): control,
+  trigger and fault boundaries at equal times, requests and readiness
+  arming later boundaries, strict delivery, crash and reboot, pause with
+  held frames and owed I/O, time forks with owed I/O, launch barriers and
+  release, runtime checkpoints, failed faults, a poisoned world, rejected
+  adapter observations, and a world with pause, crash, resume, reboot, a
+  trigger, a request, serial input and frames that must give one receipt
+  and one routed-effect digest on 1, 2 and 3 workers with and without
+  reversed completion order.
 - Scripted machines run with serial, 1, 2 and 4 workers, with natural and
   reversed host completion order. They cover ping-pong, simultaneous
   senders, idle guests, a busy guest beside idle ones, exact boundaries,
@@ -172,11 +181,42 @@ It works for any `WorldMachine`; the parallel path needs `M: Send`.
   nominal time. The loop delivers assigned frames up to `early` ahead, runs
   to the next event or the stop, and timestamps every drained frame at the
   machine's time. Equal-time stalls fail.
+- **Coordinator.** `Coord` owns the world's policies for the segment and
+  is both the executor's `Router` and its between-rounds `Hook`. The hook
+  runs on the calling thread before every plan. It first absorbs the last
+  round's effects in a fixed order: receiver outcomes, fault effects (a
+  success with id 0 is management readiness), observed console bytes,
+  exits, delivered control replies, then control requests, each sorted by
+  (time, machine, channel order). It then applies every world boundary no
+  live machine can act before, in the reference order (control, then
+  triggers, then faults), exactly as the legacy loop did at the same
+  times, and registers the next control, trigger, fault, checkpoint and
+  fork times as exact round boundaries. Management commands and control
+  replies are queued as `Msg::Control` world events at their boundary;
+  they are never delivered early. Scenario serial input and partitions are
+  ordinary world events; a partition is applied by the router when its
+  sender delivers it, in order with the frames the sender routes.
+- **Lifecycle.** Pause, resume, crash and reboot run between rounds. A
+  paused, down or parked machine is *suspended* in the planner: its key is
+  never, so it neither runs nor receives until the coordinator resumes it
+  and re-syncs its state. A crash drops the machine's queued management
+  commands with the dead incarnation; a reboot drops frames queued before
+  it, as before. The router's receiver-side policy (held frames while
+  paused, none while down) reads the coordinator's committed lifecycle.
+- **Forks and checkpoints.** A boot fork ends at the guest's launch
+  barrier (`Stop::Barrier`) or, for a time fork, at an exact boundary at
+  the fork time: a machine that reaches it parks once it owes no I/O, and
+  the coordinator parks any machine that cannot act before it. The segment
+  ends with `barrier` once every machine is parked. A runtime checkpoint
+  ends a segment with `checkpoint` as soon as every machine key and world
+  boundary is at or after its time, before anything happens there. A later
+  segment starts from the world's committed machine states and queues
+  (`World::with_machines`), so release, snapshot and restore stay outside
+  the scheduler.
 - **Router.** The world's link policy (`faults.route`, link RNG and FIFO
-  state) is applied by the coordinator in commit order. Receiver outcomes
-  and management readiness are applied after the run in sorted order. Frames
-  still in flight go back into `world.events`, so the report's network
-  witness covers them.
+  state) is applied by the coordinator in commit order. Frames still in
+  flight and undelivered management go back into `world.events` and
+  `world.strict_events`, so the report's network witness covers them.
 - **x86 VMM.**
   - `Machine` is `Send`, and the disk's shared base image is now an `Arc`.
   - Each pool thread opens its own `Counter` or `PvClock` and pins itself to
@@ -193,10 +233,9 @@ It works for any `WorldMachine`; the parallel path needs `M: Send`.
     the undo shadow) are `Send`, through the `SendPtr` newtype, so `Machine`
     is `Send` by derivation. A future non-`Send` field still fails to
     compile.
-- **Scope.** Runtime control, faults, scenarios, `kill_restart`, boot forks
-  and checkpoints are rejected before boot. Console triggers, control
-  requests and fault effects fail the run if they appear.
-  `--machine-workers` and `--machine-cpus` apply only to windowed runs.
+- **Scope.** `--machine-workers` and `--machine-cpus` apply to every run.
+  A delivery that fails (a control frame the guest cannot take) fails the
+  run instead of ending it as `fault_failed`.
 
 ## Remaining plan
 
@@ -217,5 +256,7 @@ It works for any `WorldMachine`; the parallel path needs `M: Send`.
    exits near `B`.
 5. **Real workload.** Run the four-machine etcd Compose workload through
    `seedbox run` / `seedbox replay` once the CLI passes the flags.
-6. **arm64.** The adapter is generic, so the arm64 backend can use the
-   serial path as is. The parallel path also needs its machine to be `Send`.
+6. **arm64.** The adapter is generic and now covers everything the legacy
+   loop did, so the arm64 backend can call `world_windowed::simulate` with a
+   `Run` in place of `world::simulate` / `simulate_launch`, after which the
+   legacy loop can go. The parallel path also needs its machine to be `Send`.

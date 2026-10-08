@@ -3,8 +3,8 @@
 //! `cargo test --release -p seedbox-engine-core --test window_overhead -- --ignored --nocapture`.
 
 use seedbox_engine_core::window::{
-    run_parallel, run_serial, Assignment, Delivery, Machine, Output, Params, Report, Router, Time,
-    World,
+    run_parallel, run_serial, Assignment, Delivery, Machine, NoHook, Output, Params, Report,
+    Router, Time, World,
 };
 use std::hint::black_box;
 
@@ -48,6 +48,7 @@ impl Machine<u64> for Burner {
             consumed: a.incoming.len(),
             outputs,
             exited: None,
+            suspended: false,
         })
     }
 }
@@ -99,10 +100,7 @@ fn overhead() {
             let mut world = World::new(n, p.clone()).unwrap();
             let mut ms = machines(n, spin);
             let (_, s) = if workers == 0 {
-                run_serial(&mut world, &mut ms, &mut (), &mut Ring(n, latency), || {
-                    Ok(())
-                })
-                .unwrap()
+                run_serial(&mut world, &mut ms, &mut (), &mut Ring(n, latency), NoHook).unwrap()
             } else {
                 run_parallel(
                     &mut world,
@@ -110,7 +108,7 @@ fn overhead() {
                     workers,
                     |_| Ok(()),
                     &mut Ring(n, latency),
-                    || Ok(()),
+                    NoHook,
                 )
                 .unwrap()
             };
