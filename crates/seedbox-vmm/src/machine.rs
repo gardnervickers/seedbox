@@ -2360,17 +2360,25 @@ mod io_boundary_tests {
         let kvm=Kvm::new().unwrap();
         let mut counter=Counter::new().unwrap();
         let mut want=None;
-        for undo in [0,16,256,1024] {
+        // A 4096 margin leaves more than 128 branches after a landing with any
+        // plausible skid, so that run must refine at least once.
+        for undo in [0,16,256,1024,4096] {
             let mut m=loop_probe(&kvm,false,undo);
-            // Store the loop counter on every branch, so a newer checkpoint
-            // must retain guest RAM as well as the register landing.
-            let code=[0xbb,0xe8,0x03,0x00,0x00,0x4b,0x89,0x1d,0x00,0x00,0x08,0x00,0x75,0xf7,0xeb,0xf0];
+            // Increment a RAM word on every branch. A refinement that kept
+            // registers but lost RAM would count some iterations twice.
+            // outer: mov ebx,1000; inner: inc dword [0x80000]; dec ebx; jnz inner; jmp outer
+            let code=[0xbb,0xe8,0x03,0x00,0x00,0xff,0x05,0x00,0x00,0x08,0x00,0x4b,0x75,0xf7,0xeb,0xf0];
             m.memory()[0x100000..0x100000+code.len()].copy_from_slice(&code);
+            let word=|m:&mut Machine| u32::from_le_bytes(m.memory()[0x80000..0x80004].try_into().unwrap());
+            let start=word(&mut m);
             m.adaptive_margin=true;
             assert_eq!(m.run_until(&mut counter,1_000_000,0,&mut Vec::new()).unwrap(),Stop::Reached);
             assert_eq!(m.time,1_000_000);
             assert_eq!(m.branches,1_000_000);
-            let got=(m.exit_witness(),m.state_digest().0);
+            if undo==4096 {
+                assert!(m.undo.as_ref().unwrap().stats.checkpoints>=2,"undo={undo}: no refined approach");
+            }
+            let got=(word(&mut m).wrapping_sub(start),m.exit_witness(),m.state_digest().0);
             if let Some(want)=&want {assert_eq!(&got,want,"undo={undo}");} else {want=Some(got);}
         }
     }

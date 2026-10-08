@@ -147,105 +147,24 @@ expected for a different scheduler.
   test determinism, not speed.
 - `cargo test-vmm --features kvm-tests` passes.
 
-### Counter stop refinement (2026-10-08)
+### Counter stop refinement
 
-Profiling `b90a315` on the same 5950X found that the serial regression was
-mostly the final breakpoint approach to counted stops. A successful
-overflow could land hundreds of branches inside the margin grown by prior
-overshoots; the engine then stepped all those branches. The windowed
-scheduler exposes this cost more often: `window4` had 656 precision stops,
-versus 251 under the old scheduler.
+A successful overflow can land hundreds of branches inside an undo margin
+grown by earlier overshoots, and the engine used to single-step all of them.
+The windowed scheduler makes more counted stops (656 versus 251 on `window4`),
+so this dominated its serial overhead. `machine/counted.rs` now checkpoints
+such a landing when more than 128 branches remain and approaches the same
+hard target again with a margin of `min(undo, remaining / 4)`. A rollback
+returns time to the held checkpoint, so the margin grows as before; a
+successful refinement strictly advances the checkpoint. Nothing observable
+happens at an overflow landing, so stops and witnesses are unchanged, and
+`--undo 0` and the PV timebase take their existing paths.
 
-`crates/seedbox-vmm/src/machine/counted.rs` now saves a successful,
-unobservable overflow landing and attempts another overflow closer to the
-same hard target when more than 128 branches remain. It uses the existing
-undo machinery and resets the approach margin to the smaller of the initial
-undo margin and a quarter of the remaining count. After rollback, time
-equals the held checkpoint's time, so the engine grows the margin as before
-instead of restarting the same failed approach. Successful refinements
-strictly advance the checkpoint. Short approaches still step immediately.
-
-This changes host work only. It neither publishes guest time nor injects
-interrupts, adopts timers, polls devices or draws RNG at an overflow
-landing. Natural exits and exact counted stops remain the observable
-boundaries. Undo disabled (`--undo 0`) and the PV timebase take their
-existing paths. Window arithmetic, admission and report validation,
-coordinator order, routed effects, CLI contracts and arm64 are unchanged.
-
-The table gives median **whole-process wall time**, including setup and
-full-state hashing, from five interleaved trials per row. The old engine is
-`d8caba1`, windowed before is `b90a315`, and after includes the refinement.
-All use the same guest kernel (Linux 6.12.112 built from `kernel/`), initramfs,
-seed 7, counter timebase, default undo and `--digest`. The host ran Linux
-6.18.54. Serial runs used `taskset -c 14,15,30,31`; parallel runs used
-`taskset -c 12-15,28-31 --machine-workers 4 --machine-cpus 12,13,14,15`.
-
-| World | Old scheduler | Windowed before, 1 worker | After, 1 worker | Before, 4 workers | After, 4 workers |
-| --- | --- | --- | --- | --- | --- |
-| `window4` | 5.95 s | 7.95 s | 6.01 s | 3.41 s | 2.58 s |
-| `window2` | 1.25 s | 1.66 s | 1.46 s | 1.22 s | 1.09 s |
-
-`window4` improves 24.4% serially and 24.3% on four workers, which now run
-2.31 times faster than the old scheduler. `window2` improves 12.2% and
-10.4%; only two machines can run concurrently. Shared-host contention
-produced parallel outliers: the `window4` before/after four-worker ranges
-were 3.39–4.88 s and 2.53–3.65 s. Its serial ranges were 7.78–8.09 s and
-5.87–6.07 s.
-
-Profiles of the unmodified engine and before/after machine timers separate
-the suspected causes:
-
-- **Precision stepping:** old versus windowed serial `window4` spent
-  1.20 versus 2.88 s stepping. After refinement this is 0.86 s, with median
-  step exits falling from 385,919 to 122,870. Checkpoint plus rollback time
-  grows from 102 to 133 ms. The round count (601), machine-run count (2,400),
-  0.5 ms windows and 656 precision stops remain the same. For `window2`,
-  stepping falls from 0.506 to 0.265 s and 71,795 to 39,127 exits; extra
-  checkpoint/rollback work costs 13 ms. These are sums of machine timers;
-  parallel sums are CPU work, not elapsed run time.
-- **Counter arming:** entry/return kprobes on `perf_ioctl` measured 7,243
-  calls taking 24.7 ms total on one worker, and 7,232 taking 25.0 ms on
-  four workers. This includes counter period/enable operations. Direct
-  counter ioctl cost cannot explain the approximately 2 s serial gap.
-- **vCPU migration:** `synchronize_rcu` entry/return probes recorded zero
-  calls on both one- and four-worker runs, despite roughly 1,650–1,750
-  machine-to-thread changes in parallel runs. Scheduler-switch stacks
-  contained no RCU wait. Sticky placement is not the remedy on this host
-  kernel; other kernels need their own measurement.
-- **Rayon/coordinator:** one worker calls `run_serial`, so there is no pool
-  barrier. The measured coordinator cost was about 2 ms per `window4` run.
-  The existing `window_overhead` no-work benchmark measured about 2 ms of
-  synchronization over 200 rounds with four workers (about 10 microseconds
-  per round); that estimates 6 ms over 601 rounds, not the serial regression.
-- **Window size:** diagnostic runs of the unmodified engine with network
-  latency increased to 2 and 4 ms (1 and 2 ms windows) took median 6.61 and
-  5.52 s over three trials, versus 7.95 s for the original 0.5 ms windows.
-  Stepping took 1.61 and 0.76 s, with 555 and 471 rounds. These change network
-  semantics and witnesses, so the fix retains the original latency, early
-  allowance and window size.
-
-CPU sampling used `perf record -e cpu-clock -F 997 --call-graph dwarf,8192`;
-the RCU/counter measurements used paired entry/return kprobes, and blocked
-stacks used `sched:sched_switch`. Probes and the Zen MSR workaround were
-removed/restored after measurement.
-
-Before/after runs agree on world, network, machine exit and full-state
-witnesses, guest console bytes, machine times, routed-effect digest and
-committed end. This includes all five trials at one and four workers and
-full `--undo 0` runs of both worlds. The windowed witnesses already differed
-from the old scheduler's at `b90a315`; that relationship is unchanged.
-`harness/windowed-matrix.sh` passes before and after for PV and counter:
-one and two workers on `window2`, one through four on `window4`, and
-reversed completion order. Each matrix agrees on full state, world and
-network witnesses, machine times and the committed end.
-Applying only this refinement to the historical old engine also preserves
-its original counter and PV witnesses. Full `seedbox run` / `seedbox replay`
-checks with a hashing Compose guest give PASS/MATCH before and after, both
-with default undo and `--undo 0`, and agree on full-state witnesses and
-console bytes. The focused KVM test
-`machine::io_boundary_tests::refined_counter_approaches_preserve_ram_and_exact_stops`
-compares exact count, exit witness and RAM/register state with undo margins
-0, 16, 256 and 1,024 while guest code writes RAM on every loop branch.
+On the 5950X (seed 7, counter, median of five whole-process runs), `window4`
+went from 7.95 to 6.01 s on one worker and 3.41 to 2.58 s on four (old
+scheduler: 5.95 s); step exits fell from 385,919 to 122,870. Kprobes found
+counter `perf_ioctl` cost (25 ms) and vCPU-migration `synchronize_rcu` calls
+(none on Linux 6.18.54) too small to explain the gap.
 
 ## Why this matters most for PV
 
@@ -347,13 +266,10 @@ It works for any `WorldMachine`; the parallel path needs `M: Send`.
    template.
 2. **Reports.** Show the end machine's exit time beside the committed end in
    the CLI report. Today they appear only in `vmm.json`, under `scheduler`.
-3. **Sticky placement.** Measure migration costs on each host kernel before
-   changing placement. Linux 6.18.54 showed no `synchronize_rcu` calls during
-   these runs, despite frequent migration; see the counter refinement
-   measurements above.
-4. **Counter overhead.** The refinement above cuts precision stepping while
-   preserving existing stops. Larger windows and soft stops at natural
-   exits near `B` would need separate scheduler-semantics evidence.
+3. **Sticky placement.** Linux 6.18.54 made no `synchronize_rcu` calls on
+   migration; measure other host kernels before changing placement.
+4. **Counter overhead.** Larger windows and soft stops at natural exits
+   near `B` would cut stepping further but change scheduler semantics.
 5. **Real workload.** Run the four-machine etcd Compose workload through
    `seedbox run` / `seedbox replay` once the CLI passes the flags.
 6. **arm64.** The adapter is generic and now covers everything the legacy
