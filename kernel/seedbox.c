@@ -11,7 +11,8 @@
  *
  * Once the page is active, interrupt masking (8259) and virtio-mmio interrupt
  * status go through the page instead of trapping port and MMIO accesses, and
- * the PIT is armed with a single port write. The VMM applies page state only
+ * the PIT is armed through the page when advertised, otherwise with a
+ * single port write. The VMM applies page state only
  * at deterministic points.
  *
  * In the VMM's PV clock timebase (no host perf counter), guest progress is
@@ -23,6 +24,7 @@
 #include <linux/stddef.h>
 #include <linux/init.h>
 #include <linux/io.h>
+#include <linux/i8253.h>
 #include <linux/kernel.h>
 #include <linux/printk.h>
 #include <asm/cpufeature.h>
@@ -121,6 +123,13 @@ void __init seedbox_time_init(void)
 	BUILD_BUG_ON(offsetof(struct seedbox_time_page, entropy[1]) != 11 * sizeof(u64));
 	BUILD_BUG_ON(offsetof(struct seedbox_time_page, entropy[2]) != 12 * sizeof(u64));
 	BUILD_BUG_ON(offsetof(struct seedbox_time_page, entropy[3]) != 13 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, timer_deadline) != 14 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, capabilities) != 15 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, syscall_ns) != 16 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, syscalls0) != 17 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, plan_time) != 18 * sizeof(u64));
+	BUILD_BUG_ON(SEEDBOX_ABI != 4);
+	BUILD_BUG_ON(SEEDBOX_CAP_PAGE_TIMER != 1);
 
 	/*
 	 * setup_arch calls us after jump_label_init and early_ioremap_init,
@@ -140,6 +149,45 @@ void __init seedbox_time_init(void)
 	outl(SEEDBOX_ABI, SEEDBOX_PORT_TIME_READY);
 	WRITE_ONCE(seedbox_page, p);
 	pr_info("seedbox: deterministic time page active\n");
+}
+
+bool seedbox_set_next_event(unsigned long ticks)
+{
+	struct seedbox_time_page *p = READ_ONCE(seedbox_page);
+	u64 now, deadline, reload = (u16)ticks ?: 65536;
+
+	if (!p || !(READ_ONCE(p->capabilities) & SEEDBOX_CAP_PAGE_TIMER))
+		return false;
+	/* Match the PIT's round-up conversion, without another clock read. */
+	now = max(READ_ONCE(p->tsc), READ_ONCE(p->last));
+	deadline = now + DIV_ROUND_UP_ULL(reload * 1000000000ULL, PIT_TICK_RATE);
+	WRITE_ONCE(p->timer_deadline, deadline);
+	if (static_branch_unlikely(&seedbox_pv_clock)) {
+		if (deadline < READ_ONCE(p->bound)) {
+			u64 t0 = READ_ONCE(p->plan_time);
+			u64 s0 = READ_ONCE(p->syscalls0);
+			u64 ns = READ_ONCE(p->syscall_ns);
+			u64 left = deadline > t0 ? deadline - t0 : 0;
+
+			/* The VMM keeps this origin fixed through watchdog splits.
+			 * Keep an earlier bound on a later re-arm: only a legal
+			 * exit may publish a new plan. This also keeps left=0's
+			 * target at s0+1, even if that syscall already happened.
+			 */
+			WRITE_ONCE(p->bound, deadline);
+			WRITE_ONCE(p->syscall_target,
+				   s0 + max(1ULL, DIV_ROUND_UP_ULL(left, ns)));
+		}
+	}
+	return true;
+}
+
+void seedbox_timer_disarm(void)
+{
+	struct seedbox_time_page *p = READ_ONCE(seedbox_page);
+
+	if (p && (READ_ONCE(p->capabilities) & SEEDBOX_CAP_PAGE_TIMER))
+		WRITE_ONCE(p->timer_deadline, SEEDBOX_TIMER_DISARMED);
 }
 
 static int __init seedbox_user_tsc_init(void)

@@ -40,6 +40,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Deferred TX kicks | off; service TX as in the current engine | `--deferred-tx` (prepare/run/explore) |
 | Runtime checkpoint | absent; ordinary execution | `--checkpoint-at-ns T --branch-seed B` (run only; B=P continues without reseeding; no environment backing) |
 | Timebase | `counter` (retired guest branches) | `--timebase` (prepare/run/explore) |
+| Page timer | off; ABI-4 clockevent stores, aimed at PV | `--page-timer` (prepare/run/explore) |
 | Exploration count | `1` | `--count` |
 | Exploration workers | `1`, sequential execution | `--workers` (1..32; automatic CPU selection for parallel execution) |
 | Torn disk writes | off (drop all unflushed sectors on crash) | `--torn-writes` |
@@ -475,6 +476,34 @@ are printed as `omitted files: N`; omitted local output is not transferred.
 Existing files/runs are never replaced. `--max-bytes` changes the local transfer
 cap without changing run identity. See [runtime instructions](docs/runtime.md#bundles)
 for bounds and supported formats.
+
+`run`, `prepare` and `explore` accept `--page-timer` (off by default,
+no environment override). An ABI-4 kernel arms one-shot clockevents by writing
+an absolute deadline into the shared time page, avoiding port `0x530` exits.
+The VMM advertises the capability only after the guest announces ABI 4;
+with the flag enabled, older kernels fail at boot with a rebuild/drop-flag error.
+The flag is aimed at PV: an earlier arm lowers the clock bound and uses the same
+syscall budget as the VMM planner, without a prompt syscall exit. Watchdog and probe splits leave the bound, budget and plan origin untouched,
+including between the guest's arm loads and stores. A later re-arm retains an
+earlier lowered bound until a legal exit; an overdue arm retains its original
+`syscalls0 + 1` target. These splits never adopt the page word, expire timers
+or draw jitter. Adoption happens only at legal exits (including HLT and PV
+yields), canonical spin-idle landings and world slice boundaries, after the
+exit clock is accounted. A halted machine wakes from the adopted deadline
+(including its seeded jitter), never from a raw page store. In the counter
+timebase, an earlier page arm waits for the next exit and may fire late by up
+to a slice. One-shot stop/restart
+uses page disarm and avoids PIT mode port writes.
+The requested semantic parameter is retained
+as `page_timer: true` only when enabled. Replay restores it without an override.
+Timer jitter uses the existing seeded stream. This changes enabled-run timing
+and witnesses; omission preserves the existing identity encoding for the same
+engine and kernel inputs.
+Checkpoint parent identities also bind the page timer only when enabled,
+preventing checkpoint reuse across timer modes while preserving feature-off hashes.
+This composes with deferred TX's `+deferred-tx` timebase suffix: all four flag
+combinations have distinct parent and branch identities, and both off retains
+the original encoding.
 
 ## Low-level engine fixtures
 

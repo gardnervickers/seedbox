@@ -23,6 +23,7 @@ use std::time::Instant;
 
 mod counted;
 pub mod pv;
+mod pv_plan;
 
 pub const TIME_PAGE: u64 = 0xd000_0000;
 pub const NET_MMIO: u64 = 0xd000_1000;
@@ -52,6 +53,50 @@ pub const ABI_PAGE_RESEED: u64 = 3;
 const PAGE_PV_CLOCK: usize = 6;
 const PAGE_BOUND: usize = 7;
 const PAGE_SYSCALL_TARGET: usize = 8;
+const PAGE_TIMER_DEADLINE: usize = 14;
+const PAGE_CAPABILITIES: usize = 15;
+// Rewritten at every plan, outside the checkpointed PAGE_FIELDS.
+const PAGE_SYSCALL_NS: usize = 16;
+const PAGE_SYSCALLS0: usize = 17;
+const PAGE_PLAN_TIME: usize = 18;
+pub const ABI_PAGE_TIMER: u64 = 4;
+const CAP_PAGE_TIMER: u64 = 1;
+const TIMER_DISARMED: u64 = u64::MAX;
+
+/// The last adopted page store. Kept separately so expiration cannot rearm
+/// an unchanged word, and legacy PIT writes can still replace a page arm.
+#[derive(Clone, Copy)]
+struct PageTimer {
+    enabled: bool,
+    seen: u64,
+}
+
+impl PageTimer {
+    fn new() -> Self { Self { enabled: false, seen: TIMER_DISARMED } }
+
+    fn pickup(&mut self, word: u64, pit: &mut Pit, now: u64) -> Result<bool, String> {
+        if self.enabled && word != self.seen {
+            // Like the PV timer port: replacing an overdue arm cannot lose IRQ0.
+            let fired = pit.expire_through(now)? > 0;
+            self.seen = word;
+            pit.program_deadline((word != TIMER_DISARMED).then_some(word));
+            Ok(fired)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+/// Both timer transports use exactly the same latency stream and draw order.
+fn timer_latency(pit: &mut Pit, exact: &mut bool, rng: Option<&mut crate::rng::Rng>, jitter: u64, ppm: u64) {
+    if pit.fresh {
+        pit.fresh = false;
+        if let (Some(d), Some(rng)) = (pit.deadline, rng) {
+            if jitter > 0 { pit.deadline = Some(d + rng.below(jitter + 1)); }
+            *exact = ppm > 0 && rng.below(1_000_000) < ppm;
+        }
+    }
+}
 
 // Pin every extension word without extending the checkpoint/digest prefix.
 const _: () = {
@@ -66,6 +111,13 @@ const _: () = {
     assert!(PAGE_ENTROPY + 3 == 13);
     assert!(PAGE_ENTROPY_FIELDS == 4);
     assert!(ABI_PAGE_RESEED == 3);
+    assert!(PAGE_TIMER_DEADLINE == 14);
+    assert!(PAGE_CAPABILITIES == 15);
+    assert!(PAGE_SYSCALL_NS == 16);
+    assert!(PAGE_SYSCALLS0 == 17);
+    assert!(PAGE_PLAN_TIME == 18);
+    assert!(ABI_PAGE_TIMER == 4);
+    assert!(CAP_PAGE_TIMER == 1);
 };
 
 pub struct BootSpec<'a> {
@@ -84,6 +136,7 @@ pub struct BootSpec<'a> {
     pub barrier: bool,
     /// The machine runs under the PV clock timebase (no host perf counter).
     pub pv_clock: bool,
+    pub page_timer: bool,
 }
 
 /// Port of the launch barrier, see guest/barrier.h.
@@ -126,6 +179,7 @@ pub struct MachineSnapshot {
     pv: bool,
     syscall_ns: u64,
     abi: u64,
+    page_timer: PageTimer,
     armed_wake: u64,
     pit_exact: bool,
     exit_req: bool,
@@ -326,6 +380,7 @@ pub struct Machine {
     pv: bool,
     /// Guest ABI version announced on the time page port (0 before then).
     abi: u64,
+    page_timer: PageTimer,
     armed_wake: u64,
     /// The pending timer deadline must be delivered at its exact time.
     pit_exact: bool,
@@ -364,6 +419,7 @@ pub struct Machine {
     entropy: [u32; ENTROPY_WORDS],
     entropy_read: usize,
     pv_clock: bool,
+    page_timer_requested: bool,
     /// The MSR list a fork snapshot saves.
     msrs: Msrs,
     pub stats: Stats,
@@ -594,6 +650,7 @@ impl Machine {
             exit_req: false,
             pv: false,
             abi: 0,
+            page_timer: PageTimer::new(),
             armed_wake: 0,
             pit_exact: false,
             exact_timer_ppm: 0,
@@ -617,6 +674,7 @@ impl Machine {
             entropy: [0; ENTROPY_WORDS],
             entropy_read: 0,
             pv_clock: spec.pv_clock,
+            page_timer_requested: spec.page_timer,
             msrs,
             stats: Stats::default(),
             // A PV clock run can never share a witness with a counter run.
@@ -824,7 +882,7 @@ impl Machine {
             management_framer: self.management_framer.clone(),
             net: self.net.clone(), channel: self.channel.clone(), blk: self.blk.clone(),
             control_dma_bytes: self.control_dma_bytes, control_tx_bytes: self.control_tx_bytes,
-            pv: self.pv, syscall_ns: self.syscall_ns, abi: self.abi, armed_wake: self.armed_wake, pit_exact: self.pit_exact, exit_req: self.exit_req,
+            pv: self.pv, syscall_ns: self.syscall_ns, abi: self.abi, page_timer: self.page_timer, armed_wake: self.armed_wake, pit_exact: self.pit_exact, exit_req: self.exit_req,
             margin: self.margin, fm: self.fm, parked: self.parked,
             stats: self.stats.clone(), witness: self.witness.clone(), undo_stats,
         })
@@ -897,6 +955,7 @@ impl Machine {
         self.pv = s.pv;
         self.syscall_ns = s.syscall_ns;
         self.abi = s.abi;
+        self.page_timer = s.page_timer;
         self.armed_wake = s.armed_wake;
         self.pit_exact = s.pit_exact;
         self.exit_req = s.exit_req;
@@ -1079,6 +1138,27 @@ impl Machine {
         }
     }
 
+    fn enable_page_timer(&mut self) {
+        if self.page_timer_requested && self.abi >= ABI_PAGE_TIMER {
+            self.page_set(PAGE_TIMER_DEADLINE, TIMER_DISARMED);
+            self.page_set(PAGE_CAPABILITIES, CAP_PAGE_TIMER);
+            self.page_timer.enabled = true;
+        }
+    }
+
+    // Adoption is an observable effect: call only at a legal exit or a world
+    // boundary, after accounting for that point's guest clock progress. Never
+    // call from a timebase prepare/plan or a watchdog/probe landing.
+    fn sync_page_timer(&mut self) -> Result<(), String> {
+        if !self.page_timer.enabled { return Ok(()); }
+        if self.page_timer.pickup(self.page_get(PAGE_TIMER_DEADLINE), &mut self.pit, self.time)? {
+            self.pic.raise(0);
+        }
+        timer_latency(&mut self.pit, &mut self.pit_exact, self.timer_rng.as_mut(), self.timer_jitter, self.exact_timer_ppm);
+        Ok(())
+    }
+
+    // Expiration consults adopted device state only, never a guest page store.
     fn expire_timers(&mut self) -> Result<(), String> {
         if self.pit.expire_through(self.time)? > 0 {
             self.pic.raise(0);
@@ -1112,7 +1192,9 @@ impl Machine {
         let t = Instant::now();
         self.complete_io()?;
         let page: [u64; PAGE_FIELDS] = std::array::from_fn(|i| self.page_get(i));
+        let timer_deadline = self.page_timer.enabled.then(|| self.page_get(PAGE_TIMER_DEADLINE));
         let u = self.undo.as_mut().unwrap();
+        u.timer_deadline = timer_deadline;
         u.save(&self._vm, &self.vcpu, self.mem)?;
         u.page = page;
         u.time = self.time;
@@ -1129,6 +1211,9 @@ impl Machine {
         let (regs, sregs) = u.restore(&self._vm, &self.vcpu, self.mem)?;
         for i in 0..PAGE_FIELDS {
             unsafe { std::ptr::write_volatile(self.page.add(i), u.page[i]) };
+        }
+        if let Some(deadline) = u.timer_deadline {
+            unsafe { std::ptr::write_volatile(self.page.add(PAGE_TIMER_DEADLINE), deadline) };
         }
         self.time = u.time;
         self.branches = u.branches;
@@ -1329,12 +1414,14 @@ impl Machine {
                 self.fm = self.undo_margin;
                 // Guest clock reads can advance time independently of the PMU.
                 // Check before expiring timers or accepting the slice boundary.
+                if self.page_timer.enabled { self.expire_timers()?; }
                 self.sync_from_page(hard_limit(
                     limit,
                     self.pit.deadline,
                     self.pit_exact,
                     self.tolerance,
                 ))?;
+                self.sync_page_timer()?;
                 self.expire_timers()?;
                 // Also runs on slice entry after world RX delivery. Never poll
                 // at overflow landings or intermediate precision steps.
@@ -1377,7 +1464,14 @@ impl Machine {
                 self.exit_req = window;
             }
             let syscalls0 = self.page_get(PAGE_SYSCALLS);
-            if let Prepared::Idle = tb.prepare(self, remaining, soft)? {
+            if let Prepared::Idle = tb.prepare(self, remaining, soft, legal)? {
+                if self.page_timer.enabled {
+                    // A proven cycle's canonical landing is deterministic, unlike the
+                    // watchdog and intermediate probe steps that found it.
+                    self.sync_from_page(hard)?;
+                    self.sync_page_timer()?;
+                    self.expire_timers()?;
+                }
                 // A proven PV cycle is deterministic; watchdog landings are not.
                 // Complete pending TX before declaring a completion waiter idle,
                 // including with interrupts disabled or suppressed by the guest.
@@ -1480,12 +1574,20 @@ impl Machine {
             self.time += delta;
             if legal {
                 // Sent/Hlt/Exited can return before the next loop synchronizes
-                // the page. Validate guest clock progress before any exit
-                // effects, while preserving the existing publication timing.
-                // The exit still borrows vcpu; inspect only the disjoint page
-                // and clock fields until its payload has been consumed.
+                // the page. Validate guest clock progress before exit effects.
+                // The exit still borrows vcpu: use only the disjoint fields.
                 let last = unsafe { std::ptr::read_volatile(self.page.add(1)) };
-                advance_time(self.time, last.saturating_sub(self.time), hard)?;
+                let exit_time = advance_time(self.time, last.saturating_sub(self.time), hard)?;
+                if self.page_timer.enabled {
+                    // In particular HLT must adopt at its full exit time, not
+                    // at a watchdog landing's partial syscall-only time.
+                    self.stats.time_by[Cause::ClockReads as usize] += exit_time - self.time;
+                    self.time = exit_time;
+                    let word = unsafe { std::ptr::read_volatile(self.page.add(PAGE_TIMER_DEADLINE)) };
+                    if self.page_timer.pickup(word, &mut self.pit, self.time)? { self.pic.raise(0); }
+                    timer_latency(&mut self.pit, &mut self.pit_exact, self.timer_rng.as_mut(), self.timer_jitter, self.exact_timer_ppm);
+                    if self.pit.expire_through(self.time)? > 0 { self.pic.raise(0); }
+                }
             }
             self.stats.exits += 1;
             if self.stepping {
@@ -1505,14 +1607,17 @@ impl Machine {
                     // move, so move it there.
                     let v = data[0];
                     if v == 1 && self.pv_clock {
-                        self.advance_to(soft, Cause::ClockBound);
+                        let bound = if self.page_timer.enabled { self.page_get(PAGE_BOUND).min(soft) } else { soft };
+                        self.advance_to(bound, Cause::ClockBound);
                     }
                     self.stats.yields += 1;
                     if self.time >= soft {
                         self.stats.yield_stops += 1;
                         self.record(b'Y', v as u64);
                     } else {
-                        legal = false;
+                        // A page arm can lower the clock/syscall budget below
+                        // the previous soft bound. This is a legal pickup.
+                        legal = self.page_timer.enabled;
                     }
                 }
                 Ok(VcpuExit::IoOut(port, data)) => {
@@ -1591,6 +1696,10 @@ impl Machine {
                                     self.name
                                 ));
                             }
+                            if self.page_timer_requested && self.abi < ABI_PAGE_TIMER {
+                                return Err("the guest kernel lacks page timer support; rebuild it from kernel/ or drop --page-timer".into());
+                            }
+                            self.enable_page_timer();
                             self.pv = v >= 2;
                             if self.pv {
                                 self.sync_pic();
@@ -1620,22 +1729,11 @@ impl Machine {
                             } else {
                                 self.pit.write(port, v, now);
                             }
-                            if self.pit.fresh {
-                                // Seeded timer latency: varies preemption points across seeds.
-                                self.pit.fresh = false;
-                                if let (Some(d), Some(rng)) =
-                                    (self.pit.deadline, self.timer_rng.as_mut())
-                                {
-                                    if self.timer_jitter > 0 {
-                                        self.pit.deadline =
-                                            Some(d + rng.below(self.timer_jitter + 1));
-                                    }
-                                    // Some deadlines interrupt at their exact time, i.e. at an
-                                    // arbitrary instruction, rather than the next syscall.
-                                    self.pit_exact = self.exact_timer_ppm > 0
-                                        && rng.below(1_000_000) < self.exact_timer_ppm;
-                                }
+                            // A legacy write supersedes the last page request.
+                            if self.page_timer.enabled {
+                                self.page_timer.seen = self.page_get(PAGE_TIMER_DEADLINE);
                             }
+                            timer_latency(&mut self.pit, &mut self.pit_exact, self.timer_rng.as_mut(), self.timer_jitter, self.exact_timer_ppm);
                         }
                         0x70 => self.rtc_index = v & 0x7f,
                         0xe9 => self.com1.transmit(v)?,
@@ -1929,6 +2027,9 @@ impl Machine {
         for i in 0..PAGE_FIELDS {
             h.update(self.page_get(i).to_le_bytes());
         }
+        if self.page_timer.enabled {
+            h.update(self.page_get(PAGE_TIMER_DEADLINE).to_le_bytes());
+        }
         parts.push(("time_page", hex(h)));
         let mut h = Sha256::new();
         h.update(self.memory());
@@ -1968,7 +2069,7 @@ mod net_poll_tests {
     struct Natural;
     impl Timebase for Natural {
         const BRANCHES: bool = false;
-        fn prepare(&mut self, _: &mut Machine, _: u64, _: u64) -> Result<Prepared, String> { Ok(Prepared::Run) }
+        fn prepare(&mut self, _: &mut Machine, _: u64, _: u64, _: bool) -> Result<Prepared, String> { Ok(Prepared::Run) }
         fn start(&mut self, _: u64) -> u64 { 0 }
         fn read(&mut self, _: u64) -> u64 { 0 }
         fn inject_guard(&self) -> u64 { INJECT_GUARD }
@@ -1990,7 +2091,7 @@ mod net_poll_tests {
                 let mut kernel = vec![0; 1024];kernel[0x1f1] = 1;kernel.extend(code);
                 let spec = BootSpec { kernel: &kernel, initrd: &[], cmdline: String::new(), mem: INITRD_ADDR + 0x100000,
                     rng_seed: [0; 32], mac: Some([2, 0, 0, 0, 0, 1]), control_channel: false, disk: None,
-                    undo_margin: 0, barrier: false, pv_clock: true };
+                    undo_margin: 0, barrier: false, pv_clock: true, page_timer:false};
                 let mut m = Machine::new(&kvm, "net-poll", &spec).unwrap();
                 let mut r = m.vcpu.get_regs().unwrap();r.rflags = 0x202;m.vcpu.set_regs(&r).unwrap();
                 let memory = unsafe { std::slice::from_raw_parts_mut(m.mem, m.mem_size) };
@@ -2032,19 +2133,30 @@ mod net_poll_tests {
         use std::time::Duration;
         use super::pv::PvClock;
         let kvm = Kvm::new().unwrap();
-        for event_idx in [false, true] {
+        for (event_idx, page_timer) in [(false, false), (true, false), (false, true), (true, true)] {
             let mut first = None;
             for ms in [2, 7] {
                 // Publish TX, then busy-wait for used->idx with interrupts off.
                 // The stable cycle is serviced at its canonical point; never
                 // service at the host-time watchdog or a probe landing.
-                let code = [0xc7, 0x05, 0x02, 0x20, 0x08, 0x00, 1, 0, 0, 0,
+                let mut code = vec![0xc7, 0x05, 0x02, 0x20, 0x08, 0x00, 1, 0, 0, 0,
                     0x66, 0x83, 0x3d, 0x02, 0x30, 0x08, 0, 0, 0x74, 0xf6, 0xf4];
+                if page_timer {
+                    // Store clock progress and an arm before publishing TX.
+                    let mut stores = Vec::new();
+                    for (address, value) in [(0xd0000008u32, 12300u32), (0xd0000070, 40000), (0xd0000074, 0)] {
+                        stores.extend_from_slice(&[0xc7, 0x05]);
+                        stores.extend_from_slice(&address.to_le_bytes());
+                        stores.extend_from_slice(&value.to_le_bytes());
+                    }
+                    stores.extend(code);code = stores;
+                }
                 let mut kernel = vec![0; 1024];kernel[0x1f1] = 1;kernel.extend(code);
                 let spec = BootSpec { kernel: &kernel, initrd: &[], cmdline: String::new(), mem: INITRD_ADDR + 0x100000,
                     rng_seed: [0; 32], mac: Some([2, 0, 0, 0, 0, 1]), control_channel: false, disk: None,
-                    undo_margin: 0, barrier: false, pv_clock: true };
+                    undo_margin: 0, barrier: false, pv_clock: true, page_timer};
                 let mut m = Machine::new(&kvm, "tx-spin", &spec).unwrap();
+                m.abi = ABI_PAGE_TIMER;m.enable_page_timer();
                 let memory = unsafe { std::slice::from_raw_parts_mut(m.mem, m.mem_size) };
                 let net = m.net.as_mut().unwrap();net.deferred_tx = true;
                 for (off, v) in [(0x020, if event_idx { 1 << 29 } else { 0 }), (0x070, 15),
@@ -2060,6 +2172,8 @@ mod net_poll_tests {
                 let mut frames = Vec::new();
                 assert_eq!(m.run_until(&mut tb, 1_000_000, 0, &mut frames).unwrap(), Stop::Sent);
                 assert_eq!(frames, [b"frame".to_vec()]);
+                assert_eq!(m.time, if page_timer { 12300 } else { 0 });
+                assert_eq!(m.pit.deadline, page_timer.then_some(40000));
                 assert_eq!(m.net.as_ref().unwrap().doorbell_exits, 0);
                 assert_eq!(m.run_until(&mut tb, 1_000_000, 0, &mut frames).unwrap(), Stop::Exited);
                 let evidence = (m.time, m.exit_witness(), m.state_digest());
@@ -2085,7 +2199,7 @@ mod io_boundary_tests {
         else {code.push(if write {0xee} else {0xec});}
         code.extend_from_slice(&[0x85,0xc0,0x74,0x00,0xc7,0x05,0x00,0x00,0x08,0x00,0x78,0x56,0x34,0x12,0xf4]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false,pv_clock:false};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false,pv_clock:false,page_timer:false};
         let mut machine=Machine::new(kvm,"io-probe",&spec).unwrap();
         let mut r=machine.vcpu.get_regs().unwrap();r.rflags=0x202;machine.vcpu.set_regs(&r).unwrap();
         machine.pit.write(0x43,0x34,0);
@@ -2245,11 +2359,42 @@ mod io_boundary_tests {
         let back=-(code.len() as i8+2);
         code.extend_from_slice(&[0xeb,back as u8]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false,pv_clock:false};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false,pv_clock:false,page_timer:false};
         let mut machine=Machine::new(kvm,"stop-probe",&spec).unwrap();
         let mut r=machine.vcpu.get_regs().unwrap();r.rflags=0x2;machine.vcpu.set_regs(&r).unwrap();
         machine.pic.set_masks(0xffff);
         machine
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn an_overdue_arm_replaced_by_a_page_store_does_not_depend_on_undo() {
+        let kvm = Kvm::new().unwrap();
+        let mut counter = Counter::new().unwrap();
+        // mov ecx,280000; dec ecx; jnz; store deadline 900000 to word 14; hlt
+        let mut code = vec![0xb9, 0xc0, 0x45, 0x04, 0x00, 0x49, 0x75, 0xfd];
+        for (address, value) in [(0xd0000070u32, 900_000u32), (0xd0000074, 0)] {
+            code.extend_from_slice(&[0xc7, 0x05]);
+            code.extend_from_slice(&address.to_le_bytes());
+            code.extend_from_slice(&value.to_le_bytes());
+        }
+        code.push(0xf4);
+        let mut want = None;
+        for undo in [0, 16, 256] {
+            let mut kernel = vec![0u8; 1024]; kernel[0x1f1] = 1; kernel.extend(&code);
+            let spec = BootSpec { kernel: &kernel, initrd: &[], cmdline: String::new(), mem: INITRD_ADDR + 0x100000, rng_seed: [0; 32], mac: None, control_channel: false, disk: None, undo_margin: undo, barrier: false, pv_clock: false, page_timer: true };
+            let mut m = Machine::new(&kvm, "page-rearm", &spec).unwrap();
+            let mut r = m.vcpu.get_regs().unwrap(); r.rflags = 0x202; m.vcpu.set_regs(&r).unwrap();
+            m.abi = ABI_PAGE_TIMER;
+            m.enable_page_timer();
+            m.tolerance = 200_000;
+            m.pit.program_deadline(Some(100_000)); // D = 100k, hard = 300k, exit at ~280k
+            m.pic.set_masks(0xffff);
+            assert_eq!(m.run_until(&mut counter, 1_000_000, 0, &mut Vec::new()).unwrap(), Stop::Halted);
+            m.pic.set_masks(0);
+            let got = (m.time, m.pic.pending(), m.pit.deadline, m.exit_witness());
+            if let Some(want) = &want { assert_eq!(&got, want, "undo={undo}"); } else { want = Some(got); }
+        }
     }
 
     #[test]
@@ -2420,11 +2565,54 @@ mod fork_tests {
         assert_eq!(fields["syscall_target"], (PAGE_SYSCALL_TARGET, 1));
         assert_eq!(fields["entropy_gen"], (PAGE_ENTROPY_GEN, 1));
         assert_eq!(fields["entropy"], (PAGE_ENTROPY, PAGE_ENTROPY_FIELDS));
-        assert_eq!(index, 14);
+        assert_eq!(fields["timer_deadline"], (PAGE_TIMER_DEADLINE, 1));
+        assert_eq!(fields["capabilities"], (PAGE_CAPABILITIES, 1));
+        assert_eq!(fields["syscall_ns"], (PAGE_SYSCALL_NS, 1));
+        assert_eq!(fields["syscalls0"], (PAGE_SYSCALLS0, 1));
+        assert_eq!(fields["plan_time"], (PAGE_PLAN_TIME, 1));
+        assert_eq!(index, 19);
         assert_eq!(PAGE_FIELDS, PAGE_PV_CLOCK);
         assert_eq!(PAGE_ENTROPY_FIELDS * 8, ENTROPY_WORDS * 4);
         let abi: u64 = header.lines().find_map(|l| l.strip_prefix("#define SEEDBOX_ABI\t")).unwrap().trim().parse().unwrap();
-        assert_eq!(abi, ABI_PAGE_RESEED);
+        assert_eq!(abi, ABI_PAGE_TIMER);
+    }
+
+    #[test]
+    #[ignore = "requires Linux x86-64 KVM"]
+    fn page_timer_negotiation_and_undo_restore_the_separate_page_word() {
+        let kvm = Kvm::new().unwrap();
+        let mut m = probe_machine(&kvm, 256, false);
+        for requested in [false, true] {
+            for abi in 0..=ABI_PAGE_TIMER {
+                m.page_timer_requested = requested;
+                m.abi = abi;
+                m.page_timer = PageTimer::new();
+                m.page_set(PAGE_TIMER_DEADLINE, 0);
+                m.page_set(PAGE_CAPABILITIES, 0);
+                m.enable_page_timer();
+                let active = requested && abi >= ABI_PAGE_TIMER;
+                assert_eq!(m.page_timer.enabled, active);
+                assert_eq!(m.page_get(PAGE_CAPABILITIES), if active { CAP_PAGE_TIMER } else { 0 });
+                assert_eq!(m.page_get(PAGE_TIMER_DEADLINE), if active { TIMER_DISARMED } else { 0 });
+            }
+        }
+        m.page_set(PAGE_TIMER_DEADLINE, 10000);
+        m.sync_page_timer().unwrap();
+        m.checkpoint().unwrap();
+        m.page_set(PAGE_TIMER_DEADLINE, 20000);
+        // Speculative guest stores are not adopted before a legal landing.
+        m.rollback().unwrap();
+        assert_eq!(m.page_get(PAGE_TIMER_DEADLINE), 10000);
+        assert_eq!(m.next_deadline(), 10000);
+        m.page_set(PAGE_TIMER_DEADLINE, TIMER_DISARMED);
+        m.checkpoint().unwrap();
+        m.page_set(PAGE_TIMER_DEADLINE, 30000);
+        m.rollback().unwrap();
+        assert_eq!(m.page_get(PAGE_TIMER_DEADLINE), TIMER_DISARMED);
+        assert_eq!(m.next_deadline(), 10000, "unadopted disarm cannot change idle wake time");
+        m.sync_page_timer().unwrap();
+        assert_eq!(m.next_deadline(), TIMER_DISARMED);
+        assert_eq!(m.pit.deadline, None);
     }
 
     // These tests create a vCPU but never enter the guest or open a perf event.
@@ -2490,7 +2678,7 @@ mod fork_tests {
         code.extend_from_slice(&[0xb9,0xe8,0x03,0,0, 0x49, 0x75,0xfd]);
         code.extend_from_slice(&[0xc7,0x05,0x00,0x10,0x08,0x00,0xad,0xde,0,0, 0xf4]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier,pv_clock:false};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier,pv_clock:false,page_timer:false};
         Machine::new(kvm,"fork-probe",&spec).unwrap()
     }
 
@@ -2815,7 +3003,7 @@ mod timed_log_tests {
             0xb0,b'A',0xe6,0xe9,0xbb,0xe8,0x03,0,0,0x4b,0x75,0xfd,
             0xb0,b'B',0xe6,0xe9,0xb0,0,0xe6,0xf4];
         let mut kernel=vec![0;1024];kernel[0x1f1]=1;kernel.extend_from_slice(&code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false,pv_clock:false};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false,pv_clock:false,page_timer:false};
         let mut m=Machine::new(kvm,"timed",&spec).unwrap();
         let mut r=m.vcpu.get_regs().unwrap();r.rflags=2;m.vcpu.set_regs(&r).unwrap();m.pic.set_masks(0xffff);m
     }
@@ -2882,8 +3070,8 @@ mod timed_log_tests {
     struct RejectOnce {counter:Counter,rollback:bool,first:bool}
     impl Timebase for RejectOnce {
         const BRANCHES:bool=true;
-        fn prepare(&mut self,m:&mut Machine,remaining:u64,soft:u64)->Result<Prepared,String> {
-            let prepared=self.counter.prepare(m,remaining,soft)?;
+        fn prepare(&mut self,m:&mut Machine,remaining:u64,soft:u64,legal:bool)->Result<Prepared,String> {
+            let prepared=self.counter.prepare(m,remaining,soft,legal)?;
             if self.first && self.rollback {m.checkpoint()?;}
             Ok(prepared)
         }
@@ -2925,7 +3113,7 @@ mod committed_trigger_tests {
     struct DiscardFirst {prepared:bool,discarded:bool}
     impl Timebase for DiscardFirst {
         const BRANCHES:bool=true;
-        fn prepare(&mut self,m:&mut Machine,_:u64,_:u64)->Result<Prepared,String> {
+        fn prepare(&mut self,m:&mut Machine,_:u64,_:u64,_:bool)->Result<Prepared,String> {
             if !self.prepared {m.checkpoint()?;self.prepared=true;}
             Ok(Prepared::Run)
         }
@@ -2941,7 +3129,7 @@ mod committed_trigger_tests {
     fn committed_console_discards_rolled_back_candidate_before_matcher_feed() {
         let kvm=Kvm::new().unwrap();
         let mut kernel=vec![0;1024];kernel[0x1f1]=1;kernel.extend_from_slice(&[0xb0,b'A',0xe6,0xe9,0xf4]);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:256,barrier:false,pv_clock:false};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:256,barrier:false,pv_clock:false,page_timer:false};
         let mut m=Machine::new(&kvm,"source",&spec).unwrap();m.observe_console=true;
         let mut tb=DiscardFirst{prepared:false,discarded:false};let mut frames=Vec::new();
         assert_eq!(m.run_until(&mut tb,10,0,&mut frames).unwrap(),Stop::Control);
@@ -2954,5 +3142,74 @@ mod committed_trigger_tests {
         assert_eq!(m.run_until(&mut tb,10,0,&mut frames).unwrap(),Stop::Exited);
         assert_eq!(m.committed_console,None);assert_eq!(m.com1.out,b"A");
         assert_eq!(m.com1.chunks.records,vec![[0,0,0,0,1]]);assert_eq!(m.log_order,1);
+    }
+}
+
+#[cfg(test)]
+mod page_timer_tests {
+    use super::*;
+
+    #[test]
+    fn page_deadline_is_picked_up_once_and_sentinel_disarms() {
+        let mut page = PageTimer { enabled: true, seen: TIMER_DISARMED };
+        let mut pit = Pit::default();
+        pit.write(0x43, 0x38, 0);
+        page.pickup(12345, &mut pit, 0).unwrap();
+        assert_eq!(pit.deadline, Some(12345));
+        assert!(!pit.expire(12344).unwrap());
+        assert!(pit.expire(12345).unwrap());
+        page.pickup(12345, &mut pit, 0).unwrap();
+        assert_eq!(pit.deadline, None, "an expired word must not rearm");
+        page.pickup(20000, &mut pit, 0).unwrap();
+        page.pickup(TIMER_DISARMED, &mut pit, 0).unwrap();
+        assert_eq!(pit.deadline, None);
+        assert!(!pit.expire(u64::MAX).unwrap());
+    }
+
+    #[test]
+    fn page_and_port_arms_share_expiration_and_latency_draws() {
+        let mut port = Pit::default();
+        port.write(0x43, 0x38, 0);
+        port.program(1193, 100);
+        let word = port.deadline.unwrap();
+        let mut pit = Pit::default();
+        let mut page = PageTimer { enabled: true, seen: TIMER_DISARMED };
+        page.pickup(word, &mut pit, 0).unwrap();
+        let mut a = crate::rng::Rng::new(4000, "timer/test");
+        let mut b = crate::rng::Rng::new(4000, "timer/test");
+        let (mut exact_a, mut exact_b) = (false, false);
+        timer_latency(&mut port, &mut exact_a, Some(&mut a), 1000000, 500000);
+        timer_latency(&mut pit, &mut exact_b, Some(&mut b), 1000000, 500000);
+        assert_eq!(pit.deadline, port.deadline);
+        assert_eq!(exact_a, exact_b);
+        assert_eq!(a.below(1000000), b.below(1000000));
+        let due = port.deadline.unwrap();
+        for now in [due - 1, due, due + 1] {
+            assert_eq!(pit.expire_through(now).unwrap(), port.expire_through(now).unwrap());
+            page.pickup(word, &mut pit, 0).unwrap();
+            assert_eq!(pit.deadline, port.deadline);
+        }
+    }
+
+    #[test]
+    fn a_page_rearm_preserves_an_overdue_interrupt() {
+        let mut page = PageTimer { enabled: true, seen: TIMER_DISARMED };
+        let mut pit = Pit::default();
+        assert!(!page.pickup(100, &mut pit, 0).unwrap());
+        assert!(page.pickup(200, &mut pit, 100).unwrap());
+        assert_eq!(pit.deadline, Some(200));
+        assert!(!page.pickup(200, &mut pit, 100).unwrap());
+    }
+
+    #[test]
+    fn disabled_page_timer_ignores_page_words_and_preserves_port_arms() {
+        let mut page = PageTimer::new();
+        let mut pit = Pit::default();
+        pit.program(100, 0);
+        let deadline = pit.deadline;
+        for word in [0, 1, TIMER_DISARMED] {
+            page.pickup(word, &mut pit, 0).unwrap();
+            assert_eq!(pit.deadline, deadline);
+        }
     }
 }

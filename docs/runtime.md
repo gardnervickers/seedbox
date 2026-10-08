@@ -34,7 +34,9 @@ the effect. Boot forks still require every machine parked.
 The CLI and engine share `crates/seedbox-vmm/src/checkpoint.rs`. Parent identity
 uses the versioned `seedbox-world-parent-v2` domain, config with checkpoint
 metadata removed, kernel/initrd/disk paths replaced by content hashes, engine
-hash, timebase and parent seed. Branch identity binds this parent, T and B.
+hash, timebase and parent seed. An enabled page timer adds an explicit semantic
+tag to the parent hash; omission adds no bytes, preserving feature-off identities.
+Checkpoints cannot be reused across timer modes. Branch identity binds this parent, T and B.
 The retained RunIdentity also binds T and B; it is not a second parent-identity
 scheme. Relocating inputs does not change the branch. Counter and PV parents
 have different identities. With deferred TX enabled, both sides hash
@@ -350,6 +352,37 @@ The VMM report is checked against it; reports from older engines without a
 timebase field mean counter. Run/replay and inspect print `timebase: VALUE`.
 `inspect --json` exposes the semantic profile and, when present, the VMM's
 reported `report.timebase` through the library's serialization.
+
+`run`, `prepare` and `explore` accept `--page-timer` (off by default,
+no environment override). An ABI-4 kernel arms one-shot clockevents by writing
+an absolute deadline into the shared time page, avoiding port `0x530` exits.
+The VMM advertises the capability only after the guest announces ABI 4;
+with the flag enabled, older kernels fail at boot with a rebuild/drop-flag error.
+The flag is aimed at PV: an earlier arm lowers the clock bound and uses the same
+syscall budget as the VMM planner, without a prompt syscall exit. Watchdog and probe splits leave the bound, budget and plan origin untouched,
+including between the guest's arm loads and stores. A later re-arm retains an
+earlier lowered bound until a legal exit; an overdue arm retains its original
+`syscalls0 + 1` target. These splits never adopt the page word, expire timers
+or draw jitter. Adoption happens only at legal exits (including HLT and PV
+yields), canonical spin-idle landings and world slice boundaries, after the
+exit clock is accounted. A halted machine wakes from the adopted deadline
+(including its seeded jitter), never from a raw page store. In the counter
+timebase, an earlier page arm waits for the next exit and may fire late by up
+to a slice. One-shot stop/restart
+uses page disarm and avoids PIT mode port writes.
+The VMM report includes `machines[].pio_total`: all KVM PIO exits across incarnations, including
+`0x52c` yields and rolled-back exits, outside witnesses. The existing `pio` count
+excludes yields.
+The requested semantic parameter is retained
+as `page_timer: true` only when enabled. Replay restores it without an override.
+Timer jitter uses the existing seeded stream. This changes enabled-run timing
+and witnesses; omission preserves the existing identity encoding for the same
+engine and kernel inputs.
+Checkpoint parent identities also bind the page timer only when enabled,
+preventing checkpoint reuse across timer modes while preserving feature-off hashes.
+This composes with deferred TX's `+deferred-tx` timebase suffix: all four flag
+combinations have distinct parent and branch identities, and both off retains
+the original encoding.
 
 PV uses no host PMU counter. It keeps the CPU/SMT leases but skips the counter
 profile, `--allow-unqualified-cpu`, the perf event checks and the Zen MSR

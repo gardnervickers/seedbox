@@ -59,6 +59,29 @@ semantic profile and the VMM's reported `report.timebase` when available.
 Bundles preserve the timebase. PV uses no PMU counter, but the CLI retains the
 same host admission, CPU/SMT lease and Zen MSR policy for both choices.
 
+`run`, `prepare` and `explore` accept `--page-timer` (off by default,
+no environment override). An ABI-4 kernel arms one-shot clockevents by writing
+an absolute deadline into the shared time page, avoiding port `0x530` exits.
+The VMM advertises the capability only after the guest announces ABI 4;
+with the flag enabled, older kernels fail at boot with a rebuild/drop-flag error.
+The flag is aimed at PV: an earlier arm lowers the clock bound and uses the same
+syscall budget as the VMM planner, without a prompt syscall exit. Watchdog splits
+reproduce that bound and budget without adopting the page word, expiring timers
+or drawing jitter. Adoption happens only at legal exits (including HLT and PV
+yields), canonical spin-idle landings and world slice boundaries, after the
+exit clock is accounted. A halted machine wakes from the adopted deadline
+(including its seeded jitter), never from a raw page store. In the counter
+timebase, an earlier page arm waits for the next exit and may fire late by up
+to a slice. One-shot stop/restart
+uses page disarm and avoids PIT mode port writes.
+The requested semantic parameter is retained
+as `page_timer: true` only when enabled. Replay restores it without an override.
+Timer jitter uses the existing seeded stream. This changes enabled-run timing
+and witnesses; omission preserves the existing identity encoding for the same
+engine and kernel inputs.
+Checkpoint parent identities also bind the page timer only when enabled,
+preventing checkpoint reuse across timer modes while preserving feature-off hashes.
+
 Charged timer I/O retains its full cost across scheduler boundaries; pending
 operations are included in terminal witnesses.
 

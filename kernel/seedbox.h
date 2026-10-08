@@ -9,7 +9,9 @@
 #define SEEDBOX_PORT_YIELD	0x52c	/* write: requested exit (0: syscall, 1: clock bound) */
 #define SEEDBOX_PORT_TIMER	0x530	/* write: arm PIT channel 0 for N ticks */
 #define SEEDBOX_TIME_PAGE_PHYS	0xd0000000UL
-#define SEEDBOX_ABI		3
+#define SEEDBOX_ABI		4
+#define SEEDBOX_CAP_PAGE_TIMER	1ULL
+#define SEEDBOX_TIMER_DISARMED	(~0ULL)
 #define SEEDBOX_TSC_KHZ		1000000
 /* PV clock: virtual time one guest clock read costs (ns; 1 in the counter timebase). */
 #define SEEDBOX_PV_READ_NS	100
@@ -43,6 +45,11 @@ struct seedbox_time_page {
 	u64 syscall_target;
 	u64 entropy_gen;	/* VMM bumps after writing entropy at a time fork */
 	u64 entropy[4];	/* 32 bytes the kernel mixes in before reseeding */
+	u64 timer_deadline;	/* guest-written absolute 1 GHz deadline, or DISARMED */
+	u64 capabilities;	/* VMM feature bits (ABI 4) */
+	u64 syscall_ns;	/* VMM plan: per-syscall cost, zero in counter mode */
+	u64 syscalls0;	/* VMM plan: syscall count used for syscall_target */
+	u64 plan_time;	/* VMM plan: t0 at the last deterministic publication */
 };
 
 /* Enabled at boot in the PV clock timebase; a no-op (no branch) otherwise. */
@@ -54,6 +61,9 @@ unsigned long long seedbox_rdtsc(void);
 bool seedbox_emulate_user_tsc(struct pt_regs *regs);
 unsigned long seedbox_tsc_khz(void);
 void __init seedbox_time_init(void);
+/* Returns false when the timer port must be used. */
+bool seedbox_set_next_event(unsigned long ticks);
+void seedbox_timer_disarm(void);
 /* Mix in fork entropy and reseed if the VMM published new (drivers/char/random.c). */
 void seedbox_take_entropy(void);
 

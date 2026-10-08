@@ -1875,6 +1875,23 @@ fn replay_rejects_unknown_recorded_timebase_before_host_checks() {
 }
 
 #[test]
+fn page_timer_is_an_opt_in_runtime_flag_and_replay_accepts_no_override() {
+    let directory = tempfile::tempdir().unwrap();
+    for command in ["prepare", "run", "explore"] {
+        let output = seedbox(&[command, "--help"], directory.path());
+        assert!(output.status.success());
+        let help = String::from_utf8_lossy(&output.stdout);
+        assert!(help.contains("--page-timer"));
+        let output = seedbox(&[command, "no-such.yaml", "--page-timer"], directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(!stderr(&output).contains("unexpected argument '--page-timer'"));
+    }
+    let output = seedbox(&["replay", ".", "--page-timer"], directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("unexpected argument '--page-timer'"));
+}
+
+#[test]
 fn deferred_tx_help_is_presence_only_and_replay_uses_the_recorded_mode() {
     let directory = tempfile::tempdir().unwrap();
     for command in ["run", "prepare", "explore"] {

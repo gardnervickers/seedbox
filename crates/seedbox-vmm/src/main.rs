@@ -90,6 +90,7 @@ struct BootInputs {
     console_limit: Option<usize>,
     /// The machine runs under the PV clock timebase.
     pv_clock: bool,
+    page_timer: bool,
     deferred_tx: bool,
     log_chunk_limit: Option<usize>,
 }
@@ -146,6 +147,7 @@ fn boot_machine(kvm: &kvm_ioctls::Kvm, name: &str, b: &BootInputs, barrier: bool
         undo_margin: b.undo_margin,
         barrier,
         pv_clock: b.pv_clock,
+        page_timer: b.page_timer,
     };
     let mut mach = Machine::new(kvm, name, &spec)?;
     if let Some(net) = mach.net.as_mut() { net.deferred_tx = b.deferred_tx; }
@@ -368,6 +370,7 @@ impl World {
             "discarded_pending_io": old.pending_io.is_some(), "discarded_management_bytes": discarded,
             "witness": old.exit_witness(),
         });
+        summary["pio_total"] = json!(old.stats.kvm_n[2]);
         summary["net"] = json!(old.net.as_ref().map(net_report));
         summary["disk_lost_sectors"] = json!(self.machines[m].succeed(&mut old, t, self.run_seed, self.branch_identity.as_deref())?);
         self.incarnations[m].push(summary);
@@ -435,6 +438,7 @@ fn run() -> Result<Value, String> {
         Some("pv") => true,
         Some(other) => return Err(format!("--timebase {other}: expected counter or pv")),
     };
+    let page_timer = args.iter().any(|a| a == "--page-timer");
     let deferred_tx = args.iter().any(|a| a == "--deferred-tx");
     // Undo-able precise stops (performance only): initial final margin, 0 = off.
     let undo_margin: u64 = match std::env::var("SEEDBOX_UNDO").as_deref() {
@@ -573,6 +577,7 @@ fn run() -> Result<Value, String> {
             margin,
             console_limit,
             pv_clock,
+            page_timer,
             deferred_tx,
             log_chunk_limit: arg(&args,"--log-chunk-limit").map(|v|v.parse::<usize>()).transpose().map_err(|e|e.to_string())?,
         };
@@ -660,7 +665,7 @@ fn run() -> Result<Value, String> {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let engine = format!("{:x}", Sha256::digest(std::fs::read(exe).map_err(|e| e.to_string())?));
             let identity_timebase = checkpoint::identity_timebase(world.clock.name(), deferred_tx);
-            let parent = checkpoint::parent_identity(&cfg, seed, &engine, &identity_timebase, |p| {
+            let parent = checkpoint::parent_identity(&cfg, seed, &engine, &identity_timebase, page_timer, |p| {
                 std::fs::read(base.join(p)).map(|bytes|format!("{:x}",Sha256::digest(bytes))).map_err(|e|format!("{p}: {e}"))
             })?;
             if let Some(expected) = cfg["checkpoint"]["parent_identity"].as_str() {
@@ -1396,6 +1401,10 @@ fn report(
             "control_channel":mach.channel.as_ref().map(|_|json!({"transport":"virtio-console-v1","tx_bytes":mach.control_tx_bytes,"rx_dma_bytes":mach.control_dma_bytes})),
             "net": mach.net.as_ref().map(net_report),
         });
+        // All ports and incarnations, including 0x52c and rolled-back exits;
+        // diagnostic only, outside the witness.
+        row["pio_total"] = json!(s.kvm_n[2] + world.incarnations[index].iter()
+            .filter_map(|old| old["pio_total"].as_u64()).sum::<u64>());
         row["disk"] = json!(mach.blk.as_ref().map(|b| json!({
                 "fault_model": disk::disk_fault_model_report(b.disk.fault_model()), "capacity_sectors": b.disk.capacity(), "base_sha256": b.disk.base_sha256(),
                 "digest": b.disk.digest(), "stable_sectors": b.disk.stable_sectors(), "volatile_sectors": b.disk.volatile_sectors(),
@@ -1527,7 +1536,7 @@ mod checkpoint_tests {
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
         let boot=BootInputs {kernel:kernel.into(),initrd:Rc::from([]),cmdline:(String::new(),String::new()),
             mem:0x0810_0000,mac:None,control_channel:true,disk:Some(disk::Disk::new(None,Some(8)).unwrap()),
-            undo_margin:undo,tolerance:0,timer_jitter:0,exact_timer_ppm:0,margin:None,console_limit:None,pv_clock:false,log_chunk_limit:None,deferred_tx:false};
+            undo_margin:undo,tolerance:0,timer_jitter:0,exact_timer_ppm:0,margin:None,console_limit:None,pv_clock:false,page_timer:false,log_chunk_limit:None,deferred_tx:false};
         let names=vec!["a".to_string(),"b".to_string()];
         let machines=names.iter().map(|name|boot_machine(&kvm,name,&boot,false,[0;32]).unwrap()).collect();
         World {machines,kvm,boot:vec![boot.clone(),boot],barrier:false,boot_seed:7,run_seed:7,branch_identity:None,
