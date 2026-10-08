@@ -28,6 +28,122 @@ fn stderr(output: &Output) -> String {
 }
 
 #[test]
+fn version_and_help_describe_the_builtin_engine_without_exposing_worker_dispatch() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let version = seedbox(&["--version"], directory.path());
+    assert!(version.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&version.stdout),
+        "seedbox 0.1.0-dev.1\n"
+    );
+    assert!(version.stderr.is_empty());
+
+    let root_help = seedbox(&["--help"], directory.path());
+    assert!(root_help.status.success());
+    let help = String::from_utf8_lossy(&root_help.stdout);
+    assert!(!help.contains("__engine"), "{help}");
+    assert!(!help.contains("seedbox-internal-worker-v1"), "{help}");
+    assert!(!help.contains("arm64-fixture-v1"), "{help}");
+
+    let run_help = seedbox(&["help", "run"], directory.path());
+    assert!(run_help.status.success());
+    let help = String::from_utf8_lossy(&run_help.stdout);
+    assert!(help.contains("--vmm"), "{help}");
+    assert!(help.contains("legacy standalone VMM"), "{help}");
+    assert!(help.contains("engine built into seedbox"), "{help}");
+}
+
+#[test]
+fn internal_dispatch_rejects_missing_and_unknown_contracts_before_cli_state_setup() {
+    let directory = tempfile::tempdir().unwrap();
+    for args in [&["__engine"][..], &["__engine", "unknown-contract"]] {
+        let output = seedbox(args, directory.path());
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert!(
+            stderr(&output).contains("internal engine contract"),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+        assert!(!directory.path().join(".seedbox").exists(), "{args:?}");
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn internal_worker_requires_config_without_state_or_external_tools() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let tools = root.join("tools");
+    fs::create_dir(&tools).unwrap();
+    let marker = root.join("tool-called");
+    let cargo = tools.join("cargo");
+    fs::write(
+        &cargo,
+        format!(
+            "#!/bin/sh\necho invoked >> '{}'\nexit 0\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_seedbox"))
+        .args(["__engine", "seedbox-internal-worker-v1"])
+        .current_dir(root)
+        .env_clear()
+        .env("HOME", root)
+        .env("TMPDIR", root)
+        .env("PATH", &tools)
+        .env("CARGO", &cargo)
+        .env("CARGO_MANIFEST_DIR", env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(output.stdout.is_empty());
+    assert!(
+        stderr(&output).contains("--config required"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!marker.exists(), "worker invoked external cargo");
+    assert!(!root.join(".seedbox").exists());
+}
+
+#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn arm_fixture_contract_uses_the_shared_fixture_argument_parser() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = seedbox(
+        &[
+            "__engine",
+            "arm64-fixture-v1",
+            "run",
+            "--kernel",
+            "kernel",
+            "--initrd",
+            "initrd",
+            "--seed",
+            "not-a-seed",
+        ],
+        directory.path(),
+    );
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(output.stdout.is_empty());
+    assert!(stderr(&output).contains("--seed"), "{}", stderr(&output));
+    assert!(!stderr(&output).contains("requires Linux arm64"));
+    assert!(!directory.path().join(".seedbox").exists());
+}
+
+#[test]
 fn host_pause_commands_acknowledge_boundaries_and_reject_inactive_runs() {
     let directory = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
     let cwd = directory.path();

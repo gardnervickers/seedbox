@@ -141,7 +141,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "seedbox-control"
+name = "seedbox-vmm-control"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -156,7 +156,7 @@ dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
- "seedbox-control",
+ "seedbox-vmm-control",
  "serde_json",
  "sha2",
 ]

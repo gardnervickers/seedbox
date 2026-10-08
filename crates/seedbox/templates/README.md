@@ -37,10 +37,17 @@ logs do not change the outcome; retained records and `--json` output are unchang
 Preparation unpacks images with root ownership and runs before the execution CPU
 lease. Admission briefly checks an eligible core first and releases all temporary
 resources before preparation.
-`run` picks a free CPU and finds the guest kernel and VMM by default; see
+`run` picks a free CPU, finds the guest kernel and uses its linked VMM; see
 `seedbox help run`. Run/replay must be invoked with the required KVM/MSR access;
 see the repository's `docs/runtime.md` for setup and limits. `--margin` and
 `--undo` control PMU approach and stepping performance without changing results.
+`seedbox --version` reports the simulator version. New runs retain the whole
+executable for replay, so an installed CLI upgrade does not replace the recorded
+engine. No separate VMM build or runtime compiler invocation is needed. The
+combined development engine requires `--allow-dev-engine` until qualified;
+`prepare` records its development marker without granting execution permission.
+ARM builds include the experimental fixture engine, but Compose execution
+currently requires Linux x86-64.
 `--torn-writes` opts into seeded partial survival of unflushed 512-byte disk
 sectors on machine crash (off by default). It is part of run identity and replay
 restores it automatically. It applies only to retained disks; this template

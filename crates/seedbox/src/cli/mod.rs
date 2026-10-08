@@ -18,7 +18,7 @@ use seedbox::{
     preparation::OciPreparer,
     store::ContentStore,
     templates::Template,
-    vmm::{recorded_counter, recorded_torn_writes, VmmExecutor},
+    vmm::{recorded_counter, VmmExecutor},
     Error, Result,
 };
 use signals::Signals;
@@ -46,7 +46,7 @@ const VMM_FAILURE_HELP: &str = "Text VMM failures also show up to 5 non-empty li
 
 #[derive(Parser)]
 #[command(
-    version,
+    version = seedbox::engine::SIMULATOR_VERSION,
     about = "Deterministic simulation of Compose applications on real Linux machines",
     long_about = "Deterministic simulation of Compose applications on real Linux machines.\n\n\
                   A seed plus the retained inputs regenerate the same execution. \
@@ -306,8 +306,7 @@ struct KvmInputs {
     /// ./artifacts, then ~/seedbox-sim/artifacts for the user and any sudo caller].
     #[arg(long, env = "SEEDBOX_KERNEL")]
     kernel: Option<PathBuf>,
-    /// VMM binary [default: next to an installed seedbox, then this checkout's `cargo build-vmm`
-    /// output (built by `cargo run` for run/prepare if missing), then PATH].
+    /// Override with a legacy standalone VMM [default: the engine built into seedbox].
     #[arg(long, env = "SEEDBOX_VMM")]
     vmm: Option<PathBuf>,
 }
@@ -355,8 +354,12 @@ impl RuntimeInputs {
         } else {
             WitnessMode::Exits
         };
-        let executor = VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?
-            .with_torn_writes(self.torn_writes);
+        let executor = if self.kvm.vmm.is_some() {
+            VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?
+        } else {
+            VmmExecutor::new_internal(&engine, store, cpu, self.memory_mb, witness, counter)?
+        }
+        .with_torn_writes(self.torn_writes);
         let preparer = self.preparer(engine, store, scratch, executor.profile())?;
         Ok((preparer, executor))
     }
@@ -496,14 +499,24 @@ fn run(cli: Cli) -> Result<u8> {
             Ok(0)
         }
         Command::Doctor { cpu, inputs, json } => {
-            let engine = defaults::engine_lookup(inputs.vmm)?;
+            let internal = inputs.vmm.is_none();
+            let engine = defaults::engine(inputs.vmm)?;
             let kernel = defaults::kernel(inputs.kernel)?;
-            let report = VmmExecutor::doctor_with_dev_engine(
-                &engine,
-                &kernel,
-                cpu.cpu,
-                cpu.allow_dev_engine,
-            )?;
+            let report = if internal {
+                VmmExecutor::doctor_internal_with_dev_engine(
+                    &engine,
+                    &kernel,
+                    cpu.cpu,
+                    cpu.allow_dev_engine,
+                )?
+            } else {
+                VmmExecutor::doctor_with_dev_engine(
+                    &engine,
+                    &kernel,
+                    cpu.cpu,
+                    cpu.allow_dev_engine,
+                )?
+            };
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -522,7 +535,11 @@ fn run(cli: Cli) -> Result<u8> {
                         .collect::<Vec<_>>()
                         .join(",")
                 );
-                println!("engine: {}", report.engine.hex());
+                if let Some(version) = &report.simulator_version {
+                    println!("simulator: {version}");
+                } else {
+                    println!("engine: {}", report.engine.hex());
+                }
                 println!("kernel: {}", report.kernel.hex());
             }
             Ok(0)
@@ -545,7 +562,15 @@ fn run(cli: Cli) -> Result<u8> {
             let (store, _) = state.open()?;
             let scratch = tempfile::tempdir()?;
             let counter = CounterProfile::host().unwrap_or(CounterProfile::Zen);
-            let (mut preparer, _) = inputs.backends(&store, None, counter, scratch.path())?;
+            let (mut preparer, executor) =
+                inputs.backends(&store, None, counter, scratch.path())?;
+            if inputs.kvm.vmm.is_none() {
+                // Preparing development bytes grants no execution permission.
+                // Their retained profile must nevertheless state their qualification.
+                preparer.profile = executor
+                    .with_dev_engine(true, &seedbox::admission::file_digest(&preparer.kernel)?)
+                    .profile();
+            }
             preparer.tools.build_epoch = build.build_epoch;
             let prepared = preparer.prepare(&simulation, &store)?;
             let file = std::fs::OpenOptions::new()
@@ -725,23 +750,9 @@ fn run(cli: Cli) -> Result<u8> {
                 Some(path) => defaults::existing("--vmm", path)?,
                 None => store.materialize(&profile.engine, scratch.path())?,
             };
-            let memory = profile
-                .semantic_parameters
-                .get("memory_mb")
-                .and_then(|value| value.parse().ok())
-                .ok_or_else(|| Error::Integrity("recorded profile missing memory_mb".into()))?;
             let executor = performance.apply(
-                VmmExecutor::new(
-                    &engine,
-                    &store,
-                    cpu.cpu,
-                    memory,
-                    profile.witness_mode.clone(),
-                    counter,
-                )?
-                .with_torn_writes(recorded_torn_writes(profile)?)
-                .with_unqualified_cpu(cpu.allow_unqualified_cpu)
-                .with_dev_engine(cpu.allow_dev_engine, &previous.identity.inputs.kernel),
+                VmmExecutor::from_retained(&engine, &store, profile.clone(), cpu.cpu, counter)?
+                    .with_retained_permissions(cpu.allow_unqualified_cpu, cpu.allow_dev_engine),
             )?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
@@ -930,6 +941,16 @@ fn same_counter(run: &Path, recorded: CounterProfile, host: CounterProfile) -> R
 fn report(run: &orchestration::Run) -> u8 {
     // Scripts parse the run directory from this one `OUTCOME: path` line.
     println!("{}: {}", word(&run.record.outcome), run.directory.display());
+    if let Some(version) = run
+        .record
+        .identity
+        .inputs
+        .profile
+        .semantic_parameters
+        .get("simulator_version")
+    {
+        println!("simulator: {version}");
+    }
     if seedbox::admission::is_dev_engine(&run.record.identity.inputs.profile) {
         println!("engine_qualification: dev-unpinned (unqualified dev engine)");
     }

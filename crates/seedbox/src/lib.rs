@@ -11,6 +11,7 @@ pub mod bundle;
 pub mod config;
 pub mod counter;
 pub mod diff;
+pub mod engine;
 pub mod execution;
 pub mod exploration;
 pub mod guest;

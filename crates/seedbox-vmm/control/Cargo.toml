@@ -1,0 +1,17 @@
+[package]
+name = "seedbox-vmm-control"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# The standalone VMM requires an in-workspace package path for stable Cargo
+# metadata across checkout locations. A distinct package name lets the combined
+# Seedbox build also use its ordinary control crate without a source-ID clash.
+# Both packages compile this one shared protocol source; no schema is copied.
+[lib]
+name = "seedbox_control"
+path = "../../seedbox-control/src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

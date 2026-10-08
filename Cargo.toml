@@ -16,3 +16,6 @@ seedbox-control = { path = "crates/seedbox-control" }
 libc = "0.2"
 serde_json = "1"
 sha2 = "0.10"
+
+[profile.release]
+debug = 1

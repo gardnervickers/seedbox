@@ -1194,7 +1194,7 @@ impl Machine {
                         0x3f8..=0x3ff => {
                             if port == 0x3f8
                                 && v == b'\n'
-                                && std::env::var("SEEDBOX_TRACE_CONSOLE").is_ok()
+                                && crate::console_trace_enabled()
                             {
                                 let line_start = self
                                     .com1
@@ -1203,12 +1203,10 @@ impl Machine {
                                     .rposition(|&b| b == b'\n')
                                     .map(|p| p + 1)
                                     .unwrap_or(0);
-                                eprintln!(
-                                    "[host {:.3}s guest {:.6}s br {}] {}",
-                                    crate::START.with(|s| s.elapsed().as_secs_f64()),
-                                    self.time as f64 / 1e9,
+                                crate::emit_console_trace(
+                                    self.time,
                                     self.branches,
-                                    String::from_utf8_lossy(&self.com1.out[line_start..])
+                                    &self.com1.out[line_start..]
                                 );
                             }
                             self.com1.write(port - 0x3f8, v)?

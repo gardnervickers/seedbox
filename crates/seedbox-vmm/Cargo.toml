@@ -4,10 +4,9 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
-# The VMM's binary hash is part of every run's identity, so it builds in its
-# own workspace with its own lockfile: features unified from other crates in
-# a shared build would otherwise change the engine. Build it with
-# `cargo build-vmm` (an alias in .cargo/config.toml).
+# Keep the standalone VMM build and its lockfile available through `cargo
+# build-vmm`. The Seedbox executable also links this library: that combined
+# build uses the root workspace's features and has its own engine identity.
 [workspace]
 
 [workspace.package]
@@ -20,9 +19,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dependencies]
-# Keep Cargo's path-source hash relative to this workspace. The symlink reaches
-# the shared source without putting an absolute checkout path into -C metadata.
-seedbox-control = { path = "seedbox-control" }
+# Keep standalone dependency metadata relative to this workspace while sharing
+# the protocol source with Seedbox. See control/Cargo.toml for package isolation.
+seedbox-control = { package = "seedbox-vmm-control", path = "control" }
 kvm-ioctls = "=0.25.0"
 kvm-bindings = { version = "=0.14.1", features = ["fam-wrappers"] }
 libc = "0.2"

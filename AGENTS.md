@@ -9,12 +9,14 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 - `crates/seedbox` is the default package: `cargo run -- <command>` runs the CLI.
 - `crates/seedbox-vmm` is Linux-only and deliberately **not** a workspace member.
   It is its own workspace with its own `Cargo.lock`, because cargo unifies
-  dependency features across one build: building it alongside other crates
-  would change its binary, and so the engine hash of every run. Build and test
-  it from the repository root with the aliases in `.cargo/config.toml`:
+  dependency features across one build. The public CLI links its library only
+  on Linux x86-64 and retains the complete CLI executable as the new engine.
+  Standalone low-level fixtures keep a separate lockfile and identity. Build
+  and test those from the repository root with the aliases in `.cargo/config.toml`:
   `cargo build-vmm` and `cargo test-vmm`. Both already pass `--locked`; adding
-  it again is an error. It builds into `crates/seedbox-vmm/target`, where a
-  `seedbox` run from the checkout finds it. Don't set a global
+  it again is an error. It builds into `crates/seedbox-vmm/target`. Public
+  runtime commands never invoke Cargo or search for a separate VMM by default.
+  Don't set a global
   `target-dir` in `.cargo/config.toml`: cargo applies it by current directory,
   so it would also move standalone crate builds and break their scripts.
   These two aliases select `harness/vmm-rustc.py` for path remapping and removal
@@ -44,10 +46,14 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   `crates/seedbox-vmm` produces a new engine: its source, its `Cargo.toml` or
   lockfile, its `[profile.release]`, or even reformatting (which moves panic
   line numbers; `crates/seedbox-vmm/rustfmt.toml` disables formatting). Build
-  it only with `cargo build-vmm`. Don't tidy the VMM as a side effect of other
+  standalone fixtures only with `cargo build-vmm`. The linked CLI uses the
+  root lockfile and records an explicit internal-worker contract and simulator
+  version; historical profiles without it retain the standalone launch contract.
+  New combined builds remain development engines until separately qualified.
+  Don't tidy the VMM as a side effect of other
   work. `crates/seedbox-control/**`, `harness/vmm-rustc.py` and the VMM alias
   flags in `.cargo/config.toml` also determine engine bytes and identity. The
-  VMM reaches the shared control crate through its in-workspace symlink so
+  VMM reaches the shared control source through its in-workspace control package so
   Cargo's crate metadata does not hash an absolute checkout path; its inherited
   workspace package and dependency keys must match the root workspace.
 - Performance settings (`--margin`, `--undo`) must never change results.
@@ -96,7 +102,9 @@ The CLI lives in `crates/seedbox/src/cli/`:
 - `defaults.rs`: how each runtime input is found when no flag is given.
 - `signals.rs`: cancellation.
 
-`src/main.rs` only calls `cli::main()`. The library (everything else in `src/`)
+`src/main.rs` dispatches the private retained worker before calling `cli::main()`.
+`engine_worker.rs` is a process boundary alongside the public CLI. The library
+(everything else in `src/`)
 never parses arguments or reads environment variables, and prints only cleanup
 failures from `Drop` that it cannot return. The CLI is that boundary.
 
@@ -202,8 +210,8 @@ deliberately change one.
   The last one is copied into every project `seedbox init` creates.
 
 `doctor` shares execution admission and guest-kernel/VMM defaults; host-kernel
-bytes are not checked. VMM resolution is lookup-only and must never trigger the
-cargo auto-build fallback. Success reports
+bytes are not checked. VMM resolution is lookup-only and must never invoke a
+compiler or launch the worker. Success reports
 only the exact cleaned-up probe observations and selected core; the library does
 not read arguments/environment or print. It creates no state/run and never prepares
 images or executes guests. Compatibility readiness is not replay qualification.

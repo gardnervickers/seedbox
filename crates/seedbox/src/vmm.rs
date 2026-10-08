@@ -37,6 +37,8 @@ pub struct DoctorReport {
     pub cpu: u32,
     pub cpus: Vec<u32>,
     pub engine: ContentDigest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub simulator_version: Option<String>,
     pub kernel: ContentDigest,
     pub observations: Vec<crate::admission::CoreObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -50,6 +52,56 @@ struct AdmissionProbe {
 }
 
 impl VmmExecutor {
+    /// Retain this Seedbox executable and explicitly record its worker contract.
+    pub fn new_internal(
+        engine: &Path,
+        store: &ContentStore,
+        cpu: Option<u32>,
+        memory_mb: u32,
+        witness_mode: WitnessMode,
+        counter: CounterProfile,
+    ) -> Result<Self> {
+        let descriptor = crate::engine::internal_parameters()?;
+        let mut executor = Self::new(engine, store, cpu, memory_mb, witness_mode, counter)?;
+        executor.profile.semantic_parameters.extend(descriptor);
+        Ok(executor)
+    }
+
+    /// Preserve retained metadata exactly. A replacement executable changes only
+    /// its digest, so the orchestrator can retain profile/admission rejection.
+    pub fn from_retained(
+        engine: &Path,
+        store: &ContentStore,
+        mut profile: ExecutionProfile,
+        cpu: Option<u32>,
+        counter: CounterProfile,
+    ) -> Result<Self> {
+        profile.engine = store.put_file(engine)?;
+        Ok(Self {
+            cpu,
+            counter,
+            allow_unqualified: false,
+            allow_dev_engine: false,
+            profile,
+            performance: BTreeMap::from([
+                ("SEEDBOX_MARGIN".into(), "adaptive".into()),
+                ("SEEDBOX_UNDO".into(), "256".into()),
+            ]),
+            admission: Default::default(),
+        })
+    }
+
+    /// Replay permissions are not a reason to rewrite retained qualifications.
+    pub fn with_retained_permissions(
+        mut self,
+        allow_unqualified_cpu: bool,
+        allow_dev_engine: bool,
+    ) -> Self {
+        self.allow_unqualified = allow_unqualified_cpu;
+        self.allow_dev_engine = allow_dev_engine;
+        self
+    }
+
     pub fn new(
         engine: &Path,
         store: &ContentStore,
@@ -133,6 +185,29 @@ impl VmmExecutor {
             WitnessMode::Exits,
             CounterProfile::Zen,
         )?;
+        Self::doctor_executor(executor, kernel, allow)
+    }
+
+    /// Inspect the built-in worker without storing bytes or invoking it.
+    pub fn doctor_internal_with_dev_engine(
+        engine: &Path,
+        kernel: &Path,
+        cpu: Option<u32>,
+        allow: bool,
+    ) -> Result<DoctorReport> {
+        let descriptor = crate::engine::internal_parameters()?;
+        let mut executor = Self::from_engine_digest(
+            crate::admission::file_digest(engine)?,
+            cpu,
+            1024,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )?;
+        executor.profile.semantic_parameters.extend(descriptor);
+        Self::doctor_executor(executor, kernel, allow)
+    }
+
+    fn doctor_executor(executor: Self, kernel: &Path, allow: bool) -> Result<DoctorReport> {
         if !allow {
             crate::admission::validate_profile(&executor.profile)?;
         }
@@ -205,6 +280,11 @@ impl VmmExecutor {
                 .map(|observation| observation.cpu)
                 .collect(),
             engine: self.profile.engine.clone(),
+            simulator_version: self
+                .profile
+                .semantic_parameters
+                .get("simulator_version")
+                .cloned(),
             kernel,
             observations: probe.observations,
             engine_qualification: self
@@ -1244,6 +1324,13 @@ mod linux {
         let report_path = request.output.join("vmm.json");
         let endpoint = crate::host_control::Endpoint::new(request.output)?;
         let mut command = Command::new(engine);
+        if crate::engine::recorded_launch(&backend.profile)?
+            == crate::engine::ExecutableKind::InternalWorker
+        {
+            command
+                .arg("__engine")
+                .arg(crate::engine::INTERNAL_WORKER_V1);
+        }
         command
             .arg("--config")
             .arg(&world_path)
@@ -1383,6 +1470,130 @@ mod linux {
 mod doctor_tests {
     use super::*;
     use crate::admission::{required_policy, CoreObservation, ENGINE, GUEST_KERNEL};
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    #[test]
+    fn internal_world_refusal_precedes_retention_or_input_reading() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store_path = temporary.path().join("objects");
+        let store = ContentStore::new(&store_path);
+        let missing = temporary.path().join("missing");
+        let expected = "built-in Compose world execution requires Linux x86-64; ARM world integration is not available yet";
+        let result = VmmExecutor::new_internal(
+            &missing,
+            &store,
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        );
+        assert_eq!(result.unwrap_err().to_string(), expected);
+        assert!(!store_path.exists());
+        assert_eq!(
+            VmmExecutor::doctor_internal_with_dev_engine(&missing, &missing, None, true)
+                .unwrap_err()
+                .to_string(),
+            expected
+        );
+        assert!(!store_path.exists());
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn internal_doctor_reports_simulator_version_with_dev_qualification() {
+        let temporary = tempfile::tempdir().unwrap();
+        let executable = temporary.path().join("worker");
+        std::fs::write(&executable, b"combined executable").unwrap();
+        let store = ContentStore::new(temporary.path().join("objects"));
+        let kernel = ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap();
+        let executor = VmmExecutor::new_internal(
+            &executable,
+            &store,
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap()
+        .with_dev_engine(true, &kernel);
+        let report = executor
+            .doctor_report(
+                kernel,
+                AdmissionProbe {
+                    cpu: Some(8),
+                    observations: vec![observed(8)],
+                    result: Ok(()),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            report.simulator_version.as_deref(),
+            Some(crate::engine::SIMULATOR_VERSION)
+        );
+        assert_eq!(
+            report.engine_qualification.as_deref(),
+            Some(crate::admission::DEV_UNPINNED)
+        );
+    }
+
+    #[test]
+    fn replay_preserves_missing_proof_and_qualification_without_current_defaults() {
+        let temporary = tempfile::tempdir().unwrap();
+        let executable = temporary.path().join("retained-worker");
+        std::fs::write(&executable, b"retained executable").unwrap();
+        let store = ContentStore::new(temporary.path().join("objects"));
+        let mut profile = VmmExecutor::from_engine_digest(
+            ContentDigest::of(b"retained executable"),
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap()
+        .profile;
+        profile.semantic_parameters.remove("host_policy");
+        profile.semantic_parameters.insert(
+            crate::admission::ENGINE_QUALIFICATION.into(),
+            crate::admission::DEV_UNPINNED.into(),
+        );
+        let before = serde_json::to_vec(&profile).unwrap();
+        let executor =
+            VmmExecutor::from_retained(&executable, &store, profile, None, CounterProfile::Zen)
+                .unwrap()
+                .with_retained_permissions(true, true);
+        assert_eq!(serde_json::to_vec(&executor.profile).unwrap(), before);
+        assert!(crate::admission::validate_profile(&executor.profile)
+            .unwrap_err()
+            .to_string()
+            .contains("host admission proof missing: host_policy"));
+        assert_eq!(
+            crate::engine::recorded_launch(&executor.profile).unwrap(),
+            crate::engine::ExecutableKind::Standalone
+        );
+    }
+
+    #[test]
+    fn replay_override_changes_only_retained_executable_digest() {
+        let temporary = tempfile::tempdir().unwrap();
+        let executable = temporary.path().join("replacement-worker");
+        std::fs::write(&executable, b"replacement executable").unwrap();
+        let store = ContentStore::new(temporary.path().join("objects"));
+        let profile = VmmExecutor::from_engine_digest(
+            ContentDigest::of(b"original executable"),
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap()
+        .profile;
+        let mut expected = profile.clone();
+        expected.engine = ContentDigest::of(b"replacement executable");
+        let executor =
+            VmmExecutor::from_retained(&executable, &store, profile, None, CounterProfile::Zen)
+                .unwrap();
+        assert_eq!(executor.profile, expected);
+    }
 
     #[test]
     fn capacity_admission_holds_all_reservations_and_releases_them_on_every_exit() {
@@ -1525,6 +1736,7 @@ mod doctor_tests {
             let report = dev.doctor_report(kernel, AdmissionProbe { cpu: Some(8), observations: vec![observed(8)], result: Ok(()) }).unwrap();
             let json = serde_json::to_value(report).unwrap();
             assert_eq!(json["engine_qualification"], "dev-unpinned");
+            assert!(json.get("simulator_version").is_none());
             assert!(json.get("qualified").is_none());
         }
         let pinned = VmmExecutor::from_engine_digest(

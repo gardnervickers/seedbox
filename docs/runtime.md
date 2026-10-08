@@ -51,14 +51,26 @@ From the repository root:
 nix develop
 bash kernel/build.sh
 cargo build --release --locked
-cargo build-vmm
 ```
 
-`cargo build-vmm` builds the VMM in its own workspace with its own lockfile, so
-the engine binary, and the engine hash recorded in every run, does not depend on
-which cargo command built it or what else was built with it. It still depends on
-the toolchain, `RUSTFLAGS` and the checkout's absolute path, which debug
-information embeds.
+The platform VMM is linked into `seedbox`; ordinary runtime commands do not
+compile or find a separate executable. `cargo build-vmm` and `cargo test-vmm`
+remain isolated standalone aliases for low-level fixtures. Their compiler
+wrapper remaps build paths and removes the shell's synthetic checkout RPATH.
+The linked executable uses the workspace lockfile and has its own engine identity.
+
+New profiles record simulator version, host and guest architectures, backend,
+timebase and an explicit internal-worker contract. The content store retains
+the complete executable, including its signature on macOS. Replay launches that
+retained executable with the saved contract and metadata, without replacing its
+version with the installed CLI's version. No manifest or bundle format changes
+are needed. Historical profiles with no descriptor still invoke their retained
+standalone VMM directly. Partial, unknown or incompatible descriptors fail
+before host execution. The combined executable is a development engine under
+the existing explicit `--allow-dev-engine` gate; it has not received new release
+qualification. `prepare` records the development marker without authorizing
+execution. On ARM, only the experimental fixture is integrated; Compose worlds
+remain Linux x86-64.
 
 The `seedbox` build embeds the static guest supervisor from `guest/compose-init.c`,
 compiled with the shell's musl compiler (`SEEDBOX_STATIC_CC`, or `musl-gcc`).
@@ -134,9 +146,8 @@ seedbox=./target/release/seedbox
 Every input has a default; `seedbox help run` lists them with their overrides.
 The kernel is found in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`,
 `./artifacts` or `~/seedbox-sim/artifacts` (also in the invoking user's home
-under sudo). The VMM is found next to an installed `seedbox`, then in this
-checkout's `cargo build-vmm` output, then on `PATH`. A `seedbox` inside cargo's
-`target/` directories, like the one above, uses the `cargo build-vmm` output.
+under sudo). The VMM defaults to the engine linked into `seedbox`; `--vmm`
+explicitly selects the legacy standalone contract.
 The guest supervisor is built into `seedbox`, and BusyBox comes from
 `SEEDBOX_BUSYBOX`. A missing input fails before preparation starts and names
 every location searched.

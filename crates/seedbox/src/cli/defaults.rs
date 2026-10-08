@@ -8,7 +8,6 @@ use seedbox::{store::ContentStore, Error, Result};
 use std::{
     env,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 const COMPOSE_FILES: [&str; 4] = [
@@ -82,98 +81,17 @@ fn sudo_home() -> Option<PathBuf> {
     Some(PathBuf::from(std::ffi::OsStr::from_bytes(home.to_bytes())))
 }
 
-/// The VMM: `seedbox-vmm` next to this executable (an installed pair), then
-/// this checkout's `cargo build-vmm` output, then on `PATH`. Under `cargo run`
-/// in this checkout, a missing VMM is built exactly as `cargo build-vmm` does.
+/// The VMM is linked into this executable. An explicit path selects the legacy
+/// standalone worker contract for development and historical runs.
 pub fn engine(explicit: Option<PathBuf>) -> Result<PathBuf> {
-    resolve_engine(explicit, true)
-}
-
-/// Resolve the ordinary VMM candidates without invoking cargo or installing it.
-pub fn engine_lookup(explicit: Option<PathBuf>) -> Result<PathBuf> {
-    resolve_engine(explicit, false)
-}
-
-fn resolve_engine(explicit: Option<PathBuf>, allow_build: bool) -> Result<PathBuf> {
     if let Some(path) = explicit {
         return existing("--vmm", path);
     }
-    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent();
-    let vmm = crates.unwrap_or(Path::new(".")).join("seedbox-vmm");
-    let built = vmm.join("target/release/seedbox-vmm");
-    // Without a known executable path, only that one candidate is skipped.
-    let mut searched = engine_candidates(env::current_exe().ok().as_deref(), &built);
-    if let Some(path) = first_file(&searched).or_else(|| on_path("seedbox-vmm")) {
-        return Ok(path);
-    }
-    if let Some(path) = build_if_allowed(allow_build, || {
-        if let Some(cargo) = cargo_run_here() {
-            build_engine(&cargo, &vmm)?;
-            if built.is_file() {
-                return Ok(Some(built));
-            }
-        }
-        Ok(None)
-    })? {
-        return Ok(path);
-    }
-    searched.push(PathBuf::from("$PATH/seedbox-vmm"));
-    Err(missing(
-        "VMM",
-        &searched,
-        "build it with `cargo build-vmm`, or pass --vmm or set SEEDBOX_VMM",
-    ))
-}
-
-fn build_if_allowed(
-    allow_build: bool,
-    build: impl FnOnce() -> Result<Option<PathBuf>>,
-) -> Result<Option<PathBuf>> {
-    if allow_build {
-        build()
-    } else {
-        Ok(None)
-    }
-}
-
-/// Where to look for the VMM, in order: next to `exe`, then `built`. A cargo
-/// profile directory (it holds `.cargo-lock`) never receives the VMM, which
-/// builds in its own workspace, so a `seedbox-vmm` found there is stale.
-fn engine_candidates(exe: Option<&Path>, built: &Path) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(directory) = exe
-        .and_then(Path::parent)
-        .filter(|dir| !dir.join(".cargo-lock").exists())
-    {
-        candidates.push(directory.join("seedbox-vmm"));
-    }
-    candidates.push(built.to_owned());
-    candidates
-}
-
-/// The cargo running this binary, when it was started by `cargo run` (or a
-/// test) in this checkout rather than by an unrelated cargo project.
-fn cargo_run_here() -> Option<std::ffi::OsString> {
-    let manifest = env::var_os("CARGO_MANIFEST_DIR")?;
-    (Path::new(&manifest) == Path::new(env!("CARGO_MANIFEST_DIR")))
-        .then(|| env::var_os("CARGO"))
-        .flatten()
-}
-
-/// Build the VMM through its alias, including its isolated compiler wrapper.
-fn build_engine(cargo: &std::ffi::OsStr, vmm: &Path) -> Result<()> {
-    eprintln!("seedbox-vmm not built; building it with `cargo build-vmm`");
-    let status = Command::new(cargo)
-        .arg("build-vmm")
-        .current_dir(vmm.join("../.."))
-        .status()
-        .map_err(|error| Error::Setup(format!("running cargo to build seedbox-vmm: {error}")))?;
-    if !status.success() {
-        return Err(Error::Setup(
-            "building seedbox-vmm failed (see cargo output above)".into(),
-        ));
-    }
-    Ok(())
+    env::current_exe().map_err(|error| {
+        Error::Setup(format!(
+            "cannot locate the built-in VMM executable: {error}; reinstall seedbox or pass --vmm"
+        ))
+    })
 }
 
 /// The static guest supervisor: the copy embedded at build time, written to
@@ -327,54 +245,6 @@ pub fn preparation_tool(path: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    #[test]
-    fn auto_build_uses_the_vmm_alias_from_the_checkout_root() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let vmm = root.join("crates/seedbox-vmm");
-        std::fs::create_dir_all(&vmm).unwrap();
-        let cargo = root.join("fake-cargo");
-        std::fs::write(
-            &cargo,
-            "#!/bin/sh\npwd -P > build-command\nprintf '%s\\n' \"$@\" >> build-command\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
-        super::build_engine(cargo.as_os_str(), &vmm).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(root.join("build-command")).unwrap(),
-            format!("{}\nbuild-vmm\n", root.display())
-        );
-        std::fs::write(&cargo, "#!/bin/sh\nexit 1\n").unwrap();
-        assert_eq!(
-            super::build_engine(cargo.as_os_str(), &vmm)
-                .unwrap_err()
-                .to_string(),
-            "building seedbox-vmm failed (see cargo output above)"
-        );
-    }
-
-    #[test]
-    fn lookup_only_never_invokes_the_missing_engine_builder() {
-        let invoked = std::cell::Cell::new(false);
-        let result = super::build_if_allowed(false, || {
-            invoked.set(true);
-            Err(seedbox::Error::Setup("builder must not run".into()))
-        })
-        .unwrap();
-        assert!(result.is_none());
-        assert!(!invoked.get());
-        assert!(super::build_if_allowed(true, || {
-            invoked.set(true);
-            Err(seedbox::Error::Setup("existing build path".into()))
-        })
-        .is_err());
-        assert!(invoked.get());
-    }
-
     use super::*;
 
     #[test]
@@ -413,24 +283,8 @@ mod tests {
     }
 
     #[test]
-    fn installed_vmm_wins_but_cargo_profile_dirs_are_skipped() {
-        let directory = tempfile::tempdir().unwrap();
-        let built = directory.path().join("checkout/seedbox-vmm");
-        let installed = directory.path().join("bin");
-        std::fs::create_dir(&installed).unwrap();
-        assert_eq!(
-            engine_candidates(Some(&installed.join("seedbox")), &built),
-            [installed.join("seedbox-vmm"), built.clone()]
-        );
-        let profile = directory.path().join("target/debug");
-        std::fs::create_dir_all(&profile).unwrap();
-        std::fs::write(profile.join(".cargo-lock"), "").unwrap();
-        let only_built = std::slice::from_ref(&built);
-        assert_eq!(
-            engine_candidates(Some(&profile.join("seedbox")), &built),
-            only_built
-        );
-        assert_eq!(engine_candidates(None, &built), only_built);
+    fn engine_defaults_to_the_current_executable() {
+        assert_eq!(engine(None).unwrap(), env::current_exe().unwrap());
     }
 
     #[test]

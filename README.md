@@ -16,11 +16,10 @@ qualified host (see [host requirements](#host-requirements)) and root.
 nix develop                          # Rust, OCI tools, static BusyBox, musl
 bash kernel/build.sh                 # guest kernel -> ~/seedbox-sim/artifacts/bzImage
 cargo build --release                # target/release/seedbox
-cargo build-vmm                      # crates/seedbox-vmm/target/release/seedbox-vmm (alias)
 
 cargo run -- validate examples/etcd
-sudo -E env PATH="$PATH" target/release/seedbox run examples/etcd
-sudo -E env PATH="$PATH" target/release/seedbox replay .seedbox/runs/ATTEMPT
+sudo -E env PATH="$PATH" target/release/seedbox run examples/etcd --allow-dev-engine
+sudo -E env PATH="$PATH" target/release/seedbox replay .seedbox/runs/ATTEMPT --allow-dev-engine
 cargo run -- inspect .seedbox/runs/ATTEMPT
 cargo run -- diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
 ```
@@ -38,7 +37,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Torn disk writes | off (drop all unflushed sectors on crash) | `--torn-writes` |
 | CPU | first free core other than CPU 0's, under the shared lease | `--cpu`, `SEEDBOX_CPU` |
 | Guest kernel | `bzImage` in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`, `./artifacts`, then `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
-| VMM | `seedbox-vmm` next to an installed `seedbox`, then this checkout's `cargo build-vmm` output, then on `PATH`; `cargo run` builds it if missing | `--vmm`, `SEEDBOX_VMM` |
+| VMM | the platform engine linked into `seedbox`; runtime commands never invoke Cargo | `--vmm`, `SEEDBOX_VMM` (legacy standalone engine) |
 | Guest supervisor | built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | BusyBox | `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
 | mke2fs (only for named volumes) | `SEEDBOX_MKE2FS` (set by `nix develop`), then a static `mke2fs` on `PATH` | `--mke2fs` |
@@ -73,6 +72,21 @@ or `doctor`. Unpinned engine or guest-kernel bytes record the semantic parameter
 engine. Replay requires this flag and the exact retained engine/kernel hashes;
 bundles preserve the marker. Passing the flag with both pinned artifacts adds no
 marker. All host, CPU, PMU, MSR, lease, ABI and control-channel checks still apply.
+
+`seedbox --version` reports the simulator version. New runs retain the complete
+`seedbox` executable and its platform/worker contract; replay launches those
+retained bytes even after the installed CLI is upgraded. The executable hash is
+an internal integrity reference, so equal version labels never substitute for
+equal bytes. Existing runs without a worker descriptor retain the standalone
+VMM contract. The combined development executable requires `--allow-dev-engine`
+until it receives separate runtime qualification; the frozen engine policy is
+unchanged. `prepare` records this development qualification without granting
+permission to execute.
+
+The ARM engine is also linked on ARM hypervisor hosts. It currently supports the
+existing experimental fixture only; public Compose `run`/`replay` still require
+Linux x86-64. Full Mac worlds and automatic guest-runtime provisioning are the
+next integration steps. Image preparation continues to use the existing tools.
 
 `seedbox run --torn-writes` enables seeded partial survival of unflushed
 512-byte disk sectors on crash. It is recorded in run identity and replayed
@@ -169,7 +183,7 @@ rebuilt OCI images to have identical bytes.
 | Path | Contents |
 | --- | --- |
 | [`crates/seedbox/`](crates/seedbox/README.md) | Configuration, OCI preparation, orchestration and the `seedbox` CLI |
-| `crates/seedbox-vmm/` | KVM VMM and world scheduler (`seedbox-vmm`); its own workspace and lockfile, because its binary hash is the run's engine identity |
+| `crates/seedbox-vmm/` | KVM world engine linked into the Linux x86-64 CLI; isolated standalone workspace and lockfile for low-level fixtures |
 | `examples/` | Compose applications: etcd, Redis, [TCP faults/recovery](examples/faults/README.md), and [one-service MinIO conditional writes](examples/minio/README.md) (MinIO runtime qualification pending) |
 | `kernel/` | Guest kernel patch, config and build script (Linux 6.12.112) |
 | `guest/` | Generic OCI guest supervisor plus low-level guest fixtures and builders |
@@ -187,11 +201,13 @@ entry through `_addRpathPrefix`; real library and Nix store paths remain intact.
 Other Cargo builds and their target directories are unaffected.
 The wrapper's content hash is included in Cargo's compiler fingerprint, so
 enabling or editing it invalidates cached VMM artifacts and dependencies.
-The shared `seedbox-control` source is reached through
-`crates/seedbox-vmm/seedbox-control`, a symlink inside the VMM workspace. Cargo
+The shared `seedbox-control` source is compiled by
+`crates/seedbox-vmm/control/Cargo.toml`, a small package inside the VMM workspace. Cargo
 then hashes its path relative to that workspace instead of the checkout's
 absolute path when computing crate metadata. The VMM's inherited workspace
-package and dependency keys match the root workspace.
+package and dependency keys match the root workspace. Its distinct package name
+also lets the combined CLI use the same protocol source without Cargo path-ID
+collisions; the schema is not copied.
 
 On Linux in the project dev shell, run
 `bash harness/check-vmm-reproducible.sh [REV]` (default `HEAD`). It builds two

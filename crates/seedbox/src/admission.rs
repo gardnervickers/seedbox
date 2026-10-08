@@ -201,6 +201,15 @@ pub fn admit_artifacts(
 }
 
 pub fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
+    crate::engine::validate_host(profile)?;
+    if crate::engine::recorded_launch(profile)? == crate::engine::ExecutableKind::InternalWorker
+        && !is_dev_engine(profile)
+    {
+        return Err(Error::Setup(
+            "internal worker is an unqualified dev engine; pass --allow-dev-engine to execute"
+                .into(),
+        ));
+    }
     let counter = crate::vmm::recorded_counter(profile)?;
     if counter != crate::counter::CounterProfile::Zen
         && profile
