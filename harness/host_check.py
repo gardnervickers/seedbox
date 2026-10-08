@@ -154,7 +154,7 @@ def execute(plan, args):
             if not stored:
                 source.run('vmm-build', ['nice', 'cargo', 'build-vmm'])
             if args.skip_portable:
-                source.run('vmm-test', ['nice', 'cargo', 'test-vmm'])
+                source.run('vmm-test', ['nice', 'cargo', 'test-vmm', '--features', 'kvm-tests'])
             else:
                 source.run('fmt', ['cargo', 'fmt', '-p', 'seedbox', '--check'])
                 source.run('clippy', ['nice', 'cargo', 'clippy', '-p', 'seedbox',

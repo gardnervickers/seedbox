@@ -32,8 +32,9 @@ sha2 = "0.10"
 iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "instr_info"] }
 
 [features]
-# Runs the tests that need only /dev/kvm (no PMU or core lease). `cargo
-# test-vmm` enables it; tests that need a lease stay #[ignore].
+# Runs the tests that need only /dev/kvm (no PMU or core lease). The portable
+# suite and host check enable it when /dev/kvm is usable; tests that need a
+# lease stay #[ignore].
 kvm-tests = []
 
 [profile.release]

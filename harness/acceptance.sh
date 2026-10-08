@@ -17,7 +17,14 @@ if [[ $(uname -s) == Linux ]]; then tests+=(test_batch); fi
 (cd python && python3 -m unittest discover -s tests -q)
 # The portable pre-check may share a workspace cache. Keep the standalone VMM
 # in its prescribed crates/seedbox-vmm/target directory.
-if [[ $(uname -s) == Linux ]]; then env -u CARGO_TARGET_DIR cargo test-vmm; fi
+if [[ $(uname -s) == Linux ]]; then
+  if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+    env -u CARGO_TARGET_DIR cargo test-vmm --features kvm-tests
+  else
+    echo 'acceptance: /dev/kvm is not usable; skipping the KVM-only VMM tests' >&2
+    env -u CARGO_TARGET_DIR cargo test-vmm
+  fi
+fi
 cargo test --workspace --locked
 for scenario in harness/acceptance/workloads/*.yaml; do
   cargo run --quiet --locked -p seedbox -- validate "$scenario"
