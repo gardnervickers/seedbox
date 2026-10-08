@@ -317,7 +317,7 @@ struct CpuArg {
     /// Run even when this CPU's branch counter profile is unqualified; its results are unverified.
     #[arg(long)]
     allow_unqualified_cpu: bool,
-    /// Allow unpinned engines or guest kernels; their results are unqualified.
+    /// No effect: every built engine and guest kernel is admitted. Kept so existing scripts parse.
     #[arg(long)]
     allow_dev_engine: bool,
 }
@@ -557,12 +557,7 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Doctor { cpu, inputs, json } => {
             let engine = defaults::engine_lookup(inputs.vmm)?;
             let kernel = defaults::kernel(inputs.kernel)?;
-            let report = VmmExecutor::doctor_with_dev_engine(
-                &engine,
-                &kernel,
-                cpu.cpu,
-                cpu.allow_dev_engine,
-            )?;
+            let report = VmmExecutor::doctor(&engine, &kernel, cpu.cpu)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -634,11 +629,6 @@ fn run(cli: Cli) -> Result<u8> {
                 inputs.backends(&store, cpu.cpu, counter, scratch.path())?;
             cpu.admit(detected?)?;
             let executor = executor.with_unqualified_cpu(cpu.allow_unqualified_cpu);
-            let executor = if cpu.allow_dev_engine {
-                executor.with_dev_engine(true, &seedbox::admission::file_digest(&preparer.kernel)?)
-            } else {
-                executor
-            };
             preparer.profile = executor.profile();
             preparer.tools.build_epoch = build.build_epoch;
             let executor = performance.apply(executor)?;
@@ -697,11 +687,6 @@ fn run(cli: Cli) -> Result<u8> {
             }
             cpu.admit(detected?)?;
             let executor = executor.with_unqualified_cpu(cpu.allow_unqualified_cpu);
-            let executor = if cpu.allow_dev_engine {
-                executor.with_dev_engine(true, &seedbox::admission::file_digest(&preparer.kernel)?)
-            } else {
-                executor
-            };
             preparer.profile = executor.profile();
             let executor = performance.apply(executor)?;
             // Exploration retains any backend admission refusal in its batch checkpoint.
@@ -764,13 +749,7 @@ fn run(cli: Cli) -> Result<u8> {
             let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
             // Historical/incompatible records must reach the retained-proof gate
             // and remain captured as NOT_COMPARABLE before querying this host.
-            if seedbox::admission::admit_artifacts(
-                &previous.identity.inputs.profile,
-                &previous.identity.inputs.kernel,
-                cpu.allow_dev_engine,
-            )
-            .is_ok()
-            {
+            if seedbox::admission::validate_profile(&previous.identity.inputs.profile).is_ok() {
                 cpu.admit(detected?)?;
                 same_counter(
                     &run,
@@ -801,8 +780,7 @@ fn run(cli: Cli) -> Result<u8> {
                 )?
                 .with_timebase(timebase)
                 .with_torn_writes(recorded_torn_writes(profile)?)
-                .with_unqualified_cpu(cpu.allow_unqualified_cpu)
-                .with_dev_engine(cpu.allow_dev_engine, &previous.identity.inputs.kernel),
+                .with_unqualified_cpu(cpu.allow_unqualified_cpu),
             )?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;

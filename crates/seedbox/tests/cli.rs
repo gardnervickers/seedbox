@@ -879,7 +879,9 @@ fn doctor_bad_inputs_execute_no_tools_and_create_no_state_even_with_cargo_enviro
     }
     fs::write(root.join("engine"), b"unsupported engine").unwrap();
     let output = seedbox(&["doctor", "--vmm", "engine", "--kernel", "kernel"], root);
-    assert_eq!(stderr(&output),"error: input integrity: engine is outside the admitted host policy; no engine-change override bypass is available\n");
+    // Any engine is admitted; doctor goes on to refuse on host readiness instead.
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!stderr(&output).contains("engine is outside"));
     assert!(!marker.exists());
     assert!(output.stdout.is_empty());
 }

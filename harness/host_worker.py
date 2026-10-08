@@ -149,8 +149,6 @@ def run_smoke(job, commands):
                '--guest-init', job['guest_init'], '--busybox', job['busybox'],
                '--cpu', str(job['pair'][0]), '--tool-path', commands.env['PATH'],
                '--output', str(commands.root / 'smoke')]
-    if job.get('pinned_engine'):
-        command += ['--allow-dev-engine', '--pinned-engine', job['pinned_engine']]
     if 'perf-replay' in job['checks']:
         command += ['--perf-replay']
     project = commands.root / 'project'
