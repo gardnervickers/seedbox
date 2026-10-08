@@ -19,11 +19,14 @@
 //! for a while and steps it branch by branch. If the whole machine state
 //! repeats, the loop provably never ends by itself: the machine steps to a
 //! canonical point of the cycle and is idle there, like HLT, until an
-//! interrupt. Any other long run resumes untouched (stepping changes no guest
-//! state), so the watchdog changes how fast a spin is noticed, never where it
-//! lands. Not every endless loop is caught: one whose state changes on every
-//! pass (`while (!flag) n++;`), a cycle of more than about a third of `PROBE_STEPS` landings,
-//! or one with a run of straight-line code longer than the planner's cap
+//! interrupt. A change to the time page's `last` since the probe started
+//! proves clock progress, so the probe gives up immediately. Any other long
+//! run resumes untouched (probing changes no guest-visible state; giving up
+//! only resumes the run), so the watchdog changes how fast a spin is noticed,
+//! never where it lands. Not every endless loop is caught: one whose state
+//! changes on every pass (`while (!flag) n++;`), a cycle longer than
+//! about a third of `PROBE_STEPS` landings, or one with a run of straight-line
+//! code longer than the planner's cap
 //! never goes idle, so virtual time stops and the world stalls until its
 //! wall-time limit. That follows from the model: such a loop waits on
 //! something only virtual time could bring.
@@ -77,7 +80,30 @@ pub struct PvClock {
 /// A step landing: RIP, then the general registers and flags.
 type Key = (u64, [u64; 17]);
 
-enum Probe {
+struct Probe {
+    /// Captured before the first step, kept across candidate cycles.
+    last: Option<u64>,
+    phase: Phase,
+}
+
+impl Probe {
+    fn new() -> Self {
+        Self { last: None, phase: Phase::Search { saved: None, keys: Vec::new(), power: 1, steps: 0 } }
+    }
+
+    fn clock_progress(probe: &mut Option<Self>, last: u64, stats: &mut super::Stats) -> bool {
+        let Some(p) = probe.as_mut() else { return false; };
+        if last == *p.last.get_or_insert(last) {
+            return false;
+        }
+        *probe = None;
+        stats.spin_false += 1;
+        stats.spin_clock_progress += 1;
+        true
+    }
+}
+
+enum Phase {
     /// Brent's cycle search. `saved` is the reference state, taken at the
     /// landing `keys[0]`; `keys` holds every landing since. The reference
     /// moves to the current landing whenever `keys` reaches `power`
@@ -110,8 +136,17 @@ impl PvClock {
     fn probe_step(&mut self, m: &mut Machine) -> Result<Option<Prepared>, String> {
         let regs = unsafe { m.vcpu.get_kvm_run().s.regs.regs };
         let key = key(&regs);
-        let next = match self.probe.take().unwrap() {
-            Probe::Search { mut saved, mut keys, power, steps } => {
+        match self.probe.as_ref().unwrap().phase {
+            Phase::Search { .. } => {
+                if Probe::clock_progress(&mut self.probe, m.page_get(1), &mut m.stats) {
+                    return Ok(None);
+                }
+            }
+            Phase::Canon { .. } => {}
+        }
+        let mut probe = self.probe.take().unwrap();
+        let next = match probe.phase {
+            Phase::Search { mut saved, mut keys, power, steps } => {
                 if steps >= PROBE_STEPS {
                     m.stats.spin_false += 1;
                     return Ok(None);
@@ -139,23 +174,23 @@ impl PvClock {
                     if key == target {
                         return Ok(Some(Prepared::Idle));
                     }
-                    Probe::Canon { target, left: keys.len() }
+                    Phase::Canon { target, left: keys.len() }
                 } else if saved.is_none() || keys.len() >= power {
                     let power = if saved.is_none() { 1 } else { power * 2 };
-                    Probe::Search { saved: Some(Box::new(Saved::take(m)?)), keys: vec![key], power, steps }
+                    Phase::Search { saved: Some(Box::new(Saved::take(m)?)), keys: vec![key], power, steps }
                 } else {
                     keys.push(key);
-                    Probe::Search { saved, keys, power, steps }
+                    Phase::Search { saved, keys, power, steps }
                 }
             }
-            Probe::Canon { target, left } => {
+            Phase::Canon { target, left } => {
                 if key == target {
                     return Ok(Some(Prepared::Idle));
                 }
                 if left == 0 {
                     return Err(format!("{}: lost the spin cycle at rip {:#x}", m.name, target.0));
                 }
-                Probe::Canon { target, left: left - 1 }
+                Phase::Canon { target, left: left - 1 }
             }
         };
         if m.arm_step()? {
@@ -164,7 +199,8 @@ impl PvClock {
             m.stats.spin_false += 1;
             return Ok(None);
         }
-        self.probe = Some(next);
+        probe.phase = next;
+        self.probe = Some(probe);
         Ok(Some(Prepared::Run))
     }
 
@@ -255,7 +291,7 @@ impl Timebase for PvClock {
                 self.skip -= 1;
             } else if self.probe.is_none() && !std::mem::take(&mut self.progressed) {
                 j.stats.spin_probes += 1;
-                self.probe = Some(Probe::Search { saved: None, keys: Vec::new(), power: 1, steps: 0 });
+                self.probe = Some(Probe::new());
                 self.landed = true;
             }
             return Ok(Verdict::Advance { legal: false });
@@ -410,6 +446,50 @@ mod tests {
     use super::super::{BootSpec, Stop, INITRD_ADDR};
     use super::*;
     use kvm_ioctls::Kvm;
+
+    /// A saved search reference needs no live vCPU for clock-progress checks.
+    fn search() -> Phase {
+        let saved = Saved {
+            cpu: VcpuState::new(kvm_bindings::Msrs::from_entries(&[]).unwrap()),
+            page: Box::new([0; 4096]),
+            ram: None,
+            written: Vec::new(),
+        };
+        Phase::Search { saved: Some(Box::new(saved)), keys: vec![(0x100000, [0; 17])], power: 2, steps: 2 }
+    }
+
+    #[test]
+    fn clock_progress_abandons_search_before_the_step_limit() {
+        for phase in [Phase::Search { saved: None, keys: Vec::new(), power: 1, steps: 1 }, search()] {
+            let mut stats = super::super::Stats::default();
+            let mut probe = Some(Probe::new());
+            assert!(!Probe::clock_progress(&mut probe, 100, &mut stats));
+            probe.as_mut().unwrap().phase = phase;
+            assert!(!Probe::clock_progress(&mut probe, 100, &mut stats), "an unchanged clock must allow probing");
+            assert_eq!((stats.spin_false, stats.spin_clock_progress), (0, 0));
+            assert!(Probe::clock_progress(&mut probe, 200, &mut stats), "a clock read must abandon even an incomplete candidate");
+            assert!(probe.is_none());
+            assert_eq!((stats.spin_false, stats.spin_clock_progress), (1, 1));
+            assert!(!Probe::clock_progress(&mut probe, 200, &mut stats));
+            assert_eq!((stats.spin_false, stats.spin_clock_progress), (1, 1), "count each abandoned probe once");
+        }
+    }
+
+    #[test]
+    fn clock_baseline_survives_candidate_changes_and_resets_for_a_new_probe() {
+        let mut stats = super::super::Stats::default();
+        let mut probe = Some(Probe::new());
+        assert!(!Probe::clock_progress(&mut probe, 200, &mut stats));
+        probe.as_mut().unwrap().phase = search();
+        assert!(!Probe::clock_progress(&mut probe, 200, &mut stats));
+        probe.as_mut().unwrap().phase = Phase::Search { saved: None, keys: Vec::new(), power: 4, steps: 4 };
+        assert!(!Probe::clock_progress(&mut probe, 200, &mut stats));
+        assert_eq!(probe.as_ref().unwrap().last, Some(200));
+        assert!(Probe::clock_progress(&mut probe, 100, &mut stats), "any difference from the start must give up");
+        probe = Some(Probe::new());
+        assert!(!Probe::clock_progress(&mut probe, 100, &mut stats), "a later probe captures its own baseline");
+        assert_eq!((stats.spin_false, stats.spin_clock_progress), (1, 1));
+    }
 
     /// A 32-bit payload at the kernel entry, interrupts enabled and unmasked.
     fn machine(kvm: &Kvm, code: &[u8], undo: u64) -> Machine {
