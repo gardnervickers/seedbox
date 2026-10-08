@@ -5,7 +5,7 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"
 source_revision=$(git rev-parse --verify HEAD)
 source_dirty=0
-if test -n "$(git status --porcelain)"; then source_dirty=1; fi
+if test -n "$(git --no-optional-locks status --porcelain --untracked-files=no)"; then source_dirty=1; fi
 if test "$(uname -s)/$(uname -m)" != Darwin/arm64; then
   printf '%s\n' 'build-cli.sh requires an Apple Silicon Mac' >&2
   exit 2

@@ -90,6 +90,7 @@ fn main() {
 
 fn git(root: &Path, arguments: &[&str]) -> Option<String> {
     let output = Command::new("git")
+        .arg("--no-optional-locks")
         .arg("-C")
         .arg(root)
         .args(arguments)
@@ -119,14 +120,28 @@ fn simulator_version() {
         // Exported build sources have no release-tag proof.
         (Some(revision), dirty, None)
     } else {
-        for name in ["HEAD", "index", "packed-refs"] {
-            if let Some(path) = git(&root, &["rev-parse", "--git-path", name]) {
-                println!("cargo::rerun-if-changed={path}");
+        // Git may return repository-relative paths in ordinary clones. Cargo
+        // interprets watchers relative to this crate, so request absolute paths.
+        // Missing files force Cargo to rebuild forever; refs directories cover
+        // creation of loose refs after packing and release-tag-only changes.
+        for name in ["HEAD", "index", "packed-refs", "refs/heads", "refs/tags"] {
+            if let Some(path) = git(
+                &root,
+                &["rev-parse", "--path-format=absolute", "--git-path", name],
+            ) {
+                if Path::new(&path).exists() {
+                    println!("cargo::rerun-if-changed={path}");
+                }
             }
         }
         if let Some(branch) = git(&root, &["symbolic-ref", "-q", "HEAD"]) {
-            if let Some(path) = git(&root, &["rev-parse", "--git-path", &branch]) {
-                println!("cargo::rerun-if-changed={path}");
+            if let Some(path) = git(
+                &root,
+                &["rev-parse", "--path-format=absolute", "--git-path", &branch],
+            ) {
+                if Path::new(&path).exists() {
+                    println!("cargo::rerun-if-changed={path}");
+                }
             }
         }
         if let Some(files) = git(&root, &["ls-files", "-z"]) {
@@ -136,7 +151,8 @@ fn simulator_version() {
         }
         (
             git(&root, &["rev-parse", "--verify", "HEAD"]),
-            git(&root, &["status", "--porcelain"]).is_none_or(|status| !status.is_empty()),
+            git(&root, &["status", "--porcelain", "--untracked-files=no"])
+                .is_none_or(|status| !status.is_empty()),
             git(&root, &["describe", "--exact-match", "--tags", "HEAD"]),
         )
     };

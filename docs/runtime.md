@@ -73,8 +73,10 @@ execution. Apple Silicon also supports the native development ARM Compose
 backend described below.
 
 Development versions carry the Git source commit (`0.1.0-dev+COMMIT`) and a
-`.dirty` suffix for local changes. Source exports without provenance report
-`-dev+unknown`; a matching clean release tag is required for a release label.
+`.dirty` suffix for staged or unstaged tracked changes. Source exports without
+provenance report `-dev+unknown`; a matching release tag with no tracked changes
+is required for a release label. Untracked build inputs remain covered by
+retained hashes.
 This readable label does not replace exact retained bytes or qualify a new
 runtime. The Mac maintainer build propagates source provenance into its exported
 Linux helper without copying Git history.
