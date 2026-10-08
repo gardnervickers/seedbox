@@ -334,6 +334,11 @@ const DISK_LOSS_SURVIVAL_PROBABILITY: &str = "disk_loss_survival_probability";
 
 /// Recover the disk policy from a retained profile, rejecting unknown semantics.
 pub fn recorded_torn_writes(profile: &ExecutionProfile) -> Result<bool> {
+    if profile.semantic_parameters.contains_key(DISK_LOSS) {
+        return Err(Error::Integrity(
+            "legacy disk_loss semantic parameter is not replay-compatible; use the retained previous CLI for historical evidence".into(),
+        ));
+    }
     let sector_bytes = profile.semantic_parameters.get(DISK_LOSS_SECTOR_BYTES);
     let survival_probability = profile
         .semantic_parameters

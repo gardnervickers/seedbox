@@ -1031,5 +1031,13 @@ fn torn_writes_are_recorded_replayed_and_omitted_when_disabled() {
             ..*base
         };
         assert!(vmm::world(&request).is_err());
+
+        let mut legacy = original.clone();
+        legacy.semantic_parameters.insert(
+            "disk_loss".into(),
+            "flush-stable/seeded-latest-sector-512-half/disk-loss-machine-incarnation/v1".into(),
+        );
+        let error = vmm::recorded_torn_writes(&legacy).unwrap_err().to_string();
+        assert!(error.contains("legacy disk_loss semantic parameter"));
     });
 }

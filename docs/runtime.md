@@ -16,12 +16,16 @@ The omitted setting adds no profile or world JSON field and leaves the existing
 disk digest and witness inputs unchanged. Building the modified VMM still changes
 the engine binary hash, as every VMM source change does.
 
-When enabled, the profile's semantic parameter `disk_loss` and each disk report's
-`model` are
-`flush-stable/seeded-latest-sector-512-half/disk-loss-machine-incarnation/v1`.
-Replay restores this policy from the retained profile; there is no replay override
-or environment variable. The low-level world JSON uses the same `disk_loss` key
-and model string. Unknown model strings are rejected.
+When enabled, the profile retains semantic parameters
+`disk_loss_sector_bytes = "512"` and
+`disk_loss_survival_probability = "0.5"`; each disk report carries the same
+numeric policy under `disk.fault_model`. Replay restores this policy from the
+retained profile; there is no replay override or environment variable. A retained
+legacy profile containing the old `disk_loss` semantic parameter is rejected as
+not replay-compatible by this CLI. The low-level world JSON uses a top-level
+`disk_loss` object, for example
+`{"sector_bytes": 512, "survival_probability": 0.5}`. Unknown or non-object
+parameters are rejected.
 
 At each crash, the latest unflushed version of each sector independently has a
 50% chance of surviving. The atomic unit is 512 bytes: multi-sector writes can

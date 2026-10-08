@@ -23,3 +23,13 @@ fn disk_fault_model_is_parameterized_without_a_wire_name() {
         }
     );
 }
+
+#[test]
+fn committed_torn_disk_world_uses_disk_loss_object() {
+    let world: serde_json::Value =
+        serde_json::from_str(include_str!("../../../harness/worlds/disk-ext4-torn.json")).unwrap();
+    let model = disk::parse_disk_fault_model(&world["disk_loss"]).unwrap();
+    assert_eq!(model.sector_bytes, disk::SECTOR);
+    assert_eq!(model.survival_probability, 0.5);
+    assert!(world["disk_loss"].is_object());
+}
