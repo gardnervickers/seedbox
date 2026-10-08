@@ -23,6 +23,7 @@ use std::time::Instant;
 
 mod counted;
 pub mod pv;
+mod pv_plan;
 
 pub const TIME_PAGE: u64 = 0xd000_0000;
 pub const NET_MMIO: u64 = 0xd000_1000;
@@ -52,6 +53,50 @@ pub const ABI_PAGE_RESEED: u64 = 3;
 const PAGE_PV_CLOCK: usize = 6;
 const PAGE_BOUND: usize = 7;
 const PAGE_SYSCALL_TARGET: usize = 8;
+const PAGE_TIMER_DEADLINE: usize = 14;
+const PAGE_CAPABILITIES: usize = 15;
+// Rewritten at every plan, outside the checkpointed PAGE_FIELDS.
+const PAGE_SYSCALL_NS: usize = 16;
+const PAGE_SYSCALLS0: usize = 17;
+const PAGE_PLAN_TIME: usize = 18;
+pub const ABI_PAGE_TIMER: u64 = 4;
+const CAP_PAGE_TIMER: u64 = 1;
+const TIMER_DISARMED: u64 = u64::MAX;
+
+/// The last adopted page store. Kept separately so expiration cannot rearm
+/// an unchanged word, and legacy PIT writes can still replace a page arm.
+#[derive(Clone, Copy)]
+struct PageTimer {
+    enabled: bool,
+    seen: u64,
+}
+
+impl PageTimer {
+    fn new() -> Self { Self { enabled: false, seen: TIMER_DISARMED } }
+
+    fn pickup(&mut self, word: u64, pit: &mut Pit, now: u64) -> Result<bool, String> {
+        if self.enabled && word != self.seen {
+            // Like the PV timer port: replacing an overdue arm cannot lose IRQ0.
+            let fired = pit.expire_through(now)? > 0;
+            self.seen = word;
+            pit.program_deadline((word != TIMER_DISARMED).then_some(word));
+            Ok(fired)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+/// Both timer transports use exactly the same latency stream and draw order.
+fn timer_latency(pit: &mut Pit, exact: &mut bool, rng: Option<&mut crate::rng::Rng>, jitter: u64, ppm: u64) {
+    if pit.fresh {
+        pit.fresh = false;
+        if let (Some(d), Some(rng)) = (pit.deadline, rng) {
+            if jitter > 0 { pit.deadline = Some(d + rng.below(jitter + 1)); }
+            *exact = ppm > 0 && rng.below(1_000_000) < ppm;
+        }
+    }
+}
 
 // Pin every extension word without extending the checkpoint/digest prefix.
 const _: () = {
@@ -66,6 +111,13 @@ const _: () = {
     assert!(PAGE_ENTROPY + 3 == 13);
     assert!(PAGE_ENTROPY_FIELDS == 4);
     assert!(ABI_PAGE_RESEED == 3);
+    assert!(PAGE_TIMER_DEADLINE == 14);
+    assert!(PAGE_CAPABILITIES == 15);
+    assert!(PAGE_SYSCALL_NS == 16);
+    assert!(PAGE_SYSCALLS0 == 17);
+    assert!(PAGE_PLAN_TIME == 18);
+    assert!(ABI_PAGE_TIMER == 4);
+    assert!(CAP_PAGE_TIMER == 1);
 };
 
 pub struct BootSpec<'a> {
@@ -84,6 +136,7 @@ pub struct BootSpec<'a> {
     pub barrier: bool,
     /// The machine runs under the PV clock timebase (no host perf counter).
     pub pv_clock: bool,
+    pub page_timer: bool,
 }
 
 /// Port of the launch barrier, see guest/barrier.h.
@@ -95,6 +148,10 @@ pub const ENTROPY_WORDS: usize = 8;
 pub struct MachineSnapshot {
     world: MachineState,
     ram: Mapping,
+    pending_io: Option<PendingIo>,
+    timer_rng: Option<crate::rng::Rng>,
+    entropy: [u32; ENTROPY_WORDS],
+    entropy_read: usize,
     page: Box<[u8; 4096]>,
     cpu: VcpuState,
     branches: u64,
@@ -114,7 +171,9 @@ pub struct MachineSnapshot {
     control_dma_bytes: u64,
     control_tx_bytes: u64,
     pv: bool,
+    syscall_ns: u64,
     abi: u64,
+    page_timer: PageTimer,
     armed_wake: u64,
     pit_exact: bool,
     exit_req: bool,
@@ -270,6 +329,7 @@ pub struct Machine {
     pv: bool,
     /// Guest ABI version announced on the time page port (0 before then).
     abi: u64,
+    page_timer: PageTimer,
     armed_wake: u64,
     /// The pending timer deadline must be delivered at its exact time.
     pit_exact: bool,
@@ -297,6 +357,7 @@ pub struct Machine {
     entropy: [u32; ENTROPY_WORDS],
     entropy_read: usize,
     pv_clock: bool,
+    page_timer_requested: bool,
     /// The MSR list a fork snapshot saves.
     msrs: Msrs,
     pub stats: Stats,
@@ -530,6 +591,7 @@ impl Machine {
             exit_req: false,
             pv: false,
             abi: 0,
+            page_timer: PageTimer::new(),
             armed_wake: 0,
             pit_exact: false,
             exact_timer_ppm: 0,
@@ -548,6 +610,7 @@ impl Machine {
             entropy: [0; ENTROPY_WORDS],
             entropy_read: 0,
             pv_clock: spec.pv_clock,
+            page_timer_requested: spec.page_timer,
             msrs,
             stats: Stats::default(),
             // A PV clock run can never share a witness with a counter run.
@@ -611,6 +674,18 @@ impl Machine {
         if self.abi < ABI_PAGE_RESEED {
             return Ok(Reseed::Unsupported);
         }
+        self.reseed_time_page(entropy)?;
+        Ok(Reseed::Page)
+    }
+
+    /// Publish fork entropy without parking, advancing clocks or touching I/O.
+    /// ABI zero is pre-boot: retain the page until the kernel announces its ABI.
+    pub fn reseed_time_page(&mut self, entropy: [u32; ENTROPY_WORDS]) -> Result<(), String> {
+        if self.abi != 0 && self.abi < ABI_PAGE_RESEED {
+            return Err(format!("{}: runtime checkpoint reseeding requires guest ABI 3; rebuild the kernel from kernel/", self.world.name));
+        }
+        self.entropy = entropy;
+        self.entropy_read = 0;
         let gen = self.page_get(PAGE_ENTROPY_GEN) + 1;
         for (i, v) in page_entropy(&entropy).into_iter().enumerate() {
             self.page_set(PAGE_ENTROPY + i, v);
@@ -618,7 +693,12 @@ impl Machine {
         // Publish the generation last: the guest reads it first.
         self.page_set(PAGE_ENTROPY_GEN, gen);
         self.record(b'S', gen);
-        Ok(Reseed::Page)
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn published_entropy(&self) -> [u64;5] {
+        std::array::from_fn(|i|self.page_get(PAGE_ENTROPY_GEN+i))
     }
 
     /// Freeze the machine at a world boundary. Nothing about the vCPU changes:
@@ -653,7 +733,7 @@ impl Machine {
     /// witness covers every incarnation. Nothing else crosses: RAM, device
     /// queues, KVM's I/O state and the undo checkpoint die with the VM.
     /// Returns the number of volatile sectors lost, or None without a disk.
-    pub fn succeed(&mut self, old: &mut Machine, at: u64, seed: u64) -> Result<Option<u64>, String> {
+    pub fn succeed(&mut self, old: &mut Machine, at: u64, seed: u64, identity: Option<&str>) -> Result<Option<u64>, String> {
         self.world.succeed(&old.world,at)?;
         for (new, old) in [(&mut self.com1, &mut old.com1), (&mut self.com2, &mut old.com2)] {
             new.out = std::mem::take(&mut old.out);
@@ -668,7 +748,7 @@ impl Machine {
         self.syscall_ns = old.syscall_ns;
         // Flushed data survives; the disk policy chooses unflushed survivors.
         let lost = if let (Some(new), Some(blk)) = (self.blk.as_mut(), old.blk.as_ref()) {
-            let (disk, lost) = blk.disk().crashed_seeded(seed, &old.world.name, old.world.incarnation);
+            let (disk, lost) = blk.disk().crashed_branch(seed, identity, &old.world.name, old.world.incarnation);
             *new = VirtioBlk::new(disk);
             Some(lost)
         } else { None };
@@ -690,9 +770,9 @@ impl Machine {
         Ok(())
     }
 
-    /// Capture this machine at the world's fork point: parked, no I/O owed.
+    /// Capture at a committed scheduler boundary, including unpaid I/O cost.
     pub fn snapshot(&mut self) -> Result<MachineSnapshot, String> {
-        if self.pending_io.is_some() || self.stepping || !self.world.fault_effects.is_empty() || !self.world.control_requests.is_empty() || self.world.committed_console.is_some() {
+        if self.stepping || !self.world.fault_effects.is_empty() || !self.world.control_requests.is_empty() || self.world.committed_console.is_some() {
             return Err(format!("{}: not at a fork point", self.world.name));
         }
         self.complete_io()?;
@@ -709,13 +789,15 @@ impl Machine {
         Ok(MachineSnapshot {
             ram, page, cpu,
             world: self.world.clone(), branches: self.branches, tsc_latch: self.tsc_latch,
+            pending_io: self.pending_io.clone(), timer_rng: self.timer_rng.clone(),
+            entropy: self.entropy, entropy_read: self.entropy_read,
             guest_exit_code: self.guest_exit_code, guest_init_error: self.guest_init_error,
             pic: self.pic.clone(), pit: self.pit.clone(), rtc_index: self.rtc_index,
             com1: self.com1.snapshot(), com2: self.com2.snapshot(), log_order: self.log_order,
             management_framer: self.management_framer.clone(),
             net: self.net.clone(), channel: self.channel.clone(), blk: self.blk.clone(),
             control_dma_bytes: self.control_dma_bytes, control_tx_bytes: self.control_tx_bytes,
-            pv: self.pv, abi: self.abi, armed_wake: self.armed_wake, pit_exact: self.pit_exact, exit_req: self.exit_req,
+            pv: self.pv, syscall_ns: self.syscall_ns, abi: self.abi, page_timer: self.page_timer, armed_wake: self.armed_wake, pit_exact: self.pit_exact, exit_req: self.exit_req,
             margin: self.margin, fm: self.fm,
             stats: self.stats.clone(), witness: self.witness.clone(), undo_stats,
         })
@@ -765,7 +847,8 @@ impl Machine {
         self.world = s.world.clone();
         self.branches = s.branches;
         self.tsc_latch = s.tsc_latch;
-        self.pending_io = None;
+        self.pending_io = s.pending_io.clone();
+        self.timer_rng = s.timer_rng.clone();
         self.guest_exit_code = s.guest_exit_code;
         self.guest_init_error = s.guest_init_error;
         self.pic = s.pic.clone();
@@ -782,15 +865,16 @@ impl Machine {
         self.control_dma_bytes = s.control_dma_bytes;
         self.control_tx_bytes = s.control_tx_bytes;
         self.pv = s.pv;
+        self.syscall_ns = s.syscall_ns;
         self.abi = s.abi;
+        self.page_timer = s.page_timer;
         self.armed_wake = s.armed_wake;
         self.pit_exact = s.pit_exact;
         self.exit_req = s.exit_req;
         self.margin = s.margin;
         self.fm = s.fm;
-        self.world.restore_lifecycle();
-        self.entropy = [0; ENTROPY_WORDS];
-        self.entropy_read = 0;
+        self.entropy = s.entropy;
+        self.entropy_read = s.entropy_read;
         self.stats = s.stats.clone();
         self.witness = s.witness.clone();
         Ok(pages)
@@ -847,6 +931,18 @@ impl Machine {
             self.raise_net();
         }
         Ok(outcome)
+    }
+
+    fn poll_net(&mut self, frames: &mut Vec<Vec<u8>>, boundary: bool) -> Result<bool, String> {
+        let m = unsafe { std::slice::from_raw_parts_mut(self.mem, self.mem_size) };
+        let Some(n) = self.net.as_mut() else { return Ok(false); };
+        let out = n.poll_at(m, self.world.time, boundary);
+        self.take_dma();
+        let out = out?;
+        if out.irq { self.raise_net(); }
+        let sent = !out.frames.is_empty();
+        frames.extend(out.frames);
+        Ok(sent)
     }
 
     /// Syscalls the guest has entered (counted in the time page).
@@ -949,6 +1045,27 @@ impl Machine {
         }
     }
 
+    fn enable_page_timer(&mut self) {
+        if self.page_timer_requested && self.abi >= ABI_PAGE_TIMER {
+            self.page_set(PAGE_TIMER_DEADLINE, TIMER_DISARMED);
+            self.page_set(PAGE_CAPABILITIES, CAP_PAGE_TIMER);
+            self.page_timer.enabled = true;
+        }
+    }
+
+    // Adoption is an observable effect: call only at a legal exit or a world
+    // boundary, after accounting for that point's guest clock progress. Never
+    // call from a timebase prepare/plan or a watchdog/probe landing.
+    fn sync_page_timer(&mut self) -> Result<(), String> {
+        if !self.page_timer.enabled { return Ok(()); }
+        if self.page_timer.pickup(self.page_get(PAGE_TIMER_DEADLINE), &mut self.pit, self.world.time)? {
+            self.pic.raise(0);
+        }
+        timer_latency(&mut self.pit, &mut self.pit_exact, self.timer_rng.as_mut(), self.timer_jitter, self.exact_timer_ppm);
+        Ok(())
+    }
+
+    // Expiration consults adopted device state only, never a guest page store.
     fn expire_timers(&mut self) -> Result<(), String> {
         if self.pit.expire_through(self.world.time)? > 0 {
             self.pic.raise(0);
@@ -957,7 +1074,8 @@ impl Machine {
     }
 
     /// Device effects and the KVM response have already been committed once.
-    /// No guest entry, publication, injection or checkpoint until all cost is paid.
+    /// No guest execution, publication, injection or speculative checkpoint until
+    /// all cost is paid. A world snapshot may complete KVM I/O and retain the debt.
     fn drain_io(&mut self, limit: u64) -> Result<bool, String> {
         while self.pending_io.is_some() {
             self.expire_timers()?;
@@ -981,7 +1099,9 @@ impl Machine {
         let t = Instant::now();
         self.complete_io()?;
         let page: [u64; PAGE_FIELDS] = std::array::from_fn(|i| self.page_get(i));
+        let timer_deadline = self.page_timer.enabled.then(|| self.page_get(PAGE_TIMER_DEADLINE));
         let u = self.undo.as_mut().unwrap();
+        u.timer_deadline = timer_deadline;
         u.save(&self._vm, &self.vcpu, self.mem)?;
         u.page = page;
         u.time = self.world.time;
@@ -998,6 +1118,9 @@ impl Machine {
         let (regs, sregs) = u.restore(&self._vm, &self.vcpu, self.mem)?;
         for i in 0..PAGE_FIELDS {
             unsafe { std::ptr::write_volatile(self.page.add(i), u.page[i]) };
+        }
+        if let Some(deadline) = u.timer_deadline {
+            unsafe { std::ptr::write_volatile(self.page.add(PAGE_TIMER_DEADLINE), deadline) };
         }
         self.world.time = u.time;
         self.branches = u.branches;
@@ -1166,6 +1289,12 @@ impl Machine {
         // page, interrupts, timer expiry) changes only at deterministic points:
         // natural exits and exact counted stops, never
         // at overflow landings or intermediate single steps.
+        let deferred = self.net.as_ref().is_some_and(|n| n.deferred_tx());
+        let poll_end = crate::virtio_net::poll_limit(self.world.time, limit, deferred);
+        // A new polling deadline is exact. The world's early-stop allowance
+        // can exceed TX_POLL_NS; subtracting it here would create 1 ns slices.
+        let early = if poll_end < limit { 0 } else { early };
+        let limit = poll_end;
         let slice_end = limit
             .saturating_sub(early)
             .max(self.world.time.saturating_add(1))
@@ -1175,6 +1304,11 @@ impl Machine {
             if self.pending_io.is_some() {
                 if !self.drain_io(limit)? {
                     self.set_stepping(false)?;
+                    // Charged I/O can split at an exact slice boundary too.
+                    if self.poll_net(frames, true)? {
+                        self.note_skew(Site::Sent);
+                        return Ok(Stop::Sent);
+                    }
                     return Ok(Stop::Reached);
                 }
             }
@@ -1187,13 +1321,22 @@ impl Machine {
                 self.fm = self.undo_margin;
                 // Guest clock reads can advance time independently of the PMU.
                 // Check before expiring timers or accepting the slice boundary.
+                if self.page_timer.enabled { self.expire_timers()?; }
                 self.sync_from_page(hard_limit(
                     limit,
                     self.pit.deadline,
                     self.pit_exact,
                     self.tolerance,
                 ))?;
+                self.sync_page_timer()?;
                 self.expire_timers()?;
+                // Also runs on slice entry after world RX delivery. Never poll
+                // at overflow landings or intermediate precision steps.
+                if self.poll_net(frames, self.world.time >= slice_end)? {
+                    self.note_skew(Site::Sent);
+                    self.set_stepping(false)?;
+                    return Ok(Stop::Sent);
+                }
                 if self.world.time >= slice_end {
                     self.set_stepping(false)?;
                     return Ok(Stop::Reached);
@@ -1228,7 +1371,31 @@ impl Machine {
                 self.exit_req = window;
             }
             let syscalls0 = self.page_get(PAGE_SYSCALLS);
-            if let Prepared::Idle = tb.prepare(self, remaining, soft)? {
+            if let Prepared::Idle = tb.prepare(self, remaining, soft, legal)? {
+                if self.page_timer.enabled {
+                    // A proven cycle's canonical landing is deterministic, unlike the
+                    // watchdog and intermediate probe steps that found it.
+                    self.sync_from_page(hard)?;
+                    self.sync_page_timer()?;
+                    self.expire_timers()?;
+                }
+                // A proven PV cycle is deterministic; watchdog landings are not.
+                // Complete pending TX before declaring a completion waiter idle,
+                // including with interrupts disabled or suppressed by the guest.
+                if deferred {
+                    // Device DMA must not cross a checkpoint held during the
+                    // cycle proof, just as at any other deterministic stop.
+                    if let Some(u) = self.undo.as_mut() { u.valid = false; }
+                    self.fm = self.undo_margin;
+                    self.set_stepping(false)?;
+                    let memory = unsafe { std::slice::from_raw_parts(self.mem, self.mem_size) };
+                    let pending = self.net.as_ref().map(|n| n.pending_tx(memory)).transpose()?.unwrap_or(false);
+                    if self.poll_net(frames, true)? {
+                        self.note_skew(Site::Sent);
+                        return Ok(Stop::Sent);
+                    }
+                    if pending { legal = true;continue; }
+                }
                 return self.spin_idle();
             }
             self.vcpu.get_kvm_run().kvm_valid_regs =
@@ -1314,12 +1481,25 @@ impl Machine {
             self.world.time += delta;
             if legal {
                 // Sent/Hlt/Exited can return before the next loop synchronizes
-                // the page. Validate guest clock progress before any exit
-                // effects, while preserving the existing publication timing.
-                // The exit still borrows vcpu; inspect only the disjoint page
-                // and clock fields until its payload has been consumed.
+                // the page. Validate guest clock progress before exit effects.
+                // The exit still borrows vcpu: use only the disjoint fields.
                 let last = unsafe { std::ptr::read_volatile(self.page.add(1)) };
-                advance_time(self.world.time, last.saturating_sub(self.world.time), hard)?;
+                let exit_time = advance_time(self.world.time, last.saturating_sub(self.world.time), hard)?;
+                if self.pv_clock || self.page_timer.enabled {
+                    // In particular HLT must adopt at its full exit time, not
+                    // at a watchdog landing's partial syscall-only time. A
+                    // stop that left the guest's clock ahead of ours could be
+                    // given a next limit below time the guest already read;
+                    // a timer armed here must count from that clock too.
+                    self.stats.time_by[Cause::ClockReads as usize] += exit_time - self.world.time;
+                    self.world.time = exit_time;
+                }
+                if self.page_timer.enabled {
+                    let word = unsafe { std::ptr::read_volatile(self.page.add(PAGE_TIMER_DEADLINE)) };
+                    if self.page_timer.pickup(word, &mut self.pit, self.world.time)? { self.pic.raise(0); }
+                    timer_latency(&mut self.pit, &mut self.pit_exact, self.timer_rng.as_mut(), self.timer_jitter, self.exact_timer_ppm);
+                    if self.pit.expire_through(self.world.time)? > 0 { self.pic.raise(0); }
+                }
             }
             self.stats.exits += 1;
             if self.stepping {
@@ -1339,14 +1519,17 @@ impl Machine {
                     // move, so move it there.
                     let v = data[0];
                     if v == 1 && self.pv_clock {
-                        self.advance_to(soft, Cause::ClockBound);
+                        let bound = if self.page_timer.enabled { self.page_get(PAGE_BOUND).min(soft) } else { soft };
+                        self.advance_to(bound, Cause::ClockBound);
                     }
                     self.stats.yields += 1;
                     if self.world.time >= soft {
                         self.stats.yield_stops += 1;
                         self.record(b'Y', v as u64);
                     } else {
-                        legal = false;
+                        // A page arm can lower the clock/syscall budget below
+                        // the previous soft bound. This is a legal pickup.
+                        legal = self.page_timer.enabled;
                     }
                 }
                 Ok(VcpuExit::IoOut(port, data)) => {
@@ -1414,12 +1597,19 @@ impl Machine {
                         }
                         0x528 => {
                             self.abi = v as u64;
+                            if self.abi < ABI_PAGE_RESEED && self.page_get(PAGE_ENTROPY_GEN) != 0 {
+                                return Err(format!("{}: checkpoint entropy requires guest ABI 3", self.world.name));
+                            }
                             if self.pv_clock && self.page_get(PAGE_PV_CLOCK) != 2 {
                                 return Err(format!(
                                     "{}: the guest kernel lacks PV clock support; rebuild it from kernel/ for the pv timebase",
                                     self.world.name
                                 ));
                             }
+                            if self.page_timer_requested && self.abi < ABI_PAGE_TIMER {
+                                return Err("the guest kernel lacks page timer support; rebuild it from kernel/ or drop --page-timer".into());
+                            }
+                            self.enable_page_timer();
                             self.pv = v >= 2;
                             if self.pv {
                                 self.sync_pic();
@@ -1449,22 +1639,11 @@ impl Machine {
                             } else {
                                 self.pit.write(port, v, now);
                             }
-                            if self.pit.fresh {
-                                // Seeded timer latency: varies preemption points across seeds.
-                                self.pit.fresh = false;
-                                if let (Some(d), Some(rng)) =
-                                    (self.pit.deadline, self.timer_rng.as_mut())
-                                {
-                                    if self.timer_jitter > 0 {
-                                        self.pit.deadline =
-                                            Some(d + rng.below(self.timer_jitter + 1));
-                                    }
-                                    // Some deadlines interrupt at their exact time, i.e. at an
-                                    // arbitrary instruction, rather than the next syscall.
-                                    self.pit_exact = self.exact_timer_ppm > 0
-                                        && rng.below(1_000_000) < self.exact_timer_ppm;
-                                }
+                            // A legacy write supersedes the last page request.
+                            if self.page_timer.enabled {
+                                self.page_timer.seen = self.page_get(PAGE_TIMER_DEADLINE);
                             }
+                            timer_latency(&mut self.pit, &mut self.pit_exact, self.timer_rng.as_mut(), self.timer_jitter, self.exact_timer_ppm);
                         }
                         0x70 => self.rtc_index = v & 0x7f,
                         0xe9 => self.com1.transmit(v)?,
@@ -1615,7 +1794,7 @@ impl Machine {
                         let (mem, size) = (self.mem, self.mem_size);
                         let m = unsafe { std::slice::from_raw_parts_mut(mem, size) };
                         if let Some(n) = self.net.as_mut() {
-                            let out = n.write(m, addr - NET_MMIO, v);
+                            let out = n.write_at(m, addr - NET_MMIO, v, self.world.time.max(unsafe { std::ptr::read_volatile(self.page.add(1)) }));
                             self.take_dma();
                             let out=out?;
                             if out.irq {
@@ -1637,9 +1816,18 @@ impl Machine {
                     // The world checks pending interrupts while halted.
                     self.sync_pic();
                     self.set_stepping(false)?;
+                    if deferred && self.poll_net(frames, true)? {
+                        self.note_skew(Site::Sent);
+                        return Ok(Stop::Sent);
+                    }
                     if self.vcpu.get_kvm_run().if_flag == 0 {
                         self.world.state = State::Exited(0xfe);
                         return Ok(Stop::Exited);
+                    }
+                    // A guest may publish buffers and halt without a kick.
+                    if self.poll_net(frames, true)? {
+                        self.note_skew(Site::Sent);
+                        return Ok(Stop::Sent);
                     }
                     self.world.state = State::Halted;
                     return Ok(Stop::Halted);
@@ -1750,6 +1938,9 @@ impl Machine {
         for i in 0..PAGE_FIELDS {
             h.update(self.page_get(i).to_le_bytes());
         }
+        if self.page_timer.enabled {
+            h.update(self.page_get(PAGE_TIMER_DEADLINE).to_le_bytes());
+        }
         parts.push(("time_page", hex(h)));
         let mut h = Sha256::new();
         h.update(self.memory());
@@ -1780,6 +1971,158 @@ impl Machine {
     }
 }
 
+#[cfg(test)]
+mod net_poll_tests {
+    use super::*;
+
+    // All exits in these tiny payloads are natural, with no PMU or host-time
+    // stepping. Test the machine's service wiring, not counter qualification.
+    struct Natural;
+    impl Timebase for Natural {
+        const BRANCHES: bool = false;
+        fn prepare(&mut self, _: &mut Machine, _: u64, _: u64, _: bool) -> Result<Prepared, String> { Ok(Prepared::Run) }
+        fn start(&mut self, _: u64) -> u64 { 0 }
+        fn read(&mut self, _: u64) -> u64 { 0 }
+        fn inject_guard(&self) -> u64 { INJECT_GUARD }
+        fn judge(&mut self, _: Judge<'_>, _: &Run) -> Result<Verdict, String> { Ok(Verdict::Advance { legal: true }) }
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM on a Linux x86-64 host")]
+    fn event_idx_polls_on_entry_slice_boundary_and_halt_without_kicks() {
+        let kvm = Kvm::new().unwrap();
+        for site in ["entry", "slice", "bounded_slice", "halt", "charged_io"] {
+            for (event_idx, deferred) in [(false, false), (true, false), (false, true), (true, true)] {
+                let case = format!("site={site} event_idx={event_idx} deferred={deferred}");
+                // Publish a head, then yield to the slice end, halt, or start
+                // charged port I/O. Entry starts with an already posted head.
+                let mut code = vec![0xc7, 0x05, 0x02, 0x20, 0x08, 0x00, 1, 0, 0, 0];
+                if site == "slice" || site == "bounded_slice" { code.extend_from_slice(&[0xb0, 1, 0xba, 0x2c, 0x05, 0, 0, 0xee]); }
+                if site == "charged_io" { code.extend_from_slice(&[0xba, 0x30, 0x05, 0, 0, 0xee]); }
+                code.push(0xf4);
+                let mut kernel = vec![0; 1024];kernel[0x1f1] = 1;kernel.extend(code);
+                let spec = BootSpec { kernel: &kernel, initrd: &[], cmdline: String::new(), mem: INITRD_ADDR + 0x100000,
+                    rng_seed: [0; 32], mac: Some([2, 0, 0, 0, 0, 1]), control_channel: false, disk: None,
+                    undo_margin: 0, barrier: false, pv_clock: true, page_timer:false};
+                let mut m = Machine::new(&kvm, "net-poll", &spec).unwrap();
+                let mut r = m.vcpu.get_regs().unwrap();r.rflags = 0x202;m.vcpu.set_regs(&r).unwrap();
+                let memory = unsafe { std::slice::from_raw_parts_mut(m.mem, m.mem_size) };
+                let net = m.net.as_mut().unwrap();
+                net.set_deferred_tx(deferred);
+                for (off, v) in [(0x020, (1 << 5) | if event_idx { 1 << 29 } else { 0 }), (0x024, 1), (0x020, 1), (0x070, 15),
+                    (0x030, 1), (0x038, 1), (0x080, 0x81000), (0x090, 0x82000), (0x0a0, 0x83000), (0x044, 1)] {
+                    net.write(memory, off, v).unwrap();
+                }
+                memory[0x81000..0x81008].copy_from_slice(&0x84000u64.to_le_bytes());
+                memory[0x81008..0x8100c].copy_from_slice(&17u32.to_le_bytes());
+                memory[0x8400c..0x84011].copy_from_slice(b"frame");
+                if site == "entry" { memory[0x82002..0x82004].copy_from_slice(&1u16.to_le_bytes()); }
+                let mut frames = Vec::new();
+                let (limit, early) = if site == "bounded_slice" { (1_000_000, 100_000) } else { (500, 0) };
+                let stop = m.run_until(&mut Natural, limit, early, &mut frames).unwrap();
+                if site == "bounded_slice" {
+                    assert_eq!(m.time, if deferred { crate::virtio_net::TX_POLL_NS } else { limit - early }, "{case}");
+                }
+                if event_idx || deferred {
+                    assert_eq!(stop, Stop::Sent, "{case}");
+                    assert_eq!(frames, [b"frame".to_vec()], "{case}");
+                    // used->idx is at used + 2; used + 12 is avail_event
+                    // for this one-entry queue. Only one head was posted.
+                    assert_eq!(u16::from_le_bytes(m.memory()[0x83002..0x83004].try_into().unwrap()), 1, "{case}");
+                } else {
+                    assert_eq!(stop, if site == "slice" || site == "bounded_slice" || site == "charged_io" { Stop::Reached } else { Stop::Halted }, "{case}");
+                    assert!(frames.is_empty(), "{case}");
+                }
+                let net = m.net.as_ref().unwrap();
+                assert_eq!(net.stats().doorbell_exits, 0, "{case}");
+                assert_eq!(net.stats().tx_frames, u64::from(event_idx || deferred), "{case}");
+                assert_eq!(net.stats().tx_polled_at_boundary, u64::from((event_idx || deferred) && site != "entry"), "{case}");
+                assert!(net.dirty.is_empty(), "{case}"); // Machine adopted all DMA writes.
+            }
+        }
+    }
+    #[test]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM on a Linux x86-64 host")]
+    fn pv_stop_adopts_the_guest_clock() {
+        let kvm = Kvm::new().unwrap();
+        for arm in [false, true] {
+            // Read the clock 5 ms ahead of the VMM, optionally arm one PIT
+            // tick through port 0x530, halt. The stop's time, which the world
+            // plans the next limit from, and any deadline follow that clock.
+            let mut code = vec![0xc7, 0x05, 0x08, 0x00, 0x00, 0xd0];
+            code.extend_from_slice(&5_000_000u32.to_le_bytes());
+            if arm { code.extend_from_slice(&[0xb8, 1, 0, 0, 0, 0xba, 0x30, 0x05, 0, 0, 0x66, 0xef]); }
+            code.push(0xf4);
+            let mut kernel = vec![0; 1024];kernel[0x1f1] = 1;kernel.extend(code);
+            let spec = BootSpec { kernel: &kernel, initrd: &[], cmdline: String::new(), mem: INITRD_ADDR + 0x100000,
+                rng_seed: [0; 32], mac: None, control_channel: false, disk: None,
+                undo_margin: 0, barrier: false, pv_clock: true, page_timer: false};
+            let mut m = Machine::new(&kvm, "pv-stop", &spec).unwrap();
+            let mut frames = Vec::new();
+            let mut stop = m.run_until(&mut Natural, 10_000_000, 0, &mut frames).unwrap();
+            while stop == Stop::Reached { stop = m.run_until(&mut Natural, 10_000_000, 0, &mut frames).unwrap(); }
+            assert!(m.time >= 5_000_000, "arm={arm} time {}", m.time);
+            assert!(m.pit.deadline.is_none_or(|d| d > 5_000_000), "arm={arm} {:?}", m.pit.deadline);
+        }
+    }
+    #[test]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM on a Linux x86-64 host")]
+    fn deferred_tx_completes_a_pv_spin_without_halt_kick_or_interrupts() {
+        use std::time::Duration;
+        use super::pv::PvClock;
+        let kvm = Kvm::new().unwrap();
+        for (event_idx, page_timer) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut first = None;
+            for ms in [2, 7] {
+                let case = format!("site=pv_spin event_idx={event_idx} page_timer={page_timer} deferred=true watchdog_ms={ms}");
+                // Publish TX, then busy-wait for used->idx with interrupts off.
+                // The stable cycle is serviced at its canonical point; never
+                // service at the host-time watchdog or a probe landing.
+                let mut code = vec![0xc7, 0x05, 0x02, 0x20, 0x08, 0x00, 1, 0, 0, 0,
+                    0x66, 0x83, 0x3d, 0x02, 0x30, 0x08, 0, 0, 0x74, 0xf6, 0xf4];
+                if page_timer {
+                    // Store clock progress and an arm before publishing TX.
+                    let mut stores = Vec::new();
+                    for (address, value) in [(0xd0000008u32, 12300u32), (0xd0000070, 40000), (0xd0000074, 0)] {
+                        stores.extend_from_slice(&[0xc7, 0x05]);
+                        stores.extend_from_slice(&address.to_le_bytes());
+                        stores.extend_from_slice(&value.to_le_bytes());
+                    }
+                    stores.extend(code);code = stores;
+                }
+                let mut kernel = vec![0; 1024];kernel[0x1f1] = 1;kernel.extend(code);
+                let spec = BootSpec { kernel: &kernel, initrd: &[], cmdline: String::new(), mem: INITRD_ADDR + 0x100000,
+                    rng_seed: [0; 32], mac: Some([2, 0, 0, 0, 0, 1]), control_channel: false, disk: None,
+                    undo_margin: 0, barrier: false, pv_clock: true, page_timer};
+                let mut m = Machine::new(&kvm, "tx-spin", &spec).unwrap();
+                m.abi = ABI_PAGE_TIMER;m.enable_page_timer();
+                let memory = unsafe { std::slice::from_raw_parts_mut(m.mem, m.mem_size) };
+                let net = m.net.as_mut().unwrap();net.set_deferred_tx(true);
+                for (off, v) in [(0x020, if event_idx { 1 << 29 } else { 0 }), (0x070, 15),
+                    (0x030, 1), (0x038, 1), (0x080, 0x81000), (0x090, 0x82000), (0x0a0, 0x83000), (0x044, 1)] {
+                    net.write(memory, off, v).unwrap();
+                }
+                memory[0x81000..0x81008].copy_from_slice(&0x84000u64.to_le_bytes());
+                memory[0x81008..0x8100c].copy_from_slice(&17u32.to_le_bytes());
+                memory[0x8400c..0x84011].copy_from_slice(b"frame");
+                memory[0x82000..0x82002].copy_from_slice(&1u16.to_le_bytes()); // NO_INTERRUPT
+                memory[0x82006..0x82008].copy_from_slice(&1u16.to_le_bytes()); // used_event
+                let mut tb = PvClock::new(Duration::from_millis(ms)).unwrap();tb.max_false_alarms = 10;
+                let mut frames = Vec::new();
+                assert_eq!(m.run_until(&mut tb, 1_000_000, 0, &mut frames).unwrap(), Stop::Sent, "{case}");
+                assert_eq!(frames, [b"frame".to_vec()], "{case}");
+                assert_eq!(m.time, if page_timer { 12300 } else { 0 }, "{case}");
+                assert_eq!(m.pit.deadline, page_timer.then_some(40000), "{case}");
+                assert_eq!(m.net.as_ref().unwrap().stats().doorbell_exits, 0, "{case}");
+                assert_eq!(m.run_until(&mut tb, 1_000_000, 0, &mut frames).unwrap(), Stop::Exited, "{case}");
+                let evidence = (m.time, m.exit_witness(), m.state_digest());
+                if let Some(want) = &first { assert_eq!(&evidence, want, "{case}"); } else { first = Some(evidence); }
+            }
+        }
+    }
+
+}
+
 
 #[cfg(test)]
 mod io_boundary_tests {
@@ -1795,7 +2138,7 @@ mod io_boundary_tests {
         else {code.push(if write {0xee} else {0xec});}
         code.extend_from_slice(&[0x85,0xc0,0x74,0x00,0xc7,0x05,0x00,0x00,0x08,0x00,0x78,0x56,0x34,0x12,0xf4]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false,pv_clock:false};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false,pv_clock:false,page_timer:false};
         let mut machine=Machine::new(kvm,"io-probe",&spec).unwrap();
         let mut r=machine.vcpu.get_regs().unwrap();r.rflags=0x202;machine.vcpu.set_regs(&r).unwrap();
         machine.pit.write(0x43,0x34,0);
@@ -1806,7 +2149,34 @@ mod io_boundary_tests {
     }
 
     #[test]
-    #[ignore = "requires KVM on the qualified Linux host"]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn runtime_checkpoint_keeps_unpaid_io_without_repeating_its_effect() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        for undo in [0,256] {
+            for (port,write) in [(0x40,false),(0x43,true),(0x530,true)] {
+                let mut m=probe(&kvm,port,write,undo);
+                let mut frames=Vec::new();
+                assert_eq!(m.run_until(&mut counter,500,0,&mut frames).unwrap(),Stop::Reached);
+                let pending=m.pending_io.clone();
+                assert!(pending.is_some());
+                let saved=m.snapshot().unwrap();
+                let finish=|m: &mut Machine,counter: &mut Counter| {
+                    let mut frames=Vec::new();
+                    while !matches!(m.run_until(counter,10_000,0,&mut frames).unwrap(),Stop::Halted|Stop::Exited) {}
+                    (m.exit_witness(),m.state_digest().0,m.time,m.branches)
+                };
+                let want=finish(&mut m,&mut counter);
+                let mut fresh=probe(&kvm,port,write,undo);
+                fresh.restore(&saved).unwrap();
+                assert_eq!(fresh.pending_io,pending);
+                assert_eq!(finish(&mut fresh,&mut counter),want,"port={port:#x}, write={write}, undo={undo}");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM on the qualified Linux host")]
     fn page_capture_has_documented_format_and_preserves_ram_witness_state() {
         let kvm=Kvm::new().unwrap();
         let mut m=probe(&kvm,0x530,true,0);
@@ -1928,11 +2298,42 @@ mod io_boundary_tests {
         let back=-(code.len() as i8+2);
         code.extend_from_slice(&[0xeb,back as u8]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false,pv_clock:false};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false,pv_clock:false,page_timer:false};
         let mut machine=Machine::new(kvm,"stop-probe",&spec).unwrap();
         let mut r=machine.vcpu.get_regs().unwrap();r.rflags=0x2;machine.vcpu.set_regs(&r).unwrap();
         machine.pic.set_masks(0xffff);
         machine
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn an_overdue_arm_replaced_by_a_page_store_does_not_depend_on_undo() {
+        let kvm = Kvm::new().unwrap();
+        let mut counter = Counter::new().unwrap();
+        // mov ecx,280000; dec ecx; jnz; store deadline 900000 to word 14; hlt
+        let mut code = vec![0xb9, 0xc0, 0x45, 0x04, 0x00, 0x49, 0x75, 0xfd];
+        for (address, value) in [(0xd0000070u32, 900_000u32), (0xd0000074, 0)] {
+            code.extend_from_slice(&[0xc7, 0x05]);
+            code.extend_from_slice(&address.to_le_bytes());
+            code.extend_from_slice(&value.to_le_bytes());
+        }
+        code.push(0xf4);
+        let mut want = None;
+        for undo in [0, 16, 256] {
+            let mut kernel = vec![0u8; 1024]; kernel[0x1f1] = 1; kernel.extend(&code);
+            let spec = BootSpec { kernel: &kernel, initrd: &[], cmdline: String::new(), mem: INITRD_ADDR + 0x100000, rng_seed: [0; 32], mac: None, control_channel: false, disk: None, undo_margin: undo, barrier: false, pv_clock: false, page_timer: true };
+            let mut m = Machine::new(&kvm, "page-rearm", &spec).unwrap();
+            let mut r = m.vcpu.get_regs().unwrap(); r.rflags = 0x202; m.vcpu.set_regs(&r).unwrap();
+            m.abi = ABI_PAGE_TIMER;
+            m.enable_page_timer();
+            m.tolerance = 200_000;
+            m.pit.program_deadline(Some(100_000)); // D = 100k, hard = 300k, exit at ~280k
+            m.pic.set_masks(0xffff);
+            assert_eq!(m.run_until(&mut counter, 1_000_000, 0, &mut Vec::new()).unwrap(), Stop::Halted);
+            m.pic.set_masks(0);
+            let got = (m.time, m.pic.pending(), m.pit.deadline, m.exit_witness());
+            if let Some(want) = &want { assert_eq!(&got, want, "undo={undo}"); } else { want = Some(got); }
+        }
     }
 
     #[test]
@@ -2103,16 +2504,59 @@ mod fork_tests {
         assert_eq!(fields["syscall_target"], (PAGE_SYSCALL_TARGET, 1));
         assert_eq!(fields["entropy_gen"], (PAGE_ENTROPY_GEN, 1));
         assert_eq!(fields["entropy"], (PAGE_ENTROPY, PAGE_ENTROPY_FIELDS));
-        assert_eq!(index, 14);
+        assert_eq!(fields["timer_deadline"], (PAGE_TIMER_DEADLINE, 1));
+        assert_eq!(fields["capabilities"], (PAGE_CAPABILITIES, 1));
+        assert_eq!(fields["syscall_ns"], (PAGE_SYSCALL_NS, 1));
+        assert_eq!(fields["syscalls0"], (PAGE_SYSCALLS0, 1));
+        assert_eq!(fields["plan_time"], (PAGE_PLAN_TIME, 1));
+        assert_eq!(index, 19);
         assert_eq!(PAGE_FIELDS, PAGE_PV_CLOCK);
         assert_eq!(PAGE_ENTROPY_FIELDS * 8, ENTROPY_WORDS * 4);
         let abi: u64 = header.lines().find_map(|l| l.strip_prefix("#define SEEDBOX_ABI\t")).unwrap().trim().parse().unwrap();
-        assert_eq!(abi, ABI_PAGE_RESEED);
+        assert_eq!(abi, ABI_PAGE_TIMER);
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
+    fn page_timer_negotiation_and_undo_restore_the_separate_page_word() {
+        let kvm = Kvm::new().unwrap();
+        let mut m = probe_machine(&kvm, 256, false);
+        for requested in [false, true] {
+            for abi in 0..=ABI_PAGE_TIMER {
+                m.page_timer_requested = requested;
+                m.abi = abi;
+                m.page_timer = PageTimer::new();
+                m.page_set(PAGE_TIMER_DEADLINE, 0);
+                m.page_set(PAGE_CAPABILITIES, 0);
+                m.enable_page_timer();
+                let active = requested && abi >= ABI_PAGE_TIMER;
+                assert_eq!(m.page_timer.enabled, active);
+                assert_eq!(m.page_get(PAGE_CAPABILITIES), if active { CAP_PAGE_TIMER } else { 0 });
+                assert_eq!(m.page_get(PAGE_TIMER_DEADLINE), if active { TIMER_DISARMED } else { 0 });
+            }
+        }
+        m.page_set(PAGE_TIMER_DEADLINE, 10000);
+        m.sync_page_timer().unwrap();
+        m.checkpoint().unwrap();
+        m.page_set(PAGE_TIMER_DEADLINE, 20000);
+        // Speculative guest stores are not adopted before a legal landing.
+        m.rollback().unwrap();
+        assert_eq!(m.page_get(PAGE_TIMER_DEADLINE), 10000);
+        assert_eq!(m.next_deadline(), 10000);
+        m.page_set(PAGE_TIMER_DEADLINE, TIMER_DISARMED);
+        m.checkpoint().unwrap();
+        m.page_set(PAGE_TIMER_DEADLINE, 30000);
+        m.rollback().unwrap();
+        assert_eq!(m.page_get(PAGE_TIMER_DEADLINE), TIMER_DISARMED);
+        assert_eq!(m.next_deadline(), 10000, "unadopted disarm cannot change idle wake time");
+        m.sync_page_timer().unwrap();
+        assert_eq!(m.next_deadline(), TIMER_DISARMED);
+        assert_eq!(m.pit.deadline, None);
     }
 
     // These tests create a vCPU but never enter the guest or open a perf event.
     #[test]
-    #[ignore = "requires Linux x86-64 KVM"]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
     fn abi_below_3_time_forks_do_not_write_extensions_or_add_reseed_witnesses() {
         let kvm=Kvm::new().unwrap();
         for abi in 0..ABI_PAGE_RESEED {
@@ -2136,7 +2580,7 @@ mod fork_tests {
     }
 
     #[test]
-    #[ignore = "requires Linux x86-64 KVM"]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
     fn a_time_fork_writes_only_entropy_and_a_barrier_writes_none() {
         let kvm=Kvm::new().unwrap();
         for barrier in [false,true] {
@@ -2173,7 +2617,7 @@ mod fork_tests {
         code.extend_from_slice(&[0xb9,0xe8,0x03,0,0, 0x49, 0x75,0xfd]);
         code.extend_from_slice(&[0xc7,0x05,0x00,0x10,0x08,0x00,0xad,0xde,0,0, 0xf4]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier,pv_clock:false};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier,pv_clock:false,page_timer:false};
         Machine::new(kvm,"fork-probe",&spec).unwrap()
     }
 
@@ -2342,7 +2786,7 @@ mod fork_tests {
             old.syscall_ns=937;
             let crash=old.world.time+100;
             let mut new=probe_machine(&kvm,undo,false);
-            new.succeed(&mut old,crash,1009).unwrap();
+            new.succeed(&mut old,crash,1009,None).unwrap();
             assert!(new.down && !new.paused);
             assert_eq!(new.syscall_ns,937,"the next incarnation keeps the PV syscall cost");
             assert_eq!((new.incarnation,new.time),(1,crash));
@@ -2390,7 +2834,7 @@ mod fork_tests {
                 witness.update(1000u64.to_le_bytes());
                 witness.update(b"pending_io");
                 witness.update(new.pending_io_bytes());
-                assert_eq!(new.succeed(&mut old,1000,seed).unwrap(),Some(expected.1));
+                assert_eq!(new.succeed(&mut old,1000,seed,None).unwrap(),Some(expected.1));
                 assert_eq!(new.exit_witness(),format!("{:x}",witness.finalize()));
                 let disk=new.blk.as_ref().unwrap().disk();
                 assert_eq!(disk.digest(),expected.0.digest());
@@ -2426,7 +2870,7 @@ mod fork_tests {
         disk.write(1,&[b'C';512]).unwrap();
         let mut new=probe_machine(&kvm,256,false);
         with_disk(&mut new);
-        assert_eq!(new.succeed(&mut old,1000,1009).unwrap(),Some(2));
+        assert_eq!(new.succeed(&mut old,1000,1009,None).unwrap(),Some(2));
         let disk=new.blk.as_ref().unwrap().disk();
         let mut buf=[0u8;1024];
         disk.read(0,&mut buf).unwrap();
@@ -2436,6 +2880,54 @@ mod fork_tests {
         assert_eq!(old.blk.as_ref().unwrap().disk().volatile_sectors(),2,"the old incarnation is untouched");
         old.restore(&snap).unwrap();
         assert_eq!(old.blk.as_ref().unwrap().disk().digest(),Disk::new(None,Some(8)).unwrap().digest());
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
+    fn runtime_checkpoint_restores_pv_fields_and_seeded_syscall_cost() {
+        let kvm=Kvm::new().unwrap();
+        let mut m=probe_machine(&kvm,0,false);
+        m.pv_clock=true;m.syscall_ns=937;m.abi=ABI_PAGE_RESEED;
+        for i in 6..14 {m.page_set(i,100+i as u64);}
+        let saved=m.snapshot().unwrap();
+        m.syscall_ns=1000;for i in 6..14 {m.page_set(i,0);}
+        m.restore(&saved).unwrap();
+        assert_eq!(m.syscall_ns,937);
+        assert_eq!((6..14).map(|i|m.page_get(i)).collect::<Vec<_>>(),(6..14).map(|i|100+i as u64).collect::<Vec<_>>());
+        let pv_fields=(6..9).map(|i|m.page_get(i)).collect::<Vec<_>>();
+        m.reseed_time_page([42;ENTROPY_WORDS]).unwrap();
+        assert_eq!((6..9).map(|i|m.page_get(i)).collect::<Vec<_>>(),pv_fields);
+        assert_eq!(m.page_get(9),110);
+        assert_eq!((10..14).map(|i|m.page_get(i)).collect::<Vec<_>>(),page_entropy(&[42;ENTROPY_WORDS]));
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
+    fn runtime_reseed_publishes_page_without_advancing_or_unpausing() {
+        let kvm=Kvm::new().unwrap();
+        let mut m=probe_machine(&kvm,0,false);
+        m.abi=ABI_PAGE_RESEED;
+        m.pause().unwrap();
+        let saved=m.snapshot().unwrap();
+        let before=m.published_entropy();
+        m.reseed_time_page([42;ENTROPY_WORDS]).unwrap();
+        assert!(m.paused);assert_eq!(m.time,0);assert!(!m.parked);
+        assert_eq!(m.page_get(PAGE_ENTROPY_GEN),1);
+        let page=page_entropy(&[42;ENTROPY_WORDS]);
+        for (i,word) in page.into_iter().enumerate() {assert_eq!(m.page_get(PAGE_ENTROPY+i),word);}
+        let branch=m.published_entropy();
+        assert_ne!(branch,before);
+        m.restore(&saved).unwrap();
+        m.reseed_time_page([43;ENTROPY_WORDS]).unwrap();
+        assert_ne!(m.published_entropy(),branch);
+        m.restore(&saved).unwrap();
+        m.reseed_time_page([42;ENTROPY_WORDS]).unwrap();
+        assert_eq!(m.published_entropy(),branch);
+        m.abi=2;
+        assert!(m.reseed_time_page([44;ENTROPY_WORDS]).unwrap_err().contains("requires guest ABI 3"));
+        m.abi=0;
+        m.reseed_time_page([45;ENTROPY_WORDS]).unwrap();
+        assert_eq!(m.page_get(PAGE_ENTROPY_GEN),2,"pre-boot entropy is published too");
     }
 }
 
@@ -2450,7 +2942,7 @@ mod timed_log_tests {
             0xb0,b'A',0xe6,0xe9,0xbb,0xe8,0x03,0,0,0x4b,0x75,0xfd,
             0xb0,b'B',0xe6,0xe9,0xb0,0,0xe6,0xf4];
         let mut kernel=vec![0;1024];kernel[0x1f1]=1;kernel.extend_from_slice(&code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false,pv_clock:false};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false,pv_clock:false,page_timer:false};
         let mut m=Machine::new(kvm,"timed",&spec).unwrap();
         let mut r=m.vcpu.get_regs().unwrap();r.rflags=2;m.vcpu.set_regs(&r).unwrap();m.pic.set_masks(0xffff);m
     }
@@ -2487,11 +2979,29 @@ mod timed_log_tests {
         let kvm=Kvm::new().unwrap();let mut counter=Counter::new().unwrap();
         let mut old=output_machine(&kvm,256);let mut frames=Vec::new();
         assert_eq!(old.run_until(&mut counter,2000,0,&mut frames).unwrap(),Stop::Exited);
-        let mut new=output_machine(&kvm,256);new.succeed(&mut old,5000,1009).unwrap();new.boot_at(5000).unwrap();
+        let mut new=output_machine(&kvm,256);new.succeed(&mut old,5000,1009,None).unwrap();new.boot_at(5000).unwrap();
         assert_eq!(new.run_until(&mut counter,7000,0,&mut frames).unwrap(),Stop::Exited);
         assert_eq!(new.com1.out,b"\0AB\0AB");assert_eq!(new.com2.out,b"\xff\xff");
         assert_eq!(new.com1.chunks.records,vec![[0,0,0,0,1],[0,0,2,1,2],[5000,1,3,3,1],[5000,1,5,4,2]]);
         assert_eq!(new.com2.chunks.records,vec![[0,0,1,0,1],[5000,1,4,1,1]]);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn runtime_checkpoint_restores_timed_log_cursor_and_order() {
+        let kvm=Kvm::new().unwrap();let mut counter=Counter::new().unwrap();
+        let mut m=output_machine(&kvm,256);let mut frames=Vec::new();
+        m.run_until(&mut counter,500,0,&mut frames).unwrap();
+        let saved=m.snapshot().unwrap();
+        m.run_until(&mut counter,2000,0,&mut frames).unwrap();
+        let want=(m.com1.out.clone(),m.com2.out.clone(),m.com1.chunks.records.clone(),m.com2.chunks.records.clone(),m.log_order);
+        for _ in 0..2 {
+            let mut fresh=output_machine(&kvm,256);fresh.restore(&saved).unwrap();
+            assert_eq!(fresh.com1.chunks.seen,saved.com1.chunks.seen);
+            assert_eq!(fresh.com2.chunks.seen,saved.com2.chunks.seen);
+            fresh.run_until(&mut counter,2000,0,&mut frames).unwrap();
+            assert_eq!((fresh.com1.out.clone(),fresh.com2.out.clone(),fresh.com1.chunks.records.clone(),fresh.com2.chunks.records.clone(),fresh.log_order),want);
+        }
     }
 
     // Inject a judge decision at a real KVM output exit to exercise the commit
@@ -2499,8 +3009,8 @@ mod timed_log_tests {
     struct RejectOnce {counter:Counter,rollback:bool,first:bool}
     impl Timebase for RejectOnce {
         const BRANCHES:bool=true;
-        fn prepare(&mut self,m:&mut Machine,remaining:u64,soft:u64)->Result<Prepared,String> {
-            let prepared=self.counter.prepare(m,remaining,soft)?;
+        fn prepare(&mut self,m:&mut Machine,remaining:u64,soft:u64,legal:bool)->Result<Prepared,String> {
+            let prepared=self.counter.prepare(m,remaining,soft,legal)?;
             if self.first && self.rollback {m.checkpoint()?;}
             Ok(prepared)
         }
@@ -2542,7 +3052,7 @@ mod committed_trigger_tests {
     struct DiscardFirst {prepared:bool,discarded:bool}
     impl Timebase for DiscardFirst {
         const BRANCHES:bool=true;
-        fn prepare(&mut self,m:&mut Machine,_:u64,_:u64)->Result<Prepared,String> {
+        fn prepare(&mut self,m:&mut Machine,_:u64,_:u64,_:bool)->Result<Prepared,String> {
             if !self.prepared {m.checkpoint()?;self.prepared=true;}
             Ok(Prepared::Run)
         }
@@ -2554,11 +3064,11 @@ mod committed_trigger_tests {
         }
     }
     #[test]
-    #[ignore = "requires KVM"]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
     fn committed_console_discards_rolled_back_candidate_before_matcher_feed() {
         let kvm=Kvm::new().unwrap();
         let mut kernel=vec![0;1024];kernel[0x1f1]=1;kernel.extend_from_slice(&[0xb0,b'A',0xe6,0xe9,0xf4]);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:256,barrier:false,pv_clock:false};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:256,barrier:false,pv_clock:false,page_timer:false};
         let mut m=Machine::new(&kvm,"source",&spec).unwrap();m.observe_console=true;
         let mut tb=DiscardFirst{prepared:false,discarded:false};let mut frames=Vec::new();
         assert_eq!(m.run_until(&mut tb,10,0,&mut frames).unwrap(),Stop::Control);
@@ -2571,5 +3081,74 @@ mod committed_trigger_tests {
         assert_eq!(m.run_until(&mut tb,10,0,&mut frames).unwrap(),Stop::Exited);
         assert_eq!(m.committed_console,None);assert_eq!(m.com1.out,b"A");
         assert_eq!(m.com1.chunks.records,vec![[0,0,0,0,1]]);assert_eq!(m.log_order,1);
+    }
+}
+
+#[cfg(test)]
+mod page_timer_tests {
+    use super::*;
+
+    #[test]
+    fn page_deadline_is_picked_up_once_and_sentinel_disarms() {
+        let mut page = PageTimer { enabled: true, seen: TIMER_DISARMED };
+        let mut pit = Pit::default();
+        pit.write(0x43, 0x38, 0);
+        page.pickup(12345, &mut pit, 0).unwrap();
+        assert_eq!(pit.deadline, Some(12345));
+        assert!(!pit.expire(12344).unwrap());
+        assert!(pit.expire(12345).unwrap());
+        page.pickup(12345, &mut pit, 0).unwrap();
+        assert_eq!(pit.deadline, None, "an expired word must not rearm");
+        page.pickup(20000, &mut pit, 0).unwrap();
+        page.pickup(TIMER_DISARMED, &mut pit, 0).unwrap();
+        assert_eq!(pit.deadline, None);
+        assert!(!pit.expire(u64::MAX).unwrap());
+    }
+
+    #[test]
+    fn page_and_port_arms_share_expiration_and_latency_draws() {
+        let mut port = Pit::default();
+        port.write(0x43, 0x38, 0);
+        port.program(1193, 100);
+        let word = port.deadline.unwrap();
+        let mut pit = Pit::default();
+        let mut page = PageTimer { enabled: true, seen: TIMER_DISARMED };
+        page.pickup(word, &mut pit, 0).unwrap();
+        let mut a = crate::rng::Rng::new(4000, "timer/test");
+        let mut b = crate::rng::Rng::new(4000, "timer/test");
+        let (mut exact_a, mut exact_b) = (false, false);
+        timer_latency(&mut port, &mut exact_a, Some(&mut a), 1000000, 500000);
+        timer_latency(&mut pit, &mut exact_b, Some(&mut b), 1000000, 500000);
+        assert_eq!(pit.deadline, port.deadline);
+        assert_eq!(exact_a, exact_b);
+        assert_eq!(a.below(1000000), b.below(1000000));
+        let due = port.deadline.unwrap();
+        for now in [due - 1, due, due + 1] {
+            assert_eq!(pit.expire_through(now).unwrap(), port.expire_through(now).unwrap());
+            page.pickup(word, &mut pit, 0).unwrap();
+            assert_eq!(pit.deadline, port.deadline);
+        }
+    }
+
+    #[test]
+    fn a_page_rearm_preserves_an_overdue_interrupt() {
+        let mut page = PageTimer { enabled: true, seen: TIMER_DISARMED };
+        let mut pit = Pit::default();
+        assert!(!page.pickup(100, &mut pit, 0).unwrap());
+        assert!(page.pickup(200, &mut pit, 100).unwrap());
+        assert_eq!(pit.deadline, Some(200));
+        assert!(!page.pickup(200, &mut pit, 100).unwrap());
+    }
+
+    #[test]
+    fn disabled_page_timer_ignores_page_words_and_preserves_port_arms() {
+        let mut page = PageTimer::new();
+        let mut pit = Pit::default();
+        pit.program(100, 0);
+        let deadline = pit.deadline;
+        for word in [0, 1, TIMER_DISARMED] {
+            page.pickup(word, &mut pit, 0).unwrap();
+            assert_eq!(pit.deadline, deadline);
+        }
     }
 }

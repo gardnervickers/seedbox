@@ -1064,6 +1064,7 @@ fn actual_arm_proxy_obeys_core_strict_reply_boundary_despite_fatal_control() {
         barrier: false,
         boot_seed: 1,
         run_seed: 2,
+        branch_identity: None,
         incarnations: vec![vec![]],
         paused_ingress: vec![0],
         clock: (),

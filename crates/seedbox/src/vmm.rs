@@ -14,6 +14,7 @@ use std::{
     path::Path,
 };
 
+use seedbox_engine_core::checkpoint;
 /// Execution failure whose VMM stderr may be excerpted by the CLI.
 pub const VMM_FAILURE_MESSAGE: &str = "VMM failed; see vmm.stderr";
 
@@ -39,8 +40,6 @@ pub struct VmmExecutor {
 /// Successful compatibility observation; it is not empirical replay qualification.
 #[derive(Debug, Serialize)]
 pub struct DoctorReport {
-    pub policy_version: String,
-    pub policy_fingerprint: String,
     pub cpu: u32,
     pub cpus: Vec<u32>,
     pub engine: ContentDigest,
@@ -48,8 +47,6 @@ pub struct DoctorReport {
     pub simulator_version: Option<String>,
     pub kernel: ContentDigest,
     pub observations: Vec<crate::admission::CoreObservation>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub engine_qualification: Option<String>,
 }
 
 struct AdmissionProbe {
@@ -136,9 +133,7 @@ impl VmmExecutor {
             ("control_channel".into(), "virtio-console-v1".into()),
             ("memory_mb".into(), memory_mb.to_string()),
         ]);
-        if counter == CounterProfile::Zen {
-            semantic_parameters.extend(crate::admission::bindings()?);
-        } else {
+        if counter != CounterProfile::Zen {
             semantic_parameters.insert(COUNTER.into(), counter.name().into());
         }
         Ok(Self {
@@ -159,16 +154,52 @@ impl VmmExecutor {
         })
     }
 
+    /// Defer virtio-net TX kicks to deterministic polls (semantic, off by default).
+    pub fn with_deferred_tx(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.profile
+                .semantic_parameters
+                .insert("deferred_tx".into(), "true".into());
+        } else {
+            self.profile.semantic_parameters.remove("deferred_tx");
+        }
+        self
+    }
+
     /// Counter is recorded by omission to preserve existing run identities.
+    /// PV reads no branch counter, so its identity carries no counter profile.
     pub fn with_timebase(mut self, timebase: Timebase) -> Self {
+        self.profile.semantic_parameters.remove(COUNTER);
         if timebase == Timebase::Counter {
             self.profile.semantic_parameters.remove("timebase");
+            if self.counter != CounterProfile::Zen {
+                self.profile
+                    .semantic_parameters
+                    .insert(COUNTER.into(), self.counter.name().into());
+            }
         } else {
             self.profile
                 .semantic_parameters
                 .insert("timebase".into(), timebase.name().into());
         }
         self
+    }
+
+    /// Page timer is recorded only when requested; off preserves legacy identities.
+    pub fn with_page_timer(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.profile
+                .semantic_parameters
+                .insert("page_timer".into(), "true".into());
+        } else {
+            self.profile.semantic_parameters.remove("page_timer");
+        }
+        self
+    }
+
+    /// Whether the engine reads the host branch counter; PV does not.
+    fn counted(&self) -> bool {
+        recorded_timebase(&self.profile).map_or(true, |timebase| timebase == Timebase::Counter)
     }
 
     /// Check the existing execution policy without storing inputs or starting guests.
@@ -220,7 +251,7 @@ impl VmmExecutor {
     }
 
     fn validate_execution_mode(&self) -> Result<()> {
-        if !self.counter.qualified() && !self.allow_unqualified {
+        if self.counted() && !self.counter.qualified() && !self.allow_unqualified {
             return Err(Error::Setup(format!(
                 "{} is unqualified; explicitly allow unqualified CPU execution",
                 self.counter.name()
@@ -236,8 +267,6 @@ impl VmmExecutor {
             crate::admission::validate_observation(observation)?;
         }
         Ok(DoctorReport {
-            policy_version: self.profile.semantic_parameters["host_policy"].clone(),
-            policy_fingerprint: self.profile.semantic_parameters["host_policy_fingerprint"].clone(),
             cpu: probe
                 .cpu
                 .ok_or_else(|| Error::Execution("host probe did not select a CPU".into()))?,
@@ -254,11 +283,6 @@ impl VmmExecutor {
                 .cloned(),
             kernel,
             observations: probe.observations,
-            engine_qualification: self
-                .profile
-                .semantic_parameters
-                .get(crate::admission::ENGINE_QUALIFICATION)
-                .cloned(),
         })
     }
 
@@ -331,6 +355,25 @@ impl VmmExecutor {
         }
     }
 
+    /// Bind a runtime checkpoint and its branch seed into retained semantics.
+    pub fn with_checkpoint(mut self, at_ns: u64, branch_seed: u64) -> Self {
+        self.profile
+            .semantic_parameters
+            .insert("checkpoint_at_ns".into(), at_ns.to_string());
+        self.profile
+            .semantic_parameters
+            .insert("checkpoint_branch_seed".into(), branch_seed.to_string());
+        self
+    }
+
+    /// Reconstruct checkpoint settings from retained inputs during replay.
+    pub fn with_recorded_checkpoint(self, profile: &ExecutionProfile) -> Result<Self> {
+        Ok(match recorded_checkpoint(profile)? {
+            Some((at, seed)) => self.with_checkpoint(at, seed),
+            None => self,
+        })
+    }
+
     /// Seeded survival of the latest unflushed 512-byte sectors on crash.
     /// Off is represented by omission to preserve existing profile bytes.
     pub fn with_torn_writes(mut self, enabled: bool) -> Self {
@@ -371,6 +414,29 @@ impl VmmExecutor {
         self.performance
             .insert("SEEDBOX_UNDO".into(), branches.to_string());
         Ok(self)
+    }
+}
+
+/// Checkpoints are optional, but partial or malformed retained settings fail closed.
+pub fn recorded_checkpoint(profile: &ExecutionProfile) -> Result<Option<(u64, u64)>> {
+    let parameters = &profile.semantic_parameters;
+    match (
+        parameters.get("checkpoint_at_ns"),
+        parameters.get("checkpoint_branch_seed"),
+    ) {
+        (None, None) => Ok(None),
+        (Some(at), Some(seed)) => {
+            let invalid = || Error::Integrity("invalid checkpoint semantic parameters".into());
+            let t: u64 = at.parse().map_err(|_| invalid())?;
+            let b: u64 = seed.parse().map_err(|_| invalid())?;
+            if at != &t.to_string() || seed != &b.to_string() {
+                return Err(invalid());
+            }
+            Ok(Some((t, b)))
+        }
+        _ => Err(Error::Integrity(
+            "incomplete checkpoint semantic parameters".into(),
+        )),
     }
 }
 
@@ -432,8 +498,12 @@ pub fn recorded_counter(profile: &ExecutionProfile) -> Result<CounterProfile> {
 
 impl VmmExecutor {
     fn preflight_capacity(&self, workers: u32, output: Option<&Path>) -> Result<()> {
+        recorded_checkpoint(&self.profile)?;
         crate::admission::validate_profile(&self.profile)?;
         self.validate_execution_mode()?;
+        if !self.counted() {
+            return self.uncounted_preflight(workers);
+        }
         if !self.counter.qualified() {
             if workers == 1 {
                 return self.unqualified_preflight(output);
@@ -484,6 +554,25 @@ impl VmmExecutor {
             Ok(())
         })
     }
+
+    /// PV needs only KVM and free cores: no perf event or workaround MSR is opened.
+    fn uncounted_preflight(&self, workers: u32) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            with_capacity(
+                workers,
+                || crate::host::CpuReservation::acquire(self.cpu),
+                |_| Ok(()),
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = workers;
+            Err(Error::Setup(
+                "PV execution requires a Linux KVM host".into(),
+            ))
+        }
+    }
 }
 
 /// Keep the entire capacity reserved during admission, then release it before
@@ -527,7 +616,32 @@ pub(crate) fn engine_command(
     if timebase != Timebase::Counter {
         command.arg("--timebase").arg(timebase.name());
     }
+    if recorded_page_timer(profile) {
+        command.arg("--page-timer");
+    }
+    if recorded_deferred_tx(profile)? {
+        command.arg("--deferred-tx");
+    }
     Ok(command)
+}
+
+/// Missing page timer means the legacy port transport.
+pub fn recorded_page_timer(profile: &ExecutionProfile) -> bool {
+    profile
+        .semantic_parameters
+        .get("page_timer")
+        .is_some_and(|v| v == "true")
+}
+
+/// Older engines and profiles service TX without deferring kicks.
+pub fn recorded_deferred_tx(profile: &ExecutionProfile) -> Result<bool> {
+    match profile.semantic_parameters.get("deferred_tx").map(String::as_str) {
+        None => Ok(false),
+        Some("true") => Ok(true),
+        Some(value) => Err(Error::Integrity(format!(
+            "recorded --deferred-tx {value}: expected true or an absent parameter; use a run recorded with a supported TX mode"
+        ))),
+    }
 }
 
 /// Missing timebase means counter, including records from older engines.
@@ -562,7 +676,7 @@ impl ExecutionBackend for VmmExecutor {
     fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {
         crate::admission::validate_profile(&inputs.profile)?;
         self.validate_execution_mode()?;
-        if recorded_counter(&inputs.profile)? != self.counter {
+        if self.counted() && recorded_counter(&inputs.profile)? != self.counter {
             return Err(Error::Integrity(
                 "recorded branch counter differs from executor".into(),
             ));
@@ -698,7 +812,48 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
             None => json!({"sector_bytes": 512, "survival_probability": 0.5}),
         };
     }
+    if let Some(checkpoint) = checkpoint_metadata(request, &world)? {
+        world["checkpoint"] = checkpoint;
+    }
     Ok(world)
+}
+
+fn checkpoint_metadata(request: &ExecutionRequest<'_>, world: &Value) -> Result<Option<Value>> {
+    let Some((at, seed)) = recorded_checkpoint(&request.prepared.profile)? else {
+        return Ok(None);
+    };
+    if at >= request.limits.simulated_time_ns {
+        return Err(Error::Execution(
+            "checkpoint time must be before the simulated time limit".into(),
+        ));
+    }
+    let parent = checkpoint::parent_identity(
+        world,
+        request.seed,
+        request.prepared.profile.engine.hex(),
+        &checkpoint::identity_timebase(
+            recorded_timebase(&request.prepared.profile)?.name(),
+            recorded_deferred_tx(&request.prepared.profile)?,
+        ),
+        recorded_page_timer(&request.prepared.profile),
+        |path| {
+            request
+                .artifacts
+                .iter()
+                .find_map(|(digest, artifact)| {
+                    std::path::absolute(artifact)
+                        .ok()
+                        .filter(|p| p == Path::new(path))
+                        .map(|_| digest.hex().to_owned())
+                })
+                .ok_or_else(|| format!("checkpoint artifact {path} is not verified"))
+        },
+    )
+    .map_err(Error::Integrity)?;
+    Ok(Some(
+        json!({"at_ns":at,"branch_seed":seed,"parent_identity":parent,
+        "branch_identity":checkpoint::branch_identity(&parent,at,seed)}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -773,8 +928,12 @@ struct CrashedIncarnation {
 }
 #[derive(Deserialize)]
 pub(crate) struct VmmReport {
+    #[serde(default)]
+    checkpoint: Option<Value>,
     /// Older engines always used counter.
     timebase: Option<String>,
+    #[serde(default)]
+    deferred_tx: bool,
     pub(crate) report_version: u32,
     seed: u64,
     /// Absent from engines older than counter profiles, which are all Zen.
@@ -1365,6 +1524,19 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
     if raw.report_version != 1 || raw.seed != request.seed {
         return Err(Error::Integrity("VMM report version/seed mismatch".into()));
     }
+    let expected_checkpoint = if recorded_checkpoint(&request.prepared.profile)?.is_some() {
+        world(request)?.get("checkpoint").cloned()
+    } else {
+        None
+    };
+    if raw.checkpoint != expected_checkpoint {
+        return Err(Error::Integrity("VMM checkpoint identity mismatch".into()));
+    }
+    if raw.deferred_tx != recorded_deferred_tx(&request.prepared.profile)? {
+        return Err(Error::Integrity(
+            "VMM deferred_tx does not match recorded --deferred-tx".into(),
+        ));
+    }
     let timebase = recorded_timebase(&request.prepared.profile)?;
     let reported = raw.timebase.as_deref().unwrap_or("counter");
     if reported != timebase.name() {
@@ -1659,10 +1831,12 @@ mod linux {
         {
             return Err(Error::Execution("CPU exceeds affinity mask".into()));
         }
+        let timebase = recorded_timebase(&backend.profile)?;
         use crate::worker_process::{incomplete, WorkerLaunch};
         let mut launch = WorkerLaunch::prepare(&request)?;
         // Performance values are explicit; hidden process settings stay cleared.
         launch.command.envs(request.performance_parameters);
+
         if request.cancellation.is_cancelled() {
             return Ok(incomplete(
                 StopReason::Cancelled,
@@ -1674,7 +1848,9 @@ mod linux {
             .lock()
             .map_err(|_| Error::Execution("host admission evidence lock poisoned".into()))?
             .clone();
-        if backend.counter.qualified() {
+        let counted = timebase == Timebase::Counter;
+        let workaround = backend.counter.workaround().filter(|_| counted);
+        if counted && backend.counter.qualified() {
             fs::write(
                 request.output.join("host-static.json"),
                 serde_json::to_vec_pretty(&static_evidence)?,
@@ -1682,9 +1858,12 @@ mod linux {
         }
         let (cpu, mut lease) = HostLease::acquire_checked(
             backend.cpu,
-            backend.counter.workaround(),
+            workaround,
             request.output,
             |reservation| {
+                if !counted {
+                    return Ok(());
+                }
                 if !backend.counter.qualified() {
                     let check = crate::admission::check_unqualified(
                         reservation.cpus.iter().copied(),
@@ -1722,7 +1901,7 @@ mod linux {
             },
         )?;
         let originals = lease.original_registers();
-        if backend.counter.workaround().is_some() {
+        if workaround.is_some() {
             fs::write(
                 request.output.join("host-workaround.json"),
                 serde_json::to_vec_pretty(&lease.enabled_registers()?)?,
@@ -1746,7 +1925,7 @@ mod linux {
             report(bytes, &request)
         });
         lease.restore()?;
-        if backend.counter.workaround().is_some() {
+        if workaround.is_some() {
             fs::write(
                 request.output.join("host-restored.json"),
                 serde_json::to_vec_pretty(&originals)?,
@@ -1759,7 +1938,7 @@ mod linux {
 #[cfg(test)]
 mod doctor_tests {
     use super::*;
-    use crate::admission::{required_policy, CoreObservation, ENGINE, GUEST_KERNEL};
+    use crate::admission::{required_policy, CoreObservation};
 
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
     #[test]
@@ -1795,7 +1974,7 @@ mod doctor_tests {
         let executable = temporary.path().join("worker");
         std::fs::write(&executable, b"combined executable").unwrap();
         let store = ContentStore::new(temporary.path().join("objects"));
-        let kernel = ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap();
+        let kernel = ContentDigest::of(b"kernel");
         let executor = VmmExecutor::new_internal(
             &executable,
             &store,
@@ -1819,11 +1998,14 @@ mod doctor_tests {
             report.simulator_version.as_deref(),
             Some(crate::engine::SIMULATOR_VERSION)
         );
-        assert!(report.engine_qualification.is_none());
+        assert!(serde_json::to_value(report)
+            .unwrap()
+            .get("engine_qualification")
+            .is_none());
     }
 
     #[test]
-    fn replay_preserves_missing_proof_and_qualification_without_current_defaults() {
+    fn replay_preserves_historical_policy_data_without_current_defaults() {
         let temporary = tempfile::tempdir().unwrap();
         let executable = temporary.path().join("retained-worker");
         std::fs::write(&executable, b"retained executable").unwrap();
@@ -1840,7 +2022,7 @@ mod doctor_tests {
         profile.semantic_parameters.remove("host_policy");
         profile.semantic_parameters.insert(
             crate::admission::ENGINE_QUALIFICATION.into(),
-            crate::admission::DEV_UNPINNED.into(),
+            "dev-unpinned".into(),
         );
         let before = serde_json::to_vec(&profile).unwrap();
         let executor =
@@ -1848,14 +2030,59 @@ mod doctor_tests {
                 .unwrap()
                 .with_unqualified_cpu(true);
         assert_eq!(serde_json::to_vec(&executor.profile).unwrap(), before);
-        assert!(crate::admission::validate_profile(&executor.profile)
-            .unwrap_err()
-            .to_string()
-            .contains("host admission proof missing: host_policy"));
+        crate::admission::validate_profile(&executor.profile).unwrap();
         assert_eq!(
             crate::engine::recorded_launch(&executor.profile).unwrap(),
             crate::engine::ExecutableKind::Standalone
         );
+    }
+
+    #[test]
+    fn retained_worker_launch_preserves_timer_and_deferred_tx_options() {
+        let executor = VmmExecutor::from_engine_digest(
+            ContentDigest::of(b"engine"),
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap()
+        .with_timebase(Timebase::Pv)
+        .with_page_timer(true)
+        .with_deferred_tx(true);
+        for internal in [false, true] {
+            let mut profile = executor.profile.clone();
+            if internal {
+                profile.semantic_parameters.extend(BTreeMap::from([
+                    (
+                        "engine_executable_kind".into(),
+                        crate::engine::INTERNAL_WORKER_V1.into(),
+                    ),
+                    (
+                        "simulator_version".into(),
+                        crate::engine::SIMULATOR_VERSION.into(),
+                    ),
+                    ("host_os".into(), "linux".into()),
+                    ("host_arch".into(), "x86_64".into()),
+                    ("guest_arch".into(), "x86_64".into()),
+                    ("engine_backend".into(), "kvm".into()),
+                    ("engine_timebase".into(), "counter-pv-v1".into()),
+                ]));
+            }
+            let retained: ExecutionProfile =
+                serde_json::from_slice(&serde_json::to_vec(&profile).unwrap()).unwrap();
+            let command = engine_command(Path::new("retained-engine"), &retained).unwrap();
+            let mut expected = Vec::new();
+            if internal {
+                expected.extend(["__engine", crate::engine::INTERNAL_WORKER_V1]);
+            }
+            expected.extend(["--timebase", "pv", "--page-timer", "--deferred-tx"]);
+            assert_eq!(command.get_args().collect::<Vec<_>>(), expected);
+            profile
+                .semantic_parameters
+                .insert("deferred_tx".into(), "false".into());
+            assert!(engine_command(Path::new("retained-engine"), &profile).is_err());
+        }
     }
 
     #[test]
@@ -2112,7 +2339,7 @@ mod doctor_tests {
     #[test]
     fn parallel_preflight_preserves_the_experimental_admission_gate() {
         let pinned = VmmExecutor::from_engine_digest(
-            ContentDigest::try_from(ENGINE.to_owned()).unwrap(),
+            ContentDigest::of(b"engine"),
             None,
             512,
             WitnessMode::Exits,
@@ -2142,15 +2369,15 @@ mod doctor_tests {
     }
 
     fn observed(cpu: u32) -> CoreObservation {
-        let p = required_policy().unwrap();
+        let p = required_policy();
         CoreObservation {
             cpu,
             architecture: p.architecture,
             vendor: p.vendor,
-            family: p.family,
-            model: p.model,
-            stepping: p.stepping,
-            microcode: p.microcode,
+            family: 25,
+            model: 33,
+            stepping: 0,
+            microcode: 0,
             kvm_api: p.kvm_api,
             immediate_exit: p.immediate_exit,
             guest_debug: p.guest_debug,
@@ -2159,18 +2386,51 @@ mod doctor_tests {
             perf_disabled_open: true,
             perf_error: None,
             workaround_msr: 17,
-            raw_cpuid: p.effective_cpuid,
+            raw_cpuid: Vec::new(),
         }
     }
     #[test]
+    fn replay_reconstructs_checkpoint_profile_without_performance_changes() {
+        let ordinary = VmmExecutor::from_engine_digest(
+            ContentDigest::of(b"engine"),
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap();
+        let branch = ordinary.clone().with_checkpoint(500, 42);
+        assert_eq!(
+            branch.performance_parameters(),
+            ordinary.performance_parameters()
+        );
+        assert_eq!(
+            ordinary
+                .clone()
+                .with_recorded_checkpoint(&branch.profile())
+                .unwrap()
+                .profile(),
+            branch.profile()
+        );
+        assert_eq!(
+            ordinary
+                .clone()
+                .with_recorded_checkpoint(&ordinary.profile())
+                .unwrap()
+                .profile(),
+            ordinary.profile()
+        );
+    }
+
+    #[test]
     fn any_engine_and_kernel_pair_is_admitted() {
-        let pinned_engine = ContentDigest::try_from(ENGINE.to_owned()).unwrap();
-        let pinned_kernel = ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap();
+        let pinned_engine = ContentDigest::of(b"engine");
+        let pinned_kernel = ContentDigest::of(b"kernel");
         for (engine, kernel) in [
             (pinned_engine, pinned_kernel),
             (
                 ContentDigest::of(b"dev engine"),
-                ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap(),
+                ContentDigest::of(b"kernel"),
             ),
             (
                 ContentDigest::of(b"dev engine"),
@@ -2203,14 +2463,16 @@ mod doctor_tests {
                 .semantic_parameters
                 .contains_key(crate::admission::ENGINE_QUALIFICATION));
             backend.validate_retained(&inputs).unwrap();
-            // Runs recorded before pins were removed carry the dev marker and still replay.
+            // Older runs carry a dev marker and policy bindings; both are only data now.
             let mut marked = inputs.clone();
-            marked.profile.semantic_parameters.insert(
-                crate::admission::ENGINE_QUALIFICATION.into(),
-                crate::admission::DEV_UNPINNED.into(),
-            );
+            for key in [crate::admission::ENGINE_QUALIFICATION, "host_policy"] {
+                marked
+                    .profile
+                    .semantic_parameters
+                    .insert(key.into(), "anything".into());
+            }
             backend.validate_retained(&marked).unwrap();
-            for key in ["host_policy", "guest_abi", "control_channel", "memory_mb"] {
+            for key in ["guest_abi", "control_channel", "memory_mb"] {
                 let mut wrong = inputs.clone();
                 wrong
                     .profile
@@ -2233,27 +2495,42 @@ mod doctor_tests {
             assert!(json.get("simulator_version").is_none());
             assert!(json.get("qualified").is_none());
         }
-        let mut forged = VmmExecutor::from_engine_digest(
-            ContentDigest::of(b"dev engine"),
+    }
+
+    #[test]
+    fn pv_carries_no_counter_profile_and_needs_no_counter_admission() {
+        let intel = VmmExecutor::from_engine_digest(
+            ContentDigest::of(b"engine"),
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::IntelIceLake,
+        )
+        .unwrap();
+        let pv = intel.clone().with_timebase(Timebase::Pv);
+        assert!(!pv.profile.semantic_parameters.contains_key(COUNTER));
+        assert_eq!(recorded_counter(&pv.profile).unwrap(), CounterProfile::Zen);
+        assert!(pv.validate_execution_mode().is_ok());
+        let zen_pv = VmmExecutor::from_engine_digest(
+            ContentDigest::of(b"engine"),
             None,
             512,
             WitnessMode::Exits,
             CounterProfile::Zen,
         )
         .unwrap()
-        .profile();
-        forged.semantic_parameters.insert(
-            crate::admission::ENGINE_QUALIFICATION.into(),
-            "qualified".into(),
-        );
-        assert!(crate::admission::validate_profile(&forged).is_err());
+        .with_timebase(Timebase::Pv);
+        assert_eq!(pv.profile, zen_pv.profile);
+        let counted = pv.with_timebase(Timebase::Counter);
+        assert_eq!(counted.profile, intel.profile);
+        assert!(counted.validate_execution_mode().is_err());
     }
 
     #[test]
     fn experimental_mode_never_carries_amd_proof_and_cannot_relax_release_or_counter_checks() {
         let make = |counter| {
             VmmExecutor::from_engine_digest(
-                ContentDigest::try_from(ENGINE.to_owned()).unwrap(),
+                ContentDigest::of(b"engine"),
                 None,
                 512,
                 WitnessMode::Exits,
@@ -2285,15 +2562,10 @@ mod doctor_tests {
         let mut wrong = experimental.profile.clone();
         wrong
             .semantic_parameters
-            .extend(crate::admission::bindings().unwrap());
-        assert!(crate::admission::validate_profile(&wrong).is_err());
-        wrong = experimental.profile.clone();
-        wrong
-            .semantic_parameters
             .insert("counter".into(), "unknown".into());
         assert!(crate::admission::validate_profile(&wrong).is_err());
         let inputs = PreparedInputs {
-            kernel: ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap(),
+            kernel: ContentDigest::of(b"kernel"),
             images: BTreeMap::new(),
             placement: BTreeMap::new(),
             guests: BTreeMap::new(),
@@ -2311,18 +2583,12 @@ mod doctor_tests {
             .with_unqualified_cpu(true)
             .validate_retained(&inputs)
             .is_err());
-        let zen = make(CounterProfile::Zen);
-        let mut stripped = zen.profile.clone();
-        stripped
-            .semantic_parameters
-            .retain(|key, _| !key.starts_with("host_policy"));
-        assert!(crate::admission::validate_profile(&stripped).is_err());
     }
 
     #[test]
     fn doctor_report_preserves_actual_selected_core_and_exact_admitted_observations() {
         let executor = VmmExecutor::from_engine_digest(
-            ContentDigest::try_from(ENGINE.to_owned()).unwrap(),
+            ContentDigest::of(b"engine"),
             None,
             1024,
             WitnessMode::Exits,
@@ -2332,7 +2598,7 @@ mod doctor_tests {
         let observations = vec![observed(2), observed(18)];
         let report = executor
             .doctor_report(
-                ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap(),
+                ContentDigest::of(b"kernel"),
                 AdmissionProbe {
                     cpu: Some(18),
                     observations: observations.clone(),
@@ -2354,7 +2620,7 @@ mod doctor_tests {
     #[test]
     fn no_doctor_success_report_on_probe_cleanup_error_or_capability_drift() {
         let executor = VmmExecutor::from_engine_digest(
-            ContentDigest::try_from(ENGINE.to_owned()).unwrap(),
+            ContentDigest::of(b"engine"),
             Some(2),
             1024,
             WitnessMode::Exits,
@@ -2367,7 +2633,7 @@ mod doctor_tests {
                 observation.perf_disabled_open = false;
             }
             if case == 2 {
-                observation.raw_cpuid[0].flags ^= 1;
+                observation.immediate_exit = 0;
             }
             let result = if case == 0 {
                 Err(Error::Execution(
@@ -2378,7 +2644,7 @@ mod doctor_tests {
             };
             assert!(executor
                 .doctor_report(
-                    ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap(),
+                    ContentDigest::of(b"kernel"),
                     AdmissionProbe {
                         cpu: Some(2),
                         observations: vec![observation],

@@ -18,12 +18,18 @@ impl WorldMachine for Machine {
     fn pause(&mut self)->Result<(),String> {Machine::pause(self)}
     fn resume(&mut self,at:u64)->Result<(),String> {Machine::resume(self,at)}
     fn boot_at(&mut self,at:u64)->Result<(),String> {Machine::boot_at(self,at)}
-    fn succeed(&mut self,old:&mut Self,at:u64,seed:u64)->Result<Option<u64>,String> {Machine::succeed(self,old,at,seed)}
+    fn succeed(&mut self,old:&mut Self,at:u64,seed:u64)->Result<Option<u64>,String> {Machine::succeed(self,old,at,seed,None)}
+    fn succeed_branch(&mut self,old:&mut Self,at:u64,seed:u64,identity:Option<&str>)->Result<Option<u64>,String> {Machine::succeed(self,old,at,seed,identity)}
+    fn crash_observations(&self)->serde_json::Value {serde_json::json!({"pio_total":self.stats.kvm_n[2],"net":self.net.as_ref().map(|n|n.report())})}
+    fn checkpoint_boundary(clock:&Self::Clock)->Result<(),String> {if let Clock::Pv(clock)=clock {clock.checkpoint_boundary()?;}Ok(())}
+    fn restore_boundary(clock:&mut Self::Clock)->Result<(),String> {if let Clock::Pv(clock)=clock {clock.restore_boundary()?;}Ok(())}
+    fn reseed_guest(&mut self,entropy:[u32;8])->Result<(),String> {self.reseed_time_page(entropy)}
     fn park(&mut self)->Result<(),String> {Machine::park(self)}
     fn wake(&mut self,at:u64)->Result<(),String> {Machine::wake(self,at);Ok(())}
     fn release(&mut self,at:u64,entropy:[u32;8])->Result<Reseed,String> {Machine::release(self,at,entropy)}
     fn abi(&self)->u64 {Machine::abi(self)}
     fn seed_timer(&mut self,seed:u64,domain:&str)->Result<(),String> {self.timer_rng=Some(Rng::new(seed,domain));Ok(())}
+    fn seed_timer_branch(&mut self,seed:u64,identity:Option<&str>,domain:&str)->Result<(),String> {self.timer_rng=Some(Rng::branch(seed,identity,domain));Ok(())}
     fn supports_speed_reseed(&self)->bool {true}
     fn seed_speed(&mut self,seed:u64,domain:&str)->Result<(),String> {self.syscall_ns=crate::machine::pv::syscall_ns(&mut Rng::new(seed,domain));Ok(())}
     fn branches(&self)->u64 {self.branches}

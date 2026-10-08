@@ -187,7 +187,14 @@ fn tx_chains_preserve_opaque_bytes_and_complete_each_available_head_once() {
     );
     assert_eq!(
         net.dirty,
-        vec![(0x304, 8), (0x302, 2), (0x30c, 8), (0x302, 2)]
+        vec![
+            (0x300, 2),
+            (0x304, 8),
+            (0x302, 2),
+            (0x30c, 8),
+            (0x302, 2),
+            (0x300, 2)
+        ]
     );
     // The returned frames own their bytes; subsequent guest writes cannot change them.
     memory[0x500..0x900].fill(0);
@@ -290,7 +297,10 @@ fn receive_drain_keeps_completed_prefix_and_failed_backlog_head() {
     assert_eq!(&memory[0x40c..0x411], b"first");
     assert_eq!(&memory[0x500..0x520], &[0; 32]);
     assert_eq!(&memory[0x302..0x304], &[1, 0]);
-    assert_eq!(net.dirty, vec![(0x400, 17), (0x304, 8), (0x302, 2)]);
+    assert_eq!(
+        net.dirty,
+        vec![(0x300, 2), (0x400, 17), (0x304, 8), (0x302, 2)]
+    );
     memory[0x118..0x11c].copy_from_slice(&128u32.to_le_bytes());
     assert!(net.write(&mut memory, 0x050, 0).unwrap().irq);
     assert_eq!(net.stats().rx_frames, 2);
@@ -318,7 +328,7 @@ fn transmit_late_error_preserves_completed_dma_and_retries_failed_head() {
     assert!(net.write(&mut memory, 0x050, 1).is_err());
     assert_eq!(net.stats().tx_frames, 1);
     assert_eq!(net.read(0x060), 0);
-    assert_eq!(net.dirty, vec![(0x304, 8), (0x302, 2)]);
+    assert_eq!(net.dirty, vec![(0x300, 2), (0x304, 8), (0x302, 2)]);
     memory[0x11c..0x11e].fill(0);
     let output = net.write(&mut memory, 0x050, 1).unwrap();
     assert_eq!(output.frames, vec![vec![0; 2]]);

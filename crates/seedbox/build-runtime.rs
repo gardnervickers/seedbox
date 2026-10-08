@@ -80,6 +80,10 @@ fn main() {
     println!("cargo::rerun-if-env-changed=SEEDBOX_STATIC_CC");
     println!(
         "cargo::rerun-if-changed={}",
+        source.with_file_name("environment.h").display()
+    );
+    println!(
+        "cargo::rerun-if-changed={}",
         source.with_file_name("io.h").display()
     );
     println!(

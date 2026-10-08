@@ -52,11 +52,13 @@ edit(
     "\t\t\t:: \"ecx\");\n\n\treturn EAX_EDX_VAL(val, low, high);\n}\n#endif\n",
 )
 
+# Ahead of the UMIP fixup, which would fetch and fully decode every trapped
+# RDTSC looking for SGDT/SIDT/SMSW before giving up.
 edit(
     "arch/x86/kernel/traps.c",
-    "\tif (user_mode(regs)) {\n\t\tif (fixup_iopl_exception(regs))\n",
-    "\tif (user_mode(regs)) {\n\t\tif (seedbox_emulate_user_tsc(regs))\n\t\t\tgoto exit;\n\n"
-    "\t\tif (fixup_iopl_exception(regs))\n",
+    "\tcond_local_irq_enable(regs);\n\n\tif (static_cpu_has(X86_FEATURE_UMIP)) {\n",
+    "\tcond_local_irq_enable(regs);\n\n\tif (user_mode(regs) && seedbox_emulate_user_tsc(regs))\n\t\tgoto exit;\n\n"
+    "\tif (static_cpu_has(X86_FEATURE_UMIP)) {\n",
 )
 edit("arch/x86/kernel/traps.c", "#include <asm/traps.h>\n", "#include <asm/traps.h>\n#include <asm/seedbox.h>\n")
 
@@ -109,14 +111,42 @@ edit(
 )
 edit("arch/x86/kernel/i8259.c", "#include <asm/i8259.h>\n", "#include <asm/i8259.h>\n#include <asm/seedbox.h>\n")
 
-# Arm the oneshot timer with one port write instead of two.
+# Arm the oneshot timer through the time page, with the port fallback.
 edit(
     "drivers/clocksource/i8253.c",
     "\traw_spin_lock(&i8253_lock);\n\toutb_p(delta & 0xff , PIT_CH0);\t/* LSB */\n\toutb_p(delta >> 8 , PIT_CH0);\t\t/* MSB */\n",
-    "\traw_spin_lock(&i8253_lock);\n\tif (seedbox_page) {\n\t\toutl(delta, SEEDBOX_PORT_TIMER);\n\t} else {\n"
+    "\traw_spin_lock(&i8253_lock);\n\tif (seedbox_set_next_event(delta)) {\n\t\t/* No exit: picked up at the next deterministic stop. */\n\t} else if (seedbox_page) {\n\t\toutl(delta, SEEDBOX_PORT_TIMER);\n\t} else {\n"
     "\t\toutb_p(delta & 0xff , PIT_CH0);\t/* LSB */\n\t\toutb_p(delta >> 8 , PIT_CH0);\t/* MSB */\n\t}\n",
 )
 edit("drivers/clocksource/i8253.c", "#include <linux/i8253.h>\n", "#include <linux/i8253.h>\n#include <asm/seedbox.h>\n")
+# Keep mode changes on the PIT path, and clear any pending page arm too.
+edit(
+    "drivers/clocksource/i8253.c",
+    "\tguard(raw_spinlock_irqsave)(&i8253_lock);\n",
+    "\tguard(raw_spinlock_irqsave)(&i8253_lock);\n\tseedbox_timer_disarm();\n",
+)
+edit(
+    "drivers/clocksource/i8253.c",
+    "static int pit_shutdown(struct clock_event_device *evt)\n{\n",
+    "static int pit_shutdown(struct clock_event_device *evt)\n{\n\tseedbox_timer_disarm();\n",
+)
+edit(
+    "drivers/clocksource/i8253.c",
+    "static int pit_set_oneshot(struct clock_event_device *evt)\n{\n",
+    "static int seedbox_pit_oneshot_stopped(struct clock_event_device *evt)\n{\n"
+    "\tseedbox_timer_disarm();\n\treturn 0;\n}\n\n"
+    "static int pit_set_oneshot(struct clock_event_device *evt)\n{\n"
+    "\tif (seedbox_page && (READ_ONCE(seedbox_page->capabilities) & SEEDBOX_CAP_PAGE_TIMER))\n"
+    "\t\treturn 0;\n",
+)
+edit(
+    "drivers/clocksource/i8253.c",
+    "\ti8253_clockevent.cpumask = cpumask_of(smp_processor_id());\n",
+    "\ti8253_clockevent.cpumask = cpumask_of(smp_processor_id());\n"
+    "\tif (seedbox_page && (READ_ONCE(seedbox_page->capabilities) & SEEDBOX_CAP_PAGE_TIMER))\n"
+    "\t\ti8253_clockevent.set_state_oneshot_stopped = seedbox_pit_oneshot_stopped;\n",
+)
+
 
 # Only the network device uses the shared-page ISR fast path. Other virtio
 # devices have independent interrupt status registers.

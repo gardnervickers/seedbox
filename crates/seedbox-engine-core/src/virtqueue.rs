@@ -127,18 +127,22 @@ fn rd64(m: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(m[at..at + 8].try_into().expect("validated DMA"))
 }
 
+/// Virtio split-ring event threshold, including u16 index wrap.
+pub fn need_event(event: u16, new: u16, old: u16) -> bool {
+    new.wrapping_sub(event).wrapping_sub(1) < new.wrapping_sub(old)
+}
+
 impl Queue {
-    /// Validate the complete rings and chain before any guest or device mutation.
-    pub fn validated_chain(
+    // Includes both event-index words, even when the feature is not negotiated.
+    fn rings(
         &self,
         memory: &[u8],
         base: u64,
-        policy: Policy,
-    ) -> Result<Option<Chain>, String> {
+        d: Diagnostics,
+    ) -> Result<Option<(usize, usize, usize)>, String> {
         if !self.ready {
             return Ok(None);
         }
-        let d = policy.diagnostics;
         if self.num == 0 || self.num > 256 || !self.num.is_power_of_two() {
             return Err(d.error(Invalid::Size));
         }
@@ -148,10 +152,91 @@ impl Queue {
         let desc = span(memory, base, self.desc, self.num as usize * 16, d)?;
         let avail = span(memory, base, self.avail, 6 + self.num as usize * 2, d)?;
         let used = span(memory, base, self.used, 6 + self.num as usize * 8, d)?;
-        let pending = rd16(memory, avail + 2).wrapping_sub(self.last_avail);
-        if pending > self.num {
+        if rd16(memory, avail + 2).wrapping_sub(self.last_avail) > self.num {
             return Err(d.error(Invalid::Overrun));
         }
+        Ok(Some((desc, avail, used)))
+    }
+    pub fn pending(&self, memory: &[u8], base: u64) -> Result<bool, String> {
+        Ok(self
+            .rings(memory, base, Diagnostics::Virtio)?
+            .is_some_and(|(_, avail, _)| rd16(memory, avail + 2) != self.last_avail))
+    }
+    pub fn interrupt(
+        &self,
+        memory: &[u8],
+        base: u64,
+        event_idx: bool,
+        old_used: u16,
+    ) -> Result<bool, String> {
+        let Some((_, avail, _)) = self.rings(memory, base, Diagnostics::Virtio)? else {
+            return Ok(false);
+        };
+        Ok(if event_idx {
+            need_event(
+                rd16(memory, avail + 4 + 2 * self.num as usize),
+                self.used_idx,
+                old_used,
+            )
+        } else {
+            rd16(memory, avail) & 1 == 0
+        })
+    }
+    pub fn suppress_notify(
+        &self,
+        memory: &mut [u8],
+        base: u64,
+        suppress: bool,
+        mut dirty: impl FnMut(usize, usize),
+    ) -> Result<(), String> {
+        let Some((_, _, used)) = self.rings(memory, base, Diagnostics::Virtio)? else {
+            return Ok(());
+        };
+        let flags = rd16(memory, used);
+        let next = if suppress { flags | 1 } else { flags & !1 };
+        if flags != next {
+            memory[used..used + 2].copy_from_slice(&next.to_le_bytes());
+            dirty(used, 2);
+        }
+        Ok(())
+    }
+    pub fn arm_notify(
+        &self,
+        memory: &mut [u8],
+        base: u64,
+        event_idx: bool,
+        deferred: bool,
+        mut dirty: impl FnMut(usize, usize),
+    ) -> Result<bool, String> {
+        let Some((_, _, used)) = self.rings(memory, base, Diagnostics::Virtio)? else {
+            return Ok(false);
+        };
+        if event_idx {
+            let at = used + 4 + 8 * self.num as usize;
+            let event = self
+                .last_avail
+                .wrapping_add(if deferred { self.num } else { 0 });
+            if rd16(memory, at) != event {
+                memory[at..at + 2].copy_from_slice(&event.to_le_bytes());
+                dirty(at, 2);
+            }
+        } else {
+            self.suppress_notify(memory, base, deferred, &mut dirty)?;
+        }
+        self.pending(memory, base)
+    }
+    /// Validate the complete rings and chain before any guest or device mutation.
+    pub fn validated_chain(
+        &self,
+        memory: &[u8],
+        base: u64,
+        policy: Policy,
+    ) -> Result<Option<Chain>, String> {
+        let Some((desc, avail, used)) = self.rings(memory, base, policy.diagnostics)? else {
+            return Ok(None);
+        };
+        let d = policy.diagnostics;
+        let pending = rd16(memory, avail + 2).wrapping_sub(self.last_avail);
         if pending == 0 {
             return Ok(None);
         }

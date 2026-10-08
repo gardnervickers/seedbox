@@ -11,7 +11,7 @@ use crate::timebase::{Judge, Prepared, Run, Timebase, Verdict};
 impl Timebase for Counter {
     const BRANCHES: bool = true;
 
-    fn prepare(&mut self, m: &mut Machine, remaining: u64, _soft: u64) -> Result<Prepared, String> {
+    fn prepare(&mut self, m: &mut Machine, remaining: u64, _soft: u64, _legal: bool) -> Result<Prepared, String> {
         let undo = m.undo.is_some();
         let threshold = if undo { m.fm } else { m.margin };
         if remaining > threshold {

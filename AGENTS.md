@@ -78,8 +78,7 @@ and queue processing; adapters supply GPA base, dirty callbacks and event projec
 Preserve partial-error mutation and IRQ timing documented in `docs/virtio-console.md`.
 The shared block model owns request decoding, disk effects and DMA, with descriptor
 profiles and partial-error semantics in `docs/virtio-block.md`. Use explicit disk
-and statistics accessors in platform callers. KVM net and the network model remain
-in adapters until their separately reviewed move.
+and statistics accessors in platform callers.
 The shared network model owns packet DMA, backlogs and counters; preserve the
 profile-specific admission, partial-error and IRQ order in `docs/virtio-network.md`.
 The core PV progress engine owns watchdog policy and cycle proof; architecture
@@ -161,7 +160,7 @@ Run these before committing:
 cargo fmt -p seedbox --check
 cargo clippy -p seedbox --all-targets --locked -- -D warnings
 cargo test --workspace --locked
-cargo test-vmm                       # Linux only
+cargo test-vmm --features kvm-tests  # Linux; the feature needs /dev/kvm
 bash harness/acceptance.sh portable
 ```
 
@@ -219,8 +218,7 @@ deliberately change one.
    (image pulls, builds, CPU leases). Fail fast. `run` and `explore` check immutable runtime
    inputs and backend host admission before
    preparation; no transient perf descriptor, affinity or CPU reservation survives
-   that check. Replay validates retained host-policy proof before live admission,
-   so old/missing proof is a retained NOT_COMPARABLE rejection before execution.
+   that check.
 5. Add it to the defaults table in README.md's quick start.
 
 ### Help text

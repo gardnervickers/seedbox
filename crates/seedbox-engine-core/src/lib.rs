@@ -34,3 +34,4 @@ pub mod pv_progress;
 #[allow(clippy::drain_collect)] // Preserve reference delivery collection during extraction.
 pub mod world;
 pub mod world_events;
+pub mod checkpoint;

@@ -61,15 +61,6 @@ class SmokeTests(unittest.TestCase):
                 self.assertEqual(read.call_count, 1)
                 affinity.assert_not_called()
 
-    def test_new_runs_carry_no_qualification_marker(self):
-        smoke.verify_qualification(self.record)
-        self.record['report']['engine_qualification'] = 'dev-unpinned'
-        with self.assertRaisesRegex(RuntimeError, 'run report'):
-            smoke.verify_qualification(self.record)
-        self.record['identity']['inputs']['profile']['semantic_parameters'] = {'engine_qualification': 'dev-unpinned'}
-        with self.assertRaisesRegex(RuntimeError, 'new run'):
-            smoke.verify_qualification(self.record)
-
     def exercise_success(self, performance):
         args = type('Args', (), dict(kernel='kernel', engine='engine', guest_init='init',
             busybox='busybox', cpu=8, cli='cli', tool_path='', perf_replay=performance))()

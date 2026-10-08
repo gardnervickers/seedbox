@@ -14,7 +14,6 @@ services:
       - --initial-cluster-state=new
       - --logger=zap
       - --log-level=error
-    environment: {GOMAXPROCS: "4"}
     volumes: [n1data:/data]
   client:
     build: {context: ../../../examples/etcd/workload, dockerfile: acceptance.Dockerfile}

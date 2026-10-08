@@ -226,6 +226,11 @@ impl Orchestrator {
         if baseline.identity.inputs.profile.backend == "seedbox-kvm" {
             let recorded = crate::vmm::recorded_timebase(&baseline.identity.inputs.profile)?;
             let requested = crate::vmm::recorded_timebase(&executor.profile())?;
+            if crate::vmm::recorded_deferred_tx(&baseline.identity.inputs.profile)?
+                != crate::vmm::recorded_deferred_tx(&executor.profile())?
+            {
+                return Err(Error::Integrity("executor TX mode does not match the recorded --deferred-tx; use an executor with the recorded TX mode".into()));
+            }
             if recorded != requested {
                 return Err(Error::Integrity(format!(
                     "executor timebase {} does not match the recorded --timebase {}; use an executor with the recorded timebase",
@@ -234,9 +239,7 @@ impl Orchestrator {
             }
         }
         let mut identity = baseline.identity.clone();
-        // Development replay always compares the exact retained artifact pair.
-        if options.allow_engine_change && !crate::admission::is_dev_engine(&identity.inputs.profile)
-        {
+        if options.allow_engine_change {
             identity.inputs.profile.engine = executor.profile().engine;
         }
         let mut run = self.execute(

@@ -83,6 +83,22 @@ impl Transport {
         }
     }
 
+    pub fn negotiated(&self, word: usize, feature: u32) -> bool {
+        self.status & FEATURES_OK != 0
+            && self
+                .spec
+                .features
+                .get(word)
+                .is_some_and(|bits| bits & feature != 0)
+            && self
+                .features
+                .get(word)
+                .is_some_and(|bits| bits & feature != 0)
+    }
+    pub fn selected_queue(&self) -> usize {
+        (self.queue_sel as usize).min(self.queues.len() - 1)
+    }
+
     /// Configuration-space reads are handled by the device adapter.
     pub fn read(&self, offset: u64) -> u32 {
         match offset {
@@ -183,7 +199,7 @@ impl Transport {
             0x50 => {
                 match self.policy {
                     Policy::Application if value as usize >= self.queues.len() => {
-                        return Err("virtio notification queue out of range".into())
+                        return Err("virtio notification queue out of range".into());
                     }
                     Policy::Console => {
                         if value as usize >= self.queues.len() {

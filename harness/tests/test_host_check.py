@@ -279,7 +279,7 @@ class DispatchTests(unittest.TestCase):
                 names = [name for name, cmd in calls]
                 self.assertEqual(names, ['worktree', 'build'] + ([] if stored else ['vmm-build']) +
                                  ['vmm-test', 'guest-init', 'doctor-cpu2'])
-                self.assertIn(['nice', 'cargo', 'test-vmm'], [cmd for name, cmd in calls])
+                self.assertIn(['nice', 'cargo', 'test-vmm', '--features', 'kvm-tests'], [cmd for name, cmd in calls])
 
     def test_portable_or_vmm_test_failure_prevents_guest_dispatch(self):
         for skip, name in ((False, 'fmt'), (False, 'clippy'), (False, 'suite'), (True, 'vmm-test')):

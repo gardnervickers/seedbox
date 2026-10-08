@@ -178,5 +178,8 @@ fn scatter_receive_checks_entire_chain_before_writing() {
 #[test]
 fn serialized_queue_keeps_the_retained_arm_field_names_and_order() {
     let (q, _) = fixture(0);
-    assert_eq!(serde_json::to_string(&q).unwrap(), "{\"num\":8,\"ready\":true,\"desc\":0,\"avail\":4096,\"used\":4352,\"last_avail\":0,\"used_idx\":0}");
+    assert_eq!(
+        serde_json::to_string(&q).unwrap(),
+        "{\"num\":8,\"ready\":true,\"desc\":0,\"avail\":4096,\"used\":4352,\"last_avail\":0,\"used_idx\":0}"
+    );
 }

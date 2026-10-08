@@ -141,6 +141,10 @@ impl Links {
         Self::new(seed, names, global, baselines)
     }
     pub fn reseed(&mut self, seed: u64, names: &[String]) {
+        self.reseed_branch(seed, None, names);
+    }
+    /// Preserve sampled arrivals, baselines and layers; only future draws change.
+    pub fn reseed_branch(&mut self, seed: u64, identity: Option<&str>, names: &[String]) {
         self.loss.clear();
         self.jitter.clear();
         for a in 0..names.len() {
@@ -148,15 +152,20 @@ impl Links {
                 if a != b {
                     self.loss.insert(
                         (a, b),
-                        Rng::new(seed, &format!("link-loss/{}/{}", names[a], names[b])),
+                        Rng::branch(seed, identity, &format!("link-loss/{}/{}", names[a], names[b])),
                     );
                     self.jitter.insert(
                         (a, b),
-                        Rng::new(seed, &format!("link/{}/{}", names[a], names[b])),
+                        Rng::branch(seed, identity, &format!("link/{}/{}", names[a], names[b])),
                     );
                 }
             }
         }
+    }
+    /// Advance both named streams for deterministic diagnostics and acceptance.
+    #[doc(hidden)]
+    pub fn stream_sample(&mut self, pair: Pair) -> (u64,u64) {
+        (self.loss.get_mut(&pair).unwrap().next(),self.jitter.get_mut(&pair).unwrap().next())
     }
     /// The run has baseline overrides or has applied a shape layer.
     pub fn in_use(&self) -> bool {

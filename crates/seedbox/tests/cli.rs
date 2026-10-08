@@ -752,7 +752,7 @@ fn build_epoch_custom_builder_fails_before_runtime_resolution_or_state_creation(
 }
 
 #[test]
-fn old_host_proof_replay_is_not_comparable_while_inspection_and_transfer_stay_available() {
+fn old_records_stay_inspectable_and_transferable() {
     use seedbox::{
         config,
         execution::*,
@@ -833,22 +833,6 @@ fn old_host_proof_replay_is_not_comparable_while_inspection_and_transfer_stay_av
     fs::create_dir_all(root.join("state/runs/old")).unwrap();
     let manifest = serde_json::to_vec(&serde_json::json!({"sha256": ContentDigest::of(&serde_json::to_vec(&record).unwrap()), "record": record})).unwrap();
     fs::write(root.join("state/runs/old/manifest.json"), &manifest).unwrap();
-    for override_engine in [false, true] {
-        let mut args = vec!["replay", "state/runs/old", "--state", "state"];
-        if override_engine {
-            args.push("--allow-engine-change");
-        }
-        let output = seedbox(&args, root);
-        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.starts_with("ERROR: "), "{stdout}");
-        assert!(stdout.contains("replay: NOT_COMPARABLE"), "{stdout}");
-        assert_eq!(stderr(&output), "input integrity: host admission proof missing: host_policy; use the retained previous CLI only for historical evidence\n");
-        assert_eq!(
-            fs::read(root.join("state/runs/old/manifest.json")).unwrap(),
-            manifest
-        );
-    }
     assert!(seedbox(&["inspect", "state/runs/old", "--json"], root)
         .status
         .success());
@@ -870,85 +854,6 @@ fn old_host_proof_replay_is_not_comparable_while_inspection_and_transfer_stay_av
         fs::read(root.join("state/runs/old/manifest.json")).unwrap(),
         manifest
     );
-}
-
-#[test]
-fn engine52eb_v2_replay_retains_not_comparable_without_host_execution() {
-    use seedbox::{admission, orchestration::*, store::ContentDigest};
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path();
-    let mut previous = admission::required_policy().unwrap();
-    previous.version = "amd-zen3-engine52eb-v2".into();
-    previous.engine = "52eb41490f521a0104ea4ab06297cbdbdd7bc9a68261febf6c5cc19854bacdcf".into();
-    previous.guest_kernel =
-        "e8ece7cba2d5fc4924da83e39cc672ae2516c117f8f76ecfa04aeaa98e697847".into();
-    let fields = serde_json::to_string(&previous).unwrap();
-    let fixture: serde_json::Value =
-        serde_json::from_slice(include_bytes!("fixtures/formats/demo41-fail-v2.json")).unwrap();
-    let mut record: RunRecord = serde_json::from_value(fixture["record"].clone()).unwrap();
-    let inputs = &mut record.identity.inputs;
-    inputs.kernel = ContentDigest::try_from(previous.guest_kernel.clone()).unwrap();
-    inputs.profile.engine = ContentDigest::try_from(previous.engine.clone()).unwrap();
-    inputs.profile.semantic_parameters.extend([
-        ("host_policy".into(), previous.version),
-        (
-            "host_policy_fingerprint".into(),
-            ContentDigest::of(fields.as_bytes()).hex().into(),
-        ),
-        ("host_policy_fields".into(), fields),
-    ]);
-    record.run_id = ContentDigest::of(&serde_json::to_vec(&record.identity).unwrap());
-    let manifest = serde_json::to_vec(&serde_json::json!({
-        "sha256": ContentDigest::of(&serde_json::to_vec(&record).unwrap()),
-        "record": record,
-    }))
-    .unwrap();
-    fs::create_dir(root.join("old")).unwrap();
-    fs::write(root.join("old/manifest.json"), &manifest).unwrap();
-    fs::write(root.join("unused-engine"), b"never execute").unwrap();
-    for allow_dev_engine in [false, true] {
-        let mut args = vec![
-            "replay",
-            "old",
-            "--state",
-            "state",
-            "--vmm",
-            "unused-engine",
-            "--allow-engine-change",
-        ];
-        if allow_dev_engine {
-            args.push("--allow-dev-engine");
-        }
-        let output = seedbox(&args, root);
-        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.starts_with("ERROR: "),
-            "{stdout}; {}",
-            stderr(&output)
-        );
-        let attempt = stdout
-            .lines()
-            .next()
-            .unwrap()
-            .strip_prefix("ERROR: ")
-            .unwrap();
-        assert!(stdout.contains("replay: NOT_COMPARABLE"), "{stdout}");
-        assert_eq!(
-            stderr(&output),
-            "input integrity: host admission proof incompatible: host_policy\n"
-        );
-        let rejected = inspect(&root.join(attempt)).unwrap();
-        assert_eq!(rejected.outcome, Outcome::Error);
-        assert_eq!(rejected.replay.unwrap().status, ReplayStatus::NotComparable);
-        assert_eq!(
-            rejected.error.as_deref(),
-            Some("input integrity: host admission proof incompatible: host_policy")
-        );
-        assert!(!root.join(attempt).join("output").exists());
-        assert!(!root.join(attempt).join("inputs").exists());
-        assert_eq!(fs::read(root.join("old/manifest.json")).unwrap(), manifest);
-    }
 }
 
 #[test]
@@ -1768,6 +1673,151 @@ mod timed_logs {
     }
 }
 
+#[allow(dead_code)]
+#[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/log_index.rs"]
+mod checkpoint_log_producer;
+#[allow(dead_code)]
+#[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/output_layout.rs"]
+mod checkpoint_layout;
+
+#[allow(dead_code)]
+mod checkpoint_evidence {
+    use super::*;
+    use super::{checkpoint_layout as checkpoint, checkpoint_log_producer as producer};
+    use seedbox as sb;
+    use std::io::Write;
+    include!("support/diff_fixture.rs");
+
+    fn branch_record(seed: u64) -> sb::orchestration::RunRecord {
+        let mut record = fixture();
+        let parameters = &mut record.identity.inputs.profile.semantic_parameters;
+        parameters.insert("checkpoint_at_ns".into(), "20".into());
+        parameters.insert("checkpoint_branch_seed".into(), seed.to_string());
+        record
+    }
+
+    fn branch_output(run: &Path, seed: u64) -> std::path::PathBuf {
+        let out = run.join("output/machines");
+        let branch = checkpoint::checkpoint_directory(out.to_str().unwrap(), 1, 1, 20, seed);
+        fs::create_dir_all(&branch).unwrap();
+        branch.into()
+    }
+
+    // Use the same recursive retention layout as a run, including batch subdirectories.
+    fn retain_output(run: &Path, record: &mut sb::orchestration::RunRecord, directory: &Path) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                retain_output(run, record, &path);
+            } else {
+                let name = path.strip_prefix(run.join("output")).unwrap();
+                record.logs.insert(
+                    name.to_str().unwrap().into(),
+                    sb::store::ContentDigest::of(&fs::read(&path).unwrap()),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn logs_on_checkpoint_branch_include_post_checkpoint_chunks() {
+        for stream in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            let run = root.join("branch");
+            let branch = branch_output(&run, 11);
+            let mut record = branch_record(11);
+            let mut order = 0;
+            let mut snapshots = Vec::new();
+            for ext in ["console", "mgmt"] {
+                let raw = branch.join(format!("workload.{ext}"));
+                let raw = raw.to_str().unwrap();
+                let mut parent = producer::Index::default();
+                parent.open(&producer::index_name(raw));
+                parent.capture(6, 10, 0, &mut order);
+                parent.finish();
+                snapshots.push((ext, parent.snapshot()));
+                // Stale output from the prefix sink must be replaced on restore.
+                fs::write(raw, b"prefixdiscarded").unwrap();
+                let mut discarded_order = 100;
+                parent.capture(15, 30, 0, &mut discarded_order);
+                parent.finish();
+                drop(parent);
+            }
+            for (ext, mut restored) in snapshots {
+                let raw = branch.join(format!("workload.{ext}"));
+                let raw = raw.to_str().unwrap();
+                let mut sink = restored.reopen_stream(raw, b"prefix", stream).unwrap();
+                let suffix = if ext == "console" {
+                    b"console"
+                } else {
+                    b"manage!"
+                };
+                if let Some(file) = sink.as_mut() {
+                    file.write_all(suffix).unwrap();
+                } else {
+                    fs::write(raw, [b"prefix".as_slice(), suffix].concat()).unwrap();
+                }
+                restored.capture(13, 21, 0, &mut order);
+                restored.finish();
+            }
+            retain_output(&run, &mut record, &run.join("output"));
+            write_fixture(&run, &mut record, None, None);
+            for (ext, expected) in [("console", b"console"), ("mgmt", b"manage!")] {
+                let out = seedbox(
+                    &["logs", "branch", "--stream", ext, "--since-ns", "20"],
+                    root,
+                );
+                assert!(out.status.success(), "{}", stderr(&out));
+                assert_eq!(out.stdout, expected);
+                assert_eq!(stderr(&out), "logs: branch\n");
+                let out = seedbox(
+                    &["logs", "branch", "--stream", ext, "--until-ns", "20"],
+                    root,
+                );
+                assert!(out.status.success(), "{}", stderr(&out));
+                assert_eq!(out.stdout, b"prefix");
+            }
+        }
+    }
+
+    #[test]
+    fn diff_between_full_state_checkpoint_branches_finds_page_hashes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let (a, b) = ram_pair();
+        for (name, seed, raw, pfn) in [("a", 11, &a, None), ("b", 12, &b, Some(37))] {
+            let run = root.join(name);
+            let branch = branch_output(&run, seed);
+            let mut record = branch_record(seed);
+            record.identity.inputs.profile.witness_mode = sb::execution::WitnessMode::FullState;
+            let mut pages = vec![0u8; 1024 * 1024];
+            if let Some(pfn) = pfn {
+                pages[pfn * 8] = 1;
+            }
+            fs::write(branch.join("server.pages"), pages).unwrap();
+            retain_output(&run, &mut record, &run.join("output"));
+            write_fixture(&run, &mut record, Some(raw), None);
+        }
+        let out = seedbox(&["diff", "a", "b", "--json"], root);
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        assert!(out.stderr.is_empty());
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(report["machines"][0]["ram_pages"]["differing_pfns"], 1);
+        assert_eq!(
+            report["machines"][0]["ram_pages"]["first_pfns"],
+            serde_json::json!([37])
+        );
+        assert!(!report["limitations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str().unwrap().contains("page hashes unavailable")));
+    }
+}
+
 #[test]
 fn logs_help_is_portable_and_has_no_runtime_options() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1819,6 +1869,81 @@ fn torn_writes_is_opt_in_presence_only_and_replay_uses_the_recorded_policy() {
 }
 
 #[test]
+fn checkpoint_flags_are_paired_typed_and_documented() {
+    let dir = tempfile::tempdir().unwrap();
+    for (args, phrase) in [
+        (vec!["run", "--checkpoint-at-ns", "1"], "--branch-seed"),
+        (vec!["run", "--branch-seed", "2"], "--checkpoint-at-ns"),
+        (
+            vec!["run", "--checkpoint-at-ns", "bad", "--branch-seed", "2"],
+            "--checkpoint-at-ns",
+        ),
+        (
+            vec![
+                "run",
+                "--checkpoint-at-ns",
+                "1",
+                "--branch-seed",
+                "18446744073709551616",
+            ],
+            "--branch-seed",
+        ),
+    ] {
+        let result = seedbox_with(&args, dir.path(), None);
+        assert_eq!(result.status.code(), Some(2));
+        assert!(stderr(&result).contains(phrase), "{}", stderr(&result));
+    }
+    let help = seedbox_with(&["help", "run"], dir.path(), None);
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("--checkpoint-at-ns"));
+    assert!(help.contains("the parent seed continues unchanged"));
+    assert!(help.contains("--branch-seed"));
+    assert!(!help.contains("SEEDBOX_CHECKPOINT"));
+    fs::write(dir.path().join("compose.yaml"), "name: checkpoint-test\nservices:\n  workload: {image: example/workload:v1}\nx-seedbox:\n  version: 1\n  seed: 0\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: workload}\n").unwrap();
+    let result = seedbox_with(
+        &[
+            "run",
+            "--checkpoint-at-ns",
+            "1000000000",
+            "--branch-seed",
+            "2",
+        ],
+        dir.path(),
+        None,
+    );
+    assert_eq!(result.status.code(), Some(2));
+    let expected = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "error: --checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac\n"
+    } else {
+        "error: --checkpoint-at-ns must be before the simulated time limit; choose an earlier checkpoint\n"
+    };
+    assert_eq!(stderr(&result), expected);
+    assert!(!dir.path().join(".seedbox").exists());
+    let accepted = seedbox_with(
+        &[
+            "run",
+            "--checkpoint-at-ns",
+            "0",
+            "--branch-seed",
+            "0",
+            "--vmm",
+            "/checkpoint-missing-vmm",
+        ],
+        dir.path(),
+        None,
+    );
+    assert_eq!(
+        stderr(&accepted),
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            "error: --checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac\n"
+        } else {
+            "error: --vmm /checkpoint-missing-vmm: not found\n"
+        }
+    );
+}
+
+#[test]
 fn timebase_help_values_and_replay_uses_only_the_recorded_choice() {
     let directory = tempfile::tempdir().unwrap();
     for command in ["run", "prepare", "explore"] {
@@ -1850,10 +1975,14 @@ fn timebase_help_values_and_replay_uses_only_the_recorded_choice() {
                 directory.path(),
             );
             assert_eq!(output.status.code(), Some(2));
-            assert_eq!(
-                stderr(&output),
+            let expected = if cfg!(all(target_os = "macos", target_arch = "aarch64"))
+                && value == "counter"
+            {
+                "error: --timebase counter requires Linux KVM; use --timebase pv or omit it on Mac\n"
+            } else {
                 "error: Compose file no-such.yaml: not found\n"
-            );
+            };
+            assert_eq!(stderr(&output), expected);
         }
     }
 }
@@ -1948,6 +2077,33 @@ fn mac_counter_timebase_is_rejected_before_preparation() {
     }
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn mac_linux_only_runtime_modes_fail_before_state_or_preparation() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("compose.yaml"), "name: mac-modes\nservices:\n  app:\n    image: busybox:1.37.0\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app, exit_code: 0}\n").unwrap();
+    for (args, expected) in [
+        (
+            vec!["run", ".", "--page-timer"],
+            "error: --page-timer and --deferred-tx require Linux KVM; omit them on Mac\n",
+        ),
+        (
+            vec!["run", ".", "--deferred-tx"],
+            "error: --page-timer and --deferred-tx require Linux KVM; omit them on Mac\n",
+        ),
+        (
+            vec!["run", ".", "--checkpoint-at-ns", "1", "--branch-seed", "2"],
+            "error: --checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac\n",
+        ),
+    ] {
+        let output = seedbox(&args, directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(stderr(&output), expected);
+        assert!(output.stdout.is_empty());
+        assert!(!directory.path().join(".seedbox").exists());
+    }
+}
+
 #[test]
 fn replay_original_internal_worker_reaches_retained_proof_gate() {
     use seedbox::{orchestration::RunRecord, store::ContentDigest};
@@ -2002,4 +2158,67 @@ fn replay_original_internal_worker_reaches_retained_proof_gate() {
         fs::read(directory.path().join("manifest.json")).unwrap(),
         bytes
     );
+}
+
+#[test]
+fn page_timer_is_an_opt_in_runtime_flag_and_replay_accepts_no_override() {
+    let directory = tempfile::tempdir().unwrap();
+    for command in ["prepare", "run", "explore"] {
+        let output = seedbox(&[command, "--help"], directory.path());
+        assert!(output.status.success());
+        let help = String::from_utf8_lossy(&output.stdout);
+        assert!(help.contains("--page-timer"));
+        let output = seedbox(&[command, "no-such.yaml", "--page-timer"], directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert!(!stderr(&output).contains("unexpected argument '--page-timer'"));
+    }
+    let output = seedbox(&["replay", ".", "--page-timer"], directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("unexpected argument '--page-timer'"));
+}
+
+#[test]
+fn deferred_tx_help_is_presence_only_and_replay_uses_the_recorded_mode() {
+    let directory = tempfile::tempdir().unwrap();
+    for command in ["run", "prepare", "explore"] {
+        let help = seedbox(&["help", command], directory.path());
+        assert!(help.status.success());
+        assert!(String::from_utf8_lossy(&help.stdout).contains("--deferred-tx"));
+        let mut args = vec![command, "no-such.yaml", "--deferred-tx"];
+        if command == "prepare" {
+            args.extend(["--output", "prepared"]);
+        }
+        let output = seedbox(&args, directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        let expected = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            "error: --page-timer and --deferred-tx require Linux KVM; omit them on Mac\n"
+        } else {
+            "error: Compose file no-such.yaml: not found\n"
+        };
+        assert_eq!(stderr(&output), expected);
+    }
+    let help = seedbox(&["help", "replay"], directory.path());
+    assert!(!String::from_utf8_lossy(&help.stdout).contains("--deferred-tx"));
+    let output = seedbox(&["replay", ".", "--deferred-tx"], directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("unexpected argument '--deferred-tx'"));
+    timebase_record(directory.path(), None);
+    let mut record = seedbox::orchestration::inspect(directory.path()).unwrap();
+    record
+        .identity
+        .inputs
+        .profile
+        .semantic_parameters
+        .insert("deferred_tx".into(), "future".into());
+    record.run_id =
+        seedbox::store::ContentDigest::of(&serde_json::to_vec(&record.identity).unwrap());
+    let checksum = seedbox::store::ContentDigest::of(&serde_json::to_vec(&record).unwrap());
+    fs::write(
+        directory.path().join("manifest.json"),
+        serde_json::to_vec(&serde_json::json!({"sha256": checksum, "record": record})).unwrap(),
+    )
+    .unwrap();
+    let output = seedbox(&["replay", "."], directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("recorded --deferred-tx future"));
 }

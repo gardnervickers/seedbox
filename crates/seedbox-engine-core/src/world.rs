@@ -2,7 +2,7 @@
 //! MachineState is stored once in the real machine/proxy; it is never refreshed
 //! from an independently mutable scheduler mirror.
 use crate::world_events as events;
-use crate::{connections, control, faults, links, network_counters, rng::Rng};
+use crate::{control, faults, links, network_counters, rng::Rng};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
@@ -187,11 +187,49 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
     fn resume(&mut self, at: u64) -> Result<(), String>;
     fn boot_at(&mut self, at: u64) -> Result<(), String>;
     fn succeed(&mut self, old: &mut Self, at: u64, seed: u64) -> Result<Option<u64>, String>;
+    fn succeed_branch(
+        &mut self,
+        old: &mut Self,
+        at: u64,
+        seed: u64,
+        identity: Option<&str>,
+    ) -> Result<Option<u64>, String> {
+        if identity.is_some() {
+            return Err("runtime checkpoint succession is unsupported by this backend".into());
+        }
+        self.succeed(old, at, seed)
+    }
+    /// Observation fields shared by terminal and crashed incarnations.
+    fn crash_observations(&self) -> Value {
+        Value::Null
+    }
+
     fn park(&mut self) -> Result<(), String>;
     fn wake(&mut self, at: u64) -> Result<(), String>;
     fn release(&mut self, at: u64, entropy: [u32; 8]) -> Result<Reseed, String>;
     fn abi(&self) -> u64;
     fn seed_timer(&mut self, seed: u64, domain: &str) -> Result<(), String>;
+    fn seed_timer_branch(
+        &mut self,
+        seed: u64,
+        identity: Option<&str>,
+        domain: &str,
+    ) -> Result<(), String> {
+        if identity.is_some() {
+            return Err("runtime checkpoint timer reseeding is unsupported by this backend".into());
+        }
+        self.seed_timer(seed, domain)
+    }
+    fn reseed_guest(&mut self, _: [u32; 8]) -> Result<(), String> {
+        Err("runtime checkpoint guest reseeding is unsupported by this backend".into())
+    }
+    fn checkpoint_boundary(_: &Self::Clock) -> Result<(), String> {
+        Err("runtime checkpoints are unsupported by this backend".into())
+    }
+    fn restore_boundary(_: &mut Self::Clock) -> Result<(), String> {
+        Err("runtime checkpoints are unsupported by this backend".into())
+    }
+
     fn supports_speed_reseed(&self) -> bool;
     fn seed_speed(&mut self, seed: u64, domain: &str) -> Result<(), String>;
     fn branches(&self) -> u64;
@@ -326,6 +364,7 @@ pub struct World<M: WorldMachine> {
     pub boot_seed: u64,
     /// The seed the world plan was armed with; reboots draw from it.
     pub run_seed: u64,
+    pub branch_identity: Option<String>,
     /// Per machine, a summary of each incarnation that crashed.
     pub incarnations: Vec<Vec<Value>>,
     /// Frames queued for each paused machine during its current pause.
@@ -610,12 +649,22 @@ impl<M: WorldMachine> World<M> {
                 .incarnation
                 .checked_add(1)
                 .ok_or("incarnation overflow")?;
-            let seed = entropy_seed(self.run_seed, &format!("reboot-entropy/{name}/{next}"));
+            let mut rng = Rng::branch(
+                self.run_seed,
+                self.branch_identity.as_deref(),
+                &format!("reboot-entropy/{name}/{next}"),
+            );
+            let mut seed = [0u8; 32];
+            for chunk in seed.chunks_mut(8) {
+                chunk.copy_from_slice(&rng.next().to_le_bytes());
+            }
             // A failed constructor owns cleanup of any partially booted worker.
             let mut fresh = M::boot(&self.factory, &name, &self.boot[m], false, seed)?;
-            if let Err(mut error) =
-                fresh.seed_timer(self.run_seed, &format!("timer-jitter/{name}/{next}"))
-            {
+            if let Err(mut error) = fresh.seed_timer_branch(
+                self.run_seed,
+                self.branch_identity.as_deref(),
+                &format!("timer-jitter/{name}/{next}"),
+            ) {
                 if let Err(cleanup) = fresh.terminate_worker() {
                     error.push_str(&format!("; fresh worker cleanup: {cleanup}"));
                 }
@@ -633,8 +682,17 @@ impl<M: WorldMachine> World<M> {
                 "discarded_pending_io": old.owed_io().is_some(), "discarded_management_bytes": discarded,
                 "witness": witness,
             });
-            summary["disk_lost_sectors"] =
-                json!(self.machines[m].succeed(old, t, self.run_seed)?);
+            if let Some(observations) = old.crash_observations().as_object() {
+                for (key, value) in observations {
+                    summary[key] = value.clone();
+                }
+            }
+            summary["disk_lost_sectors"] = json!(self.machines[m].succeed_branch(
+                old,
+                t,
+                self.run_seed,
+                self.branch_identity.as_deref()
+            )?);
             self.incarnations[m].push(summary);
             Ok(())
         })();
@@ -871,36 +929,106 @@ pub fn release<M: WorldMachine>(
     ))
 }
 
-/// A world parked at its launch barrier, kept so that later seeds start from
-/// it without booting. The usual boot snapshot has no armed control plan;
-/// readiness carries over and release builds the run plan from its seed. If
-/// triggers are present, preserve their matcher, control and effect state too.
+/// Keep the captured plan and all sampled effects. Only future draws change.
+pub fn reseed_checkpoint<M: WorldMachine>(
+    world: &mut World<M>,
+    names: &[String],
+    parent_seed: u64,
+    seed: u64,
+    identity: &str,
+) -> Result<Vec<Value>, String> {
+    world.check_active()?;
+    world.validate()?;
+    if names.len() != world.machines.len() {
+        return Err("checkpoint machine names differ from world".into());
+    }
+    M::checkpoint_boundary(&world.clock)?;
+    // Branch P continues every captured stream, including guest entropy.
+    if seed == parent_seed {
+        return Ok(world
+            .machines
+            .iter()
+            .map(|m| json!({"machine":m.name,"reseed":"continuation"}))
+            .collect());
+    }
+    world.run_seed = seed;
+    world.branch_identity = Some(identity.to_string());
+    world
+        .faults
+        .links
+        .reseed_branch(seed, Some(identity), names);
+    let mut reseed = Vec::new();
+    for (mach, name) in world.machines.iter_mut().zip(names) {
+        mach.seed_timer_branch(
+            seed,
+            Some(identity),
+            &format!("timer-jitter/{name}/{}", mach.incarnation),
+        )?;
+        let status = if mach.down || matches!(mach.state, State::Exited(_)) {
+            "not_up"
+        } else {
+            let mut rng = Rng::branch(
+                seed,
+                Some(identity),
+                &format!("guest-entropy/{name}/{}", mach.incarnation),
+            );
+            mach.reseed_guest(std::array::from_fn(|_| rng.next() as u32))?;
+            "time_page"
+        };
+        reseed.push(json!({"machine":name,"incarnation":mach.incarnation,"reseed":status}));
+    }
+    Ok(reseed)
+}
+
+/// A committed world boundary. Runtime forks retain the active plan and RNG
+/// positions; boot forks still replace the plan and streams at release.
 pub struct WorldSnapshot<M: WorldMachine> {
+    boot_snapshot: bool,
     machines: Vec<M::Snapshot>,
     events: Vec<BTreeMap<(u64, u64), Payload>>,
     strict_events: Vec<BTreeMap<(u64, u64), Vec<u8>>>,
     seq: u64,
-    links: links::Links,
-    connections: connections::Connections,
     partitioned: BTreeMap<(usize, usize), bool>,
     dropped: u64,
     delivered: u64,
     link_counts: BTreeMap<(usize, usize), [u64; 4]>,
     semantic_counts: network_counters::NetworkCounters,
     slices: u64,
-    readiness: Vec<Value>,
-    control: control::Control,
     faults: faults::Faults,
+    control: control::Control,
+    run_seed: u64,
+    branch_identity: Option<String>,
+    incarnations: Vec<Vec<Value>>,
+    paused_ingress: Vec<u64>,
 }
 
 impl<M: WorldMachine> WorldSnapshot<M> {
     pub fn take(world: &mut World<M>) -> Result<Self, String> {
         world.check_active()?;
         world.validate()?;
-        if !world.machines.iter().all(|m| m.parked) {
-            return Err("world fork requires every machine at its launch barrier".into());
+        if world.machines.iter().any(|m| !m.parked) {
+            return Err("boot snapshot requires all machines parked".into());
+        }
+        Self::capture(world, true)
+    }
+
+    pub fn take_checkpoint(world: &mut World<M>) -> Result<Self, String> {
+        M::checkpoint_boundary(&world.clock)?;
+        Self::capture(world, false)
+    }
+
+    fn capture(world: &mut World<M>, boot_snapshot: bool) -> Result<Self, String> {
+        world.check_active()?;
+        world.validate()?;
+        if world.machines.iter().any(|m| {
+            !m.fault_effects.is_empty()
+                || !m.control_requests.is_empty()
+                || m.committed_console.is_some()
+        }) {
+            return Err("checkpoint requires drained machine messages".into());
         }
         Ok(Self {
+            boot_snapshot,
             machines: world
                 .machines
                 .iter_mut()
@@ -909,18 +1037,37 @@ impl<M: WorldMachine> WorldSnapshot<M> {
             events: world.events.clone(),
             strict_events: world.strict_events.clone(),
             seq: world.seq,
-            links: world.faults.links.clone(),
-            connections: world.faults.connections.clone(),
             partitioned: world.partitioned.clone(),
             dropped: world.dropped,
             delivered: world.delivered,
             link_counts: world.link_counts.clone(),
             semantic_counts: world.semantic_counts.clone(),
             slices: world.slices,
-            readiness: world.faults.readiness.clone(),
-            control: world.control.clone(),
             faults: world.faults.clone(),
+            control: world.control.clone(),
+            run_seed: world.run_seed,
+            branch_identity: world.branch_identity.clone(),
+            incarnations: world.incarnations.clone(),
+            paused_ingress: world.paused_ingress.clone(),
         })
+    }
+
+    /// Multiple held snapshots cannot share Undo's single dirty-page baseline.
+    /// Fresh VMs force full RAM copies and discard stale incarnation/KVM state.
+    pub fn restore_checkpoint(&self, world: &mut World<M>) -> Result<u64, String> {
+        world.check_active()?;
+        world.validate()?;
+        if self.machines.len() != world.machines.len() {
+            return Err("snapshot machine count differs from world".into());
+        }
+        M::restore_boundary(&mut world.clock)?;
+        for i in 0..world.machines.len() {
+            let name = world.machines[i].name.clone();
+            let seed = entropy_seed(world.boot_seed, &format!("boot-entropy/{name}"));
+            world.machines[i] =
+                M::boot(&world.factory, &name, &world.boot[i], world.barrier, seed)?;
+        }
+        self.restore(world)
     }
 
     /// Put the world back to the fork point. Returns RAM pages copied back.
@@ -942,8 +1089,13 @@ impl<M: WorldMachine> WorldSnapshot<M> {
             }
             pages += world.machines[i].restore(snapshot)?;
         }
-        world.incarnations.iter_mut().for_each(Vec::clear);
-        world.paused_ingress.fill(0);
+        if self.boot_snapshot {
+            world.incarnations.iter_mut().for_each(Vec::clear);
+            world.paused_ingress.fill(0);
+        } else {
+            world.incarnations = self.incarnations.clone();
+            world.paused_ingress = self.paused_ingress.clone();
+        }
         world.events = self.events.clone();
         world.strict_events = self.strict_events.clone();
         world.seq = self.seq;
@@ -953,14 +1105,22 @@ impl<M: WorldMachine> WorldSnapshot<M> {
         world.link_counts = self.link_counts.clone();
         world.semantic_counts = self.semantic_counts.clone();
         world.slices = self.slices;
-        let names: Vec<String> = world.machines.iter().map(|m| m.name.clone()).collect();
-        world.faults = boot_faults(&names, &self.readiness, world.latency, self.links.clone())?;
-        world.faults.connections = self.connections.clone();
-        world.control = control::Control::new(&Value::Null, names, world.latency, world.early)?;
-        if !self.control.triggers.records.is_empty() {
-            world.control = self.control.clone();
+        if self.boot_snapshot && self.control.triggers.records.is_empty() {
+            let names: Vec<_> = world.machines.iter().map(|m| m.name.clone()).collect();
+            world.faults = boot_faults(
+                &names,
+                &self.faults.readiness,
+                world.latency,
+                self.faults.links.clone(),
+            )?;
+            world.faults.connections = self.faults.connections.clone();
+            world.control = control::Control::new(&Value::Null, names, world.latency, world.early)?;
+        } else {
             world.faults = self.faults.clone();
+            world.control = self.control.clone();
         }
+        world.run_seed = self.run_seed;
+        world.branch_identity = self.branch_identity.clone();
         Ok(pages)
     }
 }
@@ -969,6 +1129,67 @@ impl<M: WorldMachine> WorldSnapshot<M> {
 /// at its fork point: the guest's launch barrier, or with `Some(Some(t))` its
 /// first deterministic point at or after simulated time `t`. Returns the
 /// outcome.
+pub fn drain_machine_messages<M: WorldMachine>(
+    world: &mut World<M>,
+    m: usize,
+    until_barrier: bool,
+    exited: bool,
+) -> Result<(), String> {
+    if let Some((at, byte)) = world.machines[m].committed_console.take() {
+        let max_time = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
+        world.control.triggers.committed(
+            &world.machines[m].name,
+            at,
+            byte,
+            world.control.latency,
+            max_time,
+        )?;
+    }
+    for (id, at, success) in world.machines[m].fault_effects.drain(..) {
+        if id == 0 && success {
+            if let Err(error) = world.faults.management_ready(m, at, world.control.latency) {
+                world.faults.error = Some(error);
+            }
+        } else {
+            world.faults.effect(m, id, at, success);
+        }
+    }
+    if exited {
+        for id in world
+            .control
+            .triggers
+            .records
+            .iter()
+            .filter_map(|r| r.fault_id)
+        {
+            world.faults.target_exited(id, m, world.machines[m].time);
+        }
+    }
+    if exited {
+        if let Some(id) = world.control.pending.as_ref().and_then(|p| p.fault) {
+            world.faults.target_exited(id, m, world.machines[m].time);
+        }
+    }
+    for (at, line) in world.machines[m]
+        .control_requests
+        .drain(..)
+        .collect::<Vec<_>>()
+    {
+        if until_barrier {
+            return Err(format!(
+                "{}: runtime control request at {at} ns, before the fork point; fork earlier (boot.fork_at_ns)",
+                world.machines[m].name
+            ));
+        }
+        let max_time = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
+        if let Err(e) = world.control.request(m, at, &line, max_time) {
+            world.control.log.push(json!({"status":"rejected","machine":world.machines[m].name,"at_ns":at,"frame":String::from_utf8_lossy(&line),"error":e}));
+            world.control.error = Some(e);
+        }
+    }
+    Ok(())
+}
+
 pub fn simulate<M: WorldMachine>(
     world: &mut World<M>,
     cfg: &Value,
@@ -977,7 +1198,22 @@ pub fn simulate<M: WorldMachine>(
     fork: Option<Option<u64>>,
     boundary: &mut impl FnMut() -> Result<(), String>,
 ) -> Result<&'static str, String> {
+    simulate_to(world, cfg, duration, end_on, fork, None, boundary)
+}
+
+pub fn simulate_to<M: WorldMachine>(
+    world: &mut World<M>,
+    cfg: &Value,
+    duration: u64,
+    end_on: &Option<String>,
+    fork: Option<Option<u64>>,
+    checkpoint: Option<u64>,
+    boundary: &mut impl FnMut() -> Result<(), String>,
+) -> Result<&'static str, String> {
     world.validate()?;
+    if checkpoint.is_some() {
+        M::checkpoint_boundary(&world.clock)?;
+    }
     let until_barrier = fork.is_some();
     let fork_at = fork.flatten();
     let n = world.machines.len();
@@ -985,6 +1221,11 @@ pub fn simulate<M: WorldMachine>(
     let mut frames = Vec::new();
     let outcome;
     loop {
+        if checkpoint.is_some() {
+            for m in 0..n {
+                drain_machine_messages(world, m, until_barrier, false)?;
+            }
+        }
         boundary()?;
         let keys: Vec<u64> = (0..n).map(|m| world.key(m)).collect();
         let (m, &key) = keys
@@ -992,6 +1233,15 @@ pub fn simulate<M: WorldMachine>(
             .enumerate()
             .min_by_key(|(i, k)| (**k, *i))
             .unwrap();
+        // A checkpoint precedes every action at T, including exact-time faults.
+        if checkpoint.is_some_and(|t| {
+            key >= t
+                && world.control.boundary() >= t
+                && world.faults.next_boundary() >= t
+                && world.control.triggers.boundary() >= t
+        }) {
+            return Ok("checkpoint");
+        }
         if until_barrier
             && world
                 .machines
@@ -1124,7 +1374,8 @@ pub fn simulate<M: WorldMachine>(
             .min(duration)
             .min(fault_boundary)
             .min(control_boundary)
-            .min(trigger_boundary);
+            .min(trigger_boundary)
+            .min(checkpoint.unwrap_or(u64::MAX));
         if let Some(t) = fork_at {
             // Stop exactly at the fork time, or as soon after it as owed I/O
             // cost allows.
@@ -1135,6 +1386,7 @@ pub fn simulate<M: WorldMachine>(
         // A slice ending at the horizon or an event may stop a little early
         // (at a cheap deterministic point); the run's end is exact.
         let early = if limit == duration
+            || checkpoint == Some(limit)
             || fork_at == Some(limit)
             || limit == fault_boundary
             || limit == control_boundary
@@ -1175,58 +1427,7 @@ pub fn simulate<M: WorldMachine>(
             plan,
             world.machines[m].time != plan.1 || stop != Stop::Reached,
         )?;
-        if let Some((at, byte)) = world.machines[m].committed_console.take() {
-            let max_time = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
-            world.control.triggers.committed(
-                &world.machines[m].name,
-                at,
-                byte,
-                world.control.latency,
-                max_time,
-            )?;
-        }
-        for (id, at, success) in world.machines[m].fault_effects.drain(..) {
-            if id == 0 && success {
-                if let Err(error) = world.faults.management_ready(m, at, world.control.latency) {
-                    world.faults.error = Some(error);
-                }
-            } else {
-                world.faults.effect(m, id, at, success);
-            }
-        }
-        if stop == Stop::Exited {
-            for id in world
-                .control
-                .triggers
-                .records
-                .iter()
-                .filter_map(|r| r.fault_id)
-            {
-                world.faults.target_exited(id, m, world.machines[m].time);
-            }
-        }
-        if stop == Stop::Exited {
-            if let Some(id) = world.control.pending.as_ref().and_then(|p| p.fault) {
-                world.faults.target_exited(id, m, world.machines[m].time);
-            }
-        }
-        for (at, line) in world.machines[m]
-            .control_requests
-            .drain(..)
-            .collect::<Vec<_>>()
-        {
-            if until_barrier {
-                return Err(format!(
-                    "{}: runtime control request at {at} ns, before the fork point; fork earlier (boot.fork_at_ns)",
-                    world.machines[m].name
-                ));
-            }
-            let max_time = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
-            if let Err(e) = world.control.request(m, at, &line, max_time) {
-                world.control.log.push(json!({"status":"rejected","machine":world.machines[m].name,"at_ns":at,"frame":String::from_utf8_lossy(&line),"error":e}));
-                world.control.error = Some(e);
-            }
-        }
+        drain_machine_messages(world, m, until_barrier, stop == Stop::Exited)?;
         world
             .control
             .observe_faults(&world.faults, world.machines[m].time)?;

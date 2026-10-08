@@ -788,7 +788,7 @@ impl ExecutionBackend for DevBackend<'_> {
         let mut profile = self.policy.profile();
         profile.semantic_parameters.insert(
             seedbox::admission::ENGINE_QUALIFICATION.into(),
-            seedbox::admission::DEV_UNPINNED.into(),
+            "dev-unpinned".into(),
         );
         profile
     }
@@ -889,23 +889,19 @@ fn legacy_dev_marked_runs_replay_without_a_flag_and_round_trip() {
         policy: changed,
         fixture: &f.backend,
     };
-    for allow_engine_change in [false, true] {
-        let rejected = runner
-            .replay_with_options(
-                &imported.directory,
-                &changed_backend,
-                ReplayOptions {
-                    allow_engine_change,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        assert_eq!(
-            rejected.record.replay.unwrap().status,
-            ReplayStatus::NotComparable
-        );
-        assert!(!rejected.directory.join("output").exists());
-    }
+    // Without --allow-engine-change a different engine is not comparable.
+    let rejected = runner
+        .replay_with_options(
+            &imported.directory,
+            &changed_backend,
+            ReplayOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        rejected.record.replay.unwrap().status,
+        ReplayStatus::NotComparable
+    );
+    assert!(!rejected.directory.join("output").exists());
     f.backend.calls.store(0, Ordering::SeqCst);
     let mut mismatching = f.backend.report.clone();
     mismatching.witness = Some(ContentDigest::of(b"different witness"));

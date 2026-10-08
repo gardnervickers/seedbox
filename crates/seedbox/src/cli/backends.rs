@@ -22,6 +22,15 @@ pub enum Executor {
     Mac(seedbox::mac::MacExecutor),
 }
 impl Executor {
+    pub fn with_checkpoint(self, at_ns: u64, branch_seed: u64) -> Result<Self> {
+        match self {
+            Self::Linux(executor) => Ok(Self::Linux(executor.with_checkpoint(at_ns, branch_seed))),
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            Self::Mac(_) => Err(seedbox::Error::Setup(
+                "--checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac".into(),
+            )),
+        }
+    }
     pub fn with_unqualified_cpu(self, allow: bool) -> Self {
         match self {
             Self::Linux(e) => Self::Linux(e.with_unqualified_cpu(allow)),

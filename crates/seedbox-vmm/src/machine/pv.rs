@@ -32,7 +32,10 @@
 //! something only virtual time could bring.
 
 use super::{map, Machine, Mapping, PAGE_BOUND, PAGE_SYSCALLS, PAGE_SYSCALL_TARGET};
+#[cfg(test)]
+use super::PAGE_TIMER_DEADLINE;
 use crate::timebase::{Judge, Prepared, Run, Timebase, Verdict};
+use super::pv_plan::clock_plan;
 use crate::undo::VcpuState;
 use std::time::Duration;
 
@@ -69,7 +72,21 @@ impl PvClock {
     pub fn new(watchdog: Duration) -> Result<Self, String> {
         Ok(Self { _watchdog: Watchdog::new(watchdog)?, progress: PvProgress::new(), syscalls0: 0, remaining: 0, syscall_ns: SYSCALL_NS, max_false_alarms: u64::MAX })
     }
-    fn plan(&mut self, m: &mut Machine, remaining: u64, soft: u64) -> Result<Prepared, String> {
+
+    /// No architecture probe may survive a committed checkpoint boundary.
+    pub fn checkpoint_boundary(&self) -> Result<(), String> {
+        if self.progress.hold_watchdog() { return Err("PV checkpoint inside a spin probe".into()); }
+        Ok(())
+    }
+
+    /// Recreate host-only watchdog and probe scratch after restoring a machine.
+    pub fn restore_boundary(&mut self) -> Result<(), String> {
+        self.progress = PvProgress::new();
+        self.syscalls0 = 0; self.remaining = 0; self.syscall_ns = SYSCALL_NS;
+        self._watchdog.hold(false)
+    }
+
+    fn plan(&mut self, m: &mut Machine, remaining: u64, soft: u64, legal: bool) -> Result<Prepared, String> {
         self.remaining = remaining;
         self.syscall_ns = m.syscall_ns;
         match self.progress.prepare(m, self.max_false_alarms)? {
@@ -77,10 +94,20 @@ impl PvClock {
             Decision::Step => return Ok(Prepared::Run),
             Decision::Resume => (),
         }
-        m.page_set(PAGE_BOUND, soft);
-        let syscalls = m.page_get(PAGE_SYSCALLS);
-        let left = soft.saturating_sub(m.time).div_ceil(self.syscall_ns).max(1);
-        m.page_set(PAGE_SYSCALL_TARGET, syscalls + left);
+        m.set_stepping(false)?;
+        // An ABI-4 arm is a sequence of guest loads/stores, not an atomic
+        // transaction. Never rewrite any of its inputs at a watchdog/probe
+        // landing: even a mathematically equivalent replan can tear those
+        // loads, relax a previous re-arm's bound, or move an overdue target.
+        if let Some((bound, target)) = clock_plan(m.time, m.page_get(PAGE_SYSCALLS), self.syscall_ns, soft, m.page_timer.enabled, legal) {
+            m.page_set(PAGE_BOUND, bound);
+            m.page_set(PAGE_SYSCALL_TARGET, target);
+            if m.page_timer.enabled {
+                m.page_set(super::PAGE_SYSCALL_NS, self.syscall_ns);
+                m.page_set(super::PAGE_SYSCALLS0, m.page_get(PAGE_SYSCALLS));
+                m.page_set(super::PAGE_PLAN_TIME, m.time);
+            }
+        }
         Ok(Prepared::Run)
     }
 }
@@ -123,8 +150,8 @@ fn key(r: &kvm_bindings::kvm_regs) -> Key {
 impl Timebase for PvClock {
     const BRANCHES: bool = false;
 
-    fn prepare(&mut self, m: &mut Machine, remaining: u64, soft: u64) -> Result<Prepared, String> {
-        let prepared = self.plan(m, remaining, soft);
+    fn prepare(&mut self, m: &mut Machine, remaining: u64, soft: u64, legal: bool) -> Result<Prepared, String> {
+        let prepared = self.plan(m, remaining, soft, legal);
         // No tick may interrupt a probe step: an interrupt is taken before a
         // code breakpoint at the same instruction, so a tick there stops the
         // vCPU on a landing without reporting it, and stepping on past it
@@ -280,6 +307,33 @@ mod tests {
     use super::*;
     use kvm_ioctls::Kvm;
 
+    #[test]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
+    fn guest_without_page_timer_support_fails_at_boot() {
+        let kvm = Kvm::new().unwrap();
+        for requested in [false, true] {
+            for abi in 0..=super::super::ABI_PAGE_TIMER {
+                let mut code = vec![0xb8];
+                code.extend_from_slice(&(abi as u32).to_le_bytes());
+                code.extend_from_slice(&[0xba, 0x28, 0x05, 0, 0, 0xef, 0xf4]);
+                let mut m = machine(&kvm, &code, 0);
+                m.page_timer_requested = requested;
+                m.page_set(super::super::PAGE_PV_CLOCK, 2);
+                m.pic.set_masks(0xffff);
+                let mut clock = PvClock::new(Duration::from_secs(10)).unwrap();
+                let got = m.run_until(&mut clock, 1000000, 0, &mut Vec::new());
+                if requested && abi < super::super::ABI_PAGE_TIMER {
+                    assert_eq!(got.unwrap_err(), "the guest kernel lacks page timer support; rebuild it from kernel/ or drop --page-timer");
+                    assert!(!m.page_timer.enabled);
+                    assert_eq!(m.page_get(super::super::PAGE_CAPABILITIES), 0);
+                } else {
+                    assert_eq!(got.unwrap(), Stop::Halted);
+                    assert_eq!(m.page_timer.enabled, requested);
+                }
+            }
+        }
+    }
+
     /// A 32-bit payload at the kernel entry, interrupts enabled and unmasked.
     fn machine(kvm: &Kvm, code: &[u8], undo: u64) -> Machine {
         let mut kernel = vec![0u8; 1024];
@@ -288,7 +342,7 @@ mod tests {
         let spec = BootSpec {
             kernel: &kernel, initrd: &[], cmdline: String::new(), mem: INITRD_ADDR + 0x100000,
             rng_seed: [0; 32], mac: None, control_channel: false, disk: None, undo_margin: undo, barrier: false,
-            pv_clock: true,
+            pv_clock: true, page_timer: false,
         };
         let mut m = Machine::new(kvm, "pv-probe", &spec).unwrap();
         let mut r = m.vcpu.get_regs().unwrap();
@@ -296,6 +350,212 @@ mod tests {
         m.vcpu.set_regs(&r).unwrap();
         m.pic.set_masks(0);
         m
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
+    fn a_page_arm_lowers_the_running_guest_clock_bound() {
+        let kvm = Kvm::new().unwrap();
+        let mut code = Vec::new();
+        // Store a 20 us deadline and lower bound while KVM is running.
+        for (address, value) in [(0xd0000070u32, 20000u32), (0xd0000074, 0), (0xd0000038, 20000)] {
+            code.extend_from_slice(&[0xc7, 0x05]);
+            code.extend_from_slice(&address.to_le_bytes());
+            code.extend_from_slice(&value.to_le_bytes());
+        }
+        // Review repro: 2^24 branches between the stores and the yield.
+        code.extend_from_slice(&[0xb9, 0, 0, 0, 0x01, 0x49, 0x75, 0xfd]);
+        code.extend_from_slice(&[0xba, 0x2c, 0x05, 0, 0, 0xb0, 1, 0xee, 0xf4]);
+        for watchdog in [Duration::from_secs(10), Duration::from_micros(100)] {
+            let mut m = machine(&kvm, &code, 0);
+            m.page_timer_requested = true;
+            m.abi = super::super::ABI_PAGE_TIMER;
+            m.enable_page_timer();
+            m.pic.set_masks(0xffff); // Retain IRQ0 rather than entering an absent IDT.
+            let mut clock = PvClock::new(watchdog).unwrap();
+            let stop = m.run_until(&mut clock, 1000000, 0, &mut Vec::new()).unwrap();
+            assert_eq!((stop, m.time), (Stop::Halted, 20000), "watchdog={watchdog:?}");
+            assert_eq!(m.pit.deadline, None);
+            m.pic.set_masks(0);
+            assert_eq!(m.pic.pending(), Some(0));
+        }
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
+    fn watchdog_plans_do_not_adopt_expire_or_draw_page_timer_latency() {
+        let kvm = Kvm::new().unwrap();
+        let mut m = machine(&kvm, &[0xf4], 0);
+        m.page_timer_requested = true;
+        m.abi = super::super::ABI_PAGE_TIMER;
+        m.enable_page_timer();
+        m.pit.program_deadline(Some(10000));
+        m.pit.fresh = false;
+        m.timer_rng = Some(crate::rng::Rng::new(1009, "timer/pv-probe"));
+        m.timer_jitter = 1000;
+        let mut clock = PvClock::new(Duration::from_secs(10)).unwrap();
+        m.page_set(PAGE_SYSCALLS, 17);
+        clock.prepare(&mut m, 100000, 100000, true).unwrap();
+        let fields = [PAGE_BOUND, PAGE_SYSCALL_TARGET, super::super::PAGE_SYSCALL_NS,
+                      super::super::PAGE_SYSCALLS0, super::super::PAGE_PLAN_TIME];
+        let plan = fields.map(|i| m.page_get(i));
+        // Simulate watchdog landings before/after an old arm is overdue.
+        // Even a split between guest plan loads must keep every field fixed.
+        for time in [0, 9999, 10000, 10293] {
+            m.time = time;
+            m.page_set(PAGE_SYSCALLS, 24);
+            for word in [5000, 20000, super::super::TIMER_DISARMED] {
+                m.page_set(PAGE_TIMER_DEADLINE, word);
+                assert!(matches!(clock.prepare(&mut m, 100000, 100000, false).unwrap(), Prepared::Run));
+                assert_eq!(fields.map(|i| m.page_get(i)), plan, "watchdog cannot tear a guest arm's plan loads");
+                assert_eq!(m.page_timer.seen, super::super::TIMER_DISARMED);
+                assert_eq!(m.pit.deadline, Some(10000));
+                assert_eq!(m.pic.pending(), None);
+                assert_eq!(m.timer_rng.as_ref().unwrap().counter(), 0);
+                assert_eq!(m.next_deadline(), 10000, "idle wake must ignore the raw word");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
+    fn store_deadline_then_halt_has_the_same_wake_irq_and_witness_across_watchdogs() {
+        let kvm = Kvm::new().unwrap();
+        for (spin, old, word) in [(false, None, 900000u64), (false, Some(20000), 900000),
+                                  (false, None, 20000), (false, Some(20000), super::super::TIMER_DISARMED),
+                                  (true, None, 900000)] {
+            let mut code = Vec::new();
+            // Clock reads have advanced last to 30 us. Store the deadline,
+            // compute for long enough to encounter watchdog splits, then HLT.
+            for (address, value) in [(0xd0000008u32, 30000u32), (0xd000000c, 0),
+                                     (0xd0000070, word as u32), (0xd0000074, (word >> 32) as u32)] {
+                code.extend_from_slice(&[0xc7, 0x05]);
+                code.extend_from_slice(&address.to_le_bytes());
+                code.extend_from_slice(&value.to_le_bytes());
+            }
+            if spin {
+                code.extend_from_slice(&[0xeb, 0xfe]); // Canonical spin idle is also a legal adoption point.
+            } else {
+                code.extend_from_slice(&[0xb9, 0, 0, 0, 0x01, 0x49, 0x75, 0xfd, 0xf4]);
+            }
+            let mut want = None;
+            for (watchdog, undo) in [(if spin { Duration::from_millis(2) } else { Duration::from_secs(10) }, 0),
+                                      (Duration::from_micros(100), 0),
+                                      (Duration::from_micros(200), 256)] {
+                let mut m = machine(&kvm, &code, undo);
+                m.page_timer_requested = true;
+                m.abi = super::super::ABI_PAGE_TIMER;
+                m.enable_page_timer();
+                m.pit.program_deadline(old);
+                m.pit.fresh = false;
+                m.tolerance = 100000;
+                m.timer_jitter = 1000;
+                m.exact_timer_ppm = 500000;
+                m.timer_rng = Some(crate::rng::Rng::new(1009, "timer/pv-probe"));
+                // Keep IRQ0 pending until HLT: this payload has no IDT.
+                m.pic.set_masks(0xffff);
+                let mut clock = PvClock::new(watchdog).unwrap();
+                assert_eq!(m.run_until(&mut clock, 1000000, 0, &mut Vec::new()).unwrap(), Stop::Halted);
+                assert_eq!(m.time, 30000, "idle must include page-clock progress");
+                assert_eq!(m.stats.spin_idles, u64::from(spin));
+                if watchdog < Duration::from_secs(1) {
+                    assert!(m.stats.eintr > 0, "the short watchdog must actually interrupt the guest");
+                }
+                m.pic.set_masks(0);
+                let pending = old.is_some() || word <= 30000;
+                assert_eq!(m.pic.pending(), pending.then_some(0), "overdue arms must survive replacement/disarm");
+                let adopted = m.next_deadline();
+                let wake = if pending { m.time } else { adopted };
+                if !pending {
+                    assert!((word..=word + 1000).contains(&wake));
+                }
+                // Model the world's halted key and wake, then expire and inject
+                // once without entering the guest's absent interrupt handler.
+                m.wake(wake);
+                m.expire_timers().unwrap();
+                m.inject();
+                assert_eq!(m.stats.irqs, 1);
+                assert_eq!(m.pic.pending(), None);
+                let mut rng = m.timer_rng.as_ref().unwrap().clone();
+                let got = (wake, adopted, m.stats.irqs, m.exit_witness(), rng.next());
+                if let Some(want) = &want { assert_eq!(&got, want, "watchdog={watchdog:?} undo={undo}"); }
+                else { want = Some(got); }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
+    fn changing_idle_periods_keep_plan_and_wake_across_watchdogs() {
+        let kvm = Kvm::new().unwrap();
+        let start = 1_010_599_858u64;
+        let periods = [(100_001, 500_003), (700_007, 300_011), (200_013, 800_017)];
+        // No IDT: retain IRQ0 in the PIC, observe it, then acknowledge between
+        // rounds. HLT still has IF set (machine() uses rflags=0x202).
+        let store = |code: &mut Vec<u8>, address: u32, value: u64| {
+            for (address, value) in [(address, value as u32), (address + 4, (value >> 32) as u32)] {
+                code.extend_from_slice(&[0xc7, 0x05]);
+                code.extend_from_slice(&address.to_le_bytes());
+                code.extend_from_slice(&value.to_le_bytes());
+            }
+        };
+        let delay = [0xb9, 0, 0, 0, 0x01, 0x49, 0x75, 0xfd];
+        let mut code = Vec::new();
+        for (round, (first, second)) in periods.into_iter().enumerate() {
+            let origin = start + round as u64 * 2_000_000;
+            code.extend_from_slice(&delay); // splits before the first arm
+            store(&mut code, 0xd0000070, origin + first);
+            store(&mut code, 0xd0000038, origin + first);
+            code.extend_from_slice(&delay); // splits while the first bound is lowered
+            store(&mut code, 0xd0000070, origin + second);
+            // A later re-arm retains the earlier bound, as seedbox.c does.
+            store(&mut code, 0xd0000038, origin + first.min(second));
+            code.extend_from_slice(&delay); // splits after re-arm, before idle
+            code.extend_from_slice(&[0xba, 0x2c, 0x05, 0, 0, 0xb0, 1, 0xee, 0xf4]);
+        }
+        let mut want = None;
+        for (watchdog, undo) in [(Duration::from_secs(10), 0), (Duration::from_micros(100), 0),
+                                 (Duration::from_micros(700), 256)] {
+            let mut m = machine(&kvm, &code, undo);
+            m.page_timer_requested = true;
+            m.abi = super::super::ABI_PAGE_TIMER;
+            m.enable_page_timer();
+            m.pic.set_masks(0xffff);
+            m.timer_jitter = 1000;
+            m.exact_timer_ppm = 500000;
+            m.timer_rng = Some(crate::rng::Rng::new(1009, "timer/pv-probe"));
+            let mut clock = PvClock::new(watchdog).unwrap();
+            let mut evidence = Vec::new();
+            for (round, (first, second)) in periods.into_iter().enumerate() {
+                let origin = start + round as u64 * 2_000_000;
+                m.wake(origin);
+                assert_eq!(m.run_until(&mut clock, origin + 1_000_000, 0, &mut Vec::new()).unwrap(), Stop::Halted);
+                assert_eq!(m.time, origin + first.min(second));
+                let adopted = m.next_deadline();
+                assert!((origin + second..=origin + second + 1000).contains(&adopted));
+                // A halted world does not enter KVM. Even hypothetical repeated
+                // watchdog preparation here must leave its wake and plan intact.
+                let plan = [PAGE_BOUND, PAGE_SYSCALL_TARGET, super::super::PAGE_SYSCALLS0,
+                            super::super::PAGE_PLAN_TIME].map(|i| m.page_get(i));
+                for _ in 0..round + 1 {
+                    clock.prepare(&mut m, 2_000_000, origin + 2_000_000, false).unwrap();
+                    assert_eq!(m.next_deadline(), adopted);
+                    assert_eq!([PAGE_BOUND, PAGE_SYSCALL_TARGET, super::super::PAGE_SYSCALLS0,
+                                super::super::PAGE_PLAN_TIME].map(|i| m.page_get(i)), plan);
+                }
+                evidence.push((m.time, m.pic.pending(), m.pit.deadline, m.exit_witness(), m.timer_rng.as_ref().unwrap().counter()));
+                m.wake(adopted);
+                m.expire_timers().unwrap();
+                m.pic.set_masks(0);
+                assert_eq!(m.pic.pending(), Some(0));
+                evidence.push((m.time, m.pic.pending(), m.pit.deadline, m.exit_witness(), m.timer_rng.as_ref().unwrap().counter()));
+                m.pic.take(0);
+                m.pic.set_masks(0xffff);
+            }
+            if watchdog < Duration::from_secs(1) { assert!(m.stats.eintr > 0); }
+            if let Some(want) = &want { assert_eq!(&evidence, want, "watchdog={watchdog:?} undo={undo}"); }
+            else { want = Some(evidence); }
+        }
     }
 
     /// Run to the first stop under several watchdog periods and undo
@@ -326,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires KVM"]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
     fn a_jump_to_itself_is_idle_at_the_jump() {
         let (stop, rip, _, m) = run(&[0xeb, 0xfe], true); // jmp $
         assert_eq!(stop, Stop::Halted);
@@ -336,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires KVM"]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
     fn a_cycle_with_an_inner_loop_is_idle_at_its_canonical_point() {
         // outer: mov ecx,5; inner: dec ecx; jnz inner; jmp outer
         let (stop, rip, rcx, m) = run(&[0xb9, 5, 0, 0, 0, 0x49, 0x75, 0xfd, 0xeb, 0xf6], true);
@@ -366,7 +626,7 @@ mod tests {
     /// Ticks far more often than a check lasts: every check still counts
     /// each landing, so all runs idle at the same point after one check.
     #[test]
-    #[ignore = "requires KVM"]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
     fn frequent_ticks_do_not_disturb_a_spin_check() {
         let kvm = Kvm::new().unwrap();
         let code = [0xb9, 5, 0, 0, 0, 0x49, 0x75, 0xfd, 0xeb, 0xf6];
@@ -382,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires KVM"]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
     fn a_long_finite_loop_is_left_alone() {
         // mov ecx,0x20000000; l: dec ecx; jnz l; hlt
         let (stop, rip, rcx, m) = run(&[0xb9, 0, 0, 0, 0x20, 0x49, 0x75, 0xfd, 0xf4], false);

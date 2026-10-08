@@ -61,12 +61,12 @@ fn update_fault_model_digest(model: DiskFaultModel, h: &mut Sha256) {
     h.update(model.survival_probability.to_bits().to_le_bytes());
 }
 
-fn seeded_survival(model: DiskFaultModel, seed: u64, machine: &str, incarnation: u32) -> Option<Rng> {
+fn seeded_survival_branch(model: DiskFaultModel, seed: u64, identity: Option<&str>, machine: &str, incarnation: u32) -> Option<Rng> {
     if model.survival_probability == 0.0 {
         None
     } else {
         debug_assert_eq!(model.sector_bytes, SECTOR);
-        Some(Rng::new(seed, &format!("disk-loss/{machine}/{incarnation}")))
+        Some(Rng::branch(seed, identity, &format!("disk-loss/{machine}/{incarnation}")))
     }
 }
 
@@ -142,7 +142,14 @@ impl Disk {
     /// Incarnation is the one that crashed, not the successor. Recreating the
     /// stream here also makes snapshot/fork replay independent of earlier runs.
     pub fn crashed_seeded(&self, seed: u64, machine: &str, incarnation: u32) -> (Disk, u64) {
-        let Some(mut rng) = seeded_survival(self.fault_model, seed, machine, incarnation) else {
+        self.crashed_branch(seed, None, machine, incarnation)
+    }
+
+    /// A runtime branch keys future loss on its full identity. Continuations
+    /// retain the ordinary seedbox-v1 stream. Selection is atomic at crash;
+    /// there is no partially consumed survival RNG to capture.
+    pub fn crashed_branch(&self, seed: u64, identity: Option<&str>, machine: &str, incarnation: u32) -> (Disk, u64) {
+        let Some(mut rng) = seeded_survival_branch(self.fault_model, seed, identity, machine, incarnation) else {
             return self.crashed();
         };
         self.crashed_keeping(|sector, data| sector_survives(self.fault_model, &mut rng, sector, data))
@@ -428,6 +435,39 @@ mod tests {
         assert_eq!(d.digest(), before);
         assert_eq!(after.crashed_seeded(1010, "server", 1).0.digest(), after.digest(), "survivors are stable across later crashes");
         assert_eq!(d.clone().crashed_seeded(1009, "server", 0).0.digest(), after.digest(), "a fork retains the policy and layers");
+    }
+
+    #[test]
+    fn checkpoint_restore_keeps_survival_inputs_and_branches_future_loss() {
+        let mut d = Disk::new(None, Some(64)).unwrap().with_fault_model(DiskFaultModel {sector_bytes:512,survival_probability:0.5});
+        d.write(0, &fill(b'A', 64)).unwrap();
+        d.flush();
+        d.write(0, &fill(b'B', 64)).unwrap();
+        let saved = d.clone();
+        let parent = d.crashed_seeded(7, "server", 3);
+        let identities = [crate::checkpoint::branch_identity("parent", 100, 42),
+            crate::checkpoint::branch_identity("parent", 200, 42)];
+        let mut branches = Vec::new();
+        for id in [&identities[0], &identities[1], &identities[0]] {
+            d = saved.clone();
+            assert_eq!(d.fault_model(), DiskFaultModel {sector_bytes:512,survival_probability:0.5});
+            let (after, lost) = d.crashed_branch(42, Some(id), "server", 3);
+            let mut rng = Rng::branch(42, Some(id), "disk-loss/server/3");
+            for sector in 0..64 {
+                assert_eq!(at(&after, sector), if sector_survives(d.fault_model, &mut rng, sector, &[b'B';512]) { b'B' } else { b'A' });
+            }
+            assert!(lost > 0 && lost < 64);
+            assert_eq!(after.volatile_sectors(), 0);
+            branches.push((after.digest(), lost));
+        }
+        assert_eq!(branches[0], branches[2]);
+        assert_ne!(branches[0].0, branches[1].0);
+        assert_ne!(branches[0].0, parent.0.digest());
+        let restored = saved.crashed_branch(7, None, "server", 3);
+        assert_eq!((restored.0.digest(), restored.1), (parent.0.digest(), parent.1));
+        // A down snapshot has already sampled survival: later branches cannot
+        // change those stable survivors without another write.
+        assert_eq!(parent.0.crashed_branch(42, Some(&identities[0]), "server", 4).0.digest(), parent.0.digest());
     }
 
     #[test]

@@ -20,6 +20,8 @@ cargo build --release                # target/release/seedbox
 cargo run -- validate examples/etcd
 sudo -E env PATH="$PATH" target/release/seedbox run examples/etcd
 sudo -E env PATH="$PATH" target/release/seedbox replay .seedbox/runs/ATTEMPT
+# Optional semantic mode: batch virtio-net TX until a deterministic poll.
+sudo -E env PATH="$PATH" target/release/seedbox run examples/etcd --deferred-tx
 cargo run -- inspect .seedbox/runs/ATTEMPT
 cargo run -- logs .seedbox/runs/ATTEMPT --machine client --stream console --since-ns 1000000000
 cargo run -- diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
@@ -48,8 +50,7 @@ and executes application machines natively under HVF. Replay uses retained bytes
 without starting that preparation VM. No runtime compiler or separate VMM path
 is needed. Images must support `linux/arm64`; memory is limited to 3072 MiB per
 service. Mac execution remains a development backend with distinct admission.
-The generated etcd example uses `GOMAXPROCS=1` for its single-vCPU guests;
-the four-worker variant stalled under the cooperative native PV backend.
+The guest supervisor defaults an unset `GOMAXPROCS` to the guest CPU count.
 See [the Mac workflow](tools/mac-runtime/README.md).
 
 `seedbox run` with no arguments runs the Compose project in the current
@@ -61,7 +62,10 @@ directory. Every runtime input has a default, so no flags are required:
 | Directed link baselines | no overrides; global latency/jitter and zero loss | `x-seedbox.network.links` |
 | Connection selectors | disabled; discover and select through the guest control API | `world.connections`, `world.drop_connection` |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
+| Deferred TX kicks (Linux KVM) | off; service TX as in the current engine | `--deferred-tx` (prepare/run/explore) |
+| Runtime checkpoint (Linux KVM) | absent; ordinary execution | `--checkpoint-at-ns T --branch-seed B` (run only; B=P continues without reseeding; no environment backing) |
 | Timebase | Linux: `counter` (retired guest branches); Mac: `pv` | `--timebase` (prepare/run/explore) |
+| Page timer (Linux KVM) | off; ABI-4 clockevent stores, aimed at PV | `--page-timer` (prepare/run/explore) |
 | Exploration count | `1` | `--count` |
 | Exploration workers | `1`, sequential execution; Mac currently requires `1` | `--workers` (1..32; Linux automatic CPU selection for parallel execution) |
 | Torn disk writes | off (drop all unflushed sectors on crash) | `--torn-writes` |
@@ -108,9 +112,8 @@ for lifecycle and unsupported-traffic behavior, and the
 
 Engines and guest kernels are not pinned: any built engine and kernel are
 admitted, and each run records their hashes. `--allow-dev-engine` is still accepted and has no effect.
-Runs recorded earlier with `engine_qualification = "dev-unpinned"` still replay,
-on their exact retained engine and kernel. All host, CPU, PMU, MSR, lease, ABI and
-control-channel checks still apply.
+The host checks are the KVM and perf capabilities the engine needs; CPU model,
+microcode and CPUID are not pinned.
 
 `seedbox --version` reports the simulator version. Development builds identify
 their source commit as `0.1.0-dev+COMMIT`, with `.dirty` for staged or unstaged
@@ -180,6 +183,19 @@ logs do not change the outcome. Retained records and `--json` output are unchang
 and transfer from qualified execution. Same software versions, seed and exact
 retained inputs must replay on a qualified compatible profile; changing versions
 may change execution. Release compatibility remains a V0 qualification gate.
+
+Experimental runtime forks use `seedbox run examples/redis --checkpoint-at-ns
+1000000000 --branch-seed 42` with the newly built VMM. The
+ordinary seed drives the prefix; the full branch identity keys future simulator
+randomness and guest CRNG entropy after one simulated second. Build the VMM and
+current K2/ABI-3 guest kernel from this checkout. A branch seed
+equal to the parent seed continues without any reseeding. Replay reads these
+semantic settings from the retained run. Application-owned PRNG state remains
+captured. Each public branch has its own retained attempt with the normal
+`output/machines/` layout: `logs` includes its prefix and post-checkpoint chunks,
+and `diff` reads page hashes retained by `run --full-state`.
+See the [checkpoint design](docs/runtime.md#runtime-checkpoint-design-experimental)
+for state coverage, engine-only multiple checkpoints/branches and unverified KVM behavior.
 
 ## Finite exploration
 
@@ -258,6 +274,7 @@ rebuilt OCI images to have identical bytes.
 | `docs/` | [Vision](docs/vision.md), [runtime instructions](docs/runtime.md), [backends](docs/backends.md), [acceptance record](docs/acceptance.md) |
 | `harness/` | YAML acceptance scenarios, portable checks, low-level world fixtures and their batch runner ([migration map](harness/worlds/README.md)), `msr54.py` |
 | [`tools/mac-tcg/`](tools/mac-tcg/README.md) | Experimental local Mac TCG runner and tests; separate from the production KVM backend |
+| [`tools/droplet/`](tools/droplet/README.md) | Batch PV runs and replays for several commits on a throwaway DigitalOcean droplet |
 
 ## Contributor checks
 
@@ -394,9 +411,11 @@ bytes and does not establish a pass for the committed SHA.
   (`intel-0x5101c4` up to Comet Lake, `intel-0x5111c4` from Ice Lake) that
   have never run on hardware; `run` and `replay` refuse them unless given
   `--allow-unqualified-cpu`, and then warn that results are unverified.
-- The CLI retains the same host admission, CPU/SMT leasing and MSR policy for
-  both timebases. PV itself does not use a host perf counter; selecting it does
-  not qualify additional hosts through this CLI.
+- `--timebase pv` reads no host perf counter, so it needs only KVM and a free
+  core: it skips the counter profile, `--allow-unqualified-cpu`, the perf event
+  checks and the workaround MSR, and its identity records no counter profile.
+  It runs on any x86-64 KVM host, including cloud VMs with nested KVM and no
+  guest PMU. Hosts other than the workstation are not qualified for PV.
 - **The Zen SpeculativeLockMap workaround must be on** for the cores running
   simulations (MSR 0xC0011020 bit 54, rr's workaround). Without it, branch
   counts drift on lock-heavy code (e.g. Go) and runs diverge. The Rust executor
@@ -407,34 +426,25 @@ bytes and does not establish a pass for the committed SHA.
 `--allow-unqualified-cpu` also applies to `explore`. This explicit non-Zen
 path is experimental: it retains the counter in identity, validates exact
 supported release inputs and applicable KVM capabilities, and holds every SMT
-lease through child cleanup. It carries no qualified AMD host-policy proof and
-never opens AMD workaround MSRs. `doctor` refuses an unqualified counter rather
+lease through child cleanup. It never opens AMD workaround MSRs. `doctor` refuses an unqualified counter rather
 than reporting qualified compatibility. Disabled selected-event readiness is checked
 before preparation and again under held leases; no guest counter is enabled by
 admission. Intel determinism is not established.
 
-The versioned `amd-zen3-engine391f-v3` admission policy checks AMD family 25,
-model 33, stepping 0 and microcode 0xa20102e, KVM capabilities and the engine's complete existing CPUID
-policy. Host-kernel bytes are not checked. Before image preparation, it temporarily
+Host admission checks for an AMD x86-64 CPU and the KVM and perf capabilities the
+engine needs. CPU model, microcode, CPUID and host-kernel bytes are not checked.
+Before image preparation, it temporarily
 reserves an eligible core, checks each online/allowed SMT sibling and opens the
 exact perf event disabled. Descriptors close and affinity/reservations restore
 before preparation. The leased execution core is checked again before MSR writes.
 This is readiness admission; it does not prove guest counting, overflow behavior
-or cross-host determinism. Matching a second machine admits compatibility without
-host-ID enrollment. Support evidence remains the tested host and inputs.
-
-Qualified Zen run identities bind the full policy and its fingerprint. Existing records
-remain inspectable and transferable, but replay through this CLI rejects missing
-or drifted host-policy proof as ERROR/NOT_COMPARABLE (exit 2), even with
-`--allow-engine-change`. A retained previous CLI can still be used for explicitly
-historical evidence; its execution does not establish new-policy admission.
-Admission source checks are separate from the still-required focused Linux
-guest/profile acceptance.
+or cross-host determinism. Run identities carry no host-policy proof; host-policy
+fields in older records are kept as data and do not block replay.
 
 ## Check execution compatibility
 
 `seedbox doctor` checks the installed engine, guest kernel and selected host core
-against the same versioned admission policy used by execution. It needs a Linux
+with the same readiness checks used by execution. It needs a Linux
 KVM host and root, uses the normal `--cpu`, `--kernel` and `--vmm` defaults, and
 never builds a missing VMM, prepares images or starts guests. `--json` prints the
 exact admitted observations. Success prints `VALID` after probe resources and
@@ -531,6 +541,34 @@ are printed as `omitted files: N`; omitted local output is not transferred.
 Existing files/runs are never replaced. `--max-bytes` changes the local transfer
 cap without changing run identity. See [runtime instructions](docs/runtime.md#bundles)
 for bounds and supported formats.
+
+`run`, `prepare` and `explore` accept `--page-timer` (off by default,
+no environment override). An ABI-4 kernel arms one-shot clockevents by writing
+an absolute deadline into the shared time page, avoiding port `0x530` exits.
+The VMM advertises the capability only after the guest announces ABI 4;
+with the flag enabled, older kernels fail at boot with a rebuild/drop-flag error.
+The flag is aimed at PV: an earlier arm lowers the clock bound and uses the same
+syscall budget as the VMM planner, without a prompt syscall exit. Watchdog and probe splits leave the bound, budget and plan origin untouched,
+including between the guest's arm loads and stores. A later re-arm retains an
+earlier lowered bound until a legal exit; an overdue arm retains its original
+`syscalls0 + 1` target. These splits never adopt the page word, expire timers
+or draw jitter. Adoption happens only at legal exits (including HLT and PV
+yields), canonical spin-idle landings and world slice boundaries, after the
+exit clock is accounted. A halted machine wakes from the adopted deadline
+(including its seeded jitter), never from a raw page store. In the counter
+timebase, an earlier page arm waits for the next exit and may fire late by up
+to a slice. One-shot stop/restart
+uses page disarm and avoids PIT mode port writes.
+The requested semantic parameter is retained
+as `page_timer: true` only when enabled. Replay restores it without an override.
+Timer jitter uses the existing seeded stream. This changes enabled-run timing
+and witnesses; omission preserves the existing identity encoding for the same
+engine and kernel inputs.
+Checkpoint parent identities also bind the page timer only when enabled,
+preventing checkpoint reuse across timer modes while preserving feature-off hashes.
+This composes with deferred TX's `+deferred-tx` timebase suffix: all four flag
+combinations have distinct parent and branch identities, and both off retains
+the original encoding.
 
 ## Low-level engine fixtures
 

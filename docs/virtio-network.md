@@ -1,9 +1,9 @@
 # Network device compatibility
 
-The KVM network hardening checkpoint precedes extraction of the shared network
-model. It uses the shared bounded split-queue validator while preserving valid
-KVM traffic, register behavior, backlog policy, counters and completion order.
-The ARM network model is unchanged at this checkpoint.
+The shared network model serves both the KVM Network profile and the ARM
+Application profile. The Network profile includes bounded split-ring validation,
+notification suppression, EVENT_IDX and optional deferred TX. The Application
+profile retains its existing features, interrupt behavior and state projection.
 
 ## KVM validation changes
 
@@ -34,15 +34,47 @@ changes still happen at the successful outer notification/drain boundary.
 Both machine MMIO and inbound delivery collect dirty writes before propagating
 errors. The world propagates delivery errors rather than counting them as drops.
 Reset retains the pending dirty journal while clearing device state, counters and
-backlog. Snapshot cloning retains its own backlog and queue cursors.
+backlog. The semantic deferred-TX setting survives reset. Snapshot cloning retains
+its own backlog, queue cursors, deferred-TX setting and diagnostic observations.
+
+## Notifications and deterministic polling
+
+The Network profile offers EVENT_IDX (bit 29). It becomes active only after
+FEATURES_OK and driver negotiation. Without EVENT_IDX, each completed batch
+samples the live available-ring NO_INTERRUPT flag. With EVENT_IDX, each batch
+samples the live used_event threshold using wrapping 16-bit ring arithmetic.
+Completion and frame acceptance remain independent of whether an IRQ is raised.
+
+Legacy drains set used-ring NO_NOTIFY while servicing validated requests and
+clear it before checking for more work. EVENT_IDX drains instead arm avail_event
+after the complete used ring, then check available heads again. These event and
+flag writes are bounded, preserve unrelated flag bits, and enter the ordered DMA
+journal. Unready queues never touch rings. Malformed requests still fail before
+that request changes guest memory or advances a cursor; completed prefixes and
+their suppression writes remain visible on a later failure.
+
+Deterministic device polls can service both TX and queued RX when EVENT_IDX is
+negotiated. Legacy RX remains driven by notifications. Deferred TX is an explicit
+semantic run setting, disabled by default. It suppresses TX notifications through
+NO_NOTIFY or a full-ring avail_event threshold and services TX at deterministic
+stops, with a maximum 50,000 ns simulated polling interval while time advances.
+It does not enable legacy RX polling. Polling limits saturate at u64::MAX.
+
+The shared model reports doorbell exits, suppressed batch interrupts, polled TX
+frames and upper bounds on pickup delay from the last observed empty TX queue.
+These counters and timing observations are diagnostic only: they do not affect
+service decisions or enter execution witnesses. The VMM adapter owns the RAM
+base and journal and exposes fallible polling and timestamped writes.
 
 ## Evidence boundaries
 
 Portable tests compile the actual KVM device source on macOS. They cover bounded
 hostile-chain execution, rejected-request cursor preservation, ordered completed
-prefixes, frame/chain limits, reset and snapshot ownership. The valid-traffic
-differential compares old and hardened production device code, including complete
-RAM, queue state, backlog, counters, interrupts, returned frames and dirty order.
+prefixes, frame/chain limits, reset and snapshot ownership. Additional tests cover
+live suppression flags, event thresholds and full-ring offsets, index wrap,
+notification-free polls, deferred-TX bounds and pickup diagnostics. The earlier
+valid-traffic differential established the bounded-validation checkpoint; the
+subsequent suppression changes intentionally add flag/event DMA journal entries.
 Machine-level KVM execution and undo remain Linux merge-train checks; portable
 device tests do not claim that host evidence.
 
@@ -64,8 +96,9 @@ notifications. The application transport keeps its stricter register admission.
 | Admission | Not-ready/full backlog before size check | Not-ready before size; size before full backlog |
 | RX direct path | Enqueue then drain; failed new frame remains queued | Try DMA first; failed new frame is not enqueued |
 | TX notification | Also drains pending RX after TX completes | TX only |
-| IRQ | Per completed chain, including prefix before error | Successful notification/drain boundary |
-| Counters | Existing retained-state projection has none | TX, RX and dropped-frame counters |
+| IRQ | Per completed chain, including prefix before error | Live suppression/event threshold at successful batch boundary |
+| Features and polling | Existing MAC/VERSION_1 features; no deferred TX or EVENT_IDX | MAC/VERSION_1/EVENT_IDX; optional deferred TX |
+| Counters | Existing retained-state projection has none | TX, RX, drops and report-only notification/pickup diagnostics |
 
 The application projection retains the original `kind`, `mac` and `backlog`
 fields, and transport projection field order is unchanged. These profiles preserve

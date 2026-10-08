@@ -175,6 +175,9 @@ pub struct Undo {
     cpu: VcpuState,
     /// Machine-level state restored with the vCPU.
     pub page: [u64; crate::machine::PAGE_FIELDS],
+    // The time page is slot 1, outside the slot-0 RAM dirty log. Keep the
+    // guest-written ABI-4 word explicitly, without extending legacy digests.
+    pub timer_deadline: Option<u64>,
     pub time: u64,
     pub branches: u64,
     pub exit_req: bool,
@@ -211,6 +214,7 @@ impl Undo {
             valid: false,
             cpu: VcpuState::new(msr_list(kvm, vcpu)?),
             page: [0; crate::machine::PAGE_FIELDS],
+            timer_deadline: None,
             time: 0,
             branches: 0,
             exit_req: false,

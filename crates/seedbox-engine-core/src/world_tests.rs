@@ -160,6 +160,27 @@ impl WorldMachine for Mock {
             Ok(())
         }
     }
+    fn checkpoint_boundary(_: &()) -> Result<(), String> {
+        Ok(())
+    }
+    fn restore_boundary(_: &mut ()) -> Result<(), String> {
+        Ok(())
+    }
+    fn seed_timer_branch(
+        &mut self,
+        seed: u64,
+        identity: Option<&str>,
+        domain: &str,
+    ) -> Result<(), String> {
+        if let Some(identity) = identity {
+            self.record(&format!("branch/{seed}/{identity}/{domain}"));
+        }
+        self.seed_timer(seed, domain)
+    }
+    fn reseed_guest(&mut self, _: [u32; 8]) -> Result<(), String> {
+        self.record("reseed-guest");
+        Ok(())
+    }
     fn supports_speed_reseed(&self) -> bool {
         true
     }
@@ -200,7 +221,6 @@ impl WorldMachine for Mock {
         self.irq = s.irq;
         self.timer = s.timer;
         self.common.clear_effects();
-        self.common.restore_lifecycle();
         Ok(1)
     }
     fn advance(
@@ -284,6 +304,7 @@ fn world(names: &[&str]) -> World<Mock> {
         barrier: false,
         boot_seed: 1,
         run_seed: 2,
+        branch_identity: None,
         incarnations: vec![vec![]; n],
         paused_ingress: vec![0; n],
         clock: (),
@@ -1002,4 +1023,115 @@ fn original_coordinator_receipts() {
             json!({"variant":variant,"outcome":outcome,"machines":machines,"trace":*w.factory.borrow(),"events":events,"strict":w.strict_events.iter().map(|e|e.iter().collect::<Vec<_>>()).collect::<Vec<_>>(),"faults":w.faults.log,"readiness":w.faults.readiness,"control":w.control.log,"triggers":w.control.triggers.evidence().unwrap(),"incarnations":w.incarnations,"network":w.network_snapshot(),"slices":w.slices,"seq":w.seq,"delivered":w.delivered,"dropped":w.dropped})
         );
     }
+}
+
+#[test]
+fn runtime_checkpoint_precedes_exact_time_fault_and_preserves_active_plan() {
+    let mut w = world(&["a", "b"]);
+    w.faults
+        .append(seedbox_control::Plan {
+            id: 0,
+            at_ns: 10,
+            deadline_ns: 20,
+            action: partition("checkpoint-cut"),
+        })
+        .unwrap();
+    assert_eq!(
+        simulate_to(&mut w, &Value::Null, 30, &None, None, Some(10), &mut || Ok(
+            ()
+        ))
+        .unwrap(),
+        "checkpoint"
+    );
+    assert_eq!(w.faults.log[0]["status"], "unrequested");
+    assert!(!w.faults.blocked(0, 1));
+    let saved = WorldSnapshot::take_checkpoint(&mut w).unwrap();
+    for _ in 0..2 {
+        saved.restore_checkpoint(&mut w).unwrap();
+        assert_eq!(
+            simulate_to(&mut w, &Value::Null, 30, &None, None, Some(11), &mut || Ok(
+                ()
+            ))
+            .unwrap(),
+            "checkpoint"
+        );
+        assert!(w.faults.blocked(0, 1));
+        assert_eq!(w.faults.log.len(), 1);
+    }
+}
+
+#[test]
+fn runtime_checkpoint_drains_committed_messages_before_selection_and_snapshot() {
+    let mut w = world(&["a"]);
+    configure_control(&mut w);
+    w.machines[0].time = 10;
+    w.machines[0].fault_effects.push((0, 9, true));
+    w.machines[0].control_requests.push((
+        9,
+        b"SBX_RPC1 1 1 {\"version\":1,\"id\":1,\"op\":\"now\"}".to_vec(),
+    ));
+    assert!(
+        matches!(WorldSnapshot::take_checkpoint(&mut w), Err(error) if error.contains("drained"))
+    );
+    assert_eq!(
+        simulate_to(&mut w, &Value::Null, 30, &None, None, Some(10), &mut || Ok(
+            ()
+        ))
+        .unwrap(),
+        "checkpoint"
+    );
+    assert!(w.machines[0].fault_effects.is_empty());
+    assert!(w.machines[0].control_requests.is_empty());
+    assert_eq!(w.faults.readiness, [json!({"machine":"a", "at_ns":9})]);
+    let boundary = w.control.boundary();
+    let saved = WorldSnapshot::take_checkpoint(&mut w).unwrap();
+    saved.restore_checkpoint(&mut w).unwrap();
+    assert!(w.control.pending.is_some());
+    assert_eq!(w.control.boundary(), boundary);
+}
+
+#[test]
+fn runtime_snapshot_preserves_lifecycle_transit_and_continuation_rng_positions() {
+    let mut w = world(&["a", "b"]);
+    w.machines[0].time = 4;
+    w.machines[0].paused = true;
+    w.machines[0].incarnation = 2;
+    w.machines[0].booted_at = 3;
+    w.incarnations[0].push(json!({"incarnation":1}));
+    w.paused_ingress[0] = 7;
+    w.run_seed = 42;
+    w.branch_identity = Some("captured-parent".into());
+    w.schedule(
+        1,
+        15,
+        Payload::Frame {
+            from: 0,
+            bytes: vec![1, 2, 3],
+        },
+    );
+    w.faults.links.stream_sample((0, 1));
+    let saved = WorldSnapshot::take_checkpoint(&mut w).unwrap();
+    let expected = w.faults.links.stream_sample((0, 1));
+    w.machines[0].paused = false;
+    w.incarnations[0].clear();
+    w.events[1].clear();
+    w.paused_ingress[0] = 0;
+    w.run_seed = 99;
+    saved.restore_checkpoint(&mut w).unwrap();
+    assert!(w.machines[0].paused);
+    assert_eq!((w.machines[0].incarnation, w.machines[0].booted_at), (2, 3));
+    assert_eq!(w.incarnations[0], [json!({"incarnation":1})]);
+    assert_eq!(w.paused_ingress[0], 7);
+    assert_eq!(w.events[1].len(), 1);
+    let names = vec!["a".into(), "b".into()];
+    let report = reseed_checkpoint(&mut w, &names, 42, 42, "ignored-continuation-id").unwrap();
+    assert!(report.iter().all(|r| r["reseed"] == "continuation"));
+    assert_eq!(w.run_seed, 42);
+    assert_eq!(w.branch_identity.as_deref(), Some("captured-parent"));
+    assert_eq!(w.faults.links.stream_sample((0, 1)), expected);
+    saved.restore_checkpoint(&mut w).unwrap();
+    reseed_checkpoint(&mut w, &names, 42, 43, "new-branch").unwrap();
+    assert_eq!(w.run_seed, 43);
+    assert_eq!(w.branch_identity.as_deref(), Some("new-branch"));
+    assert_ne!(w.faults.links.stream_sample((0, 1)), expected);
 }

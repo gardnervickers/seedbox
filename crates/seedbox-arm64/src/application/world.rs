@@ -174,6 +174,7 @@ pub fn run(options: &Options) -> Result<Value> {
         barrier: false,
         boot_seed: options.seed,
         run_seed: options.seed,
+        branch_identity: None,
         incarnations: names.iter().map(|_| Vec::new()).collect(),
         paused_ingress: vec![0; names.len()],
         clock: (),

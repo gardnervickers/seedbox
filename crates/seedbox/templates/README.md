@@ -70,7 +70,8 @@ compiler or extra VMM path is needed.
 Images must support `linux/arm64`, RAM is limited to 3072 MiB per guest, and
 exploration is serial. CPU/PMU flags apply to Linux. Mac profiles have distinct
 PV time, boot-layout, device and HVF host identities and remain unqualified.
-The etcd template uses one Go worker per single-vCPU guest (`GOMAXPROCS=1`).
+The supervisor defaults Go workers to the guest's CPU count (one in the etcd
+template), while preserving an explicit `GOMAXPROCS` value.
 The native PV backend requires cooperative guest boundaries; four Go workers
 stalled in the Mac example and are not validated.
 `--torn-writes` opts into seeded partial survival of unflushed 512-byte disk
@@ -90,8 +91,44 @@ semantic profile and the VMM's reported `report.timebase` when available.
 Bundles preserve the timebase. PV uses no PMU counter, but the CLI retains the
 same host admission, CPU/SMT lease and Zen MSR policy for both choices.
 
+`run`, `prepare` and `explore` accept `--page-timer` (off by default,
+no environment override). An ABI-4 kernel arms one-shot clockevents by writing
+an absolute deadline into the shared time page, avoiding port `0x530` exits.
+The VMM advertises the capability only after the guest announces ABI 4;
+with the flag enabled, older kernels fail at boot with a rebuild/drop-flag error.
+The flag is aimed at PV: an earlier arm lowers the clock bound and uses the same
+syscall budget as the VMM planner, without a prompt syscall exit. Watchdog splits
+reproduce that bound and budget without adopting the page word, expiring timers
+or drawing jitter. Adoption happens only at legal exits (including HLT and PV
+yields), canonical spin-idle landings and world slice boundaries, after the
+exit clock is accounted. A halted machine wakes from the adopted deadline
+(including its seeded jitter), never from a raw page store. In the counter
+timebase, an earlier page arm waits for the next exit and may fire late by up
+to a slice. One-shot stop/restart
+uses page disarm and avoids PIT mode port writes.
+The requested semantic parameter is retained
+as `page_timer: true` only when enabled. Replay restores it without an override.
+Timer jitter uses the existing seeded stream. This changes enabled-run timing
+and witnesses; omission preserves the existing identity encoding for the same
+engine and kernel inputs.
+Checkpoint parent identities also bind the page timer only when enabled,
+preventing checkpoint reuse across timer modes while preserving feature-off hashes.
+
 Charged timer I/O retains its full cost across scheduler boundaries; pending
 operations are included in terminal witnesses.
+
+For an experimental runtime fork, `seedbox run --checkpoint-at-ns 1000000000
+--branch-seed 42` captures the world at one simulated second
+and continues with branch-identity-derived simulator randomness and guest CRNG
+entropy. Use the newly built VMM and current K2/ABI-3 guest kernel.
+These are semantic options with no environment backing; replay reads them from
+the retained run. A branch seed equal to the parent seed continues without any
+reseeding. Application-owned PRNG state stays in captured RAM. Each branch's
+retained attempt uses `output/machines/` for prefix and continuation logs,
+`.chunks` indexes and `--full-state` page hashes; use `logs` and `diff` on that attempt.
+The public CLI currently supports one checkpoint branch, without saved snapshot
+files or event-triggered capture. See the
+repository's `docs/runtime.md` for coverage and pending KVM qualification.
 
 From another terminal, `seedbox pause RUN` pauses the host's entire world at a
 slice boundary and `seedbox resume RUN` continues it. Use the executing attempt
@@ -179,12 +216,9 @@ when checking that a fault occurred. Reused tuples do not inherit a stale select
 See the repository's `docs/runtime.md` connection selector section for pagination,
 SYN/FIN/RST semantics, bounded tracking and unsupported/fragmented traffic.
 
-Run/replay enforce the versioned admitted host/engine/guest-kernel policy;
-host-kernel bytes are not checked. Matching a second machine is compatibility
-admission, not cross-host qualification. Old
-records stay inspectable/exportable/importable, but absent or drifted host proof
-is NOT_COMPARABLE (exit 2) in this CLI and cannot be bypassed with
-`--allow-engine-change`. A retained previous CLI is only historical evidence.
+Run/replay check that the host has the KVM and perf capabilities the engine
+needs; CPU model, microcode, CPUID, engine and kernel bytes are not pinned.
+Passing on a second machine is not cross-host qualification.
 
 Check the host and installed engine/kernel with `seedbox doctor` (Linux KVM as
 root, or Apple Silicon Mac as the current user) before running. It uses the normal CPU/runtime defaults without building,
@@ -232,3 +266,12 @@ actual effect. `world.cancel_trigger(trigger)` cancels an unmatched trigger.
 Markers use only future committed console bytes, and effects occur at a safe
 future world barrier. See [the trigger contract](https://github.com/gardnervickers/seedbox/blob/main/docs/triggers.md)
 for bounds, deadlines and the outstanding development-engine AMD checks.
+
+`prepare`, `run` and `explore` also accept `--deferred-tx` (off by default).
+It suppresses virtio-net TX kicks while deterministic polls service the queue,
+with slices capped at 50 microseconds of simulated time. RX is unchanged.
+This changes packet timing and identity: the profile records `deferred_tx=true`
+only when enabled. Replay uses the recorded mode without an override.
+Raw `output/vmm.json` reports doorbells, TX packets polled at boundaries and
+mean/max upper bounds on publish-to-pickup delay. These bounds start at the
+previous empty-ring observation; ordinary guest RAM stores are not timestamped.

@@ -21,7 +21,10 @@ use seedbox::{
     preparation::OciPreparer,
     store::ContentStore,
     templates::Template,
-    vmm::{recorded_counter, recorded_timebase, VmmExecutor},
+    vmm::{
+        recorded_counter, recorded_deferred_tx, recorded_page_timer, recorded_timebase,
+        recorded_torn_writes, VmmExecutor,
+    },
     Error, Result,
 };
 use signals::Signals;
@@ -114,6 +117,12 @@ enum Command {
         /// Simulation seed [default: x-seedbox.seed from the Compose file].
         #[arg(long)]
         seed: Option<u64>,
+        /// Capture the world before this simulated nanosecond and retain a branch with ordinary logs and diff evidence.
+        #[arg(long, requires = "branch_seed", value_parser = clap::value_parser!(u64))]
+        checkpoint_at_ns: Option<u64>,
+        /// Branch seed for simulator and guest kernel randomness; the parent seed continues unchanged.
+        #[arg(long, requires = "checkpoint_at_ns", value_parser = clap::value_parser!(u64))]
+        branch_seed: Option<u64>,
         #[command(flatten)]
         cpu: CpuArg,
         #[command(flatten)]
@@ -332,21 +341,19 @@ struct CpuArg {
 }
 
 impl CpuArg {
-    /// The host's branch counter profile, refused when unqualified unless allowed.
-    fn admit(&self, counter: CounterProfile) -> Result<CounterProfile> {
+    /// Refuse a missing or unqualified host branch counter unless allowed.
+    /// PV reads no counter, so it admits any KVM host.
+    fn admit(&self, detected: Result<CounterProfile>, timebase: Timebase) -> Result<()> {
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        {
-            if self.cpu.is_some() || self.allow_unqualified_cpu {
-                return Err(Error::Setup(
-                    "--cpu and --allow-unqualified-cpu require Linux KVM; omit them on Mac".into(),
-                ));
-            }
-            Ok(counter)
+        if self.cpu.is_some() || self.allow_unqualified_cpu {
+            return Err(Error::Setup(
+                "--cpu and --allow-unqualified-cpu require Linux KVM; omit them on Mac".into(),
+            ));
         }
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        admit_counter(counter, self.allow_unqualified_cpu)?;
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        Ok(counter)
+        if timebase == Timebase::Pv {
+            return Ok(());
+        }
+        admit_counter(detected?, self.allow_unqualified_cpu)
     }
 }
 
@@ -409,6 +416,12 @@ struct RuntimeInputs {
     /// Timebase for guest progress; changes run identity and results [default: pv on Mac; counter on Linux].
     #[arg(long, value_enum)]
     timebase: Option<TimebaseArg>,
+    /// Arm clockevents through the time page (ABI 4, aimed at PV); changes run identity and results.
+    #[arg(long)]
+    page_timer: bool,
+    /// Defer virtio-net TX kicks to deterministic polls; changes run identity and results.
+    #[arg(long)]
+    deferred_tx: bool,
     /// Also record and compare every machine's RAM and registers (Linux also retains per-page hashes).
     #[arg(long)]
     full_state: bool,
@@ -418,6 +431,29 @@ struct RuntimeInputs {
 }
 
 impl RuntimeInputs {
+    fn validate_platform(&self) -> Result<()> {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            if self.kvm.vmm.is_some() {
+                return Err(Error::Setup(
+                    "--vmm requires Linux KVM; use the built-in Mac engine".into(),
+                ));
+            }
+            if matches!(self.timebase, Some(TimebaseArg::Counter)) {
+                return Err(Error::Setup(
+                    "--timebase counter requires Linux KVM; use --timebase pv or omit it on Mac"
+                        .into(),
+                ));
+            }
+            if self.page_timer || self.deferred_tx {
+                return Err(Error::Setup(
+                    "--page-timer and --deferred-tx require Linux KVM; omit them on Mac".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve every input and build the matching preparer and executor.
     fn backends(
         &self,
@@ -426,6 +462,7 @@ impl RuntimeInputs {
         counter: CounterProfile,
         scratch: &Path,
     ) -> Result<(Preparer, Executor)> {
+        self.validate_platform()?;
         let engine = defaults::engine(self.kvm.vmm.clone())?;
         let witness = if self.full_state {
             WitnessMode::FullState
@@ -434,15 +471,9 @@ impl RuntimeInputs {
         };
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {
-            if cpu.is_some() || self.kvm.vmm.is_some() {
+            if cpu.is_some() {
                 return Err(Error::Setup(
-                    "--cpu and --vmm require Linux KVM; use the built-in Mac engine".into(),
-                ));
-            }
-            if matches!(self.timebase, Some(TimebaseArg::Counter)) {
-                return Err(Error::Setup(
-                    "--timebase counter requires Linux KVM; use --timebase pv or omit it on Mac"
-                        .into(),
+                    "--cpu requires Linux KVM; use automatic HVF scheduling on Mac".into(),
                 ));
             }
             let _ = (counter, scratch);
@@ -489,7 +520,9 @@ impl RuntimeInputs {
                 VmmExecutor::new_internal(&engine, store, cpu, self.memory_mb, witness, counter)?
             }
             .with_torn_writes(self.torn_writes)
-            .with_timebase(self.timebase.unwrap_or(TimebaseArg::Counter).into());
+            .with_timebase(self.timebase.unwrap_or(TimebaseArg::Counter).into())
+            .with_page_timer(self.page_timer)
+            .with_deferred_tx(self.deferred_tx);
             let preparer = self.preparer(engine, store, scratch, executor.profile())?;
             Ok((
                 Preparer::Linux(Box::new(preparer)),
@@ -685,7 +718,7 @@ fn run(cli: Cli) -> Result<u8> {
             let _signals = Signals::register(&cancellation)?;
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             {
-                cpu.admit(CounterProfile::Zen)?;
+                cpu.admit(Ok(CounterProfile::Zen), Timebase::Pv)?;
                 if let Some(path) = inputs.vmm.as_ref() {
                     defaults::existing("--vmm", path.clone())?;
                     if let Some(kernel) = inputs.kernel.as_ref() {
@@ -773,6 +806,7 @@ fn run(cli: Cli) -> Result<u8> {
             mut inputs,
             build,
         } => {
+            inputs.validate_platform()?;
             if output.exists() {
                 return Err(Error::Setup(format!(
                     "--output {}: already exists",
@@ -804,6 +838,8 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Run {
             compose,
             seed,
+            checkpoint_at_ns,
+            branch_seed,
             cpu,
             state,
             mut inputs,
@@ -811,8 +847,19 @@ fn run(cli: Cli) -> Result<u8> {
             performance,
         } => {
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            cpu.admit(CounterProfile::Zen)?;
+            cpu.admit(Ok(CounterProfile::Zen), Timebase::Pv)?;
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            if checkpoint_at_ns.is_some() || branch_seed.is_some() {
+                return Err(Error::Setup(
+                    "--checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac"
+                        .into(),
+                ));
+            }
+            inputs.validate_platform()?;
             let simulation = compose.load()?;
+            if checkpoint_at_ns.is_some_and(|t| t >= simulation.limits.simulated_time_ns) {
+                return Err(Error::Setup("--checkpoint-at-ns must be before the simulated time limit; choose an earlier checkpoint".into()));
+            }
             build.configure(&simulation, &mut inputs)?;
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
@@ -825,8 +872,15 @@ fn run(cli: Cli) -> Result<u8> {
             if cancellation.is_cancelled() {
                 return Err(Error::PreparationCancelled);
             }
-            cpu.admit(detected?)?;
+            cpu.admit(
+                detected,
+                inputs.timebase.map(Into::into).unwrap_or(Timebase::Counter),
+            )?;
             let executor = executor.with_unqualified_cpu(cpu.allow_unqualified_cpu);
+            let executor = match (checkpoint_at_ns, branch_seed) {
+                (Some(at), Some(branch)) => executor.with_checkpoint(at, branch)?,
+                _ => executor,
+            };
             preparer.profile = executor.profile();
             preparer.tools.build_epoch = build.build_epoch;
             let executor = performance.apply(executor)?;
@@ -852,6 +906,7 @@ fn run(cli: Cli) -> Result<u8> {
             build,
             performance,
         } => {
+            inputs.validate_platform()?;
             let resources = Resources::start();
             let simulation = compose.load()?;
             build.configure(&simulation, &mut inputs)?;
@@ -875,7 +930,7 @@ fn run(cli: Cli) -> Result<u8> {
                 ));
             }
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            cpu.admit(CounterProfile::Zen)?;
+            cpu.admit(Ok(CounterProfile::Zen), Timebase::Pv)?;
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
             let detected = execution_counter();
@@ -898,7 +953,10 @@ fn run(cli: Cli) -> Result<u8> {
                     preparer.tools.docker = defaults::preparation_tool(&preparer.tools.docker)?;
                 }
             }
-            cpu.admit(detected?)?;
+            cpu.admit(
+                detected,
+                inputs.timebase.map(Into::into).unwrap_or(Timebase::Counter),
+            )?;
             let executor = executor.with_unqualified_cpu(cpu.allow_unqualified_cpu);
             preparer.profile = executor.profile();
             let executor = performance.apply(executor)?;
@@ -956,16 +1014,26 @@ fn run(cli: Cli) -> Result<u8> {
         } => {
             let run = defaults::run_directory(run)?;
             let previous = orchestration::inspect(&run)?;
-            if previous.identity.inputs.profile.backend != "seedbox-hvf" {
-                recorded_timebase(&previous.identity.inputs.profile)?;
-            }
+            let is_mac = previous.identity.inputs.profile.backend == "seedbox-hvf";
+            let timebase = if is_mac {
+                Timebase::Pv
+            } else {
+                recorded_timebase(&previous.identity.inputs.profile)?
+            };
+            let deferred_tx = if is_mac {
+                false
+            } else {
+                recorded_deferred_tx(&previous.identity.inputs.profile)?
+            };
             let detected = execution_counter();
             let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
-            // Retained profiles are validated before live host admission.
-            if previous.identity.inputs.profile.backend != "seedbox-hvf"
+            // Historical/incompatible records must reach the retained-proof gate
+            // and remain captured as NOT_COMPARABLE before querying this host.
+            if !is_mac
+                && timebase == Timebase::Counter
                 && seedbox::admission::validate_profile(&previous.identity.inputs.profile).is_ok()
             {
-                cpu.admit(detected?)?;
+                cpu.admit(detected, timebase)?;
                 same_counter(
                     &run,
                     recorded_counter(&previous.identity.inputs.profile)?,
@@ -982,7 +1050,7 @@ fn run(cli: Cli) -> Result<u8> {
             let executor = if profile.backend == "seedbox-hvf" {
                 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
                 {
-                    cpu.admit(counter)?;
+                    cpu.admit(Ok(counter), Timebase::Pv)?;
                     Executor::Mac(seedbox::mac::MacExecutor::from_retained(
                         &engine,
                         &store,
@@ -996,13 +1064,15 @@ fn run(cli: Cli) -> Result<u8> {
                     ));
                 }
             } else {
-                Executor::Linux(VmmExecutor::from_retained(
-                    &engine,
-                    &store,
-                    profile.clone(),
-                    cpu.cpu,
-                    counter,
-                )?)
+                Executor::Linux(
+                    VmmExecutor::from_retained(&engine, &store, profile.clone(), cpu.cpu, counter)?
+                        .with_timebase(timebase)
+                        .with_page_timer(recorded_page_timer(profile))
+                        .with_deferred_tx(deferred_tx)
+                        .with_torn_writes(recorded_torn_writes(profile)?)
+                        .with_unqualified_cpu(cpu.allow_unqualified_cpu)
+                        .with_recorded_checkpoint(profile)?,
+                )
             };
             let executor =
                 performance.apply(executor.with_unqualified_cpu(cpu.allow_unqualified_cpu))?;
@@ -1199,12 +1269,7 @@ fn run(cli: Cli) -> Result<u8> {
             );
             print_timebase(&record);
             if let Some(replay) = record.replay {
-                let label = if seedbox::admission::is_dev_engine(&record.identity.inputs.profile) {
-                    " (unqualified dev engine)"
-                } else {
-                    ""
-                };
-                println!("replay: {}{label}", word(&replay.status));
+                println!("replay: {}", word(&replay.status));
             }
             if let Some(error) = record.error {
                 println!("error: {error}");
@@ -1217,7 +1282,6 @@ fn run(cli: Cli) -> Result<u8> {
 
 /// Refuse an unqualified counter profile unless the caller allowed it, and
 /// then say that its results are unverified.
-#[cfg(any(test, not(all(target_os = "macos", target_arch = "aarch64"))))]
 fn admit_counter(counter: CounterProfile, allow_unqualified: bool) -> Result<()> {
     if counter.qualified() {
         return Ok(());
@@ -1265,20 +1329,12 @@ fn report(run: &orchestration::Run) -> u8 {
         println!("simulator: {version}");
     }
     print_timebase(&run.record);
-    if seedbox::admission::is_dev_engine(&run.record.identity.inputs.profile) {
-        println!("engine_qualification: dev-unpinned (unqualified dev engine)");
-    }
     if let Some(error) = &run.record.error {
         eprintln!("{error}");
         diagnostics::vmm_failure(&run.directory, error);
     }
     if let Some(replay) = &run.record.replay {
-        let label = if seedbox::admission::is_dev_engine(&run.record.identity.inputs.profile) {
-            " (unqualified dev engine)"
-        } else {
-            ""
-        };
-        println!("replay: {}{label}", word(&replay.status));
+        println!("replay: {}", word(&replay.status));
         diagnostics::replay_pages(replay);
         return match replay.status {
             ReplayStatus::Match => 0,
@@ -1455,5 +1511,19 @@ mod tests {
              results are unverified; pass --allow-unqualified-cpu to run anyway"
         );
         assert!(admit_counter(CounterProfile::IntelSkylake, true).is_ok());
+        let cpu = CpuArg {
+            cpu: None,
+            allow_unqualified_cpu: false,
+            allow_dev_engine: false,
+        };
+        let missing = || Err(Error::Setup("no branch counter profile".into()));
+        assert!(cpu.admit(missing(), Timebase::Pv).is_ok());
+        assert!(cpu
+            .admit(Ok(CounterProfile::IntelIceLake), Timebase::Pv)
+            .is_ok());
+        assert!(cpu.admit(missing(), Timebase::Counter).is_err());
+        assert!(cpu
+            .admit(Ok(CounterProfile::IntelIceLake), Timebase::Counter)
+            .is_err());
     }
 }
