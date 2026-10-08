@@ -364,7 +364,7 @@ pub fn run(options: &Options) -> Result<Value> {
     }
     let network = format!("{:x}", network.finalize());
     hash.update(network.as_bytes());
-    let counts: Vec<_> = world.link_counts.iter().collect();
+    let counts = witness_counts(&world.link_counts);
     hash.update(
         serde_json::to_vec(&(&world.faults.log, &world.control.log, counts))
             .map_err(|e| e.to_string())?,
@@ -388,10 +388,19 @@ pub fn run(options: &Options) -> Result<Value> {
     }
     Ok(report)
 }
+/// Queue drops are appended only when present, so a run without them keeps
+/// the four-counter witness bytes.
+fn witness_counts(counts: &BTreeMap<(usize, usize), [u64; 5]>) -> Vec<(&(usize, usize), &[u64])> {
+    counts.iter().map(|(pair, c)| (pair, if c[4] == 0 { &c[..4] } else { &c[..] })).collect()
+}
 fn arm_counters(world: &world_core::World<ArmMachine>) -> Value {
     let counts: BTreeMap<_,_> = world.link_counts.iter().map(|(&(from,to),c)|
         (format!("{}->{}",world.machines[from].name,world.machines[to].name),
-         json!({"delivered":c[0],"partition_dropped":c[1],"receiver_dropped":c[2],"loss_dropped":c[3]}))).collect();
+         {
+             let mut row = json!({"delivered":c[0],"partition_dropped":c[1],"receiver_dropped":c[2],"loss_dropped":c[3]});
+             if c[4] > 0 { row["queue_dropped"] = json!(c[4]); }
+             row
+         })).collect();
     json!(counts)
 }
 
@@ -451,6 +460,15 @@ mod tests {
             "end_on_exit":"a", "timer_jitter_ns":0, "stop_tolerance_ns":0,
             "network":{"latency_ns":10}, "machines":[{"name":"a","initrd":"initrd"}],
             "control":null, "control_channel":"virtio-console-v1"})
+    }
+
+    #[test]
+    fn link_counts_without_queue_drops_keep_the_four_counter_witness_bytes() {
+        let counts = BTreeMap::from([((0, 1), [1, 2, 3, 4, 0]), ((1, 0), [5, 0, 0, 0, 6])]);
+        assert_eq!(
+            serde_json::to_vec(&witness_counts(&counts)).unwrap(),
+            br#"[[[0,1],[1,2,3,4]],[[1,0],[5,0,0,0,6]]]"#
+        );
     }
 
     #[test]

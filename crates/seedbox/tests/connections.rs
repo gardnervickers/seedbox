@@ -234,7 +234,7 @@ fn passive_tracking_preserves_legacy_bytes_and_partition_rng_and_snapshot_state(
     for n in 0..10 {
         assert_eq!(
             f.route(0, 1, n, &frame(4000, false, 1, 0, 2), false),
-            reference.links.decide(0, 1, n, false)
+            reference.links.decide(0, 1, n, 1500, false)
         );
         assert_eq!(hash(&f), hash(&reference));
         assert_eq!(
@@ -388,6 +388,8 @@ fn no_selectors_preserve_bytes_with_link_shapes_cuts_and_random_loss() {
                 latency_ns: 10,
                 jitter_ns: 9,
                 loss_ppm: 500_000,
+                bandwidth_bps: None,
+                queue_bound_ns: None,
             },
             0,
         );
@@ -416,7 +418,9 @@ fn no_selectors_preserve_bytes_with_link_shapes_cuts_and_random_loss() {
         let packet = frame(4000 + n as u16, false, 1, 0, 2);
         assert_eq!(
             f.route(0, 1, n, &packet, false),
-            reference.links.decide(0, 1, n, reference.blocked(0, 1))
+            reference
+                .links
+                .decide(0, 1, n, 1500, reference.blocked(0, 1))
         );
         assert_eq!(hash(&f), hash(&reference));
         assert_eq!(
@@ -526,6 +530,8 @@ fn selected_drop_preserves_other_flow_jitter_and_does_not_advance_fifo() {
                 latency_ns: 1000,
                 jitter_ns: 999,
                 loss_ppm: 0,
+                bandwidth_bps: None,
+                queue_bound_ns: None,
             },
             0,
         );

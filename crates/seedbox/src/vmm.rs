@@ -830,10 +830,19 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
         .collect::<Result<Vec<_>>>()?;
     let links = request.network.links.iter().map(|link| {
         let machine = |service: &str| request.prepared.placement.get(service).ok_or_else(||Error::Integrity(format!("missing link placement for {service}")));
-        Ok(json!({"from":machine(&link.from)?,"to":machine(&link.to)?,"latency_ns":link.latency_ns,"jitter_ns":link.jitter_ns,"loss_ppm":link.loss_ppm}))
+        let mut policy = json!({"from":machine(&link.from)?,"to":machine(&link.to)?,"latency_ns":link.latency_ns,"jitter_ns":link.jitter_ns,"loss_ppm":link.loss_ppm});
+        if let Some(rate) = link.bandwidth_bps { policy["bandwidth_bps"] = json!(rate); }
+        if let Some(bound) = link.queue_bound_ns { policy["queue_bound_ns"] = json!(bound); }
+        Ok(policy)
     }).collect::<Result<Vec<_>>>()?;
     let mut network =
         json!({"latency_ns":request.network.latency_ns,"jitter_ns":request.network.jitter_ns});
+    if let Some(rate) = request.network.bandwidth_bps {
+        network["bandwidth_bps"] = json!(rate);
+    }
+    if let Some(bound) = request.network.queue_bound_ns {
+        network["queue_bound_ns"] = json!(bound);
+    }
     // Absent unless used, so a world without link overrides is unchanged.
     if !links.is_empty() {
         network["links"] = json!(links);
@@ -1198,6 +1207,8 @@ fn validate_control_history(
                 latency_ns,
                 jitter_ns,
                 loss_ppm,
+                bandwidth_bps,
+                queue_bound_ns,
             } => {
                 let handle = if response {
                     &metadata["result"]["handle"]
@@ -1213,6 +1224,8 @@ fn validate_control_history(
                         .checked_add(jitter_ns)
                         .is_none_or(|n| n > 3_600_000_000_000)
                     || loss_ppm > 1_000_000
+                    || bandwidth_bps == Some(0)
+                    || (queue_bound_ns.is_some() && bandwidth_bps.is_none())
                 {
                     return Err(bad());
                 }
@@ -1232,6 +1245,8 @@ fn validate_control_history(
                     latency_ns,
                     jitter_ns,
                     loss_ppm,
+                    bandwidth_bps,
+                    queue_bound_ns,
                 }
             }
             Operation::DropConnection { connection } => {

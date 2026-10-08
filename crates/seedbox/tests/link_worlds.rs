@@ -48,6 +48,8 @@ fn full_world_window_45_reveals_lossmid_after_cut_heal_and_bounds_nominal_arriva
                             } else {
                                 0
                             },
+                            bandwidth_bps: None,
+                            queue_bound_ns: None
                         }
                     );
                     assert_eq!(
@@ -55,7 +57,7 @@ fn full_world_window_45_reveals_lossmid_after_cut_heal_and_bounds_nominal_arriva
                         matches!((src, dst), (0, 2) | (2, 0)) && (43..45).contains(&wi)
                     );
                 }
-                let outcome = f.links.decide(src, dst, send, cut);
+                let outcome = f.links.decide(src, dst, send, 1500, cut);
                 if src != 2 || dst != 0 {
                     continue;
                 }
@@ -70,6 +72,8 @@ fn full_world_window_45_reveals_lossmid_after_cut_heal_and_bounds_nominal_arriva
                             latency_ns: 1_000_000,
                             jitter_ns: 500_000,
                             loss_ppm: 500_000,
+                            bandwidth_bps: None,
+                            queue_bound_ns: None
                         }
                     );
                     match outcome {
@@ -79,6 +83,7 @@ fn full_world_window_45_reveals_lossmid_after_cut_heal_and_bounds_nominal_arriva
                             received += 1;
                         }
                         Outcome::Lost => {}
+                        Outcome::QueueDropped => panic!("unlimited fixture must not tail-drop"),
                         Outcome::Cut => panic!("healing cut must reveal the live lossmid layer"),
                     }
                 }
@@ -121,6 +126,8 @@ fn short_world_applies_the_same_ordered_faults_and_exposes_at_least_300_lossmid_
                     latency_ns: 10_000_000,
                     jitter_ns: 500_000,
                     loss_ppm: 500_000,
+                    bandwidth_bps: None,
+                    queue_bound_ns: None
                 }
             );
             exposed += 1;
