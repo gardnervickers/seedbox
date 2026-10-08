@@ -3,6 +3,9 @@
 
 use std::collections::VecDeque;
 
+#[path = "log_index.rs"]
+pub mod log_index;
+
 /// Master 8259A. The slave is accepted but never raises interrupts.
 #[derive(Default, Clone)]
 pub struct Pic {
@@ -286,6 +289,7 @@ pub struct Uart {
     pub out: Vec<u8>,
     pub output_file: Option<std::fs::File>,
     pub output_limit: Option<usize>,
+    pub chunks: log_index::Index,
 }
 
 impl Uart {
@@ -294,15 +298,17 @@ impl Uart {
         Uart {
             ier: self.ier, lcr: self.lcr, mcr: self.mcr, scr: self.scr, dll: self.dll, dlm: self.dlm,
             rx: self.rx.clone(), thre: self.thre, level: self.level, out: self.out.clone(),
-            output_file: None, output_limit: None,
+            output_file: None, output_limit: None, chunks: self.chunks.snapshot(),
         }
     }
     /// Put device state back from a snapshot, keeping this run's output sink.
     pub fn restore(&mut self, s: &Uart) {
         let (file, limit) = (self.output_file.take(), self.output_limit);
+        let chunks_file = self.chunks.file.take();
         *self = s.snapshot();
         self.output_file = file;
         self.output_limit = limit;
+        self.chunks.file = chunks_file;
     }
     fn dlab(&self) -> bool {
         self.lcr & 0x80 != 0

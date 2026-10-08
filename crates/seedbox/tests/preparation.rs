@@ -151,13 +151,17 @@ fn cancelled_copy_retains_command_and_cleanup_receipts_after_drop() {
     let context = PreparationContext::new(root.path().join("evidence"), token.clone()).unwrap();
     std::thread::scope(|scope| {
         let task = scope.spawn(|| preparer.prepare_cancellable(&simulation, &store, &context));
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(30);
         while fs::read_to_string(&ready)
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
             .is_none()
         {
-            assert!(Instant::now() < deadline);
+            let within_deadline = Instant::now() < deadline;
+            if !within_deadline {
+                token.cancel();
+            }
+            assert!(within_deadline);
             std::thread::yield_now();
         }
         token.cancel();

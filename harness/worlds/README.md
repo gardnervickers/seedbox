@@ -33,6 +33,8 @@ and identities.
 | `rdrand.json`, `rdrand-raw.json` | RDRAND/RDSEED as a guest sees them: hidden from CPUID and, with `-raw`, executed anyway (see below) |
 | `net-pause.json`, `net-crash.json`, `net-crash-fork.json` | `net.json` with machine `b` paused, or crashed and rebooted, while `a` pings it (see below) |
 | `disk-nocrash.json`, `disk-crash.json`, `disk-crash-fork.json`, `disk-ext4-crash.json` | One machine with a retained disk: raw-block FLUSH/FUA probe with and without a crash, and an fsync ledger on ext4 across a crash (see below) |
+| `entropy-fork.json` | One machine printing `getrandom` and `/dev/urandom` bytes before and after a time fork (see below) |
+| `entropy-barrier.json` | The same guest forked at its launch barrier instead (see below) |
 
 `batch.sh`, `batch.py` and `msr54.py` still run these fixtures with shared CPU/SMT
 leases and verified MSR restoration. Runtime lifecycle tests also use their CPU
@@ -75,12 +77,31 @@ CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/cluster-fork.json fo
 With `boot.fork_at_ns` instead, the world forks at a simulated time rather
 than at the guests' barrier: every machine parks at its first deterministic
 point at or after that time, so boot and application startup are both shared.
-No guest cooperation is needed, but nothing reseeds the guest kernels either:
-seeds differ only through what the run seed drives after the fork (timer and
-link jitter, release skew, faults, control and scenario events). A world with
-no jitter and no faults therefore runs identically for every seed after a
-time fork, which is why `cluster-fork-late.json` adds jitter. Run it the same
-way, with `fork-late-cold` and `fork-late-loop` prefixes.
+The x86 time page is u64-indexed: fields 0–5 retain the counter ABI;
+`pv_clock`, `bound`, and `syscall_target` occupy 6, 7, and 8;
+`entropy_gen` occupies 9 and the four entropy words occupy 10–13. Both
+`SEEDBOX_ABI` and `ABI_PAGE_RESEED` are 3. The checkpoint and dedicated
+time-page digest retain only fields 0–5 (`PAGE_FIELDS = 6`). The VMM never
+writes fields 6–8 in counter mode; it writes fields 9–13 only when releasing
+a parked time fork with ABI >= 3. Full world-fork snapshots still copy the
+whole page so later seeds restore the original generation.
+
+No guest cooperation is needed. On a guest kernel with time page ABI 3, the
+engine writes the seed's entropy into the time page at the release and the
+kernel mixes it in and reseeds its CRNG before its next random output, so
+`getrandom`, `/dev/urandom` and batched kernel randomness differ per seed from
+the fork on. Userspace generators seeded before the fork keep their state.
+Older kernels (ABI 2, such as `e8ece7cb`) are not reseeded: the engine says so
+on stderr, and seeds differ only through what the run seed drives after the
+fork (timer and link jitter, release skew, faults, control and scenario
+events), so a world with no jitter and no faults runs identically for every
+seed. Each seed's report records the delivery per machine in `boot.reseed`
+(`barrier`, `time_page` or `unsupported`). `cluster-fork-late.json` adds jitter;
+run it the same way, with `fork-late-cold` and `fork-late-loop` prefixes.
+`entropy-fork.json` prints random bytes on either side of a time fork at 2
+simulated seconds, and `entropy-barrier.json` on either side of the launch
+barrier; build their initramfs from `guest/entropy-fork.init` with
+`guest/rngprobe.c` at `bin/rngprobe`.
 
 The `scenario` partitions these fixtures use are older than the runtime fault
 API and don't follow its same-time ordering (see
@@ -195,8 +216,8 @@ CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/net-crash-fork.json 
 
 A machine's `disk` gives it a virtio-blk disk at `/dev/vda`:
 `{"size_mib": N}` for a zeroed disk, or `{"image": PATH}` for a raw image
-(relative to the config; with `size_mib` too, it must be that size). Its
-semantics (`disk.rs`, model `flush-stable/drop-all-unflushed/v1`):
+(relative to the config; with `size_mib` too, it must be that size). Its default
+semantics (`disk.rs`) drop every unflushed sector on crash:
 
 - The device offers a write cache with FLUSH and no native FUA, as virtio 1.2
   defines it, so Linux runs it in writeback mode and emulates FUA with a
@@ -212,7 +233,7 @@ semantics (`disk.rs`, model `flush-stable/drop-all-unflushed/v1`):
   nothing is written to host storage.
 - A fork restore puts the whole disk back, both layers.
 
-Each machine's report has a `disk` object: the model, capacity, the base
+Each machine's report has a `disk` object: `fault_model`, capacity, the base
 image's SHA-256 (null for a zeroed disk), a `digest` of both layers, their sizes and request counts.
 The disk's digest feeds the world witness, and with `--digest` it is the
 `disk` part of the machine's state digest. Each crashed incarnation reports
@@ -245,12 +266,15 @@ for s in 1010 1011; do CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worl
 CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/disk-crash-fork.json disk-fork-loop "1009" --digest --fork-seeds 1010,1011
 ```
 
-For seeded torn writes, set the world's top-level `disk_loss` to
-`flush-stable/seeded-latest-sector-512-half/disk-loss-machine-incarnation/v1`.
+For seeded torn writes, set the world's top-level `disk_loss` object to
+`{"sector_bytes": 512, "survival_probability": 0.5}`.
 [`disk-ext4-torn.json`](disk-ext4-torn.json) enables it for the same fsync ledger.
 Each latest unflushed 512-byte sector survives with probability 1/2, with its own
 machine/incarnation RNG domain. Stable data remains unless overwritten by a
-surviving sector; older overwritten volatile versions are not candidates. See
+surviving sector; older overwritten volatile versions are not candidates. Compose
+runs retain this policy as `disk_loss_sector_bytes` and
+`disk_loss_survival_probability` profile parameters; low-level reports expose it
+as each disk's `fault_model`. See
 [the full contract](../../docs/runtime.md#disk-crash-policy).
 
 On the qualified Linux host, run the fixture with repeated and distinct seeds:

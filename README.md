@@ -8,7 +8,7 @@ interrupt timing.
 
 ## Quick start
 
-`validate`, `init`, `inspect`, `diff`, `export` and `import` run on Linux or macOS. `run`,
+`validate`, `init`, `inspect`, `diff`, `logs`, `export` and `import` run on Linux or macOS. `run`,
 `explore` and `replay` need the
 qualified host (see [host requirements](#host-requirements)) and root.
 
@@ -21,6 +21,7 @@ cargo run -- validate examples/etcd
 sudo -E env PATH="$PATH" target/release/seedbox run examples/etcd --allow-dev-engine
 sudo -E env PATH="$PATH" target/release/seedbox replay .seedbox/runs/ATTEMPT --allow-dev-engine
 cargo run -- inspect .seedbox/runs/ATTEMPT
+cargo run -- logs .seedbox/runs/ATTEMPT --machine client --stream console --since-ns 1000000000
 cargo run -- diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
 ```
 
@@ -31,7 +32,9 @@ directory. Every runtime input has a default, so no flags are required:
 | --- | --- | --- |
 | Compose file | `compose.yaml` in the given directory (default `.`) | positional path |
 | Directed link baselines | no overrides; global latency/jitter and zero loss | `x-seedbox.network.links` |
+| Connection selectors | disabled; discover and select through the guest control API | `world.connections`, `world.drop_connection` |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
+| Timebase | `counter` (retired guest branches) | `--timebase` (prepare/run/explore) |
 | Exploration count | `1` | `--count` |
 | Exploration workers | `1`, sequential execution | `--workers` (1..32; automatic CPU selection for parallel execution) |
 | Torn disk writes | off (drop all unflushed sectors on crash) | `--torn-writes` |
@@ -45,6 +48,8 @@ directory. Every runtime input has a default, so no flags are required:
 | Engine qualification | pinned engine and guest kernel; dev artifacts require explicit opt-in | `--allow-dev-engine` (run/explore/replay/doctor; no environment backing) |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
 | Diff inputs | Two required retained run directories; no runtime inputs or state lookup | positional `RUN_A RUN_B` |
+| Per-page RAM evidence | off; under `--full-state`, retain `output/machines/NAME.pages` beside machine traces | existing `--full-state` |
+| Log selection | All indexed machines and both streams, with no time bounds; raw bytes on stdout (`--json` for metadata) | `logs RUN --machine NAME --stream console --since-ns N --until-ns N` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
 
 Directed baselines are optional Compose settings. For example, with `server` and
@@ -65,6 +70,14 @@ preparation. Guest controllers can temporarily override links with
 `world.shape(["server"], ["client"], latency=20_000_000, jitter=2_000_000, loss_ppm=50000)`
 and release the returned handle with `world.heal(handle)`; see
 [network policy](docs/runtime.md#directed-link-policy).
+
+For one TCP direction, use `world.connections("server", "client")`, select an
+exact returned record with `world.drop_connection(record)`, then
+`world.heal(handle)` and require its `dropped` count to be positive. Discovery is
+paginated and selectors bind an observed incarnation, so tuple reuse does not
+inherit the old fault. See [connection selectors](docs/runtime.md#connection-selectors)
+for lifecycle and unsupported-traffic behavior, and the
+[AMD validation procedure](docs/connection-selectors-amd.md).
 
 For development artifacts, pass `--allow-dev-engine` to `run`, `explore`, `replay`
 or `doctor`. Unpinned engine or guest-kernel bytes record the semantic parameter
@@ -92,11 +105,30 @@ next integration steps. Image preparation continues to use the existing tools.
 512-byte disk sectors on crash. It is recorded in run identity and replayed
 automatically. It applies to retained disks, including Compose named volumes. See [disk semantics](docs/runtime.md#disk-crash-policy).
 
-`seedbox help run` lists every option. A run prints `OUTCOME: run-directory`;
+Choose `seedbox run examples/etcd --timebase pv` for the PV clock model.
+`prepare` and `explore` accept the same option. PV compute between exits costs no
+virtual time; time advances at guest exits,
+syscalls and clock reads. The default `counter` counts retired guest branches.
+The choice changes results and run identity, has no environment override, and is
+retained through export/import. Replay uses the recorded timebase and accepts no
+`--timebase` override. `inspect` and run/replay output show `timebase: VALUE`;
+`inspect --json` includes the VMM's reported timebase in `report.timebase` when a
+report is available. Older counter records omit this report field.
+
+`seedbox help run` lists every option. The guest Python API supports
+[bounded committed console triggers](docs/triggers.md) for future stop/partition
+faults in the development engine; see that contract and AMD validation handoff. A run prints `OUTCOME: run-directory`;
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
 INCOMPLETE and 124 TIMEOUT. A cancelled or incomplete replay exits 2
 (NOT_COMPARABLE). Offline `diff` exits 0 for MATCH, 1 for DIFFERENT,
 and 2 for usage/setup or invalid retained evidence.
+
+`seedbox run --full-state` also retains per-page RAM hashes with each machine's
+final state. Replay inherits that mode. On RAM-only state-digest differences,
+plain `diff` and MISMATCH replay print the differing PFN count and first eight
+PFNs on stderr. The files travel in bundles under the ordinary retention policy
+and are excluded from run identity, witnesses and replay verdicts. See the
+[binary format and diagnostic fields](docs/runtime.md#compare-retained-runs).
 
 Pause a running world from another terminal with `sudo seedbox pause RUN`, then
 continue it with `sudo seedbox resume RUN`. Use the executing attempt directory
@@ -277,10 +309,11 @@ bytes and does not establish a pass for the committed SHA.
 
 ## How execution is controlled
 
-- **Progress and time.** Guest progress is the host perf count of retired
+- **Progress and time.** With the default counter timebase, guest progress is
+  the host perf count of retired
   conditional branches (guest only, kernel and user). Virtual time advances
   1 ns per branch; idle machines jump to their next event.
-- **Stops.** Events (timer deadlines, frames, scenario commands) are delivered
+- **Stops (counter timebase).** Events (timer deadlines, frames, scenario commands) are delivered
   at deterministic points only: a natural VM exit, or an exact branch count
   reached by overflow interrupt plus hardware-breakpoint stepping (no TF).
   Syscalls are not stopping points. A timer interrupt fires at the first
@@ -313,6 +346,9 @@ bytes and does not establish a pass for the committed SHA.
   (`intel-0x5101c4` up to Comet Lake, `intel-0x5111c4` from Ice Lake) that
   have never run on hardware; `run` and `replay` refuse them unless given
   `--allow-unqualified-cpu`, and then warn that results are unverified.
+- The CLI retains the same host admission, CPU/SMT leasing and MSR policy for
+  both timebases. PV itself does not use a host perf counter; selecting it does
+  not qualify additional hosts through this CLI.
 - **The Zen SpeculativeLockMap workaround must be on** for the cores running
   simulations (MSR 0xC0011020 bit 54, rr's workaround). Without it, branch
   counts drift on lock-heavy code (e.g. Go) and runs diverge. The Rust executor
@@ -325,13 +361,13 @@ path is experimental: it retains the counter in identity, validates exact
 supported release inputs and applicable KVM capabilities, and holds every SMT
 lease through child cleanup. It carries no qualified AMD host-policy proof and
 never opens AMD workaround MSRs. `doctor` refuses an unqualified counter rather
-than reporting qualified compatibility. The source policy now pins the frozen engine52eb and accepted guest kernel.
+than reporting qualified compatibility. The source policy now pins frozen engine391f and guest kernel68bf (K2).
 The artifact is built but unqualified: this staged release still requires fresh
 runtime acceptance before use. Disabled selected-event readiness is checked
 before preparation and again under held leases; no guest counter is enabled by
 admission. Intel determinism is not established.
 
-The versioned `amd-zen3-engine52eb-v2` admission policy checks AMD family 25,
+The versioned `amd-zen3-engine391f-v3` admission policy checks AMD family 25,
 model 33, stepping 0 and microcode 0xa20102e, controlled guest-kernel bytes,
 accepted engine bytes, KVM capabilities and the engine's complete existing CPUID
 policy. Host-kernel bytes are not checked. Before image preparation, it temporarily
@@ -404,6 +440,32 @@ MATCH means equality of the compared evidence, even if incomplete; it does not
 qualify replay or prove equality of unrecorded state. Performance counters,
 margin/undo, attempt metadata and arbitrary console output are excluded.
 See [comparison details](docs/runtime.md#compare-retained-runs).
+
+## Read committed-time logs
+
+`seedbox logs RUN [--machine NAME] [--stream console|mgmt] [--since-ns N]
+[--until-ns N] [--json]` reads checksum-verified retained output on Linux or macOS.
+Each chunk coalesces consecutive bytes from one machine/incarnation/stream within
+a world slice, ending when another stream writes or the slice returns. Its time
+is the first byte's simulated commit time. Filters select whole chunks by that
+time: the lower bound is inclusive and the upper bound exclusive, even if later
+bytes in a selected chunk commit beyond the upper bound. Equal-time chunks sort
+by machine name, then the machine's output order across both streams.
+
+By default, stdout contains the selected raw bytes in chunk order, without
+prefixes, encoding changes or added newlines. Status and omission diagnostics go
+to stderr. Select one machine and stream for its exact indexed byte sequence.
+`--json` includes times, incarnations, byte ranges and lossless `bytes_hex` in one
+report. The library's `logs::Reader::copy_chunk` also returns the exact raw bytes.
+No application schema or line framing is imposed.
+
+Capture is bounded and independent of the witness. Missing indexes (including
+older engines), unindexed raw suffixes, and retention omissions are explicit.
+A successful read does not claim complete logs; check stderr or JSON `omissions`.
+Bundles retain the indexes through the ordinary log policy. This source change creates a new
+**unqualified engine**; the frozen engine and release pins are unchanged.
+See [format, portable demo and AMD validation](docs/timed-logs.md) for the pending
+hardware acceptance.
 
 ## Sharing a retained run
 

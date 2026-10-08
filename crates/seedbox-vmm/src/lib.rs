@@ -3,6 +3,7 @@
 
 mod boundary;
 mod control;
+mod triggers;
 mod counter;
 mod devices;
 mod disk;
@@ -10,6 +11,7 @@ mod events;
 mod faults;
 mod host_control;
 mod links;
+mod connections;
 mod machine;
 mod network_counters;
 mod profile;
@@ -22,6 +24,7 @@ mod virtio_net;
 mod virtio_console;
 
 use counter::Counter;
+use machine::pv::PvClock;
 use machine::{BootSpec, Machine, MachineSnapshot, State, Stop, NET_IRQ, NET_MMIO, CHANNEL_IRQ, CHANNEL_MMIO, BLK_IRQ, BLK_MMIO};
 use rng::Rng;
 use serde_json::{json, Value};
@@ -43,18 +46,18 @@ pub struct PerformanceOptions {
     pub undo_margin: u64,
     /// None selects the adaptive stepping margin.
     pub margin: Option<u64>,
-    pub page_hashes: bool,
+    pub pv_watchdog_ms: u64,
 }
 
 impl Default for PerformanceOptions {
     fn default() -> Self {
-        Self { undo_margin: 256, margin: None, page_hashes: false }
+        Self { undo_margin: 256, margin: None, pv_watchdog_ms: 20 }
     }
 }
 
 impl PerformanceOptions {
     /// Interpret values supplied by the process boundary, without reading its environment.
-    pub fn parse(undo: Option<&str>, margin: Option<&str>, page_hashes: bool) -> Result<Self, String> {
+    pub fn parse(undo: Option<&str>, margin: Option<&str>) -> Result<Self, String> {
         let undo_margin = match undo {
             None => 256,
             Some(m) => m.parse().map_err(|e| format!("SEEDBOX_UNDO: {e}"))?,
@@ -63,7 +66,7 @@ impl PerformanceOptions {
             Some("adaptive") | None => None,
             Some(m) => Some(m.parse().map_err(|e| format!("margin: {e}"))?),
         };
-        Ok(Self { undo_margin, margin, page_hashes })
+        Ok(Self { undo_margin, margin, ..Self::default() })
     }
 }
 
@@ -88,6 +91,8 @@ pub struct WorkerOptions {
     pub digest: bool,
     pub host_control: Option<PathBuf>,
     pub console_limit: Option<usize>,
+    pub log_chunk_limit: Option<usize>,
+    pub pv_clock: bool,
     pub stream_console: bool,
     pub trace: bool,
     pub performance: PerformanceOptions,
@@ -110,8 +115,14 @@ impl WorkerOptions {
         let console_limit = arg(args, "--console-limit")
             .map(|limit| limit.parse::<usize>().map_err(|error| format!("console limit: {error}")))
             .transpose()?;
+        let pv_clock = match arg(args, "--timebase").as_deref() {
+            None | Some("counter") => false,
+            Some("pv") => true,
+            Some(other) => return Err(format!("--timebase {other}: expected counter or pv")),
+        };
+        let log_chunk_limit = arg(args,"--log-chunk-limit").map(|v|v.parse::<usize>()).transpose().map_err(|e|e.to_string())?;
         Ok(Self {
-            config, seed, fork_seeds, out,
+            config, seed, fork_seeds, out, pv_clock, log_chunk_limit,
             digest: args.iter().any(|a| a == "--digest"),
             host_control: arg(args, "--host-control").map(PathBuf::from),
             console_limit,
@@ -154,6 +165,21 @@ enum Payload {
     Partition { from: usize, to: usize, on: bool },
 }
 
+/// The world's timebase (see `timebase.rs`), one for all its machines.
+enum Clock {
+    Counter(Counter),
+    Pv(PvClock),
+}
+
+impl Clock {
+    fn name(&self) -> &'static str {
+        match self {
+            Clock::Counter(_) => "counter",
+            Clock::Pv(_) => "pv",
+        }
+    }
+}
+
 /// Frames that may wait for a paused machine, queued while it is paused and
 /// due before it resumes. Later ones are dropped at the receiver. Part of the
 /// execution semantics: changing it changes runs.
@@ -180,6 +206,9 @@ struct BootInputs {
     /// A fixed stepping margin; None adapts it.
     margin: Option<u64>,
     console_limit: Option<usize>,
+    /// The machine runs under the PV clock timebase.
+    pv_clock: bool,
+    log_chunk_limit: Option<usize>,
 }
 
 fn entropy_seed(seed: u64, domain: &str) -> [u8; 32] {
@@ -233,10 +262,13 @@ fn boot_machine(kvm: &kvm_ioctls::Kvm, name: &str, b: &BootInputs, barrier: bool
         disk: b.disk.clone(),
         undo_margin: b.undo_margin,
         barrier,
+        pv_clock: b.pv_clock,
     };
     let mut mach = Machine::new(kvm, name, &spec)?;
     mach.com1.output_limit = b.console_limit;
     mach.com2.output_limit = b.console_limit;
+    mach.com1.chunks.limit = b.log_chunk_limit;
+    mach.com2.chunks.limit = b.log_chunk_limit;
     mach.tolerance = b.tolerance;
     mach.timer_jitter = b.timer_jitter;
     mach.exact_timer_ppm = b.exact_timer_ppm;
@@ -260,7 +292,7 @@ struct World {
     incarnations: Vec<Vec<Value>>,
     /// Frames queued for each paused machine during its current pause.
     paused_ingress: Vec<u64>,
-    counter: Counter,
+    clock: Clock,
     events: Vec<BTreeMap<(u64, u64), Payload>>,
     seq: u64,
     /// No frame can arrive sooner than this after it is sent: the horizon.
@@ -377,8 +409,8 @@ impl World {
         let targets = links::candidates(src,dst_mac,&self.macs);
         for dst in targets {
             let last = self.faults.links.last.get(&(src,dst)).copied();
-            let cut = self.faults.blocked(src,dst) || *self.partitioned.get(&(src,dst)).unwrap_or(&false);
-            let t = match self.faults.links.decide(src,dst,send_time,cut) {
+            let cut = *self.partitioned.get(&(src,dst)).unwrap_or(&false);
+            let t = match self.faults.route(src,dst,send_time,&frame,cut) {
                 links::Outcome::Cut => { self.dropped += 1; self.count_link(send_time,src,dst,1); continue; }
                 links::Outcome::Lost => { self.dropped += 1; self.count_link(send_time,src,dst,3); continue; }
                 links::Outcome::Deliver(t) => t,
@@ -434,6 +466,7 @@ impl World {
     /// transit stay queued for the reboot to sort out.
     fn crash(&mut self, m: usize, t: u64) -> Result<(), String> {
         let name = self.machines[m].name.clone();
+        self.control.triggers.reset_source(&name);
         let next = self.machines[m].incarnation.checked_add(1).ok_or("incarnation overflow")?;
         let seed = entropy_seed(self.run_seed, &format!("reboot-entropy/{name}/{next}"));
         let mut fresh = boot_machine(&self.kvm, &name, &self.boot[m], false, seed)?;
@@ -500,9 +533,10 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
     seeds.extend_from_slice(&options.fork_seeds);
     let out = options.out.to_string_lossy().into_owned();
     let digest = options.digest;
+    let pv_clock = options.pv_clock;
     // Undo-able precise stops (performance only): initial final margin, 0 = off.
     let undo_margin = options.performance.undo_margin;
-    std::fs::create_dir_all(&options.out).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
     let mut host_control=options.host_control.as_deref()
         .map(host_control::HostControl::bind)
         .transpose().map_err(|e|format!("host control: {e}"))?;
@@ -510,11 +544,7 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
         &std::fs::read(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?,
     )
     .map_err(|e| format!("config: {e}"))?;
-    let torn_writes = match &cfg["disk_loss"] {
-        Value::Null => false,
-        Value::String(model) if model == disk::TORN_MODEL => true,
-        _ => return Err("unknown disk_loss model".into()),
-    };
+    let disk_fault_model = disk::parse_disk_fault_model(&cfg["disk_loss"])?;
     let base = config_path
         .parent()
         .unwrap()
@@ -588,7 +618,7 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
             cmdline += &format!(" virtio_mmio.device=4K@{NET_MMIO:#x}:{NET_IRQ}");
         }
         if control_channel {cmdline+=&format!(" virtio_mmio.device=4K@{CHANNEL_MMIO:#x}:{CHANNEL_IRQ}");}
-        let disk = machine_disk(&mc["disk"], &path)?.map(|d| d.with_torn_writes(torn_writes));
+        let disk = machine_disk(&mc["disk"], &path)?.map(|d| d.with_fault_model(disk_fault_model));
         if disk.is_some() {
             cmdline += &format!(" virtio_mmio.device=4K@{BLK_MMIO:#x}:{BLK_IRQ}");
         }
@@ -612,6 +642,8 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
             exact_timer_ppm: cfg["exact_timer_ppm"].as_u64().unwrap_or(0),
             margin,
             console_limit,
+            pv_clock,
+            log_chunk_limit: options.log_chunk_limit,
         };
         let seed = entropy_seed(boot_seed, &format!("boot-entropy/{}", names[i]));
         let mut mach = boot_machine(&kvm, &names[i], &boot, barrier, seed)?;
@@ -626,7 +658,10 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
                     .map_err(|error| error.to_string())?,
             );
         }
+        mach.com1.chunks.open(&format!("{out}/{}.console.chunks",names[i]));
+        mach.com2.chunks.open(&format!("{out}/{}.mgmt.chunks",names[i]));
         mach.timer_rng = Some(Rng::new(boot_seed, &format!("timer-jitter/{}", names[i])));
+        mach.syscall_ns = machine::pv::syscall_ns(&mut Rng::new(boot_seed, &format!("pv-speed/{}", names[i])));
         if options.trace {
             let f = std::fs::File::create(format!("{out}/{}.trace", names[i]))
                 .map_err(|e| e.to_string())?;
@@ -648,6 +683,14 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
     let net = &cfg["network"];
     let latency = net["latency_ns"].as_u64().unwrap_or(1_000_000);
     let early = (latency / 2).min(cfg["stop_tolerance_ns"].as_u64().unwrap_or(0));
+    let clock = if pv_clock {
+        // Host CPU time a run may go without an exit before it is checked
+        // for a spin (performance only).
+        let ms = options.performance.pv_watchdog_ms;
+        Clock::Pv(PvClock::new(std::time::Duration::from_millis(ms.max(1)))?)
+    } else {
+        Clock::Counter(Counter::new()?)
+    };
     let mut world = World {
         kvm,
         boot: boots,
@@ -656,7 +699,7 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
         run_seed: seed,
         incarnations: vec![Vec::new(); n],
         paused_ingress: vec![0; n],
-        counter: Counter::new()?,
+        clock,
         events: (0..n).map(|_| BTreeMap::new()).collect(),
         seq: 0,
         lookahead: latency,
@@ -681,7 +724,7 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
         let started = Instant::now();
         let outcome = simulate(&mut world, &cfg, duration, &end_on, None, &mut host_control)?;
         let host_seconds = started.elapsed().as_secs_f64();
-        return report(&mut world, outcome, seed, &kills, host_seconds, digest, options.performance.page_hashes, &out, duration, &end_on);
+        return report(&mut world, outcome, seed, &kills, host_seconds, digest, &out, duration, &end_on);
     }
 
     let started = Instant::now();
@@ -703,6 +746,12 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
         let dir = if seeds.len() > 1 { format!("{out}/seed-{seed}") } else { out.clone() };
         if seeds.len() > 1 {
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            if !stream {
+                for mach in &mut world.machines {
+                    mach.com1.chunks.open(&format!("{dir}/{}.console.chunks",mach.name));
+                    mach.com2.chunks.open(&format!("{dir}/{}.mgmt.chunks",mach.name));
+                }
+            }
             if stream {
                 for mach in world.machines.iter_mut() {
                     for (uart, ext) in [(&mut mach.com1, "console"), (&mut mach.com2, "mgmt")] {
@@ -711,19 +760,21 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
                             .map_err(|e| e.to_string())?;
                         file.write_all(&uart.out).map_err(|e| e.to_string())?;
                         uart.output_file = Some(file);
+                        uart.chunks.open(&format!("{dir}/{}.{ext}.chunks",mach.name));
                     }
                 }
             }
         }
         let started = Instant::now();
-        let kills = release(&mut world, &cfg, &names, seed, release_skew)?;
+        let (kills, reseed) = release(&mut world, &cfg, &names, seed, release_skew)?;
         let outcome = simulate(&mut world, &cfg, duration, &end_on, None, &mut host_control)?;
         let host_seconds = started.elapsed().as_secs_f64();
-        let mut r = report(&mut world, outcome, seed, &kills, host_seconds, digest, options.performance.page_hashes, &dir, duration, &end_on)?;
+        let mut r = report(&mut world, outcome, seed, &kills, host_seconds, digest, &dir, duration, &end_on)?;
         r["boot"] = json!({
             "seed": boot_seed, "barrier_ns": barrier_ns, "fork_at_ns": fork_at, "release_skew_ns": release_skew,
             "boot_host_seconds": boot_host_seconds, "forked": i > 0,
             "restored_pages": restored_pages, "restore_host_seconds": restore_host_seconds,
+            "reseed": reseed,
         });
         reports.push(r);
     }
@@ -787,11 +838,13 @@ fn check_plan_after(cfg: &Value, from: u64) -> Result<(), String> {
 fn arm_seed(world: &mut World, cfg: &Value, names: &[String], seed: u64, from: u64) -> Result<Vec<Value>, String> {
     check_plan_after(cfg, from)?;
     let booted = std::mem::take(&mut world.faults.readiness);
+    let connections = world.faults.connections.clone();
     world.faults = faults::Faults::with_links(
         cfg["faults"].as_array().cloned().unwrap_or_default(),
         names.to_vec(),
         world.faults.links.clone(),
     )?;
+    world.faults.connections = connections;
     world.control = control::Control::new(&cfg["control"], names.to_vec(), world.latency, world.early)?;
     world.faults.require_readiness();
     replay_readiness(&mut world.faults, names, &booted, world.latency)?;
@@ -850,31 +903,40 @@ fn arm_seed(world: &mut World, cfg: &Value, names: &[String], seed: u64, from: u
 
 /// Release a world parked at its launch barrier under `seed`. Every machine
 /// resumes at the latest barrier time plus a seeded skew, so which service
-/// starts first still varies by seed. Each guest reads its seeded entropy and
-/// reseeds its kernel CRNG; timer jitter and the seed's world plan start here.
-fn release(world: &mut World, cfg: &Value, names: &[String], seed: u64, skew: u64) -> Result<Vec<Value>, String> {
+/// starts first still varies by seed. Each guest reseeds its kernel CRNG from
+/// seeded entropy, read at its launch barrier or, after a time fork, taken
+/// from the time page; timer jitter and the seed's world plan start here.
+/// Returns the kills and, per machine, how its entropy was delivered.
+fn release(world: &mut World, cfg: &Value, names: &[String], seed: u64, skew: u64) -> Result<(Vec<Value>, Value), String> {
     let at = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
     check_plan_after(cfg, at.saturating_add(skew))?;
+    let mut reseed = serde_json::Map::new();
     for (i, mach) in world.machines.iter_mut().enumerate() {
         let mut rng = Rng::new(seed, &format!("fork-entropy/{}", names[i]));
         let entropy = std::array::from_fn(|_| rng.next() as u32);
         let delay = Rng::new(seed, &format!("release/{}", names[i])).below(skew.saturating_add(1));
-        mach.release(at.saturating_add(delay), entropy)?;
+        let how = mach.release(at.saturating_add(delay), entropy)?;
+        if how == machine::Reseed::Unsupported {
+            eprintln!("{}: guest ABI {} predates time-page reseeding; its CRNG is not reseeded at this time fork", names[i], mach.abi());
+        }
+        reseed.insert(names[i].clone(), json!(how.as_str()));
         mach.timer_rng = Some(Rng::new(seed, &format!("timer-jitter/{}", names[i])));
+        mach.syscall_ns = machine::pv::syscall_ns(&mut Rng::new(seed, &format!("pv-speed/{}", names[i])));
     }
-    arm_seed(world, cfg, names, seed, at.saturating_add(skew))
+    Ok((arm_seed(world, cfg, names, seed, at.saturating_add(skew))?, Value::Object(reseed)))
 }
 
 /// A world parked at its launch barrier, kept so that later seeds start from
-/// it without booting. Faults, control and scenarios are not captured: they
-/// are empty until the release, which builds them from the run seed. Only
-/// the management readiness recorded during boot carries over.
+/// it without booting. The usual boot snapshot has no armed control plan;
+/// readiness carries over and release builds the run plan from its seed. If
+/// triggers are present, preserve their matcher, control and effect state too.
 struct WorldSnapshot {
     machines: Vec<MachineSnapshot>,
     events: Vec<BTreeMap<(u64, u64), Payload>>,
     strict_events: Vec<BTreeMap<(u64, u64), Vec<u8>>>,
     seq: u64,
     links: links::Links,
+    connections: connections::Connections,
     partitioned: BTreeMap<(usize, usize), bool>,
     dropped: u64,
     delivered: u64,
@@ -882,6 +944,8 @@ struct WorldSnapshot {
     semantic_counts: network_counters::NetworkCounters,
     slices: u64,
     readiness: Vec<Value>,
+    control:control::Control,
+    faults:faults::Faults,
 }
 
 impl WorldSnapshot {
@@ -895,6 +959,7 @@ impl WorldSnapshot {
             strict_events: world.strict_events.clone(),
             seq: world.seq,
             links: world.faults.links.clone(),
+            connections: world.faults.connections.clone(),
             partitioned: world.partitioned.clone(),
             dropped: world.dropped,
             delivered: world.delivered,
@@ -902,6 +967,7 @@ impl WorldSnapshot {
             semantic_counts: world.semantic_counts.clone(),
             slices: world.slices,
             readiness: world.faults.readiness.clone(),
+            control:world.control.clone(),faults:world.faults.clone(),
         })
     }
 
@@ -931,7 +997,9 @@ impl WorldSnapshot {
         world.slices = self.slices;
         let names: Vec<String> = world.machines.iter().map(|m| m.name.clone()).collect();
         world.faults = boot_faults(&names, &self.readiness, world.latency, self.links.clone())?;
+        world.faults.connections = self.connections.clone();
         world.control = control::Control::new(&Value::Null, names, world.latency, world.early)?;
+        if !self.control.triggers.records.is_empty() {world.control=self.control.clone();world.faults=self.faults.clone();}
         Ok(pages)
     }
 }
@@ -976,8 +1044,9 @@ fn simulate(
             continue;
         }
         let control_boundary = world.control.boundary();
-        world.semantic_counts.advance(key.min(control_boundary).min(world.faults.next_boundary()).min(duration));
-        if control_boundary <= key && control_boundary < duration {
+        let trigger_boundary=world.control.triggers.boundary();
+        world.semantic_counts.advance(key.min(control_boundary).min(trigger_boundary).min(world.faults.next_boundary()).min(duration));
+        if control_boundary <= key && control_boundary <= trigger_boundary && control_boundary < duration {
             if world.machines.iter().any(|m| m.time > control_boundary) {
                 return Err("control boundary is in committed machine past".into());
             }
@@ -990,6 +1059,7 @@ fn simulate(
                 .is_some_and(|p| !p.admitted_done && matches!(p.operation,Some(seedbox_control::Operation::Inspect{})))
             {
                 world.control.pending.as_mut().unwrap().result = json!({"services":cfg["control"]["placement"],"machines":world.machines.iter().enumerate().map(|(i,m)|json!({"name":m.name,"state":if matches!(m.state,State::Exited(_)) {format!("{:?}",m.state)} else {world.faults.process_state(i).to_owned()}})).collect::<Vec<_>>(),"active_handles":world.faults.active_handles(),"network_counters":world.counter_snapshot(world.semantic_counts.counts())});
+                if let Some(evidence)=world.control.triggers.evidence()? {world.control.pending.as_mut().unwrap().result["triggers"]=evidence;}
             }
             if let Some(bytes) =
                 world
@@ -1001,6 +1071,10 @@ fn simulate(
                 world.strict_events[target].insert((control_boundary, world.seq), bytes);
             }
             continue;
+        }
+        if trigger_boundary<=key && trigger_boundary<duration && trigger_boundary<=world.faults.next_boundary() {
+            if world.machines.iter().any(|m|m.time>trigger_boundary) {return Err("trigger boundary is in committed machine past".into())}
+            world.control.triggers.apply_boundary(&mut world.faults,trigger_boundary)?;continue;
         }
         let fault_boundary = world.faults.next_boundary();
         if fault_boundary <= key && fault_boundary < duration {
@@ -1054,7 +1128,8 @@ fn simulate(
             .min(world.next_event(m))
             .min(duration)
             .min(fault_boundary)
-            .min(control_boundary);
+            .min(control_boundary)
+            .min(trigger_boundary);
         if let Some(t) = fork_at {
             // Stop exactly at the fork time, or as soon after it as owed I/O
             // cost allows.
@@ -1068,6 +1143,7 @@ fn simulate(
             || fork_at == Some(limit)
             || limit == fault_boundary
             || limit == control_boundary
+            || limit == trigger_boundary
             || world.strict_events[m]
                 .keys()
                 .next()
@@ -1078,13 +1154,22 @@ fn simulate(
             world.early
         };
         let plan=(m,world.machines[m].time,limit,horizon,world.next_event(m),fault_boundary,control_boundary,world.machines[m].next_deadline(),world.machines[m].pending_io.as_ref().map_or(0,|p|p.remaining_ns),world.seq);
-        let stop = world.machines[m].run_until(&mut world.counter, limit, early, &mut frames)?;
+        world.machines[m].observe_console=world.control.triggers.observes(&world.machines[m].name);
+        let stop = match &mut world.clock {
+            Clock::Counter(c) => world.machines[m].run_until(c, limit, early, &mut frames)?,
+            Clock::Pv(p) => world.machines[m].run_until(p, limit, early, &mut frames)?,
+        };
         stop_progress(&mut stalled_plan,plan,world.machines[m].time!=plan.1 || stop!=Stop::Reached)?;
+        if let Some((at,byte))=world.machines[m].committed_console.take() {
+            let max_time=world.machines.iter().map(|m|m.time).max().unwrap_or(0);
+            world.control.triggers.committed(&world.machines[m].name,at,byte,world.control.latency,max_time)?;
+        }
         for (id,at,success) in world.machines[m].fault_effects.drain(..) {
             if id==0 && success {
                 if let Err(error)=world.faults.management_ready(m,at,world.control.latency) {world.faults.error=Some(error);}
             } else {world.faults.effect(m,id,at,success);}
         }
+        if stop==Stop::Exited {for id in world.control.triggers.records.iter().filter_map(|r|r.fault_id) {world.faults.target_exited(id,m,world.machines[m].time);}}
         if stop==Stop::Exited {if let Some(id)=world.control.pending.as_ref().and_then(|p|p.fault) {world.faults.target_exited(id,m,world.machines[m].time);}}
         for (at, line) in world.machines[m]
             .control_requests
@@ -1137,7 +1222,6 @@ fn report(
     kills: &[Value],
     host_seconds: f64,
     digest: bool,
-    page_hashes: bool,
     out: &str,
     duration: u64,
     end_on: &Option<String>,
@@ -1145,6 +1229,8 @@ fn report(
     let slices = world.slices;
     let cut_off_at=if outcome=="duration" {duration} else if outcome=="end_machine_exited" {end_on.as_ref().and_then(|name|world.machines.iter().find(|m|&m.name==name)).map(|m|m.time).unwrap_or(0)} else {world.machines.iter().map(|m|m.time).max().unwrap_or(0)};
     world.control.cut_off(&world.faults,cut_off_at);
+    world.control.triggers.cut_off(cut_off_at);
+    let trigger_evidence=world.control.triggers.evidence()?;
     let fault_error=world.faults.error.clone().or(world.control.error.clone());
     let mut network_hash = Sha256::new();
     network_hash.update(b"seedbox-network-v1");
@@ -1166,9 +1252,10 @@ fn report(
     for (&pair,_) in legacy_cuts { links::pair_hash(&mut network_hash,pair); }
     let network_witness = network_hash.finalize();
     let mut world_witness = Sha256::new();
+    world.control.triggers.hash_into(&mut world_witness)?;
     // Only a run that uses link policy carries the network witness, so a run
     // without it keeps the world witness it had before link policy existed.
-    if world.faults.links.in_use() {
+    if world.faults.links.in_use() || world.faults.connections.used {
         world_witness.update(network_witness);
     }
     if world.control.controller.is_some() {
@@ -1190,10 +1277,10 @@ fn report(
         world_witness.update(w.as_bytes());
         let (state_digest, state_parts) = if digest {
             let (d, parts) = mach.state_digest();
-            if page_hashes {
-                std::fs::write(format!("{out}/{}.pages", mach.name), mach.page_hashes())
-                    .map_err(|e| e.to_string())?;
-            }
+            // The host supplies output/MACHINE_OUTPUT_DIR as --out; retention
+            // preserves that directory prefix (see seedbox/src/vmm.rs).
+            std::fs::write(format!("{out}/{}.pages", mach.name), mach.page_hashes())
+                .map_err(|e| e.to_string())?;
             let parts: serde_json::Map<String, Value> = parts
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), json!(v)))
@@ -1250,7 +1337,7 @@ fn report(
             "net": mach.net.as_ref().map(|n| json!({"tx": n.tx_frames, "rx": n.rx_frames, "rx_dropped": n.rx_dropped})),
         });
         row["disk"] = json!(mach.blk.as_ref().map(|b| json!({
-                "model": b.disk.model(), "capacity_sectors": b.disk.capacity(), "base_sha256": b.disk.base_sha256(),
+                "fault_model": disk::disk_fault_model_report(b.disk.fault_model()), "capacity_sectors": b.disk.capacity(), "base_sha256": b.disk.base_sha256(),
                 "digest": b.disk.digest(), "stable_sectors": b.disk.stable_sectors(), "volatile_sectors": b.disk.volatile_sectors(),
                 "reads": b.stats.reads, "writes": b.stats.writes, "flushes": b.stats.flushes,
                 "sectors_read": b.stats.sectors_read, "sectors_written": b.stats.sectors_written,
@@ -1259,13 +1346,31 @@ fn report(
         row["incarnation"] = json!(mach.incarnation);
         row["booted_at_ns"] = json!(mach.booted_at);
         row["crashed_incarnations"] = json!(world.incarnations[index]);
+        let skew: serde_json::Map<String, Value> = machine::Site::NAMES
+            .iter()
+            .zip(&s.skew)
+            .map(|(k, v)| (k.to_string(), json!({"n": v.n, "ahead": v.ahead, "ahead_max_ns": v.ahead_max_ns, "behind": v.behind, "behind_max_ns": v.behind_max_ns})))
+            .collect();
+        row["timer"] = json!({"writes": s.timer_writes, "overdue": s.timer_overdue, "overdue_max_ns": s.timer_overdue_max_ns, "overdue_syscalls_max": s.timer_write_syscalls_max, "guest_clock_skew": skew});
+        if let Clock::Pv(_) = world.clock {
+            row["spin"] = json!({"probes": s.spin_probes, "idles": s.spin_idles, "false_alarms": s.spin_false, "clock_progress": s.spin_clock_progress, "mismatch": s.spin_mismatch});
+            row["syscalls"] = json!(mach.syscalls());
+            row["syscall_ns"] = json!(mach.syscall_ns);
+            let by: serde_json::Map<String, Value> = machine::Cause::NAMES
+                .iter()
+                .zip(s.time_by)
+                .map(|(k, v)| (k.to_string(), json!(v)))
+                .collect();
+            row["time_ns_by_cause"] = Value::Object(by);
+        }
         report.push(row);
     }
     let sim_ns = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
-    Ok(json!({
+    let mut result=json!({
         "report_version": 1,
         "seed": seed,
-        "counter_profile": profile::host()?.name,
+        "timebase": world.clock.name(),
+        "counter_profile": match world.clock { Clock::Counter(_) => Some(profile::host()?.name), Clock::Pv(_) => None },
         "outcome": outcome,
         "sim_seconds": sim_ns as f64 / 1e9,
         "host_seconds": host_seconds,
@@ -1281,10 +1386,10 @@ fn report(
         "rejected_fault_effects":world.faults.rejected_effects,"management_readiness":world.faults.readiness,
         "in_flight_policy":"retain_send_time_decisions; cuts_dominate_shapes",
         "machines": report,
-    }))
+    });
+    if let Some(evidence)=trigger_evidence {result["triggers"]=evidence;}
+    Ok(result)
 }
-
-
 
 #[cfg(test)]
 mod progress_tests {
@@ -1340,6 +1445,9 @@ mod progress_tests {
 }
 
 #[cfg(test)]
+mod trigger_world_tests;
+
+#[cfg(test)]
 mod worker_options_tests {
     use super::*;
 
@@ -1349,11 +1457,11 @@ mod worker_options_tests {
 
     #[test]
     fn worker_flags_preserve_the_standalone_protocol() {
-        let performance = PerformanceOptions::parse(Some("0"), Some("64"), true).unwrap();
+        let performance = PerformanceOptions::parse(Some("0"), Some("64")).unwrap();
         let options = WorkerOptions::from_args(&args(&[
             "seedbox-vmm", "--config", "world.json", "--seed", "7", "--out", "output",
             "--fork-seeds", "8,9", "--digest", "--host-control", "control.sock",
-            "--console-limit", "123", "--stream-console", "--trace",
+            "--console-limit", "123", "--log-chunk-limit", "456", "--timebase", "pv", "--stream-console", "--trace",
         ]), performance).unwrap();
         assert_eq!(options.config, PathBuf::from("world.json"));
         assert_eq!(options.seed, 7);
@@ -1361,6 +1469,8 @@ mod worker_options_tests {
         assert_eq!(options.out, PathBuf::from("output"));
         assert_eq!(options.host_control, Some(PathBuf::from("control.sock")));
         assert_eq!(options.console_limit, Some(123));
+        assert_eq!(options.log_chunk_limit, Some(456));
+        assert!(options.pv_clock);
         assert!(options.digest && options.stream_console && options.trace);
         assert_eq!(options.performance, performance);
         assert!(options.console_trace.is_none());
@@ -1368,10 +1478,10 @@ mod worker_options_tests {
 
     #[test]
     fn performance_values_are_explicit_and_keep_their_defaults() {
-        assert_eq!(PerformanceOptions::parse(None, None, false).unwrap(), PerformanceOptions::default());
-        assert_eq!(PerformanceOptions::parse(Some("256"), Some("adaptive"), false).unwrap(), PerformanceOptions::default());
-        assert!(PerformanceOptions::parse(Some("invalid"), None, false).unwrap_err().starts_with("SEEDBOX_UNDO: "));
-        assert!(PerformanceOptions::parse(None, Some("invalid"), false).unwrap_err().starts_with("margin: "));
+        assert_eq!(PerformanceOptions::parse(None, None).unwrap(), PerformanceOptions::default());
+        assert_eq!(PerformanceOptions::parse(Some("256"), Some("adaptive")).unwrap(), PerformanceOptions::default());
+        assert!(PerformanceOptions::parse(Some("invalid"), None).unwrap_err().starts_with("SEEDBOX_UNDO: "));
+        assert!(PerformanceOptions::parse(None, Some("invalid")).unwrap_err().starts_with("margin: "));
     }
 
     #[test]
@@ -1383,6 +1493,20 @@ mod worker_options_tests {
         assert_eq!(WorkerOptions::from_args(&args(&["--config", "world.json", "--seed", "7"]), performance).unwrap_err(), "--out required");
         assert!(WorkerOptions::from_args(&args(&["--config", "world.json", "--seed", "7", "--out", "output", "--fork-seeds", "8,invalid"]), performance).unwrap_err().starts_with("--fork-seeds: "));
         assert!(WorkerOptions::from_args(&args(&["--config", "world.json", "--seed", "7", "--out", "output", "--console-limit", "invalid"]), performance).unwrap_err().starts_with("console limit: "));
+    }
+
+    #[test]
+    fn worker_timebase_defaults_to_counter_and_accepts_pv() {
+        let base = args(&["--config", "world.json", "--seed", "7", "--out", "output"]);
+        assert!(!WorkerOptions::from_args(&base, PerformanceOptions::default()).unwrap().pv_clock);
+        for (value, pv) in [("counter", false), ("pv", true)] {
+            let mut argv = base.clone();
+            argv.extend(args(&["--timebase", value]));
+            assert_eq!(WorkerOptions::from_args(&argv, PerformanceOptions::default()).unwrap().pv_clock, pv);
+        }
+        let mut argv = base;
+        argv.extend(args(&["--timebase", "bad"]));
+        assert_eq!(WorkerOptions::from_args(&argv, PerformanceOptions::default()).unwrap_err(), "--timebase bad: expected counter or pv");
     }
 
     #[test]
