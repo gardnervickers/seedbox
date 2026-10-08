@@ -71,7 +71,7 @@ pub struct Faults {
 }
 impl Faults {
     pub fn new(plans: Vec<Value>, names: Vec<String>) -> Result<Self, String> {
-        let links = Links::new(0, &names, Policy { latency_ns: 1, jitter_ns: 0, loss_ppm: 0 }, BTreeMap::new())?;
+        let links = Links::new(0, &names, Policy { latency_ns: 1, jitter_ns: 0, loss_ppm: 0, bandwidth_bps:None, queue_bound_ns:None }, BTreeMap::new())?;
         Self::with_links(plans, names, links)
     }
     pub fn with_links(plans: Vec<Value>, names: Vec<String>, links: Links) -> Result<Self, String> {
@@ -161,8 +161,8 @@ impl Faults {
                     }
                 }
             }
-            Action::Shape {handle, from, to, latency_ns, jitter_ns, loss_ppm} => {
-                Policy {latency_ns:*latency_ns, jitter_ns:*jitter_ns, loss_ppm:*loss_ppm}.validate(self.links.global.latency_ns)?;
+            Action::Shape {handle, from, to, latency_ns, jitter_ns, loss_ppm, bandwidth_bps, queue_bound_ns} => {
+                Policy {latency_ns:*latency_ns, jitter_ns:*jitter_ns, loss_ppm:*loss_ppm, bandwidth_bps:*bandwidth_bps, queue_bound_ns:*queue_bound_ns}.validate(self.links.global.latency_ns)?;
                 if handle.is_empty() || from.is_empty() || to.is_empty() { return Err("empty fault handle/shape side".into()); }
                 let mut members = BTreeSet::new();
                 let mut sides = Vec::new();
@@ -303,7 +303,14 @@ impl Faults {
         let drop=self.connections.drops(c,cut,|s| {
             self.log[s.fault_id as usize-1]["selection_counts"]=json!({"matched":s.matched,"dropped":s.dropped});
         });
-        if drop {self.links.selected_drop(src,dst);crate::links::Outcome::Lost} else {self.links.decide(src,dst,send,cut)}
+        if drop {self.links.selected_drop(src,dst);return crate::links::Outcome::Lost;}
+        let outcome = self.links.decide(src,dst,send,frame.len(),cut);
+        if let Some((&id, layer)) = self.links.layers.iter().rev().find(|(_,l)|l.pairs.contains(&(src,dst))) {
+            if layer.policy.bandwidth_bps.is_some() {
+                self.log[id as usize-1]["queue_counts"] = json!(layer.queue_counts);
+            }
+        }
+        outcome
     }
     pub fn blocked(&self, from: usize, to: usize) -> bool {
         self.cuts.contains_key(&(from, to))
@@ -466,9 +473,10 @@ impl Faults {
                             );
                             self.changed_network.push(i);
                         }
-                        Action::Shape {handle, latency_ns, jitter_ns, loss_ppm, ..} => {
+                        Action::Shape {handle, latency_ns, jitter_ns, loss_ppm, bandwidth_bps, queue_bound_ns, ..} => {
                             if self.active_handles().contains(&handle) { self.fail(i,"duplicate active handle".into()); continue; }
-                            if let Err(error) = self.links.shape(id, handle.clone(), self.entries[i].pairs.clone(), Policy {latency_ns,jitter_ns,loss_ppm}) { self.fail(i,error); continue; }
+                            if let Err(error) = self.links.shape(id, handle.clone(), self.entries[i].pairs.clone(), Policy {latency_ns,jitter_ns,loss_ppm,bandwidth_bps,queue_bound_ns}) { self.fail(i,error); continue; }
+                            if bandwidth_bps.is_some() { self.log[i]["queue_counts"] = json!(crate::links::QueueCounts::default()); }
                             self.applied(i,now,format!("handle={handle}; in-flight frames retained"));
                             self.changed_network.push(i);
                         }
@@ -484,7 +492,9 @@ impl Faults {
                                 self.applied(i,now,format!("handle={handle}; selected packets dropped={}",selection.dropped));
                                 continue;
                             }
+                            let queue_counts = self.links.layers.values().find(|l|l.handle==handle && l.policy.bandwidth_bps.is_some()).map(|l|l.queue_counts);
                             if self.links.heal(&handle) {
+                                if let Some(counts) = queue_counts { self.log[i]["queue_counts"] = json!(counts); }
                                 self.applied(i,now,format!("handle={handle}; prior policy revealed"));
                                 self.changed_network.push(i);
                                 continue;
@@ -602,7 +612,7 @@ mod link_tests {
     fn heal(id:u32,handle:&str)->Value { json!({"id":id,"at_ns":id as u64*10,"deadline_ns":id as u64*10+1,"action":"heal","handle":handle}) }
     fn fixture(plans:Vec<Value>) -> Faults {
         let names = vec!["a".into(),"b".into(),"c".into()];
-        let links = Links::new(1009,&names,Policy {latency_ns:10,jitter_ns:0,loss_ppm:0},BTreeMap::from([((0,1),Policy {latency_ns:20,jitter_ns:0,loss_ppm:0})])).unwrap();
+        let links = Links::new(1009,&names,Policy {latency_ns:10,jitter_ns:0,loss_ppm:0, bandwidth_bps: None, queue_bound_ns: None },BTreeMap::from([((0,1),Policy {latency_ns:20,jitter_ns:0,loss_ppm:0, bandwidth_bps: None, queue_bound_ns: None })])).unwrap();
         Faults::with_links(plans,names,links).unwrap()
     }
     #[test]
@@ -625,10 +635,10 @@ mod link_tests {
         let mut f=fixture(vec![shape(1,"s",30),json!({"id":2,"at_ns":20,"deadline_ns":21,"action":"partition","handle":"p","left":["a"],"right":["b"]}),heal(3,"p"),heal(4,"s")]);
         f.apply_due(10); let mut reference = f.links.clone();
         f.apply_due(20);
-        assert_eq!(f.links.decide(0,1,20,f.blocked(0,1)),crate::links::Outcome::Cut);
+        assert_eq!(f.links.decide(0,1,20, 1500,f.blocked(0,1)),crate::links::Outcome::Cut);
         assert_eq!(f.links.last,reference.last);
         f.apply_due(30);
-        assert_eq!(f.links.decide(0,1,30,f.blocked(0,1)),reference.decide(0,1,30,false));
+        assert_eq!(f.links.decide(0,1,30, 1500,f.blocked(0,1)),reference.decide(0,1,30, 1500,false));
         let mut h=Sha256::new(); f.links.witness(&mut h); let mut r=Sha256::new(); reference.witness(&mut r);
         assert_eq!(h.finalize(),r.finalize());
         f.apply_due(40); assert_eq!(f.links.policy((0,1)).latency_ns,20);

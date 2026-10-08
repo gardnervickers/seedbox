@@ -65,7 +65,7 @@ Capture covers the following state from current main:
 | Machines/devices | RAM, vCPU registers/MSRs/events, full shared page, PIC/PIT, UARTs, virtio network/control/block queues, entropy words/cursor, pending charged I/O, timer RNG, clocks and witness accumulators. |
 | PV timebase (#85, #89, #113) | Full page captures PV enable/ack, bound and syscall target, as well as the original fields and fork entropy. `MachineSnapshot.syscall_ns` retains the sampled per-machine speed across fresh-VM restore; forks do not resample it. The configured timebase stays in immutable boot inputs and parent identity. Spin probes finish inside `run_until`; capture refuses an active probe. The completed probe's idle state is captured in the machine. Watchdog phase/backoff and KVM-run scratch affect host performance only and reset at restore; `prepare`/`start` overwrite remaining progress and syscall baseline before guest entry. |
 | Triggers (#109) | The full `Control` clone carries arm order, KMP failure tables, partial prefix/seen/reset counts, match/effect deadlines, cancellations, statuses and evidence. The committed byte slot is drained before capture. Machine `observe_console` is restored and scheduled trigger boundaries constrain the checkpoint stop. |
-| Directed links (#97) | The full `Faults.links` clone carries baselines, active layers, FIFO arrival history, shaped-use marker and both RNG positions. Changed-seed forks replace future loss/jitter streams only; in-flight packets retain send-time decisions. |
+| Directed links (#97) | The full `Faults.links` clone carries baselines, active layers, FIFO arrival and serialization departure history, optional queue evidence, use markers and both RNG positions. Changed-seed forks replace future loss/jitter streams only; in-flight packets retain send-time decisions. |
 | Connection selectors (#106) | `Faults.connections` carries TCP tuples/incarnations, SYN/FIN/closed state, next-ID/eviction counters, live selections, matched/dropped counts and witness-use marker. Selections are not rediscovered at restore. |
 | Timed logs (#105) | UART snapshots retain raw prefixes and index records, seen-byte cursor, pending/coalescing state, caps and failure state. Machine-wide log order and incarnation are retained. Each runtime branch opens its own console/management index sinks and writes the captured prefix before further output. Host descriptors are recreated. |
 | Lifecycle (#91) | Complete `Control`/`Faults` include pending calls/plans/replies, relay/session counters, readiness, process/lifecycle state, active handles, boundaries, queued lifecycle effects and logs. Machines retain paused/down flags, incarnation and boot time; the world retains incarnation history, management deliveries and paused ingress counts. Supervisor/relay state lives in RAM. |
@@ -793,7 +793,7 @@ network:
   latency: 1ms
   jitter: 100us
   links:
-    - {from: server, to: client, latency: 20ms, jitter: 2ms, loss_ppm: 50000}
+    - {from: server, to: client, latency: 20ms, jitter: 2ms, loss_ppm: 50000, bandwidth_bps: 1000000, queue_bound: 50ms}
 ```
 
 Within `x-seedbox`, each pair must be unique and name existing services. An entry
@@ -803,7 +803,18 @@ runtime shape requires latency at least the global latency, jitter less than its
 latency, latency plus jitter at most one hour, and integer loss in `[0, 1000000]`.
 The global latency remains the whole-run lookahead; it cannot be lowered by a shape.
 
-`world.shape(from_, to, latency=..., jitter=0, loss_ppm=0)` uses nanosecond integers
+Global policy, directed baselines and shapes also accept optional bandwidth and
+queue limits. `bandwidth_bps` is a positive u64 integer in bits per second;
+Compose `queue_bound` is a duration and the RPC uses `queue_bound_ns`. The bound
+requires finite bandwidth; zero drops every nonempty frame. Absent bandwidth
+means infinite bandwidth; an absent bound means no tail-drop limit. These are
+absolute settings: a baseline or shape that omits them uses infinite bandwidth
+and an unbounded queue, even if the global policy is finite. Resolved settings
+are retained in the run's semantic configuration and identity; replay restores
+them and offers no override.
+
+`world.shape(from_, to, latency=..., jitter=0, loss_ppm=0,
+bandwidth_bps=None, queue_bound=None)` uses nanosecond integers for durations
 and returns a healable handle. Its nonempty sides must name distinct machines.
 It shapes only `from_ × to`; partitions still cut both directions. Among live
 shape layers the highest fault ID wins. Healing removes exactly one handle and
@@ -823,15 +834,54 @@ A delivered frame arrives at `max(send + latency + jitter, last_arrival + 1)`;
 a delay decrease preserves FIFO and head-of-line waiting. The scheduler's global
 early-delivery window remains unchanged.
 
+For a finite rate, serialization costs
+`ceil(frame_bytes * 8 * 1_000_000_000 / bandwidth_bps)` nanoseconds, using the
+actual transmitted Ethernet bytes without preamble, FCS or inter-frame gap.
+`depart = max(send, last_depart) + serialization`, and arrival uses
+`depart + latency + jitter` before the same FIFO clamp. Each directed pair has
+its own departure clock; NIC-wide egress sharing is out of scope. A candidate
+with `depart - send > queue_bound_ns` is tail-dropped and reserves neither
+departure nor arrival. Equality is accepted. Cuts, selected drops and ordinary
+loss reserve no bandwidth. A receiver rejection still consumed serialization,
+although it retains the existing arrival-clock rollback. Shaping, healing,
+snapshot restore and changed-seed forks preserve accepted departures and queued
+frames; a faster rate cannot erase an earlier reservation. Timestamp overflow
+on the finite-rate path is counted as a queue drop instead of wrapping.
+
+Bandwidth consumes no new RNG draws. The existing loss-then-jitter order remains
+exact, including on tail drops. Bandwidth shapes retain `queue_counts` on both
+their fault row and heal result: `matched` counts non-cut, non-lost candidates
+that reached the winning queue policy, `queue_dropped` counts tail drops, and
+`delayed_max_ns` is the maximum proposed send-to-departure delay, including
+dropped candidates. Losing layers receive no counts. An unused bandwidth shape
+returns explicit zeros. `world.heal(bandwidth_shape)` returns this evidence
+object; unlimited shapes retain their existing effect-time return value.
+
 Counters distinguish `delivered`, `partition_dropped`, `receiver_dropped`, and
-`loss_dropped`; `loss_dropped` includes selector drops and is omitted for a link
-that has lost nothing.
+`loss_dropped`, and `queue_dropped`; loss includes selector drops. Loss and queue
+fields are omitted while zero. Queue drops count at send time, under the same
+strict-before-admission rule used by inspection and fault snapshots.
 The report's `network_witness` hashes in-flight frames, per-link last
 arrivals, stream positions, live layers, cuts and baselines. It is folded into
-`world_witness` only when the run has baseline overrides, applied a shape or used a connection selector, so
+`world_witness` only when the run has baseline overrides, configured finite global bandwidth, applied a shape or used a connection selector, so
 a run without link policy keeps its previous world witness. Shape/heal evidence follows the same strict-before-admission
 counter boundary as partitions. Fork snapshots retain baselines, last arrivals,
 and both RNG streams; arming a run seed reseeds those streams as before.
+Finite bandwidth adds a tagged witness extension for its optional parameters,
+departure clocks, per-pair and live-layer queue evidence and retained use marker.
+With bandwidth absent, no extension bytes, counters or events are added; the
+existing feature-off link/network/world witnesses remain unchanged.
+
+The network seed-diversity audit still finds zero default jitter and loss.
+`link/<from>/<to>` and `link-loss/<from>/<to>` each advance once per non-cut
+candidate, but zero jitter/loss makes their decisions seed-independent for an
+identical send trace. An explicit `network.jitter: 100us` at `latency: 1ms`
+enables seed variation through the existing jitter stream. Bandwidth and tail
+drop depend on bytes and simulated send times, with no extra streams. This PR
+keeps the jitter default at zero to preserve feature-off witnesses; any default
+change needs a separate semantic-default decision. Reorder, duplicate and burst
+profiles will need independent `link-reorder/`, `link-dup/` and `link-burst/`
+streams, drawn only when configured after the existing loss/jitter draws.
 
 Every final report includes `network_witness`; runs using link policy fold it into
 `world_witness` as described above. Its

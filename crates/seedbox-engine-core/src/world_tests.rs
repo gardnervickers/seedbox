@@ -2,6 +2,38 @@ use super::*;
 use crate::world_mock::*;
 
 #[test]
+fn queue_drops_count_at_send_time_and_receiver_rejection_still_uses_bandwidth() {
+    for down in [false, true] {
+        let mut w = world(&["a", "b"]);
+        w.machines[1].down = down;
+        w.faults.links = links::Links::from_config(
+            1,
+            &["a".into(), "b".into()],
+            &json!({"latency_ns":10,"bandwidth_bps":1_000_000_000_000u64,"queue_bound_ns":12}),
+        )
+        .unwrap();
+        let mut frame = vec![0; 1500];
+        frame[5] = 1;
+        w.route(0, 5, frame.clone());
+        w.route(0, 5, frame);
+        assert_eq!(w.dropped, if down { 2 } else { 1 });
+        assert_eq!(w.link_counts[&(0, 1)][4], 1);
+        assert_eq!(w.faults.links.last_depart[&(0, 1)], 17);
+        assert_eq!(
+            w.faults.links.last.get(&(0, 1)),
+            if down { None } else { Some(&27) }
+        );
+        w.semantic_counts.advance(5);
+        assert!(w.semantic_counts.counts().is_empty());
+        w.semantic_counts.advance(6);
+        assert_eq!(
+            w.counter_snapshot(w.semantic_counts.counts()),
+            json!({"a->b":{"delivered":0,"partition_dropped":0,"receiver_dropped":0,"queue_dropped":1}})
+        );
+    }
+}
+
+#[test]
 fn tie_break_and_halted_wake_keys_use_one_coordinator() {
     let mut w = world(&["a", "b"]);
     assert_eq!(
@@ -927,7 +959,8 @@ fn initial_barrier_release_precedes_first_packet_rpc_and_trigger_effects() {
             // constrained by the same causal lookahead as normal simulation.
             assert_eq!(w.slices, 2);
             let send = w.machines[0].time;
-            let crate::links::Outcome::Deliver(arrival) = w.faults.links.decide(0, 1, send, false)
+            let crate::links::Outcome::Deliver(arrival) =
+                w.faults.links.decide(0, 1, send, 1500, false)
             else {
                 panic!("packet dropped")
             };

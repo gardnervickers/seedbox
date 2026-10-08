@@ -137,13 +137,23 @@ class ControlTests(unittest.TestCase):
     def test_shape_defaults_and_invalid_local_values(self):
         peer = Peer(reply(result={"handle": "p1"}))
         with World(peer) as world:
-            for kwargs in [{"latency": True}, {"latency": 1.5}, {"latency": -1}, {"latency": 10, "jitter": 10}, {"latency": 10, "loss_ppm": 1_000_001}, {"latency": 3_600_000_000_000, "jitter": 1}]:
+            for kwargs in [{"latency": True}, {"latency": 1.5}, {"latency": -1}, {"latency": 10, "jitter": 10}, {"latency": 10, "loss_ppm": 1_000_001}, {"latency": 3_600_000_000_000, "jitter": 1}, {"latency": 10, "bandwidth_bps": 0}, {"latency": 10, "bandwidth_bps": True}, {"latency": 10, "bandwidth_bps": 1.5}, {"latency": 10, "queue_bound": 1}, {"latency": 10, "bandwidth_bps": 1, "queue_bound": -1}]:
                 with self.assertRaises(ValueError):
                     world.shape(["client"], ["server"], **kwargs)
             self.assertEqual(peer.requests, [])
             world.shape(["client"], ["server"], latency=10)
         self.assertEqual(peer.requests[0]["jitter_ns"], 0)
         self.assertEqual(peer.requests[0]["loss_ppm"], 0)
+
+    def test_bandwidth_shape_and_heal_preserve_queue_evidence(self):
+        counts = {"matched": 2, "queue_dropped": 1, "delayed_max_ns": 24_000_000}
+        peer = Peer(reply(result={"handle": "p1"}) + reply(2, {"queue_counts": counts}))
+        with World(peer) as world:
+            handle = world.shape(["client"], ["server"], latency=1_000_000,
+                                 bandwidth_bps=1_000_000, queue_bound=12_000_000)
+            self.assertEqual(world.heal(handle), {"queue_counts": counts})
+        self.assertEqual(peer.requests[0]["bandwidth_bps"], 1_000_000)
+        self.assertEqual(peer.requests[0]["queue_bound_ns"], 12_000_000)
 
     def test_graceful_reconnect_starts_new_ids_and_preserves_explicit_handles(self):
         # Use actual Unix streams and independent literal peer messages. The

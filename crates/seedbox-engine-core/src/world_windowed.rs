@@ -367,7 +367,7 @@ struct Coord<'a, M: WorldMachine> {
     macs: &'a [[u8; 6]],
     dropped: &'a mut u64,
     delivered: &'a mut u64,
-    link_counts: &'a mut BTreeMap<(usize, usize), [u64; 4]>,
+    link_counts: &'a mut BTreeMap<(usize, usize), [u64; 5]>,
     semantic: &'a mut network_counters::NetworkCounters,
     latency: u64,
     /// Each machine's committed lifecycle: (paused, down).
@@ -395,6 +395,9 @@ impl<M: WorldMachine> Coord<'_, M> {
                     let mut c = json!({"delivered":counts[0],"partition_dropped":counts[1],"receiver_dropped":counts[2]});
                     if counts[3] > 0 {
                         c["loss_dropped"] = json!(counts[3]);
+                    }
+                    if counts[4] > 0 {
+                        c["queue_dropped"] = json!(counts[4]);
                     }
                     c
                 })
@@ -780,6 +783,11 @@ impl<M: WorldMachine> sw::Router<Msg> for Coord<'_, M> {
                 links::Outcome::Lost => {
                     *self.dropped += 1;
                     self.count(sent_at, src, dst, 3);
+                    continue;
+                }
+                links::Outcome::QueueDropped => {
+                    *self.dropped += 1;
+                    self.count(sent_at, src, dst, 4);
                     continue;
                 }
                 links::Outcome::Deliver(at) => at,

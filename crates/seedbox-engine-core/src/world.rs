@@ -390,7 +390,7 @@ pub struct World<M: WorldMachine> {
     pub macs: Vec<[u8; 6]>,
     pub dropped: u64,
     pub delivered: u64,
-    pub link_counts: BTreeMap<(usize, usize), [u64; 4]>,
+    pub link_counts: BTreeMap<(usize, usize), [u64; 5]>,
     pub semantic_counts: network_counters::NetworkCounters,
     pub slices: u64,
 }
@@ -460,13 +460,14 @@ impl<M: WorldMachine> World<M> {
     pub fn network_snapshot(&self) -> Value {
         self.counter_snapshot(&self.link_counts)
     }
-    pub fn counter_snapshot(&self, counts: &BTreeMap<(usize, usize), [u64; 4]>) -> Value {
+    pub fn counter_snapshot(&self, counts: &BTreeMap<(usize, usize), [u64; 5]>) -> Value {
         let snapshot:BTreeMap<_,_>=counts.iter().map(|(&(from,to),counts)|(
             format!("{}->{}",self.machines[from].name,self.machines[to].name),
             {
                 // Omitted while zero, so a run that loses nothing keeps main's counters.
                 let mut c=json!({"delivered":counts[0],"partition_dropped":counts[1],"receiver_dropped":counts[2]});
                 if counts[3]>0 {c["loss_dropped"]=json!(counts[3]);}
+                if counts[4]>0 {c["queue_dropped"]=json!(counts[4]);}
                 c
             }
         )).collect();
@@ -570,6 +571,11 @@ impl<M: WorldMachine> World<M> {
                 links::Outcome::Lost => {
                     self.dropped += 1;
                     self.count_link(send_time, src, dst, 3);
+                    continue;
+                }
+                links::Outcome::QueueDropped => {
+                    self.dropped += 1;
+                    self.count_link(send_time, src, dst, 4);
                     continue;
                 }
                 links::Outcome::Deliver(t) => t,
@@ -1015,7 +1021,7 @@ pub struct WorldSnapshot<M: WorldMachine> {
     partitioned: BTreeMap<(usize, usize), bool>,
     dropped: u64,
     delivered: u64,
-    link_counts: BTreeMap<(usize, usize), [u64; 4]>,
+    link_counts: BTreeMap<(usize, usize), [u64; 5]>,
     semantic_counts: network_counters::NetworkCounters,
     slices: u64,
     faults: faults::Faults,

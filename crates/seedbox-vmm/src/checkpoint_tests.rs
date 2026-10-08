@@ -301,8 +301,8 @@ fn checkpoint_keeps_partial_matchers_selectors_and_pending_trigger_effects() {
     let connection=w.faults.connections.list("a","b",0,&names).pop().unwrap();
     w.faults.connections.select(99,"selected".into(),connection,&names).unwrap();
     assert!(w.faults.connections.drops(Some(session),false,|_|{}));
-    w.faults.links.shape(98,"shaped".into(),std::collections::BTreeSet::from([(0,1)]),links::Policy {latency_ns:200,jitter_ns:10,loss_ppm:500_000}).unwrap();
-    w.faults.links.decide(0,1,499,false);
+    w.faults.links.shape(98,"shaped".into(),std::collections::BTreeSet::from([(0,1)]),links::Policy {latency_ns:200,jitter_ns:10,loss_ppm:500_000, bandwidth_bps: None, queue_bound_ns: None }).unwrap();
+    w.faults.links.decide(0,1,499, 1500,false);
     let saved=WorldSnapshot::take_checkpoint(&mut w).unwrap();
     let mut evidence=Vec::new();
     for _ in 0..2 {

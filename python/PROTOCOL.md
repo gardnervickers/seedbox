@@ -96,7 +96,7 @@ Common fields are `version: 1`, `id`, and `op`. Targets are typed objects:
 | `crash` | `target`: a typed target | `{}` after destroying the machine |
 | `reboot` | `target`: a typed target | `{}` after booting a crashed machine from its retained image |
 | `partition` | `left`, `right`: nonempty, disjoint arrays of typed targets | `{"handle":"opaque value"}` |
-| `shape` | `from`, `to`: nonempty disjoint typed-target arrays; `latency_ns`, `jitter_ns`, `loss_ppm`: integers | `{"handle":"opaque value"}` |
+| `shape` | `from`, `to`: nonempty disjoint typed-target arrays; `latency_ns`, `jitter_ns`, `loss_ppm`: integers; optional `bandwidth_bps`, `queue_bound_ns` | `{"handle":"opaque value"}` |
 | `connections` | `from`, `to`: distinct typed targets; `after`: optional unsigned incarnation cursor (default 0) | `connections`: up to 32 directional records; `next_after`: last returned incarnation (or input cursor) |
 | `drop_connection` | `connection`: one exact discovery record | `{"handle":"opaque value"}` after arming selected loss |
 | `heal` | `handle`: a previously returned handle | `{}` for a link or partition handle; `{"matched": N, "dropped": N}` for a connection handle |
@@ -154,12 +154,28 @@ covering a directed pair wins; healing reveals the previous layer or baseline.
 A cut always dominates. Latency must be at least the global network latency,
 jitter must be less than latency, their sum must not exceed one hour, and
 `loss_ppm` must be in `[0, 1000000]`. Invalid values receive `invalid_request`.
-The Python API is `world.shape(from_, to, latency=..., jitter=0, loss_ppm=0)`
+The Python API is `world.shape(from_, to, latency=..., jitter=0, loss_ppm=0,
+bandwidth_bps=None, queue_bound=None)`
 with nanosecond integers (`Controller` is an alias for `World`); `world.heal()` accepts each returned handle type.
 Shapes take effect at admission, and each frame retains its send-time decision.
-Counters include `delivered`, `partition_dropped`, `receiver_dropped`, and
-`loss_dropped` (omitted while zero); a candidate lost by link policy consumes one loss
-and one jitter sample. Selected connection loss consumes neither.
+Optional `bandwidth_bps` is a positive u64 integer in bits per second and
+`queue_bound_ns` is a nonnegative u64 integer that requires finite bandwidth.
+Omitting both retains unlimited policy and the historical request bytes.
+Serialization uses actual Ethernet bytes and ceiling nanosecond division;
+the bound includes both waiting and serialization. Tail drops reserve no queue
+space, and healing preserves already accepted departures. Counters include
+`delivered`, `partition_dropped`, `receiver_dropped`, `loss_dropped` and
+`queue_dropped` (the last two are omitted while zero). A non-cut candidate,
+including selected loss and tail drop, consumes one loss and one jitter sample.
+Bandwidth adds no RNG draws.
+
+Healing a bandwidth shape returns
+`{"queue_counts":{"matched":2,"queue_dropped":1,"delayed_max_ns":24000000}}`.
+Matched candidates reached that winning queue after cuts and loss; the maximum
+delay includes proposed departures of tail-dropped frames. The shape and heal
+fault rows retain the same evidence, including explicit zeros for an unused
+shape. The Python API returns the result object for bandwidth shapes and the
+existing effect timestamp for unlimited shapes.
 
 Connection discovery and selection take effect at the exact admission barrier,
 including frames sent before it and excluding equal-time sends. Discovery records

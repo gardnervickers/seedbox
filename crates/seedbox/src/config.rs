@@ -83,6 +83,10 @@ pub struct Network {
     pub name: String,
     pub latency_ns: u64,
     pub jitter_ns: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bandwidth_bps: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_bound_ns: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
 }
@@ -95,6 +99,10 @@ pub struct Link {
     pub latency_ns: u64,
     pub jitter_ns: u64,
     pub loss_ppm: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bandwidth_bps: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_bound_ns: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -443,16 +451,23 @@ pub fn parse_for_architecture(
         name: network_name,
         latency_ns: 1_000_000,
         jitter_ns: 0,
+        bandwidth_bps: None,
+        queue_bound_ns: None,
         links: Vec::new(),
     };
     if let Some(raw) = ext.get("network") {
-        let net = fields(raw, "$.x-seedbox.network", &["latency", "jitter", "links"])?;
+        let net = fields(
+            raw,
+            "$.x-seedbox.network",
+            &["latency", "jitter", "links", "bandwidth_bps", "queue_bound"],
+        )?;
         if let Some(v) = net.get("latency") {
             network.latency_ns = duration(v, "$.x-seedbox.network.latency", false)?;
         }
         if let Some(v) = net.get("jitter") {
             network.jitter_ns = duration(v, "$.x-seedbox.network.jitter", true)?;
         }
+        (network.bandwidth_bps, network.queue_bound_ns) = bandwidth(net, "$.x-seedbox.network")?;
     }
     if network.jitter_ns >= network.latency_ns {
         return invalid("$.x-seedbox.network.jitter", "must be less than latency");
@@ -464,7 +479,19 @@ pub fn parse_for_architecture(
             .enumerate()
         {
             let p = format!("$.x-seedbox.network.links[{i}]");
-            let entry = fields(raw, &p, &["from", "to", "latency", "jitter", "loss_ppm"])?;
+            let entry = fields(
+                raw,
+                &p,
+                &[
+                    "from",
+                    "to",
+                    "latency",
+                    "jitter",
+                    "loss_ppm",
+                    "bandwidth_bps",
+                    "queue_bound",
+                ],
+            )?;
             let from = text(get(entry, "from"), &format!("{p}.from"))?;
             let to = text(get(entry, "to"), &format!("{p}.to"))?;
             for (key, name) in [("from", &from), ("to", &to)] {
@@ -505,12 +532,15 @@ pub fn parse_for_architecture(
             {
                 return invalid(&p, "latency + jitter must not exceed one hour");
             }
+            let (bandwidth_bps, queue_bound_ns) = bandwidth(entry, &p)?;
             network.links.push(Link {
                 from,
                 to,
                 latency_ns,
                 jitter_ns,
                 loss_ppm,
+                bandwidth_bps,
+                queue_bound_ns,
             });
         }
     }
@@ -590,6 +620,28 @@ pub fn parse_for_architecture(
         },
         seed,
     })
+}
+
+fn bandwidth(fields: &Mapping, path: &str) -> Result<(Option<u64>, Option<u64>)> {
+    let rate = fields
+        .get("bandwidth_bps")
+        .map(|v| {
+            v.as_u64().filter(|n| *n > 0).ok_or_else(|| {
+                validation(
+                    &format!("{path}.bandwidth_bps"),
+                    "expected a positive integer in bits per second",
+                )
+            })
+        })
+        .transpose()?;
+    let bound = fields
+        .get("queue_bound")
+        .map(|v| duration(v, &format!("{path}.queue_bound"), true))
+        .transpose()?;
+    if bound.is_some() && rate.is_none() {
+        return invalid(&format!("{path}.queue_bound"), "requires bandwidth_bps");
+    }
+    Ok((rate, bound))
 }
 
 fn reject_static_faults(raw: Option<&Value>) -> Result<()> {

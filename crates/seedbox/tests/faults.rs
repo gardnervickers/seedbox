@@ -473,6 +473,8 @@ fn link_layers_and_cuts_survive_machine_lifecycle_and_heal_independently() {
             latency_ns: 10,
             jitter_ns: 0,
             loss_ppm: 0,
+            bandwidth_bps: None,
+            queue_bound_ns: None,
         },
         std::collections::BTreeMap::new(),
     )
@@ -500,7 +502,10 @@ fn link_layers_and_cuts_survive_machine_lifecycle_and_heal_independently() {
     }
     f.apply_due(40);
     assert!(!f.blocked(0, 1));
-    assert_eq!(f.links.decide(0, 1, 40, false), links::Outcome::Deliver(70));
+    assert_eq!(
+        f.links.decide(0, 1, 40, 1500, false),
+        links::Outcome::Deliver(70)
+    );
     assert_eq!(f.links.policy((1, 0)).latency_ns, 10);
     f.apply_due(50);
     assert!(f.active_handles().is_empty());
