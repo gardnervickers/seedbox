@@ -329,10 +329,13 @@ struct CpuArg {
 }
 
 impl CpuArg {
-    /// The host's branch counter profile, refused when unqualified unless allowed.
-    fn admit(&self, counter: CounterProfile) -> Result<CounterProfile> {
-        admit_counter(counter, self.allow_unqualified_cpu)?;
-        Ok(counter)
+    /// Refuse a missing or unqualified host branch counter unless allowed.
+    /// PV reads no counter, so it admits any KVM host.
+    fn admit(&self, detected: Result<CounterProfile>, timebase: Timebase) -> Result<()> {
+        if timebase == Timebase::Pv {
+            return Ok(());
+        }
+        admit_counter(detected?, self.allow_unqualified_cpu)
     }
 }
 
@@ -634,7 +637,7 @@ fn run(cli: Cli) -> Result<u8> {
             let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
             let (mut preparer, executor) =
                 inputs.backends(&store, cpu.cpu, counter, scratch.path())?;
-            cpu.admit(detected?)?;
+            cpu.admit(detected, inputs.timebase.into())?;
             let executor = executor.with_unqualified_cpu(cpu.allow_unqualified_cpu);
             let executor = match (checkpoint_at_ns, branch_seed) {
                 (Some(at), Some(branch)) => executor.with_checkpoint(at, branch),
@@ -696,7 +699,7 @@ fn run(cli: Cli) -> Result<u8> {
             {
                 preparer.tools.docker = defaults::preparation_tool(&preparer.tools.docker)?;
             }
-            cpu.admit(detected?)?;
+            cpu.admit(detected, inputs.timebase.into())?;
             let executor = executor.with_unqualified_cpu(cpu.allow_unqualified_cpu);
             preparer.profile = executor.profile();
             let executor = performance.apply(executor)?;
@@ -760,8 +763,10 @@ fn run(cli: Cli) -> Result<u8> {
             let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
             // Historical/incompatible records must reach the retained-proof gate
             // and remain captured as NOT_COMPARABLE before querying this host.
-            if seedbox::admission::validate_profile(&previous.identity.inputs.profile).is_ok() {
-                cpu.admit(detected?)?;
+            if timebase == Timebase::Counter
+                && seedbox::admission::validate_profile(&previous.identity.inputs.profile).is_ok()
+            {
+                cpu.admit(detected, timebase)?;
                 same_counter(
                     &run,
                     recorded_counter(&previous.identity.inputs.profile)?,
@@ -1175,5 +1180,19 @@ mod tests {
              results are unverified; pass --allow-unqualified-cpu to run anyway"
         );
         assert!(admit_counter(CounterProfile::IntelSkylake, true).is_ok());
+        let cpu = CpuArg {
+            cpu: None,
+            allow_unqualified_cpu: false,
+            allow_dev_engine: false,
+        };
+        let missing = || Err(Error::Setup("no branch counter profile".into()));
+        assert!(cpu.admit(missing(), Timebase::Pv).is_ok());
+        assert!(cpu
+            .admit(Ok(CounterProfile::IntelIceLake), Timebase::Pv)
+            .is_ok());
+        assert!(cpu.admit(missing(), Timebase::Counter).is_err());
+        assert!(cpu
+            .admit(Ok(CounterProfile::IntelIceLake), Timebase::Counter)
+            .is_err());
     }
 }
