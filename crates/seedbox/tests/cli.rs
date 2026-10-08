@@ -49,6 +49,32 @@ fn mac_rejects_linux_cpu_options_before_preparation_or_state_creation() {
     }
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn mac_explore_rejects_multiple_workers_before_state_or_runtime_setup() {
+    let directory = tempfile::tempdir().unwrap();
+    assert!(seedbox(&["init", "demo"], directory.path())
+        .status
+        .success());
+    let project = directory.path().join("demo");
+
+    let help = seedbox(&["help", "explore"], &project);
+    assert!(help.status.success());
+    assert!(String::from_utf8_lossy(&help.stdout).contains(
+        "Maximum active attempts; Mac supports only 1. Omit --cpu for Linux parallel execution"
+    ));
+    assert!(String::from_utf8_lossy(&help.stdout).contains("[default: 1]"));
+
+    let output = seedbox_with(&["explore", "--workers", "2"], &project, None);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        stderr(&output),
+        "error: --workers: Mac exploration supports one worker; use --workers 1 or omit it\n"
+    );
+    assert!(!project.join(".seedbox").exists());
+}
+
 #[test]
 fn version_and_help_describe_the_builtin_engine_without_exposing_worker_dispatch() {
     let directory = tempfile::tempdir().unwrap();
