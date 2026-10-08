@@ -130,6 +130,36 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
             ..*request
         })
         .unwrap();
+        prepared
+            .profile
+            .semantic_parameters
+            .insert("checkpoint_at_ns".into(), "500".into());
+        prepared
+            .profile
+            .semantic_parameters
+            .insert("checkpoint_branch_seed".into(), "42".into());
+        let checkpoint_world = vmm::world(&ExecutionRequest {
+            prepared: &prepared,
+            ..*request
+        })
+        .unwrap();
+        let parent = checkpoint_protocol::parent_identity(
+            &checkpoint_world,
+            request.seed,
+            prepared.profile.engine.hex(),
+            "counter",
+            |_| Ok(ContentDigest::of(b"retained input").hex().to_owned()),
+        )
+        .unwrap();
+        assert_eq!(checkpoint_world["checkpoint"]["parent_identity"], parent);
+        assert_eq!(checkpoint_world["machines"], world["machines"]);
+        prepared.images.clear();
+        let without_volume = vmm::world(&ExecutionRequest {
+            prepared: &prepared,
+            ..*request
+        })
+        .unwrap();
+        assert_ne!(without_volume["checkpoint"]["parent_identity"], parent);
         let disks: Vec<_> = world["machines"]
             .as_array()
             .unwrap()
@@ -1400,5 +1430,164 @@ fn deferred_tx_report_must_match_semantic_parameter_and_legacy_reports_mean_off(
                 assert_eq!(result.is_ok(), reported.unwrap_or(false) == enabled);
             }
         }
+    });
+}
+
+#[test]
+fn checkpoint_semantics_bind_parent_and_report_and_fail_closed() {
+    fixture(|base| {
+        assert!(vmm::world(base).unwrap().get("checkpoint").is_none());
+        let mut inputs = base.prepared.clone();
+        inputs
+            .profile
+            .semantic_parameters
+            .insert("checkpoint_at_ns".into(), "500".into());
+        assert!(vmm::recorded_checkpoint(&inputs.profile).is_err());
+        inputs
+            .profile
+            .semantic_parameters
+            .insert("checkpoint_branch_seed".into(), "42".into());
+        let request = ExecutionRequest {
+            prepared: &inputs,
+            ..*base
+        };
+        let checkpoint = vmm::world(&request).unwrap()["checkpoint"].clone();
+        assert_eq!(checkpoint["at_ns"], 500);
+        assert_eq!(checkpoint["branch_seed"], 42);
+        assert_eq!(
+            checkpoint["branch_identity"],
+            checkpoint_protocol::branch_identity(
+                checkpoint["parent_identity"].as_str().unwrap(),
+                500,
+                42
+            )
+        );
+        let mut raw = report();
+        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
+        raw["checkpoint"] = checkpoint;
+        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
+        raw["checkpoint"]["branch_seed"] = json!(43);
+        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
+        inputs
+            .profile
+            .semantic_parameters
+            .insert("checkpoint_at_ns".into(), "0500".into());
+        assert!(vmm::recorded_checkpoint(&inputs.profile).is_err());
+    });
+}
+
+// Run the engine's pure protocol tests on Darwin as well as Linux.
+#[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/checkpoint.rs"]
+mod checkpoint_protocol;
+
+#[test]
+fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
+    fixture(|base| {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input");
+        std::fs::write(&input, b"retained input").unwrap();
+        let mut artifacts = BTreeMap::from([(ContentDigest::of(b"retained input"), input)]);
+        let mut inputs = base.prepared.clone();
+        inputs
+            .profile
+            .semantic_parameters
+            .insert("checkpoint_at_ns".into(), "500".into());
+        inputs
+            .profile
+            .semantic_parameters
+            .insert("checkpoint_branch_seed".into(), "42".into());
+        let ordinary = vmm::world(&ExecutionRequest {
+            prepared: &inputs,
+            artifacts: &artifacts,
+            ..*base
+        })
+        .unwrap();
+        inputs
+            .profile
+            .semantic_parameters
+            .insert("disk_loss_sector_bytes".into(), "512".into());
+        inputs
+            .profile
+            .semantic_parameters
+            .insert("disk_loss_survival_probability".into(), "0.5".into());
+        let cfg = vmm::world(&ExecutionRequest {
+            prepared: &inputs,
+            artifacts: &artifacts,
+            ..*base
+        })
+        .unwrap();
+        assert_ne!(
+            cfg["checkpoint"]["parent_identity"],
+            ordinary["checkpoint"]["parent_identity"]
+        );
+        let parent = checkpoint_protocol::parent_identity(
+            &cfg,
+            base.seed,
+            inputs.profile.engine.hex(),
+            "counter",
+            |path| {
+                Ok(ContentDigest::of(&std::fs::read(path).unwrap())
+                    .hex()
+                    .to_owned())
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg["checkpoint"]["parent_identity"], parent);
+        let mut pv_inputs = inputs.clone();
+        pv_inputs
+            .profile
+            .semantic_parameters
+            .insert("timebase".into(), "pv".into());
+        let pv_world = vmm::world(&ExecutionRequest {
+            prepared: &pv_inputs,
+            artifacts: &artifacts,
+            ..*base
+        })
+        .unwrap();
+        let pv_parent = checkpoint_protocol::parent_identity(
+            &pv_world,
+            base.seed,
+            inputs.profile.engine.hex(),
+            "pv",
+            |path| {
+                Ok(ContentDigest::of(&std::fs::read(path).unwrap())
+                    .hex()
+                    .to_owned())
+            },
+        )
+        .unwrap();
+        assert_eq!(pv_world["checkpoint"]["parent_identity"], pv_parent);
+        assert_ne!(pv_parent, parent);
+        let relocated = dir.path().join("relocated");
+        std::fs::copy(artifacts.values().next().unwrap(), &relocated).unwrap();
+        *artifacts.values_mut().next().unwrap() = relocated;
+        inputs
+            .profile
+            .semantic_parameters
+            .insert("checkpoint_at_ns".into(), "600".into());
+        inputs
+            .profile
+            .semantic_parameters
+            .insert("checkpoint_branch_seed".into(), "43".into());
+        let moved = vmm::world(&ExecutionRequest {
+            prepared: &inputs,
+            artifacts: &artifacts,
+            ..*base
+        })
+        .unwrap();
+        assert_eq!(moved["checkpoint"]["parent_identity"], parent);
+        assert_ne!(
+            moved["checkpoint"]["branch_identity"],
+            cfg["checkpoint"]["branch_identity"]
+        );
+        inputs.profile.engine = ContentDigest::of(b"another engine");
+        let changed = vmm::world(&ExecutionRequest {
+            prepared: &inputs,
+            artifacts: &artifacts,
+            ..*base
+        })
+        .unwrap();
+        assert_ne!(changed["checkpoint"]["parent_identity"], parent);
     });
 }

@@ -103,6 +103,19 @@ simulated seconds, and `entropy-barrier.json` on either side of the launch
 barrier; build their initramfs from `guest/entropy-fork.init` with
 `guest/rngprobe.c` at `bin/rngprobe`.
 
+On the Linux development host, build the entropy fixture with:
+
+```sh
+mkdir -p artifacts
+"$SEEDBOX_STATIC_CC" -O2 -static -o artifacts/rngprobe guest/rngprobe.c
+guest/build-initramfs.sh artifacts/entropy-fork.cpio guest/entropy-fork.init artifacts/rngprobe:bin/rngprobe
+```
+
+The ignored runtime-checkpoint entropy test also uses this initramfs, alongside
+the current K2/ABI-3 kernel at `artifacts/bzImage`. Runtime checkpoints use
+main's reseed hook (PV fields 6–8, generation 9, entropy 10–13); see the
+[checkpoint design](../../docs/runtime.md#runtime-checkpoint-design-experimental).
+
 The `scenario` partitions these fixtures use are older than the runtime fault
 API and don't follow its same-time ordering (see
 [docs/runtime.md](../../docs/runtime.md)). Each is queued at the sending machine
