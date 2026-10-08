@@ -23,6 +23,10 @@ fn main() {
         source.with_file_name("barrier.h").display()
     );
     println!("cargo::rerun-if-env-changed=SEEDBOX_STATIC_CC");
+    println!(
+        "cargo::rerun-if-changed={}",
+        source.with_file_name("environment.h").display()
+    );
     println!("cargo::rerun-if-env-changed=PATH");
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();

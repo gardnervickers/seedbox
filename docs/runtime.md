@@ -384,9 +384,10 @@ This composes with deferred TX's `+deferred-tx` timebase suffix: all four flag
 combinations have distinct parent and branch identities, and both off retains
 the original encoding.
 
-PV uses no host PMU counter, but the CLI currently retains the same CPU profile
-admission, CPU/SMT leases and Zen MSR workaround for both choices. This change
-does not qualify additional PV hosts. The counter stop-placement description
+PV uses no host PMU counter. It keeps the CPU/SMT leases but skips the counter
+profile, `--allow-unqualified-cpu`, the perf event checks and the Zen MSR
+workaround, so any x86-64 KVM host can run it, and its identity carries no
+counter profile. That does not qualify additional PV hosts. The counter stop-placement description
 below applies to the default counter model; PV uses its own exit-based progress.
 
 `--state` chooses the content store and attempts root (default `.seedbox`).
@@ -557,6 +558,12 @@ The supervisor sets credentials and executes the argv directly. Config files are
 root-owned mode 0444 bind mounts remounted read-only. `/dev`, `/proc`, `/sys` and
 `/etc/hosts` are reserved runtime paths. The backend supplies no host mounts,
 external network, container daemon, or host filesystem persistence to the guest.
+
+The supervisor defaults `GOMAXPROCS` to the guest's online CPU count (currently
+one vCPU per machine), unless the merged image/Compose environment already
+contains it, including an empty value. Process stop/start reuses that environment.
+Bundled Go workloads use this default instead of fixed CPU counts. This changes
+their execution and witnesses; the supervisor bytes are part of run identity.
 
 Image modes, UID/GID, symlinks and hard links are retained in newc archives.
 Device/FIFO entries, Linux extended attributes (including file capabilities/ACLs),
