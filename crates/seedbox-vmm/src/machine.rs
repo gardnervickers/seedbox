@@ -2082,6 +2082,7 @@ mod net_poll_tests {
         let kvm = Kvm::new().unwrap();
         for site in ["entry", "slice", "bounded_slice", "halt", "charged_io"] {
             for (event_idx, deferred) in [(false, false), (true, false), (false, true), (true, true)] {
+                let case = format!("site={site} event_idx={event_idx} deferred={deferred}");
                 // Publish a head, then yield to the slice end, halt, or start
                 // charged port I/O. Entry starts with an already posted head.
                 let mut code = vec![0xc7, 0x05, 0x02, 0x20, 0x08, 0x00, 1, 0, 0, 0];
@@ -2109,21 +2110,23 @@ mod net_poll_tests {
                 let (limit, early) = if site == "bounded_slice" { (1_000_000, 100_000) } else { (500, 0) };
                 let stop = m.run_until(&mut Natural, limit, early, &mut frames).unwrap();
                 if site == "bounded_slice" {
-                    assert_eq!(m.time, if deferred { crate::virtio_net::TX_POLL_NS } else { limit - early });
+                    assert_eq!(m.time, if deferred { crate::virtio_net::TX_POLL_NS } else { limit - early }, "{case}");
                 }
                 if event_idx || deferred {
-                    assert_eq!(stop, Stop::Sent, "{site}");
-                    assert_eq!(frames, [b"frame".to_vec()]);
-                    assert_eq!(u16::from_le_bytes(m.memory()[0x8300c..0x8300e].try_into().unwrap()), if deferred { 2 } else { 1 });
+                    assert_eq!(stop, Stop::Sent, "{case}");
+                    assert_eq!(frames, [b"frame".to_vec()], "{case}");
+                    // used->idx is at used + 2; used + 12 is avail_event
+                    // for this one-entry queue. Only one head was posted.
+                    assert_eq!(u16::from_le_bytes(m.memory()[0x83002..0x83004].try_into().unwrap()), 1, "{case}");
                 } else {
-                    assert_eq!(stop, if site == "slice" || site == "bounded_slice" || site == "charged_io" { Stop::Reached } else { Stop::Halted }, "{site}");
-                    assert!(frames.is_empty());
+                    assert_eq!(stop, if site == "slice" || site == "bounded_slice" || site == "charged_io" { Stop::Reached } else { Stop::Halted }, "{case}");
+                    assert!(frames.is_empty(), "{case}");
                 }
                 let net = m.net.as_ref().unwrap();
-                assert_eq!(net.doorbell_exits, 0);
-                assert_eq!(net.tx_frames, u64::from(event_idx || deferred));
-                assert_eq!(net.tx_polled_at_boundary, u64::from((event_idx || deferred) && site != "entry"));
-                assert!(net.dirty.is_empty()); // Machine adopted all DMA writes.
+                assert_eq!(net.doorbell_exits, 0, "{case}");
+                assert_eq!(net.tx_frames, u64::from(event_idx || deferred), "{case}");
+                assert_eq!(net.tx_polled_at_boundary, u64::from((event_idx || deferred) && site != "entry"), "{case}");
+                assert!(net.dirty.is_empty(), "{case}"); // Machine adopted all DMA writes.
             }
         }
     }
@@ -2136,6 +2139,7 @@ mod net_poll_tests {
         for (event_idx, page_timer) in [(false, false), (true, false), (false, true), (true, true)] {
             let mut first = None;
             for ms in [2, 7] {
+                let case = format!("site=pv_spin event_idx={event_idx} page_timer={page_timer} deferred=true watchdog_ms={ms}");
                 // Publish TX, then busy-wait for used->idx with interrupts off.
                 // The stable cycle is serviced at its canonical point; never
                 // service at the host-time watchdog or a probe landing.
@@ -2170,14 +2174,14 @@ mod net_poll_tests {
                 memory[0x82006..0x82008].copy_from_slice(&1u16.to_le_bytes()); // used_event
                 let mut tb = PvClock::new(Duration::from_millis(ms)).unwrap();tb.max_false_alarms = 10;
                 let mut frames = Vec::new();
-                assert_eq!(m.run_until(&mut tb, 1_000_000, 0, &mut frames).unwrap(), Stop::Sent);
-                assert_eq!(frames, [b"frame".to_vec()]);
-                assert_eq!(m.time, if page_timer { 12300 } else { 0 });
-                assert_eq!(m.pit.deadline, page_timer.then_some(40000));
-                assert_eq!(m.net.as_ref().unwrap().doorbell_exits, 0);
-                assert_eq!(m.run_until(&mut tb, 1_000_000, 0, &mut frames).unwrap(), Stop::Exited);
+                assert_eq!(m.run_until(&mut tb, 1_000_000, 0, &mut frames).unwrap(), Stop::Sent, "{case}");
+                assert_eq!(frames, [b"frame".to_vec()], "{case}");
+                assert_eq!(m.time, if page_timer { 12300 } else { 0 }, "{case}");
+                assert_eq!(m.pit.deadline, page_timer.then_some(40000), "{case}");
+                assert_eq!(m.net.as_ref().unwrap().doorbell_exits, 0, "{case}");
+                assert_eq!(m.run_until(&mut tb, 1_000_000, 0, &mut frames).unwrap(), Stop::Exited, "{case}");
                 let evidence = (m.time, m.exit_witness(), m.state_digest());
-                if let Some(want) = &first { assert_eq!(&evidence, want); } else { first = Some(evidence); }
+                if let Some(want) = &first { assert_eq!(&evidence, want, "{case}"); } else { first = Some(evidence); }
             }
         }
     }
