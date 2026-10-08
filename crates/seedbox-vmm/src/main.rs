@@ -434,6 +434,7 @@ fn run() -> Result<Value, String> {
         Some("pv") => true,
         Some(other) => return Err(format!("--timebase {other}: expected counter or pv")),
     };
+    let page_timer = args.iter().any(|a| a == "--page-timer");
     // Undo-able precise stops (performance only): initial final margin, 0 = off.
     let undo_margin: u64 = match std::env::var("SEEDBOX_UNDO").as_deref() {
         Err(_) => 256,
@@ -571,7 +572,7 @@ fn run() -> Result<Value, String> {
             margin,
             console_limit,
             pv_clock,
-            page_timer: args.iter().any(|a| a == "--page-timer"),
+            page_timer,
             log_chunk_limit: arg(&args,"--log-chunk-limit").map(|v|v.parse::<usize>()).transpose().map_err(|e|e.to_string())?,
         };
         let seed = entropy_seed(boot_seed, &format!("boot-entropy/{}", names[i]));
@@ -657,7 +658,7 @@ fn run() -> Result<Value, String> {
         if !checkpoint_times.is_empty() {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let engine = format!("{:x}", Sha256::digest(std::fs::read(exe).map_err(|e| e.to_string())?));
-            let parent = checkpoint::parent_identity(&cfg, seed, &engine, world.clock.name(), |p| {
+            let parent = checkpoint::parent_identity(&cfg, seed, &engine, world.clock.name(), page_timer, |p| {
                 std::fs::read(base.join(p)).map(|bytes|format!("{:x}",Sha256::digest(bytes))).map_err(|e|format!("{p}: {e}"))
             })?;
             if let Some(expected) = cfg["checkpoint"]["parent_identity"].as_str() {

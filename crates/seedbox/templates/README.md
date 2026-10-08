@@ -79,6 +79,8 @@ as `page_timer: true` only when enabled. Replay restores it without an override.
 Timer jitter uses the existing seeded stream. This changes enabled-run timing
 and witnesses; omission preserves the existing identity encoding for the same
 engine and kernel inputs.
+Checkpoint parent identities also bind the page timer only when enabled,
+preventing checkpoint reuse across timer modes while preserving feature-off hashes.
 
 Charged timer I/O retains its full cost across scheduler boundaries; pending
 operations are included in terminal witnesses.

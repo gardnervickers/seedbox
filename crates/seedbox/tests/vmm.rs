@@ -148,6 +148,7 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
             request.seed,
             prepared.profile.engine.hex(),
             "counter",
+            false,
             |_| Ok(ContentDigest::of(b"retained input").hex().to_owned()),
         )
         .unwrap();
@@ -1455,6 +1456,75 @@ fn checkpoint_semantics_bind_parent_and_report_and_fail_closed() {
 mod checkpoint_protocol;
 
 #[test]
+fn checkpoint_page_timer_mode_binds_cli_and_engine_metadata() {
+    fixture(|base| {
+        for timebase in ["counter", "pv"] {
+            let mut off_inputs = base.prepared.clone();
+            off_inputs.profile.semantic_parameters.extend([
+                ("checkpoint_at_ns".into(), "500".into()),
+                ("checkpoint_branch_seed".into(), "42".into()),
+                ("timebase".into(), timebase.into()),
+            ]);
+            let off_request = ExecutionRequest {
+                prepared: &off_inputs,
+                ..*base
+            };
+            let off = vmm::world(&off_request).unwrap()["checkpoint"].clone();
+            let mut on_inputs = off_inputs.clone();
+            on_inputs
+                .profile
+                .semantic_parameters
+                .insert("page_timer".into(), "true".into());
+            let on_request = ExecutionRequest {
+                prepared: &on_inputs,
+                ..*base
+            };
+            let on_world = vmm::world(&on_request).unwrap();
+            let on = &on_world["checkpoint"];
+            assert_ne!(on["parent_identity"], off["parent_identity"], "{timebase}");
+            assert_ne!(on["branch_identity"], off["branch_identity"], "{timebase}");
+            let engine_parent = checkpoint_protocol::parent_identity(
+                &on_world,
+                base.seed,
+                on_inputs.profile.engine.hex(),
+                timebase,
+                true,
+                |_| Ok(ContentDigest::of(b"retained input").hex().to_owned()),
+            )
+            .unwrap();
+            assert_eq!(on["parent_identity"], engine_parent);
+
+            let mut raw = report();
+            raw["timebase"] = json!(timebase);
+            raw["checkpoint"] = on.clone();
+            assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &on_request).is_ok());
+            let error = vmm::report(&serde_json::to_vec(&raw).unwrap(), &off_request)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("VMM checkpoint identity mismatch"),
+                "{error}"
+            );
+            raw["checkpoint"] = off.clone();
+            let error = vmm::report(&serde_json::to_vec(&raw).unwrap(), &on_request)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("VMM checkpoint identity mismatch"),
+                "{error}"
+            );
+            on_inputs.profile.semantic_parameters.remove("page_timer");
+            let restored_off = vmm::world(&ExecutionRequest {
+                prepared: &on_inputs,
+                ..*base
+            })
+            .unwrap();
+            assert_eq!(restored_off["checkpoint"], off);
+        }
+    });
+}
+
+#[test]
 fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
     fixture(|base| {
         let dir = tempfile::tempdir().unwrap();
@@ -1499,6 +1569,7 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
             base.seed,
             inputs.profile.engine.hex(),
             "counter",
+            false,
             |path| {
                 Ok(ContentDigest::of(&std::fs::read(path).unwrap())
                     .hex()
@@ -1523,6 +1594,7 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
             base.seed,
             inputs.profile.engine.hex(),
             "pv",
+            false,
             |path| {
                 Ok(ContentDigest::of(&std::fs::read(path).unwrap())
                     .hex()

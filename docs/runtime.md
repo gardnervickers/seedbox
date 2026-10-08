@@ -34,7 +34,9 @@ the effect. Boot forks still require every machine parked.
 The CLI and engine share `crates/seedbox-vmm/src/checkpoint.rs`. Parent identity
 uses the versioned `seedbox-world-parent-v2` domain, config with checkpoint
 metadata removed, kernel/initrd/disk paths replaced by content hashes, engine
-hash, timebase and parent seed. Branch identity binds this parent, T and B.
+hash, timebase and parent seed. An enabled page timer adds an explicit semantic
+tag to the parent hash; omission adds no bytes, preserving feature-off identities.
+Checkpoints cannot be reused across timer modes. Branch identity binds this parent, T and B.
 The retained RunIdentity also binds T and B; it is not a second parent-identity
 scheme. Relocating inputs does not change the branch. Counter and PV parents
 have different identities. The engine recomputes the supplied CLI identity.
@@ -371,6 +373,8 @@ as `page_timer: true` only when enabled. Replay restores it without an override.
 Timer jitter uses the existing seeded stream. This changes enabled-run timing
 and witnesses; omission preserves the existing identity encoding for the same
 engine and kernel inputs.
+Checkpoint parent identities also bind the page timer only when enabled,
+preventing checkpoint reuse across timer modes while preserving feature-off hashes.
 
 PV uses no host PMU counter, but the CLI currently retains the same CPU profile
 admission, CPU/SMT leases and Zen MSR workaround for both choices. This change
