@@ -5,13 +5,19 @@
  * Every kernel TSC read (rdtsc/rdtsc_ordered) returns virtual time published
  * by the VMM, never the hardware counter. Before the shared page is mapped,
  * reads use two port reads. Repeated reads with no new publication advance
- * by one tick, so polling loops make progress deterministically. User-mode
+ * by one tick (SEEDBOX_PV_READ_NS under the PV clock), so polling loops make
+ * progress deterministically. User-mode
  * RDTSC/RDTSCP trap through CR4.TSD and are emulated here.
  *
  * Once the page is active, interrupt masking (8259) and virtio-mmio interrupt
  * status go through the page instead of trapping port and MMIO accesses, and
  * the PIT is armed with a single port write. The VMM applies page state only
  * at deterministic points.
+ *
+ * In the VMM's PV clock timebase (no host perf counter), guest progress is
+ * not measured: the guest exits at a clock bound and a syscall budget the VMM
+ * publishes instead. Both checks sit behind a static key, so in the counter
+ * timebase they compile to no-ops and retire no extra branches.
  */
 #include <linux/init.h>
 #include <linux/io.h>
@@ -25,6 +31,7 @@
 
 struct seedbox_time_page *seedbox_page;
 static unsigned long long seedbox_early_last;
+DEFINE_STATIC_KEY_FALSE(seedbox_pv_clock);
 
 noinstr unsigned long long seedbox_rdtsc(void)
 {
@@ -32,10 +39,28 @@ noinstr unsigned long long seedbox_rdtsc(void)
 	unsigned long long v, last;
 
 	if (likely(p)) {
+again:
 		v = READ_ONCE(p->tsc);
 		last = READ_ONCE(p->last);
+		/*
+		 * A read costs 1 ns, or SEEDBOX_PV_READ_NS under the PV clock,
+		 * where compute is free and a loop polling the clock would
+		 * otherwise need a read per nanosecond it waits. The static key
+		 * retires no conditional branch in the counter timebase.
+		 */
+		if (static_branch_unlikely(&seedbox_pv_clock))
+			last += SEEDBOX_PV_READ_NS - 1;
 		if (v <= last)
 			v = last + 1;
+		/*
+		 * PV clock: never show a time past the VMM's bound. The exit lets
+		 * the VMM move time there (firing timers) and raise the bound.
+		 */
+		if (static_branch_unlikely(&seedbox_pv_clock) &&
+		    v > READ_ONCE(p->bound)) {
+			outl(1, SEEDBOX_PORT_YIELD);
+			goto again;
+		}
 		WRITE_ONCE(p->last, v);
 		return v;
 	}
@@ -88,6 +113,10 @@ static int __init seedbox_time_init(void)
 	if (!p)
 		panic("seedbox: cannot map time page");
 	WRITE_ONCE(p->last, seedbox_early_last);
+	if (READ_ONCE(p->pv_clock)) {
+		static_branch_enable(&seedbox_pv_clock);
+		WRITE_ONCE(p->pv_clock, 2);	/* tell the VMM this kernel has it */
+	}
 	WRITE_ONCE(p->pic_imr, cached_irq_mask);
 	outl(SEEDBOX_ABI, SEEDBOX_PORT_TIME_READY);
 	WRITE_ONCE(seedbox_page, p);

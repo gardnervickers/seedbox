@@ -6,14 +6,17 @@
 #define SEEDBOX_PORT_TIME_LO	0x520	/* read: latch virtual TSC, low 32 bits */
 #define SEEDBOX_PORT_TIME_HI	0x524	/* read: high 32 bits of latched value */
 #define SEEDBOX_PORT_TIME_READY	0x528	/* write: shared page in use (value: ABI version) */
-#define SEEDBOX_PORT_YIELD	0x52c	/* write: requested exit at a syscall */
+#define SEEDBOX_PORT_YIELD	0x52c	/* write: requested exit (0: syscall, 1: clock bound) */
 #define SEEDBOX_PORT_TIMER	0x530	/* write: arm PIT channel 0 for N ticks */
 #define SEEDBOX_TIME_PAGE_PHYS	0xd0000000UL
 #define SEEDBOX_ABI		2
 #define SEEDBOX_TSC_KHZ		1000000
+/* PV clock: virtual time one guest clock read costs (ns; 1 in the counter timebase). */
+#define SEEDBOX_PV_READ_NS	100
 
 #ifndef __ASSEMBLY__
 #include <linux/types.h>
+#include <linux/jump_label.h>
 #include <asm/io.h>
 
 /*
@@ -27,7 +30,20 @@ struct seedbox_time_page {
 	u64 syscalls;	/* syscalls entered */
 	u64 pic_imr;	/* 8259 masks, master | slave << 8 */
 	u64 net_isr;	/* virtio-mmio interrupt status: VMM sets, guest clears */
+	/*
+	 * PV clock timebase only (pv_clock set by the VMM before boot). Guest
+	 * progress is not counted: virtual time moves only at exits. The
+	 * guest exits when its clock would pass `bound` and at the syscall
+	 * that makes `syscalls` reach `syscall_target`. The kernel answers a
+	 * nonzero pv_clock by setting it to 2.
+	 */
+	u64 pv_clock;
+	u64 bound;
+	u64 syscall_target;
 };
+
+/* Enabled at boot in the PV clock timebase; a no-op (no branch) otherwise. */
+DECLARE_STATIC_KEY_FALSE(seedbox_pv_clock);
 
 struct pt_regs;
 extern struct seedbox_time_page *seedbox_page;
@@ -44,8 +60,13 @@ static __always_inline void seedbox_syscall_hook(void)
 	struct seedbox_time_page *p = READ_ONCE(seedbox_page);
 
 	if (p) {
-		WRITE_ONCE(p->syscalls, p->syscalls + 1);
+		u64 n = p->syscalls + 1;
+
+		WRITE_ONCE(p->syscalls, n);
 		if (READ_ONCE(p->exit_req))
+			outl(0, SEEDBOX_PORT_YIELD);
+		else if (static_branch_unlikely(&seedbox_pv_clock) &&
+			 n >= READ_ONCE(p->syscall_target))
 			outl(0, SEEDBOX_PORT_YIELD);
 	}
 }

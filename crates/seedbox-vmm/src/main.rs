@@ -24,6 +24,7 @@ mod virtio_net;
 mod virtio_console;
 
 use counter::Counter;
+use machine::pv::PvClock;
 use machine::{BootSpec, Machine, MachineSnapshot, State, Stop, NET_IRQ, NET_MMIO, CHANNEL_IRQ, CHANNEL_MMIO, BLK_IRQ, BLK_MMIO};
 use rng::Rng;
 use serde_json::{json, Value};
@@ -41,6 +42,21 @@ enum Payload {
     Frame { from: usize, bytes: Vec<u8> },
     Serial(Vec<u8>),
     Partition { from: usize, to: usize, on: bool },
+}
+
+/// The world's timebase (see `timebase.rs`), one for all its machines.
+enum Clock {
+    Counter(Counter),
+    Pv(PvClock),
+}
+
+impl Clock {
+    fn name(&self) -> &'static str {
+        match self {
+            Clock::Counter(_) => "counter",
+            Clock::Pv(_) => "pv",
+        }
+    }
 }
 
 /// Frames that may wait for a paused machine, queued while it is paused and
@@ -69,6 +85,8 @@ struct BootInputs {
     /// A fixed stepping margin; None adapts it.
     margin: Option<u64>,
     console_limit: Option<usize>,
+    /// The machine runs under the PV clock timebase.
+    pv_clock: bool,
     log_chunk_limit: Option<usize>,
 }
 
@@ -123,6 +141,7 @@ fn boot_machine(kvm: &kvm_ioctls::Kvm, name: &str, b: &BootInputs, barrier: bool
         disk: b.disk.clone(),
         undo_margin: b.undo_margin,
         barrier,
+        pv_clock: b.pv_clock,
     };
     let mut mach = Machine::new(kvm, name, &spec)?;
     mach.com1.output_limit = b.console_limit;
@@ -152,7 +171,7 @@ struct World {
     incarnations: Vec<Vec<Value>>,
     /// Frames queued for each paused machine during its current pause.
     paused_ingress: Vec<u64>,
-    counter: Counter,
+    clock: Clock,
     events: Vec<BTreeMap<(u64, u64), Payload>>,
     seq: u64,
     /// No frame can arrive sooner than this after it is sent: the horizon.
@@ -401,6 +420,12 @@ fn run() -> Result<Value, String> {
     }
     let out = arg(&args, "--out").ok_or("--out required")?;
     let digest = args.iter().any(|a| a == "--digest");
+    // Part of the run's identity: a seed gives a different run under each.
+    let pv_clock = match arg(&args, "--timebase").as_deref() {
+        None | Some("counter") => false,
+        Some("pv") => true,
+        Some(other) => return Err(format!("--timebase {other}: expected counter or pv")),
+    };
     // Undo-able precise stops (performance only): initial final margin, 0 = off.
     let undo_margin: u64 = match std::env::var("SEEDBOX_UNDO").as_deref() {
         Err(_) => 256,
@@ -522,6 +547,7 @@ fn run() -> Result<Value, String> {
             exact_timer_ppm: cfg["exact_timer_ppm"].as_u64().unwrap_or(0),
             margin,
             console_limit,
+            pv_clock,
             log_chunk_limit: arg(&args,"--log-chunk-limit").map(|v|v.parse::<usize>()).transpose().map_err(|e|e.to_string())?,
         };
         let seed = entropy_seed(boot_seed, &format!("boot-entropy/{}", names[i]));
@@ -540,6 +566,7 @@ fn run() -> Result<Value, String> {
         mach.com1.chunks.open(&format!("{out}/{}.console.chunks",names[i]));
         mach.com2.chunks.open(&format!("{out}/{}.mgmt.chunks",names[i]));
         mach.timer_rng = Some(Rng::new(boot_seed, &format!("timer-jitter/{}", names[i])));
+        mach.syscall_ns = machine::pv::syscall_ns(&mut Rng::new(boot_seed, &format!("pv-speed/{}", names[i])));
         if args.iter().any(|a| a == "--trace") {
             let f = std::fs::File::create(format!("{out}/{}.trace", names[i]))
                 .map_err(|e| e.to_string())?;
@@ -561,6 +588,17 @@ fn run() -> Result<Value, String> {
     let net = &cfg["network"];
     let latency = net["latency_ns"].as_u64().unwrap_or(1_000_000);
     let early = (latency / 2).min(cfg["stop_tolerance_ns"].as_u64().unwrap_or(0));
+    let clock = if pv_clock {
+        // Host CPU time a run may go without an exit before it is checked
+        // for a spin (performance only).
+        let ms: u64 = match std::env::var("SEEDBOX_PV_WATCHDOG_MS").as_deref() {
+            Err(_) => 20,
+            Ok(m) => m.parse().map_err(|e| format!("SEEDBOX_PV_WATCHDOG_MS: {e}"))?,
+        };
+        Clock::Pv(PvClock::new(std::time::Duration::from_millis(ms.max(1)))?)
+    } else {
+        Clock::Counter(Counter::new()?)
+    };
     let mut world = World {
         kvm,
         boot: boots,
@@ -569,7 +607,7 @@ fn run() -> Result<Value, String> {
         run_seed: seed,
         incarnations: vec![Vec::new(); n],
         paused_ingress: vec![0; n],
-        counter: Counter::new()?,
+        clock,
         events: (0..n).map(|_| BTreeMap::new()).collect(),
         seq: 0,
         lookahead: latency,
@@ -783,6 +821,7 @@ fn release(world: &mut World, cfg: &Value, names: &[String], seed: u64, skew: u6
         let delay = Rng::new(seed, &format!("release/{}", names[i])).below(skew.saturating_add(1));
         mach.release(at.saturating_add(delay), entropy)?;
         mach.timer_rng = Some(Rng::new(seed, &format!("timer-jitter/{}", names[i])));
+        mach.syscall_ns = machine::pv::syscall_ns(&mut Rng::new(seed, &format!("pv-speed/{}", names[i])));
     }
     arm_seed(world, cfg, names, seed, at.saturating_add(skew))
 }
@@ -1016,7 +1055,10 @@ fn simulate(
         };
         let plan=(m,world.machines[m].time,limit,horizon,world.next_event(m),fault_boundary,control_boundary,world.machines[m].next_deadline(),world.machines[m].pending_io.as_ref().map_or(0,|p|p.remaining_ns),world.seq);
         world.machines[m].observe_console=world.control.triggers.observes(&world.machines[m].name);
-        let stop = world.machines[m].run_until(&mut world.counter, limit, early, &mut frames)?;
+        let stop = match &mut world.clock {
+            Clock::Counter(c) => world.machines[m].run_until(c, limit, early, &mut frames)?,
+            Clock::Pv(p) => world.machines[m].run_until(p, limit, early, &mut frames)?,
+        };
         stop_progress(&mut stalled_plan,plan,world.machines[m].time!=plan.1 || stop!=Stop::Reached)?;
         if let Some((at,byte))=world.machines[m].committed_console.take() {
             let max_time=world.machines.iter().map(|m|m.time).max().unwrap_or(0);
@@ -1204,13 +1246,31 @@ fn report(
         row["incarnation"] = json!(mach.incarnation);
         row["booted_at_ns"] = json!(mach.booted_at);
         row["crashed_incarnations"] = json!(world.incarnations[index]);
+        let skew: serde_json::Map<String, Value> = machine::Site::NAMES
+            .iter()
+            .zip(&s.skew)
+            .map(|(k, v)| (k.to_string(), json!({"n": v.n, "ahead": v.ahead, "ahead_max_ns": v.ahead_max_ns, "behind": v.behind, "behind_max_ns": v.behind_max_ns})))
+            .collect();
+        row["timer"] = json!({"writes": s.timer_writes, "overdue": s.timer_overdue, "overdue_max_ns": s.timer_overdue_max_ns, "overdue_syscalls_max": s.timer_write_syscalls_max, "guest_clock_skew": skew});
+        if let Clock::Pv(_) = world.clock {
+            row["spin"] = json!({"probes": s.spin_probes, "idles": s.spin_idles, "false_alarms": s.spin_false, "mismatch": s.spin_mismatch});
+            row["syscalls"] = json!(mach.syscalls());
+            row["syscall_ns"] = json!(mach.syscall_ns);
+            let by: serde_json::Map<String, Value> = machine::Cause::NAMES
+                .iter()
+                .zip(s.time_by)
+                .map(|(k, v)| (k.to_string(), json!(v)))
+                .collect();
+            row["time_ns_by_cause"] = Value::Object(by);
+        }
         report.push(row);
     }
     let sim_ns = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
     let mut result=json!({
         "report_version": 1,
         "seed": seed,
-        "counter_profile": profile::host()?.name,
+        "timebase": world.clock.name(),
+        "counter_profile": match world.clock { Clock::Counter(_) => Some(profile::host()?.name), Clock::Pv(_) => None },
         "outcome": outcome,
         "sim_seconds": sim_ns as f64 / 1e9,
         "host_seconds": host_seconds,
