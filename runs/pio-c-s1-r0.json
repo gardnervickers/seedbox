@@ -1,0 +1,131 @@
+{
+  "control_history": [],
+  "control_latency_ns": 0,
+  "counter_profile": "amd-zen",
+  "fault_error": null,
+  "faults": [],
+  "frames_delivered": 0,
+  "frames_dropped": 0,
+  "host_seconds": 0.561405186,
+  "in_flight_policy": "retain_send_time_decisions; cuts_dominate_shapes",
+  "kills": [],
+  "machines": [
+    {
+      "booted_at_ns": 0,
+      "branches": 272646802,
+      "control_channel": null,
+      "crashed_incarnations": [],
+      "disk": null,
+      "eintr": 71,
+      "exits": 45951,
+      "final_margin": 16384,
+      "guest_exit_code": 0,
+      "guest_init_error": null,
+      "halts": 44,
+      "incarnation": 0,
+      "infrastructure_error": false,
+      "irqs": 103,
+      "kvm_ms_by_exit": {
+        "debug": 192.36833,
+        "eintr": 146.692482,
+        "hlt": 0.502551,
+        "mmio": 0.0,
+        "other": 0.0,
+        "pio": 65.864417,
+        "window": 0.067645
+      },
+      "kvm_n_by_exit": [
+        209,
+        45341,
+        482,
+        0,
+        44,
+        13,
+        0,
+        0
+      ],
+      "mmio": 0,
+      "name": "n1",
+      "net": null,
+      "pending_io": null,
+      "pio": 482,
+      "precise_stops": 46,
+      "run_ms": 561.357814,
+      "skid_count": 71,
+      "skid_max": 7081,
+      "skid_p50": 1286,
+      "skid_p99": 7081,
+      "soft_misses": 0,
+      "soft_misses_clean": 0,
+      "soft_undos": 0,
+      "state": "Exited(0)",
+      "state_digest": "355ce6ac924ba7298538f84043fe717382dbe914f36ae71356c55aa6dfa220d2",
+      "state_digest_parts": {
+        "events": "exc:none int:none shadow:0 nmi:0/0/0",
+        "msrs": "7085b186b6a67a31ec001e8a19ca8cde0ae5f01717f13bb81fbb61ddcecc7060",
+        "pending_io": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+        "ram": "e13c03954ea0455ff3448bf3cbc09798ea15a50756244952067d6c0fa6e79c43",
+        "regs": "323f4a62d5ab416a2e4d78170b158337624886349a97281d017de637193fc757",
+        "time_page": "2479eaa37e61c71457f69611a2fba0226a210f838613c1b3501ce8019332a4b6",
+        "xcrs": "02bef8f9e42dbabde667aa536a1e761917f1e8264395fba767dd7b1f691a50ac",
+        "xsave": "70f8dc688871685bdb46f15dc043c85997f90092db3423a22824eee0429ff82c"
+      },
+      "step_ms": 314.036335,
+      "steps": 45341,
+      "time_ns": 1272692269,
+      "timer": {
+        "guest_clock_skew": {
+          "halt": {
+            "ahead": 0,
+            "ahead_max_ns": 0,
+            "behind": 44,
+            "behind_max_ns": 45140,
+            "n": 44
+          },
+          "sent": {
+            "ahead": 0,
+            "ahead_max_ns": 0,
+            "behind": 0,
+            "behind_max_ns": 0,
+            "n": 0
+          },
+          "timer_write": {
+            "ahead": 0,
+            "ahead_max_ns": 0,
+            "behind": 99,
+            "behind_max_ns": 8193,
+            "n": 99
+          }
+        },
+        "overdue": 0,
+        "overdue_max_ns": 0,
+        "overdue_syscalls_max": 0,
+        "writes": 99
+      },
+      "undo": {
+        "checkpoint_ms": 28.492965,
+        "checkpoints": 49,
+        "restored_pages": 3531,
+        "rollback_ms": 3.584095,
+        "rollbacks": 138,
+        "synced_pages": 8671
+      },
+      "window_exits": 13,
+      "witness": "aa69ce3b96d64ab23e0f0162cff0de45e2a99d532e5508f7990b5a36afaae0e4",
+      "yield_stops": 0,
+      "yields": 0
+    }
+  ],
+  "management_readiness": [],
+  "network_counters": {},
+  "network_witness": "620f368f482eb69e490d98e8302291c6c45ad73147317cd230410e3a4a7348fd",
+  "outcome": "end_machine_exited",
+  "rejected_fault_effects": [],
+  "report_version": 1,
+  "seed": 1,
+  "sim_seconds": 1.272692269,
+  "slices": 45,
+  "speed": 2.2669763314227738,
+  "timebase": "counter",
+  "world_witness": "95bc1da6daf4e53ec0586bd8a82d2c7402dc07fc645f7565137257bf18101e6f"
+}

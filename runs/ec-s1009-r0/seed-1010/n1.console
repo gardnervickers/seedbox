@@ -1,0 +1,2 @@
+before fork: getrandom=dedd6d8ab631333b333f001bd37bb9a6 urandom=008935d2e019898bc1a5d0347de745a7
+after fork: getrandom=3ccb05c5338b2630bf6a9ce564fa16bd urandom=3d5085c8e2713357e25c3251d844e503

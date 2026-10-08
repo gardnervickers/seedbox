@@ -5,8 +5,8 @@ It has not qualified an engine or enabled a runner. Run only under a separately
 reviewed finite hardware release on the compatible qualified AMD host as root.
 The admission CLI must be bound to the exact frozen engine/guest-kernel candidate;
 there is no engine-change override. Host-kernel bytes are not checked.
-The source admission policy `amd-zen3-engine391f-v3` pins engine391f
-(`391ff19696f1bfbad144892bcaa1f831ff19f06549561420b3d17060bf316938`) and K2
+The source admission policy `amd-zen3-engine62ad-v4` pins engine62ad
+(`62adf0563a0a20f6bc5ea23c15060347d84b7ea2d6c7adc7eb85edcd46b0b84c`) and K2
 (`68bf3f024fc6ec0c01399020b5c37e4b42d661c2604f3c87fc879ccf9280e166`).
 Final combined admission/CPUID-selected profile integration
 is a compatibility prerequisite; this entrypoint never passes

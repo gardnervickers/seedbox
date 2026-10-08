@@ -1,0 +1,443 @@
+{
+  "boot": {
+    "barrier_ns": 1983591449,
+    "boot_host_seconds": 0.086606429,
+    "seed": 1,
+    "snapshot_host_seconds": 0.247755295
+  },
+  "report_version": 1,
+  "seeds": [
+    {
+      "boot": {
+        "barrier_ns": 1983591449,
+        "boot_host_seconds": 0.086606429,
+        "fork_at_ns": 2000000000,
+        "forked": false,
+        "release_skew_ns": 0,
+        "reseed": {
+          "n1": "time_page"
+        },
+        "restore_host_seconds": 3e-8,
+        "restored_pages": 0,
+        "seed": 1
+      },
+      "control_history": [],
+      "control_latency_ns": 0,
+      "counter_profile": "amd-zen",
+      "fault_error": null,
+      "faults": [],
+      "frames_delivered": 0,
+      "frames_dropped": 0,
+      "host_seconds": 0.003660821,
+      "in_flight_policy": "retain_send_time_decisions; cuts_dominate_shapes",
+      "kills": [],
+      "machines": [
+        {
+          "booted_at_ns": 0,
+          "branches": 22917744,
+          "control_channel": null,
+          "crashed_incarnations": [],
+          "disk": null,
+          "eintr": 0,
+          "exits": 662,
+          "final_margin": 16384,
+          "guest_exit_code": 0,
+          "guest_init_error": null,
+          "halts": 127,
+          "incarnation": 0,
+          "infrastructure_error": false,
+          "irqs": 133,
+          "kvm_ms_by_exit": {
+            "debug": 0.0,
+            "eintr": 0.0,
+            "hlt": 1.169559,
+            "mmio": 0.0,
+            "other": 0.0,
+            "pio": 61.040414,
+            "window": 0.031951
+          },
+          "kvm_n_by_exit": [
+            0,
+            0,
+            529,
+            0,
+            127,
+            6,
+            0,
+            0
+          ],
+          "mmio": 0,
+          "name": "n1",
+          "net": null,
+          "pending_io": null,
+          "pio": 529,
+          "precise_stops": 0,
+          "run_ms": 90.143116,
+          "skid_count": 0,
+          "skid_max": 0,
+          "skid_p50": null,
+          "skid_p99": null,
+          "soft_misses": 0,
+          "soft_misses_clean": 0,
+          "soft_undos": 0,
+          "state": "Exited(0)",
+          "state_digest": "088db39ba573b201614536835c757456dc06f879525337d8ffb9526f1c854326",
+          "state_digest_parts": {
+            "events": "exc:none int:none shadow:0 nmi:0/0/0",
+            "msrs": "7085b186b6a67a31ec001e8a19ca8cde0ae5f01717f13bb81fbb61ddcecc7060",
+            "pending_io": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+            "ram": "2dde53b329d257eb4f38ce22b132a05a35a86072a017da1cdfc5c81f4f1630c9",
+            "regs": "1d389bf7260d939d3d7ca16aa30d33a9e1970f15a56a045ddb74a3e9a1480bf3",
+            "time_page": "836804ae9963005ac6155676f900876b09d81b4b1dbdc6a7e82c42b4a767258a",
+            "xcrs": "02bef8f9e42dbabde667aa536a1e761917f1e8264395fba767dd7b1f691a50ac",
+            "xsave": "70f8dc688871685bdb46f15dc043c85997f90092db3423a22824eee0429ff82c"
+          },
+          "step_ms": 0.0,
+          "steps": 0,
+          "time_ns": 3022865685,
+          "timer": {
+            "guest_clock_skew": {
+              "halt": {
+                "ahead": 0,
+                "ahead_max_ns": 0,
+                "behind": 127,
+                "behind_max_ns": 75068,
+                "n": 127
+              },
+              "sent": {
+                "ahead": 0,
+                "ahead_max_ns": 0,
+                "behind": 0,
+                "behind_max_ns": 0,
+                "n": 0
+              },
+              "timer_write": {
+                "ahead": 0,
+                "ahead_max_ns": 0,
+                "behind": 147,
+                "behind_max_ns": 8193,
+                "n": 147
+              }
+            },
+            "overdue": 0,
+            "overdue_max_ns": 0,
+            "overdue_syscalls_max": 0,
+            "writes": 147
+          },
+          "undo": {
+            "checkpoint_ms": 26.149416,
+            "checkpoints": 8,
+            "restored_pages": 0,
+            "rollback_ms": 0.0,
+            "rollbacks": 0,
+            "synced_pages": 6732
+          },
+          "window_exits": 6,
+          "witness": "c529237f3a1f3d86255afe446741d7190a3e1930e3bcc86e49977171ef4e5881",
+          "yield_stops": 0,
+          "yields": 0
+        }
+      ],
+      "management_readiness": [],
+      "network_counters": {},
+      "network_witness": "620f368f482eb69e490d98e8302291c6c45ad73147317cd230410e3a4a7348fd",
+      "outcome": "end_machine_exited",
+      "rejected_fault_effects": [],
+      "report_version": 1,
+      "seed": 1009,
+      "sim_seconds": 3.022865685,
+      "slices": 128,
+      "speed": 825.7343598608072,
+      "timebase": "counter",
+      "world_witness": "5beb4cfc2d5eb33c3f6ed3fec01da543470693ae4ede29002e63645dec0c69fb"
+    },
+    {
+      "boot": {
+        "barrier_ns": 1983591449,
+        "boot_host_seconds": 0.086606429,
+        "fork_at_ns": 2000000000,
+        "forked": true,
+        "release_skew_ns": 0,
+        "reseed": {
+          "n1": "time_page"
+        },
+        "restore_host_seconds": 0.000806244,
+        "restored_pages": 234,
+        "seed": 1
+      },
+      "control_history": [],
+      "control_latency_ns": 0,
+      "counter_profile": "amd-zen",
+      "fault_error": null,
+      "faults": [],
+      "frames_delivered": 0,
+      "frames_dropped": 0,
+      "host_seconds": 0.003415478,
+      "in_flight_policy": "retain_send_time_decisions; cuts_dominate_shapes",
+      "kills": [],
+      "machines": [
+        {
+          "booted_at_ns": 0,
+          "branches": 22918133,
+          "control_channel": null,
+          "crashed_incarnations": [],
+          "disk": null,
+          "eintr": 0,
+          "exits": 662,
+          "final_margin": 16384,
+          "guest_exit_code": 0,
+          "guest_init_error": null,
+          "halts": 127,
+          "incarnation": 0,
+          "infrastructure_error": false,
+          "irqs": 133,
+          "kvm_ms_by_exit": {
+            "debug": 0.0,
+            "eintr": 0.0,
+            "hlt": 1.141618,
+            "mmio": 0.0,
+            "other": 0.0,
+            "pio": 60.871355,
+            "window": 0.03191
+          },
+          "kvm_n_by_exit": [
+            0,
+            0,
+            529,
+            0,
+            127,
+            6,
+            0,
+            0
+          ],
+          "mmio": 0,
+          "name": "n1",
+          "net": null,
+          "pending_io": null,
+          "pio": 529,
+          "precise_stops": 0,
+          "run_ms": 89.902588,
+          "skid_count": 0,
+          "skid_max": 0,
+          "skid_p50": null,
+          "skid_p99": null,
+          "soft_misses": 0,
+          "soft_misses_clean": 0,
+          "soft_undos": 0,
+          "state": "Exited(0)",
+          "state_digest": "4abc3d4d4e2c194253ef47c53068d2362123e68df9b6ea60948d75866ebe5d85",
+          "state_digest_parts": {
+            "events": "exc:none int:none shadow:0 nmi:0/0/0",
+            "msrs": "7085b186b6a67a31ec001e8a19ca8cde0ae5f01717f13bb81fbb61ddcecc7060",
+            "pending_io": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+            "ram": "711e5dce0bcd032057078a74ba171a9409e6754b6eb211de97611bd78288a0fe",
+            "regs": "7fc16e0e7abc5f36af0351f35a69f06a007a13314804bc4e34f0c7ff0005c1b6",
+            "time_page": "30ca585ace2f965e6601625fc89016055a9d37ad18697d0d3b028cdc47f6d3c1",
+            "xcrs": "02bef8f9e42dbabde667aa536a1e761917f1e8264395fba767dd7b1f691a50ac",
+            "xsave": "70f8dc688871685bdb46f15dc043c85997f90092db3423a22824eee0429ff82c"
+          },
+          "step_ms": 0.0,
+          "steps": 0,
+          "time_ns": 3022866074,
+          "timer": {
+            "guest_clock_skew": {
+              "halt": {
+                "ahead": 0,
+                "ahead_max_ns": 0,
+                "behind": 127,
+                "behind_max_ns": 75068,
+                "n": 127
+              },
+              "sent": {
+                "ahead": 0,
+                "ahead_max_ns": 0,
+                "behind": 0,
+                "behind_max_ns": 0,
+                "n": 0
+              },
+              "timer_write": {
+                "ahead": 0,
+                "ahead_max_ns": 0,
+                "behind": 147,
+                "behind_max_ns": 8193,
+                "n": 147
+              }
+            },
+            "overdue": 0,
+            "overdue_max_ns": 0,
+            "overdue_syscalls_max": 0,
+            "writes": 147
+          },
+          "undo": {
+            "checkpoint_ms": 26.121825,
+            "checkpoints": 8,
+            "restored_pages": 0,
+            "rollback_ms": 0.0,
+            "rollbacks": 0,
+            "synced_pages": 6681
+          },
+          "window_exits": 6,
+          "witness": "39b4be06c584f8bf2ac744328de4766072f7ec4f9ad8509f7065380793825d71",
+          "yield_stops": 0,
+          "yields": 0
+        }
+      ],
+      "management_readiness": [],
+      "network_counters": {},
+      "network_witness": "620f368f482eb69e490d98e8302291c6c45ad73147317cd230410e3a4a7348fd",
+      "outcome": "end_machine_exited",
+      "rejected_fault_effects": [],
+      "report_version": 1,
+      "seed": 1010,
+      "sim_seconds": 3.022866074,
+      "slices": 128,
+      "speed": 885.049200726809,
+      "timebase": "counter",
+      "world_witness": "0f04bd1556b03ce0653b2d34204b7b2c6e35865187c9a670690c5e38a028e96e"
+    },
+    {
+      "boot": {
+        "barrier_ns": 1983591449,
+        "boot_host_seconds": 0.086606429,
+        "fork_at_ns": 2000000000,
+        "forked": true,
+        "release_skew_ns": 0,
+        "reseed": {
+          "n1": "time_page"
+        },
+        "restore_host_seconds": 0.000277765,
+        "restored_pages": 234,
+        "seed": 1
+      },
+      "control_history": [],
+      "control_latency_ns": 0,
+      "counter_profile": "amd-zen",
+      "fault_error": null,
+      "faults": [],
+      "frames_delivered": 0,
+      "frames_dropped": 0,
+      "host_seconds": 0.002967651,
+      "in_flight_policy": "retain_send_time_decisions; cuts_dominate_shapes",
+      "kills": [],
+      "machines": [
+        {
+          "booted_at_ns": 0,
+          "branches": 22917718,
+          "control_channel": null,
+          "crashed_incarnations": [],
+          "disk": null,
+          "eintr": 0,
+          "exits": 662,
+          "final_margin": 16384,
+          "guest_exit_code": 0,
+          "guest_init_error": null,
+          "halts": 127,
+          "incarnation": 0,
+          "infrastructure_error": false,
+          "irqs": 133,
+          "kvm_ms_by_exit": {
+            "debug": 0.0,
+            "eintr": 0.0,
+            "hlt": 1.112221,
+            "mmio": 0.0,
+            "other": 0.0,
+            "pio": 60.473022,
+            "window": 0.031099
+          },
+          "kvm_n_by_exit": [
+            0,
+            0,
+            529,
+            0,
+            127,
+            6,
+            0,
+            0
+          ],
+          "mmio": 0,
+          "name": "n1",
+          "net": null,
+          "pending_io": null,
+          "pio": 529,
+          "precise_stops": 0,
+          "run_ms": 89.456589,
+          "skid_count": 0,
+          "skid_max": 0,
+          "skid_p50": null,
+          "skid_p99": null,
+          "soft_misses": 0,
+          "soft_misses_clean": 0,
+          "soft_undos": 0,
+          "state": "Exited(0)",
+          "state_digest": "e40767b8f3b3aa875102ba7f57d718669f2ee58acf3dfbe09ee242c0b46ca552",
+          "state_digest_parts": {
+            "events": "exc:none int:none shadow:0 nmi:0/0/0",
+            "msrs": "7085b186b6a67a31ec001e8a19ca8cde0ae5f01717f13bb81fbb61ddcecc7060",
+            "pending_io": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+            "ram": "1b49596707f6dddc24fff54f714029676aaa6eb292f21747a3b90bfa13ac85e6",
+            "regs": "6b576d13a2009e2465630f501f8b05c7cdef6b0c24a2639879756597374e92de",
+            "time_page": "fc029459676d717747b859836358d1236d254afe860e41ab29844b943f6cb05a",
+            "xcrs": "02bef8f9e42dbabde667aa536a1e761917f1e8264395fba767dd7b1f691a50ac",
+            "xsave": "70f8dc688871685bdb46f15dc043c85997f90092db3423a22824eee0429ff82c"
+          },
+          "step_ms": 0.0,
+          "steps": 0,
+          "time_ns": 3022865659,
+          "timer": {
+            "guest_clock_skew": {
+              "halt": {
+                "ahead": 0,
+                "ahead_max_ns": 0,
+                "behind": 127,
+                "behind_max_ns": 75068,
+                "n": 127
+              },
+              "sent": {
+                "ahead": 0,
+                "ahead_max_ns": 0,
+                "behind": 0,
+                "behind_max_ns": 0,
+                "n": 0
+              },
+              "timer_write": {
+                "ahead": 0,
+                "ahead_max_ns": 0,
+                "behind": 147,
+                "behind_max_ns": 8193,
+                "n": 147
+              }
+            },
+            "overdue": 0,
+            "overdue_max_ns": 0,
+            "overdue_syscalls_max": 0,
+            "writes": 147
+          },
+          "undo": {
+            "checkpoint_ms": 26.110834,
+            "checkpoints": 8,
+            "restored_pages": 0,
+            "rollback_ms": 0.0,
+            "rollbacks": 0,
+            "synced_pages": 6681
+          },
+          "window_exits": 6,
+          "witness": "657206548782fe21d308ed3e64ef5a44c8f4953f9a6555f333ac55edc23f635d",
+          "yield_stops": 0,
+          "yields": 0
+        }
+      ],
+      "management_readiness": [],
+      "network_counters": {},
+      "network_witness": "620f368f482eb69e490d98e8302291c6c45ad73147317cd230410e3a4a7348fd",
+      "outcome": "end_machine_exited",
+      "rejected_fault_effects": [],
+      "report_version": 1,
+      "seed": 1011,
+      "sim_seconds": 3.022865659,
+      "slices": 128,
+      "speed": 1018.6055095427325,
+      "timebase": "counter",
+      "world_witness": "d645ce0d6171dc8a30c86bb04a790d6b2c176414c7fbe15f137cda1c1b492bc4"
+    }
+  ]
+}

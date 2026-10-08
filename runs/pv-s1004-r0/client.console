@@ -1,0 +1,3 @@
+SEEDBOX_PHASE client_start guest_ns=1501201462
+LOAD acked=128 failed=0 elapsed=1.066532015s
+RESULT pass acked=128 failed=0 rev=129 hash=fb0c377d

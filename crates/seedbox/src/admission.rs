@@ -1,11 +1,11 @@
-//! Versioned host readiness for the frozen engine391f CPUID/PMU policy.
+//! Versioned host readiness for the frozen engine62ad CPUID/PMU policy.
 //! Matching another machine admits compatibility; it is not replay qualification.
 use crate::{execution::ExecutionProfile, store::ContentDigest, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, io::Read, path::Path};
 
-pub const POLICY_VERSION: &str = "amd-zen3-engine391f-v3";
-pub const ENGINE: &str = "391ff19696f1bfbad144892bcaa1f831ff19f06549561420b3d17060bf316938";
+pub const POLICY_VERSION: &str = "amd-zen3-engine62ad-v4";
+pub const ENGINE: &str = "62adf0563a0a20f6bc5ea23c15060347d84b7ea2d6c7adc7eb85edcd46b0b84c";
 pub const GUEST_KERNEL: &str = "68bf3f024fc6ec0c01399020b5c37e4b42d661c2604f3c87fc879ccf9280e166";
 
 /// Bound input hashing before any OCI preparation or host state changes.
@@ -49,7 +49,7 @@ pub struct CpuidEntry {
     pub padding: [u32; 3],
 }
 
-/// Frozen engine391f guest_cpuid filter, unchanged from engine168ad/52eb; no sorting or omissions.
+/// Frozen engine62ad guest_cpuid filter, unchanged from engine168ad/52eb/391f; no sorting or omissions.
 pub fn effective_cpuid(raw: &[CpuidEntry]) -> Vec<CpuidEntry> {
     let mut entries = raw.to_vec();
     for e in &mut entries {

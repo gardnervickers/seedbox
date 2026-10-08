@@ -163,8 +163,8 @@ not cross-host replay qualification; `--json` shows the admitted observations.
 Known non-Zen counters require explicit `--allow-unqualified-cpu` for run,
 explore and replay and remain unverified. They retain exact release/counter/input
 checks and SMT ownership but carry no qualified AMD proof or AMD MSR writes.
-`doctor` refuses those counters. The source policy `amd-zen3-engine391f-v3` pins
-built-but-unqualified engine391f and guest kernel68bf (K2); fresh runtime acceptance
+`doctor` refuses those counters. The source policy `amd-zen3-engine62ad-v4` pins
+built-but-unqualified engine62ad and guest kernel68bf (K2); fresh runtime acceptance
 is still required. Disabled selected-event readiness precedes preparation and
 is rechecked under leases; it never enables a guest counter. Intel is not qualified.
 

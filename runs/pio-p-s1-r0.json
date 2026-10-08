@@ -1,0 +1,147 @@
+{
+  "control_history": [],
+  "control_latency_ns": 0,
+  "counter_profile": null,
+  "fault_error": null,
+  "faults": [],
+  "frames_delivered": 0,
+  "frames_dropped": 0,
+  "host_seconds": 0.303027325,
+  "in_flight_policy": "retain_send_time_decisions; cuts_dominate_shapes",
+  "kills": [],
+  "machines": [
+    {
+      "booted_at_ns": 0,
+      "branches": 0,
+      "control_channel": null,
+      "crashed_incarnations": [],
+      "disk": null,
+      "eintr": 11,
+      "exits": 12792,
+      "final_margin": 12288,
+      "guest_exit_code": 0,
+      "guest_init_error": null,
+      "halts": 45,
+      "incarnation": 0,
+      "infrastructure_error": false,
+      "irqs": 57,
+      "kvm_ms_by_exit": {
+        "debug": 53.256383,
+        "eintr": 165.368236,
+        "hlt": 0.300799,
+        "mmio": 0.0,
+        "other": 0.0,
+        "pio": 31.049716,
+        "window": 0.062319
+      },
+      "kvm_n_by_exit": [
+        11,
+        12288,
+        436,
+        0,
+        45,
+        12,
+        0,
+        0
+      ],
+      "mmio": 0,
+      "name": "n1",
+      "net": null,
+      "pending_io": null,
+      "pio": 436,
+      "precise_stops": 3,
+      "run_ms": 302.982551,
+      "skid_count": 0,
+      "skid_max": 0,
+      "skid_p50": null,
+      "skid_p99": null,
+      "soft_misses": 0,
+      "soft_misses_clean": 0,
+      "soft_undos": 0,
+      "spin": {
+        "clock_progress": 0,
+        "false_alarms": 3,
+        "idles": 0,
+        "mismatch": {},
+        "probes": 3
+      },
+      "state": "Exited(0)",
+      "state_digest": "0ac77961f555b22eb80e18ddc430d0edf67f73b39cba689ee37c6272e76e7496",
+      "state_digest_parts": {
+        "events": "exc:none int:none shadow:0 nmi:0/0/0",
+        "msrs": "7085b186b6a67a31ec001e8a19ca8cde0ae5f01717f13bb81fbb61ddcecc7060",
+        "pending_io": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+        "ram": "faff76cd37924d6913b291262604f24f8f6da2511095de5933c95bdae8f4ed5f",
+        "regs": "71f62cef809ce02eacd644e49f36b8c1a51e3f7d598edff8b6c1e534bcefc672",
+        "time_page": "3aa33a783612e30b9d7714afa13a94a7269730b8cf95748794fcf66c48b0aa8e",
+        "xcrs": "02bef8f9e42dbabde667aa536a1e761917f1e8264395fba767dd7b1f691a50ac",
+        "xsave": "70f8dc688871685bdb46f15dc043c85997f90092db3423a22824eee0429ff82c"
+      },
+      "step_ms": 92.478533,
+      "steps": 12288,
+      "syscall_ns": 1064,
+      "syscalls": 1045,
+      "time_ns": 1001337284,
+      "time_ns_by_cause": {
+        "clock_bound": 0,
+        "clock_reads": 192904,
+        "idle": 999978500,
+        "io": 54000,
+        "progress": 1111880
+      },
+      "timer": {
+        "guest_clock_skew": {
+          "halt": {
+            "ahead": 42,
+            "ahead_max_ns": 400,
+            "behind": 3,
+            "behind_max_ns": 22008,
+            "n": 45
+          },
+          "sent": {
+            "ahead": 0,
+            "ahead_max_ns": 0,
+            "behind": 0,
+            "behind_max_ns": 0,
+            "n": 0
+          },
+          "timer_write": {
+            "ahead": 51,
+            "ahead_max_ns": 500,
+            "behind": 2,
+            "behind_max_ns": 1800,
+            "n": 54
+          }
+        },
+        "overdue": 0,
+        "overdue_max_ns": 0,
+        "overdue_syscalls_max": 0,
+        "writes": 54
+      },
+      "undo": {
+        "checkpoint_ms": 0.0,
+        "checkpoints": 0,
+        "restored_pages": 0,
+        "rollback_ms": 0.0,
+        "rollbacks": 0,
+        "synced_pages": 6865
+      },
+      "window_exits": 12,
+      "witness": "4b438267554a9cd7e52fcbf8889e1fdac2f9e9d906168e4dfedb5c8d2ad611f2",
+      "yield_stops": 0,
+      "yields": 0
+    }
+  ],
+  "management_readiness": [],
+  "network_counters": {},
+  "network_witness": "620f368f482eb69e490d98e8302291c6c45ad73147317cd230410e3a4a7348fd",
+  "outcome": "end_machine_exited",
+  "rejected_fault_effects": [],
+  "report_version": 1,
+  "seed": 1,
+  "sim_seconds": 1.001337284,
+  "slices": 46,
+  "speed": 3.304445511638266,
+  "timebase": "pv",
+  "world_witness": "e76040e2eaaf6362bfc94313ebcb6eb8c4ddcaa8e0003558b72bcaed124dabb6"
+}

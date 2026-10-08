@@ -345,13 +345,13 @@ path is experimental: it retains the counter in identity, validates exact
 supported release inputs and applicable KVM capabilities, and holds every SMT
 lease through child cleanup. It carries no qualified AMD host-policy proof and
 never opens AMD workaround MSRs. `doctor` refuses an unqualified counter rather
-than reporting qualified compatibility. The source policy now pins frozen engine391f and guest kernel68bf (K2).
+than reporting qualified compatibility. The source policy now pins frozen engine62ad and guest kernel68bf (K2).
 The artifact is built but unqualified: this staged release still requires fresh
 runtime acceptance before use. Disabled selected-event readiness is checked
 before preparation and again under held leases; no guest counter is enabled by
 admission. Intel determinism is not established.
 
-The versioned `amd-zen3-engine391f-v3` admission policy checks AMD family 25,
+The versioned `amd-zen3-engine62ad-v4` admission policy checks AMD family 25,
 model 33, stepping 0 and microcode 0xa20102e, controlled guest-kernel bytes,
 accepted engine bytes, KVM capabilities and the engine's complete existing CPUID
 policy. Host-kernel bytes are not checked. Before image preparation, it temporarily

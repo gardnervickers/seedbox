@@ -1,0 +1,591 @@
+{
+  "control_history": [],
+  "control_latency_ns": 0,
+  "counter_profile": null,
+  "fault_error": null,
+  "faults": [],
+  "frames_delivered": 3134,
+  "frames_dropped": 0,
+  "host_seconds": 3.126525065,
+  "in_flight_policy": "retain_send_time_decisions; cuts_dominate_shapes",
+  "kills": [],
+  "machines": [
+    {
+      "booted_at_ns": 0,
+      "branches": 0,
+      "control_channel": null,
+      "crashed_incarnations": [],
+      "disk": null,
+      "eintr": 19,
+      "exits": 20467,
+      "final_margin": 12288,
+      "guest_exit_code": null,
+      "guest_init_error": null,
+      "halts": 1212,
+      "incarnation": 0,
+      "infrastructure_error": false,
+      "irqs": 2030,
+      "kvm_ms_by_exit": {
+        "debug": 71.488778,
+        "eintr": 264.793042,
+        "hlt": 21.285137,
+        "mmio": 42.728593,
+        "other": 0.0,
+        "pio": 81.677079,
+        "window": 0.185261
+      },
+      "kvm_n_by_exit": [
+        19,
+        16384,
+        2035,
+        774,
+        1212,
+        43,
+        0,
+        0
+      ],
+      "mmio": 774,
+      "name": "n1",
+      "net": {
+        "rx": 724,
+        "rx_dropped": 0,
+        "tx": 701
+      },
+      "pending_io": null,
+      "pio": 1931,
+      "precise_stops": 4,
+      "run_ms": 758.409966,
+      "skid_count": 0,
+      "skid_max": 0,
+      "skid_p50": null,
+      "skid_p99": null,
+      "soft_misses": 0,
+      "soft_misses_clean": 0,
+      "soft_undos": 0,
+      "spin": {
+        "clock_progress": 0,
+        "false_alarms": 4,
+        "idles": 0,
+        "mismatch": {},
+        "probes": 4
+      },
+      "state": "Halted",
+      "state_digest": "8ed5c4c4fbb252f57cb4f0411e178af60e05ac97596baf079830a41dcc5d0097",
+      "state_digest_parts": {
+        "events": "exc:none int:none shadow:0 nmi:0/0/0",
+        "msrs": "f3d74151fc819c637720657bc05916c8903bca2bfcbe31d6cdb0e0fdd46abeec",
+        "pending_io": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+        "ram": "85433e8700e4ce8dbaee89e1540a608ed6872743a18ce68611cac37ba9a16ddc",
+        "regs": "e65f07e2c2ab1e47f47a232d95c29b7e3adbb979886ea0f545e437e5e9234018",
+        "time_page": "2ca434c6f96f41f128c09ab64a7c13d107612b5473b45e6718b2ab3e8d3d5e35",
+        "xcrs": "02bef8f9e42dbabde667aa536a1e761917f1e8264395fba767dd7b1f691a50ac",
+        "xsave": "254ea11f0c4dcb35422beb49b88bd5783bd829ccfe9f0a56db8b36849057b642"
+      },
+      "step_ms": 121.008218,
+      "steps": 16384,
+      "syscall_ns": 1020,
+      "syscalls": 30611,
+      "time_ns": 2780045140,
+      "time_ns_by_cause": {
+        "clock_bound": 1549258,
+        "clock_reads": 307164,
+        "idle": 2745249498,
+        "io": 1716000,
+        "progress": 31223220
+      },
+      "timer": {
+        "guest_clock_skew": {
+          "halt": {
+            "ahead": 357,
+            "ahead_max_ns": 1160,
+            "behind": 855,
+            "behind_max_ns": 356160,
+            "n": 1212
+          },
+          "sent": {
+            "ahead": 119,
+            "ahead_max_ns": 1560,
+            "behind": 580,
+            "behind_max_ns": 24100,
+            "n": 699
+          },
+          "timer_write": {
+            "ahead": 1068,
+            "ahead_max_ns": 44060,
+            "behind": 636,
+            "behind_max_ns": 39860,
+            "n": 1716
+          }
+        },
+        "overdue": 0,
+        "overdue_max_ns": 0,
+        "overdue_syscalls_max": 0,
+        "writes": 1716
+      },
+      "undo": {
+        "checkpoint_ms": 0.0,
+        "checkpoints": 0,
+        "restored_pages": 0,
+        "rollback_ms": 0.0,
+        "rollbacks": 0,
+        "synced_pages": 114475
+      },
+      "window_exits": 43,
+      "witness": "38293d47461586bcc7f47473adec5991f2864bfc52ae638a69b485e0a1c3cd75",
+      "yield_stops": 104,
+      "yields": 104
+    },
+    {
+      "booted_at_ns": 0,
+      "branches": 0,
+      "control_channel": null,
+      "crashed_incarnations": [],
+      "disk": null,
+      "eintr": 20,
+      "exits": 24403,
+      "final_margin": 12288,
+      "guest_exit_code": null,
+      "guest_init_error": null,
+      "halts": 1179,
+      "incarnation": 0,
+      "infrastructure_error": false,
+      "irqs": 1979,
+      "kvm_ms_by_exit": {
+        "debug": 88.766585,
+        "eintr": 253.266794,
+        "hlt": 18.736403,
+        "mmio": 58.957404,
+        "other": 0.0,
+        "pio": 74.231579,
+        "window": 0.195274
+      },
+      "kvm_n_by_exit": [
+        20,
+        20480,
+        1912,
+        767,
+        1179,
+        45,
+        0,
+        0
+      ],
+      "mmio": 767,
+      "name": "n2",
+      "net": {
+        "rx": 714,
+        "rx_dropped": 0,
+        "tx": 694
+      },
+      "pending_io": null,
+      "pio": 1809,
+      "precise_stops": 5,
+      "run_ms": 772.444372,
+      "skid_count": 0,
+      "skid_max": 0,
+      "skid_p50": null,
+      "skid_p99": null,
+      "soft_misses": 0,
+      "soft_misses_clean": 0,
+      "soft_undos": 0,
+      "spin": {
+        "clock_progress": 0,
+        "false_alarms": 5,
+        "idles": 0,
+        "mismatch": {
+          "ram": 3
+        },
+        "probes": 5
+      },
+      "state": "Halted",
+      "state_digest": "3a5661cdbb6bc08bb878dccccac9e136e0e5758981197c119a29b2a0631b14c6",
+      "state_digest_parts": {
+        "events": "exc:none int:none shadow:0 nmi:0/0/0",
+        "msrs": "f3d74151fc819c637720657bc05916c8903bca2bfcbe31d6cdb0e0fdd46abeec",
+        "pending_io": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+        "ram": "be615f7446c7ee1025ec58a02ddaa4399e9f1a72545eee1598065c8a419115bb",
+        "regs": "96c4bb24d5b44d23a7f7d39f3159311759a447d085ab9ec95d07753f6268b9d7",
+        "time_page": "aacb337d389fa066cb412d106065002f4100d32e601528d65eda062e4d2ef161",
+        "xcrs": "02bef8f9e42dbabde667aa536a1e761917f1e8264395fba767dd7b1f691a50ac",
+        "xsave": "254ea11f0c4dcb35422beb49b88bd5783bd829ccfe9f0a56db8b36849057b642"
+      },
+      "step_ms": 152.633064,
+      "steps": 20480,
+      "syscall_ns": 1025,
+      "syscalls": 39570,
+      "time_ns": 2781033716,
+      "time_ns_by_cause": {
+        "clock_bound": 51339,
+        "clock_reads": 294903,
+        "idle": 2738534224,
+        "io": 1594000,
+        "progress": 40559250
+      },
+      "timer": {
+        "guest_clock_skew": {
+          "halt": {
+            "ahead": 324,
+            "ahead_max_ns": 24700,
+            "behind": 855,
+            "behind_max_ns": 97450,
+            "n": 1179
+          },
+          "sent": {
+            "ahead": 111,
+            "ahead_max_ns": 3575,
+            "behind": 580,
+            "behind_max_ns": 28575,
+            "n": 692
+          },
+          "timer_write": {
+            "ahead": 1019,
+            "ahead_max_ns": 35650,
+            "behind": 565,
+            "behind_max_ns": 62025,
+            "n": 1594
+          }
+        },
+        "overdue": 0,
+        "overdue_max_ns": 0,
+        "overdue_syscalls_max": 0,
+        "writes": 1594
+      },
+      "undo": {
+        "checkpoint_ms": 0.0,
+        "checkpoints": 0,
+        "restored_pages": 0,
+        "rollback_ms": 0.0,
+        "rollbacks": 0,
+        "synced_pages": 115496
+      },
+      "window_exits": 45,
+      "witness": "711e63ac1fe6ad7d2fadf7c0f94bdd828fd3a7b1e5431e2fe1f526ae68c1d7d7",
+      "yield_stops": 103,
+      "yields": 103
+    },
+    {
+      "booted_at_ns": 0,
+      "branches": 0,
+      "control_channel": null,
+      "crashed_incarnations": [],
+      "disk": null,
+      "eintr": 25,
+      "exits": 21055,
+      "final_margin": 12288,
+      "guest_exit_code": null,
+      "guest_init_error": null,
+      "halts": 1096,
+      "incarnation": 0,
+      "infrastructure_error": false,
+      "irqs": 2627,
+      "kvm_ms_by_exit": {
+        "debug": 71.291442,
+        "eintr": 246.830555,
+        "hlt": 16.514657,
+        "mmio": 53.896795,
+        "other": 0.0,
+        "pio": 106.751328,
+        "window": 0.138643
+      },
+      "kvm_n_by_exit": [
+        25,
+        16384,
+        2229,
+        1289,
+        1096,
+        32,
+        0,
+        0
+      ],
+      "mmio": 1289,
+      "name": "n3",
+      "net": {
+        "rx": 1198,
+        "rx_dropped": 0,
+        "tx": 1203
+      },
+      "pending_io": null,
+      "pio": 1883,
+      "precise_stops": 4,
+      "run_ms": 757.404622,
+      "skid_count": 0,
+      "skid_max": 0,
+      "skid_p50": null,
+      "skid_p99": null,
+      "soft_misses": 0,
+      "soft_misses_clean": 0,
+      "soft_undos": 0,
+      "spin": {
+        "clock_progress": 0,
+        "false_alarms": 4,
+        "idles": 0,
+        "mismatch": {},
+        "probes": 4
+      },
+      "state": "Halted",
+      "state_digest": "c44e45696e7e1146ba59ba5721a96388549c385d51dde8c88058abbbe9134e21",
+      "state_digest_parts": {
+        "events": "exc:none int:none shadow:0 nmi:0/0/0",
+        "msrs": "f3d74151fc819c637720657bc05916c8903bca2bfcbe31d6cdb0e0fdd46abeec",
+        "pending_io": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+        "ram": "6184242da57d2285d9edc7db4d27ac3fb2b80f9290b38b76d8c67bfb41961dcb",
+        "regs": "07e711f1e656647380c7b31c376918ea56baaf9bdc00f3f2c6795dcefe31f8de",
+        "time_page": "b7a3dff1eb4184e00e7a609c9de02c366406d609fb5db20ada0af747185a6320",
+        "xcrs": "02bef8f9e42dbabde667aa536a1e761917f1e8264395fba767dd7b1f691a50ac",
+        "xsave": "254ea11f0c4dcb35422beb49b88bd5783bd829ccfe9f0a56db8b36849057b642"
+      },
+      "step_ms": 120.288355,
+      "steps": 16384,
+      "syscall_ns": 1071,
+      "syscalls": 73806,
+      "time_ns": 2785128520,
+      "time_ns_by_cause": {
+        "clock_bound": 40426,
+        "clock_reads": 299174,
+        "idle": 2704074694,
+        "io": 1668000,
+        "progress": 79046226
+      },
+      "timer": {
+        "guest_clock_skew": {
+          "halt": {
+            "ahead": 290,
+            "ahead_max_ns": 6487,
+            "behind": 806,
+            "behind_max_ns": 43592,
+            "n": 1096
+          },
+          "sent": {
+            "ahead": 135,
+            "ahead_max_ns": 1887,
+            "behind": 1066,
+            "behind_max_ns": 32543,
+            "n": 1201
+          },
+          "timer_write": {
+            "ahead": 1026,
+            "ahead_max_ns": 38787,
+            "behind": 637,
+            "behind_max_ns": 34456,
+            "n": 1668
+          }
+        },
+        "overdue": 0,
+        "overdue_max_ns": 0,
+        "overdue_syscalls_max": 0,
+        "writes": 1668
+      },
+      "undo": {
+        "checkpoint_ms": 0.0,
+        "checkpoints": 0,
+        "restored_pages": 0,
+        "rollback_ms": 0.0,
+        "rollbacks": 0,
+        "synced_pages": 113455
+      },
+      "window_exits": 32,
+      "witness": "5579f5a1c6340c8c90ce0984da218f88f6a4d76548976444984ef06e0f2ee9e1",
+      "yield_stops": 346,
+      "yields": 346
+    },
+    {
+      "booted_at_ns": 0,
+      "branches": 0,
+      "control_channel": null,
+      "crashed_incarnations": [],
+      "disk": null,
+      "eintr": 24,
+      "exits": 19848,
+      "final_margin": 12288,
+      "guest_exit_code": 0,
+      "guest_init_error": null,
+      "halts": 615,
+      "incarnation": 0,
+      "infrastructure_error": false,
+      "irqs": 1215,
+      "kvm_ms_by_exit": {
+        "debug": 76.321181,
+        "eintr": 353.173753,
+        "hlt": 7.191123,
+        "mmio": 38.995343,
+        "other": 0.0,
+        "pio": 65.337943,
+        "window": 0.143154
+      },
+      "kvm_n_by_exit": [
+        24,
+        17410,
+        1176,
+        591,
+        615,
+        32,
+        0,
+        0
+      ],
+      "mmio": 591,
+      "name": "client",
+      "net": {
+        "rx": 498,
+        "rx_dropped": 0,
+        "tx": 523
+      },
+      "pending_io": null,
+      "pio": 1132,
+      "precise_stops": 8,
+      "run_ms": 824.230245,
+      "skid_count": 0,
+      "skid_max": 0,
+      "skid_p50": null,
+      "skid_p99": null,
+      "soft_misses": 0,
+      "soft_misses_clean": 0,
+      "soft_undos": 0,
+      "spin": {
+        "clock_progress": 0,
+        "false_alarms": 4,
+        "idles": 4,
+        "mismatch": {
+          "ram": 3
+        },
+        "probes": 8
+      },
+      "state": "Exited(0)",
+      "state_digest": "185875d2760405e50a9678832ebf66557a8863923daf82abe53dd152fb671bd5",
+      "state_digest_parts": {
+        "events": "exc:none int:none shadow:0 nmi:0/0/0",
+        "msrs": "7085b186b6a67a31ec001e8a19ca8cde0ae5f01717f13bb81fbb61ddcecc7060",
+        "pending_io": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+        "ram": "ea29d7f53cbfd8615a94eb9b63667dcfee30fdded8d683740902a2fb9adaedfe",
+        "regs": "b6a8c59c0f96de0618261a9b4f6bfea5f3fb26dc50e59d125d7c08fb5f19edbd",
+        "time_page": "c326759de54159dc7d5b39a6a58cafd3c586251f9fd850c1580adaeda16c6157",
+        "xcrs": "02bef8f9e42dbabde667aa536a1e761917f1e8264395fba767dd7b1f691a50ac",
+        "xsave": "70f8dc688871685bdb46f15dc043c85997f90092db3423a22824eee0429ff82c"
+      },
+      "step_ms": 128.749575,
+      "steps": 17410,
+      "syscall_ns": 1077,
+      "syscalls": 5720,
+      "time_ns": 2786091806,
+      "time_ns_by_cause": {
+        "clock_bound": 1356328,
+        "clock_reads": 231583,
+        "idle": 2777549455,
+        "io": 794000,
+        "progress": 6160440
+      },
+      "timer": {
+        "guest_clock_skew": {
+          "halt": {
+            "ahead": 144,
+            "ahead_max_ns": 900,
+            "behind": 471,
+            "behind_max_ns": 50096,
+            "n": 615
+          },
+          "sent": {
+            "ahead": 78,
+            "ahead_max_ns": 2646,
+            "behind": 445,
+            "behind_max_ns": 14955,
+            "n": 523
+          },
+          "timer_write": {
+            "ahead": 497,
+            "ahead_max_ns": 700,
+            "behind": 282,
+            "behind_max_ns": 321131,
+            "n": 794
+          }
+        },
+        "overdue": 0,
+        "overdue_max_ns": 0,
+        "overdue_syscalls_max": 0,
+        "writes": 794
+      },
+      "undo": {
+        "checkpoint_ms": 0.0,
+        "checkpoints": 0,
+        "restored_pages": 0,
+        "rollback_ms": 0.0,
+        "rollbacks": 0,
+        "synced_pages": 134368
+      },
+      "window_exits": 32,
+      "witness": "0b1adf1b21c95713f7fd413ab621f34ee4a932958d98f9588e22b6a35669ab13",
+      "yield_stops": 44,
+      "yields": 44
+    }
+  ],
+  "management_readiness": [],
+  "network_counters": {
+    "client->n1": {
+      "delivered": 181,
+      "partition_dropped": 0,
+      "receiver_dropped": 0
+    },
+    "client->n2": {
+      "delivered": 172,
+      "partition_dropped": 0,
+      "receiver_dropped": 0
+    },
+    "client->n3": {
+      "delivered": 173,
+      "partition_dropped": 0,
+      "receiver_dropped": 0
+    },
+    "n1->client": {
+      "delivered": 164,
+      "partition_dropped": 0,
+      "receiver_dropped": 0
+    },
+    "n1->n2": {
+      "delivered": 27,
+      "partition_dropped": 0,
+      "receiver_dropped": 0
+    },
+    "n1->n3": {
+      "delivered": 512,
+      "partition_dropped": 0,
+      "receiver_dropped": 0
+    },
+    "n2->client": {
+      "delivered": 157,
+      "partition_dropped": 0,
+      "receiver_dropped": 0
+    },
+    "n2->n1": {
+      "delivered": 28,
+      "partition_dropped": 0,
+      "receiver_dropped": 0
+    },
+    "n2->n3": {
+      "delivered": 513,
+      "partition_dropped": 0,
+      "receiver_dropped": 0
+    },
+    "n3->client": {
+      "delivered": 177,
+      "partition_dropped": 0,
+      "receiver_dropped": 0
+    },
+    "n3->n1": {
+      "delivered": 515,
+      "partition_dropped": 0,
+      "receiver_dropped": 0
+    },
+    "n3->n2": {
+      "delivered": 515,
+      "partition_dropped": 0,
+      "receiver_dropped": 0
+    }
+  },
+  "network_witness": "72b583fe3b0aca141dd032042e97c5032209fd28412ba24c5394bec5f811cbde",
+  "outcome": "end_machine_exited",
+  "rejected_fault_effects": [],
+  "report_version": 1,
+  "seed": 1003,
+  "sim_seconds": 2.786091806,
+  "slices": 7651,
+  "speed": 0.8911144955110091,
+  "timebase": "pv",
+  "world_witness": "74680c96d229da90f6adb7c0d558a18648ed5ed032e8c606558d106523778bb2"
+}

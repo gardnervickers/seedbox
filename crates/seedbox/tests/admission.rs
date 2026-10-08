@@ -73,7 +73,7 @@ fn complete_policy_matches_without_host_enrollment_or_incidental_core_identity()
         admit_artifacts(&pinned, &kernel, allow_dev_engine).unwrap();
         assert!(!is_dev_engine(&pinned));
     }
-    assert_eq!(POLICY_VERSION, "amd-zen3-engine391f-v3");
+    assert_eq!(POLICY_VERSION, "amd-zen3-engine62ad-v4");
     assert_eq!(
         GUEST_KERNEL,
         "68bf3f024fc6ec0c01399020b5c37e4b42d661c2604f3c87fc879ccf9280e166"
@@ -210,6 +210,18 @@ fn engine52eb_v2_policy_proof_is_not_comparable_and_immutable() {
     previous_proof_is_not_comparable(
         &previous,
         "c6810457fc18589220c53f99fbdef1b439ad7302ba7cb3a264ffbec78cbe4575",
+        false,
+    );
+}
+
+#[test]
+fn engine391f_v3_policy_proof_is_not_comparable_and_immutable() {
+    let mut previous = required_policy().unwrap();
+    previous.version = "amd-zen3-engine391f-v3".into();
+    previous.engine = "391ff19696f1bfbad144892bcaa1f831ff19f06549561420b3d17060bf316938".into();
+    previous_proof_is_not_comparable(
+        &previous,
+        "500db94b49ffd28e4b803bedcc342fa5223f7e5d03e5e5268215309060822e14",
         false,
     );
 }
@@ -418,6 +430,6 @@ fn successor_release_rejects_previous_exact_engine_and_policy_without_migration(
         .contains("host admission proof incompatible"));
     assert_eq!(
         ENGINE,
-        "391ff19696f1bfbad144892bcaa1f831ff19f06549561420b3d17060bf316938"
+        "62adf0563a0a20f6bc5ea23c15060347d84b7ea2d6c7adc7eb85edcd46b0b84c"
     );
 }
