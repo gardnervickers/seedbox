@@ -345,9 +345,11 @@ bytes and does not establish a pass for the committed SHA.
   (`intel-0x5101c4` up to Comet Lake, `intel-0x5111c4` from Ice Lake) that
   have never run on hardware; `run` and `replay` refuse them unless given
   `--allow-unqualified-cpu`, and then warn that results are unverified.
-- The CLI retains the same host admission, CPU/SMT leasing and MSR policy for
-  both timebases. PV itself does not use a host perf counter; selecting it does
-  not qualify additional hosts through this CLI.
+- `--timebase pv` reads no host perf counter, so it needs only KVM and a free
+  core: it skips the counter profile, `--allow-unqualified-cpu`, the perf event
+  checks and the workaround MSR, and its identity records no counter profile.
+  It runs on any x86-64 KVM host, including cloud VMs with nested KVM and no
+  guest PMU. Hosts other than the workstation are not qualified for PV.
 - **The Zen SpeculativeLockMap workaround must be on** for the cores running
   simulations (MSR 0xC0011020 bit 54, rr's workaround). Without it, branch
   counts drift on lock-heavy code (e.g. Go) and runs diverge. The Rust executor

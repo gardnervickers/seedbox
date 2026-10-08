@@ -351,9 +351,10 @@ timebase field mean counter. Run/replay and inspect print `timebase: VALUE`.
 `inspect --json` exposes the semantic profile and, when present, the VMM's
 reported `report.timebase` through the library's serialization.
 
-PV uses no host PMU counter, but the CLI currently retains the same CPU profile
-admission, CPU/SMT leases and Zen MSR workaround for both choices. This change
-does not qualify additional PV hosts. The counter stop-placement description
+PV uses no host PMU counter. It keeps the CPU/SMT leases but skips the counter
+profile, `--allow-unqualified-cpu`, the perf event checks and the Zen MSR
+workaround, so any x86-64 KVM host can run it, and its identity carries no
+counter profile. That does not qualify additional PV hosts. The counter stop-placement description
 below applies to the default counter model; PV uses its own exit-based progress.
 
 `--state` chooses the content store and attempts root (default `.seedbox`).

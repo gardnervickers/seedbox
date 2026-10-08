@@ -130,15 +130,27 @@ impl VmmExecutor {
     }
 
     /// Counter is recorded by omission to preserve existing run identities.
+    /// PV reads no branch counter, so its identity carries no counter profile.
     pub fn with_timebase(mut self, timebase: Timebase) -> Self {
+        self.profile.semantic_parameters.remove(COUNTER);
         if timebase == Timebase::Counter {
             self.profile.semantic_parameters.remove("timebase");
+            if self.counter != CounterProfile::Zen {
+                self.profile
+                    .semantic_parameters
+                    .insert(COUNTER.into(), self.counter.name().into());
+            }
         } else {
             self.profile
                 .semantic_parameters
                 .insert("timebase".into(), timebase.name().into());
         }
         self
+    }
+
+    /// Whether the engine reads the host branch counter; PV does not.
+    fn counted(&self) -> bool {
+        recorded_timebase(&self.profile).map_or(true, |timebase| timebase == Timebase::Counter)
     }
 
     /// Check the existing execution policy without storing inputs or starting guests.
@@ -172,7 +184,7 @@ impl VmmExecutor {
     }
 
     fn validate_execution_mode(&self) -> Result<()> {
-        if !self.counter.qualified() && !self.allow_unqualified {
+        if self.counted() && !self.counter.qualified() && !self.allow_unqualified {
             return Err(Error::Setup(format!(
                 "{} is unqualified; explicitly allow unqualified CPU execution",
                 self.counter.name()
@@ -399,6 +411,9 @@ impl VmmExecutor {
         recorded_checkpoint(&self.profile)?;
         crate::admission::validate_profile(&self.profile)?;
         self.validate_execution_mode()?;
+        if !self.counted() {
+            return self.uncounted_preflight(workers);
+        }
         if !self.counter.qualified() {
             if workers == 1 {
                 return self.unqualified_preflight(output);
@@ -448,6 +463,25 @@ impl VmmExecutor {
             drop(saved);
             Ok(())
         })
+    }
+
+    /// PV needs only KVM and free cores: no perf event or workaround MSR is opened.
+    fn uncounted_preflight(&self, workers: u32) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            with_capacity(
+                workers,
+                || crate::host::CpuReservation::acquire(self.cpu),
+                |_| Ok(()),
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = workers;
+            Err(Error::Setup(
+                "PV execution requires a Linux KVM host".into(),
+            ))
+        }
     }
 }
 
@@ -513,7 +547,7 @@ impl ExecutionBackend for VmmExecutor {
     fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {
         crate::admission::validate_profile(&inputs.profile)?;
         self.validate_execution_mode()?;
-        if recorded_counter(&inputs.profile)? != self.counter {
+        if self.counted() && recorded_counter(&inputs.profile)? != self.counter {
             return Err(Error::Integrity(
                 "recorded branch counter differs from executor".into(),
             ));
@@ -1764,7 +1798,9 @@ mod linux {
             .lock()
             .map_err(|_| Error::Execution("host admission evidence lock poisoned".into()))?
             .clone();
-        if backend.counter.qualified() {
+        let counted = timebase == Timebase::Counter;
+        let workaround = backend.counter.workaround().filter(|_| counted);
+        if counted && backend.counter.qualified() {
             fs::write(
                 request.output.join("host-static.json"),
                 serde_json::to_vec_pretty(&static_evidence)?,
@@ -1772,9 +1808,12 @@ mod linux {
         }
         let (cpu, mut lease) = HostLease::acquire_checked(
             backend.cpu,
-            backend.counter.workaround(),
+            workaround,
             request.output,
             |reservation| {
+                if !counted {
+                    return Ok(());
+                }
                 if !backend.counter.qualified() {
                     let check = crate::admission::check_unqualified(
                         reservation.cpus.iter().copied(),
@@ -1812,7 +1851,7 @@ mod linux {
             },
         )?;
         let originals = lease.original_registers();
-        if backend.counter.workaround().is_some() {
+        if workaround.is_some() {
             fs::write(
                 request.output.join("host-workaround.json"),
                 serde_json::to_vec_pretty(&lease.enabled_registers()?)?,
@@ -1852,7 +1891,7 @@ mod linux {
         };
         child.stop()?;
         lease.restore()?;
-        if backend.counter.workaround().is_some() {
+        if workaround.is_some() {
             fs::write(
                 request.output.join("host-restored.json"),
                 serde_json::to_vec_pretty(&originals)?,
@@ -2069,6 +2108,35 @@ mod doctor_tests {
             let json = serde_json::to_value(report).unwrap();
             assert!(json["engine_qualification"].is_null());
         }
+    }
+
+    #[test]
+    fn pv_carries_no_counter_profile_and_needs_no_counter_admission() {
+        let intel = VmmExecutor::from_engine_digest(
+            ContentDigest::of(b"engine"),
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::IntelIceLake,
+        )
+        .unwrap();
+        let pv = intel.clone().with_timebase(Timebase::Pv);
+        assert!(!pv.profile.semantic_parameters.contains_key(COUNTER));
+        assert_eq!(recorded_counter(&pv.profile).unwrap(), CounterProfile::Zen);
+        assert!(pv.validate_execution_mode().is_ok());
+        let zen_pv = VmmExecutor::from_engine_digest(
+            ContentDigest::of(b"engine"),
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap()
+        .with_timebase(Timebase::Pv);
+        assert_eq!(pv.profile, zen_pv.profile);
+        let counted = pv.with_timebase(Timebase::Counter);
+        assert_eq!(counted.profile, intel.profile);
+        assert!(counted.validate_execution_mode().is_err());
     }
 
     #[test]
