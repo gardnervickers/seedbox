@@ -2491,7 +2491,7 @@ mod fork_tests {
             assert_eq!(a,run(1009));
             let b=run(1010);
             assert_eq!(a.0,b.0);
-            if enabled {assert_ne!(a.1,b.1);} else {assert_eq!(a.1,b.1);}
+            if fault_model.survival_probability>0.0 {assert_ne!(a.1,b.1);} else {assert_eq!(a.1,b.1);}
         }
     }
 
