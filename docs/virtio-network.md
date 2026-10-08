@@ -45,3 +45,29 @@ differential compares old and hardened production device code, including complet
 RAM, queue state, backlog, counters, interrupts, returned frames and dirty order.
 Machine-level KVM execution and undo remain Linux merge-train checks; portable
 device tests do not claim that host evidence.
+
+## Shared model
+
+`seedbox-engine-core::virtio_network::Network` owns the MAC, ingress backlog,
+network counters, packet copying and queue completion. Both adapters pass their
+RAM base and a dirty-write callback. The KVM adapter retains the ordered journal;
+the ARM adapter uses its existing memory tracking. Both use the shared MMIO
+transport. The network transport profile retains KVM's invalid-selector clamp to
+queue 1, truncated/clamped queue sizes, exact-one ready flag and ignored invalid
+notifications. The application transport keeps its stricter register admission.
+
+| Behavior | Application profile (ARM) | Network profile (KVM) |
+| --- | --- | --- |
+| TX header | Requires 12 bytes and zero first 10 bytes | Opaque header; short/empty TX completes without frame |
+| Empty chain | Rejected | Allowed |
+| RX limit | 65536-byte frame | 4 MiB minus header |
+| Admission | Not-ready/full backlog before size check | Not-ready before size; size before full backlog |
+| RX direct path | Enqueue then drain; failed new frame remains queued | Try DMA first; failed new frame is not enqueued |
+| TX notification | Also drains pending RX after TX completes | TX only |
+| IRQ | Per completed chain, including prefix before error | Successful notification/drain boundary |
+| Counters | Existing retained-state projection has none | TX, RX and dropped-frame counters |
+
+The application projection retains the original `kind`, `mac` and `backlog`
+fields, and transport projection field order is unchanged. These profiles preserve
+existing engine behavior; sharing implementation does not establish cross-engine
+replay equivalence.

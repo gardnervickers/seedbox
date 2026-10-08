@@ -52,7 +52,7 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 
 `crates/seedbox-engine-core` owns deterministic RNG, disk, links, connection,
 trigger, fault, control and network-counter policies, plus bounded split-ring
-validation/completion, modern virtio MMIO register transitions and console/block models. It has no CPU backend or
+validation/completion, modern virtio MMIO register transitions and console/block/network models. It has no CPU backend or
 UART dependency. Adapters pass actual transmitted bytes to its management framer;
 legacy PC divisor-register writes remain in `seedbox-vmm/src/management_uart.rs`.
 Keep mechanical policy moves separate from behavioral changes.
@@ -62,7 +62,7 @@ length, direction and diagnostic policy. ARM queue field names and serialization
 order remain part of retained state evidence. KVM console and block completion
 feed every used-ring write to their existing dirty-range journals; do not drop
 or reorder those entries. The shared MMIO transport serves ARM devices and KVM
-console/block; its compatibility profiles are documented in
+console/block/network; its compatibility profiles are documented in
 `docs/virtio-transport.md`. Preserve error precedence, cursor resets and the
 explicit ARM state projection. Adapters handle typed Notify/Reset effects and
 retain model-reset ownership. The shared console owns handshake, backlogs, counters
@@ -72,6 +72,8 @@ The shared block model owns request decoding, disk effects and DMA, with descrip
 profiles and partial-error semantics in `docs/virtio-block.md`. Use explicit disk
 and statistics accessors in platform callers. KVM net and the network model remain
 in adapters until their separately reviewed move.
+The shared network model owns packet DMA, backlogs and counters; preserve the
+profile-specific admission, partial-error and IRQ order in `docs/virtio-network.md`.
 
 The standalone backends compile the canonical sources through their in-workspace
 `engine-core` packages, with distinct package names just like their control

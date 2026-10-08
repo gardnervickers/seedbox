@@ -72,7 +72,7 @@ fn receiver_not_ready_drops_and_ready_dma_reports_acceptance_with_irq() {
             irq: false
         }
     );
-    assert_eq!(net.rx_dropped, 1);
+    assert_eq!(net.stats().rx_dropped, 1);
     let (mut net, mut memory) = rx_device(true);
     assert_eq!(
         net.receive(&mut memory, b"frame").unwrap(),
@@ -81,8 +81,8 @@ fn receiver_not_ready_drops_and_ready_dma_reports_acceptance_with_irq() {
             irq: true
         }
     );
-    assert_eq!(net.rx_frames, 1);
-    assert_eq!(net.rx_dropped, 0);
+    assert_eq!(net.stats().rx_frames, 1);
+    assert_eq!(net.stats().rx_dropped, 0);
     assert_eq!(&memory[0x40c..0x411], b"frame");
     assert_eq!(
         u16::from_le_bytes(memory[0x302..0x304].try_into().unwrap()),
@@ -103,8 +103,8 @@ fn accepted_backlog_has_no_irq_until_dma_and_full_backlog_drops() {
             }
         );
     }
-    assert_eq!(net.rx_frames, 0);
-    assert_eq!(net.rx_dropped, 0);
+    assert_eq!(net.stats().rx_frames, 0);
+    assert_eq!(net.stats().rx_dropped, 0);
     assert_eq!(
         net.receive(&mut memory, b"overflow").unwrap(),
         ReceiveOutcome {
@@ -112,13 +112,13 @@ fn accepted_backlog_has_no_irq_until_dma_and_full_backlog_drops() {
             irq: false
         }
     );
-    assert_eq!(net.rx_dropped, 1);
+    assert_eq!(net.stats().rx_dropped, 1);
     // Publishing one real guest descriptor drains an accepted queued frame.
     memory[0x202..0x204].copy_from_slice(&1u16.to_le_bytes());
     assert!(net.write(&mut memory, 0x050, 0).unwrap().irq);
-    assert_eq!(net.rx_frames, 1);
+    assert_eq!(net.stats().rx_frames, 1);
     assert_eq!(&memory[0x40c..0x412], b"queued");
-    assert_eq!(net.rx_dropped, 1);
+    assert_eq!(net.stats().rx_dropped, 1);
     assert_eq!(
         net.receive(&mut memory, b"replacement").unwrap(),
         ReceiveOutcome {
@@ -176,7 +176,7 @@ fn tx_chains_preserve_opaque_bytes_and_complete_each_available_head_once() {
     assert_eq!(output.frames, vec![frame.to_vec(), second.to_vec()]);
     assert!(output.irq);
     assert_eq!(net.read(0x060), 1);
-    assert_eq!(net.tx_frames, 2);
+    assert_eq!(net.stats().tx_frames, 2);
     assert_eq!(
         &memory[0x302..0x314],
         &[
@@ -198,7 +198,7 @@ fn tx_chains_preserve_opaque_bytes_and_complete_each_available_head_once() {
     assert!(duplicate.frames.is_empty());
     assert!(!duplicate.irq);
     assert_eq!(net.read(0x060), 0);
-    assert_eq!(net.tx_frames, 2);
+    assert_eq!(net.stats().tx_frames, 2);
     assert!(net.dirty.is_empty());
 }
 
@@ -250,7 +250,14 @@ fn malformed_receive_chains_fail_without_consuming_or_writing() {
         assert!(net.receive(&mut memory, b"frame").is_err(), "case {case}");
         assert_eq!(memory, before, "case {case}");
         assert!(net.dirty.is_empty());
-        assert_eq!((net.rx_frames, net.rx_dropped, net.read(0x060)), (0, 0, 0));
+        assert_eq!(
+            (
+                net.stats().rx_frames,
+                net.stats().rx_dropped,
+                net.read(0x060)
+            ),
+            (0, 0, 0)
+        );
         // Repair the malformed request in place. Exactly one successful completion
         // proves that the rejected head did not advance the device cursor.
         memory[0x100..0x108].copy_from_slice(&0x400u64.to_le_bytes());
@@ -261,7 +268,7 @@ fn malformed_receive_chains_fail_without_consuming_or_writing() {
         net.write(&mut memory, 0x038, 1).unwrap();
         net.write(&mut memory, 0x0a0, 0x300).unwrap();
         assert!(net.receive(&mut memory, b"frame").unwrap().irq);
-        assert_eq!(net.rx_frames, 1);
+        assert_eq!(net.stats().rx_frames, 1);
         assert_eq!(&memory[0x302..0x304], &[1, 0]);
     }
 }
@@ -278,7 +285,7 @@ fn receive_drain_keeps_completed_prefix_and_failed_backlog_head() {
     memory[0x202..0x204].copy_from_slice(&2u16.to_le_bytes());
     memory[0x206..0x208].copy_from_slice(&1u16.to_le_bytes());
     assert!(net.write(&mut memory, 0x050, 0).is_err());
-    assert_eq!(net.rx_frames, 1);
+    assert_eq!(net.stats().rx_frames, 1);
     assert_eq!(net.read(0x060), 0);
     assert_eq!(&memory[0x40c..0x411], b"first");
     assert_eq!(&memory[0x500..0x520], &[0; 32]);
@@ -286,7 +293,7 @@ fn receive_drain_keeps_completed_prefix_and_failed_backlog_head() {
     assert_eq!(net.dirty, vec![(0x400, 17), (0x304, 8), (0x302, 2)]);
     memory[0x118..0x11c].copy_from_slice(&128u32.to_le_bytes());
     assert!(net.write(&mut memory, 0x050, 0).unwrap().irq);
-    assert_eq!(net.rx_frames, 2);
+    assert_eq!(net.stats().rx_frames, 2);
     assert_eq!(&memory[0x50c..0x512], b"second");
     assert_eq!(&memory[0x302..0x304], &[2, 0]);
 }
@@ -309,13 +316,13 @@ fn transmit_late_error_preserves_completed_dma_and_retries_failed_head() {
     memory[0x202..0x204].copy_from_slice(&2u16.to_le_bytes());
     memory[0x206..0x208].copy_from_slice(&1u16.to_le_bytes());
     assert!(net.write(&mut memory, 0x050, 1).is_err());
-    assert_eq!(net.tx_frames, 1);
+    assert_eq!(net.stats().tx_frames, 1);
     assert_eq!(net.read(0x060), 0);
     assert_eq!(net.dirty, vec![(0x304, 8), (0x302, 2)]);
     memory[0x11c..0x11e].fill(0);
     let output = net.write(&mut memory, 0x050, 1).unwrap();
     assert_eq!(output.frames, vec![vec![0; 2]]);
-    assert_eq!(net.tx_frames, 2);
+    assert_eq!(net.stats().tx_frames, 2);
     assert_eq!(&memory[0x302..0x304], &[2, 0]);
 }
 
@@ -326,14 +333,14 @@ fn receive_frame_limit_is_checked_before_backlog_admission() {
     assert!(net.receive(&mut memory, &frame).unwrap().accepted);
     let oversized = vec![0; frame.len() + 1];
     assert!(net.receive(&mut memory, &oversized).is_err());
-    assert_eq!(net.rx_dropped, 0);
+    assert_eq!(net.stats().rx_dropped, 0);
     // The maximum accepted frame fits exactly in a maximum-size chain.
     memory.resize(0x400 + (4 << 20), 0);
     memory[0x108..0x10c].copy_from_slice(&(4u32 << 20).to_le_bytes());
     memory[0x202..0x204].copy_from_slice(&1u16.to_le_bytes());
     assert!(net.write(&mut memory, 0x050, 0).unwrap().irq);
     assert_eq!(&memory[0x40c..], frame);
-    assert_eq!(net.rx_frames, 1);
+    assert_eq!(net.stats().rx_frames, 1);
 }
 
 #[test]
@@ -357,7 +364,7 @@ fn transmit_empty_short_and_limit_boundaries_are_explicit() {
         if size > 4 << 20 {
             assert!(output.is_err());
             assert!(net.dirty.is_empty());
-            assert_eq!(net.tx_frames, 0);
+            assert_eq!(net.stats().tx_frames, 0);
             assert_eq!(&memory[0x302..0x304], &[0, 0]);
         } else {
             let output = output.unwrap();
@@ -382,9 +389,9 @@ fn network_reset_preserves_dirty_journal_but_clears_backlog_and_counters() {
     assert_eq!(net.dirty, dirty);
     assert_eq!(
         (
-            net.rx_frames,
-            net.rx_dropped,
-            net.tx_frames,
+            net.stats().rx_frames,
+            net.stats().rx_dropped,
+            net.stats().tx_frames,
             net.read(0x060)
         ),
         (0, 0, 0, 0)
@@ -393,7 +400,7 @@ fn network_reset_preserves_dirty_journal_but_clears_backlog_and_counters() {
     memory[0x202..0x204].copy_from_slice(&2u16.to_le_bytes());
     assert!(snapshot.write(&mut memory, 0x050, 0).unwrap().irq);
     assert_eq!(&memory[0x40c..0x412], b"queued");
-    assert_eq!(snapshot.rx_frames, 2);
+    assert_eq!(snapshot.stats().rx_frames, 2);
     assert!(!net.receive(&mut memory, b"not ready").unwrap().accepted);
-    assert_eq!(net.rx_dropped, 1);
+    assert_eq!(net.stats().rx_dropped, 1);
 }

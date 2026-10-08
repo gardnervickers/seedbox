@@ -6,14 +6,23 @@ fn device(policy: Policy) -> Transport {
             device_id: 3,
             features: [2, 1],
         },
-        if policy == Policy::Block { 1 } else { 4 },
+        match policy {
+            Policy::Block => 1,
+            Policy::Network => 2,
+            _ => 4,
+        },
         policy,
     )
 }
 
 #[test]
 fn queue_profiles_preserve_validation_precedence_and_cursor_transitions() {
-    for policy in [Policy::Application, Policy::Console, Policy::Block] {
+    for policy in [
+        Policy::Application,
+        Policy::Console,
+        Policy::Block,
+        Policy::Network,
+    ] {
         let mut t = device(policy);
         t.write(0x30, 99).unwrap();
         assert_eq!(t.read(0x34), 0);
@@ -28,11 +37,11 @@ fn queue_profiles_preserve_validation_precedence_and_cursor_transitions() {
                 invalid_selector.unwrap_err(),
                 "invalid console queue selector"
             ),
-            Policy::Block => assert_eq!(invalid_selector.unwrap(), Effect::None),
+            Policy::Block | Policy::Network => assert_eq!(invalid_selector.unwrap(), Effect::None),
         }
         t.write(0x30, 0).unwrap();
         let oversized = t.write(0x38, 65537);
-        if policy == Policy::Block {
+        if matches!(policy, Policy::Block | Policy::Network) {
             assert_eq!(oversized.unwrap(), Effect::None);
             assert_eq!(t.queues[0].num, 1);
         } else {
@@ -66,10 +75,10 @@ fn queue_profiles_preserve_validation_precedence_and_cursor_transitions() {
             assert_eq!(mutation.unwrap_err(), "invalid virtio queue size");
         } else {
             mutation.unwrap();
-            assert_eq!(t.queues[0].num, 0);
+            assert_eq!(t.queues[0].num, u16::from(policy == Policy::Network));
         }
         let invalid_ready = t.write(0x44, 2);
-        if policy == Policy::Block {
+        if matches!(policy, Policy::Block | Policy::Network) {
             invalid_ready.unwrap();
             assert!(!t.queues[0].ready);
         } else {
@@ -90,7 +99,12 @@ fn queue_profiles_preserve_validation_precedence_and_cursor_transitions() {
 
 #[test]
 fn notification_and_feature_errors_keep_existing_order_and_partial_status() {
-    for policy in [Policy::Application, Policy::Console, Policy::Block] {
+    for policy in [
+        Policy::Application,
+        Policy::Console,
+        Policy::Block,
+        Policy::Network,
+    ] {
         let mut t = device(policy);
         let invalid = t.write(0x50, 99);
         match policy {
@@ -99,7 +113,7 @@ fn notification_and_feature_errors_keep_existing_order_and_partial_status() {
                 "virtio notification queue out of range"
             ),
             Policy::Console => assert_eq!(invalid.unwrap_err(), "invalid console notify queue"),
-            Policy::Block => assert_eq!(invalid.unwrap(), Effect::None),
+            Policy::Block | Policy::Network => assert_eq!(invalid.unwrap(), Effect::None),
         }
         let early = t.write(0x50, 0);
         if policy == Policy::Console {

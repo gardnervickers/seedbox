@@ -19,6 +19,7 @@ pub enum Policy {
     Application,
     Console,
     Block,
+    Network,
 }
 
 /// RAM and model effects remain in the adapter, after register admission.
@@ -123,11 +124,16 @@ impl Transport {
             0x24 => self.drv_sel = value,
             0x30 => self.queue_sel = value,
             0x38 | 0x44 | 0x80 | 0x84 | 0x90 | 0x94 | 0xa0 | 0xa4 => {
-                let Some(queue) = self.queues.get_mut(self.queue_sel as usize) else {
+                let selected = if self.policy == Policy::Network {
+                    (self.queue_sel as usize).min(1)
+                } else {
+                    self.queue_sel as usize
+                };
+                let Some(queue) = self.queues.get_mut(selected) else {
                     return match self.policy {
                         Policy::Application => Err("virtio queue selection out of range".into()),
                         Policy::Console => Err("invalid console queue selector".into()),
-                        Policy::Block => Ok(Effect::None),
+                        Policy::Block | Policy::Network => Ok(Effect::None),
                     };
                 };
                 if self.policy == Policy::Console && queue.ready && offset != 0x44 {
@@ -135,7 +141,7 @@ impl Transport {
                 }
                 match offset {
                     0x38 => {
-                        if self.policy != Policy::Block
+                        if matches!(self.policy, Policy::Application | Policy::Console)
                             && (value == 0 || value > QUEUE_SIZE as u32 || !value.is_power_of_two())
                         {
                             return Err(match self.policy {
@@ -144,10 +150,15 @@ impl Transport {
                             }
                             .into());
                         }
-                        queue.num = value as u16;
+                        queue.num = if self.policy == Policy::Network {
+                            (value as u16).clamp(1, QUEUE_SIZE)
+                        } else {
+                            value as u16
+                        };
                     }
                     0x44 => {
-                        if self.policy != Policy::Block && value > 1 {
+                        if matches!(self.policy, Policy::Application | Policy::Console) && value > 1
+                        {
                             return Err(match self.policy {
                                 Policy::Console => "invalid console queue ready value",
                                 _ => "invalid virtio queue ready flag",
@@ -183,6 +194,7 @@ impl Transport {
                         }
                     }
                     Policy::Block if value != 0 => return Ok(Effect::None),
+                    Policy::Network if value > 1 => return Ok(Effect::None),
                     _ => (),
                 }
                 return Ok(Effect::Notify(value as usize));

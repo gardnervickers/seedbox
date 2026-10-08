@@ -9,19 +9,19 @@ The initial extraction preserves these existing register policies. They are
 compatibility profiles for the implementations being moved, not a requirement
 that future device models retain different platform behavior.
 
-| Behavior | Application (ARM net/console/block) | Console (KVM) | Block (KVM) |
-| --- | --- | --- | --- |
-| Invalid selected queue write | Error | Error | Ignore |
-| Queue size write | Nonzero power of two, at most 256 | Same | Truncate to u16; validate on DMA |
-| Queue changed while ready | Allowed | Reject except QueueReady | Allowed |
-| QueueReady value | 0 or 1 | 0 or 1 | Only 1 means ready |
-| QueueReady cursor reset | On both 0 and 1 | Only on 0 | On every write |
-| Invalid notification queue | Error | Error, before readiness check | Ignore |
-| Notify before DRIVER_OK | Allowed | Error | Allowed |
-| FEATURES_OK negotiation | Record status | Clear bit unless both feature words match | Record status |
-| DRIVER_OK without FEATURES_OK | Record status | Error after recording status | Record status |
-| Interrupt acknowledgment | Clear requested ISR bits | Same | Same |
-| Reset | Fresh transport and model, retaining disk | Fresh transport/model, retain dirty journal | Fresh transport, retain disk, statistics and dirty journal |
+| Behavior | Application (ARM net/console/block) | Console (KVM) | Block (KVM) | Network (KVM) |
+| --- | --- | --- | --- | --- |
+| Invalid selected queue write | Error | Error | Ignore | Clamp to queue 1 |
+| Queue size write | Nonzero power of two, at most 256 | Same | Truncate to u16; validate on DMA | Truncate to u16 then clamp to 1..256; validate on DMA |
+| Queue changed while ready | Allowed | Reject except QueueReady | Allowed | Allowed |
+| QueueReady value | 0 or 1 | 0 or 1 | Only 1 means ready | Only 1 means ready |
+| QueueReady cursor reset | On both 0 and 1 | Only on 0 | On every write | On every write |
+| Invalid notification queue | Error | Error, before readiness check | Ignore | Ignore |
+| Notify before DRIVER_OK | Allowed | Error | Allowed | Allowed |
+| FEATURES_OK negotiation | Record status | Clear bit unless both feature words match | Record status | Record status |
+| DRIVER_OK without FEATURES_OK | Record status | Error after recording status | Record status | Record status |
+| Interrupt acknowledgment | Clear requested ISR bits | Same | Same | Same |
+| Reset | Fresh transport and model, retaining disk | Fresh transport/model, retain dirty journal | Fresh transport, retain disk, statistics and dirty journal | Fresh transport/model, retain dirty journal |
 
 Block also records FEATURES_OK without enforcing a feature negotiation policy.
 The shared transport returns typed notification and reset effects. Adapters keep
@@ -34,6 +34,6 @@ Internal specifications and compatibility profiles do not change that projection
 Cloning a device includes transport selectors, queues and cursors as well as the
 adapter's model data and pending journal.
 
-The KVM network adapter remains on its existing implementation in this stage.
-Its move to bounded shared DMA and the later convergence of device policies need
-separate review and acceptance evidence.
+The KVM network adapter uses the shared transport after its bounded-DMA
+hardening checkpoint. Network model differences and error-order guarantees are
+documented in [virtio-network.md](virtio-network.md).

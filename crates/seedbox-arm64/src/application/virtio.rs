@@ -4,10 +4,7 @@ use super::Event;
 use crate::{disk::Disk, Result, RAM_BASE};
 use seedbox_engine_core::virtio_block::{Block, Policy as BlockPolicy};
 use seedbox_engine_core::virtio_console::{Console, Policy as ConsolePolicy};
-use std::collections::VecDeque;
-
-const CHAIN_LIMIT: usize = 4 << 20;
-const NET_HEADER: usize = 12;
+use seedbox_engine_core::virtio_network::{Network, Policy as NetworkPolicy};
 
 #[cfg(test)]
 fn u16_at(m: &[u8], offset: usize) -> u16 {
@@ -21,35 +18,8 @@ fn u32_at(m: &[u8], offset: usize) -> u32 {
 use seedbox_engine_core::virtio_mmio::{
     Effect as MmioEffect, Policy as MmioPolicy, Spec, Transport,
 };
-use seedbox_engine_core::virtqueue::{Chain, Diagnostics, Direction, Policy, Queue};
-
-trait ArmQueue {
-    fn chain(&self, memory: &[u8]) -> Result<Option<Chain>>;
-    fn complete(&mut self, memory: &mut [u8], chain: &Chain, len: usize);
-}
-impl ArmQueue for Queue {
-    fn chain(&self, memory: &[u8]) -> Result<Option<Chain>> {
-        self.validated_chain(
-            memory,
-            RAM_BASE,
-            Policy {
-                limit: CHAIN_LIMIT,
-                direction: Direction::Any,
-                reject_empty: true,
-                diagnostics: Diagnostics::Virtio,
-            },
-        )
-    }
-    fn complete(&mut self, memory: &mut [u8], chain: &Chain, len: usize) {
-        self.complete_chain(memory, chain, len, |_, _| {});
-    }
-}
-
 pub enum Model {
-    Net {
-        mac: [u8; 6],
-        backlog: VecDeque<Vec<u8>>,
-    },
+    Net(Network),
     Console(Console),
     Block(Block),
 }
@@ -59,13 +29,7 @@ pub struct Virtio {
 }
 impl Virtio {
     pub fn net(mac: [u8; 6]) -> Self {
-        Self::new(
-            Model::Net {
-                mac,
-                backlog: VecDeque::new(),
-            },
-            2,
-        )
+        Self::new(Model::Net(Network::new(mac, NetworkPolicy::Application)), 2)
     }
     pub fn console() -> Self {
         Self::new(Model::Console(Console::new(ConsolePolicy::Application)), 4)
@@ -75,7 +39,7 @@ impl Virtio {
     }
     fn new(model: Model, queues: usize) -> Self {
         let spec = match &model {
-            Model::Net { .. } => Spec {
+            Model::Net(_) => Spec {
                 device_id: 1,
                 features: [1 << 5, 1],
             },
@@ -100,9 +64,7 @@ impl Virtio {
     /// and durable/volatile disk layers, not merely bytes visible to the guest.
     pub fn state_digest(&self) -> Result<String> {
         let model = match &self.model {
-            Model::Net { mac, backlog } => {
-                serde_json::json!({"kind":"net","mac":mac,"backlog":backlog})
-            }
+            Model::Net(net) => net.projection(),
             Model::Console(console) => console.projection(),
             Model::Block(disk) => serde_json::json!({"kind":"block","disk":disk.disk().digest()}),
         };
@@ -134,7 +96,7 @@ impl Virtio {
     }
     fn config_byte(&self, offset: u64) -> u8 {
         match &self.model {
-            Model::Net { mac, .. } => mac.get(offset as usize).copied().unwrap_or(0),
+            Model::Net(net) => net.mac().get(offset as usize).copied().unwrap_or(0),
             Model::Console(_) => {
                 if offset == 4 {
                     1
@@ -167,7 +129,7 @@ impl Virtio {
             MmioEffect::Reset => {
                 let old = std::mem::replace(self, Self::console());
                 *self = match old.model {
-                    Model::Net { mac, .. } => Self::net(mac),
+                    Model::Net(net) => Self::net(net.mac()),
                     Model::Console(_) => Self::console(),
                     Model::Block(disk) => Self::block(disk.into_disk()),
                 };
@@ -187,75 +149,23 @@ impl Virtio {
             block.notify(&mut self.transport, memory, RAM_BASE, |_, _| {})?;
             return Ok(Vec::new());
         }
-        let mut events = Vec::new();
-        if matches!(self.model, Model::Net { .. }) && index == 0 {
-            self.drain(memory)?;
-            return Ok(events);
+        if let Model::Net(net) = &mut self.model {
+            let output = net.notify(&mut self.transport, memory, RAM_BASE, index, |_, _| {})?;
+            return Ok(output.frames.into_iter().map(Event::Frame).collect());
         }
-        while let Some(chain) = self.transport.queues[index].chain(memory)? {
-            let written = match &mut self.model {
-                Model::Net { .. } => {
-                    let bytes = chain.read(memory)?;
-                    if bytes.len() < NET_HEADER {
-                        return Err("short virtio network header".into());
-                    }
-                    if bytes[..10].iter().any(|b| *b != 0) {
-                        return Err("unnegotiated virtio network offload".into());
-                    }
-                    if bytes.len() > NET_HEADER {
-                        events.push(Event::Frame(bytes[NET_HEADER..].to_vec()));
-                    }
-                    0
-                }
-                Model::Console(_) => unreachable!("console handled above"),
-                Model::Block(_) => unreachable!("block handled above"),
-            };
-            self.transport.queues[index].complete(memory, &chain, written);
-            self.transport.isr |= 1;
-        }
-        self.drain(memory)?;
-        Ok(events)
-    }
-    fn drain(&mut self, memory: &mut [u8]) -> Result<()> {
-        match &mut self.model {
-            Model::Net { backlog, .. } => {
-                while let Some(bytes) = backlog.front() {
-                    let Some(chain) = self.transport.queues[0].chain(memory)? else {
-                        break;
-                    };
-                    let mut packet = vec![0; NET_HEADER];
-                    packet[10] = 1;
-                    packet.extend(bytes);
-                    chain.write(memory, &packet)?;
-                    self.transport.queues[0].complete(memory, &chain, packet.len());
-                    backlog.pop_front();
-                    self.transport.isr |= 1;
-                }
-            }
-            Model::Console(_) => unreachable!("console owns its drain"),
-            Model::Block(_) => {}
-        }
-        Ok(())
+        unreachable!("all device models handled")
     }
     pub fn receive(&mut self, memory: &mut [u8], bytes: &[u8]) -> Result<bool> {
         match &mut self.model {
-            Model::Net { backlog, .. } => {
-                if !self.transport.queues[0].ready || backlog.len() >= 256 {
-                    return Ok(false);
-                }
-                if bytes.len() > 65536 {
-                    return Err("network frame too large".into());
-                }
-                backlog.push_back(bytes.to_vec());
+            Model::Net(net) => {
+                Ok(net.receive(&mut self.transport, memory, RAM_BASE, bytes, |_, _| {})?.accepted)
             }
             Model::Console(console) => {
                 console.receive(&mut self.transport, memory, RAM_BASE, bytes, |_, _| {})?;
-                return Ok(true);
+                Ok(true)
             }
-            Model::Block(_) => return Err("block device cannot receive a frame".into()),
+            Model::Block(_) => Err("block device cannot receive a frame".into()),
         }
-        self.drain(memory)?;
-        Ok(true)
     }
     pub fn disk(&self) -> Option<&Disk> {
         match &self.model {
@@ -281,6 +191,7 @@ impl Virtio {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const NET_HEADER: usize = 12;
     const DESC: usize = 0;
     const AVAIL: usize = 0x1000;
     const USED: usize = 0x1100;
