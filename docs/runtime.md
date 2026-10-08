@@ -431,6 +431,15 @@ and timeouts. Serial output is capped at 1 GiB total divided equally between the
 two ports of all machines; exceeding that cap fails execution. Trace recording
 is not enabled by this adapter.
 
+Each machine's `net` report includes negotiated `event_idx`, `doorbell_exits`
+(virtio-net MMIO queue-notify writes), and `suppressed_interrupts` (completion
+batches that did not request an interrupt). These diagnostics are outside the
+witness. With EVENT_IDX negotiated, the device publishes `avail_event` after
+consuming buffers and samples `used_event` for completion interrupts. It polls
+available buffers at deterministic guest stops, including slice entry after RX
+delivery, slice boundaries and halt, so suppressed kicks do not stall queues.
+Without negotiation, the existing NO_INTERRUPT/NO_NOTIFY path is retained.
+
 When text output reports `execution: VMM failed; see vmm.stderr`, `run`, `replay`,
 `explore` and `inspect` also print up to five non-empty lines from the final 8 KiB
 of the attempt's `output/vmm.stderr` to stderr. Each line starts with `vmm stderr:`;

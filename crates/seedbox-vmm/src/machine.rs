@@ -937,6 +937,17 @@ impl Machine {
         outcome
     }
 
+    fn poll_net(&mut self, frames: &mut Vec<Vec<u8>>) -> bool {
+        let m = unsafe { std::slice::from_raw_parts_mut(self.mem, self.mem_size) };
+        let Some(n) = self.net.as_mut() else { return false; };
+        let out = n.poll(m);
+        self.take_dma();
+        if out.irq { self.raise_net(); }
+        let sent = !out.frames.is_empty();
+        frames.extend(out.frames);
+        sent
+    }
+
     /// Syscalls the guest has entered (counted in the time page).
     /// Move virtual time forward to `t` (never back) for `cause`.
     fn advance_to(&mut self, t: u64, cause: Cause) {
@@ -1263,6 +1274,11 @@ impl Machine {
             if self.pending_io.is_some() {
                 if !self.drain_io(limit)? {
                     self.set_stepping(false)?;
+                    // Charged I/O can split at an exact slice boundary too.
+                    if self.poll_net(frames) {
+                        self.note_skew(Site::Sent);
+                        return Ok(Stop::Sent);
+                    }
                     return Ok(Stop::Reached);
                 }
             }
@@ -1282,6 +1298,13 @@ impl Machine {
                     self.tolerance,
                 ))?;
                 self.expire_timers()?;
+                // Also runs on slice entry after world RX delivery. Never poll
+                // at overflow landings or intermediate precision steps.
+                if self.poll_net(frames) {
+                    self.note_skew(Site::Sent);
+                    self.set_stepping(false)?;
+                    return Ok(Stop::Sent);
+                }
                 if self.time >= slice_end {
                     self.set_stepping(false)?;
                     return Ok(Stop::Reached);
@@ -1730,6 +1753,11 @@ impl Machine {
                         self.state = State::Exited(0xfe);
                         return Ok(Stop::Exited);
                     }
+                    // A guest may publish buffers and halt without a kick.
+                    if self.poll_net(frames) {
+                        self.note_skew(Site::Sent);
+                        return Ok(Stop::Sent);
+                    }
                     self.state = State::Halted;
                     return Ok(Stop::Halted);
                 }
@@ -1866,6 +1894,69 @@ impl Machine {
             out.extend_from_slice(&hash.to_le_bytes());
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod net_poll_tests {
+    use super::*;
+
+    // All exits in these tiny payloads are natural, with no PMU or host-time
+    // stepping. Test the machine's service wiring, not counter qualification.
+    struct Natural;
+    impl Timebase for Natural {
+        const BRANCHES: bool = false;
+        fn prepare(&mut self, _: &mut Machine, _: u64, _: u64) -> Result<Prepared, String> { Ok(Prepared::Run) }
+        fn start(&mut self, _: u64) -> u64 { 0 }
+        fn read(&mut self, _: u64) -> u64 { 0 }
+        fn inject_guard(&self) -> u64 { INJECT_GUARD }
+        fn judge(&mut self, _: Judge<'_>, _: &Run) -> Result<Verdict, String> { Ok(Verdict::Advance { legal: true }) }
+    }
+
+    #[test]
+    #[ignore = "requires KVM on a Linux x86-64 host"]
+    fn event_idx_polls_on_entry_slice_boundary_and_halt_without_kicks() {
+        let kvm = Kvm::new().unwrap();
+        for site in ["entry", "slice", "halt", "charged_io"] {
+            for event_idx in [false, true] {
+                // Publish a head, then yield to the slice end, halt, or start
+                // charged port I/O. Entry starts with an already posted head.
+                let mut code = vec![0xc7, 0x05, 0x02, 0x20, 0x08, 0x00, 1, 0, 0, 0];
+                if site == "slice" { code.extend_from_slice(&[0xb0, 1, 0xba, 0x2c, 0x05, 0, 0, 0xee]); }
+                if site == "charged_io" { code.extend_from_slice(&[0xba, 0x30, 0x05, 0, 0, 0xee]); }
+                code.push(0xf4);
+                let mut kernel = vec![0; 1024];kernel[0x1f1] = 1;kernel.extend(code);
+                let spec = BootSpec { kernel: &kernel, initrd: &[], cmdline: String::new(), mem: INITRD_ADDR + 0x100000,
+                    rng_seed: [0; 32], mac: Some([2, 0, 0, 0, 0, 1]), control_channel: false, disk: None,
+                    undo_margin: 0, barrier: false, pv_clock: true };
+                let mut m = Machine::new(&kvm, "net-poll", &spec).unwrap();
+                let mut r = m.vcpu.get_regs().unwrap();r.rflags = 0x202;m.vcpu.set_regs(&r).unwrap();
+                let memory = unsafe { std::slice::from_raw_parts_mut(m.mem, m.mem_size) };
+                let net = m.net.as_mut().unwrap();
+                for (off, v) in [(0x020, (1 << 5) | if event_idx { 1 << 29 } else { 0 }), (0x024, 1), (0x020, 1), (0x070, 15),
+                    (0x030, 1), (0x038, 1), (0x080, 0x81000), (0x090, 0x82000), (0x0a0, 0x83000), (0x044, 1)] {
+                    net.write(memory, off, v);
+                }
+                memory[0x81000..0x81008].copy_from_slice(&0x84000u64.to_le_bytes());
+                memory[0x81008..0x8100c].copy_from_slice(&17u32.to_le_bytes());
+                memory[0x8400c..0x84011].copy_from_slice(b"frame");
+                if site == "entry" { memory[0x82002..0x82004].copy_from_slice(&1u16.to_le_bytes()); }
+                let mut frames = Vec::new();
+                let stop = m.run_until(&mut Natural, 500, 0, &mut frames).unwrap();
+                if event_idx {
+                    assert_eq!(stop, Stop::Sent, "{site}");
+                    assert_eq!(frames, [b"frame".to_vec()]);
+                    assert_eq!(u16::from_le_bytes(m.memory()[0x8300c..0x8300e].try_into().unwrap()), 1);
+                } else {
+                    assert_eq!(stop, if site == "slice" || site == "charged_io" { Stop::Reached } else { Stop::Halted }, "{site}");
+                    assert!(frames.is_empty());
+                }
+                let net = m.net.as_ref().unwrap();
+                assert_eq!(net.doorbell_exits, 0);
+                assert_eq!(net.tx_frames, u64::from(event_idx));
+                assert!(net.dirty.is_empty()); // Machine adopted all DMA writes.
+            }
+        }
     }
 }
 
