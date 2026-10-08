@@ -73,14 +73,6 @@ struct PageTimer {
 impl PageTimer {
     fn new() -> Self { Self { enabled: false, seen: TIMER_DISARMED } }
 
-    fn deadline(&self, word: u64, pit: &Pit) -> Option<u64> {
-        if self.enabled && word != self.seen {
-            (word != TIMER_DISARMED).then_some(word)
-        } else {
-            pit.deadline
-        }
-    }
-
     fn pickup(&mut self, word: u64, pit: &mut Pit, now: u64) -> Result<bool, String> {
         if self.enabled && word != self.seen {
             // Like the PV timer port: replacing an overdue arm cannot lose IRQ0.
@@ -708,7 +700,7 @@ impl Machine {
 
     /// Earliest internal event (timer) for a halted machine.
     pub fn next_deadline(&self) -> u64 {
-        self.page_timer.deadline(self.page_get(PAGE_TIMER_DEADLINE), &self.pit).unwrap_or(u64::MAX)
+        self.pit.deadline.unwrap_or(u64::MAX)
     }
 
     pub fn has_pending_irq(&self) -> bool {
@@ -1111,6 +1103,9 @@ impl Machine {
         }
     }
 
+    // Adoption is an observable effect: call only at a legal exit or a world
+    // boundary, after accounting for that point's guest clock progress. Never
+    // call from a timebase prepare/plan or a watchdog/probe landing.
     fn sync_page_timer(&mut self) -> Result<(), String> {
         if !self.page_timer.enabled { return Ok(()); }
         if self.page_timer.pickup(self.page_get(PAGE_TIMER_DEADLINE), &mut self.pit, self.time)? {
@@ -1120,8 +1115,8 @@ impl Machine {
         Ok(())
     }
 
+    // Expiration consults adopted device state only, never a guest page store.
     fn expire_timers(&mut self) -> Result<(), String> {
-        self.sync_page_timer()?;
         if self.pit.expire_through(self.time)? > 0 {
             self.pic.raise(0);
         }
@@ -1265,7 +1260,14 @@ impl Machine {
 
     /// The guest is in a state cycle (see `pv.rs`), at its canonical point:
     /// idle, like HLT, until an interrupt.
-    fn spin_idle(&mut self) -> Result<Stop, String> {
+    fn spin_idle(&mut self, hard: u64) -> Result<Stop, String> {
+        if self.page_timer.enabled {
+            // A proven cycle's canonical landing is deterministic, unlike the
+            // watchdog and intermediate probe steps that found it.
+            self.sync_from_page(hard)?;
+            self.sync_page_timer()?;
+            self.expire_timers()?;
+        }
         let (rip, if_flag) = {
             let run = self.vcpu.get_kvm_run();
             (unsafe { run.s.regs.regs.rip }, run.if_flag)
@@ -1364,7 +1366,6 @@ impl Machine {
                 self.fm = self.undo_margin;
                 // Guest clock reads can advance time independently of the PMU.
                 // Check before expiring timers or accepting the slice boundary.
-                self.sync_page_timer()?;
                 if self.page_timer.enabled { self.expire_timers()?; }
                 self.sync_from_page(hard_limit(
                     limit,
@@ -1372,6 +1373,7 @@ impl Machine {
                     self.pit_exact,
                     self.tolerance,
                 ))?;
+                self.sync_page_timer()?;
                 self.expire_timers()?;
                 if self.time >= slice_end {
                     self.set_stepping(false)?;
@@ -1415,7 +1417,7 @@ impl Machine {
                 self.page_set(PAGE_PLAN_TIME, self.time);
             }
             if let Prepared::Idle = tb.prepare(self, remaining, soft)? {
-                return self.spin_idle();
+                return self.spin_idle(hard);
             }
             self.vcpu.get_kvm_run().kvm_valid_regs =
                 (KVM_SYNC_X86_REGS | KVM_SYNC_X86_SREGS) as u64;
@@ -1498,19 +1500,22 @@ impl Machine {
             }
             self.stats.time_by[Cause::Progress as usize] += delta;
             self.time += delta;
-            if legal && self.page_timer.enabled {
-                let word = unsafe { std::ptr::read_volatile(self.page.add(PAGE_TIMER_DEADLINE)) };
-                if self.page_timer.pickup(word, &mut self.pit, self.time)? { self.pic.raise(0); }
-                timer_latency(&mut self.pit, &mut self.pit_exact, self.timer_rng.as_mut(), self.timer_jitter, self.exact_timer_ppm);
-            }
             if legal {
                 // Sent/Hlt/Exited can return before the next loop synchronizes
-                // the page. Validate guest clock progress before any exit
-                // effects, while preserving the existing publication timing.
-                // The exit still borrows vcpu; inspect only the disjoint page
-                // and clock fields until its payload has been consumed.
+                // the page. Validate guest clock progress before exit effects.
+                // The exit still borrows vcpu: use only the disjoint fields.
                 let last = unsafe { std::ptr::read_volatile(self.page.add(1)) };
-                advance_time(self.time, last.saturating_sub(self.time), hard)?;
+                let exit_time = advance_time(self.time, last.saturating_sub(self.time), hard)?;
+                if self.page_timer.enabled {
+                    // In particular HLT must adopt at its full exit time, not
+                    // at a watchdog landing's partial syscall-only time.
+                    self.stats.time_by[Cause::ClockReads as usize] += exit_time - self.time;
+                    self.time = exit_time;
+                    let word = unsafe { std::ptr::read_volatile(self.page.add(PAGE_TIMER_DEADLINE)) };
+                    if self.page_timer.pickup(word, &mut self.pit, self.time)? { self.pic.raise(0); }
+                    timer_latency(&mut self.pit, &mut self.pit_exact, self.timer_rng.as_mut(), self.timer_jitter, self.exact_timer_ppm);
+                    if self.pit.expire_through(self.time)? > 0 { self.pic.raise(0); }
+                }
             }
             self.stats.exits += 1;
             if self.stepping {
@@ -2369,8 +2374,9 @@ mod fork_tests {
         m.page_set(PAGE_TIMER_DEADLINE, 30000);
         m.rollback().unwrap();
         assert_eq!(m.page_get(PAGE_TIMER_DEADLINE), TIMER_DISARMED);
-        assert_eq!(m.next_deadline(), TIMER_DISARMED);
+        assert_eq!(m.next_deadline(), 10000, "unadopted disarm cannot change idle wake time");
         m.sync_page_timer().unwrap();
+        assert_eq!(m.next_deadline(), TIMER_DISARMED);
         assert_eq!(m.pit.deadline, None);
     }
 
@@ -2847,7 +2853,6 @@ mod page_timer_tests {
         let mut page = PageTimer { enabled: true, seen: TIMER_DISARMED };
         let mut pit = Pit::default();
         pit.write(0x43, 0x38, 0);
-        assert_eq!(page.deadline(12345, &pit), Some(12345));
         page.pickup(12345, &mut pit, 0).unwrap();
         assert_eq!(pit.deadline, Some(12345));
         assert!(!pit.expire(12344).unwrap());
@@ -2855,7 +2860,6 @@ mod page_timer_tests {
         page.pickup(12345, &mut pit, 0).unwrap();
         assert_eq!(pit.deadline, None, "an expired word must not rearm");
         page.pickup(20000, &mut pit, 0).unwrap();
-        assert_eq!(page.deadline(TIMER_DISARMED, &pit), None);
         page.pickup(TIMER_DISARMED, &mut pit, 0).unwrap();
         assert_eq!(pit.deadline, None);
         assert!(!pit.expire(u64::MAX).unwrap());
@@ -2903,7 +2907,6 @@ mod page_timer_tests {
         pit.program(100, 0);
         let deadline = pit.deadline;
         for word in [0, 1, TIMER_DISARMED] {
-            assert_eq!(page.deadline(word, &pit), deadline);
             page.pickup(word, &mut pit, 0).unwrap();
             assert_eq!(pit.deadline, deadline);
         }

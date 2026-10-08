@@ -241,6 +241,9 @@ impl PvClock {
         // Exit when the guest clock would pass the soft stop, or at the
         // syscall whose cost reaches it.
         let syscalls = m.page_get(PAGE_SYSCALLS);
+        // Also runs after non-legal watchdog/probe exits: only read the word
+        // to lower the bound. Pickup, expiry, IRQ0 and RNG draws belong to
+        // the machine's deterministic exit/boundary path, never to planning.
         let timer = m.page_timer.enabled.then(|| (m.page_get(PAGE_TIMER_DEADLINE), m.page_timer.seen));
         let (bound, target) = clock_stop(m.time, syscalls, self.syscall_ns, soft, timer);
         m.page_set(PAGE_BOUND, bound);
@@ -630,6 +633,103 @@ mod tests {
             assert_eq!(m.pit.deadline, None);
             m.pic.set_masks(0);
             assert_eq!(m.pic.pending(), Some(0));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Linux x86-64 KVM"]
+    fn watchdog_plans_do_not_adopt_expire_or_draw_page_timer_latency() {
+        let kvm = Kvm::new().unwrap();
+        let mut m = machine(&kvm, &[0xf4], 0);
+        m.page_timer_requested = true;
+        m.abi = super::super::ABI_PAGE_TIMER;
+        m.enable_page_timer();
+        m.pit.program_deadline(Some(10000));
+        m.pit.fresh = false;
+        m.timer_rng = Some(crate::rng::Rng::new(1009, "timer/pv-probe"));
+        m.timer_jitter = 1000;
+        let mut clock = PvClock::new(Duration::from_secs(10)).unwrap();
+        // Simulate watchdog landings before/after an old arm is overdue.
+        // An unadopted earlier arm may only lower the published bound.
+        for time in [0, 9999, 10000, 10293] {
+            m.time = time;
+            for word in [5000, 20000, super::super::TIMER_DISARMED] {
+                m.page_set(PAGE_TIMER_DEADLINE, word);
+                assert!(matches!(clock.prepare(&mut m, 100000, 100000).unwrap(), Prepared::Run));
+                assert_eq!(m.page_get(PAGE_BOUND), word.min(100000));
+                assert_eq!(m.page_timer.seen, super::super::TIMER_DISARMED);
+                assert_eq!(m.pit.deadline, Some(10000));
+                assert_eq!(m.pic.pending(), None);
+                assert_eq!(m.timer_rng.as_ref().unwrap().counter(), 0);
+                assert_eq!(m.next_deadline(), 10000, "idle wake must ignore the raw word");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Linux x86-64 KVM"]
+    fn store_deadline_then_halt_has_the_same_wake_irq_and_witness_across_watchdogs() {
+        let kvm = Kvm::new().unwrap();
+        for (spin, old, word) in [(false, None, 900000u64), (false, Some(20000), 900000),
+                                  (false, None, 20000), (false, Some(20000), super::super::TIMER_DISARMED),
+                                  (true, None, 900000)] {
+            let mut code = Vec::new();
+            // Clock reads have advanced last to 30 us. Store the deadline,
+            // compute for long enough to encounter watchdog splits, then HLT.
+            for (address, value) in [(0xd0000008u32, 30000u32), (0xd000000c, 0),
+                                     (0xd0000070, word as u32), (0xd0000074, (word >> 32) as u32)] {
+                code.extend_from_slice(&[0xc7, 0x05]);
+                code.extend_from_slice(&address.to_le_bytes());
+                code.extend_from_slice(&value.to_le_bytes());
+            }
+            if spin {
+                code.extend_from_slice(&[0xeb, 0xfe]); // Canonical spin idle is also a legal adoption point.
+            } else {
+                code.extend_from_slice(&[0xb9, 0, 0, 0, 0x01, 0x49, 0x75, 0xfd, 0xf4]);
+            }
+            let mut want = None;
+            for (watchdog, undo) in [(if spin { Duration::from_millis(2) } else { Duration::from_secs(10) }, 0),
+                                      (Duration::from_micros(100), 0),
+                                      (Duration::from_micros(200), 256)] {
+                let mut m = machine(&kvm, &code, undo);
+                m.page_timer_requested = true;
+                m.abi = super::super::ABI_PAGE_TIMER;
+                m.enable_page_timer();
+                m.pit.program_deadline(old);
+                m.pit.fresh = false;
+                m.tolerance = 100000;
+                m.timer_jitter = 1000;
+                m.exact_timer_ppm = 500000;
+                m.timer_rng = Some(crate::rng::Rng::new(1009, "timer/pv-probe"));
+                // Keep IRQ0 pending until HLT: this payload has no IDT.
+                m.pic.set_masks(0xffff);
+                let mut clock = PvClock::new(watchdog).unwrap();
+                assert_eq!(m.run_until(&mut clock, 1000000, 0, &mut Vec::new()).unwrap(), Stop::Halted);
+                assert_eq!(m.time, 30000, "idle must include page-clock progress");
+                assert_eq!(m.stats.spin_idles, u64::from(spin));
+                if watchdog < Duration::from_secs(1) {
+                    assert!(m.stats.eintr > 0, "the short watchdog must actually interrupt the guest");
+                }
+                m.pic.set_masks(0);
+                let pending = old.is_some() || word <= 30000;
+                assert_eq!(m.pic.pending(), pending.then_some(0), "overdue arms must survive replacement/disarm");
+                let adopted = m.next_deadline();
+                let wake = if pending { m.time } else { adopted };
+                if !pending {
+                    assert!((word..=word + 1000).contains(&wake));
+                }
+                // Model the world's halted key and wake, then expire and inject
+                // once without entering the guest's absent interrupt handler.
+                m.wake(wake);
+                m.expire_timers().unwrap();
+                m.inject();
+                assert_eq!(m.stats.irqs, 1);
+                assert_eq!(m.pic.pending(), None);
+                let mut rng = m.timer_rng.as_ref().unwrap().clone();
+                let got = (wake, adopted, m.stats.irqs, m.exit_witness(), rng.next());
+                if let Some(want) = &want { assert_eq!(&got, want, "watchdog={watchdog:?} undo={undo}"); }
+                else { want = Some(got); }
+            }
         }
     }
 

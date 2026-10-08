@@ -66,8 +66,13 @@ The VMM advertises the capability only after the guest announces ABI 4;
 with the flag enabled, older kernels fail at boot with a rebuild/drop-flag error.
 The flag is aimed at PV: an earlier arm lowers the clock bound and uses the same
 syscall budget as the VMM planner, without a prompt syscall exit. Watchdog splits
-reproduce that bound and budget. In the counter timebase, an earlier page arm
-waits for the next exit and may fire late by up to a slice. One-shot stop/restart
+reproduce that bound and budget without adopting the page word, expiring timers
+or drawing jitter. Adoption happens only at legal exits (including HLT and PV
+yields), canonical spin-idle landings and world slice boundaries, after the
+exit clock is accounted. A halted machine wakes from the adopted deadline
+(including its seeded jitter), never from a raw page store. In the counter
+timebase, an earlier page arm waits for the next exit and may fire late by up
+to a slice. One-shot stop/restart
 uses page disarm and avoids PIT mode port writes.
 The requested semantic parameter is retained
 as `page_timer: true` only when enabled. Replay restores it without an override.
