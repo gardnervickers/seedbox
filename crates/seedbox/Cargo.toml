@@ -27,3 +27,6 @@ seedbox-vmm = { path = "../seedbox-vmm" }
 
 [target.'cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))'.dependencies]
 seedbox-arm64 = { path = "../seedbox-arm64" }
+
+[dev-dependencies]
+seedbox-engine-core.workspace = true

@@ -1,19 +1,5 @@
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/connections.rs"]
-mod connections;
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/links.rs"]
-mod links;
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/rng.rs"]
-mod rng;
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/faults.rs"]
-mod engine;
+use seedbox_engine_core::faults as engine;
+use seedbox_engine_core::links;
 use serde_json::json;
 
 fn fixture() -> engine::Faults {

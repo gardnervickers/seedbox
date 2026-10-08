@@ -15,10 +15,12 @@ edition = "2021"
 publish = false
 
 [workspace.dependencies]
+sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dependencies]
+seedbox-engine-core = { package = "seedbox-vmm-engine-core", path = "engine-core" }
 # Keep standalone dependency metadata relative to this workspace while sharing
 # the protocol source with Seedbox. See control/Cargo.toml for package isolation.
 seedbox-control = { package = "seedbox-vmm-control", path = "control" }

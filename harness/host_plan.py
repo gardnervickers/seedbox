@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 MAP = Path(__file__).with_name('host-check-map.json')
-ENGINE_INPUTS = ('crates/seedbox-vmm/**', 'crates/seedbox-control/**', 'guest/**',
+ENGINE_INPUTS = ('crates/seedbox-vmm/**', 'crates/seedbox-engine-core/**', 'crates/seedbox-control/**', 'guest/**',
                  'harness/vmm-rustc.py', 'flake.nix', 'flake.lock',
                  'rust-toolchain*', 'Cargo.lock', '.cargo/**')
 
@@ -132,7 +132,7 @@ def plan_revision(repo, base, head, extra=()):
     # A merged/reverted engine change can have identical inputs despite changed paths.
     main_sha = git(repo, 'rev-parse', '--verify', 'origin/main^{commit}').decode().strip()
     engine_paths = git(repo, 'diff', '--name-only', '--no-renames', '-z', main_sha, tip, '--',
-                       'crates/seedbox-vmm', 'crates/seedbox-control', 'guest',
+                       'crates/seedbox-vmm', 'crates/seedbox-engine-core', 'crates/seedbox-control', 'guest',
                        'harness/vmm-rustc.py', 'flake.nix', 'flake.lock',
                        'rust-toolchain*', 'Cargo.lock', '.cargo').split(b'\0')
     engine_changed = any(path and not portable(path.decode('utf-8', 'surrogateescape'))

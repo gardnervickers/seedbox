@@ -255,6 +255,7 @@ dependencies = [
  "kvm-ioctls",
  "libc",
  "seedbox-arm64-control",
+ "seedbox-arm64-engine-core",
  "serde",
  "serde_json",
  "sha2",
@@ -266,6 +267,16 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "seedbox-arm64-engine-core"
+version = "0.1.0"
+dependencies = [
+ "seedbox-arm64-control",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

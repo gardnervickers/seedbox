@@ -2,20 +2,14 @@
 //! all executed by one host thread. A seed and the config fully determine the run.
 
 mod boundary;
-mod control;
-mod triggers;
+mod management_uart;
+use seedbox_engine_core::{rng,disk,links,connections,triggers,faults,control,network_counters};
 mod counter;
 mod devices;
-mod disk;
 mod events;
-mod faults;
 mod host_control;
-mod links;
-mod connections;
 mod machine;
-mod network_counters;
 mod profile;
-mod rng;
 mod stepper;
 mod timebase;
 mod undo;

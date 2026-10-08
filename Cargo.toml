@@ -11,6 +11,7 @@ edition = "2021"
 publish = false
 
 [workspace.dependencies]
+seedbox-engine-core = { path = "crates/seedbox-engine-core" }
 serde = { version = "1", features = ["derive"] }
 seedbox-control = { path = "crates/seedbox-control" }
 libc = "0.2"

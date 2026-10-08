@@ -1,13 +1,6 @@
 //! Device effects are applied by Machine only at stopped-vCPU boundaries.
 pub mod pl011;
-// Shared management framing retains a legacy UART helper for its portable
-// tests. Application machines use PL011 and virtio console exclusively.
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../../seedbox-vmm/src/devices.rs"]
-mod legacy;
 use crate::{pv::PvClock, timebase::Timebase, Result};
-pub(crate) use legacy::Uart;
 #[derive(Debug, PartialEq, Eq)]
 pub enum Effect {
     None,

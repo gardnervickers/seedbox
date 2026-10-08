@@ -13,39 +13,10 @@ pub mod pv;
 pub mod timebase;
 pub mod witness;
 
-// Reuse the existing disk/crash policy and random streams verbatim. Formatting
-// this ARM crate must not rewrite the separately qualified x86 engine sources.
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/disk.rs"]
-pub mod disk;
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/rng.rs"]
-pub(crate) mod rng;
+// One policy implementation is compiled through this backend's isolated package.
+pub use seedbox_engine_core::disk;
+pub(crate) use seedbox_engine_core::{control, faults, links, network_counters, rng};
 
-// The portable world policies are shared verbatim with the existing engine.
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/connections.rs"]
-#[allow(dead_code)] // Shared fault policy uses the connection table.
-pub(crate) mod connections;
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/triggers.rs"]
-#[allow(dead_code)] // Shared control state includes the trigger matcher.
-pub(crate) mod triggers;
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/links.rs"]
-#[allow(dead_code)] // Shared module also exposes APIs used only by the x86 coordinator.
-pub(crate) mod links;
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/faults.rs"]
-#[allow(dead_code)] // Preserve the qualified shared source verbatim.
-pub(crate) mod faults;
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/control.rs"]
-#[allow(dead_code)] // ARM virtio framing does not use the legacy UART write API.
-pub(crate) mod control;
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/network_counters.rs"]
-pub(crate) mod network_counters;
 #[rustfmt::skip]
 #[path = "../../seedbox-vmm/src/host_control.rs"]
 pub(crate) mod host_control;

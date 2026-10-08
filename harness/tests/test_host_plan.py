@@ -120,6 +120,15 @@ class MapTests(unittest.TestCase):
             else:
                 self.assertIn("example minio: its reviewer's run list is required", text)
 
+    def test_moved_core_policies_keep_their_host_checks_and_reviewer_runs(self):
+        for name in ['rng', 'disk', 'links', 'connections', 'triggers', 'faults', 'control', 'network_counters']:
+            with self.subTest(module=name):
+                original = host_plan.select_checks({'rev': ['crates/seedbox-vmm/src/' + name + '.rs']})
+                moved = host_plan.select_checks({'rev': ['crates/seedbox-engine-core/src/' + name + '.rs']})
+                self.assertEqual(set(moved['checks']), set(original['checks']))
+                self.assertEqual(set(moved['runs']), set(original['runs']))
+                self.assertIn('cluster-fixed', moved['checks'])
+
     def test_execution_row(self):
         self.assert_paths(['crates/seedbox-vmm/src/rng.rs', 'guest/sbx.c',
                            *['crates/seedbox/src/' + name + '.rs' for name in
@@ -341,6 +350,8 @@ class GitPlannerTests(unittest.TestCase):
         self.git('init', '-q')
         self.git('config', 'user.name', 'Portable Test')
         self.git('config', 'user.email', 'portable@example.invalid')
+        # Temporary fixtures must never invoke the caller's signing service.
+        self.git('config', 'commit.gpgsign', 'false')
         self.commit('README.md')
         self.git('branch', 'base')
         self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
@@ -405,6 +416,22 @@ class GitPlannerTests(unittest.TestCase):
                 plan = host_plan.plan_revision(self.repo, 'base', 'HEAD')
                 self.assertFalse(plan['engine_changed'])
                 self.assertEqual(set(plan['checks']), CORE)
+
+    def test_core_inputs_are_compared_with_main_even_after_a_cli_only_change(self):
+        path = 'crates/seedbox-engine-core/src/rng.rs'
+        self.commit(path, 'original')
+        self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        self.git('branch', '-f', 'base')
+        self.commit(path, 'changed')
+        self.git('branch', '-f', 'base')
+        self.commit('crates/seedbox/src/cli/mod.rs', 'fn run() { execute(); }')
+        plan = host_plan.plan_revision(self.repo, 'base', 'HEAD')
+        self.assertTrue(plan['engine_changed'])
+        self.assertIn('cluster-fixed', plan['checks'])
+        self.commit(path, 'original')
+        plan = host_plan.plan_revision(self.repo, 'base', 'HEAD')
+        self.assertFalse(plan['engine_changed'])
+        self.assertNotIn('cluster-fixed', plan['checks'])
 
     def test_wrapper_and_control_are_engine_inputs_compared_with_main(self):
         for path in ('harness/vmm-rustc.py', 'crates/seedbox-control/Cargo.toml',

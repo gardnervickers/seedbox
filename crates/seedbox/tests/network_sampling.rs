@@ -1,7 +1,5 @@
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/network_counters.rs"]
-mod network_counters;
 use network_counters::NetworkCounters;
+use seedbox_engine_core::network_counters;
 
 #[test]
 fn inspection_excludes_future_and_equal_time_events_regardless_of_early_dma() {

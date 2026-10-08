@@ -1478,8 +1478,8 @@ impl Machine {
                         }
                         0x2f8..=0x2ff => {
                             if self.channel.is_some() {self.com2.write(port-0x2f8,v)?;} else if let Some(line) =
-                                self.management_framer
-                                    .write(&mut self.com2, port - 0x2f8, v)?
+                                crate::management_uart::write(
+                                    &mut self.management_framer, &mut self.com2, port - 0x2f8, v)?
                             {
                                 self.control_requests.push((after_io, line));
                                 control_stop = true;

@@ -416,6 +416,7 @@ dependencies = [
  "libc",
  "seedbox-arm64",
  "seedbox-control",
+ "seedbox-engine-core",
  "seedbox-vmm",
  "serde",
  "serde_json",
@@ -439,6 +440,7 @@ dependencies = [
  "kvm-ioctls 0.24.0",
  "libc",
  "seedbox-arm64-control",
+ "seedbox-arm64-engine-core",
  "serde",
  "serde_json",
  "sha2",
@@ -453,11 +455,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "seedbox-arm64-engine-core"
+version = "0.1.0"
+dependencies = [
+ "seedbox-arm64-control",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "seedbox-control"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "seedbox-engine-core"
+version = "0.1.0"
+dependencies = [
+ "seedbox-control",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -469,6 +491,7 @@ dependencies = [
  "kvm-ioctls 0.25.0",
  "libc",
  "seedbox-vmm-control",
+ "seedbox-vmm-engine-core",
  "serde",
  "serde_json",
  "sha2",
@@ -480,6 +503,16 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "seedbox-vmm-engine-core"
+version = "0.1.0"
+dependencies = [
+ "seedbox-vmm-control",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

@@ -240,6 +240,7 @@ rebuilt OCI images to have identical bytes.
 | --- | --- |
 | [`crates/seedbox/`](crates/seedbox/README.md) | Configuration, OCI preparation, orchestration and the `seedbox` CLI |
 | `crates/seedbox-vmm/` | KVM world engine linked into the Linux x86-64 CLI; isolated standalone workspace and lockfile for low-level fixtures |
+| `crates/seedbox-engine-core/` | Canonical deterministic RNG, disk, network, fault and control policies shared by both engines |
 | `crates/seedbox-arm64/` | ARM PV machines, native HVF application world, and isolated fixture workspace |
 | `tools/mac-runtime/` | Signed Mac CLI build and packaged Linux preparation workflow |
 | `examples/` | Compose applications: etcd, Redis, [TCP faults/recovery](examples/faults/README.md), and [one-service MinIO conditional writes](examples/minio/README.md) (MinIO runtime qualification pending) |
@@ -266,6 +267,11 @@ absolute path when computing crate metadata. The VMM's inherited workspace
 package and dependency keys match the root workspace. Its distinct package name
 also lets the combined CLI use the same protocol source without Cargo path-ID
 collisions; the schema is not copied.
+The canonical `seedbox-engine-core` policies use the same package isolation via
+both backends' `engine-core` packages. Their directory links and source watchers
+cover every policy module, including added files. Portable tests import the core
+crate directly; UART register admission remains in the KVM adapter. Moving these
+sources changes engine bytes and requires final Linux merge-train validation.
 
 On Linux in the project dev shell, run
 `bash harness/check-vmm-reproducible.sh [REV]` (default `HEAD`). It builds two

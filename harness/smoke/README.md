@@ -94,7 +94,7 @@ The [checked-in map](../host-check-map.json) defines these rows:
 | stepper.rs, machine/counted.rs, timebase.rs, boundary.rs, counter.rs, undo/checkpoint code | core + one --undo 0 --margin 16384 replay |
 | disk.rs, virtio-blk, guest/disk*, build-disk.sh | core + disk-crash and disk-ext4-crash worlds |
 | network, link, faults routing | core + net, net-pause, net-crash worlds |
-| crates/seedbox-vmm/src/links.rs, crates/seedbox-vmm/src/connections.rs | existing automatic checks + reviewer L1/L2 shaped replay and P1 == M1 plain feature-off comparison |
+| crates/seedbox-engine-core/src/links.rs, crates/seedbox-engine-core/src/connections.rs | existing automatic checks + reviewer L1/L2 shaped replay and P1 == M1 plain feature-off comparison |
 | shared machine/main/devices changed lines mentioning undo/checkpoint/rollback/margin/stepping/counter | existing automatic checks + reviewer short U1/U2 undo invariance |
 | control.rs, host control, python/seedbox/control.py | core + control-cases (run, then replay) |
 | guest/compose-init.c, preparation, images, volumes | core + sanity (+ volume-crash if volumes changed) |

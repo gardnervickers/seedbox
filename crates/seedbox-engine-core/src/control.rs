@@ -6,32 +6,20 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_FRAME: usize = 16384;
 pub const MAX_TRANSPORT_FRAME: usize = MAX_FRAME + 64;
-/// Frame only actual UART transmissions, excluding divisor-register writes.
+/// Frame actual transport bytes; adapters exclude register-only writes.
 #[derive(Default, Clone)]
 pub struct ManagementFramer {
     line: Vec<u8>,
 }
 impl ManagementFramer {
-    pub fn write(
-        &mut self,
-        uart: &mut crate::devices::Uart,
-        off: u16,
-        byte: u8,
-    ) -> Result<Option<Vec<u8>>, String> {
-        let before = uart.out.len();
-        uart.write(off, byte)?;
-        if uart.out.len() == before {
-            return Ok(None);
-        }
-        self.byte(byte)
-    }
-    fn byte(&mut self,byte:u8)->Result<Option<Vec<u8>>,String> {
+    /// Accept a byte only after its transport actually transmits it.
+    pub fn transmitted_byte(&mut self,byte:u8)->Result<Option<Vec<u8>>,String> {
         if byte==b'\n' {let line=std::mem::take(&mut self.line);return Ok(line.starts_with(b"SBX_RPC1 ").then_some(line));}
         if self.line.len()>=MAX_TRANSPORT_FRAME {return Err("management frame too large".into())}
         self.line.push(byte);Ok(None)
     }
     pub fn receive(&mut self,bytes:&[u8])->Result<Vec<Vec<u8>>,String> {
-        let mut frames=Vec::new();for byte in bytes {if let Some(frame)=self.byte(*byte)? {frames.push(frame);}}Ok(frames)
+        let mut frames=Vec::new();for byte in bytes {if let Some(frame)=self.transmitted_byte(*byte)? {frames.push(frame);}}Ok(frames)
 
     }
 }

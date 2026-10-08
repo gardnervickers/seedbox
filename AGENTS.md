@@ -48,6 +48,22 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   acceptance uses `seedbox run` / `seedbox replay` directly; do not add a host
   scenario runner. `kernel/` and `guest/` hold guest build inputs.
 
+## Shared engine policies
+
+`crates/seedbox-engine-core` owns deterministic RNG, disk, links, connection,
+trigger, fault, control and network-counter policies. It has no CPU backend or
+UART dependency. Adapters pass actual transmitted bytes to its management framer;
+legacy PC divisor-register writes remain in `seedbox-vmm/src/management_uart.rs`.
+Keep mechanical policy moves separate from behavioral changes.
+
+The standalone backends compile the canonical sources through their in-workspace
+`engine-core` packages, with distinct package names just like their control
+packages. Each `src` link points to the canonical directory; its build script
+watches that whole directory, including new modules. Keep inherited package and
+dependency keys aligned across workspaces. These inputs change engine bytes and
+require final Linux reproducibility/merge-train validation. Portable tests import
+the canonical crate; do not restore sibling source inclusion for these policies.
+
 ## Identity and determinism
 
 - The VMM binary's hash, the guest kernel, the guest supervisor

@@ -1,0 +1,17 @@
+[package]
+name = "seedbox-vmm-engine-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# Keep the standalone package source ID inside its own workspace, while both
+# backends compile the same canonical policies. The protocol stays isolated too.
+[lib]
+name = "seedbox_engine_core"
+path = "src/lib.rs"
+
+[dependencies]
+seedbox-control = { package = "seedbox-vmm-control", path = "../control" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
