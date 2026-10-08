@@ -230,6 +230,17 @@ with `matched`, `queue_dropped`, and `delayed_max_ns`; require positive evidence
 when the scenario needs queue saturation. Earlier departures remain reserved
 across shaping and healing. Replay retains these settings automatically.
 
+Shapes also accept `reorder_ppm` with `reorder_delay`, `duplicate_ppm`,
+`burst_loss_ppm` with `burst_length`, `latency_spike_ppm` with `latency_spike`,
+and `tcp_reset_ppm`. Probabilities are integer parts per million; delays are
+nanoseconds. Each optional fault has its own seed-derived stream and is released
+with `world.heal(handle)`, which returns `network_fault_counts`. The newest
+matching shape replaces the entire policy; healing reveals the prior layer.
+Queued decisions survive healing. Require receipt/socket evidence in your
+scenario: the `reordered` and `tcp_reset` counts report scheduled injections.
+Reset supports ACK-bearing unfragmented IPv4 TCP segments. See
+`python/PROTOCOL.md` in the Seedbox repository for parameters and limits.
+
 Controllers can also discover directional TCP incarnations with
 `world.connections("server", "client")`, then pass an exact returned record to
 `world.drop_connection(record)`. The returned handle arms loss for that direction

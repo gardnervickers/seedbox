@@ -89,6 +89,70 @@ fn configure_control(w: &mut World<Mock>) {
 }
 
 #[test]
+fn dynamic_network_faults_and_healing_are_identical_across_worker_counts_and_snapshots() {
+    let mut reference = None;
+    for workers in [0, 1, 2, 4] {
+        let mut w = world(&["a", "b"]);
+        w.early = 0;
+        for plan in [
+            json!({"id":1,"at_ns":4,"deadline_ns":4,"action":"shape","handle":"s","from":["a"],"to":["b"],"latency_ns":10,"jitter_ns":0,"loss_ppm":0,"network_faults":{"reorder_ppm":500_000,"reorder_delay_ns":30,"duplicate_ppm":500_000,"burst_loss_ppm":100_000,"burst_length":3,"latency_spike_ppm":500_000,"latency_spike_ns":20,"tcp_reset_ppm":500_000}}),
+            json!({"id":2,"at_ns":30,"deadline_ns":30,"action":"heal","handle":"s"}),
+        ] {
+            w.faults
+                .append(serde_json::from_value(plan).unwrap())
+                .unwrap();
+        }
+        let mut frame = vec![0; 55];
+        frame[5] = 1;
+        frame[12..14].copy_from_slice(&[8, 0]);
+        frame[14] = 0x45;
+        frame[16..18].copy_from_slice(&41u16.to_be_bytes());
+        frame[23] = 6;
+        frame[34..38].copy_from_slice(&[0x0f, 0xa0, 0, 80]);
+        frame[46] = 0x50;
+        frame[47] = 0x18;
+        for at in 5..40 {
+            let mut step = Step::new(at, Stop::Sent);
+            step.frames = vec![frame.clone()];
+            w.machines[0].steps.push_back(step);
+        }
+        let snapshot = WorldSnapshot::take_checkpoint(&mut w).unwrap();
+        w.factory.lock().unwrap().clear();
+        let execute = |w: &mut World<Mock>| {
+            run_with(w, 100, None, workers, Duration::from_micros(3)).unwrap();
+            let mut h = sha2::Sha256::new();
+            w.faults.network_witness(&mut h);
+            let counts = &w.faults.log[1]["network_fault_counts"];
+            for key in [
+                "reordered",
+                "duplicated",
+                "burst_dropped",
+                "spiked",
+                "tcp_reset",
+            ] {
+                assert!(counts[key].as_u64().unwrap() > 0, "{counts}");
+            }
+            assert!(w.faults.active_handles().is_empty());
+            (
+                w.network_snapshot(),
+                h.finalize().to_vec(),
+                machine_trace(w, "b"),
+                w.faults.log.clone(),
+            )
+        };
+        let observed = execute(&mut w);
+        if let Some(want) = &reference {
+            assert_eq!(&observed, want);
+        } else {
+            reference = Some(observed.clone());
+        }
+        snapshot.restore(&mut w).unwrap();
+        w.factory.lock().unwrap().clear();
+        assert_eq!(execute(&mut w), observed);
+    }
+}
+
+#[test]
 fn bandwidth_tail_drop_and_nominal_counts_are_identical_across_worker_counts() {
     let mut reference = None;
     for workers in [0, 1, 2, 4] {

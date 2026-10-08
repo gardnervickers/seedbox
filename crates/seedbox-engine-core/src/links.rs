@@ -1,5 +1,7 @@
 //! Directed, send-time link decisions. No host, device or scheduler dependencies.
 use crate::rng::Rng;
+use crate::network_faults::{self, Counts, Streams};
+use seedbox_control::NetworkFaults;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -69,6 +71,9 @@ pub struct Layer {
     pub pairs: BTreeSet<Pair>,
     pub policy: Policy,
     pub queue_counts: QueueCounts,
+    pub network_faults: NetworkFaults,
+    pub network_counts: Counts,
+    burst_remaining: BTreeMap<Pair, u64>,
 }
 #[derive(Clone)]
 pub struct Links {
@@ -84,6 +89,8 @@ pub struct Links {
     pub shaped: bool,
     loss: BTreeMap<Pair, Rng>,
     jitter: BTreeMap<Pair, Rng>,
+    network_streams: Streams,
+    network_used: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -124,6 +131,8 @@ impl Links {
             shaped: false,
             loss: BTreeMap::new(),
             jitter: BTreeMap::new(),
+            network_streams: Streams::default(),
+            network_used: false,
         };
         links.reseed(seed, names);
         Ok(links)
@@ -192,6 +201,7 @@ impl Links {
     }
     /// Preserve sampled arrivals, baselines and layers; only future draws change.
     pub fn reseed_branch(&mut self, seed: u64, identity: Option<&str>, names: &[String]) {
+        self.network_streams.reseed(seed, identity, names);
         self.loss.clear();
         self.jitter.clear();
         for a in 0..names.len() {
@@ -234,12 +244,20 @@ impl Links {
         pairs: BTreeSet<Pair>,
         policy: Policy,
     ) -> Result<(), String> {
+        self.shape_with_faults(id, handle, pairs, policy, NetworkFaults::default())
+    }
+    pub fn shape_with_faults(
+        &mut self, id: u32, handle: String, pairs: BTreeSet<Pair>, policy: Policy,
+        network_faults: NetworkFaults,
+    ) -> Result<(), String> {
         policy.validate(self.global.latency_ns)?;
+        network_faults.validate(policy.latency_ns, policy.jitter_ns)?;
         if self.layers.contains_key(&id) || self.layers.values().any(|l| l.handle == handle) {
             return Err("duplicate active shape".into());
         }
         self.shaped = true;
         self.bandwidth_used |= policy.bandwidth_bps.is_some();
+        self.network_used |= !network_faults.is_off();
         self.layers.insert(
             id,
             Layer {
@@ -247,6 +265,9 @@ impl Links {
                 pairs,
                 policy,
                 queue_counts: QueueCounts::default(),
+                network_faults,
+                network_counts: Counts::default(),
+                burst_remaining: BTreeMap::new(),
             },
         );
         Ok(())
@@ -276,6 +297,24 @@ impl Links {
         if (loss as u128) * 1_000_000 < (policy.loss_ppm as u128) << 64 {
             return Outcome::Lost;
         }
+        // Existing loss/jitter draws precede every new stream. Bursts reserve
+        // neither the serialization clock nor the FIFO arrival clock.
+        if let Some(layer) = self.layers.values_mut().rev().find(|l| l.pairs.contains(&pair)) {
+            let f = layer.network_faults;
+            if !f.is_off() { layer.network_counts.matched += 1; }
+            if f.burst_loss_ppm != 0 {
+                let remaining = layer.burst_remaining.entry(pair).or_default();
+                if *remaining > 0 { *remaining -= 1; }
+                else if self.network_streams.choose(pair, network_faults::BURST, f.burst_loss_ppm) {
+                    *remaining = f.burst_length - 1;
+                } else { return self.finish_decision(pair, send, bytes, policy, jitter); }
+                layer.network_counts.burst_dropped += 1;
+                return Outcome::Lost;
+            }
+        }
+        self.finish_decision(pair, send, bytes, policy, jitter)
+    }
+    fn finish_decision(&mut self, pair: Pair, send: u64, bytes: usize, policy: Policy, jitter: u64) -> Outcome {
         // Bandwidth uses no randomness, and is evaluated after the established
         // loss/jitter draws. Dropped candidates reserve neither clock.
         let depart = if let Some(rate) = policy.bandwidth_bps {
@@ -300,6 +339,40 @@ impl Links {
             (depart + policy.latency_ns + jitter).max(self.last.get(&pair).copied().unwrap_or(0) + 1);
         self.last.insert(pair, arrival);
         Outcome::Deliver(arrival)
+    }
+    /// Receive-side injection at the retained frame deadline. Added delays are
+    /// outside the base FIFO clock so a later frame can overtake a held frame.
+    /// A duplicate is one copy a nanosecond later, without another send
+    /// decision or serialization charge. Healing never edits these queued bytes.
+    pub fn deliveries(&mut self, pair: Pair, arrival: u64, frame: &[u8]) -> Vec<(u64, Vec<u8>)> {
+        let Some(layer) = self.layers.values_mut().rev().find(|l| l.pairs.contains(&pair)) else {
+            return vec![(arrival, frame.to_vec())];
+        };
+        let f = layer.network_faults;
+        let mut delay = 0;
+        if self.network_streams.choose(pair, network_faults::REORDER, f.reorder_ppm) {
+            delay += self.network_streams.delay(pair, f.reorder_delay_ns);
+            layer.network_counts.reordered += 1;
+        }
+        if self.network_streams.choose(pair, network_faults::SPIKE, f.latency_spike_ppm) {
+            delay += f.latency_spike_ns;
+            layer.network_counts.spiked += 1;
+        }
+        layer.network_counts.delayed_max_ns = layer.network_counts.delayed_max_ns.max(delay);
+        let reset = if f.tcp_reset_ppm != 0 { crate::connections::reset_frame(frame) } else { None };
+        let bytes = if let Some(reset) = reset.filter(|_| self.network_streams.choose(pair, network_faults::RESET, f.tcp_reset_ppm)) {
+            layer.network_counts.tcp_reset += 1;
+            reset
+        } else { frame.to_vec() };
+        let at = arrival.saturating_add(delay);
+        let mut deliveries = vec![(at, bytes)];
+        if self.network_streams.choose(pair, network_faults::DUPLICATE, f.duplicate_ppm) {
+            if let Some(duplicate_at) = at.checked_add(1) {
+                layer.network_counts.duplicated += 1;
+                deliveries.push((duplicate_at, deliveries[0].1.clone()));
+            }
+        }
+        deliveries
     }
     /// Fixed little-endian, length-prefixed encoding, ordered by pair/fault ID.
     pub fn witness(&self, h: &mut Sha256) {
@@ -357,6 +430,24 @@ impl Links {
             h.update((self.queue_counts.len() as u64).to_le_bytes());
             for (&pair, &counts) in &self.queue_counts { pair_hash(h, pair); counts.witness(h); }
         }
+        if self.network_used {
+            h.update(b"seedbox-network-faults-v1");
+            self.network_streams.witness(h);
+            h.update((self.layers.len() as u64).to_le_bytes());
+            for (&id, layer) in &self.layers {
+                h.update(id.to_le_bytes());
+                let f = layer.network_faults;
+                for n in [f.reorder_ppm, f.reorder_delay_ns, f.duplicate_ppm, f.burst_loss_ppm,
+                    f.burst_length, f.latency_spike_ppm, f.latency_spike_ns, f.tcp_reset_ppm] {
+                    h.update(n.to_le_bytes());
+                }
+                layer.network_counts.witness(h);
+                h.update((layer.burst_remaining.len() as u64).to_le_bytes());
+                for (&pair, &remaining) in &layer.burst_remaining {
+                    pair_hash(h, pair); h.update(remaining.to_le_bytes());
+                }
+            }
+        }
     }
 }
 fn optional_u64(value: &Value, key: &str) -> Result<Option<u64>, String> {
@@ -403,6 +494,147 @@ mod tests {
     }
     fn draws(l: &Links, p: Pair) -> (u64, u64) {
         (l.loss[&p].counter(), l.jitter[&p].counter())
+    }
+    fn impair(l: &mut Links, send: u64, frame: &[u8]) -> (Outcome, Vec<(u64,Vec<u8>)>) {
+        let outcome = l.decide(0,1,send,frame.len(),false);
+        let deliveries = match outcome { Outcome::Deliver(at) => l.deliveries((0,1),at,frame), _ => vec![] };
+        (outcome,deliveries)
+    }
+    #[test]
+    fn inactive_faults_add_zero_draws_and_active_faults_do_not_move_legacy_streams() {
+        let p = policy(100,50,500_000);
+        let mut plain = links(p);
+        let mut off = plain.clone();
+        off.shape_with_faults(1,"s".into(),BTreeSet::from([(0,1)]),p,NetworkFaults::default()).unwrap();
+        plain.shape(1,"s".into(),BTreeSet::from([(0,1)]),p).unwrap();
+        for n in 0..128 {
+            assert_eq!(impair(&mut off,n,&[0;60]),impair(&mut plain,n,&[0;60]));
+        }
+        assert_eq!(hash(&off),hash(&plain));
+        assert_eq!(off.network_streams.counters((0,1)),[0;5]);
+        let mut on = links(p);
+        let f = NetworkFaults { reorder_ppm:500_000,reorder_delay_ns:100,duplicate_ppm:500_000,
+            burst_loss_ppm:500_000,burst_length:3,latency_spike_ppm:500_000,latency_spike_ns:200,
+            tcp_reset_ppm:500_000 };
+        on.shape_with_faults(1,"s".into(),BTreeSet::from([(0,1)]),p,f).unwrap();
+        let mut reference = links(p);
+        for n in 0..128 {
+            if n%7==0 { on.selected_drop(0,1); reference.selected_drop(0,1); }
+            let cut = n%11==0;
+            let outcome=on.decide(0,1,n,60,cut);
+            if let Outcome::Deliver(at)=outcome {on.deliveries((0,1),at,&[0;60]);}
+            reference.decide(0,1,n,60,cut);
+            assert_eq!(draws(&on,(0,1)),draws(&reference,(0,1)));
+        }
+        assert_eq!(on.stream_sample((0,1)),reference.stream_sample((0,1)));
+        assert_eq!(on.network_streams.counters((0,2)),[0;5]);
+        assert_eq!(on.network_streams.counters((0,1))[network_faults::RESET],0,"non-TCP never samples reset");
+        let draws=on.network_streams.counters((0,1));
+        assert_eq!(on.decide(0,1,200,60,true),Outcome::Cut);
+        on.selected_drop(0,1);
+        assert_eq!(on.network_streams.counters((0,1)),draws);
+        on.heal("s");
+        for n in 201..210 {impair(&mut on,n,&[0;60]);}
+        assert_eq!(on.network_streams.counters((0,1)),draws,"healing stops new draws");
+    }
+    #[test]
+    fn bursts_have_exact_lengths_and_reserve_no_bandwidth_or_fifo_clocks() {
+        let p=rate(None);
+        let f=NetworkFaults {burst_loss_ppm:200_000,burst_length:3,..Default::default()};
+        let mut l=links(p);
+        l.shape_with_faults(1,"s".into(),BTreeSet::from([(0,1)]),p,f).unwrap();
+        let mut rng=Rng::new(1009,"link-burst-loss/a/b");
+        let mut remaining=0;
+        let mut lost=0;
+        for n in 0..128 {
+            let drop=if remaining>0 {remaining-=1;true} else if (rng.next() as u128)*1_000_000<(f.burst_loss_ppm as u128)<<64 {remaining=2;true} else {false};
+            let last=l.last.clone();let depart=l.last_depart.clone();
+            let result=l.decide(0,1,n,1500,false);
+            assert_eq!(result==Outcome::Lost,drop);
+            if drop {lost+=1;assert_eq!(l.last,last);assert_eq!(l.last_depart,depart);}
+        }
+        assert!(lost>3 && lost<128);
+        assert_eq!(l.layers[&1].network_counts.burst_dropped,lost);
+        assert_eq!(l.network_streams.counters((0,1)),[0,0,rng.counter(),0,0]);
+        assert_eq!(l.layers[&1].burst_remaining[&(0,1)],remaining);
+    }
+    #[test]
+    fn delays_overtake_copies_are_adjacent_and_each_fault_has_its_own_stream() {
+        let p=policy(10,0,0);
+        let f=NetworkFaults {reorder_ppm:1_000_000,reorder_delay_ns:1000,duplicate_ppm:1_000_000,
+            latency_spike_ppm:1_000_000,latency_spike_ns:100,..Default::default()};
+        let mut l=links(p);
+        l.shape_with_faults(1,"s".into(),BTreeSet::from([(0,1)]),p,f).unwrap();
+        let mut rng=Rng::new(1009,"link-reorder/a/b");
+        let mut arrivals=vec![];
+        for n in 0..32 {
+            rng.next();let extra=rng.below(1000)+1;
+            let (base,frames)=impair(&mut l,n,&[n as u8;60]);
+            assert_eq!(base,Outcome::Deliver(n+10));
+            assert_eq!(frames,vec![(n+110+extra,vec![n as u8;60]),(n+111+extra,vec![n as u8;60])]);
+            arrivals.push(frames[0].0);
+        }
+        assert!(arrivals.windows(2).any(|p|p[1]<p[0]),"actually overtakes");
+        assert_eq!(l.network_streams.counters((0,1)),[64,32,0,32,0]);
+        assert_eq!(l.decide(1,0,0,60,false),Outcome::Deliver(10));
+        let mut spike_only=links(p);
+        spike_only.shape_with_faults(1,"s".into(),BTreeSet::from([(0,1)]),p,NetworkFaults {latency_spike_ppm:1_000_000,latency_spike_ns:100,..Default::default()}).unwrap();
+        assert_eq!(impair(&mut spike_only,0,&[0;60]).1,vec![(110,vec![0;60])]);
+        assert_eq!(spike_only.network_streams.counters((0,1)),[0,0,0,1,0]);
+    }
+    #[test]
+    fn layers_heal_in_either_order_and_snapshots_retain_streams_bursts_and_witnesses() {
+        let p=policy(10,0,0);
+        let f=NetworkFaults {reorder_ppm:500_000,reorder_delay_ns:100,duplicate_ppm:500_000,
+            burst_loss_ppm:100_000,burst_length:5,..Default::default()};
+        for order in [["old","new"],["new","old"]] {
+            let mut l=links(p);
+            l.shape_with_faults(1,"old".into(),BTreeSet::from([(0,1)]),p,f).unwrap();
+            for n in 0..16 {impair(&mut l,n,&[0;60]);}
+            let before=l.clone();
+            l.shape(2,"new".into(),BTreeSet::from([(0,1)]),p).unwrap();
+            for n in 16..20 {impair(&mut l,n,&[0;60]);}
+            assert_eq!(l.network_streams.counters((0,1)),before.network_streams.counters((0,1)),"masked layer does not draw");
+            assert_eq!(l.layers[&1].burst_remaining,before.layers[&1].burst_remaining);
+            let saved=l.clone();
+            let sequence=|l:&mut Links| {l.heal(order[0]);let a=impair(l,20,&[0;60]);l.heal(order[1]);(a,impair(l,21,&[0;60]),hash(l))};
+            let observed=sequence(&mut l);
+            let mut restored=saved.clone();
+            assert_eq!(sequence(&mut restored),observed);
+            let mut branched=before.clone();
+            branched.reseed_branch(42,Some("branch"),&names());
+            assert_eq!(branched.layers[&1].burst_remaining,before.layers[&1].burst_remaining);
+            assert_eq!(branched.last,before.last);
+            assert_eq!(branched.network_streams.counters((0,1)),[0;5]);
+            let mut same=before.clone();same.reseed_branch(42,Some("branch"),&names());
+            for n in 20..64 {assert_eq!(impair(&mut branched,n,&[0;60]),impair(&mut same,n,&[0;60]));}
+            let mut changed=before.clone();changed.layers.get_mut(&1).unwrap().burst_remaining.insert((0,1),99);
+            assert_ne!(hash(&changed),hash(&before));
+            let mut changed=before.clone();changed.layers.get_mut(&1).unwrap().network_counts.duplicated+=1;
+            assert_ne!(hash(&changed),hash(&before));
+            let mut changed=before.clone();changed.layers.get_mut(&1).unwrap().network_faults.reorder_ppm+=1;
+            assert_ne!(hash(&changed),hash(&before));
+        }
+    }
+    #[test]
+    fn reset_only_samples_eligible_tcp_and_healing_retains_scheduled_reset_bytes() {
+        let p=policy(10,0,0);
+        let mut l=links(p);
+        l.shape_with_faults(1,"s".into(),BTreeSet::from([(0,1)]),p,NetworkFaults {tcp_reset_ppm:1_000_000,..Default::default()}).unwrap();
+        let mut frame=vec![0;55];frame[12..14].copy_from_slice(&[8,0]);frame[14]=0x45;
+        frame[16..18].copy_from_slice(&41u16.to_be_bytes());frame[22]=64;frame[23]=6;
+        frame[34..38].copy_from_slice(&[0x0f,0xa0,0,80]);frame[46]=0x50;frame[47]=0x18;
+        for bytes in [&[0;60][..],&frame[..54]] {impair(&mut l,0,bytes);}
+        assert_eq!(l.network_streams.counters((0,1)),[0;5]);
+        let (base,queued)=impair(&mut l,1,&frame);
+        assert_eq!(base,Outcome::Deliver(12));
+        assert_eq!(queued[0].1[47],0x14);assert_eq!(queued[0].1.len(),54);
+        assert_eq!(l.network_streams.counters((0,1)),[0,0,0,0,1]);
+        assert_eq!(l.layers[&1].network_counts.tcp_reset,1);
+        l.heal("s");
+        assert_eq!(queued[0].1[47],0x14);
+        assert_eq!(impair(&mut l,2,&frame).1[0].1,frame);
+        assert_eq!(l.network_streams.counters((0,1)),[0,0,0,0,1]);
     }
     #[test]
     fn floor_and_policy_bounds_are_validated_again_in_the_vmm() {

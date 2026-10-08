@@ -4,6 +4,74 @@ pub const PROCESS_EFFECT_TIMEOUT_NS: u64 = 5_000_000_000;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, num::NonZeroU32};
 
+/// Opt-in send-time impairments, carried by a healable directed shape layer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NetworkFaults {
+    pub reorder_ppm: u64,
+    pub reorder_delay_ns: u64,
+    pub duplicate_ppm: u64,
+    pub burst_loss_ppm: u64,
+    pub burst_length: u64,
+    pub latency_spike_ppm: u64,
+    pub latency_spike_ns: u64,
+    pub tcp_reset_ppm: u64,
+}
+impl NetworkFaults {
+    pub fn is_off(&self) -> bool {
+        self.reorder_ppm == 0
+            && self.duplicate_ppm == 0
+            && self.burst_loss_ppm == 0
+            && self.latency_spike_ppm == 0
+            && self.tcp_reset_ppm == 0
+    }
+    pub fn validate(&self, latency_ns: u64, jitter_ns: u64) -> Result<(), String> {
+        for (name, ppm) in [
+            ("reorder_ppm", self.reorder_ppm),
+            ("duplicate_ppm", self.duplicate_ppm),
+            ("burst_loss_ppm", self.burst_loss_ppm),
+            ("latency_spike_ppm", self.latency_spike_ppm),
+            ("tcp_reset_ppm", self.tcp_reset_ppm),
+        ] {
+            if ppm > 1_000_000 {
+                return Err(format!("{name} exceeds 1000000"));
+            }
+        }
+        for (name, ppm, amount) in [
+            ("reorder_delay_ns", self.reorder_ppm, self.reorder_delay_ns),
+            ("burst_length", self.burst_loss_ppm, self.burst_length),
+            (
+                "latency_spike_ns",
+                self.latency_spike_ppm,
+                self.latency_spike_ns,
+            ),
+        ] {
+            if ppm != 0 && amount == 0 {
+                return Err(format!("{name} must be positive when its fault is active"));
+            }
+        }
+        let reorder = if self.reorder_ppm == 0 {
+            0
+        } else {
+            self.reorder_delay_ns
+        };
+        let spike = if self.latency_spike_ppm == 0 {
+            0
+        } else {
+            self.latency_spike_ns
+        };
+        if latency_ns
+            .checked_add(jitter_ns)
+            .and_then(|n| n.checked_add(reorder))
+            .and_then(|n| n.checked_add(spike))
+            .is_none_or(|n| n > 3_600_000_000_000)
+        {
+            return Err("latency, jitter and fault delays exceed one hour".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Target {
@@ -73,6 +141,8 @@ pub enum Operation {
         bandwidth_bps: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         queue_bound_ns: Option<u64>,
+        #[serde(default, skip_serializing_if = "NetworkFaults::is_off")]
+        network_faults: NetworkFaults,
     },
     Heal {
         handle: String,
@@ -184,6 +254,8 @@ pub enum Action {
         bandwidth_bps: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         queue_bound_ns: Option<u64>,
+        #[serde(default, skip_serializing_if = "NetworkFaults::is_off")]
+        network_faults: NetworkFaults,
     },
     Heal {
         handle: String,

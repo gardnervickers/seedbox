@@ -65,6 +65,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Compose file | `compose.yaml` in the given directory (default `.`) | positional path |
 | Directed link baselines | no overrides; global latency/jitter and zero loss | `x-seedbox.network.links` |
 | Link bandwidth and queue | infinite bandwidth, unbounded queue | `x-seedbox.network.bandwidth_bps`, `queue_bound`, or the same keys in `links` |
+| Runtime network impairments | off | `world.shape`: reorder, duplicate, burst loss, latency spike and TCP reset parameters |
 | Connection selectors | disabled; discover and select through the guest control API | `world.connections`, `world.drop_connection` |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
 | Deferred TX kicks (Linux KVM) | off; service TX as in the current engine | `--deferred-tx` (prepare/run/explore) |
@@ -116,6 +117,14 @@ scenario needs to exercise a full queue. The guest-owned
 `harness/acceptance/workloads/bandwidth.yaml` checks serialization delay, queue
 drops and a successful exchange after healing; run it and replay its retained run
 on a Linux KVM host.
+
+Runtime shapes also support packet reorder and duplication, burst loss, latency
+spikes and TCP reset injection. Each uses an optional seed-derived stream and
+returns `network_fault_counts` when healed. For example:
+`world.shape(["client"], ["server"], latency=1_000_000, reorder_ppm=500_000, reorder_delay=100_000_000)`.
+See the [dynamic fault parameters](python/PROTOCOL.md#dynamic-network-impairments)
+and `harness/acceptance/workloads/network-faults.yaml` for dynamic on/off checks
+and replay.
 
 For one TCP direction, use `world.connections("server", "client")`, select an
 exact returned record with `world.drop_connection(record)`, then

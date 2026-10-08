@@ -272,6 +272,7 @@ fn triggered_partition_dominates_live_shape_and_heal_reveals_it() {
             loss_ppm: 0,
             bandwidth_bps: None,
             queue_bound_ns: None,
+            network_faults: Default::default(),
         },
     })
     .unwrap();

@@ -155,6 +155,40 @@ class ControlTests(unittest.TestCase):
         self.assertEqual(peer.requests[0]["bandwidth_bps"], 1_000_000)
         self.assertEqual(peer.requests[0]["queue_bound_ns"], 12_000_000)
 
+    def test_each_network_fault_uses_shape_and_returns_heal_evidence(self):
+        for kwargs, wire in [
+            ({"reorder_ppm": 500_000, "reorder_delay": 100}, {"reorder_ppm": 500_000, "reorder_delay_ns": 100}),
+            ({"duplicate_ppm": 1_000_000}, {"duplicate_ppm": 1_000_000}),
+            ({"burst_loss_ppm": 10_000, "burst_length": 4}, {"burst_loss_ppm": 10_000, "burst_length": 4}),
+            ({"latency_spike_ppm": 100_000, "latency_spike": 200}, {"latency_spike_ppm": 100_000, "latency_spike_ns": 200}),
+            ({"tcp_reset_ppm": 1_000_000}, {"tcp_reset_ppm": 1_000_000}),
+        ]:
+            counts = {"matched": 3, "duplicated": 3}
+            peer = Peer(reply(result={"handle": "p1"}) + reply(2, {"network_fault_counts": counts}))
+            with World(peer) as world:
+                handle = world.shape(["client"], ["server"], latency=10, **kwargs)
+                self.assertEqual(world.heal(handle), {"network_fault_counts": counts})
+            for key, value in wire.items():
+                self.assertEqual(peer.requests[0]["network_faults"][key], value)
+            self.assertEqual(peer.requests[1]["handle"], "p1")
+
+    def test_invalid_network_faults_are_rejected_before_sending(self):
+        peer = Peer(reply(result={"handle": "p1"}))
+        with World(peer) as world:
+            for kwargs in [
+                {"duplicate_ppm": True}, {"duplicate_ppm": 0.5}, {"duplicate_ppm": 1_000_001},
+                {"reorder_ppm": 1}, {"reorder_delay": -1},
+                {"reorder_ppm": 1, "reorder_delay": 3_600_000_000_000},
+                {"burst_loss_ppm": 1}, {"burst_length": 2**64},
+                {"latency_spike_ppm": 1}, {"latency_spike": True},
+                {"tcp_reset_ppm": -1},
+            ]:
+                with self.assertRaises(ValueError):
+                    world.shape(["client"], ["server"], latency=10, **kwargs)
+            self.assertEqual(peer.requests, [])
+            world.shape(["client"], ["server"], latency=10)
+        self.assertNotIn("network_faults", peer.requests[0])
+
     def test_graceful_reconnect_starts_new_ids_and_preserves_explicit_handles(self):
         # Use actual Unix streams and independent literal peer messages. The
         # public client never sees the broker's private session/relay counters.
