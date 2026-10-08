@@ -218,7 +218,11 @@ by SHA-256. Runtime identities:
 | --- | --- |
 | CLI | `14e3d03c33cd2bcd6fe196314b573f8fef4e457094be6c512aab9a8d4ced0cb6` |
 | VMM | `af0debdb6fe642543e771fe6e66efb56fecb7b29696d7508136b3cee37b082e3` |
-| Kernel | `e8ece7cba2d5fc4924da83e39cc672ae2516c117f8f76ecfa04aeaa98e697847` |
+| Kernel (current release-policy pin, K2) | `68bf3f024fc6ec0c01399020b5c37e4b42d661c2604f3c87fc879ccf9280e166` |
+
+The historical run above used kernel `e8ece7cba2d5fc4924da83e39cc672ae2516c117f8f76ecfa04aeaa98e697847`.
+The Kernel row now names the K2 release-policy pin; these historical receipts
+do not qualify that pair. Fresh AMD host run/replay acceptance is required.
 
 Formatting, strict all-target Clippy, workspace tests and portable acceptance
 passed on Darwin. Linux strict Clippy, portable acceptance and VMM tests passed.
@@ -411,3 +415,21 @@ single-member etcd fixture is preserved.
 The direct KVM results above retain their recorded engine identities; hardware
 execution was not repeated for this merge. The seed-4004 clock-bound failure is
 tracked in [issue #33](https://github.com/gardnervickers/seedbox/issues/33).
+
+
+## Change-scoped host-check source staging
+
+The [host-check planner and smoke tier](../harness/smoke/README.md#change-scoped-host-checks)
+select a minimal core for engine changes and add only the affected disk, link,
+preparation, control or stepping checks. `host-plan.py BASE HEAD` prints paths
+from `BASE...HEAD`, supports JSON and unions repeatable reviewer `--extra`
+additions. `host-check.sh --plan` performs no host work; `--lanes 1,2,3`
+selects explicit reciprocal SMT pairs and refuses CPU 0/16. Core includes the
+fixed full-state smoke, default MATCH and a seed-1009 cluster comparison against
+main. Only selected stepping/counter/undo checks add `--perf-replay`. Passing
+checks discard run state and keep timing/comparison summaries; failures print
+a cleanup command. Portable controls
+exercise the map, Git planning, real disposable flock contention and harmless
+concurrent workers. These controls do not execute a guest or qualify a candidate.
+Parallel dispatch and its host cleanup behavior have not been accepted on Linux;
+no new hardware result, release pin or qualification is recorded here.

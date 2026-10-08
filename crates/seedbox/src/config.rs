@@ -43,6 +43,9 @@ pub struct Service {
     pub working_dir: Option<String>,
     pub user: Option<String>,
     pub configs: Vec<ConfigMount>,
+    /// Named volumes, kept on the service machine's retained disk.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub volumes: Vec<VolumeMount>,
     pub network: String,
 }
 
@@ -67,10 +70,31 @@ pub struct ConfigMount {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct VolumeMount {
+    /// A top-level `volumes` name.
+    pub source: String,
+    /// Absolute directory in the service's filesystem.
+    pub target: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Network {
     pub name: String,
     pub latency_ns: u64,
     pub jitter_ns: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Link>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Link {
+    pub from: String,
+    pub to: String,
+    pub latency_ns: u64,
+    pub jitter_ns: u64,
+    pub loss_ppm: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,7 +131,14 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
     let top = fields(
         &doc,
         "$",
-        &["name", "services", "configs", "networks", "x-seedbox"],
+        &[
+            "name",
+            "services",
+            "configs",
+            "volumes",
+            "networks",
+            "x-seedbox",
+        ],
     )?;
     let base = source.parent().unwrap_or(Path::new("."));
     let name = match top.get("name") {
@@ -137,6 +168,15 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
             key,
             local_path(get(cfg, "file"), &format!("{p}.file"), base, false)?,
         );
+    }
+    let mut volumes = BTreeMap::new();
+    for (key, value) in entries(top.get("volumes"), "$.volumes")? {
+        if !identifier(&key) {
+            return invalid("$.volumes", format!("invalid volume name {key:?}"));
+        }
+        empty_options(value, &format!("$.volumes.{key}"))?;
+        // The service that mounts it, once one does.
+        volumes.insert(key, None::<String>);
     }
     let network_name = if let Some(networks) = top.get("networks") {
         let nets = entries(Some(networks), "$.networks")?;
@@ -178,6 +218,7 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
                 "working_dir",
                 "user",
                 "configs",
+                "volumes",
                 "networks",
             ],
         )?;
@@ -280,6 +321,49 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
                 mounts.push(ConfigMount { source, target });
             }
         }
+        let mut volume_mounts: Vec<VolumeMount> = Vec::new();
+        if let Some(raw) = svc.get("volumes") {
+            for (i, item) in sequence(raw, &format!("{p}.volumes"))?.iter().enumerate() {
+                let vp = format!("{p}.volumes[{i}]");
+                let (source, target) = if item.is_string() {
+                    let short = text(item, &vp)?;
+                    match short.split(':').collect::<Vec<_>>()[..] {
+                        [source, target] => (source.to_owned(), target.to_owned()),
+                        _ => {
+                            return invalid(
+                                &vp,
+                                "expected NAME:/path; access modes and bind mounts are unsupported",
+                            )
+                        }
+                    }
+                } else {
+                    let mount = fields(item, &vp, &["type", "source", "target"])?;
+                    if text(get(mount, "type"), &format!("{vp}.type"))? != "volume" {
+                        return invalid(&format!("{vp}.type"), "only named volumes are supported");
+                    }
+                    (
+                        text(get(mount, "source"), &format!("{vp}.source"))?,
+                        text(get(mount, "target"), &format!("{vp}.target"))?,
+                    )
+                };
+                match volumes.get_mut(&source) {
+                    None => return invalid(&vp, format!("unknown volume {source:?}; declare it under top-level volumes")),
+                    Some(Some(user)) => return invalid(&vp, format!("volume {source:?} is already mounted by service {user:?}; each volume lives on one machine's disk")),
+                    Some(owner) => *owner = Some(key.clone()),
+                }
+                guest_path(&target, &format!("{vp}.target"))?;
+                if target == "/" || volume_mounts.iter().any(|m| m.target == target) {
+                    return invalid(&vp, "volume target must be a unique directory other than /");
+                }
+                if mounts
+                    .iter()
+                    .any(|m| m.target == target || m.target.starts_with(&format!("{target}/")))
+                {
+                    return invalid(&vp, "volume target overlaps a config mount");
+                }
+                volume_mounts.push(VolumeMount { source, target });
+            }
+        }
         let working_dir = optional_text(svc.get("working_dir"), &format!("{p}.working_dir"))?;
         if let Some(dir) = &working_dir {
             guest_path(dir, &format!("{p}.working_dir"))?;
@@ -299,6 +383,7 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
                 working_dir,
                 user: optional_text(svc.get("user"), &format!("{p}.user"))?,
                 configs: mounts,
+                volumes: volume_mounts,
                 network: network_name.clone(),
             },
         );
@@ -330,9 +415,10 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
         name: network_name,
         latency_ns: 1_000_000,
         jitter_ns: 0,
+        links: Vec::new(),
     };
     if let Some(raw) = ext.get("network") {
-        let net = fields(raw, "$.x-seedbox.network", &["latency", "jitter"])?;
+        let net = fields(raw, "$.x-seedbox.network", &["latency", "jitter", "links"])?;
         if let Some(v) = net.get("latency") {
             network.latency_ns = duration(v, "$.x-seedbox.network.latency", false)?;
         }
@@ -342,6 +428,63 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
     }
     if network.jitter_ns >= network.latency_ns {
         return invalid("$.x-seedbox.network.jitter", "must be less than latency");
+    }
+    if let Some(raw) = ext.get("network").and_then(|v| v.get("links")) {
+        let mut pairs = std::collections::BTreeSet::new();
+        for (i, raw) in sequence(raw, "$.x-seedbox.network.links")?
+            .iter()
+            .enumerate()
+        {
+            let p = format!("$.x-seedbox.network.links[{i}]");
+            let entry = fields(raw, &p, &["from", "to", "latency", "jitter", "loss_ppm"])?;
+            let from = text(get(entry, "from"), &format!("{p}.from"))?;
+            let to = text(get(entry, "to"), &format!("{p}.to"))?;
+            for (key, name) in [("from", &from), ("to", &to)] {
+                if !services.contains_key(name) {
+                    return invalid(&format!("{p}.{key}"), "unknown service");
+                }
+            }
+            if !pairs.insert((from.clone(), to.clone())) {
+                return invalid(&p, "duplicate directed pair");
+            }
+            let latency_ns = duration(get(entry, "latency"), &format!("{p}.latency"), false)?;
+            let jitter_ns = entry
+                .get("jitter")
+                .map(|v| duration(v, &format!("{p}.jitter"), true))
+                .transpose()?
+                .unwrap_or(0);
+            let loss_ppm = entry
+                .get("loss_ppm")
+                .map(|v| {
+                    v.as_u64().filter(|n| *n <= 1_000_000).ok_or_else(|| {
+                        validation(
+                            &format!("{p}.loss_ppm"),
+                            "expected an integer in [0, 1000000]",
+                        )
+                    })
+                })
+                .transpose()?
+                .unwrap_or(0);
+            if latency_ns < network.latency_ns {
+                return invalid(&format!("{p}.latency"), "must be at least global latency");
+            }
+            if jitter_ns >= latency_ns {
+                return invalid(&format!("{p}.jitter"), "must be less than latency");
+            }
+            if latency_ns
+                .checked_add(jitter_ns)
+                .is_none_or(|n| n > 3_600_000_000_000)
+            {
+                return invalid(&p, "latency + jitter must not exceed one hour");
+            }
+            network.links.push(Link {
+                from,
+                to,
+                latency_ns,
+                jitter_ns,
+                loss_ppm,
+            });
+        }
     }
     let mut schedule = Schedule::default();
     if let Some(raw) = ext.get("schedule") {

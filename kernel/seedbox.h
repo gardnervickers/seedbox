@@ -9,10 +9,13 @@
 #define SEEDBOX_PORT_YIELD	0x52c	/* write: requested exit (0: syscall, 1: clock bound) */
 #define SEEDBOX_PORT_TIMER	0x530	/* write: arm PIT channel 0 for N ticks */
 #define SEEDBOX_TIME_PAGE_PHYS	0xd0000000UL
-#define SEEDBOX_ABI		2
+#define SEEDBOX_ABI		3
 #define SEEDBOX_TSC_KHZ		1000000
+/* PV clock: virtual time one guest clock read costs (ns; 1 in the counter timebase). */
+#define SEEDBOX_PV_READ_NS	100
 
 #ifndef __ASSEMBLY__
+#include <linux/init.h>
 #include <linux/types.h>
 #include <linux/jump_label.h>
 #include <asm/io.h>
@@ -38,6 +41,8 @@ struct seedbox_time_page {
 	u64 pv_clock;
 	u64 bound;
 	u64 syscall_target;
+	u64 entropy_gen;	/* VMM bumps after writing entropy at a time fork */
+	u64 entropy[4];	/* 32 bytes the kernel mixes in before reseeding */
 };
 
 /* Enabled at boot in the PV clock timebase; a no-op (no branch) otherwise. */
@@ -48,6 +53,9 @@ extern struct seedbox_time_page *seedbox_page;
 unsigned long long seedbox_rdtsc(void);
 bool seedbox_emulate_user_tsc(struct pt_regs *regs);
 unsigned long seedbox_tsc_khz(void);
+void __init seedbox_time_init(void);
+/* Mix in fork entropy and reseed if the VMM published new (drivers/char/random.c). */
+void seedbox_take_entropy(void);
 
 /*
  * Offer the VMM a deterministic stopping point. The executed conditional

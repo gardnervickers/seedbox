@@ -114,6 +114,7 @@ impl Fixture {
                         user: "".into(),
                         working_dir: "/".into(),
                         volumes: vec![],
+                        disk_volumes: vec![],
                     },
                 },
             )]),
@@ -138,6 +139,7 @@ impl Fixture {
                 full_state: None,
                 faults: vec![],
                 detail: None,
+                engine_qualification: None,
             },
             calls: AtomicUsize::new(0),
             fail: false,
@@ -768,6 +770,275 @@ fn envelope_missing_unrelated_and_over_count_objects_fail_before_opening_state()
         let state = f.directory.path().join(format!("inventory-{case}"));
         rejected(&path, &state, &Options::default());
         assert!(!state.exists());
+    }
+}
+
+/// Exercises real artifact admission with synthetic execution, never host probes.
+struct DevBackend<'a> {
+    policy: seedbox::vmm::VmmExecutor,
+    fixture: &'a Backend,
+}
+impl ExecutionBackend for DevBackend<'_> {
+    fn performance_parameters(&self) -> BTreeMap<String, String> {
+        self.fixture.performance_parameters()
+    }
+    fn profile(&self) -> ExecutionProfile {
+        self.policy.profile()
+    }
+    fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {
+        self.policy.validate_retained(inputs)
+    }
+    fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
+        self.fixture.execute(request)
+    }
+}
+
+#[test]
+fn dev_replay_permission_exact_hashes_and_bundle_marker_round_trip() {
+    let mut f = Fixture::new();
+    let store = ContentStore::new(f.directory.path().join("store"));
+    let engine = store
+        .materialize(
+            &f.backend.profile.engine,
+            &f.directory.path().join("engine"),
+        )
+        .unwrap();
+    let policy = seedbox::vmm::VmmExecutor::new(
+        &engine,
+        &store,
+        None,
+        512,
+        WitnessMode::Exits,
+        seedbox::counter::CounterProfile::Zen,
+    )
+    .unwrap();
+    let dev = policy
+        .clone()
+        .with_dev_engine(true, &f.preparer.inputs.kernel);
+    f.backend.profile = dev.profile();
+    f.preparer.inputs.profile = dev.profile();
+    let backend = DevBackend {
+        policy: dev.clone(),
+        fixture: &f.backend,
+    };
+    let run = f
+        .orchestrator
+        .run(&f.simulation, RunOptions::default(), &f.preparer, &backend)
+        .unwrap();
+    assert_eq!(run.record.outcome, Outcome::Pass);
+    assert_eq!(
+        run.record.identity.inputs.profile.semantic_parameters["engine_qualification"],
+        "dev-unpinned"
+    );
+    assert_eq!(
+        run.record
+            .report
+            .as_ref()
+            .unwrap()
+            .engine_qualification
+            .as_deref(),
+        Some("dev-unpinned")
+    );
+    let baseline_manifest = fs::read(run.directory.join("manifest.json")).unwrap();
+    let archive = export(&f, &run);
+    let state = f.directory.path().join("imported");
+    let imported = bundle::import(&archive, &state, &Options::default()).unwrap();
+    assert_eq!(inspect(&imported.directory).unwrap(), run.record);
+    let runner = Orchestrator::new(ContentStore::new(state.join("objects")), state.join("runs"));
+    let cli_refusal = std::process::Command::new(env!("CARGO_BIN_EXE_seedbox"))
+        .args([
+            "replay",
+            imported.directory.to_str().unwrap(),
+            "--state",
+            state.to_str().unwrap(),
+        ])
+        .env_clear()
+        .env("HOME", f.directory.path())
+        .env("PATH", "")
+        // Replay creates scratch storage even when retained admission refuses.
+        // Keep it in the fixture rather than macOS's sandbox-restricted default.
+        .env("TMPDIR", f.directory.path())
+        .output()
+        .unwrap();
+    assert_eq!(cli_refusal.status.code(), Some(2));
+    let stdout = String::from_utf8(cli_refusal.stdout).unwrap();
+    assert!(
+        stdout.starts_with("ERROR: "),
+        "stdout: {stdout:?}; stderr: {:?}",
+        String::from_utf8_lossy(&cli_refusal.stderr)
+    );
+    assert!(stdout.contains("replay: NOT_COMPARABLE (unqualified dev engine)"));
+    assert!(String::from_utf8(cli_refusal.stderr)
+        .unwrap()
+        .contains("--allow-dev-engine"));
+    let cli_inspect = std::process::Command::new(env!("CARGO_BIN_EXE_seedbox"))
+        .args(["inspect", imported.directory.to_str().unwrap(), "--json"])
+        .env_clear()
+        .env("HOME", f.directory.path())
+        .env("PATH", "")
+        .output()
+        .unwrap();
+    assert!(cli_inspect.status.success());
+    let inspected: serde_json::Value = serde_json::from_slice(&cli_inspect.stdout).unwrap();
+    assert_eq!(
+        inspected["identity"]["inputs"]["profile"]["semantic_parameters"]["engine_qualification"],
+        "dev-unpinned"
+    );
+    assert_eq!(inspected["report"]["engine_qualification"], "dev-unpinned");
+
+    let matched = runner
+        .replay(&imported.directory, &backend, &CancellationToken::default())
+        .unwrap();
+    assert_eq!(matched.record.replay.unwrap().status, ReplayStatus::Match);
+    assert_eq!(matched.record.identity, run.record.identity);
+    let refused_backend = DevBackend {
+        policy,
+        fixture: &f.backend,
+    };
+    let refused = runner
+        .replay(
+            &imported.directory,
+            &refused_backend,
+            &CancellationToken::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        refused.record.replay.unwrap().status,
+        ReplayStatus::NotComparable
+    );
+    assert!(refused.record.error.unwrap().contains("--allow-dev-engine"));
+    assert!(!refused.directory.join("output").exists());
+    let changed_engine = f.directory.path().join("changed-engine");
+    fs::write(&changed_engine, b"different dev engine").unwrap();
+    let changed = seedbox::vmm::VmmExecutor::new(
+        &changed_engine,
+        &store,
+        None,
+        512,
+        WitnessMode::Exits,
+        seedbox::counter::CounterProfile::Zen,
+    )
+    .unwrap()
+    .with_dev_engine(true, &f.preparer.inputs.kernel);
+    let changed_backend = DevBackend {
+        policy: changed,
+        fixture: &f.backend,
+    };
+    for allow_engine_change in [false, true] {
+        let rejected = runner
+            .replay_with_options(
+                &imported.directory,
+                &changed_backend,
+                ReplayOptions {
+                    allow_engine_change,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            rejected.record.replay.unwrap().status,
+            ReplayStatus::NotComparable
+        );
+        assert!(!rejected.directory.join("output").exists());
+    }
+    f.backend.calls.store(0, Ordering::SeqCst);
+    let mut mismatching = f.backend.report.clone();
+    mismatching.witness = Some(ContentDigest::of(b"different witness"));
+    let mismatch_fixture = Backend {
+        report: mismatching,
+        ..f.backend
+    };
+    let mismatch_backend = DevBackend {
+        policy: dev,
+        fixture: &mismatch_fixture,
+    };
+    let mismatch = runner
+        .replay(
+            &imported.directory,
+            &mismatch_backend,
+            &CancellationToken::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        mismatch.record.replay.unwrap().status,
+        ReplayStatus::Mismatch
+    );
+    assert_eq!(
+        mismatch
+            .record
+            .report
+            .unwrap()
+            .engine_qualification
+            .as_deref(),
+        Some("dev-unpinned")
+    );
+    assert_eq!(
+        fs::read(run.directory.join("manifest.json")).unwrap(),
+        baseline_manifest
+    );
+    assert_eq!(
+        fs::read(imported.directory.join("manifest.json")).unwrap(),
+        baseline_manifest
+    );
+}
+
+#[test]
+fn timed_indexes_and_explicit_omissions_round_trip_without_original_output() {
+    for omit in [false, true] {
+        let mut f = Fixture::new();
+        let mut index = b"SBLOG001".to_vec();
+        for v in [10u64, 0, 0, 0, 3] {
+            index.extend_from_slice(&v.to_le_bytes());
+        }
+        f.backend
+            .extra_logs
+            .insert("machines/workload.console".into(), vec![0, 255, 10]);
+        f.backend
+            .extra_logs
+            .insert("machines/workload.console.chunks".into(), index.clone());
+        if omit {
+            f.orchestrator = f.orchestrator.with_log_policy(LogPolicy {
+                max_file_bytes: 4,
+                max_total_bytes: 100,
+            });
+        }
+        let run = f.run();
+        let archive = export(&f, &run);
+        fs::remove_dir_all(&run.directory).unwrap();
+        let imported = bundle::import(
+            &archive,
+            &f.directory.path().join("imported"),
+            &Options::default(),
+        )
+        .unwrap();
+        assert_eq!(imported.record.logs, run.record.logs);
+        assert_eq!(imported.record.omitted_logs, run.record.omitted_logs);
+        let mut reader =
+            seedbox::logs::Reader::open(&imported.directory, &Default::default()).unwrap();
+        if omit {
+            assert!(reader.report.chunks.is_empty());
+            assert!(reader
+                .report
+                .omissions
+                .contains_key("machines/workload.console.chunks"));
+            assert!(!imported
+                .directory
+                .join("output/machines/workload.console.chunks")
+                .exists());
+        } else {
+            assert_eq!(
+                fs::read(
+                    imported
+                        .directory
+                        .join("output/machines/workload.console.chunks")
+                )
+                .unwrap(),
+                index
+            );
+            let mut bytes = Vec::new();
+            reader.copy_chunk(0, &mut bytes).unwrap();
+            assert_eq!(bytes, [0, 255, 10]);
+        }
     }
 }
 

@@ -103,17 +103,47 @@ impl PreparedInputs {
 /// Resolves/builds images and retains their entire input closure in `store`.
 /// No guest execution, CPU pinning, or host-state mutation is allowed here.
 pub trait PreparationBackend: Send + Sync {
+    /// Fast immutable runtime input checks, before any OCI work.
+    fn validate_runtime_inputs(&self) -> Result<()> {
+        Ok(())
+    }
     fn prepare(&self, simulation: &Simulation, store: &ContentStore) -> Result<PreparedInputs>;
+    /// Exploration preparation owns diagnostics independently of scratch inputs.
+    /// Backends must explicitly support cancellation; the default fails before work.
+    fn prepare_cancellable(
+        &self,
+        _simulation: &Simulation,
+        _store: &ContentStore,
+        _context: &crate::preparation::PreparationContext,
+    ) -> Result<PreparedInputs> {
+        Err(crate::Error::Setup(
+            "preparation backend does not support exploration cancellation".into(),
+        ))
+    }
 }
 
+#[derive(Debug, Default)]
+struct CancellationState {
+    cancelled: AtomicBool,
+    parent: Option<CancellationToken>,
+}
 #[derive(Clone, Debug, Default)]
-pub struct CancellationToken(Arc<AtomicBool>);
+pub struct CancellationToken(Arc<CancellationState>);
 impl CancellationToken {
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
+        self.0.cancelled.store(true, Ordering::Release);
     }
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.0.cancelled.load(Ordering::Acquire)
+            || self.0.parent.as_ref().is_some_and(Self::is_cancelled)
+    }
+    /// Internal failures cancel owned work without changing the caller token;
+    /// external cancellation remains directly observable without a polling race.
+    pub(crate) fn owned(&self) -> Self {
+        Self(Arc::new(CancellationState {
+            cancelled: AtomicBool::new(false),
+            parent: Some(self.clone()),
+        }))
     }
 }
 
@@ -135,6 +165,24 @@ pub struct ExecutionRequest<'a> {
 }
 
 pub trait ExecutionBackend: Send + Sync {
+    /// Admit the requested exploration capacity before preparation. Backends are
+    /// serial unless they explicitly support owned concurrent executions.
+    fn preflight_workers(&self, workers: u32) -> Result<()> {
+        if workers != 1 {
+            return Err(crate::Error::Setup(
+                "--workers: execution backend supports only one worker".into(),
+            ));
+        }
+        self.preflight(None)
+    }
+    /// Readiness check; all transient host resources must close before return.
+    fn preflight(&self, _output: Option<&Path>) -> Result<()> {
+        Ok(())
+    }
+    /// Admission proof and inputs must be checked even for old retained records.
+    fn validate_retained(&self, _inputs: &PreparedInputs) -> Result<()> {
+        Ok(())
+    }
     /// Must exactly match the recorded profile before execution can begin.
     fn profile(&self) -> ExecutionProfile;
     /// Only knobs whose witness invariance has been qualified belong here.
@@ -188,4 +236,25 @@ pub struct ExecutionReport {
     pub full_state: Option<BTreeMap<String, ContentDigest>>,
     pub faults: Vec<FaultEvent>,
     pub detail: Option<String>,
+    /// Development artifact qualification, copied from the semantic identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_qualification: Option<String>,
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::CancellationToken;
+    #[test]
+    fn owned_cancellation_is_isolated_and_parent_cancellation_is_immediate() {
+        let caller = CancellationToken::default();
+        let first = caller.owned();
+        let sibling = caller.owned();
+        first.cancel();
+        assert!(first.is_cancelled());
+        assert!(!caller.is_cancelled() && !sibling.is_cancelled());
+        let nested = sibling.owned();
+        assert!(!nested.is_cancelled());
+        caller.cancel();
+        assert!(sibling.is_cancelled() && nested.is_cancelled());
+    }
 }

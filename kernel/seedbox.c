@@ -5,7 +5,8 @@
  * Every kernel TSC read (rdtsc/rdtsc_ordered) returns virtual time published
  * by the VMM, never the hardware counter. Before the shared page is mapped,
  * reads use two port reads. Repeated reads with no new publication advance
- * by one tick, so polling loops make progress deterministically. User-mode
+ * by one tick (SEEDBOX_PV_READ_NS under the PV clock), so polling loops make
+ * progress deterministically. User-mode
  * RDTSC/RDTSCP trap through CR4.TSD and are emulated here.
  *
  * Once the page is active, interrupt masking (8259) and virtio-mmio interrupt
@@ -18,11 +19,14 @@
  * publishes instead. Both checks sit behind a static key, so in the counter
  * timebase they compile to no-ops and retire no extra branches.
  */
+#include <linux/build_bug.h>
+#include <linux/stddef.h>
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/printk.h>
 #include <asm/cpufeature.h>
+#include <asm/fixmap.h>
 #include <asm/i8259.h>
 #include <asm/insn-eval.h>
 #include <asm/seedbox.h>
@@ -41,6 +45,14 @@ noinstr unsigned long long seedbox_rdtsc(void)
 again:
 		v = READ_ONCE(p->tsc);
 		last = READ_ONCE(p->last);
+		/*
+		 * A read costs 1 ns, or SEEDBOX_PV_READ_NS under the PV clock,
+		 * where compute is free and a loop polling the clock would
+		 * otherwise need a read per nanosecond it waits. The static key
+		 * retires no conditional branch in the counter timebase.
+		 */
+		if (static_branch_unlikely(&seedbox_pv_clock))
+			last += SEEDBOX_PV_READ_NS - 1;
 		if (v <= last)
 			v = last + 1;
 		/*
@@ -96,13 +108,29 @@ unsigned long seedbox_tsc_khz(void)
 	return SEEDBOX_TSC_KHZ;
 }
 
-static int __init seedbox_time_init(void)
+void __init seedbox_time_init(void)
 {
 	struct seedbox_time_page *p;
 
-	p = memremap(SEEDBOX_TIME_PAGE_PHYS, PAGE_SIZE, MEMREMAP_WB);
-	if (!p)
-		panic("seedbox: cannot map time page");
+	/* Pin the u64-indexed ABI shared with the VMM. */
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, pv_clock) != 6 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, bound) != 7 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, syscall_target) != 8 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, entropy_gen) != 9 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, entropy[0]) != 10 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, entropy[1]) != 11 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, entropy[2]) != 12 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, entropy[3]) != 13 * sizeof(u64));
+
+	/*
+	 * setup_arch calls us after jump_label_init and early_ioremap_init,
+	 * before tsc_early_init selects delay_tsc. A permanent, write-back
+	 * fixmap needs no allocator and survives the boot page-table switch.
+	 * In particular, the PIC's 8 * 2 us + 100 us initialization delays
+	 * must poll this page, not make two port exits per nanosecond.
+	 */
+	set_fixmap(FIX_SEEDBOX_TIME, SEEDBOX_TIME_PAGE_PHYS);
+	p = (struct seedbox_time_page *)fix_to_virt(FIX_SEEDBOX_TIME);
 	WRITE_ONCE(p->last, seedbox_early_last);
 	if (READ_ONCE(p->pv_clock)) {
 		static_branch_enable(&seedbox_pv_clock);
@@ -111,8 +139,13 @@ static int __init seedbox_time_init(void)
 	WRITE_ONCE(p->pic_imr, cached_irq_mask);
 	outl(SEEDBOX_ABI, SEEDBOX_PORT_TIME_READY);
 	WRITE_ONCE(seedbox_page, p);
-	cr4_set_bits(X86_CR4_TSD);
 	pr_info("seedbox: deterministic time page active\n");
+}
+
+static int __init seedbox_user_tsc_init(void)
+{
+	/* cpu_init clears TSD after setup_arch; enable user traps afterwards. */
+	cr4_set_bits(X86_CR4_TSD);
 	return 0;
 }
-early_initcall(seedbox_time_init);
+early_initcall(seedbox_user_tsc_init);

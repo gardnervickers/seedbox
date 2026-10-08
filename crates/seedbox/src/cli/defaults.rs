@@ -86,6 +86,15 @@ fn sudo_home() -> Option<PathBuf> {
 /// this checkout's `cargo build-vmm` output, then on `PATH`. Under `cargo run`
 /// in this checkout, a missing VMM is built exactly as `cargo build-vmm` does.
 pub fn engine(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    resolve_engine(explicit, true)
+}
+
+/// Resolve the ordinary VMM candidates without invoking cargo or installing it.
+pub fn engine_lookup(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    resolve_engine(explicit, false)
+}
+
+fn resolve_engine(explicit: Option<PathBuf>, allow_build: bool) -> Result<PathBuf> {
     if let Some(path) = explicit {
         return existing("--vmm", path);
     }
@@ -97,11 +106,16 @@ pub fn engine(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = first_file(&searched).or_else(|| on_path("seedbox-vmm")) {
         return Ok(path);
     }
-    if let Some(cargo) = cargo_run_here() {
-        build_engine(&cargo, &vmm)?;
-        if built.is_file() {
-            return Ok(built);
+    if let Some(path) = build_if_allowed(allow_build, || {
+        if let Some(cargo) = cargo_run_here() {
+            build_engine(&cargo, &vmm)?;
+            if built.is_file() {
+                return Ok(Some(built));
+            }
         }
+        Ok(None)
+    })? {
+        return Ok(path);
     }
     searched.push(PathBuf::from("$PATH/seedbox-vmm"));
     Err(missing(
@@ -109,6 +123,17 @@ pub fn engine(explicit: Option<PathBuf>) -> Result<PathBuf> {
         &searched,
         "build it with `cargo build-vmm`, or pass --vmm or set SEEDBOX_VMM",
     ))
+}
+
+fn build_if_allowed(
+    allow_build: bool,
+    build: impl FnOnce() -> Result<Option<PathBuf>>,
+) -> Result<Option<PathBuf>> {
+    if allow_build {
+        build()
+    } else {
+        Ok(None)
+    }
 }
 
 /// Where to look for the VMM, in order: next to `exe`, then `built`. A cargo
@@ -135,14 +160,12 @@ fn cargo_run_here() -> Option<std::ffi::OsString> {
         .flatten()
 }
 
-/// Build the VMM with the same arguments as the `cargo build-vmm` alias.
+/// Build the VMM through its alias, including its isolated compiler wrapper.
 fn build_engine(cargo: &std::ffi::OsStr, vmm: &Path) -> Result<()> {
     eprintln!("seedbox-vmm not built; building it with `cargo build-vmm`");
     let status = Command::new(cargo)
-        .args(["build", "--release", "--locked", "--manifest-path"])
-        .arg(vmm.join("Cargo.toml"))
-        .arg("--target-dir")
-        .arg(vmm.join("target"))
+        .arg("build-vmm")
+        .current_dir(vmm.join("../.."))
         .status()
         .map_err(|error| Error::Setup(format!("running cargo to build seedbox-vmm: {error}")))?;
     if !status.success() {
@@ -200,6 +223,17 @@ pub fn busybox(explicit: Option<PathBuf>) -> Result<PathBuf> {
             "enter `nix develop`, or pass --busybox or set SEEDBOX_BUSYBOX",
         )),
     }
+}
+
+/// A static Linux amd64 mke2fs, if there is one: an explicit path, else
+/// `mke2fs` on `PATH` when it is statically linked (the Nix shell sets
+/// SEEDBOX_MKE2FS). Only Compose files with named volumes need it, so
+/// preparation reports its absence then.
+pub fn mke2fs(explicit: Option<PathBuf>) -> Result<Option<PathBuf>> {
+    if let Some(path) = explicit {
+        return existing("--mke2fs", path).map(Some);
+    }
+    Ok(on_path("mke2fs").filter(|path| is_static_elf(path)))
 }
 
 /// A recorded run: a directory holding `manifest.json`.
@@ -276,8 +310,71 @@ fn is_static_elf(path: &Path) -> bool {
     })
 }
 
+/// Resolve a preparation executable at the CLI environment boundary.
+pub fn preparation_tool(path: &Path) -> Result<PathBuf> {
+    let candidate = if path.components().count() == 1 {
+        path.to_str().and_then(on_path)
+    } else {
+        Some(path.to_owned())
+    };
+    candidate.filter(|p| p.is_file()).ok_or_else(|| {
+        Error::Setup(format!(
+            "{} not found; install it or enter `nix develop`",
+            path.display()
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn auto_build_uses_the_vmm_alias_from_the_checkout_root() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let vmm = root.join("crates/seedbox-vmm");
+        std::fs::create_dir_all(&vmm).unwrap();
+        let cargo = root.join("fake-cargo");
+        std::fs::write(
+            &cargo,
+            "#!/bin/sh\npwd -P > build-command\nprintf '%s\\n' \"$@\" >> build-command\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        super::build_engine(cargo.as_os_str(), &vmm).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("build-command")).unwrap(),
+            format!("{}\nbuild-vmm\n", root.display())
+        );
+        std::fs::write(&cargo, "#!/bin/sh\nexit 1\n").unwrap();
+        assert_eq!(
+            super::build_engine(cargo.as_os_str(), &vmm)
+                .unwrap_err()
+                .to_string(),
+            "building seedbox-vmm failed (see cargo output above)"
+        );
+    }
+
+    #[test]
+    fn lookup_only_never_invokes_the_missing_engine_builder() {
+        let invoked = std::cell::Cell::new(false);
+        let result = super::build_if_allowed(false, || {
+            invoked.set(true);
+            Err(seedbox::Error::Setup("builder must not run".into()))
+        })
+        .unwrap();
+        assert!(result.is_none());
+        assert!(!invoked.get());
+        assert!(super::build_if_allowed(true, || {
+            invoked.set(true);
+            Err(seedbox::Error::Setup("existing build path".into()))
+        })
+        .is_err());
+        assert!(invoked.get());
+    }
+
     use super::*;
 
     #[test]
@@ -307,6 +404,7 @@ mod tests {
         assert_eq!(kernel(Some(path.clone())).unwrap(), path);
         assert_eq!(engine(Some(path.clone())).unwrap(), path);
         assert_eq!(busybox(Some(path.clone())).unwrap(), path);
+        assert_eq!(mke2fs(Some(path.clone())).unwrap(), Some(path.clone()));
         let error = kernel(Some("/nonexistent/bzImage".into())).unwrap_err();
         assert_eq!(
             error.to_string(),

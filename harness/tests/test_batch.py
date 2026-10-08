@@ -92,11 +92,13 @@ class BatchTests(unittest.TestCase):
             with batch.cpu_locks({14,30}, root):
                 pass
 
-    @unittest.skipUnless(hasattr(os,"WNOWAIT"), "Linux waitid lifecycle control")
+    @unittest.skipUnless(sys.platform == 'linux' and hasattr(os,"WNOWAIT"),
+                         "Linux waitid lifecycle control")
     def test_timeout_reaps_before_restore_and_preserves_cpu_locks(self):
         self.exercise_lifecycle()
 
-    @unittest.skipUnless(hasattr(os,"WNOWAIT"), "Linux waitid lifecycle control")
+    @unittest.skipUnless(sys.platform == 'linux' and hasattr(os,"WNOWAIT"),
+                         "Linux waitid lifecycle control")
     def test_interruption_reaps_every_concurrent_child_before_restore(self):
         self.exercise_lifecycle(interrupt=True,count=2)
 
@@ -107,7 +109,9 @@ class BatchTests(unittest.TestCase):
             pid_file = Path(tmp)/'descendant'
             child = subprocess.Popen([sys.executable,'-c',
                 'import os,signal,time,sys; p=os.fork(); '
-                'open(sys.argv[1],"w").write(str(p)) if p else None; '
+                # Publish the pid atomically so the wait below never reads an empty file.
+                'open(sys.argv[1]+".tmp","w").write(str(p)) if p else None; '
+                'os.replace(sys.argv[1]+".tmp",sys.argv[1]) if p else None; '
                 'signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(60)',str(pid_file)],
                 start_new_session=True)
             try:

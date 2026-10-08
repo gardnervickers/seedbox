@@ -2,11 +2,14 @@
 import argparse
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import signal
+import shlex
+import shutil
 import stat
 import sys
 import time
@@ -17,6 +20,7 @@ REPO = Path(__file__).resolve().parents[2]
 TOTAL_SECONDS = 300
 CLEANUP_SECONDS = 30
 MSR = 0xc0011020
+SMOKE_BATCH = 4
 
 
 def save(path, value):
@@ -55,6 +59,8 @@ def pair(cpu):
     cpus = cpulist(Path(f'/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list').read_text())
     if len(cpus) != 2 or cpu not in cpus:
         raise RuntimeError('smoke requires one SMT pair')
+    if cpus & {0, 16}:
+        raise RuntimeError('cpu 0 and its sibling 16 are reserved for the host')
     online = cpulist(Path('/sys/devices/system/cpu/online').read_text())
     if not cpus <= online or not cpus <= os.sched_getaffinity(0):
         raise RuntimeError('both siblings must be online and allowed')
@@ -125,6 +131,14 @@ def closure(record):
     return objects
 
 
+def verify_qualification(record, dev_engine):
+    marker = record['identity']['inputs']['profile'].get('semantic_parameters', {}).get('engine_qualification')
+    if marker != ('dev-unpinned' if dev_engine else None):
+        raise RuntimeError('engine qualification marker differs from requested smoke mode')
+    if record['report'].get('engine_qualification') != ('dev-unpinned' if dev_engine else None):
+        raise RuntimeError('dev engine marker missing from run report')
+
+
 def verify_record(record, run, state):
     if record['outcome'] != 'PASS' or record['error'] is not None or record['allow_engine_change']:
         raise RuntimeError('baseline/replay did not genuinely PASS')
@@ -160,14 +174,23 @@ def compare(base, replay, baseline_streams, replay_streams):
         raise RuntimeError('opaque guest streams differ')
 
 
-def verify_performance(base, replay, parameter=None, value=None):
+def verify_performance(base, replay, changes=None):
     expected = base['performance_parameters'].copy()
-    if parameter is not None:
+    for parameter, value in (changes or {}).items():
         if parameter not in expected or expected[parameter] == value:
             raise RuntimeError('baseline cannot exercise the requested performance change')
         expected[parameter] = value
     if replay['performance_parameters'] != expected:
         raise RuntimeError('recorded performance parameters differ from the requested change')
+
+
+def faults_project(destination):
+    """The fixed faults path with four writes per batch and the full fault sequence.
+    The template's build contexts need python/seedbox copied in."""
+    spec = importlib.util.spec_from_file_location('faults_generate', REPO / 'examples/faults/generate.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.generate(destination, batch=SMOKE_BATCH) / 'fixed'
 
 
 class Campaign:
@@ -207,6 +230,8 @@ class Campaign:
                     lambda child: save(phase / 'spawn.json', {'pid': child.pid}),
                     capture, lambda value: save(phase / 'lifecycle.json', value), cwd=self.root)
         finally:
+            # Timed even when the phase fails, so a slow phase shows up in the receipt.
+            save(phase / 'wall.json', {'wall_seconds': time.monotonic() - started})
             # Cleanup measurements precede every exit/text assertion, including errors.
             if execution:
                 errors = []
@@ -227,7 +252,6 @@ class Campaign:
                 self.last_run = next(iter(new))
         if life is None or life['failure'] or life['manager_handoff'] or not life['leader_reaped'] or not life['owned_session_gone']:
             raise RuntimeError('owned command failed or cleanup uncertain')
-        save(phase / 'wall.json', {'wall_seconds': time.monotonic() - started})
         self.remaining()
         return life['exit'], (phase / 'stdout').read_text(), (phase / 'stderr').read_text()
 
@@ -245,46 +269,93 @@ class Campaign:
         a = self.args
         runtime = ['--kernel', str(a.kernel), '--vmm', str(a.engine), '--guest-init', str(a.guest_init),
                    '--busybox', str(a.busybox), '--cpu', str(a.cpu), '--state', str(self.state), '--memory-mb', '512']
+        project = str(getattr(a, 'project', None) or faults_project(self.root / 'project'))
         wrong = self.root / 'wrong-kernel-input'
         wrong.write_bytes(b'private wrong kernel; real kernel unchanged\n')
         invalid = runtime.copy()
         invalid[1] = str(wrong)
-        code, stdout, stderr = self.invoke('wrong-kernel', [str(a.cli), 'run', str(REPO / 'examples/faults'), *invalid])
+        # This refusal control always uses the pinned engine without dev permission.
+        if getattr(a, 'pinned_engine', None) is not None:
+            invalid[invalid.index('--vmm') + 1] = str(a.pinned_engine)
+        code, stdout, stderr = self.invoke('wrong-kernel', [str(a.cli), 'run', project, *invalid])
         if code != 2 or stdout or 'guest kernel is outside the admitted host policy' not in stderr:
             raise RuntimeError('wrong kernel did not receive the required policy refusal; stop')
         if self.state.exists() and any(self.state.rglob('manifest.json')):
             raise RuntimeError('wrong kernel dispatched a run')
+        dev_engine = getattr(a, 'allow_dev_engine', False)
+        dev_flags = ['--allow-dev-engine'] if dev_engine else []
+        runtime += dev_flags
         self.cpus = pair(a.cpu)
         self.locks = lock_free(self.cpus)
         pinned_workloads(self.cpus)
         save(self.root / 'pair.json', {'cpus': self.cpus, 'locks': self.locks})
-        code, stdout, _ = self.invoke('fixed', [str(a.cli), 'run', str(REPO / 'examples/faults'), '--seed', '1009', '--full-state', *runtime], True)
+        doctor_args = [str(a.cli), 'doctor', '--kernel', str(a.kernel), '--vmm', str(a.engine), '--cpu', str(a.cpu), *dev_flags]
+        code, stdout, _ = self.invoke('doctor', doctor_args)
+        if code != 0 or (dev_engine and 'dev engine: unqualified' not in stdout):
+            raise RuntimeError('doctor did not report the requested engine mode')
+        if dev_engine and re.search(r'(?<!un)qualified', stdout):
+            raise RuntimeError('doctor claimed qualification for a dev engine')
+        code, stdout, _ = self.invoke('doctor-json', [*doctor_args, '--json'])
+        if code != 0 or json.loads(stdout).get('engine_qualification') != ('dev-unpinned' if dev_engine else None):
+            raise RuntimeError('doctor JSON qualification differs from smoke mode')
+        code, stdout, _ = self.invoke('fixed', [str(a.cli), 'run', project, '--seed', '1009', '--full-state', *runtime], True)
         if code != 0:
             raise RuntimeError('fixed baseline failed')
         baseline_run = result_directory(stdout, self.state, self.last_run)
         baseline = self.inspect('fixed-inspect', baseline_run)
         streams = verify_record(baseline, baseline_run, self.state)
+        verify_qualification(baseline, dev_engine)
+        if dev_engine and 'engine_qualification: dev-unpinned (unqualified dev engine)' not in (self.root / 'fixed/stdout').read_text():
+            raise RuntimeError('dev engine label missing from public run output')
         if baseline['identity']['inputs']['kernel'] != digest(a.kernel) or baseline['identity']['inputs']['profile']['engine'] != digest(a.engine):
             raise RuntimeError('executed kernel/engine differ from frozen supplied bytes')
-        for name, flags, parameter, value in [('default', [], None, None), ('margin', ['--margin', '32768'], 'SEEDBOX_MARGIN', '32768'), ('undo', ['--undo', '0'], 'SEEDBOX_UNDO', '0')]:
-            code, stdout, _ = self.invoke(name, [str(a.cli), 'replay', str(baseline_run), '--cpu', str(a.cpu), '--state', str(self.state), *flags], True)
+        # One undo-off replay covers both performance settings: with undo on, the
+        # counter's final approach uses the undo margin and never reads --margin.
+        # Undo-off stepping dominates the tier, so the margin is the profile's
+        # smallest adaptive margin rather than a larger, slower one.
+        replays = [('default', [], None)]
+        if getattr(a, 'perf_replay', False):
+            replays.append(('undo-margin', ['--undo', '0', '--margin', '16384'],
+                            {'SEEDBOX_UNDO': '0', 'SEEDBOX_MARGIN': '16384'}))
+        for name, flags, changes in replays:
+            code, stdout, _ = self.invoke(name, [str(a.cli), 'replay', str(baseline_run), '--cpu', str(a.cpu), '--state', str(self.state), *dev_flags, *flags], True)
             if code != 0:
                 raise RuntimeError('retained replay failed')
             run = result_directory(stdout, self.state, self.last_run)
             record = self.inspect(name + '-inspect', run)
             compare(baseline, record, streams, verify_record(record, run, self.state))
-            verify_performance(baseline, record, parameter, value)
+            verify_qualification(record, dev_engine)
+            if dev_engine and 'replay: MATCH (unqualified dev engine)' not in stdout:
+                raise RuntimeError('dev replay is missing its unqualified label')
+            verify_performance(baseline, record, changes)
         if pair(a.cpu) != self.cpus:
             raise RuntimeError('sibling topology changed')
         save(self.root / 'final-cleanup.json', {'cpus': self.cpus, 'locks': lock_free(self.cpus, self.locks), 'msrs': snapshot(self.cpus)})
 
 
-def main():
+def phase_walls(root):
+    """Each phase's wall time, in the order the phases started."""
+    paths = sorted(root.glob('*/wall.json'), key=lambda path: (path.parent / 'command.json').stat().st_mtime_ns)
+    return {path.parent.name: round(json.loads(path.read_text())['wall_seconds'], 1) for path in paths}
+
+
+def argument_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('cli', 'engine', 'kernel', 'guest-init', 'busybox', 'output'):
         parser.add_argument('--' + name, required=True, type=Path)
     parser.add_argument('--cpu', required=True, type=int)
+    parser.add_argument('--perf-replay', action='store_true',
+                        help='Add the undo-off/margin replay for stepping, counter or undo changes.')
+    parser.add_argument('--project', type=Path,
+                        help='Compose workload instead of the generated fixed faults project.')
+    parser.add_argument('--allow-dev-engine', action='store_true', help='Exercise unpinned artifacts, visibly unqualified.')
+    parser.add_argument('--pinned-engine', type=Path, help='Pinned engine for the unflagged wrong-kernel control; required in dev mode.')
     parser.add_argument('--tool-path', required=True, help='Explicit admitted preparation-tool PATH; no build is performed by this wrapper.')
+    return parser
+
+
+def main():
+    parser = argument_parser()
     args = parser.parse_args()
     if sys.platform != 'linux' or os.geteuid() != 0:
         parser.error('requires the qualified Linux AMD host and root')
@@ -293,6 +364,14 @@ def main():
         if not path.is_file():
             parser.error(name + ' must name an existing frozen file')
         setattr(args, name, path)
+    if args.allow_dev_engine and args.pinned_engine is None:
+        parser.error('--allow-dev-engine requires --pinned-engine for the wrong-kernel refusal control')
+    if args.pinned_engine is not None:
+        args.pinned_engine = args.pinned_engine.resolve(strict=True)
+        if not args.pinned_engine.is_file():
+            parser.error('--pinned-engine must name an existing frozen file')
+    if args.project is not None:
+        args.project = args.project.resolve(strict=True)
     root = args.output.absolute()
     root.mkdir(mode=0o700)  # Never reuse or write failure receipts into an existing directory.
     (root / 'home').mkdir()
@@ -307,16 +386,24 @@ def main():
         signal.setitimer(signal.ITIMER_REAL, TOTAL_SECONDS - CLEANUP_SECONDS)
         save(root / 'inputs.json', {name: {'path': str(getattr(args, name)), 'sha256': digest(getattr(args, name))}
              for name in ('cli', 'engine', 'kernel', 'guest_init', 'busybox')})
+        save(root / 'mode.json', {'allow_dev_engine': args.allow_dev_engine,
+            'pinned_engine': None if args.pinned_engine is None else {'path': str(args.pinned_engine), 'sha256': digest(args.pinned_engine)}})
         Campaign(args, root, deadline).run()
         if time.monotonic() >= deadline - CLEANUP_SECONDS:
             raise TimeoutError('final evidence exhausted campaign allocation')
-        save(root / 'result.json', {'status': 'COMPLETE_PENDING_INDEPENDENT_REVIEW', 'wall_seconds': time.monotonic() - began})
+        save(root / 'result.json', {'status': 'COMPLETE_PENDING_INDEPENDENT_REVIEW', 'wall_seconds': time.monotonic() - began,
+             'phase_wall_seconds': phase_walls(root)})
+        shutil.rmtree(root / 'state', ignore_errors=False)
         print('complete: staged smoke evidence requires independent review')
         return 0
     except BaseException as error:
-        save(root / 'failure.json', {'error': repr(error), 'stop_later_operations': True})
+        save(root / 'failure.json', {'error': repr(error), 'stop_later_operations': True,
+             'phase_wall_seconds': phase_walls(root)})
+        print('cleanup: sudo rm -rf -- ' + shlex.quote(str(root / 'state')), file=sys.stderr)
         raise
     finally:
+        for name, seconds in phase_walls(root).items():
+            print(f'phase {name}: {seconds:.1f}s', flush=True)
         signal.setitimer(signal.ITIMER_REAL, 0)
         for sig, handler in old.items():
             signal.signal(sig, handler)
