@@ -93,13 +93,12 @@ pub const ENTROPY_WORDS: usize = 8;
 /// Everything about one machine that a world fork puts back: vCPU, RAM, the
 /// shared page, device models and the VMM's per-machine scalars.
 pub struct MachineSnapshot {
+    world: MachineState,
     ram: Mapping,
     page: Box<[u8; 4096]>,
     cpu: VcpuState,
-    time: u64,
     branches: u64,
     tsc_latch: u64,
-    state: State,
     guest_exit_code: Option<u8>,
     guest_init_error: Option<u8>,
     pic: Pic,
@@ -108,7 +107,6 @@ pub struct MachineSnapshot {
     com1: Uart,
     com2: Uart,
     log_order: u64,
-    observe_console: bool,
     management_framer: crate::control::ManagementFramer,
     net: Option<VirtioNet>,
     channel: Option<VirtioConsole>,
@@ -122,32 +120,13 @@ pub struct MachineSnapshot {
     exit_req: bool,
     margin: u64,
     fm: u64,
-    parked: bool,
     stats: Stats,
     witness: Sha256,
     undo_stats: Option<UndoStats>,
 }
 
-/// How a released guest receives its seed's entropy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Reseed {
-    /// The guest reads it at its launch barrier (guest/barrier.h).
-    Barrier,
-    /// Time fork: the kernel takes it from the time page (ABI 3).
-    Page,
-    /// Time fork on a kernel before ABI 3: the guest CRNG is not reseeded.
-    Unsupported,
-}
-
-impl Reseed {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Reseed::Barrier => "barrier",
-            Reseed::Page => "time_page",
-            Reseed::Unsupported => "unsupported",
-        }
-    }
-}
+pub use seedbox_engine_core::world::{Reseed,State,Stop};
+use seedbox_engine_core::world::MachineState;
 
 /// The time page's entropy fields: the seed's 32 bytes, little-endian.
 fn page_entropy(entropy: &[u32; ENTROPY_WORDS]) -> [u64; PAGE_ENTROPY_FIELDS] {
@@ -163,26 +142,6 @@ impl Drop for Mapping {
     fn drop(&mut self) {
         unsafe { libc::munmap(self.ptr.cast(), self.size) };
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum State {
-    Running,
-    Halted,
-    Exited(u8),
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum Stop {
-    Reached,
-    Halted,
-    Exited,
-    /// The guest produced frames; the world must re-plan before continuing.
-    Sent,
-    /// The guest reached its launch barrier and is parked until released.
-    Barrier,
-    /// A committed management request/effect requires global causal replanning.
-    Control,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -274,18 +233,16 @@ impl Cause {
 }
 
 pub struct Machine {
-    pub name: String,
+    pub world: MachineState,
     profile: &'static CounterProfile,
     _vm: VmFd,
     vcpu: VcpuFd,
     mem: *mut u8,
     mem_size: usize,
     page: *mut u64,
-    pub time: u64,
     pub branches: u64,
     pub pending_io: Option<PendingIo>,
     tsc_latch: u64,
-    pub state: State,
     /// Only an explicit guest exit-port write is a workload exit. KVM errors
     /// which also stop the machine must not be mistaken for application status.
     pub guest_exit_code: Option<u8>,
@@ -296,10 +253,6 @@ pub struct Machine {
     pub com1: Uart,
     pub com2: Uart,
     log_order: u64,
-    pub fault_effects: Vec<(u32, u64, bool)>,
-    pub control_requests: Vec<(u64, Vec<u8>)>,
-    pub observe_console: bool,
-    pub committed_console: Option<(u64,u8)>,
     management_framer: crate::control::ManagementFramer,
     pub net: Option<VirtioNet>,
     pub channel: Option<VirtioConsole>,
@@ -338,18 +291,7 @@ pub struct Machine {
     pub undo: Option<Box<Undo>>,
     undo_margin: u64,
     fm: u64,
-    /// Parked at the launch barrier: the world does not run this machine.
-    pub parked: bool,
-    /// Paused by a lifecycle fault: CPU and devices are frozen, any unpaid
-    /// I/O cost stays owed, and the world does not run this machine.
-    pub paused: bool,
-    /// Built for a reboot that has not happened yet: the world does not run
-    /// this machine. Its predecessor's VM is already gone.
-    pub down: bool,
-    /// Boots of this machine before this one: 0 for the first.
-    pub incarnation: u32,
-    /// Virtual time at which this incarnation started executing.
-    pub booted_at: u64,
+    /// The initial guest uses the launch-barrier boot protocol.
     barrier: bool,
     /// Per-seed words the guest reads after its release.
     entropy: [u32; ENTROPY_WORDS],
@@ -360,6 +302,14 @@ pub struct Machine {
     pub stats: Stats,
     pub witness: Sha256,
     pub trace: Option<std::io::BufWriter<std::fs::File>>,
+}
+
+impl std::ops::Deref for Machine {
+    type Target = MachineState;
+    fn deref(&self)->&MachineState { &self.world }
+}
+impl std::ops::DerefMut for Machine {
+    fn deref_mut(&mut self)->&mut MachineState { &mut self.world }
 }
 
 fn put(m: &mut [u8], at: usize, v: u64, n: usize) {
@@ -548,18 +498,16 @@ impl Machine {
             None
         };
         Ok(Self {
-            name: name.to_string(),
+            world: MachineState::new(name.to_string()),
             profile,
             _vm: vm,
             vcpu,
             mem,
             mem_size,
             page: page.cast(),
-            time: 0,
             branches: 0,
             pending_io: None,
             tsc_latch: 0,
-            state: State::Running,
             guest_exit_code: None,
             guest_init_error: None,
             pic: Pic::new(),
@@ -568,9 +516,6 @@ impl Machine {
             com1: Uart::default(),
             com2: Uart::default(),
             log_order: 0,
-            fault_effects: Vec::new(),
-            control_requests: Vec::new(),
-            observe_console:false, committed_console:None,
             management_framer: crate::control::ManagementFramer::default(),
             net,
             channel: spec.control_channel.then(VirtioConsole::new),
@@ -599,11 +544,6 @@ impl Machine {
             undo,
             undo_margin: spec.undo_margin,
             fm: spec.undo_margin,
-            parked: false,
-            paused: false,
-            down: false,
-            incarnation: 0,
-            booted_at: 0,
             barrier: spec.barrier,
             entropy: [0; ENTROPY_WORDS],
             entropy_read: 0,
@@ -632,12 +572,12 @@ impl Machine {
             let _ = writeln!(
                 t,
                 "{} {} {} {:x} {:x}",
-                kind as char, self.branches, self.time, extra, rip
+                kind as char, self.branches, self.world.time, extra, rip
             );
         }
         self.witness.update([kind]);
         self.witness.update(self.branches.to_le_bytes());
-        self.witness.update(self.time.to_le_bytes());
+        self.witness.update(self.world.time.to_le_bytes());
         self.witness.update(extra.to_le_bytes());
     }
 
@@ -656,10 +596,7 @@ impl Machine {
     /// time page instead and the kernel reseeds its CRNG before its next
     /// random output. Returns how the guest receives it.
     pub fn release(&mut self, at: u64, entropy: [u32; ENTROPY_WORDS]) -> Result<Reseed, String> {
-        if !self.parked {
-            return Err(format!("{}: released without reaching the launch barrier", self.name));
-        }
-        self.parked = false;
+        self.world.begin_release()?;
         // The parked interval passes like idle time: a timer that fell due
         // meanwhile fires now, late, so the armed deadline is ahead of the
         // clock again before the next slice computes its hard stop.
@@ -667,7 +604,7 @@ impl Machine {
         self.expire_timers()?;
         self.entropy = entropy;
         self.entropy_read = 0;
-        self.record(b'R', self.time);
+        self.record(b'R', self.world.time);
         if self.barrier {
             return Ok(Reseed::Barrier);
         }
@@ -688,10 +625,7 @@ impl Machine {
     /// an exit KVM still has to complete, and the I/O cost owed for it, stay
     /// exactly as they are until the machine resumes.
     pub fn pause(&mut self) -> Result<(), String> {
-        if self.paused || self.down || self.parked {
-            return Err(format!("{}: cannot pause here", self.name));
-        }
-        self.paused = true;
+        self.world.pause()?;
         self.record(b'Z', 0);
         Ok(())
     }
@@ -700,25 +634,16 @@ impl Machine {
     /// passes like idle time, as at a release: timers that fell due fire now,
     /// late and coalesced, keeping their phase.
     pub fn resume(&mut self, at: u64) -> Result<(), String> {
-        if !self.paused {
-            return Err(format!("{}: resumed without being paused", self.name));
-        }
-        self.paused = false;
-        self.time = self.time.max(at);
+        self.world.resume(at)?;
         self.expire_timers()?;
-        self.record(b'U', self.time);
+        self.record(b'U', self.world.time);
         Ok(())
     }
 
     /// Take a machine built for a reboot to its first instruction at `at`.
     pub fn boot_at(&mut self, at: u64) -> Result<(), String> {
-        if !self.down || at < self.time {
-            return Err(format!("{}: cannot boot here", self.name));
-        }
-        self.down = false;
-        self.time = at;
-        self.booted_at = at;
-        self.record(b'N', self.incarnation as u64);
+        self.world.boot_at(at)?;
+        self.record(b'N', self.world.incarnation as u64);
         Ok(())
     }
 
@@ -729,9 +654,7 @@ impl Machine {
     /// queues, KVM's I/O state and the undo checkpoint die with the VM.
     /// Returns the number of volatile sectors lost, or None without a disk.
     pub fn succeed(&mut self, old: &mut Machine, at: u64, seed: u64) -> Result<Option<u64>, String> {
-        self.incarnation = old.incarnation.checked_add(1).ok_or("incarnation overflow")?;
-        self.down = true;
-        self.time = at;
+        self.world.succeed(&old.world,at)?;
         for (new, old) in [(&mut self.com1, &mut old.com1), (&mut self.com2, &mut old.com2)] {
             new.out = std::mem::take(&mut old.out);
             new.output_file = old.output_file.take();
@@ -745,7 +668,7 @@ impl Machine {
         self.syscall_ns = old.syscall_ns;
         // Flushed data survives; the disk policy chooses unflushed survivors.
         let lost = if let (Some(new), Some(blk)) = (self.blk.as_mut(), old.blk.as_ref()) {
-            let (disk, lost) = blk.disk().crashed_seeded(seed, &old.name, old.incarnation);
+            let (disk, lost) = blk.disk().crashed_seeded(seed, &old.world.name, old.world.incarnation);
             *new = VirtioBlk::new(disk);
             Some(lost)
         } else { None };
@@ -757,22 +680,20 @@ impl Machine {
     /// Park the machine at a fork point the world chose (a simulated time),
     /// rather than one the guest announced. It must owe no I/O cost.
     pub fn park(&mut self) -> Result<(), String> {
-        if self.parked || self.pending_io.is_some() {
-            return Err(format!("{}: cannot park here", self.name));
-        }
+        self.world.check_park(self.pending_io.is_some())?;
         self.set_stepping(false)?;
         // As at the launch barrier: finish any exit KVM still owes, so a cold
         // run and a restored fork resume from identical vCPU state.
         self.complete_io()?;
-        self.parked = true;
+        self.world.commit_park();
         self.record(b'P', 0);
         Ok(())
     }
 
     /// Capture this machine at the world's fork point: parked, no I/O owed.
     pub fn snapshot(&mut self) -> Result<MachineSnapshot, String> {
-        if self.pending_io.is_some() || self.stepping || !self.fault_effects.is_empty() || !self.control_requests.is_empty() || self.committed_console.is_some() {
-            return Err(format!("{}: not at a fork point", self.name));
+        if self.pending_io.is_some() || self.stepping || !self.world.fault_effects.is_empty() || !self.world.control_requests.is_empty() || self.world.committed_console.is_some() {
+            return Err(format!("{}: not at a fork point", self.world.name));
         }
         self.complete_io()?;
         let mut cpu = VcpuState::new(self.msrs.clone());
@@ -787,16 +708,15 @@ impl Machine {
         unsafe { std::ptr::copy_nonoverlapping(self.page as *const u8, page.as_mut_ptr(), 4096) };
         Ok(MachineSnapshot {
             ram, page, cpu,
-            time: self.time, branches: self.branches, tsc_latch: self.tsc_latch, state: self.state,
+            world: self.world.clone(), branches: self.branches, tsc_latch: self.tsc_latch,
             guest_exit_code: self.guest_exit_code, guest_init_error: self.guest_init_error,
             pic: self.pic.clone(), pit: self.pit.clone(), rtc_index: self.rtc_index,
             com1: self.com1.snapshot(), com2: self.com2.snapshot(), log_order: self.log_order,
-            observe_console:self.observe_console,
             management_framer: self.management_framer.clone(),
             net: self.net.clone(), channel: self.channel.clone(), blk: self.blk.clone(),
             control_dma_bytes: self.control_dma_bytes, control_tx_bytes: self.control_tx_bytes,
             pv: self.pv, abi: self.abi, armed_wake: self.armed_wake, pit_exact: self.pit_exact, exit_req: self.exit_req,
-            margin: self.margin, fm: self.fm, parked: self.parked,
+            margin: self.margin, fm: self.fm,
             stats: self.stats.clone(), witness: self.witness.clone(), undo_stats,
         })
     }
@@ -842,10 +762,9 @@ impl Machine {
         run.s.regs.regs = regs;
         run.s.regs.sregs = sregs;
         self.sync_regs_ready = true;
-        self.time = s.time;
+        self.world = s.world.clone();
         self.branches = s.branches;
         self.tsc_latch = s.tsc_latch;
-        self.state = s.state;
         self.pending_io = None;
         self.guest_exit_code = s.guest_exit_code;
         self.guest_init_error = s.guest_init_error;
@@ -855,9 +774,7 @@ impl Machine {
         self.com1.restore(&s.com1);
         self.com2.restore(&s.com2);
         self.log_order = s.log_order;
-        self.fault_effects.clear();
-        self.control_requests.clear();
-        self.observe_console=s.observe_console;self.committed_console=None;
+        self.world.clear_effects();
         self.management_framer = s.management_framer.clone();
         self.net = s.net.clone();
         self.channel = s.channel.clone();
@@ -871,11 +788,7 @@ impl Machine {
         self.exit_req = s.exit_req;
         self.margin = s.margin;
         self.fm = s.fm;
-        self.parked = s.parked;
-        self.paused = false;
-        self.down = false;
-        self.incarnation = 0;
-        self.booted_at = 0;
+        self.world.restore_lifecycle();
         self.entropy = [0; ENTROPY_WORDS];
         self.entropy_read = 0;
         self.stats = s.stats.clone();
@@ -886,9 +799,7 @@ impl Machine {
     /// Resume a halted machine at virtual time `t`.
     pub fn wake(&mut self, t: u64) {
         self.advance_to(t, Cause::Idle);
-        if self.state == State::Halted {
-            self.state = State::Running;
-        }
+        self.world.wake();
     }
 
     pub fn deliver_serial(&mut self, bytes: &[u8]) {
@@ -910,7 +821,7 @@ impl Machine {
     }
     fn capture_output(&mut self) {
         for uart in [&mut self.com1,&mut self.com2] {
-            uart.chunks.capture(uart.out.len() as u64,self.time,self.incarnation,&mut self.log_order);
+            uart.chunks.capture(uart.out.len() as u64,self.world.time,self.world.incarnation,&mut self.log_order);
         }
     }
     fn channel_output(&mut self,bytes:&[u8])->Result<bool,String> {
@@ -919,7 +830,7 @@ impl Machine {
         self.com2.out.extend_from_slice(bytes);self.control_tx_bytes+=bytes.len() as u64;
         self.capture_output();
         let frames=self.management_framer.receive(bytes)?;let stop=!frames.is_empty();
-        self.control_requests.extend(frames.into_iter().map(|f|(self.time,f)));Ok(stop)
+        self.world.control_requests.extend(frames.into_iter().map(|f|(self.world.time,f)));Ok(stop)
     }
 
     pub fn deliver_frame(&mut self, frame: &[u8]) -> Result<ReceiveOutcome,String> {
@@ -941,9 +852,9 @@ impl Machine {
     /// Syscalls the guest has entered (counted in the time page).
     /// Move virtual time forward to `t` (never back) for `cause`.
     fn advance_to(&mut self, t: u64, cause: Cause) {
-        if t > self.time {
-            self.stats.time_by[cause as usize] += t - self.time;
-            self.time = t;
+        if t > self.world.time {
+            self.stats.time_by[cause as usize] += t - self.world.time;
+            self.world.time = t;
         }
     }
 
@@ -1009,8 +920,8 @@ impl Machine {
         self.vcpu.set_kvm_immediate_exit(0);
         match r {
             Err(e) if e.errno() == libc::EINTR => Ok(()),
-            Err(e) => Err(format!("{}: completing I/O: {e}", self.name)),
-            Ok(e) => Err(format!("{}: exit while completing I/O: {e}", self.name)),
+            Err(e) => Err(format!("{}: completing I/O: {e}", self.world.name)),
+            Ok(e) => Err(format!("{}: exit while completing I/O: {e}", self.world.name)),
         }
     }
 
@@ -1029,17 +940,17 @@ impl Machine {
         let last = self.page_get(1);
         let k = &mut self.stats.skew[site as usize];
         k.n += 1;
-        if last > self.time {
+        if last > self.world.time {
             k.ahead += 1;
-            k.ahead_max_ns = k.ahead_max_ns.max(last - self.time);
-        } else if last < self.time {
+            k.ahead_max_ns = k.ahead_max_ns.max(last - self.world.time);
+        } else if last < self.world.time {
             k.behind += 1;
-            k.behind_max_ns = k.behind_max_ns.max(self.time - last);
+            k.behind_max_ns = k.behind_max_ns.max(self.world.time - last);
         }
     }
 
     fn expire_timers(&mut self) -> Result<(), String> {
-        if self.pit.expire_through(self.time)? > 0 {
+        if self.pit.expire_through(self.world.time)? > 0 {
             self.pic.raise(0);
         }
         Ok(())
@@ -1056,10 +967,10 @@ impl Machine {
                 self.pending_io = None;
                 return Ok(true);
             }
-            if self.time == limit {
+            if self.world.time == limit {
                 return Ok(false);
             }
-            let t = pending.advance(self.time, limit, self.pit.deadline)?;
+            let t = pending.advance(self.world.time, limit, self.pit.deadline)?;
             self.advance_to(t, Cause::Io);
             self.expire_timers()?;
         }
@@ -1073,7 +984,7 @@ impl Machine {
         let u = self.undo.as_mut().unwrap();
         u.save(&self._vm, &self.vcpu, self.mem)?;
         u.page = page;
-        u.time = self.time;
+        u.time = self.world.time;
         u.branches = self.branches;
         u.exit_req = self.exit_req;
         u.stats.checkpoint_ns += t.elapsed().as_nanos();
@@ -1088,7 +999,7 @@ impl Machine {
         for i in 0..PAGE_FIELDS {
             unsafe { std::ptr::write_volatile(self.page.add(i), u.page[i]) };
         }
-        self.time = u.time;
+        self.world.time = u.time;
         self.branches = u.branches;
         self.exit_req = u.exit_req;
         u.stats.rollback_ns += t.elapsed().as_nanos();
@@ -1102,7 +1013,7 @@ impl Machine {
 
     fn checked_page_time(&self, limit: u64) -> Result<u64, String> {
         let last = unsafe { std::ptr::read_volatile(self.page.add(1)) };
-        advance_time(self.time, last.saturating_sub(self.time), limit)
+        advance_time(self.world.time, last.saturating_sub(self.world.time), limit)
     }
 
     fn sync_from_page(&mut self, limit: u64) -> Result<(), String> {
@@ -1113,7 +1024,7 @@ impl Machine {
     }
 
     fn publish(&mut self) {
-        unsafe { std::ptr::write_volatile(self.page, self.time) };
+        unsafe { std::ptr::write_volatile(self.page, self.world.time) };
     }
 
     fn set_stepping(&mut self, on: bool) -> Result<(), String> {
@@ -1164,7 +1075,7 @@ impl Machine {
         planner.refresh_from(&sr);
         let (targets, capped) = planner
             .plan_capped(mem, &r)
-            .map_err(|e| format!("{}: step plan: {e}", self.name))?;
+            .map_err(|e| format!("{}: step plan: {e}", self.world.name))?;
         Planner::arm(&self.vcpu, &targets)?;
         self.last_plan = (r.rip, targets.clone());
         if targets.contains(&r.rip) {
@@ -1188,10 +1099,10 @@ impl Machine {
         if if_flag == 0 {
             return Err(format!(
                 "{}: the guest spins with interrupts off at rip {rip:#x}; nothing can end the loop",
-                self.name
+                self.world.name
             ));
         }
-        self.state = State::Halted;
+        self.world.state = State::Halted;
         Ok(Stop::Halted)
     }
 
@@ -1257,7 +1168,7 @@ impl Machine {
         // at overflow landings or intermediate single steps.
         let slice_end = limit
             .saturating_sub(early)
-            .max(self.time.saturating_add(1))
+            .max(self.world.time.saturating_add(1))
             .min(limit);
         let mut legal = true;
         loop {
@@ -1283,7 +1194,7 @@ impl Machine {
                     self.tolerance,
                 ))?;
                 self.expire_timers()?;
-                if self.time >= slice_end {
+                if self.world.time >= slice_end {
                     self.set_stepping(false)?;
                     return Ok(Stop::Reached);
                 }
@@ -1299,7 +1210,7 @@ impl Machine {
             let pit = self.pit.deadline.unwrap_or(u64::MAX);
             let soft = slice_end.min(pit);
             let hard = hard_limit(limit, self.pit.deadline, self.pit_exact, self.tolerance);
-            let remaining = hard - self.time;
+            let remaining = hard - self.world.time;
             // Interrupt injection depends only on the distance to the stop, never
             // on the stepping margin, so it is deterministic.
             if legal {
@@ -1309,7 +1220,7 @@ impl Machine {
                     self.vcpu.get_kvm_run().request_interrupt_window = 0;
                 }
             }
-            let rem_soft = soft.saturating_sub(self.time);
+            let rem_soft = soft.saturating_sub(self.world.time);
             let windowed = false;
             let window = false;
             if window != self.exit_req {
@@ -1359,7 +1270,7 @@ impl Machine {
                 syscalled,
             };
             let judge = Judge {
-                name: &self.name,
+                name: &self.world.name,
                 stepping: self.stepping,
                 pv: self.pv,
                 undo_valid: self.undo.as_ref().is_some_and(|u| u.valid),
@@ -1387,7 +1298,7 @@ impl Machine {
                     let r = self.vcpu.get_regs().ok();
                     return Err(format!(
                         "overshoot on {}: {} branches past stop target (stepping={} exit={} rip={:#x?} last_plan={:x?})",
-                        self.name,
+                        self.world.name,
                         delta - remaining,
                         self.stepping,
                         what,
@@ -1400,7 +1311,7 @@ impl Machine {
                 self.branches += delta;
             }
             self.stats.time_by[Cause::Progress as usize] += delta;
-            self.time += delta;
+            self.world.time += delta;
             if legal {
                 // Sent/Hlt/Exited can return before the next loop synchronizes
                 // the page. Validate guest clock progress before any exit
@@ -1408,13 +1319,13 @@ impl Machine {
                 // The exit still borrows vcpu; inspect only the disjoint page
                 // and clock fields until its payload has been consumed.
                 let last = unsafe { std::ptr::read_volatile(self.page.add(1)) };
-                advance_time(self.time, last.saturating_sub(self.time), hard)?;
+                advance_time(self.world.time, last.saturating_sub(self.world.time), hard)?;
             }
             self.stats.exits += 1;
             if self.stepping {
                 self.stats.steps += 1;
             }
-            let now = self.time;
+            let now = self.world.time;
             match exit {
                 Err(e) if e.errno() == libc::EINTR => {
                     self.stats.eintr += 1;
@@ -1431,7 +1342,7 @@ impl Machine {
                         self.advance_to(soft, Cause::ClockBound);
                     }
                     self.stats.yields += 1;
-                    if self.time >= soft {
+                    if self.world.time >= soft {
                         self.stats.yield_stops += 1;
                         self.record(b'Y', v as u64);
                     } else {
@@ -1444,16 +1355,16 @@ impl Machine {
                     let charge = io_charge(port, true);
                     // Reserve the full cost arithmetically, without requiring
                     // it to fit before this world's next delivery boundary.
-                    advance_time(self.time, charge, u64::MAX)?;
+                    advance_time(self.world.time, charge, u64::MAX)?;
                     let descriptor = unsafe { (*run_ptr).__bindgen_anon_1.io };
                     let pending = if charge > 0 {
-                        Some(PendingIo::new(self.time, port, true, descriptor.size, descriptor.count, data.to_vec())?)
+                        Some(PendingIo::new(self.world.time, port, true, descriptor.size, descriptor.count, data.to_vec())?)
                     } else { None };
                     #[cfg(test)]
                     if charge>0 && self.require_io_checkpoint {
                         assert!(self.undo.as_ref().is_some_and(|u|u.valid),"charged access must begin with the real held checkpoint");
                     }
-                    let after_io = self.time;
+                    let after_io = self.world.time;
                     let mut control_stop = false;
                     let console_before=self.com1.out.len();
                     match port {
@@ -1470,7 +1381,7 @@ impl Machine {
                                     .map(|p| p + 1)
                                     .unwrap_or(0);
                                 crate::emit_console_trace(
-                                    self.time,
+                                    self.world.time,
                                     self.branches,
                                     &self.com1.out[line_start..]
                                 );
@@ -1482,7 +1393,7 @@ impl Machine {
                                 crate::management_uart::write(
                                     &mut self.management_framer, &mut self.com2, port - 0x2f8, v)?
                             {
-                                self.control_requests.push((after_io, line));
+                                self.world.control_requests.push((after_io, line));
                                 control_stop = true;
                             }
                         }
@@ -1491,7 +1402,7 @@ impl Machine {
                                 data.try_into()
                                     .map_err(|_| "fault effect must be a 32-bit I/O write")?,
                             );
-                            self.fault_effects.push((id, after_io, port == 0xf6));
+                            self.world.fault_effects.push((id, after_io, port == 0xf6));
                             control_stop = true;
                         }
                         0x20 | 0x21 | 0xa0 | 0xa1 => {
@@ -1506,7 +1417,7 @@ impl Machine {
                             if self.pv_clock && self.page_get(PAGE_PV_CLOCK) != 2 {
                                 return Err(format!(
                                     "{}: the guest kernel lacks PV clock support; rebuild it from kernel/ for the pv timebase",
-                                    self.name
+                                    self.world.name
                                 ));
                             }
                             self.pv = v >= 2;
@@ -1559,16 +1470,16 @@ impl Machine {
                         0xe9 => self.com1.transmit(v)?,
                         0xf4 => {
                             self.guest_exit_code = Some(v);
-                            self.state = State::Exited(v);
+                            self.world.state = State::Exited(v);
                             self.record(b'X', v as u64);
                             self.set_stepping(false)?;
                             return Ok(Stop::Exited);
                         }
                         BARRIER_PORT if self.barrier => {
-                            if self.parked || self.entropy_read != 0 {
-                                return Err(format!("{}: launch barrier reached twice", self.name));
+                            if self.world.parked || self.entropy_read != 0 {
+                                return Err(format!("{}: launch barrier reached twice", self.world.name));
                             }
-                            self.parked = true;
+                            self.world.parked = true;
                             self.record(b'B', 0);
                             self.set_stepping(false)?;
                             // Finish the port write now, so the machine is
@@ -1578,7 +1489,7 @@ impl Machine {
                         }
                         0xf5 => {
                             self.guest_init_error = Some(v);
-                            self.state = State::Exited(v);
+                            self.world.state = State::Exited(v);
                             self.record(b'E', v as u64);
                             self.set_stepping(false)?;
                             return Ok(Stop::Exited);
@@ -1586,11 +1497,11 @@ impl Machine {
                         _ => {}
                     }
                     self.capture_output();
-                    if self.observe_console && self.com1.out.len()>console_before {
+                    if self.world.observe_console && self.com1.out.len()>console_before {
                         // Judge::Rollback discarded the exit before reaching here.
                         // Console ports have zero charge; the sink and pending KVM
                         // response are committed once at this deterministic exit.
-                        self.committed_console=Some((after_io,v));control_stop=true;
+                        self.world.committed_console=Some((after_io,v));control_stop=true;
                         if let Some(u)=self.undo.as_mut() {u.valid=false;}
                     }
                     self.record(b'O', (port as u64) << 8 | v as u64);
@@ -1607,14 +1518,14 @@ impl Machine {
                 Ok(VcpuExit::IoIn(port, data)) => {
                     self.stats.pio += 1;
                     let charge = io_charge(port, false);
-                    advance_time(self.time, charge, u64::MAX)?;
+                    advance_time(self.world.time, charge, u64::MAX)?;
                     let descriptor = unsafe { (*run_ptr).__bindgen_anon_1.io };
                     match port {
                         0x520 => {
-                            let t = self.time.max(advance_time(self.tsc_latch, 1, hard)?);
+                            let t = self.world.time.max(advance_time(self.tsc_latch, 1, hard)?);
                             self.tsc_latch = t;
-                            self.stats.time_by[Cause::ClockReads as usize] += t - self.time;
-                            self.time = t;
+                            self.stats.time_by[Cause::ClockReads as usize] += t - self.world.time;
+                            self.world.time = t;
                             data.copy_from_slice(&(t as u32).to_le_bytes()[..data.len()]);
                         }
                         0x524 => data.copy_from_slice(
@@ -1639,7 +1550,7 @@ impl Machine {
                         }
                     }
                     let pending = if charge > 0 {
-                        Some(PendingIo::new(self.time, port, false, descriptor.size, descriptor.count, data.to_vec())?)
+                        Some(PendingIo::new(self.world.time, port, false, descriptor.size, descriptor.count, data.to_vec())?)
                     } else { None };
                     self.record(b'i', port as u64);
                     self.serial_edges();
@@ -1727,22 +1638,22 @@ impl Machine {
                     self.sync_pic();
                     self.set_stepping(false)?;
                     if self.vcpu.get_kvm_run().if_flag == 0 {
-                        self.state = State::Exited(0xfe);
+                        self.world.state = State::Exited(0xfe);
                         return Ok(Stop::Exited);
                     }
-                    self.state = State::Halted;
+                    self.world.state = State::Halted;
                     return Ok(Stop::Halted);
                 }
                 Ok(VcpuExit::IrqWindowOpen) => {
                     self.stats.window_exits += 1;
                 }
                 Ok(VcpuExit::Shutdown) => {
-                    self.state = State::Exited(0xff);
+                    self.world.state = State::Exited(0xff);
                     self.set_stepping(false)?;
                     return Ok(Stop::Exited);
                 }
-                Ok(other) => return Err(format!("{}: unexpected exit {other:?}", self.name)),
-                Err(e) => return Err(format!("{}: KVM_RUN: {e}", self.name)),
+                Ok(other) => return Err(format!("{}: unexpected exit {other:?}", self.world.name)),
+                Err(e) => return Err(format!("{}: KVM_RUN: {e}", self.world.name)),
             }
         }
     }
@@ -2429,7 +2340,7 @@ mod fork_tests {
             let first=(old.branches,old.exit_witness());
             old.com1.out.extend_from_slice(b"first boot\n");
             old.syscall_ns=937;
-            let crash=old.time+100;
+            let crash=old.world.time+100;
             let mut new=probe_machine(&kvm,undo,false);
             new.succeed(&mut old,crash,1009).unwrap();
             assert!(new.down && !new.paused);
@@ -2466,7 +2377,7 @@ mod fork_tests {
                 disk.write(0,&[b'A';32*512]).unwrap();
                 disk.flush();
                 disk.write(0,&[b'B';32*512]).unwrap();
-                let expected=disk.crashed_seeded(seed,&old.name,old.incarnation);
+                let expected=disk.crashed_seeded(seed,&old.world.name,old.world.incarnation);
                 old.blk=Some(VirtioBlk::new(disk));
                 let mut new=probe_machine(&kvm,256,false);
                 new.blk=Some(VirtioBlk::new(Disk::new(None,Some(32)).unwrap().with_fault_model(fault_model)));

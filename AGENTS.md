@@ -78,6 +78,12 @@ The core PV progress engine owns watchdog policy and cycle proof; architecture
 adapters supply stepping and complete comparison primitives. Preserve the
 proof/diagnostic boundary in `docs/progress-proof.md`; ARM support must not assume
 a PMU or treat an unsupported dirty log as proof that RAM is unchanged.
+The shared world coordinator owns scheduling, routing, control/trigger/fault
+ordering, lifecycle policy and world snapshots. Machine adapters embed its single
+`MachineState` and supply stopped execution and physical lifecycle operations.
+Keep hard limits exact, including owed I/O; preserve the lifecycle commit sites
+relative to fallible architecture actions. See `docs/world-coordinator.md`.
+ARM still uses its existing world loop until its separate coordinator adapter stage.
 
 The standalone backends compile the canonical sources through their in-workspace
 `engine-core` packages, with distinct package names just like their control

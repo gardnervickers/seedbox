@@ -76,9 +76,7 @@ fn malformed_world_faults_return_errors_instead_of_panicking() {
     }
 }
 
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/events.rs"]
-mod events;
+use seedbox_engine_core::world_events as events;
 #[test]
 fn already_routed_frames_survive_same_time_partition_and_events_keep_sequence() {
     use std::collections::BTreeMap;

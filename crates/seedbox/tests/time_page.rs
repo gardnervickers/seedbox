@@ -73,12 +73,15 @@ fn extension_writes_stay_behind_pv_and_parked_abi_3_time_fork_gates() {
     let release = section(MACHINE, "pub fn release(", "/// Freeze the machine");
     let write = release.find("self.page_set(PAGE_ENTROPY + i, v)").unwrap();
     for gate in [
-        "if !self.parked {",
+        "self.world.begin_release()?;",
         "if self.barrier {",
         "if self.abi < ABI_PAGE_RESEED {",
     ] {
         assert!(release.find(gate).unwrap() < write);
     }
+    let world = include_str!("../../seedbox-engine-core/src/world.rs");
+    let guard = section(world, "pub fn begin_release(", "pub fn pause(");
+    assert!(guard.find("if !self.parked {").unwrap() < guard.find("self.parked = false;").unwrap());
     assert!(release.contains("return Ok(Reseed::Unsupported);"));
     // Generation publication follows the payload, with no other runtime writer.
     assert!(

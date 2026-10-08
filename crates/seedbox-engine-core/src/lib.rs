@@ -30,3 +30,7 @@ pub mod virtio_block;
 pub mod virtio_network;
 
 pub mod pv_progress;
+
+#[allow(clippy::drain_collect)] // Preserve reference delivery collection during extraction.
+pub mod world;
+pub mod world_events;
