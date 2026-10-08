@@ -2153,6 +2153,37 @@ fn torn_write_policy_changes_identity_and_replay_requires_the_recorded_policy() 
 }
 
 #[test]
+fn checkpoint_identity_replays_retained_semantics() {
+    let mut fixture = Fixture::new();
+    let parent = fixture.run();
+    fixture
+        .backend
+        .profile
+        .semantic_parameters
+        .insert("checkpoint_at_ns".into(), "500".into());
+    fixture
+        .backend
+        .profile
+        .semantic_parameters
+        .insert("checkpoint_branch_seed".into(), "42".into());
+    fixture.preparer.inputs.profile = fixture.backend.profile.clone();
+    let branch = fixture.run();
+    assert_eq!(branch.record.outcome, Outcome::Pass);
+    assert_ne!(branch.record.run_id, parent.record.run_id);
+    let replay = fixture.replay(&branch);
+    assert_eq!(replay.record.run_id, branch.record.run_id);
+    assert_eq!(replay.record.replay.unwrap().status, ReplayStatus::Match);
+    fixture
+        .backend
+        .profile
+        .semantic_parameters
+        .insert("checkpoint_branch_seed".into(), "43".into());
+    fixture.preparer.inputs.profile = fixture.backend.profile.clone();
+    let other = fixture.run();
+    assert_ne!(other.record.run_id, branch.record.run_id);
+}
+
+#[test]
 fn timebase_changes_identity_while_default_counter_preserves_legacy_bytes() {
     use seedbox::{
         counter::CounterProfile,

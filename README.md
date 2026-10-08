@@ -35,6 +35,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Directed link baselines | no overrides; global latency/jitter and zero loss | `x-seedbox.network.links` |
 | Connection selectors | disabled; discover and select through the guest control API | `world.connections`, `world.drop_connection` |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
+| Runtime checkpoint | absent; ordinary execution | `--checkpoint-at-ns T --branch-seed B` (run only; B=P continues without reseeding; no environment backing) |
 | Timebase | `counter` (retired guest branches) | `--timebase` (prepare/run/explore) |
 | Page timer | off; ABI-4 clockevent stores, aimed at PV | `--page-timer` (prepare/run/explore) |
 | Exploration count | `1` | `--count` |
@@ -132,6 +133,19 @@ logs do not change the outcome. Retained records and `--json` output are unchang
 and transfer from qualified execution. Same software versions, seed and exact
 retained inputs must replay on a qualified compatible profile; changing versions
 may change execution. Release compatibility remains a V0 qualification gate.
+
+Experimental runtime forks use `seedbox run examples/redis --checkpoint-at-ns
+1000000000 --branch-seed 42` with the newly built VMM. The
+ordinary seed drives the prefix; the full branch identity keys future simulator
+randomness and guest CRNG entropy after one simulated second. Build the VMM and
+current K2/ABI-3 guest kernel from this checkout. A branch seed
+equal to the parent seed continues without any reseeding. Replay reads these
+semantic settings from the retained run. Application-owned PRNG state remains
+captured. Each public branch has its own retained attempt with the normal
+`output/machines/` layout: `logs` includes its prefix and post-checkpoint chunks,
+and `diff` reads page hashes retained by `run --full-state`.
+See the [checkpoint design](docs/runtime.md#runtime-checkpoint-design-experimental)
+for state coverage, engine-only multiple checkpoints/branches and unverified KVM behavior.
 
 ## Finite exploration
 

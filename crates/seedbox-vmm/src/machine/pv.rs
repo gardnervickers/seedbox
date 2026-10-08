@@ -132,6 +132,22 @@ impl PvClock {
         })
     }
 
+    /// Probes finish inside run_until; no spin-search reference survives a
+    /// committed scheduler boundary. Page fields and syscall cost live in Machine.
+    pub fn checkpoint_boundary(&self) -> Result<(), String> {
+        if self.probe.is_some() {return Err("PV checkpoint inside a spin probe".into());}
+        Ok(())
+    }
+
+    /// Scratch for the next KVM_RUN is overwritten by prepare/start. Watchdog
+    /// phase and backoff are host performance state, recreated after restore.
+    pub fn restore_boundary(&mut self) -> Result<(), String> {
+        self.probe=None;self.landed=false;self.progressed=true;
+        self.skip=0;self.backoff=0;self.syscalls0=0;self.remaining=0;
+        self.syscall_ns=SYSCALL_NS;
+        self._watchdog.hold(false)
+    }
+
     /// One probe step at a landing. `None`: the check gave up, run freely.
     fn probe_step(&mut self, m: &mut Machine) -> Result<Option<Prepared>, String> {
         let regs = unsafe { m.vcpu.get_kvm_run().s.regs.regs };

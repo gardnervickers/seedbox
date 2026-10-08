@@ -146,6 +146,14 @@ pub const ENTROPY_WORDS: usize = 8;
 /// shared page, device models and the VMM's per-machine scalars.
 pub struct MachineSnapshot {
     ram: Mapping,
+    pending_io: Option<PendingIo>,
+    timer_rng: Option<crate::rng::Rng>,
+    paused: bool,
+    down: bool,
+    incarnation: u32,
+    booted_at: u64,
+    entropy: [u32; ENTROPY_WORDS],
+    entropy_read: usize,
     page: Box<[u8; 4096]>,
     cpu: VcpuState,
     time: u64,
@@ -168,6 +176,7 @@ pub struct MachineSnapshot {
     control_dma_bytes: u64,
     control_tx_bytes: u64,
     pv: bool,
+    syscall_ns: u64,
     abi: u64,
     page_timer: PageTimer,
     armed_wake: u64,
@@ -731,6 +740,18 @@ impl Machine {
         if self.abi < ABI_PAGE_RESEED {
             return Ok(Reseed::Unsupported);
         }
+        self.reseed_time_page(entropy)?;
+        Ok(Reseed::Page)
+    }
+
+    /// Publish fork entropy without parking, advancing clocks or touching I/O.
+    /// ABI zero is pre-boot: retain the page until the kernel announces its ABI.
+    pub fn reseed_time_page(&mut self, entropy: [u32; ENTROPY_WORDS]) -> Result<(), String> {
+        if self.abi != 0 && self.abi < ABI_PAGE_RESEED {
+            return Err(format!("{}: runtime checkpoint reseeding requires guest ABI 3; rebuild the kernel from kernel/", self.name));
+        }
+        self.entropy = entropy;
+        self.entropy_read = 0;
         let gen = self.page_get(PAGE_ENTROPY_GEN) + 1;
         for (i, v) in page_entropy(&entropy).into_iter().enumerate() {
             self.page_set(PAGE_ENTROPY + i, v);
@@ -738,7 +759,12 @@ impl Machine {
         // Publish the generation last: the guest reads it first.
         self.page_set(PAGE_ENTROPY_GEN, gen);
         self.record(b'S', gen);
-        Ok(Reseed::Page)
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn published_entropy(&self) -> [u64;5] {
+        std::array::from_fn(|i|self.page_get(PAGE_ENTROPY_GEN+i))
     }
 
     /// Freeze the machine at a world boundary. Nothing about the vCPU changes:
@@ -785,7 +811,7 @@ impl Machine {
     /// witness covers every incarnation. Nothing else crosses: RAM, device
     /// queues, KVM's I/O state and the undo checkpoint die with the VM.
     /// Returns the number of volatile sectors lost, or None without a disk.
-    pub fn succeed(&mut self, old: &mut Machine, at: u64, seed: u64) -> Result<Option<u64>, String> {
+    pub fn succeed(&mut self, old: &mut Machine, at: u64, seed: u64, identity: Option<&str>) -> Result<Option<u64>, String> {
         self.incarnation = old.incarnation.checked_add(1).ok_or("incarnation overflow")?;
         self.down = true;
         self.time = at;
@@ -802,7 +828,7 @@ impl Machine {
         self.syscall_ns = old.syscall_ns;
         // Flushed data survives; the disk policy chooses unflushed survivors.
         let lost = if let (Some(new), Some(blk)) = (self.blk.as_mut(), old.blk.as_ref()) {
-            let (disk, lost) = blk.disk.crashed_seeded(seed, &old.name, old.incarnation);
+            let (disk, lost) = blk.disk.crashed_branch(seed, identity, &old.name, old.incarnation);
             *new = VirtioBlk::new(disk);
             Some(lost)
         } else { None };
@@ -826,9 +852,9 @@ impl Machine {
         Ok(())
     }
 
-    /// Capture this machine at the world's fork point: parked, no I/O owed.
+    /// Capture at a committed scheduler boundary, including unpaid I/O cost.
     pub fn snapshot(&mut self) -> Result<MachineSnapshot, String> {
-        if self.pending_io.is_some() || self.stepping || !self.fault_effects.is_empty() || !self.control_requests.is_empty() || self.committed_console.is_some() {
+        if self.stepping || !self.fault_effects.is_empty() || !self.control_requests.is_empty() || self.committed_console.is_some() {
             return Err(format!("{}: not at a fork point", self.name));
         }
         self.complete_io()?;
@@ -844,6 +870,9 @@ impl Machine {
         unsafe { std::ptr::copy_nonoverlapping(self.page as *const u8, page.as_mut_ptr(), 4096) };
         Ok(MachineSnapshot {
             ram, page, cpu,
+            pending_io: self.pending_io.clone(), timer_rng: self.timer_rng.clone(),
+            paused: self.paused, down: self.down, incarnation: self.incarnation, booted_at: self.booted_at,
+            entropy: self.entropy, entropy_read: self.entropy_read,
             time: self.time, branches: self.branches, tsc_latch: self.tsc_latch, state: self.state,
             guest_exit_code: self.guest_exit_code, guest_init_error: self.guest_init_error,
             pic: self.pic.clone(), pit: self.pit.clone(), rtc_index: self.rtc_index,
@@ -852,7 +881,7 @@ impl Machine {
             management_framer: self.management_framer.clone(),
             net: self.net.clone(), channel: self.channel.clone(), blk: self.blk.clone(),
             control_dma_bytes: self.control_dma_bytes, control_tx_bytes: self.control_tx_bytes,
-            pv: self.pv, abi: self.abi, page_timer: self.page_timer, armed_wake: self.armed_wake, pit_exact: self.pit_exact, exit_req: self.exit_req,
+            pv: self.pv, syscall_ns: self.syscall_ns, abi: self.abi, page_timer: self.page_timer, armed_wake: self.armed_wake, pit_exact: self.pit_exact, exit_req: self.exit_req,
             margin: self.margin, fm: self.fm, parked: self.parked,
             stats: self.stats.clone(), witness: self.witness.clone(), undo_stats,
         })
@@ -903,7 +932,8 @@ impl Machine {
         self.branches = s.branches;
         self.tsc_latch = s.tsc_latch;
         self.state = s.state;
-        self.pending_io = None;
+        self.pending_io = s.pending_io.clone();
+        self.timer_rng = s.timer_rng.clone();
         self.guest_exit_code = s.guest_exit_code;
         self.guest_init_error = s.guest_init_error;
         self.pic = s.pic.clone();
@@ -922,6 +952,7 @@ impl Machine {
         self.control_dma_bytes = s.control_dma_bytes;
         self.control_tx_bytes = s.control_tx_bytes;
         self.pv = s.pv;
+        self.syscall_ns = s.syscall_ns;
         self.abi = s.abi;
         self.page_timer = s.page_timer;
         self.armed_wake = s.armed_wake;
@@ -930,12 +961,12 @@ impl Machine {
         self.margin = s.margin;
         self.fm = s.fm;
         self.parked = s.parked;
-        self.paused = false;
-        self.down = false;
-        self.incarnation = 0;
-        self.booted_at = 0;
-        self.entropy = [0; ENTROPY_WORDS];
-        self.entropy_read = 0;
+        self.paused = s.paused;
+        self.down = s.down;
+        self.incarnation = s.incarnation;
+        self.booted_at = s.booted_at;
+        self.entropy = s.entropy;
+        self.entropy_read = s.entropy_read;
         self.stats = s.stats.clone();
         self.witness = s.witness.clone();
         Ok(pages)
@@ -1124,7 +1155,8 @@ impl Machine {
     }
 
     /// Device effects and the KVM response have already been committed once.
-    /// No guest entry, publication, injection or checkpoint until all cost is paid.
+    /// No guest execution, publication, injection or speculative checkpoint until
+    /// all cost is paid. A world snapshot may complete KVM I/O and retain the debt.
     fn drain_io(&mut self, limit: u64) -> Result<bool, String> {
         while self.pending_io.is_some() {
             self.expire_timers()?;
@@ -1615,6 +1647,9 @@ impl Machine {
                         }
                         0x528 => {
                             self.abi = v as u64;
+                            if self.abi < ABI_PAGE_RESEED && self.page_get(PAGE_ENTROPY_GEN) != 0 {
+                                return Err(format!("{}: checkpoint entropy requires guest ABI 3", self.name));
+                            }
                             if self.pv_clock && self.page_get(PAGE_PV_CLOCK) != 2 {
                                 return Err(format!(
                                     "{}: the guest kernel lacks PV clock support; rebuild it from kernel/ for the pv timebase",
@@ -1999,6 +2034,33 @@ mod io_boundary_tests {
         machine.pit.write(0x43,0,0);
         machine.pic.set_masks(0);
         machine
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn runtime_checkpoint_keeps_unpaid_io_without_repeating_its_effect() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        for undo in [0,256] {
+            for (port,write) in [(0x40,false),(0x43,true),(0x530,true)] {
+                let mut m=probe(&kvm,port,write,undo);
+                let mut frames=Vec::new();
+                assert_eq!(m.run_until(&mut counter,500,0,&mut frames).unwrap(),Stop::Reached);
+                let pending=m.pending_io.clone();
+                assert!(pending.is_some());
+                let saved=m.snapshot().unwrap();
+                let finish=|m: &mut Machine,counter: &mut Counter| {
+                    let mut frames=Vec::new();
+                    while !matches!(m.run_until(counter,10_000,0,&mut frames).unwrap(),Stop::Halted|Stop::Exited) {}
+                    (m.exit_witness(),m.state_digest().0,m.time,m.branches)
+                };
+                let want=finish(&mut m,&mut counter);
+                let mut fresh=probe(&kvm,port,write,undo);
+                fresh.restore(&saved).unwrap();
+                assert_eq!(fresh.pending_io,pending);
+                assert_eq!(finish(&mut fresh,&mut counter),want,"port={port:#x}, write={write}, undo={undo}");
+            }
+        }
     }
 
     #[test]
@@ -2612,7 +2674,7 @@ mod fork_tests {
             old.syscall_ns=937;
             let crash=old.time+100;
             let mut new=probe_machine(&kvm,undo,false);
-            new.succeed(&mut old,crash,1009).unwrap();
+            new.succeed(&mut old,crash,1009,None).unwrap();
             assert!(new.down && !new.paused);
             assert_eq!(new.syscall_ns,937,"the next incarnation keeps the PV syscall cost");
             assert_eq!((new.incarnation,new.time),(1,crash));
@@ -2660,7 +2722,7 @@ mod fork_tests {
                 witness.update(1000u64.to_le_bytes());
                 witness.update(b"pending_io");
                 witness.update(new.pending_io_bytes());
-                assert_eq!(new.succeed(&mut old,1000,seed).unwrap(),Some(expected.1));
+                assert_eq!(new.succeed(&mut old,1000,seed,None).unwrap(),Some(expected.1));
                 assert_eq!(new.exit_witness(),format!("{:x}",witness.finalize()));
                 let disk=&new.blk.as_ref().unwrap().disk;
                 assert_eq!(disk.digest(),expected.0.digest());
@@ -2696,7 +2758,7 @@ mod fork_tests {
         disk.write(1,&[b'C';512]).unwrap();
         let mut new=probe_machine(&kvm,256,false);
         with_disk(&mut new);
-        assert_eq!(new.succeed(&mut old,1000,1009).unwrap(),Some(2));
+        assert_eq!(new.succeed(&mut old,1000,1009,None).unwrap(),Some(2));
         let disk=&new.blk.as_ref().unwrap().disk;
         let mut buf=[0u8;1024];
         disk.read(0,&mut buf).unwrap();
@@ -2706,6 +2768,54 @@ mod fork_tests {
         assert_eq!(old.blk.as_ref().unwrap().disk.volatile_sectors(),2,"the old incarnation is untouched");
         old.restore(&snap).unwrap();
         assert_eq!(old.blk.as_ref().unwrap().disk.digest(),Disk::new(None,Some(8)).unwrap().digest());
+    }
+
+    #[test]
+    #[ignore = "requires Linux x86-64 KVM"]
+    fn runtime_checkpoint_restores_pv_fields_and_seeded_syscall_cost() {
+        let kvm=Kvm::new().unwrap();
+        let mut m=probe_machine(&kvm,0,false);
+        m.pv_clock=true;m.syscall_ns=937;m.abi=ABI_PAGE_RESEED;
+        for i in 6..14 {m.page_set(i,100+i as u64);}
+        let saved=m.snapshot().unwrap();
+        m.syscall_ns=1000;for i in 6..14 {m.page_set(i,0);}
+        m.restore(&saved).unwrap();
+        assert_eq!(m.syscall_ns,937);
+        assert_eq!((6..14).map(|i|m.page_get(i)).collect::<Vec<_>>(),(6..14).map(|i|100+i as u64).collect::<Vec<_>>());
+        let pv_fields=(6..9).map(|i|m.page_get(i)).collect::<Vec<_>>();
+        m.reseed_time_page([42;ENTROPY_WORDS]).unwrap();
+        assert_eq!((6..9).map(|i|m.page_get(i)).collect::<Vec<_>>(),pv_fields);
+        assert_eq!(m.page_get(9),110);
+        assert_eq!((10..14).map(|i|m.page_get(i)).collect::<Vec<_>>(),page_entropy(&[42;ENTROPY_WORDS]));
+    }
+
+    #[test]
+    #[ignore = "requires KVM"]
+    fn runtime_reseed_publishes_page_without_advancing_or_unpausing() {
+        let kvm=Kvm::new().unwrap();
+        let mut m=probe_machine(&kvm,0,false);
+        m.abi=ABI_PAGE_RESEED;
+        m.pause().unwrap();
+        let saved=m.snapshot().unwrap();
+        let before=m.published_entropy();
+        m.reseed_time_page([42;ENTROPY_WORDS]).unwrap();
+        assert!(m.paused);assert_eq!(m.time,0);assert!(!m.parked);
+        assert_eq!(m.page_get(PAGE_ENTROPY_GEN),1);
+        let page=page_entropy(&[42;ENTROPY_WORDS]);
+        for (i,word) in page.into_iter().enumerate() {assert_eq!(m.page_get(PAGE_ENTROPY+i),word);}
+        let branch=m.published_entropy();
+        assert_ne!(branch,before);
+        m.restore(&saved).unwrap();
+        m.reseed_time_page([43;ENTROPY_WORDS]).unwrap();
+        assert_ne!(m.published_entropy(),branch);
+        m.restore(&saved).unwrap();
+        m.reseed_time_page([42;ENTROPY_WORDS]).unwrap();
+        assert_eq!(m.published_entropy(),branch);
+        m.abi=2;
+        assert!(m.reseed_time_page([44;ENTROPY_WORDS]).unwrap_err().contains("requires guest ABI 3"));
+        m.abi=0;
+        m.reseed_time_page([45;ENTROPY_WORDS]).unwrap();
+        assert_eq!(m.page_get(PAGE_ENTROPY_GEN),2,"pre-boot entropy is published too");
     }
 }
 
@@ -2757,11 +2867,29 @@ mod timed_log_tests {
         let kvm=Kvm::new().unwrap();let mut counter=Counter::new().unwrap();
         let mut old=output_machine(&kvm,256);let mut frames=Vec::new();
         assert_eq!(old.run_until(&mut counter,2000,0,&mut frames).unwrap(),Stop::Exited);
-        let mut new=output_machine(&kvm,256);new.succeed(&mut old,5000,1009).unwrap();new.boot_at(5000).unwrap();
+        let mut new=output_machine(&kvm,256);new.succeed(&mut old,5000,1009,None).unwrap();new.boot_at(5000).unwrap();
         assert_eq!(new.run_until(&mut counter,7000,0,&mut frames).unwrap(),Stop::Exited);
         assert_eq!(new.com1.out,b"\0AB\0AB");assert_eq!(new.com2.out,b"\xff\xff");
         assert_eq!(new.com1.chunks.records,vec![[0,0,0,0,1],[0,0,2,1,2],[5000,1,3,3,1],[5000,1,5,4,2]]);
         assert_eq!(new.com2.chunks.records,vec![[0,0,1,0,1],[5000,1,4,1,1]]);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn runtime_checkpoint_restores_timed_log_cursor_and_order() {
+        let kvm=Kvm::new().unwrap();let mut counter=Counter::new().unwrap();
+        let mut m=output_machine(&kvm,256);let mut frames=Vec::new();
+        m.run_until(&mut counter,500,0,&mut frames).unwrap();
+        let saved=m.snapshot().unwrap();
+        m.run_until(&mut counter,2000,0,&mut frames).unwrap();
+        let want=(m.com1.out.clone(),m.com2.out.clone(),m.com1.chunks.records.clone(),m.com2.chunks.records.clone(),m.log_order);
+        for _ in 0..2 {
+            let mut fresh=output_machine(&kvm,256);fresh.restore(&saved).unwrap();
+            assert_eq!(fresh.com1.chunks.seen,saved.com1.chunks.seen);
+            assert_eq!(fresh.com2.chunks.seen,saved.com2.chunks.seen);
+            fresh.run_until(&mut counter,2000,0,&mut frames).unwrap();
+            assert_eq!((fresh.com1.out.clone(),fresh.com2.out.clone(),fresh.com1.chunks.records.clone(),fresh.com2.chunks.records.clone(),fresh.log_order),want);
+        }
     }
 
     // Inject a judge decision at a real KVM output exit to exercise the commit

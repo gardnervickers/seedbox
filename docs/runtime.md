@@ -8,6 +8,107 @@ These are version-bound results, not qualification of arbitrary OCI runtimes or
 the latest changed example inputs. See [draft formats and runtime scope](compatibility.md)
 for current readers/writers, exit meanings and remaining release gates.
 
+## Runtime checkpoint design (experimental)
+
+`seedbox run --checkpoint-at-ns T --branch-seed B` executes the parent seed P
+up to simulated time T, captures the world, and continues under B. B=P is a
+true continuation: every captured stream and guest entropy stays in place.
+Each public branch is its own retained run/attempt. Its prefix and continuation
+use the ordinary `output/machines/NAME.console` and `.mgmt` files with `.chunks`
+indexes, and `--full-state` writes `NAME.pages` alongside them. `logs` and `diff`
+read that attempt directly, as they do for ordinary runs and replays.
+Both options are semantic parameters with no environment backing. Replay
+reconstructs the parent prefix and checkpoint from retained inputs; bundles
+need no RAM snapshot. Without the options, the ordinary scheduler, RNG draw
+order, dedicated six-field time-page digest and witness inputs remain main's.
+
+Capture occurs at a committed scheduler boundary before control, triggers,
+faults and guest work at T. Queued committed console bytes, fault effects and
+control requests from completed slices drain into world state before the stop
+is tested. Pending world RPCs remain captured. Running machines have reached T;
+sleeping, paused, down and exited machines retain their clocks, with no possible
+next action before T. Charged I/O may still owe time: its response and device
+effect are already committed, and restoring keeps the debt without repeating
+the effect. Boot forks still require every machine parked.
+
+The CLI and engine share `crates/seedbox-vmm/src/checkpoint.rs`. Parent identity
+uses the versioned `seedbox-world-parent-v2` domain, config with checkpoint
+metadata removed, kernel/initrd/disk paths replaced by content hashes, engine
+hash, timebase and parent seed. Branch identity binds this parent, T and B.
+The retained RunIdentity also binds T and B; it is not a second parent-identity
+scheme. Relocating inputs does not change the branch. Counter and PV parents
+have different identities. The engine recomputes the supplied CLI identity.
+
+Build the VMM and current K2/ABI-3 kernel from this checkout. #93 was closed;
+its reseed hook landed through #126 with PV fields at u64 indices 6–8,
+`entropy_gen` at 9, entropy at 10–13, and `SEEDBOX_ABI = 3`. No engine/kernel
+pins or host-policy proof are added. A changed-seed branch keys future directed
+link loss/jitter, timer jitter, reboot entropy and disk survival on its full
+branch identity. Each up machine, including paused guests and controllers,
+receives 32 bytes through the time page. The kernel mixes them into its CRNG
+before its next kernel random output; the timer hook refreshes the vDSO
+generation at its next tick. Pre-boot machines keep the publication until kernel
+initialization. Announced ABI <3 is unsupported for changed-seed runtime
+reseeding and produces an explicit error. `checkpoint_reseed` reports
+`time_page`, `not_up` or `continuation` per machine. Publication does not prove
+guest consumption. Application-owned PRNGs and already consumed bytes stay in RAM.
+
+Capture covers the following state from current main:
+
+| State | Capture and continuation |
+| --- | --- |
+| Machines/devices | RAM, vCPU registers/MSRs/events, full shared page, PIC/PIT, UARTs, virtio network/control/block queues, entropy words/cursor, pending charged I/O, timer RNG, clocks and witness accumulators. |
+| PV timebase (#85, #89, #113) | Full page captures PV enable/ack, bound and syscall target, as well as the original fields and fork entropy. `MachineSnapshot.syscall_ns` retains the sampled per-machine speed across fresh-VM restore; forks do not resample it. The configured timebase stays in immutable boot inputs and parent identity. Spin probes finish inside `run_until`; capture refuses an active probe. The completed probe's idle state is captured in the machine. Watchdog phase/backoff and KVM-run scratch affect host performance only and reset at restore; `prepare`/`start` overwrite remaining progress and syscall baseline before guest entry. |
+| Triggers (#109) | The full `Control` clone carries arm order, KMP failure tables, partial prefix/seen/reset counts, match/effect deadlines, cancellations, statuses and evidence. The committed byte slot is drained before capture. Machine `observe_console` is restored and scheduled trigger boundaries constrain the checkpoint stop. |
+| Directed links (#97) | The full `Faults.links` clone carries baselines, active layers, FIFO arrival history, shaped-use marker and both RNG positions. Changed-seed forks replace future loss/jitter streams only; in-flight packets retain send-time decisions. |
+| Connection selectors (#106) | `Faults.connections` carries TCP tuples/incarnations, SYN/FIN/closed state, next-ID/eviction counters, live selections, matched/dropped counts and witness-use marker. Selections are not rediscovered at restore. |
+| Timed logs (#105) | UART snapshots retain raw prefixes and index records, seen-byte cursor, pending/coalescing state, caps and failure state. Machine-wide log order and incarnation are retained. Each runtime branch opens its own console/management index sinks and writes the captured prefix before further output. Host descriptors are recreated. |
+| Lifecycle (#91) | Complete `Control`/`Faults` include pending calls/plans/replies, relay/session counters, readiness, process/lifecycle state, active handles, boundaries, queued lifecycle effects and logs. Machines retain paused/down flags, incarnation and boot time; the world retains incarnation history, management deliveries and paused ingress counts. Supervisor/relay state lives in RAM. |
+| Disk/torn writes (#100) | Complete virtio-blk state includes transport counters/queues, fault model, immutable base and stable/volatile overlays. Main's parameterized survival threshold and ascending sector draw order are preserved. Selection is atomic at crash, so no partially consumed survival cursor needs capture. A down snapshot already holds selected survivors; forks cannot resample its earlier crash. |
+| Network inspection | Physical link counts and `NetworkCounters` totals, pending nominal deltas and frontier are cloned, alongside packets, partitions and event ordering counters. |
+| Named volumes (#96) | Filesystem/page-cache state is in RAM; retained block state is in virtio-blk. Mount declarations/placement are immutable inputs. Formatting/mounting is not rerun. |
+
+Fault plans, sampled deadlines, arrivals and control requests remain captured;
+`arm_seed` is never rerun for a runtime branch. New incarnations created after
+branching use branch-derived entropy/timer streams. A down incarnation already
+constructed before T retains its sampled boot entropy; its disk and future
+reboot action are captured. Host leases, pause/resume socket, counter/watchdog
+handles and undo caches are not world semantics. They remain owned by the
+executing process or are recreated at restore. Page-hash files (#121) are
+observation artifacts generated from restored RAM at report time. Offline
+readers, parallel exploration workers and host diagnostics add no state to a
+single captured world; public checkpoint flags stay `run`-only.
+
+The low-level engine supports multiple held checkpoints and N forks:
+
+```sh
+seedbox-vmm --config WORLD.json --seed 7 --checkpoint-at-ns 1000000000,2000000000 \
+  --fork-seeds 11,12 --out OUTPUT --digest
+```
+
+This runs branches 7, 11 and 12 at each T, producing six reports/directories
+under `OUTPUT/checkpoint-T/seed-B/`. A single (T, B) writes directly under
+`OUTPUT`, matching the public retained-run layout. Each prefix starts from the
+same origin, so an earlier hard stop cannot perturb a later checkpoint. Restores
+use fresh VMs/full RAM copies; multiple held snapshots cannot share Undo's dirty
+baseline. RAM cost is approximately whole-world RAM per held checkpoint, plus
+an origin when several times are requested. Times must increase and precede
+duration. A world ending before T fails checkpoint creation explicitly.
+Runtime checkpoints cannot mix with `boot` forks or trace output. Console/index
+streams are reopened with captured prefixes. Output directories contain logs and
+reports, not resumable RAM snapshots.
+
+Event-triggered capture, serialized snapshots, cross-process/host resume,
+public multi-branch manifests and application PRNG reseeding remain future work.
+Ignored KVM tests cover nonmonotonic restore, repeated branches, B=P, parked
+boot guard, message/committed-byte draining, matcher/selector state, scheduled
+trigger effects, PV page/speed, timed-log cursor/order, lifecycle calls, disk
+survivors, branch streams and getrandom/urandom divergence. Portable tests
+check shared identity, ABI layout, replay settings and feature-off link/disk/RNG
+results and witness traces generated from main. Actual restored execution and
+whole-guest feature-off equality remain unverified on this Mac. See
+[the AMD host procedure](checkpoint-amd.md) for the exact remaining commands.
+
 ## Disk crash policy
 
 `run` and `prepare` accept `--torn-writes` (off by default). Off retains the
@@ -35,16 +136,19 @@ are not candidates; there is no write log. Lost sectors fall back to their last
 flushed contents or the base image. Every completed FLUSH stabilizes all preceding
 completed writes, so it never loses coverage under this policy.
 
-Selection visits volatile sectors in ascending sector order, using `below(2) == 1`
+Selection visits volatile sectors in ascending sector order, testing the unit
+interval draw against the recorded survival probability (main's implementation),
 from the versioned SHA-256 RNG domain `disk-loss/<machine>/<incarnation>` and the
-run seed. Incarnation identifies the machine that crashed (initially 0). No
-other RNG stream is consumed. Survivors become stable in the next incarnation;
+run seed. Changed-seed runtime checkpoints prefix that domain with
+`checkpoint/<branch-identity>/`; plain continuations keep the original domain.
+Incarnation identifies the machine that crashed (initially 0). No other RNG
+stream is consumed. Survivors become stable in the next incarnation;
 snapshot/fork restore carries the policy and both disk layers. Reports count
 only actually lost volatile sectors in `disk_lost_sectors`.
 
-This policy applies to retained virtio-blk disks. Current Compose application
-storage remains RAM-backed; attaching named volumes to retained disks is separate
-work. Low-level disk fixtures, including the ext4 fsync ledger, are documented in
+This policy applies to retained virtio-blk disks, including the disks backing
+Compose named volumes. Unmounted application paths remain RAM-backed. Low-level
+disk fixtures, including the ext4 fsync ledger, are documented in
 [`harness/worlds/README.md`](../harness/worlds/README.md#retained-disk).
 
 ## Build on the qualified Linux host

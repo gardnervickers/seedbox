@@ -14,6 +14,10 @@ use std::{
     path::Path,
 };
 
+#[allow(dead_code)]
+#[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/checkpoint.rs"]
+mod checkpoint;
 /// Execution failure whose VMM stderr may be excerpted by the CLI.
 pub const VMM_FAILURE_MESSAGE: &str = "VMM failed; see vmm.stderr";
 
@@ -267,6 +271,25 @@ impl VmmExecutor {
         }
     }
 
+    /// Bind a runtime checkpoint and its branch seed into retained semantics.
+    pub fn with_checkpoint(mut self, at_ns: u64, branch_seed: u64) -> Self {
+        self.profile
+            .semantic_parameters
+            .insert("checkpoint_at_ns".into(), at_ns.to_string());
+        self.profile
+            .semantic_parameters
+            .insert("checkpoint_branch_seed".into(), branch_seed.to_string());
+        self
+    }
+
+    /// Reconstruct checkpoint settings from retained inputs during replay.
+    pub fn with_recorded_checkpoint(self, profile: &ExecutionProfile) -> Result<Self> {
+        Ok(match recorded_checkpoint(profile)? {
+            Some((at, seed)) => self.with_checkpoint(at, seed),
+            None => self,
+        })
+    }
+
     /// Seeded survival of the latest unflushed 512-byte sectors on crash.
     /// Off is represented by omission to preserve existing profile bytes.
     pub fn with_torn_writes(mut self, enabled: bool) -> Self {
@@ -310,6 +333,29 @@ impl VmmExecutor {
     }
 }
 
+/// Checkpoints are optional, but partial or malformed retained settings fail closed.
+pub fn recorded_checkpoint(profile: &ExecutionProfile) -> Result<Option<(u64, u64)>> {
+    let parameters = &profile.semantic_parameters;
+    match (
+        parameters.get("checkpoint_at_ns"),
+        parameters.get("checkpoint_branch_seed"),
+    ) {
+        (None, None) => Ok(None),
+        (Some(at), Some(seed)) => {
+            let invalid = || Error::Integrity("invalid checkpoint semantic parameters".into());
+            let t: u64 = at.parse().map_err(|_| invalid())?;
+            let b: u64 = seed.parse().map_err(|_| invalid())?;
+            if at != &t.to_string() || seed != &b.to_string() {
+                return Err(invalid());
+            }
+            Ok(Some((t, b)))
+        }
+        _ => Err(Error::Integrity(
+            "incomplete checkpoint semantic parameters".into(),
+        )),
+    }
+}
+
 const COUNTER: &str = "counter";
 const DISK_LOSS: &str = "disk_loss";
 const DISK_LOSS_SECTOR_BYTES: &str = "disk_loss_sector_bytes";
@@ -350,6 +396,7 @@ pub fn recorded_counter(profile: &ExecutionProfile) -> Result<CounterProfile> {
 
 impl VmmExecutor {
     fn preflight_capacity(&self, workers: u32, output: Option<&Path>) -> Result<()> {
+        recorded_checkpoint(&self.profile)?;
         crate::admission::validate_profile(&self.profile)?;
         self.validate_execution_mode()?;
         if !self.counter.qualified() {
@@ -599,7 +646,44 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
             "survival_probability": 0.5,
         });
     }
+    if let Some(checkpoint) = checkpoint_metadata(request, &world)? {
+        world["checkpoint"] = checkpoint;
+    }
     Ok(world)
+}
+
+fn checkpoint_metadata(request: &ExecutionRequest<'_>, world: &Value) -> Result<Option<Value>> {
+    let Some((at, seed)) = recorded_checkpoint(&request.prepared.profile)? else {
+        return Ok(None);
+    };
+    if at >= request.limits.simulated_time_ns {
+        return Err(Error::Execution(
+            "checkpoint time must be before the simulated time limit".into(),
+        ));
+    }
+    let parent = checkpoint::parent_identity(
+        world,
+        request.seed,
+        request.prepared.profile.engine.hex(),
+        recorded_timebase(&request.prepared.profile)?.name(),
+        |path| {
+            request
+                .artifacts
+                .iter()
+                .find_map(|(digest, artifact)| {
+                    std::path::absolute(artifact)
+                        .ok()
+                        .filter(|p| p == Path::new(path))
+                        .map(|_| digest.hex().to_owned())
+                })
+                .ok_or_else(|| format!("checkpoint artifact {path} is not verified"))
+        },
+    )
+    .map_err(Error::Integrity)?;
+    Ok(Some(
+        json!({"at_ns":at,"branch_seed":seed,"parent_identity":parent,
+        "branch_identity":checkpoint::branch_identity(&parent,at,seed)}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -674,6 +758,8 @@ struct CrashedIncarnation {
 }
 #[derive(Deserialize)]
 pub(crate) struct VmmReport {
+    #[serde(default)]
+    checkpoint: Option<Value>,
     /// Older engines always used counter.
     timebase: Option<String>,
     pub(crate) report_version: u32,
@@ -1265,6 +1351,14 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
     let raw: VmmReport = serde_json::from_slice(bytes)?;
     if raw.report_version != 1 || raw.seed != request.seed {
         return Err(Error::Integrity("VMM report version/seed mismatch".into()));
+    }
+    let expected_checkpoint = if recorded_checkpoint(&request.prepared.profile)?.is_some() {
+        world(request)?.get("checkpoint").cloned()
+    } else {
+        None
+    };
+    if raw.checkpoint != expected_checkpoint {
+        return Err(Error::Integrity("VMM checkpoint identity mismatch".into()));
     }
     let timebase = recorded_timebase(&request.prepared.profile)?;
     let reported = raw.timebase.as_deref().unwrap_or("counter");
@@ -1858,6 +1952,39 @@ mod doctor_tests {
             raw_cpuid: Vec::new(),
         }
     }
+    #[test]
+    fn replay_reconstructs_checkpoint_profile_without_performance_changes() {
+        let ordinary = VmmExecutor::from_engine_digest(
+            ContentDigest::of(b"engine"),
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap();
+        let branch = ordinary.clone().with_checkpoint(500, 42);
+        assert_eq!(
+            branch.performance_parameters(),
+            ordinary.performance_parameters()
+        );
+        assert_eq!(
+            ordinary
+                .clone()
+                .with_recorded_checkpoint(&branch.profile())
+                .unwrap()
+                .profile(),
+            branch.profile()
+        );
+        assert_eq!(
+            ordinary
+                .clone()
+                .with_recorded_checkpoint(&ordinary.profile())
+                .unwrap()
+                .profile(),
+            ordinary.profile()
+        );
+    }
+
     #[test]
     fn any_engine_and_kernel_pair_is_admitted() {
         let pinned_engine = ContentDigest::of(b"engine");
