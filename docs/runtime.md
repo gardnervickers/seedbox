@@ -899,8 +899,7 @@ streams, ordering and feature-off witnesses are unchanged.
 
 `harness/acceptance/workloads/network-faults.yaml` exercises runtime activation
 and healing, checks actual packet receipts and socket effects, and reconnects
-after healing. Run and replay it through the public CLI on the Linux KVM host;
-the validation procedure is in [network fault checks](network-faults.md).
+after healing. Run and replay it through the public CLI on a Linux KVM host.
 
 The network seed-diversity audit still finds zero default jitter and loss.
 `link/<from>/<to>` and `link-loss/<from>/<to>` each advance once per non-cut
