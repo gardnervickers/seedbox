@@ -13,6 +13,10 @@ for current readers/writers, exit meanings and remaining release gates.
 `seedbox run --checkpoint-at-ns T --branch-seed B` executes the parent seed P
 up to simulated time T, captures the world, and continues under B. B=P is a
 true continuation: every captured stream and guest entropy stays in place.
+Each public branch is its own retained run/attempt. Its prefix and continuation
+use the ordinary `output/machines/NAME.console` and `.mgmt` files with `.chunks`
+indexes, and `--full-state` writes `NAME.pages` alongside them. `logs` and `diff`
+read that attempt directly, as they do for ordinary runs and replays.
 Both options are semantic parameters with no environment backing. Replay
 reconstructs the parent prefix and checkpoint from retained inputs; bundles
 need no RAM snapshot. Without the options, the ordinary scheduler, RNG draw
@@ -83,7 +87,8 @@ seedbox-vmm --config WORLD.json --seed 7 --checkpoint-at-ns 1000000000,200000000
 ```
 
 This runs branches 7, 11 and 12 at each T, producing six reports/directories
-under `OUTPUT/checkpoint-T/seed-B/`. Every prefix starts independently from the
+under `OUTPUT/checkpoint-T/seed-B/`. A single (T, B) writes directly under
+`OUTPUT`, matching the public retained-run layout. Each prefix starts from the
 same origin, so an earlier hard stop cannot perturb a later checkpoint. Restores
 use fresh VMs/full RAM copies; multiple held snapshots cannot share Undo's dirty
 baseline. RAM cost is approximately whole-world RAM per held checkpoint, plus

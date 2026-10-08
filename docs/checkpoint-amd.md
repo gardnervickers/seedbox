@@ -230,7 +230,15 @@ for timebase in counter pv; do
 done
 ```
 
-Expected: workload PASS and replay MATCH for every retained branch. For a public feature-off comparison on Redis, run:
+Expected: workload PASS and replay MATCH for every retained branch. On a workload
+that emits console/management bytes after T, verify `seedbox logs RUN --since-ns
+1000000000` includes those bytes from the branch. Compare two RAM-divergent
+`--full-state` branch attempts with `seedbox diff RUN_A RUN_B --json`: the affected
+machine's `ram_pages` must contain the differing PFNs without reporting missing
+page hashes. Evidence should be directly under `RUN/output/machines/`,
+including `.chunks` indexes and `.pages` files, for both run and replay.
+
+For a public feature-off comparison on Redis, run:
 
 ```sh
 for lane in main candidate; do

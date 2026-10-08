@@ -68,8 +68,11 @@ and continues with branch-identity-derived simulator randomness and guest CRNG
 entropy. Use the newly built VMM and current K2/ABI-3 guest kernel.
 These are semantic options with no environment backing; replay reads them from
 the retained run. A branch seed equal to the parent seed continues without any
-reseeding. Application-owned PRNG state stays in captured RAM. The public CLI
-currently supports one checkpoint branch, without saved snapshot files or event-triggered capture. See the
+reseeding. Application-owned PRNG state stays in captured RAM. Each branch's
+retained attempt uses `output/machines/` for prefix and continuation logs,
+`.chunks` indexes and `--full-state` page hashes; use `logs` and `diff` on that attempt.
+The public CLI currently supports one checkpoint branch, without saved snapshot
+files or event-triggered capture. See the
 repository's `docs/runtime.md` for coverage and pending KVM qualification.
 
 From another terminal, `seedbox pause RUN` pauses the host's entire world at a

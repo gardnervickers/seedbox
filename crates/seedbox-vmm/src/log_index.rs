@@ -4,6 +4,9 @@ use std::io::{BufWriter,Write};
 pub const MAGIC: &[u8;8] = b"SBLOG001";
 pub const MAX_CHUNKS: usize = 65_536;
 
+/// Index filename shared by every UART sink and the retained-log reader.
+pub fn index_name(raw: &str) -> String {format!("{raw}.chunks")}
+
 #[derive(Default)]
 pub struct Index {
     pub records: Vec<[u64;5]>,
@@ -14,6 +17,15 @@ pub struct Index {
     failed: bool,
 }
 impl Index {
+    /// Reopen a restored stream with its captured bytes and timed records.
+    pub fn reopen_stream(&mut self, raw: &str, prefix: &[u8], stream: bool) -> Result<Option<std::fs::File>, String> {
+        self.open(&index_name(raw));
+        if !stream {return Ok(None);}
+        let mut file = std::fs::File::create(raw).map_err(|e|e.to_string())?;
+        file.write_all(prefix).map_err(|e|e.to_string())?;
+        Ok(Some(file))
+    }
+
     pub fn snapshot(&self) -> Self {
         Self {records:self.records.clone(),file:None,limit:self.limit,seen:self.seen,pending:self.pending,failed:self.failed}
     }

@@ -15,6 +15,11 @@ const MAGIC: &[u8; 8] = b"SBLOG001";
 const MAX_CHUNKS: usize = 65_536;
 const MAX_TOTAL_CHUNKS: usize = 1_048_576;
 
+#[allow(dead_code)]
+#[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/log_index.rs"]
+mod log_index;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Stream {
@@ -108,7 +113,7 @@ impl Reader {
             let mut orders = BTreeMap::new();
             for stream in [Stream::Console, Stream::Mgmt] {
                 let name = format!("machines/{machine}.{}", stream.extension());
-                let index_name = format!("{name}.chunks");
+                let index_name = log_index::index_name(&name);
                 let Some(mut index) = retained::log(directory, &record, &index_name, "logs")?
                 else {
                     reader.report.omissions.entry(index_name).or_insert(

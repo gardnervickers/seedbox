@@ -1498,6 +1498,151 @@ mod timed_logs {
     }
 }
 
+#[allow(dead_code)]
+#[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/log_index.rs"]
+mod checkpoint_log_producer;
+#[allow(dead_code)]
+#[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/output_layout.rs"]
+mod checkpoint_layout;
+
+#[allow(dead_code)]
+mod checkpoint_evidence {
+    use super::*;
+    use super::{checkpoint_layout as checkpoint, checkpoint_log_producer as producer};
+    use seedbox as sb;
+    use std::io::Write;
+    include!("support/diff_fixture.rs");
+
+    fn branch_record(seed: u64) -> sb::orchestration::RunRecord {
+        let mut record = fixture();
+        let parameters = &mut record.identity.inputs.profile.semantic_parameters;
+        parameters.insert("checkpoint_at_ns".into(), "20".into());
+        parameters.insert("checkpoint_branch_seed".into(), seed.to_string());
+        record
+    }
+
+    fn branch_output(run: &Path, seed: u64) -> std::path::PathBuf {
+        let out = run.join("output/machines");
+        let branch = checkpoint::checkpoint_directory(out.to_str().unwrap(), 1, 1, 20, seed);
+        fs::create_dir_all(&branch).unwrap();
+        branch.into()
+    }
+
+    // Use the same recursive retention layout as a run, including batch subdirectories.
+    fn retain_output(run: &Path, record: &mut sb::orchestration::RunRecord, directory: &Path) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                retain_output(run, record, &path);
+            } else {
+                let name = path.strip_prefix(run.join("output")).unwrap();
+                record.logs.insert(
+                    name.to_str().unwrap().into(),
+                    sb::store::ContentDigest::of(&fs::read(&path).unwrap()),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn logs_on_checkpoint_branch_include_post_checkpoint_chunks() {
+        for stream in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            let run = root.join("branch");
+            let branch = branch_output(&run, 11);
+            let mut record = branch_record(11);
+            let mut order = 0;
+            let mut snapshots = Vec::new();
+            for ext in ["console", "mgmt"] {
+                let raw = branch.join(format!("workload.{ext}"));
+                let raw = raw.to_str().unwrap();
+                let mut parent = producer::Index::default();
+                parent.open(&producer::index_name(raw));
+                parent.capture(6, 10, 0, &mut order);
+                parent.finish();
+                snapshots.push((ext, parent.snapshot()));
+                // Stale output from the prefix sink must be replaced on restore.
+                fs::write(raw, b"prefixdiscarded").unwrap();
+                let mut discarded_order = 100;
+                parent.capture(15, 30, 0, &mut discarded_order);
+                parent.finish();
+                drop(parent);
+            }
+            for (ext, mut restored) in snapshots {
+                let raw = branch.join(format!("workload.{ext}"));
+                let raw = raw.to_str().unwrap();
+                let mut sink = restored.reopen_stream(raw, b"prefix", stream).unwrap();
+                let suffix = if ext == "console" {
+                    b"console"
+                } else {
+                    b"manage!"
+                };
+                if let Some(file) = sink.as_mut() {
+                    file.write_all(suffix).unwrap();
+                } else {
+                    fs::write(raw, [b"prefix".as_slice(), suffix].concat()).unwrap();
+                }
+                restored.capture(13, 21, 0, &mut order);
+                restored.finish();
+            }
+            retain_output(&run, &mut record, &run.join("output"));
+            write_fixture(&run, &mut record, None, None);
+            for (ext, expected) in [("console", b"console"), ("mgmt", b"manage!")] {
+                let out = seedbox(
+                    &["logs", "branch", "--stream", ext, "--since-ns", "20"],
+                    root,
+                );
+                assert!(out.status.success(), "{}", stderr(&out));
+                assert_eq!(out.stdout, expected);
+                assert_eq!(stderr(&out), "logs: branch\n");
+                let out = seedbox(
+                    &["logs", "branch", "--stream", ext, "--until-ns", "20"],
+                    root,
+                );
+                assert!(out.status.success(), "{}", stderr(&out));
+                assert_eq!(out.stdout, b"prefix");
+            }
+        }
+    }
+
+    #[test]
+    fn diff_between_full_state_checkpoint_branches_finds_page_hashes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let (a, b) = ram_pair();
+        for (name, seed, raw, pfn) in [("a", 11, &a, None), ("b", 12, &b, Some(37))] {
+            let run = root.join(name);
+            let branch = branch_output(&run, seed);
+            let mut record = branch_record(seed);
+            record.identity.inputs.profile.witness_mode = sb::execution::WitnessMode::FullState;
+            let mut pages = vec![0u8; 1024 * 1024];
+            if let Some(pfn) = pfn {
+                pages[pfn * 8] = 1;
+            }
+            fs::write(branch.join("server.pages"), pages).unwrap();
+            retain_output(&run, &mut record, &run.join("output"));
+            write_fixture(&run, &mut record, Some(raw), None);
+        }
+        let out = seedbox(&["diff", "a", "b", "--json"], root);
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        assert!(out.stderr.is_empty());
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(report["machines"][0]["ram_pages"]["differing_pfns"], 1);
+        assert_eq!(
+            report["machines"][0]["ram_pages"]["first_pfns"],
+            serde_json::json!([37])
+        );
+        assert!(!report["limitations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str().unwrap().contains("page hashes unavailable")));
+    }
+}
+
 #[test]
 fn logs_help_is_portable_and_has_no_runtime_options() {
     let tmp = tempfile::tempdir().unwrap();

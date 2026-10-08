@@ -140,7 +140,10 @@ randomness and guest CRNG entropy after one simulated second. Build the VMM and
 current K2/ABI-3 guest kernel from this checkout. A branch seed
 equal to the parent seed continues without any reseeding. Replay reads these
 semantic settings from the retained run. Application-owned PRNG state remains
-captured. See the [checkpoint design](docs/runtime.md#runtime-checkpoint-design-experimental)
+captured. Each public branch has its own retained attempt with the normal
+`output/machines/` layout: `logs` includes its prefix and post-checkpoint chunks,
+and `diff` reads page hashes retained by `run --full-state`.
+See the [checkpoint design](docs/runtime.md#runtime-checkpoint-design-experimental)
 for state coverage, engine-only multiple checkpoints/branches and unverified KVM behavior.
 
 ## Finite exploration

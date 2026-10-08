@@ -112,7 +112,7 @@ enum Command {
         /// Simulation seed [default: x-seedbox.seed from the Compose file].
         #[arg(long)]
         seed: Option<u64>,
-        /// Capture the world before this simulated nanosecond and continue a branch.
+        /// Capture the world before this simulated nanosecond and retain a branch with ordinary logs and diff evidence.
         #[arg(long, requires = "branch_seed", value_parser = clap::value_parser!(u64))]
         checkpoint_at_ns: Option<u64>,
         /// Branch seed for simulator and guest kernel randomness; the parent seed continues unchanged.

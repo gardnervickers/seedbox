@@ -15,6 +15,7 @@ mod links;
 mod connections;
 mod machine;
 mod network_counters;
+mod output_layout;
 mod profile;
 mod rng;
 mod stepper;
@@ -582,8 +583,8 @@ fn run() -> Result<Value, String> {
                     .map_err(|error| error.to_string())?,
             );
         }
-        mach.com1.chunks.open(&format!("{out}/{}.console.chunks",names[i]));
-        mach.com2.chunks.open(&format!("{out}/{}.mgmt.chunks",names[i]));
+        mach.com1.chunks.open(&devices::log_index::index_name(&format!("{out}/{}.console",names[i])));
+        mach.com2.chunks.open(&devices::log_index::index_name(&format!("{out}/{}.mgmt",names[i])));
         mach.timer_rng = Some(Rng::new(boot_seed, &format!("timer-jitter/{}", names[i])));
         mach.syscall_ns = machine::pv::syscall_ns(&mut Rng::new(boot_seed, &format!("pv-speed/{}", names[i])));
         if args.iter().any(|a| a == "--trace") {
@@ -675,7 +676,7 @@ fn run() -> Result<Value, String> {
                     snapshot.restore_checkpoint(&mut world)?;
                     let identity = checkpoint::branch_identity(&parent,*at,branch_seed);
                     let reseed = reseed_checkpoint(&mut world, &names, seed, branch_seed, &identity)?;
-                    let dir = format!("{out}/checkpoint-{at}/seed-{branch_seed}");
+                    let dir = output_layout::checkpoint_directory(&out, held.len(), seeds.len(), *at, branch_seed);
                     checkpoint_output(&mut world, &dir, args.iter().any(|a| a == "--stream-console"))?;
                     let started = Instant::now();
                     let outcome = simulate(&mut world, &cfg, duration, &end_on, None, &mut host_control)?;
@@ -718,8 +719,8 @@ fn run() -> Result<Value, String> {
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
             if !stream {
                 for mach in &mut world.machines {
-                    mach.com1.chunks.open(&format!("{dir}/{}.console.chunks",mach.name));
-                    mach.com2.chunks.open(&format!("{dir}/{}.mgmt.chunks",mach.name));
+                    mach.com1.chunks.open(&devices::log_index::index_name(&format!("{dir}/{}.console",mach.name)));
+                    mach.com2.chunks.open(&devices::log_index::index_name(&format!("{dir}/{}.mgmt",mach.name)));
                 }
             }
             if stream {
@@ -730,7 +731,7 @@ fn run() -> Result<Value, String> {
                             .map_err(|e| e.to_string())?;
                         file.write_all(&uart.out).map_err(|e| e.to_string())?;
                         uart.output_file = Some(file);
-                        uart.chunks.open(&format!("{dir}/{}.{ext}.chunks",mach.name));
+                        uart.chunks.open(&devices::log_index::index_name(&format!("{dir}/{}.{ext}",mach.name)));
                     }
                 }
             }
@@ -784,17 +785,8 @@ fn reseed_checkpoint(world: &mut World, names: &[String], parent_seed: u64, seed
 fn checkpoint_output(world: &mut World, out: &str, stream: bool) -> Result<(), String> {
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     for mach in &mut world.machines {
-        mach.com1.chunks.open(&format!("{out}/{}.console.index",mach.name));
-        mach.com2.chunks.open(&format!("{out}/{}.mgmt.index",mach.name));
-    }
-    if stream {
-        use std::io::Write;
-        for mach in &mut world.machines {
-            for (uart, ext) in [(&mut mach.com1, "console"), (&mut mach.com2, "mgmt")] {
-                let mut file = std::fs::File::create(format!("{out}/{}.{ext}", mach.name)).map_err(|e| e.to_string())?;
-                file.write_all(&uart.out).map_err(|e| e.to_string())?;
-                uart.output_file = Some(file);
-            }
+        for (uart, ext) in [(&mut mach.com1, "console"), (&mut mach.com2, "mgmt")] {
+            uart.output_file = uart.chunks.reopen_stream(&format!("{out}/{}.{ext}",mach.name), &uart.out, stream)?;
         }
     }
     Ok(())
