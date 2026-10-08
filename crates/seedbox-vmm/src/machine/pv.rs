@@ -271,6 +271,12 @@ fn note_site(m: &mut Machine, keys: &[Key], rip: u64) {
     let mem = unsafe { std::slice::from_raw_parts(m.mem, m.mem_size) };
     let pause = m.planner.as_ref().is_some_and(|p| keys.iter().any(|k| p.block_has_pause(mem, k.0)));
     let site = format!("{rip:#x} cpl{cpl} pause{}", pause as u8);
+    m.stats.spin_paths.entry(site.clone()).or_insert_with(|| {
+        let mut rips: Vec<u64> = keys.iter().map(|k| k.0).collect();
+        rips.sort_unstable();
+        rips.dedup();
+        format!("{} landings: {}", keys.len(), rips.iter().map(|r| format!("{r:#x}")).collect::<Vec<_>>().join(" "))
+    });
     *m.stats.spin_sites.entry(site).or_default() += 1;
 }
 

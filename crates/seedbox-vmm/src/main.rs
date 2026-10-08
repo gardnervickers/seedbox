@@ -1413,7 +1413,7 @@ fn report(
             .collect();
         row["timer"] = json!({"writes": s.timer_writes, "overdue": s.timer_overdue, "overdue_max_ns": s.timer_overdue_max_ns, "overdue_syscalls_max": s.timer_write_syscalls_max, "guest_clock_skew": skew});
         if let Clock::Pv(_) = world.clock {
-            row["spin"] = json!({"probes": s.spin_probes, "idles": s.spin_idles, "false_alarms": s.spin_false, "clock_progress": s.spin_clock_progress, "mismatch": s.spin_mismatch, "sites": s.spin_sites});
+            row["spin"] = json!({"probes": s.spin_probes, "idles": s.spin_idles, "false_alarms": s.spin_false, "clock_progress": s.spin_clock_progress, "mismatch": s.spin_mismatch, "sites": s.spin_sites, "paths": s.spin_paths});
             row["syscalls"] = json!(mach.syscalls());
             row["syscall_ns"] = json!(mach.syscall_ns);
             let by: serde_json::Map<String, Value> = machine::Cause::NAMES

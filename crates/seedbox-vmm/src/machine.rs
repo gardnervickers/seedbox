@@ -231,6 +231,8 @@ pub struct Stats {
     /// Proven spin cycles by canonical RIP, privilege level and whether any
     /// of the cycle's blocks executes PAUSE (diagnostics).
     pub spin_sites: std::collections::BTreeMap<String, u64>,
+    /// For each site, the distinct landing RIPs of its first proven cycle.
+    pub spin_paths: std::collections::BTreeMap<String, String>,
     /// Virtual time advanced, by cause (see `Cause`).
     pub time_by: [u64; 5],
     /// Report-only timer diagnostics. Writes to the PIT or port 0x530, and

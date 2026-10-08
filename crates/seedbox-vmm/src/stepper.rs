@@ -198,7 +198,7 @@ impl Planner {
     }
 
     /// Whether the straight-line block starting at `ip` (up to its first
-    /// control transfer) executes PAUSE. Diagnostics only.
+    /// landing, as plan_capped plans it) executes PAUSE. Diagnostics only.
     pub fn block_has_pause(&self, mem: &[u8], ip: u64) -> bool {
         let mut ip = ip;
         for _ in 0..256 {
@@ -206,10 +206,20 @@ impl Planner {
             if ins.mnemonic() == Mnemonic::Pause {
                 return true;
             }
-            if ins.flow_control() != FlowControl::Next {
-                return false;
-            }
-            ip = ins.next_ip();
+            // Follow what plan_capped follows without a landing: direct
+            // near jumps and calls.
+            ip = match ins.flow_control() {
+                FlowControl::Next => ins.next_ip(),
+                FlowControl::UnconditionalBranch | FlowControl::Call
+                    if matches!(
+                        ins.op0_kind(),
+                        OpKind::NearBranch64 | OpKind::NearBranch32 | OpKind::NearBranch16
+                    ) && ins.near_branch_target() != ip =>
+                {
+                    ins.near_branch_target()
+                }
+                _ => return false,
+            };
         }
         false
     }
@@ -494,6 +504,23 @@ mod tests {
             fs_base: 0,
             gs_base: 0,
         }
+    }
+
+    /// A PAUSE behind a direct call is in the same planned block (the
+    /// planner follows the call without a landing); one past a conditional
+    /// branch is not.
+    #[test]
+    fn block_pause_follows_direct_calls_only() {
+        let mut mem = vec![0u8; 0x4000];
+        mem[0x1000..0x1005].copy_from_slice(&[0xe8, 0xfb, 0x0f, 0x00, 0x00]); // call 0x2000
+        mem[0x2000..0x2002].copy_from_slice(&[0xf3, 0x90]); // pause
+        mem[0x2002] = 0xc3; // ret
+        mem[0x1100..0x1102].copy_from_slice(&[0x75, 0x00]); // jnz next
+        mem[0x1102..0x1104].copy_from_slice(&[0xf3, 0x90]); // pause
+        let p = planner(64);
+        assert!(p.block_has_pause(&mem, 0x1000));
+        assert!(p.block_has_pause(&mem, 0x2000));
+        assert!(!p.block_has_pause(&mem, 0x1100));
     }
 
     #[test]
