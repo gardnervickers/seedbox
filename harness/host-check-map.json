@@ -178,6 +178,7 @@
         "guest/compose-init.c",
         "guest/build-compose.sh",
         "crates/seedbox/build.rs",
+        "crates/seedbox/build-runtime.rs",
         "crates/seedbox/src/guest.rs",
         "**/preparation*",
         "**/image*",

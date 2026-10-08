@@ -21,6 +21,8 @@ class CoreBuildTests(unittest.TestCase):
             for spelling in ['first', 'long checkout with spaces']:
                 root = temporary / spelling
                 (root / 'harness').mkdir(parents=True)
+                (root / '.cargo').mkdir()
+                shutil.copy2(ROOT / '.cargo/config.toml', root / '.cargo/config.toml')
                 shutil.copy2(ROOT / 'harness/vmm-rustc.py', root / 'harness/vmm-rustc.py')
                 for name in ['seedbox-control', 'seedbox-engine-core']:
                     shutil.copytree(ROOT / 'crates' / name, root / 'crates' / name)

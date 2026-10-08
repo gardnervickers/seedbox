@@ -214,7 +214,7 @@ class CargoTests(unittest.TestCase):
         self.assertEqual((production / control_path / shared_source).resolve(),
                          (HARNESS.parent / 'crates/seedbox-control/src/lib.rs').resolve())
         def metadata(log):
-            return {name: value for name, value in re.findall(r'--crate-name (\S+).*? -C metadata=(\w+)', log) if name != 'build_script_build'}
+            return {name: value for name, value in re.findall(r'--crate-name (\S+).*? -C metadata=(\w+)', log) if not name.startswith('build_script_')}
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve()
             binaries = []
@@ -259,7 +259,10 @@ publish.workspace = true
                 source = isolated / shared_source
                 source.parent.mkdir(parents=True, exist_ok=True)
                 source.symlink_to(os.path.relpath(dep / 'src/lib.rs', source.parent))
-                shutil.copy2(production / control_path / 'build.rs', isolated / 'build.rs')
+                build_script = control_manifest['package']['build']
+                shutil.copy2(production / control_path / build_script, isolated / build_script)
+                manifest_text = (isolated / 'Cargo.toml').read_text()
+                (isolated / 'Cargo.toml').write_text(manifest_text.replace('[package]\n', '[package]\nbuild = ' + json.dumps(build_script) + '\n'))
                 dependency = ('seedbox-control = { package = ' +
                               json.dumps(control_dependency['package']) +
                               ', path = ' + json.dumps(control_path) + ' }')

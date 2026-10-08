@@ -1,4 +1,5 @@
 [package]
+build = "build-cache.rs"
 name = "seedbox-vmm-control"
 version.workspace = true
 edition.workspace = true

@@ -1,4 +1,5 @@
 [package]
+build = "build-cache.rs"
 name = "seedbox-arm64-control"
 version.workspace = true
 edition.workspace = true

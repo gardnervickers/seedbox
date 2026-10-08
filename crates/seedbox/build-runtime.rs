@@ -12,7 +12,24 @@ use std::{
 mod build_version;
 
 fn main() {
-    simulator_version();
+    let manifest =
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo package directory"));
+    let root = std::fs::canonicalize(manifest.join("../..")).expect("source checkout");
+    println!("cargo::rerun-if-env-changed=SEEDBOX_BUILD_ROOT");
+    let configured =
+        env::var_os("SEEDBOX_BUILD_ROOT").and_then(|path| std::fs::canonicalize(path).ok());
+    if configured.as_ref() != Some(&root) {
+        // Outside the checkout config, recheck inputs on every invocation. The
+        // runtime manifest still selects the source when Cargo reuses this script.
+        let output = env::var_os("OUT_DIR").expect("Cargo build output directory");
+        println!(
+            "cargo::rerun-if-changed={}",
+            Path::new(&output)
+                .join("seedbox-unconfigured-source-cache")
+                .display()
+        );
+    }
+    simulator_version(&root);
     println!("cargo::rerun-if-env-changed=SEEDBOX_MAC_RUNTIME_BUNDLE");
     let bundle = env::var_os("SEEDBOX_MAC_RUNTIME_BUNDLE").map(PathBuf::from);
     let declaration = if let Some(bundle) = bundle {
@@ -32,7 +49,7 @@ fn main() {
     )
     .unwrap();
     println!("cargo::rustc-check-cfg=cfg(seedbox_embedded_init)");
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest/compose-init.c");
+    let source = root.join("guest/compose-init.c");
     println!("cargo::rerun-if-changed={}", source.display());
     println!(
         "cargo::rerun-if-changed={}",
@@ -105,11 +122,10 @@ fn git(root: &Path, arguments: &[&str]) -> Option<String> {
     })
 }
 
-fn simulator_version() {
+fn simulator_version(root: &Path) {
     println!("cargo::rerun-if-changed=build_version.rs");
     println!("cargo::rerun-if-env-changed=SEEDBOX_SOURCE_REVISION");
     println!("cargo::rerun-if-env-changed=SEEDBOX_SOURCE_DIRTY");
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let explicit = env::var("SEEDBOX_SOURCE_REVISION").ok();
     let (revision, dirty, tag) = if let Some(revision) = explicit {
         let dirty = match env::var("SEEDBOX_SOURCE_DIRTY").as_deref() {
@@ -126,7 +142,7 @@ fn simulator_version() {
         // creation of loose refs after packing and release-tag-only changes.
         for name in ["HEAD", "index", "packed-refs", "refs/heads", "refs/tags"] {
             if let Some(path) = git(
-                &root,
+                root,
                 &["rev-parse", "--path-format=absolute", "--git-path", name],
             ) {
                 if Path::new(&path).exists() {
@@ -134,9 +150,9 @@ fn simulator_version() {
                 }
             }
         }
-        if let Some(branch) = git(&root, &["symbolic-ref", "-q", "HEAD"]) {
+        if let Some(branch) = git(root, &["symbolic-ref", "-q", "HEAD"]) {
             if let Some(path) = git(
-                &root,
+                root,
                 &["rev-parse", "--path-format=absolute", "--git-path", &branch],
             ) {
                 if Path::new(&path).exists() {
@@ -144,16 +160,16 @@ fn simulator_version() {
                 }
             }
         }
-        if let Some(files) = git(&root, &["ls-files", "-z"]) {
+        if let Some(files) = git(root, &["ls-files", "-z"]) {
             for file in files.split('\0').filter(|file| !file.is_empty()) {
                 println!("cargo::rerun-if-changed={}", root.join(file).display());
             }
         }
         (
-            git(&root, &["rev-parse", "--verify", "HEAD"]),
-            git(&root, &["status", "--porcelain", "--untracked-files=no"])
+            git(root, &["rev-parse", "--verify", "HEAD"]),
+            git(root, &["status", "--porcelain", "--untracked-files=no"])
                 .is_none_or(|status| !status.is_empty()),
-            git(&root, &["describe", "--exact-match", "--tags", "HEAD"]),
+            git(root, &["describe", "--exact-match", "--tags", "HEAD"]),
         )
     };
     let version = build_version::label(

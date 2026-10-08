@@ -1,5 +1,6 @@
 [package]
 name = "seedbox"
+build = "build-runtime.rs"
 description = "Seedbox simulation configuration and orchestration"
 version.workspace = true
 edition.workspace = true

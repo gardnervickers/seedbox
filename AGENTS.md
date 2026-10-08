@@ -59,7 +59,15 @@ Keep mechanical policy moves separate from behavioral changes.
 The standalone backends compile the canonical sources through their in-workspace
 `engine-core` packages, with distinct package names just like their control
 packages. Each `src` link points to the canonical directory; its build script
-watches that whole directory, including new modules. Keep inherited package and
+watches that whole directory, including new modules. Canonical and wrapper build
+scripts track the automatic build-only `SEEDBOX_BUILD_ROOT` from `.cargo/config.toml`
+to invalidate a reused target when switching checkouts, even if source timestamps
+predate the cache. Run Cargo from the checkout root for caching; missing or unrelated
+config safely forces a source rebuild on every invocation, including older checkouts.
+The CLI `build-runtime.rs` uses the same invalidation and resolves Git and guest
+inputs from the runtime package directory. Keep this input out of library sources
+and runtime identity.
+Keep inherited package and
 dependency keys aligned across workspaces. These inputs change engine bytes and
 require final Linux reproducibility/merge-train validation. Portable tests import
 the canonical crate; do not restore sibling source inclusion for these policies.
@@ -67,7 +75,7 @@ the canonical crate; do not restore sibling source inclusion for these policies.
 ## Identity and determinism
 
 - The VMM binary's hash, the guest kernel, the guest supervisor
-  (`guest/compose-init.c`, embedded by `crates/seedbox/build.rs`) and the
+  (`guest/compose-init.c`, embedded by `crates/seedbox/build-runtime.rs`) and the
   semantic parameters together make up a run's identity. Any change to
   `crates/seedbox-vmm` produces a new engine: its source, its `Cargo.toml` or
   lockfile, its `[profile.release]`, or even reformatting (which moves panic

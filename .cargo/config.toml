@@ -7,3 +7,8 @@ build-vmm = "build --release --locked --manifest-path crates/seedbox-vmm/Cargo.t
 test-vmm = "test --release --locked --manifest-path crates/seedbox-vmm/Cargo.toml --target-dir crates/seedbox-vmm/target --config build.rustc-wrapper='harness/vmm-rustc.py'"
 build-arm64 = "build --release --locked --manifest-path crates/seedbox-arm64/Cargo.toml --target-dir crates/seedbox-arm64/target"
 test-arm64 = "test --release --locked --manifest-path crates/seedbox-arm64/Cargo.toml --target-dir crates/seedbox-arm64/target"
+
+# Build-only checkout input for shared-source package watchers. Cargo otherwise
+# reuses relative dep-info across worktrees even when older sources differ.
+[env]
+SEEDBOX_BUILD_ROOT = { value = ".", relative = true, force = true }

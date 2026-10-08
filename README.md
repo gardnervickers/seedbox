@@ -269,7 +269,14 @@ also lets the combined CLI use the same protocol source without Cargo path-ID
 collisions; the schema is not copied.
 The canonical `seedbox-engine-core` policies use the same package isolation via
 both backends' `engine-core` packages. Their directory links and source watchers
-cover every policy module, including added files. Portable tests import the core
+cover every policy module, including added files. Canonical and wrapper build
+scripts also track the automatic build-only checkout input from `.cargo/config.toml`,
+so a shared cache cannot reuse another checkout's code merely because its timestamps
+are older. Run Cargo from the checkout root (including standalone aliases) for caching.
+Without matching config, the source is safely rebuilt on every invocation. The CLI
+build script follows the same rule for Git provenance, embedded supervisor inputs
+and the Mac runtime bundle. It resolves inputs from Cargo's runtime package directory,
+even when the script executable was cached in another checkout. This input stays in the build scripts. Portable tests import the core
 crate directly; UART register admission remains in the KVM adapter. Moving these
 sources changes engine bytes and requires final Linux merge-train validation.
 

@@ -36,7 +36,8 @@ class ProtocolSourceTests(unittest.TestCase):
             first = temporary / 'first'
             shared = first / 'crates' / canonical
             (shared / 'src').mkdir(parents=True)
-            shutil.copy2(ROOT / 'crates' / canonical / 'Cargo.toml', shared / 'Cargo.toml')
+            for filename in ['Cargo.toml', 'build.rs']:
+                shutil.copy2(ROOT / 'crates' / canonical / filename, shared / filename)
             def source(root, value, new_api=False):
                 src = root / 'crates' / canonical / 'src'
                 function = 'new_api' if new_api else 'value'
@@ -50,10 +51,13 @@ class ProtocolSourceTests(unittest.TestCase):
                 else:
                     (src / 'lib.rs').write_text('pub fn ' + function + '() -> u32 { ' + str(value) + ' }\n')
             source(first, 1)
+            (first / '.cargo').mkdir()
+            shutil.copy2(ROOT / '.cargo/config.toml', first / '.cargo/config.toml')
             if package == 'engine-core':
                 protocol = first / 'crates/seedbox-control'
                 (protocol / 'src').mkdir(parents=True)
-                shutil.copy2(ROOT / 'crates/seedbox-control/Cargo.toml', protocol / 'Cargo.toml')
+                for filename in ['Cargo.toml', 'build.rs']:
+                    shutil.copy2(ROOT / 'crates/seedbox-control' / filename, protocol / filename)
                 (protocol / 'src/lib.rs').write_text('// protocol dependency fixture\n')
             first.mkdir(exist_ok=True)
             (first / 'Cargo.toml').write_text('[workspace]\nmembers=["crates/consumer","crates/' + canonical + '"]\nexclude=[' + ','.join('"crates/' + p.parent.parent.name + '"' for p in wrappers) + ']\n' + WORKSPACE)
@@ -83,26 +87,75 @@ class ProtocolSourceTests(unittest.TestCase):
             graphs = [('combined', 'crates/consumer', 'combined-probe', aliases)]
             graphs.extend((p.parent.parent.name, 'crates/' + p.parent.parent.name, p.parent.parent.name + '-probe', ['protocol']) for p in wrappers)
 
-            def build(root, name, relative, binary, expected):
+            def build(root, name, relative, binary, expected, outside=False, configured=None):
                 environment = os.environ.copy()
                 environment.pop('CARGO_BUILD_TARGET', None)
                 environment['CARGO_TARGET_DIR'] = str(temporary / (name + '-target'))
-                result = subprocess.run(['cargo', 'build', '--offline', '--manifest-path', str(root / relative / 'Cargo.toml')], env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+                environment.pop('SEEDBOX_BUILD_ROOT', None)
+                if configured is not None:
+                    environment['SEEDBOX_BUILD_ROOT'] = configured
+                result = subprocess.run(['cargo', 'build', '--offline', '--manifest-path', str(root / relative / 'Cargo.toml')], cwd=temporary if outside else root, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
                 self.assertEqual(result.returncode, 0, result.stdout)
                 actual = subprocess.check_output([str(temporary / (name + '-target/debug') / binary)], text=True).strip()
                 self.assertEqual(actual, str(expected), result.stdout)
 
-            for name, relative, binary, used in graphs:
-                build(first, name, relative, binary, len(used))
-            # Only the shared source changes: consumers must not retain old output.
-            source(first, 2)
-            for name, relative, binary, used in graphs:
-                build(first, name, relative, binary, 2 * len(used))
             second = temporary / 'second'
             shutil.copytree(first, second, symlinks=True)
             source(second, 3, new_api=True)
             for name, relative, binary, used in graphs:
                 main = second / relative / 'src/main.rs'
-                main.write_text('fn main(){println!("{}",' + '+'.join(a + '::new_api()' for a in used) + ');}\n')
+                main.write_text('fn main(){println!("{}",' + '+'.join(a + '::new_api()' for a in used) + '); }\n')
+            same_api = temporary / 'same-api'
+            shutil.copytree(first, same_api, symlinks=True)
+            source(same_api, 4)
+            legacy = temporary / 'legacy'
+            shutil.copytree(first, legacy, symlinks=True)
+            source(legacy, 5)
+            shutil.rmtree(legacy / '.cargo')
+            # Historical packages had relative watches and no build-root input;
+            # canonical packages gain a build script in the fixed checkout.
+            for filename in legacy.glob('crates/seedbox-*/build.rs'):
+                filename.unlink()
+            for wrapper in wrappers:
+                relative = wrapper.parent.relative_to(ROOT)
+                manifest = legacy / relative / 'Cargo.toml'
+                manifest.write_text(manifest.read_text().replace('build = "build-cache.rs"\n', ''))
+                (legacy / relative / 'build-cache.rs').unlink()
+                (legacy / relative / 'build.rs').write_text(
+                    'fn main() { println!("cargo::rerun-if-changed=../../' + canonical + '/src"); }\n')
+                if package == 'engine-core':
+                    control = legacy / relative.parent / 'control'
+                    manifest = control / 'Cargo.toml'
+                    manifest.write_text(manifest.read_text().replace('build = "build-cache.rs"\n', ''))
+                    (control / 'build-cache.rs').unlink()
+                    (control / 'build.rs').write_text(
+                        'fn main() { println!("cargo::rerun-if-changed=../../seedbox-control/src"); }\n')
+            for name, relative, binary, used in graphs:
+                build(legacy, name, relative, binary, 5 * len(used))
+            # Both alternate checkouts exist before the older one is built.
+            # Their mtimes must not allow a warm cache to retain the old code.
+            for name, relative, binary, used in graphs:
+                build(first, name, relative, binary, len(used))
+                build(legacy, name, relative, binary, 5 * len(used))
+                build(first, name, relative, binary, len(used))
+            # Only the shared source changes: consumers must not retain old output.
+            source(first, 2)
+            for name, relative, binary, used in graphs:
+                build(first, name, relative, binary, 2 * len(used))
+            # An unchanged API must still reflect the selected checkout's behavior.
+            for name, relative, binary, used in graphs:
+                build(same_api, name, relative, binary, 4 * len(used))
+                build(first, name, relative, binary, 2 * len(used))
+            for name, relative, binary, used in graphs:
                 # The precheck cache is reused across different worktree paths.
                 build(second, name, relative, binary, 3 * len(used))
+            # Return in both directions without touching any source files.
+            for name, relative, binary, used in graphs:
+                build(same_api, name, relative, binary, 4 * len(used))
+                build(first, name, relative, binary, 2 * len(used))
+            # Outside-root builds lack automatic config or inherit another root.
+            # Repeated invocations and returns must use current package sources.
+            for configured in [None, str(first), str(temporary)]:
+                for name, relative, binary, used in graphs:
+                    for checkout, value in [(first, 2), (second, 3), (second, 3), (legacy, 5), (first, 2)]:
+                        build(checkout, name, relative, binary, value * len(used), outside=True, configured=configured)
