@@ -21,19 +21,23 @@ use std::{
 };
 
 /// Probe only explicit replacements. Normal retained replay stays lookup-only.
-pub(crate) fn replacement_version(engine: &std::path::Path) -> Result<Option<String>> {
-    replacement_version_with_timeout(engine, Duration::from_secs(2))
+pub(crate) fn replacement_version(
+    engine: &std::path::Path,
+    supplied_path: &std::path::Path,
+) -> Result<Option<String>> {
+    replacement_version_with_timeout(engine, supplied_path, Duration::from_secs(2))
 }
 
 fn replacement_version_with_timeout(
     engine: &std::path::Path,
+    supplied_path: &std::path::Path,
     timeout: Duration,
 ) -> Result<Option<String>> {
     use std::process::Stdio;
     let failure = |detail: &str| {
         Error::Setup(format!(
             "--vmm {}: {detail}; use a Seedbox CLI or standalone VMM executable",
-            engine.display()
+            supplied_path.display()
         ))
     };
     let child = Command::new(engine)
@@ -333,7 +337,7 @@ mod tests {
         let probe = |body: &str, timeout| {
             fs::write(&engine, format!("#!/bin/sh\n{body}\n")).unwrap();
             fs::set_permissions(&engine, fs::Permissions::from_mode(0o700)).unwrap();
-            replacement_version_with_timeout(&engine, timeout)
+            replacement_version_with_timeout(&engine, &engine, timeout)
         };
         assert_eq!(
             probe(

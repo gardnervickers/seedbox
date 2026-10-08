@@ -461,6 +461,7 @@ impl RuntimeInputs {
         cpu: Option<u32>,
         counter: CounterProfile,
         scratch: &Path,
+        simulation: &config::Simulation,
     ) -> Result<(Preparer, Executor)> {
         self.validate_platform()?;
         let engine = defaults::engine(self.kvm.vmm.clone())?;
@@ -476,7 +477,7 @@ impl RuntimeInputs {
                     "--cpu requires Linux KVM; use automatic HVF scheduling on Mac".into(),
                 ));
             }
-            let _ = (counter, scratch);
+            let _ = (counter, scratch, simulation);
             let runtime = backends::mac_runtime()?;
             let resolve = |flag, explicit: &Option<PathBuf>, name| match explicit {
                 Some(path) => defaults::existing(flag, path.clone()),
@@ -515,7 +516,7 @@ impl RuntimeInputs {
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         {
             let executor = if self.kvm.vmm.is_some() {
-                VmmExecutor::new_detected(&engine, store, cpu, self.memory_mb, witness, counter)?
+                VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?
             } else {
                 VmmExecutor::new_internal(&engine, store, cpu, self.memory_mb, witness, counter)?
             }
@@ -523,7 +524,22 @@ impl RuntimeInputs {
             .with_timebase(self.timebase.unwrap_or(TimebaseArg::Counter).into())
             .with_page_timer(self.page_timer)
             .with_deferred_tx(self.deferred_tx);
-            let preparer = self.preparer(engine, store, scratch, executor.profile())?;
+            let mut preparer = self.preparer(engine.clone(), store, scratch, executor.profile())?;
+            preparer.tools.skopeo = defaults::preparation_tool(&preparer.tools.skopeo)?;
+            preparer.tools.umoci = defaults::preparation_tool(&preparer.tools.umoci)?;
+            if simulation
+                .services
+                .values()
+                .any(|service| matches!(service.source, config::ImageSource::Build { .. }))
+            {
+                preparer.tools.docker = defaults::preparation_tool(&preparer.tools.docker)?;
+            }
+            let executor = if self.kvm.vmm.is_some() {
+                executor.with_detected_contract(store, &engine)?
+            } else {
+                executor
+            };
+            preparer.profile = executor.profile();
             Ok((
                 Preparer::Linux(Box::new(preparer)),
                 Executor::Linux(executor),
@@ -814,7 +830,8 @@ fn run(cli: Cli) -> Result<u8> {
             let counter = CounterProfile::host().unwrap_or(CounterProfile::Zen);
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
-            let (mut preparer, _) = inputs.backends(&store, None, counter, scratch.path())?;
+            let (mut preparer, _) =
+                inputs.backends(&store, None, counter, scratch.path(), &simulation)?;
             if cancellation.is_cancelled() {
                 return Err(Error::PreparationCancelled);
             }
@@ -862,7 +879,7 @@ fn run(cli: Cli) -> Result<u8> {
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
             let (mut preparer, executor) =
-                inputs.backends(&store, cpu.cpu, counter, scratch.path())?;
+                inputs.backends(&store, cpu.cpu, counter, scratch.path(), &simulation)?;
             if cancellation.is_cancelled() {
                 return Err(Error::PreparationCancelled);
             }
@@ -930,23 +947,11 @@ fn run(cli: Cli) -> Result<u8> {
             let detected = execution_counter();
             let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
             let (mut preparer, executor) =
-                inputs.backends(&store, cpu.cpu, counter, scratch.path())?;
+                inputs.backends(&store, cpu.cpu, counter, scratch.path(), &simulation)?;
             if cancellation.is_cancelled() {
                 return Err(Error::PreparationCancelled);
             }
             preparer.tools.build_epoch = build.build_epoch;
-            #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-            {
-                preparer.tools.skopeo = defaults::preparation_tool(&preparer.tools.skopeo)?;
-                preparer.tools.umoci = defaults::preparation_tool(&preparer.tools.umoci)?;
-                if simulation
-                    .services
-                    .values()
-                    .any(|s| matches!(s.source, config::ImageSource::Build { .. }))
-                {
-                    preparer.tools.docker = defaults::preparation_tool(&preparer.tools.docker)?;
-                }
-            }
             cpu.admit(
                 detected,
                 inputs.timebase.map(Into::into).unwrap_or(Timebase::Counter),
