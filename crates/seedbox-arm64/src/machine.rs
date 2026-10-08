@@ -29,6 +29,8 @@ pub struct Machine<B: Backend> {
     uart: Pl011,
     uart_irq: bool,
     deferred_spis: BTreeSet<u32>,
+    // Keep only one source asserted across guest entry; others wait for a rendezvous.
+    asserted_spis: BTreeSet<u32>,
     deferred_spi_events: u64,
     deferred_clock_read_spis: u64,
     event: ClockEvent,
@@ -120,6 +122,7 @@ impl<B: Backend> Machine<B> {
             uart: Pl011::default(),
             uart_irq: false,
             deferred_spis: BTreeSet::new(),
+            asserted_spis: BTreeSet::new(),
             deferred_spi_events: 0,
             deferred_clock_read_spis: 0,
             event: ClockEvent,
@@ -266,6 +269,7 @@ impl<B: Backend> Machine<B> {
                 self.powered_off,
                 self.uart_irq,
                 &self.deferred_spis,
+                &self.asserted_spis,
                 self.timer_policy
                     .as_ref()
                     .map(|(policy, rng)| (policy, rng.counter())),
@@ -707,24 +711,41 @@ impl<B: Backend> Machine<B> {
         Ok(())
     }
     fn inject_spi(&mut self, intid: u32, level: bool) -> Result<()> {
-        // Retain level assertions until an unmasked semantic exit. Queuing an
-        // IRQ in hardware while masked lets it skid after a later guest unmask.
-        // Deassertions also cancel an assertion not yet sent to the backend.
-        if level && self.backend.get_reg(CoreReg::Pstate)? & (1 << 7) != 0 {
+        if !level {
+            self.deferred_spis.remove(&intid);
+            self.asserted_spis.remove(&intid);
+            return self.backend.inject_spi(intid, false);
+        }
+        if self.asserted_spis.contains(&intid) {
+            return Ok(());
+        }
+        // Multiple queued hardware sources can leave a second IRQ pending after
+        // the first handler unmasks. Its interrupted PC then skids, contaminating
+        // guest state (including Linux's interrupt entropy pool). Admit one line
+        // only, and wait for its deassertion plus an unmasked semantic exit.
+        if !self.asserted_spis.is_empty() || self.backend.get_reg(CoreReg::Pstate)? & (1 << 7) != 0
+        {
             if self.deferred_spis.insert(intid) {
                 self.deferred_spi_events += 1;
             }
             return Ok(());
         }
         self.deferred_spis.remove(&intid);
-        self.backend.inject_spi(intid, level)
+        self.backend.inject_spi(intid, true)?;
+        self.asserted_spis.insert(intid);
+        Ok(())
     }
     fn flush_spis(&mut self) -> Result<()> {
-        if !self.deferred_spis.is_empty() && self.backend.get_reg(CoreReg::Pstate)? & (1 << 7) == 0
+        if self.asserted_spis.is_empty()
+            && !self.deferred_spis.is_empty()
+            && self.backend.get_reg(CoreReg::Pstate)? & (1 << 7) == 0
         {
-            for intid in std::mem::take(&mut self.deferred_spis) {
-                self.backend.inject_spi(intid, true)?;
-            }
+            let intid = self
+                .deferred_spis
+                .pop_first()
+                .expect("nonempty deferred SPIs");
+            self.backend.inject_spi(intid, true)?;
+            self.asserted_spis.insert(intid);
         }
         Ok(())
     }
@@ -815,5 +836,121 @@ mod tests {
         assert!(image_layout(&k).is_err());
         k[16..24].copy_from_slice(&4096u64.to_le_bytes());
         assert_eq!(image_layout(&k).unwrap(), (RAM_BASE, 4096));
+    }
+}
+
+#[cfg(test)]
+mod spi_regression {
+    use super::*;
+    use crate::backend::{core_index, DirtyPages, Stop};
+    use std::collections::BTreeMap;
+    #[derive(Default)]
+    struct Fake {
+        regs: BTreeMap<u32, u64>,
+        sys: BTreeMap<u16, u64>,
+        injected: Vec<(u32, bool)>,
+    }
+    impl Backend for Fake {
+        fn create() -> Result<Self> {
+            Ok(Self::default())
+        }
+        fn map_memory(&mut self, _: u32, _: u64, _: Rc<Memory>) -> Result<()> {
+            Ok(())
+        }
+        fn unmap_memory(&mut self, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn create_vcpu(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn get_reg(&self, r: CoreReg) -> Result<u64> {
+            Ok(*self.regs.get(&core_index(r)?).unwrap_or(&0))
+        }
+        fn set_reg(&mut self, r: CoreReg, v: u64) -> Result<()> {
+            self.regs.insert(core_index(r)?, v);
+            Ok(())
+        }
+        fn get_sys_reg(&self, r: SysReg) -> Result<u64> {
+            Ok(*self.sys.get(&r.0).unwrap_or(&0))
+        }
+        fn set_sys_reg(&mut self, r: SysReg, v: u64) -> Result<()> {
+            self.sys.insert(r.0, v);
+            Ok(())
+        }
+        fn run(&mut self) -> Result<Stop> {
+            Err("unexpected guest entry".into())
+        }
+        fn complete(&mut self, _: Option<u64>) -> Result<()> {
+            Ok(())
+        }
+        fn inject_spi(&mut self, id: u32, level: bool) -> Result<()> {
+            self.injected.push((id, level));
+            Ok(())
+        }
+        fn dirty_pages(&self, _: u32) -> Result<DirtyPages> {
+            Ok(DirtyPages::Unsupported)
+        }
+    }
+    fn machine() -> Machine<Fake> {
+        let mut kernel = [0; 64];
+        kernel[56..60].copy_from_slice(b"ARM\x64");
+        kernel[16..24].copy_from_slice(&4096u64.to_le_bytes());
+        Machine::for_application(boot::BootSpec::fixture(&kernel, b"initrd", 1), [0; 6], None)
+            .unwrap()
+    }
+    #[test]
+    fn overlapping_sources_cannot_queue_a_second_hardware_irq() {
+        let mut m = machine();
+        m.backend.set_reg(CoreReg::Pstate, 0).unwrap();
+        m.inject_spi(TIMER_SPI, true).unwrap();
+        m.inject_spi(application::NET_SPI, true).unwrap();
+        m.inject_spi(application::CONSOLE_SPI, true).unwrap();
+        m.inject_spi(TIMER_SPI, true).unwrap();
+        m.flush_spis().unwrap();
+        assert_eq!(m.backend.injected, vec![(TIMER_SPI, true)]);
+        assert_eq!(m.asserted_spis, BTreeSet::from([TIMER_SPI]));
+        m.backend.set_reg(CoreReg::Pstate, 1 << 7).unwrap();
+        m.inject_spi(TIMER_SPI, false).unwrap();
+        m.flush_spis().unwrap();
+        assert!(m.asserted_spis.is_empty());
+        m.backend.set_reg(CoreReg::Pstate, 0).unwrap();
+        m.flush_spis().unwrap();
+        assert_eq!(m.asserted_spis, BTreeSet::from([application::NET_SPI]));
+        assert_eq!(m.deferred_spis, BTreeSet::from([application::CONSOLE_SPI]));
+        m.flush_spis().unwrap();
+        assert_eq!(
+            m.backend.injected,
+            vec![
+                (TIMER_SPI, true),
+                (TIMER_SPI, false),
+                (application::NET_SPI, true)
+            ]
+        );
+        m.inject_spi(application::NET_SPI, false).unwrap();
+        m.flush_spis().unwrap();
+        assert_eq!(m.asserted_spis, BTreeSet::from([application::CONSOLE_SPI]));
+    }
+    #[test]
+    fn cancelled_deferred_sources_never_reach_hardware_and_sync_keeps_active_timer() {
+        let mut m = machine();
+        m.inject_spi(application::NET_SPI, true).unwrap();
+        m.inject_spi(application::NET_SPI, true).unwrap();
+        assert_eq!(m.deferred_spi_events, 1);
+        m.inject_spi(application::NET_SPI, false).unwrap();
+        m.backend.set_reg(CoreReg::Pstate, 0).unwrap();
+        m.flush_spis().unwrap();
+        assert!(m.backend.injected.iter().all(|(_, level)| !level));
+        m.inject_spi(TIMER_SPI, true).unwrap();
+        m.sync_application_irqs().unwrap();
+        m.sync_application_irqs().unwrap();
+        assert_eq!(m.asserted_spis, BTreeSet::from([TIMER_SPI]));
+        assert_eq!(
+            m.backend
+                .injected
+                .iter()
+                .filter(|(_, level)| *level)
+                .count(),
+            1
+        );
     }
 }

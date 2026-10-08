@@ -241,8 +241,12 @@ Clockevent u64 writes: offset 0 arms an absolute deadline (zero cancels); 8
 acknowledges and lowers the IRQ; 16 declares idle; 24 yields at the published
 clock bound; 32 performs the ABI-2 handshake. Idle with an armed deadline jumps
 to it and raises SPI 40 while stopped. New IRQ assertions require PSTATE.I to
-be clear. Masked level assertions are retained in Machine and delivered at the
-next unmasked semantic exit; deassertions cancel any queued assertion. Debug
+be clear and no other source to be asserted. Machine retains other level
+assertions until the active source deasserts and an unmasked semantic exit occurs;
+it drains one pending source in interrupt-ID order. Deassertions cancel any
+queued assertion. This prevents a second hardware-pending IRQ from skidding
+after the first handler unmasks, which would change the interrupted PC and
+Linux interrupt entropy state. Full-state evidence includes the asserted source. Debug
 unlock completions do not flush pending lines. The idle helper unmasks IRQs and
 executes ISB before the MMIO rendezvous, then restores its incoming mask.
 A polling yield restores and unmasks IRQs, executes ISB, writes event+24, then

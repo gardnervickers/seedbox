@@ -103,28 +103,73 @@ impl<const EXTENDED: bool, const REARM: bool> Backend for G<EXTENDED, REARM> {
                     } else {
                         uart(0x44, 0)
                     }
-                    // First unmasked semantic exit delivers both lines.
+                    // First unmasked semantic exit admits only one source.
                 }
                 8 => {
-                    assert_eq!(
-                        self.assertions,
-                        BTreeMap::from([(TIMER_SPI, 1), (UART_SPI, 1)])
-                    );
-                    assert!(self.levels[&TIMER_SPI] && self.levels[&UART_SPI]);
+                    let first = if REARM { TIMER_SPI } else { UART_SPI };
+                    let second = if REARM { UART_SPI } else { TIMER_SPI };
+                    assert_eq!(self.assertions, BTreeMap::from([(first, 1)]));
+                    assert!(self.levels[&first]);
+                    assert!(!self.levels.get(&second).copied().unwrap_or(false));
+                    assert_eq!(unsafe { self.m[&1].word(32)? }, 1);
                     uart(0x44, 0) // unchanged levels must not reassert
                 }
                 9 => {
                     self.regs[33] |= 1 << 7;
-                    mmio(EVENT_ADDR + 8, 1)
+                    // Acknowledge the admitted source while masked. The other
+                    // line remains deferred, even after this deassertion.
+                    if REARM {
+                        mmio(EVENT_ADDR + 8, 1)
+                    } else {
+                        uart(0x38, 0)
+                    }
                 }
-                10 => uart(0x38, 0), // deassertions are allowed while masked
+                10 => {
+                    assert!(self.levels.values().all(|level| !level));
+                    assert_eq!(self.assertions.len(), 1);
+                    assert_eq!(unsafe { self.m[&1].word(32)? }, 1);
+                    self.regs[33] &= !(1 << 7);
+                    Exit::SysReg {
+                        reg: SysReg::OSLAR.0,
+                        write: true,
+                        rt: 31,
+                        data: 0,
+                    }
+                }
+                11 => {
+                    assert!(
+                        self.levels.values().all(|level| !level),
+                        "debug completion delivered IRQ"
+                    );
+                    assert_eq!(self.assertions.len(), 1);
+                    uart(0x44, 0) // next unmasked semantic exit admits the second
+                }
+                12 => {
+                    let first = if REARM { TIMER_SPI } else { UART_SPI };
+                    let second = if REARM { UART_SPI } else { TIMER_SPI };
+                    assert_eq!(
+                        self.assertions,
+                        BTreeMap::from([(TIMER_SPI, 1), (UART_SPI, 1)])
+                    );
+                    assert!(!self.levels[&first] && self.levels[&second]);
+                    assert_eq!(unsafe { self.m[&1].word(32)? }, 0);
+                    uart(0x44, 0)
+                }
+                13 => {
+                    self.regs[33] |= 1 << 7;
+                    if REARM {
+                        uart(0x38, 0)
+                    } else {
+                        mmio(EVENT_ADDR + 8, 1)
+                    }
+                }
                 _ => {
                     assert_eq!(
                         self.assertions,
                         BTreeMap::from([(TIMER_SPI, 1), (UART_SPI, 1)])
                     );
                     assert!(!self.levels[&TIMER_SPI] && !self.levels[&UART_SPI]);
-                    let n = self.step - 11;
+                    let n = self.step - 14;
                     if n < b"SEEDBOX_INIT_PASS\n".len() {
                         Exit::Mmio {
                             addr: UART_ADDR,
@@ -188,6 +233,12 @@ impl<const EXTENDED: bool, const REARM: bool> Backend for G<EXTENDED, REARM> {
             "masked backend assertion"
         );
         if level {
+            assert!(
+                self.levels
+                    .iter()
+                    .all(|(&id, &asserted)| !asserted || id == intid),
+                "overlapping hardware IRQ sources"
+            );
             assert!(EXTENDED, "review repro ACK must cancel the deferred timer");
             *self.assertions.entry(intid).or_default() += 1;
         }
@@ -233,8 +284,13 @@ fn reassertion_at_unmask_consumes_the_deferred_level_once() {
     let mut k = [0; 64];
     k[56..60].copy_from_slice(b"ARM\x64");
     k[16..24].copy_from_slice(&4096u64.to_le_bytes());
-    Machine::<G<true, true>>::new(&k, b"cpio", 1)
+    let report = Machine::<G<true, true>>::new(&k, b"cpio", 1)
         .unwrap()
         .run(|| {})
         .unwrap();
+    assert_eq!(report.virtual_ns, 101);
+    assert_eq!(report.deferred_spi_events, 2);
+    assert_eq!(report.deferred_clock_read_spis, 1);
+    assert!(report.trace.iter().all(|record| record.kind != 4));
+    assert_eq!(report.trace[6].time, 101);
 }
