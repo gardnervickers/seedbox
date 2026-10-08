@@ -1,13 +1,20 @@
 //! Host perf counter of retired guest conditional branches (the raw event of
 //! the host's counter profile), counting guest kernel and user, excluding the host.
-//! Overflow signals the world thread so KVM_RUN returns with EINTR.
+//! Overflow signals the thread that opened the counter, so its KVM_RUN
+//! returns with EINTR. Each thread counts only its own overflows: a counter on
+//! another worker thread cannot disturb this one's arming.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::cell::Cell;
+use std::sync::atomic::Ordering;
 
-pub static OVERFLOWS: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    // Const-initialized and without Drop, so the signal handler's access
+    // never runs lazy initialization.
+    static OVERFLOWS: Cell<u64> = const { Cell::new(0) };
+}
 
 extern "C" fn on_overflow(_: libc::c_int) {
-    OVERFLOWS.fetch_add(1, Ordering::Relaxed);
+    OVERFLOWS.with(|o| o.set(o.get() + 1));
 }
 
 #[repr(C)]
@@ -166,7 +173,7 @@ impl Counter {
 
     /// Ensure an overflow fires once the count reaches `at` (absolute).
     pub fn arm(&mut self, now: u64, at: u64) {
-        let fired = OVERFLOWS.load(Ordering::Relaxed);
+        let fired = OVERFLOWS.with(Cell::get);
         if self.armed_at == Some(at) && fired == self.seen_overflows {
             return;
         }
@@ -178,7 +185,7 @@ impl Counter {
     }
 
     pub fn disarm(&mut self) {
-        let fired = OVERFLOWS.load(Ordering::Relaxed);
+        let fired = OVERFLOWS.with(Cell::get);
         if self.armed_at == Some(u64::MAX) && fired == self.seen_overflows {
             return;
         }

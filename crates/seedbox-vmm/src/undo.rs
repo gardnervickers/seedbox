@@ -162,7 +162,7 @@ impl VcpuState {
 }
 
 pub struct Undo {
-    shadow: *mut u8,
+    shadow: crate::machine::SendPtr<u8>,
     size: usize,
     /// Dirty bitmap buffer for KVM_GET_DIRTY_LOG.
     log: Vec<u64>,
@@ -206,7 +206,7 @@ impl Undo {
         let shadow = crate::machine::map(size)?;
         let pages = size / PAGE;
         Ok(Self {
-            shadow,
+            shadow: crate::machine::SendPtr(shadow),
             size,
             log: vec![0; pages.div_ceil(64)],
             vmm: vec![0; pages.div_ceil(64)],
@@ -278,7 +278,7 @@ impl Undo {
     /// Save guest state. The vCPU must have no I/O pending completion.
     pub fn save(&mut self, vm: &VmFd, vcpu: &VcpuFd, mem: *mut u8) -> Result<(), String> {
         self.fetch(vm)?;
-        self.stats.synced_pages += self.copy_logged(mem, self.shadow);
+        self.stats.synced_pages += self.copy_logged(mem, self.shadow.0);
         self.cpu.save(vcpu, "checkpoint")?;
         self.valid = true;
         self.stats.checkpoints += 1;
@@ -294,7 +294,7 @@ impl Undo {
         mem: *mut u8,
     ) -> Result<(kvm_regs, kvm_sregs), String> {
         self.fetch(vm)?;
-        self.stats.restored_pages += self.copy_logged(self.shadow, mem);
+        self.stats.restored_pages += self.copy_logged(self.shadow.0, mem);
         let restored = self.cpu.restore(vcpu, "rollback")?;
         self.stats.rollbacks += 1;
         Ok(restored)
@@ -304,7 +304,7 @@ impl Undo {
     pub fn sync(&mut self, vm: &VmFd, mem: *mut u8) -> Result<(), String> {
         self.valid = false;
         self.fetch(vm)?;
-        self.stats.synced_pages += self.copy_logged(mem, self.shadow);
+        self.stats.synced_pages += self.copy_logged(mem, self.shadow.0);
         Ok(())
     }
 
@@ -331,7 +331,7 @@ impl Undo {
                     let (now, then) = unsafe {
                         (
                             std::slice::from_raw_parts(mem.add(off), PAGE),
-                            std::slice::from_raw_parts(self.shadow.add(off), PAGE),
+                            std::slice::from_raw_parts(self.shadow.0.add(off), PAGE),
                         )
                     };
                     if now != then {
@@ -347,7 +347,7 @@ impl Undo {
     /// here on, so a fork can later be put back by copying only those pages.
     pub fn fork_point(&mut self, vm: &VmFd, mem: *mut u8) -> Result<(), String> {
         self.fetch(vm)?;
-        self.stats.synced_pages += self.copy_logged(mem, self.shadow);
+        self.stats.synced_pages += self.copy_logged(mem, self.shadow.0);
         self.since_fork = Some(vec![0; self.log.len()]);
         self.valid = false;
         Ok(())
@@ -367,7 +367,7 @@ impl Undo {
         let fork = self.since_fork.as_mut().unwrap();
         std::mem::swap(&mut self.log, fork);
         let n = self.copy_logged(image, mem);
-        self.copy_logged(image, self.shadow);
+        self.copy_logged(image, self.shadow.0);
         self.log.fill(0);
         self.since_fork.as_mut().unwrap().fill(0);
         self.valid = false;

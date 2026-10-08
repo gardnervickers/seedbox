@@ -192,14 +192,23 @@ fn page_entropy(entropy: &[u32; ENTROPY_WORDS]) -> [u64; PAGE_ENTROPY_FIELDS] {
     std::array::from_fn(|i| entropy[2 * i] as u64 | (entropy[2 * i + 1] as u64) << 32)
 }
 
+/// A raw pointer to memory its owner maps and unmaps. The owner is the only
+/// user, so moving the owner to another thread moves the mapping with it.
+/// Only owning fields use it, so any other non-`Send` field added to a
+/// machine is still caught by the compiler.
+#[derive(Clone, Copy)]
+pub(crate) struct SendPtr<T>(pub(crate) *mut T);
+// SAFETY: see above; the pointee is reached only through its owner.
+unsafe impl<T> Send for SendPtr<T> {}
+
 /// An anonymous private mapping, unmapped on drop.
 struct Mapping {
-    ptr: *mut u8,
+    ptr: SendPtr<u8>,
     size: usize,
 }
 impl Drop for Mapping {
     fn drop(&mut self) {
-        unsafe { libc::munmap(self.ptr.cast(), self.size) };
+        unsafe { libc::munmap(self.ptr.0.cast(), self.size) };
     }
 }
 
@@ -296,9 +305,9 @@ pub struct Machine {
     profile: &'static CounterProfile,
     _vm: VmFd,
     vcpu: VcpuFd,
-    mem: *mut u8,
+    mem: SendPtr<u8>,
     mem_size: usize,
-    page: *mut u64,
+    page: SendPtr<u64>,
     pub branches: u64,
     pub pending_io: Option<PendingIo>,
     tsc_latch: u64,
@@ -340,6 +349,9 @@ pub struct Machine {
     pub timer_jitter: u64,
     /// PV clock: virtual time one syscall costs on this machine.
     pub syscall_ns: u64,
+    /// PV watchdog and spin-probe state. It belongs to the machine, not the
+    /// thread's clock, so it never carries between machines.
+    pub(crate) pv_progress: pv::Progress,
     pub timer_rng: Option<crate::rng::Rng>,
     pub margin: u64,
     /// Recompute `margin` from the recent guest branch rate.
@@ -563,9 +575,9 @@ impl Machine {
             profile,
             _vm: vm,
             vcpu,
-            mem,
+            mem: SendPtr(mem),
             mem_size,
-            page: page.cast(),
+            page: SendPtr(page.cast()),
             branches: 0,
             pending_io: None,
             tsc_latch: 0,
@@ -599,6 +611,7 @@ impl Machine {
             tolerance: 0,
             timer_jitter: 0,
             syscall_ns: pv::SYSCALL_NS,
+            pv_progress: pv::Progress::new(),
             timer_rng: None,
             margin: profile.margin,
             adaptive_margin: false,
@@ -625,7 +638,7 @@ impl Machine {
     }
 
     pub fn memory(&mut self) -> &mut [u8] {
-        unsafe { std::slice::from_raw_parts_mut(self.mem, self.mem_size) }
+        unsafe { std::slice::from_raw_parts_mut(self.mem.0, self.mem_size) }
     }
 
     fn record(&mut self, kind: u8, extra: u64) {
@@ -775,17 +788,19 @@ impl Machine {
         if self.stepping || !self.world.fault_effects.is_empty() || !self.world.control_requests.is_empty() || self.world.committed_console.is_some() {
             return Err(format!("{}: not at a fork point", self.world.name));
         }
+        // No architecture probe may survive a committed checkpoint boundary.
+        if self.pv_progress.hold_watchdog() {return Err("PV checkpoint inside a spin probe".into());}
         self.complete_io()?;
         let mut cpu = VcpuState::new(self.msrs.clone());
         cpu.save(&self.vcpu, "fork")?;
         let undo_stats = self.undo.as_ref().map(|u| u.stats.clone());
-        let ram = Mapping { ptr: map(self.mem_size)?, size: self.mem_size };
-        unsafe { std::ptr::copy_nonoverlapping(self.mem, ram.ptr, self.mem_size) };
+        let ram = Mapping { ptr: SendPtr(map(self.mem_size)?), size: self.mem_size };
+        unsafe { std::ptr::copy_nonoverlapping(self.mem.0, ram.ptr.0, self.mem_size) };
         if let Some(u) = self.undo.as_mut() {
-            u.fork_point(&self._vm, self.mem)?;
+            u.fork_point(&self._vm, self.mem.0)?;
         }
         let mut page = Box::new([0u8; 4096]);
-        unsafe { std::ptr::copy_nonoverlapping(self.page as *const u8, page.as_mut_ptr(), 4096) };
+        unsafe { std::ptr::copy_nonoverlapping(self.page.0 as *const u8, page.as_mut_ptr(), 4096) };
         Ok(MachineSnapshot {
             ram, page, cpu,
             world: self.world.clone(), branches: self.branches, tsc_latch: self.tsc_latch,
@@ -812,28 +827,30 @@ impl Machine {
         // is overwritten just the same.
         let _ = self.complete_io();
         self.set_stepping(false)?;
+        // Host-only watchdog and probe scratch starts over at the fork point.
+        self.pv_progress = pv::Progress::new();
         let pages = match self.undo.as_mut() {
             // A machine rebuilt for this restore (the run rebooted it) has
             // held no fork point yet: copy everything, then hold one here.
             Some(u) if !u.holds_fork_point() => {
-                unsafe { std::ptr::copy_nonoverlapping(s.ram.ptr, self.mem, self.mem_size) };
+                unsafe { std::ptr::copy_nonoverlapping(s.ram.ptr.0, self.mem.0, self.mem_size) };
                 u.mark(0, self.mem_size);
-                u.fork_point(&self._vm, self.mem)?;
+                u.fork_point(&self._vm, self.mem.0)?;
                 u.stats = s.undo_stats.clone().unwrap_or_default();
                 (self.mem_size / 4096) as u64
             }
             Some(u) => {
-                let pages = u.return_to_fork(&self._vm, self.mem, s.ram.ptr)?;
+                let pages = u.return_to_fork(&self._vm, self.mem.0, s.ram.ptr.0)?;
                 // Each seed reports its own undo work on top of the boot's.
                 u.stats = s.undo_stats.clone().unwrap_or_default();
                 pages
             }
             None => {
-                unsafe { std::ptr::copy_nonoverlapping(s.ram.ptr, self.mem, self.mem_size) };
+                unsafe { std::ptr::copy_nonoverlapping(s.ram.ptr.0, self.mem.0, self.mem_size) };
                 (self.mem_size / 4096) as u64
             }
         };
-        unsafe { std::ptr::copy_nonoverlapping(s.page.as_ptr(), self.page as *mut u8, 4096) };
+        unsafe { std::ptr::copy_nonoverlapping(s.page.as_ptr(), self.page.0 as *mut u8, 4096) };
         let (regs, sregs) = s.cpu.restore(&self.vcpu, "fork restore")?;
         // Refresh KVM's exit outputs (interrupt flag, injection readiness and
         // the synchronized registers) from the restored state, exactly as the
@@ -895,7 +912,7 @@ impl Machine {
 
     /// Strict runtime delivery requires all bytes DMA into posted guest buffers.
     pub fn deliver_control(&mut self,bytes:&[u8])->Result<(),String> {
-        let memory=unsafe {std::slice::from_raw_parts_mut(self.mem,self.mem_size)};
+        let memory=unsafe {std::slice::from_raw_parts_mut(self.mem.0,self.mem_size)};
         let channel=self.channel.as_mut().ok_or("runtime control channel absent")?;
         let received=channel.receive(memory,bytes)?;
         let complete=received.accepted && channel.pending_rx_bytes()==0;
@@ -918,7 +935,7 @@ impl Machine {
     }
 
     pub fn deliver_frame(&mut self, frame: &[u8]) -> Result<ReceiveOutcome,String> {
-        let (mem, size) = (self.mem, self.mem_size);
+        let (mem, size) = (self.mem.0, self.mem_size);
         let m = unsafe { std::slice::from_raw_parts_mut(mem, size) };
         let outcome = self
             .net
@@ -934,7 +951,7 @@ impl Machine {
     }
 
     fn poll_net(&mut self, frames: &mut Vec<Vec<u8>>, boundary: bool) -> Result<bool, String> {
-        let m = unsafe { std::slice::from_raw_parts_mut(self.mem, self.mem_size) };
+        let m = unsafe { std::slice::from_raw_parts_mut(self.mem.0, self.mem_size) };
         let Some(n) = self.net.as_mut() else { return Ok(false); };
         let out = n.poll_at(m, self.world.time, boundary);
         self.take_dma();
@@ -959,11 +976,11 @@ impl Machine {
     }
 
     fn page_get(&self, i: usize) -> u64 {
-        unsafe { std::ptr::read_volatile(self.page.add(i)) }
+        unsafe { std::ptr::read_volatile(self.page.0.add(i)) }
     }
 
     fn page_set(&mut self, i: usize, v: u64) {
-        unsafe { std::ptr::write_volatile(self.page.add(i), v) }
+        unsafe { std::ptr::write_volatile(self.page.0.add(i), v) }
     }
 
     fn raise_net(&mut self) {
@@ -1102,7 +1119,7 @@ impl Machine {
         let timer_deadline = self.page_timer.enabled.then(|| self.page_get(PAGE_TIMER_DEADLINE));
         let u = self.undo.as_mut().unwrap();
         u.timer_deadline = timer_deadline;
-        u.save(&self._vm, &self.vcpu, self.mem)?;
+        u.save(&self._vm, &self.vcpu, self.mem.0)?;
         u.page = page;
         u.time = self.world.time;
         u.branches = self.branches;
@@ -1115,12 +1132,12 @@ impl Machine {
         let t = Instant::now();
         self.complete_io()?;
         let u = self.undo.as_mut().unwrap();
-        let (regs, sregs) = u.restore(&self._vm, &self.vcpu, self.mem)?;
+        let (regs, sregs) = u.restore(&self._vm, &self.vcpu, self.mem.0)?;
         for i in 0..PAGE_FIELDS {
-            unsafe { std::ptr::write_volatile(self.page.add(i), u.page[i]) };
+            unsafe { std::ptr::write_volatile(self.page.0.add(i), u.page[i]) };
         }
         if let Some(deadline) = u.timer_deadline {
-            unsafe { std::ptr::write_volatile(self.page.add(PAGE_TIMER_DEADLINE), deadline) };
+            unsafe { std::ptr::write_volatile(self.page.0.add(PAGE_TIMER_DEADLINE), deadline) };
         }
         self.world.time = u.time;
         self.branches = u.branches;
@@ -1135,7 +1152,7 @@ impl Machine {
     }
 
     fn checked_page_time(&self, limit: u64) -> Result<u64, String> {
-        let last = unsafe { std::ptr::read_volatile(self.page.add(1)) };
+        let last = unsafe { std::ptr::read_volatile(self.page.0.add(1)) };
         advance_time(self.world.time, last.saturating_sub(self.world.time), limit)
     }
 
@@ -1147,7 +1164,7 @@ impl Machine {
     }
 
     fn publish(&mut self) {
-        unsafe { std::ptr::write_volatile(self.page, self.world.time) };
+        unsafe { std::ptr::write_volatile(self.page.0, self.world.time) };
     }
 
     fn set_stepping(&mut self, on: bool) -> Result<(), String> {
@@ -1166,7 +1183,7 @@ impl Machine {
                 run.s.regs.sregs=sregs;
                 self.sync_regs_ready=true;
             }
-            let mem = unsafe { std::slice::from_raw_parts(self.mem, self.mem_size) };
+            let mem = unsafe { std::slice::from_raw_parts(self.mem.0, self.mem_size) };
             self.planner = Some(Planner::load(&self.vcpu, mem)?);
         } else {
             self.vcpu
@@ -1193,7 +1210,7 @@ impl Machine {
             let run = self.vcpu.get_kvm_run();
             unsafe { (run.s.regs.regs, run.s.regs.sregs) }
         };
-        let mem = unsafe { std::slice::from_raw_parts(self.mem, self.mem_size) };
+        let mem = unsafe { std::slice::from_raw_parts(self.mem.0, self.mem_size) };
         let planner = self.planner.as_mut().unwrap();
         planner.refresh_from(&sr);
         let (targets, capped) = planner
@@ -1367,7 +1384,7 @@ impl Machine {
             let windowed = false;
             let window = false;
             if window != self.exit_req {
-                unsafe { std::ptr::write_volatile(self.page.add(2), window as u64) };
+                unsafe { std::ptr::write_volatile(self.page.0.add(2), window as u64) };
                 self.exit_req = window;
             }
             let syscalls0 = self.page_get(PAGE_SYSCALLS);
@@ -1388,7 +1405,7 @@ impl Machine {
                     if let Some(u) = self.undo.as_mut() { u.valid = false; }
                     self.fm = self.undo_margin;
                     self.set_stepping(false)?;
-                    let memory = unsafe { std::slice::from_raw_parts(self.mem, self.mem_size) };
+                    let memory = unsafe { std::slice::from_raw_parts(self.mem.0, self.mem_size) };
                     let pending = self.net.as_ref().map(|n| n.pending_tx(memory)).transpose()?.unwrap_or(false);
                     if self.poll_net(frames, true)? {
                         self.note_skew(Site::Sent);
@@ -1419,7 +1436,7 @@ impl Machine {
             };
             self.stats.kvm_ns[kind] += run_ns;
             self.stats.kvm_n[kind] += 1;
-            let syscalls1 = unsafe { std::ptr::read_volatile(self.page.add(PAGE_SYSCALLS)) };
+            let syscalls1 = unsafe { std::ptr::read_volatile(self.page.0.add(PAGE_SYSCALLS)) };
             let c1 = tb.read(syscalls1);
             let delta = c1 - c0;
             let interrupted = matches!(&exit, Err(e) if e.errno() == libc::EINTR);
@@ -1447,6 +1464,7 @@ impl Machine {
                 armed_wake: self.armed_wake,
                 profile: self.profile,
                 stats: &mut self.stats,
+                pv_progress: &mut self.pv_progress,
             };
             match tb.judge(judge, &run)? {
                 Verdict::Advance { legal: l } => legal = l,
@@ -1483,7 +1501,7 @@ impl Machine {
                 // Sent/Hlt/Exited can return before the next loop synchronizes
                 // the page. Validate guest clock progress before exit effects.
                 // The exit still borrows vcpu: use only the disjoint fields.
-                let last = unsafe { std::ptr::read_volatile(self.page.add(1)) };
+                let last = unsafe { std::ptr::read_volatile(self.page.0.add(1)) };
                 let exit_time = advance_time(self.world.time, last.saturating_sub(self.world.time), hard)?;
                 if self.pv_clock || self.page_timer.enabled {
                     // In particular HLT must adopt at its full exit time, not
@@ -1495,7 +1513,7 @@ impl Machine {
                     self.world.time = exit_time;
                 }
                 if self.page_timer.enabled {
-                    let word = unsafe { std::ptr::read_volatile(self.page.add(PAGE_TIMER_DEADLINE)) };
+                    let word = unsafe { std::ptr::read_volatile(self.page.0.add(PAGE_TIMER_DEADLINE)) };
                     if self.page_timer.pickup(word, &mut self.pit, self.world.time)? { self.pic.raise(0); }
                     timer_latency(&mut self.pit, &mut self.pit_exact, self.timer_rng.as_mut(), self.timer_jitter, self.exact_timer_ppm);
                     if self.pit.expire_through(self.world.time)? > 0 { self.pic.raise(0); }
@@ -1763,7 +1781,7 @@ impl Machine {
                     let v = u32::from_le_bytes(v);
                     self.record(b'w', addr << 32 | v as u64);
                     if (CHANNEL_MMIO..CHANNEL_MMIO+0x1000).contains(&addr) {
-                        let memory=unsafe{std::slice::from_raw_parts_mut(self.mem,self.mem_size)};
+                        let memory=unsafe{std::slice::from_raw_parts_mut(self.mem.0,self.mem_size)};
                         if let Some(channel)=self.channel.as_mut() {
                             let output=channel.write(memory,addr-CHANNEL_MMIO,v)?;
                             self.take_dma();if output.irq {self.pic.raise(CHANNEL_IRQ);}
@@ -1771,7 +1789,7 @@ impl Machine {
                         }
                     }
                     if (BLK_MMIO..BLK_MMIO + 0x1000).contains(&addr) {
-                        let m = unsafe { std::slice::from_raw_parts_mut(self.mem, self.mem_size) };
+                        let m = unsafe { std::slice::from_raw_parts_mut(self.mem.0, self.mem_size) };
                         if let Some(b) = self.blk.as_mut() {
                             let done = b.write(m, addr - BLK_MMIO, v)?;
                             self.take_dma();
@@ -1791,10 +1809,10 @@ impl Machine {
                         }
                     }
                     if (NET_MMIO..NET_MMIO + 0x1000).contains(&addr) {
-                        let (mem, size) = (self.mem, self.mem_size);
+                        let (mem, size) = (self.mem.0, self.mem_size);
                         let m = unsafe { std::slice::from_raw_parts_mut(mem, size) };
                         if let Some(n) = self.net.as_mut() {
-                            let out = n.write_at(m, addr - NET_MMIO, v, self.world.time.max(unsafe { std::ptr::read_volatile(self.page.add(1)) }));
+                            let out = n.write_at(m, addr - NET_MMIO, v, self.world.time.max(unsafe { std::ptr::read_volatile(self.page.0.add(1)) }));
                             self.take_dma();
                             let out=out?;
                             if out.irq {
@@ -2006,7 +2024,7 @@ mod net_poll_tests {
                     undo_margin: 0, barrier: false, pv_clock: true, page_timer:false};
                 let mut m = Machine::new(&kvm, "net-poll", &spec).unwrap();
                 let mut r = m.vcpu.get_regs().unwrap();r.rflags = 0x202;m.vcpu.set_regs(&r).unwrap();
-                let memory = unsafe { std::slice::from_raw_parts_mut(m.mem, m.mem_size) };
+                let memory = unsafe { std::slice::from_raw_parts_mut(m.mem.0, m.mem_size) };
                 let net = m.net.as_mut().unwrap();
                 net.set_deferred_tx(deferred);
                 for (off, v) in [(0x020, (1 << 5) | if event_idx { 1 << 29 } else { 0 }), (0x024, 1), (0x020, 1), (0x070, 15),
@@ -2096,7 +2114,7 @@ mod net_poll_tests {
                     undo_margin: 0, barrier: false, pv_clock: true, page_timer};
                 let mut m = Machine::new(&kvm, "tx-spin", &spec).unwrap();
                 m.abi = ABI_PAGE_TIMER;m.enable_page_timer();
-                let memory = unsafe { std::slice::from_raw_parts_mut(m.mem, m.mem_size) };
+                let memory = unsafe { std::slice::from_raw_parts_mut(m.mem.0, m.mem_size) };
                 let net = m.net.as_mut().unwrap();net.set_deferred_tx(true);
                 for (off, v) in [(0x020, if event_idx { 1 << 29 } else { 0 }), (0x070, 15),
                     (0x030, 1), (0x038, 1), (0x080, 0x81000), (0x090, 0x82000), (0x0a0, 0x83000), (0x044, 1)] {
