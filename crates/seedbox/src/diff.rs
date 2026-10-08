@@ -3,10 +3,10 @@
 use crate::{
     orchestration::{self, RunRecord},
     store::ContentDigest,
-    vmm::{MachineReport, StateDigestParts, VmmReport},
+    vmm::{page_hash_log, MachineReport, StateDigestParts, VmmReport},
     Error, Result,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -50,6 +50,21 @@ pub struct MachineDiff {
     pub witness: Witness,
     pub full_state: Witness,
     pub differences: Vec<Difference>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ram_pages: Option<PageHashDiff>,
+}
+
+/// Diagnostic evidence only; never participates in identity or replay verdicts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageHashDiff {
+    pub differing_pfns: u64,
+    pub first_pfns: Vec<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RamPageReport {
+    pub machines: BTreeMap<String, PageHashDiff>,
+    pub limitations: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -254,6 +269,11 @@ pub fn diff(a: &Path, b: &Path) -> Result<DiffReport> {
     let left = load(a)?;
     let right = load(b)?;
     let mut result = compare(&left, &right)?;
+    let pages = ram_pages(a, &left, b, &right)?;
+    result.limitations.extend(pages.limitations);
+    for machine in &mut result.machines {
+        machine.ram_pages = pages.machines.get(&machine.machine).cloned();
+    }
     let mut traces = Vec::new();
     for machine in &result.machines {
         let name = format!("machines/{}.trace", machine.machine);
@@ -350,6 +370,7 @@ fn compare(a: &Evidence, b: &Evidence) -> Result<DiffReport> {
             witness,
             full_state,
             differences,
+            ram_pages: None,
         });
     }
     let world_witness = Witness::new(a.world.clone(), b.world.clone());
@@ -392,6 +413,99 @@ fn compare(a: &Evidence, b: &Evidence) -> Result<DiffReport> {
         evidence_differences,
         limitations,
     })
+}
+
+pub(crate) fn replay_ram_pages(a: &Path, b: &Path) -> Result<RamPageReport> {
+    ram_pages(a, &load(a)?, b, &load(b)?)
+}
+
+fn ram_only(a: &Machine, b: &Machine) -> bool {
+    let digests_differ = a
+        .state_digest
+        .as_ref()
+        .zip(b.state_digest.as_ref())
+        .is_some_and(|(a, b)| a != b);
+    digests_differ
+        && a.state_digest_parts
+            .as_ref()
+            .zip(b.state_digest_parts.as_ref())
+            .is_some_and(|(a, b)| a.ram_only_difference(b))
+}
+
+fn page_file(directory: &Path, evidence: &Evidence, name: &str) -> Result<Option<File>> {
+    let Some(file) = log(directory, &evidence.record, name)? else {
+        return Ok(None);
+    };
+    let expected = evidence
+        .record
+        .identity
+        .inputs
+        .profile
+        .semantic_parameters
+        .get("memory_mb")
+        .and_then(|m| m.parse::<u64>().ok())
+        .filter(|m| *m > 0)
+        .and_then(|m| m.checked_mul(2048))
+        .ok_or_else(|| bad(directory, "page hashes require recorded memory_mb"))?;
+    if file.metadata().map_err(|e| bad(directory, e))?.len() != expected {
+        return Err(bad(
+            &directory.join("output").join(name),
+            format!("page hash length must be {expected} bytes for recorded RAM"),
+        ));
+    }
+    Ok(Some(file))
+}
+
+fn ram_pages(a: &Path, left: &Evidence, b: &Path, right: &Evidence) -> Result<RamPageReport> {
+    let mut report = RamPageReport::default();
+    for (machine, x) in &left.machines {
+        let Some(y) = right.machines.get(machine) else {
+            continue;
+        };
+        if !ram_only(x, y) {
+            continue;
+        }
+        let name = page_hash_log(machine);
+        let x = page_file(a, left, &name)?;
+        let y = page_file(b, right, &name)?;
+        if let (Some(x), Some(y)) = (x, y) {
+            let pages = compare_pages(x, y)
+                .map_err(|e| bad(a, format!("{name} compared with {}: {e}", b.display())))?;
+            report.machines.insert(machine.clone(), pages);
+        } else {
+            report.limitations.push(format!(
+                "{machine}: page hashes unavailable on one or both sides"
+            ));
+        }
+    }
+    Ok(report)
+}
+
+fn compare_pages(a: impl Read, b: impl Read) -> Result<PageHashDiff> {
+    let mut a = BufReader::new(a);
+    let mut b = BufReader::new(b);
+    let mut result = PageHashDiff {
+        differing_pfns: 0,
+        first_pfns: vec![],
+    };
+    let mut pfn = 0;
+    loop {
+        let mut x = [0; 8];
+        let mut y = [0; 8];
+        if a.fill_buf()?.is_empty() && b.fill_buf()?.is_empty() {
+            break;
+        }
+        a.read_exact(&mut x)?;
+        b.read_exact(&mut y)?;
+        if u64::from_le_bytes(x) != u64::from_le_bytes(y) {
+            result.differing_pfns += 1;
+            if result.first_pfns.len() < 8 {
+                result.first_pfns.push(pfn);
+            }
+        }
+        pfn += 1;
+    }
+    Ok(result)
 }
 
 // Existing engine trace format: kind branches time_ns extra(hex) rip(hex).
@@ -452,6 +566,128 @@ mod tests {
     use super::*;
     use crate as sb;
     include!("../tests/support/diff_fixture.rs");
+
+    #[test]
+    fn ram_pages_are_read_where_the_vmm_writes_them() {
+        // vmm.rs passes --out output/machines, so NAME.pages sits beside NAME.trace.
+        let (a, b) = ram_pair();
+        let dir = tempfile::tempdir().unwrap();
+        for (name, raw, pfns) in [("a", &a, vec![]), ("b", &b, vec![3usize])] {
+            let path = dir.path().join(name);
+            let mut record = fixture();
+            write_fixture(&path, &mut record, Some(raw), None);
+            let mut bytes = vec![0u8; 1024 * 1024];
+            for pfn in pfns {
+                bytes[pfn * 8] = 1;
+            }
+            std::fs::write(path.join("output/machines/server.pages"), &bytes).unwrap();
+            record
+                .logs
+                .insert("machines/server.pages".into(), ContentDigest::of(&bytes));
+            write_fixture(&path, &mut record, Some(raw), None);
+        }
+        let report = diff(&dir.path().join("a"), &dir.path().join("b")).unwrap();
+        assert_eq!(
+            report.machines[0].ram_pages.as_ref().unwrap().first_pfns,
+            [3]
+        );
+    }
+
+    #[test]
+    fn ram_pages_count_all_pfns_and_bound_the_sample() {
+        let (a, b) = ram_pair();
+        let dir = tempfile::tempdir().unwrap();
+        let left = dir.path().join("a");
+        let right = dir.path().join("b");
+        let mut ra = fixture();
+        let mut rb = fixture();
+        write_fixture(&left, &mut ra, Some(&a), None);
+        write_fixture(&right, &mut rb, Some(&b), None);
+        write_pages(&left, &mut ra, &[]);
+        write_pages(&right, &mut rb, &[0, 3, 9, 10, 11, 12, 13, 14, 15, 131071]);
+        write_fixture(&left, &mut ra, Some(&a), None);
+        write_fixture(&right, &mut rb, Some(&b), None);
+        let result = diff(&left, &right).unwrap();
+        let pages = result.machines[0].ram_pages.as_ref().unwrap();
+        assert_eq!(pages.differing_pfns, 10);
+        assert_eq!(pages.first_pfns, [0, 3, 9, 10, 11, 12, 13, 14]);
+        assert_eq!(ra.run_id, rb.run_id);
+        assert!(result.identity_differences.is_empty());
+
+        // Even another textual part changing rules out a RAM-only diagnostic.
+        let mut mixed = b.clone();
+        mixed["machines"][1]["state_digest_parts"]["events"] = "different events".into();
+        write_fixture(&right, &mut rb, Some(&mixed), None);
+        assert!(diff(&left, &right)
+            .unwrap()
+            .machines
+            .iter()
+            .all(|m| m.ram_pages.is_none()));
+    }
+
+    #[test]
+    fn ram_page_evidence_is_optional_but_declared_bytes_are_validated() {
+        let (a, b) = ram_pair();
+        let (dir, result) = pair(&a, &b);
+        assert!(result
+            .limitations
+            .iter()
+            .any(|l| l.contains("page hashes unavailable")));
+        let left = dir.path().join("a");
+        let right = dir.path().join("b");
+        let mut ra = fixture();
+        let mut rb = fixture();
+        // Unregistered files on disk are ignored.
+        std::fs::write(left.join("output/machines/server.pages"), b"junk").unwrap();
+        assert!(diff(&left, &right).unwrap().machines[0].ram_pages.is_none());
+        write_pages(&left, &mut ra, &[]);
+        write_pages(&right, &mut rb, &[1]);
+        write_fixture(&left, &mut ra, Some(&a), None);
+        write_fixture(&right, &mut rb, Some(&b), None);
+        std::fs::write(right.join("output/machines/server.pages"), b"corrupt").unwrap();
+        assert!(diff(&left, &right)
+            .unwrap_err()
+            .to_string()
+            .contains("evidence checksum mismatch"));
+        for length in [7, 8, 1024 * 1024 - 8] {
+            let bytes = vec![0; length];
+            std::fs::write(right.join("output/machines/server.pages"), &bytes).unwrap();
+            rb.logs
+                .insert("machines/server.pages".into(), ContentDigest::of(&bytes));
+            write_fixture(&right, &mut rb, Some(&b), None);
+            assert!(diff(&left, &right)
+                .unwrap_err()
+                .to_string()
+                .contains("page hash length must be 1048576 bytes"));
+        }
+        rb.logs.remove("machines/server.pages");
+        rb.omitted_logs
+            .insert("machines/server.pages".into(), "retention cap".into());
+        write_fixture(&right, &mut rb, Some(&b), None);
+        let result = diff(&left, &right).unwrap();
+        assert!(result.machines[0].ram_pages.is_none());
+        assert!(result
+            .limitations
+            .iter()
+            .any(|l| l.contains("page hashes unavailable")));
+    }
+
+    #[test]
+    fn page_capture_presence_alone_does_not_change_diff_or_witnesses() {
+        for full_state in [false, true] {
+            let a = current_report(full_state);
+            let (dir, before) = pair(&a, &a);
+            let mut record = fixture();
+            let left = dir.path().join("a");
+            write_pages(&left, &mut record, &[1]);
+            write_fixture(&left, &mut record, Some(&a), None);
+            let after = diff(&left, &dir.path().join("b")).unwrap();
+            assert_eq!(
+                serde_json::to_vec(&before).unwrap(),
+                serde_json::to_vec(&after).unwrap()
+            );
+        }
+    }
 
     fn pair(a: &Value, b: &Value) -> (tempfile::TempDir, DiffReport) {
         let dir = tempfile::tempdir().unwrap();

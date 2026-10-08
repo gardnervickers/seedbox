@@ -119,3 +119,23 @@ fn write_fixture(
     )
     .unwrap();
 }
+
+fn ram_pair() -> (serde_json::Value, serde_json::Value) {
+    let a = current_report(true);
+    let mut b = a.clone();
+    for key in ["state_digest", "state_digest_parts/ram"] {
+        *b.pointer_mut(&format!("/machines/1/{key}")).unwrap() =
+            serde_json::to_value(sb::store::ContentDigest::of(b"changed RAM")).unwrap();
+    }
+    (a, b)
+}
+
+fn write_pages(path: &std::path::Path, record: &mut sb::orchestration::RunRecord, pfns: &[usize]) {
+    // The fixture records 512 MiB, or 131072 guest pages.
+    let mut bytes = vec![0; 1024 * 1024];
+    for pfn in pfns {
+        bytes[pfn * 8..pfn * 8 + 8].copy_from_slice(&0x0123456789abcdefu64.to_le_bytes());
+    }
+    std::fs::write(path.join("output/machines/server.pages"), &bytes).unwrap();
+    record.logs.insert("machines/server.pages".into(), sb::store::ContentDigest::of(&bytes));
+}

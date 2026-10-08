@@ -258,7 +258,7 @@ below applies to the default counter model; PV uses its own exit-based progress.
 
 `--state` chooses the content store and attempts root (default `.seedbox`).
 `--memory-mb` defaults to 1024 MiB per service and is a semantic parameter; `--full-state` requests RAM/register
-digests. Preparation checks a conservative archive boot-memory floor before acquiring
+digests and retains per-page RAM hashes (format below). Preparation checks a conservative archive boot-memory floor before acquiring
 a CPU lease. Application memory can require a larger value; the etcd image failed
 to unpack at 512 MiB and passed at 1024 MiB. `--margin` and `--undo` are recorded per attempt and do not change identity.
 `--undo` defaults to 256 branches; zero disables undo and 16 exercises a smaller
@@ -330,6 +330,34 @@ manifest's full-state digests remain usable when the raw engine report was omitt
 State parts such as `ram`, `disk` and `pending_io` are compared separately;
 `events` is the engine's descriptive event state, while the other parts are
 validated lowercase SHA-256 digests.
+
+With `--full-state`, the VMM also writes `output/machines/NAME.pages` for each machine.
+Retention records the files as `logs["machines/NAME.pages"]` for diff and replay.
+The binary format has no header: entry PFN `p` occupies bytes `8*p..8*p+8` and is
+a little-endian `u64`, formed by interpreting the first eight SHA-256 bytes of
+guest RAM bytes `4096*p..4096*p+4096` as little-endian. Entries cover all guest
+RAM in ascending PFN order, including zero pages; 512 MiB RAM produces exactly
+1 MiB of hashes. These are truncated hashes, not RAM snapshots, and collisions
+can hide a page difference. Capture reads RAM without changing it or consuming
+random draws. It adds no witness or state-digest input. The former env-only
+page-capture switch has been removed; no new flag or environment setting is needed.
+
+Page files follow the ordinary log retention policy and travel in bundles when
+retained. They are excluded from run identity and never decide the replay verdict
+or offline diff status. When a machine's full-state digest differs and `ram` is
+the only differing state part, diff adds `machines[].ram_pages` with
+`differing_pfns` and `first_pfns` (up to eight, ascending). Plain diff prints the
+summary on stderr. A MISMATCH replay adds the same evidence under
+`replay.ram_pages.machines` and prints it on stderr. Existing JSON fields remain;
+`diff --json` still emits one document and no page-summary stderr.
+
+Both files must be manifest-declared, checksum-valid and exactly eight bytes per
+recorded 4 KiB page. Missing or omitted evidence cannot locate PFNs and is reported
+as a limitation. Invalid selected page evidence makes offline diff exit 2;
+replay keeps its MISMATCH/exit 1 and retains the diagnostic in
+`replay.ram_pages.limitations`. Old engines' runs remain readable without these
+files. PFNs locate final RAM differences, not the first divergent instruction.
+
 All changed identity fields are listed as JSON pointers with both values, including
 configuration, seed, engine, kernel, images/layers, guest archives, provenance and
 semantic parameters. Missing values are null. Arrays are compared as whole values.

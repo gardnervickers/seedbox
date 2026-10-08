@@ -1185,10 +1185,10 @@ fn report(
         world_witness.update(w.as_bytes());
         let (state_digest, state_parts) = if digest {
             let (d, parts) = mach.state_digest();
-            if std::env::var("SEEDBOX_PAGE_HASHES").is_ok() {
-                std::fs::write(format!("{out}/{}.pages", mach.name), mach.page_hashes())
-                    .map_err(|e| e.to_string())?;
-            }
+            // The host supplies output/MACHINE_OUTPUT_DIR as --out; retention
+            // preserves that directory prefix (see seedbox/src/vmm.rs).
+            std::fs::write(format!("{out}/{}.pages", mach.name), mach.page_hashes())
+                .map_err(|e| e.to_string())?;
             let parts: serde_json::Map<String, Value> = parts
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), json!(v)))

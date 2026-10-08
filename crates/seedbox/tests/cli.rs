@@ -946,6 +946,93 @@ mod diff_tests {
     include!("support/diff_fixture.rs");
 
     #[test]
+    fn ram_only_page_diagnostics_preserve_stdout_json_and_exit_contracts() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (a, b) = ram_pair();
+        for (name, raw, pfns) in [("a", &a, vec![]), ("b", &b, vec![2, 5, 131071])] {
+            let path = root.join(name);
+            let mut record = fixture();
+            write_fixture(&path, &mut record, Some(raw), None);
+            write_pages(&path, &mut record, &pfns);
+            write_fixture(&path, &mut record, Some(raw), None);
+        }
+        let plain = seedbox(&["diff", "a", "b"], root);
+        assert_eq!(plain.status.code(), Some(1));
+        assert_eq!(
+            stderr(&plain),
+            "ram pages: server: differing pfns: 3; first pfns: [2, 5, 131071]\n"
+        );
+        let stdout = String::from_utf8(plain.stdout).unwrap();
+        assert!(stdout.starts_with("DIFFERENT: a <> b\n"));
+        assert_eq!(
+            stdout
+                .lines()
+                .filter(|l| l.starts_with("DIFFERENT: "))
+                .count(),
+            1
+        );
+        let json = seedbox(&["diff", "a", "b", "--json"], root);
+        assert_eq!(json.status.code(), Some(1));
+        assert!(json.stderr.is_empty());
+        let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+        assert_eq!(value["machines"][0]["ram_pages"]["differing_pfns"], 3);
+        assert_eq!(
+            value["machines"][0]["ram_pages"]["first_pfns"],
+            serde_json::json!([2, 5, 131071])
+        );
+        for field in [
+            "status",
+            "world_witness",
+            "machines",
+            "first_record",
+            "identity_differences",
+            "result_differences",
+            "evidence_differences",
+            "limitations",
+        ] {
+            assert!(value.get(field).is_some(), "lost {field}");
+        }
+        for field in ["machine", "witness", "full_state", "differences"] {
+            assert!(value["machines"][0].get(field).is_some(), "lost {field}");
+        }
+        let matched = seedbox(&["diff", "a", "a"], root);
+        assert_eq!(matched.status.code(), Some(0));
+        assert!(matched.stderr.is_empty());
+    }
+
+    #[test]
+    fn selected_page_file_errors_are_setup_errors_with_no_json_stdout() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (a, b) = ram_pair();
+        let mut left = fixture();
+        let mut right = fixture();
+        for (name, record, raw) in [("a", &mut left, &a), ("b", &mut right, &b)] {
+            let path = root.join(name);
+            write_fixture(&path, record, Some(raw), None);
+            write_pages(&path, record, &[]);
+            write_fixture(&path, record, Some(raw), None);
+        }
+        fs::write(root.join("b/output/machines/server.pages"), b"broken").unwrap();
+        for (error, update_digest, remove_memory) in [
+            ("diff b/output/machines/server.pages: evidence checksum mismatch", false, false),
+            ("diff b/output/machines/server.pages: page hash length must be 1048576 bytes for recorded RAM", true, false),
+            ("diff b: page hashes require recorded memory_mb", true, true),
+        ] {
+            if update_digest {
+                right.logs.insert("machines/server.pages".into(), sb::store::ContentDigest::of(b"broken"));
+            }
+            if remove_memory { right.identity.inputs.profile.semantic_parameters.remove("memory_mb"); }
+            write_fixture(&root.join("b"), &mut right, Some(&b), None);
+            let output = seedbox(&["diff", "a", "b", "--json"], root);
+            assert_eq!(output.status.code(), Some(2));
+            assert!(output.stdout.is_empty());
+            assert_eq!(stderr(&output), format!("error: {error}; use an intact retained run directory (import bundles first)\n"));
+        }
+    }
+
+    #[test]
     fn diff_current_multi_machine_parts_and_cli_contract() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();

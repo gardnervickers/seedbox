@@ -17,6 +17,14 @@ use std::{
 /// Execution failure whose VMM stderr may be excerpted by the CLI.
 pub const VMM_FAILURE_MESSAGE: &str = "VMM failed; see vmm.stderr";
 
+/// VMM `--out` directory relative to run output; recursive retention keeps this prefix.
+pub(crate) const MACHINE_OUTPUT_DIR: &str = "machines";
+
+/// Manifest-relative page evidence, beside the VMM's per-machine traces.
+pub(crate) fn page_hash_log(machine: &str) -> String {
+    format!("{MACHINE_OUTPUT_DIR}/{machine}.pages")
+}
+
 #[derive(Clone, Debug)]
 pub struct VmmExecutor {
     /// Host CPU to pin the VMM to; `None` leases the first free eligible core.
@@ -616,6 +624,20 @@ struct RawFault {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(try_from = "BTreeMap<String, String>")]
 pub(crate) struct StateDigestParts(BTreeMap<String, String>);
+
+impl StateDigestParts {
+    pub(crate) fn ram_only_difference(&self, other: &Self) -> bool {
+        self.0
+            .get("ram")
+            .zip(other.0.get("ram"))
+            .is_some_and(|(a, b)| a != b)
+            && self
+                .0
+                .iter()
+                .filter(|(k, _)| k.as_str() != "ram")
+                .eq(other.0.iter().filter(|(k, _)| k.as_str() != "ram"))
+    }
+}
 
 impl TryFrom<BTreeMap<String, String>> for StateDigestParts {
     type Error = Error;
@@ -1594,7 +1616,7 @@ mod linux {
             .arg("--seed")
             .arg(request.seed.to_string())
             .arg("--out")
-            .arg(request.output.join("machines"));
+            .arg(request.output.join(MACHINE_OUTPUT_DIR));
         if timebase != Timebase::Counter {
             command.arg("--timebase").arg(timebase.name());
         }
