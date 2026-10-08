@@ -31,7 +31,7 @@ next action before T. Charged I/O may still owe time: its response and device
 effect are already committed, and restoring keeps the debt without repeating
 the effect. Boot forks still require every machine parked.
 
-The CLI and engine share `crates/seedbox-vmm/src/checkpoint.rs`. Parent identity
+The CLI and engine share `crates/seedbox-engine-core/src/checkpoint.rs`. Parent identity
 uses the versioned `seedbox-world-parent-v2` domain, config with checkpoint
 metadata removed, kernel/initrd/disk paths replaced by content hashes, engine
 hash, timebase and parent seed. An enabled page timer adds an explicit semantic
