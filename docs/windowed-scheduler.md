@@ -1,17 +1,17 @@
 # Windowed scheduler (experimental)
 
-Status: the default scheduler for static worlds, unqualified.
-`seedbox-engine-core` holds the planner and executors (`src/window/`) and
-the adapter over the shared world (`src/world_windowed.rs`), generic over
-`WorldMachine`. The x86 VMM runs every world the round model supports
-(no faults, control, scenarios, `kill_restart`, boot forks or checkpoints)
-through it, and the legacy loop otherwise; the choice depends only on the
-world's inputs, so a replay makes the same one. `--scheduler legacy` forces
-the old loop and reproduces the preceding engine's witnesses;
-`--scheduler windowed` fails instead of falling back. `--machine-workers N`
+Status: the scheduler for static worlds, unqualified. `seedbox-engine-core`
+holds the planner and executors (`src/window/`) and the adapter over the
+shared world (`src/world_windowed.rs`), generic over `WorldMachine`. The
+x86 VMM runs every world the round model supports through it. A world it
+cannot run yet (faults, control, scenarios, `kill_restart`, boot forks,
+checkpoints) still takes the legacy loop, until those move into the round
+model and the loop goes; the choice depends only on the world's inputs, so
+a replay makes the same one, and `vmm.json` names the scheduler that ran
+under `scheduler.name`. There is no flag to choose. `--machine-workers N`
 and `--machine-cpus` set the thread count and pinning (performance only);
 the `seedbox` CLI does not pass them yet, so CLI runs are windowed on one
-thread. `vmm.json` names the scheduler that ran under `scheduler.name`.
+thread.
 
 The question this prototype answers: can several machines of one world run
 concurrently, with results identical for any worker count, and does that
@@ -94,9 +94,11 @@ windows.
 
 ### AMD host (5950X, `nixos`)
 
-`harness/windowed-matrix.sh KERNEL VMM BASE_VMM CPUS` reproduces this as
-root in the dev shell, with the worlds in `harness/worlds/window2.json` and
-`window4.json`. It exits nonzero if any witness disagrees.
+`harness/windowed-matrix.sh KERNEL VMM CPUS` reproduces the thread-count
+agreement as root in the dev shell, with the worlds in
+`harness/worlds/window2.json` and `window4.json`. It exits nonzero if any
+witness disagrees. The old-scheduler rows below are from the engine before
+this one became the default.
 
 `guest/window.init` makes four guests that each hash 1.25 GiB from
 `/dev/zero` while pinging the next guest 100 times at 20 ms intervals.
@@ -120,9 +122,9 @@ and 2 workers and reversed order (PV: 0.43 s serial, 0.23 s with two
 threads). The windowed witnesses differ from the old scheduler's, as
 expected for a different scheduler.
 
-- **Legacy path unchanged.** The same worlds with `--scheduler legacy` give
-  the same world witnesses as the VMM at `6d4f443` (#169's head), for PV and
-  counter.
+- **Legacy path unchanged** at the time of measurement: the same worlds
+  under the old scheduler gave the same world witnesses as the VMM at
+  `6d4f443` (#169's head), for PV and counter.
 - **PV:** windowed execution costs nothing serially, and four threads run
   3.3× faster than the old scheduler.
 - **Counter:** serial windowed is 40% slower than the old scheduler. Every
@@ -194,8 +196,7 @@ It works for any `WorldMachine`; the parallel path needs `M: Send`.
 - **Scope.** Runtime control, faults, scenarios, `kill_restart`, boot forks
   and checkpoints are rejected before boot. Console triggers, control
   requests and fault effects fail the run if they appear.
-  `--machine-workers` and `--machine-cpus` are rejected with
-  `--scheduler legacy`.
+  `--machine-workers` and `--machine-cpus` apply only to windowed runs.
 
 ## Remaining plan
 

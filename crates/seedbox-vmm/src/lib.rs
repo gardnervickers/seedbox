@@ -84,16 +84,6 @@ pub struct ConsoleTrace<'a> {
 
 pub type ConsoleTraceCallback = for<'a> fn(ConsoleTrace<'a>);
 
-/// The world scheduler. `Auto` runs the windowed scheduler wherever the
-/// world supports it (static worlds) and the legacy loop otherwise.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Scheduler {
-    #[default]
-    Auto,
-    Windowed,
-    Legacy,
-}
-
 /// Explicit inputs to a world worker. Argument and environment acquisition belong to its caller.
 #[derive(Clone, Debug)]
 pub struct WorkerOptions {
@@ -114,10 +104,8 @@ pub struct WorkerOptions {
     pub trace: bool,
     pub performance: PerformanceOptions,
     pub console_trace: Option<ConsoleTraceCallback>,
-    /// Which world scheduler runs the world (docs/windowed-scheduler.md).
-    /// Part of the run's identity.
-    pub scheduler: Scheduler,
-    /// Windowed machine threads (performance only).
+    /// Machine threads for the windowed scheduler (performance only;
+    /// docs/windowed-scheduler.md).
     pub machine_workers: usize,
     /// One CPU per machine thread, in thread order (performance only).
     pub machine_cpus: Vec<usize>,
@@ -149,28 +137,19 @@ impl WorkerOptions {
         if args.iter().any(|a| a == "--checkpoint-at-ns") && checkpoint_at_ns.is_none() {
             return Err("--checkpoint-at-ns requires comma-separated unsigned nanoseconds".into());
         }
-        let scheduler = match arg(args, "--scheduler").as_deref() {
-            None => Scheduler::Auto,
-            Some("windowed") => Scheduler::Windowed,
-            Some("legacy") => Scheduler::Legacy,
-            Some(other) => return Err(format!("--scheduler {other}: expected windowed or legacy")),
-        };
-        let legacy = scheduler == Scheduler::Legacy;
         let machine_workers = match arg(args, "--machine-workers") {
             None => 1,
-            Some(_) if legacy => return Err("--machine-workers requires the windowed scheduler".into()),
             Some(n) => n.parse().ok().filter(|n| (1..=64).contains(n)).ok_or("--machine-workers: use 1..64")?,
         };
         let machine_cpus: Vec<usize> = match arg(args, "--machine-cpus") {
             None => Vec::new(),
-            Some(_) if legacy => return Err("--machine-cpus requires the windowed scheduler".into()),
             Some(list) => list.split(',').map(|c| c.parse().map_err(|e| format!("--machine-cpus: {e}"))).collect::<Result<_, _>>()?,
         };
         if !machine_cpus.is_empty() && machine_cpus.len() != machine_workers {
             return Err("--machine-cpus: give one CPU per machine worker".into());
         }
         Ok(Self {
-            config, seed, fork_seeds, out, pv_clock, log_chunk_limit, checkpoint_at_ns, scheduler, machine_workers, machine_cpus,
+            config, seed, fork_seeds, out, pv_clock, log_chunk_limit, checkpoint_at_ns, machine_workers, machine_cpus,
             page_timer: args.iter().any(|a| a == "--page-timer"),
             deferred_tx: args.iter().any(|a| a == "--deferred-tx"),
             digest: args.iter().any(|a| a == "--digest"),
@@ -402,15 +381,11 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
     )
     .map_err(|e| format!("config: {e}"))?;
     let disk_fault_model = disk::parse_disk_fault_model(&cfg["disk_loss"])?;
-    let supported = world_windowed::check_supported(&cfg, !options.fork_seeds.is_empty() || options.checkpoint_at_ns.is_some());
-    let windowed = match options.scheduler {
-        Scheduler::Legacy => false,
-        Scheduler::Windowed => { supported?; true }
-        // A world the round model cannot run yet (faults, control, forks,
-        // checkpoints) takes the legacy loop. The choice depends only on the
-        // world's inputs, so a replay makes the same one.
-        Scheduler::Auto => supported.is_ok(),
-    };
+    // The windowed scheduler runs every world it supports. A world it cannot
+    // run yet (faults, control, forks, checkpoints) takes the legacy loop
+    // until those move into the round model. The choice depends only on the
+    // world's inputs, so a replay makes the same one.
+    let windowed = world_windowed::check_supported(&cfg, !options.fork_seeds.is_empty() || options.checkpoint_at_ns.is_some()).is_ok();
     let base = config_path
         .parent()
         .unwrap()
@@ -1023,17 +998,15 @@ mod worker_options_tests {
     }
 
     #[test]
-    fn the_scheduler_defaults_to_windowed_where_supported_and_legacy_is_explicit() {
+    fn machine_workers_are_performance_settings() {
         let performance = PerformanceOptions::default();
         let base = ["--config", "world.json", "--seed", "7", "--out", "output"];
         let with = |extra: &[&str]| WorkerOptions::from_args(&args(&[&base[..], extra].concat()), performance);
-        assert_eq!(with(&[]).unwrap().scheduler, Scheduler::Auto);
-        assert_eq!(with(&["--scheduler", "windowed", "--machine-workers", "4", "--machine-cpus", "4,5,6,7"]).unwrap().scheduler, Scheduler::Windowed);
-        assert_eq!(with(&["--machine-workers", "2"]).unwrap().machine_workers, 2);
-        assert_eq!(with(&["--scheduler", "legacy"]).unwrap().scheduler, Scheduler::Legacy);
-        assert_eq!(with(&["--scheduler", "legacy", "--machine-workers", "2"]).unwrap_err(), "--machine-workers requires the windowed scheduler");
-        assert_eq!(with(&["--scheduler", "legacy", "--machine-cpus", "4"]).unwrap_err(), "--machine-cpus requires the windowed scheduler");
-        assert_eq!(with(&["--scheduler", "other"]).unwrap_err(), "--scheduler other: expected windowed or legacy");
+        let o = with(&[]).unwrap();
+        assert_eq!((o.machine_workers, o.machine_cpus.as_slice()), (1, &[][..]));
+        let o = with(&["--machine-workers", "4", "--machine-cpus", "4,5,6,7"]).unwrap();
+        assert_eq!((o.machine_workers, o.machine_cpus.as_slice()), (4, &[4, 5, 6, 7][..]));
+        assert_eq!(with(&["--machine-workers", "0"]).unwrap_err(), "--machine-workers: use 1..64");
         assert_eq!(with(&["--machine-workers", "2", "--machine-cpus", "4,5,6"]).unwrap_err(), "--machine-cpus: give one CPU per machine worker");
     }
 
