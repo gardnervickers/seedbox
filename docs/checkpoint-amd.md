@@ -138,7 +138,9 @@ def semantic(r):
     assert r.get('fault_error') is None
     assert all(not m.get('infrastructure_error') and m.get('guest_init_error') is None for m in r['machines'])
     return {k:r.get(k) for k in ('outcome','world_witness','network_witness','network_counters','faults','control_history','triggers')} | {
-        'machines':[{k:m.get(k) for k in ('name','state','guest_exit_code','time_ns','branches','witness','state_digest','pending_io','disk','crashed_incarnations')} for m in r['machines']]}
+        'machines':[{k:m.get(k) for k in ('name','state','guest_exit_code','time_ns','branches','witness','state_digest','pending_io','disk')} | {
+            # The diagnostic `exits` count may differ; every semantic field must match.
+            'crashed_incarnations':[{k:v for k,v in c.items() if k!='exits'} for c in m.get('crashed_incarnations') or []]} for m in r['machines']]}
 for candidate in sorted(runs.glob('off-candidate-*-s*-r0.json')):
     main=candidate.with_name(candidate.name.replace('off-candidate-','off-main-'))
     assert candidate.with_suffix('.status').read_text().strip()=='0'
