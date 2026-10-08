@@ -189,6 +189,20 @@ static int open_management(const char *sysfs, const char *devices) {
 }
 
 static int launch_error_fd = -1;
+/* SIGCHLD stays blocked except inside ppoll, so a child's exit wakes the
+ * supervisor and cannot land between the reap and the wait. Waiting needs no
+ * timeout: an idle supervisor costs its machine no timer interrupts. */
+static int watching;
+static sigset_t wait_mask;
+static void child_exited(int signal) { (void)signal; }
+static void watch_children(void) {
+    struct sigaction action = {.sa_handler = child_exited, .sa_flags = SA_NOCLDSTOP};
+    sigset_t blocked;
+    sigemptyset(&blocked); sigaddset(&blocked, SIGCHLD);
+    if (sigemptyset(&action.sa_mask) || sigaction(SIGCHLD, &action, NULL) || sigprocmask(SIG_BLOCK, &blocked, &wait_mask)) die("watch children");
+    sigdelset(&wait_mask, SIGCHLD);
+    watching = 1;
+}
 static char **arguments, **environment;
 static char *user, *working_dir;
 
@@ -382,6 +396,7 @@ static pid_t start(void) {
     if (!pid) {
         close(launch_error[0]); launch_error_fd = launch_error[1];
         if (setpgid(0, 0)) die("application process group");
+        if (watching && sigprocmask(SIG_SETMASK, &wait_mask, NULL)) die("application signal mask");
         if (management >= 0) close(management);
         int input = open("/dev/null", O_RDONLY);
         if (input < 0 || dup2(input, STDIN_FILENO) < 0) die("application stdin");
@@ -508,7 +523,8 @@ static void service_channels(pid_t *child, int timeout) {
         {.fd = control_client < 0 ? control_listener : -1, .events = POLLIN},
         {.fd = control_client, .events = POLLIN}
     };
-    int ready = poll(pfds, 3, timeout);
+    struct timespec limit = {.tv_sec = timeout / 1000, .tv_nsec = timeout % 1000 * 1000000L};
+    int ready = ppoll(pfds, 3, timeout < 0 ? NULL : &limit, watching ? &wait_mask : NULL);
     if (ready < 0) { if (errno != EINTR) die("poll management"); return; }
     if (!ready) return;
     if (pfds[1].revents & (POLLERR|POLLHUP|POLLNVAL)) { errno = EIO; die("control listener poll"); }
@@ -517,6 +533,16 @@ static void service_channels(pid_t *child, int timeout) {
     if (pfds[2].revents & (POLLIN|POLLHUP)) relay_requests();
     if (pfds[0].revents & (POLLERR|POLLNVAL)) { errno = EIO; die("management port poll"); }
     if (pfds[0].revents & (POLLIN|POLLHUP)) relay_management(child);
+}
+static void supervise(pid_t *child) {
+    for (;;) {
+        int status;
+        pid_t done;
+        while ((done = waitpid(-1, &status, WNOHANG)) > 0) {
+            if (done == *child) finish(WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status), 0);
+        }
+        service_channels(child, -1);
+    }
 }
 #ifndef SEEDBOX_SUPERVISOR_TEST
 int main(void) {
@@ -557,15 +583,11 @@ int main(void) {
     /* Everything before this point is fixed by the boot seed; the application
      * starts after the world is released under the run seed. */
     if (seedbox_launch_barrier("/proc/cmdline", "/dev/urandom")) die("launch barrier");
+    watch_children();
     pid_t child = start();
     if (child < 0) die("initial application launch failed");
     management_ready();
-    for (;;) {
-        int status;
-        pid_t done = waitpid(-1, &status, WNOHANG);
-        if (done == child && child > 0) finish(WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status), 0);
-        service_channels(&child, 1);
-    }
+    supervise(&child);
 }
 
 #endif

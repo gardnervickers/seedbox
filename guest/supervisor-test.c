@@ -36,6 +36,13 @@ static void test_cmdline(const char *path, const char *text) {
     assert(!close(fd));
 }
 int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "exit-later")) {
+        /* Launched by the supervisor: SIGCHLD must not stay blocked. */
+        sigset_t mask; assert(!sigprocmask(SIG_SETMASK, NULL, &mask));
+        if (sigismember(&mask, SIGCHLD)) _exit(3);
+        struct timespec delay = {.tv_nsec = 100000000}; nanosleep(&delay, NULL);
+        _exit(7);
+    }
     if (argc > 1) { for (;;) pause(); }
     int sockets[2]; assert(!socketpair(AF_UNIX,SOCK_STREAM,0,sockets));
     assert(!fcntl(sockets[0], F_SETFL, O_NONBLOCK));
@@ -165,4 +172,19 @@ int main(int argc, char **argv) {
     }
     close(control_listener); control_listener = -1;
     assert(!unlink(address.sun_path) && !unlink(cmdline_path) && !rmdir(directory));
+    /* With no timeout and nothing else to wake it, the supervisor still sees
+     * its application exit, whether before or during the wait. */
+    for (int later = 0; later < 2; later++) {
+        check = fork(); assert(check >= 0);
+        if (!check) {
+            alarm(10); close(management); management = -1;
+            watch_children();
+            char *exit_later[] = {argv[0], "exit-later", NULL}, *exit_now[] = {"false", NULL};
+            arguments = later ? exit_later : exit_now;
+            child = start(); assert(child > 0);
+            supervise(&child);
+        }
+        assert(waitpid(check, &status, 0) == check);
+        assert(WIFEXITED(status) && WEXITSTATUS(status) == (later ? 7 : 1));
+    }
 }
