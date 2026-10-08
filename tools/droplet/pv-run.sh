@@ -104,12 +104,20 @@ echo "creating droplet $name ($size, $region)" >&2
 id="$(do_ compute droplet create "$name" --size "$size" --region "$region" \
   --image ubuntu-24-04-x64 --ssh-keys "$ssh_keys" --tag-name seedbox-pv \
   --wait --format ID --no-header)"
+gone() {
+  # DigitalOcean keeps listing a deleted droplet for a few seconds.
+  for _ in $(seq 30); do
+    do_ compute droplet get "$id" >/dev/null 2>&1 || return 0
+    sleep 5
+  done
+  return 1
+}
 cleanup() {
   status=$?
   minutes=$(( ($(date +%s) - started + 59) / 60 ))
   if [ "$keep" = 1 ]; then
     echo "droplet $id kept; delete it with: doctl ${context:+--context $context }compute droplet delete -f $id" >&2
-  elif do_ compute droplet delete -f "$id" >/dev/null && ! do_ compute droplet get "$id" >/dev/null 2>&1; then
+  elif do_ compute droplet delete -f "$id" >/dev/null && gone; then
     echo "droplet $id deleted after about $minutes min" >&2
   else
     echo "error: could not confirm droplet $id was deleted; check: doctl compute droplet list --tag-name seedbox-pv" >&2
@@ -148,7 +156,7 @@ remote=$?
 set -e
 scp "${ssh_opts[@]}" -q -r "root@$ip:/root/results/." "$out/" || true
 {
-  echo "droplet: $size $region ($(ssh "${ssh_opts[@]}" "root@$ip" "grep -m1 'model name' /proc/cpuinfo | cut -d: -f2-" 2>/dev/null))"
+  echo "droplet: $size $region ($(ssh "${ssh_opts[@]}" "root@$ip" "grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs" 2>/dev/null))"
   echo "results: $out"
 } >&2
 [ -f "$out/summary.txt" ] && cat "$out/summary.txt" || tail -n 40 "$out/remote.log" >&2
