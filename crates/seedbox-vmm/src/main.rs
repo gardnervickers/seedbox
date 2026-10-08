@@ -1416,7 +1416,7 @@ fn report(
             row["spin"] = json!({"probes": s.spin_probes, "idles": s.spin_idles, "false_alarms": s.spin_false, "clock_progress": s.spin_clock_progress, "mismatch": s.spin_mismatch});
             row["syscalls"] = json!(mach.syscalls());
             let (crossings, walks) = mach.crossings();
-            row["crossings"] = json!({"count": crossings, "walks": walks});
+            row["crossings"] = json!({"count": crossings, "walks": walks, "yields": s.crossing_yields, "crossing_ns": machine::pv::CROSSING_NS, "soft_late_max_ns": s.soft_late_max_ns});
             row["syscall_ns"] = json!(mach.syscall_ns);
             let by: serde_json::Map<String, Value> = machine::Cause::NAMES
                 .iter()

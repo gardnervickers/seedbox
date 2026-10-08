@@ -72,10 +72,11 @@ pub trait Timebase {
     /// Before KVM_RUN, `remaining` progress before the hard stop, and the
     /// soft stop's virtual time: arrange for the run to end in time.
     fn prepare(&mut self, m: &mut Machine, remaining: u64, soft: u64) -> Result<Prepared, String>;
-    /// Progress so far, read before KVM_RUN; `syscalls` is the guest's count.
-    fn start(&mut self, syscalls: u64) -> u64;
+    /// Progress so far, read before KVM_RUN; `syscalls` and `crossings`
+    /// are the guest's counts.
+    fn start(&mut self, syscalls: u64, crossings: u64) -> u64;
     /// Progress so far, read after KVM_RUN.
-    fn read(&mut self, syscalls: u64) -> u64;
+    fn read(&mut self, syscalls: u64, crossings: u64) -> u64;
     /// Pending interrupts are injected only when the hard stop is further
     /// away than this. Part of the execution semantics.
     fn inject_guard(&self) -> u64;

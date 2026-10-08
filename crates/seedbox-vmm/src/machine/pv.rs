@@ -7,12 +7,17 @@
 //!   (`seedbox_rdtsc`),
 //! - syscalls, counted by the guest in the time page, each costing the
 //!   machine's `Machine::syscall_ns`: `SYSCALL_NS` scaled by a seeded
-//!   per-machine speed (see `syscall_ns`).
+//!   per-machine speed (see `syscall_ns`),
+//! - crossings into user code pages, counted by the guest in the time page
+//!   (`seedbox_exec_fault`), `CROSSING_NS` each. A loop that spans more code
+//!   pages than the guest keeps open faults on every pass, so it is charged
+//!   and reaches its exit like any other compute.
 //!
 //! So a run needs no counted stop: the guest kernel exits by itself when its
 //! clock would pass the soft stop (the `bound` we publish) or at the syscall
 //! that reaches it (`syscall_target`), both behind a static key that is off in
-//! the counter timebase. Every exit is a deterministic point.
+//! the counter timebase. Crossings have a target too (`crossing_target`).
+//! Every exit is a deterministic point.
 //!
 //! A loop with no exit at all would never end and never let time move. A
 //! watchdog (host CPU time, a performance setting) catches a run with no exit
@@ -31,13 +36,16 @@
 //! wall-time limit. That follows from the model: such a loop waits on
 //! something only virtual time could bring.
 
-use super::{map, Machine, Mapping, PAGE_BOUND, PAGE_SYSCALLS, PAGE_SYSCALL_TARGET};
+use super::{map, Machine, Mapping, PAGE_BOUND, PAGE_CROSSINGS, PAGE_CROSSING_TARGET, PAGE_SYSCALLS, PAGE_SYSCALL_TARGET};
 use crate::timebase::{Judge, Prepared, Run, Timebase, Verdict};
 use crate::undo::VcpuState;
 use std::time::Duration;
 
 /// Nominal virtual time one syscall costs. Part of the PV clock's semantics.
 pub const SYSCALL_NS: u64 = 1000;
+/// Virtual time one crossing into a user code page costs. Part of the PV
+/// clock's semantics.
+pub const CROSSING_NS: u64 = 10;
 /// Spread of per-machine syscall cost around `SYSCALL_NS`, in percent.
 pub const SPEED_SPREAD_PCT: u64 = 10;
 
@@ -67,6 +75,7 @@ pub struct PvClock {
     skip: u32,
     backoff: u32,
     syscalls0: u64,
+    crossings0: u64,
     remaining: u64,
     /// The running machine's syscall cost.
     syscall_ns: u64,
@@ -124,6 +133,7 @@ impl PvClock {
             skip: 0,
             backoff: 0,
             syscalls0: 0,
+            crossings0: 0,
             remaining: 0,
             syscall_ns: SYSCALL_NS,
             probe: None,
@@ -143,7 +153,7 @@ impl PvClock {
     /// phase and backoff are host performance state, recreated after restore.
     pub fn restore_boundary(&mut self) -> Result<(), String> {
         self.probe=None;self.landed=false;self.progressed=true;
-        self.skip=0;self.backoff=0;self.syscalls0=0;self.remaining=0;
+        self.skip=0;self.backoff=0;self.syscalls0=0;self.crossings0=0;self.remaining=0;
         self.syscall_ns=SYSCALL_NS;
         self._watchdog.hold(false)
     }
@@ -255,11 +265,13 @@ impl PvClock {
         }
         m.set_stepping(false)?;
         // Exit when the guest clock would pass the soft stop, or at the
-        // syscall whose cost reaches it.
+        // syscall or crossing whose cost reaches it.
         m.page_set(PAGE_BOUND, soft);
+        let budget = soft.saturating_sub(m.time);
         let syscalls = m.page_get(PAGE_SYSCALLS);
-        let left = soft.saturating_sub(m.time).div_ceil(self.syscall_ns).max(1);
-        m.page_set(PAGE_SYSCALL_TARGET, syscalls + left);
+        m.page_set(PAGE_SYSCALL_TARGET, syscalls + budget.div_ceil(self.syscall_ns).max(1));
+        let crossings = m.page_get(PAGE_CROSSINGS);
+        m.page_set(PAGE_CROSSING_TARGET, crossings + budget.div_ceil(CROSSING_NS).max(1));
         Ok(Prepared::Run)
     }
 }
@@ -287,13 +299,17 @@ impl Timebase for PvClock {
         self._watchdog.hold(self.probe.is_some())?;
         prepared
     }
-    fn start(&mut self, syscalls: u64) -> u64 {
+    fn start(&mut self, syscalls: u64, crossings: u64) -> u64 {
         self.syscalls0 = syscalls;
+        self.crossings0 = crossings;
         0
     }
 
-    fn read(&mut self, syscalls: u64) -> u64 {
-        (syscalls - self.syscalls0).saturating_mul(self.syscall_ns).min(self.remaining)
+    fn read(&mut self, syscalls: u64, crossings: u64) -> u64 {
+        (syscalls - self.syscalls0)
+            .saturating_mul(self.syscall_ns)
+            .saturating_add((crossings - self.crossings0).saturating_mul(CROSSING_NS))
+            .min(self.remaining)
     }
 
     fn inject_guard(&self) -> u64 {
@@ -365,12 +381,7 @@ impl Saved {
         let page = page_copy(m);
         let part = match self.cpu.differs(&cpu) {
             Some(part) => Some(part),
-            // Stage A prototype: crossings are counted but charge nothing,
-            // so a loop over several code pages would never repeat state
-            // through them alone. Leave the crossing words out of the proof.
-            None => match self.page.iter().zip(page.iter()).enumerate().position(|(i, (a, b))| {
-                a != b && !(super::PAGE_CROSSINGS * 8..(super::PAGE_CROSSING_WALKS + 1) * 8).contains(&i)
-            }) {
+            None => match self.page.iter().zip(page.iter()).position(|(a, b)| a != b) {
                 Some(at) => Some(format!("time page word {}", at / 8)),
                 None => {
                     let ram = match (&self.ram, m.undo.as_mut()) {

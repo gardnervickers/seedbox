@@ -45,11 +45,11 @@ impl Timebase for Counter {
         Ok(Prepared::Run)
     }
 
-    fn start(&mut self, _syscalls: u64) -> u64 {
+    fn start(&mut self, _syscalls: u64, _crossings: u64) -> u64 {
         self.last()
     }
 
-    fn read(&mut self, _syscalls: u64) -> u64 {
+    fn read(&mut self, _syscalls: u64, _crossings: u64) -> u64 {
         self.read_fast()
     }
 

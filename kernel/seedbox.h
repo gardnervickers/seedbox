@@ -6,7 +6,7 @@
 #define SEEDBOX_PORT_TIME_LO	0x520	/* read: latch virtual TSC, low 32 bits */
 #define SEEDBOX_PORT_TIME_HI	0x524	/* read: high 32 bits of latched value */
 #define SEEDBOX_PORT_TIME_READY	0x528	/* write: shared page in use (value: ABI version) */
-#define SEEDBOX_PORT_YIELD	0x52c	/* write: requested exit (0: syscall, 1: clock bound) */
+#define SEEDBOX_PORT_YIELD	0x52c	/* write: requested exit (0: syscall, 1: clock bound, 2: crossing) */
 #define SEEDBOX_PORT_TIMER	0x530	/* write: arm PIT channel 0 for N ticks */
 #define SEEDBOX_TIME_PAGE_PHYS	0xd0000000UL
 #define SEEDBOX_ABI		3
@@ -45,8 +45,9 @@ struct seedbox_time_page {
 	u64 entropy[4];	/* 32 bytes the kernel mixes in before reseeding */
 	/*
 	 * PV clock only: crossings into user code pages (seedbox_exec_fault).
-	 * crossing_target is reserved for the VMM; crossing_walks counts
-	 * full re-protections of an address space (diagnostic).
+	 * The guest exits at the crossing that makes `crossings` reach
+	 * `crossing_target`, like `syscall_target`. crossing_walks counts full
+	 * re-protections of an address space (diagnostic).
 	 */
 	u64 crossings;
 	u64 crossing_target;

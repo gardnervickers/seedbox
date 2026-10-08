@@ -55,7 +55,7 @@ const PAGE_SYSCALL_TARGET: usize = 8;
 /// PV clock: crossings into user code pages (guest-counted), the target the
 /// VMM may publish for them, and full re-protections (diagnostic).
 pub(crate) const PAGE_CROSSINGS: usize = 14;
-const PAGE_CROSSING_TARGET: usize = 15;
+pub(crate) const PAGE_CROSSING_TARGET: usize = 15;
 pub(crate) const PAGE_CROSSING_WALKS: usize = 16;
 
 // Pin every extension word without extending the checkpoint/digest prefix.
@@ -234,6 +234,11 @@ pub struct Stats {
     pub spin_false: u64,
     /// Of the false alarms, probes abandoned as soon as the guest clock moved.
     pub spin_clock_progress: u64,
+    /// PV clock: yields at the crossing target, and how far past the soft
+    /// stop a yield stop landed at most (a run charging both syscalls and
+    /// crossings can pass it before either target).
+    pub crossing_yields: u64,
+    pub soft_late_max_ns: u64,
     /// Per state part, cycle checks that failed first on it.
     pub spin_mismatch: std::collections::BTreeMap<String, u64>,
     /// Virtual time advanced, by cause (see `Cause`).
@@ -1390,6 +1395,7 @@ impl Machine {
                 self.exit_req = window;
             }
             let syscalls0 = self.page_get(PAGE_SYSCALLS);
+            let crossings0 = self.page_get(PAGE_CROSSINGS);
             if let Prepared::Idle = tb.prepare(self, remaining, soft)? {
                 // A proven PV cycle is deterministic; watchdog landings are not.
                 // Complete pending TX before declaring a completion waiter idle,
@@ -1412,7 +1418,7 @@ impl Machine {
             }
             self.vcpu.get_kvm_run().kvm_valid_regs =
                 (KVM_SYNC_X86_REGS | KVM_SYNC_X86_SREGS) as u64;
-            let c0 = tb.start(syscalls0);
+            let c0 = tb.start(syscalls0, crossings0);
             let t_run = Instant::now();
             let run_ptr = self.vcpu.get_kvm_run() as *mut kvm_run;
             let exit = self.vcpu.run();
@@ -1432,7 +1438,8 @@ impl Machine {
             self.stats.kvm_ns[kind] += run_ns;
             self.stats.kvm_n[kind] += 1;
             let syscalls1 = unsafe { std::ptr::read_volatile(self.page.add(PAGE_SYSCALLS)) };
-            let c1 = tb.read(syscalls1);
+            let crossings1 = unsafe { std::ptr::read_volatile(self.page.add(PAGE_CROSSINGS)) };
+            let c1 = tb.read(syscalls1, crossings1);
             let delta = c1 - c0;
             let interrupted = matches!(&exit, Err(e) if e.errno() == libc::EINTR);
             let syscalled = syscalls1 != syscalls0;
@@ -1521,8 +1528,12 @@ impl Machine {
                         self.advance_to(soft, Cause::ClockBound);
                     }
                     self.stats.yields += 1;
+                    if v == 2 {
+                        self.stats.crossing_yields += 1;
+                    }
                     if self.time >= soft {
                         self.stats.yield_stops += 1;
+                        self.stats.soft_late_max_ns = self.stats.soft_late_max_ns.max(self.time - soft);
                         self.record(b'Y', v as u64);
                     } else {
                         legal = false;
@@ -1982,8 +1993,8 @@ mod net_poll_tests {
     impl Timebase for Natural {
         const BRANCHES: bool = false;
         fn prepare(&mut self, _: &mut Machine, _: u64, _: u64) -> Result<Prepared, String> { Ok(Prepared::Run) }
-        fn start(&mut self, _: u64) -> u64 { 0 }
-        fn read(&mut self, _: u64) -> u64 { 0 }
+        fn start(&mut self, _: u64, _: u64) -> u64 { 0 }
+        fn read(&mut self, _: u64, _: u64) -> u64 { 0 }
         fn inject_guard(&self) -> u64 { INJECT_GUARD }
         fn judge(&mut self, _: Judge<'_>, _: &Run) -> Result<Verdict, String> { Ok(Verdict::Advance { legal: true }) }
     }
@@ -2903,8 +2914,8 @@ mod timed_log_tests {
             if self.first && self.rollback {m.checkpoint()?;}
             Ok(prepared)
         }
-        fn start(&mut self,syscalls:u64)->u64 {self.counter.start(syscalls)}
-        fn read(&mut self,_:u64)->u64 {if self.first && !self.rollback {self.counter.read()+1_000_000} else {self.counter.read()}}
+        fn start(&mut self,syscalls:u64,crossings:u64)->u64 {self.counter.start(syscalls,crossings)}
+        fn read(&mut self,_:u64,_:u64)->u64 {if self.first && !self.rollback {self.counter.read()+1_000_000} else {self.counter.read()}}
         fn inject_guard(&self)->u64 {INJECT_GUARD}
         fn judge(&mut self,j:Judge<'_>,run:&Run)->Result<Verdict,String> {
             if self.first {self.first=false;return Ok(if self.rollback {assert!(j.undo_valid);Verdict::Rollback} else {Verdict::Overshoot});}
@@ -2945,8 +2956,8 @@ mod committed_trigger_tests {
             if !self.prepared {m.checkpoint()?;self.prepared=true;}
             Ok(Prepared::Run)
         }
-        fn start(&mut self,_:u64)->u64 {0}
-        fn read(&mut self,_:u64)->u64 {0}
+        fn start(&mut self,_:u64,_:u64)->u64 {0}
+        fn read(&mut self,_:u64,_:u64)->u64 {0}
         fn inject_guard(&self)->u64 {INJECT_GUARD}
         fn judge(&mut self,_:Judge<'_>,_:&Run)->Result<Verdict,String> {
             if !self.discarded {self.discarded=true;Ok(Verdict::Rollback)} else {Ok(Verdict::Advance{legal:true})}

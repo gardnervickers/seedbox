@@ -252,6 +252,7 @@ bool seedbox_exec_fault(unsigned long error_code, unsigned long address)
 	struct vm_area_struct *vma;
 	unsigned long page = address & PAGE_MASK;
 	bool handled = false;
+	u64 n = 0;
 
 	if ((error_code & want) != want || !mm || !p)
 		return false;
@@ -283,10 +284,14 @@ bool seedbox_exec_fault(unsigned long error_code, unsigned long address)
 		seedbox_xlen++;
 	seedbox_xring[seedbox_xhead] = page;
 	seedbox_xhead = (seedbox_xhead + 1) % SEEDBOX_XRING;
-	WRITE_ONCE(p->crossings, p->crossings + 1);
+	n = p->crossings + 1;
+	WRITE_ONCE(p->crossings, n);
 	handled = true;
 out:
 	mmap_read_unlock(mm);
+	/* The crossing whose cost reaches the VMM's soft stop exits. */
+	if (handled && n >= READ_ONCE(p->crossing_target))
+		outl(2, SEEDBOX_PORT_YIELD);
 	return handled;
 }
 
