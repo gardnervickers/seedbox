@@ -62,6 +62,54 @@ schema or failure grouping is required. Attempts are not unique bug groups.
 Full-state comparisons are identified separately; `null` supplies no full-state
 proof. Machine digests alone are not complete network/world state.
 
+## Guest runtime facilities
+
+The shared supervisor gives each service VM a private tmpfs `/dev` containing
+`null`, `zero`, `full`, `random`, `urandom`, and `tty`. `/dev/shm` is a 64 MiB
+tmpfs with mode 1777; `/dev/pts` is a private devpts mount with `/dev/ptmx`
+pointing to `pts/ptmx`. `/dev/fd` and `/dev/stdin`, `/dev/stdout`, `/dev/stderr`
+point into `/proc/self/fd`. The app inherits console output; this does not
+implement Compose `tty:`. Bootstrap disk and management device nodes are absent
+from the app's `/dev`; the supervisor opens its management channel and mounts
+named volumes before installing this layout.
+
+The hostname and `/etc/hostname` are the Compose service name, and `/etc/hosts`
+contains the service's assigned address alongside its peers. Before every exec,
+including process restart, the supervisor sets both `RLIMIT_NOFILE` limits to
+1048576 before dropping image credentials. `vm.max_map_count` defaults to
+262144 and is recorded alongside the hostname in the retained `SBXLAUNCH3`
+launch recipe. Compose `hostname:`, `ulimits:`, and `sysctls:` overrides remain
+unsupported. `memlock` keeps its kernel default.
+
+Both application kernels enable SysV IPC, POSIX message queues, UTS/IPC/PID/net
+namespaces, UNIX98 ptys, seccomp and seccomp filters. **io_uring stays enabled**;
+the old x86 `n IO_URING` request never survived Kconfig resolution without
+`EXPERT`, so removing it preserves the existing io_uring behavior. The equally
+ineffective `n HPET_TIMER` request is removed too. These features do not imply
+complete Chromium or user-namespace sandbox support. Network feature alignment,
+user namespaces and less common syscalls remain separate work.
+
+Each VM exposes one CPU. Seastar applications such as ScyllaDB and Redpanda
+need `--smp 1`; DPDK must select only guest CPU 0. JVM GC, tokio worker counts
+and Go parallelism reflect that CPU count. Real SMP remains out of scope.
+Wall-clock epochs still differ between architectures; a recorded shared epoch
+and TLS certificates minted after the current boot epoch need issue #172's
+follow-up. CPU feature baselines and cross-host replay remain unproven.
+
+`seedbox run harness/acceptance/workloads/runtime.yaml` exercises the actual
+interfaces as a non-root image user: devices, ptys, POSIX and SysV IPC,
+hostname resolution, limits, the sysctl, a named volume, an io_uring NOP and a
+seccomp allow filter. Replay its retained run to check `MATCH`. This is a
+focused interface smoke test; application acceptance remains version-bound.
+
+The `runtime-postgres.yaml`, `runtime-nginx.yaml`, `runtime-python.yaml`,
+`runtime-jvm.yaml` and `runtime-node.yaml` projects in the same directory run
+initdb plus a SQL query, an HTTP request through nginx's ordinary stdout log,
+a Python process pool, JVM local hostname lookup and Node HTTP, respectively.
+Run those with `--memory-mb 2048` to accommodate their image archives and
+application heaps. The io_uring probe checks a real ring completion separately;
+a Node HTTP pass alone does not establish which libuv path was used.
+
 ## Placement and evidence limits
 
 Production OCI preparation uses one service per VM/chroot. The library's placement

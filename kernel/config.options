@@ -15,6 +15,13 @@ y PROC_SYSCTL
 y SYSFS
 y TMPFS
 y SHMEM
+y UNIX98_PTYS
+y SYSVIPC
+y POSIX_MQUEUE
+y SECCOMP
+y SECCOMP_FILTER
+# Keep io_uring enabled: libuv and other runtimes already use it.
+y IO_URING
 y MULTIUSER
 y X86_IOPL_IOPERM
 y POSIX_TIMERS
@@ -66,7 +73,6 @@ n DEBUG_INFO
 n DEBUG_INFO_BTF
 n ACPI
 n PCI
-n HPET_TIMER
 n X86_MCE
 n CPU_FREQ
 n CPU_IDLE
@@ -80,10 +86,12 @@ n WLAN
 n ETHERNET
 n SOFTLOCKUP_DETECTOR
 n DETECT_HUNG_TASK
-n IO_URING
 
 # One-VM service network isolation and fixed-delay/fault controls.
 y NAMESPACES
+y UTS_NS
+y IPC_NS
+y PID_NS
 y NET_NS
 y VETH
 y NET_SCHED

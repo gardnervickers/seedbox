@@ -1,0 +1,15 @@
+name: runtime-python
+services:
+  python:
+    image: docker.io/library/python:3.12-alpine
+    user: "123:456"
+    command: [python3, /runtime.py]
+    configs:
+      - {source: driver, target: /runtime.py}
+configs:
+  driver: {file: ../driver/runtime_python.py}
+x-seedbox:
+  version: 1
+  seed: 172
+  limits: {simulated_time: 60s, wall_time: 15m}
+  check: {service: python, exit_code: 0}
