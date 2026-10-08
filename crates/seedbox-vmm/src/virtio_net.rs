@@ -7,6 +7,12 @@ use std::collections::VecDeque;
 const HDR: usize = 12; // virtio_net_hdr with num_buffers (VERSION_1)
 const QSIZE: u16 = 256;
 const BACKLOG: usize = 256;
+/// Deferred TX must be serviced at least this often while simulated time moves.
+pub const TX_POLL_NS: u64 = 50_000;
+
+pub fn poll_limit(now: u64, limit: u64, deferred: bool) -> u64 {
+    if deferred { limit.min(now.saturating_add(TX_POLL_NS)) } else { limit }
+}
 const VIRTIO_RING_F_EVENT_IDX: u32 = 1 << 29;
 const FEATURES_OK: u32 = 8;
 const VRING_AVAIL_F_NO_INTERRUPT: u16 = 1;
@@ -53,6 +59,17 @@ pub struct VirtioNet {
     /// Report-only counters; never included in execution witnesses.
     pub doorbell_exits: u64,
     pub suppressed_interrupts: u64,
+    /// Semantic run setting, preserved across device resets.
+    pub deferred_tx: bool,
+    /// Report-only observations, never used for service decisions.
+    pub tx_polled_at_boundary: u64,
+    pub tx_polled: u64,
+    pub tx_pickup_samples: u64,
+    pub tx_pickup_delay_upper_ns_sum: u128,
+    pub tx_pickup_delay_upper_ns_max: u64,
+    // Last deterministic observation of an empty TX queue. The ordinary guest
+    // avail store is untrapped: its timestamp lies between this and pickup.
+    tx_empty_at: Option<u64>,
     /// Guest memory ranges (start, len) written by the device since last taken.
     pub dirty: Vec<(usize, usize)>,
 }
@@ -133,6 +150,21 @@ impl Queue {
         }
         self.pending(m)
     }
+    fn defer_notify(&self, m: &mut [u8], dirty: &mut Vec<(usize, usize)>, event_idx: bool) {
+        if !self.ready { return; }
+        if event_idx {
+            let a = self.used + 4 + 8 * self.num as u64;
+            // At most num heads can be outstanding, including across u16 wrap.
+            // None crosses this threshold before the next deterministic poll.
+            let event = self.last_avail.wrapping_add(self.num);
+            if rd16(m, a) != event {
+                wr16(m, a, event);
+                dirty.push((a as usize, 2));
+            }
+        } else {
+            self.suppress_notify(m, dirty, true);
+        }
+    }
     fn pop(&mut self, m: &[u8]) -> Option<u16> {
         if !self.pending(m) {
             return None;
@@ -169,9 +201,18 @@ impl VirtioNet {
             rx_dropped: 0,
             doorbell_exits: 0,
             suppressed_interrupts: 0,
+            deferred_tx: false,
+            tx_polled_at_boundary: 0,
+            tx_polled: 0,
+            tx_pickup_samples: 0,
+            tx_pickup_delay_upper_ns_sum: 0,
+            tx_pickup_delay_upper_ns_max: 0,
+            tx_empty_at: None,
             dirty: Vec::new(),
         }
     }
+
+    pub fn pending_tx(&self, m: &[u8]) -> bool { self.q[1].pending(m) }
 
     pub fn event_idx(&self) -> bool {
         self.status & FEATURES_OK != 0 && self.drv_features[0] & VIRTIO_RING_F_EVENT_IDX != 0
@@ -259,6 +300,9 @@ impl VirtioNet {
                     q.suppress_notify(m, &mut self.dirty, false);
                     q.finish_drain(m, &mut self.dirty, true);
                 }
+                if q.ready && qs == 1 && self.deferred_tx {
+                    q.defer_notify(m, &mut self.dirty, event_idx);
+                }
             }
             0x050 => {
                 self.doorbell_exits += 1;
@@ -273,7 +317,9 @@ impl VirtioNet {
                 self.status = v;
                 if v == 0 {
                     let dirty = std::mem::take(&mut self.dirty);
+                    let deferred_tx = self.deferred_tx;
                     *self = Self::new(self.mac);
+                    self.deferred_tx = deferred_tx;
                     self.dirty = dirty;
                 }
             }
@@ -285,6 +331,7 @@ impl VirtioNet {
             0x0a4 => self.q[qs].used = (self.q[qs].used & 0xffff_ffff) | (v as u64) << 32,
             _ => {}
         }
+        if self.deferred_tx { let event_idx = self.event_idx();self.q[1].defer_notify(m, &mut self.dirty, event_idx); }
         if out.irq {
             self.isr |= 1;
         }
@@ -313,19 +360,52 @@ impl VirtioNet {
                     self.tx_frames += 1;
                 }
             }
-            if !self.q[1].finish_drain(m, &mut self.dirty, event_idx) { break; }
+            if self.deferred_tx {
+                self.q[1].defer_notify(m, &mut self.dirty, event_idx);
+                if !self.q[1].pending(m) { break; }
+            } else if !self.q[1].finish_drain(m, &mut self.dirty, event_idx) { break; }
         }
         out.irq = self.interrupt(m, 1, old_used);
         out
     }
 
     /// Poll only at deterministic stops, including after RX delivery and before
-    /// a slice boundary or halt. Legacy guests retain kick-driven service.
+    /// a slice boundary or halt. Legacy RX and non-deferred TX retain
+    /// kick-driven service when EVENT_IDX is not negotiated.
     pub fn poll(&mut self, m: &mut [u8]) -> WriteOutcome {
-        if !self.event_idx() { return WriteOutcome { irq: false, frames: Vec::new() }; }
-        let rx_irq = self.drain(m);
+        if !self.event_idx() && !self.deferred_tx { return WriteOutcome { irq: false, frames: Vec::new() }; }
+        // Legacy RX remains kick-driven, even with deferred TX enabled.
+        let rx_irq = self.event_idx() && self.drain(m);
         let mut out = self.transmit(m);
         out.irq |= rx_irq;
+        if self.deferred_tx { let event_idx = self.event_idx();self.q[1].defer_notify(m, &mut self.dirty, event_idx); }
+        out
+    }
+
+    fn pickup_stats(&mut self, m: &[u8], now: u64, packets: u64) {
+        if let Some(empty) = self.tx_empty_at {
+            let upper = now.saturating_sub(empty);
+            self.tx_pickup_samples += packets;
+            self.tx_pickup_delay_upper_ns_sum += upper as u128 * packets as u128;
+            self.tx_pickup_delay_upper_ns_max = self.tx_pickup_delay_upper_ns_max.max(if packets > 0 { upper } else { 0 });
+        }
+        if self.q[1].ready && !self.q[1].pending(m) { self.tx_empty_at = Some(now); }
+    }
+
+    pub fn poll_at(&mut self, m: &mut [u8], now: u64, boundary: bool) -> WriteOutcome {
+        let before = self.tx_frames;
+        let out = self.poll(m);
+        let packets = self.tx_frames - before;
+        self.tx_polled += packets;
+        if boundary { self.tx_polled_at_boundary += packets; }
+        self.pickup_stats(m, now, packets);
+        out
+    }
+
+    pub fn write_at(&mut self, m: &mut [u8], off: u64, v: u32, now: u64) -> WriteOutcome {
+        let before = self.tx_frames;
+        let out = self.write(m, off, v);
+        self.pickup_stats(m, now, self.tx_frames.saturating_sub(before));
         out
     }
 
@@ -711,4 +791,110 @@ mod tests {
         assert!(g.net.poll(&mut []).frames.is_empty());
         assert!(!g.net.poll(&mut []).irq);
     }
+    #[test]
+    fn deferred_tx_suppresses_lone_and_full_ring_kicks_across_wrap() {
+        for event_idx in [false, true] {
+            let mut g = Guest::new(1);
+            if event_idx { negotiate(&mut g); }
+            g.net.deferred_tx = true;
+            // Test boot-time arming as well as re-arming after drains.
+            g.net.write(&mut g.m, 0x044, 1);
+            for start in [0, u16::MAX - 1, u16::MAX] {
+                g.net.q[1].last_avail = start;
+                g.net.q[1].used_idx = start;
+                wr16(&mut g.m, AVAIL + 2, start);
+                g.net.poll_at(&mut g.m, 100, false);
+                let mut packet = vec![0; HDR];packet.extend_from_slice(b"frame");
+                for n in 1..=2 {
+                    g.post(&packet);
+                    if event_idx {
+                        let event = rd16(&g.m, USED + 4 + 8 * 2);
+                        assert!(!vring_need_event(event, start.wrapping_add(n), start));
+                    } else {
+                        assert_ne!(rd16(&g.m, USED) & VRING_USED_F_NO_NOTIFY, 0);
+                    }
+                }
+                let out = g.net.poll_at(&mut g.m, 250, true);
+                assert_eq!(out.frames, [b"frame".to_vec(), b"frame".to_vec()]);
+                assert_eq!(rd16(&g.m, USED + 2), start.wrapping_add(2));
+                assert!(!g.net.pending_tx(&g.m));
+                if event_idx {
+                    assert_eq!(rd16(&g.m, USED + 4 + 8 * 2), start.wrapping_add(4));
+                } else { assert_ne!(rd16(&g.m, USED) & VRING_USED_F_NO_NOTIFY, 0); }
+            }
+            assert_eq!(g.net.doorbell_exits, 0);
+            assert_eq!(g.net.tx_polled_at_boundary, 6);
+            assert_eq!(g.net.tx_pickup_samples, 6);
+            assert_eq!(g.net.tx_pickup_delay_upper_ns_sum, 900);
+            assert_eq!(g.net.tx_pickup_delay_upper_ns_max, 150);
+            g.net.write(&mut g.m, 0x070, 0);
+            assert!(g.net.deferred_tx, "device reset must retain the run's TX mode");
+        }
+    }
+
+    #[test]
+    fn deferred_lone_tx_stays_suppressed_after_each_empty_poll() {
+        for event_idx in [false, true] {
+            let mut g = Guest::new(1);
+            if event_idx { negotiate(&mut g); }
+            g.net.deferred_tx = true;
+            for n in 0..10 {
+                g.net.poll_at(&mut g.m, n * 100, false);
+                let old = rd16(&g.m, AVAIL + 2);
+                let mut packet = vec![0; HDR];packet.extend_from_slice(b"frame");
+                g.post(&packet);
+                if event_idx {
+                    assert!(!vring_need_event(rd16(&g.m, USED + 4 + 8 * 2), old.wrapping_add(1), old));
+                } else { assert_ne!(rd16(&g.m, USED) & VRING_USED_F_NO_NOTIFY, 0); }
+                assert_eq!(g.net.poll_at(&mut g.m, n * 100 + 50, true).frames, [b"frame".to_vec()]);
+            }
+            assert_eq!(g.net.doorbell_exits, 0);
+            assert_eq!(g.net.tx_polled_at_boundary, 10);
+            assert_eq!(g.net.tx_pickup_delay_upper_ns_sum, 500);
+            assert_eq!(g.net.tx_pickup_delay_upper_ns_max, 50);
+        }
+    }
+
+    #[test]
+    fn deferred_legacy_tx_does_not_change_rx_polling_or_notification_flags() {
+        let mut g = Guest::new(0);
+        g.net.deferred_tx = true;
+        assert!(g.net.receive(&mut g.m, b"frame").accepted);
+        g.post(&[]);
+        assert!(!g.net.poll_at(&mut g.m, 100, true).irq);
+        assert_eq!(g.net.rx_frames, 0);
+        assert_eq!(rd16(&g.m, USED), 0);
+        assert!(g.notify().irq);
+        assert_eq!(g.net.rx_frames, 1);
+        assert_eq!(rd16(&g.m, USED), 0);
+    }
+
+    #[test]
+    fn pickup_diagnostics_do_not_change_off_mode_dma_frames_or_interrupts() {
+        for event_idx in [false, true] {
+            let mut g = Guest::new(1);
+            if event_idx { negotiate(&mut g); }
+            for (off, value) in [(0x050, 1), (0x064, 1), (0x050, 1), (0x070, 0)] {
+                let mut packet = vec![0; HDR];packet.extend_from_slice(b"frame");
+                g.post(&packet);
+                let mut raw = g.net.clone();let mut memory = g.m.clone();
+                let expected = raw.write(&mut memory, off, value);
+                let observed = g.net.write_at(&mut g.m, off, value, 100);
+                assert_eq!((observed.irq, observed.frames), (expected.irq, expected.frames));
+                assert_eq!(g.m, memory);
+                assert_eq!(g.net.dirty, raw.dirty);
+                assert_eq!(g.net.isr, raw.isr);
+                assert_eq!(g.net.tx_frames, raw.tx_frames);
+            }
+        }
+    }
+
+    #[test]
+    fn deferred_poll_bound_is_semantic_and_off_keeps_the_original_limit() {
+        assert_eq!(poll_limit(100, 1_000_000, false), 1_000_000);
+        assert_eq!(poll_limit(100, 1_000_000, true), 100 + TX_POLL_NS);
+        assert_eq!(poll_limit(100, 500, true), 500);
+        assert_eq!(poll_limit(u64::MAX - 1, u64::MAX, true), u64::MAX);
+    }
+
 }

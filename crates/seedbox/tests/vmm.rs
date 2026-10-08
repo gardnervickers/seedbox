@@ -1375,3 +1375,30 @@ fn pv_reports_may_omit_unqualified_counter_profile_but_counter_reports_must_not(
         }
     });
 }
+
+#[test]
+fn deferred_tx_report_must_match_semantic_parameter_and_legacy_reports_mean_off() {
+    fixture(|base| {
+        for enabled in [false, true] {
+            let mut prepared = base.prepared.clone();
+            if enabled {
+                prepared
+                    .profile
+                    .semantic_parameters
+                    .insert("deferred_tx".into(), "true".into());
+            }
+            let request = ExecutionRequest {
+                prepared: &prepared,
+                ..*base
+            };
+            for reported in [None, Some(false), Some(true)] {
+                let mut raw = report();
+                if let Some(reported) = reported {
+                    raw["deferred_tx"] = json!(reported);
+                }
+                let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request);
+                assert_eq!(result.is_ok(), reported.unwrap_or(false) == enabled);
+            }
+        }
+    });
+}

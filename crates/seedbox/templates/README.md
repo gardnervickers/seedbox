@@ -197,3 +197,12 @@ actual effect. `world.cancel_trigger(trigger)` cancels an unmatched trigger.
 Markers use only future committed console bytes, and effects occur at a safe
 future world barrier. See [the trigger contract](https://github.com/gardnervickers/seedbox/blob/main/docs/triggers.md)
 for bounds, deadlines and the outstanding development-engine AMD checks.
+
+`prepare`, `run` and `explore` also accept `--deferred-tx` (off by default).
+It suppresses virtio-net TX kicks while deterministic polls service the queue,
+with slices capped at 50 microseconds of simulated time. RX is unchanged.
+This changes packet timing and identity: the profile records `deferred_tx=true`
+only when enabled. Replay uses the recorded mode without an override.
+Raw `output/vmm.json` reports doorbells, TX packets polled at boundaries and
+mean/max upper bounds on publish-to-pickup delay. These bounds start at the
+previous empty-ring observation; ordinary guest RAM stores are not timestamped.

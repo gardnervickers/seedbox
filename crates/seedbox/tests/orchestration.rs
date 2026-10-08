@@ -2310,3 +2310,56 @@ fn replay_refuses_timebase_drift_and_unknown_values_before_execution() {
         }
     }
 }
+
+#[test]
+fn deferred_tx_is_semantic_only_when_on_and_replay_cannot_switch_modes() {
+    use seedbox::{counter::CounterProfile, vmm::VmmExecutor};
+    let mut f = Fixture::new();
+    let store = ContentStore::new(f.directory.path().join("store"));
+    let engine = f.directory.path().join("engine");
+    fs::write(&engine, b"fixture engine").unwrap();
+    let off = VmmExecutor::new(
+        &engine,
+        &store,
+        None,
+        1024,
+        WitnessMode::Exits,
+        CounterProfile::Zen,
+    )
+    .unwrap();
+    assert_eq!(off.profile(), off.clone().with_deferred_tx(false).profile());
+    let on = off.clone().with_deferred_tx(true);
+    assert_eq!(on.profile().semantic_parameters["deferred_tx"], "true");
+    assert_eq!(on.clone().with_deferred_tx(false).profile(), off.profile());
+    let mut ids = Vec::new();
+    for recorded in [off.clone(), on.clone()] {
+        f.backend.profile = recorded.profile();
+        f.preparer.inputs.profile = recorded.profile();
+        let run = f.run();
+        let replay = f
+            .orchestrator
+            .replay(&run.directory, &f.backend, &CancellationToken::default())
+            .unwrap();
+        assert_eq!(replay.record.replay.unwrap().status, ReplayStatus::Match);
+        assert_eq!(replay.record.run_id, run.record.run_id);
+        ids.push(run.record.run_id);
+        let enabled = seedbox::vmm::recorded_deferred_tx(&recorded.profile()).unwrap();
+        f.backend.profile = off.clone().with_deferred_tx(!enabled).profile();
+        for allow_engine_change in [false, true] {
+            let error = f
+                .orchestrator
+                .replay_with_options(
+                    &run.directory,
+                    &f.backend,
+                    ReplayOptions {
+                        allow_engine_change,
+                        ..Default::default()
+                    },
+                )
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("--deferred-tx"));
+        }
+    }
+    assert_ne!(ids[0], ids[1]);
+}
