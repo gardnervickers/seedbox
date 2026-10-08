@@ -525,21 +525,23 @@ impl RuntimeInputs {
             .with_page_timer(self.page_timer)
             .with_deferred_tx(self.deferred_tx);
             let mut preparer = self.preparer(engine.clone(), store, scratch, executor.profile())?;
-            preparer.tools.skopeo = defaults::preparation_tool(&preparer.tools.skopeo)?;
-            preparer.tools.umoci = defaults::preparation_tool(&preparer.tools.umoci)?;
+            preparer.inputs.tools.skopeo =
+                defaults::preparation_tool(&preparer.inputs.tools.skopeo)?;
+            preparer.inputs.tools.umoci = defaults::preparation_tool(&preparer.inputs.tools.umoci)?;
             if simulation
                 .services
                 .values()
                 .any(|service| matches!(service.source, config::ImageSource::Build { .. }))
             {
-                preparer.tools.docker = defaults::preparation_tool(&preparer.tools.docker)?;
+                preparer.inputs.tools.docker =
+                    defaults::preparation_tool(&preparer.inputs.tools.docker)?;
             }
             let executor = if self.kvm.vmm.is_some() {
                 executor.with_detected_contract(store, &engine)?
             } else {
                 executor
             };
-            preparer.profile = executor.profile();
+            preparer.inputs.profile = executor.profile();
             Ok((
                 Preparer::Linux(Box::new(preparer)),
                 Executor::Linux(executor),
