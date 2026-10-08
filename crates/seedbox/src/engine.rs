@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 
 pub const INTERNAL_WORKER_V1: &str = "seedbox-internal-worker-v1";
 pub const SIMULATOR_VERSION: &str = env!("SEEDBOX_SIMULATOR_VERSION");
+pub(crate) const ARM_LAUNCH_POLICY: &str = "seeded-barrier-v1";
+pub(crate) const ARM_LAUNCH_MAX_SKEW_NS: u64 = 1_000_000;
 const KIND: &str = "engine_executable_kind";
 const FIELDS: [&str; 7] = [
     KIND,
@@ -21,6 +23,28 @@ pub enum ExecutableKind {
     Standalone,
     InternalWorker,
     ArmWorld,
+}
+
+/// Historical profiles have no launch phase. New profiles bind the policy and
+/// its cap; the network lookahead further bounds skew to preserve causal order.
+pub(crate) fn arm_launch_skew(profile: &ExecutionProfile, lookahead: u64) -> Result<Option<u64>> {
+    let parameters = &profile.semantic_parameters;
+    match (
+        parameters.get("arm_launch_policy").map(String::as_str),
+        parameters.get("arm_launch_max_skew_ns").map(String::as_str),
+    ) {
+        (None, None) => Ok(None),
+        (Some(ARM_LAUNCH_POLICY), Some("1000000"))
+            if profile.backend == "seedbox-hvf"
+                && recorded_launch(profile)? == ExecutableKind::ArmWorld
+                && lookahead > 0 =>
+        {
+            Ok(Some(ARM_LAUNCH_MAX_SKEW_NS.min(lookahead)))
+        }
+        _ => Err(Error::Integrity(
+            "retained ARM launch policy is incomplete or unsupported".into(),
+        )),
+    }
 }
 
 pub fn arm_parameters() -> BTreeMap<String, String> {
@@ -189,6 +213,43 @@ mod tests {
             witness_mode: WitnessMode::Exits,
             semantic_parameters: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn launch_policy_is_retained_and_cannot_outrun_network_lookahead() {
+        let mut recorded = profile();
+        assert_eq!(arm_launch_skew(&recorded, 1).unwrap(), None);
+        recorded.backend = "seedbox-hvf".into();
+        recorded.semantic_parameters = arm_parameters();
+        recorded.semantic_parameters.extend(BTreeMap::from([
+            ("arm_launch_policy".into(), ARM_LAUNCH_POLICY.into()),
+            (
+                "arm_launch_max_skew_ns".into(),
+                ARM_LAUNCH_MAX_SKEW_NS.to_string(),
+            ),
+        ]));
+        assert_eq!(arm_launch_skew(&recorded, 800_000).unwrap(), Some(800_000));
+        assert_eq!(
+            arm_launch_skew(&recorded, 2_000_000).unwrap(),
+            Some(1_000_000)
+        );
+        assert!(arm_launch_skew(&recorded, 0).is_err());
+        for (key, value) in [
+            ("arm_launch_policy", "unknown"),
+            ("arm_launch_max_skew_ns", "0"),
+            ("arm_launch_max_skew_ns", "2000000"),
+        ] {
+            let mut wrong = recorded.clone();
+            wrong.semantic_parameters.insert(key.into(), value.into());
+            assert!(arm_launch_skew(&wrong, 800_000).is_err(), "{key}={value}");
+        }
+        for key in ["arm_launch_policy", "arm_launch_max_skew_ns"] {
+            let mut partial = recorded.clone();
+            partial.semantic_parameters.remove(key);
+            assert!(arm_launch_skew(&partial, 800_000).is_err(), "{key}");
+        }
+        recorded.backend = "seedbox-kvm".into();
+        assert!(arm_launch_skew(&recorded, 800_000).is_err());
     }
 
     #[test]

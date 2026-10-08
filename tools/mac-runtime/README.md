@@ -51,6 +51,14 @@ ARM fixture or the qualified x86 KVM profile. Mac execution remains a developmen
 engine; matching evidence does not establish
 cross-host qualification.
 
+New ARM profiles keep initial guests at the shared launch barrier, then release
+each service at a seeded per-name offset capped by `min(1 ms, network lookahead)`.
+That bound preserves causal packet and RPC-trigger ordering relative to the
+latest release. The profile binds the policy and cap, and the world report
+records the initial launch; retained profiles without these keys keep their
+earlier release behavior. The release phase remains within the configured
+absolute simulated-time limit.
+
 Images must provide Linux ARM64 releases. Mac parsing defaults to
 `linux/arm64` and rejects `linux/amd64`; no guest instruction emulation is used.
 Supported RAM is 64..3072 MiB per service. CPU pinning and unqualified PMU flags

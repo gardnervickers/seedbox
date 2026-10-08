@@ -69,6 +69,46 @@ fn report() -> serde_json::Value {
 }
 
 #[test]
+fn initial_arm_launch_uses_retained_policy_and_network_bound() {
+    fixture(|base| {
+        assert!(vmm::world(base).unwrap().get("launch_skew_ns").is_none());
+        let mut prepared = base.prepared.clone();
+        prepared.profile.backend = "seedbox-hvf".into();
+        prepared
+            .profile
+            .semantic_parameters
+            .extend(seedbox::engine::arm_parameters());
+        // Old ARM profiles keep their original world config for replay.
+        let request = ExecutionRequest {
+            prepared: &prepared,
+            ..*base
+        };
+        assert!(vmm::world(&request)
+            .unwrap()
+            .get("launch_skew_ns")
+            .is_none());
+        prepared.profile.semantic_parameters.extend([
+            ("arm_launch_policy".into(), "seeded-barrier-v1".into()),
+            ("arm_launch_max_skew_ns".into(), "1000000".into()),
+        ]);
+        let request = ExecutionRequest {
+            prepared: &prepared,
+            ..*base
+        };
+        assert_eq!(vmm::world(&request).unwrap()["launch_skew_ns"], 80_000);
+        prepared
+            .profile
+            .semantic_parameters
+            .remove("arm_launch_policy");
+        let request = ExecutionRequest {
+            prepared: &prepared,
+            ..*base
+        };
+        assert!(vmm::world(&request).is_err());
+    });
+}
+
+#[test]
 fn current_parts_accept_text_events_and_validate_digests() {
     fixture(|request| {
         let mut raw = report();

@@ -806,6 +806,13 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
         "machines":machines,"control":control,
         "control_channel":"virtio-console-v1",
     });
+    let lookahead = request
+        .network
+        .latency_ns
+        .saturating_sub(request.network.jitter_ns);
+    if let Some(skew) = crate::engine::arm_launch_skew(&request.prepared.profile, lookahead)? {
+        world["launch_skew_ns"] = json!(skew);
+    }
     if recorded_torn_writes(&request.prepared.profile)? {
         world[DISK_LOSS] = match request.prepared.profile.semantic_parameters.get(DISK_LOSS) {
             Some(model) => json!(model), // The retained historical worker owns its disk semantics.

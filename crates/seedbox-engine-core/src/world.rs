@@ -1210,6 +1210,62 @@ pub fn simulate_to<M: WorldMachine>(
     checkpoint: Option<u64>,
     boundary: &mut impl FnMut() -> Result<(), String>,
 ) -> Result<&'static str, String> {
+    simulate_stopped(
+        world,
+        cfg,
+        duration,
+        end_on,
+        SimulationStop {
+            fork,
+            checkpoint,
+            require_barrier: true,
+        },
+        boundary,
+    )
+}
+
+/// Boot initial guests to their launch barriers without converting an ordinary
+/// duration or end-machine exit into a failed fork. No snapshot is required.
+pub fn simulate_launch<M: WorldMachine>(
+    world: &mut World<M>,
+    cfg: &Value,
+    duration: u64,
+    end_on: &Option<String>,
+    boundary: &mut impl FnMut() -> Result<(), String>,
+) -> Result<&'static str, String> {
+    simulate_stopped(
+        world,
+        cfg,
+        duration,
+        end_on,
+        SimulationStop {
+            fork: Some(None),
+            checkpoint: None,
+            require_barrier: false,
+        },
+        boundary,
+    )
+}
+
+struct SimulationStop {
+    fork: Option<Option<u64>>,
+    checkpoint: Option<u64>,
+    require_barrier: bool,
+}
+
+fn simulate_stopped<M: WorldMachine>(
+    world: &mut World<M>,
+    cfg: &Value,
+    duration: u64,
+    end_on: &Option<String>,
+    stop: SimulationStop,
+    boundary: &mut impl FnMut() -> Result<(), String>,
+) -> Result<&'static str, String> {
+    let SimulationStop {
+        fork,
+        checkpoint,
+        require_barrier,
+    } = stop;
     world.validate()?;
     if checkpoint.is_some() {
         M::checkpoint_boundary(&world.clock)?;
@@ -1447,7 +1503,7 @@ pub fn simulate_to<M: WorldMachine>(
             break;
         }
     }
-    if until_barrier && outcome != "barrier" {
+    if require_barrier && until_barrier && outcome != "barrier" {
         return Err(format!("launch barrier not reached: {outcome}"));
     }
     Ok(outcome)

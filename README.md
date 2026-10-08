@@ -51,6 +51,10 @@ without starting that preparation VM. No runtime compiler or separate VMM path
 is needed. Images must support `linux/arm64`; memory is limited to 3072 MiB per
 service. Mac execution remains a development backend with distinct admission.
 The guest supervisor defaults an unset `GOMAXPROCS` to the guest CPU count.
+New Mac profiles release initially parked guests at seeded per-service offsets,
+capped at 1 ms and the network lookahead. The profile and report bind this
+policy; its release phase stays within the configured absolute simulated-time
+limit.
 See [the Mac workflow](tools/mac-runtime/README.md).
 
 `seedbox run` with no arguments runs the Compose project in the current

@@ -72,6 +72,9 @@ exploration is serial. CPU/PMU flags apply to Linux. Mac profiles have distinct
 PV time, boot-layout, device and HVF host identities and remain unqualified.
 The supervisor defaults Go workers to the guest's CPU count (one in the etcd
 template), while preserving an explicit `GOMAXPROCS` value.
+New Mac profiles release initial guests through a seeded launch barrier, with
+per-service offsets capped at 1 ms and network lookahead. This policy is retained
+for replay and remains inside the configured absolute simulated-time limit.
 The native PV backend requires cooperative guest boundaries; four Go workers
 stalled in the Mac example and are not validated.
 `--torn-writes` opts into seeded partial survival of unflushed 512-byte disk

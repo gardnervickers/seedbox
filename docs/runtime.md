@@ -286,9 +286,13 @@ snapshot/restore and release from a deterministic time park remain unsupported.
 This remains unqualified development evidence. ARM images, 64..3072 MiB per
 guest and one exploration worker are required; PMU/core options apply to Linux.
 The supervisor defaults `GOMAXPROCS` to the guest's online CPU count (one for
-the generated etcd example), while preserving explicit overrides. The
-native PV backend advances through cooperative guest boundaries; the example
-with four Go workers stalled in native guest execution and is not validated.
+the generated etcd example), while preserving explicit overrides. New ARM
+profiles park initial guests at the shared launch barrier, then release them
+at seeded per-name offsets capped by `min(1 ms, network lookahead)`. The cap
+keeps causal packets and RPC triggers from preceding the latest release, and
+the phase stays within the existing absolute simulated-time limit. The policy
+is profile-bound and recorded as `initial_launch` in the report; retained
+profiles without its policy keys keep their earlier release behavior.
 
 After building the binaries above, as root with the Nix tools on PATH
 (`sudo -E env PATH="$PATH" ...` from the Nix shell):

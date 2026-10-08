@@ -122,6 +122,14 @@ impl MacExecutor {
                 crate::admission::DEV_UNPINNED.into(),
             ),
             ("hvf_guest_kernel".into(), kernel.hex().into()),
+            (
+                "arm_launch_policy".into(),
+                crate::engine::ARM_LAUNCH_POLICY.into(),
+            ),
+            (
+                "arm_launch_max_skew_ns".into(),
+                crate::engine::ARM_LAUNCH_MAX_SKEW_NS.to_string(),
+            ),
         ]));
         if torn_writes {
             parameters.insert("disk_loss_sector_bytes".into(), "512".into());
@@ -174,6 +182,7 @@ fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
             "retained HVF application profile is missing its world descriptor".into(),
         ));
     }
+    crate::engine::arm_launch_skew(profile, 1)?;
     let p = &profile.semantic_parameters;
     for (key, value) in [
         ("hvf_host_policy", POLICY),
@@ -284,6 +293,20 @@ pub(crate) fn validate_report(bytes: &[u8], request: &ExecutionRequest<'_>) -> R
             "HVF report missing application timebase".into(),
         ));
     }
+    let launch_skew = crate::engine::arm_launch_skew(
+        &request.prepared.profile,
+        request
+            .network
+            .latency_ns
+            .saturating_sub(request.network.jitter_ns),
+    )?;
+    validate_initial_launch(
+        &report,
+        launch_skew,
+        request.seed,
+        request.limits.simulated_time_ns,
+        request.prepared.guests.keys().map(String::as_str),
+    )?;
     let kernel_path = request
         .artifacts
         .get(&request.prepared.kernel)
@@ -340,6 +363,9 @@ pub(crate) fn validate_report(bytes: &[u8], request: &ExecutionRequest<'_>) -> R
                 == Some(name)
         }) {
             cmdline.push_str(" seedbox.control=1");
+        }
+        if launch_skew.is_some() && incarnation == 0 {
+            cmdline.push_str(" seedbox.barrier=1");
         }
         let spec = BootSpec::for_application(&kernel, &initrd, seed, memory, &cmdline)
             .map_err(Error::Integrity)?;
@@ -420,6 +446,69 @@ pub(crate) fn validate_report(bytes: &[u8], request: &ExecutionRequest<'_>) -> R
     Ok(())
 }
 
+fn validate_initial_launch<'a>(
+    report: &serde_json::Value,
+    skew: Option<u64>,
+    seed: u64,
+    duration: u64,
+    names: impl Iterator<Item = &'a str>,
+) -> Result<()> {
+    let bad = || Error::Integrity("HVF initial launch evidence mismatch".into());
+    let Some(skew) = skew else {
+        return if report.get("initial_launch").is_none() {
+            Ok(())
+        } else {
+            Err(bad())
+        };
+    };
+    let launch = &report["initial_launch"];
+    if launch["policy"] != crate::engine::ARM_LAUNCH_POLICY
+        || launch["max_skew_ns"].as_u64() != Some(skew)
+    {
+        return Err(bad());
+    }
+    let times = launch["release_times"].as_object().ok_or_else(bad)?;
+    if launch["released"].as_bool() == Some(false) {
+        if !launch["release_ns"].is_null()
+            || !times.is_empty()
+            || (!launch["barrier_ns"].is_null()
+                && launch["barrier_ns"].as_u64().is_none_or(|at| at > duration))
+            || !matches!(
+                report["outcome"].as_str(),
+                Some("duration" | "end_machine_exited" | "fault_failed" | "quiescent")
+            )
+        {
+            return Err(bad());
+        }
+        return Ok(());
+    }
+    if launch["released"].as_bool() != Some(true) {
+        return Err(bad());
+    }
+    let barrier = launch["barrier_ns"].as_u64().ok_or_else(bad)?;
+    let release = barrier
+        .checked_add(skew)
+        .filter(|at| *at <= duration)
+        .ok_or_else(bad)?;
+    if launch["release_ns"].as_u64() != Some(release) {
+        return Err(bad());
+    }
+    let mut count = 0;
+    for name in names {
+        let mut rng = seedbox_engine_core::rng::Rng::new(seed, &format!("release/{name}"));
+        if times.get(name).and_then(serde_json::Value::as_u64)
+            != Some(barrier + rng.below(skew + 1))
+        {
+            return Err(bad());
+        }
+        count += 1;
+    }
+    if times.len() != count {
+        return Err(bad());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod process_tests {
     use super::*;
@@ -453,6 +542,45 @@ mod process_tests {
             witness_mode: WitnessMode::FullState,
             semantic_parameters: parameters,
         }
+    }
+    #[test]
+    fn launch_report_binds_seeded_offsets_and_preserves_short_timeouts() {
+        assert_eq!(
+            crate::engine::ARM_LAUNCH_POLICY,
+            seedbox_arm64::application::world::LAUNCH_POLICY
+        );
+        assert_eq!(
+            crate::engine::ARM_LAUNCH_MAX_SKEW_NS,
+            seedbox_arm64::application::world::MAX_LAUNCH_SKEW_NS
+        );
+        let names = ["client", "server"];
+        let mut times = serde_json::Map::new();
+        for name in names {
+            let mut rng = seedbox_engine_core::rng::Rng::new(1009, &format!("release/{name}"));
+            times.insert(name.into(), serde_json::json!(100 + rng.below(801)));
+        }
+        let mut report = serde_json::json!({"initial_launch": {
+            "policy": crate::engine::ARM_LAUNCH_POLICY, "max_skew_ns": 800,
+            "released": true, "barrier_ns":100, "release_ns":900, "release_times":times,
+        }});
+        validate_initial_launch(&report, Some(800), 1009, 1000, names.into_iter()).unwrap();
+        assert!(
+            validate_initial_launch(&report, Some(800), 1010, 1000, names.into_iter()).is_err()
+        );
+        assert!(validate_initial_launch(&report, Some(800), 1009, 899, names.into_iter()).is_err());
+        assert!(validate_initial_launch(&report, None, 1009, 1000, names.into_iter()).is_err());
+        report["initial_launch"]["release_times"]["client"] = serde_json::json!(0);
+        assert!(
+            validate_initial_launch(&report, Some(800), 1009, 1000, names.into_iter()).is_err()
+        );
+        let mut timeout = serde_json::json!({"outcome":"duration", "initial_launch": {
+            "policy": crate::engine::ARM_LAUNCH_POLICY, "max_skew_ns": 800,
+            "released": false, "barrier_ns":null, "release_ns":null, "release_times":{},
+        }});
+        validate_initial_launch(&timeout, Some(800), 1009, 1, names.into_iter()).unwrap();
+        timeout["initial_launch"]["release_ns"] = serde_json::json!(800);
+        assert!(validate_initial_launch(&timeout, Some(800), 1009, 1, names.into_iter()).is_err());
+        validate_initial_launch(&serde_json::json!({}), None, 1009, 1, names.into_iter()).unwrap();
     }
     #[test]
     fn retained_application_requires_complete_proof_and_cannot_use_fixture_identity() {

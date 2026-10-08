@@ -283,6 +283,7 @@ impl WorldMachine for Mock {
         match step.stop {
             Stop::Exited => self.common.state = State::Exited(0),
             Stop::Halted => self.common.state = State::Halted,
+            Stop::Barrier => self.common.commit_park(),
             _ => (),
         }
         self.record("advance");
@@ -1134,4 +1135,107 @@ fn runtime_snapshot_preserves_lifecycle_transit_and_continuation_rng_positions()
     assert_eq!(w.run_seed, 43);
     assert_eq!(w.branch_identity.as_deref(), Some("new-branch"));
     assert_ne!(w.faults.links.stream_sample((0, 1)), expected);
+}
+
+#[test]
+fn initial_launch_deadline_is_an_ordinary_outcome_but_fork_still_requires_barrier() {
+    let mut w = world(&["a", "b"]);
+    w.machines[0].steps.push_back(Step::new(2, Stop::Barrier));
+    assert_eq!(
+        simulate_launch(&mut w, &Value::Null, 7, &None, &mut || Ok(())).unwrap(),
+        "duration"
+    );
+    assert!(w.machines[0].parked);
+    assert_eq!(w.machines[1].time, 7);
+    assert!(w.factory.borrow().iter().all(|s| !s.contains(":release:")));
+    assert_eq!(w.finish("duration", 7, &None).unwrap(), 7);
+    let mut strict = world(&["a"]);
+    assert!(
+        simulate(&mut strict, &Value::Null, 7, &None, Some(None), &mut || Ok(
+            ()
+        ))
+        .unwrap_err()
+        .contains("launch barrier not reached: duration")
+    );
+}
+
+#[test]
+fn initial_launch_preserves_end_machine_exit_and_cancellation() {
+    let mut w = world(&["a", "b"]);
+    w.machines[0].steps.push_back(Step::new(3, Stop::Exited));
+    assert_eq!(
+        simulate_launch(&mut w, &Value::Null, 20, &Some("a".into()), &mut || Ok(())).unwrap(),
+        "end_machine_exited"
+    );
+    assert_eq!(w.machines[0].state, State::Exited(0));
+    assert!(w.factory.borrow().iter().all(|s| !s.contains(":release:")));
+    let mut cancelled = world(&["a"]);
+    assert_eq!(
+        simulate_launch(&mut cancelled, &Value::Null, 20, &None, &mut || Err(
+            "cancelled".into()
+        ))
+        .unwrap_err(),
+        "cancelled"
+    );
+    assert!(cancelled.factory.borrow().is_empty());
+}
+
+#[test]
+fn initial_barrier_release_precedes_first_packet_rpc_and_trigger_effects() {
+    let names = vec!["a".to_owned(), "b".to_owned()];
+    let cfg = json!({"control":{"machine":"a","latency_ns":10,"placement":{}}});
+    for seed in [1009, 1010, 1011] {
+        for skew in [0, 10] {
+            let mut w = world(&["a", "b"]);
+            w.barrier = true;
+            w.early = 0;
+            w.machines[0].steps.push_back(Step::new(2, Stop::Barrier));
+            w.machines[1].steps.push_back(Step::new(3, Stop::Barrier));
+            assert_eq!(
+                simulate_launch(&mut w, &cfg, 100, &None, &mut || Ok(())).unwrap(),
+                "barrier"
+            );
+            assert_eq!(w.slices, 2);
+            let (kills, reseed) = release(&mut w, &cfg, &names, seed, skew, &mut |_, _| {
+                panic!("unsupported")
+            })
+            .unwrap();
+            assert!(kills.is_empty());
+            assert_eq!(reseed, json!({"a":"barrier","b":"barrier"}));
+            let upper = 3 + skew;
+            for m in &w.machines {
+                let expected = 3 + Rng::new(seed, &format!("release/{}", m.name)).below(skew + 1);
+                assert_eq!(m.time, expected);
+                assert!(!m.parked);
+                assert!((3..=upper).contains(&m.time));
+            }
+            // All release ACKs occur without guest entry. New effects are
+            // constrained by the same causal lookahead as normal simulation.
+            assert_eq!(w.slices, 2);
+            let send = w.machines[0].time;
+            let crate::links::Outcome::Deliver(arrival) = w.faults.links.decide(0, 1, send, false)
+            else {
+                panic!("packet dropped")
+            };
+            assert!(arrival >= upper);
+            w.control
+                .request(
+                    0,
+                    send,
+                    b"SBX_RPC1 1 1 {\"version\":1,\"id\":1,\"op\":\"inspect\"}",
+                    upper,
+                )
+                .unwrap();
+            assert!(w.control.boundary() >= upper);
+            w.control
+                .triggers
+                .arm("a".into(), b"X".to_vec(), send, 100, partition("initial"))
+                .unwrap();
+            w.control
+                .triggers
+                .committed("a", send, b'X', w.control.latency, upper)
+                .unwrap();
+            assert!(w.control.triggers.boundary() >= upper);
+        }
+    }
 }

@@ -16,6 +16,8 @@ use std::{
 };
 
 pub const CONTRACT: &str = "arm64-world-v1";
+pub const LAUNCH_POLICY: &str = "seeded-barrier-v1";
+pub const MAX_LAUNCH_SKEW_NS: u64 = 1_000_000;
 pub fn entropy_seed(seed: u64, domain: &str) -> u64 {
     crate::rng::Rng::new(seed, domain).next()
 }
@@ -43,6 +45,8 @@ struct Config {
     control_channel: String,
     #[serde(default)]
     disk_loss: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launch_skew_ns: Option<u64>,
 }
 #[derive(Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -103,6 +107,8 @@ pub fn run(options: &Options) -> Result<Value> {
         .checked_sub(links.global.jitter_ns)
         .filter(|n| *n > 0)
         .ok_or("network lookahead must be positive")?;
+    validate_launch_skew(cfg.launch_skew_ns, lookahead)?;
+    let initial_barrier = cfg.launch_skew_ns.is_some();
     let control = Control::new(&cfg.control, names.clone(), lookahead, 0)?;
     let mut faults = Faults::with_links(Vec::new(), names.clone(), links)?;
     faults.require_readiness();
@@ -161,7 +167,7 @@ pub fn run(options: &Options) -> Result<Value> {
             &factory,
             &m.name,
             &boot,
-            false,
+            initial_barrier,
             world_core::entropy_seed(options.seed, &format!("boot-entropy/{}", m.name)),
         )?);
         boots.push(boot);
@@ -171,7 +177,7 @@ pub fn run(options: &Options) -> Result<Value> {
         machines,
         factory,
         boot: boots,
-        barrier: false,
+        barrier: initial_barrier,
         boot_seed: options.seed,
         run_seed: options.seed,
         branch_identity: None,
@@ -202,19 +208,89 @@ pub fn run(options: &Options) -> Result<Value> {
         .transpose()
         .map_err(|e| format!("host control: {e}"))?;
     let raw_config = serde_json::to_value(&cfg).map_err(|e| e.to_string())?;
-    let outcome = world_core::simulate(
-        &mut world,
-        &raw_config,
-        cfg.duration_ns,
-        &Some(cfg.end_on_exit.clone()),
-        None,
-        &mut || {
-            if let Some(host) = &mut host {
-                host.boundary().map_err(|e| format!("host control: {e}"))?;
+    let end_on = Some(cfg.end_on_exit.clone());
+    let mut boundary = || {
+        if let Some(host) = &mut host {
+            host.boundary().map_err(|e| format!("host control: {e}"))?;
+        }
+        Ok(())
+    };
+    let mut initial_launch = cfg.launch_skew_ns.map(|skew| {
+        json!({
+            "policy": LAUNCH_POLICY, "max_skew_ns": skew, "released": false,
+            "barrier_ns": null, "release_ns": null, "release_times": {}
+        })
+    });
+    let bootstrap = if initial_barrier {
+        Some(world_core::simulate_launch(
+            &mut world,
+            &raw_config,
+            cfg.duration_ns,
+            &end_on,
+            &mut boundary,
+        )?)
+    } else {
+        None
+    };
+    let outcome = if let Some(stopped) = bootstrap.filter(|s| *s != "barrier") {
+        stopped
+    } else if let Some(skew) = cfg.launch_skew_ns {
+        let at = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
+        if let Some(launch) = &mut initial_launch {
+            launch["barrier_ns"] = json!(at);
+        }
+        if let Some(release_at) = launch_release_bound(&raw_config, at, skew, cfg.duration_ns)? {
+            validate_pending_launch(&world, release_at)?;
+            let (_, reseed) = world_core::release(
+                &mut world,
+                &raw_config,
+                &names,
+                options.seed,
+                skew,
+                &mut |_, _| {},
+            )?;
+            if names.iter().any(|name| reseed[name] != "barrier") {
+                return Err("ARM initial launch did not reseed through the launch barrier".into());
             }
-            Ok(())
-        },
-    )?;
+            let release_times: BTreeMap<_, _> = world
+                .machines
+                .iter()
+                .map(|m| (m.name.clone(), m.time))
+                .collect();
+            if world
+                .machines
+                .iter()
+                .any(|m| m.parked || m.time < at || m.time > release_at)
+            {
+                return Err("ARM initial launch acknowledgment outside release bounds".into());
+            }
+            initial_launch = Some(json!({
+                "policy": LAUNCH_POLICY, "max_skew_ns": skew, "released": true,
+                "barrier_ns": at, "release_ns": release_at, "release_times": release_times
+            }));
+            world_core::simulate(
+                &mut world,
+                &raw_config,
+                cfg.duration_ns,
+                &end_on,
+                None,
+                &mut boundary,
+            )?
+        } else {
+            // The duration is absolute: never move a release or extend a run
+            // to make room for initial launch, including the exact endpoint.
+            "duration"
+        }
+    } else {
+        world_core::simulate(
+            &mut world,
+            &raw_config,
+            cfg.duration_ns,
+            &end_on,
+            None,
+            &mut boundary,
+        )?
+    };
     world.finish(outcome, cfg.duration_ns, &Some(cfg.end_on_exit.clone()))?;
     let mut hash = Sha256::new_with_prefix(b"seedbox-arm64-world-witness-v1\0");
     let horizons = format!("{:x}", transcript.borrow().horizons.clone().finalize());
@@ -304,6 +380,9 @@ pub fn run(options: &Options) -> Result<Value> {
         "control_history":world.control.log,"control_latency_ns":world.control.latency,
         "rejected_fault_effects":world.faults.rejected_effects,"management_readiness":world.faults.readiness,
         "slices":world.slices});
+    if let Some(launch) = initial_launch {
+        report["initial_launch"] = launch;
+    }
     if let Some(evidence) = trigger_evidence {
         report["triggers"] = evidence;
     }
@@ -314,4 +393,138 @@ fn arm_counters(world: &world_core::World<ArmMachine>) -> Value {
         (format!("{}->{}",world.machines[from].name,world.machines[to].name),
          json!({"delivered":c[0],"partition_dropped":c[1],"receiver_dropped":c[2],"loss_dropped":c[3]}))).collect();
     json!(counts)
+}
+
+fn validate_launch_skew(skew: Option<u64>, lookahead: u64) -> Result<()> {
+    if skew.is_some_and(|skew| skew > MAX_LAUNCH_SKEW_NS.min(lookahead)) {
+        return Err("ARM launch_skew_ns exceeds one millisecond or network lookahead".into());
+    }
+    Ok(())
+}
+
+fn launch_release_bound(cfg: &Value, at: u64, skew: u64, duration: u64) -> Result<Option<u64>> {
+    let release = at
+        .checked_add(skew)
+        .ok_or("ARM initial launch time overflow")?;
+    if release >= duration {
+        return Ok(None);
+    }
+    world_core::check_plan_after(cfg, release)?;
+    Ok(Some(release))
+}
+
+fn validate_pending_launch<M: WorldMachine>(
+    world: &world_core::World<M>,
+    release: u64,
+) -> Result<()> {
+    // No guest enters during release. Since skew <= lookahead, every new
+    // packet, RPC or console-trigger effect is due at or after the latest
+    // release: sender time + lookahead >= barrier time + maximum skew.
+    // Already sampled bootstrap effects must satisfy that boundary too.
+    let pending = world
+        .events
+        .iter()
+        .filter_map(|q| q.keys().next().map(|k| k.0))
+        .chain(
+            world
+                .strict_events
+                .iter()
+                .filter_map(|q| q.keys().next().map(|k| k.0)),
+        )
+        .chain([
+            world.control.boundary(),
+            world.control.triggers.boundary(),
+            world.faults.next_boundary(),
+        ]);
+    if pending.into_iter().any(|at| at < release) {
+        return Err("ARM bootstrap effect is before the initial launch release bound".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> Value {
+        json!({"kernel":"kernel", "mem_mb":64, "duration_ns":100,
+            "end_on_exit":"a", "timer_jitter_ns":0, "stop_tolerance_ns":0,
+            "network":{"latency_ns":10}, "machines":[{"name":"a","initrd":"initrd"}],
+            "control":null, "control_channel":"virtio-console-v1"})
+    }
+
+    #[test]
+    fn absent_launch_policy_preserves_legacy_config_shape_and_zero_is_explicit() {
+        let mut raw = config();
+        let cfg: Config = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(cfg.launch_skew_ns, None);
+        assert!(serde_json::to_value(cfg)
+            .unwrap()
+            .get("launch_skew_ns")
+            .is_none());
+        raw["launch_skew_ns"] = json!(0);
+        let cfg: Config = serde_json::from_value(raw).unwrap();
+        assert_eq!(cfg.launch_skew_ns, Some(0));
+        assert_eq!(serde_json::to_value(cfg).unwrap()["launch_skew_ns"], 0);
+    }
+
+    #[test]
+    fn launch_bound_is_limited_by_both_lookahead_and_one_millisecond() {
+        assert!(validate_launch_skew(None, 10).is_ok());
+        assert!(validate_launch_skew(Some(0), 10).is_ok());
+        assert!(validate_launch_skew(Some(10), 10).is_ok());
+        assert!(validate_launch_skew(Some(11), 10).is_err());
+        assert!(validate_launch_skew(Some(MAX_LAUNCH_SKEW_NS), u64::MAX).is_ok());
+        assert!(validate_launch_skew(Some(MAX_LAUNCH_SKEW_NS + 1), u64::MAX).is_err());
+        for value in [json!(-1), json!(1.5), json!("10")] {
+            let mut raw = config();
+            raw["launch_skew_ns"] = value;
+            assert!(serde_json::from_value::<Config>(raw).is_err());
+        }
+    }
+
+    #[test]
+    fn initial_release_never_uses_or_extends_the_absolute_deadline() {
+        assert_eq!(
+            launch_release_bound(&Value::Null, 100, 10, 111).unwrap(),
+            Some(110)
+        );
+        assert_eq!(
+            launch_release_bound(&Value::Null, 100, 10, 110).unwrap(),
+            None
+        );
+        assert_eq!(
+            launch_release_bound(&Value::Null, 100, 10, 109).unwrap(),
+            None
+        );
+        assert_eq!(
+            launch_release_bound(&Value::Null, 100, 0, 100).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn release_admission_rejects_earlier_actions_without_shifting_them() {
+        for key in ["faults", "scenario"] {
+            let mut raw = json!({});
+            raw[key] = json!([{"at_ns":109}]);
+            assert!(launch_release_bound(&raw, 100, 10, 1000)
+                .unwrap_err()
+                .contains("109"));
+            assert_eq!(raw[key][0]["at_ns"], 109);
+            raw[key][0]["at_ns"] = json!(110);
+            assert_eq!(
+                launch_release_bound(&raw, 100, 10, 1000).unwrap(),
+                Some(110)
+            );
+        }
+        assert!(
+            launch_release_bound(&json!({"kill_restart":{"start_ns":109}}), 100, 10, 1000).is_err()
+        );
+        assert!(launch_release_bound(&Value::Null, u64::MAX, 1, u64::MAX).is_err());
+        assert_eq!(
+            launch_release_bound(&Value::Null, 100, 0, 1000).unwrap(),
+            Some(100)
+        );
+    }
 }
