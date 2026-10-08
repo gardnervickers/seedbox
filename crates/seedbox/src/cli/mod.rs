@@ -56,8 +56,8 @@ const VMM_FAILURE_HELP: &str = "Text VMM failures also show up to 5 non-empty li
     about = "Deterministic simulation of Compose applications on real Linux machines",
     long_about = "Deterministic simulation of Compose applications on real Linux machines.\n\n\
                   A seed plus the retained inputs regenerate the same execution. \
-                  `run` and `replay` support a qualified Linux KVM host with root, \
-                  or the development backend on Apple Silicon Mac."
+                  `run` and `replay` support Linux x86-64 KVM (PV needs KVM device access; \
+                  counter also needs PMU/MSR access), or native HVF on Apple Silicon Mac."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -89,6 +89,8 @@ enum Command {
     Doctor {
         #[command(flatten)]
         cpu: CpuArg,
+        #[command(flatten)]
+        clock: TimebaseArgs,
         /// Print the admitted observations as JSON.
         #[arg(long)]
         json: bool,
@@ -297,6 +299,13 @@ enum TimebaseArg {
     Pv,
 }
 
+#[derive(Args)]
+struct TimebaseArgs {
+    /// Timebase for guest progress; changes run identity and results [default: pv on Mac; counter on Linux].
+    #[arg(long, value_enum)]
+    timebase: Option<TimebaseArg>,
+}
+
 impl From<TimebaseArg> for Timebase {
     fn from(timebase: TimebaseArg) -> Self {
         match timebase {
@@ -413,9 +422,8 @@ struct RuntimeInputs {
     /// Guest RAM per service, in MiB.
     #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(64..=65536))]
     memory_mb: u32,
-    /// Timebase for guest progress; changes run identity and results [default: pv on Mac; counter on Linux].
-    #[arg(long, value_enum)]
-    timebase: Option<TimebaseArg>,
+    #[command(flatten)]
+    clock: TimebaseArgs,
     /// Arm clockevents through the time page (ABI 4, aimed at PV); changes run identity and results.
     #[arg(long)]
     page_timer: bool,
@@ -439,7 +447,7 @@ impl RuntimeInputs {
                     "--vmm requires Linux KVM; use the built-in Mac engine".into(),
                 ));
             }
-            if matches!(self.timebase, Some(TimebaseArg::Counter)) {
+            if matches!(self.clock.timebase, Some(TimebaseArg::Counter)) {
                 return Err(Error::Setup(
                     "--timebase counter requires Linux KVM; use --timebase pv or omit it on Mac"
                         .into(),
@@ -524,7 +532,7 @@ impl RuntimeInputs {
                 VmmExecutor::new_internal(&engine, store, cpu, self.memory_mb, witness, counter)?
             }
             .with_torn_writes(self.torn_writes)
-            .with_timebase(self.timebase.unwrap_or(TimebaseArg::Counter).into())
+            .with_timebase(self.clock.timebase.unwrap_or(TimebaseArg::Counter).into())
             .with_page_timer(self.page_timer)
             .with_deferred_tx(self.deferred_tx);
             if seedbox::container_runtime::Runtime::available() {
@@ -775,11 +783,19 @@ fn run(cli: Cli) -> Result<u8> {
             }
             Ok(0)
         }
-        Command::Doctor { cpu, inputs, json } => {
+        Command::Doctor {
+            cpu,
+            clock,
+            inputs,
+            json,
+        } => {
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             {
+                if matches!(clock.timebase, Some(TimebaseArg::Counter)) {
+                    return Err(Error::Setup("--timebase counter requires Linux KVM; use --timebase pv or omit it on Mac".into()));
+                }
                 cpu.admit(Ok(CounterProfile::Zen), Timebase::Pv)?;
                 if let Some(path) = inputs.vmm.as_ref() {
                     defaults::existing("--vmm", path.clone())?;
@@ -828,14 +844,25 @@ fn run(cli: Cli) -> Result<u8> {
                 }
                 let kernel = &runtime.kernel;
                 let report = if internal {
-                    VmmExecutor::doctor_internal(&engine, kernel, cpu.cpu)?
+                    VmmExecutor::doctor_internal_with_timebase(
+                        &engine,
+                        kernel,
+                        cpu.cpu,
+                        clock.timebase.unwrap_or(TimebaseArg::Counter).into(),
+                    )?
                 } else {
-                    VmmExecutor::doctor(&engine, kernel, cpu.cpu)?
+                    VmmExecutor::doctor_with_timebase(
+                        &engine,
+                        kernel,
+                        cpu.cpu,
+                        clock.timebase.unwrap_or(TimebaseArg::Counter).into(),
+                    )?
                 };
                 if json {
                     println!("{}", serde_json::to_string_pretty(&report)?);
                 } else {
                     println!("VALID: compatible execution profile");
+                    println!("timebase: {}", report.timebase.name());
                     println!("cpu: {}", report.cpu);
                     println!(
                         "cpus: {}",
@@ -942,7 +969,11 @@ fn run(cli: Cli) -> Result<u8> {
             }
             cpu.admit(
                 detected,
-                inputs.timebase.map(Into::into).unwrap_or(Timebase::Counter),
+                inputs
+                    .clock
+                    .timebase
+                    .map(Into::into)
+                    .unwrap_or(Timebase::Counter),
             )?;
             let executor = executor.with_unqualified_cpu(cpu.allow_unqualified_cpu);
             let executor = match (checkpoint_at_ns, branch_seed) {
@@ -1016,7 +1047,11 @@ fn run(cli: Cli) -> Result<u8> {
             preparer.tools.build_epoch = build.build_epoch;
             cpu.admit(
                 detected,
-                inputs.timebase.map(Into::into).unwrap_or(Timebase::Counter),
+                inputs
+                    .clock
+                    .timebase
+                    .map(Into::into)
+                    .unwrap_or(Timebase::Counter),
             )?;
             let executor = executor.with_unqualified_cpu(cpu.allow_unqualified_cpu);
             preparer.profile = executor.profile();

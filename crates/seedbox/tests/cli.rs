@@ -864,7 +864,7 @@ fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
     assert!(help.status.success());
     let text = String::from_utf8(help.stdout).unwrap();
     assert!(text.contains("Linux KVM host"));
-    for flag in ["--cpu", "--kernel", "--vmm", "--json"] {
+    for flag in ["--cpu", "--kernel", "--vmm", "--timebase", "--json"] {
         assert!(text.contains(flag), "{text}");
     }
     for flag in [
@@ -877,6 +877,19 @@ fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
         assert!(!text.contains(flag), "{text}");
     }
     assert!(text.contains("Doctor never builds"));
+    let invalid_timebase = seedbox(&["doctor", "--timebase", "invalid"], root);
+    assert_eq!(invalid_timebase.status.code(), Some(2));
+    assert!(stderr(&invalid_timebase).contains("--timebase"));
+    let pv_missing = seedbox(&["doctor", "--timebase", "pv", "--vmm", "missing"], root);
+    assert_eq!(stderr(&pv_missing), "error: --vmm missing: not found\n");
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        let counter = seedbox(&["doctor", "--timebase", "counter"], root);
+        assert_eq!(
+            stderr(&counter),
+            "error: --timebase counter requires Linux KVM; use --timebase pv or omit it on Mac\n"
+        );
+    }
     let invalid = seedbox(&["doctor", "--cpu", "1024"], root);
     assert_eq!(invalid.status.code(), Some(2));
     assert!(stderr(&invalid).contains("--cpu"));

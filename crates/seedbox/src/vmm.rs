@@ -40,6 +40,7 @@ pub struct VmmExecutor {
 /// Successful compatibility observation; it is not empirical replay qualification.
 #[derive(Debug, Serialize)]
 pub struct DoctorReport {
+    pub timebase: Timebase,
     pub cpu: u32,
     pub cpus: Vec<u32>,
     pub engine: ContentDigest,
@@ -265,6 +266,16 @@ impl VmmExecutor {
     /// Check the existing execution policy without storing inputs or starting guests.
     /// Host observations are the same bounded probe used by execution preflight.
     pub fn doctor(engine: &Path, kernel: &Path, cpu: Option<u32>) -> Result<DoctorReport> {
+        Self::doctor_with_timebase(engine, kernel, cpu, Timebase::Counter)
+    }
+
+    /// Check compatibility for the selected guest progress mode.
+    pub fn doctor_with_timebase(
+        engine: &Path,
+        kernel: &Path,
+        cpu: Option<u32>,
+        timebase: Timebase,
+    ) -> Result<DoctorReport> {
         let executor = Self::from_engine_digest(
             crate::admission::file_digest(engine)?,
             cpu,
@@ -272,11 +283,21 @@ impl VmmExecutor {
             WitnessMode::Exits,
             CounterProfile::Zen,
         )?;
-        Self::doctor_executor(executor, kernel)
+        Self::doctor_executor(executor.with_timebase(timebase), kernel)
     }
 
     /// Inspect the built-in worker without storing bytes or invoking it.
     pub fn doctor_internal(engine: &Path, kernel: &Path, cpu: Option<u32>) -> Result<DoctorReport> {
+        Self::doctor_internal_with_timebase(engine, kernel, cpu, Timebase::Counter)
+    }
+
+    /// Check the built-in worker for the selected progress mode without starting it.
+    pub fn doctor_internal_with_timebase(
+        engine: &Path,
+        kernel: &Path,
+        cpu: Option<u32>,
+        timebase: Timebase,
+    ) -> Result<DoctorReport> {
         let descriptor = crate::engine::internal_parameters()?;
         let mut executor = Self::from_engine_digest(
             crate::admission::file_digest(engine)?,
@@ -286,12 +307,44 @@ impl VmmExecutor {
             CounterProfile::Zen,
         )?;
         executor.profile.semantic_parameters.extend(descriptor);
-        Self::doctor_executor(executor, kernel)
+        Self::doctor_executor(executor.with_timebase(timebase), kernel)
     }
 
     fn doctor_executor(executor: Self, kernel: &Path) -> Result<DoctorReport> {
         crate::admission::validate_profile(&executor.profile)?;
         let kernel = crate::admission::file_digest(kernel)?;
+        if !executor.counted() {
+            #[cfg(target_os = "linux")]
+            {
+                crate::host::check_kvm_access()?;
+                return with_capacity(
+                    1,
+                    || crate::host::CpuReservation::acquire(executor.cpu),
+                    |reservations| {
+                        let reservation = reservations.first().ok_or_else(|| {
+                            Error::Integrity("doctor did not reserve a CPU".into())
+                        })?;
+                        Ok(DoctorReport {
+                            timebase: Timebase::Pv,
+                            cpu: reservation.cpu,
+                            cpus: reservation.cpus.iter().copied().collect(),
+                            engine: executor.profile.engine.clone(),
+                            simulator_version: executor
+                                .profile
+                                .semantic_parameters
+                                .get("simulator_version")
+                                .cloned(),
+                            kernel: kernel.clone(),
+                            observations: Vec::new(),
+                        })
+                    },
+                );
+            }
+            #[cfg(not(target_os = "linux"))]
+            return Err(Error::Setup(
+                "PV compatibility checks require a Linux KVM host".into(),
+            ));
+        }
         Self::doctor_counter(crate::counter::CounterProfile::host()?)?;
         let probe = executor.probe();
         executor.doctor_report(kernel, probe)
@@ -327,6 +380,7 @@ impl VmmExecutor {
             crate::admission::validate_observation(observation)?;
         }
         Ok(DoctorReport {
+            timebase: recorded_timebase(&self.profile)?,
             cpu: probe
                 .cpu
                 .ok_or_else(|| Error::Execution("host probe did not select a CPU".into()))?,

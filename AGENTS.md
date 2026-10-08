@@ -284,7 +284,8 @@ deliberately change one.
   defaults table), docs/runtime.md, and `crates/seedbox/templates/README.md`.
   The last one is copied into every project `seedbox init` creates.
 
-`doctor` shares execution admission and guest-kernel/VMM defaults; host-kernel
+`doctor --timebase pv` shares PV KVM permission and CPU-reservation admission;
+counter doctor retains its perf/MSR checks. Both use guest-kernel/VMM defaults; host-kernel
 bytes are not checked. VMM resolution is lookup-only and must never invoke a
 compiler or launch the worker. Success reports
 only the exact cleaned-up probe observations and selected core; the library does
