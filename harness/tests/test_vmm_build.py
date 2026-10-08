@@ -1,3 +1,4 @@
+from fixture_files import copy_cargo_config
 """Build-path isolation and reproducibility-runner lifecycle; no KVM required."""
 import importlib.util
 import json
@@ -226,7 +227,7 @@ class CargoTests(unittest.TestCase):
                 crate = root / 'crates/seedbox-vmm'
                 (crate / 'src').mkdir(parents=True)
                 shutil.copy2(HARNESS / 'vmm-rustc.py', root / 'harness/vmm-rustc.py')
-                shutil.copy2(HARNESS.parent / '.cargo/config.toml', root / '.cargo/config.toml')
+                copy_cargo_config(HARNESS.parent / '.cargo/config.toml', root)
                 package_keys = '''[workspace.package]
 version = "0.1.0"
 edition = "2021"

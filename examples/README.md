@@ -1,5 +1,15 @@
 # Compose application examples
 
+From the repository root, start Docker/Podman, then:
+
+```sh
+nix develop
+cargo build --release
+./target/release/seedbox run examples/etcd  # Mac
+# Linux: add --timebase pv
+./target/release/seedbox replay .seedbox/runs/ATTEMPT
+```
+
 These are the canonical application definitions. Run either `etcd/compose.yaml`
 or `redis/compose.yaml` with the Rust `seedbox run` CLI, or create a self-contained
 copy using `seedbox init DIRECTORY --template etcd` (or `redis`). Both paths use
@@ -19,8 +29,9 @@ For intentional failure controls, set the Redis client's
 command list. The runtime suite checks FAIL plus replay MATCH for both.
 
 Each service gets a controlled Linux VM and private RAM-backed root filesystem;
-application data does not persist across fresh runs. Use the patched Seedbox
-kernel, qualified AMD Zen KVM host, and at least the tested 1024 MiB per service.
+application data does not persist across fresh runs. Use the release executable, which bundles the patched Seedbox kernel. Run on
+Apple Silicon HVF or Linux KVM (`--timebase pv` avoids hardware-counter
+requirements), with at least the tested 1024 MiB per service.
 The image supplies userspace dependencies. Image versions, launch metadata and
 filesystem layers are resolved and retained before execution.
 

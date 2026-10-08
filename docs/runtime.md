@@ -1,4 +1,12 @@
-# OCI preparation and KVM execution
+# OCI preparation and execution
+
+On Apple Silicon or Linux x86-64, start Docker/Podman and build Seedbox once with
+`nix develop` followed by `cargo build --release`. Guest assets are prepared
+automatically and cached; Mac signing is automatic. Run the release executable
+with the Compose directory as its positional argument. On Linux use
+`--timebase pv` for KVM without performance-counter requirements and give your
+user read/write access to `/dev/kvm`. No Lima or manual packaging script is
+needed. Replay requires retained inputs, not the container engine.
 
 The etcd and Redis Compose examples have passed real guest runs, failure controls
 and replay on the qualified Linux workstation. See [the acceptance record](acceptance.md)
@@ -162,18 +170,14 @@ From the repository root:
 
 ```sh
 nix develop
-bash kernel/build.sh
 cargo build --release --locked
 ```
 
-A maintainer can instead run `bash tools/linux-runtime/build-cli.sh` in that
-shell to include the x86-64 guest kernel, supervisor, BusyBox and mke2fs in the
-release executable. The package includes license notices and source/build
-provenance. The existing pinned kernel/supervisor builders produce these assets;
-no compiler or guest-asset download is invoked at runtime. Skopeo, umoci and the
-Docker-compatible builder remain host preparation dependencies. See
-[the Linux package workflow](../tools/linux-runtime/README.md). Linux package
-execution and reproducibility remain final merge-train checks.
+The normal release build prepares and embeds the guest kernel, static helpers
+and Linux filesystem tools automatically through Docker/Podman. The resulting
+CLI needs no extra build script or runtime compiler. Preparation uses the
+container endpoint; use `--timebase pv` and KVM device permissions to run as your
+ordinary user. See [Linux setup](../tools/linux-runtime/README.md).
 
 The platform VMM is linked into `seedbox`; ordinary runtime commands do not
 compile or find a separate executable. `cargo build-vmm` and `cargo test-vmm`
@@ -210,7 +214,7 @@ example the output of `bash guest/build-compose.sh FILE`.
 
 Preparation requires `skopeo`, `umoci`, and a Docker-compatible builder (the shell
 supplies Podman). Rootful unpacking preserves image ownership and modes. Run on
-the supported Linux amd64 host, or use the packaged private preparation VM on Mac.
+the supported Linux amd64 host; container-backed preparation does not support this option.
 
 `skopeo` selects Linux amd64 and copies the original platform-specific manifest
 and blobs with preserved digests. Seedbox verifies descriptor hashes and sizes,
@@ -227,6 +231,10 @@ Use fully qualified Dockerfile `FROM` references such as
 `docker.io/library/busybox:1.37`; the supported Podman host has no default
 unqualified registry search list. `--builder docker` selects a Docker client
 instead when the host provides one.
+
+Container-backed preparation currently rejects `--build-epoch`; omit it in
+the packaged workflow. The following policy applies only to unbundled native
+Linux development builds.
 
 `prepare`, `run` and `explore` accept optional `--build-epoch SECONDS`
 (0..=4294967295; no environment backing). It requires the inspected project-Nix
@@ -263,12 +271,12 @@ guarantee or an image reproducibility guarantee.
 ## Preparation, execution, and replay
 
 Apple Silicon uses the native development HVF application backend. Enter
-`nix develop` and run `bash tools/mac-runtime/build-cli.sh` to produce the signed
+`nix develop` and run `cargo build --release` to produce the signed
 CLI with its ARM kernel, static helpers and Linux preparation tools embedded.
 Use `target/release/seedbox run PROJECT` and
 `target/release/seedbox replay RUN`, without host root or
-separate binary paths. The owned preparation VM stops before HVF execution;
-replay never starts it. Runtime commands never invoke Rust. See
+separate binary paths. Docker/Podman handles image preparation through filesystem
+tools containers; replay needs no container engine. Runtime commands never invoke Rust. See
 [the full Mac workflow](../tools/mac-runtime/README.md).
 
 Mac profiles retain their own executable descriptor, ARM boot placement,
@@ -297,14 +305,13 @@ the phase stays within the existing absolute simulated-time limit. The numeric
 runs; replay clips it to network lookahead. `initial_launch` records the release
 evidence. Profiles without a numeric cap keep their earlier release behavior.
 
-After building the binaries above, as root with the Nix tools on PATH
-(`sudo -E env PATH="$PATH" ...` from the Nix shell):
+After the release build, run as your current user with KVM device access on
+Linux. Use PV to avoid the additional counter-mode privileges:
 
 ```sh
 seedbox=./target/release/seedbox
 
-"$seedbox" prepare examples/redis --output prepared.json
-"$seedbox" run examples/redis
+"$seedbox" prepare examples/redis --output prepared.json --timebase pv
 "$seedbox" run examples/redis --timebase pv
 "$seedbox" inspect .seedbox/runs/ATTEMPT --json
 "$seedbox" replay .seedbox/runs/ATTEMPT
@@ -365,14 +372,14 @@ path. SIGKILL and host loss cannot guarantee cleanup.
 From a second terminal, pause or resume the host's entire executing world:
 
 ```sh
-sudo seedbox pause .seedbox/runs/ATTEMPT
-sudo seedbox resume .seedbox/runs/ATTEMPT
+seedbox pause .seedbox/runs/ATTEMPT
+seedbox resume .seedbox/runs/ATTEMPT
 ```
 
 The attempt directory exists before execution finishes. Find live attempts with
 `find .seedbox/runs -path '*/output/host-control'`; remove the `/output/host-control`
 suffix to get RUN. A replay creates a new attempt: control that directory, not
-the completed source run. Use the execution user's privileges (normally root).
+the completed source run. Use the same user that started the execution.
 `PAUSED: RUN` means the VMM acknowledged a slice boundary; `RESUMED: RUN` means
 it released the host gate. Requests are idempotent and concurrent requests take
 effect in receive order. A request waits at most five seconds for acknowledgement;

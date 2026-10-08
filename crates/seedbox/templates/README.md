@@ -1,8 +1,16 @@
 # Seedbox simulation example
 
+On Apple Silicon or Linux x86-64, start Docker/Podman and build Seedbox once with
+`nix develop` followed by `cargo build --release`. Guest assets are prepared
+automatically and cached; Mac signing is automatic. Run the release executable
+with the Compose directory as its positional argument. On Linux use
+`--timebase pv` for KVM without performance-counter requirements and give your
+user read/write access to `/dev/kvm`. No Lima or manual packaging script is
+needed. Replay requires retained inputs, not the container engine.
+
 This project is self-contained. Use the same commands on Linux x86-64 KVM or
-Apple Silicon HVF after building the packaged CLI for that platform. Linux
-execution requires root and KVM access; Mac execution uses the current user.
+Apple Silicon HVF after building the packaged CLI for that platform. Linux PV execution requires read/write access to `/dev/kvm`; Mac execution
+uses the current user. Linux counter execution also needs privileged PMU/MSR access.
 The etcd and Redis templates passed real workloads,
 intentional failure controls, and exact replays on the supported Linux amd64 AMD Zen
 workstation with the controlled Seedbox kernel and 1024 MiB RAM per service.
@@ -23,8 +31,8 @@ From this directory, with the packaged `seedbox` executable on `PATH`:
 
 ```sh
 seedbox validate
-seedbox doctor
-seedbox run
+seedbox doctor --timebase pv  # Linux; omit --timebase on Mac
+seedbox run --timebase pv     # Linux; omit --timebase on Mac
 seedbox inspect .seedbox/runs/ATTEMPT --json
 seedbox logs .seedbox/runs/ATTEMPT --machine client --stream console
 seedbox replay .seedbox/runs/ATTEMPT
@@ -32,12 +40,12 @@ seedbox diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
 seedbox explore --count 2
 ```
 
-The Linux maintainer build `bash tools/linux-runtime/build-cli.sh` from the
+The Linux maintainer build `cargo build --release` from the
 Seedbox checkout includes the guest kernel, supervisor, BusyBox and mke2fs in
 one executable. Explicit runtime-input flags and their environment path overrides
 still win. Configured artifact directories precede the packaged kernel;
 packaged assets precede incidental checkout/home/PATH defaults. Skopeo, umoci
-and the image builder remain installed preparation tools. Unbundled developer
+and tar run in the bundled tools container; Docker/Podman supplies the endpoint. Unbundled developer
 builds keep the existing input search. Package execution on Linux remains a
 final merge-train check. Replay uses only retained inputs after an upgrade.
 
@@ -62,10 +70,10 @@ compatibility no-op. Native replay evidence remains separate.
 Apple Silicon builds also support native ARM Compose execution through the shared
 world coordinator, including connection selectors and committed console triggers.
 Arbitrary ARM snapshot/fork reuse remains unsupported. Build once with
-`nix develop` and `bash tools/mac-runtime/build-cli.sh` from the Seedbox checkout.
+`nix develop` and `cargo build --release` from the Seedbox checkout.
 The signed CLI packages the ARM kernel and static helpers and automatically owns
-a Linux VM for preparation with Skopeo/umoci/Podman. That VM stops before native
-HVF execution; replay uses only retained bytes and never starts it. No runtime
+Linux filesystem-tools containers through your Docker/Podman endpoint.
+Replay uses retained bytes without that endpoint. No runtime
 compiler or extra VMM path is needed.
 Images must support `linux/arm64`, RAM is limited to 3072 MiB per guest, and
 exploration is serial. CPU/PMU flags apply to Linux. Mac profiles have distinct
@@ -143,6 +151,10 @@ acknowledgement; guest time, state and witnesses remain fixed while paused.
 Wall-time limits and cancellation remain active, and pause time counts against
 the wall limit. CPU leases remain held until execution ends. This requires a
 host-control-capable engine; see the repository's `docs/runtime.md` for details.
+
+Container-backed preparation currently rejects `--build-epoch`; omit it in
+the packaged workflow. The following policy applies only to unbundled native
+Linux development builds.
 
 For optional build timestamp control, `prepare`, `run` and `explore` accept
 `--build-epoch SECONDS` (0..=4294967295; default absent, no environment backing).
@@ -225,8 +237,8 @@ Run/replay check that the host has the KVM and perf capabilities the engine
 needs; CPU model, microcode, CPUID, engine and kernel bytes are not pinned.
 Passing on a second machine is not cross-host qualification.
 
-Check the host and installed engine/kernel with `seedbox doctor` (Linux KVM as
-root, or Apple Silicon Mac as the current user) before running. It uses the normal CPU/runtime defaults without building,
+Check the host and installed engine/kernel with `seedbox doctor --timebase pv`
+on Linux KVM, or `seedbox doctor` on Apple Silicon Mac, before running. It uses the normal CPU/runtime defaults without building,
 preparing images or starting guests. `VALID` means execution-profile compatibility,
 not cross-host replay qualification; `--json` shows the admitted observations.
 

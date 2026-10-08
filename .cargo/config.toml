@@ -12,3 +12,7 @@ test-arm64 = "test --release --locked --manifest-path crates/seedbox-arm64/Cargo
 # reuses relative dep-info across worktrees even when older sources differ.
 [env]
 SEEDBOX_BUILD_ROOT = { value = ".", relative = true, force = true }
+
+# Signing happens after linking, before rustc publishes the executable.
+[target.aarch64-apple-darwin]
+linker = "tools/runtime/linker.py"

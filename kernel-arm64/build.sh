@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Run only inside the Ubuntu arm64 VM. All heavy work stays on its Linux disk.
+# Build in a Linux arm64 environment with a native Linux filesystem.
 set -euo pipefail
 application=false
 if [ "${1:-}" = --application ]; then application=true; shift; fi
 if [ "$#" -ne 1 ]; then echo "usage: $0 [--application] OUTPUT_DIRECTORY" >&2; exit 2; fi
 if [ "$(uname -s)" != Linux ] || [ "$(uname -m)" != aarch64 ]; then
-  echo "build inside the Ubuntu arm64 VM; native macOS builds are unsupported" >&2; exit 2
+  echo "build inside Linux arm64; Cargo release builds provide this container environment" >&2; exit 2
 fi
 here="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$1"
@@ -15,10 +15,10 @@ mkdir -p "$build"
 build="$(cd "$build" && pwd)"
 static_cc="${SEEDBOX_STATIC_CC:-musl-gcc}"
 for tool in curl sha256sum tar xz make gcc "$static_cc" python3 objdump flex bison bc perl findmnt ld ar nm objcopy readelf; do
-  command -v "$tool" >/dev/null || { echo "missing $tool; see docs/arm64-backends.md for VM dependencies" >&2; exit 2; }
+  command -v "$tool" >/dev/null || { echo "missing $tool; use the project assets development shell" >&2; exit 2; }
 done
 case "$(findmnt -n -o FSTYPE -T "$build")" in
-  virtiofs|9p|nfs*|fuse*) echo "build dir must be on the VM's Linux disk: $build" >&2; exit 2 ;;
+  virtiofs|9p|nfs*|fuse*) echo "build dir must use a native Linux filesystem: $build" >&2; exit 2 ;;
 esac
 version=6.12.112
 want=164dc9d1f6c93c61a15e1f071c48379b467f2b17c469cce7223471968208ed03

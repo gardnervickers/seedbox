@@ -31,69 +31,6 @@ pub struct OciPreparer {
 
 pub use crate::preparation_command::PreparationContext;
 
-/// Explicit Linux-only preparation job used by the Mac's owned preparation
-/// VM. It uses ordinary OCI tools and never admits or executes a hypervisor.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkerJob {
-    pub simulation: Simulation,
-    pub tools: OciTools,
-    pub kernel: PathBuf,
-    pub engine: PathBuf,
-    pub init: PathBuf,
-    pub busybox: PathBuf,
-    pub mke2fs: Option<PathBuf>,
-    pub profile: ExecutionProfile,
-    pub store: PathBuf,
-    #[serde(default)]
-    pub export: Option<PathBuf>,
-}
-impl WorkerJob {
-    pub fn prepare(self) -> Result<PreparedInputs> {
-        if !cfg!(all(target_os = "linux", target_arch = "aarch64")) {
-            return Err(Error::Setup(
-                "ARM image preparation requires the owned Linux ARM VM".into(),
-            ));
-        }
-        if self.profile.backend != "seedbox-hvf"
-            || crate::guest::Architecture::from_profile(&self.profile)?
-                != crate::guest::Architecture::Arm64
-        {
-            return Err(Error::Integrity(
-                "ARM preparation job requires an HVF application profile".into(),
-            ));
-        }
-        let preparer = OciPreparer {
-            tools: self.tools,
-            kernel: self.kernel,
-            engine: self.engine,
-            init: self.init,
-            busybox: self.busybox,
-            mke2fs: self.mke2fs,
-            profile: self.profile,
-        };
-        let store = ContentStore::new(self.store);
-        let prepared = preparer.prepare(&self.simulation, &store)?;
-        if let Some(export) = self.export {
-            fs::create_dir(&export)?;
-            fs::write(
-                export.join("prepared.json"),
-                serde_json::to_vec_pretty(&prepared)?,
-            )?;
-            let objects = export.join("objects");
-            fs::create_dir(&objects)?;
-            let digests: std::collections::BTreeSet<_> = prepared.digests().collect();
-            for digest in digests {
-                use std::os::unix::fs::PermissionsExt;
-                let path = objects.join(digest.hex());
-                store.copy_to(digest, &mut fs::File::create(&path)?)?;
-                fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
-            }
-        }
-        Ok(prepared)
-    }
-}
-
 impl PreparationBackend for OciPreparer {
     fn validate_runtime_inputs(&self) -> Result<()> {
         if self.profile.backend == "seedbox-kvm" {
@@ -108,7 +45,7 @@ impl PreparationBackend for OciPreparer {
     }
     fn prepare(&self, simulation: &Simulation, store: &ContentStore) -> Result<PreparedInputs> {
         self.validate_runtime_inputs()?;
-        self.prepare_inner(simulation, store, None)
+        self.prepare_inner(simulation, store, None, &self.tools)
     }
     fn prepare_cancellable(
         &self,
@@ -126,15 +63,28 @@ impl PreparationBackend for OciPreparer {
             self.tools.validate_build_epoch()?;
             context.admit_builder(&self.tools.docker)?;
         }
-        self.prepare_inner(simulation, store, Some(context))
+        self.prepare_inner(simulation, store, Some(context), &self.tools)
     }
 }
 impl OciPreparer {
+    /// Use an explicit image transport while sharing launch, retention and
+    /// boot-archive construction with native Linux preparation.
+    pub fn prepare_with_transport(
+        &self,
+        simulation: &Simulation,
+        store: &ContentStore,
+        context: &PreparationContext,
+        transport: &dyn crate::oci::ImageTransport,
+    ) -> Result<PreparedInputs> {
+        self.validate_runtime_inputs()?;
+        self.prepare_inner(simulation, store, Some(context), transport)
+    }
     fn prepare_inner(
         &self,
         simulation: &Simulation,
         store: &ContentStore,
         context: Option<&PreparationContext>,
+        transport: &dyn crate::oci::ImageTransport,
     ) -> Result<PreparedInputs> {
         let architecture = crate::guest::Architecture::from_profile(&self.profile)?;
         for (name, service) in &simulation.services {
@@ -307,7 +257,7 @@ impl OciPreparer {
                 // A failed import (including cleanup-unverified) never enters this map.
                 let (owner, source) =
                     successful_source(&mut imported_sources, key.clone(), || {
-                        let imported = self.tools.import_frozen_for_arch(
+                        let imported = transport.import(
                             service,
                             &temporary.path().join(name),
                             store,
@@ -329,7 +279,7 @@ impl OciPreparer {
                 }
                 source.for_service(service, store)?
             } else {
-                self.tools.import_frozen_for_arch(
+                transport.import(
                     service,
                     &temporary.path().join(name),
                     store,
@@ -351,7 +301,16 @@ impl OciPreparer {
             // Package only retained bootstrap bytes. The source paths may be
             // replaced by another build while an image is being downloaded.
             let mke2fs = mke2fs.as_deref().filter(|_| !service.volumes.is_empty());
-            build_initramfs_with(&imported.rootfs, &init, &busybox, mke2fs, &recipe, &archive)?;
+            match &imported.rootfs {
+                crate::oci::RootFilesystem::Directory(root) => {
+                    build_initramfs_with(root, &init, &busybox, mke2fs, &recipe, &archive)?
+                }
+                crate::oci::RootFilesystem::Archive(root) => {
+                    crate::guest::build_initramfs_from_tar(
+                        root, &init, &busybox, mke2fs, &recipe, &archive,
+                    )?
+                }
+            }
             let memory_mb = self
                 .profile
                 .semantic_parameters

@@ -158,3 +158,109 @@ fn binary_recipe_keeps_arguments_and_config_bytes_literal() {
     assert_eq!(field(&recipe, &mut cursor), [0, 255, 10]);
     assert_eq!(cursor, recipe.len());
 }
+
+#[test]
+fn linux_tar_preserves_ownership_modes_hardlinks_and_symlinks_without_host_extraction() {
+    let temporary = tempfile::tempdir().unwrap();
+    let input = temporary.path().join("linux.tar");
+    let mut tar = tar::Builder::new(fs::File::create(&input).unwrap());
+    let mut entry = |name: &str, kind, link: Option<&str>, bytes: &[u8]| {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(kind);
+        header.set_uid(1234);
+        header.set_gid(5678);
+        header.set_mode(0o751);
+        header.set_mtime(1234567);
+        header.set_size(bytes.len() as u64);
+        if let Some(link) = link {
+            header.set_link_name(link).unwrap();
+        }
+        header.set_cksum();
+        tar.append_data(&mut header, name, bytes).unwrap();
+    };
+    entry("rootfs", tar::EntryType::Directory, None, b"");
+    entry("rootfs/file", tar::EntryType::Regular, None, b"payload");
+    entry(
+        "rootfs/hardlink",
+        tar::EntryType::Link,
+        Some("rootfs/file"),
+        b"",
+    );
+    entry("rootfs/symlink", tar::EntryType::Symlink, Some("file"), b"");
+    tar.finish().unwrap();
+    let helper = temporary.path().join("helper");
+    fs::write(&helper, b"helper").unwrap();
+    let output = temporary.path().join("guest.cpio");
+    seedbox::guest::build_initramfs_from_tar(&input, &helper, &helper, None, b"recipe", &output)
+        .unwrap();
+    let bytes = fs::read(&output).unwrap();
+    let mut at = 0;
+    let mut entries = std::collections::BTreeMap::new();
+    while at < bytes.len() {
+        assert_eq!(&bytes[at..at + 6], b"070701");
+        let number = |field: usize| {
+            u32::from_str_radix(
+                std::str::from_utf8(&bytes[at + 6 + field * 8..at + 14 + field * 8]).unwrap(),
+                16,
+            )
+            .unwrap()
+        };
+        let inode = number(0);
+        let mode = number(1);
+        let uid = number(2);
+        let gid = number(3);
+        let links = number(4);
+        let mtime = number(5);
+        let size = number(6) as usize;
+        let length = number(11) as usize;
+        let name = std::str::from_utf8(&bytes[at + 110..at + 110 + length - 1])
+            .unwrap()
+            .to_owned();
+        at = (at + 110 + length + 3) & !3;
+        let data = bytes[at..at + size].to_vec();
+        entries.insert(name, (inode, mode, uid, gid, links, mtime, data));
+        at = (at + size + 3) & !3;
+    }
+    let file = &entries["rootfs/file"];
+    assert_eq!(
+        (file.1, file.2, file.3, file.4, file.5),
+        (0o100751, 1234, 5678, 2, 1234567)
+    );
+    assert_eq!(file.6, b"payload");
+    assert_eq!(file.0, entries["rootfs/hardlink"].0);
+    assert_eq!(entries["rootfs/symlink"].6, b"file");
+}
+
+#[test]
+fn linux_tar_cannot_replace_seedbox_bootstrap_or_reference_missing_hardlinks() {
+    let temporary = tempfile::tempdir().unwrap();
+    for (name, link) in [("init", None), ("rootfs/link", Some("rootfs/absent"))] {
+        let input = temporary.path().join("bad.tar");
+        let mut archive = tar::Builder::new(fs::File::create(&input).unwrap());
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o755);
+        header.set_size(0);
+        header.set_mtime(0);
+        if let Some(link) = link {
+            header.set_entry_type(tar::EntryType::Link);
+            header.set_link_name(link).unwrap();
+        }
+        header.set_cksum();
+        archive.append_data(&mut header, name, &[][..]).unwrap();
+        archive.finish().unwrap();
+        let helper = temporary.path().join("helper");
+        fs::write(&helper, b"helper").unwrap();
+        let error = seedbox::guest::build_initramfs_from_tar(
+            &input,
+            &helper,
+            &helper,
+            None,
+            b"",
+            &temporary.path().join("bad.cpio"),
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("invalid Linux root filesystem archive"));
+    }
+}

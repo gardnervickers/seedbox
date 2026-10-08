@@ -863,7 +863,7 @@ fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
     let help = seedbox(&["help", "doctor"], root);
     assert!(help.status.success());
     let text = String::from_utf8(help.stdout).unwrap();
-    assert!(text.contains("Linux KVM host, root"));
+    assert!(text.contains("Linux KVM host"));
     for flag in ["--cpu", "--kernel", "--vmm", "--json"] {
         assert!(text.contains(flag), "{text}");
     }

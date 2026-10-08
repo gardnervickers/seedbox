@@ -97,7 +97,12 @@ fn real_registry_images_use_the_verified_import_path() {
                 &store,
             )
             .unwrap();
-        assert!(imported.rootfs.join(binary).is_file());
+        assert!(match &imported.rootfs {
+            seedbox::oci::RootFilesystem::Directory(path) => path,
+            _ => panic!("native import returned an archive"),
+        }
+        .join(binary)
+        .is_file());
         assert!(!imported.image.layers.is_empty());
         for hash in imported.image.layers {
             store.verify(&hash).unwrap();
@@ -126,10 +131,27 @@ fn dockerfile_layers_apply_whiteouts_and_preserve_launch_metadata() {
     let imported = OciTools::default()
         .import(&service, &directory.path().join("image"), &store)
         .unwrap();
-    assert!(!imported.rootfs.join("data/remove").exists());
-    assert!(!imported.rootfs.join("source/ignored").exists());
+    assert!(!match &imported.rootfs {
+        seedbox::oci::RootFilesystem::Directory(path) => path,
+        _ => panic!("native import returned an archive"),
+    }
+    .join("data/remove")
+    .exists());
+    assert!(!match &imported.rootfs {
+        seedbox::oci::RootFilesystem::Directory(path) => path,
+        _ => panic!("native import returned an archive"),
+    }
+    .join("source/ignored")
+    .exists());
     assert_eq!(
-        fs::read_to_string(imported.rootfs.join("data/link")).unwrap(),
+        fs::read_to_string(
+            match &imported.rootfs {
+                seedbox::oci::RootFilesystem::Directory(path) => path,
+                _ => panic!("native import returned an archive"),
+            }
+            .join("data/link")
+        )
+        .unwrap(),
         "keep\n"
     );
     assert_eq!(imported.image.launch.argv, ["/bin/echo", "default"]);

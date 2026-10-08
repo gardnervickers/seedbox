@@ -1,3 +1,4 @@
+from fixture_files import copy_cargo_config
 """Compile the real portable core through the standalone package boundary."""
 import hashlib
 import os
@@ -22,7 +23,7 @@ class CoreBuildTests(unittest.TestCase):
                 root = temporary / spelling
                 (root / 'harness').mkdir(parents=True)
                 (root / '.cargo').mkdir()
-                shutil.copy2(ROOT / '.cargo/config.toml', root / '.cargo/config.toml')
+                copy_cargo_config(ROOT / '.cargo/config.toml', root)
                 shutil.copy2(ROOT / 'harness/vmm-rustc.py', root / 'harness/vmm-rustc.py')
                 for name in ['seedbox-control', 'seedbox-engine-core']:
                     shutil.copytree(ROOT / 'crates' / name, root / 'crates' / name)

@@ -70,6 +70,15 @@ impl ExecutionBackend for Executor {
         self.backend().validate_retained(inputs)
     }
     fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
+        eprintln!(
+            "running: starting {} machines through {}",
+            request.prepared.guests.len(),
+            if cfg!(target_os = "macos") {
+                "HVF"
+            } else {
+                "KVM"
+            }
+        );
         self.backend().execute(request)
     }
 }
@@ -77,8 +86,7 @@ impl ExecutionBackend for Executor {
 pub enum Preparer {
     #[cfg_attr(all(target_os = "macos", target_arch = "aarch64"), allow(dead_code))]
     Linux(Box<LinuxPreparer>),
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    Mac(Box<seedbox::mac_runtime::MacPreparer>),
+    Container(Box<seedbox::container_runtime::ContainerPreparer>),
 }
 pub struct LinuxPreparer {
     pub inputs: OciPreparer,
@@ -86,19 +94,10 @@ pub struct LinuxPreparer {
     pub _assets: Option<seedbox::runtime_assets::RuntimeAssets>,
 }
 impl Preparer {
-    pub fn cancellation(&mut self, token: CancellationToken) {
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        if let Self::Mac(preparer) = self {
-            preparer.cancellation = token;
-        }
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        let _ = token;
-    }
     fn backend(&self) -> &dyn PreparationBackend {
         match self {
             Self::Linux(e) => &e.inputs,
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            Self::Mac(e) => e.as_ref(),
+            Self::Container(e) => e.as_ref(),
         }
     }
 }
@@ -107,8 +106,7 @@ impl Deref for Preparer {
     fn deref(&self) -> &OciPreparer {
         match self {
             Self::Linux(e) => &e.inputs,
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            Self::Mac(e) => &e.inputs,
+            Self::Container(e) => &e.inputs,
         }
     }
 }
@@ -116,8 +114,7 @@ impl DerefMut for Preparer {
     fn deref_mut(&mut self) -> &mut OciPreparer {
         match self {
             Self::Linux(e) => &mut e.inputs,
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            Self::Mac(e) => &mut e.inputs,
+            Self::Container(e) => &mut e.inputs,
         }
     }
 }
@@ -139,18 +136,56 @@ impl PreparationBackend for Preparer {
     }
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub fn mac_runtime() -> Result<seedbox::mac_runtime::Runtime> {
+pub fn container_runtime(kernel_only: bool) -> Result<seedbox::container_runtime::Runtime> {
     let home = std::env::var_os("HOME").ok_or_else(|| {
         seedbox::Error::Setup("HOME is unset; set it to your home directory".into())
     })?;
     let cache = std::env::var_os("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(home).join("Library/Caches"));
-    let lima = super::defaults::preparation_tool(Path::new("limactl"))?;
-    // Lima's UNIX sockets need a short path. The runtime enforces private
-    // ownership and a Seedbox marker before ever starting or stopping a VM.
-    let vm_home =
-        std::path::PathBuf::from(format!("/tmp/seedbox-prep-{}", unsafe { libc::geteuid() }));
-    seedbox::mac_runtime::Runtime::embedded(&cache.join("seedbox/mac-runtime"), lima, vm_home)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(home).join(if cfg!(target_os = "macos") {
+                "Library/Caches"
+            } else {
+                ".cache"
+            })
+        });
+    seedbox::container_runtime::Runtime::embedded(&cache.join("seedbox/runtime"), kernel_only)
+}
+
+pub fn container_client(
+    requested: &Path,
+    cancellation: &CancellationToken,
+) -> Result<std::path::PathBuf> {
+    if requested != Path::new("auto") {
+        return super::defaults::preparation_tool(requested);
+    }
+    let mut found = Vec::new();
+    for name in ["docker", "podman"] {
+        if let Ok(client) = super::defaults::preparation_tool(Path::new(name)) {
+            match seedbox::container_runtime::ContainerPreparer::check_client(
+                &client,
+                cancellation.clone(),
+            ) {
+                Ok(()) => return Ok(client),
+                Err(seedbox::Error::PreparationCancelled) => {
+                    return Err(seedbox::Error::PreparationCancelled)
+                }
+                Err(_) => (),
+            }
+            found.push(name);
+        }
+    }
+    Err(seedbox::Error::Setup(if found.is_empty() {
+        "no Docker/Podman client found; install Docker or Podman (or enter nix develop), then start its Linux engine".into()
+    } else {
+        format!("container engine unavailable; start Docker Desktop or your Podman machine (Linux: start its service), and check DOCKER_HOST or CONTAINER_HOST; tried {}", found.join(", "))
+    }))
+}
+
+pub fn preparation_progress(message: &str) {
+    eprintln!("preparing: {}", message.replace('-', " "));
+}
+
+pub fn container_runtime_available() -> bool {
+    seedbox::container_runtime::Runtime::available()
 }

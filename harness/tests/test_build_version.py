@@ -1,3 +1,4 @@
+from fixture_files import copy_cargo_config
 """Exercise the actual provenance build script and Cargo's incremental cache."""
 import hashlib
 import os
@@ -24,7 +25,7 @@ class BuildVersionTests(unittest.TestCase):
         (crate / "Cargo.toml").write_text(
             '[package]\nname="version-probe"\nversion="0.1.0"\nedition="2021"\nbuild="build-runtime.rs"\n[workspace]\n')
         (crate / "src/main.rs").write_text(
-            '''include!(concat!(env!("OUT_DIR"), "/mac-runtime.rs"));
+            '''include!(concat!(env!("OUT_DIR"), "/container-runtime.rs"));
 include!(concat!(env!("OUT_DIR"), "/linux-runtime.rs"));
 fn main() {
     if std::env::args().any(|argument| argument == "--linux-bundle") {
@@ -33,17 +34,18 @@ fn main() {
             None => print!("<none>"),
         }
     } else if std::env::args().any(|argument| argument == "--bundle") {
-        print!("{}", std::str::from_utf8(MAC_RUNTIME.unwrap()).unwrap());
+        print!("{}", std::str::from_utf8(RUNTIME.unwrap_or(b"<none>")).unwrap());
     } else { println!("{}", env!("SEEDBOX_SIMULATOR_VERSION")); }
 }
 ''')
         (root / "tracked.txt").write_text("initial\n")
-        for relative in ["crates/seedbox/build-runtime.rs", ".cargo/config.toml", "crates/seedbox/build_version.rs",
+        for relative in ["crates/seedbox/build-runtime.rs", "crates/seedbox/build_version.rs",
                          "guest/compose-init.c", "guest/control.h", "guest/barrier.h", "guest/environment.h",
                          "guest/io.h", "kernel-arm64/supervisor-io.h"]:
             destination = root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / relative, destination)
+        copy_cargo_config(ROOT / ".cargo/config.toml", root)
         self.git(root, "init", "-q", "--initial-branch=probe/main")
         self.git(root, "add", ".")
         self.git(root, "commit", "-qm", "initial")
@@ -191,7 +193,7 @@ fn main() {
             environment["CARGO_TARGET_DIR"] = str(target)
             # Keep the bundle environment value unchanged across checkouts so
             # it cannot mask a missing checkout invalidation dependency.
-            environment["SEEDBOX_MAC_RUNTIME_BUNDLE"] = "../../runtime-bundle"
+            environment["SEEDBOX_LINUX_RUNTIME_BUNDLE"] = "../../runtime-bundle"
             environment["SEEDBOX_STATIC_CC"] = str(temporary / "absent-compiler")
             # Cargo selects and embeds each checkout's distinct bundle while the
             # real script must select its Git state and guest inputs at runtime.
@@ -205,7 +207,7 @@ fn main() {
                     expected += ".dirty"
                 binary = str(target / "debug/version-probe")
                 self.assertEqual(subprocess.check_output([binary], text=True).strip(), expected, result.stdout)
-                self.assertEqual(subprocess.check_output([binary, "--bundle"], text=True),
+                self.assertEqual(subprocess.check_output([binary, "--linux-bundle"], text=True),
                                  (root / "runtime-bundle").read_text(), result.stdout)
                 outputs = list((target / "debug/build").glob("version-probe-*/output"))
                 watched = [Path(line.removeprefix("cargo::rerun-if-changed=")).resolve()
@@ -237,7 +239,7 @@ fn main() {
                 runtime.update(CARGO_MANIFEST_DIR=str(root / "crates/seedbox"), OUT_DIR=str(output),
                                CARGO_CFG_TARGET_OS="linux", CARGO_CFG_TARGET_ARCH="x86_64",
                                SEEDBOX_STATIC_CC=str(compiler), SEEDBOX_BUILD_ROOT=str(first),
-                               SEEDBOX_MAC_RUNTIME_BUNDLE=str(root / "runtime-bundle"))
+                               SEEDBOX_LINUX_RUNTIME_BUNDLE=str(root / "runtime-bundle"))
                 result = subprocess.run([str(script)], cwd=root / "crates/seedbox", env=runtime,
                                         check=True, capture_output=True, text=True, timeout=30)
                 inputs = ["guest/compose-init.c", "guest/control.h", "guest/barrier.h", "guest/environment.h",
@@ -294,14 +296,14 @@ fn main() {
             environment["SEEDBOX_LINUX_RUNTIME_BUNDLE"] = str(second)
             build("linux-second")
             mac = temporary / "mac-bundle"
-            mac.write_text("mac-independent")
+            mac.write_text("<none>")
             environment["SEEDBOX_MAC_RUNTIME_BUNDLE"] = str(mac)
-            build("linux-second", "mac-independent")
+            build("linux-second", "<none>")
             environment.pop("SEEDBOX_LINUX_RUNTIME_BUNDLE")
-            build("<none>", "mac-independent")
-            build("<none>", "mac-independent", fresh=True)
+            build("<none>", "<none>")
+            build("<none>", "<none>", fresh=True)
             environment["SEEDBOX_LINUX_RUNTIME_BUNDLE"] = str(first)
-            build("linux-first-replaced-in-place", "mac-independent")
+            build("linux-first-replaced-in-place", "<none>")
             environment.pop("SEEDBOX_LINUX_RUNTIME_BUNDLE")
             environment.pop("SEEDBOX_MAC_RUNTIME_BUNDLE")
             build("<none>")

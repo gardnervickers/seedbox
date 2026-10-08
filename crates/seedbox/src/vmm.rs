@@ -601,6 +601,7 @@ impl VmmExecutor {
     fn uncounted_preflight(&self, workers: u32) -> Result<()> {
         #[cfg(target_os = "linux")]
         {
+            crate::host::check_kvm_access()?;
             with_capacity(
                 workers,
                 || crate::host::CpuReservation::acquire(self.cpu),

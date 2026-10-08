@@ -12,7 +12,6 @@ pub fn dispatch(args: impl IntoIterator<Item = OsString>) -> Option<ExitCode> {
         Some(seedbox::engine::INTERNAL_WORKER_V1) => world_worker(executable, args.collect()),
         Some("arm64-fixture-v1") => arm_fixture(executable, args.collect()),
         Some("arm64-machine-v2") => arm_machine(args.collect()),
-        Some("arm64-preparation-v1") => arm_prepare(args.collect()),
         Some("arm64-world-v1") => arm_world(executable, args.collect()),
         _ => error("unsupported internal engine contract; use the CLI retained with this run"),
     })
@@ -92,27 +91,6 @@ fn arm_world(executable: OsString, args: Vec<OsString>) -> ExitCode {
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 fn arm_world(_: OsString, _: Vec<OsString>) -> ExitCode {
     error("internal HVF world requires Apple Silicon macOS")
-}
-
-fn arm_prepare(args: Vec<OsString>) -> ExitCode {
-    let run = || -> Result<(), String> {
-        let [path] = args.as_slice() else {
-            return Err("internal ARM preparation contract requires one job path".into());
-        };
-        let file = std::fs::File::open(path).map_err(|e| format!("preparation job: {e}"))?;
-        let job: seedbox::preparation::WorkerJob =
-            serde_json::from_reader(file).map_err(|e| format!("preparation job: {e}"))?;
-        let prepared = job.prepare().map_err(|e| e.to_string())?;
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&prepared).map_err(|e| e.to_string())?
-        );
-        Ok(())
-    };
-    match run() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(message) => error(&message),
-    }
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

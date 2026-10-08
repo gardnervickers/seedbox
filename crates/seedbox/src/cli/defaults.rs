@@ -95,6 +95,10 @@ fn kernel(explicit: Option<PathBuf>) -> Result<PathBuf> {
     KernelLocations::from_environment().resolve(explicit, None)
 }
 
+pub fn packaged_kernel(explicit: Option<PathBuf>, packaged: PathBuf) -> Result<PathBuf> {
+    KernelLocations::from_environment().resolve(explicit, Some(packaged))
+}
+
 #[derive(Default)]
 pub struct LinuxOverrides {
     pub kernel: Option<PathBuf>,
@@ -129,6 +133,34 @@ pub fn linux_runtime(
     selection: AssetSelection,
     store: Option<&ContentStore>,
 ) -> Result<LinuxRuntime> {
+    if crate::cli::backends::container_runtime_available() {
+        let runtime =
+            crate::cli::backends::container_runtime(matches!(selection, AssetSelection::Kernel))?;
+        let resolve = |flag, explicit: Option<PathBuf>, name| match explicit {
+            Some(path) => existing(flag, path),
+            None => Ok(runtime.input(name)),
+        };
+        let all = matches!(selection, AssetSelection::All);
+        return Ok(LinuxRuntime {
+            kernel: packaged_kernel(overrides.kernel, runtime.input("Image"))?,
+            init: if all {
+                Some(resolve("--guest-init", overrides.init, "compose-init")?)
+            } else {
+                None
+            },
+            busybox: if all {
+                Some(resolve("--busybox", overrides.busybox, "busybox")?)
+            } else {
+                None
+            },
+            mke2fs: if all {
+                Some(resolve("--mke2fs", overrides.mke2fs, "mke2fs")?)
+            } else {
+                None
+            },
+            assets: None,
+        });
+    }
     resolve_linux_runtime(
         overrides,
         parent,

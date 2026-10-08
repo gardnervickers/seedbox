@@ -1,3 +1,4 @@
+from fixture_files import copy_cargo_config
 """Shared protocol package inputs must follow the consumer's current checkout."""
 import os
 from pathlib import Path
@@ -52,7 +53,7 @@ class ProtocolSourceTests(unittest.TestCase):
                     (src / 'lib.rs').write_text('pub fn ' + function + '() -> u32 { ' + str(value) + ' }\n')
             source(first, 1)
             (first / '.cargo').mkdir()
-            shutil.copy2(ROOT / '.cargo/config.toml', first / '.cargo/config.toml')
+            copy_cargo_config(ROOT / '.cargo/config.toml', first)
             if package == 'engine-core':
                 protocol = first / 'crates/seedbox-control'
                 (protocol / 'src').mkdir(parents=True)

@@ -239,6 +239,21 @@ impl PreparationContext {
         }
         self.run_owned(command, phase, tag, build, cleanup, None)
     }
+    /// Capture a small protocol reply with the same cancellation, quotas and
+    /// process ownership as preparation commands. Never use unbounded output().
+    pub(crate) fn output(
+        &self,
+        command: &mut Command,
+        phase: &str,
+        cleanup: bool,
+    ) -> Result<Vec<u8>> {
+        if !cleanup {
+            self.check()?;
+        }
+        let mut output = Vec::new();
+        self.run_owned(command, phase, None, false, cleanup, Some(&mut output))?;
+        Ok(output)
+    }
     #[cfg(unix)]
     fn run_owned(
         &self,

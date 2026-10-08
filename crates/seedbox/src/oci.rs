@@ -41,10 +41,42 @@ impl Default for OciTools {
     }
 }
 
+/// Linux filesystems stay on Linux; a container transport returns an archive.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RootFilesystem {
+    Directory(PathBuf),
+    Archive(PathBuf),
+}
+
+pub trait ImageTransport {
+    fn import(
+        &self,
+        service: &Service,
+        directory: &Path,
+        store: &ContentStore,
+        context: Option<(&crate::preparation::PreparationContext, &str)>,
+        frozen: Option<&FrozenContext>,
+        architecture: crate::guest::Architecture,
+    ) -> Result<ImportedImage>;
+}
+impl ImageTransport for OciTools {
+    fn import(
+        &self,
+        service: &Service,
+        directory: &Path,
+        store: &ContentStore,
+        context: Option<(&crate::preparation::PreparationContext, &str)>,
+        frozen: Option<&FrozenContext>,
+        architecture: crate::guest::Architecture,
+    ) -> Result<ImportedImage> {
+        self.import_frozen_for_arch(service, directory, store, context, frozen, architecture)
+    }
+}
+
 #[derive(Clone)]
 pub struct ImportedImage {
     pub image: PreparedImage,
-    pub rootfs: PathBuf,
+    pub rootfs: RootFilesystem,
     pub auxiliary: BTreeMap<String, ContentDigest>,
     pub provenance: BTreeMap<String, String>,
 }
@@ -61,7 +93,7 @@ impl ImportedImage {
 }
 
 /// One retained context, frozen before any service-specific build or launch.
-pub(crate) struct FrozenContext {
+pub struct FrozenContext {
     pub root: PathBuf,
     pub digest: ContentDigest,
 }
@@ -371,7 +403,7 @@ impl OciTools {
         )?;
         Ok(ImportedImage {
             image,
-            rootfs: bundle.join("rootfs"),
+            rootfs: RootFilesystem::Directory(bundle.join("rootfs")),
             auxiliary,
             provenance,
         })
@@ -732,7 +764,7 @@ mod context_tests {
                 layers: vec![store.put(b"layer").unwrap()],
                 launch: resolve_launch(&simulation.services["a"], &defaults).unwrap(),
             },
-            rootfs: temp.path().join("rootfs"),
+            rootfs: RootFilesystem::Directory(temp.path().join("rootfs")),
             auxiliary: BTreeMap::new(),
             provenance: BTreeMap::new(),
         };

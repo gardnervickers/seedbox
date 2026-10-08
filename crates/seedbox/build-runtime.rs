@@ -30,24 +30,57 @@ fn main() {
         );
     }
     simulator_version(&root);
-    println!("cargo::rerun-if-env-changed=SEEDBOX_MAC_RUNTIME_BUNDLE");
-    let bundle = env::var_os("SEEDBOX_MAC_RUNTIME_BUNDLE").map(PathBuf::from);
-    let declaration = if let Some(bundle) = bundle {
-        let bundle =
-            std::fs::canonicalize(bundle).expect("Mac runtime bundle must exist at CLI build time");
-        println!("cargo::rerun-if-changed={}", bundle.display());
+    // Release builds own guest assets. Debug builds remain portable for readers
+    // and unit tests and do not require a container engine.
+    let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo output directory"));
+    let bundle = output.join("runtime.tar.gz");
+    let release = env::var("PROFILE").as_deref() == Ok("release");
+    let supported = matches!(
+        (
+            env::var("CARGO_CFG_TARGET_OS").as_deref(),
+            env::var("CARGO_CFG_TARGET_ARCH").as_deref()
+        ),
+        (Ok("linux"), Ok("x86_64")) | (Ok("macos"), Ok("aarch64"))
+    );
+    let declaration = if release && supported {
+        for input in [
+            "flake.nix",
+            "flake.lock",
+            "guest",
+            "kernel",
+            "kernel-arm64",
+            "tools/runtime",
+            "tools/linux-runtime/package.py",
+        ] {
+            println!("cargo::rerun-if-changed={}", root.join(input).display());
+        }
+        let arch = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+            Ok("aarch64") => "arm64",
+            Ok("x86_64") => "amd64",
+            _ => panic!("unsupported guest build architecture"),
+        };
+        let status = Command::new("python3")
+            .arg(root.join("tools/runtime/build.py"))
+            .arg(&bundle)
+            .arg(arch)
+            .status()
+            .unwrap_or_else(|error| {
+                eprintln!("guest assets: cannot run python3: {error}; enter nix develop");
+                std::process::exit(1);
+            });
+        if !status.success() {
+            eprintln!("guest asset preparation failed; see build output above");
+            std::process::exit(1);
+        }
         format!(
-            "pub const MAC_RUNTIME:Option<&[u8]>=Some(include_bytes!({:?}));\n",
+            "pub const RUNTIME: Option<&[u8]> = Some(include_bytes!({:?}));\n",
             bundle
         )
     } else {
-        "pub const MAC_RUNTIME:Option<&[u8]>=None;\n".into()
+        "pub const RUNTIME: Option<&[u8]> = None;\n".into()
     };
-    std::fs::write(
-        PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("mac-runtime.rs"),
-        declaration,
-    )
-    .unwrap();
+    std::fs::write(output.join("container-runtime.rs"), declaration)
+        .expect("write runtime declaration");
     println!("cargo::rerun-if-env-changed=SEEDBOX_LINUX_RUNTIME_BUNDLE");
     let linux_bundle = env::var_os("SEEDBOX_LINUX_RUNTIME_BUNDLE").map(PathBuf::from);
     let linux_declaration = if let Some(bundle) = linux_bundle {
@@ -67,6 +100,11 @@ fn main() {
     )
     .unwrap();
     println!("cargo::rustc-check-cfg=cfg(seedbox_embedded_init)");
+    if release && supported {
+        // The package already contains the Linux-built supervisor. Native
+        // development builds keep the legacy embedded-supervisor fallback.
+        return;
+    }
     let source = root.join("guest/compose-init.c");
     println!("cargo::rerun-if-changed={}", source.display());
     println!(
