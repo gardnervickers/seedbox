@@ -317,14 +317,15 @@ impl VmmExecutor {
             #[cfg(target_os = "linux")]
             {
                 crate::host::check_kvm_access()?;
-                return with_capacity(
+                let mut report = None;
+                with_capacity(
                     1,
                     || crate::host::CpuReservation::acquire(executor.cpu),
                     |reservations| {
                         let reservation = reservations.first().ok_or_else(|| {
                             Error::Integrity("doctor did not reserve a CPU".into())
                         })?;
-                        Ok(DoctorReport {
+                        report = Some(DoctorReport {
                             timebase: Timebase::Pv,
                             cpu: reservation.cpu,
                             cpus: reservation.cpus.iter().copied().collect(),
@@ -336,9 +337,13 @@ impl VmmExecutor {
                                 .cloned(),
                             kernel: kernel.clone(),
                             observations: Vec::new(),
-                        })
+                        });
+                        Ok(())
                     },
-                );
+                )?;
+                return report.ok_or_else(|| {
+                    Error::Integrity("doctor did not collect its reserved CPU".into())
+                });
             }
             #[cfg(not(target_os = "linux"))]
             return Err(Error::Setup(
