@@ -18,8 +18,8 @@ bash kernel/build.sh                 # guest kernel -> ~/seedbox-sim/artifacts/b
 cargo build --release                # target/release/seedbox
 
 cargo run -- validate examples/etcd
-sudo -E env PATH="$PATH" target/release/seedbox run examples/etcd --allow-dev-engine
-sudo -E env PATH="$PATH" target/release/seedbox replay .seedbox/runs/ATTEMPT --allow-dev-engine
+sudo -E env PATH="$PATH" target/release/seedbox run examples/etcd
+sudo -E env PATH="$PATH" target/release/seedbox replay .seedbox/runs/ATTEMPT
 cargo run -- inspect .seedbox/runs/ATTEMPT
 cargo run -- logs .seedbox/runs/ATTEMPT --machine client --stream console --since-ns 1000000000
 cargo run -- diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
@@ -45,7 +45,7 @@ directory. Every runtime input has a default, so no flags are required:
 | BusyBox | `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
 | mke2fs (only for named volumes) | `SEEDBOX_MKE2FS` (set by `nix develop`), then a static `mke2fs` on `PATH` | `--mke2fs` |
 | Build epoch | absent; preserve the builder's ordinary timestamp policy | `--build-epoch` (prepare/run/explore; no environment backing) |
-| Engine qualification | pinned engine and guest kernel; dev artifacts require explicit opt-in | `--allow-dev-engine` (run/explore/replay/doctor; no environment backing) |
+| Engine and guest kernel | any built engine and kernel are admitted; the run records their hashes | `--vmm`, `--kernel` |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
 | Diff inputs | Two required retained run directories; no runtime inputs or state lookup | positional `RUN_A RUN_B` |
 | Per-page RAM evidence | off; under `--full-state`, retain `output/machines/NAME.pages` beside machine traces | existing `--full-state` |
@@ -79,22 +79,20 @@ inherit the old fault. See [connection selectors](docs/runtime.md#connection-sel
 for lifecycle and unsupported-traffic behavior, and the
 [AMD validation procedure](docs/connection-selectors-amd.md).
 
-For development artifacts, pass `--allow-dev-engine` to `run`, `explore`, `replay`
-or `doctor`. Unpinned engine or guest-kernel bytes record the semantic parameter
-`engine_qualification = "dev-unpinned"` and are reported as an unqualified dev
-engine. Replay requires this flag and the exact retained engine/kernel hashes;
-bundles preserve the marker. Passing the flag with both pinned artifacts adds no
-marker. All host, CPU, PMU, MSR, lease, ABI and control-channel checks still apply.
+Engines and guest kernels are not pinned: any built engine and kernel are
+admitted, and each run records their hashes. `--allow-dev-engine` is still accepted and has no effect.
+Runs recorded earlier with `engine_qualification = "dev-unpinned"` still replay,
+on their exact retained engine and kernel. All host, CPU, PMU, MSR, lease, ABI and
+control-channel checks still apply.
 
 `seedbox --version` reports the simulator version. New runs retain the complete
 `seedbox` executable and its platform/worker contract; replay launches those
 retained bytes even after the installed CLI is upgraded. The executable hash is
 an internal integrity reference, so equal version labels never substitute for
 equal bytes. Existing runs without a worker descriptor retain the standalone
-VMM contract. The combined development executable requires `--allow-dev-engine`
-until it receives separate runtime qualification; the frozen engine policy is
-unchanged. `prepare` records this development qualification without granting
-permission to execute.
+VMM contract. The combined executable has its own engine identity and needs
+separate runtime evidence. Every built engine and guest kernel is admitted;
+`--allow-dev-engine` remains a compatibility no-op.
 
 The ARM engine is also linked on ARM hypervisor hosts. It currently supports the
 existing experimental fixture only; public Compose `run`/`replay` still require
@@ -361,15 +359,12 @@ path is experimental: it retains the counter in identity, validates exact
 supported release inputs and applicable KVM capabilities, and holds every SMT
 lease through child cleanup. It carries no qualified AMD host-policy proof and
 never opens AMD workaround MSRs. `doctor` refuses an unqualified counter rather
-than reporting qualified compatibility. The source policy now pins frozen engine391f and guest kernel68bf (K2).
-The artifact is built but unqualified: this staged release still requires fresh
-runtime acceptance before use. Disabled selected-event readiness is checked
+than reporting qualified compatibility. Disabled selected-event readiness is checked
 before preparation and again under held leases; no guest counter is enabled by
 admission. Intel determinism is not established.
 
 The versioned `amd-zen3-engine391f-v3` admission policy checks AMD family 25,
-model 33, stepping 0 and microcode 0xa20102e, controlled guest-kernel bytes,
-accepted engine bytes, KVM capabilities and the engine's complete existing CPUID
+model 33, stepping 0 and microcode 0xa20102e, KVM capabilities and the engine's complete existing CPUID
 policy. Host-kernel bytes are not checked. Before image preparation, it temporarily
 reserves an eligible core, checks each online/allowed SMT sibling and opens the
 exact perf event disabled. Descriptors close and affinity/reservations restore
@@ -383,10 +378,8 @@ remain inspectable and transferable, but replay through this CLI rejects missing
 or drifted host-policy proof as ERROR/NOT_COMPARABLE (exit 2), even with
 `--allow-engine-change`. A retained previous CLI can still be used for explicitly
 historical evidence; its execution does not establish new-policy admission.
-A new engine/kernel/policy requires its own acceptance for qualification.
-`--allow-dev-engine` admits unpinned engine/kernel bytes for development with a
-retained unqualified marker; it never bypasses missing or drifted host proof. Admission source checks
-are separate from the still-required focused Linux guest/profile acceptance.
+Admission source checks are separate from the still-required focused Linux
+guest/profile acceptance.
 
 ## Check execution compatibility
 
@@ -394,9 +387,7 @@ are separate from the still-required focused Linux guest/profile acceptance.
 against the same versioned admission policy used by execution. It needs a Linux
 KVM host and root, uses the normal `--cpu`, `--kernel` and `--vmm` defaults, and
 never builds a missing VMM, prepares images or starts guests. `--json` prints the
-exact admitted observations, plus `engine_qualification: "dev-unpinned"` for dev
-artifacts. With `--allow-dev-engine`, unpinned artifacts print `dev engine:
-unqualified` and receive no qualification claim. Success prints `VALID` after probe resources and
+exact admitted observations. Success prints `VALID` after probe resources and
 thread affinity are verified cleaned up; problems use the ordinary error and
 exit status 2. This is compatibility readiness, not cross-host replay qualification.
 

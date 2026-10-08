@@ -72,11 +72,10 @@ retained executable with the saved contract and metadata, without replacing its
 version with the installed CLI's version. No manifest or bundle format changes
 are needed. Historical profiles with no descriptor still invoke their retained
 standalone VMM directly. Partial, unknown or incompatible descriptors fail
-before host execution. The combined executable is a development engine under
-the existing explicit `--allow-dev-engine` gate; it has not received new release
-qualification. `prepare` records the development marker without authorizing
-execution. On ARM, only the experimental fixture is integrated; Compose worlds
-remain Linux x86-64.
+before host execution. Every built engine and guest kernel is admitted, with
+exact bytes retained for replay; `--allow-dev-engine` is a compatibility no-op.
+Native execution and witness equivalence still need host evidence. On ARM,
+only the experimental fixture is integrated; Compose worlds remain Linux x86-64.
 
 The `seedbox` build embeds the static guest supervisor from `guest/compose-init.c`,
 compiled with the shell's musl compiler (`SEEDBOX_STATIC_CC`, or `musl-gcc`).
@@ -233,9 +232,8 @@ locator and private endpoint. Host loss or SIGKILL may leave stale paths, which
 cannot acknowledge commands; completed, unavailable and older engines return a
 setup error. Pause is not a snapshot and cannot survive process exit or host reboot.
 
-The VMM source change produces a new engine identity. The accepted frozen engine,
-kernel pins and admission policy are unchanged; build the new engine with
-`cargo build-vmm` on Linux and use `--allow-dev-engine` until separately qualified.
+The VMM source change produces a new engine identity. Build the new engine
+with `cargo build-vmm` on Linux.
 Portable tests exercise the actual socket gate and CLI acknowledgements. The ignored
 KVM comparison needs a completed full-state run made with this new engine and enough
 wall-time headroom; it exports/imports exact retained inputs into private scratch
@@ -295,19 +293,12 @@ operation, including its remaining cost and transferred bytes, in the exit
 witness and the full-state `pending_io` part. Other clock advances retain the
 strict hard-stop check.
 
-`--allow-dev-engine` on run, explore, replay and doctor explicitly admits an
-unpinned VMM or guest kernel. It has no environment or configuration backing.
-Such runs bind `engine_qualification = "dev-unpinned"` in their semantic identity,
-and their run report and inspect JSON carry the marker through export/import.
-Both pinned artifacts remain ordinary runs even when the flag is supplied.
-Unknown markers, a dev marker with both artifacts pinned, and unpinned artifacts
-without the marker are rejected. All other admission checks remain in force.
-
-Replaying a marked dev run requires `--allow-dev-engine` and the same retained
-engine/kernel hashes. MATCH and MISMATCH output is labelled `unqualified dev
-engine`; omitting the flag retains NOT_COMPARABLE (exit 2) naming the flag before
-live host admission. `--allow-engine-change` cannot change a dev run's engine.
-This opt-in does not qualify development artifacts or change release pins.
+Engines and guest kernels are not pinned: run, explore, replay and doctor admit
+any built VMM and guest kernel, and each run records their hashes in its
+identity. `--allow-dev-engine` is still accepted and has no effect. Runs recorded earlier with
+`engine_qualification = "dev-unpinned"` still replay on their exact retained
+engine and kernel, and `--allow-engine-change` cannot change their engine.
+All other admission checks remain in force.
 
 Replay defaults to the retained engine. An explicit `--vmm NEW_BINARY
 --allow-engine-change` permits a fresh identity and witness comparison with it.
@@ -420,11 +411,6 @@ exact observations admitted by that probe; there is no second read or cached
 host inventory. No content store, run directory, image preparation or guest is
 created. Missing inputs, unsupported capabilities, busy leases and profile drift
 retain the same actionable errors as execution; no repair or fallback occurs.
-
-For unpinned artifacts, `seedbox doctor --allow-dev-engine` uses the same host
-probe and prints `dev engine: unqualified`; its JSON includes
-`engine_qualification: "dev-unpinned"`. This is unqualified development readiness.
-Passing the flag with both pinned artifacts adds no marker.
 
 Exit 0 means the reported policy is compatible. It does not prove repeatability
 on an unqualified machine. Plain output has one `VALID` status line and lowercase

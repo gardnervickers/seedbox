@@ -154,6 +154,7 @@ pub fn bindings() -> Result<BTreeMap<String, String>> {
 }
 
 pub const ENGINE_QUALIFICATION: &str = "engine_qualification";
+/// Written by runs from before engine pins were removed; still accepted on replay.
 pub const DEV_UNPINNED: &str = "dev-unpinned";
 
 pub fn is_dev_engine(profile: &ExecutionProfile) -> bool {
@@ -164,52 +165,8 @@ pub fn is_dev_engine(profile: &ExecutionProfile) -> bool {
         == Some(DEV_UNPINNED)
 }
 
-pub fn artifacts_unpinned(profile: &ExecutionProfile, kernel: &ContentDigest) -> bool {
-    profile.engine.hex() != ENGINE || kernel.hex() != GUEST_KERNEL
-}
-
-/// Validate the complete artifact pair, including kernel-only development runs.
-/// The profile-only validator cannot establish whether both artifacts are pinned.
-pub fn validate_artifacts(profile: &ExecutionProfile, kernel: &ContentDigest) -> Result<()> {
-    validate_profile(profile)?;
-    if is_dev_engine(profile) {
-        if !artifacts_unpinned(profile, kernel) {
-            return Err(Error::Integrity(
-                "dev-unpinned marker requires an unpinned engine or guest kernel".into(),
-            ));
-        }
-        Ok(())
-    } else {
-        validate_kernel(kernel)
-    }
-}
-
-/// Retained development runs require explicit permission on every replay.
-pub fn admit_artifacts(
-    profile: &ExecutionProfile,
-    kernel: &ContentDigest,
-    allow_dev_engine: bool,
-) -> Result<()> {
-    validate_artifacts(profile, kernel)?;
-    if is_dev_engine(profile) && !allow_dev_engine {
-        return Err(Error::Setup(
-            "unqualified dev engine; pass --allow-dev-engine to replay these retained artifacts"
-                .into(),
-        ));
-    }
-    Ok(())
-}
-
 pub fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
     crate::engine::validate_host(profile)?;
-    if crate::engine::recorded_launch(profile)? == crate::engine::ExecutableKind::InternalWorker
-        && !is_dev_engine(profile)
-    {
-        return Err(Error::Setup(
-            "internal worker is an unqualified dev engine; pass --allow-dev-engine to execute"
-                .into(),
-        ));
-    }
     let counter = crate::vmm::recorded_counter(profile)?;
     if counter != crate::counter::CounterProfile::Zen
         && profile
@@ -259,18 +216,6 @@ pub fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
                 "unknown engine_qualification {marker}"
             )));
         }
-    }
-    if profile.engine.hex() != ENGINE && !is_dev_engine(profile) {
-        return Err(Error::Integrity("engine is outside the admitted host policy; no engine-change override bypass is available".into()));
-    }
-    Ok(())
-}
-
-pub fn validate_kernel(kernel: &ContentDigest) -> Result<()> {
-    if kernel.hex() != GUEST_KERNEL {
-        return Err(Error::Integrity(
-            "guest kernel is outside the admitted host policy".into(),
-        ));
     }
     Ok(())
 }
