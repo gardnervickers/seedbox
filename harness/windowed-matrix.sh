@@ -10,7 +10,8 @@
 # them and their SMT siblings and restored on exit.
 #
 # For each timebase and world (harness/worlds/window2.json, window4.json):
-# - the old scheduler under VMM and BASE_VMM must agree (feature-off equality);
+# - the legacy scheduler under VMM (`--scheduler legacy`) and BASE_VMM must
+#   agree (feature-off equality);
 # - windowed runs with 1..len(CPUS) threads, and with reversed completion
 #   order, must agree with each other on world, network and full-state
 #   witnesses, machine times and the committed end.
@@ -52,7 +53,7 @@ PY
     for tb in pv counter; do
         names=()
         run "$world-$tb-base" "$base" "$first" --timebase "$tb"
-        run "$world-$tb-old" "$vmm" "$first" --timebase "$tb"
+        run "$world-$tb-old" "$vmm" "$first" --timebase "$tb" --scheduler legacy
         for ((t = 1; t <= ${#cpu_list[@]} && t <= machines; t++)); do
             set=$(IFS=,; echo "${cpu_list[*]:0:t}")
             args=(--timebase "$tb" --scheduler windowed)
