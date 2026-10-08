@@ -1289,7 +1289,7 @@ fn report(
         // A disk outlives its machine's crashes: what it holds is part of
         // the outcome even without --digest.
         if let Some(b) = &mach.blk {
-            world_witness.update(b.disk.digest().as_bytes());
+            world_witness.update(b.disk().digest().as_bytes());
         }
         std::fs::write(format!("{out}/{}.console", mach.name), &mach.com1.out)
             .map_err(|e| e.to_string())?;
@@ -1331,11 +1331,11 @@ fn report(
             "net": mach.net.as_ref().map(|n| json!({"tx": n.tx_frames, "rx": n.rx_frames, "rx_dropped": n.rx_dropped})),
         });
         row["disk"] = json!(mach.blk.as_ref().map(|b| json!({
-                "fault_model": disk::disk_fault_model_report(b.disk.fault_model()), "capacity_sectors": b.disk.capacity(), "base_sha256": b.disk.base_sha256(),
-                "digest": b.disk.digest(), "stable_sectors": b.disk.stable_sectors(), "volatile_sectors": b.disk.volatile_sectors(),
-                "reads": b.stats.reads, "writes": b.stats.writes, "flushes": b.stats.flushes,
-                "sectors_read": b.stats.sectors_read, "sectors_written": b.stats.sectors_written,
-                "sectors_flushed": b.stats.sectors_flushed, "errors": b.stats.errors,
+                "fault_model": disk::disk_fault_model_report(b.disk().fault_model()), "capacity_sectors": b.disk().capacity(), "base_sha256": b.disk().base_sha256(),
+                "digest": b.disk().digest(), "stable_sectors": b.disk().stable_sectors(), "volatile_sectors": b.disk().volatile_sectors(),
+                "reads": b.stats().reads, "writes": b.stats().writes, "flushes": b.stats().flushes,
+                "sectors_read": b.stats().sectors_read, "sectors_written": b.stats().sectors_written,
+                "sectors_flushed": b.stats().sectors_flushed, "errors": b.stats().errors,
             })));
         row["incarnation"] = json!(mach.incarnation);
         row["booted_at_ns"] = json!(mach.booted_at);

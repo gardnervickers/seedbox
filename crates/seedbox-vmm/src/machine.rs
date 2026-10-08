@@ -745,7 +745,7 @@ impl Machine {
         self.syscall_ns = old.syscall_ns;
         // Flushed data survives; the disk policy chooses unflushed survivors.
         let lost = if let (Some(new), Some(blk)) = (self.blk.as_mut(), old.blk.as_ref()) {
-            let (disk, lost) = blk.disk.crashed_seeded(seed, &old.name, old.incarnation);
+            let (disk, lost) = blk.disk().crashed_seeded(seed, &old.name, old.incarnation);
             *new = VirtioBlk::new(disk);
             Some(lost)
         } else { None };
@@ -1845,7 +1845,7 @@ impl Machine {
         h.update(self.pending_io_bytes());
         parts.push(("pending_io", hex(h)));
         if let Some(b) = &self.blk {
-            parts.push(("disk", b.disk.digest()));
+            parts.push(("disk", b.disk().digest()));
         }
         let mut all = Sha256::new();
         for (_, d) in &parts {
@@ -2479,10 +2479,10 @@ mod fork_tests {
                 witness.update(new.pending_io_bytes());
                 assert_eq!(new.succeed(&mut old,1000,seed).unwrap(),Some(expected.1));
                 assert_eq!(new.exit_witness(),format!("{:x}",witness.finalize()));
-                let disk=&new.blk.as_ref().unwrap().disk;
+                let disk=new.blk.as_ref().unwrap().disk();
                 assert_eq!(disk.digest(),expected.0.digest());
                 assert_eq!(disk.volatile_sectors(),0);
-                assert_eq!(new.blk.as_ref().unwrap().stats.writes,0);
+                assert_eq!(new.blk.as_ref().unwrap().stats().writes,0);
                 (new.exit_witness(),disk.digest())
             };
             let a=run(1009);
@@ -2506,7 +2506,7 @@ mod fork_tests {
         with_disk(&mut old);
         to_halt(&mut old,&mut counter,1_000_000);
         let snap=old.snapshot().unwrap();
-        let disk=&mut old.blk.as_mut().unwrap().disk;
+        let disk=old.blk.as_mut().unwrap().disk_mut();
         disk.write(0,&[b'A';512]).unwrap();
         disk.flush();
         disk.write(0,&[b'B';512]).unwrap();
@@ -2514,15 +2514,15 @@ mod fork_tests {
         let mut new=probe_machine(&kvm,256,false);
         with_disk(&mut new);
         assert_eq!(new.succeed(&mut old,1000,1009).unwrap(),Some(2));
-        let disk=&new.blk.as_ref().unwrap().disk;
+        let disk=new.blk.as_ref().unwrap().disk();
         let mut buf=[0u8;1024];
         disk.read(0,&mut buf).unwrap();
         assert_eq!((buf[0],buf[512]),(b'A',0));
         assert_eq!((disk.stable_sectors(),disk.volatile_sectors()),(1,0));
-        assert_eq!(new.blk.as_ref().unwrap().stats.writes,0,"a fresh transport");
-        assert_eq!(old.blk.as_ref().unwrap().disk.volatile_sectors(),2,"the old incarnation is untouched");
+        assert_eq!(new.blk.as_ref().unwrap().stats().writes,0,"a fresh transport");
+        assert_eq!(old.blk.as_ref().unwrap().disk().volatile_sectors(),2,"the old incarnation is untouched");
         old.restore(&snap).unwrap();
-        assert_eq!(old.blk.as_ref().unwrap().disk.digest(),Disk::new(None,Some(8)).unwrap().digest());
+        assert_eq!(old.blk.as_ref().unwrap().disk().digest(),Disk::new(None,Some(8)).unwrap().digest());
     }
 }
 

@@ -2,6 +2,7 @@
 //! Every DMA span and descriptor chain is checked before a device effect.
 use super::Event;
 use crate::{disk::Disk, Result, RAM_BASE};
+use seedbox_engine_core::virtio_block::{Block, Policy as BlockPolicy};
 use seedbox_engine_core::virtio_console::{Console, Policy as ConsolePolicy};
 use std::collections::VecDeque;
 
@@ -12,11 +13,9 @@ const NET_HEADER: usize = 12;
 fn u16_at(m: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes(m[offset..offset + 2].try_into().expect("validated DMA"))
 }
+#[cfg(test)]
 fn u32_at(m: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(m[offset..offset + 4].try_into().expect("validated DMA"))
-}
-fn u64_at(m: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(m[offset..offset + 8].try_into().expect("validated DMA"))
 }
 
 use seedbox_engine_core::virtio_mmio::{
@@ -52,7 +51,7 @@ pub enum Model {
         backlog: VecDeque<Vec<u8>>,
     },
     Console(Console),
-    Block(Disk),
+    Block(Block),
 }
 pub struct Virtio {
     transport: Transport,
@@ -72,7 +71,7 @@ impl Virtio {
         Self::new(Model::Console(Console::new(ConsolePolicy::Application)), 4)
     }
     pub fn block(disk: Disk) -> Self {
-        Self::new(Model::Block(disk), 1)
+        Self::new(Model::Block(Block::new(disk, BlockPolicy::Application)), 1)
     }
     fn new(model: Model, queues: usize) -> Self {
         let spec = match &model {
@@ -105,7 +104,7 @@ impl Virtio {
                 serde_json::json!({"kind":"net","mac":mac,"backlog":backlog})
             }
             Model::Console(console) => console.projection(),
-            Model::Block(disk) => serde_json::json!({"kind":"block","disk":disk.digest()}),
+            Model::Block(disk) => serde_json::json!({"kind":"block","disk":disk.disk().digest()}),
         };
         let bytes =
             serde_json::to_vec(&(self.transport.projection(), model)).map_err(|e| e.to_string())?;
@@ -144,6 +143,7 @@ impl Virtio {
                 }
             }
             Model::Block(disk) => disk
+                .disk()
                 .capacity()
                 .to_le_bytes()
                 .get(offset as usize)
@@ -169,7 +169,7 @@ impl Virtio {
                 *self = match old.model {
                     Model::Net { mac, .. } => Self::net(mac),
                     Model::Console(_) => Self::console(),
-                    Model::Block(disk) => Self::block(disk),
+                    Model::Block(disk) => Self::block(disk.into_disk()),
                 };
             }
         }
@@ -182,6 +182,10 @@ impl Virtio {
         if let Model::Console(console) = &mut self.model {
             let output = console.notify(&mut self.transport, memory, RAM_BASE, index, |_, _| {})?;
             return Ok(output.payloads.into_iter().map(Event::Control).collect());
+        }
+        if let Model::Block(block) = &mut self.model {
+            block.notify(&mut self.transport, memory, RAM_BASE, |_, _| {})?;
+            return Ok(Vec::new());
         }
         let mut events = Vec::new();
         if matches!(self.model, Model::Net { .. }) && index == 0 {
@@ -204,7 +208,7 @@ impl Virtio {
                     0
                 }
                 Model::Console(_) => unreachable!("console handled above"),
-                Model::Block(disk) => block_request(disk, memory, &chain)?,
+                Model::Block(_) => unreachable!("block handled above"),
             };
             self.transport.queues[index].complete(memory, &chain, written);
             self.transport.isr |= 1;
@@ -255,7 +259,7 @@ impl Virtio {
     }
     pub fn disk(&self) -> Option<&Disk> {
         match &self.model {
-            Model::Block(disk) => Some(disk),
+            Model::Block(disk) => Some(disk.disk()),
             _ => None,
         }
     }
@@ -272,82 +276,6 @@ impl Virtio {
             _ => None,
         }
     }
-}
-
-fn block_request(disk: &mut Disk, memory: &mut [u8], chain: &Chain) -> Result<usize> {
-    if chain.segments.len() < 2 {
-        return Err("short block descriptor chain".into());
-    }
-    let header = &chain.segments[0];
-    let status = chain.segments.last().expect("validated chain length");
-    if header.writable || header.len != 16 || !status.writable || status.len != 1 {
-        return Err("invalid block header/status descriptors".into());
-    }
-    let kind = u32_at(memory, header.offset);
-    let sector = u64_at(memory, header.offset + 8);
-    let data = &chain.segments[1..chain.segments.len() - 1];
-    let len = data.iter().map(|s| s.len).sum::<usize>();
-    let mut written = 0;
-    let result = match kind {
-        0 | 1 => {
-            if !len.is_multiple_of(512) || data.iter().any(|s| s.writable != (kind == 0)) {
-                return Err("invalid block data descriptors".into());
-            }
-            let mut bytes = vec![0; len];
-            if kind == 1 {
-                let mut at = 0;
-                for s in data {
-                    bytes[at..at + s.len].copy_from_slice(&memory[s.offset..s.offset + s.len]);
-                    at += s.len;
-                }
-            }
-            let result = if kind == 0 {
-                disk.read(sector, &mut bytes)
-            } else {
-                disk.write(sector, &bytes)
-            };
-            if result.is_ok() && kind == 0 {
-                let mut at = 0;
-                for s in data {
-                    memory[s.offset..s.offset + s.len].copy_from_slice(&bytes[at..at + s.len]);
-                    at += s.len;
-                }
-                written = len;
-            }
-            if result.is_ok() {
-                0
-            } else {
-                1
-            }
-        }
-        4 => {
-            if !data.is_empty() {
-                return Err("block flush includes data descriptors".into());
-            }
-            disk.flush();
-            0
-        }
-        8 => {
-            if data.iter().any(|s| !s.writable) {
-                return Err("block ID buffer is not writable".into());
-            }
-            let id = b"seedbox-disk\0\0\0\0\0\0\0\0";
-            let mut at = 0;
-            for s in data {
-                let n = s.len.min(id.len() - at);
-                memory[s.offset..s.offset + n].copy_from_slice(&id[at..at + n]);
-                at += n;
-                if at == id.len() {
-                    break;
-                }
-            }
-            written = at;
-            0
-        }
-        _ => 2,
-    };
-    memory[status.offset] = result;
-    Ok(written + 1)
 }
 
 #[cfg(test)]
