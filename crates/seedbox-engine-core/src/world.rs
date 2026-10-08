@@ -394,6 +394,31 @@ impl<M: WorldMachine> World<M> {
         Ok(())
     }
 
+    /// Finalize retained control and trigger evidence at the run's semantic end.
+    /// Other machines may have advanced by lookahead past an exiting target.
+    pub fn finish(
+        &mut self,
+        outcome: &str,
+        duration: u64,
+        end_on: &Option<String>,
+    ) -> Result<u64, String> {
+        self.check_active()?;
+        let cutoff = if outcome == "duration" {
+            duration
+        } else if outcome == "end_machine_exited" {
+            end_on
+                .as_ref()
+                .and_then(|name| self.machines.iter().find(|m| &m.name == name))
+                .map(|m| m.time)
+                .unwrap_or(0)
+        } else {
+            self.machines.iter().map(|m| m.time).max().unwrap_or(0)
+        };
+        self.control.cut_off(&self.faults, cutoff);
+        self.control.triggers.cut_off(cutoff);
+        Ok(cutoff)
+    }
+
     fn count_link(&mut self, at: u64, from: usize, to: usize, outcome: usize) {
         self.link_counts.entry((from, to)).or_default()[outcome] += 1;
         self.semantic_counts.record(at, from, to, outcome);

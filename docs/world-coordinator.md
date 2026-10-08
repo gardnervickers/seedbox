@@ -57,7 +57,9 @@ as well as a control request.
 
 Equal-time coordinator boundaries retain control, then trigger, then fault
 precedence. Strict replies are never delivered early, including a reply owed
-before a fatal control failure terminates execution. A crash discards the dead
+before a fatal control failure terminates execution. Shared finalization cuts off
+control and trigger evidence at the designated end machine's committed exit time
+(or the duration boundary), even when another machine ran ahead by lookahead. A crash discards the dead
 incarnation's owed I/O and management queue while retaining world-transit frames;
 reboot drops frames that arrived before the new NIC existed. Pause/resume at a
 stopped boundary preserves any pending completion and remaining I/O cost; it does

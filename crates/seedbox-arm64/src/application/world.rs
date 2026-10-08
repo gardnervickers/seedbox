@@ -214,12 +214,7 @@ pub fn run(options: &Options) -> Result<Value> {
             Ok(())
         },
     )?;
-    let cutoff = if outcome == "duration" {
-        cfg.duration_ns
-    } else {
-        world.machines.iter().map(|m| m.time).max().unwrap_or(0)
-    };
-    world.control.cut_off(&world.faults, cutoff);
+    world.finish(outcome, cfg.duration_ns, &Some(cfg.end_on_exit.clone()))?;
     let mut hash = Sha256::new_with_prefix(b"seedbox-arm64-world-witness-v1\0");
     let horizons = format!("{:x}", transcript.borrow().horizons.clone().finalize());
     hash.update(horizons.as_bytes());

@@ -348,6 +348,67 @@ fn strict_delivery_is_never_early_and_equal_time_keeps_insertion_order() {
     assert_eq!(w.factory.borrow().last().unwrap(), "a:control/strict:11");
 }
 #[test]
+fn terminal_evidence_cuts_off_armed_and_matched_triggers_at_the_exiting_target() {
+    let mut w = world(&["scenario", "peer"]);
+    w.machines[0].time = 10;
+    w.machines[0].state = State::Exited(0);
+    w.machines[1].time = 20;
+    let action = seedbox_control::Action::Stop {
+        machine: "peer".into(),
+    };
+    w.control
+        .triggers
+        .arm("peer".into(), b"NEVER".to_vec(), 0, 100, action.clone())
+        .unwrap();
+    w.control
+        .triggers
+        .arm("peer".into(), b"M".to_vec(), 0, 100, action)
+        .unwrap();
+    w.control.triggers.committed("peer", 8, b'M', 5, 8).unwrap();
+    assert_eq!(w.control.triggers.records[1].status, "matched");
+    assert_eq!(
+        w.finish("end_machine_exited", 50, &Some("scenario".into()))
+            .unwrap(),
+        10
+    );
+    for record in &w.control.triggers.records {
+        assert_eq!(record.status, "cut_off");
+        assert_eq!(record.cut_off_at_ns, Some(10));
+    }
+    assert_eq!(w.control.triggers.records[1].effect_at_ns, Some(13));
+    assert_eq!(w.finish("duration", 50, &None).unwrap(), 50);
+    assert_eq!(w.finish("all_exited", 50, &None).unwrap(), 20);
+}
+#[test]
+fn duration_finalization_preserves_completed_trigger_records() {
+    let mut w = world(&["a"]);
+    let action = seedbox_control::Action::Stop {
+        machine: "a".into(),
+    };
+    for (marker, timeout) in [(b'A', 100), (b'C', 100), (b'E', 3), (b'F', 100)] {
+        w.control
+            .triggers
+            .arm("a".into(), vec![marker], 0, timeout, action.clone())
+            .unwrap();
+    }
+    w.control.triggers.cancel(2, 2).unwrap();
+    w.control.triggers.apply_boundary(&mut w.faults, 3).unwrap();
+    w.control.triggers.committed("a", 4, b'F', 1, 4).unwrap();
+    w.control.triggers.apply_boundary(&mut w.faults, 5).unwrap();
+    let completed = w.control.triggers.records[1..].to_vec();
+    assert_eq!(
+        completed
+            .iter()
+            .map(|r| r.status.as_str())
+            .collect::<Vec<_>>(),
+        ["cancelled", "expired", "fired"]
+    );
+    assert_eq!(w.finish("duration", 9, &None).unwrap(), 9);
+    assert_eq!(w.control.triggers.records[0].status, "cut_off");
+    assert_eq!(w.control.triggers.records[0].cut_off_at_ns, Some(9));
+    assert_eq!(w.control.triggers.records[1..], completed);
+}
+#[test]
 fn failed_crash_immediately_terminates_workers_and_retained_world_cannot_retry() {
     for phase in ["boot", "timer", "witness", "install"] {
         let mut w = world(&["a", "b"]);

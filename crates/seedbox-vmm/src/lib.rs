@@ -560,9 +560,7 @@ fn report(
     end_on: &Option<String>,
 ) -> Result<Value, String> {
     let slices = world.slices;
-    let cut_off_at=if outcome=="duration" {duration} else if outcome=="end_machine_exited" {end_on.as_ref().and_then(|name|world.machines.iter().find(|m|&m.world.name==name)).map(|m|m.world.time).unwrap_or(0)} else {world.machines.iter().map(|m|m.world.time).max().unwrap_or(0)};
-    world.control.cut_off(&world.faults,cut_off_at);
-    world.control.triggers.cut_off(cut_off_at);
+    world.finish(outcome,duration,end_on)?;
     let trigger_evidence=world.control.triggers.evidence()?;
     let fault_error=world.faults.error.clone().or(world.control.error.clone());
     let mut network_hash = Sha256::new();
