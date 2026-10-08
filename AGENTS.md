@@ -81,7 +81,7 @@ Run these before committing:
 cargo fmt -p seedbox --check
 cargo clippy -p seedbox --all-targets --locked -- -D warnings
 cargo test --workspace --locked
-cargo test-vmm                       # Linux only
+cargo test-vmm --features kvm-tests  # Linux; the feature needs /dev/kvm
 bash harness/acceptance.sh portable
 ```
 
