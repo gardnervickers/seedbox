@@ -708,6 +708,85 @@ fn old_host_proof_replay_is_not_comparable_while_inspection_and_transfer_stay_av
 }
 
 #[test]
+fn engine52eb_v2_replay_retains_not_comparable_without_host_execution() {
+    use seedbox::{admission, orchestration::*, store::ContentDigest};
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let mut previous = admission::required_policy().unwrap();
+    previous.version = "amd-zen3-engine52eb-v2".into();
+    previous.engine = "52eb41490f521a0104ea4ab06297cbdbdd7bc9a68261febf6c5cc19854bacdcf".into();
+    previous.guest_kernel =
+        "e8ece7cba2d5fc4924da83e39cc672ae2516c117f8f76ecfa04aeaa98e697847".into();
+    let fields = serde_json::to_string(&previous).unwrap();
+    let fixture: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/formats/demo41-fail-v2.json")).unwrap();
+    let mut record: RunRecord = serde_json::from_value(fixture["record"].clone()).unwrap();
+    let inputs = &mut record.identity.inputs;
+    inputs.kernel = ContentDigest::try_from(previous.guest_kernel.clone()).unwrap();
+    inputs.profile.engine = ContentDigest::try_from(previous.engine.clone()).unwrap();
+    inputs.profile.semantic_parameters.extend([
+        ("host_policy".into(), previous.version),
+        (
+            "host_policy_fingerprint".into(),
+            ContentDigest::of(fields.as_bytes()).hex().into(),
+        ),
+        ("host_policy_fields".into(), fields),
+    ]);
+    record.run_id = ContentDigest::of(&serde_json::to_vec(&record.identity).unwrap());
+    let manifest = serde_json::to_vec(&serde_json::json!({
+        "sha256": ContentDigest::of(&serde_json::to_vec(&record).unwrap()),
+        "record": record,
+    }))
+    .unwrap();
+    fs::create_dir(root.join("old")).unwrap();
+    fs::write(root.join("old/manifest.json"), &manifest).unwrap();
+    fs::write(root.join("unused-engine"), b"never execute").unwrap();
+    for allow_dev_engine in [false, true] {
+        let mut args = vec![
+            "replay",
+            "old",
+            "--state",
+            "state",
+            "--vmm",
+            "unused-engine",
+            "--allow-engine-change",
+        ];
+        if allow_dev_engine {
+            args.push("--allow-dev-engine");
+        }
+        let output = seedbox(&args, root);
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.starts_with("ERROR: "),
+            "{stdout}; {}",
+            stderr(&output)
+        );
+        let attempt = stdout
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("ERROR: ")
+            .unwrap();
+        assert!(stdout.contains("replay: NOT_COMPARABLE"), "{stdout}");
+        assert_eq!(
+            stderr(&output),
+            "input integrity: host admission proof incompatible: host_policy\n"
+        );
+        let rejected = inspect(&root.join(attempt)).unwrap();
+        assert_eq!(rejected.outcome, Outcome::Error);
+        assert_eq!(rejected.replay.unwrap().status, ReplayStatus::NotComparable);
+        assert_eq!(
+            rejected.error.as_deref(),
+            Some("input integrity: host admission proof incompatible: host_policy")
+        );
+        assert!(!root.join(attempt).join("output").exists());
+        assert!(!root.join(attempt).join("inputs").exists());
+        assert_eq!(fs::read(root.join("old/manifest.json")).unwrap(), manifest);
+    }
+}
+
+#[test]
 fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
