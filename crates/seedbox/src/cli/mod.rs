@@ -108,8 +108,6 @@ enum Command {
         state: StateArg,
         #[command(flatten)]
         inputs: RuntimeInputs,
-        #[command(flatten)]
-        build: BuildOptions,
     },
     /// Prepare images and run a simulation (Linux KVM host; or Apple Silicon Mac).
     #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
@@ -131,8 +129,6 @@ enum Command {
         state: StateArg,
         #[command(flatten)]
         inputs: RuntimeInputs,
-        #[command(flatten)]
-        build: BuildOptions,
         #[command(flatten)]
         performance: Performance,
     },
@@ -159,8 +155,6 @@ enum Command {
         state: StateArg,
         #[command(flatten)]
         inputs: RuntimeInputs,
-        #[command(flatten)]
-        build: BuildOptions,
         #[command(flatten)]
         performance: Performance,
     },
@@ -393,8 +387,7 @@ impl StateArg {
 #[derive(Args)]
 #[command(next_help_heading = "Runtime inputs")]
 struct KvmInputs {
-    /// Guest kernel Image on Mac, or bzImage on Linux [default: packaged on Mac; Linux searches $SEEDBOX_ARTIFACTS, $SEEDBOX_WORK/artifacts,
-    /// packaged bzImage, ./artifacts, then ~/seedbox-sim/artifacts for the user and any sudo caller].
+    /// Guest kernel Image on Mac, or bzImage on Linux [default: packaged; unbundled Linux development builds search configured artifact directories].
     #[arg(long, env = "SEEDBOX_KERNEL")]
     kernel: Option<PathBuf>,
     /// Override with a legacy standalone VMM [default: the engine built into seedbox].
@@ -436,6 +429,8 @@ struct RuntimeInputs {
     /// Keep a seeded subset of unflushed disk sectors on crash (512-byte atomicity; off by default).
     #[arg(long)]
     torn_writes: bool,
+    #[command(flatten)]
+    build: BuildOptions,
 }
 
 impl RuntimeInputs {
@@ -545,9 +540,10 @@ impl RuntimeInputs {
                 if self.kvm.vmm.is_some() {
                     executor = executor.with_detected_contract(store, &engine)?;
                 }
-                let inputs = OciPreparer {
+                let mut inputs = OciPreparer {
                     tools: OciTools {
                         docker: self.builder.clone(),
+                        build_epoch: self.build.build_epoch,
                         ..OciTools::default()
                     },
                     kernel: defaults::packaged_kernel(
@@ -560,16 +556,24 @@ impl RuntimeInputs {
                     engine,
                     profile: executor.profile(),
                 };
-                return Ok((
+                let preparer = if self.build.build_epoch.is_some() {
+                    // Explicit timestamp control retains its native Podman contract.
+                    inputs.tools.skopeo = defaults::preparation_tool(&inputs.tools.skopeo)?;
+                    inputs.tools.umoci = defaults::preparation_tool(&inputs.tools.umoci)?;
+                    Preparer::Linux(Box::new(backends::LinuxPreparer {
+                        inputs,
+                        _assets: None,
+                    }))
+                } else {
                     Preparer::Container(Box::new(seedbox::container_runtime::ContainerPreparer {
                         inputs,
                         runtime,
                         client: backends::container_client(&self.builder, cancellation)?,
                         cancellation: cancellation.clone(),
                         progress: backends::preparation_progress,
-                    })),
-                    Executor::Linux(executor),
-                ));
+                    }))
+                };
+                return Ok((preparer, Executor::Linux(executor)));
             }
             let mut preparer = self.preparer(engine.clone(), store, scratch, executor.profile())?;
             preparer.inputs.tools.skopeo =
@@ -643,7 +647,7 @@ impl RuntimeInputs {
     }
 }
 
-#[derive(Args)]
+#[derive(Args, Clone, Copy)]
 #[command(next_help_heading = "Preparation")]
 struct BuildOptions {
     /// Clamp new build-layer timestamps to this Unix epoch (qualified native Podman only) [default: absent].
@@ -653,21 +657,19 @@ struct BuildOptions {
 
 impl BuildOptions {
     fn configure(&self, simulation: &config::Simulation, inputs: &mut RuntimeInputs) -> Result<()> {
-        if !seedbox::container_runtime::Runtime::available() && inputs.builder == Path::new("auto")
-        {
-            inputs.builder = PathBuf::from("podman");
-        }
-        if seedbox::container_runtime::Runtime::available() {
-            if self.build_epoch.is_some() {
-                return Err(Error::Setup("--build-epoch requires native Linux Podman preparation; omit it for container-backed preparation".into()));
-            }
+        if seedbox::container_runtime::Runtime::available() && self.build_epoch.is_none() {
             return Ok(());
+        }
+        if inputs.builder == Path::new("auto") {
+            inputs.builder = PathBuf::from("podman");
         }
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {
             let _ = simulation;
             if self.build_epoch.is_some() {
-                return Err(Error::Setup(format!("--build-epoch: builder {} is unsupported; use the qualified project-Nix local Podman or omit --build-epoch", inputs.builder.display())));
+                return Err(Error::Setup(
+                    "--build-epoch requires native Linux preparation; omit it on Mac".into(),
+                ));
             }
             Ok(())
         }
@@ -689,6 +691,9 @@ impl BuildOptions {
                     ..OciTools::default()
                 }
                 .validate_build_epoch()?;
+            }
+            if self.build_epoch.is_some() && unsafe { libc::geteuid() } != 0 {
+                return Err(Error::Setup("--build-epoch native extraction requires image ownership permissions; run prepare inside `podman unshare`, or omit --build-epoch to use container preparation".into()));
             }
             Ok(())
         }
@@ -887,7 +892,6 @@ fn run(cli: Cli) -> Result<u8> {
             output,
             state,
             mut inputs,
-            build,
         } => {
             inputs.validate_platform()?;
             if output.exists() {
@@ -897,6 +901,7 @@ fn run(cli: Cli) -> Result<u8> {
                 )));
             }
             let simulation = compose.load()?;
+            let build = inputs.build;
             build.configure(&simulation, &mut inputs)?;
             let (store, _) = state.open()?;
             let scratch = tempfile::tempdir()?;
@@ -932,7 +937,6 @@ fn run(cli: Cli) -> Result<u8> {
             cpu,
             state,
             mut inputs,
-            build,
             performance,
         } => {
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -949,6 +953,7 @@ fn run(cli: Cli) -> Result<u8> {
             if checkpoint_at_ns.is_some_and(|t| t >= simulation.limits.simulated_time_ns) {
                 return Err(Error::Setup("--checkpoint-at-ns must be before the simulated time limit; choose an earlier checkpoint".into()));
             }
+            let build = inputs.build;
             build.configure(&simulation, &mut inputs)?;
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
@@ -1001,12 +1006,12 @@ fn run(cli: Cli) -> Result<u8> {
             cpu,
             state,
             mut inputs,
-            build,
             performance,
         } => {
             inputs.validate_platform()?;
             let resources = Resources::start();
             let simulation = compose.load()?;
+            let build = inputs.build;
             build.configure(&simulation, &mut inputs)?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;

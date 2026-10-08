@@ -1,8 +1,7 @@
-//! Embed the static guest supervisor (`guest/compose-init.c`) so `seedbox run`
-//! works without a separately built `--guest-init`. The supervisor must be
-//! linked against a libc whose user/group lookups work without NSS modules,
-//! so only a musl toolchain is used: `SEEDBOX_STATIC_CC` (set by the Nix shell)
-//! or `musl-gcc`. Without one the CLI still builds and requires `--guest-init`.
+//! Embed packaged release guest assets and the native development supervisor.
+//! Cargo delegates guest assets to the cached Linux build pipeline. Unbundled
+//! Linux development builds retain the musl supervisor fallback, whose user/group
+//! lookups must work without NSS modules.
 
 use std::{
     env,
@@ -30,6 +29,12 @@ fn main() {
         );
     }
     simulator_version(&root);
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
+        && env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64")
+    {
+        // Only the public CLI (which also hosts retained workers) needs HVF.
+        println!("cargo::rustc-link-arg-bin=seedbox=--seedbox-sign-hvf");
+    }
     // Release builds own guest assets. Debug builds remain portable for readers
     // and unit tests and do not require a container engine.
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo output directory"));

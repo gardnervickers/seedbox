@@ -17,8 +17,13 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   Doctor extracts only the selected kernel and never creates state/prepares
   images. Replay must not substitute installed package bytes for retained inputs.
   Linux package execution/reproducibility requires the final merge train.
+  Packaged runs use their bundled kernel unless `--kernel` or `SEEDBOX_KERNEL`
+  is explicit; legacy artifact-directory searches apply only to unbundled builds.
+  Explicit `--build-epoch` retains native project-Nix preparation using packaged
+  guest assets.
 - Apple Silicon application builds use `cargo build --release` inside
-  `nix develop`; Cargo prepares guest assets and signs executable outputs. It packages the audited ARM kernel, static helpers and
+  `nix develop`; Cargo prepares guest assets and signs only the Seedbox binary
+  target, selected by its build-script link argument. It packages the audited ARM kernel, static helpers and
   Linux preparation tools into the signed CLI. Runtime preparation uses a Docker/Podman endpoint and a Linux filesystem-tools
   container, with no second Seedbox executable. Replay must never require that
   engine or invoke Cargo. Mac application profiles use `arm64-world-v1`

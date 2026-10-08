@@ -70,7 +70,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Exploration workers | `1`, sequential execution; Mac currently requires `1` | `--workers` (1..32; Linux automatic CPU selection for parallel execution) |
 | Torn disk writes | off (drop all unflushed sectors on crash) | `--torn-writes` |
 | CPU | Linux: first free core other than CPU 0's, under the shared lease; Mac: automatic HVF scheduling | `--cpu`, `SEEDBOX_CPU` (Linux only) |
-| Guest kernel | Mac: packaged ARM64 `Image`; Linux: configured `$SEEDBOX_ARTIFACTS`/`$SEEDBOX_WORK/artifacts`, then packaged `bzImage`, then `./artifacts` and `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
+| Guest kernel | packaged ARM64 `Image` on Mac or x86 `bzImage` on Linux; unbundled Linux development builds retain artifact-directory searches | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | the platform engine linked into `seedbox`; runtime commands never invoke Cargo | `--vmm`, `SEEDBOX_VMM` (Linux legacy standalone engine) |
 | Guest supervisor | packaged on Mac or in the Linux asset build; otherwise built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl on Linux | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | BusyBox | packaged on Mac; Linux: `SEEDBOX_BUSYBOX` (set by `nix develop`), then packaged BusyBox, then a static `busybox` on `PATH` | `--busybox` |
@@ -248,9 +248,11 @@ cleanup alone does not prove builder cessation. Ordinary run/prepare continue
 supporting custom builders; the optional native timestamp policy below has a
 narrower admission requirement. See [preparation evidence and cancellation](docs/runtime.md#exploration-preparation).
 
-Container-backed preparation currently rejects `--build-epoch`; omit it in
-the packaged workflow. The following policy applies only to unbundled native
-Linux development builds.
+On Linux, explicit `--build-epoch` selects native preparation with the
+project-Nix Podman, Skopeo and umoci tools, using the same packaged guest assets.
+Ordinary runs use container-backed preparation. Mac does not support this option.
+Native extraction needs image ownership permissions; rootless users can run
+`prepare` inside `podman unshare`.
 
 For optional build timestamp control, `--build-epoch 0` selects the admitted
 project-Nix native Podman's creation-time and new-layer timestamp policy.

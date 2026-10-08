@@ -26,6 +26,20 @@ def run(args, **kwargs):
     return subprocess.run(list(map(str, args)), check=True, **kwargs)
 
 
+def write_package(assets, output):
+    """Archive file roles, not the container client's local chmod/umask policy."""
+    with output.open('wb') as raw:
+        with gzip.GzipFile(filename='', fileobj=raw, mode='wb', compresslevel=6, mtime=0) as compressed:
+            with tarfile.open(fileobj=compressed, mode='w', format=tarfile.USTAR_FORMAT) as archive:
+                for path in sorted(assets.iterdir()):
+                    if path.is_file():
+                        header = tarfile.TarInfo(path.name)
+                        header.size = path.stat().st_size
+                        header.mode = 0o755 if path.name in {'compose-init', 'busybox', 'mke2fs'} else 0o644
+                        with path.open('rb') as source:
+                            archive.addfile(header, source)
+
+
 def build(output, architecture):
     global BUILD_LOG
     files = []
@@ -111,16 +125,7 @@ def build(output, architecture):
                            for p in sorted(assets.iterdir()) if p.is_file()}
                 (assets / 'runtime.json').write_text(json.dumps({'version': 1, 'image': image, 'files': records}, indent=2) + '\n')
                 temporary = cache / 'runtime.partial'
-                with temporary.open('wb') as raw:
-                    with gzip.GzipFile(filename='', fileobj=raw, mode='wb', compresslevel=6, mtime=0) as compressed:
-                        with tarfile.open(fileobj=compressed, mode='w') as archive:
-                            for path in sorted(assets.iterdir()):
-                                if path.is_file():
-                                    header = archive.gettarinfo(path, arcname=path.name)
-                                    header.uid = header.gid = header.mtime = 0
-                                    header.uname = header.gname = ''
-                                    with path.open('rb') as source:
-                                        archive.addfile(header, source)
+                write_package(assets, temporary)
                 temporary.replace(package)
                 checksum.write_text(hashlib.file_digest(package.open('rb'), 'sha256').hexdigest() + '\n')
         shutil.copyfile(package, output)

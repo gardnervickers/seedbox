@@ -30,3 +30,10 @@ select `--timebase pv` for the ordinary unprivileged workflow. Replay remembers
 the timebase and needs neither a container engine nor guest build tools.
 Debug builds and explicit legacy assets retain the native Linux development
 preparation path; the release executable is the supported packaged workflow.
+
+The packaged kernel is the default. Only `--kernel` or `SEEDBOX_KERNEL`
+overrides it; old artifact-directory environment settings do not affect packaged
+runs. `--build-epoch` explicitly selects the existing native preparation path
+and requires the project-Nix Podman, Skopeo and umoci tools. It still uses the
+packaged guest assets. Native extraction needs image ownership permissions;
+rootless users can run `prepare` inside `podman unshare`.

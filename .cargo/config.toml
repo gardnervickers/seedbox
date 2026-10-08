@@ -13,6 +13,6 @@ test-arm64 = "test --release --locked --manifest-path crates/seedbox-arm64/Cargo
 [env]
 SEEDBOX_BUILD_ROOT = { value = ".", relative = true, force = true }
 
-# Signing happens after linking, before rustc publishes the executable.
+# The CLI build script selects HVF signing; other linker outputs pass through.
 [target.aarch64-apple-darwin]
 linker = "tools/runtime/linker.py"

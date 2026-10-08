@@ -152,9 +152,11 @@ Wall-time limits and cancellation remain active, and pause time counts against
 the wall limit. CPU leases remain held until execution ends. This requires a
 host-control-capable engine; see the repository's `docs/runtime.md` for details.
 
-Container-backed preparation currently rejects `--build-epoch`; omit it in
-the packaged workflow. The following policy applies only to unbundled native
-Linux development builds.
+On Linux, explicit `--build-epoch` selects native preparation with the
+project-Nix Podman, Skopeo and umoci tools, using the same packaged guest assets.
+Ordinary runs use container-backed preparation. Mac does not support this option.
+Native extraction needs image ownership permissions; rootless users can run
+`prepare` inside `podman unshare`.
 
 For optional build timestamp control, `prepare`, `run` and `explore` accept
 `--build-epoch SECONDS` (0..=4294967295; default absent, no environment backing).

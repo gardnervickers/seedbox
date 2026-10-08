@@ -744,6 +744,12 @@ fn build_epoch_custom_builder_fails_before_runtime_resolution_or_state_creation(
         }
         let output = seedbox(&args, root.path());
         assert_eq!(output.status.code(), Some(2));
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        assert_eq!(
+            stderr(&output),
+            "error: --build-epoch requires native Linux preparation; omit it on Mac\n"
+        );
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         assert_eq!(stderr(&output), "error: --build-epoch: builder ./builder is unsupported; use the qualified project-Nix local Podman or omit --build-epoch\n");
         assert!(output.stdout.is_empty());
         assert!(!root.path().join(".seedbox").exists());
@@ -2178,4 +2184,22 @@ fn deferred_tx_help_is_presence_only_and_replay_uses_the_recorded_mode() {
     let output = seedbox(&["replay", "."], directory.path());
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("recorded --deferred-tx future"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn build_epoch_native_permissions_fail_before_state_creation() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("compose.yaml"), "name: epoch\nservices:\n  app: {image: alpine}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n").unwrap();
+    let output = seedbox(
+        &["prepare", "--build-epoch", "0", "--output", "prepared.json"],
+        root.path(),
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stderr(&output), "error: --build-epoch native extraction requires image ownership permissions; run prepare inside `podman unshare`, or omit --build-epoch to use container preparation\n");
+    assert!(!root.path().join(".seedbox").exists());
+    assert!(!root.path().join("prepared.json").exists());
 }

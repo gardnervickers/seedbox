@@ -23,7 +23,7 @@ class BuildVersionTests(unittest.TestCase):
         crate = root / "crates/seedbox"
         (crate / "src").mkdir(parents=True)
         (crate / "Cargo.toml").write_text(
-            '[package]\nname="version-probe"\nversion="0.1.0"\nedition="2021"\nbuild="build-runtime.rs"\n[workspace]\n')
+            '[package]\nname="version-probe"\nversion="0.1.0"\nedition="2021"\nbuild="build-runtime.rs"\n[[bin]]\nname="seedbox"\npath="src/main.rs"\n[workspace]\n')
         (crate / "src/main.rs").write_text(
             '''include!(concat!(env!("OUT_DIR"), "/container-runtime.rs"));
 include!(concat!(env!("OUT_DIR"), "/linux-runtime.rs"));
@@ -66,7 +66,7 @@ fn main() {
             if fresh:
                 self.assertIn("Fresh version-probe", result.stdout, result.stdout)
                 self.assertNotIn("Compiling version-probe", result.stdout, result.stdout)
-            version = subprocess.check_output([str(target / "debug/version-probe")], text=True).strip()
+            version = subprocess.check_output([str(target / "debug/seedbox")], text=True).strip()
             self.assertEqual(version, expected, result.stdout)
 
         def version():
@@ -167,6 +167,9 @@ fn main() {
             start = source.index("    let manifest =")
             end = source.index("    simulator_version(&root);")
             source = source[:start] + '    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");\n' + source[end:]
+            # The historical script predates target-selected HVF signing and
+            # deliberately runs without the checkout's linker configuration.
+            source = source.replace('        println!("cargo::rustc-link-arg-bin=seedbox=--seedbox-sign-hvf");', '')
             legacy.rename(legacy.with_name("build.rs"))
             legacy.with_name("build.rs").write_text(source)
             manifest = first / "crates/seedbox/Cargo.toml"
@@ -205,7 +208,7 @@ fn main() {
                 expected = "0.1.0-dev+" + self.git(root, "rev-parse", "HEAD")[:12]
                 if root == roots[1]:
                     expected += ".dirty"
-                binary = str(target / "debug/version-probe")
+                binary = str(target / "debug/seedbox")
                 self.assertEqual(subprocess.check_output([binary], text=True).strip(), expected, result.stdout)
                 self.assertEqual(subprocess.check_output([binary, "--linux-bundle"], text=True),
                                  (root / "runtime-bundle").read_text(), result.stdout)
@@ -263,7 +266,7 @@ fn main() {
                 environment.pop(name, None)
             environment["CARGO_TARGET_DIR"] = str(target)
             environment["SEEDBOX_STATIC_CC"] = str(temporary / "absent-compiler")
-            binary = str(target / "debug/version-probe")
+            binary = str(target / "debug/seedbox")
 
             def build(expected_linux, expected_mac=None, fresh=False):
                 result = subprocess.run(["cargo", "build", "--offline", "-vv"],

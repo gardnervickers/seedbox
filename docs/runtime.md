@@ -232,9 +232,11 @@ Use fully qualified Dockerfile `FROM` references such as
 unqualified registry search list. `--builder docker` selects a Docker client
 instead when the host provides one.
 
-Container-backed preparation currently rejects `--build-epoch`; omit it in
-the packaged workflow. The following policy applies only to unbundled native
-Linux development builds.
+On Linux, explicit `--build-epoch` selects native preparation with the
+project-Nix Podman, Skopeo and umoci tools, using the same packaged guest assets.
+Ordinary runs use container-backed preparation. Mac does not support this option.
+Native extraction needs image ownership permissions; rootless users can run
+`prepare` inside `podman unshare`.
 
 `prepare`, `run` and `explore` accept optional `--build-epoch SECONDS`
 (0..=4294967295; no environment backing). It requires the inspected project-Nix
@@ -319,11 +321,10 @@ seedbox=./target/release/seedbox
 
 Every input has a default; `seedbox help run` lists them with their overrides.
 On Linux, explicit flags and their `SEEDBOX_*` path overrides take precedence.
-The kernel then searches configured `$SEEDBOX_ARTIFACTS` and
-`$SEEDBOX_WORK/artifacts`, the packaged kernel, `./artifacts`, and
-`~/seedbox-sim/artifacts` (also in the invoking user's home under sudo).
-A missing configured directory preserves the development search; an explicit
-missing `--kernel` fails immediately. For the supervisor, BusyBox and mke2fs,
+Packaged runs use their bundled kernel; `SEEDBOX_ARTIFACTS` and `SEEDBOX_WORK`
+do not override it. Unbundled Linux development builds retain searches of those
+configured directories, `./artifacts`, and `~/seedbox-sim/artifacts` (also in the
+invoking user's home under sudo). An explicit missing `--kernel` fails immediately. For the supervisor, BusyBox and mke2fs,
 packaged bytes precede the existing compiled-in supervisor or static tools on
 PATH. Unbundled development builds keep those existing fallbacks. A package
 integrity error is reported instead of silently selecting unrelated files.

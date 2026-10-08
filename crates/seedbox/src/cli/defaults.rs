@@ -96,7 +96,7 @@ fn kernel(explicit: Option<PathBuf>) -> Result<PathBuf> {
 }
 
 pub fn packaged_kernel(explicit: Option<PathBuf>, packaged: PathBuf) -> Result<PathBuf> {
-    KernelLocations::from_environment().resolve(explicit, Some(packaged))
+    existing("--kernel", explicit.unwrap_or(packaged))
 }
 
 #[derive(Default)]
@@ -408,6 +408,23 @@ pub fn preparation_tool(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packaged_kernel_requires_the_package_or_an_explicit_override() {
+        let directory = tempfile::tempdir().unwrap();
+        let packaged = directory.path().join("Image");
+        let explicit = directory.path().join("override");
+        std::fs::write(&packaged, b"packaged").unwrap();
+        std::fs::write(&explicit, b"explicit").unwrap();
+        assert_eq!(packaged_kernel(None, packaged.clone()).unwrap(), packaged);
+        assert_eq!(
+            packaged_kernel(Some(explicit.clone()), packaged.clone()).unwrap(),
+            explicit
+        );
+        let missing = directory.path().join("missing");
+        assert!(packaged_kernel(Some(missing.clone()), packaged.clone()).is_err());
+        assert!(packaged_kernel(None, missing).is_err());
+    }
 
     #[test]
     fn linux_kernel_precedence_keeps_configured_paths_ahead_of_package() {

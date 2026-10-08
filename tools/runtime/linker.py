@@ -5,11 +5,12 @@ from pathlib import Path
 import subprocess
 import sys
 
-args = sys.argv[1:]
+sign_hvf = "--seedbox-sign-hvf" in sys.argv[1:]
+args = [arg for arg in sys.argv[1:] if arg != "--seedbox-sign-hvf"]
 # Nix's compiler wrapper supplies SDK and library paths. Use the same compiler
 # rustc would normally select, rather than bypassing it with /usr/bin/clang.
 subprocess.run([os.environ.get('CC', 'cc'), *args], check=True)
-if '-o' in args and '-dynamiclib' not in args and '-bundle' not in args:
+if sign_hvf:
     output = args[args.index('-o') + 1]
     entitlement = Path(__file__).resolve().parents[2] / 'crates/seedbox-arm64/entitlements.plist'
     signed = subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--entitlements', str(entitlement), output], stderr=subprocess.PIPE)
