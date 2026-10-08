@@ -134,6 +134,7 @@ impl Fixture {
             performance: BTreeMap::from([("SEEDBOX_UNDO".into(), "256".into())]),
             extra_logs: BTreeMap::new(),
             report: ExecutionReport {
+                timebase: None,
                 reason: StopReason::Completed,
                 workload_exit: Some(WorkloadExit {
                     service: "workload".into(),
@@ -2059,4 +2060,166 @@ fn torn_write_policy_changes_identity_and_replay_requires_the_recorded_policy() 
         fixture.replay(&off).record.replay.unwrap().status,
         ReplayStatus::Match
     );
+}
+
+#[test]
+fn timebase_changes_identity_while_default_counter_preserves_legacy_bytes() {
+    use seedbox::{
+        counter::CounterProfile,
+        vmm::{self, VmmExecutor},
+    };
+    let mut f = Fixture::new();
+    let store = ContentStore::new(f.directory.path().join("store"));
+    let engine = f.directory.path().join("engine");
+    fs::write(&engine, b"fixture engine").unwrap();
+    // The exact pre-timebase profile: no timebase parameter in its identity.
+    let mut legacy = ExecutionProfile {
+        backend: "seedbox-kvm".into(),
+        engine: f.backend.profile.engine.clone(),
+        witness_mode: WitnessMode::Exits,
+        semantic_parameters: BTreeMap::from([
+            ("guest_abi".into(), "oci-init-v1".into()),
+            ("control_channel".into(), "virtio-console-v1".into()),
+            ("memory_mb".into(), "1024".into()),
+        ]),
+    };
+    legacy
+        .semantic_parameters
+        .extend(seedbox::admission::bindings().unwrap());
+    f.backend.profile = legacy.clone();
+    f.preparer.inputs.profile = legacy;
+    let before = f.run();
+    let executor = VmmExecutor::new(
+        &engine,
+        &store,
+        None,
+        1024,
+        WitnessMode::Exits,
+        CounterProfile::Zen,
+    )
+    .unwrap();
+    assert_eq!(executor.profile(), before.record.identity.inputs.profile);
+    for executor in [
+        executor.clone(),
+        executor.clone().with_timebase(Timebase::Counter),
+    ] {
+        f.backend.profile = executor.profile();
+        f.preparer.inputs.profile = executor.profile();
+        let counter = f.run();
+        assert_eq!(counter.record.run_id, before.record.run_id);
+        assert_eq!(
+            serde_json::to_vec(&counter.record.identity).unwrap(),
+            serde_json::to_vec(&before.record.identity).unwrap()
+        );
+        assert!(!counter
+            .record
+            .identity
+            .inputs
+            .profile
+            .semantic_parameters
+            .contains_key("timebase"));
+        assert_eq!(
+            vmm::recorded_timebase(&counter.record.identity.inputs.profile).unwrap(),
+            Timebase::Counter
+        );
+    }
+    let pv = executor.with_timebase(Timebase::Pv);
+    f.backend.profile = pv.profile();
+    f.preparer.inputs.profile = pv.profile();
+    let run = f.run();
+    assert_eq!(run.record.identity.seed, before.record.identity.seed);
+    assert_ne!(run.record.run_id, before.record.run_id);
+    assert_ne!(
+        fs::read(run.directory.join("manifest.json")).unwrap(),
+        fs::read(before.directory.join("manifest.json")).unwrap()
+    );
+    assert_eq!(
+        inspect(&run.directory)
+            .unwrap()
+            .identity
+            .inputs
+            .profile
+            .semantic_parameters["timebase"],
+        "pv"
+    );
+    // Old counter reports omit the field; adding it must not change replay comparison.
+    let counter = pv.clone().with_timebase(Timebase::Counter);
+    f.backend.profile = counter.profile();
+    f.backend.report.timebase = Some(Timebase::Counter);
+    let replay = f
+        .orchestrator
+        .replay(&before.directory, &f.backend, &CancellationToken::default())
+        .unwrap();
+    assert_eq!(replay.record.replay.unwrap().status, ReplayStatus::Match);
+    assert_eq!(replay.record.run_id, before.record.run_id);
+    // Switching back removes the parameter, restoring the original profile.
+    assert_eq!(
+        pv.with_timebase(Timebase::Counter).profile(),
+        before.record.identity.inputs.profile
+    );
+}
+
+#[test]
+fn replay_refuses_timebase_drift_and_unknown_values_before_execution() {
+    for (recorded, requested) in [
+        ("pv", "counter"),
+        ("counter", "pv"),
+        ("future", "counter"),
+        ("pv", "future"),
+    ] {
+        let mut f = Fixture::new();
+        f.backend.profile.backend = "seedbox-kvm".into();
+        if recorded != "counter" {
+            f.backend
+                .profile
+                .semantic_parameters
+                .insert("timebase".into(), recorded.into());
+        }
+        f.preparer.inputs.profile = f.backend.profile.clone();
+        let run = f.run();
+        f.backend.profile.semantic_parameters.remove("timebase");
+        if requested != "counter" {
+            f.backend
+                .profile
+                .semantic_parameters
+                .insert("timebase".into(), requested.into());
+        }
+        for allow_engine_change in [false, true] {
+            let error = f
+                .orchestrator
+                .replay_with_options(
+                    &run.directory,
+                    &f.backend,
+                    ReplayOptions {
+                        allow_engine_change,
+                        ..Default::default()
+                    },
+                )
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("--timebase"), "{error}");
+            if recorded != "future" && requested != "future" {
+                assert!(
+                    error.contains(&format!("executor timebase {requested}")),
+                    "{error}"
+                );
+                assert!(!error.contains("replay --timebase"), "{error}");
+            }
+            assert!(
+                error.contains(if recorded == "future" || requested == "future" {
+                    "future"
+                } else {
+                    requested
+                }),
+                "{error}"
+            );
+            assert_eq!(f.backend.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                fs::read_dir(f.directory.path().join("runs"))
+                    .unwrap()
+                    .count(),
+                1
+            );
+        }
+    }
 }

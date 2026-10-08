@@ -113,6 +113,18 @@ impl VmmExecutor {
         })
     }
 
+    /// Counter is recorded by omission to preserve existing run identities.
+    pub fn with_timebase(mut self, timebase: Timebase) -> Self {
+        if timebase == Timebase::Counter {
+            self.profile.semantic_parameters.remove("timebase");
+        } else {
+            self.profile
+                .semantic_parameters
+                .insert("timebase".into(), timebase.name().into());
+        }
+        self
+    }
+
     /// Check the existing execution policy without storing inputs or starting guests.
     /// Host observations are the same bounded probe used by execution preflight.
     pub fn doctor(engine: &Path, kernel: &Path, cpu: Option<u32>) -> Result<DoctorReport> {
@@ -420,6 +432,17 @@ fn with_capacity<T>(
     check(&reservations)
 }
 
+/// Missing timebase means counter, including records from older engines.
+pub fn recorded_timebase(profile: &ExecutionProfile) -> Result<Timebase> {
+    match profile.semantic_parameters.get("timebase").map(String::as_str) {
+        None | Some("counter") => Ok(Timebase::Counter),
+        Some("pv") => Ok(Timebase::Pv),
+        Some(value) => Err(Error::Integrity(format!(
+            "recorded --timebase {value}: expected counter or pv; use a run recorded with a supported timebase"
+        ))),
+    }
+}
+
 impl ExecutionBackend for VmmExecutor {
     fn preflight_workers(&self, workers: u32) -> Result<()> {
         if !(1..=32).contains(&workers) {
@@ -633,6 +656,8 @@ struct CrashedIncarnation {
 }
 #[derive(Deserialize)]
 pub(crate) struct VmmReport {
+    /// Older engines always used counter.
+    timebase: Option<String>,
     pub(crate) report_version: u32,
     seed: u64,
     /// Absent from engines older than counter profiles, which are all Zen.
@@ -1223,8 +1248,19 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
     if raw.report_version != 1 || raw.seed != request.seed {
         return Err(Error::Integrity("VMM report version/seed mismatch".into()));
     }
+    let timebase = recorded_timebase(&request.prepared.profile)?;
+    let reported = raw.timebase.as_deref().unwrap_or("counter");
+    if reported != timebase.name() {
+        return Err(Error::Integrity(format!(
+            "VMM --timebase {reported}: does not match recorded --timebase {}",
+            timebase.name()
+        )));
+    }
     let counted = recorded_counter(&request.prepared.profile)?;
-    if counted != CounterProfile::Zen && raw.counter_profile.is_none() {
+    if timebase == Timebase::Counter
+        && counted != CounterProfile::Zen
+        && raw.counter_profile.is_none()
+    {
         return Err(Error::Integrity(
             "unqualified VMM report is missing its counter profile".into(),
         ));
@@ -1446,6 +1482,7 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
         reason = StopReason::Error;
     }
     Ok(ExecutionReport {
+        timebase: Some(timebase),
         reason,
         workload_exit,
         witness: Some(raw.world_witness),
@@ -1539,6 +1576,7 @@ mod linux {
         {
             return Err(Error::Execution("CPU exceeds affinity mask".into()));
         }
+        let timebase = recorded_timebase(&backend.profile)?;
         let world = world(&request)?;
         let world_path = request.output.join("world.json");
         fs::write(&world_path, serde_json::to_vec_pretty(&world)?)?;
@@ -1557,6 +1595,9 @@ mod linux {
             .arg(request.seed.to_string())
             .arg("--out")
             .arg(request.output.join("machines"));
+        if timebase != Timebase::Counter {
+            command.arg("--timebase").arg(timebase.name());
+        }
         command.arg("--host-control").arg(endpoint.socket());
         command
             .arg("--stream-console")
@@ -1578,6 +1619,7 @@ mod linux {
             .stdout(fs::File::create(&report_path)?)
             .stderr(fs::File::create(request.output.join("vmm.stderr"))?);
         let incomplete = |reason| ExecutionReport {
+            timebase: Some(timebase),
             reason,
             workload_exit: None,
             witness: None,

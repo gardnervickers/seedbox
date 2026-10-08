@@ -35,6 +35,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Directed link baselines | no overrides; global latency/jitter and zero loss | `x-seedbox.network.links` |
 | Connection selectors | disabled; discover and select through the guest control API | `world.connections`, `world.drop_connection` |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
+| Timebase | `counter` (retired guest branches) | `--timebase` (prepare/run/explore) |
 | Exploration count | `1` | `--count` |
 | Exploration workers | `1`, sequential execution | `--workers` (1..32; automatic CPU selection for parallel execution) |
 | Torn disk writes | off (drop all unflushed sectors on crash) | `--torn-writes` |
@@ -88,6 +89,16 @@ marker. All host, CPU, PMU, MSR, lease, ABI and control-channel checks still app
 `seedbox run --torn-writes` enables seeded partial survival of unflushed
 512-byte disk sectors on crash. It is recorded in run identity and replayed
 automatically. It applies to retained disks, including Compose named volumes. See [disk semantics](docs/runtime.md#disk-crash-policy).
+
+Choose `seedbox run examples/etcd --timebase pv` for the PV clock model.
+`prepare` and `explore` accept the same option. PV compute between exits costs no
+virtual time; time advances at guest exits,
+syscalls and clock reads. The default `counter` counts retired guest branches.
+The choice changes results and run identity, has no environment override, and is
+retained through export/import. Replay uses the recorded timebase and accepts no
+`--timebase` override. `inspect` and run/replay output show `timebase: VALUE`;
+`inspect --json` includes the VMM's reported timebase in `report.timebase` when a
+report is available. Older counter records omit this report field.
 
 `seedbox help run` lists every option. The guest Python API supports
 [bounded committed console triggers](docs/triggers.md) for future stop/partition
@@ -274,10 +285,11 @@ bytes and does not establish a pass for the committed SHA.
 
 ## How execution is controlled
 
-- **Progress and time.** Guest progress is the host perf count of retired
+- **Progress and time.** With the default counter timebase, guest progress is
+  the host perf count of retired
   conditional branches (guest only, kernel and user). Virtual time advances
   1 ns per branch; idle machines jump to their next event.
-- **Stops.** Events (timer deadlines, frames, scenario commands) are delivered
+- **Stops (counter timebase).** Events (timer deadlines, frames, scenario commands) are delivered
   at deterministic points only: a natural VM exit, or an exact branch count
   reached by overflow interrupt plus hardware-breakpoint stepping (no TF).
   Syscalls are not stopping points. A timer interrupt fires at the first
@@ -310,6 +322,9 @@ bytes and does not establish a pass for the committed SHA.
   (`intel-0x5101c4` up to Comet Lake, `intel-0x5111c4` from Ice Lake) that
   have never run on hardware; `run` and `replay` refuse them unless given
   `--allow-unqualified-cpu`, and then warn that results are unverified.
+- The CLI retains the same host admission, CPU/SMT leasing and MSR policy for
+  both timebases. PV itself does not use a host perf counter; selecting it does
+  not qualify additional hosts through this CLI.
 - **The Zen SpeculativeLockMap workaround must be on** for the cores running
   simulations (MSR 0xC0011020 bit 54, rr's workaround). Without it, branch
   counts drift on lock-heavy code (e.g. Go) and runs diverge. The Rust executor
