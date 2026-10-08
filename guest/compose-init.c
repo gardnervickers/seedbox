@@ -1,4 +1,4 @@
-/* Generic per-machine OCI application supervisor. Compile statically for amd64.
+/* Generic per-machine OCI application supervisor. Compile statically for Linux.
  * No shell parses image arguments, environment or configuration values.
  * Filesystems are fresh RAM-backed initramfs images for each machine boot;
  * process stop/start preserves their writable contents within that run.
@@ -18,7 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #ifndef SEEDBOX_SUPERVISOR_TEST
-#include <sys/io.h>
+#include "io.h"
 #endif
 #include "control.h"
 #include "barrier.h"

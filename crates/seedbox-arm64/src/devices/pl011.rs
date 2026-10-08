@@ -7,6 +7,10 @@ pub struct Pl011 {
     regs: [u32; 16],
 }
 impl Pl011 {
+    pub fn state_digest(&self) -> String {
+        let bytes: Vec<u8> = self.regs.iter().flat_map(|reg| reg.to_le_bytes()).collect();
+        crate::witness::hash(&bytes)
+    }
     pub fn irq_level(&self) -> bool {
         self.regs[0x38 / 4] & 0x20 != 0 && self.regs[0x30 / 4] & 0x101 == 0x101
     }

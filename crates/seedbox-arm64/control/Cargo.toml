@@ -1,0 +1,15 @@
+[package]
+name = "seedbox-arm64-control"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# Compile the common protocol without changing either standalone workspace's
+# source identity or unifying its dependencies with the public CLI.
+[lib]
+name = "seedbox_control"
+path = "../../seedbox-control/src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

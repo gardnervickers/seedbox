@@ -64,6 +64,17 @@ pub enum DirtyPages {
     Bitmap { page_size: usize, words: Vec<u64> },
 }
 
+/// Explicit stopped architectural inventory, with no host handles or raw exit
+/// structures. GIC bytes use the backend's documented stable state format.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendState {
+    pub core: Vec<u64>,
+    pub system: std::collections::BTreeMap<u16, u64>,
+    pub simd: Vec<[u8; 16]>,
+    pub gic_cpu: std::collections::BTreeMap<u16, u64>,
+    pub gic: Vec<u8>,
+}
+
 /// One VM and one vCPU, confined to the creating thread. `run` is synchronous;
 /// every other operation is performed while stopped. Backends retain mappings
 /// until unmap/destruction. `complete` retires the held operation exactly once;
@@ -88,6 +99,9 @@ pub trait Backend: Sized {
     fn complete(&mut self, read: Option<u64>) -> Result<()>;
     fn inject_spi(&mut self, intid: u32, level: bool) -> Result<()>;
     fn dirty_pages(&self, slot: u32) -> Result<DirtyPages>;
+    fn state(&self) -> Result<BackendState> {
+        Err("complete stopped backend state is unavailable".into())
+    }
 }
 
 pub(crate) fn core_index(reg: CoreReg) -> Result<u32> {

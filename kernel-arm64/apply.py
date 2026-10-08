@@ -35,7 +35,7 @@ def counter_access(text):
         "\t\t/* Seedbox: PR_TSC_ENABLE means PV emulation, not hardware access. */\n"
         "\t\tsysreg_clear_set(cntkctl_el1, ARCH_TIMER_USR_VCT_ACCESS_EN, 0);")
 
-def changes(root):
+def changes(root, application=False):
     edits = {}
     def edit(path, fn):
         edits[path] = fn((root / path).read_text())
@@ -109,14 +109,22 @@ def changes(root):
         target = "arch/arm64/" + ("kernel/" if name.endswith(".c") else "include/asm/") + name
         if (root / target).exists(): raise ValueError(f"already patched: {target}")
         edits[target] = (HERE / name).read_text()
+    if application:
+        edit("drivers/char/Kconfig", lambda s: s + "\nconfig SEEDBOX_SUPERVISOR_IO\n\tbool \"Seedbox supervisor register device\"\n\tdepends on ARM64 && OF\n")
+        edit("drivers/char/Makefile", lambda s: s + "\nobj-$(CONFIG_SEEDBOX_SUPERVISOR_IO) += supervisor-io.o\n")
+        for name in ["supervisor-io.c", "supervisor-io.h"]:
+            target = "drivers/char/" + name
+            if (root / target).exists(): raise ValueError(f"already patched: {target}")
+            edits[target] = (HERE / name).read_text()
     return edits
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("source", type=Path)
     p.add_argument("--check", action="store_true", help="check anchors without writing")
+    p.add_argument("--application", action="store_true", help="include the dedicated Compose supervisor device")
     args = p.parse_args()
-    edits = changes(args.source)
+    edits = changes(args.source, args.application)
     for path, content in edits.items():
         if not args.check: (args.source / path).write_text(content)
         print(path)

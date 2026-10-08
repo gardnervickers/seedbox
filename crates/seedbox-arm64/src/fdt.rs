@@ -92,6 +92,7 @@ pub fn build(seed: u64, initrd_len: usize) -> Result<Vec<u8>> {
         INITRD_ADDR,
         INITRD_ADDR + initrd_len as u64,
         DEFAULT_COMMAND_LINE,
+        None,
     ))
 }
 
@@ -105,9 +106,29 @@ pub fn build_for_layout(layout: &BootLayout<'_>) -> Result<Vec<u8>> {
         initrd.start,
         initrd.end,
         layout.command_line(),
+        None,
     );
     if bytes.len() as u64 > DTB_RESERVATION {
         return Err("generated device tree exceeds boot layout reservation".into());
+    }
+    layout.ram_offset(layout.dtb_range().start, bytes.len())?;
+    Ok(bytes)
+}
+
+/// The application personality advertises only the devices actually present.
+/// Fixture callers retain their original byte-for-byte device tree.
+pub fn build_for_application(layout: &BootLayout<'_>, disk: bool) -> Result<Vec<u8>> {
+    let initrd = layout.initrd_range();
+    let bytes = build_tree(
+        layout.seed(),
+        layout.memory_bytes() as u64,
+        initrd.start,
+        initrd.end,
+        layout.command_line(),
+        Some(disk),
+    );
+    if bytes.len() as u64 > DTB_RESERVATION {
+        return Err("application device tree exceeds boot layout reservation".into());
     }
     layout.ram_offset(layout.dtb_range().start, bytes.len())?;
     Ok(bytes)
@@ -119,6 +140,7 @@ fn build_tree(
     initrd_start: u64,
     initrd_end: u64,
     command_line: &str,
+    application_disk: Option<bool>,
 ) -> Vec<u8> {
     let mut t = Tree {
         structure: vec![],
@@ -210,12 +232,78 @@ fn build_tree(
     t.prop("reg-names", b"time\0event\0");
     t.cells("interrupts", &[0, TIMER_SPI - 32, 4]);
     t.end();
+    if let Some(disk) = application_disk {
+        use crate::application::*;
+        t.node("seedbox-io@a020000");
+        t.string("compatible", "seedbox,supervisor-io-v1");
+        t.reg(SUPERVISOR_MMIO, PAGE_SIZE as u64);
+        t.end();
+        for (name, address, irq, present) in [
+            ("virtio@b000000", NET_MMIO, NET_SPI, true),
+            ("virtio@b010000", CONSOLE_MMIO, CONSOLE_SPI, true),
+            ("virtio@b020000", BLOCK_MMIO, BLOCK_SPI, disk),
+        ] {
+            if present {
+                t.node(name);
+                t.string("compatible", "virtio,mmio");
+                t.reg(address, PAGE_SIZE as u64);
+                t.cells("interrupts", &[0, irq - 32, 4]);
+                t.prop("dma-coherent", &[]);
+                t.end();
+            }
+        }
+    }
     t.end();
     t.finish()
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn application_tree_advertises_exact_present_devices_without_changing_fixture() {
+        let mut kernel = [0u8; 64];
+        kernel[56..60].copy_from_slice(b"ARM\x64");
+        kernel[16..24].copy_from_slice(&4096u64.to_le_bytes());
+        let spec = crate::boot::BootSpec::for_application(
+            &kernel,
+            b"archive",
+            7,
+            RAM_SIZE as u64,
+            crate::boot::DEFAULT_COMMAND_LINE,
+        )
+        .unwrap();
+        for disk in [false, true] {
+            let bytes = build_for_application(&spec.validate().unwrap(), disk).unwrap();
+            let tree = ::fdt::Fdt::new(&bytes).unwrap();
+            let supervisor = tree.find_node("/seedbox-io@a020000").unwrap();
+            let reg = supervisor.reg().unwrap().next().unwrap();
+            assert_eq!(
+                reg.starting_address as u64,
+                crate::application::SUPERVISOR_MMIO
+            );
+            assert_eq!(reg.size, Some(PAGE_SIZE));
+            for (path, irq) in [
+                ("/virtio@b000000", crate::application::NET_SPI),
+                ("/virtio@b010000", crate::application::CONSOLE_SPI),
+            ] {
+                let node = tree.find_node(path).unwrap();
+                assert_eq!(
+                    node.property("interrupts").unwrap().value,
+                    [0u32, irq - 32, 4]
+                        .into_iter()
+                        .flat_map(u32::to_be_bytes)
+                        .collect::<Vec<_>>()
+                );
+                assert!(node.property("dma-coherent").is_some());
+            }
+            assert_eq!(tree.find_node("/virtio@b020000").is_some(), disk);
+            assert!(tree.find_node("/timer").is_none());
+        }
+        let fixture = build(7, 7).unwrap();
+        let tree = ::fdt::Fdt::new(&fixture).unwrap();
+        assert!(tree.find_node("/seedbox-io@a020000").is_none());
+        assert!(tree.find_node("/virtio@b000000").is_none());
+    }
     #[test]
     fn independently_parse_layout_and_seeds() {
         let bytes = build(1, 4096).unwrap();
