@@ -508,13 +508,20 @@ fn with_capacity<T>(
 }
 
 /// Build the retained executable's launch contract without consulting the host.
-#[cfg(any(test, all(target_os = "linux", target_arch = "x86_64")))]
-fn engine_command(engine: &Path, profile: &ExecutionProfile) -> Result<std::process::Command> {
+pub(crate) fn engine_command(
+    engine: &Path,
+    profile: &ExecutionProfile,
+) -> Result<std::process::Command> {
     let mut command = std::process::Command::new(engine);
-    if crate::engine::recorded_launch(profile)? == crate::engine::ExecutableKind::InternalWorker {
-        command
-            .arg("__engine")
-            .arg(crate::engine::INTERNAL_WORKER_V1);
+    match crate::engine::recorded_launch(profile)? {
+        crate::engine::ExecutableKind::Standalone => {}
+        crate::engine::ExecutableKind::InternalWorker => {
+            command.args(["__engine", crate::engine::INTERNAL_WORKER_V1]);
+        }
+        crate::engine::ExecutableKind::ArmWorld => {
+            command.args(["__engine", "arm64-world-v1"]);
+            return Ok(command);
+        }
     }
     let timebase = recorded_timebase(profile)?;
     if timebase != Timebase::Counter {
@@ -1635,66 +1642,7 @@ fn checked_report(raw: VmmReport, request: &ExecutionRequest<'_>) -> Result<Exec
 mod linux {
     use super::*;
     use crate::host::HostLease;
-    use std::{
-        fs,
-        os::unix::{fs::PermissionsExt, process::CommandExt},
-        process::Child,
-        time::{Duration, Instant},
-    };
-
-    // VMM is a single-process engine. Keep its unreaped leader owned until the
-    // final process-group signal, including when it has already exited.
-    struct OwnedChild(Option<Child>);
-    impl OwnedChild {
-        fn stop(&mut self) -> Result<()> {
-            if let Some(child) = &mut self.0 {
-                let killed = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
-                if killed != 0
-                    && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-                {
-                    return Err(std::io::Error::last_os_error().into());
-                }
-                child.wait()?;
-                self.0 = None;
-            }
-            Ok(())
-        }
-        fn exited(&self) -> Result<Option<bool>> {
-            let child = self.0.as_ref().unwrap();
-            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-            if unsafe {
-                libc::waitid(
-                    libc::P_PID,
-                    child.id(),
-                    &mut info,
-                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-                )
-            } != 0
-            {
-                let error = std::io::Error::last_os_error();
-                if error.kind() == std::io::ErrorKind::Interrupted {
-                    return Ok(None);
-                }
-                return Err(error.into());
-            }
-            Ok(unsafe {
-                (info.si_pid() != 0)
-                    .then(|| info.si_code == libc::CLD_EXITED && info.si_status() == 0)
-            })
-        }
-    }
-    impl Drop for OwnedChild {
-        fn drop(&mut self) {
-            // An owned live child must never outlive its host-state guard.
-            // Retry interrupted waits before the guard can restore MSRs.
-            while self.0.is_some() {
-                if let Err(error) = self.stop() {
-                    eprintln!("seedbox: waiting for VMM cleanup: {error}");
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        }
-    }
+    use std::{fs, os::unix::process::CommandExt};
 
     pub(super) fn execute(
         backend: &VmmExecutor,
@@ -1711,57 +1659,15 @@ mod linux {
         {
             return Err(Error::Execution("CPU exceeds affinity mask".into()));
         }
-        let timebase = recorded_timebase(&backend.profile)?;
-        let world = world(&request)?;
-        let world_path = request.output.join("world.json");
-        fs::write(&world_path, serde_json::to_vec_pretty(&world)?)?;
-        let engine = request
-            .artifacts
-            .get(&backend.profile.engine)
-            .ok_or_else(|| Error::Integrity("missing retained VMM".into()))?;
-        fs::set_permissions(engine, fs::Permissions::from_mode(0o500))?;
-        let report_path = request.output.join("vmm.json");
-        let endpoint = crate::host_control::Endpoint::new(request.output)?;
-        let mut command = engine_command(engine, &backend.profile)?;
-        command
-            .arg("--config")
-            .arg(&world_path)
-            .arg("--seed")
-            .arg(request.seed.to_string())
-            .arg("--out")
-            .arg(request.output.join(MACHINE_OUTPUT_DIR));
-        command.arg("--host-control").arg(endpoint.socket());
-        command
-            .arg("--stream-console")
-            // Bound observation metadata to at most 40 MiB across all streams.
-            .arg("--log-chunk-limit")
-            .arg(
-                (1_048_576 / (2 * request.prepared.guests.len()))
-                    .min(65_536)
-                    .to_string(),
-            )
-            .arg("--console-limit")
-            .arg((1024 * 1024 * 1024 / (2 * request.prepared.guests.len())).to_string());
-        if backend.profile.witness_mode == WitnessMode::FullState {
-            command.arg("--digest");
-        }
-        // Do not inherit hidden performance/semantic VMM environment settings.
-        command.env_clear().envs(request.performance_parameters);
-        command
-            .stdout(fs::File::create(&report_path)?)
-            .stderr(fs::File::create(request.output.join("vmm.stderr"))?);
-        let incomplete = |reason| ExecutionReport {
-            timebase: Some(timebase),
-            reason,
-            workload_exit: None,
-            witness: None,
-            full_state: None,
-            faults: vec![],
-            detail: None,
-            engine_qualification: None,
-        };
+        use crate::worker_process::{incomplete, WorkerLaunch};
+        let mut launch = WorkerLaunch::prepare(&request)?;
+        // Performance values are explicit; hidden process settings stay cleared.
+        launch.command.envs(request.performance_parameters);
         if request.cancellation.is_cancelled() {
-            return Ok(incomplete(StopReason::Cancelled));
+            return Ok(incomplete(
+                StopReason::Cancelled,
+                recorded_timebase(&backend.profile)?,
+            ));
         }
         let static_evidence = backend
             .admission
@@ -1823,10 +1729,7 @@ mod linux {
             )?;
         }
         unsafe {
-            command.pre_exec(move || {
-                if libc::setpgid(0, 0) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
+            launch.command.pre_exec(move || {
                 let mut set: libc::cpu_set_t = std::mem::zeroed();
                 libc::CPU_ZERO(&mut set);
                 libc::CPU_SET(cpu as usize, &mut set);
@@ -1836,25 +1739,12 @@ mod linux {
                 Ok(())
             });
         }
-        let started = Instant::now();
-        let mut child = OwnedChild(Some(command.spawn()?));
-        let completion = loop {
-            if request.cancellation.is_cancelled() {
-                break Ok(incomplete(StopReason::Cancelled));
-            }
-            if let Some(success) = child.exited()? {
-                break if success {
-                    report(&fs::read(&report_path)?, &request)
-                } else {
-                    Err(Error::Execution(VMM_FAILURE_MESSAGE.into()))
-                };
-            }
-            if started.elapsed() >= Duration::from_nanos(request.limits.wall_time_ns) {
-                break Ok(incomplete(StopReason::WallTimeLimit));
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        child.stop()?;
+        // Declared after the lease: every error path finishes process cleanup
+        // before releasing the leased CPU or restoring MSRs.
+        let child = launch.spawn()?;
+        let completion = child.wait(request.cancellation, request.limits.wall_time_ns, |bytes| {
+            report(bytes, &request)
+        });
         lease.restore()?;
         if backend.counter.workaround().is_some() {
             fs::write(

@@ -32,6 +32,8 @@ mod retained;
 pub mod store;
 pub mod templates;
 pub mod vmm;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod worker_process;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

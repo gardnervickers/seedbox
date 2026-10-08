@@ -9,18 +9,10 @@ use seedbox_arm64::{
     backend::{hvf::Hvf, Backend, SysReg},
     boot::BootSpec,
 };
-use std::{
-    collections::BTreeMap,
-    fs,
-    os::unix::{fs::PermissionsExt, process::CommandExt},
-    path::Path,
-    process::{Child, Command},
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeMap, fs, path::Path};
 
 const POLICY: &str = "seedbox-hvf-application-v1";
 const TIMEBASE: &str = "arm64-pv-world-v1";
-const CONTRACT: &str = "arm64-world-v1";
 
 #[derive(Clone, Debug)]
 pub struct MacExecutor {
@@ -273,137 +265,15 @@ impl ExecutionBackend for MacExecutor {
             return Err(Error::Integrity("execution profile mismatch".into()));
         }
         self.preflight(Some(request.output))?;
-        let incomplete = |reason| ExecutionReport {
-            timebase: Some(Timebase::Pv),
-            reason,
-            workload_exit: None,
-            witness: None,
-            full_state: None,
-            faults: Vec::new(),
-            detail: None,
-            engine_qualification: None,
-        };
+        use crate::worker_process::{incomplete, WorkerLaunch};
         if request.cancellation.is_cancelled() {
-            return Ok(incomplete(StopReason::Cancelled));
+            return Ok(incomplete(StopReason::Cancelled, Timebase::Pv));
         }
-        let engine = request
-            .artifacts
-            .get(&self.profile.engine)
-            .ok_or_else(|| Error::Integrity("missing retained HVF executable".into()))?;
-        fs::set_permissions(engine, fs::Permissions::from_mode(0o500))?;
-        let world = request.output.join("world.json");
-        fs::write(
-            &world,
-            serde_json::to_vec_pretty(&crate::vmm::world(&request)?)?,
-        )?;
-        let report = request.output.join("vmm.json");
-        let endpoint = crate::host_control::Endpoint::new(request.output)?;
-        let mut command = Command::new(engine);
-        command
-            .args(["__engine", CONTRACT, "--config"])
-            .arg(&world)
-            .arg("--seed")
-            .arg(request.seed.to_string())
-            .arg("--out")
-            .arg(request.output.join("machines"))
-            .arg("--host-control")
-            .arg(endpoint.socket())
-            .arg("--console-limit")
-            .arg((1024 * 1024 * 1024 / (2 * request.prepared.guests.len())).to_string())
-            .env_clear()
-            .stdout(fs::File::create(&report)?)
-            .stderr(fs::File::create(request.output.join("vmm.stderr"))?)
-            .process_group(0);
-        if self.profile.witness_mode == WitnessMode::FullState {
-            command.arg("--digest");
-        }
-        let start = Instant::now();
-        let mut child = OwnedWorld(Some(command.spawn().map_err(|e| {
-            Error::Setup(format!(
-                "HVF worker {}: {e}; use the retained signed CLI",
-                engine.display()
-            ))
-        })?));
-        let result = loop {
-            if request.cancellation.is_cancelled() {
-                break Ok(incomplete(StopReason::Cancelled));
-            }
-            if let Some(success) = child.exited()? {
-                break if success {
-                    crate::vmm::report_hvf(&fs::read(&report)?, &request)
-                } else {
-                    Err(Error::Execution(crate::vmm::VMM_FAILURE_MESSAGE.into()))
-                };
-            }
-            if start.elapsed() >= Duration::from_nanos(request.limits.wall_time_ns) {
-                break Ok(incomplete(StopReason::WallTimeLimit));
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        child.stop()?;
-        result
-    }
-}
-
-/// Retain the unreaped group leader through the final signal, even if it has
-/// exited, so cleanup cannot target a recycled PID/process group.
-struct OwnedWorld(Option<Child>);
-impl OwnedWorld {
-    fn exited(&self) -> Result<Option<bool>> {
-        let child = self
-            .0
-            .as_ref()
-            .ok_or_else(|| Error::Execution("HVF worker already reaped".into()))?;
-        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        if unsafe {
-            libc::waitid(
-                libc::P_PID,
-                child.id(),
-                &mut info,
-                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-            )
-        } != 0
-        {
-            let error = std::io::Error::last_os_error();
-            return if error.kind() == std::io::ErrorKind::Interrupted {
-                Ok(None)
-            } else {
-                Err(error.into())
-            };
-        }
-        Ok((info.si_pid != 0).then_some(info.si_code == libc::CLD_EXITED && info.si_status == 0))
-    }
-    fn stop(&mut self) -> Result<()> {
-        let exited = self.exited()?.is_some();
-        if let Some(child) = self.0.as_mut() {
-            if unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) } != 0 {
-                let error = std::io::Error::last_os_error();
-                // Darwin reports a zombie's uid as 0 and killpg returns EPERM
-                // when no live member remains. All native workers retain our
-                // uid; a live owned member would receive the group signal.
-                // Keep the leader unreaped until this final signal so its
-                // process-group id cannot be reused.
-                if error.raw_os_error() != Some(libc::ESRCH)
-                    && !(exited && error.raw_os_error() == Some(libc::EPERM))
-                {
-                    return Err(error.into());
-                }
-            }
-            child.wait()?;
-            self.0 = None;
-        }
-        Ok(())
-    }
-}
-
-impl Drop for OwnedWorld {
-    fn drop(&mut self) {
-        while self.0.is_some() {
-            if let Err(error) = self.stop() {
-                eprintln!("seedbox: waiting for HVF cleanup: {error}");
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        }
+        WorkerLaunch::prepare(&request)?.spawn()?.wait(
+            request.cancellation,
+            request.limits.wall_time_ns,
+            |bytes| crate::vmm::report_hvf(bytes, &request),
+        )
     }
 }
 
@@ -632,30 +502,5 @@ mod process_tests {
             ContentDigest::of(b"new executable")
         );
         assert!(validate_profile(&executor.profile).is_err());
-    }
-    #[test]
-    fn exited_group_is_reaped_after_the_final_signal() {
-        let child = Command::new("/bin/sh")
-            .args(["-c", "exit 0"])
-            .process_group(0)
-            .spawn()
-            .expect("child");
-        let mut world = OwnedWorld(Some(child));
-        while world.exited().expect("waitid").is_none() {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        world.stop().expect("reap zombie group");
-        assert!(world.0.is_none());
-    }
-    #[test]
-    fn live_group_is_terminated_and_reaped() {
-        let child = Command::new("/bin/sleep")
-            .arg("60")
-            .process_group(0)
-            .spawn()
-            .expect("child");
-        let mut world = OwnedWorld(Some(child));
-        world.stop().expect("terminate group");
-        assert!(world.0.is_none());
     }
 }
