@@ -19,13 +19,12 @@ def run_pair(job, campaign, project, verifier=None):
     """Run a focused workload once, then require its ordinary retained MATCH."""
     a = campaign.args
     state = campaign.state
-    flags = ['--allow-dev-engine'] if job.get('pinned_engine') else []
     runtime = ['--kernel', a.kernel, '--vmm', a.engine, '--guest-init', a.guest_init,
                '--busybox', a.busybox, '--cpu', str(a.cpu), '--state', str(state), '--memory-mb', '512']
     if job.get('mke2fs'):
         runtime += ['--mke2fs', job['mke2fs']]
     expected = job['spec']['expected']
-    code, stdout, _ = campaign.invoke('run', [a.cli, 'run', str(project), '--full-state', *runtime, *flags], True)
+    code, stdout, _ = campaign.invoke('run', [a.cli, 'run', str(project), '--full-state', *runtime], True)
     if code != (1 if expected == 'FAIL' else 0) or not stdout.startswith(expected + ': '):
         raise RuntimeError('focused run did not reach expected ' + expected)
     baseline_run = campaign.last_run
@@ -35,7 +34,7 @@ def run_pair(job, campaign, project, verifier=None):
     if verifier:
         verifier(baseline_run)
     code, stdout, _ = campaign.invoke('replay', [a.cli, 'replay', str(baseline_run),
-                    '--cpu', str(a.cpu), '--state', str(state), *flags], True)
+                    '--cpu', str(a.cpu), '--state', str(state)], True)
     replay = campaign.inspect('replay-inspect', campaign.last_run)
     if code or replay['replay']['status'] != 'MATCH' or replay['identity'] != baseline['identity']:
         raise RuntimeError('focused default replay did not MATCH')

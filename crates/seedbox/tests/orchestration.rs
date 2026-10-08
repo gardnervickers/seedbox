@@ -1311,7 +1311,7 @@ fn exploration_actual_unsupported_profile_refuses_before_all_preparation() {
         None,
         512,
         WitnessMode::Exits,
-        seedbox::counter::CounterProfile::Zen,
+        seedbox::counter::CounterProfile::IntelIceLake,
     )
     .unwrap();
     let batch = fixture
@@ -1337,7 +1337,7 @@ fn exploration_actual_unsupported_profile_refuses_before_all_preparation() {
         .error
         .as_ref()
         .unwrap()
-        .contains("outside the admitted host policy"));
+        .contains("explicitly allow unqualified CPU execution"));
     assert!(!batch.directory.join("attempts").exists());
     assert!(!batch.preparation_directory.join("setup.json").exists());
     assert_eq!(

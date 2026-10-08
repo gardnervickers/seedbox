@@ -68,11 +68,8 @@ fn complete_policy_matches_without_host_enrollment_or_incidental_core_identity()
     validate_observation(&first).unwrap();
     validate_observation(&second).unwrap();
     let pinned = profile();
-    let kernel = ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap();
-    for allow_dev_engine in [false, true] {
-        admit_artifacts(&pinned, &kernel, allow_dev_engine).unwrap();
-        assert!(!is_dev_engine(&pinned));
-    }
+    validate_profile(&pinned).unwrap();
+    assert!(!is_dev_engine(&pinned));
     assert_eq!(POLICY_VERSION, "amd-zen3-engine391f-v3");
     assert_eq!(
         GUEST_KERNEL,
@@ -335,17 +332,12 @@ fn old_or_drifted_proof_is_distinct_from_engine_mismatch_and_cannot_be_synthesiz
     }
     let mut p = profile();
     p.engine = ContentDigest::of(b"another engine");
-    assert!(validate_profile(&p)
-        .unwrap_err()
-        .to_string()
-        .contains("engine is outside"));
+    validate_profile(&p).unwrap();
     let p = ExecutionProfile {
         semantic_parameters: BTreeMap::new(),
         ..profile()
     };
     assert!(validate_profile(&p).is_err());
-    assert!(validate_kernel(&ContentDigest::of(b"other kernel")).is_err());
-    validate_kernel(&ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap()).unwrap();
 }
 
 #[test]
@@ -401,14 +393,8 @@ fn unchanged_actual_and_synthetic_historical_records_are_readable_but_not_admitt
 }
 
 #[test]
-fn successor_release_rejects_previous_exact_engine_and_policy_without_migration() {
+fn successor_release_rejects_previous_policy_without_migration() {
     let mut previous = profile();
-    previous.engine = ContentDigest::try_from(
-        "168ad5db0e63919a3c04dbfed6c22f133aa14600747db4f64ebc3f3dc2c37c7d".to_owned(),
-    )
-    .unwrap();
-    assert!(validate_profile(&previous).is_err());
-    previous = profile();
     previous
         .semantic_parameters
         .insert("host_policy".into(), "amd-zen3-engine168ad-v1".into());

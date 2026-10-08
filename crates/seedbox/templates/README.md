@@ -44,9 +44,9 @@ see the repository's `docs/runtime.md` for setup and limits. `--margin` and
 `--undo` control PMU approach and stepping performance without changing results.
 `seedbox --version` reports the simulator version. New runs retain the whole
 executable for replay, so an installed CLI upgrade does not replace the recorded
-engine. No separate VMM build or runtime compiler invocation is needed. The
-combined development engine requires `--allow-dev-engine` until qualified;
-`prepare` records its development marker without granting execution permission.
+engine. No separate VMM build or runtime compiler invocation is needed. Every
+built engine and guest kernel is admitted; `--allow-dev-engine` is a compatibility
+no-op. Native replay evidence remains separate.
 ARM builds include the experimental fixture engine, but Compose execution
 currently requires Linux x86-64.
 `--torn-writes` opts into seeded partial survival of unflushed 512-byte disk
@@ -170,19 +170,12 @@ not cross-host replay qualification; `--json` shows the admitted observations.
 Known non-Zen counters require explicit `--allow-unqualified-cpu` for run,
 explore and replay and remain unverified. They retain exact release/counter/input
 checks and SMT ownership but carry no qualified AMD proof or AMD MSR writes.
-`doctor` refuses those counters. The source policy `amd-zen3-engine391f-v3` pins
-built-but-unqualified engine391f and guest kernel68bf (K2); fresh runtime acceptance
-is still required. Disabled selected-event readiness precedes preparation and
+`doctor` refuses those counters. Disabled selected-event readiness precedes preparation and
 is rechecked under leases; it never enables a guest counter. Intel is not qualified.
 
-For unpinned development engines or guest kernels, pass `--allow-dev-engine` to
-run, explore, replay or doctor. These runs bind `engine_qualification =
-"dev-unpinned"` in identity and report, preserved by inspect and bundles. Replay
-requires the flag and the exact retained artifact hashes and labels comparisons
-`unqualified dev engine`; without it replay retains NOT_COMPARABLE naming the
-flag. Doctor prints `dev engine: unqualified` for dev artifacts. The flag with
-both pinned artifacts adds no marker. Every host/CPU/PMU/MSR/lease/ABI check
-still applies, and release qualification still requires its own acceptance.
+Engines and guest kernels are not pinned: any built engine and kernel are
+admitted, and each run records their hashes. `--allow-dev-engine` is still accepted and has no effect.
+Every host/CPU/PMU/MSR/lease/ABI check still applies.
 
 Compare two retained run directories on Linux or macOS with `seedbox diff RUN_A
 RUN_B [--json]`. Import bundles first. Diff reports world and machine witnesses,
