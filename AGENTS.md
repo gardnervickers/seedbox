@@ -209,3 +209,22 @@ cargo auto-build fallback. Success reports
 only the exact cleaned-up probe observations and selected core; the library does
 not read arguments/environment or print. It creates no state/run and never prepares
 images or executes guests. Compatibility readiness is not replay qualification.
+
+## Current stage
+
+- Seedbox is under heavy development. Don't add pins, allowlists,
+  qualification lists, admission policies, provenance markers or similar
+  gates; #142 and #143 removed the engine, kernel, CPU and host-policy pins.
+  When a test depends on such a check, change or drop the test. Text elsewhere
+  about qualification or re-pinning is historical.
+- An engine change (see above) gives every later run a new engine hash. Old
+  runs still replay on their retained engine, but can't be replayed on the new
+  one: to compare, make a fresh run and check its witness against the old run's.
+- The default `counter` timebase needs an AMD Zen KVM host with guest perf
+  counting. `--timebase pv` needs only KVM, so it also runs on cloud VMs with
+  nested KVM and no PMU; `tools/droplet/pv-run.sh` runs batched PV checks on a
+  throwaway DigitalOcean droplet.
+- `crates/seedbox-vmm` builds only on Linux x86-64, so a Mac pre-check covers
+  none of it. A VMM change needs `cargo build-vmm` and
+  `cargo test-vmm --features kvm-tests` on a Linux KVM host. Without the
+  feature, the KVM tests are skipped, not failed.
