@@ -7,6 +7,8 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 ## Workspace
 
 - `crates/seedbox` is the default package: `cargo run -- <command>` runs the CLI.
+  Use `cargo run --release -- <command>` or the release executable for guest runs;
+  the bundled engine uses the CLI build profile.
 - `crates/seedbox-vmm` is Linux-only and deliberately **not** a workspace member.
   It is its own workspace with its own `Cargo.lock`, because cargo unifies
   dependency features across one build. The public CLI links its library only
@@ -170,6 +172,9 @@ deliberately change one.
   `WORD: detail`, where `WORD` is the SCREAMING_SNAKE_CASE serde name
   produced by `word()` (`PASS`, `MATCH`, `VALID`, `CREATED`, ...). Any
   further lines are lowercase `key: value` (`replay: MATCH`, `error: ...`).
+- `logs` without `--json` writes only the selected raw bytes to stdout, with no
+  decoration or added newlines. Its lowercase `logs:` status and `omission:`
+  diagnostics go to stderr; `--json` includes chunk metadata and `bytes_hex`.
 - Scripts find the run directory with `sed -n 's/^[A-Z]*: //p'` over both
   output streams of `run` and `replay`. Exactly one line may match
   `^[A-Z]*: `, and it must be `OUTCOME: run-directory`.

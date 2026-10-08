@@ -4,7 +4,11 @@ This is source staging for [issue68](https://github.com/gardnervickers/seedbox/i
 It has not qualified an engine or enabled a runner. Run only under a separately
 reviewed finite hardware release on the compatible qualified AMD host as root.
 The admission CLI must be bound to the exact frozen engine/guest-kernel candidate;
-there is no engine-change override. Host-kernel bytes are not checked. The source admission policy selects the accepted engine and guest kernel. Final combined admission/CPUID-selected profile integration
+there is no engine-change override. Host-kernel bytes are not checked.
+The source admission policy `amd-zen3-engine391f-v3` pins engine391f
+(`391ff19696f1bfbad144892bcaa1f831ff19f06549561420b3d17060bf316938`) and K2
+(`68bf3f024fc6ec0c01399020b5c37e4b42d661c2604f3c87fc879ccf9280e166`).
+Final combined admission/CPUID-selected profile integration
 is a compatibility prerequisite; this entrypoint never passes
 `--allow-unqualified-cpu` or `--allow-engine-change`. A merged engine PR does not update or qualify that policy.
 

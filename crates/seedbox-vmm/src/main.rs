@@ -16,10 +16,14 @@ fn run() -> Result<serde_json::Value, String> {
     let args: Vec<String> = std::env::args().collect();
     let undo = std::env::var("SEEDBOX_UNDO").ok();
     let margin = std::env::var("SEEDBOX_MARGIN").ok();
-    let performance = PerformanceOptions::parse(
-        undo.as_deref(), margin.as_deref(), std::env::var("SEEDBOX_PAGE_HASHES").is_ok(),
-    )?;
+    let performance = PerformanceOptions::parse(undo.as_deref(), margin.as_deref())?;
     let mut options = WorkerOptions::from_args(&args, performance)?;
+    if options.pv_clock {
+        if let Ok(value) = std::env::var("SEEDBOX_PV_WATCHDOG_MS") {
+            options.performance.pv_watchdog_ms = value.parse()
+                .map_err(|e| format!("SEEDBOX_PV_WATCHDOG_MS: {e}"))?;
+        }
+    }
     if std::env::var("SEEDBOX_TRACE_CONSOLE").is_ok() {
         options.console_trace = Some(trace_console);
     }

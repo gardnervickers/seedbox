@@ -48,7 +48,7 @@ struct Config {
     control: Value,
     control_channel: String,
     #[serde(default)]
-    disk_loss: Option<String>,
+    disk_loss: Value,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -523,11 +523,7 @@ pub fn run(options: &Options) -> Result<Value> {
     let control = Control::new(&cfg.control, names.clone(), lookahead, 0)?;
     let mut faults = Faults::with_links(Vec::new(), names.clone(), links)?;
     faults.require_readiness();
-    let torn = match cfg.disk_loss.as_deref() {
-        None => false,
-        Some(crate::disk::TORN_MODEL) => true,
-        _ => return Err("unknown disk loss model".into()),
-    };
+    let disk_fault_model = crate::disk::parse_disk_fault_model(&cfg.disk_loss)?;
     let base = options.config.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(&options.output).map_err(|e| format!("world output: {e}"))?;
     let mut machines = Vec::new();
@@ -563,7 +559,7 @@ pub fn run(options: &Options) -> Result<Value> {
                 .and_then(|d| d.image.as_ref())
                 .map(|p| base.join(p)),
             disk_sectors,
-            torn_writes: torn,
+            disk_fault_model,
             timer_policy: Some(super::TimerPolicy {
                 seed: options.seed,
                 domain: format!("timer-jitter/{}", m.name),

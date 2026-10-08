@@ -13,7 +13,7 @@ const FIELDS: [&str; 7] = [
     "host_arch",
     "guest_arch",
     "engine_backend",
-    "timebase",
+    "engine_timebase",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,7 +36,7 @@ pub fn internal_parameters() -> Result<BTreeMap<String, String>> {
         ("host_arch".into(), std::env::consts::ARCH.into()),
         ("guest_arch".into(), std::env::consts::ARCH.into()),
         ("engine_backend".into(), "kvm".into()),
-        ("timebase".into(), "counted-branches-v1".into()),
+        ("engine_timebase".into(), "counter-pv-v1".into()),
     ]))
 }
 
@@ -77,11 +77,11 @@ pub fn recorded_launch(profile: &ExecutionProfile) -> Result<ExecutableKind> {
         parameters["host_arch"].as_str(),
         parameters["guest_arch"].as_str(),
         parameters["engine_backend"].as_str(),
-        parameters["timebase"].as_str(),
+        parameters["engine_timebase"].as_str(),
     );
     if !matches!(
         platform,
-        ("linux", "x86_64", "x86_64", "kvm", "counted-branches-v1")
+        ("linux", "x86_64", "x86_64", "kvm", "counter-pv-v1")
     ) {
         return Err(Error::Integrity(
             "unsupported engine executable platform/backend/timebase".into(),
@@ -105,10 +105,10 @@ pub fn validate_host(profile: &ExecutionProfile) -> Result<()> {
                 std::env::consts::ARCH,
             )));
         }
-        // The production world adapter still uses the counted x86 KVM engine.
+        // The production world adapter uses the x86 KVM engine.
         if profile.backend == "seedbox-kvm" && parameters["guest_arch"] != "x86_64" {
             return Err(Error::Integrity(
-                "seedbox-kvm world execution requires the x86-64 counted engine".into(),
+                "seedbox-kvm world execution requires the x86-64 engine".into(),
             ));
         }
     }
@@ -153,7 +153,7 @@ mod tests {
             ("host_arch".into(), "x86_64".into()),
             ("guest_arch".into(), "x86_64".into()),
             ("engine_backend".into(), "kvm".into()),
-            ("timebase".into(), "counted-branches-v1".into()),
+            ("engine_timebase".into(), "counter-pv-v1".into()),
         ]);
         assert_eq!(
             recorded_launch(&recorded).unwrap(),
@@ -169,7 +169,7 @@ mod tests {
             ("host_arch", "aarch64"),
             ("guest_arch", "aarch64"),
             ("engine_backend", "hvf"),
-            ("timebase", "wall-clock"),
+            ("engine_timebase", "wall-clock"),
             ("simulator_version", "version with spaces"),
         ] {
             let mut incompatible = recorded.clone();
@@ -197,7 +197,7 @@ mod tests {
             ("host_arch", "x86_64"),
             ("guest_arch", "x86_64"),
             ("engine_backend", "kvm"),
-            ("timebase", "counted-branches-v1"),
+            ("engine_timebase", "counter-pv-v1"),
         ] {
             recorded
                 .semantic_parameters
@@ -224,7 +224,7 @@ mod tests {
                 ("host_arch".into(), "aarch64".into()),
                 ("guest_arch".into(), "aarch64".into()),
                 ("engine_backend".into(), backend.into()),
-                ("timebase".into(), "arm64-pv-v2".into()),
+                ("engine_timebase".into(), "arm64-pv-v2".into()),
             ]);
             assert!(recorded_launch(&recorded)
                 .unwrap_err()

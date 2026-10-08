@@ -6,11 +6,12 @@
 use super::Machine;
 use crate::boundary::missed_soft_stop;
 use crate::counter::Counter;
-use crate::stepper::Planner;
-use crate::timebase::{Judge, Run, Timebase, Verdict};
+use crate::timebase::{Judge, Prepared, Run, Timebase, Verdict};
 
 impl Timebase for Counter {
-    fn prepare(&mut self, m: &mut Machine, remaining: u64) -> Result<(), String> {
+    const BRANCHES: bool = true;
+
+    fn prepare(&mut self, m: &mut Machine, remaining: u64, _soft: u64) -> Result<Prepared, String> {
         let undo = m.undo.is_some();
         let threshold = if undo { m.fm } else { m.margin };
         if remaining > threshold {
@@ -39,34 +40,21 @@ impl Timebase for Counter {
             if !m.stepping {
                 self.disarm();
             }
-            m.set_stepping(true)?;
-            let (r, sr) = {
-                let run = m.vcpu.get_kvm_run();
-                unsafe { (run.s.regs.regs, run.s.regs.sregs) }
-            };
-            let mem = unsafe { std::slice::from_raw_parts(m.mem, m.mem_size) };
-            let planner = m.planner.as_mut().unwrap();
-            planner.refresh_from(&sr);
-            let targets = planner
-                .plan(mem, &r)
-                .map_err(|e| format!("{}: step plan: {e}", m.name))?;
-            Planner::arm(&m.vcpu, &targets)?;
-            m.last_plan = (r.rip, targets.clone());
-            if targets.contains(&r.rip) {
-                let mut resumed = r;
-                resumed.rflags |= 1 << 16; // RF: do not re-trigger at the current instruction
-                m.vcpu.set_regs(&resumed).map_err(|e| e.to_string())?;
-            }
+            m.arm_step()?;
         }
-        Ok(())
+        Ok(Prepared::Run)
     }
 
-    fn start(&self) -> u64 {
+    fn start(&mut self, _syscalls: u64) -> u64 {
         self.last()
     }
 
-    fn read(&mut self) -> u64 {
+    fn read(&mut self, _syscalls: u64) -> u64 {
         self.read_fast()
+    }
+
+    fn inject_guard(&self) -> u64 {
+        super::INJECT_GUARD
     }
 
     fn judge(&mut self, j: Judge<'_>, run: &Run) -> Result<Verdict, String> {

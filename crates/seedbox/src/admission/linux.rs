@@ -117,7 +117,7 @@ fn query(file: &File, command: libc::c_ulong, argument: libc::c_ulong) -> Result
     Ok(result)
 }
 
-// Matches frozen engine52eb counter.rs::PerfAttr; no enable/fcntl/mmap follows.
+// Matches frozen engine391f counter.rs::PerfAttr; no enable/fcntl/mmap follows.
 #[repr(C)]
 #[derive(Default)]
 struct PerfAttr {

@@ -17,6 +17,14 @@ use std::{
 /// Execution failure whose VMM stderr may be excerpted by the CLI.
 pub const VMM_FAILURE_MESSAGE: &str = "VMM failed; see vmm.stderr";
 
+/// VMM `--out` directory relative to run output; recursive retention keeps this prefix.
+pub(crate) const MACHINE_OUTPUT_DIR: &str = "machines";
+
+/// Manifest-relative page evidence, beside the VMM's per-machine traces.
+pub(crate) fn page_hash_log(machine: &str) -> String {
+    format!("{MACHINE_OUTPUT_DIR}/{machine}.pages")
+}
+
 #[derive(Clone, Debug)]
 pub struct VmmExecutor {
     /// Host CPU to pin the VMM to; `None` leases the first free eligible core.
@@ -163,6 +171,18 @@ impl VmmExecutor {
                 ("SEEDBOX_UNDO".into(), "256".into()),
             ]),
         })
+    }
+
+    /// Counter is recorded by omission to preserve existing run identities.
+    pub fn with_timebase(mut self, timebase: Timebase) -> Self {
+        if timebase == Timebase::Counter {
+            self.profile.semantic_parameters.remove("timebase");
+        } else {
+            self.profile
+                .semantic_parameters
+                .insert("timebase".into(), timebase.name().into());
+        }
+        self
     }
 
     /// Check the existing execution policy without storing inputs or starting guests.
@@ -370,9 +390,17 @@ impl VmmExecutor {
         if enabled {
             self.profile
                 .semantic_parameters
-                .insert(DISK_LOSS.into(), TORN_DISK_MODEL.into());
+                .insert(DISK_LOSS_SECTOR_BYTES.into(), "512".into());
+            self.profile
+                .semantic_parameters
+                .insert(DISK_LOSS_SURVIVAL_PROBABILITY.into(), "0.5".into());
         } else {
-            self.profile.semantic_parameters.remove(DISK_LOSS);
+            self.profile
+                .semantic_parameters
+                .remove(DISK_LOSS_SECTOR_BYTES);
+            self.profile
+                .semantic_parameters
+                .remove(DISK_LOSS_SURVIVAL_PROBABILITY);
         }
         self
     }
@@ -401,16 +429,30 @@ impl VmmExecutor {
 
 const COUNTER: &str = "counter";
 const DISK_LOSS: &str = "disk_loss";
-/// Declares the loss policy, atomic unit, probability and dedicated RNG domain.
-pub const TORN_DISK_MODEL: &str =
-    "flush-stable/seeded-latest-sector-512-half/disk-loss-machine-incarnation/v1";
+const DISK_LOSS_SECTOR_BYTES: &str = "disk_loss_sector_bytes";
+const DISK_LOSS_SURVIVAL_PROBABILITY: &str = "disk_loss_survival_probability";
 
 /// Recover the disk policy from a retained profile, rejecting unknown semantics.
 pub fn recorded_torn_writes(profile: &ExecutionProfile) -> Result<bool> {
-    match profile.semantic_parameters.get(DISK_LOSS) {
-        None => Ok(false),
-        Some(model) if model == TORN_DISK_MODEL => Ok(true),
-        Some(model) => Err(Error::Integrity(format!("unknown disk loss model {model}"))),
+    if profile.semantic_parameters.contains_key(DISK_LOSS) {
+        return Err(Error::Integrity(
+            "legacy disk_loss semantic parameter is not replay-compatible; use the retained previous CLI for historical evidence".into(),
+        ));
+    }
+    let sector_bytes = profile.semantic_parameters.get(DISK_LOSS_SECTOR_BYTES);
+    let survival_probability = profile
+        .semantic_parameters
+        .get(DISK_LOSS_SURVIVAL_PROBABILITY);
+    if sector_bytes.is_none() && survival_probability.is_none() {
+        return Ok(false);
+    }
+    match (sector_bytes, survival_probability) {
+        (Some(sector_bytes), Some(survival_probability))
+            if sector_bytes == "512" && survival_probability == "0.5" =>
+        {
+            Ok(true)
+        }
+        _ => Err(Error::Integrity("unknown disk loss parameters".into())),
     }
 }
 
@@ -498,6 +540,33 @@ fn with_capacity<T>(
         })?);
     }
     check(&reservations)
+}
+
+/// Build the retained executable's launch contract without consulting the host.
+#[cfg(any(test, all(target_os = "linux", target_arch = "x86_64")))]
+fn engine_command(engine: &Path, profile: &ExecutionProfile) -> Result<std::process::Command> {
+    let mut command = std::process::Command::new(engine);
+    if crate::engine::recorded_launch(profile)? == crate::engine::ExecutableKind::InternalWorker {
+        command
+            .arg("__engine")
+            .arg(crate::engine::INTERNAL_WORKER_V1);
+    }
+    let timebase = recorded_timebase(profile)?;
+    if timebase != Timebase::Counter {
+        command.arg("--timebase").arg(timebase.name());
+    }
+    Ok(command)
+}
+
+/// Missing timebase means counter, including records from older engines.
+pub fn recorded_timebase(profile: &ExecutionProfile) -> Result<Timebase> {
+    match profile.semantic_parameters.get("timebase").map(String::as_str) {
+        None | Some("counter") => Ok(Timebase::Counter),
+        Some("pv") => Ok(Timebase::Pv),
+        Some(value) => Err(Error::Integrity(format!(
+            "recorded --timebase {value}: expected counter or pv; use a run recorded with a supported timebase"
+        ))),
+    }
 }
 
 impl ExecutionBackend for VmmExecutor {
@@ -650,7 +719,10 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
         "control_channel":"virtio-console-v1",
     });
     if recorded_torn_writes(&request.prepared.profile)? {
-        world[DISK_LOSS] = json!(TORN_DISK_MODEL);
+        world[DISK_LOSS] = json!({
+            "sector_bytes": 512,
+            "survival_probability": 0.5,
+        });
     }
     Ok(world)
 }
@@ -673,6 +745,20 @@ struct RawFault {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(try_from = "BTreeMap<String, String>")]
 pub(crate) struct StateDigestParts(BTreeMap<String, String>);
+
+impl StateDigestParts {
+    pub(crate) fn ram_only_difference(&self, other: &Self) -> bool {
+        self.0
+            .get("ram")
+            .zip(other.0.get("ram"))
+            .is_some_and(|(a, b)| a != b)
+            && self
+                .0
+                .iter()
+                .filter(|(k, _)| k.as_str() != "ram")
+                .eq(other.0.iter().filter(|(k, _)| k.as_str() != "ram"))
+    }
+}
 
 impl TryFrom<BTreeMap<String, String>> for StateDigestParts {
     type Error = Error;
@@ -713,6 +799,8 @@ struct CrashedIncarnation {
 }
 #[derive(Deserialize)]
 pub(crate) struct VmmReport {
+    /// Older engines always used counter.
+    timebase: Option<String>,
     pub(crate) report_version: u32,
     seed: u64,
     /// Absent from engines older than counter profiles, which are all Zen.
@@ -728,6 +816,8 @@ pub(crate) struct VmmReport {
     control_history: Vec<Value>,
     #[serde(default)]
     control_latency_ns: Option<u64>,
+    #[serde(default)]
+    triggers: Option<Vec<seedbox_control::TriggerRecord>>,
 }
 
 #[derive(Default)]
@@ -746,6 +836,7 @@ fn validate_control_history(
     latency: Option<u64>,
     request: &ExecutionRequest<'_>,
     failed: bool,
+    trigger_plans: Vec<seedbox_control::Plan>,
 ) -> Result<ValidatedControlHistory> {
     let expected_latency = control_latency(request)?;
     let latency = latency
@@ -776,10 +867,14 @@ fn validate_control_history(
     let mut session = 0;
     let mut public_id = 0u64;
     let mut accepted = 0u64;
+    let mut next_fault_id = 1u32;
     let mut down = BTreeSet::new();
     for (i, row) in history.iter().enumerate() {
         if row["status"] == "rejected" && failed {
             continue;
+        }
+        while trigger_plans.iter().any(|plan| plan.id == next_fault_id) {
+            next_fault_id = next_fault_id.checked_add(1).ok_or_else(bad)?;
         }
         accepted += 1;
         let r = &row["request"];
@@ -856,7 +951,7 @@ fn validate_control_history(
                 if row["fault_id"].is_null() || metadata["error"]["code"] != "target_unavailable" {
                     continue;
                 }
-                if row["fault_id"].as_u64() != Some(expected.plans.len() as u64 + 1) {
+                if row["fault_id"].as_u64() != Some(u64::from(next_fault_id)) {
                     return Err(bad());
                 }
             }
@@ -872,7 +967,7 @@ fn validate_control_history(
                 }
                 continue;
             }
-            if !admitted || row["fault_id"].as_u64() != Some(expected.plans.len() as u64 + 1) {
+            if !admitted || row["fault_id"].as_u64() != Some(u64::from(next_fault_id)) {
                 return Err(bad());
             }
         }
@@ -959,6 +1054,31 @@ fn validate_control_history(
                     loss_ppm,
                 }
             }
+            Operation::DropConnection { connection } => {
+                let handle = if response {
+                    &metadata["result"]["handle"]
+                } else {
+                    &row["plan"]["handle"]
+                };
+                let handle = handle.as_str().ok_or_else(bad)?.to_owned();
+                if handle.is_empty()
+                    || (response && e != Some(a))
+                    || connection.incarnation == 0
+                    || connection.src_port == 0
+                    || connection.dst_port == 0
+                    || resolve(&seedbox_control::Target::Machine(connection.from.clone()))?
+                        == resolve(&seedbox_control::Target::Machine(connection.to.clone()))?
+                {
+                    return Err(bad());
+                }
+                Action::DropConnection { handle, connection }
+            }
+            Operation::Connections { from, to, .. } => {
+                if e != Some(a) || resolve(&from)? == resolve(&to)? {
+                    return Err(bad());
+                }
+                continue;
+            }
             Operation::Heal { handle } => {
                 if response && e != Some(a) {
                     return Err(bad());
@@ -972,6 +1092,12 @@ fn validate_control_history(
                 continue;
             }
             Operation::Inspect {} => {
+                if e != Some(a) {
+                    return Err(bad());
+                }
+                continue;
+            }
+            Operation::ArmTrigger { .. } | Operation::CancelTrigger { .. } => {
                 if e != Some(a) {
                     return Err(bad());
                 }
@@ -995,7 +1121,7 @@ fn validate_control_history(
             return Err(bad());
         }
         let plan = Plan {
-            id: u32::try_from(expected.plans.len() + 1).map_err(|_| bad())?,
+            id: next_fault_id,
             at_ns: a,
             deadline_ns: a.checked_add(PROCESS_EFFECT_TIMEOUT_NS).ok_or_else(bad)?,
             action,
@@ -1030,8 +1156,232 @@ fn validate_control_history(
             }
         }
         expected.plans.push(plan);
+        next_fault_id = next_fault_id.checked_add(1).ok_or_else(bad)?;
+    }
+    expected.plans.extend(trigger_plans);
+    expected.plans.sort_by_key(|p| p.id);
+    if expected
+        .plans
+        .iter()
+        .enumerate()
+        .any(|(i, p)| p.id as usize != i + 1)
+    {
+        return Err(bad());
     }
     Ok(expected)
+}
+
+/// Check the bounded semantic trigger records against arm/cancel RPCs and
+/// derive the sole fault each committed match may schedule. The engine owns
+/// commitment; this validator rejects malformed or uncorrelated evidence.
+fn validate_triggers(
+    records: Option<&[seedbox_control::TriggerRecord]>,
+    history: &[Value],
+    request: &ExecutionRequest<'_>,
+) -> Result<Vec<seedbox_control::Plan>> {
+    use seedbox_control::{
+        Action, Operation, Plan, Request, Target, TriggerFault, MAX_TRIGGERS, MAX_TRIGGER_MARKER,
+        PROCESS_EFFECT_TIMEOUT_NS,
+    };
+    let bad = || Error::Integrity("invalid committed trigger evidence".into());
+    if records.is_some_and(|r| r.is_empty() || r.len() > MAX_TRIGGERS) {
+        return Err(bad());
+    }
+    let records = records.unwrap_or_default();
+    let latency = control_latency(request)?;
+    let controller = request
+        .control
+        .and_then(|c| request.prepared.placement.get(&c.service));
+    let resolve = |target: &Target, fault: bool| -> Result<String> {
+        let name = match target {
+            Target::Service(s) => request.prepared.placement.get(s).ok_or_else(bad)?,
+            Target::Machine(m) => m,
+        };
+        if !request.prepared.guests.contains_key(name) || (fault && Some(name) == controller) {
+            return Err(bad());
+        }
+        Ok(name.clone())
+    };
+    let mut arms = 0;
+    let mut cancellations = BTreeMap::new();
+    for row in history {
+        let metadata = if row["response"].is_object() {
+            &row["response"]
+        } else {
+            row
+        };
+        let accepted = if row["response"].is_object() {
+            metadata["ok"] == true
+        } else {
+            row["admitted_done"] == true && row["error"].is_null()
+        };
+        if !accepted {
+            continue;
+        }
+        let op = row["request"]["op"].as_str().unwrap_or_default();
+        if op != "arm_trigger" && op != "cancel_trigger" {
+            continue;
+        }
+        let call: Request = serde_json::from_value(row["request"].clone()).map_err(|_| bad())?;
+        let at = metadata["admitted_at_ns"].as_u64().ok_or_else(bad)?;
+        match call.operation {
+            Operation::CancelTrigger { trigger_id } => {
+                if trigger_id == 0
+                    || trigger_id as usize > arms
+                    || cancellations.insert(trigger_id, at).is_some()
+                {
+                    return Err(bad());
+                }
+            }
+            Operation::ArmTrigger {
+                source,
+                marker,
+                match_timeout_ns,
+                fault,
+            } => {
+                let r = records.get(arms).ok_or_else(bad)?;
+                arms += 1;
+                if r.id as usize != arms
+                    || metadata["result"]["trigger_id"].as_u64() != Some(u64::from(r.id))
+                    || r.source != resolve(&source, false)?
+                    || r.marker != marker
+                    || marker.is_empty()
+                    || marker.len() > MAX_TRIGGER_MARKER
+                    || match_timeout_ns == 0
+                    || r.armed_at_ns != at
+                    || at.checked_add(match_timeout_ns) != Some(r.match_deadline_ns)
+                {
+                    return Err(bad());
+                }
+                let action = match fault {
+                    TriggerFault::Stop { target } => Action::Stop {
+                        machine: resolve(&target, true)?,
+                    },
+                    TriggerFault::Partition { left, right } => {
+                        let handle = metadata["result"]["handle"]
+                            .as_str()
+                            .filter(|h| !h.is_empty())
+                            .ok_or_else(bad)?
+                            .to_owned();
+                        let left = left
+                            .iter()
+                            .map(|t| resolve(t, true))
+                            .collect::<Result<Vec<_>>>()?;
+                        let right = right
+                            .iter()
+                            .map(|t| resolve(t, true))
+                            .collect::<Result<Vec<_>>>()?;
+                        let unique: BTreeSet<_> = left.iter().chain(&right).collect();
+                        if left.is_empty()
+                            || right.is_empty()
+                            || unique.len() != left.len() + right.len()
+                        {
+                            return Err(bad());
+                        }
+                        Action::Partition {
+                            handle,
+                            left,
+                            right,
+                        }
+                    }
+                };
+                if r.action != action {
+                    return Err(bad());
+                }
+            }
+            _ => return Err(bad()),
+        }
+    }
+    if arms != records.len() {
+        return Err(bad());
+    }
+    let mut plans = Vec::new();
+    for r in records {
+        let matched = r.matched_at_ns.is_some();
+        if r.prefix > r.marker.len()
+            || r.seen < r.prefix as u64
+            || r.match_deadline_ns
+                .checked_add(latency)
+                .and_then(|d| d.checked_add(PROCESS_EFFECT_TIMEOUT_NS))
+                .is_none()
+            || r.effect_at_ns.is_some() != matched
+            || (matched && r.prefix != r.marker.len())
+            || (!matched && r.prefix == r.marker.len())
+            || r.cancelled_at_ns != cancellations.get(&r.id).copied()
+            || (r.status != "rejected" && r.rejection_reason.is_some())
+        {
+            return Err(bad());
+        }
+        if let Some(m) = r.matched_at_ns {
+            if m < r.armed_at_ns
+                || m >= r.match_deadline_ns
+                || m.checked_add(latency) != r.effect_at_ns
+            {
+                return Err(bad());
+            }
+        }
+        if r.cancelled_at_ns.is_some_and(|c| {
+            c < r.armed_at_ns || c > r.match_deadline_ns || c >= request.limits.simulated_time_ns
+        }) || r
+            .cut_off_at_ns
+            .is_some_and(|c| c < r.armed_at_ns || c > request.limits.simulated_time_ns)
+        {
+            return Err(bad());
+        }
+        match r.status.as_str() {
+            "rejected"
+                if matched
+                    && r.cancelled_at_ns.is_none()
+                    && r.cut_off_at_ns.is_none()
+                    && r.fault_id.is_none()
+                    && r.effect_at_ns
+                        .is_some_and(|e| e < request.limits.simulated_time_ns)
+                    && r.rejection_reason
+                        .as_ref()
+                        .is_some_and(|reason| !reason.is_empty()) => {}
+            "fired" if matched && r.cancelled_at_ns.is_none() && r.cut_off_at_ns.is_none() => {
+                let at_ns = r.effect_at_ns.ok_or_else(bad)?;
+                if at_ns >= request.limits.simulated_time_ns {
+                    return Err(bad());
+                }
+                plans.push(Plan {
+                    id: r.fault_id.ok_or_else(bad)?,
+                    at_ns,
+                    deadline_ns: at_ns
+                        .checked_add(PROCESS_EFFECT_TIMEOUT_NS)
+                        .ok_or_else(bad)?,
+                    action: r.action.clone(),
+                });
+            }
+            "expired"
+                if !matched
+                    && r.cancelled_at_ns.is_none()
+                    && r.cut_off_at_ns.is_none()
+                    && r.match_deadline_ns < request.limits.simulated_time_ns
+                    && r.fault_id.is_none() => {}
+            "cancelled"
+                if !matched
+                    && r.cancelled_at_ns.is_some()
+                    && r.cut_off_at_ns.is_none()
+                    && r.fault_id.is_none() => {}
+            "cut_off"
+                if r.cancelled_at_ns.is_none()
+                    && r.fault_id.is_none()
+                    && r.cut_off_at_ns.is_some_and(|c| {
+                        if matched {
+                            r.effect_at_ns.is_some_and(|e| e >= c)
+                        } else {
+                            c <= r.match_deadline_ns
+                        }
+                    }) => {}
+            _ => return Err(bad()),
+        }
+    }
+    plans.sort_by_key(|p| p.at_ns);
+    if plans.windows(2).any(|p| p[0].id >= p[1].id) {
+        return Err(bad());
+    }
+    Ok(plans)
 }
 
 /// Parse the engine's structured completion report. Never infer application
@@ -1041,8 +1391,19 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
     if raw.report_version != 1 || raw.seed != request.seed {
         return Err(Error::Integrity("VMM report version/seed mismatch".into()));
     }
+    let timebase = recorded_timebase(&request.prepared.profile)?;
+    let reported = raw.timebase.as_deref().unwrap_or("counter");
+    if reported != timebase.name() {
+        return Err(Error::Integrity(format!(
+            "VMM --timebase {reported}: does not match recorded --timebase {}",
+            timebase.name()
+        )));
+    }
     let counted = recorded_counter(&request.prepared.profile)?;
-    if counted != CounterProfile::Zen && raw.counter_profile.is_none() {
+    if timebase == Timebase::Counter
+        && counted != CounterProfile::Zen
+        && raw.counter_profile.is_none()
+    {
         return Err(Error::Integrity(
             "unqualified VMM report is missing its counter profile".into(),
         ));
@@ -1107,7 +1468,9 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
         ),
     };
     if request.control.is_none()
-        && (!raw.control_history.is_empty() || raw.control_latency_ns.is_some_and(|n| n != 0))
+        && (!raw.control_history.is_empty()
+            || raw.control_latency_ns.is_some_and(|n| n != 0)
+            || raw.triggers.is_some())
     {
         return Err(Error::Integrity("unexpected control transcript".into()));
     }
@@ -1117,6 +1480,7 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
             raw.control_latency_ns,
             request,
             raw.fault_error.is_some(),
+            validate_triggers(raw.triggers.as_deref(), &raw.control_history, request)?,
         )?
     } else {
         ValidatedControlHistory::default()
@@ -1147,6 +1511,47 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
             ));
         }
         match (fault.status.as_str(), fault.applied_at_ns) {
+            // Triggered stops have no RPC reply; unavailable effects retain
+            // the same exit/crash window and prior-down evidence as process RPCs.
+            ("unavailable", None)
+                if raw.triggers.as_ref().is_some_and(|records| {
+                    records.iter().any(|r| r.fault_id == Some(fault.id))
+                }) && matches!(plan.action, seedbox_control::Action::Stop { .. })
+                    && (raw.machines.iter().any(|m| {
+                        Some(&m.name) == fault.machine.as_ref()
+                            && ((m.state.as_deref().is_some_and(|s| {
+                                s.strip_prefix("Exited(")
+                                    .and_then(|c| c.strip_suffix(')'))
+                                    .and_then(|c| c.parse::<u8>().ok())
+                                    .is_some_and(|c| s == format!("Exited({c})"))
+                            }) && m
+                                .time_ns
+                                .is_some_and(|t| t >= plan.at_ns && t <= plan.deadline_ns))
+                                || m.crashed_incarnations.iter().any(|incarnation| {
+                                    incarnation.crashed_at_ns >= plan.at_ns
+                                        && incarnation.crashed_at_ns <= plan.deadline_ns
+                                }))
+                    }) || expected
+                        .plans
+                        .iter()
+                        .take(i)
+                        .rev()
+                        .find(|prior| {
+                            prior.action.machine() == plan.action.machine()
+                                && matches!(
+                                    prior.action,
+                                    seedbox_control::Action::Crash { .. }
+                                        | seedbox_control::Action::Reboot { .. }
+                                )
+                        })
+                        .is_some_and(|prior| {
+                            matches!(prior.action, seedbox_control::Action::Crash { .. })
+                                && prior.at_ns <= plan.at_ns
+                                && raw.faults.get(prior.id as usize - 1).is_some_and(|fault| {
+                                    fault.status == "applied"
+                                        && fault.applied_at_ns == Some(prior.at_ns)
+                                })
+                        })) => {}
             // An unavailable process fault needs a prior crash without reboot
             // at admission, or the target's exact exit/crash time in its window.
             ("unavailable", None)
@@ -1220,6 +1625,7 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
         reason = StopReason::Error;
     }
     Ok(ExecutionReport {
+        timebase: Some(timebase),
         reason,
         workload_exit,
         witness: Some(raw.world_witness),
@@ -1240,7 +1646,7 @@ mod linux {
     use std::{
         fs,
         os::unix::{fs::PermissionsExt, process::CommandExt},
-        process::{Child, Command},
+        process::Child,
         time::{Duration, Instant},
     };
 
@@ -1313,6 +1719,7 @@ mod linux {
         {
             return Err(Error::Execution("CPU exceeds affinity mask".into()));
         }
+        let timebase = recorded_timebase(&backend.profile)?;
         let world = world(&request)?;
         let world_path = request.output.join("world.json");
         fs::write(&world_path, serde_json::to_vec_pretty(&world)?)?;
@@ -1323,24 +1730,24 @@ mod linux {
         fs::set_permissions(engine, fs::Permissions::from_mode(0o500))?;
         let report_path = request.output.join("vmm.json");
         let endpoint = crate::host_control::Endpoint::new(request.output)?;
-        let mut command = Command::new(engine);
-        if crate::engine::recorded_launch(&backend.profile)?
-            == crate::engine::ExecutableKind::InternalWorker
-        {
-            command
-                .arg("__engine")
-                .arg(crate::engine::INTERNAL_WORKER_V1);
-        }
+        let mut command = engine_command(engine, &backend.profile)?;
         command
             .arg("--config")
             .arg(&world_path)
             .arg("--seed")
             .arg(request.seed.to_string())
             .arg("--out")
-            .arg(request.output.join("machines"));
+            .arg(request.output.join(MACHINE_OUTPUT_DIR));
         command.arg("--host-control").arg(endpoint.socket());
         command
             .arg("--stream-console")
+            // Bound observation metadata to at most 40 MiB across all streams.
+            .arg("--log-chunk-limit")
+            .arg(
+                (1_048_576 / (2 * request.prepared.guests.len()))
+                    .min(65_536)
+                    .to_string(),
+            )
             .arg("--console-limit")
             .arg((1024 * 1024 * 1024 / (2 * request.prepared.guests.len())).to_string());
         if backend.profile.witness_mode == WitnessMode::FullState {
@@ -1352,6 +1759,7 @@ mod linux {
             .stdout(fs::File::create(&report_path)?)
             .stderr(fs::File::create(request.output.join("vmm.stderr"))?);
         let incomplete = |reason| ExecutionReport {
+            timebase: Some(timebase),
             reason,
             workload_exit: None,
             witness: None,
@@ -1570,6 +1978,129 @@ mod doctor_tests {
             crate::engine::recorded_launch(&executor.profile).unwrap(),
             crate::engine::ExecutableKind::Standalone
         );
+    }
+
+    #[test]
+    fn counter_and_pv_retain_identity_and_replay_through_worker_contract() {
+        use crate::engine::{recorded_launch, ExecutableKind, INTERNAL_WORKER_V1};
+        let temporary = tempfile::tempdir().unwrap();
+        let executable = temporary.path().join("retained-worker");
+        std::fs::write(&executable, b"combined executable").unwrap();
+        let store = ContentStore::new(temporary.path().join("objects"));
+        let mut profiles = Vec::new();
+        for timebase in [Timebase::Counter, Timebase::Pv] {
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            let executor = VmmExecutor::new_internal(
+                &executable,
+                &store,
+                None,
+                512,
+                WitnessMode::Exits,
+                CounterProfile::Zen,
+            )
+            .unwrap();
+            // A retained Linux profile is inspectable on a Mac without host admission.
+            #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+            let executor = {
+                let mut executor = VmmExecutor::new(
+                    &executable,
+                    &store,
+                    None,
+                    512,
+                    WitnessMode::Exits,
+                    CounterProfile::Zen,
+                )
+                .unwrap();
+                executor.profile.semantic_parameters.extend(BTreeMap::from([
+                    ("engine_executable_kind".into(), INTERNAL_WORKER_V1.into()),
+                    (
+                        "simulator_version".into(),
+                        crate::engine::SIMULATOR_VERSION.into(),
+                    ),
+                    ("host_os".into(), "linux".into()),
+                    ("host_arch".into(), "x86_64".into()),
+                    ("guest_arch".into(), "x86_64".into()),
+                    ("engine_backend".into(), "kvm".into()),
+                    ("engine_timebase".into(), "counter-pv-v1".into()),
+                ]));
+                executor
+            };
+            let executor = executor.with_timebase(timebase);
+            assert_eq!(
+                recorded_launch(&executor.profile).unwrap(),
+                ExecutableKind::InternalWorker
+            );
+            assert_eq!(recorded_timebase(&executor.profile).unwrap(), timebase);
+            assert_eq!(
+                executor
+                    .profile
+                    .semantic_parameters
+                    .contains_key("timebase"),
+                timebase == Timebase::Pv
+            );
+            let bytes = serde_json::to_vec(&executor.profile).unwrap();
+            let retained: ExecutionProfile = serde_json::from_slice(&bytes).unwrap();
+            let replay = VmmExecutor::from_retained(
+                &executable,
+                &store,
+                retained,
+                Some(8),
+                CounterProfile::Zen,
+            )
+            .unwrap();
+            assert_eq!(serde_json::to_vec(&replay.profile).unwrap(), bytes);
+            let expected = if timebase == Timebase::Pv {
+                vec!["__engine", INTERNAL_WORKER_V1, "--timebase", "pv"]
+            } else {
+                vec!["__engine", INTERNAL_WORKER_V1]
+            };
+            for profile in [&executor.profile, &replay.profile] {
+                let command = engine_command(&executable, profile).unwrap();
+                assert_eq!(command.get_program(), executable.as_os_str());
+                assert_eq!(command.get_args().collect::<Vec<_>>(), expected);
+                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                {
+                    let mut args = vec!["seedbox".to_owned()];
+                    args.extend(
+                        command
+                            .get_args()
+                            .skip(2)
+                            .map(|arg| arg.to_str().unwrap().to_owned()),
+                    );
+                    args.extend(
+                        ["--config", "world.json", "--seed", "7", "--out", "output"]
+                            .map(str::to_owned),
+                    );
+                    let options = seedbox_vmm::WorkerOptions::from_args(
+                        &args,
+                        seedbox_vmm::PerformanceOptions::default(),
+                    )
+                    .unwrap();
+                    assert_eq!(options.pv_clock, timebase == Timebase::Pv);
+                }
+            }
+            profiles.push(executor.profile);
+        }
+        let mut pv_as_counter = profiles.pop().unwrap();
+        pv_as_counter.semantic_parameters.remove("timebase");
+        assert_eq!(pv_as_counter, profiles[0]);
+        // #89 owns timebase even for historical standalone profiles.
+        let legacy = VmmExecutor::new(
+            &executable,
+            &store,
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap();
+        for timebase in [Timebase::Counter, Timebase::Pv] {
+            let executor = legacy.clone().with_timebase(timebase);
+            assert_eq!(
+                recorded_launch(&executor.profile).unwrap(),
+                ExecutableKind::Standalone
+            );
+        }
     }
 
     #[test]

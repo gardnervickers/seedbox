@@ -32,12 +32,16 @@ fn world_worker(executable: OsString, args: Vec<OsString>) -> ExitCode {
             .collect::<Result<Vec<_>, _>>()?;
         let undo = std::env::var("SEEDBOX_UNDO").ok();
         let margin = std::env::var("SEEDBOX_MARGIN").ok();
-        let performance = seedbox_vmm::PerformanceOptions::parse(
-            undo.as_deref(),
-            margin.as_deref(),
-            std::env::var_os("SEEDBOX_PAGE_HASHES").is_some(),
-        )?;
+        let performance =
+            seedbox_vmm::PerformanceOptions::parse(undo.as_deref(), margin.as_deref())?;
         let mut options = seedbox_vmm::WorkerOptions::from_args(&args, performance)?;
+        if options.pv_clock {
+            if let Ok(value) = std::env::var("SEEDBOX_PV_WATCHDOG_MS") {
+                options.performance.pv_watchdog_ms = value
+                    .parse()
+                    .map_err(|e| format!("SEEDBOX_PV_WATCHDOG_MS: {e}"))?;
+            }
+        }
         if std::env::var_os("SEEDBOX_TRACE_CONSOLE").is_some() {
             options.console_trace = Some(|trace| {
                 eprintln!(

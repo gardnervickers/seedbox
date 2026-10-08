@@ -73,6 +73,8 @@ pub struct ReplayComparison {
     pub witness_matches: Option<bool>,
     pub full_state_matches: Option<bool>,
     pub fault_history_matches: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ram_pages: Option<crate::diff::RamPageReport>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,19 +222,47 @@ impl Orchestrator {
         options: ReplayOptions,
     ) -> Result<Run> {
         let baseline = inspect(directory)?;
+        // Refuse timebase drift before creating an attempt or executing anything.
+        if baseline.identity.inputs.profile.backend == "seedbox-kvm" {
+            let recorded = crate::vmm::recorded_timebase(&baseline.identity.inputs.profile)?;
+            let requested = crate::vmm::recorded_timebase(&executor.profile())?;
+            if recorded != requested {
+                return Err(Error::Integrity(format!(
+                    "executor timebase {} does not match the recorded --timebase {}; use an executor with the recorded timebase",
+                    requested.name(), recorded.name()
+                )));
+            }
+        }
         let mut identity = baseline.identity.clone();
         // Development replay always compares the exact retained artifact pair.
         if options.allow_engine_change && !crate::admission::is_dev_engine(&identity.inputs.profile)
         {
             identity.inputs.profile.engine = executor.profile().engine;
         }
-        self.execute(
+        let mut run = self.execute(
             identity,
             executor,
             &options.cancellation,
             Some(&baseline),
             options.allow_engine_change,
-        )
+        )?;
+        if let Some(comparison) = &mut run.record.replay {
+            if comparison.status == ReplayStatus::Mismatch
+                && comparison.full_state_matches == Some(false)
+            {
+                // Optional evidence must never replace the execution verdict.
+                comparison.ram_pages = Some(
+                    crate::diff::replay_ram_pages(directory, &run.directory).unwrap_or_else(
+                        |error| crate::diff::RamPageReport {
+                            machines: BTreeMap::new(),
+                            limitations: vec![error.to_string()],
+                        },
+                    ),
+                );
+                write_record(&run.directory, &run.record)?;
+            }
+        }
+        Ok(run)
     }
 
     fn execute(
@@ -287,6 +317,7 @@ impl Orchestrator {
             }
             if cancellation.is_cancelled() {
                 return Ok(ExecutionReport {
+                    timebase: None,
                     reason: StopReason::Cancelled,
                     workload_exit: None,
                     witness: None,
@@ -431,7 +462,10 @@ fn classify(identity: &RunIdentity, report: &ExecutionReport) -> Result<Outcome>
         if fault.applied_at_ns < fault.requested_at_ns
             || !(simulation.services.contains_key(&fault.service)
                 || (fault.service.is_empty()
-                    && matches!(fault.action.as_str(), "partition" | "shape" | "heal")))
+                    && matches!(
+                        fault.action.as_str(),
+                        "partition" | "shape" | "drop_connection" | "heal"
+                    )))
         {
             return Err(Error::Execution(
                 "fault effect must acknowledge a known service at or after its request time".into(),
@@ -525,6 +559,7 @@ fn compare(baseline: &RunRecord, fresh: &RunRecord) -> ReplayComparison {
         witness_matches,
         full_state_matches,
         fault_history_matches,
+        ram_pages: None,
     }
 }
 

@@ -10,6 +10,31 @@ use std::{
 const TAIL_BYTES: u64 = 8 * 1024;
 const TAIL_LINES: usize = 5;
 
+pub(super) fn ram_pages(machine: &str, pages: &seedbox::diff::PageHashDiff) {
+    eprintln!("{}", ram_page_line(machine, pages));
+}
+
+fn ram_page_line(machine: &str, pages: &seedbox::diff::PageHashDiff) -> String {
+    // Escape arbitrary retained names so evidence cannot introduce status lines.
+    let machine: String = machine.chars().flat_map(char::escape_default).collect();
+    format!(
+        "ram pages: {machine}: differing pfns: {}; first pfns: {:?}",
+        pages.differing_pfns, pages.first_pfns
+    )
+}
+
+pub(super) fn replay_pages(comparison: &seedbox::orchestration::ReplayComparison) {
+    if let Some(report) = &comparison.ram_pages {
+        for (machine, pages) in &report.machines {
+            ram_pages(machine, pages);
+        }
+        for limitation in &report.limitations {
+            let safe: String = limitation.chars().flat_map(char::escape_default).collect();
+            eprintln!("ram pages: {safe}");
+        }
+    }
+}
+
 pub(super) fn vmm_failure(directory: &Path, error: &str) {
     if error != Error::Execution(VMM_FAILURE_MESSAGE.into()).to_string() {
         return;
@@ -60,6 +85,18 @@ fn tail(mut file: impl Read + Seek) -> io::Result<Vec<String>> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn page_diagnostics_cannot_inject_status_lines() {
+        let pages = seedbox::diff::PageHashDiff {
+            differing_pfns: 2,
+            first_pfns: vec![3, 9],
+        };
+        assert_eq!(
+            ram_page_line("server\nPASS: fake", &pages),
+            "ram pages: server\\nPASS: fake: differing pfns: 2; first pfns: [3, 9]"
+        );
+    }
 
     #[test]
     fn reads_only_the_bounded_tail_even_with_long_lines() {
