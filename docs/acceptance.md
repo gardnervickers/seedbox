@@ -8,16 +8,17 @@ paths and is a new engine, even though its source is unchanged.
 
 ## 2026-10-08 — issue #172 guest runtime batch
 
-The Linux AMD/KVM workstation ran `b90a315` plus this guest batch, identified
-as `0.1.0-dev+b90a31525495.dirty`. Changes arrived as patches in a private
-worktree. Builds and executions used CPU 15/31; the x86 kernel build used fresh
-`SEEDBOX_KBUILD` and `SEEDBOX_ARTIFACTS` directories. Its requested Kconfig
-checks passed, including SysV IPC, POSIX mqueue, UTS/IPC/PID namespaces,
-UNIX98 ptys, seccomp/filter and io_uring. HPET remains enabled without ACPI.
+The Linux AMD/KVM workstation ran PR #178 at `93ef5a1` (on main `b90a315`)
+from a clean checkout. The x86 kernel build used fresh `SEEDBOX_KBUILD` and
+`SEEDBOX_ARTIFACTS` directories. Against main's kernel, `kernel.config` gains
+only `SYSVIPC`, `SYSVIPC_SYSCTL`, `POSIX_MQUEUE`, `POSIX_MQUEUE_SYSCTL`,
+`SECCOMP`, `SECCOMP_FILTER`, `UTS_NS`, `IPC_NS` and `PID_NS`; `IO_URING` and
+`HPET_TIMER` are `y` on both.
 
-- Kernel SHA-256: `5e082c9d45778e702105367917e9bb9593af133c8374f6d1b9211112af371b44`.
-- Linked CLI engine SHA-256: `4e4afd32dc04d0c9f0d738ef9dcf9df7b4d18d60e082b87f9a64a27c3db421ca`.
-- Supervisor SHA-256: `f0c725f65ce7cb6228109730a3d136df5a04e664b70dd1d01389b09e5be42aa4`.
+- Kernel SHA-256: `2ee31d831d2409f19de813acb31192c1e1352559e1276e9d76b29a19a388aca7`
+  (main: `d628d375dc79e65b2d080d8b04e93e65dc66a6f29d873272784554ab03d31824`).
+- Linked CLI engine: `42b7ed58eaec4f76…`; the standalone VMM is unchanged
+  from main (`35358821bdbd…`).
 
 All cases used the public `seedbox run`, seed 172 and the default counter
 timebase. `harness/acceptance/workloads/runtime.yaml` passed with 1024 MiB and
@@ -25,12 +26,12 @@ timebase. `harness/acceptance/workloads/runtime.yaml` passed with 1024 MiB and
 pty I/O, POSIX shared memory/semaphores/mqueue, SysV shared memory, service
 hostname lookup, the 1048576 nofile limits (including fd 65535),
 `vm.max_map_count=262144`, named-volume writes, an io_uring NOP completion and
-a seccomp allow filter. An initial failure reopening the root-owned console
-through `/dev/stdout` led to the console permission fix; the final case passed.
+a seccomp allow filter.
 
 `seedbox replay` of that retained run reported `MATCH`, with outcome, witness,
 full state and fault history all matching. World witness:
-`dc134dc639f8903bea9a69ecd51952ff718c9abdff4f2f07d5238abe8232eb1c`.
+`846b2ef6d6c8de7b…`. On main, the same project fails at the `/dev/shm`
+mode check and `runtime-postgres.yaml` fails with no server response.
 
 The five `runtime-*.yaml` application projects passed with 2048 MiB:
 
@@ -42,15 +43,13 @@ The five `runtime-*.yaml` application projects passed with 2048 MiB:
 | `runtime-jvm.yaml` | Temurin 21 InetAddress.getLocalHost() resolves `jvm` | `9ececb44042a7cc91e4e6bca525c678e811c1602330a80b5f2d2fcfa0aa97c4e` |
 | `runtime-node.yaml` | Node 22 local HTTP request/response and hostname | `2c752226d477b4a886378baa95b9af252be59301b725fdb0b7e15208131505a8` |
 
-CPU 15/31 MSR readbacks after replay and the app batch matched the original
-snapshot. The standalone Linux VMM build passed; `cargo test-vmm --features
+`examples/etcd` passed and replayed to `MATCH` on both revisions, with
+different witnesses as expected. The standalone Linux VMM build passed; `cargo test-vmm --features
 kvm-tests` passed 89 tests, with 36 explicitly ignored exclusive-host cases.
-Fmt, strict clippy, workspace tests and portable acceptance passed on the Mac;
-the supervisor and ARM I/O descriptor lifetime tests also passed on Linux.
+The supervisor and ARM I/O descriptor lifetime tests also passed on Linux.
 
-This is scoped same-host evidence, before the final merge train. Main-versus-
-branch controls, the full host campaign and native ARM rebuild/HVF execution
-remain outstanding. TLS with a certificate minted that day needs the recorded
+This is scoped same-host evidence, before the final merge train. The full
+host campaign and native ARM rebuild/HVF execution remain outstanding. TLS with a certificate minted that day needs the recorded
 wall-clock epoch follow-up; this batch leaves the boot epoch unchanged. Node
 HTTP alone does not establish the libuv io_uring path; the separate kernel
 probe proves one ring completion.
