@@ -16,3 +16,5 @@ seedbox-control = { package = "seedbox-vmm-control", path = "../control" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+# Work-stealing machine workers for the windowed scheduler.
+rayon = "1"

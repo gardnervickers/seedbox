@@ -11,8 +11,20 @@ use crate::timebase::{Judge, Prepared, Run, Timebase, Verdict};
 impl Timebase for Counter {
     const BRANCHES: bool = true;
 
-    fn prepare(&mut self, m: &mut Machine, remaining: u64, _soft: u64, _legal: bool) -> Result<Prepared, String> {
+    fn prepare(&mut self, m: &mut Machine, remaining: u64, _soft: u64, legal: bool) -> Result<Prepared, String> {
         let undo = m.undo.is_some();
+        // A successful overflow can leave hundreds of branches inside the
+        // grown margin. Save that unobservable landing and approach closer
+        // before paying for one breakpoint exit per branch. After rollback,
+        // time equals the held checkpoint, so the margin keeps growing and
+        // this cannot restart the same failed approach indefinitely.
+        if !legal && !m.stepping && remaining <= m.fm
+            && remaining > 128
+            && m.undo.as_ref().is_some_and(|u| u.valid && m.world.time > u.time)
+        {
+            m.checkpoint()?;
+            m.fm = m.undo_margin.min(remaining / 4).max(1);
+        }
         let threshold = if undo { m.fm } else { m.margin };
         if remaining > threshold {
             m.set_stepping(false)?;

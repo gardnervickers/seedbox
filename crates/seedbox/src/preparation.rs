@@ -295,6 +295,7 @@ impl OciPreparer {
                 &imported.image.launch,
                 &format!("{}/24", addresses[name]),
                 &hosts,
+                name,
                 &mounts,
             )?;
             let archive = temporary.path().join(format!("{name}.cpio"));

@@ -107,6 +107,12 @@ Keep hard limits exact, including owed I/O; preserve the lifecycle commit sites
 relative to fallible architecture actions. See `docs/world-coordinator.md`.
 ARM uses this same coordinator through stopped, stamped worker primitives; no
 second world scheduler belongs in the worker. Cold run/replay require no snapshot.
+x86 runs every world through the windowed scheduler (`window/`,
+`world_windowed.rs`, [docs/windowed-scheduler.md](docs/windowed-scheduler.md)):
+the coordinator applies control, trigger and fault boundaries, lifecycle,
+forks and checkpoints between rounds, on the calling thread, from committed
+state in a fixed order. The legacy loop (`world::simulate`) stays only for
+arm64; add no x86 caller. Worker count is a performance setting.
 A failed crash transaction poisons the retained World and terminates owned worker
 transports; retries must fail before any worker activity.
 

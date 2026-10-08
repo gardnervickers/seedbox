@@ -650,6 +650,9 @@ fn invalid_shape_values_and_sides_receive_correlated_invalid_request_without_eff
         ("latency_ns", json!(9)),
         ("jitter_ns", json!(10)),
         ("loss_ppm", json!(1_000_001)),
+        ("bandwidth_bps", json!(0)),
+        ("bandwidth_bps", json!(1.5)),
+        ("queue_bound_ns", json!(10)),
         ("latency_ns", json!(3_600_000_000_001u64)),
         ("from", json!([])),
         ("to", json!([{"service":"client"}])),
@@ -671,6 +674,50 @@ fn invalid_shape_values_and_sides_receive_correlated_invalid_request_without_eff
         assert!(f.active_handles().is_empty());
         assert!(f.log.is_empty());
     }
+}
+
+#[test]
+fn bandwidth_shape_admission_and_heal_return_actual_queue_evidence() {
+    let mut c = control();
+    let mut f = faults::Faults::new(
+        vec![],
+        vec!["scenario".into(), "client".into(), "server".into()],
+    )
+    .unwrap();
+    request(&mut c,1,100,json!({"version":1,"id":1,"op":"shape","from":[{"service":"client"}],"to":[{"service":"server"}],"latency_ns":10,"jitter_ns":0,"loss_ppm":0,"bandwidth_bps":1_000_000,"queue_bound_ns":12_000_000})).unwrap();
+    assert_eq!(f.links.policy((1, 2)).bandwidth_bps, None);
+    c.apply_boundary(&mut f, 120).unwrap();
+    f.apply_due(120);
+    c.observe_faults(&f, 120).unwrap();
+    c.response(140).unwrap();
+    c.mark_delivered(140).unwrap();
+    assert_eq!(f.links.policy((1, 2)).bandwidth_bps, Some(1_000_000));
+    assert_eq!(f.links.policy((2, 1)).bandwidth_bps, None);
+    assert_eq!(
+        f.route(1, 2, 150, &vec![0; 1500], false),
+        links::Outcome::Deliver(12_000_160)
+    );
+    assert_eq!(
+        f.route(1, 2, 150, &vec![0; 1500], false),
+        links::Outcome::QueueDropped
+    );
+    request(
+        &mut c,
+        2,
+        200,
+        json!({"version":1,"id":2,"op":"heal","handle":"p1"}),
+    )
+    .unwrap();
+    c.apply_boundary(&mut f, 220).unwrap();
+    f.apply_due(220);
+    c.observe_faults(&f, 220).unwrap();
+    c.response(240).unwrap();
+    let reply = &c.log.last().unwrap()["response"];
+    let counts = json!({"matched":2,"queue_dropped":1,"delayed_max_ns":24_000_000});
+    assert_eq!(reply["result"]["queue_counts"], counts);
+    assert_eq!(f.log[0]["queue_counts"], counts);
+    assert_eq!(f.log[1]["queue_counts"], counts);
+    assert_eq!(f.links.policy((1, 2)).bandwidth_bps, None);
 }
 
 #[test]

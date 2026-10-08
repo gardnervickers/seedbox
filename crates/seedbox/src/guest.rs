@@ -93,12 +93,15 @@ pub fn launch_recipe(
     launch: &Launch,
     ip: &str,
     hosts: &str,
+    hostname: &str,
     configs: &BTreeMap<String, Vec<u8>>,
 ) -> Result<Vec<u8>> {
-    let mut bytes = b"SBXLAUNCH2".to_vec();
-    for value in [ip, hosts, &launch.user, &launch.working_dir] {
+    let mut bytes = b"SBXLAUNCH3".to_vec();
+    for value in [ip, hosts, hostname, &launch.user, &launch.working_dir] {
         field(&mut bytes, value.as_bytes())?;
     }
+    // A guest-wide default per service VM, retained with the launch inputs.
+    bytes.extend_from_slice(&262144_u32.to_le_bytes()); // vm.max_map_count
     list(&mut bytes, &launch.argv)?;
     list(
         &mut bytes,

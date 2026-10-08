@@ -1,0 +1,23 @@
+{
+  "kernel": "../../artifacts/bzImage",
+  "mem_mb": 256,
+  "duration_ns": 60000000000,
+  "stop_tolerance_ns": 2000000,
+  "end_on_exit": "a",
+  "network": {
+    "latency_ns": 1000000,
+    "jitter_ns": 100000
+  },
+  "machines": [
+    {
+      "name": "a",
+      "initrd": "../../artifacts/window.cpio",
+      "cmdline": "window.n=2 window.work=4000"
+    },
+    {
+      "name": "b",
+      "initrd": "../../artifacts/window.cpio",
+      "cmdline": "window.n=2 window.work=4000"
+    }
+  ]
+}

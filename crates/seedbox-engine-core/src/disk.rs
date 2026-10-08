@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::io::{Read, Write};
 
 pub const SECTOR: usize = 512;
@@ -80,7 +80,7 @@ type Sector = Box<[u8; SECTOR]>;
 #[derive(Clone)]
 pub struct Disk {
     /// None: an all-zero base of `capacity` sectors.
-    base: Option<Rc<[u8]>>,
+    base: Option<Arc<[u8]>>,
     capacity: u64,
     /// SHA-256 of the image; None for an all-zero base.
     base_sha256: Option<String>,
@@ -110,7 +110,7 @@ impl Disk {
                 if want.is_some_and(|w| w != sectors) {
                     return Err(format!("disk image has {sectors} sectors, config says {}", want.unwrap()));
                 }
-                (Some(Rc::<[u8]>::from(bytes)), sectors)
+                (Some(Arc::<[u8]>::from(bytes)), sectors)
             }
             (None, Some(sectors)) if sectors > 0 => (None, sectors),
             (None, _) => return Err("disk needs an image or a size".into()),

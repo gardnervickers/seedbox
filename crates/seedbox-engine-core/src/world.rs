@@ -253,7 +253,7 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
 }
 /// Immutable slice preconditions, checked before any returned effects enter the
 /// world. Channel order remains the reference KVM order, not a merged batch.
-struct SliceObservation {
+pub(crate) struct SliceObservation {
     name: String,
     time: u64,
     incarnation: u32,
@@ -263,7 +263,7 @@ struct SliceObservation {
     down: bool,
 }
 impl SliceObservation {
-    fn begin(m: &MachineState, request: SliceRequest) -> Result<Self, String> {
+    pub(crate) fn begin(m: &MachineState, request: SliceRequest) -> Result<Self, String> {
         if m.time > request.hard_limit {
             return Err(format!("{}: slice limit is in committed past", m.name));
         }
@@ -283,7 +283,12 @@ impl SliceObservation {
             down: m.down,
         })
     }
-    fn validate(&self, m: &MachineState, request: SliceRequest, stop: Stop) -> Result<(), String> {
+    pub(crate) fn validate(
+        &self,
+        m: &MachineState,
+        request: SliceRequest,
+        stop: Stop,
+    ) -> Result<(), String> {
         let error = |reason: &str| format!("{}: invalid stopped observation: {reason}", self.name);
         if m.name != self.name
             || m.incarnation != self.incarnation
@@ -385,7 +390,7 @@ pub struct World<M: WorldMachine> {
     pub macs: Vec<[u8; 6]>,
     pub dropped: u64,
     pub delivered: u64,
-    pub link_counts: BTreeMap<(usize, usize), [u64; 4]>,
+    pub link_counts: BTreeMap<(usize, usize), [u64; 5]>,
     pub semantic_counts: network_counters::NetworkCounters,
     pub slices: u64,
 }
@@ -448,20 +453,21 @@ impl<M: WorldMachine> World<M> {
         Ok(cutoff)
     }
 
-    fn count_link(&mut self, at: u64, from: usize, to: usize, outcome: usize) {
+    pub(crate) fn count_link(&mut self, at: u64, from: usize, to: usize, outcome: usize) {
         self.link_counts.entry((from, to)).or_default()[outcome] += 1;
         self.semantic_counts.record(at, from, to, outcome);
     }
     pub fn network_snapshot(&self) -> Value {
         self.counter_snapshot(&self.link_counts)
     }
-    pub fn counter_snapshot(&self, counts: &BTreeMap<(usize, usize), [u64; 4]>) -> Value {
+    pub fn counter_snapshot(&self, counts: &BTreeMap<(usize, usize), [u64; 5]>) -> Value {
         let snapshot:BTreeMap<_,_>=counts.iter().map(|(&(from,to),counts)|(
             format!("{}->{}",self.machines[from].name,self.machines[to].name),
             {
                 // Omitted while zero, so a run that loses nothing keeps main's counters.
                 let mut c=json!({"delivered":counts[0],"partition_dropped":counts[1],"receiver_dropped":counts[2]});
                 if counts[3]>0 {c["loss_dropped"]=json!(counts[3]);}
+                if counts[4]>0 {c["queue_dropped"]=json!(counts[4]);}
                 c
             }
         )).collect();
@@ -567,6 +573,11 @@ impl<M: WorldMachine> World<M> {
                     self.count_link(send_time, src, dst, 3);
                     continue;
                 }
+                links::Outcome::QueueDropped => {
+                    self.dropped += 1;
+                    self.count_link(send_time, src, dst, 4);
+                    continue;
+                }
                 links::Outcome::Deliver(t) => t,
             };
             // A frame arriving while its receiver is down meets no NIC; one
@@ -632,66 +643,20 @@ impl<M: WorldMachine> World<M> {
     /// transit stay queued for the reboot to sort out.
     pub fn crash(&mut self, m: usize, t: u64) -> Result<(), String> {
         self.check_active()?;
-        let mut predecessor = None;
-        let result = (|| {
-            let name = self.machines[m].name.clone();
-            let next = self.machines[m]
-                .incarnation
-                .checked_add(1)
-                .ok_or("incarnation overflow")?;
-            let mut rng = Rng::branch(
-                self.run_seed,
-                self.branch_identity.as_deref(),
-                &format!("reboot-entropy/{name}/{next}"),
-            );
-            let mut seed = [0u8; 32];
-            for chunk in seed.chunks_mut(8) {
-                chunk.copy_from_slice(&rng.next().to_le_bytes());
-            }
-            // A failed constructor owns cleanup of any partially booted worker.
-            let mut fresh = M::boot(&self.factory, &name, &self.boot[m], false, seed)?;
-            if let Err(mut error) = fresh.seed_timer_branch(
-                self.run_seed,
-                self.branch_identity.as_deref(),
-                &format!("timer-jitter/{name}/{next}"),
-            ) {
-                if let Err(cleanup) = fresh.terminate_worker() {
-                    error.push_str(&format!("; fresh worker cleanup: {cleanup}"));
-                }
-                return Err(error);
-            }
-            self.control.triggers.reset_source(&name);
-            let old = predecessor.insert(std::mem::replace(&mut self.machines[m], fresh));
-            let witness = old.exit_witness()?;
-            let discarded: usize = self.strict_events[m].values().map(Vec::len).sum();
-            self.strict_events[m].clear();
-            let mut summary = json!({
-                "incarnation": old.incarnation, "booted_at_ns": old.booted_at, "crashed_at_ns": t,
-                "time_ns": old.time, "branches": old.branches(), "exits": old.exits(),
-                "state": format!("{:?}", old.state), "paused": old.paused,
-                "discarded_pending_io": old.owed_io().is_some(), "discarded_management_bytes": discarded,
-                "witness": witness,
-            });
-            if let Some(observations) = old.crash_observations().as_object() {
-                for (key, value) in observations {
-                    summary[key] = value.clone();
-                }
-            }
-            summary["disk_lost_sectors"] = json!(self.machines[m].succeed_branch(
-                old,
-                t,
-                self.run_seed,
-                self.branch_identity.as_deref()
-            )?);
-            self.incarnations[m].push(summary);
-            Ok(())
-        })();
+        let discarded: usize = self.strict_events[m].values().map(Vec::len).sum();
+        self.strict_events[m].clear();
+        let result = crash_machine(
+            &mut self.machines[m],
+            &self.factory,
+            &self.boot[m],
+            self.run_seed,
+            self.branch_identity.as_deref(),
+            &mut self.control.triggers,
+            discarded,
+            &mut self.incarnations[m],
+            t,
+        );
         if let Err(mut error) = result {
-            if let Some(old) = &mut predecessor {
-                if let Err(cleanup) = old.terminate_worker() {
-                    error.push_str(&format!("; predecessor worker cleanup: {cleanup}"));
-                }
-            }
             for machine in &mut self.machines {
                 if let Err(cleanup) = machine.terminate_worker() {
                     error.push_str(&format!("; {} worker cleanup: {cleanup}", machine.name));
@@ -722,6 +687,81 @@ impl<M: WorldMachine> World<M> {
         }
         self.machines[m].boot_at(t)
     }
+}
+
+/// Replace `slot` with its next incarnation at `t`, summarizing the one that
+/// crashed under `incarnations`. `discarded` counts the management bytes the
+/// caller dropped with the dead incarnation. On failure the predecessor's
+/// worker is terminated; the caller terminates the rest and marks the world.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn crash_machine<M: WorldMachine>(
+    slot: &mut M,
+    factory: &M::Factory,
+    boot: &M::Boot,
+    run_seed: u64,
+    branch_identity: Option<&str>,
+    triggers: &mut crate::triggers::Triggers,
+    discarded: usize,
+    incarnations: &mut Vec<Value>,
+    t: u64,
+) -> Result<(), String> {
+    let mut predecessor = None;
+    let result = (|| {
+        let name = slot.name.clone();
+        let next = slot
+            .incarnation
+            .checked_add(1)
+            .ok_or("incarnation overflow")?;
+        let mut rng = Rng::branch(
+            run_seed,
+            branch_identity,
+            &format!("reboot-entropy/{name}/{next}"),
+        );
+        let mut seed = [0u8; 32];
+        for chunk in seed.chunks_mut(8) {
+            chunk.copy_from_slice(&rng.next().to_le_bytes());
+        }
+        // A failed constructor owns cleanup of any partially booted worker.
+        let mut fresh = M::boot(factory, &name, boot, false, seed)?;
+        if let Err(mut error) = fresh.seed_timer_branch(
+            run_seed,
+            branch_identity,
+            &format!("timer-jitter/{name}/{next}"),
+        ) {
+            if let Err(cleanup) = fresh.terminate_worker() {
+                error.push_str(&format!("; fresh worker cleanup: {cleanup}"));
+            }
+            return Err(error);
+        }
+        triggers.reset_source(&name);
+        let old = predecessor.insert(std::mem::replace(slot, fresh));
+        let witness = old.exit_witness()?;
+        let mut summary = json!({
+            "incarnation": old.incarnation, "booted_at_ns": old.booted_at, "crashed_at_ns": t,
+            "time_ns": old.time, "branches": old.branches(), "exits": old.exits(),
+            "state": format!("{:?}", old.state), "paused": old.paused,
+            "discarded_pending_io": old.owed_io().is_some(), "discarded_management_bytes": discarded,
+            "witness": witness,
+        });
+        if let Some(observations) = old.crash_observations().as_object() {
+            for (key, value) in observations {
+                summary[key] = value.clone();
+            }
+        }
+        summary["disk_lost_sectors"] =
+            json!(slot.succeed_branch(old, t, run_seed, branch_identity)?);
+        incarnations.push(summary);
+        Ok(())
+    })();
+    if let Err(mut error) = result {
+        if let Some(old) = &mut predecessor {
+            if let Err(cleanup) = old.terminate_worker() {
+                error.push_str(&format!("; predecessor worker cleanup: {cleanup}"));
+            }
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 // The same machine may legitimately return at an equal-time delivery. Fail
@@ -981,7 +1021,7 @@ pub struct WorldSnapshot<M: WorldMachine> {
     partitioned: BTreeMap<(usize, usize), bool>,
     dropped: u64,
     delivered: u64,
-    link_counts: BTreeMap<(usize, usize), [u64; 4]>,
+    link_counts: BTreeMap<(usize, usize), [u64; 5]>,
     semantic_counts: network_counters::NetworkCounters,
     slices: u64,
     faults: faults::Faults,

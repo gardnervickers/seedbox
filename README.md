@@ -75,6 +75,7 @@ directory. Every runtime input has a default, so no flags are required:
 | --- | --- | --- |
 | Compose file | `compose.yaml` in the given directory (default `.`) | positional path |
 | Directed link baselines | no overrides; global latency/jitter and zero loss | `x-seedbox.network.links` |
+| Link bandwidth and queue | infinite bandwidth, unbounded queue | `x-seedbox.network.bandwidth_bps`, `queue_bound`, or the same keys in `links` |
 | Connection selectors | disabled; discover and select through the guest control API | `world.connections`, `world.drop_connection` |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
 | Deferred TX kicks (Linux KVM) | off; service TX as in the current engine | `--deferred-tx` (prepare/run/explore) |
@@ -106,16 +107,26 @@ x-seedbox:
   network:
     latency: 1ms
     links:
-      - {from: server, to: client, latency: 20ms, jitter: 2ms, loss_ppm: 50000}
+      - {from: server, to: client, latency: 20ms, jitter: 2ms, loss_ppm: 50000, bandwidth_bps: 1000000, queue_bound: 50ms}
 ```
 
 Each entry affects one direction. Latency is required; jitter and loss default to
-zero. Global latency remains the fixed scheduling lower bound for every link.
+zero. Optional `bandwidth_bps` is a positive integer in bits per second;
+`queue_bound` is the maximum send-to-departure time, including serialization,
+and requires a bandwidth. Omitting both preserves infinite bandwidth. Global
+latency remains the fixed scheduling lower bound for every link.
 `seedbox validate` checks the services, duplicate pairs, and policy bounds before
 preparation. Guest controllers can temporarily override links with
 `world.shape(["server"], ["client"], latency=20_000_000, jitter=2_000_000, loss_ppm=50000)`
 and release the returned handle with `world.heal(handle)`; see
 [network policy](docs/runtime.md#directed-link-policy).
+Shapes also accept `bandwidth_bps=1_000_000, queue_bound=50_000_000` (nanoseconds).
+Healing a bandwidth shape returns `queue_counts` with matched frames, tail drops
+and maximum serialization/queue delay. Require positive drop evidence when a
+scenario needs to exercise a full queue. The guest-owned
+`harness/acceptance/workloads/bandwidth.yaml` checks serialization delay, queue
+drops and a successful exchange after healing; run it and replay its retained run
+on a Linux KVM host.
 
 For one TCP direction, use `world.connections("server", "client")`, select an
 exact returned record with `world.drop_connection(record)`, then
@@ -286,7 +297,7 @@ rebuilt OCI images to have identical bytes.
 | --- | --- |
 | [`crates/seedbox/`](crates/seedbox/README.md) | Configuration, OCI preparation, orchestration and the `seedbox` CLI |
 | `crates/seedbox-vmm/` | KVM world engine linked into the Linux x86-64 CLI; isolated standalone workspace and lockfile for low-level fixtures |
-| `crates/seedbox-engine-core/` | Canonical deterministic policies, bounded virtio queues, shared MMIO transport, console/block/network models, PV cycle proof and the shared world coordinator |
+| `crates/seedbox-engine-core/` | Canonical deterministic policies, bounded virtio queues, shared MMIO transport, console/block/network models, PV cycle proof, the shared world coordinator and the [windowed scheduler](docs/windowed-scheduler.md) |
 | `crates/seedbox-arm64/` | ARM PV machines, native HVF application world, and isolated fixture workspace |
 | `tools/mac-runtime/` | Automatic guest assets, signing and container preparation |
 | `examples/` | Compose applications: etcd, Redis, [TCP faults/recovery](examples/faults/README.md), and [one-service MinIO conditional writes](examples/minio/README.md) (MinIO runtime qualification pending) |

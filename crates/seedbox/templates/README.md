@@ -26,6 +26,12 @@ retained across process restart only. The repository's `docs/compatibility.md`
 describes current draft formats and version-bound runtime evidence; V0 release
 compatibility and host-proof admission remain qualification gates.
 
+Each service gets its service name as the hostname, a private `/dev` with
+64 MiB `/dev/shm` and devpts, soft/hard `nofile` limits of 1048576, and
+`vm.max_map_count=262144`. SysV IPC, POSIX message queues, seccomp and io_uring
+are enabled on both application kernels. Compose `hostname:`, `ulimits:`,
+`sysctls:` and `tty:` overrides remain unsupported. Each VM has one CPU.
+
 The etcd template packages Seedbox's existing Go acknowledgement-ledger workload
 in a Dockerfile and describes three registry-image members in Compose. The Redis
 template builds a dependency-free Rust workload that checks PING, SET acknowledgements,
@@ -223,6 +229,10 @@ using this project's service names. Each pair is unique; latency is required,
 jitter and loss default to zero. Latency cannot be below global network latency,
 jitter must be less than latency, their sum is at most one hour, and loss is an
 integer from 0 to 1000000. `seedbox validate` checks these bounds.
+Global network policy and each baseline also accept `bandwidth_bps: 1000000`
+(a positive integer in bits per second) and `queue_bound: 12ms`. The bound
+includes the frame's serialization time and requires bandwidth. Both are
+optional; omitting them keeps infinite bandwidth and an unbounded queue.
 
 Guest controllers can call `world.shape(["server"], ["client"], latency=20_000_000,
 jitter=2_000_000, loss_ppm=50000)` and `world.heal(handle)`. Shapes apply only in
@@ -230,6 +240,13 @@ the requested direction. The latest live layer wins; healing reveals the prior
 policy. Partitions dominate shapes, and already routed frames retain their
 send-time decisions. Inspection includes shape handles and `loss_dropped` counters.
 Network state contributes a `network_witness` to the final world witness.
+Shapes accept `bandwidth_bps=1_000_000, queue_bound=12_000_000` in nanoseconds.
+Each directed pair serializes actual Ethernet bytes independently. Frames whose
+send-to-departure time exceeds the bound are tail-dropped; `queue_dropped` appears
+in inspection when positive. Healing a bandwidth shape returns `queue_counts`
+with `matched`, `queue_dropped`, and `delayed_max_ns`; require positive evidence
+when the scenario needs queue saturation. Earlier departures remain reserved
+across shaping and healing. Replay retains these settings automatically.
 
 Controllers can also discover directional TCP incarnations with
 `world.connections("server", "client")`, then pass an exact returned record to
