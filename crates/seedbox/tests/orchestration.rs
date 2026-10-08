@@ -768,6 +768,10 @@ fn network_effects_have_no_single_service_target() {
         detail: "partition applied".into(),
     });
     assert_eq!(fixture.run().record.outcome, Outcome::Pass);
+    for action in ["shape", "drop_connection", "heal"] {
+        fixture.backend.report.faults[0].action = action.into();
+        assert_eq!(fixture.run().record.outcome, Outcome::Pass, "{action}");
+    }
     fixture.backend.report.faults[0].action = "stop".into();
     assert_eq!(fixture.run().record.outcome, Outcome::Error);
 }

@@ -126,6 +126,14 @@ policy. Partitions dominate shapes, and already routed frames retain their
 send-time decisions. Inspection includes shape handles and `loss_dropped` counters.
 Network state contributes a `network_witness` to the final world witness.
 
+Controllers can also discover directional TCP incarnations with
+`world.connections("server", "client")`, then pass an exact returned record to
+`world.drop_connection(record)`. The returned handle arms loss for that direction
+only; `world.heal(handle)` returns matched/dropped counts. Require `dropped > 0`
+when checking that a fault occurred. Reused tuples do not inherit a stale selector.
+See the repository's `docs/runtime.md` connection selector section for pagination,
+SYN/FIN/RST semantics, bounded tracking and unsupported/fragmented traffic.
+
 Run/replay enforce the versioned admitted host/engine/guest-kernel policy;
 host-kernel bytes are not checked. Matching a second machine is compatibility
 admission, not cross-host qualification. Old

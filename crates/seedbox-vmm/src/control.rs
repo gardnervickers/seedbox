@@ -209,6 +209,18 @@ impl Control {
                 result = json!({"handle":handle});
                 Some(Action::Shape {handle,from:sides.remove(0),to:sides.remove(0),latency_ns:*latency_ns,jitter_ns:*jitter_ns,loss_ppm:*loss_ppm})
             }
+            Operation::Connections {from,to,..} => {
+                if self.target(from)?==self.target(to)? {return Err("connection endpoints must differ".into());}
+                None
+            }
+            Operation::DropConnection {connection} => {
+                let from=self.target(&Target::Machine(connection.from.clone()))?;
+                let to=self.target(&Target::Machine(connection.to.clone()))?;
+                if from==to || connection.incarnation==0 || connection.src_port==0 || connection.dst_port==0 {return Err("invalid connection selector".into());}
+                self.handles=self.handles.checked_add(1).ok_or("fault handles exhausted")?;
+                let handle=format!("p{}",self.handles);result=json!({"handle":handle});
+                Some(Action::DropConnection {handle,connection:connection.clone()})
+            }
             Operation::Heal { handle } => {
                 if handle.is_empty() {
                     return Err("handle must be nonempty string".into());
@@ -359,7 +371,16 @@ impl Control {
         if self.pending.as_ref().is_some_and(|p| p.reply == Some(now)) {
             return self.response(now).map(Some);
         }
+        let discovery=match self.pending.as_ref().and_then(|p|p.operation.as_ref()) {
+            Some(Operation::Connections {from,to,after}) if self.pending.as_ref().is_some_and(|p|!p.admitted_done && p.error.is_none()) => Some((self.target(from)?,self.target(to)?,*after)),
+            _ => None,
+        };
         let p = self.pending.as_mut().ok_or("no pending control barrier")?;
+        if let Some((from,to,after))=discovery {
+            let connections=faults.connections(&from,&to,after);
+            let next_after=connections.last().map(|c|c.incarnation).unwrap_or(after);
+            p.result=json!({"connections":connections,"next_after":next_after});
+        }
         if !p.admitted_done {
             p.admitted_done = true;
             if let Some(plan) = p.plan.take() {
@@ -370,6 +391,9 @@ impl Control {
                     p.error = Some("heal of inactive handle".into());
                     p.effect = Some(now);
                 } else {
+                    if let Action::Heal {handle}=&plan.action {
+                        if let Some(s)=faults.connections.selections.get(handle) {p.result=json!({"matched":s.matched,"dropped":s.dropped});}
+                    }
                     p.fault = Some(faults.append(plan)?);
                 }
             }

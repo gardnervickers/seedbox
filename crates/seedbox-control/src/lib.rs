@@ -11,11 +11,33 @@ pub enum Target {
     Machine(String),
 }
 
+/// One direction of an observed IPv4 TCP incarnation. Names are prepared machines.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Connection {
+    pub from: String,
+    pub to: String,
+    pub src_addr: std::net::Ipv4Addr,
+    pub dst_addr: std::net::Ipv4Addr,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub incarnation: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
     Now {},
     Inspect {},
+    Connections {
+        from: Target,
+        to: Target,
+        #[serde(default)]
+        after: u64,
+    },
+    DropConnection {
+        connection: Connection,
+    },
     Sleep {
         duration_ns: u64,
     },
@@ -71,6 +93,10 @@ pub struct Header {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
+    DropConnection {
+        handle: String,
+        connection: Connection,
+    },
     Stop {
         machine: String,
     },
@@ -113,6 +139,7 @@ pub enum Action {
 impl Action {
     pub fn name(&self) -> &'static str {
         match self {
+            Self::DropConnection { .. } => "drop_connection",
             Self::Stop { .. } => "stop",
             Self::Restart { .. } => "restart",
             Self::Partition { .. } => "partition",

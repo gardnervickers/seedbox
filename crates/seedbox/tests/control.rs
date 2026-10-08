@@ -1,5 +1,9 @@
 #[allow(dead_code)]
 #[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/connections.rs"]
+mod connections;
+#[allow(dead_code)]
+#[rustfmt::skip]
 #[path = "../../seedbox-vmm/src/links.rs"]
 mod links;
 #[allow(dead_code)]
@@ -677,6 +681,90 @@ fn invalid_shape_values_and_sides_receive_correlated_invalid_request_without_eff
         assert!(f.active_handles().is_empty());
         assert!(f.log.is_empty());
     }
+}
+
+#[test]
+fn connection_discovery_admission_race_and_heal_evidence_use_actual_packet_state() {
+    let mut c = control();
+    let mut f = faults::Faults::new(
+        vec![],
+        vec!["scenario".into(), "client".into(), "server".into()],
+    )
+    .unwrap();
+    let mut syn = vec![0; 54];
+    syn[12..14].copy_from_slice(&[8, 0]);
+    syn[14] = 0x45;
+    syn[17] = 40;
+    syn[23] = 6;
+    syn[26..30].copy_from_slice(&[10, 0, 0, 1]);
+    syn[30..34].copy_from_slice(&[10, 0, 0, 2]);
+    syn[34..36].copy_from_slice(&4000u16.to_be_bytes());
+    syn[37] = 80;
+    syn[41] = 7;
+    syn[46] = 0x50;
+    syn[47] = 2;
+    request(&mut c,1,100,json!({"version":1,"id":1,"op":"connections","from":{"service":"client"},"to":{"service":"server"}})).unwrap();
+    // SYN arrives after request observation but before admission.
+    f.route(1, 2, 110, &syn, false);
+    c.apply_boundary(&mut f, 120).unwrap();
+    c.response(140).unwrap();
+    c.mark_delivered(140).unwrap();
+    let selected = c.log[0]["response"]["result"]["connections"][0].clone();
+    assert_eq!(selected["src_port"], 4000);
+    assert!(!f.connections.used);
+    request(
+        &mut c,
+        2,
+        200,
+        json!({"version":1,"id":2,"op":"drop_connection","connection":selected}),
+    )
+    .unwrap();
+    // Tuple changes before admission: reject, do not bind to replacement.
+    syn[41] = 9;
+    f.route(1, 2, 210, &syn, false);
+    c.apply_boundary(&mut f, 220).unwrap();
+    c.response(240).unwrap();
+    c.mark_delivered(240).unwrap();
+    assert_eq!(c.log[1]["response"]["error"]["code"], "invalid_state");
+    assert!(f.log.is_empty());
+    assert!(!f.connections.used);
+    let replacement = f.connections("client", "server", 0)[0].clone();
+    request(
+        &mut c,
+        3,
+        300,
+        json!({"version":1,"id":3,"op":"drop_connection","connection":replacement}),
+    )
+    .unwrap();
+    assert!(f.active_handles().is_empty());
+    c.apply_boundary(&mut f, 320).unwrap();
+    f.apply_due(320);
+    c.observe_faults(&f, 320).unwrap();
+    c.response(340).unwrap();
+    c.mark_delivered(340).unwrap();
+    assert_eq!(f.route(1, 2, 350, &syn, false), links::Outcome::Lost);
+    let handle = c.log[2]["response"]["result"]["handle"].clone();
+    request(
+        &mut c,
+        4,
+        400,
+        json!({"version":1,"id":4,"op":"heal","handle":handle}),
+    )
+    .unwrap();
+    c.apply_boundary(&mut f, 420).unwrap();
+    f.apply_due(420);
+    c.observe_faults(&f, 420).unwrap();
+    c.response(440).unwrap();
+    c.mark_delivered(440).unwrap();
+    assert_eq!(
+        c.log[3]["response"]["result"],
+        json!({"matched":1,"dropped":1})
+    );
+    assert!(f.active_handles().is_empty());
+    assert!(matches!(
+        f.route(1, 2, 450, &syn, false),
+        links::Outcome::Deliver(_)
+    ));
 }
 
 // Exercise the same admission -> fault -> observation -> reply sequence as the scheduler.
