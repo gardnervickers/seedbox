@@ -20,7 +20,8 @@
           kernelTools = with pkgs; [
             stdenv.cc pkgsStatic.stdenv.cc binutils curl python3 gnumake
             bc bison flex perl git xz util-linux
-          ];
+          ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isx86_64
+            (with pkgs; [ pkg-config elfutils elfutils.dev openssl.dev ]);
         in {
           default = pkgs.mkShell ({
             packages = with pkgs; [
