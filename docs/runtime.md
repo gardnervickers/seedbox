@@ -189,15 +189,15 @@ the complete executable, including its signature on macOS. Replay launches that
 retained executable with the saved contract and metadata, without replacing its
 version with the installed CLI's version. No manifest or bundle format changes
 are needed. Historical profiles with no descriptor still invoke their retained
-standalone VMM directly. Partial, unknown or incompatible descriptors fail
-before host execution. Every built engine and guest kernel is admitted, with
+standalone VMM directly. Unknown executable kinds fail before execution;
+recorded platform and version metadata do not restrict development replay. Every built engine and guest kernel is admitted, with
 exact bytes retained for replay; `--allow-dev-engine` is a compatibility no-op.
 Native execution and witness equivalence still need host evidence. Apple Silicon
 also supports the native development ARM Compose backend described below.
 
 Development versions carry the Git source commit (`0.1.0-dev+COMMIT`) and a
-`.dirty` suffix for staged or unstaged tracked changes. Source exports without
-provenance report `-dev+unknown`; a matching release tag with no tracked changes
+`.dirty` suffix for staged or unstaged tracked changes. Missing or malformed source revisions
+report `-dev+unknown`; a matching release tag with no tracked changes
 is required for a release label. Untracked build inputs remain covered by
 retained hashes. This readable label does not replace exact retained bytes or
 qualify a new runtime. The Mac maintainer build propagates source provenance into
@@ -274,8 +274,10 @@ replay never starts it. Runtime commands never invoke Rust. See
 Mac profiles retain their own executable descriptor, ARM boot placement,
 PV entropy/timer policy, guest-kernel hash and HVF CPU/OS observations.
 Full-state capture includes native CPU/SIMD/GIC state and application devices.
-Old fixture reports cannot satisfy this application contract. A missing or
-incompatible retained proof fails replay before host execution.
+Reports must match the actual application inputs and supported guest shape.
+HVF CPU/OS observations are diagnostic data; missing or changed observations
+and old qualification markers do not block replay. Live execution still probes
+the HVF capabilities it needs.
 Connection discovery/selectors and committed console triggers use the shared
 coordinator on Mac. Console matching observes future bytes at their first
 committed stop. Both backends retain committed-time console and management
@@ -290,9 +292,10 @@ the generated etcd example), while preserving explicit overrides. New ARM
 profiles park initial guests at the shared launch barrier, then release them
 at seeded per-name offsets capped by `min(1 ms, network lookahead)`. The cap
 keeps causal packets and RPC triggers from preceding the latest release, and
-the phase stays within the existing absolute simulated-time limit. The policy
-is profile-bound and recorded as `initial_launch` in the report; retained
-profiles without its policy keys keep their earlier release behavior.
+the phase stays within the existing absolute simulated-time limit. The numeric
+`arm_launch_max_skew_ns` cap is retained as data and defaults to 1 ms for new
+runs; replay clips it to network lookahead. `initial_launch` records the release
+evidence. Profiles without a numeric cap keep their earlier release behavior.
 
 After building the binaries above, as root with the Nix tools on PATH
 (`sudo -E env PATH="$PATH" ...` from the Nix shell):
@@ -494,6 +497,10 @@ record's `engine_qualification` parameter is kept as data and does not block rep
 
 Replay defaults to the retained engine. An explicit `--vmm NEW_BINARY
 --allow-engine-change` permits a fresh identity and witness comparison with it.
+The replacement is probed once for its launch contract: a combined Seedbox CLI
+uses its internal worker entrypoint, while a standalone VMM receives worker flags
+directly. The new run retains that contract; ordinary replay uses it without
+probing. Memory, clock, fault and other simulation settings remain unchanged.
 Replay does not require registry access, a builder, or the original Compose files.
 
 Run exits are 0 for PASS, 1 for FAIL, 2 for ERROR, 3 for INCOMPLETE, and 124 for

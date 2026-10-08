@@ -420,16 +420,6 @@ impl<M: WorldMachine> World<M> {
         if self.early >= self.lookahead {
             return Err("world early slack must be below lookahead".into());
         }
-        let mut names = std::collections::BTreeSet::new();
-        let mut macs = std::collections::BTreeSet::new();
-        for (m, mac) in self.machines.iter().zip(&self.macs) {
-            if m.name.is_empty() || !names.insert(&m.name) {
-                return Err("world machine names must be nonempty and unique".into());
-            }
-            if !macs.insert(mac) {
-                return Err("world machine MACs must be unique".into());
-            }
-        }
         Ok(())
     }
 
@@ -1076,6 +1066,9 @@ impl<M: WorldMachine> WorldSnapshot<M> {
         world.validate()?;
         if self.machines.len() != world.machines.len() {
             return Err("snapshot machine count differs from world".into());
+        }
+        if self.boot_snapshot {
+            M::restore_boundary(&mut world.clock)?;
         }
         let mut pages = 0;
         for (i, snapshot) in self.machines.iter().enumerate() {

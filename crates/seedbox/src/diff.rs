@@ -650,7 +650,7 @@ mod tests {
         record.identity.inputs.profile.backend = "seedbox-kvm".into();
         let error = arm_report_error(&mut record, &report);
         assert!(
-            error.contains("unsupported ARM application executable descriptor"),
+            error.contains("HVF backend and ARM executable descriptor disagree"),
             "{error}"
         );
 
@@ -663,17 +663,28 @@ mod tests {
             "{error}"
         );
 
-        let mut record = arm_fixture();
-        record
+        // Descriptive clock capability metadata does not gate report decoding.
+        let mut descriptive = arm_fixture();
+        descriptive
             .identity
             .inputs
             .profile
             .semantic_parameters
-            .insert("engine_timebase".into(), "counter-pv-v1".into());
-        let error = arm_report_error(&mut record, &report);
-        assert!(
-            error.contains("unsupported ARM application executable descriptor"),
-            "{error}"
+            .insert("engine_timebase".into(), "future-capabilities".into());
+        write_fixture(
+            &dir.path().join("descriptive"),
+            &mut descriptive,
+            Some(&report),
+            None,
+        );
+        assert_eq!(
+            diff(
+                &dir.path().join("descriptive"),
+                &dir.path().join("descriptive")
+            )
+            .unwrap()
+            .status,
+            Status::Match
         );
 
         let mut wrong_version = report.clone();

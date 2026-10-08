@@ -50,6 +50,7 @@ mod tests {
     const VRING_AVAIL_F_NO_INTERRUPT:u16=1;
     const VRING_USED_F_NO_NOTIFY:u16=1;
     fn rd16(m:&[u8],a:u64)->u16 {u16::from_le_bytes(m[a as usize..a as usize+2].try_into().unwrap())}
+    fn rd32(m:&[u8],a:u64)->u32 {u32::from_le_bytes(m[a as usize..a as usize+4].try_into().unwrap())}
     fn wr16(m:&mut[u8],a:u64,v:u16) {m[a as usize..a as usize+2].copy_from_slice(&v.to_le_bytes());}
     fn wr32(m:&mut[u8],a:u64,v:u32) {m[a as usize..a as usize+4].copy_from_slice(&v.to_le_bytes());}
 
@@ -140,19 +141,75 @@ mod tests {
     }
 
     #[test]
-    fn no_notify_is_set_during_drain_and_cleared_before_a_fresh_pending_check() {
+    fn legacy_tx_drain_observes_suppression_and_rechecks_after_clearing_it() {
         let mut g = Guest::new(1);
         wr16(&mut g.m, USED, 2); // Preserve unrelated flag bits.
-        g.post(&[0; HDR]);
-        assert!(g.notify().irq);
+        let mut first = vec![0; HDR];
+        first.extend_from_slice(b"first");
+        g.post(&first);
+        let memory = g.m.as_mut_ptr();
+        let mut observed_flags = Vec::new();
+        let mut injected = false;
+        let out = g
+            .net
+            .model
+            .notify(&mut g.net.transport, &mut g.m, 0, 1, |address, len| {
+                if address == USED as usize && len == 2 {
+                    // The callback runs immediately after the guest-visible flag write.
+                    let flags = unsafe { u16::from_le_bytes([*memory.add(USED as usize), *memory.add(USED as usize + 1)]) };
+                    observed_flags.push(flags);
+                    if flags == 2 && !injected {
+                        // Publish a fresh request exactly as the drain clears NO_NOTIFY,
+                        // before arm_notify rechecks avail->idx.
+                        let d = (DESC + 16) as usize;
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(0x480u64.to_le_bytes().as_ptr(), memory.add(d), 8);
+                            std::ptr::copy_nonoverlapping((HDR as u32 + 5).to_le_bytes().as_ptr(), memory.add(d + 8), 4);
+                            std::ptr::copy_nonoverlapping(0u16.to_le_bytes().as_ptr(), memory.add(d + 12), 2);
+                            std::ptr::copy_nonoverlapping(1u16.to_le_bytes().as_ptr(), memory.add((AVAIL + 6) as usize), 2);
+                            std::ptr::copy_nonoverlapping(2u16.to_le_bytes().as_ptr(), memory.add((AVAIL + 2) as usize), 2);
+                            std::ptr::copy_nonoverlapping(b"second".as_ptr(), memory.add(0x48c), 6);
+                        }
+                        injected = true;
+                    }
+                }
+                g.net.dirty.push((address, len));
+            })
+            .unwrap();
+        assert_eq!(out.frames, [b"first".to_vec(), b"secon".to_vec()]);
+        assert!(out.irq);
+        assert!(injected);
+        assert_eq!(observed_flags, [3, 2, 3, 2]);
         assert_eq!(rd16(&g.m, USED), 2);
-        assert_eq!(g.net.dirty, [(USED as usize, 2), (USED as usize + 4, 8), (USED as usize + 2, 2), (USED as usize, 2)]);
-        // Publish after the drained boundary; arming must expose this new work.
-        g.post(&[0; HDR]);
-        let q = &g.net.transport.queues[1];
-        assert!(q.arm_notify(&mut g.m, 0, false, false, |a,n|g.net.dirty.push((a,n))).unwrap());
-        assert!(g.notify().irq);
-        assert_eq!(rd16(&g.m, USED), 2);
+        assert_eq!(rd16(&g.m, USED + 2), 2);
+        assert_eq!(g.net.stats().tx_frames, 2);
+        assert_eq!(g.net.dirty.iter().filter(|&&(a, n)| a == USED as usize && n == 2).count(), 4);
+    }
+
+    #[test]
+    fn kvm_rx_truncates_to_posted_buffer_and_completes_the_prefix() {
+        for (capacity, expected_len) in [(0, 0), (11, 11), (12, 12), (1530, 1530), (1630, 1612)] {
+            for (flags, expected_irq) in [(0, true), (VRING_AVAIL_F_NO_INTERRUPT, false)] {
+                let mut g = Guest::new(0);
+                g.post(&[]);
+                wr32(&mut g.m, DESC + 8, capacity as u32);
+                wr16(&mut g.m, AVAIL, flags);
+                let frame = vec![0x5a; 1600];
+                let received = g.net.receive(&mut g.m, &frame).unwrap();
+
+                assert_eq!(received, ReceiveOutcome { accepted: true, irq: expected_irq });
+                assert_eq!(rd32(&g.m, USED + 8), expected_len as u32);
+                assert_eq!(rd16(&g.m, USED + 2), 1);
+                let mut packet = vec![0; HDR];
+                packet[10] = 1;
+                packet.extend_from_slice(&frame);
+                assert_eq!(&g.m[0x400..0x400 + expected_len], &packet[..expected_len]);
+                assert_eq!(g.net.dirty, [(0x400, expected_len), (USED as usize + 4, 8), (USED as usize + 2, 2)]);
+                assert_eq!(g.net.stats().rx_frames, 1);
+                assert!(g.net.model.projection()["backlog"].as_array().unwrap().is_empty());
+                assert_eq!(g.net.read(0x060), u32::from(expected_irq));
+            }
+        }
     }
 
     #[test]

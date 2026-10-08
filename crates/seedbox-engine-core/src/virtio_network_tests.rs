@@ -53,30 +53,32 @@ fn receive_error_retains_application_backlog_and_network_direct_request() {
         memory[0x108..0x10c].copy_from_slice(&12u32.to_le_bytes());
         let before = memory.clone();
         let mut dirty = vec![];
-        assert!(
-            model
-                .receive(&mut transport, &mut memory, 0, b"frame", |a, n| dirty
-                    .push((a, n)))
-                .is_err()
-        );
-        assert_eq!(memory, before);
-        assert!(dirty.is_empty());
-        assert_eq!(
-            model.backlog.len(),
-            usize::from(policy == Policy::Application)
-        );
-        memory[0x108..0x10c].copy_from_slice(&32u32.to_le_bytes());
+        let received = model.receive(&mut transport, &mut memory, 0, b"frame", |a, n| {
+            dirty.push((a, n))
+        });
         if policy == Policy::Application {
-            model
-                .notify(&mut transport, &mut memory, 0, 0, |a, n| dirty.push((a, n)))
-                .unwrap();
+            assert!(received.is_err());
+            assert_eq!(memory, before);
+            assert!(dirty.is_empty());
+            assert_eq!(model.backlog.len(), 1);
         } else {
-            model
-                .receive(&mut transport, &mut memory, 0, b"frame", |a, n| {
-                    dirty.push((a, n))
-                })
-                .unwrap();
+            assert_eq!(
+                received.unwrap(),
+                super::Received {
+                    accepted: true,
+                    irq: true
+                }
+            );
+            assert_eq!(&memory[0x400..0x40c], &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
+            assert_eq!(dirty, [(0x400, 12), (0x304, 8), (0x302, 2)]);
+            assert!(model.backlog.is_empty());
+            assert_eq!(model.stats.rx_frames, 1);
+            continue;
         }
+        memory[0x108..0x10c].copy_from_slice(&32u32.to_le_bytes());
+        model
+            .notify(&mut transport, &mut memory, 0, 0, |a, n| dirty.push((a, n)))
+            .unwrap();
         assert_eq!(dirty, vec![(0x400, 17), (0x304, 8), (0x302, 2)]);
         assert_eq!(&memory[0x40c..0x411], b"frame");
         assert_eq!(transport.isr, 1);
@@ -91,11 +93,9 @@ fn late_transmit_error_preserves_profile_interrupt_boundary() {
         memory[0x202..0x204].copy_from_slice(&2u16.to_le_bytes());
         memory[0x206..0x208].copy_from_slice(&2u16.to_le_bytes());
         let mut dirty = vec![];
-        assert!(
-            model
-                .notify(&mut transport, &mut memory, 0, 1, |a, n| dirty.push((a, n)))
-                .is_err()
-        );
+        assert!(model
+            .notify(&mut transport, &mut memory, 0, 1, |a, n| dirty.push((a, n)))
+            .is_err());
         assert_eq!(transport.queues[1].last_avail, 1);
         assert_eq!(
             dirty,
@@ -175,11 +175,9 @@ fn notification_extensions_validate_ring_spans_before_dma() {
             }
             let before = memory.clone();
             let mut dirty = vec![];
-            assert!(
-                queue
-                    .arm_notify(&mut memory, 0, event_idx, true, |a, n| dirty.push((a, n)))
-                    .is_err()
-            );
+            assert!(queue
+                .arm_notify(&mut memory, 0, event_idx, true, |a, n| dirty.push((a, n)))
+                .is_err());
             assert!(queue.interrupt(&memory, 0, event_idx, 0).is_err());
             assert!(queue.pending(&memory, 0).is_err());
             assert!(dirty.is_empty());
@@ -187,9 +185,7 @@ fn notification_extensions_validate_ring_spans_before_dma() {
         }
     }
     let queue = Queue::default();
-    assert!(
-        !queue
-            .arm_notify(&mut [], 0, true, true, |_, _| panic!("unready DMA"))
-            .unwrap()
-    );
+    assert!(!queue
+        .arm_notify(&mut [], 0, true, true, |_, _| panic!("unready DMA"))
+        .unwrap());
 }

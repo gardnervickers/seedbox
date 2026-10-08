@@ -231,45 +231,49 @@ impl Network {
         }
         let old_used = transport.queues[index].used_idx;
         let event_idx = self.event_idx(transport);
-        while let Some(chain) = self.chain(&transport.queues[index], memory, base, false)? {
-            let bytes = chain.read(memory)?;
-            if self.policy == Policy::Application {
-                if bytes.len() < HEADER {
-                    return Err("short virtio network header".into());
+        if self.policy == Policy::Network {
+            while transport.queues[index].pending(memory, base)? {
+                if !event_idx && !self.deferred_tx {
+                    transport.queues[index].suppress_notify(memory, base, true, &mut dirty)?;
                 }
-                if bytes[..10].iter().any(|b| *b != 0) {
-                    return Err("unnegotiated virtio network offload".into());
+                while let Some(chain) = self.chain(&transport.queues[index], memory, base, false)? {
+                    let bytes = chain.read(memory)?;
+                    transport.queues[index].complete_chain(memory, &chain, 0, &mut dirty);
+                    if bytes.len() > HEADER {
+                        out.frames.push(bytes[HEADER..].to_vec());
+                        self.stats.tx_frames += 1;
+                    }
                 }
-            }
-            if self.policy == Policy::Network && !event_idx {
-                transport.queues[index].suppress_notify(memory, base, true, &mut dirty)?;
-            }
-            transport.queues[index].complete_chain(memory, &chain, 0, &mut dirty);
-            if bytes.len() > HEADER {
-                out.frames.push(bytes[HEADER..].to_vec());
-                if self.policy == Policy::Network {
-                    self.stats.tx_frames += 1;
-                }
-            }
-            out.irq = true;
-            if self.policy == Policy::Application {
-                transport.isr |= 1;
-            }
-        }
-        if self.policy == Policy::Application {
-            out.irq |= self.drain(transport, memory, base, &mut dirty)?;
-        } else {
-            if out.irq {
-                transport.queues[index].arm_notify(
+                if transport.queues[index].arm_notify(
                     memory,
                     base,
                     event_idx,
                     self.deferred_tx,
                     &mut dirty,
-                )?;
+                )? {
+                    continue;
+                }
+                break;
             }
             out.irq = self.interrupt(transport, memory, base, index, old_used)?;
+            return Ok(out);
         }
+        while let Some(chain) = self.chain(&transport.queues[index], memory, base, false)? {
+            let bytes = chain.read(memory)?;
+            if bytes.len() < HEADER {
+                return Err("short virtio network header".into());
+            }
+            if bytes[..10].iter().any(|b| *b != 0) {
+                return Err("unnegotiated virtio network offload".into());
+            }
+            transport.queues[index].complete_chain(memory, &chain, 0, &mut dirty);
+            if bytes.len() > HEADER {
+                out.frames.push(bytes[HEADER..].to_vec());
+            }
+            out.irq = true;
+            transport.isr |= 1;
+        }
+        out.irq |= self.drain(transport, memory, base, &mut dirty)?;
         Ok(out)
     }
     fn put_frame(
@@ -284,7 +288,9 @@ impl Network {
         let Some(chain) = self.chain(&transport.queues[0], memory, base, true)? else {
             return Ok(false);
         };
-        if chain.len < HEADER + frame.len() || chain.segments.iter().any(|s| !s.writable) {
+        if (self.policy == Policy::Application && chain.len < HEADER + frame.len())
+            || chain.segments.iter().any(|s| !s.writable)
+        {
             return Err(if self.policy == Policy::Application {
                 "invalid/short virtio receive chain"
             } else {
@@ -298,18 +304,19 @@ impl Network {
         let mut packet = vec![0; HEADER];
         packet[10] = 1;
         packet.extend_from_slice(frame);
+        let packet_len = packet.len().min(chain.len);
         let mut written = 0;
         for segment in &chain.segments {
-            let n = segment.len.min(packet.len() - written);
+            let n = segment.len.min(packet_len - written);
             memory[segment.offset..segment.offset + n]
                 .copy_from_slice(&packet[written..written + n]);
             dirty(segment.offset, n);
             written += n;
-            if written == packet.len() {
+            if written == packet_len {
                 break;
             }
         }
-        transport.queues[0].complete_chain(memory, &chain, packet.len(), dirty);
+        transport.queues[0].complete_chain(memory, &chain, written, dirty);
         if self.policy == Policy::Network {
             self.stats.rx_frames += 1;
         }
@@ -325,27 +332,33 @@ impl Network {
         let mut any = false;
         let old_used = transport.queues[0].used_idx;
         let event_idx = self.event_idx(transport);
-        while let Some(frame) = self.backlog.front().cloned() {
-            if !self.put_frame(
-                transport,
-                memory,
-                base,
-                &frame,
-                self.policy == Policy::Network && !event_idx,
-                dirty,
-            )? {
-                break;
+        if self.policy == Policy::Network {
+            while !self.backlog.is_empty() && transport.queues[0].pending(memory, base)? {
+                if !event_idx {
+                    transport.queues[0].suppress_notify(memory, base, true, &mut *dirty)?;
+                }
+                while let Some(frame) = self.backlog.front().cloned() {
+                    if !self.put_frame(transport, memory, base, &frame, false, dirty)? {
+                        break;
+                    }
+                    self.backlog.pop_front();
+                    any = true;
+                }
+                if !transport.queues[0].arm_notify(memory, base, event_idx, false, &mut *dirty)? {
+                    break;
+                }
             }
-            self.backlog.pop_front();
-            any = true;
-            if self.policy == Policy::Application {
+        } else {
+            while let Some(frame) = self.backlog.front().cloned() {
+                if !self.put_frame(transport, memory, base, &frame, false, dirty)? {
+                    break;
+                }
+                self.backlog.pop_front();
+                any = true;
                 transport.isr |= 1;
             }
         }
         if self.policy == Policy::Network {
-            if any {
-                transport.queues[0].arm_notify(memory, base, event_idx, false, &mut *dirty)?;
-            }
             return self.interrupt(transport, memory, base, 0, old_used);
         }
         Ok(any)

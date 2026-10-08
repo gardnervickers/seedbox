@@ -240,7 +240,20 @@ impl Orchestrator {
         }
         let mut identity = baseline.identity.clone();
         if options.allow_engine_change {
-            identity.inputs.profile.engine = executor.profile().engine;
+            let replacement = executor.profile();
+            identity.inputs.profile.engine = replacement.engine;
+            // A new executable can use different argv without changing the
+            // simulation's retained memory, timebase, faults or other settings.
+            for key in crate::engine::DESCRIPTOR_FIELDS {
+                identity.inputs.profile.semantic_parameters.remove(key);
+                if let Some(value) = replacement.semantic_parameters.get(key) {
+                    identity
+                        .inputs
+                        .profile
+                        .semantic_parameters
+                        .insert(key.into(), value.clone());
+                }
+            }
         }
         let mut run = self.execute(
             identity,

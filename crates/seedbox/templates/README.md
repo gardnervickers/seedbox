@@ -69,12 +69,14 @@ HVF execution; replay uses only retained bytes and never starts it. No runtime
 compiler or extra VMM path is needed.
 Images must support `linux/arm64`, RAM is limited to 3072 MiB per guest, and
 exploration is serial. CPU/PMU flags apply to Linux. Mac profiles have distinct
-PV time, boot-layout, device and HVF host identities and remain unqualified.
+PV time, boot-layout and device inputs. HVF host observations are diagnostics
+and do not restrict replay.
 The supervisor defaults Go workers to the guest's CPU count (one in the etcd
 template), while preserving an explicit `GOMAXPROCS` value.
 New Mac profiles release initial guests through a seeded launch barrier, with
-per-service offsets capped at 1 ms and network lookahead. This policy is retained
-for replay and remains inside the configured absolute simulated-time limit.
+per-service offsets capped by a retained numeric value (1 ms by default) and
+network lookahead. Replay uses that value and remains inside the configured
+absolute simulated-time limit.
 The native PV backend requires cooperative guest boundaries; four Go workers
 stalled in the Mac example and are not validated.
 `--torn-writes` opts into seeded partial survival of unflushed 512-byte disk

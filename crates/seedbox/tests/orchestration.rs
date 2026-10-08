@@ -684,6 +684,15 @@ fn cross_engine_replay_is_explicit_retained_and_still_checks_semantics_and_witne
         .put(b"new engine")
         .unwrap();
     fixture.backend.profile.engine = engine.clone();
+    fixture.backend.profile.semantic_parameters.insert(
+        "engine_executable_kind".into(),
+        seedbox::engine::INTERNAL_WORKER_V1.into(),
+    );
+    fixture
+        .backend
+        .profile
+        .semantic_parameters
+        .insert("simulator_version".into(), "0.2.0-replacement".into());
     assert_eq!(fixture.replay(&first).record.outcome, Outcome::Error);
     let options = ReplayOptions {
         allow_engine_change: true,
@@ -696,7 +705,35 @@ fn cross_engine_replay_is_explicit_retained_and_still_checks_semantics_and_witne
     assert!(replay.record.allow_engine_change);
     assert_ne!(replay.record.run_id, first.record.run_id);
     assert_eq!(replay.record.identity.inputs.profile.engine, engine);
+    assert_eq!(
+        replay.record.identity.inputs.profile,
+        fixture.backend.profile
+    );
     assert_eq!(replay.record.replay.unwrap().status, ReplayStatus::Match);
+    // Switching back removes stale combined-worker dispatch metadata.
+    let combined_run = replay.directory;
+    fixture
+        .backend
+        .profile
+        .semantic_parameters
+        .remove("engine_executable_kind");
+    fixture
+        .backend
+        .profile
+        .semantic_parameters
+        .remove("simulator_version");
+    let standalone_replay = fixture
+        .orchestrator
+        .replay_with_options(&combined_run, &fixture.backend, options.clone())
+        .unwrap();
+    assert_eq!(
+        standalone_replay.record.identity.inputs.profile,
+        fixture.backend.profile
+    );
+    assert_eq!(
+        standalone_replay.record.replay.unwrap().status,
+        ReplayStatus::Match
+    );
     fixture.backend.report.witness = Some(ContentDigest::of(b"regression"));
     assert_eq!(
         fixture

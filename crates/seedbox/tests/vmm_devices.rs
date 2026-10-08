@@ -238,10 +238,10 @@ fn malformed_receive_chains_fail_without_consuming_or_writing() {
     for case in 0..9 {
         let (mut net, mut memory) = rx_device(true);
         match case {
-            0 => memory[0x108..0x10c].copy_from_slice(&13u32.to_le_bytes()),
-            1 => memory[0x10c..0x10e].copy_from_slice(&3u16.to_le_bytes()), // cycle
-            2 => memory[0x204..0x206].copy_from_slice(&1u16.to_le_bytes()), // head
-            3 => memory[0x202..0x204].copy_from_slice(&2u16.to_le_bytes()), // overrun
+            0 => memory[0x108..0x10c].copy_from_slice(&4096u32.to_le_bytes()), // span outside RAM
+            1 => memory[0x10c..0x10e].copy_from_slice(&3u16.to_le_bytes()),    // cycle
+            2 => memory[0x204..0x206].copy_from_slice(&1u16.to_le_bytes()),    // head
+            3 => memory[0x202..0x204].copy_from_slice(&2u16.to_le_bytes()),    // overrun
             4 => memory[0x100..0x108].copy_from_slice(&u64::MAX.to_le_bytes()),
             5 => memory[0x10c..0x10e].copy_from_slice(&6u16.to_le_bytes()),
             6 => memory[0x10c..0x10e].copy_from_slice(&0u16.to_le_bytes()),
@@ -286,7 +286,7 @@ fn receive_drain_keeps_completed_prefix_and_failed_backlog_head() {
     net.write(&mut memory, 0x038, 2).unwrap();
     assert!(net.receive(&mut memory, b"first").unwrap().accepted);
     assert!(net.receive(&mut memory, b"second").unwrap().accepted);
-    memory[0x110..0x118].copy_from_slice(&0x500u64.to_le_bytes());
+    memory[0x110..0x118].copy_from_slice(&u64::MAX.to_le_bytes());
     memory[0x118..0x11c].copy_from_slice(&12u32.to_le_bytes());
     memory[0x11c..0x11e].copy_from_slice(&2u16.to_le_bytes());
     memory[0x202..0x204].copy_from_slice(&2u16.to_le_bytes());
@@ -301,6 +301,7 @@ fn receive_drain_keeps_completed_prefix_and_failed_backlog_head() {
         net.dirty,
         vec![(0x300, 2), (0x400, 17), (0x304, 8), (0x302, 2)]
     );
+    memory[0x110..0x118].copy_from_slice(&0x500u64.to_le_bytes());
     memory[0x118..0x11c].copy_from_slice(&128u32.to_le_bytes());
     assert!(net.write(&mut memory, 0x050, 0).unwrap().irq);
     assert_eq!(net.stats().rx_frames, 2);
@@ -373,7 +374,10 @@ fn transmit_empty_short_and_limit_boundaries_are_explicit() {
         let output = net.write(&mut memory, 0x050, 1);
         if size > 4 << 20 {
             assert!(output.is_err());
-            assert!(net.dirty.is_empty());
+            // The legacy drain suppresses guest kicks before validating the
+            // request; that flag write remains journaled when DMA validation fails.
+            assert_eq!(net.dirty, [(0x300, 2)]);
+            assert_eq!(&memory[0x300..0x302], &[1, 0]);
             assert_eq!(net.stats().tx_frames, 0);
             assert_eq!(&memory[0x302..0x304], &[0, 0]);
         } else {

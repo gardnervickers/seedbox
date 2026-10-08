@@ -321,6 +321,11 @@ impl WorldMachine for ArmMachine {
     type Clock = ();
     type Snapshot = UnsupportedSnapshot;
 
+    fn restore_boundary(_: &mut Self::Clock) -> Result<()> {
+        // The ARM adapter has no host clock state to discard at a fork point.
+        Ok(())
+    }
+
     fn boot(
         factory: &Factory,
         name: &str,

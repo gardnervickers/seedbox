@@ -300,46 +300,11 @@ impl RuntimeAssets {
             .into_iter()
             .map(|name| (name.to_owned(), records[name].sha256.clone()))
             .collect();
-        let recipe_names = [
-            "flake.lock",
-            "flake.nix",
-            "guest/compose-init.c",
-            "guest/control.h",
-            "guest/barrier.h",
-            "guest/io.h",
-            "kernel-arm64/supervisor-io.h",
-            "kernel/apply.py",
-            "kernel/config.options",
-            "kernel/build.sh",
-            "guest/build-compose.sh",
-            "tools/linux-runtime/package.py",
-            "tools/linux-runtime/build-cli.sh",
-        ];
         if provenance.format != 1
-            || provenance.source_revision.len() != 40
-            || !provenance
-                .source_revision
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            || provenance
-                .sources
-                .keys()
-                .map(String::as_str)
-                .collect::<BTreeSet<_>>()
-                != ["linux", "busybox", "e2fsprogs", "musl"]
-                    .into_iter()
-                    .collect()
-            || provenance
-                .recipes
-                .keys()
-                .map(String::as_str)
-                .collect::<BTreeSet<_>>()
-                != recipe_names.into_iter().collect()
-            || provenance.recipes["flake.lock"] != provenance.flake_lock_sha256
             || provenance.notice_sha256 != records["NOTICE.txt"].sha256
             || provenance.artifacts != artifacts
         {
-            return Err(invalid("source/recipe/notice/artifact provenance mismatch"));
+            return Err(invalid("notice/artifact provenance mismatch"));
         }
         Ok(Self {
             directory,

@@ -443,17 +443,6 @@ fn validate_package(root: &Path) -> Result<Manifest> {
             )));
         }
     }
-    for path in [
-        &manifest.tools.skopeo,
-        &manifest.tools.umoci,
-        &manifest.tools.docker,
-    ] {
-        if !path.starts_with("/nix/store") {
-            return Err(Error::Integrity(
-                "runtime OCI tool is outside its Nix closure".into(),
-            ));
-        }
-    }
     Ok(manifest)
 }
 
@@ -575,9 +564,9 @@ mod tests {
                 .map(|name| (name.into(), ContentDigest::of(content)))
                 .collect(),
             tools: OciTools {
-                skopeo: "/nix/store/test-skopeo/bin/skopeo".into(),
-                umoci: "/nix/store/test-umoci/bin/umoci".into(),
-                docker: "/nix/store/test-podman/bin/podman".into(),
+                skopeo: "/opt/development/bin/skopeo".into(),
+                umoci: "/opt/development/bin/umoci".into(),
+                docker: "/opt/development/bin/podman".into(),
                 build_epoch: None,
             },
         };

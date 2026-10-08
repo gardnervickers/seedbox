@@ -121,11 +121,11 @@ microcode and CPUID are not pinned.
 
 `seedbox --version` reports the simulator version. Development builds identify
 their source commit as `0.1.0-dev+COMMIT`, with `.dirty` for staged or unstaged
-tracked changes. Source archives without provenance report `-dev+unknown`. Only
+tracked changes. Missing or malformed source revisions report `-dev+unknown`. Only
 a checkout with no tracked changes at a matching release tag uses the release
 label. The label does not grant runtime qualification. Untracked build inputs
 remain covered by retained hashes. New runs retain the complete
-`seedbox` executable and its platform/worker contract; replay launches those
+`seedbox` executable and its worker protocol; replay launches those
 retained bytes even after the installed CLI is upgraded. The executable hash is
 an internal integrity reference, so equal version labels never substitute for
 equal bytes. Existing runs without a worker descriptor retain the standalone

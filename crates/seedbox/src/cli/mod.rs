@@ -515,7 +515,7 @@ impl RuntimeInputs {
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         {
             let executor = if self.kvm.vmm.is_some() {
-                VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?
+                VmmExecutor::new_detected(&engine, store, cpu, self.memory_mb, witness, counter)?
             } else {
                 VmmExecutor::new_internal(&engine, store, cpu, self.memory_mb, witness, counter)?
             }
@@ -741,8 +741,6 @@ fn run(cli: Cli) -> Result<u8> {
                     println!("{}", serde_json::to_string_pretty(&report)?);
                 } else {
                     println!("VALID: compatible execution profile");
-                    println!("engine-qualification: {}", report.engine_qualification);
-                    println!("policy: {}", report.policy_version);
                     println!("simulator: {}", report.simulator_version);
                     println!("engine: {}", report.engine.hex());
                     println!("kernel: {}", report.kernel.hex());
@@ -1039,6 +1037,7 @@ fn run(cli: Cli) -> Result<u8> {
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
             let profile = &previous.identity.inputs.profile;
+            let override_engine = vmm.is_some();
             let engine = match vmm {
                 Some(path) => defaults::existing("--vmm", path)?,
                 None => store.materialize(&profile.engine, scratch.path())?,
@@ -1060,8 +1059,13 @@ fn run(cli: Cli) -> Result<u8> {
                     ));
                 }
             } else {
-                Executor::Linux(
+                let executor = if override_engine {
+                    VmmExecutor::from_override(&engine, &store, profile.clone(), cpu.cpu, counter)?
+                } else {
                     VmmExecutor::from_retained(&engine, &store, profile.clone(), cpu.cpu, counter)?
+                };
+                Executor::Linux(
+                    executor
                         .with_timebase(timebase)
                         .with_page_timer(recorded_page_timer(profile))
                         .with_deferred_tx(deferred_tx)

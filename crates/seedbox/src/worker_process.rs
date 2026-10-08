@@ -12,11 +12,90 @@ use crate::{
 };
 use std::{
     fs,
+    io::Read,
+    os::fd::AsRawFd,
     os::unix::{fs::PermissionsExt, process::CommandExt},
     path::PathBuf,
     process::{Child, Command},
     time::{Duration, Instant},
 };
+
+/// Probe only explicit replacements. Normal retained replay stays lookup-only.
+pub(crate) fn replacement_version(engine: &std::path::Path) -> Result<Option<String>> {
+    replacement_version_with_timeout(engine, Duration::from_secs(2))
+}
+
+fn replacement_version_with_timeout(
+    engine: &std::path::Path,
+    timeout: Duration,
+) -> Result<Option<String>> {
+    use std::process::Stdio;
+    let failure = |detail: &str| {
+        Error::Setup(format!(
+            "--vmm {}: {detail}; use a Seedbox CLI or standalone VMM executable",
+            engine.display()
+        ))
+    };
+    let child = Command::new(engine)
+        .arg("--version")
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map_err(|e| failure(&e.to_string()))?;
+    let mut process = OwnedProcess(Some(child));
+    let mut stdout = process
+        .0
+        .as_mut()
+        .and_then(|child| child.stdout.take())
+        .ok_or_else(|| failure("missing version output"))?;
+    let fd = stdout.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(failure(&std::io::Error::last_os_error().to_string()));
+    }
+    let start = Instant::now();
+    let mut bytes = Vec::new();
+    let mut finished: Option<bool> = None;
+    loop {
+        let mut buffer = [0; 1024];
+        loop {
+            match stdout.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if bytes.len() + n > 4096 {
+                        return Err(failure("version output exceeds 4096 bytes"));
+                    }
+                    bytes.extend_from_slice(&buffer[..n]);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(failure(&e.to_string())),
+            }
+        }
+        if let Some(success) = finished {
+            process.stop()?;
+            if !success {
+                return Ok(None);
+            }
+            let version = std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|s| s.trim().strip_prefix("seedbox "))
+                .filter(|s| !s.is_empty() && !s.contains(char::is_whitespace));
+            return Ok(version.map(str::to_owned));
+        }
+        // Drain once more after exit to include the last bytes in the pipe.
+        finished = process.exited()?;
+        if finished.is_none() {
+            if start.elapsed() >= timeout {
+                return Err(failure("version probe timed out"));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
 
 pub(crate) fn incomplete(reason: StopReason, timebase: Timebase) -> ExecutionReport {
     ExecutionReport {
@@ -245,6 +324,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn replacement_probe_bounds_output_and_cleans_up_timeout() {
+        let _lock = crate::preparation_command::PROCESS_TEST_LOCK
+            .lock()
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let engine = directory.path().join("engine");
+        let probe = |body: &str, timeout| {
+            fs::write(&engine, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(&engine, fs::Permissions::from_mode(0o700)).unwrap();
+            replacement_version_with_timeout(&engine, timeout)
+        };
+        assert_eq!(
+            probe(
+                "printf 'seedbox 0.2.0-dev+replacement\\n'",
+                Duration::from_secs(2)
+            )
+            .unwrap()
+            .as_deref(),
+            Some("0.2.0-dev+replacement")
+        );
+        assert_eq!(probe("exit 2", Duration::from_secs(2)).unwrap(), None);
+        assert_eq!(
+            probe("printf 'another program\\n'", Duration::from_secs(2)).unwrap(),
+            None
+        );
+        assert!(probe(
+            "i=0; while [ $i -lt 5000 ]; do printf x; i=$((i+1)); done",
+            Duration::from_secs(2)
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("4096"));
+        let pid_file = directory.path().join("pid");
+        let body = format!("echo $$ > '{}'; while :; do :; done", pid_file.display());
+        assert!(probe(&body, Duration::from_millis(100))
+            .unwrap_err()
+            .to_string()
+            .contains("timed out"));
+        let pid: i32 = fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+
+    #[test]
     fn prepared_launch_uses_recorded_dispatch_clock_and_retention_limits() {
         use crate::{
             config::{Check, Limits, Network, Schedule},
@@ -270,9 +400,7 @@ mod tests {
             (ExecutableKind::Standalone, Some("pv")),
             (ExecutableKind::InternalWorker, Some("counter")),
             (ExecutableKind::InternalWorker, Some("pv")),
-            (ExecutableKind::InternalWorker, Some("counted-branches-v1")),
             (ExecutableKind::ArmWorld, Some("pv")),
-            (ExecutableKind::ArmWorld, Some("arm64-pv-world-v1")),
         ] {
             let directory = tempfile::tempdir().unwrap();
             let engine = directory.path().join("retained-engine");
@@ -285,9 +413,6 @@ mod tests {
             };
             if let Some(clock) = clock {
                 semantic_parameters.insert("timebase".into(), clock.into());
-            }
-            if matches!(clock, Some("counted-branches-v1" | "arm64-pv-world-v1")) {
-                semantic_parameters.remove("engine_timebase");
             }
             semantic_parameters.insert("memory_mb".into(), "512".into());
             let prepared = PreparedInputs {

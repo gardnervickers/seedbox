@@ -1,5 +1,4 @@
-//! Native HVF application admission and execution. This profile has its own PV
-//! identity and never inherits the x86 host policy or fixture qualifications.
+//! Native HVF application admission and execution.
 use crate::{
     execution::*,
     store::{ContentDigest, ContentStore},
@@ -11,7 +10,6 @@ use seedbox_arm64::{
 };
 use std::{collections::BTreeMap, fs, path::Path};
 
-const POLICY: &str = "seedbox-hvf-application-v1";
 const TIMEBASE: &str = "arm64-pv-world-v1";
 
 #[derive(Clone, Debug)]
@@ -21,12 +19,10 @@ pub struct MacExecutor {
 }
 #[derive(Debug, serde::Serialize)]
 pub struct DoctorReport {
-    pub policy_version: String,
     pub engine: ContentDigest,
     pub kernel: ContentDigest,
     pub simulator_version: String,
     pub observations: BTreeMap<String, String>,
-    pub engine_qualification: String,
 }
 
 fn observe() -> Result<BTreeMap<String, String>> {
@@ -55,7 +51,6 @@ fn observe() -> Result<BTreeMap<String, String>> {
         .to_str()
         .map_err(|_| Error::Setup("HVF host release is not UTF-8".into()))?;
     Ok(BTreeMap::from([
-        ("hvf_host_policy".into(), POLICY.into()),
         ("hvf_host_release".into(), release.into()),
         (
             "hvf_cpu_features".into(),
@@ -117,15 +112,7 @@ impl MacExecutor {
                 "arm_device_policy".into(),
                 "net-console-optional-block/supervisor-pid1-v1".into(),
             ),
-            (
-                "engine_qualification".into(),
-                crate::admission::DEV_UNPINNED.into(),
-            ),
             ("hvf_guest_kernel".into(), kernel.hex().into()),
-            (
-                "arm_launch_policy".into(),
-                crate::engine::ARM_LAUNCH_POLICY.into(),
-            ),
             (
                 "arm_launch_max_skew_ns".into(),
                 crate::engine::ARM_LAUNCH_MAX_SKEW_NS.to_string(),
@@ -165,12 +152,10 @@ impl MacExecutor {
     }
     pub fn doctor(engine: &Path, kernel: &Path) -> Result<DoctorReport> {
         Ok(DoctorReport {
-            policy_version: POLICY.into(),
             engine: crate::admission::file_digest(engine)?,
             kernel: crate::admission::file_digest(kernel)?,
             simulator_version: crate::engine::SIMULATOR_VERSION.into(),
             observations: observe()?,
-            engine_qualification: crate::admission::DEV_UNPINNED.into(),
         })
     }
 }
@@ -185,24 +170,21 @@ fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
     crate::engine::arm_launch_skew(profile, 1)?;
     let p = &profile.semantic_parameters;
     for (key, value) in [
-        ("hvf_host_policy", POLICY),
         ("guest_abi", "oci-init-v1"),
         ("control_channel", "virtio-console-v1"),
-        (
-            "arm_boot_policy",
-            "image-reservation/archive-aligned/final-dtb-v1",
-        ),
-        ("arm_entropy_policy", "sha256-domain-u64-seed-v1"),
-        (
-            "arm_device_policy",
-            "net-console-optional-block/supervisor-pid1-v1",
-        ),
-        ("engine_qualification", crate::admission::DEV_UNPINNED),
     ] {
         if p.get(key).map(String::as_str) != Some(value) {
             return Err(Error::Integrity(format!(
                 "retained HVF profile missing or unsupported {key}"
             )));
+        }
+    }
+    match p.get("timebase").map(String::as_str) {
+        Some("pv") => {}
+        _ => {
+            return Err(Error::Integrity(
+                "retained HVF profile has invalid timebase".into(),
+            ))
         }
     }
     let memory = p
@@ -214,19 +196,14 @@ fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
             "retained HVF profile has invalid memory_mb".into(),
         ));
     }
-    for key in ["hvf_guest_kernel", "hvf_cpu_features"] {
-        ContentDigest::try_from(
-            p.get(key)
-                .ok_or_else(|| Error::Integrity(format!("retained HVF profile missing {key}")))?
-                .clone(),
-        )?;
-    }
-    if p.get("hvf_host_release").is_none_or(|v| v.is_empty()) {
-        return Err(Error::Integrity(
-            "retained HVF profile missing host release".into(),
-        ));
-    }
-    crate::engine::validate_host(profile)
+    ContentDigest::try_from(
+        p.get("hvf_guest_kernel")
+            .ok_or_else(|| {
+                Error::Integrity("retained HVF profile missing hvf_guest_kernel".into())
+            })?
+            .clone(),
+    )?;
+    Ok(())
 }
 impl ExecutionBackend for MacExecutor {
     fn profile(&self) -> ExecutionProfile {
@@ -238,13 +215,6 @@ impl ExecutionBackend for MacExecutor {
     fn preflight(&self, output: Option<&Path>) -> Result<()> {
         validate_profile(&self.profile)?;
         let observations = observe()?;
-        for (key, value) in &observations {
-            if self.profile.semantic_parameters.get(key) != Some(value) {
-                return Err(Error::Integrity(format!(
-                    "HVF host differs from retained {key}"
-                )));
-            }
-        }
         if let Some(output) = output {
             fs::write(
                 output.join("host-hvf.json"),
@@ -262,9 +232,7 @@ impl ExecutionBackend for MacExecutor {
             .map(String::as_str)
             != Some(inputs.kernel.hex())
         {
-            return Err(Error::Integrity(
-                "retained HVF kernel does not match its application policy".into(),
-            ));
+            return Err(Error::Integrity("retained HVF kernel hash mismatch".into()));
         }
         Ok(())
     }
@@ -462,9 +430,7 @@ fn validate_initial_launch<'a>(
         };
     };
     let launch = &report["initial_launch"];
-    if launch["policy"] != crate::engine::ARM_LAUNCH_POLICY
-        || launch["max_skew_ns"].as_u64() != Some(skew)
-    {
+    if launch["max_skew_ns"].as_u64() != Some(skew) {
         return Err(bad());
     }
     let times = launch["release_times"].as_object().ok_or_else(bad)?;
@@ -515,7 +481,6 @@ mod process_tests {
     fn profile() -> ExecutionProfile {
         let mut parameters = crate::engine::arm_parameters();
         for (name, value) in [
-            ("hvf_host_policy", POLICY),
             ("hvf_host_release", "test-release"),
             ("guest_abi", "oci-init-v1"),
             ("control_channel", "virtio-console-v1"),
@@ -529,7 +494,6 @@ mod process_tests {
                 "arm_device_policy",
                 "net-console-optional-block/supervisor-pid1-v1",
             ),
-            ("engine_qualification", crate::admission::DEV_UNPINNED),
         ] {
             parameters.insert(name.into(), value.into());
         }
@@ -546,10 +510,6 @@ mod process_tests {
     #[test]
     fn launch_report_binds_seeded_offsets_and_preserves_short_timeouts() {
         assert_eq!(
-            crate::engine::ARM_LAUNCH_POLICY,
-            seedbox_arm64::application::world::LAUNCH_POLICY
-        );
-        assert_eq!(
             crate::engine::ARM_LAUNCH_MAX_SKEW_NS,
             seedbox_arm64::application::world::MAX_LAUNCH_SKEW_NS
         );
@@ -560,9 +520,10 @@ mod process_tests {
             times.insert(name.into(), serde_json::json!(100 + rng.below(801)));
         }
         let mut report = serde_json::json!({"initial_launch": {
-            "policy": crate::engine::ARM_LAUNCH_POLICY, "max_skew_ns": 800,
+            "policy": seedbox_arm64::application::world::LAUNCH_POLICY, "max_skew_ns": 800,
             "released": true, "barrier_ns":100, "release_ns":900, "release_times":times,
         }});
+        report["initial_launch"]["policy"] = serde_json::json!("descriptive-development-marker");
         validate_initial_launch(&report, Some(800), 1009, 1000, names.into_iter()).unwrap();
         assert!(
             validate_initial_launch(&report, Some(800), 1010, 1000, names.into_iter()).is_err()
@@ -574,7 +535,7 @@ mod process_tests {
             validate_initial_launch(&report, Some(800), 1009, 1000, names.into_iter()).is_err()
         );
         let mut timeout = serde_json::json!({"outcome":"duration", "initial_launch": {
-            "policy": crate::engine::ARM_LAUNCH_POLICY, "max_skew_ns": 800,
+            "policy": seedbox_arm64::application::world::LAUNCH_POLICY, "max_skew_ns": 800,
             "released": false, "barrier_ns":null, "release_ns":null, "release_times":{},
         }});
         validate_initial_launch(&timeout, Some(800), 1009, 1, names.into_iter()).unwrap();
@@ -583,12 +544,11 @@ mod process_tests {
         validate_initial_launch(&serde_json::json!({}), None, 1009, 1, names.into_iter()).unwrap();
     }
     #[test]
-    fn retained_application_requires_complete_proof_and_cannot_use_fixture_identity() {
+    fn retained_application_validates_required_inputs_and_ignores_host_metadata() {
         let complete = profile();
         validate_profile(&complete).expect("complete profile");
         for key in [
             "hvf_host_policy",
-            "hvf_guest_kernel",
             "hvf_host_release",
             "hvf_cpu_features",
             "arm_boot_policy",
@@ -596,23 +556,31 @@ mod process_tests {
             "arm_device_policy",
             "engine_qualification",
         ] {
-            let mut partial = complete.clone();
-            partial.semantic_parameters.remove(key);
-            assert!(validate_profile(&partial).is_err(), "{key}");
+            let mut descriptive = complete.clone();
+            descriptive
+                .semantic_parameters
+                .insert(key.into(), "unknown-development-value".into());
+            validate_profile(&descriptive).unwrap();
+            descriptive.semantic_parameters.remove(key);
+            validate_profile(&descriptive).unwrap();
         }
         for (key, value) in [
-            ("timebase", "arm64-pv-fixture-v1"),
-            ("guest_arch", "x86_64"),
+            ("timebase", "invalid"),
             ("memory_mb", "4096"),
-            ("arm_boot_policy", "historical-fixture"),
+            ("memory_mb", "NaN"),
+            ("hvf_guest_kernel", "not-a-hash"),
+            ("guest_abi", "unknown"),
         ] {
             let mut wrong = complete.clone();
             wrong.semantic_parameters.insert(key.into(), value.into());
             assert!(validate_profile(&wrong).is_err(), "{key}");
         }
+        let mut missing = complete;
+        missing.semantic_parameters.remove("hvf_guest_kernel");
+        assert!(validate_profile(&missing).is_err());
     }
     #[test]
-    fn retained_constructor_preserves_missing_proof_for_not_comparable_gate() {
+    fn retained_constructor_preserves_descriptive_metadata() {
         let temp = tempfile::tempdir().expect("temp");
         let engine = temp.path().join("engine");
         fs::write(&engine, b"new executable").expect("engine");
@@ -629,6 +597,6 @@ mod process_tests {
             executor.profile.engine,
             ContentDigest::of(b"new executable")
         );
-        assert!(validate_profile(&executor.profile).is_err());
+        validate_profile(&executor.profile).unwrap();
     }
 }

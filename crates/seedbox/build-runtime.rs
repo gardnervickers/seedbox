@@ -136,12 +136,12 @@ fn git(root: &Path, arguments: &[&str]) -> Option<String> {
         .stderr(std::process::Stdio::null())
         .output()
         .ok()?;
-    output.status.success().then(|| {
-        String::from_utf8(output.stdout)
-            .expect("Git build metadata must be UTF-8")
-            .trim()
-            .to_owned()
-    })
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|value| value.trim().to_owned())
 }
 
 fn simulator_version(root: &Path) {
@@ -150,11 +150,7 @@ fn simulator_version(root: &Path) {
     println!("cargo::rerun-if-env-changed=SEEDBOX_SOURCE_DIRTY");
     let explicit = env::var("SEEDBOX_SOURCE_REVISION").ok();
     let (revision, dirty, tag) = if let Some(revision) = explicit {
-        let dirty = match env::var("SEEDBOX_SOURCE_DIRTY").as_deref() {
-            Ok("0") => false,
-            Ok("1") => true,
-            _ => panic!("SEEDBOX_SOURCE_REVISION requires SEEDBOX_SOURCE_DIRTY=0 or 1"),
-        };
+        let dirty = env::var("SEEDBOX_SOURCE_DIRTY").as_deref() != Ok("0");
         // Exported build sources have no release-tag proof.
         (Some(revision), dirty, None)
     } else {
@@ -199,8 +195,7 @@ fn simulator_version(root: &Path) {
         revision.as_deref(),
         dirty,
         tag.as_deref(),
-    )
-    .expect("invalid simulator build provenance");
+    );
     println!("cargo::rustc-env=SEEDBOX_SIMULATOR_VERSION={version}");
 }
 

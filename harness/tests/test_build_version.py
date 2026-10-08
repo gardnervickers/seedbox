@@ -103,6 +103,35 @@ fn main() {
         build(version() + ".dirty")  # A newly staged source is now tracked.
         build(version() + ".dirty", fresh=True)
 
+    def test_exported_build_metadata_is_descriptive_and_never_panics(self):
+        with tempfile.TemporaryDirectory(prefix="seedbox-version-export-") as directory:
+            temporary = Path(directory).resolve()
+            script = temporary / "build-script"
+            environment = os.environ.copy()
+            environment["CARGO_PKG_VERSION"] = "0.1.0"
+            subprocess.run(["rustc", "--edition=2021", str(ROOT / "crates/seedbox/build-runtime.rs"),
+                            "-o", str(script)], env=environment, check=True, capture_output=True, timeout=120)
+            for name in ["SEEDBOX_MAC_RUNTIME_BUNDLE", "SEEDBOX_LINUX_RUNTIME_BUNDLE", "SEEDBOX_SOURCE_DIRTY"]:
+                environment.pop(name, None)
+            environment.update(CARGO_MANIFEST_DIR=str(ROOT / "crates/seedbox"),
+                               OUT_DIR=str(temporary), CARGO_CFG_TARGET_OS="macos",
+                               CARGO_CFG_TARGET_ARCH="aarch64", SEEDBOX_BUILD_ROOT=str(ROOT))
+            for revision, dirty, expected in [
+                ("malformed", None, "0.1.0-dev+unknown"),
+                ("invalid\nrevision", "unexpected", "0.1.0-dev+unknown"),
+                ("a" * 40, None, "0.1.0-dev+aaaaaaaaaaaa.dirty"),
+                ("a" * 40, "0", "0.1.0-dev+aaaaaaaaaaaa"),
+            ]:
+                environment["SEEDBOX_SOURCE_REVISION"] = revision
+                if dirty is None:
+                    environment.pop("SEEDBOX_SOURCE_DIRTY", None)
+                else:
+                    environment["SEEDBOX_SOURCE_DIRTY"] = dirty
+                result = subprocess.run([str(script)], env=environment, text=True,
+                                        capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"cargo::rustc-env=SEEDBOX_SIMULATOR_VERSION={expected}\n", result.stdout)
+
     def test_normal_checkout_and_linked_worktree_track_provenance_without_noop_rebuilds(self):
         with tempfile.TemporaryDirectory(prefix="seedbox-version-test-") as directory:
             temporary = Path(directory).resolve()

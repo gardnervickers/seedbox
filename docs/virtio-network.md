@@ -16,11 +16,14 @@ available-ring overrun, misalignment, unsupported flags and address overflow
 return execution errors instead of unchecked access or unbounded traversal.
 
 Receive validates the entire writable chain, including tails that the old loop
-might skip after copying enough payload. A buffer smaller than the 12-byte header
-plus frame now fails without truncation or completion. Incoming frames larger
-than 4 MiB minus 12 bytes fail before backlog admission, but the existing
-not-ready drop check still runs first. A ready full backlog still drops valid-size
-frames. Its 256-frame bound is unchanged.
+might skip after copying enough payload. The KVM Network profile preserves its
+prior behavior for a short posted buffer: it copies the packet prefix that fits,
+completes the head with the number of bytes copied, and reports acceptance and
+the normal batch IRQ. The ARM Application profile still rejects a buffer too
+small for the complete header and frame. Incoming KVM frames larger than 4 MiB
+minus 12 bytes fail before backlog admission, but the existing not-ready drop
+check still runs first. A ready full backlog still drops valid-size frames. Its
+256-frame bound is unchanged.
 
 Transmit retains opaque 12-byte header stripping; header bytes are not interpreted
 or restricted. Empty and short chains still complete without producing a frame.

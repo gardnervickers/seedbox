@@ -396,8 +396,8 @@ fn arm_counters(world: &world_core::World<ArmMachine>) -> Value {
 }
 
 fn validate_launch_skew(skew: Option<u64>, lookahead: u64) -> Result<()> {
-    if skew.is_some_and(|skew| skew > MAX_LAUNCH_SKEW_NS.min(lookahead)) {
-        return Err("ARM launch_skew_ns exceeds one millisecond or network lookahead".into());
+    if skew.is_some_and(|skew| skew > lookahead) {
+        return Err("ARM launch_skew_ns exceeds network lookahead".into());
     }
     Ok(())
 }
@@ -469,13 +469,13 @@ mod tests {
     }
 
     #[test]
-    fn launch_bound_is_limited_by_both_lookahead_and_one_millisecond() {
+    fn launch_bound_preserves_causality_without_a_fixed_cap_gate() {
         assert!(validate_launch_skew(None, 10).is_ok());
         assert!(validate_launch_skew(Some(0), 10).is_ok());
         assert!(validate_launch_skew(Some(10), 10).is_ok());
         assert!(validate_launch_skew(Some(11), 10).is_err());
         assert!(validate_launch_skew(Some(MAX_LAUNCH_SKEW_NS), u64::MAX).is_ok());
-        assert!(validate_launch_skew(Some(MAX_LAUNCH_SKEW_NS + 1), u64::MAX).is_err());
+        assert!(validate_launch_skew(Some(MAX_LAUNCH_SKEW_NS + 1), u64::MAX).is_ok());
         for value in [json!(-1), json!(1.5), json!("10")] {
             let mut raw = config();
             raw["launch_skew_ns"] = value;

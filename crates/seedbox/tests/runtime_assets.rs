@@ -218,9 +218,7 @@ fn provenance_and_notice_are_validated_after_payload_hashes_match() {
     let provenance: Value = serde_json::from_slice(&original["provenance.json"]).unwrap();
     for (label, field, value) in [
         ("version", "format", json!(2)),
-        ("revision", "source_revision", json!("A".repeat(40))),
         ("notice", "notice_sha256", json!("0".repeat(64))),
-        ("lock", "flake_lock_sha256", json!("0".repeat(64))),
         ("unknown", "extra", json!(true)),
     ] {
         let mut files = original.clone();
@@ -230,7 +228,8 @@ fn provenance_and_notice_are_validated_after_payload_hashes_match() {
         assert_rejected(&archive(&files, &manifest(&files)), AssetSelection::Kernel);
         assert!(!label.is_empty());
     }
-    for field in ["recipes", "sources", "artifacts"] {
+    {
+        let field = "artifacts";
         let mut files = original.clone();
         let mut bad = provenance.clone();
         let key = bad[field]
@@ -253,6 +252,33 @@ fn provenance_and_notice_are_validated_after_payload_hashes_match() {
         assert_rejected(&archive(&files, &manifest(&files)), AssetSelection::All);
     }
 }
+#[test]
+fn source_and_recipe_metadata_do_not_qualify_runtime_assets() {
+    let mut files = files();
+    let mut provenance: Value = serde_json::from_slice(&files["provenance.json"]).unwrap();
+    provenance["source_revision"] = json!("development checkout");
+    provenance["recipes"] = json!({"different-recipe": "a".repeat(64)});
+    provenance["sources"] = json!({"different-source": {"sha256": "b".repeat(64)}});
+    provenance["flake_lock_sha256"] = json!("c".repeat(64));
+    files.insert(
+        "provenance.json".into(),
+        serde_json::to_vec(&provenance).unwrap(),
+    );
+    let parent = tempfile::tempdir().unwrap();
+    let installed = RuntimeAssets::install(
+        &archive(&files, &manifest(&files)),
+        parent.path(),
+        PLATFORM,
+        AssetSelection::All,
+    )
+    .unwrap();
+    assert_eq!(installed.provenance.source_revision, "development checkout");
+    assert!(installed
+        .provenance
+        .sources
+        .contains_key("different-source"));
+}
+
 #[test]
 fn dynamic_dependencies_fail_but_dependency_free_static_pie_is_admitted() {
     let mut data = fixtures::elf();

@@ -74,11 +74,8 @@ pub fn required_policy() -> RequiredPolicy {
 
 /// Older runs recorded this marker in their identity; it is carried as data only.
 pub const ENGINE_QUALIFICATION: &str = "engine_qualification";
-/// Retained by the ARM worker descriptor and historical execution profiles.
-pub const DEV_UNPINNED: &str = "dev-unpinned";
 
 pub fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
-    crate::engine::validate_host(profile)?;
     crate::vmm::recorded_counter(profile)?;
     crate::vmm::recorded_deferred_tx(profile)?;
     let policy = required_policy();

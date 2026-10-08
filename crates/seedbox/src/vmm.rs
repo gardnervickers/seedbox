@@ -56,6 +56,57 @@ struct AdmissionProbe {
 }
 
 impl VmmExecutor {
+    /// Detect the launch contract of an explicitly supplied executable.
+    pub fn new_detected(
+        engine: &Path,
+        store: &ContentStore,
+        cpu: Option<u32>,
+        memory_mb: u32,
+        witness_mode: WitnessMode,
+        counter: CounterProfile,
+    ) -> Result<Self> {
+        Self::new(engine, store, cpu, memory_mb, witness_mode, counter)?.detect_contract(store)
+    }
+
+    /// Preserve simulation settings and use the replacement's own argv contract.
+    /// Normal replay uses `from_retained` without probing or rewriting metadata.
+    pub fn from_override(
+        engine: &Path,
+        store: &ContentStore,
+        profile: ExecutionProfile,
+        cpu: Option<u32>,
+        counter: CounterProfile,
+    ) -> Result<Self> {
+        Self::from_retained(engine, store, profile, cpu, counter)?.detect_contract(store)
+    }
+
+    fn detect_contract(mut self, store: &ContentStore) -> Result<Self> {
+        // Probe the retained copy, so the metadata describes the bytes we run.
+        let scratch = tempfile::tempdir()?;
+        let engine = store.materialize(&self.profile.engine, scratch.path())?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o500))?;
+        let version = crate::worker_process::replacement_version(&engine)?;
+        for key in crate::engine::DESCRIPTOR_FIELDS {
+            self.profile.semantic_parameters.remove(key);
+        }
+        if let Some(version) = version {
+            self.profile.semantic_parameters.extend(BTreeMap::from([
+                (
+                    "engine_executable_kind".into(),
+                    crate::engine::INTERNAL_WORKER_V1.into(),
+                ),
+                ("simulator_version".into(), version),
+                ("host_os".into(), "linux".into()),
+                ("host_arch".into(), "x86_64".into()),
+                ("guest_arch".into(), "x86_64".into()),
+                ("engine_backend".into(), "kvm".into()),
+                ("engine_timebase".into(), "counter-pv-v1".into()),
+            ]));
+        }
+        Ok(self)
+    }
+
     /// Retain this Seedbox executable and explicitly record its worker contract.
     pub fn new_internal(
         engine: &Path,
@@ -71,7 +122,8 @@ impl VmmExecutor {
         Ok(executor)
     }
 
-    /// Preserve retained metadata exactly. A replacement executable changes only
+    /// Preserve retained metadata exactly, without detecting a new launch contract.
+    /// A replacement executable changes only
     /// its digest, so the orchestrator can retain profile/admission rejection.
     pub fn from_retained(
         engine: &Path,
@@ -447,25 +499,7 @@ const DISK_LOSS_SURVIVAL_PROBABILITY: &str = "disk_loss_survival_probability";
 
 /// Recover the disk policy from a retained profile, rejecting unknown semantics.
 pub fn recorded_torn_writes(profile: &ExecutionProfile) -> Result<bool> {
-    if let Some(model) = profile.semantic_parameters.get(DISK_LOSS) {
-        let historical_worker = !profile.semantic_parameters.contains_key("engine_timebase")
-            && matches!(
-                crate::engine::recorded_launch(profile),
-                Ok(crate::engine::ExecutableKind::ArmWorld
-                    | crate::engine::ExecutableKind::InternalWorker)
-            );
-        if historical_worker
-            && model
-                == "flush-stable/seeded-latest-sector-512-half/disk-loss-machine-incarnation/v1"
-            && !profile
-                .semantic_parameters
-                .contains_key(DISK_LOSS_SECTOR_BYTES)
-            && !profile
-                .semantic_parameters
-                .contains_key(DISK_LOSS_SURVIVAL_PROBABILITY)
-        {
-            return Ok(true);
-        }
+    if profile.semantic_parameters.contains_key(DISK_LOSS) {
         return Err(Error::Integrity(
             "legacy disk_loss semantic parameter is not replay-compatible; use the retained previous CLI for historical evidence".into(),
         ));
@@ -649,8 +683,6 @@ pub fn recorded_timebase(profile: &ExecutionProfile) -> Result<Timebase> {
     match profile.semantic_parameters.get("timebase").map(String::as_str) {
         None | Some("counter") => Ok(Timebase::Counter),
         Some("pv") => Ok(Timebase::Pv),
-        Some("counted-branches-v1")
-            if crate::engine::recorded_launch(profile)? == crate::engine::ExecutableKind::InternalWorker => Ok(Timebase::Counter),
         Some(value) => Err(Error::Integrity(format!(
             "recorded --timebase {value}: expected counter or pv; use a run recorded with a supported timebase"
         ))),
@@ -2045,6 +2077,93 @@ mod doctor_tests {
     }
 
     #[test]
+    fn explicit_override_uses_replacement_contract_in_both_directions() {
+        let _lock = crate::preparation_command::PROCESS_TEST_LOCK
+            .lock()
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let combined = directory.path().join("combined");
+        let standalone = directory.path().join("standalone");
+        std::fs::write(
+            &combined,
+            b"#!/bin/sh\nprintf 'seedbox 0.2.0-replacement\\n'\n",
+        )
+        .unwrap();
+        std::fs::write(&standalone, b"#!/bin/sh\nexit 2\n").unwrap();
+        let store = ContentStore::new(directory.path().join("store"));
+        let original = VmmExecutor::new(
+            &standalone,
+            &store,
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap()
+        .with_timebase(Timebase::Pv)
+        .with_page_timer(true)
+        .with_deferred_tx(true)
+        .with_torn_writes(true);
+        let combined = VmmExecutor::from_override(
+            &combined,
+            &store,
+            original.profile.clone(),
+            None,
+            CounterProfile::Zen,
+        )
+        .unwrap();
+        assert_eq!(
+            combined.profile.semantic_parameters["simulator_version"],
+            "0.2.0-replacement"
+        );
+        assert_eq!(
+            engine_command(Path::new("engine"), &combined.profile)
+                .unwrap()
+                .get_args()
+                .collect::<Vec<_>>(),
+            [
+                "__engine",
+                crate::engine::INTERNAL_WORKER_V1,
+                "--timebase",
+                "pv",
+                "--page-timer",
+                "--deferred-tx"
+            ]
+        );
+        assert!(recorded_torn_writes(&combined.profile).unwrap());
+        let standalone = VmmExecutor::from_override(
+            &standalone,
+            &store,
+            combined.profile,
+            None,
+            CounterProfile::Zen,
+        )
+        .unwrap();
+        assert_eq!(standalone.profile, original.profile);
+        assert_eq!(
+            engine_command(Path::new("engine"), &standalone.profile)
+                .unwrap()
+                .get_args()
+                .collect::<Vec<_>>(),
+            ["--timebase", "pv", "--page-timer", "--deferred-tx"]
+        );
+        // Explicit fresh runs perform the same detection; retained replay does not.
+        let detected = VmmExecutor::new_detected(
+            &directory.path().join("combined"),
+            &store,
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap();
+        assert_eq!(
+            detected.profile.semantic_parameters["engine_executable_kind"],
+            crate::engine::INTERNAL_WORKER_V1
+        );
+    }
+
+    #[test]
     fn retained_worker_launch_preserves_timer_and_deferred_tx_options() {
         let executor = VmmExecutor::from_engine_digest(
             ContentDigest::of(b"engine"),
@@ -2216,7 +2335,7 @@ mod doctor_tests {
     }
 
     #[test]
-    fn original_internal_worker_replay_keeps_its_descriptor_and_counter_clock() {
+    fn recorded_descriptor_is_data_and_unknown_timebases_still_fail() {
         let temporary = tempfile::tempdir().unwrap();
         let executable = temporary.path().join("old-worker");
         std::fs::write(&executable, b"retained worker").unwrap();
@@ -2257,22 +2376,7 @@ mod doctor_tests {
             crate::engine::recorded_launch(&executor.profile).unwrap(),
             crate::engine::ExecutableKind::InternalWorker
         );
-        assert_eq!(
-            recorded_timebase(&executor.profile).unwrap(),
-            Timebase::Counter
-        );
-        for (key, value) in [
-            ("engine_timebase", "counter-pv-v1"),
-            ("engine_backend", "hvf"),
-            ("guest_arch", "aarch64"),
-        ] {
-            let mut invalid = profile.clone();
-            invalid.semantic_parameters.insert(key.into(), value.into());
-            assert!(crate::engine::recorded_launch(&invalid).is_err());
-            assert!(recorded_timebase(&invalid).is_err());
-        }
-        profile.semantic_parameters.remove("timebase");
-        assert!(crate::engine::recorded_launch(&profile).is_err());
+        assert!(recorded_timebase(&executor.profile).is_err());
     }
 
     #[test]

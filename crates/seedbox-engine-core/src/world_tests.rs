@@ -2,6 +2,12 @@ use super::*;
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 type Trace = Rc<RefCell<Vec<String>>>;
+#[derive(Default)]
+struct MockClock {
+    pv_backoff: u64,
+    watchdog_deadline: Option<u64>,
+    restore_calls: usize,
+}
 #[derive(Clone)]
 struct Step {
     at: u64,
@@ -71,7 +77,7 @@ impl Mock {
 impl WorldMachine for Mock {
     type Factory = Trace;
     type Boot = ();
-    type Clock = ();
+    type Clock = MockClock;
     type Snapshot = Saved;
     fn boot(trace: &Trace, name: &str, _: &(), _: bool, _: [u8; 32]) -> Result<Self, String> {
         if trace.borrow().iter().any(|x| x == "fail/boot") {
@@ -160,10 +166,13 @@ impl WorldMachine for Mock {
             Ok(())
         }
     }
-    fn checkpoint_boundary(_: &()) -> Result<(), String> {
+    fn checkpoint_boundary(_: &MockClock) -> Result<(), String> {
         Ok(())
     }
-    fn restore_boundary(_: &mut ()) -> Result<(), String> {
+    fn restore_boundary(clock: &mut MockClock) -> Result<(), String> {
+        clock.restore_calls += 1;
+        clock.pv_backoff = 0;
+        clock.watchdog_deadline = None;
         Ok(())
     }
     fn seed_timer_branch(
@@ -225,7 +234,7 @@ impl WorldMachine for Mock {
     }
     fn advance(
         &mut self,
-        _: &mut (),
+        _: &mut MockClock,
         request: SliceRequest,
         frames: &mut Vec<Vec<u8>>,
     ) -> Result<Stop, String> {
@@ -308,7 +317,7 @@ fn world(names: &[&str]) -> World<Mock> {
         branch_identity: None,
         incarnations: vec![vec![]; n],
         paused_ingress: vec![0; n],
-        clock: (),
+        clock: MockClock::default(),
         events: vec![BTreeMap::new(); n],
         seq: 0,
         lookahead: 10,
@@ -485,8 +494,9 @@ fn pause_resume_preserves_owed_io_and_pays_it_once_after_resume() {
         early_slack: 0,
         observe_console: false,
     };
+    let mut clock = MockClock::default();
     w.machines[0]
-        .advance(&mut (), request, &mut vec![])
+        .advance(&mut clock, request, &mut vec![])
         .unwrap();
     assert_eq!(w.machines[0].owed, Some(4));
     let request = SliceRequest {
@@ -495,7 +505,7 @@ fn pause_resume_preserves_owed_io_and_pays_it_once_after_resume() {
         observe_console: false,
     };
     w.machines[0]
-        .advance(&mut (), request, &mut vec![])
+        .advance(&mut clock, request, &mut vec![])
         .unwrap();
     assert_eq!(w.machines[0].owed, None);
     assert_eq!(w.machines[0].time, 27);
@@ -624,11 +634,16 @@ fn admission_rejects_invalid_worlds_before_execution() {
     w.boot.pop();
     assert!(w.validate().unwrap_err().contains("lengths"));
     assert!(w.factory.borrow().is_empty());
+    let w = world(&[""]);
+    assert!(w.validate().is_ok());
     let w = world(&["a", "a"]);
-    assert!(w.validate().unwrap_err().contains("names"));
+    assert!(w.validate().is_ok());
     let mut w = world(&["a", "b"]);
     w.macs[1] = w.macs[0];
-    assert!(w.validate().unwrap_err().contains("MACs"));
+    assert!(w.validate().is_ok());
+    let names = (0..257).map(|i| format!("machine-{i}")).collect::<Vec<_>>();
+    let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+    assert!(world(&names).validate().is_ok());
     let mut w = world(&["a"]);
     w.early = w.lookahead;
     assert!(w.validate().unwrap_err().contains("slack"));
@@ -891,6 +906,31 @@ fn boot_snapshot_resets_plan_but_keeps_readiness_and_rebuilds_crashed_machine() 
     assert!(w.control.controller.is_none());
     assert!(w.incarnations.iter().all(Vec::is_empty));
 }
+
+#[test]
+fn snapshot_restore_resets_clock_boundary_once_for_boot_and_runtime_forks() {
+    let mut w = world(&["a"]);
+    w.machines[0].park().unwrap();
+    let boot = WorldSnapshot::take(&mut w).unwrap();
+
+    for expected_calls in 1..=3 {
+        w.clock.pv_backoff = 100 + expected_calls as u64;
+        w.clock.watchdog_deadline = Some(200 + expected_calls as u64);
+        boot.restore(&mut w).unwrap();
+        assert_eq!(w.clock.pv_backoff, 0);
+        assert_eq!(w.clock.watchdog_deadline, None);
+        assert_eq!(w.clock.restore_calls, expected_calls);
+    }
+
+    let runtime = WorldSnapshot::take_checkpoint(&mut w).unwrap();
+    w.clock.pv_backoff = 400;
+    w.clock.watchdog_deadline = Some(500);
+    runtime.restore_checkpoint(&mut w).unwrap();
+    assert_eq!(w.clock.pv_backoff, 0);
+    assert_eq!(w.clock.watchdog_deadline, None);
+    assert_eq!(w.clock.restore_calls, 4);
+}
+
 #[test]
 fn shared_lifecycle_guards_preserve_failure_and_commit_points() {
     let mut s = MachineState::new("a".into());

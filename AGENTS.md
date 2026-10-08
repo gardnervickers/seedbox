@@ -22,8 +22,8 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   Linux preparation tools into the signed CLI. Runtime preparation owns a
   private Lima VM and stops it before native HVF execution; replay must never
   start that VM or invoke Cargo. Mac application profiles use `arm64-world-v1`
-  and remain development engines. Do not reuse fixture or x86 qualification
-  for them. CLI platform selection lives in `cli/backends.rs`; the library
+  with their actual guest inputs and diagnostic HVF host observations. CLI
+  platform selection lives in `cli/backends.rs`; the library
   receives explicit inputs and cancellation.
 - `crates/seedbox-vmm` is Linux-only and deliberately **not** a workspace member.
   It is its own workspace with its own `Cargo.lock`, because cargo unifies
@@ -122,7 +122,7 @@ the canonical crate; do not restore sibling source inclusion for these policies.
   standalone fixtures only with `cargo build-vmm`. The linked CLI uses the
   root lockfile and records an explicit internal-worker contract and simulator
   version; historical profiles without it retain the standalone launch contract.
-  New combined builds remain development engines until separately qualified.
+  Platform/version/qualification metadata never gates development replay.
   Don't tidy the VMM as a side effect of other
   work. `crates/seedbox-control/**`, `harness/vmm-rustc.py` and the VMM alias
   flags in `.cargo/config.toml` also determine engine bytes and identity. The

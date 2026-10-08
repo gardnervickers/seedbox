@@ -36,8 +36,9 @@ carries before/after identity and a physical stopped observation. A malformed,
 stale or unexpected response poisons the transport before effects are published.
 Poisoning closes, kills and reaps the process; later calls send no requests.
 
-World admission rejects empty machine sets, mismatched parallel inputs, duplicate
-names/MACs and early slack greater than or equal to lookahead.
+World admission rejects empty machine sets, mismatched parallel inputs and early
+slack greater than or equal to lookahead. Raw worker inputs preserve main's
+handling of empty or duplicate names and MACs; Compose supplies unique names.
 
 ## Stops and effects
 
