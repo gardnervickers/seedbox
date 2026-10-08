@@ -51,10 +51,6 @@ without starting that preparation VM. No runtime compiler or separate VMM path
 is needed. Images must support `linux/arm64`; memory is limited to 3072 MiB per
 service. Mac execution remains a development backend with distinct admission.
 The guest supervisor defaults an unset `GOMAXPROCS` to the guest CPU count.
-Each service gets its service name as the hostname, a private `/dev` with
-64 MiB `/dev/shm` and devpts, a soft/hard `nofile` limit of 1048576, and
-`vm.max_map_count=262144`. These defaults apply on both architectures; see
-[guest runtime facilities](docs/compatibility.md#guest-runtime-facilities).
 New Mac profiles release initially parked guests at seeded per-service offsets,
 capped at 1 ms and the network lookahead. The profile and report bind this
 policy; its release phase stays within the configured absolute simulated-time
