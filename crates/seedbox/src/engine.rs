@@ -4,7 +4,7 @@ use crate::{execution::ExecutionProfile, Error, Result};
 use std::collections::BTreeMap;
 
 pub const INTERNAL_WORKER_V1: &str = "seedbox-internal-worker-v1";
-pub const SIMULATOR_VERSION: &str = "0.1.0-dev.1";
+pub const SIMULATOR_VERSION: &str = env!("SEEDBOX_SIMULATOR_VERSION");
 const KIND: &str = "engine_executable_kind";
 const FIELDS: [&str; 7] = [
     KIND,

@@ -9,8 +9,10 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
+mod build_version;
 
 fn main() {
+    simulator_version();
     println!("cargo::rerun-if-env-changed=SEEDBOX_MAC_RUNTIME_BUNDLE");
     let bundle = env::var_os("SEEDBOX_MAC_RUNTIME_BUNDLE").map(PathBuf::from);
     let declaration = if let Some(bundle) = bundle {
@@ -84,6 +86,68 @@ fn main() {
             compiler.display()
         ),
     }
+}
+
+fn git(root: &Path, arguments: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(arguments)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    output.status.success().then(|| {
+        String::from_utf8(output.stdout)
+            .expect("Git build metadata must be UTF-8")
+            .trim()
+            .to_owned()
+    })
+}
+
+fn simulator_version() {
+    println!("cargo::rerun-if-changed=build_version.rs");
+    println!("cargo::rerun-if-env-changed=SEEDBOX_SOURCE_REVISION");
+    println!("cargo::rerun-if-env-changed=SEEDBOX_SOURCE_DIRTY");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let explicit = env::var("SEEDBOX_SOURCE_REVISION").ok();
+    let (revision, dirty, tag) = if let Some(revision) = explicit {
+        let dirty = match env::var("SEEDBOX_SOURCE_DIRTY").as_deref() {
+            Ok("0") => false,
+            Ok("1") => true,
+            _ => panic!("SEEDBOX_SOURCE_REVISION requires SEEDBOX_SOURCE_DIRTY=0 or 1"),
+        };
+        // Exported build sources have no release-tag proof.
+        (Some(revision), dirty, None)
+    } else {
+        for name in ["HEAD", "index", "packed-refs"] {
+            if let Some(path) = git(&root, &["rev-parse", "--git-path", name]) {
+                println!("cargo::rerun-if-changed={path}");
+            }
+        }
+        if let Some(branch) = git(&root, &["symbolic-ref", "-q", "HEAD"]) {
+            if let Some(path) = git(&root, &["rev-parse", "--git-path", &branch]) {
+                println!("cargo::rerun-if-changed={path}");
+            }
+        }
+        if let Some(files) = git(&root, &["ls-files", "-z"]) {
+            for file in files.split('\0').filter(|file| !file.is_empty()) {
+                println!("cargo::rerun-if-changed={}", root.join(file).display());
+            }
+        }
+        (
+            git(&root, &["rev-parse", "--verify", "HEAD"]),
+            git(&root, &["status", "--porcelain"]).is_none_or(|status| !status.is_empty()),
+            git(&root, &["describe", "--exact-match", "--tags", "HEAD"]),
+        )
+    };
+    let version = build_version::label(
+        env!("CARGO_PKG_VERSION"),
+        revision.as_deref(),
+        dirty,
+        tag.as_deref(),
+    )
+    .expect("invalid simulator build provenance");
+    println!("cargo::rustc-env=SEEDBOX_SIMULATOR_VERSION={version}");
 }
 
 fn on_path(name: &str) -> Option<PathBuf> {

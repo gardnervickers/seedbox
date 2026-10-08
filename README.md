@@ -93,7 +93,11 @@ engine. Replay requires this flag and the exact retained engine/kernel hashes;
 bundles preserve the marker. Passing the flag with both pinned artifacts adds no
 marker. All host, CPU, PMU, MSR, lease, ABI and control-channel checks still apply.
 
-`seedbox --version` reports the simulator version. New runs retain the complete
+`seedbox --version` reports the simulator version. Development builds identify
+their source commit as `0.1.0-dev+COMMIT`, with `.dirty` for local changes; source
+archives without provenance report `-dev+unknown`. Only a clean checkout at a
+matching release tag uses the release label. The label does not grant runtime
+qualification. New runs retain the complete
 `seedbox` executable and its platform/worker contract; replay launches those
 retained bytes even after the installed CLI is upgraded. The executable hash is
 an internal integrity reference, so equal version labels never substitute for

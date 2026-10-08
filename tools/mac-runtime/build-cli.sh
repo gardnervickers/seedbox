@@ -3,6 +3,9 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$root"
+source_revision=$(git rev-parse --verify HEAD)
+source_dirty=0
+if test -n "$(git status --porcelain)"; then source_dirty=1; fi
 if test "$(uname -s)/$(uname -m)" != Darwin/arm64; then
   printf '%s\n' 'build-cli.sh requires an Apple Silicon Mac' >&2
   exit 2
@@ -17,18 +20,22 @@ cleanup() {
   rm -rf "$stage"
 }
 trap cleanup EXIT
+printf '%s %s\n' "$source_revision" "$source_dirty" > "$stage/source-provenance"
 limactl --tty=false start --name seedbox-build tools/mac-runtime/lima.yaml
 COPYFILE_DISABLE=1 /usr/bin/tar --no-xattrs --no-mac-metadata --exclude=target --exclude=__pycache__ \
   -czf "$stage/source.tar.gz" Cargo.toml Cargo.lock flake.nix flake.lock .cargo crates guest kernel-arm64 tools/mac-runtime \
   examples/etcd/compose.yaml examples/etcd/workload/Dockerfile examples/etcd/workload/main.go \
   examples/etcd/workload/go.mod examples/etcd/workload/go.sum examples/etcd/workload/main_test.go \
-  examples/redis/compose.yaml examples/redis/workload/Dockerfile examples/redis/workload/main.rs
+  examples/redis/compose.yaml examples/redis/workload/Dockerfile examples/redis/workload/main.rs \
+  -C "$stage" source-provenance
 limactl --tty=false copy "$stage/source.tar.gz" seedbox-build:/tmp/seedbox-source.tar.gz
 limactl --tty=false shell --workdir /tmp seedbox-build sh -c '
   set -eu
   mkdir /tmp/seedbox-source
   tar -xf /tmp/seedbox-source.tar.gz -C /tmp/seedbox-source
   cd /tmp/seedbox-source
+  read -r SEEDBOX_SOURCE_REVISION SEEDBOX_SOURCE_DIRTY < source-provenance
+  export SEEDBOX_SOURCE_REVISION SEEDBOX_SOURCE_DIRTY
   printf "%s\n" "target/" "**/target/" "__pycache__/" > .gitignore
   "$HOME/.nix-profile/bin/nix" develop --command sh -c "git init -q; git add ."
   "$HOME/.nix-profile/bin/nix" develop --command bash tools/mac-runtime/build-linux.sh /tmp/seedbox-package

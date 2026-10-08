@@ -57,7 +57,7 @@ fn version_and_help_describe_the_builtin_engine_without_exposing_worker_dispatch
     assert!(version.status.success());
     assert_eq!(
         String::from_utf8_lossy(&version.stdout),
-        "seedbox 0.1.0-dev.1\n"
+        format!("seedbox {}\n", seedbox::engine::SIMULATOR_VERSION)
     );
     assert!(version.stderr.is_empty());
 

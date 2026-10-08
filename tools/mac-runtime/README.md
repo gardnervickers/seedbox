@@ -17,6 +17,8 @@ that payload into the CLI, and signs the CLI with the HVF entitlement. Its exit
 trap stops and deletes the build VM. The preparation closure contains no Rust
 compiler. The current unoptimized packaging size is roughly 250 MiB; release
 distribution and payload-size optimization are separate work.
+The exported build source carries the host checkout's commit and dirty marker,
+so the Linux preparation helper keeps its provenance without copying `.git`.
 
 At runtime, the CLI verifies and caches its embedded payload. Preparation uses
 a private, marked Lima directory and an exclusive lock. It copies only the
