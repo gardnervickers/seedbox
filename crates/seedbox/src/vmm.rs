@@ -331,6 +331,14 @@ impl VmmExecutor {
             .insert("SEEDBOX_UNDO".into(), branches.to_string());
         Ok(self)
     }
+
+    /// Host CPU time a PV run may go without an exit before the VMM checks
+    /// it for a spin loop. Changes only how soon a spin is noticed.
+    pub fn with_pv_watchdog_ms(mut self, ms: u64) -> Self {
+        self.performance
+            .insert("SEEDBOX_PV_WATCHDOG_MS".into(), ms.to_string());
+        self
+    }
 }
 
 /// Checkpoints are optional, but partial or malformed retained settings fail closed.

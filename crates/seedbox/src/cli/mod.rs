@@ -502,6 +502,10 @@ struct Performance {
     /// Initial undo margin in branches; 0 disables undo.
     #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u64).range(0..=1 << 18))]
     undo: u64,
+    /// Host CPU milliseconds a PV run may go without an exit before it is
+    /// checked for a spin loop. [default: 20]
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=10_000))]
+    pv_watchdog_ms: Option<u64>,
 }
 
 fn parse_margin(value: &str) -> std::result::Result<String, String> {
@@ -514,7 +518,11 @@ fn parse_margin(value: &str) -> std::result::Result<String, String> {
 
 impl Performance {
     fn apply(&self, executor: VmmExecutor) -> Result<VmmExecutor> {
-        executor.with_margin(&self.margin)?.with_undo(self.undo)
+        let executor = executor.with_margin(&self.margin)?.with_undo(self.undo)?;
+        Ok(match self.pv_watchdog_ms {
+            Some(ms) => executor.with_pv_watchdog_ms(ms),
+            None => executor,
+        })
     }
 }
 

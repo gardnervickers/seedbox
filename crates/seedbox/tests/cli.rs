@@ -226,6 +226,7 @@ fn bad_values_are_usage_errors() {
     for (args, expected) in [
         (&["run", "--margin", "0"][..], "positive branch count"),
         (&["run", "--undo", "999999999"], "not in 0..=262144"),
+        (&["run", "--pv-watchdog-ms", "0"], "not in 1..=10000"),
         (&["run", "--memory-mb", "1"], "not in 64..=65536"),
         (&["run", "--cpu", "5000"], "not in 0..1024"),
         (

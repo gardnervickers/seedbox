@@ -363,7 +363,10 @@ a CPU lease. Application memory can require a larger value; the etcd image faile
 to unpack at 512 MiB and passed at 1024 MiB. `--margin` and `--undo` are recorded per attempt and do not change identity.
 `--undo` defaults to 256 branches; zero disables undo and 16 exercises a smaller
 margin. The accepted range is 0..262144. Both settings are passed explicitly to
-the retained engine, without inheriting VMM environment variables. `--margin`
+the retained engine, without inheriting VMM environment variables.
+`--pv-watchdog-ms` (PV timebase only, default 20) is how much host CPU time a
+run may spend with no exit before the VMM checks it for a spin loop; a proven
+spin lands at the same canonical point whenever the check starts. `--margin`
 controls PMU approach and stepping distance when undo is off. Neither setting
 decides where a stop lands: the first natural VM exit at or after the soft
 target and below the hard target, otherwise an exact branch count at the hard
