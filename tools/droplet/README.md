@@ -28,8 +28,9 @@ are kept under `target/droplet-pv/<time>/`, one directory per commit.
 
 Commits are shipped from the local checkout with `git archive`, so they don't
 need to be pushed. The guest kernel is copied from `$SEEDBOX_KERNEL` or
-`~/seedbox-sim/artifacts/bzImage`. Pass `--build-kernel` when a commit changes
-`kernel/`.
+`~/seedbox-sim/artifacts/bzImage`, and every run on the droplet uses it through
+`SEEDBOX_KERNEL` rather than downloading a released kernel. Pass
+`--build-kernel` when a commit changes `kernel/`.
 
 ## Requirements
 

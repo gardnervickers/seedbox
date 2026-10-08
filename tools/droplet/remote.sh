@@ -30,6 +30,9 @@ for sha in $SHAS; do
   short=${sha:0:12}
   mkdir -p "$results/$short"
   export WORLDS SEEDS BUILD_KERNEL sha out="$results/$short" summary="$results/summary.txt"
+  # Release builds otherwise download the published kernel; use the shipped
+  # (or --build-kernel) bzImage, which kernel/build.sh also writes here.
+  export SEEDBOX_KERNEL=/root/seedbox-sim/artifacts/bzImage
   (cd "/root/seedbox/$sha" && nix develop --command bash -euo pipefail -c '
     start=$(date +%s)
     {
