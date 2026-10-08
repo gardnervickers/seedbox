@@ -31,8 +31,11 @@
 //! wall-time limit. That follows from the model: such a loop waits on
 //! something only virtual time could bring.
 
-use super::{map, Machine, Mapping, PAGE_BOUND, PAGE_SYSCALLS, PAGE_SYSCALL_TARGET, PAGE_TIMER_DEADLINE};
+use super::{map, Machine, Mapping, PAGE_BOUND, PAGE_SYSCALLS, PAGE_SYSCALL_TARGET};
+#[cfg(test)]
+use super::PAGE_TIMER_DEADLINE;
 use crate::timebase::{Judge, Prepared, Run, Timebase, Verdict};
+use super::pv_plan::clock_plan;
 use crate::undo::VcpuState;
 use std::time::Duration;
 
@@ -221,7 +224,7 @@ impl PvClock {
     }
 
     /// The work of `prepare` (see there).
-    fn plan(&mut self, m: &mut Machine, remaining: u64, soft: u64) -> Result<Prepared, String> {
+    fn plan(&mut self, m: &mut Machine, remaining: u64, soft: u64, legal: bool) -> Result<Prepared, String> {
         self.remaining = remaining;
         self.syscall_ns = m.syscall_ns;
         if self.probe.is_some() {
@@ -254,28 +257,21 @@ impl PvClock {
             }
         }
         m.set_stepping(false)?;
-        // Exit when the guest clock would pass the soft stop, or at the
-        // syscall whose cost reaches it.
-        let syscalls = m.page_get(PAGE_SYSCALLS);
-        // Also runs after non-legal watchdog/probe exits: only read the word
-        // to lower the bound. Pickup, expiry, IRQ0 and RNG draws belong to
-        // the machine's deterministic exit/boundary path, never to planning.
-        let timer = m.page_timer.enabled.then(|| (m.page_get(PAGE_TIMER_DEADLINE), m.page_timer.seen));
-        let (bound, target) = clock_stop(m.time, syscalls, self.syscall_ns, soft, timer);
-        m.page_set(PAGE_BOUND, bound);
-        m.page_set(PAGE_SYSCALL_TARGET, target);
+        // An ABI-4 arm is a sequence of guest loads/stores, not an atomic
+        // transaction. Never rewrite any of its inputs at a watchdog/probe
+        // landing: even a mathematically equivalent replan can tear those
+        // loads, relax a previous re-arm's bound, or move an overdue target.
+        if let Some((bound, target)) = clock_plan(m.time, m.page_get(PAGE_SYSCALLS), self.syscall_ns, soft, m.page_timer.enabled, legal) {
+            m.page_set(PAGE_BOUND, bound);
+            m.page_set(PAGE_SYSCALL_TARGET, target);
+            if m.page_timer.enabled {
+                m.page_set(super::PAGE_SYSCALL_NS, self.syscall_ns);
+                m.page_set(super::PAGE_SYSCALLS0, m.page_get(PAGE_SYSCALLS));
+                m.page_set(super::PAGE_PLAN_TIME, m.time);
+            }
+        }
         Ok(Prepared::Run)
     }
-}
-
-/// Reproduce a running guest's earlier arm after any watchdog split. Syscall
-/// charges move t0 and s0 together, leaving the absolute target unchanged.
-fn clock_stop(t0: u64, s0: u64, ns: u64, mut soft: u64, timer: Option<(u64, u64)>) -> (u64, u64) {
-    if let Some((word, seen)) = timer {
-        if word != seen && word < soft { soft = word; }
-    }
-    let left = soft.saturating_sub(t0).div_ceil(ns).max(1);
-    (soft, s0 + left)
 }
 
 fn key(r: &kvm_bindings::kvm_regs) -> Key {
@@ -292,8 +288,8 @@ fn key(r: &kvm_bindings::kvm_regs) -> Key {
 impl Timebase for PvClock {
     const BRANCHES: bool = false;
 
-    fn prepare(&mut self, m: &mut Machine, remaining: u64, soft: u64) -> Result<Prepared, String> {
-        let prepared = self.plan(m, remaining, soft);
+    fn prepare(&mut self, m: &mut Machine, remaining: u64, soft: u64, legal: bool) -> Result<Prepared, String> {
+        let prepared = self.plan(m, remaining, soft, legal);
         // No tick may interrupt a probe step: an interrupt is taken before a
         // code breakpoint at the same instruction, so a tick there stops the
         // vCPU on a landing without reporting it, and stepping on past it
@@ -521,63 +517,6 @@ mod tests {
         assert_eq!((stats.spin_false, stats.spin_clock_progress), (1, 1));
     }
 
-    // Mirror seedbox_set_next_event: only an earlier deadline changes the
-    // published bound/target; C rounds up with DIV_ROUND_UP_ULL and max(1).
-    fn guest_arm(t0: u64, s0: u64, ns: u64, deadline: u64, bound: u64, target: u64) -> (u64, u64) {
-        if deadline >= bound { return (bound, target); }
-        let left = deadline.saturating_sub(t0);
-        let rounded = (left / ns) + u64::from(left % ns != 0);
-        (deadline, s0 + rounded.max(1))
-    }
-
-    #[test]
-    fn guest_arm_and_plan_compute_identical_bounds_and_targets() {
-        for t0 in [0, 1, 999, 1000000, u64::MAX - 10000] {
-            for s0 in [0, 1, 123456] {
-                for ns in [1, 900, 937, 1000, 1100] {
-                    let mut deadlines = vec![0, t0.saturating_sub(1), t0];
-                    for offset in [1, ns - 1, ns, ns + 1, 2 * ns - 1, 2 * ns, 2 * ns + 1] {
-                        deadlines.push(t0 + offset);
-                    }
-                    for deadline in deadlines {
-                        for soft in [t0, deadline.saturating_sub(1), deadline, deadline + 1, t0 + 5000] {
-                            let (bound, target) = clock_stop(t0, s0, ns, soft, None);
-                            let guest = guest_arm(t0, s0, ns, deadline, bound, target);
-                            let plan = clock_stop(t0, s0, ns, soft, Some((deadline, u64::MAX)));
-                            assert_eq!(guest, plan, "t0={t0} s0={s0} ns={ns} deadline={deadline} soft={soft}");
-                            assert_eq!(clock_stop(t0, s0, ns, soft, Some((deadline, deadline))), (bound, target), "an adopted word must not change the plan");
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn an_unadopted_page_arm_is_split_invariant() {
-        for t0 in [0, 987654] {
-            for s0 in [0, 54321] {
-                for ns in [900, 937, 1000, 1100] {
-                    for offset in [ns - 1, ns, ns + 1, 16 * ns - 1, 16 * ns, 16 * ns + 1] {
-                        let deadline = t0 + offset;
-                        let soft = deadline + 1000000;
-                        let want = clock_stop(t0, s0, ns, soft, Some((deadline, u64::MAX)));
-                        let initial = clock_stop(t0, s0, ns, soft, None);
-                        assert_eq!(guest_arm(t0, s0, ns, deadline, initial.0, initial.1), want);
-                        // Every possible split before the guest's budget exit.
-                        for charged in 0..(want.1 - s0) {
-                            let t1 = t0 + charged * ns;
-                            let s1 = s0 + charged;
-                            assert_eq!(clock_stop(t1, s1, ns, soft, Some((deadline, u64::MAX))), want);
-                            let initial = clock_stop(t1, s1, ns, soft, None);
-                            assert_eq!(guest_arm(t1, s1, ns, deadline, initial.0, initial.1), want);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     #[test]
     #[ignore = "requires KVM"]
     fn guest_without_page_timer_support_fails_at_boot() {
@@ -665,14 +604,20 @@ mod tests {
         m.timer_rng = Some(crate::rng::Rng::new(1009, "timer/pv-probe"));
         m.timer_jitter = 1000;
         let mut clock = PvClock::new(Duration::from_secs(10)).unwrap();
+        m.page_set(PAGE_SYSCALLS, 17);
+        clock.prepare(&mut m, 100000, 100000, true).unwrap();
+        let fields = [PAGE_BOUND, PAGE_SYSCALL_TARGET, super::super::PAGE_SYSCALL_NS,
+                      super::super::PAGE_SYSCALLS0, super::super::PAGE_PLAN_TIME];
+        let plan = fields.map(|i| m.page_get(i));
         // Simulate watchdog landings before/after an old arm is overdue.
-        // An unadopted earlier arm may only lower the published bound.
+        // Even a split between guest plan loads must keep every field fixed.
         for time in [0, 9999, 10000, 10293] {
             m.time = time;
+            m.page_set(PAGE_SYSCALLS, 24);
             for word in [5000, 20000, super::super::TIMER_DISARMED] {
                 m.page_set(PAGE_TIMER_DEADLINE, word);
-                assert!(matches!(clock.prepare(&mut m, 100000, 100000).unwrap(), Prepared::Run));
-                assert_eq!(m.page_get(PAGE_BOUND), word.min(100000));
+                assert!(matches!(clock.prepare(&mut m, 100000, 100000, false).unwrap(), Prepared::Run));
+                assert_eq!(fields.map(|i| m.page_get(i)), plan, "watchdog cannot tear a guest arm's plan loads");
                 assert_eq!(m.page_timer.seen, super::super::TIMER_DISARMED);
                 assert_eq!(m.pit.deadline, Some(10000));
                 assert_eq!(m.pic.pending(), None);
@@ -746,6 +691,80 @@ mod tests {
                 if let Some(want) = &want { assert_eq!(&got, want, "watchdog={watchdog:?} undo={undo}"); }
                 else { want = Some(got); }
             }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Linux x86-64 KVM"]
+    fn changing_idle_periods_keep_plan_and_wake_across_watchdogs() {
+        let kvm = Kvm::new().unwrap();
+        let start = 1_010_599_858u64;
+        let periods = [(100_001, 500_003), (700_007, 300_011), (200_013, 800_017)];
+        // No IDT: retain IRQ0 in the PIC, observe it, then acknowledge between
+        // rounds. HLT still has IF set (machine() uses rflags=0x202).
+        let store = |code: &mut Vec<u8>, address: u32, value: u64| {
+            for (address, value) in [(address, value as u32), (address + 4, (value >> 32) as u32)] {
+                code.extend_from_slice(&[0xc7, 0x05]);
+                code.extend_from_slice(&address.to_le_bytes());
+                code.extend_from_slice(&value.to_le_bytes());
+            }
+        };
+        let delay = [0xb9, 0, 0, 0, 0x01, 0x49, 0x75, 0xfd];
+        let mut code = Vec::new();
+        for (round, (first, second)) in periods.into_iter().enumerate() {
+            let origin = start + round as u64 * 2_000_000;
+            code.extend_from_slice(&delay); // splits before the first arm
+            store(&mut code, 0xd0000070, origin + first);
+            store(&mut code, 0xd0000038, origin + first);
+            code.extend_from_slice(&delay); // splits while the first bound is lowered
+            store(&mut code, 0xd0000070, origin + second);
+            // A later re-arm retains the earlier bound, as seedbox.c does.
+            store(&mut code, 0xd0000038, origin + first.min(second));
+            code.extend_from_slice(&delay); // splits after re-arm, before idle
+            code.extend_from_slice(&[0xba, 0x2c, 0x05, 0, 0, 0xb0, 1, 0xee, 0xf4]);
+        }
+        let mut want = None;
+        for (watchdog, undo) in [(Duration::from_secs(10), 0), (Duration::from_micros(100), 0),
+                                 (Duration::from_micros(700), 256)] {
+            let mut m = machine(&kvm, &code, undo);
+            m.page_timer_requested = true;
+            m.abi = super::super::ABI_PAGE_TIMER;
+            m.enable_page_timer();
+            m.pic.set_masks(0xffff);
+            m.timer_jitter = 1000;
+            m.exact_timer_ppm = 500000;
+            m.timer_rng = Some(crate::rng::Rng::new(1009, "timer/pv-probe"));
+            let mut clock = PvClock::new(watchdog).unwrap();
+            let mut evidence = Vec::new();
+            for (round, (first, second)) in periods.into_iter().enumerate() {
+                let origin = start + round as u64 * 2_000_000;
+                m.wake(origin);
+                assert_eq!(m.run_until(&mut clock, origin + 1_000_000, 0, &mut Vec::new()).unwrap(), Stop::Halted);
+                assert_eq!(m.time, origin + first.min(second));
+                let adopted = m.next_deadline();
+                assert!((origin + second..=origin + second + 1000).contains(&adopted));
+                // A halted world does not enter KVM. Even hypothetical repeated
+                // watchdog preparation here must leave its wake and plan intact.
+                let plan = [PAGE_BOUND, PAGE_SYSCALL_TARGET, super::super::PAGE_SYSCALLS0,
+                            super::super::PAGE_PLAN_TIME].map(|i| m.page_get(i));
+                for _ in 0..round + 1 {
+                    clock.prepare(&mut m, 2_000_000, origin + 2_000_000, false).unwrap();
+                    assert_eq!(m.next_deadline(), adopted);
+                    assert_eq!([PAGE_BOUND, PAGE_SYSCALL_TARGET, super::super::PAGE_SYSCALLS0,
+                                super::super::PAGE_PLAN_TIME].map(|i| m.page_get(i)), plan);
+                }
+                evidence.push((m.time, m.pic.pending(), m.pit.deadline, m.exit_witness(), m.timer_rng.as_ref().unwrap().counter()));
+                m.wake(adopted);
+                m.expire_timers().unwrap();
+                m.pic.set_masks(0);
+                assert_eq!(m.pic.pending(), Some(0));
+                evidence.push((m.time, m.pic.pending(), m.pit.deadline, m.exit_witness(), m.timer_rng.as_ref().unwrap().counter()));
+                m.pic.take(0);
+                m.pic.set_masks(0xffff);
+            }
+            if watchdog < Duration::from_secs(1) { assert!(m.stats.eintr > 0); }
+            if let Some(want) = &want { assert_eq!(&evidence, want, "watchdog={watchdog:?} undo={undo}"); }
+            else { want = Some(evidence); }
         }
     }
 

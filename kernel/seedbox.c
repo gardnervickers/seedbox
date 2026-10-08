@@ -169,7 +169,11 @@ bool seedbox_set_next_event(unsigned long ticks)
 			u64 ns = READ_ONCE(p->syscall_ns);
 			u64 left = deadline > t0 ? deadline - t0 : 0;
 
-			/* Identical to PvClock::plan, including after a split. */
+			/* The VMM keeps this origin fixed through watchdog splits.
+			 * Keep an earlier bound on a later re-arm: only a legal
+			 * exit may publish a new plan. This also keeps left=0's
+			 * target at s0+1, even if that syscall already happened.
+			 */
 			WRITE_ONCE(p->bound, deadline);
 			WRITE_ONCE(p->syscall_target,
 				   s0 + max(1ULL, DIV_ROUND_UP_ULL(left, ns)));

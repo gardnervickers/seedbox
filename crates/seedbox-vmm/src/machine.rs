@@ -23,6 +23,7 @@ use std::time::Instant;
 
 mod counted;
 pub mod pv;
+mod pv_plan;
 
 pub const TIME_PAGE: u64 = 0xd000_0000;
 pub const NET_MMIO: u64 = 0xd000_1000;
@@ -1441,14 +1442,7 @@ impl Machine {
                 self.exit_req = window;
             }
             let syscalls0 = self.page_get(PAGE_SYSCALLS);
-            if self.page_timer.enabled {
-                self.page_set(PAGE_SYSCALL_NS, if self.pv_clock { self.syscall_ns } else { 0 });
-                self.page_set(PAGE_SYSCALLS0, syscalls0);
-                // PAGE_TSC is only published at legal exits. After a watchdog
-                // split it can lag the syscall time charged since that exit.
-                self.page_set(PAGE_PLAN_TIME, self.time);
-            }
-            if let Prepared::Idle = tb.prepare(self, remaining, soft)? {
+            if let Prepared::Idle = tb.prepare(self, remaining, soft, legal)? {
                 return self.spin_idle(hard);
             }
             self.vcpu.get_kvm_run().kvm_valid_regs =
@@ -2897,8 +2891,8 @@ mod timed_log_tests {
     struct RejectOnce {counter:Counter,rollback:bool,first:bool}
     impl Timebase for RejectOnce {
         const BRANCHES:bool=true;
-        fn prepare(&mut self,m:&mut Machine,remaining:u64,soft:u64)->Result<Prepared,String> {
-            let prepared=self.counter.prepare(m,remaining,soft)?;
+        fn prepare(&mut self,m:&mut Machine,remaining:u64,soft:u64,legal:bool)->Result<Prepared,String> {
+            let prepared=self.counter.prepare(m,remaining,soft,legal)?;
             if self.first && self.rollback {m.checkpoint()?;}
             Ok(prepared)
         }
@@ -2940,7 +2934,7 @@ mod committed_trigger_tests {
     struct DiscardFirst {prepared:bool,discarded:bool}
     impl Timebase for DiscardFirst {
         const BRANCHES:bool=true;
-        fn prepare(&mut self,m:&mut Machine,_:u64,_:u64)->Result<Prepared,String> {
+        fn prepare(&mut self,m:&mut Machine,_:u64,_:u64,_:bool)->Result<Prepared,String> {
             if !self.prepared {m.checkpoint()?;self.prepared=true;}
             Ok(Prepared::Run)
         }
