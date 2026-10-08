@@ -2356,6 +2356,27 @@ mod io_boundary_tests {
 
     #[test]
     #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn refined_counter_approaches_preserve_ram_and_exact_stops() {
+        let kvm=Kvm::new().unwrap();
+        let mut counter=Counter::new().unwrap();
+        let mut want=None;
+        for undo in [0,16,256,1024] {
+            let mut m=loop_probe(&kvm,false,undo);
+            // Store the loop counter on every branch, so a newer checkpoint
+            // must retain guest RAM as well as the register landing.
+            let code=[0xbb,0xe8,0x03,0x00,0x00,0x4b,0x89,0x1d,0x00,0x00,0x08,0x00,0x75,0xf7,0xeb,0xf0];
+            m.memory()[0x100000..0x100000+code.len()].copy_from_slice(&code);
+            m.adaptive_margin=true;
+            assert_eq!(m.run_until(&mut counter,1_000_000,0,&mut Vec::new()).unwrap(),Stop::Reached);
+            assert_eq!(m.time,1_000_000);
+            assert_eq!(m.branches,1_000_000);
+            let got=(m.exit_witness(),m.state_digest().0);
+            if let Some(want)=&want {assert_eq!(&got,want,"undo={undo}");} else {want=Some(got);}
+        }
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
     fn stops_at_natural_exits_or_exact_hard_counts_without_yields() {
         let kvm=Kvm::new().unwrap();
         let mut counter=Counter::new().unwrap();
