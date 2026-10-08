@@ -562,10 +562,6 @@ fn run(cli: Cli) -> Result<u8> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!("VALID: compatible execution profile");
-                if report.engine_qualification.is_some() {
-                    println!("dev engine: unqualified");
-                }
-                println!("policy: {}", report.policy_version);
                 println!("cpu: {}", report.cpu);
                 println!(
                     "cpus: {}",
@@ -975,12 +971,7 @@ fn run(cli: Cli) -> Result<u8> {
             );
             print_timebase(&record);
             if let Some(replay) = record.replay {
-                let label = if seedbox::admission::is_dev_engine(&record.identity.inputs.profile) {
-                    " (unqualified dev engine)"
-                } else {
-                    ""
-                };
-                println!("replay: {}{label}", word(&replay.status));
+                println!("replay: {}", word(&replay.status));
             }
             if let Some(error) = record.error {
                 println!("error: {error}");
@@ -1030,20 +1021,12 @@ fn report(run: &orchestration::Run) -> u8 {
     // Scripts parse the run directory from this one `OUTCOME: path` line.
     println!("{}: {}", word(&run.record.outcome), run.directory.display());
     print_timebase(&run.record);
-    if seedbox::admission::is_dev_engine(&run.record.identity.inputs.profile) {
-        println!("engine_qualification: dev-unpinned (unqualified dev engine)");
-    }
     if let Some(error) = &run.record.error {
         eprintln!("{error}");
         diagnostics::vmm_failure(&run.directory, error);
     }
     if let Some(replay) = &run.record.replay {
-        let label = if seedbox::admission::is_dev_engine(&run.record.identity.inputs.profile) {
-            " (unqualified dev engine)"
-        } else {
-            ""
-        };
-        println!("replay: {}{label}", word(&replay.status));
+        println!("replay: {}", word(&replay.status));
         diagnostics::replay_pages(replay);
         return match replay.status {
             ReplayStatus::Match => 0,

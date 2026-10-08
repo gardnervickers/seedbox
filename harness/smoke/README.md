@@ -74,8 +74,7 @@ fork/vDSO/new kernel features, or replace StageB. No workflow or privileged host
 service is installed. Portable controls run through `harness/acceptance.sh portable`;
 they test the harness's refusal logic, not guest correctness.
 
-The smoke requires that new runs carry no `engine_qualification` marker in
-identity, run report or doctor JSON. Doctor receipts are retained.
+Doctor receipts are retained.
 
 ## Change-scoped host checks
 

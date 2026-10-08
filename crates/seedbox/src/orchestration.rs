@@ -234,9 +234,7 @@ impl Orchestrator {
             }
         }
         let mut identity = baseline.identity.clone();
-        // Development replay always compares the exact retained artifact pair.
-        if options.allow_engine_change && !crate::admission::is_dev_engine(&identity.inputs.profile)
-        {
+        if options.allow_engine_change {
             identity.inputs.profile.engine = executor.profile().engine;
         }
         let mut run = self.execute(

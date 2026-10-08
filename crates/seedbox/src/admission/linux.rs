@@ -1,5 +1,6 @@
 //! Linux system queries only: no VM creation, MSR write, event enable or signals.
 use super::*;
+use std::collections::BTreeMap;
 use std::{
     fs::{self, File},
     io::Read,

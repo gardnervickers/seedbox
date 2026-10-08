@@ -82,9 +82,8 @@ for lifecycle and unsupported-traffic behavior, and the
 
 Engines and guest kernels are not pinned: any built engine and kernel are
 admitted, and each run records their hashes. `--allow-dev-engine` is still accepted and has no effect.
-Runs recorded earlier with `engine_qualification = "dev-unpinned"` still replay,
-on their exact retained engine and kernel. All host, CPU, PMU, MSR, lease, ABI and
-control-channel checks still apply.
+The host checks are the KVM and perf capabilities the engine needs; CPU model,
+microcode and CPUID are not pinned.
 
 `seedbox run --torn-writes` enables seeded partial survival of unflushed
 512-byte disk sectors on crash. It is recorded in run identity and replayed
@@ -342,34 +341,25 @@ bytes and does not establish a pass for the committed SHA.
 `--allow-unqualified-cpu` also applies to `explore`. This explicit non-Zen
 path is experimental: it retains the counter in identity, validates exact
 supported release inputs and applicable KVM capabilities, and holds every SMT
-lease through child cleanup. It carries no qualified AMD host-policy proof and
-never opens AMD workaround MSRs. `doctor` refuses an unqualified counter rather
+lease through child cleanup. It never opens AMD workaround MSRs. `doctor` refuses an unqualified counter rather
 than reporting qualified compatibility. Disabled selected-event readiness is checked
 before preparation and again under held leases; no guest counter is enabled by
 admission. Intel determinism is not established.
 
-The versioned `amd-zen3-engine391f-v3` admission policy checks AMD family 25,
-model 33, stepping 0 and microcode 0xa20102e, KVM capabilities and the engine's complete existing CPUID
-policy. Host-kernel bytes are not checked. Before image preparation, it temporarily
+Host admission checks for an AMD x86-64 CPU and the KVM and perf capabilities the
+engine needs. CPU model, microcode, CPUID and host-kernel bytes are not checked.
+Before image preparation, it temporarily
 reserves an eligible core, checks each online/allowed SMT sibling and opens the
 exact perf event disabled. Descriptors close and affinity/reservations restore
 before preparation. The leased execution core is checked again before MSR writes.
 This is readiness admission; it does not prove guest counting, overflow behavior
-or cross-host determinism. Matching a second machine admits compatibility without
-host-ID enrollment. Support evidence remains the tested host and inputs.
-
-Qualified Zen run identities bind the full policy and its fingerprint. Existing records
-remain inspectable and transferable, but replay through this CLI rejects missing
-or drifted host-policy proof as ERROR/NOT_COMPARABLE (exit 2), even with
-`--allow-engine-change`. A retained previous CLI can still be used for explicitly
-historical evidence; its execution does not establish new-policy admission.
-Admission source checks are separate from the still-required focused Linux
-guest/profile acceptance.
+or cross-host determinism. Run identities carry no host-policy proof; host-policy
+fields in older records are kept as data and do not block replay.
 
 ## Check execution compatibility
 
 `seedbox doctor` checks the installed engine, guest kernel and selected host core
-against the same versioned admission policy used by execution. It needs a Linux
+with the same readiness checks used by execution. It needs a Linux
 KVM host and root, uses the normal `--cpu`, `--kernel` and `--vmm` defaults, and
 never builds a missing VMM, prepares images or starts guests. `--json` prints the
 exact admitted observations. Success prints `VALID` after probe resources and

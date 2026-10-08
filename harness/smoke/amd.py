@@ -131,14 +131,6 @@ def closure(record):
     return objects
 
 
-def verify_qualification(record):
-    """New runs carry no engine qualification marker: every built engine is admitted."""
-    if record['identity']['inputs']['profile'].get('semantic_parameters', {}).get('engine_qualification') is not None:
-        raise RuntimeError('new run carries an engine qualification marker')
-    if record['report'].get('engine_qualification') is not None:
-        raise RuntimeError('run report carries an engine qualification marker')
-
-
 def verify_record(record, run, state):
     if record['outcome'] != 'PASS' or record['error'] is not None or record['allow_engine_change']:
         raise RuntimeError('baseline/replay did not genuinely PASS')
@@ -279,15 +271,14 @@ class Campaign:
         if code != 0:
             raise RuntimeError('doctor refused the supplied engine and kernel')
         code, stdout, _ = self.invoke('doctor-json', [*doctor_args, '--json'])
-        if code != 0 or json.loads(stdout).get('engine_qualification') is not None:
-            raise RuntimeError('doctor JSON carries an engine qualification marker')
+        if code != 0:
+            raise RuntimeError('doctor JSON failed')
         code, stdout, _ = self.invoke('fixed', [str(a.cli), 'run', project, '--seed', '1009', '--full-state', *runtime], True)
         if code != 0:
             raise RuntimeError('fixed baseline failed')
         baseline_run = result_directory(stdout, self.state, self.last_run)
         baseline = self.inspect('fixed-inspect', baseline_run)
         streams = verify_record(baseline, baseline_run, self.state)
-        verify_qualification(baseline)
         if baseline['identity']['inputs']['kernel'] != digest(a.kernel) or baseline['identity']['inputs']['profile']['engine'] != digest(a.engine):
             raise RuntimeError('executed kernel/engine differ from frozen supplied bytes')
         # One undo-off replay covers both performance settings: with undo on, the
@@ -305,7 +296,6 @@ class Campaign:
             run = result_directory(stdout, self.state, self.last_run)
             record = self.inspect(name + '-inspect', run)
             compare(baseline, record, streams, verify_record(record, run, self.state))
-            verify_qualification(record)
             verify_performance(baseline, record, changes)
         if pair(a.cpu) != self.cpus:
             raise RuntimeError('sibling topology changed')
