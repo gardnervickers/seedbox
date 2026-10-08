@@ -1873,3 +1873,59 @@ fn replay_rejects_unknown_recorded_timebase_before_host_checks() {
     assert!(inspect.status.success(), "{}", stderr(&inspect));
     assert!(String::from_utf8_lossy(&inspect.stdout).contains("timebase: future"));
 }
+
+#[test]
+fn replay_original_internal_worker_reaches_retained_proof_gate() {
+    use seedbox::{orchestration::RunRecord, store::ContentDigest};
+    let directory = tempfile::tempdir().unwrap();
+    timebase_record(directory.path(), Some("counted-branches-v1"));
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(directory.path().join("manifest.json")).unwrap()).unwrap();
+    let mut record: RunRecord = serde_json::from_value(manifest["record"].clone()).unwrap();
+    record
+        .identity
+        .inputs
+        .profile
+        .semantic_parameters
+        .extend(std::collections::BTreeMap::from([
+            (
+                "engine_executable_kind".into(),
+                "seedbox-internal-worker-v1".into(),
+            ),
+            ("simulator_version".into(), "0.1.0-dev.1".into()),
+            ("host_os".into(), "linux".into()),
+            ("host_arch".into(), "x86_64".into()),
+            ("guest_arch".into(), "x86_64".into()),
+            ("engine_backend".into(), "kvm".into()),
+        ]));
+    record.run_id = ContentDigest::of(&serde_json::to_vec(&record.identity).unwrap());
+    manifest = serde_json::json!({"sha256": ContentDigest::of(&serde_json::to_vec(&record).unwrap()), "record": record});
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    fs::write(directory.path().join("manifest.json"), &bytes).unwrap();
+    fs::write(directory.path().join("unused-engine"), b"never execute").unwrap();
+    let output = seedbox(
+        &[
+            "replay",
+            ".",
+            "--vmm",
+            "unused-engine",
+            "--allow-engine-change",
+        ],
+        directory.path(),
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        !stderr(&output).contains("recorded --timebase"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("replay: NOT_COMPARABLE"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(
+        fs::read(directory.path().join("manifest.json")).unwrap(),
+        bytes
+    );
+}

@@ -10,7 +10,7 @@ publish.workspace = true
 # Both packages compile this one shared protocol source; no schema is copied.
 [lib]
 name = "seedbox_control"
-path = "../../seedbox-control/src/lib.rs"
+path = "src/lib.rs"
 
 [dependencies]
 serde.workspace = true

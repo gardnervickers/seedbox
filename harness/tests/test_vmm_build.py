@@ -214,7 +214,7 @@ class CargoTests(unittest.TestCase):
         self.assertEqual((production / control_path / shared_source).resolve(),
                          (HARNESS.parent / 'crates/seedbox-control/src/lib.rs').resolve())
         def metadata(log):
-            return dict(re.findall(r'--crate-name (\S+).*? -C metadata=(\w+)', log))
+            return {name: value for name, value in re.findall(r'--crate-name (\S+).*? -C metadata=(\w+)', log) if name != 'build_script_build'}
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve()
             binaries = []
@@ -254,6 +254,12 @@ publish.workspace = true
                     '\nversion.workspace = true\nedition.workspace = true\npublish.workspace = true\n' +
                     '[lib]\nname = ' + json.dumps(control_manifest['lib']['name']) +
                     '\npath = ' + json.dumps(shared_source) + '\n')
+                # Use the same watched source layout, including the build script,
+                # so this checks metadata and bytes after the cache fix too.
+                source = isolated / shared_source
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.symlink_to(os.path.relpath(dep / 'src/lib.rs', source.parent))
+                shutil.copy2(production / control_path / 'build.rs', isolated / 'build.rs')
                 dependency = ('seedbox-control = { package = ' +
                               json.dumps(control_dependency['package']) +
                               ', path = ' + json.dumps(control_path) + ' }')
