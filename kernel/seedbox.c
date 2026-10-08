@@ -19,6 +19,8 @@
  * publishes instead. Both checks sit behind a static key, so in the counter
  * timebase they compile to no-ops and retire no extra branches.
  */
+#include <linux/build_bug.h>
+#include <linux/stddef.h>
 #include <linux/init.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
@@ -109,6 +111,16 @@ unsigned long seedbox_tsc_khz(void)
 void __init seedbox_time_init(void)
 {
 	struct seedbox_time_page *p;
+
+	/* Pin the u64-indexed ABI shared with the VMM. */
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, pv_clock) != 6 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, bound) != 7 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, syscall_target) != 8 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, entropy_gen) != 9 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, entropy[0]) != 10 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, entropy[1]) != 11 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, entropy[2]) != 12 * sizeof(u64));
+	BUILD_BUG_ON(offsetof(struct seedbox_time_page, entropy[3]) != 13 * sizeof(u64));
 
 	/*
 	 * setup_arch calls us after jump_label_init and early_ioremap_init,

@@ -40,11 +40,33 @@ const PAGE_SYSCALLS: usize = 3;
 const PAGE_PIC_IMR: usize = 4;
 const PAGE_NET_ISR: usize = 5;
 pub const PAGE_FIELDS: usize = 6;
+/// Fork entropy (ABI 3): written by the VMM only while the world is parked,
+/// so undo checkpoints need not carry them.
+const PAGE_ENTROPY_GEN: usize = 9;
+const PAGE_ENTROPY: usize = 10;
+const PAGE_ENTROPY_FIELDS: usize = 4;
+/// Guest ABI from which the kernel reseeds its CRNG from the page.
+pub const ABI_PAGE_RESEED: u64 = 3;
 /// PV clock fields, written by the VMM and outside `PAGE_FIELDS` (they are
 /// zero in the counter timebase, whose checkpoints and digests skip them).
 const PAGE_PV_CLOCK: usize = 6;
 const PAGE_BOUND: usize = 7;
 const PAGE_SYSCALL_TARGET: usize = 8;
+
+// Pin every extension word without extending the checkpoint/digest prefix.
+const _: () = {
+    assert!(PAGE_FIELDS == 6);
+    assert!(PAGE_PV_CLOCK == 6);
+    assert!(PAGE_BOUND == 7);
+    assert!(PAGE_SYSCALL_TARGET == 8);
+    assert!(PAGE_ENTROPY_GEN == 9);
+    assert!(PAGE_ENTROPY == 10);
+    assert!(PAGE_ENTROPY + 1 == 11);
+    assert!(PAGE_ENTROPY + 2 == 12);
+    assert!(PAGE_ENTROPY + 3 == 13);
+    assert!(PAGE_ENTROPY_FIELDS == 4);
+    assert!(ABI_PAGE_RESEED == 3);
+};
 
 pub struct BootSpec<'a> {
     pub kernel: &'a [u8],
@@ -94,6 +116,7 @@ pub struct MachineSnapshot {
     control_dma_bytes: u64,
     control_tx_bytes: u64,
     pv: bool,
+    abi: u64,
     armed_wake: u64,
     pit_exact: bool,
     exit_req: bool,
@@ -103,6 +126,32 @@ pub struct MachineSnapshot {
     stats: Stats,
     witness: Sha256,
     undo_stats: Option<UndoStats>,
+}
+
+/// How a released guest receives its seed's entropy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reseed {
+    /// The guest reads it at its launch barrier (guest/barrier.h).
+    Barrier,
+    /// Time fork: the kernel takes it from the time page (ABI 3).
+    Page,
+    /// Time fork on a kernel before ABI 3: the guest CRNG is not reseeded.
+    Unsupported,
+}
+
+impl Reseed {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Reseed::Barrier => "barrier",
+            Reseed::Page => "time_page",
+            Reseed::Unsupported => "unsupported",
+        }
+    }
+}
+
+/// The time page's entropy fields: the seed's 32 bytes, little-endian.
+fn page_entropy(entropy: &[u32; ENTROPY_WORDS]) -> [u64; PAGE_ENTROPY_FIELDS] {
+    std::array::from_fn(|i| entropy[2 * i] as u64 | (entropy[2 * i + 1] as u64) << 32)
 }
 
 /// An anonymous private mapping, unmapped on drop.
@@ -266,6 +315,8 @@ pub struct Machine {
     exit_req: bool,
     /// The guest uses the shared page for interrupt masks and status (ABI 2).
     pv: bool,
+    /// Guest ABI version announced on the time page port (0 before then).
+    abi: u64,
     armed_wake: u64,
     /// The pending timer deadline must be delivered at its exact time.
     pit_exact: bool,
@@ -533,6 +584,7 @@ impl Machine {
             planner: None,
             exit_req: false,
             pv: false,
+            abi: 0,
             armed_wake: 0,
             pit_exact: false,
             exact_timer_ppm: 0,
@@ -562,6 +614,11 @@ impl Machine {
             witness: if spec.pv_clock { Sha256::new_with_prefix(b"timebase=pv") } else { Sha256::new() },
             trace: None,
         })
+    }
+
+    /// Guest ABI announced on the time page port, 0 before the kernel has.
+    pub fn abi(&self) -> u64 {
+        self.abi
     }
 
     pub fn memory(&mut self) -> &mut [u8] {
@@ -594,8 +651,11 @@ impl Machine {
     }
 
     /// Take the machine off its launch barrier at virtual time `at`, with the
-    /// seed's entropy for the guest to read.
-    pub fn release(&mut self, at: u64, entropy: [u32; ENTROPY_WORDS]) -> Result<(), String> {
+    /// seed's entropy for the guest to read. A guest parked at a simulated
+    /// time never reads the barrier port, so on ABI 3 the entropy goes in the
+    /// time page instead and the kernel reseeds its CRNG before its next
+    /// random output. Returns how the guest receives it.
+    pub fn release(&mut self, at: u64, entropy: [u32; ENTROPY_WORDS]) -> Result<Reseed, String> {
         if !self.parked {
             return Err(format!("{}: released without reaching the launch barrier", self.name));
         }
@@ -608,7 +668,20 @@ impl Machine {
         self.entropy = entropy;
         self.entropy_read = 0;
         self.record(b'R', self.time);
-        Ok(())
+        if self.barrier {
+            return Ok(Reseed::Barrier);
+        }
+        if self.abi < ABI_PAGE_RESEED {
+            return Ok(Reseed::Unsupported);
+        }
+        let gen = self.page_get(PAGE_ENTROPY_GEN) + 1;
+        for (i, v) in page_entropy(&entropy).into_iter().enumerate() {
+            self.page_set(PAGE_ENTROPY + i, v);
+        }
+        // Publish the generation last: the guest reads it first.
+        self.page_set(PAGE_ENTROPY_GEN, gen);
+        self.record(b'S', gen);
+        Ok(Reseed::Page)
     }
 
     /// Freeze the machine at a world boundary. Nothing about the vCPU changes:
@@ -722,7 +795,7 @@ impl Machine {
             management_framer: self.management_framer.clone(),
             net: self.net.clone(), channel: self.channel.clone(), blk: self.blk.clone(),
             control_dma_bytes: self.control_dma_bytes, control_tx_bytes: self.control_tx_bytes,
-            pv: self.pv, armed_wake: self.armed_wake, pit_exact: self.pit_exact, exit_req: self.exit_req,
+            pv: self.pv, abi: self.abi, armed_wake: self.armed_wake, pit_exact: self.pit_exact, exit_req: self.exit_req,
             margin: self.margin, fm: self.fm, parked: self.parked,
             stats: self.stats.clone(), witness: self.witness.clone(), undo_stats,
         })
@@ -792,6 +865,7 @@ impl Machine {
         self.control_dma_bytes = s.control_dma_bytes;
         self.control_tx_bytes = s.control_tx_bytes;
         self.pv = s.pv;
+        self.abi = s.abi;
         self.armed_wake = s.armed_wake;
         self.pit_exact = s.pit_exact;
         self.exit_req = s.exit_req;
@@ -1429,6 +1503,7 @@ impl Machine {
                             }
                         }
                         0x528 => {
+                            self.abi = v as u64;
                             if self.pv_clock && self.page_get(PAGE_PV_CLOCK) != 2 {
                                 return Err(format!(
                                     "{}: the guest kernel lacks PV clock support; rebuild it from kernel/ for the pv timebase",
@@ -2066,6 +2141,97 @@ mod io_boundary_tests {
 #[cfg(test)]
 mod fork_tests {
     use super::*;
+
+    #[test]
+    fn page_entropy_carries_all_32_bytes_in_order() {
+        let words: [u32; ENTROPY_WORDS] = std::array::from_fn(|i| 0x1111_1111 * (i as u32 + 1));
+        let bytes: Vec<u8> = page_entropy(&words).iter().flat_map(|f| f.to_le_bytes()).collect();
+        let want: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        assert_eq!(bytes, want);
+    }
+
+    /// The field indices here must match struct seedbox_time_page in
+    /// kernel/seedbox.h, which the guest kernel is built from.
+    #[test]
+    fn time_page_fields_match_the_kernel_header() {
+        let header = include_str!("../../../kernel/seedbox.h");
+        let body = header.split("struct seedbox_time_page {").nth(1).unwrap().split("};").next().unwrap();
+        let mut index = 0;
+        let mut fields = std::collections::BTreeMap::new();
+        for line in body.lines().map(str::trim).filter(|l| l.starts_with("u64 ")) {
+            let decl = line["u64 ".len()..].split(';').next().unwrap();
+            let (name, count) = match decl.split_once('[') {
+                Some((n, c)) => (n, c.trim_end_matches(']').parse::<usize>().unwrap()),
+                None => (decl, 1),
+            };
+            fields.insert(name.to_string(), (index, count));
+            index += count;
+        }
+        assert_eq!(fields["syscalls"], (PAGE_SYSCALLS, 1));
+        assert_eq!(fields["pic_imr"], (PAGE_PIC_IMR, 1));
+        assert_eq!(fields["net_isr"], (PAGE_NET_ISR, 1));
+        assert_eq!(fields["pv_clock"], (PAGE_PV_CLOCK, 1));
+        assert_eq!(fields["bound"], (PAGE_BOUND, 1));
+        assert_eq!(fields["syscall_target"], (PAGE_SYSCALL_TARGET, 1));
+        assert_eq!(fields["entropy_gen"], (PAGE_ENTROPY_GEN, 1));
+        assert_eq!(fields["entropy"], (PAGE_ENTROPY, PAGE_ENTROPY_FIELDS));
+        assert_eq!(index, 14);
+        assert_eq!(PAGE_FIELDS, PAGE_PV_CLOCK);
+        assert_eq!(PAGE_ENTROPY_FIELDS * 8, ENTROPY_WORDS * 4);
+        let abi: u64 = header.lines().find_map(|l| l.strip_prefix("#define SEEDBOX_ABI\t")).unwrap().trim().parse().unwrap();
+        assert_eq!(abi, ABI_PAGE_RESEED);
+    }
+
+    // These tests create a vCPU but never enter the guest or open a perf event.
+    #[test]
+    #[ignore = "requires Linux x86-64 KVM"]
+    fn abi_below_3_time_forks_do_not_write_extensions_or_add_reseed_witnesses() {
+        let kvm=Kvm::new().unwrap();
+        for abi in 0..ABI_PAGE_RESEED {
+            let mut m=probe_machine(&kvm,0,false);
+            assert!((6..14).all(|i|m.page_get(i)==0),"counter boot, ABI {abi}");
+            for i in 6..14 {m.page_set(i,100+i as u64);}
+            m.abi=abi;
+            m.park().unwrap();
+            let mut witness=m.witness.clone();
+            witness.update([b'R']);
+            witness.update(m.branches.to_le_bytes());
+            witness.update(m.time.to_le_bytes());
+            witness.update(m.time.to_le_bytes());
+            // Pre-K2 exit_witness also covers pending I/O: none after park().
+            witness.update(b"pending_io");
+            witness.update([0]);
+            assert_eq!(m.release(m.time,[7;ENTROPY_WORDS]).unwrap(),Reseed::Unsupported);
+            assert!((6..14).all(|i|m.page_get(i)==100+i as u64),"ABI {abi}");
+            assert_eq!(m.exit_witness(),format!("{:x}",witness.finalize()),"ABI {abi}");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Linux x86-64 KVM"]
+    fn a_time_fork_writes_only_entropy_and_a_barrier_writes_none() {
+        let kvm=Kvm::new().unwrap();
+        for barrier in [false,true] {
+            let mut m=probe_machine(&kvm,0,barrier);
+            assert!((6..14).all(|i|m.page_get(i)==0),"counter boot");
+            m.abi=ABI_PAGE_RESEED;
+            for i in 0..14 {m.page_set(i,100+i as u64);}
+            let before:Vec<_>=(0..14).map(|i|m.page_get(i)).collect();
+            // Both release paths require a parked world, before any page write.
+            assert!(m.release(m.time,[7;ENTROPY_WORDS]).is_err());
+            assert_eq!((0..14).map(|i|m.page_get(i)).collect::<Vec<_>>(),before);
+            m.park().unwrap();
+            let how=m.release(m.time,[7;ENTROPY_WORDS]).unwrap();
+            assert_eq!(how,if barrier {Reseed::Barrier} else {Reseed::Page});
+            assert_eq!((0..9).map(|i|m.page_get(i)).collect::<Vec<_>>(),before[..9]);
+            if barrier {
+                assert_eq!((9..14).map(|i|m.page_get(i)).collect::<Vec<_>>(),before[9..14]);
+            } else {
+                assert_eq!(m.page_get(PAGE_ENTROPY_GEN),before[9]+1);
+                assert_eq!((10..14).map(|i|m.page_get(i)).collect::<Vec<_>>(),page_entropy(&[7;ENTROPY_WORDS]));
+            }
+        }
+    }
 
     /// 32-bit payload through the real boot handoff: announce the launch
     /// barrier, read one entropy word into a marker, spin 1000 counted
