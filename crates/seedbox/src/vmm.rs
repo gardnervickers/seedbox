@@ -1057,6 +1057,24 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
             "VMM counted with a different branch counter profile than the recorded {expected}"
         )));
     }
+    checked_report(raw, request)
+}
+
+/// The ARM adapter validates its own version, boot layout and PV identity
+/// before sharing outcome/control correlation checks with the existing engine.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) fn report_hvf(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionReport> {
+    let raw: VmmReport = serde_json::from_slice(bytes)?;
+    if raw.report_version != 2 || raw.seed != request.seed || raw.counter_profile.is_some() {
+        return Err(Error::Integrity(
+            "HVF application report version/seed/timebase mismatch".into(),
+        ));
+    }
+    crate::mac::validate_report(bytes, request)?;
+    checked_report(raw, request)
+}
+
+fn checked_report(raw: VmmReport, request: &ExecutionRequest<'_>) -> Result<ExecutionReport> {
     let names: BTreeSet<_> = raw.machines.iter().map(|machine| &machine.name).collect();
     if names.len() != raw.machines.len() || names != request.prepared.guests.keys().collect() {
         return Err(Error::Integrity("VMM report machine set mismatch".into()));

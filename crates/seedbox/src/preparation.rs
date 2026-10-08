@@ -31,6 +31,69 @@ pub struct OciPreparer {
 
 pub use crate::preparation_command::PreparationContext;
 
+/// Explicit Linux-only preparation job used by the Mac's owned preparation
+/// VM. It uses ordinary OCI tools and never admits or executes a hypervisor.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerJob {
+    pub simulation: Simulation,
+    pub tools: OciTools,
+    pub kernel: PathBuf,
+    pub engine: PathBuf,
+    pub init: PathBuf,
+    pub busybox: PathBuf,
+    pub mke2fs: Option<PathBuf>,
+    pub profile: ExecutionProfile,
+    pub store: PathBuf,
+    #[serde(default)]
+    pub export: Option<PathBuf>,
+}
+impl WorkerJob {
+    pub fn prepare(self) -> Result<PreparedInputs> {
+        if !cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+            return Err(Error::Setup(
+                "ARM image preparation requires the owned Linux ARM VM".into(),
+            ));
+        }
+        if self.profile.backend != "seedbox-hvf"
+            || crate::guest::Architecture::from_profile(&self.profile)?
+                != crate::guest::Architecture::Arm64
+        {
+            return Err(Error::Integrity(
+                "ARM preparation job requires an HVF application profile".into(),
+            ));
+        }
+        let preparer = OciPreparer {
+            tools: self.tools,
+            kernel: self.kernel,
+            engine: self.engine,
+            init: self.init,
+            busybox: self.busybox,
+            mke2fs: self.mke2fs,
+            profile: self.profile,
+        };
+        let store = ContentStore::new(self.store);
+        let prepared = preparer.prepare(&self.simulation, &store)?;
+        if let Some(export) = self.export {
+            fs::create_dir(&export)?;
+            fs::write(
+                export.join("prepared.json"),
+                serde_json::to_vec_pretty(&prepared)?,
+            )?;
+            let objects = export.join("objects");
+            fs::create_dir(&objects)?;
+            let digests: std::collections::BTreeSet<_> = prepared.digests().collect();
+            for digest in digests {
+                use std::os::unix::fs::PermissionsExt;
+                let path = objects.join(digest.hex());
+                store.copy_to(digest, &mut fs::File::create(&path)?)?;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
+            }
+        }
+        Ok(prepared)
+    }
+}
+
 impl PreparationBackend for OciPreparer {
     fn validate_runtime_inputs(&self) -> Result<()> {
         if self.profile.backend == "seedbox-kvm" {
@@ -77,6 +140,16 @@ impl OciPreparer {
         store: &ContentStore,
         context: Option<&PreparationContext>,
     ) -> Result<PreparedInputs> {
+        let architecture = crate::guest::Architecture::from_profile(&self.profile)?;
+        for (name, service) in &simulation.services {
+            if service.platform != architecture.platform() {
+                return Err(Error::Setup(format!(
+                    "service {name} requests {}; this engine requires {}",
+                    service.platform,
+                    architecture.platform()
+                )));
+            }
+        }
         if let Some(context) = context {
             context.check()?;
         }
@@ -103,7 +176,7 @@ impl OciPreparer {
             None
         };
         for path in [&self.init, &self.busybox] {
-            amd64_elf(path)?;
+            architecture.validate_elf(path)?;
         }
         for (name, service) in &simulation.services {
             for mount in &service.volumes {
@@ -126,7 +199,7 @@ impl OciPreparer {
                         .into(),
                 )
             })?;
-            amd64_elf(mke2fs)?;
+            architecture.validate_elf(mke2fs)?;
             auxiliary.insert("guest-mke2fs".into(), store.put_file(mke2fs)?);
         }
         let mut configs = BTreeMap::new();
@@ -160,8 +233,8 @@ impl OciPreparer {
             &auxiliary["guest-busybox"],
             &temporary.path().join("busybox"),
         )?;
-        amd64_elf(&init)?;
-        amd64_elf(&busybox)?;
+        architecture.validate_elf(&init)?;
+        architecture.validate_elf(&busybox)?;
         let mke2fs = auxiliary
             .get("guest-mke2fs")
             .map(|digest| store.materialize(digest, &temporary.path().join("mke2fs")))
@@ -228,7 +301,7 @@ impl OciPreparer {
                     dockerfile_digest: store.put_file(&frozen.root.join(&relative))?,
                     dockerfile: relative,
                     closure: closure.clone(),
-                    platform: "linux/amd64",
+                    platform: architecture.platform(),
                     epoch: self.tools.build_epoch,
                 })
             } else {
@@ -238,12 +311,13 @@ impl OciPreparer {
                 // A failed import (including cleanup-unverified) never enters this map.
                 let (owner, source) =
                     successful_source(&mut imported_sources, key.clone(), || {
-                        let imported = self.tools.import_frozen(
+                        let imported = self.tools.import_frozen_for_arch(
                             service,
                             &temporary.path().join(name),
                             store,
                             context.map(|c| (c, name.as_str())),
                             Some(&frozen_contexts[&key.context]),
+                            architecture,
                         )?;
                         Ok((name.clone(), imported))
                     })?;
@@ -259,11 +333,13 @@ impl OciPreparer {
                 }
                 source.for_service(service, store)?
             } else {
-                self.tools.import_with_context(
+                self.tools.import_frozen_for_arch(
                     service,
                     &temporary.path().join(name),
                     store,
                     context.map(|c| (c, name.as_str())),
+                    None,
+                    architecture,
                 )?
             };
             if let Some(context) = context {
@@ -382,18 +458,6 @@ fn reuse_closure(tools: &OciTools) -> Result<Option<ContentDigest>> {
     Ok(Some(ContentDigest::of(&serde_json::to_vec(&(
         proof, transports,
     ))?)))
-}
-
-fn amd64_elf(path: &Path) -> Result<()> {
-    let mut header = [0; 20];
-    fs::File::open(path)?.read_exact(&mut header)?;
-    if &header[..6] != b"\x7fELF\x02\x01" || header[18..20] != [62, 0] {
-        return Err(Error::Integrity(format!(
-            "expected an amd64 ELF guest helper: {}",
-            path.display()
-        )));
-    }
-    Ok(())
 }
 
 fn validate_config_target(path: &str) -> Result<()> {

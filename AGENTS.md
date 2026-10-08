@@ -7,6 +7,14 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 ## Workspace
 
 - `crates/seedbox` is the default package: `cargo run -- <command>` runs the CLI.
+- Apple Silicon application builds use `bash tools/mac-runtime/build-cli.sh`
+  inside `nix develop`. It packages the audited ARM kernel, static helpers and
+  Linux preparation tools into the signed CLI. Runtime preparation owns a
+  private Lima VM and stops it before native HVF execution; replay must never
+  start that VM or invoke Cargo. Mac application profiles use `arm64-world-v1`
+  and remain development engines requiring `--allow-dev-engine`. Do not reuse
+  fixture or x86 qualification for them. CLI platform selection lives in
+  `cli/backends.rs`; the library receives explicit inputs and cancellation.
 - `crates/seedbox-vmm` is Linux-only and deliberately **not** a workspace member.
   It is its own workspace with its own `Cargo.lock`, because cargo unifies
   dependency features across one build. The public CLI links its library only

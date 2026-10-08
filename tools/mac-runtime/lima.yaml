@@ -1,0 +1,29 @@
+# Linux is used for guest input preparation; HVF executes the world on macOS.
+vmType: vz
+arch: aarch64
+cpus: 4
+memory: 6GiB
+disk: 32GiB
+images:
+  - location: https://cloud-images.ubuntu.com/releases/noble/release-20260705/ubuntu-24.04-server-cloudimg-arm64.img
+    arch: aarch64
+    digest: sha256:7df0201546f75b8bcc1044594c806c35749421ad3c9bc1be2a3ab806cfae39cc
+mounts: []
+containerd:
+  system: false
+  user: false
+provision:
+  - mode: user
+    script: |
+      #!/bin/sh
+      set -eu
+      if test -x "$HOME/.nix-profile/bin/nix"; then exit 0; fi
+      bootstrap="$(mktemp -d /tmp/seedbox-nix.XXXXXX)"
+      trap 'rm -rf "$bootstrap"' EXIT
+      curl --fail --location https://releases.nixos.org/nix/nix-2.28.5/nix-2.28.5-aarch64-linux.tar.xz -o "$bootstrap/nix.tar.xz"
+      printf '%s  %s\n' a7d20e2897de8044ed35a481d455e88130b6d70e40f2470d1b7c26727f6c8d8c "$bootstrap/nix.tar.xz" | sha256sum --check --status
+      mkdir "$bootstrap/release"
+      tar -xf "$bootstrap/nix.tar.xz" -C "$bootstrap/release" --strip-components=1
+      "$bootstrap/release/install" --no-daemon --yes --no-channel-add --no-modify-profile
+      mkdir -p "$HOME/.config/nix"
+      printf '%s\n' 'experimental-features = nix-command flakes' > "$HOME/.config/nix/nix.conf"

@@ -46,8 +46,15 @@ executable for replay, so an installed CLI upgrade does not replace the recorded
 engine. No separate VMM build or runtime compiler invocation is needed. The
 combined development engine requires `--allow-dev-engine` until qualified;
 `prepare` records its development marker without granting execution permission.
-ARM builds include the experimental fixture engine, but Compose execution
-currently requires Linux x86-64.
+Apple Silicon builds also support native ARM Compose execution. Build once with
+`nix develop` and `bash tools/mac-runtime/build-cli.sh` from the Seedbox checkout.
+The signed CLI packages the ARM kernel and static helpers and automatically owns
+a Linux VM for preparation with Skopeo/umoci/Podman. That VM stops before native
+HVF execution; replay uses only retained bytes and never starts it. No runtime
+compiler or extra VMM path is needed. Use `--allow-dev-engine` on run/replay/doctor.
+Images must support `linux/arm64`, RAM is limited to 3072 MiB per guest, and
+exploration is serial. CPU/PMU flags apply to Linux. Mac profiles have distinct
+PV time, boot-layout, device and HVF host identities and remain unqualified.
 `--torn-writes` opts into seeded partial survival of unflushed 512-byte disk
 sectors on machine crash (off by default). It is part of run identity and replay
 restores it automatically. It applies only to retained disks; this template

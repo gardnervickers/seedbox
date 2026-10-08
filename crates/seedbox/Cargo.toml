@@ -17,6 +17,7 @@ tempfile = "3"
 thiserror = "2"
 tar = "0.4"
 walkdir = "2"
+flate2 = "1"
 xattr = "1"
 libc.workspace = true
 signal-hook = "0.3"

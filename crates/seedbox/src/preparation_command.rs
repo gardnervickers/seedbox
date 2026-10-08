@@ -50,12 +50,25 @@ pub(crate) fn inspect_native_builder(requested: &Path) -> Result<NativeBuilder> 
         ))
     })?);
     let native_hash = fs::read(&native).map(|b| ContentDigest::of(&b)).ok();
+    // Each pair identifies the launcher and native executable from the pinned
+    // project flake. Architecture changes executable bytes and closure paths.
+    let (qualified_launch, qualified_native) = if cfg!(target_arch = "aarch64") {
+        (
+            "b3cc1fb6472ec3b0e3ffe2ddd317de30becd9151a879000b13a6d9e773960a30",
+            "5d963d69a73f5e7e37f56b0e6677f1dc7e5fc2ebcd806c46ecbad65f91e22709",
+        )
+    } else {
+        (
+            "e6af7244c45039a6e91ab6b3800c66115516fefeba325503b756856c10d62e84",
+            "678a185b5553ef52c0e8b0b5adbc240c99202600a328f25ddeae71cbbcac0de2",
+        )
+    };
     let admitted = cfg!(target_os = "linux")
         && launcher.starts_with("/nix/store")
-        && launch_hash.hex() == "e6af7244c45039a6e91ab6b3800c66115516fefeba325503b756856c10d62e84"
-        && native_hash.as_ref().is_some_and(|h| {
-            h.hex() == "678a185b5553ef52c0e8b0b5adbc240c99202600a328f25ddeae71cbbcac0de2"
-        });
+        && launch_hash.hex() == qualified_launch
+        && native_hash
+            .as_ref()
+            .is_some_and(|h| h.hex() == qualified_native);
     Ok(NativeBuilder {
         launcher,
         native,

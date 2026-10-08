@@ -131,6 +131,23 @@ guarantee or an image reproducibility guarantee.
 
 ## Preparation, execution, and replay
 
+Apple Silicon uses the native development HVF application backend. Enter
+`nix develop` and run `bash tools/mac-runtime/build-cli.sh` to produce the signed
+CLI with its ARM kernel, static helpers and Linux preparation tools embedded.
+Use `target/release/seedbox run PROJECT --allow-dev-engine` and
+`target/release/seedbox replay RUN --allow-dev-engine`, without host root or
+separate binary paths. The owned preparation VM stops before HVF execution;
+replay never starts it. Runtime commands never invoke Rust. See
+[the full Mac workflow](../tools/mac-runtime/README.md).
+
+Mac profiles retain their own executable descriptor, ARM boot placement,
+PV entropy/timer policy, guest-kernel hash and HVF CPU/OS observations.
+Full-state capture includes native CPU/SIMD/GIC state and application devices.
+Old fixture reports cannot satisfy this application contract. A missing or
+incompatible retained proof fails replay before host execution.
+This remains unqualified development evidence. ARM images, 64..3072 MiB per
+guest and one exploration worker are required; PMU/core options apply to Linux.
+
 After building the binaries above, as root with the Nix tools on PATH
 (`sudo -E env PATH="$PATH" ...` from the Nix shell):
 

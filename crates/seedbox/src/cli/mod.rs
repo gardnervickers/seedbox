@@ -1,17 +1,19 @@
 //! The `seedbox` command line. Style rules for changes: `AGENTS.md`, "CLI".
 
+mod backends;
 mod defaults;
 mod diagnostics;
 mod signals;
+use backends::{Executor, Preparer};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+use seedbox::execution::ExecutionProfile;
 use seedbox::{
     bundle, config,
     counter::CounterProfile,
     diff,
-    execution::{
-        CancellationToken, ExecutionBackend, ExecutionProfile, PreparationBackend, WitnessMode,
-    },
+    execution::{CancellationToken, ExecutionBackend, PreparationBackend, WitnessMode},
     exploration::{self, ExploreOptions},
     oci::OciTools,
     orchestration::{self, Orchestrator, Outcome, ReplayOptions, ReplayStatus, RunOptions},
@@ -75,7 +77,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Check execution-profile compatibility without images or guests (Linux KVM host, root).
+    /// Check execution-profile compatibility without images or guests (Linux KVM host, root; or Apple Silicon Mac).
     #[command(
         after_help = "Success means profile compatibility, not cross-host replay qualification. Doctor never builds missing runtime inputs."
     )]
@@ -102,7 +104,7 @@ enum Command {
         #[command(flatten)]
         build: BuildOptions,
     },
-    /// Prepare images and run a simulation (Linux KVM host, root).
+    /// Prepare images and run a simulation (Linux KVM host, root; or Apple Silicon Mac).
     #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
     Run {
         #[command(flatten)]
@@ -121,7 +123,7 @@ enum Command {
         #[command(flatten)]
         performance: Performance,
     },
-    /// Explore a finite seed sequence with one frozen preparation (Linux KVM host, root).
+    /// Explore a finite seed sequence with one frozen preparation (Linux KVM host, root; or Apple Silicon Mac).
     #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
     Explore {
         #[command(flatten)]
@@ -149,7 +151,7 @@ enum Command {
         #[command(flatten)]
         performance: Performance,
     },
-    /// Re-execute a recorded run from its retained inputs and compare (Linux KVM host, root).
+    /// Re-execute a recorded run from its retained inputs and compare (Linux KVM host, root; or Apple Silicon Mac).
     #[command(after_help = format!("{EXIT_CODES}\n\n{VMM_FAILURE_HELP}"))]
     Replay {
         /// Run directory, as printed by `run`.
@@ -250,6 +252,13 @@ struct ComposeArg {
 impl ComposeArg {
     fn load(&self) -> Result<config::Simulation> {
         let path = defaults::compose_file(&self.compose)?;
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        return config::load_for_architecture(
+            &path,
+            &std::env::vars().collect(),
+            seedbox::guest::Architecture::Arm64,
+        );
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         config::load(&path, &std::env::vars().collect())
     }
 }
@@ -270,7 +279,18 @@ struct CpuArg {
 impl CpuArg {
     /// The host's branch counter profile, refused when unqualified unless allowed.
     fn admit(&self, counter: CounterProfile) -> Result<CounterProfile> {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            if self.cpu.is_some() || self.allow_unqualified_cpu {
+                return Err(Error::Setup(
+                    "--cpu and --allow-unqualified-cpu require Linux KVM; omit them on Mac".into(),
+                ));
+            }
+            Ok(counter)
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         admit_counter(counter, self.allow_unqualified_cpu)?;
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         Ok(counter)
     }
 }
@@ -302,7 +322,7 @@ impl StateArg {
 #[derive(Args)]
 #[command(next_help_heading = "Runtime inputs")]
 struct KvmInputs {
-    /// Guest kernel bzImage [default: bzImage in $SEEDBOX_ARTIFACTS, $SEEDBOX_WORK/artifacts,
+    /// Guest kernel Image on Mac (packaged), or bzImage on Linux [default: packaged on Mac; bzImage in $SEEDBOX_ARTIFACTS, $SEEDBOX_WORK/artifacts,
     /// ./artifacts, then ~/seedbox-sim/artifacts for the user and any sudo caller].
     #[arg(long, env = "SEEDBOX_KERNEL")]
     kernel: Option<PathBuf>,
@@ -319,10 +339,10 @@ struct RuntimeInputs {
     /// Static guest supervisor [default: the copy built into this binary].
     #[arg(long, env = "SEEDBOX_GUEST_INIT")]
     guest_init: Option<PathBuf>,
-    /// Static Linux amd64 BusyBox [default: busybox on PATH, if static].
+    /// Static Linux BusyBox for the guest architecture [default: packaged on Mac; busybox on PATH on Linux, if static].
     #[arg(long, env = "SEEDBOX_BUSYBOX")]
     busybox: Option<PathBuf>,
-    /// Static Linux amd64 mke2fs, for named volumes [default: mke2fs on PATH, if static].
+    /// Static Linux mke2fs for named volumes [default: packaged on Mac; mke2fs on PATH on Linux, if static].
     #[arg(long, env = "SEEDBOX_MKE2FS")]
     mke2fs: Option<PathBuf>,
     /// Docker-compatible client for `build:` services.
@@ -347,23 +367,73 @@ impl RuntimeInputs {
         cpu: Option<u32>,
         counter: CounterProfile,
         scratch: &Path,
-    ) -> Result<(OciPreparer, VmmExecutor)> {
+    ) -> Result<(Preparer, Executor)> {
         let engine = defaults::engine(self.kvm.vmm.clone())?;
         let witness = if self.full_state {
             WitnessMode::FullState
         } else {
             WitnessMode::Exits
         };
-        let executor = if self.kvm.vmm.is_some() {
-            VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?
-        } else {
-            VmmExecutor::new_internal(&engine, store, cpu, self.memory_mb, witness, counter)?
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            if cpu.is_some() || self.kvm.vmm.is_some() {
+                return Err(Error::Setup(
+                    "--cpu and --vmm require Linux KVM; use the built-in Mac engine".into(),
+                ));
+            }
+            let _ = (counter, scratch);
+            let runtime = backends::mac_runtime()?;
+            let resolve = |flag, explicit: &Option<PathBuf>, name| match explicit {
+                Some(path) => defaults::existing(flag, path.clone()),
+                None => Ok(runtime.input(name)),
+            };
+            let kernel = resolve("--kernel", &self.kvm.kernel, "Image")?;
+            let executor = seedbox::mac::MacExecutor::new(
+                &engine,
+                &kernel,
+                store,
+                self.memory_mb,
+                witness,
+                self.torn_writes,
+            )?;
+            let inputs = OciPreparer {
+                tools: OciTools {
+                    docker: self.builder.clone(),
+                    ..runtime.manifest.tools.clone()
+                },
+                kernel,
+                engine,
+                init: resolve("--guest-init", &self.guest_init, "compose-init")?,
+                busybox: resolve("--busybox", &self.busybox, "busybox")?,
+                mke2fs: Some(resolve("--mke2fs", &self.mke2fs, "mke2fs")?),
+                profile: executor.profile(),
+            };
+            Ok((
+                Preparer::Mac(Box::new(seedbox::mac_runtime::MacPreparer {
+                    inputs,
+                    runtime,
+                    cancellation: CancellationToken::default(),
+                })),
+                Executor::Mac(executor),
+            ))
         }
-        .with_torn_writes(self.torn_writes);
-        let preparer = self.preparer(engine, store, scratch, executor.profile())?;
-        Ok((preparer, executor))
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        {
+            let executor = if self.kvm.vmm.is_some() {
+                VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?
+            } else {
+                VmmExecutor::new_internal(&engine, store, cpu, self.memory_mb, witness, counter)?
+            }
+            .with_torn_writes(self.torn_writes);
+            let preparer = self.preparer(engine, store, scratch, executor.profile())?;
+            Ok((
+                Preparer::Linux(Box::new(preparer)),
+                Executor::Linux(executor),
+            ))
+        }
     }
 
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
     fn preparer(
         &self,
         engine: PathBuf,
@@ -402,24 +472,40 @@ struct BuildOptions {
 
 impl BuildOptions {
     fn configure(&self, simulation: &config::Simulation, inputs: &mut RuntimeInputs) -> Result<()> {
-        if simulation
-            .services
-            .values()
-            .any(|service| matches!(service.source, config::ImageSource::Build { .. }))
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {
-            match defaults::preparation_tool(&inputs.builder) {
+            let _ = simulation;
+            if inputs.builder != Path::new("podman") {
+                return Err(Error::Setup(if self.build_epoch.is_some() {
+                    format!("--build-epoch: builder {} is unsupported; use the qualified project-Nix local Podman or omit --build-epoch",inputs.builder.display())
+                } else {
+                    "--builder: Mac preparation uses the packaged Linux Podman; omit --builder"
+                        .into()
+                }));
+            }
+            Ok(())
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        {
+            if simulation
+                .services
+                .values()
+                .any(|service| matches!(service.source, config::ImageSource::Build { .. }))
+            {
+                match defaults::preparation_tool(&inputs.builder) {
                 Ok(builder) => inputs.builder = builder,
                 Err(error) if self.build_epoch.is_some() => return Err(Error::Setup(format!("--build-epoch: {error}; use the qualified project-Nix local Podman or omit --build-epoch"))),
                 Err(_) => (), // Preserve ordinary custom-builder discovery at execution.
             }
-            OciTools {
-                docker: inputs.builder.clone(),
-                build_epoch: self.build_epoch,
-                ..OciTools::default()
+                OciTools {
+                    docker: inputs.builder.clone(),
+                    build_epoch: self.build_epoch,
+                    ..OciTools::default()
+                }
+                .validate_build_epoch()?;
             }
-            .validate_build_epoch()?;
+            Ok(())
         }
-        Ok(())
     }
 }
 
@@ -443,9 +529,22 @@ fn parse_margin(value: &str) -> std::result::Result<String, String> {
     }
 }
 
+// This value only routes the Linux constructor. The Mac profile contains no
+// branch-counter identity and admission is performed by its HVF backend.
+fn execution_counter() -> Result<CounterProfile> {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        Ok(CounterProfile::Zen)
+    }
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    {
+        CounterProfile::host()
+    }
+}
+
 impl Performance {
-    fn apply(&self, executor: VmmExecutor) -> Result<VmmExecutor> {
-        executor.with_margin(&self.margin)?.with_undo(self.undo)
+    fn apply(&self, executor: Executor) -> Result<Executor> {
+        executor.performance(&self.margin, self.undo)
     }
 }
 
@@ -499,50 +598,83 @@ fn run(cli: Cli) -> Result<u8> {
             Ok(0)
         }
         Command::Doctor { cpu, inputs, json } => {
-            let internal = inputs.vmm.is_none();
-            let engine = defaults::engine(inputs.vmm)?;
-            let kernel = defaults::kernel(inputs.kernel)?;
-            let report = if internal {
-                VmmExecutor::doctor_internal_with_dev_engine(
-                    &engine,
-                    &kernel,
-                    cpu.cpu,
-                    cpu.allow_dev_engine,
-                )?
-            } else {
-                VmmExecutor::doctor_with_dev_engine(
-                    &engine,
-                    &kernel,
-                    cpu.cpu,
-                    cpu.allow_dev_engine,
-                )?
-            };
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                println!("VALID: compatible execution profile");
-                if report.engine_qualification.is_some() {
-                    println!("dev engine: unqualified");
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            {
+                cpu.admit(CounterProfile::Zen)?;
+                if let Some(path) = inputs.vmm.as_ref() {
+                    defaults::existing("--vmm", path.clone())?;
+                    if let Some(kernel) = inputs.kernel.as_ref() {
+                        defaults::existing("--kernel", kernel.clone())?;
+                    }
+                    return Err(Error::Setup(
+                        "--vmm requires Linux KVM; use the built-in Mac engine".into(),
+                    ));
                 }
-                println!("policy: {}", report.policy_version);
-                println!("cpu: {}", report.cpu);
-                println!(
-                    "cpus: {}",
-                    report
-                        .cpus
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(",")
-                );
-                if let Some(version) = &report.simulator_version {
-                    println!("simulator: {version}");
+                let engine = defaults::engine(None)?;
+                let kernel = match inputs.kernel {
+                    Some(path) => defaults::existing("--kernel", path)?,
+                    None => backends::mac_runtime()?.input("Image"),
+                };
+                let report =
+                    seedbox::mac::MacExecutor::doctor(&engine, &kernel, cpu.allow_dev_engine)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
                 } else {
-                    println!("engine: {}", report.engine.hex());
+                    println!("VALID: compatible execution profile");
+                    println!("engine-qualification: {}", report.engine_qualification);
+                    println!("policy: {}", report.policy_version);
+                    println!("simulator: {}", report.simulator_version);
+                    println!("kernel: {}", report.kernel.hex());
                 }
-                println!("kernel: {}", report.kernel.hex());
+                Ok(0)
             }
-            Ok(0)
+            #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+            {
+                let internal = inputs.vmm.is_none();
+                let engine = defaults::engine(inputs.vmm)?;
+                let kernel = defaults::kernel(inputs.kernel)?;
+                let report = if internal {
+                    VmmExecutor::doctor_internal_with_dev_engine(
+                        &engine,
+                        &kernel,
+                        cpu.cpu,
+                        cpu.allow_dev_engine,
+                    )?
+                } else {
+                    VmmExecutor::doctor_with_dev_engine(
+                        &engine,
+                        &kernel,
+                        cpu.cpu,
+                        cpu.allow_dev_engine,
+                    )?
+                };
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else {
+                    println!("VALID: compatible execution profile");
+                    if report.engine_qualification.is_some() {
+                        println!("dev engine: unqualified");
+                    }
+                    println!("policy: {}", report.policy_version);
+                    println!("cpu: {}", report.cpu);
+                    println!(
+                        "cpus: {}",
+                        report
+                            .cpus
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    );
+                    if let Some(version) = &report.simulator_version {
+                        println!("simulator: {version}");
+                    } else {
+                        println!("engine: {}", report.engine.hex());
+                    }
+                    println!("kernel: {}", report.kernel.hex());
+                }
+                Ok(0)
+            }
         }
         Command::Prepare {
             compose,
@@ -572,6 +704,9 @@ fn run(cli: Cli) -> Result<u8> {
                     .profile();
             }
             preparer.tools.build_epoch = build.build_epoch;
+            let cancellation = CancellationToken::default();
+            let _signals = Signals::register(&cancellation)?;
+            preparer.cancellation(cancellation);
             let prepared = preparer.prepare(&simulation, &store)?;
             let file = std::fs::OpenOptions::new()
                 .write(true)
@@ -590,11 +725,13 @@ fn run(cli: Cli) -> Result<u8> {
             build,
             performance,
         } => {
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            cpu.admit(CounterProfile::Zen)?;
             let simulation = compose.load()?;
             build.configure(&simulation, &mut inputs)?;
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
-            let detected = CounterProfile::host();
+            let detected = execution_counter();
             let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
             let (mut preparer, executor) =
                 inputs.backends(&store, cpu.cpu, counter, scratch.path())?;
@@ -611,6 +748,7 @@ fn run(cli: Cli) -> Result<u8> {
             // Backend admission checks the selected core before preparation.
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
+            preparer.cancellation(cancellation.clone());
             let result = orchestrator.run(
                 &simulation,
                 RunOptions { seed, cancellation },
@@ -645,21 +783,26 @@ fn run(cli: Cli) -> Result<u8> {
             if workers > 1 && cpu.cpu.is_some() {
                 return Err(Error::Setup("--workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU".into()));
             }
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            cpu.admit(CounterProfile::Zen)?;
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
-            let detected = CounterProfile::host();
+            let detected = execution_counter();
             let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
             let (mut preparer, executor) =
                 inputs.backends(&store, cpu.cpu, counter, scratch.path())?;
             preparer.tools.build_epoch = build.build_epoch;
-            preparer.tools.skopeo = defaults::preparation_tool(&preparer.tools.skopeo)?;
-            preparer.tools.umoci = defaults::preparation_tool(&preparer.tools.umoci)?;
-            if simulation
-                .services
-                .values()
-                .any(|s| matches!(s.source, config::ImageSource::Build { .. }))
+            #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
             {
-                preparer.tools.docker = defaults::preparation_tool(&preparer.tools.docker)?;
+                preparer.tools.skopeo = defaults::preparation_tool(&preparer.tools.skopeo)?;
+                preparer.tools.umoci = defaults::preparation_tool(&preparer.tools.umoci)?;
+                if simulation
+                    .services
+                    .values()
+                    .any(|s| matches!(s.source, config::ImageSource::Build { .. }))
+                {
+                    preparer.tools.docker = defaults::preparation_tool(&preparer.tools.docker)?;
+                }
             }
             cpu.admit(detected?)?;
             let executor = executor.with_unqualified_cpu(cpu.allow_unqualified_cpu);
@@ -725,16 +868,17 @@ fn run(cli: Cli) -> Result<u8> {
         } => {
             let run = defaults::run_directory(run)?;
             let previous = orchestration::inspect(&run)?;
-            let detected = CounterProfile::host();
+            let detected = execution_counter();
             let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
             // Historical/incompatible records must reach the retained-proof gate
             // and remain captured as NOT_COMPARABLE before querying this host.
-            if seedbox::admission::admit_artifacts(
-                &previous.identity.inputs.profile,
-                &previous.identity.inputs.kernel,
-                cpu.allow_dev_engine,
-            )
-            .is_ok()
+            if previous.identity.inputs.profile.backend != "seedbox-hvf"
+                && seedbox::admission::admit_artifacts(
+                    &previous.identity.inputs.profile,
+                    &previous.identity.inputs.kernel,
+                    cpu.allow_dev_engine,
+                )
+                .is_ok()
             {
                 cpu.admit(detected?)?;
                 same_counter(
@@ -750,9 +894,33 @@ fn run(cli: Cli) -> Result<u8> {
                 Some(path) => defaults::existing("--vmm", path)?,
                 None => store.materialize(&profile.engine, scratch.path())?,
             };
+            let executor = if profile.backend == "seedbox-hvf" {
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                {
+                    cpu.admit(counter)?;
+                    Executor::Mac(seedbox::mac::MacExecutor::from_retained(
+                        &engine,
+                        &store,
+                        profile.clone(),
+                    )?)
+                }
+                #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+                {
+                    return Err(Error::Setup(
+                        "replay of an HVF world requires an Apple Silicon Mac".into(),
+                    ));
+                }
+            } else {
+                Executor::Linux(VmmExecutor::from_retained(
+                    &engine,
+                    &store,
+                    profile.clone(),
+                    cpu.cpu,
+                    counter,
+                )?)
+            };
             let executor = performance.apply(
-                VmmExecutor::from_retained(&engine, &store, profile.clone(), cpu.cpu, counter)?
-                    .with_retained_permissions(cpu.allow_unqualified_cpu, cpu.allow_dev_engine),
+                executor.with_retained_permissions(cpu.allow_unqualified_cpu, cpu.allow_dev_engine),
             )?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
@@ -905,6 +1073,7 @@ fn run(cli: Cli) -> Result<u8> {
 
 /// Refuse an unqualified counter profile unless the caller allowed it, and
 /// then say that its results are unverified.
+#[cfg(any(test, not(all(target_os = "macos", target_arch = "aarch64"))))]
 fn admit_counter(counter: CounterProfile, allow_unqualified: bool) -> Result<()> {
     if counter.qualified() {
         return Ok(());

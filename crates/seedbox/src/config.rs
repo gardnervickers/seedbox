@@ -126,6 +126,31 @@ pub fn load(path: &Path, environment: &BTreeMap<String, String>) -> Result<Simul
 }
 
 pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Result<Simulation> {
+    parse_for_architecture(yaml, source, host, crate::guest::Architecture::Amd64)
+}
+
+/// The CLI selects a guest ISA explicitly. The library never derives it from
+/// the host; historical callers retain the original amd64 default.
+pub fn load_for_architecture(
+    path: &Path,
+    environment: &BTreeMap<String, String>,
+    architecture: crate::guest::Architecture,
+) -> Result<Simulation> {
+    let source = std::fs::canonicalize(path)?;
+    parse_for_architecture(
+        &std::fs::read_to_string(&source)?,
+        &source,
+        environment,
+        architecture,
+    )
+}
+
+pub fn parse_for_architecture(
+    yaml: &str,
+    source: &Path,
+    host: &BTreeMap<String, String>,
+    architecture: crate::guest::Architecture,
+) -> Result<Simulation> {
     let doc: Value = serde_yaml_ng::from_str(yaml)?;
     reject_tags(&doc, "$")?;
     let top = fields(
@@ -272,9 +297,12 @@ pub fn parse(yaml: &str, source: &Path, host: &BTreeMap<String, String>) -> Resu
                 ),
             };
         let platform = optional_text(svc.get("platform"), &format!("{p}.platform"))?
-            .unwrap_or("linux/amd64".into());
-        if platform != "linux/amd64" {
-            return invalid(&format!("{p}.platform"), "only linux/amd64 is supported");
+            .unwrap_or(architecture.platform().into());
+        if platform != architecture.platform() {
+            return invalid(
+                &format!("{p}.platform"),
+                format!("only {} is supported", architecture.platform()),
+            );
         }
         let nets = match svc.get("networks") {
             None => vec!["default".into()],

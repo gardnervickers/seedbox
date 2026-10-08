@@ -12,6 +12,68 @@ use std::{
     path::Path,
 };
 
+/// Guest ISA comes from the retained execution profile, never host tools or an
+/// inherited image-platform setting. Historical profiles retain amd64.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Architecture {
+    Amd64,
+    Arm64,
+}
+impl Architecture {
+    pub fn from_profile(profile: &crate::execution::ExecutionProfile) -> Result<Self> {
+        match profile
+            .semantic_parameters
+            .get("guest_arch")
+            .map(String::as_str)
+        {
+            None if profile.backend != "seedbox-hvf" => Ok(Self::Amd64),
+            Some("x86_64") => Ok(Self::Amd64),
+            Some("aarch64") => Ok(Self::Arm64),
+            value => Err(Error::Integrity(format!(
+                "unsupported guest architecture {value:?}"
+            ))),
+        }
+    }
+    pub fn oci_name(self) -> &'static str {
+        match self {
+            Self::Amd64 => "amd64",
+            Self::Arm64 => "arm64",
+        }
+    }
+    pub fn platform(self) -> &'static str {
+        match self {
+            Self::Amd64 => "linux/amd64",
+            Self::Arm64 => "linux/arm64",
+        }
+    }
+    fn elf_machine(self) -> [u8; 2] {
+        match self {
+            Self::Amd64 => [62, 0],
+            Self::Arm64 => [183, 0],
+        }
+    }
+    pub(crate) fn validate_elf(self, path: &Path) -> Result<()> {
+        let mut header = [0; 20];
+        fs::File::open(path)
+            .and_then(|mut file| file.read_exact(&mut header))
+            .map_err(|error| {
+                Error::Setup(format!(
+                    "guest helper {}: {error}; provide a static {} ELF",
+                    path.display(),
+                    self.oci_name()
+                ))
+            })?;
+        if &header[..6] != b"\x7fELF\x02\x01" || header[18..20] != self.elf_machine() {
+            return Err(Error::Integrity(format!(
+                "expected an {} ELF guest helper: {}",
+                self.oci_name(),
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Conservative boot floor for the controlled kernel: the input archive is
 /// resident while root tmpfs is populated, and tmpfs's default capacity is half
 /// the available RAM. Reserve additional space for the kernel and bootstrap.

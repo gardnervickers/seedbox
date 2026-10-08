@@ -4,6 +4,10 @@
 //! `SEEDBOX_*` environment variable) and otherwise searches conventional
 //! locations. A failed search names every place it looked and how to fix it.
 
+// Linux input resolvers remain covered by portable tests; native Mac inputs
+// come from the embedded preparation package.
+#![cfg_attr(all(target_os = "macos", target_arch = "aarch64"), allow(dead_code))]
+
 use seedbox::{store::ContentStore, Error, Result};
 use std::{
     env,

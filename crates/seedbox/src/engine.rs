@@ -20,6 +20,19 @@ const FIELDS: [&str; 7] = [
 pub enum ExecutableKind {
     Standalone,
     InternalWorker,
+    ArmWorld,
+}
+
+pub fn arm_parameters() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (KIND.into(), "arm64-world-v1".into()),
+        ("simulator_version".into(), SIMULATOR_VERSION.into()),
+        ("host_os".into(), "macos".into()),
+        ("host_arch".into(), "aarch64".into()),
+        ("guest_arch".into(), "aarch64".into()),
+        ("engine_backend".into(), "hvf".into()),
+        ("timebase".into(), "arm64-pv-world-v1".into()),
+    ])
 }
 
 /// Compile-time platform metadata, with no process environment lookup.
@@ -52,7 +65,7 @@ pub fn recorded_launch(profile: &ExecutionProfile) -> Result<ExecutableKind> {
         }
         return Ok(ExecutableKind::Standalone);
     };
-    if kind != INTERNAL_WORKER_V1 {
+    if kind != INTERNAL_WORKER_V1 && kind != "arm64-world-v1" {
         return Err(Error::Integrity(format!(
             "unknown engine executable kind {kind}"
         )));
@@ -79,6 +92,16 @@ pub fn recorded_launch(profile: &ExecutionProfile) -> Result<ExecutableKind> {
         parameters["engine_backend"].as_str(),
         parameters["timebase"].as_str(),
     );
+    if kind == "arm64-world-v1" {
+        if platform != ("macos", "aarch64", "aarch64", "hvf", "arm64-pv-world-v1")
+            || profile.backend != "seedbox-hvf"
+        {
+            return Err(Error::Integrity(
+                "unsupported ARM application executable descriptor".into(),
+            ));
+        }
+        return Ok(ExecutableKind::ArmWorld);
+    }
     if !matches!(
         platform,
         ("linux", "x86_64", "x86_64", "kvm", "counted-branches-v1")
@@ -92,7 +115,7 @@ pub fn recorded_launch(profile: &ExecutionProfile) -> Result<ExecutableKind> {
 
 /// An executable is replayed on its recorded platform, never auto-substituted.
 pub fn validate_host(profile: &ExecutionProfile) -> Result<()> {
-    if recorded_launch(profile)? == ExecutableKind::InternalWorker {
+    if recorded_launch(profile)? != ExecutableKind::Standalone {
         let parameters = &profile.semantic_parameters;
         if parameters["host_os"] != std::env::consts::OS
             || parameters["host_arch"] != std::env::consts::ARCH
@@ -127,6 +150,33 @@ mod tests {
             witness_mode: WitnessMode::Exits,
             semantic_parameters: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn arm_world_is_a_distinct_complete_descriptor() {
+        let mut recorded = profile();
+        recorded.backend = "seedbox-hvf".into();
+        recorded.semantic_parameters = arm_parameters();
+        assert_eq!(
+            recorded_launch(&recorded).unwrap(),
+            ExecutableKind::ArmWorld
+        );
+        for field in FIELDS {
+            let mut partial = recorded.clone();
+            partial.semantic_parameters.remove(field);
+            assert!(recorded_launch(&partial).is_err(), "{field}");
+        }
+        for (key, value) in [
+            ("timebase", "pv"),
+            ("engine_backend", "kvm"),
+            ("guest_arch", "x86_64"),
+        ] {
+            let mut fixture = recorded.clone();
+            fixture.semantic_parameters.insert(key.into(), value.into());
+            assert!(recorded_launch(&fixture).is_err(), "{key}");
+        }
+        recorded.backend = "seedbox-kvm".into();
+        assert!(recorded_launch(&recorded).is_err());
     }
 
     #[test]

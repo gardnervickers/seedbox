@@ -9,8 +9,8 @@ interrupt timing.
 ## Quick start
 
 `validate`, `init`, `inspect`, `diff`, `export` and `import` run on Linux or macOS. `run`,
-`explore` and `replay` need the
-qualified host (see [host requirements](#host-requirements)) and root.
+`explore` and `replay` use the qualified Linux KVM host as root, or the development
+native HVF backend on an Apple Silicon Mac.
 
 ```sh
 nix develop                          # Rust, OCI tools, static BusyBox, musl
@@ -24,6 +24,24 @@ cargo run -- inspect .seedbox/runs/ATTEMPT
 cargo run -- diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
 ```
 
+On Apple Silicon, build the signed CLI and its preparation payload once:
+
+```sh
+nix develop
+bash tools/mac-runtime/build-cli.sh
+target/release/seedbox doctor --allow-dev-engine
+target/release/seedbox run PROJECT --allow-dev-engine
+target/release/seedbox replay .seedbox/runs/ATTEMPT --allow-dev-engine
+```
+
+The Mac CLI packages the ARM guest kernel and static helpers. It automatically
+owns a Linux preparation VM for the existing OCI tools, stops it before running,
+and executes application machines natively under HVF. Replay uses retained bytes
+without starting that preparation VM. No runtime compiler or separate VMM path
+is needed. Images must support `linux/arm64`; memory is limited to 3072 MiB per
+service. Mac execution remains unqualified and requires `--allow-dev-engine`.
+See [the Mac workflow](tools/mac-runtime/README.md).
+
 `seedbox run` with no arguments runs the Compose project in the current
 directory. Every runtime input has a default, so no flags are required:
 
@@ -33,14 +51,14 @@ directory. Every runtime input has a default, so no flags are required:
 | Directed link baselines | no overrides; global latency/jitter and zero loss | `x-seedbox.network.links` |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
 | Exploration count | `1` | `--count` |
-| Exploration workers | `1`, sequential execution | `--workers` (1..32; automatic CPU selection for parallel execution) |
+| Exploration workers | `1`, sequential execution; Mac currently requires `1` | `--workers` (1..32; Linux automatic CPU selection for parallel execution) |
 | Torn disk writes | off (drop all unflushed sectors on crash) | `--torn-writes` |
-| CPU | first free core other than CPU 0's, under the shared lease | `--cpu`, `SEEDBOX_CPU` |
-| Guest kernel | `bzImage` in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`, `./artifacts`, then `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
-| VMM | the platform engine linked into `seedbox`; runtime commands never invoke Cargo | `--vmm`, `SEEDBOX_VMM` (legacy standalone engine) |
-| Guest supervisor | built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl | `--guest-init`, `SEEDBOX_GUEST_INIT` |
-| BusyBox | `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
-| mke2fs (only for named volumes) | `SEEDBOX_MKE2FS` (set by `nix develop`), then a static `mke2fs` on `PATH` | `--mke2fs` |
+| CPU | Linux: first free core other than CPU 0's, under the shared lease; Mac: automatic HVF scheduling | `--cpu`, `SEEDBOX_CPU` (Linux only) |
+| Guest kernel | Mac: packaged ARM64 `Image`; Linux: `bzImage` in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`, `./artifacts`, then `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
+| VMM | the platform engine linked into `seedbox`; runtime commands never invoke Cargo | `--vmm`, `SEEDBOX_VMM` (Linux legacy standalone engine) |
+| Guest supervisor | packaged on Mac; built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl on Linux | `--guest-init`, `SEEDBOX_GUEST_INIT` |
+| BusyBox | packaged on Mac; Linux: `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
+| mke2fs (only for named volumes) | packaged on Mac; Linux: `SEEDBOX_MKE2FS` (set by `nix develop`), then a static `mke2fs` on `PATH` | `--mke2fs` |
 | Build epoch | absent; preserve the builder's ordinary timestamp policy | `--build-epoch` (prepare/run/explore; no environment backing) |
 | Engine qualification | pinned engine and guest kernel; dev artifacts require explicit opt-in | `--allow-dev-engine` (run/explore/replay/doctor; no environment backing) |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
@@ -83,10 +101,11 @@ until it receives separate runtime qualification; the frozen engine policy is
 unchanged. `prepare` records this development qualification without granting
 permission to execute.
 
-The ARM engine is also linked on ARM hypervisor hosts. It currently supports the
-existing experimental fixture only; public Compose `run`/`replay` still require
-Linux x86-64. Full Mac worlds and automatic guest-runtime provisioning are the
-next integration steps. Image preparation continues to use the existing tools.
+The ARM application engine is linked into the Mac CLI. Its PV world identity,
+boot-layout evidence and HVF host admission are distinct from the existing ARM
+fixture and x86 KVM profiles. Mac defaults use packaged Image, supervisor,
+BusyBox and mke2fs, with `linux/arm64` as the image platform. `--cpu`, `--vmm`
+and `--allow-unqualified-cpu` remain Linux-only; Mac exploration is serial.
 
 `seedbox run --torn-writes` enables seeded partial survival of unflushed
 512-byte disk sectors on crash. It is recorded in run identity and replayed
@@ -184,6 +203,8 @@ rebuilt OCI images to have identical bytes.
 | --- | --- |
 | [`crates/seedbox/`](crates/seedbox/README.md) | Configuration, OCI preparation, orchestration and the `seedbox` CLI |
 | `crates/seedbox-vmm/` | KVM world engine linked into the Linux x86-64 CLI; isolated standalone workspace and lockfile for low-level fixtures |
+| `crates/seedbox-arm64/` | ARM PV machines, native HVF application world, and isolated fixture workspace |
+| `tools/mac-runtime/` | Signed Mac CLI build and packaged Linux preparation workflow |
 | `examples/` | Compose applications: etcd, Redis, [TCP faults/recovery](examples/faults/README.md), and [one-service MinIO conditional writes](examples/minio/README.md) (MinIO runtime qualification pending) |
 | `kernel/` | Guest kernel patch, config and build script (Linux 6.12.112) |
 | `guest/` | Generic OCI guest supervisor plus low-level guest fixtures and builders |

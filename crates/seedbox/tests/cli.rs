@@ -27,6 +27,28 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn mac_rejects_linux_cpu_options_before_preparation_or_state_creation() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("compose.yaml"), "name: mac-options\nservices:\n  app: {image: example/app}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n").unwrap();
+    for command in ["run", "explore", "doctor"] {
+        for flags in [&["--cpu", "1"][..], &["--allow-unqualified-cpu"][..]] {
+            let mut args = vec![command];
+            args.extend(flags);
+            let output = seedbox(&args, directory.path());
+            assert_eq!(output.status.code(), Some(2), "{args:?}");
+            assert!(output.stdout.is_empty(), "{args:?}");
+            assert_eq!(
+                stderr(&output),
+                "error: --cpu and --allow-unqualified-cpu require Linux KVM; omit them on Mac\n",
+                "{args:?}"
+            );
+            assert!(!directory.path().join(".seedbox").exists(), "{args:?}");
+        }
+    }
+}
+
 #[test]
 fn version_and_help_describe_the_builtin_engine_without_exposing_worker_dispatch() {
     let directory = tempfile::tempdir().unwrap();
@@ -915,7 +937,13 @@ fn doctor_bad_inputs_execute_no_tools_and_create_no_state_even_with_cargo_enviro
     }
     fs::write(root.join("engine"), b"unsupported engine").unwrap();
     let output = seedbox(&["doctor", "--vmm", "engine", "--kernel", "kernel"], root);
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
     assert_eq!(stderr(&output),"error: input integrity: engine is outside the admitted host policy; no engine-change override bypass is available\n");
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    assert_eq!(
+        stderr(&output),
+        "error: --vmm requires Linux KVM; use the built-in Mac engine\n"
+    );
     assert!(!marker.exists());
     assert!(output.stdout.is_empty());
 }
@@ -967,9 +995,15 @@ fn doctor_dev_opt_in_keeps_host_refusal_and_creates_no_state() {
         }
         let output = seedbox(&args, dir.path());
         assert_eq!(output.status.code(), Some(2));
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         assert_eq!(
             stderr(&output),
             "error: run and replay require the qualified Linux KVM host\n"
+        );
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        assert_eq!(
+            stderr(&output),
+            "error: --vmm requires Linux KVM; use the built-in Mac engine\n"
         );
         assert!(output.stdout.is_empty());
         assert!(!dir.path().join(".seedbox").exists());

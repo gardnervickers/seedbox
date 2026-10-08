@@ -11,8 +11,126 @@ pub fn dispatch(args: impl IntoIterator<Item = OsString>) -> Option<ExitCode> {
     Some(match args.next().as_deref().and_then(|arg| arg.to_str()) {
         Some(seedbox::engine::INTERNAL_WORKER_V1) => world_worker(executable, args.collect()),
         Some("arm64-fixture-v1") => arm_fixture(executable, args.collect()),
+        Some("arm64-machine-v1") => arm_machine(args.collect()),
+        Some("arm64-preparation-v1") => arm_prepare(args.collect()),
+        Some("arm64-world-v1") => arm_world(executable, args.collect()),
         _ => error("unsupported internal engine contract; use the CLI retained with this run"),
     })
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn arm_world(executable: OsString, args: Vec<OsString>) -> ExitCode {
+    let run = || -> Result<(), String> {
+        let mut config = None;
+        let mut output = None;
+        let mut seed = None;
+        let mut host_control = None;
+        let mut full_state = false;
+        let mut console_limit = 1024 * 1024 * 1024;
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            let text = arg.to_str().ok_or("worker argument is not UTF-8")?;
+            match text {
+                "--config" => {
+                    config = Some(std::path::PathBuf::from(
+                        args.next().ok_or("--config needs a path")?,
+                    ))
+                }
+                "--out" => {
+                    output = Some(std::path::PathBuf::from(
+                        args.next().ok_or("--out needs a path")?,
+                    ))
+                }
+                "--seed" => {
+                    seed = Some(
+                        args.next()
+                            .and_then(|n| n.to_str())
+                            .ok_or("--seed needs a value")?
+                            .parse::<u64>()
+                            .map_err(|e| format!("worker seed: {e}"))?,
+                    )
+                }
+                "--host-control" => {
+                    host_control = Some(std::path::PathBuf::from(
+                        args.next().ok_or("--host-control needs a path")?,
+                    ))
+                }
+                "--digest" => full_state = true,
+                "--stream-console" => {}
+                "--console-limit" => {
+                    console_limit = args
+                        .next()
+                        .and_then(|n| n.to_str())
+                        .ok_or("--console-limit needs a value")?
+                        .parse::<usize>()
+                        .map_err(|e| format!("console limit: {e}"))?;
+                }
+                _ => return Err(format!("unsupported ARM world argument {text}")),
+            }
+        }
+        let options = seedbox_arm64::application::world::Options {
+            executable: executable.into(),
+            config: config.ok_or("worker requires --config")?,
+            output: output.ok_or("worker requires --out")?,
+            seed: seed.ok_or("worker requires --seed")?,
+            full_state,
+            host_control,
+            console_limit,
+        };
+        let report = seedbox_arm64::application::world::run(&options)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+        );
+        Ok(())
+    };
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => error(&message),
+    }
+}
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+fn arm_world(_: OsString, _: Vec<OsString>) -> ExitCode {
+    error("internal HVF world requires Apple Silicon macOS")
+}
+
+fn arm_prepare(args: Vec<OsString>) -> ExitCode {
+    let run = || -> Result<(), String> {
+        let [path] = args.as_slice() else {
+            return Err("internal ARM preparation contract requires one job path".into());
+        };
+        let file = std::fs::File::open(path).map_err(|e| format!("preparation job: {e}"))?;
+        let job: seedbox::preparation::WorkerJob =
+            serde_json::from_reader(file).map_err(|e| format!("preparation job: {e}"))?;
+        let prepared = job.prepare().map_err(|e| e.to_string())?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&prepared).map_err(|e| e.to_string())?
+        );
+        Ok(())
+    };
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => error(&message),
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn arm_machine(args: Vec<OsString>) -> ExitCode {
+    if !args.is_empty() {
+        return error("internal ARM machine contract takes no arguments");
+    }
+    match seedbox_arm64::application::worker::serve::<seedbox_arm64::backend::hvf::Hvf>(
+        &mut std::io::stdin().lock(),
+        &mut std::io::stdout().lock(),
+    ) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => error(&message),
+    }
+}
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+fn arm_machine(_: Vec<OsString>) -> ExitCode {
+    error("internal HVF machine requires Apple Silicon macOS")
 }
 
 fn error(message: &str) -> ExitCode {

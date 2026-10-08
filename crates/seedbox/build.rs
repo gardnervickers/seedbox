@@ -11,6 +11,24 @@ use std::{
 };
 
 fn main() {
+    println!("cargo::rerun-if-env-changed=SEEDBOX_MAC_RUNTIME_BUNDLE");
+    let bundle = env::var_os("SEEDBOX_MAC_RUNTIME_BUNDLE").map(PathBuf::from);
+    let declaration = if let Some(bundle) = bundle {
+        let bundle =
+            std::fs::canonicalize(bundle).expect("Mac runtime bundle must exist at CLI build time");
+        println!("cargo::rerun-if-changed={}", bundle.display());
+        format!(
+            "pub const MAC_RUNTIME:Option<&[u8]>=Some(include_bytes!({:?}));\n",
+            bundle
+        )
+    } else {
+        "pub const MAC_RUNTIME:Option<&[u8]>=None;\n".into()
+    };
+    std::fs::write(
+        PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("mac-runtime.rs"),
+        declaration,
+    )
+    .unwrap();
     println!("cargo::rustc-check-cfg=cfg(seedbox_embedded_init)");
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest/compose-init.c");
     println!("cargo::rerun-if-changed={}", source.display());
@@ -23,11 +41,21 @@ fn main() {
         source.with_file_name("barrier.h").display()
     );
     println!("cargo::rerun-if-env-changed=SEEDBOX_STATIC_CC");
+    println!(
+        "cargo::rerun-if-changed={}",
+        source.with_file_name("io.h").display()
+    );
+    println!(
+        "cargo::rerun-if-changed={}",
+        source
+            .with_file_name("../kernel-arm64/supervisor-io.h")
+            .display()
+    );
     println!("cargo::rerun-if-env-changed=PATH");
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-    if target_os != "linux" || target_arch != "x86_64" {
+    if target_os != "linux" || !matches!(target_arch.as_str(), "x86_64" | "aarch64") {
         return;
     }
     let Some(compiler) = env::var_os("SEEDBOX_STATIC_CC")
