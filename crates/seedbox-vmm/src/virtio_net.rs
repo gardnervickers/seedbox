@@ -8,15 +8,15 @@ const HDR: usize = 12; // virtio_net_hdr with num_buffers (VERSION_1)
 const QSIZE: u16 = 256;
 const BACKLOG: usize = 256;
 
-#[derive(Default, Clone)]
-struct Queue {
-    num: u16,
-    ready: bool,
-    desc: u64,
-    avail: u64,
-    used: u64,
-    last_avail: u16,
-    used_idx: u16,
+const CHAIN_LIMIT: usize = 4 << 20;
+use seedbox_engine_core::virtqueue::{Chain, Diagnostics, Direction, Policy, Queue};
+trait NetworkQueue {
+    fn chain(&self, memory: &[u8], writable: bool) -> Result<Option<Chain>,String>;
+}
+impl NetworkQueue for Queue {
+    fn chain(&self, memory: &[u8], writable: bool) -> Result<Option<Chain>,String> {
+        self.validated_chain(memory,0,Policy {limit:CHAIN_LIMIT,direction:Direction::Uniform(writable),reject_empty:false,diagnostics:Diagnostics::Virtio})
+    }
 }
 
 /// Receiver acceptance and IRQ notification are independent. A frame queued
@@ -48,66 +48,6 @@ pub struct VirtioNet {
     pub rx_dropped: u64,
     /// Guest memory ranges (start, len) written by the device since last taken.
     pub dirty: Vec<(usize, usize)>,
-}
-
-fn rd16(m: &[u8], a: u64) -> u16 {
-    let a = a as usize;
-    u16::from_le_bytes(m[a..a + 2].try_into().unwrap())
-}
-fn rd32(m: &[u8], a: u64) -> u32 {
-    let a = a as usize;
-    u32::from_le_bytes(m[a..a + 4].try_into().unwrap())
-}
-fn rd64(m: &[u8], a: u64) -> u64 {
-    let a = a as usize;
-    u64::from_le_bytes(m[a..a + 8].try_into().unwrap())
-}
-fn wr16(m: &mut [u8], a: u64, v: u16) {
-    let a = a as usize;
-    m[a..a + 2].copy_from_slice(&v.to_le_bytes());
-}
-fn wr32(m: &mut [u8], a: u64, v: u32) {
-    let a = a as usize;
-    m[a..a + 4].copy_from_slice(&v.to_le_bytes());
-}
-
-struct Desc {
-    addr: u64,
-    len: u32,
-    flags: u16,
-    next: u16,
-}
-
-impl Queue {
-    fn desc(&self, m: &[u8], i: u16) -> Desc {
-        let a = self.desc + 16 * i as u64;
-        Desc {
-            addr: rd64(m, a),
-            len: rd32(m, a + 8),
-            flags: rd16(m, a + 12),
-            next: rd16(m, a + 14),
-        }
-    }
-    fn pending(&self, m: &[u8]) -> bool {
-        self.ready && rd16(m, self.avail + 2) != self.last_avail
-    }
-    fn pop(&mut self, m: &[u8]) -> Option<u16> {
-        if !self.pending(m) {
-            return None;
-        }
-        let head = rd16(m, self.avail + 4 + 2 * (self.last_avail % self.num) as u64);
-        self.last_avail = self.last_avail.wrapping_add(1);
-        Some(head)
-    }
-    fn push_used(&mut self, m: &mut [u8], dirty: &mut Vec<(usize, usize)>, head: u16, len: u32) {
-        let e = self.used + 4 + 8 * (self.used_idx % self.num) as u64;
-        wr32(m, e, head as u32);
-        wr32(m, e + 4, len);
-        self.used_idx = self.used_idx.wrapping_add(1);
-        wr16(m, self.used + 2, self.used_idx);
-        dirty.push((e as usize, 8));
-        dirty.push((self.used as usize + 2, 2));
-    }
 }
 
 impl VirtioNet {
@@ -178,7 +118,7 @@ impl VirtioNet {
         }
     }
 
-    pub fn write(&mut self, m: &mut [u8], off: u64, v: u32) -> WriteOutcome {
+    pub fn write(&mut self, m: &mut [u8], off: u64, v: u32) -> Result<WriteOutcome,String> {
         let mut out = WriteOutcome {
             irq: false,
             frames: Vec::new(),
@@ -202,19 +142,9 @@ impl VirtioNet {
             }
             0x050 => match v {
                 1 => {
-                    while let Some(head) = self.q[1].pop(m) {
-                        let mut bytes = Vec::new();
-                        let mut i = head;
-                        loop {
-                            let d = self.q[1].desc(m, i);
-                            let a = d.addr as usize;
-                            bytes.extend_from_slice(&m[a..a + d.len as usize]);
-                            if d.flags & 1 == 0 {
-                                break;
-                            }
-                            i = d.next;
-                        }
-                        self.q[1].push_used(m, &mut self.dirty, head, 0);
+                    while let Some(chain) = self.q[1].chain(m,false)? {
+                        let bytes = chain.read(m)?;
+                        self.q[1].complete_chain(m,&chain,0,|a,n|self.dirty.push((a,n)));
                         if bytes.len() > HDR {
                             out.frames.push(bytes[HDR..].to_vec());
                             self.tx_frames += 1;
@@ -222,7 +152,7 @@ impl VirtioNet {
                         out.irq = true;
                     }
                 }
-                0 => out.irq = self.drain(m),
+                0 => out.irq = self.drain(m)?,
                 _ => {}
             },
             0x064 => self.isr &= !v,
@@ -245,42 +175,30 @@ impl VirtioNet {
         if out.irq {
             self.isr |= 1;
         }
-        out
+        Ok(out)
     }
 
-    fn put_frame(&mut self, m: &mut [u8], frame: &[u8]) -> bool {
-        let Some(head) = self.q[0].pop(m) else {
-            return false;
-        };
-        let mut data = vec![0u8; HDR];
-        data[10] = 1; // num_buffers
-        data.extend_from_slice(frame);
-        let mut written = 0usize;
-        let mut i = head;
-        loop {
-            let d = self.q[0].desc(m, i);
-            if d.flags & 2 != 0 {
-                let n = (d.len as usize).min(data.len() - written);
-                let a = d.addr as usize;
-                m[a..a + n].copy_from_slice(&data[written..written + n]);
-                self.dirty.push((a, n));
-                written += n;
-            }
-            if d.flags & 1 == 0 || written == data.len() {
-                break;
-            }
-            i = d.next;
+    fn put_frame(&mut self, m: &mut [u8], frame: &[u8]) -> Result<bool,String> {
+        let Some(chain)=self.q[0].chain(m,true)? else {return Ok(false);};
+        if chain.len < HDR+frame.len() {return Err("network receive buffer too small".into());}
+        let mut data=vec![0u8;HDR];data[10]=1;data.extend_from_slice(frame);
+        let mut written=0;
+        for segment in &chain.segments {
+            let n=segment.len.min(data.len()-written);
+            m[segment.offset..segment.offset+n].copy_from_slice(&data[written..written+n]);
+            self.dirty.push((segment.offset,n));written+=n;
+            if written==data.len() {break;}
         }
-        self.q[0].push_used(m, &mut self.dirty, head, written as u32);
-        self.rx_frames += 1;
-        true
+        self.q[0].complete_chain(m,&chain,written,|a,n|self.dirty.push((a,n)));
+        self.rx_frames+=1;
+        Ok(true)
     }
 
-    fn drain(&mut self, m: &mut [u8]) -> bool {
+    fn drain(&mut self, m: &mut [u8]) -> Result<bool,String> {
         let mut any = false;
         while let Some(f) = self.backlog.front() {
             let f = f.clone();
-            if !self.put_frame(m, &f) {
+            if !self.put_frame(m, &f)? {
                 break;
             }
             self.backlog.pop_front();
@@ -289,30 +207,31 @@ impl VirtioNet {
         if any {
             self.isr |= 1;
         }
-        any
+        Ok(any)
     }
 
     /// Deliver an inbound frame now, reporting acceptance separately from IRQ.
-    pub fn receive(&mut self, m: &mut [u8], frame: &[u8]) -> ReceiveOutcome {
+    pub fn receive(&mut self, m: &mut [u8], frame: &[u8]) -> Result<ReceiveOutcome,String> {
         if !self.q[0].ready {
             self.rx_dropped += 1;
-            return ReceiveOutcome::default();
+            return Ok(ReceiveOutcome::default());
         }
-        if !self.backlog.is_empty() || !self.put_frame(m, frame) {
+        if frame.len()>CHAIN_LIMIT-HDR {return Err("network frame exceeds DMA limit".into());}
+        if !self.backlog.is_empty() || !self.put_frame(m, frame)? {
             if self.backlog.len() >= BACKLOG {
                 self.rx_dropped += 1;
-                return ReceiveOutcome::default();
+                return Ok(ReceiveOutcome::default());
             }
             self.backlog.push_back(frame.to_vec());
-            return ReceiveOutcome {
+            return Ok(ReceiveOutcome {
                 accepted: true,
                 irq: false,
-            };
+            });
         }
         self.isr |= 1;
-        ReceiveOutcome {
+        Ok(ReceiveOutcome {
             accepted: true,
             irq: true,
-        }
+        })
     }
 }

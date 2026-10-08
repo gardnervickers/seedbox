@@ -922,19 +922,20 @@ impl Machine {
         self.control_requests.extend(frames.into_iter().map(|f|(self.time,f)));Ok(stop)
     }
 
-    pub fn deliver_frame(&mut self, frame: &[u8]) -> ReceiveOutcome {
+    pub fn deliver_frame(&mut self, frame: &[u8]) -> Result<ReceiveOutcome,String> {
         let (mem, size) = (self.mem, self.mem_size);
         let m = unsafe { std::slice::from_raw_parts_mut(mem, size) };
         let outcome = self
             .net
             .as_mut()
             .map(|n| n.receive(m, frame))
-            .unwrap_or_default();
+            .transpose();
         self.take_dma();
+        let outcome=outcome?.unwrap_or_default();
         if outcome.irq {
             self.raise_net();
         }
-        outcome
+        Ok(outcome)
     }
 
     /// Syscalls the guest has entered (counted in the time page).
@@ -1705,6 +1706,7 @@ impl Machine {
                         if let Some(n) = self.net.as_mut() {
                             let out = n.write(m, addr - NET_MMIO, v);
                             self.take_dma();
+                            let out=out?;
                             if out.irq {
                                 self.raise_net();
                             }

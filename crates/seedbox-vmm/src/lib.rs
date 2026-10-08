@@ -378,7 +378,7 @@ impl World {
             let mach = &mut self.machines[m];
             match p {
                 Payload::Frame { from, bytes } => {
-                    if !mach.deliver_frame(&bytes).accepted {
+                    if !mach.deliver_frame(&bytes)?.accepted {
                         self.dropped += 1;
                         self.count_link(at,from, m, 2);
                     } else {
