@@ -136,6 +136,28 @@ edit(
     "int set_tsc_mode(unsigned int val)\n{\n",
     "int set_tsc_mode(unsigned int val)\n{\n\treturn -EINVAL;\n",
 )
+# PV clock: crossings into user code pages. Executable VMAs map their pages
+# NX, and the fault handler opens one page at a time (seedbox_exec_fault).
+# Both checks sit behind the static key, so the counter timebase retires no
+# extra branch.
+edit(
+    "arch/x86/mm/pgprot.c",
+    "\tval = __sme_set(val);\n",
+    "\tval = __sme_set(val);\n"
+    "\tif (static_branch_unlikely(&seedbox_pv_clock) && (vm_flags & VM_EXEC))\n"
+    "\t\tval |= _PAGE_NX;\n",
+)
+edit("arch/x86/mm/pgprot.c", "#include <asm/mem_encrypt.h>\n", "#include <asm/mem_encrypt.h>\n#include <asm/seedbox.h>\n")
+edit(
+    "arch/x86/mm/fault.c",
+    "\tperf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, address);\n",
+    "\tperf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, address);\n\n"
+    "\tif (static_branch_unlikely(&seedbox_pv_clock) &&\n"
+    "\t    seedbox_exec_fault(error_code, address))\n"
+    "\t\treturn;\n",
+)
+edit("arch/x86/mm/fault.c", "#include <asm/fred.h>\n", "#include <asm/fred.h>\n#include <asm/seedbox.h>\n")
+
 # Fork entropy (ABI 3). A world forked at a simulated time parks guests
 # without their cooperation, so the VMM writes the seed's entropy into the time
 # page and bumps a generation. The next random output mixes it into the input

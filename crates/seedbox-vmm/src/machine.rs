@@ -52,6 +52,11 @@ pub const ABI_PAGE_RESEED: u64 = 3;
 const PAGE_PV_CLOCK: usize = 6;
 const PAGE_BOUND: usize = 7;
 const PAGE_SYSCALL_TARGET: usize = 8;
+/// PV clock: crossings into user code pages (guest-counted), the target the
+/// VMM may publish for them, and full re-protections (diagnostic).
+const PAGE_CROSSINGS: usize = 14;
+const PAGE_CROSSING_TARGET: usize = 15;
+const PAGE_CROSSING_WALKS: usize = 16;
 
 // Pin every extension word without extending the checkpoint/digest prefix.
 const _: () = {
@@ -65,6 +70,9 @@ const _: () = {
     assert!(PAGE_ENTROPY + 2 == 12);
     assert!(PAGE_ENTROPY + 3 == 13);
     assert!(PAGE_ENTROPY_FIELDS == 4);
+    assert!(PAGE_CROSSINGS == 14);
+    assert!(PAGE_CROSSING_TARGET == 15);
+    assert!(PAGE_CROSSING_WALKS == 16);
     assert!(ABI_PAGE_RESEED == 3);
 };
 
@@ -990,6 +998,11 @@ impl Machine {
 
     pub fn syscalls(&self) -> u64 {
         self.page_get(PAGE_SYSCALLS)
+    }
+
+    /// Guest-counted crossings into user code pages and full re-protections.
+    pub fn crossings(&self) -> (u64, u64) {
+        (self.page_get(PAGE_CROSSINGS), self.page_get(PAGE_CROSSING_WALKS))
     }
 
     fn page_get(&self, i: usize) -> u64 {
@@ -2420,7 +2433,10 @@ mod fork_tests {
         assert_eq!(fields["syscall_target"], (PAGE_SYSCALL_TARGET, 1));
         assert_eq!(fields["entropy_gen"], (PAGE_ENTROPY_GEN, 1));
         assert_eq!(fields["entropy"], (PAGE_ENTROPY, PAGE_ENTROPY_FIELDS));
-        assert_eq!(index, 14);
+        assert_eq!(fields["crossings"], (PAGE_CROSSINGS, 1));
+        assert_eq!(fields["crossing_target"], (PAGE_CROSSING_TARGET, 1));
+        assert_eq!(fields["crossing_walks"], (PAGE_CROSSING_WALKS, 1));
+        assert_eq!(index, 17);
         assert_eq!(PAGE_FIELDS, PAGE_PV_CLOCK);
         assert_eq!(PAGE_ENTROPY_FIELDS * 8, ENTROPY_WORDS * 4);
         let abi: u64 = header.lines().find_map(|l| l.strip_prefix("#define SEEDBOX_ABI\t")).unwrap().trim().parse().unwrap();

@@ -1415,6 +1415,8 @@ fn report(
         if let Clock::Pv(_) = world.clock {
             row["spin"] = json!({"probes": s.spin_probes, "idles": s.spin_idles, "false_alarms": s.spin_false, "clock_progress": s.spin_clock_progress, "mismatch": s.spin_mismatch});
             row["syscalls"] = json!(mach.syscalls());
+            let (crossings, walks) = mach.crossings();
+            row["crossings"] = json!({"count": crossings, "walks": walks});
             row["syscall_ns"] = json!(mach.syscall_ns);
             let by: serde_json::Map<String, Value> = machine::Cause::NAMES
                 .iter()

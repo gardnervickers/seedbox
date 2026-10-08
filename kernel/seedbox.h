@@ -43,6 +43,14 @@ struct seedbox_time_page {
 	u64 syscall_target;
 	u64 entropy_gen;	/* VMM bumps after writing entropy at a time fork */
 	u64 entropy[4];	/* 32 bytes the kernel mixes in before reseeding */
+	/*
+	 * PV clock only: crossings into user code pages (seedbox_exec_fault).
+	 * crossing_target is reserved for the VMM; crossing_walks counts
+	 * full re-protections of an address space (diagnostic).
+	 */
+	u64 crossings;
+	u64 crossing_target;
+	u64 crossing_walks;
 };
 
 /* Enabled at boot in the PV clock timebase; a no-op (no branch) otherwise. */
@@ -53,6 +61,7 @@ extern struct seedbox_time_page *seedbox_page;
 unsigned long long seedbox_rdtsc(void);
 bool seedbox_emulate_user_tsc(struct pt_regs *regs);
 unsigned long seedbox_tsc_khz(void);
+bool seedbox_exec_fault(unsigned long error_code, unsigned long address);
 void __init seedbox_time_init(void);
 /* Mix in fork entropy and reseed if the VMM published new (drivers/char/random.c). */
 void seedbox_take_entropy(void);
