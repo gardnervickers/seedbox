@@ -66,6 +66,8 @@ under `target/check-reports/`, which survives development-shell cleanup.
 
 Applications use a release CLI built from the current checkout. Linux runs PV
 and, where the PMU is available, counter scenarios. Mac runs ARM PV scenarios.
+Dockerfile builds use `--build-epoch 0` so repeat runs compare identical build
+timestamps. Each CLI step streams to its report log and prints its progress.
 Image pulls, application builds and guest execution can be substantially slower
 than native unit tests. Their assertions belong to the guest workload and public
 CLI; the test runner does not interpret application protocols.

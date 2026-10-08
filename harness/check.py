@@ -203,6 +203,8 @@ class Checks:
                         continue
                     binary = str(copied)
                 command = [binary, "--test-threads=1"]
+                if target == "applications":
+                    command.append("--nocapture")
                 needs_root = package == "seedbox" and target in ("oci", "applications", "host_pause")
                 if counter:
                     command = [sys.executable, str(ROOT / "harness/check-counter.py"),
@@ -284,10 +286,10 @@ def main(argv=None):
             environment["SEEDBOX_TEST_COUNTER"] = "0" if found["counter"] else "1"
         else:
             found["applications"] = "application CLI build failed"
-    packages = [("seedbox", ["cargo", "test", "--workspace", "--locked"]),
-                ("seedbox-arm64", ["cargo", "test-arm64"])]
+    packages = [("seedbox-arm64", ["cargo", "test-arm64"])]
     if system == "Linux" and machine == "x86_64":
         packages.append(("seedbox-vmm", ["cargo", "test-vmm"]))
+    packages.append(("seedbox", ["cargo", "test", "--workspace", "--locked"]))
     for package, command in packages:
         features = features_for(package, system, machine, found)
         if features:
