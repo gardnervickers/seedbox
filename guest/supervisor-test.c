@@ -1,5 +1,8 @@
 #define _GNU_SOURCE
 #include <stdint.h>
+#include <sys/resource.h>
+static int application_setrlimit(int resource, const struct rlimit *limit);
+#define setrlimit application_setrlimit
 static int readiness_ioperm(unsigned long first, unsigned long count, int enabled);
 static void readiness_outl(uint32_t id, unsigned short port);
 #define SEEDBOX_READY_IOPERM readiness_ioperm
@@ -7,8 +10,21 @@ static void readiness_outl(uint32_t id, unsigned short port);
 #define SEEDBOX_TEST_READY_DELAY_NS 10000000ULL
 #define SEEDBOX_SUPERVISOR_TEST
 #include "compose-init.c"
+#undef setrlimit
 #include <assert.h>
 #include <sys/socket.h>
+static int application_setrlimit(int resource, const struct rlimit *limit) {
+    assert(resource == RLIMIT_NOFILE && launch_error_fd >= 0);
+    assert(limit->rlim_cur == 1048576 && limit->rlim_max == 1048576);
+    /* An unprivileged host test cannot raise its inherited hard ceiling.
+     * Check the requested default, then exercise inheritance within it. */
+    struct rlimit allowed; assert(!getrlimit(resource, &allowed));
+    if (allowed.rlim_max < limit->rlim_max) {
+        allowed.rlim_cur = allowed.rlim_max;
+        return setrlimit(resource, &allowed);
+    }
+    return setrlimit(resource, limit);
+}
 static int readiness_permissions, readiness_writes;
 static pid_t readiness_child;
 static struct timespec readiness_started;
@@ -36,6 +52,11 @@ static void test_cmdline(const char *path, const char *text) {
     assert(!close(fd));
 }
 int main(int argc, char **argv) {
+    if (argc > 1) {
+        /* Every exec, including a restart, inherits the runtime limit. */
+        struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE, &limit));
+        assert(limit.rlim_cur == limit.rlim_max && limit.rlim_max <= 1048576);
+    }
     if (argc > 1 && !strcmp(argv[1], "exit-later")) {
         /* Launched by the supervisor: SIGCHLD must not stay blocked. */
         sigset_t mask; assert(!sigprocmask(SIG_SETMASK, NULL, &mask));
