@@ -89,6 +89,6 @@ one capability selection rule. Do not register individual test names or change
 scopes from a PR's changed-file list. Hardware tests use compilation guards;
 `#[ignore]` is reserved for diagnostics outside the maintained suite.
 
-`harness/mac-check.sh [REV]` remains a portable-only compatibility wrapper for
-checking a revision in a temporary worktree. Low-level standalone world campaigns
-and reproducibility checks remain separate diagnostic tools.
+To check a different revision, check it out in a Git worktree and run the same
+command there. Low-level standalone world campaigns and reproducibility checks
+remain separate diagnostic tools, documented in `harness/worlds/README.md`.

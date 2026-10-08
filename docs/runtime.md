@@ -769,13 +769,13 @@ From the repository root in `nix develop`, run all available native suites:
 ```sh
 bash harness/check.sh
 bash harness/check.sh --require applications
+bash harness/check.sh --require oci
 ```
 
 See [the test matrix](testing.md) for discovery, capability features and inputs.
 The older focused runtime diagnostics remain available:
 
 ```sh
-bash crates/seedbox/tests/accept-oci.sh
 bash crates/seedbox/tests/accept-runtime.sh KERNEL CPU FRESH_OUTPUT_DIRECTORY
 bash crates/seedbox/tests/accept-runtime.sh KERNEL CPU ANOTHER_FRESH_DIRECTORY lifecycle
 bash crates/seedbox/tests/accept-runtime.sh KERNEL CPU FAULT_OUTPUT_DIRECTORY faults

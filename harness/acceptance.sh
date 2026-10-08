@@ -9,6 +9,7 @@ if [[ ${1:-portable} != portable || $# -gt 1 ]]; then
 fi
 cd "$(dirname "$0")/.."
 while IFS= read -r script; do
+  [[ -f $script ]] || continue
   bash -n "$script"
 done < <(git ls-files '*.sh' ':!:research/**')
 tests=(test_msr54 test_scenarios test_mac_check test_linux_runtime test_runtime_build test_runtime_linker test_runtime_package)
