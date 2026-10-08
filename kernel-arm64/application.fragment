@@ -1,4 +1,5 @@
 # Compose guest facilities; separate from the accepted fixture configuration.
+CONFIG_BINFMT_SCRIPT=y
 CONFIG_NETDEVICES=y
 CONFIG_INET=y
 CONFIG_PACKET=y
