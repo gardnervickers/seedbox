@@ -39,7 +39,7 @@ fn main() {
 ''')
         (root / "tracked.txt").write_text("initial\n")
         for relative in ["crates/seedbox/build-runtime.rs", ".cargo/config.toml", "crates/seedbox/build_version.rs",
-                         "guest/compose-init.c", "guest/control.h", "guest/barrier.h",
+                         "guest/compose-init.c", "guest/control.h", "guest/barrier.h", "guest/environment.h",
                          "guest/io.h", "kernel-arm64/supervisor-io.h"]:
             destination = root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -144,6 +144,7 @@ fn main() {
             for index, root in enumerate(roots):
                 (root / "guest/compose-init.c").write_text(f"supervisor-{index}\n")
                 (root / "guest/control.h").write_text(f"header-{index}\n")
+                (root / "guest/environment.h").write_text(f"environment-{index}\n")
                 (root / "runtime-bundle").write_text(f"bundle-{index}")
                 self.git(root, "add", ".")
                 self.git(root, "commit", "-qm", f"checkout {index}")
@@ -182,6 +183,7 @@ fn main() {
                            for output in outputs for line in output.read_text().splitlines()
                            if line.startswith("cargo::rerun-if-changed=")]
                 self.assertIn(root / "guest/compose-init.c", watched, result.stdout)
+                self.assertIn(root / "guest/environment.h", watched, result.stdout)
 
             # Exercise the real Linux supervisor branch on Mac with a compiler
             # stand-in. It hashes the source and headers passed by the script,
@@ -189,7 +191,7 @@ fn main() {
             compiler = temporary / "source-compiler"
             compiler.write_text("#!/usr/bin/env python3\nimport hashlib, pathlib, sys\n"
                                 "source = pathlib.Path(sys.argv[-1])\n"
-                                "inputs = [source, source.with_name('control.h'), source.with_name('barrier.h'), "
+                                "inputs = [source, source.with_name('control.h'), source.with_name('barrier.h'), source.with_name('environment.h'), "
                                 "source.with_name('io.h'), source.parent.parent / 'kernel-arm64/supervisor-io.h']\n"
                                 "digest = hashlib.sha256(b''.join(p.read_bytes() for p in inputs)).digest()\n"
                                 "pathlib.Path(sys.argv[sys.argv.index('-o') + 1]).write_bytes(digest)\n")
@@ -209,7 +211,7 @@ fn main() {
                                SEEDBOX_MAC_RUNTIME_BUNDLE=str(root / "runtime-bundle"))
                 result = subprocess.run([str(script)], cwd=root / "crates/seedbox", env=runtime,
                                         check=True, capture_output=True, text=True, timeout=30)
-                inputs = ["guest/compose-init.c", "guest/control.h", "guest/barrier.h",
+                inputs = ["guest/compose-init.c", "guest/control.h", "guest/barrier.h", "guest/environment.h",
                           "guest/io.h", "kernel-arm64/supervisor-io.h"]
                 expected = hashlib.sha256(b"".join((root / path).read_bytes() for path in inputs)).digest()
                 self.assertEqual((output / "compose-init").read_bytes(), expected, result.stdout)
