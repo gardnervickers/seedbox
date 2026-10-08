@@ -87,6 +87,7 @@ struct BootInputs {
     console_limit: Option<usize>,
     /// The machine runs under the PV clock timebase.
     pv_clock: bool,
+    page_timer: bool,
     log_chunk_limit: Option<usize>,
 }
 
@@ -142,6 +143,7 @@ fn boot_machine(kvm: &kvm_ioctls::Kvm, name: &str, b: &BootInputs, barrier: bool
         undo_margin: b.undo_margin,
         barrier,
         pv_clock: b.pv_clock,
+        page_timer: b.page_timer,
     };
     let mut mach = Machine::new(kvm, name, &spec)?;
     mach.com1.output_limit = b.console_limit;
@@ -544,6 +546,7 @@ fn run() -> Result<Value, String> {
             margin,
             console_limit,
             pv_clock,
+            page_timer: args.iter().any(|a| a == "--page-timer"),
             log_chunk_limit: arg(&args,"--log-chunk-limit").map(|v|v.parse::<usize>()).transpose().map_err(|e|e.to_string())?,
         };
         let seed = entropy_seed(boot_seed, &format!("boot-entropy/{}", names[i]));

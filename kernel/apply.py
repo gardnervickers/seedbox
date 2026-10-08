@@ -109,14 +109,33 @@ edit(
 )
 edit("arch/x86/kernel/i8259.c", "#include <asm/i8259.h>\n", "#include <asm/i8259.h>\n#include <asm/seedbox.h>\n")
 
-# Arm the oneshot timer with one port write instead of two.
+# Arm the oneshot timer through the time page, with the port fallback.
 edit(
     "drivers/clocksource/i8253.c",
     "\traw_spin_lock(&i8253_lock);\n\toutb_p(delta & 0xff , PIT_CH0);\t/* LSB */\n\toutb_p(delta >> 8 , PIT_CH0);\t\t/* MSB */\n",
-    "\traw_spin_lock(&i8253_lock);\n\tif (seedbox_page) {\n\t\toutl(delta, SEEDBOX_PORT_TIMER);\n\t} else {\n"
+    "\traw_spin_lock(&i8253_lock);\n\tif (seedbox_set_next_event(delta)) {\n\t\t/* No exit: picked up at the next deterministic stop. */\n\t} else if (seedbox_page) {\n\t\toutl(delta, SEEDBOX_PORT_TIMER);\n\t} else {\n"
     "\t\toutb_p(delta & 0xff , PIT_CH0);\t/* LSB */\n\t\toutb_p(delta >> 8 , PIT_CH0);\t/* MSB */\n\t}\n",
 )
 edit("drivers/clocksource/i8253.c", "#include <linux/i8253.h>\n", "#include <linux/i8253.h>\n#include <asm/seedbox.h>\n")
+# Keep mode changes on the PIT path, and clear any pending page arm too.
+edit(
+    "drivers/clocksource/i8253.c",
+    "\tguard(raw_spinlock_irqsave)(&i8253_lock);\n",
+    "\tguard(raw_spinlock_irqsave)(&i8253_lock);\n\tseedbox_timer_disarm();\n",
+)
+edit(
+    "drivers/clocksource/i8253.c",
+    "static int pit_shutdown(struct clock_event_device *evt)\n{\n",
+    "static int pit_shutdown(struct clock_event_device *evt)\n{\n\tseedbox_timer_disarm();\n",
+)
+edit(
+    "drivers/clocksource/i8253.c",
+    "\ti8253_clockevent.cpumask = cpumask_of(smp_processor_id());\n",
+    "\ti8253_clockevent.cpumask = cpumask_of(smp_processor_id());\n"
+    "\tif (seedbox_page && (READ_ONCE(seedbox_page->capabilities) & SEEDBOX_CAP_PAGE_TIMER))\n"
+    "\t\ti8253_clockevent.set_state_oneshot_stopped = pit_shutdown;\n",
+)
+
 
 # Only the network device uses the shared-page ISR fast path. Other virtio
 # devices have independent interrupt status registers.

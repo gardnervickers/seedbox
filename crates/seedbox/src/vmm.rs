@@ -125,6 +125,18 @@ impl VmmExecutor {
         self
     }
 
+    /// Page timer is recorded only when requested; off preserves legacy identities.
+    pub fn with_page_timer(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.profile
+                .semantic_parameters
+                .insert("page_timer".into(), "true".into());
+        } else {
+            self.profile.semantic_parameters.remove("page_timer");
+        }
+        self
+    }
+
     /// Check the existing execution policy without storing inputs or starting guests.
     /// Host observations are the same bounded probe used by execution preflight.
     pub fn doctor(engine: &Path, kernel: &Path, cpu: Option<u32>) -> Result<DoctorReport> {
@@ -411,6 +423,14 @@ fn with_capacity<T>(
         })?);
     }
     check(&reservations)
+}
+
+/// Missing page timer means the legacy port transport.
+pub fn recorded_page_timer(profile: &ExecutionProfile) -> bool {
+    profile
+        .semantic_parameters
+        .get("page_timer")
+        .is_some_and(|v| v == "true")
 }
 
 /// Missing timebase means counter, including records from older engines.
@@ -1595,6 +1615,9 @@ mod linux {
             .arg(request.output.join(MACHINE_OUTPUT_DIR));
         if timebase != Timebase::Counter {
             command.arg("--timebase").arg(timebase.name());
+        }
+        if recorded_page_timer(&backend.profile) {
+            command.arg("--page-timer");
         }
         command.arg("--host-control").arg(endpoint.socket());
         command

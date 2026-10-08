@@ -2310,3 +2310,61 @@ fn replay_refuses_timebase_drift_and_unknown_values_before_execution() {
         }
     }
 }
+
+#[test]
+fn page_timer_is_recorded_only_when_enabled_and_replays_from_the_profile() {
+    use seedbox::{
+        counter::CounterProfile,
+        vmm::{recorded_page_timer, VmmExecutor},
+    };
+    let mut f = Fixture::new();
+    let store = ContentStore::new(f.directory.path().join("store"));
+    let engine = f.directory.path().join("engine");
+    fs::write(&engine, b"fixture engine").unwrap();
+    let executor = VmmExecutor::new(
+        &engine,
+        &store,
+        None,
+        1024,
+        WitnessMode::Exits,
+        CounterProfile::Zen,
+    )
+    .unwrap();
+    f.backend.profile = executor.profile();
+    f.preparer.inputs.profile = executor.profile();
+    let before = f.run();
+    for off in [
+        executor.clone().with_page_timer(false),
+        executor
+            .clone()
+            .with_page_timer(true)
+            .with_page_timer(false),
+    ] {
+        f.backend.profile = off.profile();
+        f.preparer.inputs.profile = off.profile();
+        let run = f.run();
+        assert_eq!(run.record.run_id, before.record.run_id);
+        assert_eq!(
+            serde_json::to_vec(&run.record.identity).unwrap(),
+            serde_json::to_vec(&before.record.identity).unwrap()
+        );
+        assert!(!recorded_page_timer(&off.profile()));
+        assert!(!off.profile().semantic_parameters.contains_key("page_timer"));
+    }
+    let on = executor.with_page_timer(true);
+    f.backend.profile = on.profile();
+    f.preparer.inputs.profile = on.profile();
+    let run = f.run();
+    assert_ne!(run.record.run_id, before.record.run_id);
+    assert_eq!(
+        run.record.identity.inputs.profile.semantic_parameters["page_timer"],
+        "true"
+    );
+    assert!(recorded_page_timer(
+        &inspect(&run.directory).unwrap().identity.inputs.profile
+    ));
+    assert_eq!(
+        f.replay(&run).record.replay.unwrap().status,
+        ReplayStatus::Match
+    );
+}

@@ -499,7 +499,7 @@ mod tests {
         let spec = BootSpec {
             kernel: &kernel, initrd: &[], cmdline: String::new(), mem: INITRD_ADDR + 0x100000,
             rng_seed: [0; 32], mac: None, control_channel: false, disk: None, undo_margin: undo, barrier: false,
-            pv_clock: true,
+            pv_clock: true, page_timer: false,
         };
         let mut m = Machine::new(kvm, "pv-probe", &spec).unwrap();
         let mut r = m.vcpu.get_regs().unwrap();
@@ -507,6 +507,31 @@ mod tests {
         m.vcpu.set_regs(&r).unwrap();
         m.pic.set_masks(0);
         m
+    }
+
+    #[test]
+    #[ignore = "requires KVM"]
+    fn a_page_arm_lowers_the_running_guest_clock_bound() {
+        let kvm = Kvm::new().unwrap();
+        let mut code = Vec::new();
+        // Store a 20 us deadline and lower bound while KVM is running.
+        for (address, value) in [(0xd0000070u32, 20000u32), (0xd0000074, 0), (0xd0000038, 20000)] {
+            code.extend_from_slice(&[0xc7, 0x05]);
+            code.extend_from_slice(&address.to_le_bytes());
+            code.extend_from_slice(&value.to_le_bytes());
+        }
+        code.extend_from_slice(&[0xba, 0x2c, 0x05, 0, 0, 0xb0, 1, 0xee, 0xf4]);
+        let mut m = machine(&kvm, &code, 0);
+        m.page_timer_requested = true;
+        m.abi = super::super::ABI_PAGE_TIMER;
+        m.enable_page_timer();
+        m.pic.set_masks(0xffff); // Retain IRQ0 rather than entering an absent IDT.
+        let mut clock = PvClock::new(Duration::from_millis(10)).unwrap();
+        assert_eq!(m.run_until(&mut clock, 1000000, 0, &mut Vec::new()).unwrap(), Stop::Halted);
+        assert_eq!(m.time, 20000, "yield must use the guest's lowered bound");
+        assert_eq!(m.pit.deadline, None);
+        m.pic.set_masks(0);
+        assert_eq!(m.pic.pending(), Some(0));
     }
 
     /// Run to the first stop under several watchdog periods and undo

@@ -20,7 +20,9 @@ use seedbox::{
     preparation::OciPreparer,
     store::ContentStore,
     templates::Template,
-    vmm::{recorded_counter, recorded_timebase, recorded_torn_writes, VmmExecutor},
+    vmm::{
+        recorded_counter, recorded_page_timer, recorded_timebase, recorded_torn_writes, VmmExecutor,
+    },
     Error, Result,
 };
 use signals::Signals;
@@ -390,6 +392,9 @@ struct RuntimeInputs {
     /// Timebase for guest progress; changes run identity and results.
     #[arg(long, value_enum, default_value_t = TimebaseArg::Counter)]
     timebase: TimebaseArg,
+    /// Arm clockevents through the time page when supported; changes run identity and results.
+    #[arg(long)]
+    page_timer: bool,
     /// Also record and compare every machine's RAM and registers, retaining per-page RAM hashes.
     #[arg(long)]
     full_state: bool,
@@ -415,7 +420,8 @@ impl RuntimeInputs {
         };
         let executor = VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?
             .with_torn_writes(self.torn_writes)
-            .with_timebase(self.timebase.into());
+            .with_timebase(self.timebase.into())
+            .with_page_timer(self.page_timer);
         let preparer = self.preparer(engine, store, scratch, executor.profile())?;
         Ok((preparer, executor))
     }
@@ -775,6 +781,7 @@ fn run(cli: Cli) -> Result<u8> {
                     counter,
                 )?
                 .with_timebase(timebase)
+                .with_page_timer(recorded_page_timer(profile))
                 .with_torn_writes(recorded_torn_writes(profile)?)
                 .with_unqualified_cpu(cpu.allow_unqualified_cpu),
             )?;

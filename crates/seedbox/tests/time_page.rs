@@ -40,6 +40,8 @@ fn kernel_and_vmm_pin_the_agreed_extension_indices() {
         ("syscall_target", "PAGE_SYSCALL_TARGET", 8, 1),
         ("entropy_gen", "PAGE_ENTROPY_GEN", 9, 1),
         ("entropy", "PAGE_ENTROPY", 10, 4),
+        ("timer_deadline", "PAGE_TIMER_DEADLINE", 14, 1),
+        ("capabilities", "PAGE_CAPABILITIES", 15, 1),
     ] {
         assert_eq!(fields[name], (offset, count));
         assert!(MACHINE.contains(&format!("const {constant}: usize = {offset};")));
@@ -57,9 +59,10 @@ fn kernel_and_vmm_pin_the_agreed_extension_indices() {
             }
         }
     }
-    assert_eq!(index, 14);
-    assert!(HEADER.contains("#define SEEDBOX_ABI\t\t3\n"));
+    assert_eq!(index, 16);
+    assert!(HEADER.contains("#define SEEDBOX_ABI\t\t4\n"));
     assert!(MACHINE.contains("pub const ABI_PAGE_RESEED: u64 = 3;"));
+    assert!(MACHINE.contains("pub const ABI_PAGE_TIMER: u64 = 4;"));
 }
 
 #[test]

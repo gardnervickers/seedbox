@@ -36,6 +36,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Connection selectors | disabled; discover and select through the guest control API | `world.connections`, `world.drop_connection` |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
 | Timebase | `counter` (retired guest branches) | `--timebase` (prepare/run/explore) |
+| Page timer | off; ABI-4 clockevent stores when enabled | `--page-timer` (prepare/run/explore) |
 | Exploration count | `1` | `--count` |
 | Exploration workers | `1`, sequential execution | `--workers` (1..32; automatic CPU selection for parallel execution) |
 | Torn disk writes | off (drop all unflushed sectors on crash) | `--torn-writes` |
@@ -456,6 +457,16 @@ are printed as `omitted files: N`; omitted local output is not transferred.
 Existing files/runs are never replaced. `--max-bytes` changes the local transfer
 cap without changing run identity. See [runtime instructions](docs/runtime.md#bundles)
 for bounds and supported formats.
+
+`run`, `prepare` and `explore` accept `--page-timer` (off by default,
+no environment override). An ABI-4 kernel arms one-shot clockevents by writing
+an absolute deadline into the shared time page, avoiding port `0x530` exits.
+The VMM advertises the capability only after the guest announces ABI 4;
+older kernels keep the port path. The requested semantic parameter is retained
+as `page_timer: true` only when enabled. Replay restores it without an override.
+Timer jitter uses the existing seeded stream. This changes enabled-run timing
+and witnesses; omission preserves the existing identity encoding for the same
+engine and kernel inputs.
 
 ## Low-level engine fixtures
 

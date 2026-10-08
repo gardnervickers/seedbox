@@ -59,6 +59,16 @@ semantic profile and the VMM's reported `report.timebase` when available.
 Bundles preserve the timebase. PV uses no PMU counter, but the CLI retains the
 same host admission, CPU/SMT lease and Zen MSR policy for both choices.
 
+`run`, `prepare` and `explore` accept `--page-timer` (off by default,
+no environment override). An ABI-4 kernel arms one-shot clockevents by writing
+an absolute deadline into the shared time page, avoiding port `0x530` exits.
+The VMM advertises the capability only after the guest announces ABI 4;
+older kernels keep the port path. The requested semantic parameter is retained
+as `page_timer: true` only when enabled. Replay restores it without an override.
+Timer jitter uses the existing seeded stream. This changes enabled-run timing
+and witnesses; omission preserves the existing identity encoding for the same
+engine and kernel inputs.
+
 Charged timer I/O retains its full cost across scheduler boundaries; pending
 operations are included in terminal witnesses.
 
