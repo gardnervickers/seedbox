@@ -3,6 +3,7 @@
 
 mod boundary;
 mod control;
+mod triggers;
 mod counter;
 mod devices;
 mod disk;
@@ -322,6 +323,7 @@ impl World {
     /// transit stay queued for the reboot to sort out.
     fn crash(&mut self, m: usize, t: u64) -> Result<(), String> {
         let name = self.machines[m].name.clone();
+        self.control.triggers.reset_source(&name);
         let next = self.machines[m].incarnation.checked_add(1).ok_or("incarnation overflow")?;
         let seed = entropy_seed(self.run_seed, &format!("reboot-entropy/{name}/{next}"));
         let mut fresh = boot_machine(&self.kvm, &name, &self.boot[m], false, seed)?;
@@ -773,9 +775,9 @@ fn release(world: &mut World, cfg: &Value, names: &[String], seed: u64, skew: u6
 }
 
 /// A world parked at its launch barrier, kept so that later seeds start from
-/// it without booting. Faults, control and scenarios are not captured: they
-/// are empty until the release, which builds them from the run seed. Only
-/// the management readiness recorded during boot carries over.
+/// it without booting. The usual boot snapshot has no armed control plan;
+/// readiness carries over and release builds the run plan from its seed. If
+/// triggers are present, preserve their matcher, control and effect state too.
 struct WorldSnapshot {
     machines: Vec<MachineSnapshot>,
     events: Vec<BTreeMap<(u64, u64), Payload>>,
@@ -790,6 +792,8 @@ struct WorldSnapshot {
     semantic_counts: network_counters::NetworkCounters,
     slices: u64,
     readiness: Vec<Value>,
+    control:control::Control,
+    faults:faults::Faults,
 }
 
 impl WorldSnapshot {
@@ -811,6 +815,7 @@ impl WorldSnapshot {
             semantic_counts: world.semantic_counts.clone(),
             slices: world.slices,
             readiness: world.faults.readiness.clone(),
+            control:world.control.clone(),faults:world.faults.clone(),
         })
     }
 
@@ -842,6 +847,7 @@ impl WorldSnapshot {
         world.faults = boot_faults(&names, &self.readiness, world.latency, self.links.clone())?;
         world.faults.connections = self.connections.clone();
         world.control = control::Control::new(&Value::Null, names, world.latency, world.early)?;
+        if !self.control.triggers.records.is_empty() {world.control=self.control.clone();world.faults=self.faults.clone();}
         Ok(pages)
     }
 }
@@ -886,8 +892,9 @@ fn simulate(
             continue;
         }
         let control_boundary = world.control.boundary();
-        world.semantic_counts.advance(key.min(control_boundary).min(world.faults.next_boundary()).min(duration));
-        if control_boundary <= key && control_boundary < duration {
+        let trigger_boundary=world.control.triggers.boundary();
+        world.semantic_counts.advance(key.min(control_boundary).min(trigger_boundary).min(world.faults.next_boundary()).min(duration));
+        if control_boundary <= key && control_boundary <= trigger_boundary && control_boundary < duration {
             if world.machines.iter().any(|m| m.time > control_boundary) {
                 return Err("control boundary is in committed machine past".into());
             }
@@ -900,6 +907,7 @@ fn simulate(
                 .is_some_and(|p| !p.admitted_done && matches!(p.operation,Some(seedbox_control::Operation::Inspect{})))
             {
                 world.control.pending.as_mut().unwrap().result = json!({"services":cfg["control"]["placement"],"machines":world.machines.iter().enumerate().map(|(i,m)|json!({"name":m.name,"state":if matches!(m.state,State::Exited(_)) {format!("{:?}",m.state)} else {world.faults.process_state(i).to_owned()}})).collect::<Vec<_>>(),"active_handles":world.faults.active_handles(),"network_counters":world.counter_snapshot(world.semantic_counts.counts())});
+                if let Some(evidence)=world.control.triggers.evidence()? {world.control.pending.as_mut().unwrap().result["triggers"]=evidence;}
             }
             if let Some(bytes) =
                 world
@@ -911,6 +919,10 @@ fn simulate(
                 world.strict_events[target].insert((control_boundary, world.seq), bytes);
             }
             continue;
+        }
+        if trigger_boundary<=key && trigger_boundary<duration && trigger_boundary<=world.faults.next_boundary() {
+            if world.machines.iter().any(|m|m.time>trigger_boundary) {return Err("trigger boundary is in committed machine past".into())}
+            world.control.triggers.apply_boundary(&mut world.faults,trigger_boundary)?;continue;
         }
         let fault_boundary = world.faults.next_boundary();
         if fault_boundary <= key && fault_boundary < duration {
@@ -964,7 +976,8 @@ fn simulate(
             .min(world.next_event(m))
             .min(duration)
             .min(fault_boundary)
-            .min(control_boundary);
+            .min(control_boundary)
+            .min(trigger_boundary);
         if let Some(t) = fork_at {
             // Stop exactly at the fork time, or as soon after it as owed I/O
             // cost allows.
@@ -978,6 +991,7 @@ fn simulate(
             || fork_at == Some(limit)
             || limit == fault_boundary
             || limit == control_boundary
+            || limit == trigger_boundary
             || world.strict_events[m]
                 .keys()
                 .next()
@@ -988,13 +1002,19 @@ fn simulate(
             world.early
         };
         let plan=(m,world.machines[m].time,limit,horizon,world.next_event(m),fault_boundary,control_boundary,world.machines[m].next_deadline(),world.machines[m].pending_io.as_ref().map_or(0,|p|p.remaining_ns),world.seq);
+        world.machines[m].observe_console=world.control.triggers.observes(&world.machines[m].name);
         let stop = world.machines[m].run_until(&mut world.counter, limit, early, &mut frames)?;
         stop_progress(&mut stalled_plan,plan,world.machines[m].time!=plan.1 || stop!=Stop::Reached)?;
+        if let Some((at,byte))=world.machines[m].committed_console.take() {
+            let max_time=world.machines.iter().map(|m|m.time).max().unwrap_or(0);
+            world.control.triggers.committed(&world.machines[m].name,at,byte,world.control.latency,max_time)?;
+        }
         for (id,at,success) in world.machines[m].fault_effects.drain(..) {
             if id==0 && success {
                 if let Err(error)=world.faults.management_ready(m,at,world.control.latency) {world.faults.error=Some(error);}
             } else {world.faults.effect(m,id,at,success);}
         }
+        if stop==Stop::Exited {for id in world.control.triggers.records.iter().filter_map(|r|r.fault_id) {world.faults.target_exited(id,m,world.machines[m].time);}}
         if stop==Stop::Exited {if let Some(id)=world.control.pending.as_ref().and_then(|p|p.fault) {world.faults.target_exited(id,m,world.machines[m].time);}}
         for (at, line) in world.machines[m]
             .control_requests
@@ -1054,6 +1074,8 @@ fn report(
     let slices = world.slices;
     let cut_off_at=if outcome=="duration" {duration} else if outcome=="end_machine_exited" {end_on.as_ref().and_then(|name|world.machines.iter().find(|m|&m.name==name)).map(|m|m.time).unwrap_or(0)} else {world.machines.iter().map(|m|m.time).max().unwrap_or(0)};
     world.control.cut_off(&world.faults,cut_off_at);
+    world.control.triggers.cut_off(cut_off_at);
+    let trigger_evidence=world.control.triggers.evidence()?;
     let fault_error=world.faults.error.clone().or(world.control.error.clone());
     let mut network_hash = Sha256::new();
     network_hash.update(b"seedbox-network-v1");
@@ -1075,6 +1097,7 @@ fn report(
     for (&pair,_) in legacy_cuts { links::pair_hash(&mut network_hash,pair); }
     let network_witness = network_hash.finalize();
     let mut world_witness = Sha256::new();
+    world.control.triggers.hash_into(&mut world_witness)?;
     // Only a run that uses link policy carries the network witness, so a run
     // without it keeps the world witness it had before link policy existed.
     if world.faults.links.in_use() || world.faults.connections.used {
@@ -1171,7 +1194,7 @@ fn report(
         report.push(row);
     }
     let sim_ns = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
-    Ok(json!({
+    let mut result=json!({
         "report_version": 1,
         "seed": seed,
         "counter_profile": profile::host()?.name,
@@ -1190,7 +1213,9 @@ fn report(
         "rejected_fault_effects":world.faults.rejected_effects,"management_readiness":world.faults.readiness,
         "in_flight_policy":"retain_send_time_decisions; cuts_dominate_shapes",
         "machines": report,
-    }))
+    });
+    if let Some(evidence)=trigger_evidence {result["triggers"]=evidence;}
+    Ok(result)
 }
 
 fn main() {
@@ -1256,3 +1281,6 @@ mod progress_tests {
         assert!(stop_progress(&mut previous,delivered,false).is_ok());
     }
 }
+
+#[cfg(test)]
+mod trigger_world_tests;

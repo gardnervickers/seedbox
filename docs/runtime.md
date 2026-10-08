@@ -497,8 +497,8 @@ reveals the previous layer, then the baseline, then global latency/jitter with z
 loss where no baseline exists. Any active partition covering a pair dominates
 all shapes. Inspect includes both kinds in `active_handles`.
 
-At a boundary T every machine reaches T before control admission and faults in
-ID order, followed by sends at T or later. Routing fixes each candidate's loss
+At a boundary T every machine reaches T before control admission, trigger effects
+in arm order, and faults in ID order, followed by sends at T or later. Routing fixes each candidate's loss
 and arrival at send time; later shaping or healing retains in-flight decisions.
 Broadcast expands to other machines in ascending index order. Cuts consume no
 randomness; every other candidate consumes one independent per-pair loss draw
@@ -529,13 +529,14 @@ infrastructure state without packet contents or application schemas. This VMM
 change creates a new engine identity; hardware/replay qualification is separate
 from portable policy tests.
 
-Faults and control requests that take effect at the same simulated time T are
-ordered against sends as follows. The world applies a boundary at T only once
-every machine has reached T, so a machine that is still running before T keeps
-sending under the earlier network state, even when another machine is already
-waiting at T. At T, control admission and effects come first, then faults in
-ID order, and only then does any machine run, so every frame sent at T or
-later sees the new state. A frame's partition decision and arrival time are
+Faults, triggers and control requests that take effect at the same simulated
+time T are ordered against sends as follows. The world applies a boundary at T
+only once every machine has reached T, so a machine that is still running before
+T keeps sending under the earlier network state, even when another machine is already
+waiting at T. At T, control admission and effects come first, then trigger
+effects in arm ID order (taking the next fault IDs), then faults in ID order,
+and only then does any machine run, so every frame sent at T or later sees the
+new state. A frame's partition decision and arrival time are
 fixed when it is sent; a later partition or heal never changes a frame already
 in flight. A slice that runs up to a boundary always ends before the guest can
 send at the boundary itself, so no frame is ever stamped at or after a boundary
@@ -792,3 +793,12 @@ match the engine; admission adds PERF_FLAG_FD_CLOEXEC8 rather than engineopen0
 solely to protect descriptor inheritance. It never enables, maps or reads the
 guest event. Source tests and warned Intel opt-in are not Intel qualification or
 a determinism guarantee.
+
+## Committed console triggers
+
+The development engine implements bounded, exactly-once console marker triggers
+through the guest control API. Arm/cancel admission, match deadlines, future
+causal effect barriers, snapshot state and witness evidence are specified in
+[the trigger contract](triggers.md). No trigger ever armed adds no report fields,
+witness bytes or console stopping points. This changes the engine and requires
+`--allow-dev-engine`; AMD KVM validation remains outstanding.
