@@ -22,3 +22,5 @@ pub mod network_counters;
 pub mod virtqueue;
 
 pub mod virtio_mmio;
+
+pub mod virtio_console;

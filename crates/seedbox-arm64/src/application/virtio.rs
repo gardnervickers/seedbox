@@ -2,11 +2,13 @@
 //! Every DMA span and descriptor chain is checked before a device effect.
 use super::Event;
 use crate::{disk::Disk, Result, RAM_BASE};
+use seedbox_engine_core::virtio_console::{Console, Policy as ConsolePolicy};
 use std::collections::VecDeque;
 
 const CHAIN_LIMIT: usize = 4 << 20;
 const NET_HEADER: usize = 12;
 
+#[cfg(test)]
 fn u16_at(m: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes(m[offset..offset + 2].try_into().expect("validated DMA"))
 }
@@ -49,15 +51,7 @@ pub enum Model {
         mac: [u8; 6],
         backlog: VecDeque<Vec<u8>>,
     },
-    Console {
-        device_ready: bool,
-        port_ready: bool,
-        guest_open: bool,
-        rx: VecDeque<u8>,
-        control_rx: VecDeque<Vec<u8>>,
-        tx_bytes: u64,
-        rx_dma_bytes: u64,
-    },
+    Console(Console),
     Block(Disk),
 }
 pub struct Virtio {
@@ -75,18 +69,7 @@ impl Virtio {
         )
     }
     pub fn console() -> Self {
-        Self::new(
-            Model::Console {
-                device_ready: false,
-                port_ready: false,
-                guest_open: false,
-                rx: VecDeque::new(),
-                control_rx: VecDeque::new(),
-                tx_bytes: 0,
-                rx_dma_bytes: 0,
-            },
-            4,
-        )
+        Self::new(Model::Console(Console::new(ConsolePolicy::Application)), 4)
     }
     pub fn block(disk: Disk) -> Self {
         Self::new(Model::Block(disk), 1)
@@ -101,7 +84,7 @@ impl Virtio {
                 device_id: 2,
                 features: [1 << 9, 1],
             },
-            Model::Console { .. } => Spec {
+            Model::Console(_) => Spec {
                 device_id: 3,
                 features: [2, 1],
             },
@@ -121,17 +104,7 @@ impl Virtio {
             Model::Net { mac, backlog } => {
                 serde_json::json!({"kind":"net","mac":mac,"backlog":backlog})
             }
-            Model::Console {
-                device_ready,
-                port_ready,
-                guest_open,
-                rx,
-                control_rx,
-                tx_bytes,
-                rx_dma_bytes,
-            } => {
-                serde_json::json!({"kind":"console","device_ready":device_ready,"port_ready":port_ready,"guest_open":guest_open,"rx":rx,"control_rx":control_rx,"tx_bytes":tx_bytes,"rx_dma_bytes":rx_dma_bytes})
-            }
+            Model::Console(console) => console.projection(),
             Model::Block(disk) => serde_json::json!({"kind":"block","disk":disk.digest()}),
         };
         let bytes =
@@ -163,7 +136,7 @@ impl Virtio {
     fn config_byte(&self, offset: u64) -> u8 {
         match &self.model {
             Model::Net { mac, .. } => mac.get(offset as usize).copied().unwrap_or(0),
-            Model::Console { .. } => {
+            Model::Console(_) => {
                 if offset == 4 {
                     1
                 } else {
@@ -195,7 +168,7 @@ impl Virtio {
                 let old = std::mem::replace(self, Self::console());
                 *self = match old.model {
                     Model::Net { mac, .. } => Self::net(mac),
-                    Model::Console { .. } => Self::console(),
+                    Model::Console(_) => Self::console(),
                     Model::Block(disk) => Self::block(disk),
                 };
             }
@@ -206,10 +179,12 @@ impl Virtio {
         if index >= self.transport.queues.len() {
             return Err("virtio notification queue out of range".into());
         }
+        if let Model::Console(console) = &mut self.model {
+            let output = console.notify(&mut self.transport, memory, RAM_BASE, index, |_, _| {})?;
+            return Ok(output.payloads.into_iter().map(Event::Control).collect());
+        }
         let mut events = Vec::new();
-        if matches!(self.model, Model::Net { .. }) && index == 0
-            || matches!(self.model, Model::Console { .. }) && matches!(index, 0 | 2)
-        {
+        if matches!(self.model, Model::Net { .. }) && index == 0 {
             self.drain(memory)?;
             return Ok(events);
         }
@@ -228,56 +203,7 @@ impl Virtio {
                     }
                     0
                 }
-                Model::Console {
-                    device_ready,
-                    port_ready,
-                    guest_open,
-                    control_rx,
-                    tx_bytes,
-                    ..
-                } => {
-                    let bytes = chain.read(memory)?;
-                    if bytes.len() > 65536 {
-                        return Err("console transmit chain too large".into());
-                    }
-                    if index == 1 {
-                        *tx_bytes = tx_bytes
-                            .checked_add(bytes.len() as u64)
-                            .ok_or("control transmit byte counter overflow")?;
-                        events.push(Event::Control(bytes));
-                    } else {
-                        if bytes.len() != 8 {
-                            return Err("invalid console control packet length".into());
-                        }
-                        let id = u32_at(&bytes, 0);
-                        let event = u16_at(&bytes, 4);
-                        let value = u16_at(&bytes, 6);
-                        let packet = |event: u16, value: u16, data: &[u8]| {
-                            let mut b = 0u32.to_le_bytes().to_vec();
-                            b.extend(event.to_le_bytes());
-                            b.extend(value.to_le_bytes());
-                            b.extend(data);
-                            b
-                        };
-                        match (id, event, value) {
-                            (u32::MAX, 0, 1) if !*device_ready => {
-                                *device_ready = true;
-                                control_rx.push_back(packet(1, 1, &[]));
-                            }
-                            (0, 3, 1) if *device_ready && !*port_ready => {
-                                *port_ready = true;
-                                control_rx.push_back(packet(7, 1, b"seedbox"));
-                                control_rx.push_back(packet(6, 1, &[]));
-                            }
-                            (0, 6, 0 | 1) if *port_ready => *guest_open = value == 1,
-                            _ => return Err("invalid console control handshake".into()),
-                        }
-                        if control_rx.len() > 16 {
-                            return Err("console control backlog full".into());
-                        }
-                    }
-                    0
-                }
+                Model::Console(_) => unreachable!("console handled above"),
                 Model::Block(disk) => block_request(disk, memory, &chain)?,
             };
             self.transport.queues[index].complete(memory, &chain, written);
@@ -302,36 +228,7 @@ impl Virtio {
                     self.transport.isr |= 1;
                 }
             }
-            Model::Console {
-                rx,
-                control_rx,
-                rx_dma_bytes,
-                ..
-            } => {
-                while let Some(bytes) = control_rx.front() {
-                    let Some(chain) = self.transport.queues[2].chain(memory)? else {
-                        break;
-                    };
-                    chain.write(memory, bytes)?;
-                    self.transport.queues[2].complete(memory, &chain, bytes.len());
-                    control_rx.pop_front();
-                    self.transport.isr |= 1;
-                }
-                while !rx.is_empty() {
-                    let Some(chain) = self.transport.queues[0].chain(memory)? else {
-                        break;
-                    };
-                    let count = rx.len().min(chain.len);
-                    let bytes = rx.iter().take(count).copied().collect::<Vec<_>>();
-                    chain.write(memory, &bytes)?;
-                    self.transport.queues[0].complete(memory, &chain, count);
-                    *rx_dma_bytes = rx_dma_bytes
-                        .checked_add(count as u64)
-                        .ok_or("control DMA byte counter overflow")?;
-                    rx.drain(..count);
-                    self.transport.isr |= 1;
-                }
-            }
+            Model::Console(_) => unreachable!("console owns its drain"),
             Model::Block(_) => {}
         }
         Ok(())
@@ -347,11 +244,9 @@ impl Virtio {
                 }
                 backlog.push_back(bytes.to_vec());
             }
-            Model::Console { rx, .. } => {
-                if rx.len().checked_add(bytes.len()).is_none_or(|n| n > 65536) {
-                    return Err("console receive backlog full".into());
-                }
-                rx.extend(bytes);
+            Model::Console(console) => {
+                console.receive(&mut self.transport, memory, RAM_BASE, bytes, |_, _| {})?;
+                return Ok(true);
             }
             Model::Block(_) => return Err("block device cannot receive a frame".into()),
         }
@@ -366,15 +261,14 @@ impl Virtio {
     }
     pub fn control_channel(&self) -> Option<super::ControlChannel> {
         match &self.model {
-            Model::Console {
-                tx_bytes,
-                rx_dma_bytes,
-                ..
-            } => Some(super::ControlChannel {
-                transport: "virtio-console-v1".into(),
-                tx_bytes: *tx_bytes,
-                rx_dma_bytes: *rx_dma_bytes,
-            }),
+            Model::Console(console) => {
+                let (tx_bytes, rx_dma_bytes) = console.counters();
+                Some(super::ControlChannel {
+                    transport: "virtio-console-v1".into(),
+                    tx_bytes,
+                    rx_dma_bytes,
+                })
+            }
             _ => None,
         }
     }

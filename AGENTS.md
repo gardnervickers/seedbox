@@ -52,7 +52,7 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 
 `crates/seedbox-engine-core` owns deterministic RNG, disk, links, connection,
 trigger, fault, control and network-counter policies, plus bounded split-ring
-validation/completion and modern virtio MMIO register transitions. It has no CPU backend or
+validation/completion, modern virtio MMIO register transitions and the console model. It has no CPU backend or
 UART dependency. Adapters pass actual transmitted bytes to its management framer;
 legacy PC divisor-register writes remain in `seedbox-vmm/src/management_uart.rs`.
 Keep mechanical policy moves separate from behavioral changes.
@@ -65,8 +65,11 @@ or reorder those entries. The shared MMIO transport serves ARM devices and KVM
 console/block; its compatibility profiles are documented in
 `docs/virtio-transport.md`. Preserve error precedence, cursor resets and the
 explicit ARM state projection. Adapters handle typed Notify/Reset effects and
-retain model-reset ownership. KVM net and all device models remain in adapters
-until their separately reviewed moves.
+retain model-reset ownership. The shared console owns handshake, backlogs, counters
+and queue processing; adapters supply GPA base, dirty callbacks and event projection.
+Preserve partial-error mutation and IRQ timing documented in `docs/virtio-console.md`.
+KVM net and the block/network models remain in adapters until their separately
+reviewed moves.
 
 The standalone backends compile the canonical sources through their in-workspace
 `engine-core` packages, with distinct package names just like their control
