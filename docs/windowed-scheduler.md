@@ -1,11 +1,17 @@
 # Windowed scheduler (experimental)
 
-Status: experimental, unqualified. `seedbox-engine-core` holds the
-planner and executors (`src/window/`) and the adapter over the shared
-world (`src/world_windowed.rs`), generic over `WorldMachine`. The x86 VMM
-runs static worlds through it with the engine flags `--scheduler windowed`,
-`--machine-workers N` and `--machine-cpus`; the `seedbox` CLI does not pass
-them yet. Without the flag, the VMM's witnesses match the preceding engine.
+Status: the default scheduler for static worlds, unqualified.
+`seedbox-engine-core` holds the planner and executors (`src/window/`) and
+the adapter over the shared world (`src/world_windowed.rs`), generic over
+`WorldMachine`. The x86 VMM runs every world the round model supports
+(no faults, control, scenarios, `kill_restart`, boot forks or checkpoints)
+through it, and the legacy loop otherwise; the choice depends only on the
+world's inputs, so a replay makes the same one. `--scheduler legacy` forces
+the old loop and reproduces the preceding engine's witnesses;
+`--scheduler windowed` fails instead of falling back. `--machine-workers N`
+and `--machine-cpus` set the thread count and pinning (performance only);
+the `seedbox` CLI does not pass them yet, so CLI runs are windowed on one
+thread. `vmm.json` names the scheduler that ran under `scheduler.name`.
 
 The question this prototype answers: can several machines of one world run
 concurrently, with results identical for any worker count, and does that
@@ -114,8 +120,8 @@ and 2 workers and reversed order (PV: 0.43 s serial, 0.23 s with two
 threads). The windowed witnesses differ from the old scheduler's, as
 expected for a different scheduler.
 
-- **Default path unchanged.** The same worlds without `--scheduler` give the
-  same world witnesses as the VMM at `6d4f443` (#169's head), for PV and
+- **Legacy path unchanged.** The same worlds with `--scheduler legacy` give
+  the same world witnesses as the VMM at `6d4f443` (#169's head), for PV and
   counter.
 - **PV:** windowed execution costs nothing serially, and four threads run
   3.3× faster than the old scheduler.
@@ -188,12 +194,12 @@ It works for any `WorldMachine`; the parallel path needs `M: Send`.
 - **Scope.** Runtime control, faults, scenarios, `kill_restart`, boot forks
   and checkpoints are rejected before boot. Console triggers, control
   requests and fault effects fail the run if they appear.
-  `--machine-workers` and `--machine-cpus` require `--scheduler windowed`.
+  `--machine-workers` and `--machine-cpus` are rejected with
+  `--scheduler legacy`.
 
 ## Remaining plan
 
-1. **CLI.** `--scheduler windowed` becomes part of run identity and is
-   inherited by replay. `--machine-workers N` is performance-only and
+1. **CLI.** `--machine-workers N` is performance-only and
    overridable on replay. The executor leases `N` SMT-protected cores for
    the counter timebase, or any `N` CPUs for PV, and passes `--machine-cpus`.
    Neither can be combined with `explore --workers > 1` or with the
