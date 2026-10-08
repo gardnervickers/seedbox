@@ -151,6 +151,72 @@ impl<'a, M: WorldMachine> Guest<'a, M> {
             self.console.push((at, byte));
         }
     }
+
+    fn push(
+        &self,
+        a: &sw::Assignment<Msg>,
+        outputs: &mut Vec<sw::Output<Msg>>,
+        at: u64,
+        payload: Msg,
+    ) -> Result<(), String> {
+        if outputs.len() == a.max_outputs {
+            return Err(format!(
+                "{}: more than {} outputs in one round",
+                self.m.name, a.max_outputs
+            ));
+        }
+        outputs.push(sw::Output {
+            sent_at: at,
+            payload,
+        });
+        Ok(())
+    }
+
+    /// Deliver the assigned events the machine's time has reached, in key
+    /// order. With `slack`, a non-strict event may arrive `delivery_early`
+    /// before its time; a strict one never does.
+    fn deliver(
+        &mut self,
+        a: &sw::Assignment<Msg>,
+        i: &mut usize,
+        outputs: &mut Vec<sw::Output<Msg>>,
+        slack: bool,
+    ) -> Result<(), String> {
+        while let Some(e) = a.incoming.get(*i).filter(|e| {
+            let early = if slack && !e.payload.strict() {
+                a.delivery_early
+            } else {
+                0
+            };
+            e.key.at <= self.m.time.saturating_add(early)
+        }) {
+            let now = self.m.time;
+            match &e.payload {
+                Msg::Frame { from, bytes } => {
+                    let accepted = self.m.deliver_frame(bytes)?;
+                    self.received.push((e.key.at, *from, accepted));
+                }
+                Msg::Serial(bytes) => self.m.deliver_serial(bytes)?,
+                Msg::Control(bytes) => {
+                    if self.m.has_control() {
+                        self.m.deliver_control(bytes)?;
+                    } else {
+                        self.m.deliver_serial(bytes)?;
+                    }
+                    if bytes.starts_with(b"SBX_REPLY1 ") {
+                        self.replies.push(now);
+                    }
+                }
+                Msg::Partition { .. } => {
+                    // Partition state is consulted when the sender routes:
+                    // the coordinator applies it in order with the frames.
+                    self.push(a, outputs, now, e.payload.clone())?;
+                }
+            }
+            *i += 1;
+        }
+        Ok(())
+    }
 }
 
 impl<M: WorldMachine> sw::Machine<Msg> for Guest<'_, M> {
@@ -169,19 +235,6 @@ impl<M: WorldMachine> sw::Machine<Msg> for Guest<'_, M> {
         let mut exited = None;
         let mut suspended = false;
         let mut stalled = None;
-        let push = |outputs: &mut Vec<sw::Output<Msg>>, at: u64, payload: Msg, name: &str| {
-            if outputs.len() == a.max_outputs {
-                return Err(format!(
-                    "{name}: more than {} outputs in one round",
-                    a.max_outputs
-                ));
-            }
-            outputs.push(sw::Output {
-                sent_at: at,
-                payload,
-            });
-            Ok(())
-        };
         loop {
             if matches!(self.m.state, State::Exited(_)) {
                 exited = Some(self.m.time);
@@ -198,6 +251,10 @@ impl<M: WorldMachine> sw::Machine<Msg> for Guest<'_, M> {
                 suspended = true;
                 break;
             }
+            // An event the machine has already passed is due now, whatever its
+            // state and even when it stands at or past the slice end: a
+            // skewed release or a resumed segment can leave it there.
+            self.deliver(a, &mut i, &mut outputs, false)?;
             if self.m.state == State::Halted {
                 // Wake at the machine's own next action or the next event's
                 // nominal time, as the reference scheduler's key does. An
@@ -212,39 +269,7 @@ impl<M: WorldMachine> sw::Machine<Msg> for Guest<'_, M> {
             if self.m.time >= slice_end {
                 break;
             }
-            while let Some(e) = a.incoming.get(i).filter(|e| {
-                let early = if e.payload.strict() {
-                    0
-                } else {
-                    a.delivery_early
-                };
-                e.key.at <= self.m.time.saturating_add(early)
-            }) {
-                let now = self.m.time;
-                match &e.payload {
-                    Msg::Frame { from, bytes } => {
-                        let accepted = self.m.deliver_frame(bytes)?;
-                        self.received.push((e.key.at, *from, accepted));
-                    }
-                    Msg::Serial(bytes) => self.m.deliver_serial(bytes)?,
-                    Msg::Control(bytes) => {
-                        if self.m.has_control() {
-                            self.m.deliver_control(bytes)?;
-                        } else {
-                            self.m.deliver_serial(bytes)?;
-                        }
-                        if bytes.starts_with(b"SBX_REPLY1 ") {
-                            self.replies.push(now);
-                        }
-                    }
-                    Msg::Partition { .. } => {
-                        // Partition state is consulted when the sender routes:
-                        // the coordinator applies it in order with the frames.
-                        push(&mut outputs, now, e.payload.clone(), &self.m.name)?;
-                    }
-                }
-                i += 1;
-            }
+            self.deliver(a, &mut i, &mut outputs, true)?;
             let (event, strict) = a
                 .incoming
                 .get(i)
@@ -276,15 +301,8 @@ impl<M: WorldMachine> sw::Machine<Msg> for Guest<'_, M> {
             self.drain();
             let now = self.m.time;
             for bytes in frames.drain(..) {
-                push(
-                    &mut outputs,
-                    now,
-                    Msg::Frame {
-                        from: self.index,
-                        bytes,
-                    },
-                    &self.m.name,
-                )?;
+                let from = self.index;
+                self.push(a, &mut outputs, now, Msg::Frame { from, bytes })?;
             }
             match stop {
                 Stop::Exited => {

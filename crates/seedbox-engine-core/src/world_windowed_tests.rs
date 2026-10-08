@@ -880,3 +880,23 @@ fn a_fault_that_fails_ends_the_run_with_its_evidence() {
     // The round holding the failed effect commits; nothing runs after it.
     assert!(w.machines.iter().all(|m| m.time == 26), "{:?}", trace(&w));
 }
+
+#[test]
+fn an_event_already_due_is_delivered_even_when_the_machine_stands_past_the_slice_end() {
+    // A skewed release can leave a machine past a queued event's time. Its
+    // first round may assign it a slice it has already passed; the overdue
+    // event is still delivered there, at the machine's time, in every state.
+    for halted in [false, true] {
+        let mut w = world(&["a", "b"]);
+        // latency 10, early 3: round [21, 28) ends early at 25; `a` stands at 26.
+        w.machines[0].common.time = 26;
+        if halted {
+            w.machines[0].common.state = State::Halted;
+        }
+        w.schedule(0, 12, Payload::Serial(b"late".to_vec()));
+        assert_eq!(run(&mut w, 40, None).unwrap(), "duration");
+        let t = machine_trace(&w, "a");
+        assert_eq!(t[0], "a:serial/late:26", "{halted}: {t:?}");
+        assert!(w.events[0].is_empty());
+    }
+}
