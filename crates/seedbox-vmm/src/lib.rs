@@ -48,11 +48,14 @@ pub struct PerformanceOptions {
     /// None selects the adaptive stepping margin.
     pub margin: Option<u64>,
     pub pv_watchdog_ms: u64,
+    /// Windowed scheduler testing only: delay machine i's runs by
+    /// (machines - i) times this many microseconds, so later machines finish first.
+    pub windowed_skew_us: u64,
 }
 
 impl Default for PerformanceOptions {
     fn default() -> Self {
-        Self { undo_margin: 256, margin: None, pv_watchdog_ms: 20 }
+        Self { undo_margin: 256, margin: None, pv_watchdog_ms: 20, windowed_skew_us: 0 }
     }
 }
 
@@ -101,6 +104,13 @@ pub struct WorkerOptions {
     pub trace: bool,
     pub performance: PerformanceOptions,
     pub console_trace: Option<ConsoleTraceCallback>,
+    /// Experimental: run the world in rounds (docs/windowed-scheduler.md).
+    /// Part of the run's identity.
+    pub windowed: bool,
+    /// Windowed machine threads (performance only).
+    pub machine_workers: usize,
+    /// One CPU per machine thread, in thread order (performance only).
+    pub machine_cpus: Vec<usize>,
 }
 
 impl WorkerOptions {
@@ -129,8 +139,26 @@ impl WorkerOptions {
         if args.iter().any(|a| a == "--checkpoint-at-ns") && checkpoint_at_ns.is_none() {
             return Err("--checkpoint-at-ns requires comma-separated unsigned nanoseconds".into());
         }
+        let windowed = match arg(args, "--scheduler").as_deref() {
+            None => false,
+            Some("windowed") => true,
+            Some(other) => return Err(format!("--scheduler {other}: expected windowed")),
+        };
+        let machine_workers = match arg(args, "--machine-workers") {
+            None => 1,
+            Some(_) if !windowed => return Err("--machine-workers requires --scheduler windowed".into()),
+            Some(n) => n.parse().ok().filter(|n| (1..=64).contains(n)).ok_or("--machine-workers: use 1..64")?,
+        };
+        let machine_cpus: Vec<usize> = match arg(args, "--machine-cpus") {
+            None => Vec::new(),
+            Some(_) if !windowed => return Err("--machine-cpus requires --scheduler windowed".into()),
+            Some(list) => list.split(',').map(|c| c.parse().map_err(|e| format!("--machine-cpus: {e}"))).collect::<Result<_, _>>()?,
+        };
+        if !machine_cpus.is_empty() && machine_cpus.len() != machine_workers {
+            return Err("--machine-cpus: give one CPU per machine worker".into());
+        }
         Ok(Self {
-            config, seed, fork_seeds, out, pv_clock, log_chunk_limit, checkpoint_at_ns,
+            config, seed, fork_seeds, out, pv_clock, log_chunk_limit, checkpoint_at_ns, windowed, machine_workers, machine_cpus,
             page_timer: args.iter().any(|a| a == "--page-timer"),
             deferred_tx: args.iter().any(|a| a == "--deferred-tx"),
             digest: args.iter().any(|a| a == "--digest"),
@@ -273,6 +301,7 @@ fn boot_machine(kvm: &kvm_ioctls::Kvm, name: &str, b: &BootInputs, barrier: bool
 }
 
 
+use seedbox_engine_core::world_windowed;
 use seedbox_engine_core::world::{self as world_core, Payload, entropy_seed, boot_faults, check_plan_after, arm_seed};
 type World = world_core::World<Machine>;
 type WorldSnapshot = world_core::WorldSnapshot<Machine>;
@@ -288,6 +317,38 @@ fn simulate_to(world:&mut World,cfg:&Value,duration:u64,end_on:&Option<String>,f
         if let Some(control)=host_control {control.boundary().map_err(|e|format!("host control: {e}"))?;}
         Ok(())
     })
+}
+fn simulate_windowed(world:&mut World,duration:u64,end_on:&Option<String>,options:&WorkerOptions,host_control:&mut Option<host_control::HostControl>)->Result<(&'static str,Value),String> {
+    let mut boundary=|| {
+        if let Some(control)=host_control.as_mut() {control.boundary().map_err(|e|format!("host control: {e}"))?;}
+        Ok(())
+    };
+    let skew=std::time::Duration::from_micros(options.performance.windowed_skew_us);
+    if options.machine_workers<=1 {
+        return world_windowed::simulate(world,duration,end_on,skew,&mut boundary);
+    }
+    // Each pool thread opens its own clock: the counter counts that thread's
+    // guest execution, and the PV watchdog that thread's CPU time.
+    let pv=matches!(world.clock,Clock::Pv(_));
+    let watchdog=std::time::Duration::from_millis(options.performance.pv_watchdog_ms.max(1));
+    let cpus=&options.machine_cpus;
+    let workers=world_windowed::Workers{count:options.machine_workers,skew};
+    world_windowed::simulate_parallel(world,duration,end_on,workers,|w| {
+        if let Some(&cpu)=cpus.get(w) {pin(cpu)?;}
+        Ok(if pv {Clock::Pv(PvClock::new(watchdog)?)} else {Clock::Counter(Counter::new()?)})
+    },&mut boundary)
+}
+
+/// Pin the calling thread to one CPU.
+fn pin(cpu:usize)->Result<(),String> {
+    unsafe {
+        let mut set:libc::cpu_set_t=std::mem::zeroed();
+        libc::CPU_SET(cpu,&mut set);
+        if libc::sched_setaffinity(0,std::mem::size_of_val(&set),&set)!=0 {
+            return Err(format!("pin machine worker to CPU {cpu}: {}",std::io::Error::last_os_error()));
+        }
+    }
+    Ok(())
 }
 use world_core::reseed_checkpoint;
 #[cfg(test)]
@@ -329,6 +390,9 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
     )
     .map_err(|e| format!("config: {e}"))?;
     let disk_fault_model = disk::parse_disk_fault_model(&cfg["disk_loss"])?;
+    if options.windowed {
+        world_windowed::check_supported(&cfg, !options.fork_seeds.is_empty() || options.checkpoint_at_ns.is_some())?;
+    }
     let base = config_path
         .parent()
         .unwrap()
@@ -569,6 +633,13 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
             return Ok(json!({"report_version":1,"parent_identity":parent,"checkpoints":reports}));
         }
         let started = Instant::now();
+        if options.windowed {
+            let (outcome, evidence) = simulate_windowed(&mut world, duration, &end_on, options, &mut host_control)?;
+            let host_seconds = started.elapsed().as_secs_f64();
+            let mut r = report(&mut world, outcome, seed, &kills, host_seconds, digest, &out, duration, &end_on)?;
+            r["scheduler"] = evidence;
+            return Ok(r);
+        }
         let outcome = simulate(&mut world, &cfg, duration, &end_on, None, &mut host_control)?;
         let host_seconds = started.elapsed().as_secs_f64();
         return report(&mut world, outcome, seed, &kills, host_seconds, digest, &out, duration, &end_on);

@@ -448,7 +448,7 @@ impl<M: WorldMachine> World<M> {
         Ok(cutoff)
     }
 
-    fn count_link(&mut self, at: u64, from: usize, to: usize, outcome: usize) {
+    pub(crate) fn count_link(&mut self, at: u64, from: usize, to: usize, outcome: usize) {
         self.link_counts.entry((from, to)).or_default()[outcome] += 1;
         self.semantic_counts.record(at, from, to, outcome);
     }
