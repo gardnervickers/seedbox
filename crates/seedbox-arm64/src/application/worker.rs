@@ -160,6 +160,7 @@ pub struct Request {
     pub operation: Operation,
 }
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum Answer {
     Ready,
     Advanced {
@@ -167,6 +168,7 @@ pub enum Answer {
         time_ns: u64,
         events: Vec<Event>,
         console: Vec<u8>,
+        log_chunks: Vec<super::log_capture::Chunk>,
     },
     Accepted(bool),
     Evidence(Evidence),
@@ -314,6 +316,7 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                         time_ns: vm.time_ns(),
                         events: vm.take_events(),
                         console,
+                        log_chunks: vm.take_log_chunks(),
                     })
                 }
                 Operation::Frame(bytes) => {
@@ -774,6 +777,7 @@ impl OwnedWorker {
                     time_ns,
                     console,
                     events,
+                    log_chunks,
                 } = &response.answer
                 else {
                     unreachable!()
@@ -783,6 +787,25 @@ impl OwnedWorker {
                         "worker slice exceeds hard limit or disagrees with observation".into(),
                     );
                 }
+                let management = events.iter().try_fold(0usize, |length, event| {
+                    length
+                        .checked_add(match event {
+                            Event::Control(bytes) => bytes.len(),
+                            _ => 0,
+                        })
+                        .ok_or("worker management output length overflow")
+                })?;
+                super::log_capture::validate(
+                    log_chunks,
+                    console.len(),
+                    management,
+                    self.observation
+                        .as_ref()
+                        .ok_or("missing previous worker observation")?
+                        .time_ns,
+                    *time_ns,
+                    *observe_console,
+                )?;
                 let stop_valid = match stop {
                     MachineStop::Horizon { time_ns: t } => {
                         *t == *time_ns

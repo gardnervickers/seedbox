@@ -1,4 +1,5 @@
 //! Application-only device personality, separate from the accepted PV fixture.
+pub mod log_capture;
 pub mod virtio;
 pub mod worker;
 pub mod world;

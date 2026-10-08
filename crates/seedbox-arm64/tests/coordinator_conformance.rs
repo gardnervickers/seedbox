@@ -315,6 +315,75 @@ fn boot_inputs(fixture: &Fixture) -> worker::Boot {
     }
 }
 #[test]
+fn worker_logs_keep_first_commit_time_without_console_observation_stops() {
+    use seedbox_arm64::application::log_capture::{Chunk, Stream};
+    ACTIONS.with(|actions| {
+        *actions.borrow_mut() = [
+            Action::Handshake(5),
+            Action::Console(6, b'A'),
+            Action::Console(7, b'B'),
+            Action::Yield,
+            Action::Console(12, b'C'),
+            Action::Yield,
+        ]
+        .into();
+    });
+    let fixture = Fixture::new();
+    let id = identity("a", 1, 0);
+    let (result, replies) = serve_requests(vec![
+        request(
+            0,
+            id.clone(),
+            worker::Operation::Boot(boot_inputs(&fixture)),
+        ),
+        request(
+            1,
+            id.clone(),
+            worker::Operation::Advance {
+                hard_limit: 10,
+                early_slack: 3,
+                observe_console: false,
+            },
+        ),
+        request(
+            2,
+            id,
+            worker::Operation::Advance {
+                hard_limit: 20,
+                early_slack: 0,
+                observe_console: false,
+            },
+        ),
+    ]);
+    result.unwrap();
+    for (reply, expected_time, expected_bytes, first_time) in [
+        (&replies[1], 10, b"AB".as_slice(), 6),
+        (&replies[2], 20, b"C".as_slice(), 12),
+    ] {
+        let worker::Answer::Advanced {
+            time_ns,
+            console,
+            log_chunks,
+            ..
+        } = &reply.answer
+        else {
+            panic!("wrong answer");
+        };
+        assert_eq!(*time_ns, expected_time);
+        assert_eq!(console, expected_bytes);
+        assert_eq!(
+            log_chunks,
+            &[Chunk {
+                stream: Stream::Console,
+                time_ns: first_time,
+                offset: 0,
+                length: expected_bytes.len() as u64
+            }]
+        );
+    }
+}
+
+#[test]
 fn observed_console_stops_at_first_committed_byte_without_consuming_the_next() {
     ACTIONS.with(|actions| {
         *actions.borrow_mut() = [
@@ -367,9 +436,25 @@ fn boot_reply() -> Value {
         "observation":initial,"answer":"Ready"})
 }
 fn advance_reply(time: u64, stop: Value, console: &[u8], events: Value) -> Value {
+    let management: usize = events
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|event| event.get("Control").and_then(Value::as_array))
+        .map(Vec::len)
+        .sum();
+    let mut log_chunks = Vec::new();
+    if !console.is_empty() {
+        log_chunks
+            .push(json!({"stream":"Console","time_ns":time,"offset":0,"length":console.len()}));
+    }
+    if management != 0 {
+        log_chunks
+            .push(json!({"stream":"Management","time_ns":time,"offset":0,"length":management}));
+    }
     json!({"sequence":1,"before":identity("a",1,0),"after":identity("a",1,0),
         "observation":observation(time),"answer":{"Advanced":{
-            "stop":stop,"time_ns":time,"events":events,"console":console}}})
+            "stop":stop,"time_ns":time,"events":events,"console":console,"log_chunks":log_chunks}}})
 }
 fn horizon_reply() -> Value {
     advance_reply(10, json!({"Horizon":{"time_ns":10}}), b"", json!([]))
@@ -432,6 +517,24 @@ fn adversarial_replies_are_terminal_before_scheduler_effect_or_capture_publicati
         bad[field] = value;
         cases.push((label, bad));
     }
+    for (label, field, value) in [
+        ("invented timestamp", "time_ns", json!(6)),
+        ("offset gap", "offset", json!(1)),
+        ("uncovered byte", "length", json!(0)),
+        ("oversized length", "length", json!(u64::MAX)),
+        ("unknown stream", "stream", json!("Invalid")),
+        ("unknown chunk field", "unexpected", json!(0)),
+    ] {
+        let mut bad = advance_reply(5, json!({"Console":{"time_ns":5}}), b"x", json!([]));
+        bad["answer"]["Advanced"]["log_chunks"][0][field] = value;
+        cases.push((label, bad));
+    }
+    let mut missing = advance_reply(5, json!({"Console":{"time_ns":5}}), b"x", json!([]));
+    missing["answer"]["Advanced"]
+        .as_object_mut()
+        .unwrap()
+        .remove("log_chunks");
+    cases.push(("missing log metadata", missing));
     let mut control_topology = horizon_reply();
     control_topology["observation"]["has_control"] = json!(false);
     cases.push(("invented control topology", control_topology));
@@ -611,6 +714,17 @@ fn accepted_channels_are_complete_even_when_retained_capture_is_exhausted() {
     );
     assert_eq!(fs::read(fixture.path("output/a.console")).unwrap(), b"ab");
     assert_eq!(fs::read(fixture.path("output/a.mgmt")).unwrap(), b"SB");
+    for (name, order) in [("console", 0u64), ("mgmt", 1u64)] {
+        let bytes = fs::read(fixture.path(&format!("output/a.{name}.chunks"))).unwrap();
+        assert_eq!(&bytes[..8], b"SBLOG001");
+        let fields: Vec<u64> = bytes[8..]
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|bytes| u64::from_le_bytes(*bytes))
+            .collect();
+        assert_eq!(fields, [3, 0, order, 0, 2]);
+    }
     assert_eq!(machine.state, State::Running);
     let pid = fixture.pid();
     drop(machine);

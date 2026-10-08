@@ -46,6 +46,8 @@ pub struct Machine<B: Backend> {
     application: Option<application::Devices>,
     boot_identity: application::BootIdentity,
     timer_policy: Option<(application::TimerPolicy, crate::rng::Rng)>,
+    // Observation only: excluded from every machine/device digest.
+    log_capture: application::log_capture::Pending,
 }
 impl<B: Backend> Machine<B> {
     pub fn new(kernel: &[u8], initrd: &[u8], seed: u64) -> Result<Self> {
@@ -138,6 +140,7 @@ impl<B: Backend> Machine<B> {
             application,
             boot_identity,
             timer_policy: None,
+            log_capture: Default::default(),
         })
     }
     /// `before_run` is a performance-only hook for acceptance jitter. It cannot
@@ -428,6 +431,10 @@ impl<B: Backend> Machine<B> {
             .map(|disk| disk.crashed_seeded(seed, name, incarnation))
     }
 
+    pub fn take_log_chunks(&mut self) -> Vec<application::log_capture::Chunk> {
+        self.log_capture.take()
+    }
+
     pub fn take_events(&mut self) -> Vec<application::Event> {
         self.application
             .as_mut()
@@ -581,6 +588,8 @@ impl<B: Backend> Machine<B> {
             }
             // All guest memory accesses happen after the synchronous exit.
             self.clock.read(unsafe { self.page.word(8)? })?;
+            let console_before = self.uart.console.len();
+            let events_before = self.application.as_ref().map_or(0, |d| d.events.len());
             let mut response = None;
             let mut off = false;
             let mut idle = false;
@@ -707,6 +716,22 @@ impl<B: Backend> Machine<B> {
                 return Ok(MachineStop::PoweredOff);
             }
             self.backend.complete(response)?;
+            if let Some(devices) = &self.application {
+                use application::log_capture::Stream;
+                // Append only after the guest write has successfully committed.
+                // A single exit writes either PL011 or virtio management output.
+                self.log_capture.append(
+                    Stream::Console,
+                    self.clock.now(),
+                    self.uart.console.len() - console_before,
+                );
+                for event in &devices.events[events_before..] {
+                    if let application::Event::Control(bytes) = event {
+                        self.log_capture
+                            .append(Stream::Management, self.clock.now(), bytes.len());
+                    }
+                }
+            }
             self.publish()?;
             if let Some(devices) = &self.application {
                 if let Some((code, setup_error)) = devices.exit {
@@ -955,6 +980,7 @@ mod spi_regression {
         sys: BTreeMap<u16, u64>,
         injected: Vec<(u32, bool)>,
         stops: std::collections::VecDeque<RunStop>,
+        fail_completion: bool,
     }
     impl Backend for Fake {
         fn create() -> Result<Self> {
@@ -989,7 +1015,11 @@ mod spi_regression {
                 .ok_or("unexpected guest entry".into())
         }
         fn complete(&mut self, _: Option<u64>) -> Result<()> {
-            Ok(())
+            if self.fail_completion {
+                Err("injected completion failure".into())
+            } else {
+                Ok(())
+            }
         }
         fn inject_spi(&mut self, id: u32, level: bool) -> Result<()> {
             self.injected.push((id, level));
@@ -997,6 +1027,15 @@ mod spi_regression {
         }
         fn dirty_pages(&self, _: u32) -> Result<DirtyPages> {
             Ok(DirtyPages::Unsupported)
+        }
+        fn state(&self) -> Result<backend::BackendState> {
+            Ok(backend::BackendState {
+                core: (0..34).map(|i| *self.regs.get(&i).unwrap_or(&0)).collect(),
+                system: self.sys.clone(),
+                simd: Vec::new(),
+                gic_cpu: BTreeMap::new(),
+                gic: Vec::new(),
+            })
         }
     }
     fn machine() -> Machine<Fake> {
@@ -1030,6 +1069,34 @@ mod spi_regression {
         assert_eq!(m.trace.len(), 1);
         assert!(m.backend.injected.is_empty());
     }
+    #[test]
+    fn capture_requires_completed_write_and_is_excluded_from_state_evidence() {
+        let mut m = machine();
+        m.ready = true;
+        let write = backend::Stop {
+            pc: RAM_BASE,
+            exit: Exit::Mmio {
+                addr: UART_ADDR,
+                len: 1,
+                write: true,
+                data: b'a' as u64,
+                reg: None,
+            },
+        };
+        m.backend.stops.push_back(write.clone().into());
+        m.run_slice(10, 0, true).unwrap();
+        let before = m.application_evidence(true).unwrap();
+        assert_eq!(m.take_log_chunks()[0].length, 1);
+        assert_eq!(m.application_evidence(true).unwrap(), before);
+        m.backend.stops.push_back(write.into());
+        m.backend.fail_completion = true;
+        assert!(m
+            .run_slice(10, 0, true)
+            .unwrap_err()
+            .contains("completion failure"));
+        assert!(m.take_log_chunks().is_empty());
+    }
+
     #[test]
     fn observed_console_stops_on_first_committed_byte_before_next_entry() {
         let mut m = machine();

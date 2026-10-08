@@ -1,5 +1,6 @@
 //! Stopped ARM worker primitives for the shared world coordinator.
 use super::{
+    log_capture::{self, Chunk, Stream},
     worker::{
         Answer, Boot, Identity, Operation, OwnedWorker, StoppedObservation, TransferDescriptor,
     },
@@ -20,21 +21,133 @@ use std::{
 };
 
 // Retention limits never limit framing, device processing or witness input.
-struct Capture<W> {
+struct Capture<W, I = W> {
     writer: W,
+    index: Option<I>,
     remaining: usize,
+    offset: u64,
+    records: usize,
+    record_limit: usize,
 }
-impl<W: Write> Capture<W> {
-    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+trait IndexWriter: Write {
+    fn truncate(&mut self, length: u64);
+}
+struct IndexFile {
+    file: File,
+    path: PathBuf,
+}
+impl IndexFile {
+    fn open(path: PathBuf) -> Option<Self> {
+        File::create(&path).ok().map(|file| Self { file, path })
+    }
+}
+impl Write for IndexFile {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.file.write(bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+impl IndexWriter for IndexFile {
+    fn truncate(&mut self, length: u64) {
+        if length == 0 || self.file.set_len(length).is_err() {
+            // A missing index is explicit unavailable timing. A malformed one
+            // would make the retained run unreadable, so remove failed prefixes.
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+#[cfg(test)]
+impl IndexWriter for Vec<u8> {
+    fn truncate(&mut self, length: u64) {
+        self.truncate(length as usize);
+    }
+}
+impl<W: Write, I: IndexWriter> Capture<W, I> {
+    fn new(writer: W, mut index: Option<I>, remaining: usize, record_limit: usize) -> Self {
+        if let Some(sink) = &mut index {
+            if sink.write_all(log_capture::MAGIC).is_err() {
+                sink.truncate(0);
+                index = None;
+            }
+        }
+        Self {
+            writer,
+            index,
+            remaining,
+            offset: 0,
+            records: 0,
+            record_limit,
+        }
+    }
+    fn write_chunk(
+        &mut self,
+        bytes: &[u8],
+        time_ns: u64,
+        incarnation: u32,
+        order: u64,
+    ) -> std::io::Result<()> {
         let length = bytes.len().min(self.remaining);
+        if length == 0 {
+            return Ok(());
+        }
         self.writer.write_all(&bytes[..length])?;
+        let record = [
+            time_ns,
+            incarnation as u64,
+            order,
+            self.offset,
+            length as u64,
+        ];
         self.remaining -= length;
+        self.offset += length as u64;
+        if self.records < self.record_limit {
+            if let Some(index) = &mut self.index {
+                let mut encoded = [0u8; 40];
+                for (field, value) in encoded.as_chunks_mut::<8>().0.iter_mut().zip(record) {
+                    field.copy_from_slice(&value.to_le_bytes());
+                }
+                // A failed/partial record must never leave a malformed index.
+                // File sinks roll back to the last complete prefix below.
+                if index.write_all(&encoded).is_err() {
+                    index.truncate(8 + 40 * self.records as u64);
+                    self.index = None;
+                } else {
+                    self.records += 1;
+                }
+            }
+        }
         Ok(())
     }
 }
 struct Captures {
-    console: Capture<File>,
-    management: Capture<File>,
+    console: Capture<File, IndexFile>,
+    management: Capture<File, IndexFile>,
+    order: u64,
+}
+impl Captures {
+    fn append(
+        &mut self,
+        chunks: &[Chunk],
+        console: &[u8],
+        management: &[u8],
+        incarnation: u32,
+    ) -> Result<()> {
+        for chunk in chunks {
+            let (capture, bytes) = match chunk.stream {
+                Stream::Console => (&mut self.console, console),
+                Stream::Management => (&mut self.management, management),
+            };
+            let offset = chunk.offset as usize;
+            let end = offset + chunk.length as usize;
+            capture
+                .write_chunk(&bytes[offset..end], chunk.time_ns, incarnation, self.order)
+                .map_err(|e| format!("ARM output capture: {e}"))?;
+            self.order = self.order.saturating_add(1);
+        }
+        Ok(())
+    }
 }
 pub(crate) struct Transcript {
     pub horizons: Sha256,
@@ -80,14 +193,19 @@ impl Factory {
             let management = File::create(output.join(format!("{name}.mgmt")))
                 .map_err(|e| format!("management output: {e}"))?;
             captures.push(Rc::new(RefCell::new(Captures {
-                console: Capture {
-                    writer: console,
-                    remaining: console_limit,
-                },
-                management: Capture {
-                    writer: management,
-                    remaining: console_limit,
-                },
+                console: Capture::new(
+                    console,
+                    IndexFile::open(output.join(format!("{name}.console.chunks"))),
+                    console_limit,
+                    log_capture::stream_limit(names.len()),
+                ),
+                management: Capture::new(
+                    management,
+                    IndexFile::open(output.join(format!("{name}.mgmt.chunks"))),
+                    console_limit,
+                    log_capture::stream_limit(names.len()),
+                ),
+                order: 0,
             })));
         }
         Ok(Self {
@@ -450,6 +568,7 @@ impl WorldMachine for ArmMachine {
             time_ns,
             events,
             console,
+            log_chunks,
         } = self.worker.call(Operation::Advance {
             hard_limit: request.hard_limit,
             early_slack: request.early_slack,
@@ -562,18 +681,12 @@ impl WorldMachine for ArmMachine {
                 Ok(value) => value,
                 Err(error) => return self.reject(error),
             };
-        let capture_result: Result<()> = (|| {
-            let mut capture = self.captures.borrow_mut();
-            capture
-                .console
-                .write_all(&console)
-                .map_err(|e| format!("console: {e}"))?;
-            capture
-                .management
-                .write_all(&management)
-                .map_err(|e| format!("management output: {e}"))?;
-            Ok(())
-        })();
+        let capture_result = self.captures.borrow_mut().append(
+            &log_chunks,
+            &console,
+            &management,
+            self.worker.identity().incarnation,
+        );
         if let Err(error) = capture_result {
             return self.reject(error);
         }
@@ -606,15 +719,123 @@ impl WorldMachine for ArmMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn records(bytes: &[u8]) -> Vec<[u64; 5]> {
+        assert_eq!(&bytes[..8], log_capture::MAGIC);
+        assert_eq!((bytes.len() - 8) % 40, 0);
+        bytes[8..]
+            .as_chunks::<40>()
+            .0
+            .iter()
+            .map(|record| {
+                std::array::from_fn(|i| {
+                    u64::from_le_bytes(record[i * 8..i * 8 + 8].try_into().unwrap())
+                })
+            })
+            .collect()
+    }
+    struct FailingIndex {
+        bytes: Rc<RefCell<Vec<u8>>>,
+        limit: usize,
+    }
+    impl Write for FailingIndex {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let mut output = self.bytes.borrow_mut();
+            let length = bytes.len().min(self.limit - output.len());
+            if length == 0 {
+                return Err(std::io::Error::other("injected index failure"));
+            }
+            output.extend_from_slice(&bytes[..length]);
+            Ok(length)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl IndexWriter for FailingIndex {
+        fn truncate(&mut self, length: u64) {
+            self.bytes.borrow_mut().truncate(length as usize);
+        }
+    }
+    #[test]
+    fn index_limit_and_partial_sink_failure_keep_complete_prefix_without_limiting_raw_output() {
+        let bytes = Rc::new(RefCell::new(Vec::new()));
+        let mut capture = Capture::new(
+            Vec::new(),
+            Some(FailingIndex {
+                bytes: Rc::clone(&bytes),
+                limit: 8 + 40 + 3,
+            }),
+            100,
+            10,
+        );
+        capture.write_chunk(b"abc", 2, 0, 0).unwrap();
+        capture.write_chunk(b"def", 8, 0, 1).unwrap();
+        capture.write_chunk(b"ghi", 9, 1, 2).unwrap();
+        assert_eq!(capture.writer, b"abcdefghi");
+        assert!(capture.index.is_none());
+        assert_eq!(records(&bytes.borrow()), [[2, 0, 0, 0, 3]]);
+        let mut bounded = Capture::new(Vec::new(), Some(Vec::new()), 100, 1);
+        bounded.write_chunk(b"abc", 2, 0, 0).unwrap();
+        bounded.write_chunk(b"def", 8, 1, 1).unwrap();
+        assert_eq!(bounded.writer, b"abcdef");
+        assert_eq!(records(bounded.index.as_ref().unwrap()), [[2, 0, 0, 0, 3]]);
+    }
+    #[test]
+    fn machine_order_and_retained_offsets_continue_across_incarnations() {
+        let root =
+            std::env::temp_dir().join(format!("seedbox-arm-log-sink-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let stream = |name: &str| {
+            Capture::new(
+                File::create(root.join(name)).unwrap(),
+                IndexFile::open(root.join(format!("{name}.chunks"))),
+                5,
+                10,
+            )
+        };
+        let mut captures = Captures {
+            console: stream("console"),
+            management: stream("mgmt"),
+            order: 0,
+        };
+        for (time, incarnation) in [(3, 0), (10, 1)] {
+            let chunks = [
+                Chunk {
+                    stream: Stream::Console,
+                    time_ns: time,
+                    offset: 0,
+                    length: 3,
+                },
+                Chunk {
+                    stream: Stream::Management,
+                    time_ns: time,
+                    offset: 0,
+                    length: 3,
+                },
+            ];
+            captures
+                .append(&chunks, b"abc", b"def", incarnation)
+                .unwrap();
+        }
+        assert_eq!(std::fs::read(root.join("console")).unwrap(), b"abcab");
+        assert_eq!(std::fs::read(root.join("mgmt")).unwrap(), b"defde");
+        assert_eq!(
+            records(&std::fs::read(root.join("console.chunks")).unwrap()),
+            [[3, 0, 0, 0, 3], [10, 1, 2, 3, 2]]
+        );
+        assert_eq!(
+            records(&std::fs::read(root.join("mgmt.chunks")).unwrap()),
+            [[3, 0, 1, 0, 3], [10, 1, 3, 3, 2]]
+        );
+        drop(captures);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn capture_boundary_does_not_reject_or_retain_overflow() {
-        let mut capture = Capture {
-            writer: Vec::new(),
-            remaining: 5,
-        };
-        capture.write_all(b"abc").unwrap();
-        capture.write_all(b"defgh").unwrap();
-        capture.write_all(b"ignored").unwrap();
+        let mut capture = Capture::new(Vec::new(), Some(Vec::new()), 5, 10);
+        capture.write_chunk(b"abc", 2, 0, 0).unwrap();
+        capture.write_chunk(b"defgh", 8, 1, 1).unwrap();
+        capture.write_chunk(b"ignored", 9, 1, 2).unwrap();
         assert_eq!(capture.writer, b"abcde");
         assert_eq!(capture.remaining, 0);
     }

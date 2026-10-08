@@ -1,6 +1,9 @@
 # Seedbox simulation example
 
-This project is self-contained. The etcd and Redis templates passed real workloads,
+This project is self-contained. Use the same commands on Linux x86-64 KVM or
+Apple Silicon HVF after building the packaged CLI for that platform. Linux
+execution requires root and KVM access; Mac execution uses the current user.
+The etcd and Redis templates passed real workloads,
 intentional failure controls, and exact replays on the supported Linux amd64 AMD Zen
 workstation with the controlled Seedbox kernel and 1024 MiB RAM per service.
 See the repository's `docs/acceptance.md` for the tested image/kernel hashes.
@@ -16,17 +19,17 @@ in a Dockerfile and describes three registry-image members in Compose. The Redis
 template builds a dependency-free Rust workload that checks PING, SET acknowledgements,
 and exact GET values. Both use the Rust Seedbox configuration/orchestration APIs.
 
-On the supported Linux amd64 host, after building Seedbox in `nix develop`,
-from this directory:
+From this directory, with the packaged `seedbox` executable on `PATH`:
 
 ```sh
 seedbox validate
+seedbox doctor
 seedbox run
-seedbox run --timebase pv
-seedbox explore --count 2 --timebase pv
 seedbox inspect .seedbox/runs/ATTEMPT --json
+seedbox logs .seedbox/runs/ATTEMPT --machine client --stream console
 seedbox replay .seedbox/runs/ATTEMPT
 seedbox diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
+seedbox explore --count 2
 ```
 
 The Linux maintainer build `bash tools/linux-runtime/build-cli.sh` from the
@@ -44,7 +47,7 @@ prints up to five non-empty lines from the final 8 KiB of the attempt's
 logs do not change the outcome; retained records and `--json` output are unchanged.
 `inspect` keeps the recorded `error:` line on stdout alongside the run status.
 
-Preparation unpacks images with root ownership and runs before the execution CPU
+On Linux, preparation unpacks images with root ownership and runs before the execution CPU
 lease. Admission briefly checks an eligible core first and releases all temporary
 resources before preparation.
 `run` picks a free CPU, finds the guest kernel and uses its linked VMM; see
@@ -147,8 +150,8 @@ See the repository's `docs/runtime.md` for bounded preparation evidence and limi
 To share a retained run, use `seedbox export .seedbox/runs/ATTEMPT -o run.seedbox.tar`.
 On Linux or macOS, `seedbox import run.seedbox.tar --state imported` prints a new run
 directory that `seedbox inspect` can read. Replay that directory with
-`seedbox replay IMPORTED_RUN --state imported` on the qualified AMD Linux host
-using a compatible installed Seedbox release. No original checkout, registry or
+`seedbox replay IMPORTED_RUN --state imported` on a compatible host for the
+recorded backend, using a compatible installed Seedbox release. No original checkout, registry or
 image rebuild is needed. Bundles preserve retained logs and visible omissions;
 output omitted by the original capture policy is not transferred. Export/import
 never replace existing data; the default transfer cap is 32 GiB for unique objects
@@ -183,8 +186,8 @@ records stay inspectable/exportable/importable, but absent or drifted host proof
 is NOT_COMPARABLE (exit 2) in this CLI and cannot be bypassed with
 `--allow-engine-change`. A retained previous CLI is only historical evidence.
 
-Check the host and installed engine/kernel with `seedbox doctor` (Linux KVM,
-root) before running. It uses the normal CPU/runtime defaults without building,
+Check the host and installed engine/kernel with `seedbox doctor` (Linux KVM as
+root, or Apple Silicon Mac as the current user) before running. It uses the normal CPU/runtime defaults without building,
 preparing images or starting guests. `VALID` means execution-profile compatibility,
 not cross-host replay qualification; `--json` shows the admitted observations.
 
@@ -202,7 +205,8 @@ Compare two retained run directories on Linux or macOS with `seedbox diff RUN_A
 RUN_B [--json]`. Import bundles first. Diff reports world and machine witnesses,
 changed identity/semantic fields, full-state parts such as RAM and disk, and the
 first differing retained trace or terminal record (including state parts).
-`seedbox run --full-state` retains per-page RAM evidence for diff and replay diagnostics; see [docs/runtime.md](https://github.com/gardnervickers/seedbox/blob/main/docs/runtime.md#compare-retained-runs).
+`seedbox run --full-state` compares whole-machine state; Linux additionally retains
+per-page RAM evidence for diff and replay diagnostics. See [docs/runtime.md](https://github.com/gardnervickers/seedbox/blob/main/docs/runtime.md#compare-retained-runs).
 Ordinary runs do not retain exit traces; terminal times cannot locate an
 earlier divergence. Missing evidence and omissions stay explicit. Exit 0 MATCH
 means equality of compared evidence, not replay qualification; DIFFERENT exits 1,

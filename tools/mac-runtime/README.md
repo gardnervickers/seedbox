@@ -69,5 +69,7 @@ target/release/seedbox replay .seedbox/runs/ATTEMPT
 The capabilities scenario checks connection discovery, invalid-selector
 rejection, trigger arm/cancel and ordinary partition/heal operations. The trigger
 scenario checks committed matches and their scheduled effects. Arbitrary ARM
-snapshot/fork reuse remains unsupported. Timed log chunks and per-page RAM
-diagnostics are Linux features; Mac retains raw streams and whole-state evidence.
+snapshot/fork reuse remains unsupported. Console and management streams retain
+committed-time chunk indexes, so `seedbox logs RUN --machine NAME --stream console`
+and its time filters work as on Linux. Export/import preserves these indexes.
+Per-page RAM diagnostics remain Linux-only; Mac retains whole-state evidence.

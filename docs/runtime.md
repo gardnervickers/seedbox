@@ -169,8 +169,9 @@ Old fixture reports cannot satisfy this application contract. A missing or
 incompatible retained proof fails replay before host execution.
 Connection discovery/selectors and committed console triggers use the shared
 coordinator on Mac. Console matching observes future bytes at their first
-committed stop. Timed chunk indexes and per-page RAM evidence are still Linux
-features; Mac retains raw console and whole-state hashes. Full arbitrary ARM
+committed stop. Both backends retain committed-time console and management
+indexes for `seedbox logs`, including time filters and bundle transfer. Per-page
+RAM evidence remains Linux-only; Mac retains whole-state hashes. Full arbitrary ARM
 snapshot/restore and release from a deterministic time park remain unsupported.
 
 This remains unqualified development evidence. ARM images, 64..3072 MiB per
