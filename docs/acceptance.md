@@ -218,7 +218,11 @@ by SHA-256. Runtime identities:
 | --- | --- |
 | CLI | `14e3d03c33cd2bcd6fe196314b573f8fef4e457094be6c512aab9a8d4ced0cb6` |
 | VMM | `af0debdb6fe642543e771fe6e66efb56fecb7b29696d7508136b3cee37b082e3` |
-| Kernel | `e8ece7cba2d5fc4924da83e39cc672ae2516c117f8f76ecfa04aeaa98e697847` |
+| Kernel (current release-policy pin, K2) | `68bf3f024fc6ec0c01399020b5c37e4b42d661c2604f3c87fc879ccf9280e166` |
+
+The historical run above used kernel `e8ece7cba2d5fc4924da83e39cc672ae2516c117f8f76ecfa04aeaa98e697847`.
+The Kernel row now names the K2 release-policy pin; these historical receipts
+do not qualify that pair. Fresh AMD host run/replay acceptance is required.
 
 Formatting, strict all-target Clippy, workspace tests and portable acceptance
 passed on Darwin. Linux strict Clippy, portable acceptance and VMM tests passed.

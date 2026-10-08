@@ -3,8 +3,12 @@
 This is source staging for [issue68](https://github.com/gardnervickers/seedbox/issues/68).
 It has not qualified an engine or enabled a runner. Run only under a separately
 reviewed finite hardware release on the compatible qualified AMD host as root.
-The admission CLI must be bound to the exact frozen engine/kernel candidate;
-there is no engine-change override. The source admission policy selects the accepted engine and guest kernel. Final combined admission/CPUID-selected profile integration
+The admission CLI must be bound to the exact frozen engine/guest-kernel candidate;
+there is no engine-change override. Host-kernel bytes are not checked.
+The source admission policy `amd-zen3-engine391f-v3` pins engine391f
+(`391ff19696f1bfbad144892bcaa1f831ff19f06549561420b3d17060bf316938`) and K2
+(`68bf3f024fc6ec0c01399020b5c37e4b42d661c2604f3c87fc879ccf9280e166`).
+Final combined admission/CPUID-selected profile integration
 is a compatibility prerequisite; this entrypoint never passes
 `--allow-unqualified-cpu` or `--allow-engine-change`. A merged engine PR does not update or qualify that policy.
 
@@ -89,8 +93,9 @@ The development tier is unqualified evidence and does not change release policy.
 `harness/host-plan.py BASE HEAD` reads `git diff --name-only BASE...HEAD` and
 prints every selected check with the path that selected it. `--json` emits the
 same plan as JSON. Repeatable `--extra CHECK` adds reviewer checks; selection
-unions all matching rows and additions. Automatic `cluster-fixed` selection is
-conditional on changed engine inputs; explicit reviewer additions are always kept.
+unions all matching rows and additions. Engine comparison selects `cluster-fixed`
+when engine inputs change; fixture-input rows and explicit reviewer additions
+always keep it.
 The [checked-in map](../host-check-map.json) defines these rows:
 
 | Changed paths | Host checks |
@@ -100,24 +105,32 @@ The [checked-in map](../host-check-map.json) defines these rows:
 | stepper.rs, machine/counted.rs, timebase.rs, boundary.rs, counter.rs, undo/checkpoint code | core + one --undo 0 --margin 16384 replay |
 | disk.rs, virtio-blk, guest/disk*, build-disk.sh | core + disk-crash and disk-ext4-crash worlds |
 | network, link, faults routing | core + net, net-pause, net-crash worlds |
+| crates/seedbox-vmm/src/links.rs, crates/seedbox-vmm/src/connections.rs | existing automatic checks + reviewer L1/L2 shaped replay and P1 == M1 plain feature-off comparison |
+| shared machine/main/devices changed lines mentioning undo/checkpoint/rollback/margin/stepping/counter | existing automatic checks + reviewer short U1/U2 undo invariance |
 | control.rs, host control, python/seedbox/control.py | core + control-cases (run, then replay) |
 | guest/compose-init.c, preparation, images, volumes | core + sanity (+ volume-crash if volumes changed) |
 | examples/faults/**, harness/smoke/**, harness/host*, python/seedbox/** | core (control.py also keeps control-cases) |
 | harness/worlds/<name>.json | the named fixture's check when mapped, otherwise core; other matching rows can add checks |
-| harness/batch.* | core |
+| harness/batch.*, harness/worlds/cluster-fixed.json, examples/etcd/workload/** | core + cluster-fixed, even with identical engine inputs |
 | examples/<other>/** | core + "example <name>: its reviewer's run list is required" |
-| flake.nix, flake.lock, rust-toolchain*, Cargo.lock, .cargo/** | core |
+| flake.nix, flake.lock, rust-toolchain*, Cargo.lock, .cargo/**, harness/vmm-rustc.py, crates/seedbox-control/** | core (control source also keeps control-cases) |
 | kernel/ | core + "kernel campaign needed"; execution refuses incomplete coverage |
 | anything else unmatched | core (fail closed) |
 
 The plan names `core` (public CLI smoke) and `cluster-fixed` separately so their
-execution and comparison times are visible. Automatic `cluster-fixed` runs only
-when VMM, guest or toolchain/build inputs differ from local `origin/main`. The
-planner compares exact trees even when `--base` uses another ref, so merged or
-reverted engine changes with equal inputs skip the second build and both cluster
-runs. Reviewer `--extra cluster-fixed` still forces the comparison. `perf-replay`
+execution and comparison times are visible. For engine comparison, `cluster-fixed`
+runs when VMM, guest or toolchain/build inputs differ from local `origin/main`. The
+planner compares exact trees even when `--base` uses another ref, so engine-only
+changes with merged or reverted inputs equal to main skip the second build and
+both cluster runs. The batch runner, fixed world and cluster workload rows set
+`"always": true` in the map: their checks are explicit, so `cluster-fixed` exercises those inputs
+even when the engine trees match. Cluster workload changes also retain the etcd
+example's reviewer-run-list requirement. Reviewer `--extra cluster-fixed` still
+forces the comparison. `perf-replay`
 is the single opt-in undo-off/margin replay. A reviewer adding `core` or `perf-replay` also selects
 its core dependencies. Other additions select exactly the named check.
+The performance replay uses the generated short fixed `examples/faults/compose.yaml`
+workload within the smoke's 300-second campaign allocation.
 Shared machine code adds disk, network or undo checks when changed lines touch
 those controls. Shared preparation/supervisor code adds `volume-crash` when
 changed lines touch volumes. Changed comment/help lines in the CLI need only
@@ -125,6 +138,29 @@ portable checks; executable changes fall back to core. Unchanged diff context
 and file headers do not select extra checks. Review the printed reasons for
 shared code; this mapping does not prove semantic coverage. A missed keyword
 only loses an extra fixture, never core.
+
+The `links` category also emits named reviewer runs in the plan's `runs` JSON
+field and text output, with world, engine, seed, timeout, comparison and path
+reasons. L1/L2 use `harness/worlds/shaped.json` on the target engine at seed 1
+and require matching witnesses. P1 uses `harness/worlds/plain.json` on the
+target; M1 uses the same plain world and seed on main, requiring feature-off
+witness equality. Each has an 1800-second timeout. These fixtures are being
+promoted by PR #97; the planner references them by name without copying them.
+
+Only the existing `undo-checkpoint-shared` diff-gated rule adds U1/U2, both on
+PR #97's `harness/worlds/shaped-tol-short.json` at seed 1 with a 600-second
+timeout. U1 uses default undo; U2 disables undo, with the default adaptive
+margin. Their witnesses must match. Link changes alone, dedicated stepping/undo
+files and reviewer `--extra perf-replay` do not select this pair. The full
+`shaped-tol.json` U pair is never selected. Every planned undo-off or margin
+entry uses a short workload with a timeout no greater than 600 seconds.
+
+These named runs are reviewer requirements, not automatic worker jobs. They
+remain visible as `not run` in host-check summaries and the final status;
+automatic PASS does not close them. Execute only the named entries through
+the existing batch supervisor after PR #97's fixtures are available. Do not
+invoke the whole `harness/run-links.sh` campaign for a scoped plan, since that
+would add U1/U2 to link-only changes.
 
 ```sh
 python3 harness/host-plan.py origin/main HEAD --json --extra net
@@ -219,3 +255,11 @@ mapping row, mixed changes, reviewer additions, Git planning, lane selection,
 lease contention, dispatch, exact replay flags, comparison and cleanup. Linux
 parallel dispatch, guest behavior and cancellation/restoration remain hardware
 acceptance work; portable tests do not qualify an engine or host.
+
+## Work per host check
+
+Smoke now uses `batch=4`: 16 acknowledgements, healthy recovery of 4 then 12
+records, and 12 lost values in the broken restart control. All faults, probes
+and per-acknowledgement checks remain; the full example stays at `batch=32`.
+[PR #110](https://github.com/gardnervickers/seedbox/pull/110) records the portable
+evidence.

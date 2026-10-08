@@ -853,6 +853,10 @@ fn network_effects_have_no_single_service_target() {
         detail: "partition applied".into(),
     });
     assert_eq!(fixture.run().record.outcome, Outcome::Pass);
+    for action in ["shape", "drop_connection", "heal"] {
+        fixture.backend.report.faults[0].action = action.into();
+        assert_eq!(fixture.run().record.outcome, Outcome::Pass, "{action}");
+    }
     fixture.backend.report.faults[0].action = "stop".into();
     assert_eq!(fixture.run().record.outcome, Outcome::Error);
 }
@@ -1511,6 +1515,67 @@ fn exploration_checks_inputs_first_and_releases_preflight_scope_before_preparing
                     fixture.preparer.inputs
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn timed_indexes_survive_success_backend_error_cancellation_and_retention_omissions() {
+    for (fail, cancel, omit) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+    ] {
+        let mut f = Fixture::new();
+        f.backend.fail = fail;
+        f.backend.cancel = cancel;
+        let mut index = b"SBLOG001".to_vec();
+        for v in [10u64, 0, 0, 0, 3] {
+            index.extend_from_slice(&v.to_le_bytes());
+        }
+        f.backend
+            .extra_logs
+            .insert("machines/workload.console".into(), vec![0, 255, 10]);
+        f.backend
+            .extra_logs
+            .insert("machines/workload.console.chunks".into(), index.clone());
+        if omit {
+            f.orchestrator = f.orchestrator.with_log_policy(LogPolicy {
+                max_file_bytes: 4,
+                max_total_bytes: 100,
+            });
+        }
+        let run = f.run();
+        assert_eq!(
+            run.record.outcome,
+            if fail {
+                Outcome::Error
+            } else if cancel {
+                Outcome::Incomplete
+            } else {
+                Outcome::Pass
+            }
+        );
+        let mut reader = seedbox::logs::Reader::open(&run.directory, &Default::default()).unwrap();
+        if omit {
+            assert!(run
+                .record
+                .omitted_logs
+                .contains_key("machines/workload.console.chunks"));
+            assert!(reader.report.chunks.is_empty());
+            assert!(reader
+                .report
+                .omissions
+                .contains_key("machines/workload.console.chunks"));
+        } else {
+            assert_eq!(
+                run.record.logs["machines/workload.console.chunks"],
+                ContentDigest::of(&index)
+            );
+            let mut bytes = Vec::new();
+            reader.copy_chunk(0, &mut bytes).unwrap();
+            assert_eq!(bytes, [0, 255, 10]);
         }
     }
 }

@@ -8,7 +8,7 @@ interrupt timing.
 
 ## Quick start
 
-`validate`, `init`, `inspect`, `diff`, `export` and `import` run on Linux or macOS. `run`,
+`validate`, `init`, `inspect`, `diff`, `logs`, `export` and `import` run on Linux or macOS. `run`,
 `explore` and `replay` need the
 qualified host (see [host requirements](#host-requirements)) and root.
 
@@ -22,6 +22,7 @@ cargo run -- validate examples/etcd
 sudo -E env PATH="$PATH" target/release/seedbox run examples/etcd
 sudo -E env PATH="$PATH" target/release/seedbox replay .seedbox/runs/ATTEMPT
 cargo run -- inspect .seedbox/runs/ATTEMPT
+cargo run -- logs .seedbox/runs/ATTEMPT --machine client --stream console --since-ns 1000000000
 cargo run -- diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
 ```
 
@@ -31,6 +32,8 @@ directory. Every runtime input has a default, so no flags are required:
 | Input | Default | Override |
 | --- | --- | --- |
 | Compose file | `compose.yaml` in the given directory (default `.`) | positional path |
+| Directed link baselines | no overrides; global latency/jitter and zero loss | `x-seedbox.network.links` |
+| Connection selectors | disabled; discover and select through the guest control API | `world.connections`, `world.drop_connection` |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
 | Exploration count | `1` | `--count` |
 | Exploration workers | `1`, sequential execution | `--workers` (1..32; automatic CPU selection for parallel execution) |
@@ -46,7 +49,35 @@ directory. Every runtime input has a default, so no flags are required:
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
 | Diff inputs | Two required retained run directories; no runtime inputs or state lookup | positional `RUN_A RUN_B` |
 | Per-page RAM evidence | off; under `--full-state`, retain `output/machines/NAME.pages` beside machine traces | existing `--full-state` |
+| Log selection | All indexed machines and both streams, with no time bounds; raw bytes on stdout (`--json` for metadata) | `logs RUN --machine NAME --stream console --since-ns N --until-ns N` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
+
+Directed baselines are optional Compose settings. For example, with `server` and
+`client` services:
+
+```yaml
+x-seedbox:
+  network:
+    latency: 1ms
+    links:
+      - {from: server, to: client, latency: 20ms, jitter: 2ms, loss_ppm: 50000}
+```
+
+Each entry affects one direction. Latency is required; jitter and loss default to
+zero. Global latency remains the fixed scheduling lower bound for every link.
+`seedbox validate` checks the services, duplicate pairs, and policy bounds before
+preparation. Guest controllers can temporarily override links with
+`world.shape(["server"], ["client"], latency=20_000_000, jitter=2_000_000, loss_ppm=50000)`
+and release the returned handle with `world.heal(handle)`; see
+[network policy](docs/runtime.md#directed-link-policy).
+
+For one TCP direction, use `world.connections("server", "client")`, select an
+exact returned record with `world.drop_connection(record)`, then
+`world.heal(handle)` and require its `dropped` count to be positive. Discovery is
+paginated and selectors bind an observed incarnation, so tuple reuse does not
+inherit the old fault. See [connection selectors](docs/runtime.md#connection-selectors)
+for lifecycle and unsupported-traffic behavior, and the
+[AMD validation procedure](docs/connection-selectors-amd.md).
 
 For development artifacts, pass `--allow-dev-engine` to `run`, `explore`, `replay`
 or `doctor`. Unpinned engine or guest-kernel bytes record the semantic parameter
@@ -59,9 +90,12 @@ marker. All host, CPU, PMU, MSR, lease, ABI and control-channel checks still app
 512-byte disk sectors on crash. It is recorded in run identity and replayed
 automatically. It applies to retained disks, including Compose named volumes. See [disk semantics](docs/runtime.md#disk-crash-policy).
 
-`seedbox help run` lists every option. A run prints `OUTCOME: run-directory`;
+`seedbox help run` lists every option. The guest Python API supports
+[bounded committed console triggers](docs/triggers.md) for future stop/partition
+faults in the development engine; see that contract and AMD validation handoff. A run prints `OUTCOME: run-directory`;
 exit status 0 is PASS (or replay MATCH), 1 FAIL (MISMATCH), 2 ERROR, 3
-INCOMPLETE and 124 TIMEOUT. Offline `diff` exits 0 for MATCH, 1 for DIFFERENT,
+INCOMPLETE and 124 TIMEOUT. A cancelled or incomplete replay exits 2
+(NOT_COMPARABLE). Offline `diff` exits 0 for MATCH, 1 for DIFFERENT,
 and 2 for usage/setup or invalid retained evidence.
 
 `seedbox run --full-state` also retains per-page RAM hashes with each machine's
@@ -157,7 +191,7 @@ rebuilt OCI images to have identical bytes.
 | --- | --- |
 | [`crates/seedbox/`](crates/seedbox/README.md) | Configuration, OCI preparation, orchestration and the `seedbox` CLI |
 | `crates/seedbox-vmm/` | KVM VMM and world scheduler (`seedbox-vmm`); its own workspace and lockfile, because its binary hash is the run's engine identity |
-| `examples/` | Runnable Compose applications: etcd cluster and Redis, each with a workload image |
+| `examples/` | Compose applications: etcd, Redis, [TCP faults/recovery](examples/faults/README.md), and [one-service MinIO conditional writes](examples/minio/README.md) (MinIO runtime qualification pending) |
 | `kernel/` | Guest kernel patch, config and build script (Linux 6.12.112) |
 | `guest/` | Generic OCI guest supervisor plus low-level guest fixtures and builders |
 | `docs/` | [Vision](docs/vision.md), [runtime instructions](docs/runtime.md), [backends](docs/backends.md), [acceptance record](docs/acceptance.md) |
@@ -165,6 +199,34 @@ rebuilt OCI images to have identical bytes.
 | [`tools/mac-tcg/`](tools/mac-tcg/README.md) | Experimental local Mac TCG runner and tests; separate from the production KVM backend |
 
 ## Contributor checks
+
+`cargo build-vmm` and `cargo test-vmm` select `harness/vmm-rustc.py` only for
+the standalone VMM build and its dependencies. It remaps checkout, home/Cargo
+registry and rustc sysroot source paths, keeps release `debug = 1`, and removes
+the Nix dev shell's synthetic `outputs/out/lib` RPATH. Nix stdenv adds that
+entry through `_addRpathPrefix`; real library and Nix store paths remain intact.
+Other Cargo builds and their target directories are unaffected.
+The wrapper's content hash is included in Cargo's compiler fingerprint, so
+enabling or editing it invalidates cached VMM artifacts and dependencies.
+The shared `seedbox-control` source is reached through
+`crates/seedbox-vmm/seedbox-control`, a symlink inside the VMM workspace. Cargo
+then hashes its path relative to that workspace instead of the checkout's
+absolute path when computing crate metadata. The VMM's inherited workspace
+package and dependency keys match the root workspace.
+
+On Linux in the project dev shell, run
+`bash harness/check-vmm-reproducible.sh [REV]` (default `HEAD`). It builds two
+fresh archives of the same commit at different temporary paths, compares SHA-256,
+rejects embedded checkout, HOME, CARGO_HOME and rustc sysroot paths, prints
+per-crate `-C metadata` and differing embedded paths on mismatch,
+and removes both checkouts on success or failure. It needs neither KVM nor root.
+Equality assumes the same pinned toolchain, libraries and build options; this
+does not establish reproducibility across different toolchains.
+
+These flags change every engine hash. Existing pinned/accepted engine hashes
+cannot be reproduced from source with the new flags; the next engine re-pin
+must use the new build and complete host qualification. Retained old engine
+bytes remain the inputs for their existing runs. This change updates no pins.
 
 Portable checks must pass at the PR or merge-train head before spending AMD
 host time. Use the fast pre-check on a Mac or any other non-KVM machine:
@@ -235,14 +297,15 @@ bytes and does not establish a pass for the committed SHA.
   virtual time; user RDTSC/RDTSCP trap via CR4.TSD and are emulated. The
   kernel's syscall yield hook remains, but the engine never requests it.
 - **Network and scheduling.** virtio-net over virtio-mmio into an in-memory
-  fabric with seeded latency/jitter and directed partitions. The world runs the
+  fabric with per-direction latency, jitter, loss and partitions. The world runs the
   machine furthest behind in slices that never pass its causal horizon (the
   other machines' times plus link latency) or its next event. A slice may end
   at the first deterministic point in the last half-latency before that
   boundary (capped by `stop_tolerance_ns`), and events are delivered at the
   first stop up to that long before they are due: early by a bounded amount,
   never late, and never before they were sent.
-- **Witness.** Each machine hashes every deterministic exit; `--digest` adds
+- **Witness.** A network hash covers pending frames, link streams and active policies.
+  Each machine hashes every deterministic exit; `--digest` adds
   a hash of registers and all guest RAM; `--trace` writes every exit.
 
 ## Host requirements
@@ -267,16 +330,16 @@ path is experimental: it retains the counter in identity, validates exact
 supported release inputs and applicable KVM capabilities, and holds every SMT
 lease through child cleanup. It carries no qualified AMD host-policy proof and
 never opens AMD workaround MSRs. `doctor` refuses an unqualified counter rather
-than reporting qualified compatibility. The source policy now pins the frozen engine52eb and accepted guest kernel.
+than reporting qualified compatibility. The source policy now pins frozen engine391f and guest kernel68bf (K2).
 The artifact is built but unqualified: this staged release still requires fresh
 runtime acceptance before use. Disabled selected-event readiness is checked
 before preparation and again under held leases; no guest counter is enabled by
 admission. Intel determinism is not established.
 
-The versioned `amd-zen3-engine52eb-v1` admission policy checks AMD family 25,
-model 33, stepping 0 and microcode 0xa20102e, exact booted/current host kernel and
-controlled guest-kernel bytes, accepted engine bytes, KVM capabilities and the
-engine's complete existing CPUID policy. Before image preparation, it temporarily
+The versioned `amd-zen3-engine391f-v3` admission policy checks AMD family 25,
+model 33, stepping 0 and microcode 0xa20102e, controlled guest-kernel bytes,
+accepted engine bytes, KVM capabilities and the engine's complete existing CPUID
+policy. Host-kernel bytes are not checked. Before image preparation, it temporarily
 reserves an eligible core, checks each online/allowed SMT sibling and opens the
 exact perf event disabled. Descriptors close and affinity/reservations restore
 before preparation. The leased execution core is checked again before MSR writes.
@@ -346,6 +409,32 @@ MATCH means equality of the compared evidence, even if incomplete; it does not
 qualify replay or prove equality of unrecorded state. Performance counters,
 margin/undo, attempt metadata and arbitrary console output are excluded.
 See [comparison details](docs/runtime.md#compare-retained-runs).
+
+## Read committed-time logs
+
+`seedbox logs RUN [--machine NAME] [--stream console|mgmt] [--since-ns N]
+[--until-ns N] [--json]` reads checksum-verified retained output on Linux or macOS.
+Each chunk coalesces consecutive bytes from one machine/incarnation/stream within
+a world slice, ending when another stream writes or the slice returns. Its time
+is the first byte's simulated commit time. Filters select whole chunks by that
+time: the lower bound is inclusive and the upper bound exclusive, even if later
+bytes in a selected chunk commit beyond the upper bound. Equal-time chunks sort
+by machine name, then the machine's output order across both streams.
+
+By default, stdout contains the selected raw bytes in chunk order, without
+prefixes, encoding changes or added newlines. Status and omission diagnostics go
+to stderr. Select one machine and stream for its exact indexed byte sequence.
+`--json` includes times, incarnations, byte ranges and lossless `bytes_hex` in one
+report. The library's `logs::Reader::copy_chunk` also returns the exact raw bytes.
+No application schema or line framing is imposed.
+
+Capture is bounded and independent of the witness. Missing indexes (including
+older engines), unindexed raw suffixes, and retention omissions are explicit.
+A successful read does not claim complete logs; check stderr or JSON `omissions`.
+Bundles retain the indexes through the ordinary log policy. This source change creates a new
+**unqualified engine**; the frozen engine and release pins are unchanged.
+See [format, portable demo and AMD validation](docs/timed-logs.md) for the pending
+hardware acceptance.
 
 ## Sharing a retained run
 
@@ -548,3 +637,5 @@ seeded kill/restart schedule, eight writers for 60 seconds, and etcd 3.5.3
 controls over the same seeds. The historical ABI1 timings are in
 [the historical networking report](https://github.com/gardnervickers/seedbox/blob/788fc4376b7e2cc96d1bc51ed2ae3d4635d16abd/research/single-vm-network/REPORT.md)
 and must not be attributed to these revised sources.
+
+See [the experimental arm64 backend quickstart](docs/arm64-backends.md#experimental-arm64-quickstart) for the isolated HVF/KVM fixture.

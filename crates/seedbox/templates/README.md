@@ -112,8 +112,31 @@ output omitted by the original capture policy is not transferred. Export/import
 never replace existing data; the default transfer cap is 32 GiB for unique objects
 and separately for materialized log bytes (`--max-bytes` overrides it).
 
-Run/replay enforce the versioned admitted host/engine/kernel policy. Matching a
-second machine is compatibility admission, not cross-host qualification. Old
+Directed network baselines belong in `x-seedbox.network.links`, for example
+`[{from: server, to: client, latency: 20ms, jitter: 2ms, loss_ppm: 50000}]`
+using this project's service names. Each pair is unique; latency is required,
+jitter and loss default to zero. Latency cannot be below global network latency,
+jitter must be less than latency, their sum is at most one hour, and loss is an
+integer from 0 to 1000000. `seedbox validate` checks these bounds.
+
+Guest controllers can call `world.shape(["server"], ["client"], latency=20_000_000,
+jitter=2_000_000, loss_ppm=50000)` and `world.heal(handle)`. Shapes apply only in
+the requested direction. The latest live layer wins; healing reveals the prior
+policy. Partitions dominate shapes, and already routed frames retain their
+send-time decisions. Inspection includes shape handles and `loss_dropped` counters.
+Network state contributes a `network_witness` to the final world witness.
+
+Controllers can also discover directional TCP incarnations with
+`world.connections("server", "client")`, then pass an exact returned record to
+`world.drop_connection(record)`. The returned handle arms loss for that direction
+only; `world.heal(handle)` returns matched/dropped counts. Require `dropped > 0`
+when checking that a fault occurred. Reused tuples do not inherit a stale selector.
+See the repository's `docs/runtime.md` connection selector section for pagination,
+SYN/FIN/RST semantics, bounded tracking and unsupported/fragmented traffic.
+
+Run/replay enforce the versioned admitted host/engine/guest-kernel policy;
+host-kernel bytes are not checked. Matching a second machine is compatibility
+admission, not cross-host qualification. Old
 records stay inspectable/exportable/importable, but absent or drifted host proof
 is NOT_COMPARABLE (exit 2) in this CLI and cannot be bypassed with
 `--allow-engine-change`. A retained previous CLI is only historical evidence.
@@ -126,7 +149,8 @@ not cross-host replay qualification; `--json` shows the admitted observations.
 Known non-Zen counters require explicit `--allow-unqualified-cpu` for run,
 explore and replay and remain unverified. They retain exact release/counter/input
 checks and SMT ownership but carry no qualified AMD proof or AMD MSR writes.
-`doctor` refuses those counters. The source policy pins built-but-unqualified engine52eb; fresh runtime acceptance
+`doctor` refuses those counters. The source policy `amd-zen3-engine391f-v3` pins
+built-but-unqualified engine391f and guest kernel68bf (K2); fresh runtime acceptance
 is still required. Disabled selected-event readiness precedes preparation and
 is rechecked under leases; it never enables a guest counter. Intel is not qualified.
 
@@ -148,3 +172,24 @@ Ordinary runs do not retain exit traces; terminal times cannot locate an
 earlier divergence. Missing evidence and omissions stay explicit. Exit 0 MATCH
 means equality of compared evidence, not replay qualification; DIFFERENT exits 1,
 and usage/setup or invalid evidence exits 2. No guests execute and no state is created.
+
+Read committed-time chunks with `seedbox logs RUN --machine NAME --since-ns N
+--until-ns N`. Consecutive bytes from the same machine/incarnation/stream within
+one world slice coalesce until another stream writes. Times are the first byte's
+simulated commit time, inclusive at the start and exclusive at the end. Filters
+select whole chunks, so a selected chunk can contain later bytes beyond the
+upper bound. Omit filters to read all indexed output. Stdout contains raw bytes
+in time, machine name and per-machine output order, without prefixes or added
+newlines; status and omissions go to stderr. Add `--json` for metadata and
+lossless hexadecimal (`bytes_hex`). No application log format is required.
+Check stderr or JSON `omissions` for old engines without indexes, capture bounds
+or retention limits. Indexes travel with retained logs in export/import bundles. Reading logs needs no KVM or root.
+
+For a scenario using the guest control API, the development engine supports
+`world.arm_console_stop(source, b"MARKER", target, match_timeout=1)` and
+`world.arm_console_partition(source, b"MARKER", left, right, match_timeout=1)`.
+Arm confirmation means armed; inspect the trigger and target state for the
+actual effect. `world.cancel_trigger(trigger)` cancels an unmatched trigger.
+Markers use only future committed console bytes, and effects occur at a safe
+future world barrier. See [the trigger contract](https://github.com/gardnervickers/seedbox/blob/main/docs/triggers.md)
+for bounds, deadlines and the outstanding development-engine AMD checks.

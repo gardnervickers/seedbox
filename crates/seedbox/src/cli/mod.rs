@@ -13,6 +13,7 @@ use seedbox::{
         CancellationToken, ExecutionBackend, ExecutionProfile, PreparationBackend, WitnessMode,
     },
     exploration::{self, ExploreOptions},
+    logs,
     oci::OciTools,
     orchestration::{self, Orchestrator, Outcome, ReplayOptions, ReplayStatus, RunOptions},
     preparation::OciPreparer,
@@ -33,6 +34,7 @@ Exit status:
   1    FAIL, replay MISMATCH, or diff DIFFERENT
   2    ERROR, a replay that is NOT_COMPARABLE, or a usage or setup error
   3    INCOMPLETE (wall-time limit or cancelled)
+       A cancelled or incomplete replay reports 2 (NOT_COMPARABLE)
   124  TIMEOUT (simulated-time limit)";
 
 const HOST_CONTROL_HELP: &str = "\
@@ -66,7 +68,7 @@ enum Command {
         #[arg(long, value_enum, default_value_t = TemplateArg::Etcd)]
         template: TemplateArg,
     },
-    /// Check a Compose file against the supported subset, without images or guests.
+    /// Check Compose services and directed network policies, without images or guests.
     Validate {
         #[command(flatten)]
         compose: ComposeArg,
@@ -211,6 +213,26 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show committed-time logs as raw bytes without executing guests.
+    Logs {
+        /// Retained run directory.
+        run: PathBuf,
+        /// Select one machine from the retained run.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Select the console or management stream [default: both].
+        #[arg(long, value_enum)]
+        stream: Option<LogStream>,
+        /// Include chunks whose first byte commits at or after this simulated nanosecond.
+        #[arg(long)]
+        since_ns: Option<u64>,
+        /// Include chunks whose first byte commits before this simulated nanosecond.
+        #[arg(long)]
+        until_ns: Option<u64>,
+        /// Print one JSON document with lossless hexadecimal payloads.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show a recorded run, including its error on stdout, after verifying its manifest.
     #[command(after_help = VMM_FAILURE_HELP)]
     Inspect {
@@ -220,6 +242,22 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum LogStream {
+    /// Raw COM1 console bytes.
+    Console,
+    /// Raw management transport bytes.
+    Mgmt,
+}
+impl From<LogStream> for logs::Stream {
+    fn from(value: LogStream) -> Self {
+        match value {
+            LogStream::Console => Self::Console,
+            LogStream::Mgmt => Self::Mgmt,
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -863,6 +901,62 @@ fn run(cli: Cli) -> Result<u8> {
                 diff::Status::Match => 0,
                 diff::Status::Different => 1,
             })
+        }
+        Command::Logs {
+            run,
+            machine,
+            stream,
+            since_ns,
+            until_ns,
+            json,
+        } => {
+            let run = defaults::run_directory(run)?;
+            let mut reader = logs::Reader::open(
+                &run,
+                &logs::Filter {
+                    machine,
+                    stream: stream.map(Into::into),
+                    since_ns,
+                    until_ns,
+                },
+            )?;
+            use std::io::Write;
+            let mut output = std::io::BufWriter::new(std::io::stdout().lock());
+            if json {
+                writeln!(
+                    output,
+                    "{{\n  \"status\": {},\n  \"omissions\": {},\n  \"chunks\": [",
+                    serde_json::to_string(&reader.report.status)?,
+                    serde_json::to_string_pretty(&reader.report.omissions)?
+                )?;
+            } else {
+                let mut diagnostics = std::io::stderr().lock();
+                writeln!(diagnostics, "logs: {}", run.display())?;
+                for (name, reason) in &reader.report.omissions {
+                    writeln!(
+                        diagnostics,
+                        "omission: {}",
+                        serde_json::to_string(&(name, reason))?
+                    )?;
+                }
+            }
+            for index in 0..reader.report.chunks.len() {
+                if json {
+                    output.write_all(b"    ")?;
+                    reader.write_chunk_json(index, &mut output)?;
+                    if index + 1 < reader.report.chunks.len() {
+                        output.write_all(b",")?;
+                    }
+                    output.write_all(b"\n")?;
+                } else {
+                    reader.copy_chunk(index, &mut output)?;
+                }
+            }
+            if json {
+                writeln!(output, "  ]\n}}")?;
+            }
+            output.flush()?;
+            Ok(0)
         }
         Command::Inspect { run, json } => {
             let run = defaults::run_directory(run)?;

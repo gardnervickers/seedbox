@@ -295,7 +295,15 @@ impl Planner {
     }
 
     /// Breakpoint addresses for the next advance from the current state.
+    #[cfg(test)]
     pub fn plan(&self, mem: &[u8], r: &kvm_regs) -> Result<Vec<u64>, String> {
+        self.plan_capped(mem, r).map(|(targets, _)| targets)
+    }
+
+    /// As `plan`, and whether the advance stops after a run of straight-line
+    /// code at an arbitrary point (the cap) rather than at a branch.
+    pub fn plan_capped(&self, mem: &[u8], r: &kvm_regs) -> Result<(Vec<u64>, bool), String> {
+        let mut capped = false;
         let mut ip = r.rip;
         let mut targets = Vec::new();
         let mut at_rip = true;
@@ -424,6 +432,7 @@ impl Planner {
             }
             if n == 255 {
                 targets.push(ip);
+                capped = true;
             }
         }
         for h in [self.pf, self.gp, self.ud] {
@@ -433,7 +442,7 @@ impl Planner {
         }
         targets.dedup();
         targets.truncate(4);
-        Ok(targets)
+        Ok((targets, capped))
     }
 
     pub fn arm(vcpu: &VcpuFd, targets: &[u64]) -> Result<(), String> {
@@ -491,6 +500,22 @@ mod tests {
             let r = kvm_regs { rip, rsp: 0x10_0000, rax: 0x20_0000, ..Default::default() };
             let targets = planner(64).plan(&mem, &r).unwrap();
             assert_eq!(targets, [0xf000, 0xf100, 0xf200], "rip {rip:#x}");
+        }
+    }
+
+    #[test]
+    fn a_long_straight_run_lands_at_the_cap_and_says_so() {
+        let mut mem = vec![0u8; 0x4000];
+        // a: 300 x nop; jmp a; and a short one: nop; jz +0
+        mem[0x1000..0x1000 + 300].fill(0x90);
+        let back = 0x1000i64 - (0x1000 + 300 + 5);
+        mem[0x1000 + 300] = 0xe9;
+        mem[0x1000 + 301..0x1000 + 305].copy_from_slice(&(back as i32).to_le_bytes());
+        mem[0x2000..0x2003].copy_from_slice(&[0x90, 0x74, 0x00]);
+        let p = planner(32);
+        for (rip, capped) in [(0x1000, true), (0x1000 + 100, true), (0x2000, false)] {
+            let r = kvm_regs { rip, ..Default::default() };
+            assert_eq!(p.plan_capped(&mem, &r).unwrap().1, capped, "rip {rip:#x}");
         }
     }
 

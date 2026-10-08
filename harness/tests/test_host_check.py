@@ -134,6 +134,28 @@ class DispatchTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, 'SEEDBOX_MKE2FS.*project development shell'):
                         host_check.execute(dict(checks={'volume-crash': []}), None)
 
+    def test_cluster_requires_etcd_before_host_work_with_setup_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ('kernel', 'busybox', 'pinned'):
+                (root / name).write_bytes(name.encode())
+            env = dict(SEEDBOX_KERNEL=str(root / 'kernel'), SEEDBOX_BUSYBOX=str(root / 'busybox'),
+                       PINNED_ENGINE=str(root / 'pinned'))
+            plan = dict(target='a' * 40, base='b' * 40, checks={'cluster-fixed': []}, warnings=[])
+            with patch.object(host_check.sys, 'platform', 'linux'), \
+                 patch.dict(host_check.os.environ, env, clear=True), \
+                 patch.object(host_check, 'plan_revision', return_value=plan), \
+                 patch.object(host_check, 'read_pairs', side_effect=AssertionError('host probe')), \
+                 patch.object(host_check, 'allocate_pairs', side_effect=AssertionError('reservation')), \
+                 patch.object(host_check, 'Commands', side_effect=AssertionError('build')), \
+                 patch.object(host_check.tempfile, 'mkdtemp', side_effect=AssertionError('state')), \
+                 contextlib.redirect_stdout(io.StringIO()) as output, \
+                 contextlib.redirect_stderr(io.StringIO()) as errors:
+                self.assertEqual(host_check.main(['HEAD', '--extra', 'cluster-fixed']), 2)
+            self.assertEqual(output.getvalue(), host_check.format_plan(plan) + '\n')
+            self.assertEqual(errors.getvalue(),
+                             'error: cluster-fixed planned; set SEEDBOX_ETCD to a static etcd binary\n')
+
     def test_lane_admission_refusal_stops_before_parallel_dispatch(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

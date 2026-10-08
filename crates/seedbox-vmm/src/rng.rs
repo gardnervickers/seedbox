@@ -19,6 +19,7 @@ impl Rng {
             counter: 0,
         }
     }
+    pub fn counter(&self) -> u64 { self.counter }
     pub fn next(&mut self) -> u64 {
         let mut h = Sha256::new();
         h.update(self.key);

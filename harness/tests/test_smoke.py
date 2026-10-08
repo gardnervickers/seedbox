@@ -337,6 +337,7 @@ class SmokeTests(unittest.TestCase):
         project = root / 'project/fixed'
         self.assertEqual(json.loads((root / 'wrong-kernel/command.json').read_text())[2], str(project))
         self.assertTrue((project / 'compose.yaml').is_file())
+        self.assertEqual((project / 'compose.yaml').read_text().count('--batch, "4"'), 2)
         self.assertTrue((project / 'workload/seedbox').is_dir())
         self.assertTrue((root / 'wrong-kernel').is_dir())
         self.assertEqual((root / 'wrong-kernel/stdout').read_bytes(), b'')

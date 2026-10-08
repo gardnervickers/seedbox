@@ -12,8 +12,6 @@ fn observed() -> CoreObservation {
         model: p.model,
         stepping: p.stepping,
         microcode: p.microcode,
-        booted_kernel: p.host_kernel.clone(),
-        current_kernel: p.host_kernel,
         kvm_api: p.kvm_api,
         immediate_exit: p.immediate_exit,
         guest_debug: p.guest_debug,
@@ -69,7 +67,17 @@ fn complete_policy_matches_without_host_enrollment_or_incidental_core_identity()
     );
     validate_observation(&first).unwrap();
     validate_observation(&second).unwrap();
-    validate_profile(&profile()).unwrap();
+    let pinned = profile();
+    let kernel = ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap();
+    for allow_dev_engine in [false, true] {
+        admit_artifacts(&pinned, &kernel, allow_dev_engine).unwrap();
+        assert!(!is_dev_engine(&pinned));
+    }
+    assert_eq!(POLICY_VERSION, "amd-zen3-engine391f-v3");
+    assert_eq!(
+        GUEST_KERNEL,
+        "68bf3f024fc6ec0c01399020b5c37e4b42d661c2604f3c87fc879ccf9280e166"
+    );
     assert_eq!(std::mem::size_of::<CpuidEntry>(), 40);
 }
 
@@ -82,8 +90,6 @@ fn every_required_host_drift_or_missing_readiness_is_rejected() {
         |o| o.model += 1,
         |o| o.stepping += 1,
         |o| o.microcode += 1,
-        |o| o.booted_kernel = "different".into(),
-        |o| o.current_kernel = "different".into(),
         |o| o.kvm_api = 11,
         |o| o.immediate_exit = 0,
         |o| o.guest_debug = 0,
@@ -158,8 +164,61 @@ fn independent_native_trace_order_is_required_without_dropping_fields() {
     }
 }
 
+// The host-kernel field was removed from the policy; historical proofs carry it.
+const PREVIOUS_HOST_KERNEL: &str =
+    "66111c2888091bd64e96e71a6a9e831ab5496d6c6272add5d81490396bfa3cdc";
+
 #[test]
 fn previous_full_sorted_policy_proof_remains_not_comparable_and_immutable() {
+    let mut previous = required_policy().unwrap();
+    previous.version = "amd-zen3-engine168ad-v1".into();
+    previous.guest_kernel =
+        "e8ece7cba2d5fc4924da83e39cc672ae2516c117f8f76ecfa04aeaa98e697847".into();
+    previous.engine = "168ad5db0e63919a3c04dbfed6c22f133aa14600747db4f64ebc3f3dc2c37c7d".into();
+    // Reconstruct the old recorded proof only; production never sorts observations.
+    previous
+        .effective_cpuid
+        .sort_by_key(|e| (e.function, e.index, e.flags));
+    previous_proof_is_not_comparable(
+        &previous,
+        "411dc2b0286a7d8d96b142d95363500388c37f8e417e0e5483e48b2beb98c3d3",
+        true,
+    );
+}
+
+#[test]
+fn host_kernel_pinned_policy_proof_is_not_comparable_and_immutable() {
+    let mut previous = required_policy().unwrap();
+    previous.version = "amd-zen3-engine52eb-v1".into();
+    previous.engine = "52eb41490f521a0104ea4ab06297cbdbdd7bc9a68261febf6c5cc19854bacdcf".into();
+    previous.guest_kernel =
+        "e8ece7cba2d5fc4924da83e39cc672ae2516c117f8f76ecfa04aeaa98e697847".into();
+    previous_proof_is_not_comparable(
+        &previous,
+        "f9cb6aaa79501417f214b0070ec5ec38e9336567dbf92ff827fbf37da494d87d",
+        true,
+    );
+}
+
+#[test]
+fn engine52eb_v2_policy_proof_is_not_comparable_and_immutable() {
+    let mut previous = required_policy().unwrap();
+    previous.version = "amd-zen3-engine52eb-v2".into();
+    previous.engine = "52eb41490f521a0104ea4ab06297cbdbdd7bc9a68261febf6c5cc19854bacdcf".into();
+    previous.guest_kernel =
+        "e8ece7cba2d5fc4924da83e39cc672ae2516c117f8f76ecfa04aeaa98e697847".into();
+    previous_proof_is_not_comparable(
+        &previous,
+        "c6810457fc18589220c53f99fbdef1b439ad7302ba7cb3a264ffbec78cbe4575",
+        false,
+    );
+}
+
+fn previous_proof_is_not_comparable(
+    previous: &RequiredPolicy,
+    fingerprint: &str,
+    had_host_kernel: bool,
+) {
     use seedbox::{orchestration::*, store::ContentStore, vmm::VmmExecutor};
     use std::fs;
     let root = tempfile::tempdir().unwrap();
@@ -173,19 +232,19 @@ fn previous_full_sorted_policy_proof_remains_not_comparable_and_immutable() {
             .clone(),
     )
     .unwrap();
-    let mut previous = required_policy().unwrap();
-    previous.version = "amd-zen3-engine168ad-v1".into();
-    previous.engine = "168ad5db0e63919a3c04dbfed6c22f133aa14600747db4f64ebc3f3dc2c37c7d".into();
-    // Reconstruct the old recorded proof only; production never sorts observations.
-    previous
-        .effective_cpuid
-        .sort_by_key(|e| (e.function, e.index, e.flags));
-    let old_fields = serde_json::to_string(&previous).unwrap();
+    let microcode = format!("\"microcode\":{},", previous.microcode);
+    let old_fields = serde_json::to_string(previous).unwrap();
+    let old_fields = if had_host_kernel {
+        old_fields.replacen(
+            &microcode,
+            &format!("{microcode}\"host_kernel\":\"{PREVIOUS_HOST_KERNEL}\","),
+            1,
+        )
+    } else {
+        old_fields
+    };
     let old_fingerprint = ContentDigest::of(old_fields.as_bytes());
-    assert_eq!(
-        old_fingerprint.hex(),
-        "411dc2b0286a7d8d96b142d95363500388c37f8e417e0e5483e48b2beb98c3d3"
-    );
+    assert_eq!(old_fingerprint.hex(), fingerprint);
     assert_ne!(
         bindings().unwrap()["host_policy_fingerprint"],
         "8da34a9c7dfdd133bf4a93cf5b5cc7046ad30985e2352e9d21212ec8333024a5"
@@ -194,6 +253,9 @@ fn previous_full_sorted_policy_proof_remains_not_comparable_and_immutable() {
         old_fingerprint.hex(),
         bindings().unwrap()["host_policy_fingerprint"]
     );
+    record.identity.inputs.profile.engine =
+        ContentDigest::try_from(previous.engine.clone()).unwrap();
+    record.identity.inputs.kernel = ContentDigest::try_from(previous.guest_kernel.clone()).unwrap();
     record
         .identity
         .inputs
@@ -356,6 +418,6 @@ fn successor_release_rejects_previous_exact_engine_and_policy_without_migration(
         .contains("host admission proof incompatible"));
     assert_eq!(
         ENGINE,
-        "52eb41490f521a0104ea4ab06297cbdbdd7bc9a68261febf6c5cc19854bacdcf"
+        "391ff19696f1bfbad144892bcaa1f831ff19f06549561420b3d17060bf316938"
     );
 }

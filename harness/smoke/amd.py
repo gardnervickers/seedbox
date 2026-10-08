@@ -20,6 +20,7 @@ REPO = Path(__file__).resolve().parents[2]
 TOTAL_SECONDS = 300
 CLEANUP_SECONDS = 30
 MSR = 0xc0011020
+SMOKE_BATCH = 4
 
 
 def save(path, value):
@@ -184,12 +185,12 @@ def verify_performance(base, replay, changes=None):
 
 
 def faults_project(destination):
-    """The fixed examples/faults project, generated self-contained: the
-    template's build contexts need python/seedbox copied in."""
+    """The fixed faults path with four writes per batch and the full fault sequence.
+    The template's build contexts need python/seedbox copied in."""
     spec = importlib.util.spec_from_file_location('faults_generate', REPO / 'examples/faults/generate.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.generate(destination) / 'fixed'
+    return module.generate(destination, batch=SMOKE_BATCH) / 'fixed'
 
 
 class Campaign:

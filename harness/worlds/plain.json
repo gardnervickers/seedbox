@@ -1,0 +1,26 @@
+{
+ "_comment": "EXPERIMENT ONLY (#60 link-policy controls). KERNEL/INITRD replaced by run-links.sh.",
+ "kernel": "KERNEL",
+ "mem_mb": 256,
+ "duration_ns": 9000000000,
+ "stop_tolerance_ns": 0,
+ "end_on_exit": "a",
+ "network": {
+  "latency_ns": 1000000,
+  "jitter_ns": 0
+ },
+ "machines": [
+  {
+   "name": "a",
+   "initrd": "INITRD"
+  },
+  {
+   "name": "b",
+   "initrd": "INITRD"
+  },
+  {
+   "name": "c",
+   "initrd": "INITRD"
+  }
+ ]
+}

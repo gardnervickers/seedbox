@@ -1,0 +1,66 @@
+//! Bounded streaming matchers. Only the machine's committed UART sink feeds
+//! these; no speculative bytes, host log tail, packet inference or wall clock.
+use seedbox_control::{Action, Plan, TriggerRecord, MAX_TRIGGERS, MAX_TRIGGER_MARKER, PROCESS_EFFECT_TIMEOUT_NS};
+use serde_json::Value;
+use sha2::{Digest,Sha256};
+
+#[derive(Clone,Default)]
+pub struct Triggers {
+    pub records:Vec<TriggerRecord>,
+    failure:Vec<Vec<usize>>,
+}
+impl Triggers {
+    pub fn arm(&mut self,source:String,marker:Vec<u8>,now:u64,timeout:u64,action:Action)->Result<u32,String> {
+        if self.records.len()>=MAX_TRIGGERS {return Err("trigger budget exhausted (64 per run)".into())}
+        if marker.is_empty() || marker.len()>MAX_TRIGGER_MARKER {return Err("marker must contain 1..=256 bytes".into())}
+        if timeout==0 {return Err("match timeout must be positive".into())}
+        let deadline=now.checked_add(timeout).ok_or("trigger match deadline overflow")?;
+        deadline.checked_add(PROCESS_EFFECT_TIMEOUT_NS).ok_or("trigger effect deadline overflow")?;
+        let mut failure=vec![0;marker.len()];
+        for i in 1..marker.len() {let mut j=failure[i-1];while j>0 && marker[i]!=marker[j] {j=failure[j-1];}if marker[i]==marker[j] {j+=1;}failure[i]=j;}
+        let id=self.records.len() as u32+1;
+        self.records.push(TriggerRecord {id,source,marker,armed_at_ns:now,match_deadline_ns:deadline,action,prefix:0,seen:0,resets:0,matched_at_ns:None,effect_at_ns:None,fault_id:None,cancelled_at_ns:None,cut_off_at_ns:None,status:"armed".into(),rejection_reason:None});
+        self.failure.push(failure);Ok(id)
+    }
+    pub fn observes(&self,source:&str)->bool {self.records.iter().any(|r|r.status=="armed" && r.source==source)}
+    pub fn cancel(&mut self,id:u32,now:u64)->Result<(),String> {
+        let r=self.records.get_mut(id.checked_sub(1).ok_or("unknown trigger ID")? as usize).ok_or("unknown trigger ID")?;
+        if r.status!="armed" || now<r.armed_at_ns || now>r.match_deadline_ns {return Err("trigger is no longer armed".into())}
+        r.status="cancelled".into();r.cancelled_at_ns=Some(now);Ok(())
+    }
+    /// Future effects use the same fixed causal latency as control admission.
+    /// An old event cannot contribute even a partial prefix after admission.
+    pub fn committed(&mut self,source:&str,at:u64,byte:u8,latency:u64,max_time:u64)->Result<(),String> {
+        for (r,failure) in self.records.iter_mut().zip(&self.failure) {
+            if r.status!="armed" || r.source!=source || at<r.armed_at_ns || at>=r.match_deadline_ns {continue}
+            r.seen=r.seen.checked_add(1).ok_or("trigger byte count overflow")?;
+            while r.prefix>0 && byte!=r.marker[r.prefix] {r.prefix=failure[r.prefix-1];}
+            if byte==r.marker[r.prefix] {r.prefix+=1;}
+            if r.prefix==r.marker.len() {
+                let effect=at.checked_add(latency).ok_or("trigger effect overflow")?;
+                effect.checked_add(PROCESS_EFFECT_TIMEOUT_NS).ok_or("trigger effect deadline overflow")?;
+                if effect<max_time {return Err("trigger effect is in committed machine past".into())}
+                r.status="matched".into();r.matched_at_ns=Some(at);r.effect_at_ns=Some(effect);
+            }
+        }Ok(())
+    }
+    pub fn boundary(&self)->u64 {self.records.iter().filter_map(|r|match r.status.as_str() {"armed"=>Some(r.match_deadline_ns),"matched"=>r.effect_at_ns,_=>None}).min().unwrap_or(u64::MAX)}
+    /// Equal-time effects follow arm ID, independent of source-machine ties.
+    pub fn apply_boundary(&mut self,faults:&mut crate::faults::Faults,now:u64)->Result<(),String> {
+        for r in &mut self.records {
+            if r.status=="armed" && r.match_deadline_ns==now {r.status="expired".into();}
+            if r.status=="matched" && r.effect_at_ns==Some(now) {
+                if let Some(reason)=faults.admission_error(&r.action) {r.status="rejected".into();r.rejection_reason=Some(reason.into());continue}
+                r.fault_id=Some(faults.append(Plan {id:0,at_ns:now,deadline_ns:now.checked_add(PROCESS_EFFECT_TIMEOUT_NS).ok_or("trigger effect deadline overflow")?,action:r.action.clone()})?);
+                r.status="fired".into();
+            }
+        }Ok(())
+    }
+    pub fn reset_source(&mut self,source:&str) {for r in &mut self.records {if r.status=="armed" && r.source==source {r.prefix=0;r.resets+=1;}}}
+    pub fn cut_off(&mut self,now:u64) {for r in &mut self.records {if r.status=="armed" || r.status=="matched" {r.cut_off_at_ns=Some(now);r.status="cut_off".into();}}}
+    pub fn hash_into(&self,hash:&mut Sha256)->Result<(),String> {
+        if let Some(evidence)=self.evidence()? {hash.update(b"seedbox-committed-triggers-v1\0");hash.update(serde_json::to_vec(&evidence).map_err(|e|e.to_string())?);}Ok(())
+    }
+    /// None is essential: unused triggers add no bytes or report keys.
+    pub fn evidence(&self)->Result<Option<Value>,String> {if self.records.is_empty() {Ok(None)} else {serde_json::to_value(&self.records).map(Some).map_err(|e|e.to_string())}}
+}

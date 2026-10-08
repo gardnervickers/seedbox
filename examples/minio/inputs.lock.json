@@ -1,0 +1,98 @@
+{
+  "python_tag": "3.12.12-slim-bookworm",
+  "python_amd64_digest": "sha256:2986c55feb36e6cae00fa1fefb454283e4b33f35e75ff8bdd123b134130be301",
+  "python_layer_total_bytes": 45421745,
+  "wheels": [
+    {
+      "name": "boto3",
+      "version": "1.40.45",
+      "filename": "boto3-1.40.45-py3-none-any.whl",
+      "size": 139345,
+      "sha256": "5b145752d20f29908e3cb8c823bee31c77e6bcf18787e570f36bbc545cc779ed",
+      "url": "https://files.pythonhosted.org/packages/8e/db/7d3c27f530c2b354d546ad7fb94505be8b78a5ecabe34c6a1f9a9d6be03e/boto3-1.40.45-py3-none-any.whl",
+      "requires_dist": [
+        "botocore<1.41.0,>=1.40.45",
+        "jmespath<2.0.0,>=0.7.1",
+        "s3transfer<0.15.0,>=0.14.0",
+        "botocore[crt]<2.0a0,>=1.21.0; extra == \"crt\""
+      ]
+    },
+    {
+      "name": "botocore",
+      "version": "1.40.45",
+      "filename": "botocore-1.40.45-py3-none-any.whl",
+      "size": 14063670,
+      "sha256": "9abf473d8372ade8442c0d4634a9decb89c854d7862ffd5500574eb63ab8f240",
+      "url": "https://files.pythonhosted.org/packages/af/06/df47e2ecb74bd184c9d056666afd3db011a649eaca663337835a6dd5aee6/botocore-1.40.45-py3-none-any.whl",
+      "requires_dist": [
+        "jmespath<2.0.0,>=0.7.1",
+        "python-dateutil<3.0.0,>=2.1",
+        "urllib3<1.27,>=1.25.4; python_version < \"3.10\"",
+        "urllib3!=2.2.0,<3,>=1.25.4; python_version >= \"3.10\"",
+        "awscrt==0.27.6; extra == \"crt\""
+      ]
+    },
+    {
+      "name": "s3transfer",
+      "version": "0.14.0",
+      "filename": "s3transfer-0.14.0-py3-none-any.whl",
+      "size": 85712,
+      "sha256": "ea3b790c7077558ed1f02a3072fb3cb992bbbd253392f4b6e9e8976941c7d456",
+      "url": "https://files.pythonhosted.org/packages/48/f0/ae7ca09223a81a1d890b2557186ea015f6e0502e9b8cb8e1813f1d8cfa4e/s3transfer-0.14.0-py3-none-any.whl",
+      "requires_dist": [
+        "botocore<2.0a.0,>=1.37.4",
+        "botocore[crt]<2.0a.0,>=1.37.4; extra == \"crt\""
+      ]
+    },
+    {
+      "name": "jmespath",
+      "version": "1.0.1",
+      "filename": "jmespath-1.0.1-py3-none-any.whl",
+      "size": 20256,
+      "sha256": "02e2e4cc71b5bcab88332eebf907519190dd9e6e82107fa7f83b1003a6252980",
+      "url": "https://files.pythonhosted.org/packages/31/b4/b9b800c45527aadd64d5b442f9b932b00648617eb5d63d2c7a6587b7cafc/jmespath-1.0.1-py3-none-any.whl",
+      "requires_dist": null
+    },
+    {
+      "name": "python-dateutil",
+      "version": "2.9.0.post0",
+      "filename": "python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
+      "size": 229892,
+      "sha256": "a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427",
+      "url": "https://files.pythonhosted.org/packages/ec/57/56b9bcc3c9c6a792fcbaf139543cee77261f3651ca9da0c93f5c1221264b/python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
+      "requires_dist": [
+        "six >=1.5"
+      ]
+    },
+    {
+      "name": "six",
+      "version": "1.17.0",
+      "filename": "six-1.17.0-py2.py3-none-any.whl",
+      "size": 11050,
+      "sha256": "4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274",
+      "url": "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl",
+      "requires_dist": null
+    },
+    {
+      "name": "urllib3",
+      "version": "2.5.0",
+      "filename": "urllib3-2.5.0-py3-none-any.whl",
+      "size": 129795,
+      "sha256": "e6b01673c0fa6a13e374b50871808eb3bf7046c4b125b216f6bf1cc604cff0dc",
+      "url": "https://files.pythonhosted.org/packages/a7/c2/fe1e52489ae3122415c51f387e221dd0773709bad6c6cdaa599e8a2c5185/urllib3-2.5.0-py3-none-any.whl",
+      "requires_dist": [
+        "brotli>=1.0.9; platform_python_implementation == \"CPython\" and extra == \"brotli\"",
+        "brotlicffi>=0.8.0; platform_python_implementation != \"CPython\" and extra == \"brotli\"",
+        "h2<5,>=4; extra == \"h2\"",
+        "pysocks!=1.5.7,<2.0,>=1.5.6; extra == \"socks\"",
+        "zstandard>=0.18.0; extra == \"zstd\""
+      ]
+    }
+  ],
+  "minio": {
+    "release": "RELEASE.2025-09-07T16-13-09Z",
+    "size": 110989496,
+    "sha256": "7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f",
+    "url": "https://github.com/minio/minio/releases/download/RELEASE.2025-09-07T16-13-09Z/minio.linux-amd64.RELEASE.2025-09-07T16-13-09Z"
+  }
+}
