@@ -49,6 +49,12 @@ partitioned or shaped. Closing the connection does not silently heal outstanding
 admission, effect and reply timestamps. `partition` returns a `Partition` with
 its opaque handle and effect. `shape(from_, to, latency=..., jitter=0, loss_ppm=0)`
 returns a `Shape` accepted by `heal`; latency and jitter are nanosecond integers.
+Optional `bandwidth_bps=1_000_000, queue_bound=12_000_000` serializes frames in
+each directed pair and tail-drops candidates above the send-to-departure bound.
+The bound uses nanoseconds and requires finite bandwidth. Healing a bandwidth
+shape returns `queue_counts` with `matched`, `queue_dropped`, and
+`delayed_max_ns`; require positive drop evidence when testing congestion. Omitted
+options preserve the existing unlimited policy and heal effect timestamp.
 It changes only the directed pairs, with the highest live fault ID taking precedence.
 A partition dominates a shape, and in-flight decisions remain fixed. `Controller`
 is also exported as an alias for `World`. `now_ns()` reads simulated time; `inspect()` returns

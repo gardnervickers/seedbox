@@ -12,6 +12,8 @@ fn trace(seed: u64) -> Value {
         latency_ns: 100,
         jitter_ns: 50,
         loss_ppm: 500_000,
+        bandwidth_bps: None,
+        queue_bound_ns: None,
     };
     let mut links = links::Links::new(seed, &names, policy, BTreeMap::new()).unwrap();
     let mut outcomes = Vec::new();
@@ -27,8 +29,11 @@ fn trace(seed: u64) -> Value {
         if send % 7 == 0 {
             links.selected_drop(0, 1);
         }
-        outcomes.push(format!("{:?}", links.decide(0, 1, send, send % 11 == 0)));
-        links.decide(1, 0, send, false);
+        outcomes.push(format!(
+            "{:?}",
+            links.decide(0, 1, send, 1500, send % 11 == 0)
+        ));
+        links.decide(1, 0, send, 1500, false);
     }
     let mut witness = Sha256::new();
     links.witness(&mut witness);

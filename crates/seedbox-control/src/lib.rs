@@ -69,6 +69,10 @@ pub enum Operation {
         latency_ns: u64,
         jitter_ns: u64,
         loss_ppm: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bandwidth_bps: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        queue_bound_ns: Option<u64>,
     },
     Heal {
         handle: String,
@@ -176,6 +180,10 @@ pub enum Action {
         latency_ns: u64,
         jitter_ns: u64,
         loss_ppm: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bandwidth_bps: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        queue_bound_ns: Option<u64>,
     },
     Heal {
         handle: String,

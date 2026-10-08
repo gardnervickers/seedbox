@@ -180,8 +180,8 @@ impl Control {
                     right: sides.remove(0),
                 })
             }
-            Operation::Shape {from,to,latency_ns,jitter_ns,loss_ppm} => {
-                crate::links::Policy {latency_ns:*latency_ns,jitter_ns:*jitter_ns,loss_ppm:*loss_ppm}.validate(self.lookahead)?;
+            Operation::Shape {from,to,latency_ns,jitter_ns,loss_ppm,bandwidth_bps,queue_bound_ns} => {
+                crate::links::Policy {latency_ns:*latency_ns,jitter_ns:*jitter_ns,loss_ppm:*loss_ppm,bandwidth_bps:*bandwidth_bps,queue_bound_ns:*queue_bound_ns}.validate(self.lookahead)?;
                 if from.is_empty() || to.is_empty() { return Err("shape sides must be nonempty".into()); }
                 let mut members = BTreeSet::new();
                 let mut sides = Vec::new();
@@ -197,7 +197,7 @@ impl Control {
                 self.handles = self.handles.checked_add(1).ok_or("fault handles exhausted")?;
                 let handle = format!("p{}",self.handles);
                 result = json!({"handle":handle});
-                Some(Action::Shape {handle,from:sides.remove(0),to:sides.remove(0),latency_ns:*latency_ns,jitter_ns:*jitter_ns,loss_ppm:*loss_ppm})
+                Some(Action::Shape {handle,from:sides.remove(0),to:sides.remove(0),latency_ns:*latency_ns,jitter_ns:*jitter_ns,loss_ppm:*loss_ppm,bandwidth_bps:*bandwidth_bps,queue_bound_ns:*queue_bound_ns})
             }
             Operation::Connections {from,to,..} => {
                 if self.target(from)?==self.target(to)? {return Err("connection endpoints must differ".into());}
@@ -456,6 +456,11 @@ impl Control {
                         _ => None,
                     };
                     if let Some(at) = at {
+                        if matches!(p.operation, Some(Operation::Heal {..})) {
+                            if let Some(counts) = faults.log[id as usize-1].get("queue_counts") {
+                                p.result["queue_counts"] = counts.clone();
+                            }
+                        }
                         p.effect = Some(at);
                         p.reply = Some(
                             at.checked_add(self.latency)

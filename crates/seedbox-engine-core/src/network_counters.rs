@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 #[derive(Default, Clone)]
 pub struct NetworkCounters {
-    totals:BTreeMap<(usize,usize),[u64;4]>,
+    totals:BTreeMap<(usize,usize),[u64;5]>,
     pending:BTreeMap<u64,Vec<(usize,usize,usize)>>,
     frontier:u64,
 }
@@ -22,5 +22,5 @@ impl NetworkCounters {
             for (from,to,outcome) in deltas {self.totals.entry((from,to)).or_default()[outcome]+=1;}
         }
     }
-    pub fn counts(&self)->&BTreeMap<(usize,usize),[u64;4]> {&self.totals}
+    pub fn counts(&self)->&BTreeMap<(usize,usize),[u64;5]> {&self.totals}
 }

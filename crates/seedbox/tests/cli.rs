@@ -702,6 +702,24 @@ fn validate_cli_resolves_directed_baselines_and_reports_each_policy_error() {
         resolved["network"]["links"][0],
         serde_json::json!({"from":"server","to":"client","latency_ns":1_000_000,"jitter_ns":0,"loss_ppm":0})
     );
+    assert!(resolved["network"].get("bandwidth_bps").is_none());
+    let finite = yaml
+        .replace(
+            "LINKS",
+            "{from: server, to: client, latency: 1ms, bandwidth_bps: 1000000, queue_bound: 12ms}",
+        )
+        .replace(
+            "latency: 1ms, links:",
+            "latency: 1ms, bandwidth_bps: 10000000, queue_bound: 0ns, links:",
+        );
+    fs::write(&source, finite).unwrap();
+    let output = seedbox(&["validate", "--json"], directory.path());
+    assert!(output.status.success(), "{}", stderr(&output));
+    let finite: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(finite["network"]["bandwidth_bps"], 10_000_000);
+    assert_eq!(finite["network"]["queue_bound_ns"], 0);
+    assert_eq!(finite["network"]["links"][0]["bandwidth_bps"], 1_000_000);
+    assert_eq!(finite["network"]["links"][0]["queue_bound_ns"], 12_000_000);
     for (entry, path) in [
         (format!("{good},{good}"), "links[1]"),
         (
@@ -714,11 +732,48 @@ fn validate_cli_resolves_directed_baselines_and_reports_each_policy_error() {
             good.replace("1ms}", "1ms, loss_ppm: 1000001}"),
             "links[0].loss_ppm",
         ),
+        (
+            good.replace("1ms}", "1ms, bandwidth_bps: 0}"),
+            "links[0].bandwidth_bps",
+        ),
+        (
+            good.replace("1ms}", "1ms, bandwidth_bps: 1.5}"),
+            "links[0].bandwidth_bps",
+        ),
+        (
+            good.replace("1ms}", "1ms, queue_bound: 12ms}"),
+            "links[0].queue_bound",
+        ),
+        (
+            good.replace("1ms}", "1ms, bandwidth_bps: 1000000, queue_bound: -1ms}"),
+            "links[0].queue_bound",
+        ),
     ] {
         fs::write(&source, yaml.replace("LINKS", &entry)).unwrap();
         let output = seedbox(&["validate"], directory.path());
         assert_eq!(output.status.code(), Some(2));
         assert!(output.stdout.is_empty());
+        assert!(
+            stderr(&output).contains(&format!("$.x-seedbox.network.{path}")),
+            "{}",
+            stderr(&output)
+        );
+    }
+    for (options, path) in [
+        ("bandwidth_bps: 0", "bandwidth_bps"),
+        ("bandwidth_bps: true", "bandwidth_bps"),
+        ("queue_bound: 1ms", "queue_bound"),
+    ] {
+        fs::write(
+            &source,
+            yaml.replace("LINKS", good).replace(
+                "latency: 1ms, links:",
+                &format!("latency: 1ms, {options}, links:"),
+            ),
+        )
+        .unwrap();
+        let output = seedbox(&["validate"], directory.path());
+        assert_eq!(output.status.code(), Some(2));
         assert!(
             stderr(&output).contains(&format!("$.x-seedbox.network.{path}")),
             "{}",
