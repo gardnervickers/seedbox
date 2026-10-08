@@ -16,7 +16,7 @@ train: one branch, one host job, then ordinary merges with no further host time.
 2. **Check it before host time.** On the train head: `cargo fmt -p seedbox --check`,
    strict clippy, `cargo test --workspace --locked` and
    `bash harness/acceptance.sh portable` (which runs `cargo test-vmm`).
-3. **Run one host job.** `harness/host-check.sh` on the train head, plus the
+3. **Run one host job.** `bash harness/check.sh --require kvm --require counter` on the train head, plus the
    union of each PR's own host checks as its reviewer listed them, written as
    one script that runs independent checks at once on separate SMT pairs
    (never CPU 0 or its sibling). Each PR's host list covers only what its

@@ -13,7 +13,7 @@
               cpio gzip curl jq python3 gnumake bc bison flex perl
             ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               elfutils elfutils.dev openssl.dev pkgsStatic.stdenv.cc iproute2 go
-              skopeo umoci podman
+              skopeo umoci podman util-linux
             ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
               lima
             ];

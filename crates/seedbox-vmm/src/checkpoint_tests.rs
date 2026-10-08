@@ -26,7 +26,6 @@ fn finish(world: &mut World) -> Vec<(String,String)> {
 }
 
 #[test]
-#[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
 fn several_checkpoints_restore_nonmonotonically_and_repeat_branches() {
     for undo in [0,256] {
         let mut w=world(undo);
@@ -52,7 +51,6 @@ fn several_checkpoints_restore_nonmonotonically_and_repeat_branches() {
 }
 
 #[test]
-#[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
 fn checkpoint_keeps_lifecycle_disk_network_control_and_rng_state() {
     for undo in [0,256] {
         let mut w=world(undo);
@@ -106,7 +104,6 @@ fn checkpoint_keeps_lifecycle_disk_network_control_and_rng_state() {
     }
 }
 #[test]
-#[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
 fn checkpoint_branches_disk_survival_and_restores_down_survivors() {
     let mut w=world(0);
     let names=vec!["a".to_string(),"b".to_string()];
@@ -137,7 +134,6 @@ fn checkpoint_branches_disk_survival_and_restores_down_survivors() {
 }
 
 #[test]
-#[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
 fn checkpoint_restores_pending_compose_lifecycle_calls() {
     for op in ["pause","resume","crash","reboot"] {
         let mut w=world(0);
@@ -168,7 +164,6 @@ fn checkpoint_restores_pending_compose_lifecycle_calls() {
 }
 
 #[test]
-#[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
 fn boot_snapshots_require_every_machine_parked() {
     let mut w=world(0);
     assert!(WorldSnapshot::take(&mut w).is_err());
@@ -179,7 +174,6 @@ fn boot_snapshots_require_every_machine_parked() {
 }
 
 #[test]
-#[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
 fn parent_branch_continues_without_restarting_any_stream() {
     for undo in [0,256] {
         let mut w=world(undo);
@@ -205,7 +199,6 @@ fn parent_branch_continues_without_restarting_any_stream() {
 }
 
 #[test]
-#[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
 fn checkpoint_drains_fault_effects_and_control_requests_before_capture() {
     let mut w=world(0);
     let names=vec!["a".to_string(),"b".to_string()];
@@ -229,7 +222,6 @@ fn checkpoint_drains_fault_effects_and_control_requests_before_capture() {
 }
 
 #[test]
-#[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
 fn checkpoint_reseeds_paused_guests_and_reports_down_guests() {
     let mut w=world(0);
     let names=vec!["a".to_string(),"b".to_string()];
@@ -245,7 +237,6 @@ fn checkpoint_reseeds_paused_guests_and_reports_down_guests() {
 }
 
 #[test]
-#[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
 fn checkpoint_identity_keys_live_streams_and_future_incarnations() {
     let mut w=world(0);
     let names=vec!["a".to_string(),"b".to_string()];
@@ -277,7 +268,6 @@ fn checkpoint_identity_keys_live_streams_and_future_incarnations() {
 }
 
 #[test]
-#[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
 fn checkpoint_keeps_partial_matchers_selectors_and_pending_trigger_effects() {
     let mut w=world(256);
     let names=vec!["a".to_string(),"b".to_string()];
@@ -331,7 +321,6 @@ fn checkpoint_keeps_partial_matchers_selectors_and_pending_trigger_effects() {
 }
 
 #[test]
-#[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
 fn checkpoint_drain_preserves_trigger_target_exit_notification() {
     let mut w=world(0);
     w.faults.management_ready(1,0,100).unwrap();
@@ -352,13 +341,13 @@ fn checkpoint_drain_preserves_trigger_target_exit_notification() {
 
 /// Build artifacts/entropy-fork.cpio as described in harness/worlds/README.md.
 #[test]
-#[ignore = "requires ABI 3 artifacts/bzImage, artifacts/entropy-fork.cpio, exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+#[cfg(feature = "guest-tests")]
 fn runtime_checkpoint_getrandom_and_urandom_repeat_and_diverge() {
     let root=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut w=world(256);
     let mut boot=w.boot[0].clone();
-    boot.kernel=std::fs::read(root.join("artifacts/bzImage")).unwrap().into();
-    boot.initrd=std::fs::read(root.join("artifacts/entropy-fork.cpio")).unwrap().into();
+    boot.kernel=std::fs::read(std::env::var_os("SEEDBOX_TEST_KERNEL").map(std::path::PathBuf::from).unwrap_or_else(||root.join("artifacts/bzImage"))).unwrap().into();
+    boot.initrd=std::fs::read(std::env::var_os("SEEDBOX_TEST_INITRD").map(std::path::PathBuf::from).unwrap_or_else(||root.join("artifacts/entropy-fork.cpio"))).unwrap().into();
     boot.mem=256*1024*1024;boot.disk=None;boot.control_channel=false;
     boot.cmdline=("console=ttyS0 nokaslr noapic nolapic acpi=off io_delay=none tsc=reliable tsc_early_khz=1000000 lpj=1000000 clocksource=tsc random.trust_cpu=off random.trust_bootloader=on panic=-1 loglevel=4 rdinit=/init".into(),String::new());
     w.boot=vec![boot.clone(),boot.clone()];

@@ -100,11 +100,11 @@ cargo build-vmm
 cargo test-vmm
 cargo build --release --locked
 sudo -E env PATH="$PATH" target/release/seedbox doctor --cpu "$CPU" --kernel "$KERNEL" --allow-dev-engine
-sudo -E env PATH="$PATH" python3 harness/check-timed-logs-kvm.py "$CPU"
+bash harness/check.sh --require counter --cpu "$CPU"
 ```
 
 Expect both builds and non-ignored VMM tests to pass, doctor to report VALID with
-the unqualified dev marker, and the focused supervisor to pass all three ignored
+the unqualified dev marker, and the native supervisor to pass all compiled
 `machine::timed_log_tests` fixtures. It holds the shared CPU/SMT leases and MSR
 workaround through child cleanup, then verifies restoration. The real guest
 fixture writes binary bytes to COM1/debug and COM2 at equal time, then writes

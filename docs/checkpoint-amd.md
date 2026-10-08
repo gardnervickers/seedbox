@@ -19,8 +19,6 @@ bash kernel/build.sh
 cargo build --release --locked
 cargo build-vmm
 cargo test-vmm
-cargo test-vmm --no-run --message-format=json > "$OUT/tests.jsonl"
-export TEST_BINARY=$(python3 -c 'import json,sys; print(next(x["executable"] for x in map(json.loads,open(sys.argv[1])) if x.get("reason")=="compiler-artifact" and x.get("profile",{}).get("test") and x.get("executable")))' "$OUT/tests.jsonl")
 export VMM="$PWD/crates/seedbox-vmm/target/release/seedbox-vmm"
 export SEEDBOX_ROOT="$OUT"
 export CPU0="$CPU"
@@ -49,53 +47,21 @@ git worktree add --detach "$OUT/main" 7a42b56c35bf3d263ae02aeba7b0f86f866d923b
 export MAIN_VMM="$OUT/main/crates/seedbox-vmm/target/release/seedbox-vmm"
 ```
 
-## Ignored KVM tests
+## Native checkpoint tests
 
-Run every ignored VMM test in its own process, serially under one lease. The
-counter currently has process-lifetime ownership; separate test processes avoid
-accumulating perf descriptors across unrelated tests. This includes the existing
-spin, trigger, page-capture and timed-log controls, plus checkpoint tests. The
-wrapper below uses the existing batch ownership and MSR helpers; it is a test
-invocation, not an application acceptance runner.
+The platform suite discovers all VMM tests with `counter-tests` and runs them
+serially under the shared CPU/SMT lease. Provide the entropy fixture to include
+the real-kernel getrandom/urandom checkpoint control:
 
 ```sh
-sudo -n env PATH="$PATH" CPU="$CPU" TEST_BINARY="$TEST_BINARY" python3 - <<'PY'
-import os, signal, subprocess, sys, tempfile, time
-from pathlib import Path
-sys.path.insert(0, 'harness')
-import batch, msr54
-cpu=int(os.environ['CPU']); binary=os.environ['TEST_BINARY']
-names=[line.removesuffix(': test') for line in subprocess.check_output(
-    [binary,'--ignored','--list'],text=True).splitlines() if line.endswith(': test')]
-assert names
-batch.enable_subreaper()
-def interrupted(sig, frame): raise batch.Interrupted(sig)
-for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP): signal.signal(sig,interrupted)
-with batch.cpu_locks(sorted(batch.siblings(cpu))):
-    state=Path(tempfile.mkdtemp(prefix='checkpoint-kvm-',dir='/tmp')); saved=state/'saved.json'
-    try:
-        msr54.set_workaround(sorted(batch.siblings(cpu)),saved)
-        for name in names:
-            child=subprocess.Popen(['taskset','-c',str(cpu),binary,name,'--exact',
-                '--ignored','--nocapture','--test-threads=1'],start_new_session=True)
-            try:
-                deadline=time.monotonic()+600
-                while (status:=batch.exit_status(child)) is None:
-                    if time.monotonic()>deadline: raise TimeoutError(name)
-                    time.sleep(.05)
-                if status: raise RuntimeError((name,status))
-            finally: batch.stop_owned_group(child)
-    finally:
-        for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP): signal.signal(sig,signal.SIG_IGN)
-        if saved.exists(): msr54.restore_snapshot(sorted(batch.siblings(cpu)),saved)
-        if not saved.exists(): state.rmdir()
-PY
+SEEDBOX_TEST_KERNEL="$KERNEL" \
+SEEDBOX_TEST_INITRD="$PWD/artifacts/entropy-fork.cpio" \
+  bash harness/check.sh --require counter --require guests --cpu "$CPU"
 ```
 
-Expected: every ignored test passes, including runtime restore, B=P, partial
-matchers/selectors and pending trigger effects, PV page/syscall speed, timed-log
-cursor/order, torn disk survivors and per-machine getrandom/urandom repeat and
-divergence. The latter needs the entropy fixture built above.
+The suite includes runtime restore, partial matchers/selectors, pending trigger
+effects, PV page/syscall speed, timed-log cursor/order and torn disk survivors.
+The supervisor restores the exact MSR values after reaping all owned processes.
 
 ## Feature-off equality with main
 

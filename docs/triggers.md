@@ -118,19 +118,11 @@ cargo test --workspace --locked
 bash harness/acceptance.sh portable
 ```
 
-For the ignored KVM controls, build the test binary with the project alias:
+The native suite compiles the KVM controls through `counter-tests`, discovers
+them with the other VMM tests, and runs them under the shared CPU/SMT/MSR lease:
 
 ```sh
-cargo test-vmm --no-run --message-format=json > /tmp/seedbox-trigger-tests.jsonl
-TEST_BINARY=$(python3 -c 'import json; print(next(x["executable"] for x in map(json.loads,open("/tmp/seedbox-trigger-tests.jsonl")) if x.get("reason")=="compiler-artifact" and x.get("profile",{}).get("test") and x.get("executable")))')
-```
-
-Run the focused test wrapper. It acquires the existing CPU/SMT locks, saves,
-sets and verifies the Zen MSR workaround, directly owns/reaps each test process,
-and restores/verifies the original MSRs before releasing the lease:
-
-```sh
-sudo -n env PATH="$PATH" python3 harness/test-triggers.py "$CPU" "$TEST_BINARY"
+bash harness/check.sh --require counter --cpu "$CPU"
 ```
 
 Expected: all five `committed_trigger` World tests pass (reversed machine ties,

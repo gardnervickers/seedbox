@@ -943,7 +943,7 @@ mod progress_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "counter-tests"))]
 mod trigger_world_tests;
 
 #[cfg(test)]
@@ -1036,5 +1036,5 @@ mod worker_options_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "counter-tests"))]
 mod checkpoint_tests;

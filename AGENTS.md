@@ -142,33 +142,29 @@ the canonical crate; do not restore sibling source inclusion for these policies.
 Engine PRs that need host evidence go through a merge train
 ([docs/merge-train.md](docs/merge-train.md)).
 
-Portable checks must pass at the PR or merge-train head before spending AMD
-host time. `bash harness/mac-check.sh REV` is the fast pre-check for a Mac or
-any other non-KVM machine; it also works on the host. Run inside the project's
-Nix dev shell. Omit `REV` to check the current checkout, including local changes.
-The steps are fmt, clippy and `harness/acceptance.sh portable`, which includes
-workspace tests and both Python unittest suites (plus VMM tests on Linux).
-The first stdout line is `revision: FULL_SHA`, followed by the host check's
-timed step/phase summary format. Workspace builds use a persistent cache under
-`$XDG_CACHE_HOME`, or `~/Library/Caches` on macOS and `~/.cache` elsewhere;
-override it with `SEEDBOX_PRECHECK_TARGET` or `CARGO_TARGET_DIR`. A revision uses
-a temporary detached worktree under `$TMPDIR`, deleted on a pass; a failure keeps it and prints
-its path. Any failed step makes the gate exit nonzero; all steps still run.
-After a Linux pre-check pass, `bash harness/host-check.sh --skip-portable REV CPU` skips fmt,
-clippy and the portable suite (including workspace tests), while retaining VMM
-build/tests and host-specific checks. A Mac pass alone does not justify the skip.
-Match the full SHA printed by both gates.
-See [contributor checks](README.md#contributor-checks).
-
-Run these before committing:
+Run the native suite inside `nix develop` before committing:
 
 ```sh
-cargo fmt -p seedbox --check
-cargo clippy -p seedbox --all-targets --locked -- -D warnings
-cargo test --workspace --locked
-cargo test-vmm --features kvm-tests  # Linux; the feature needs /dev/kvm
-bash harness/acceptance.sh portable
+bash harness/check.sh
 ```
+
+The default runs every available capability, including native hardware tests.
+`bash harness/check.sh portable` runs the baseline without KVM, HVF, root or
+registry access. Portable checks must pass before hardware execution. Use
+`--require kvm`, `--require counter`, `--require hvf`, `--require guests` and
+`--require applications` (repeatable) when a job must include that coverage;
+unavailable required capabilities fail instead of silently shrinking the suite.
+`--list` prints the host capability selection without builds or test execution.
+
+See [docs/testing.md](docs/testing.md) for the matrix and guest inputs. Add Rust
+tests to Cargo, Python tests to unittest discovery, and application scenarios to
+`harness/acceptance/workloads/`. Gate hardware test modules/helpers with the
+appropriate Cargo feature and target OS/architecture; do not add per-test lists
+or use `#[ignore]` for maintained hardware suites. The existing standalone aliases
+retain their wrappers, lockfiles, build profiles and target directories. The
+runner builds as the current user, signs disposable HVF test copies, and uses
+scoped CPU/SMT/MSR cleanup for counted tests. `mac-check.sh [REV]` remains a
+portable-only compatibility wrapper for revision worktrees.
 
 The `seedbox-vmm` crate has existing clippy findings. Don't fix them in an
 unrelated change (see above).

@@ -13,7 +13,7 @@ cargo check --locked --manifest-path crates/seedbox-vmm/Cargo.toml --target-dir 
 cargo test -p seedbox --locked
 cargo clippy -p seedbox --locked --all-targets -- -D warnings
 test_binary=$(cargo test -p seedbox --locked \
-  --test oci --no-run --message-format=json | \
+  --features oci-tests --test oci --no-run --message-format=json | \
   jq -r 'select(.reason == "compiler-artifact" and .target.name == "oci" and .executable != null) | .executable')
 test -n "$test_binary"
-sudo -n env PATH="$PATH" "$test_binary" --ignored --nocapture --test-threads=1
+sudo -n env PATH="$PATH" "$test_binary" --nocapture --test-threads=1

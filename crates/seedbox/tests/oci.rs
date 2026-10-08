@@ -1,6 +1,8 @@
+#[cfg(all(target_os = "linux", feature = "oci-tests"))]
+use seedbox::oci::OciTools;
 use seedbox::{
     config,
-    oci::{import_metadata, OciTools},
+    oci::import_metadata,
     store::{ContentDigest, ContentStore},
 };
 use serde_json::json;
@@ -78,7 +80,7 @@ fn foreign_platform_and_image_lifecycle_hooks_fail_before_execution() {
 }
 
 #[test]
-#[ignore = "requires Linux root, registry access, skopeo and umoci from the Nix shell"]
+#[cfg(all(target_os = "linux", feature = "oci-tests"))]
 fn real_registry_images_use_the_verified_import_path() {
     let directory = tempfile::tempdir().unwrap();
     let store = ContentStore::new(directory.path().join("store"));
@@ -107,7 +109,7 @@ fn real_registry_images_use_the_verified_import_path() {
 }
 
 #[test]
-#[ignore = "requires Linux root, Podman, skopeo and umoci from the Nix shell"]
+#[cfg(all(target_os = "linux", feature = "oci-tests"))]
 fn dockerfile_layers_apply_whiteouts_and_preserve_launch_metadata() {
     let directory = tempfile::tempdir().unwrap();
     let context = directory.path().join("context");

@@ -77,37 +77,6 @@ if [ "$1" = clippy ]; then exit "$CHECK_TEST_STATUS"; fi
             ])
             self.assertIn('command-output', result.stderr)
 
-    def test_linux_portable_suite_keeps_workspace_cache_out_of_vmm(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / 'bin').mkdir()
-            (root / 'harness' / 'tests').mkdir(parents=True)
-            (root / 'python').mkdir()
-            shutil.copyfile(HARNESS / 'acceptance.sh', root / 'harness' / 'acceptance.sh')
-            scripts = {
-                'uname': '#!/bin/sh\necho Linux\n',
-                'git': '#!/bin/sh\nexit 0\n',
-                'python3': '#!/bin/sh\nexit 0\n',
-                'cargo': '''#!/bin/sh
-echo "$* target=${CARGO_TARGET_DIR-unset}" >> "$CHECK_TEST_LOG"
-''',
-            }
-            for name, script in scripts.items():
-                path = root / 'bin' / name
-                path.write_text(script)
-                path.chmod(0o755)
-            log = root / 'commands'
-            cache = root / 'workspace cache'
-            env = dict(os.environ, PATH=f'{root / "bin"}{os.pathsep}{os.environ["PATH"]}',
-                       CHECK_TEST_LOG=str(log), CARGO_TARGET_DIR=str(cache))
-            result = subprocess.run(['bash', 'harness/acceptance.sh', 'portable'],
-                                    cwd=root, env=env, capture_output=True,
-                                    text=True, check=False)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            # The KVM-only tests are added only where /dev/kvm is usable.
-            vmm, workspace = log.read_text().splitlines()[:2]
-            self.assertIn(vmm, ['test-vmm target=unset', 'test-vmm --features kvm-tests target=unset'])
-            self.assertEqual(workspace, f'test --workspace --locked target={cache}')
 
 
 class WorktreeTests(unittest.TestCase):

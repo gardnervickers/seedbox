@@ -315,7 +315,7 @@ mod tests {
     use kvm_ioctls::Kvm;
 
     #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
+    #[cfg(feature = "kvm-tests")]
     fn guest_without_page_timer_support_fails_at_boot() {
         let kvm = Kvm::new().unwrap();
         for requested in [false, true] {
@@ -360,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
+    #[cfg(feature = "kvm-tests")]
     fn a_page_arm_lowers_the_running_guest_clock_bound() {
         let kvm = Kvm::new().unwrap();
         let mut code = Vec::new();
@@ -389,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
+    #[cfg(feature = "kvm-tests")]
     fn watchdog_plans_do_not_adopt_expire_or_draw_page_timer_latency() {
         let kvm = Kvm::new().unwrap();
         let mut m = machine(&kvm, &[0xf4], 0);
@@ -425,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
+    #[cfg(feature = "kvm-tests")]
     fn store_deadline_then_halt_has_the_same_wake_irq_and_witness_across_watchdogs() {
         let kvm = Kvm::new().unwrap();
         for (spin, old, word) in [(false, None, 900000u64), (false, Some(20000), 900000),
@@ -492,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
+    #[cfg(feature = "kvm-tests")]
     fn changing_idle_periods_keep_plan_and_wake_across_watchdogs() {
         let kvm = Kvm::new().unwrap();
         let start = 1_010_599_858u64;
@@ -593,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
+    #[cfg(feature = "kvm-tests")]
     fn a_jump_to_itself_is_idle_at_the_jump() {
         let (stop, rip, _, m) = run(&[0xeb, 0xfe], true); // jmp $
         assert_eq!(stop, Stop::Halted);
@@ -603,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
+    #[cfg(feature = "kvm-tests")]
     fn a_cycle_with_an_inner_loop_is_idle_at_its_canonical_point() {
         // outer: mov ecx,5; inner: dec ecx; jnz inner; jmp outer
         let (stop, rip, rcx, m) = run(&[0xb9, 5, 0, 0, 0, 0x49, 0x75, 0xfd, 0xeb, 0xf6], true);
@@ -633,7 +633,7 @@ mod tests {
     /// Ticks far more often than a check lasts: every check still counts
     /// each landing, so all runs idle at the same point after one check.
     #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
+    #[cfg(feature = "kvm-tests")]
     fn frequent_ticks_do_not_disturb_a_spin_check() {
         let kvm = Kvm::new().unwrap();
         let code = [0xb9, 5, 0, 0, 0, 0x49, 0x75, 0xfd, 0xeb, 0xf6];
@@ -649,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
+    #[cfg(feature = "kvm-tests")]
     fn a_long_finite_loop_is_left_alone() {
         // mov ecx,0x20000000; l: dec ecx; jnz l; hlt
         let (stop, rip, rcx, m) = run(&[0xb9, 0, 0, 0, 0x20, 0x49, 0x75, 0xfd, 0xf4], false);

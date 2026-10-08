@@ -1989,7 +1989,7 @@ impl Machine {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "kvm-tests"))]
 mod net_poll_tests {
     use super::*;
 
@@ -2006,7 +2006,7 @@ mod net_poll_tests {
     }
 
     #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM on a Linux x86-64 host")]
+    #[cfg(feature = "kvm-tests")]
     fn event_idx_polls_on_entry_slice_boundary_and_halt_without_kicks() {
         let kvm = Kvm::new().unwrap();
         for site in ["entry", "slice", "bounded_slice", "halt", "charged_io"] {
@@ -2060,7 +2060,7 @@ mod net_poll_tests {
         }
     }
     #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM on a Linux x86-64 host")]
+    #[cfg(feature = "kvm-tests")]
     fn pv_stop_adopts_the_guest_clock() {
         let kvm = Kvm::new().unwrap();
         for arm in [false, true] {
@@ -2084,7 +2084,7 @@ mod net_poll_tests {
         }
     }
     #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM on a Linux x86-64 host")]
+    #[cfg(feature = "kvm-tests")]
     fn deferred_tx_completes_a_pv_spin_without_halt_kick_or_interrupts() {
         use std::time::Duration;
         use super::pv::PvClock;
@@ -2142,7 +2142,7 @@ mod net_poll_tests {
 }
 
 
-#[cfg(test)]
+#[cfg(all(test, feature = "kvm-tests"))]
 mod io_boundary_tests {
     use super::*;
 
@@ -2167,7 +2167,7 @@ mod io_boundary_tests {
     }
 
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg(feature = "counter-tests")]
     fn runtime_checkpoint_keeps_unpaid_io_without_repeating_its_effect() {
         let kvm=Kvm::new().unwrap();
         let mut counter=Counter::new().unwrap();
@@ -2194,7 +2194,7 @@ mod io_boundary_tests {
     }
 
     #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM on the qualified Linux host")]
+    #[cfg(feature = "kvm-tests")]
     fn page_capture_has_documented_format_and_preserves_ram_witness_state() {
         let kvm=Kvm::new().unwrap();
         let mut m=probe(&kvm,0x530,true,0);
@@ -2250,7 +2250,7 @@ mod io_boundary_tests {
     }
 
     #[test]
-    #[ignore = "first unchanged failed case; requires exclusive leased KVM lane"]
+    #[cfg(feature = "counter-tests")]
     fn first_case_preserves_boot_and_halts() {
         let kvm=Kvm::new().unwrap();
         let mut counter=Counter::new().unwrap();
@@ -2258,7 +2258,7 @@ mod io_boundary_tests {
     }
 
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg(feature = "counter-tests")]
     fn charged_io_completes_once_after_debt_with_no_guest_progress() {
         let kvm=Kvm::new().unwrap();
         let mut counter=Counter::new().unwrap();
@@ -2324,7 +2324,7 @@ mod io_boundary_tests {
     }
 
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg(feature = "counter-tests")]
     fn an_overdue_arm_replaced_by_a_page_store_does_not_depend_on_undo() {
         let kvm = Kvm::new().unwrap();
         let mut counter = Counter::new().unwrap();
@@ -2355,7 +2355,7 @@ mod io_boundary_tests {
     }
 
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg(feature = "counter-tests")]
     fn refined_counter_approaches_preserve_ram_and_exact_stops() {
         let kvm=Kvm::new().unwrap();
         let mut counter=Counter::new().unwrap();
@@ -2384,7 +2384,7 @@ mod io_boundary_tests {
     }
 
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg(feature = "counter-tests")]
     fn stops_at_natural_exits_or_exact_hard_counts_without_yields() {
         let kvm=Kvm::new().unwrap();
         let mut counter=Counter::new().unwrap();
@@ -2422,42 +2422,11 @@ mod io_boundary_tests {
         }
     }
 
-    fn halt_snapshot(m: &mut Machine, stage: &str) {
-        let regs=m.vcpu.get_regs().unwrap();
-        let sregs=m.vcpu.get_sregs().unwrap();
-        let (sync,if_flag,exit_reason)={let run=m.vcpu.get_kvm_run();(unsafe{run.s.regs.regs},run.if_flag,run.exit_reason)};
-        let marker=m.memory()[0x80000..0x80004].to_vec();
-        let page:Vec<_>=(0..PAGE_FIELDS).map(|i|m.page_get(i)).collect();
-        eprintln!("{}",serde_json::json!({"stage":stage,"state":format!("{:?}",m.state),"guest_exit":m.guest_exit_code,"guest_init_error":m.guest_init_error,"arch":{"rip":regs.rip,"rflags":regs.rflags,"rax":regs.rax,"rdx":regs.rdx,"rsp":regs.rsp,"cr0":sregs.cr0,"cs_base":sregs.cs.base},"sync":{"rip":sync.rip,"rflags":sync.rflags,"rax":sync.rax,"rdx":sync.rdx},"run_if_flag":if_flag,"raw_run_exit_reason":exit_reason,"pending_io":m.pending_io.as_ref().map(|p|serde_json::json!({"remaining_ns":p.remaining_ns,"port":p.port,"write":p.write,"width":p.width,"count":p.count,"bytes":p.bytes})),"time_ns":m.time,"branches":m.branches,"page":page,"marker":marker,"exits":m.stats.exits,"halts":m.stats.halts,"irqs":m.stats.irqs,"kvm_exits":m.stats.kvm_n}));
-    }
-
-    #[test]
-    #[ignore = "single manager-authorized diagnostic of unchanged halt case"]
-    fn diagnose_first_halt_case() {
-        let kvm=Kvm::new().unwrap();
-        let mut counter=Counter::new().unwrap();
-        let mut m=probe(&kvm,0x40,true,0);
-        let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend_from_slice(&m.memory()[0x100000..0x100000+26]);
-        eprintln!("fixture_kernel_sha256={:x}",Sha256::digest(&kernel));
-        halt_snapshot(&mut m,"before_first_run");
-        let mut frames=Vec::new();
-        for (limit,stage) in [(500,"after_partial_500"),(750,"after_partial_750"),(1000,"after_completion_1000")] {
-            let stop=m.run_until(&mut counter,limit,0,&mut frames);
-            eprintln!("limit={limit} stop={stop:?}");
-            halt_snapshot(&mut m,stage);
-            assert_eq!(stop.unwrap(),Stop::Reached);
-        }
-        let stop=m.run_until(&mut counter,2000,0,&mut frames);
-        eprintln!("limit=2000 stop={stop:?}");
-        halt_snapshot(&mut m,"after_final_resume");
-        assert_eq!(stop.unwrap(),Stop::Halted);
-    }
-
     /// Pause with 161 ns of I/O cost owed and a periodic timer armed: while
     /// paused nothing runs and nothing is paid. Resumed later, the missed
     /// ticks fire once, late, in phase, and the debt is paid from the resume.
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg(feature = "counter-tests")]
     fn a_pause_keeps_owed_io_cost_and_resumes_in_timer_phase() {
         let kvm=Kvm::new().unwrap();
         let mut counter=Counter::new().unwrap();
@@ -2492,7 +2461,7 @@ mod io_boundary_tests {
     /// Pause once the debt is paid but before the guest runs on: resuming
     /// later runs exactly what an unpaused machine runs, just later.
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg(feature = "counter-tests")]
     fn a_pause_with_no_debt_runs_on_unchanged_after_resume() {
         let kvm=Kvm::new().unwrap();
         let mut counter=Counter::new().unwrap();
@@ -2564,7 +2533,7 @@ mod fork_tests {
     }
 
     #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
+    #[cfg(feature = "kvm-tests")]
     fn page_timer_negotiation_and_undo_restore_the_separate_page_word() {
         let kvm = Kvm::new().unwrap();
         let mut m = probe_machine(&kvm, 256, false);
@@ -2603,7 +2572,7 @@ mod fork_tests {
 
     // These tests create a vCPU but never enter the guest or open a perf event.
     #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
+    #[cfg(feature = "kvm-tests")]
     fn abi_below_3_time_forks_do_not_write_extensions_or_add_reseed_witnesses() {
         let kvm=Kvm::new().unwrap();
         for abi in 0..ABI_PAGE_RESEED {
@@ -2627,7 +2596,7 @@ mod fork_tests {
     }
 
     #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
+    #[cfg(feature = "kvm-tests")]
     fn a_time_fork_writes_only_entropy_and_a_barrier_writes_none() {
         let kvm=Kvm::new().unwrap();
         for barrier in [false,true] {
@@ -2691,7 +2660,7 @@ mod fork_tests {
     }
 
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg(feature = "counter-tests")]
     fn a_restored_fork_matches_a_cold_run_and_seeds_differ() {
         let kvm=Kvm::new().unwrap();
         let mut counter=Counter::new().unwrap();
@@ -2724,7 +2693,7 @@ mod fork_tests {
     /// fires late at the release instead of leaving the next slice a hard
     /// stop behind its clock.
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg(feature = "counter-tests")]
     fn a_release_past_an_armed_timer_fires_it_and_runs_on() {
         let kvm=Kvm::new().unwrap();
         let mut counter=Counter::new().unwrap();
@@ -2749,7 +2718,7 @@ mod fork_tests {
     /// Fork at a simulated time inside the spin loop instead of at the guest's
     /// barrier (the port write and read are then ordinary unknown ports).
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg(feature = "counter-tests")]
     fn a_fork_at_a_simulated_time_matches_a_cold_run() {
         let kvm=Kvm::new().unwrap();
         let mut counter=Counter::new().unwrap();
@@ -2784,7 +2753,7 @@ mod fork_tests {
     /// fork point: a full copy, after which it holds one and later restores
     /// take the cheap path again. Every restore must match the cold run.
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg(feature = "counter-tests")]
     fn a_fork_restores_into_a_freshly_built_machine() {
         let kvm=Kvm::new().unwrap();
         let mut counter=Counter::new().unwrap();
@@ -2819,7 +2788,7 @@ mod fork_tests {
     /// fresh RAM, the program runs again from its first instruction at the
     /// reboot time, and the logs and witness carry across.
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg(feature = "counter-tests")]
     fn a_crashed_machine_reboots_fresh_from_its_boot_inputs() {
         let kvm=Kvm::new().unwrap();
         let mut counter=Counter::new().unwrap();
@@ -2858,7 +2827,7 @@ mod fork_tests {
     }
 
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg(feature = "counter-tests")]
     fn a_reboot_applies_seeded_sector_survival_and_keeps_the_default_witness() {
         let kvm=Kvm::new().unwrap();
         for fault_model in [crate::disk::DiskFaultModel { sector_bytes: crate::disk::SECTOR, survival_probability: 0.0 },crate::disk::DiskFaultModel { sector_bytes: crate::disk::SECTOR, survival_probability: 0.5 }] {
@@ -2901,7 +2870,7 @@ mod fork_tests {
     /// boots with the stable layer, a fresh virtio-blk transport, and none of
     /// the volatile writes. A fork restore puts the whole disk back.
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg(feature = "counter-tests")]
     fn a_reboot_keeps_flushed_disk_writes_only() {
         let kvm=Kvm::new().unwrap();
         let with_disk=|m: &mut Machine| m.blk=Some(VirtioBlk::new(Disk::new(None,Some(8)).unwrap()));
@@ -2930,7 +2899,7 @@ mod fork_tests {
     }
 
     #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
+    #[cfg(feature = "kvm-tests")]
     fn runtime_checkpoint_restores_pv_fields_and_seeded_syscall_cost() {
         let kvm=Kvm::new().unwrap();
         let mut m=probe_machine(&kvm,0,false);
@@ -2949,7 +2918,7 @@ mod fork_tests {
     }
 
     #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
+    #[cfg(feature = "kvm-tests")]
     fn runtime_reseed_publishes_page_without_advancing_or_unpausing() {
         let kvm=Kvm::new().unwrap();
         let mut m=probe_machine(&kvm,0,false);
@@ -2978,7 +2947,7 @@ mod fork_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "counter-tests"))]
 mod timed_log_tests {
     use super::*;
 
@@ -2995,7 +2964,7 @@ mod timed_log_tests {
     }
 
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg(feature = "counter-tests")]
     fn timed_logs_commit_order_and_observation_controls() {
         let kvm=Kvm::new().unwrap();let mut counter=Counter::new().unwrap();let mut expected=None;
         for undo in [0,16,256] {
@@ -3021,7 +2990,7 @@ mod timed_log_tests {
     }
 
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg(feature = "counter-tests")]
     fn timed_logs_survive_machine_incarnations() {
         let kvm=Kvm::new().unwrap();let mut counter=Counter::new().unwrap();
         let mut old=output_machine(&kvm,256);let mut frames=Vec::new();
@@ -3034,7 +3003,7 @@ mod timed_log_tests {
     }
 
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg(feature = "counter-tests")]
     fn runtime_checkpoint_restores_timed_log_cursor_and_order() {
         let kvm=Kvm::new().unwrap();let mut counter=Counter::new().unwrap();
         let mut m=output_machine(&kvm,256);let mut frames=Vec::new();
@@ -3070,7 +3039,7 @@ mod timed_log_tests {
         }
     }
     #[test]
-    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    #[cfg(feature = "counter-tests")]
     fn timed_logs_commit_gate_rejection_and_rollback() {
         let kvm=Kvm::new().unwrap();
         for rollback in [false,true] {
@@ -3091,7 +3060,7 @@ mod timed_log_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "kvm-tests"))]
 mod committed_trigger_tests {
     use super::*;
     /// Force a real KVM UART candidate through the actual rollback branch.
@@ -3111,7 +3080,7 @@ mod committed_trigger_tests {
         }
     }
     #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
+    #[cfg(feature = "kvm-tests")]
     fn committed_console_discards_rolled_back_candidate_before_matcher_feed() {
         let kvm=Kvm::new().unwrap();
         let mut kernel=vec![0;1024];kernel[0x1f1]=1;kernel.extend_from_slice(&[0xb0,b'A',0xe6,0xe9,0xf4]);

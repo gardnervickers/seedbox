@@ -10,21 +10,18 @@ fi
 cd "$(dirname "$0")/.."
 while IFS= read -r script; do
   bash -n "$script"
-done < <(git ls-files '*.sh' ':!:research/**')
-tests=(test_msr54 test_scenarios test_race_acceptance test_smoke test_smoke_fixture test_mac_check test_host_plan test_host_pairs test_host_check test_links test_vmm_build test_build_version test_linux_runtime test_protocol_source test_core_build)
-if [[ $(uname -s) == Linux ]]; then tests+=(test_batch); fi
-(cd harness/tests && python3 -m unittest -q "${tests[@]}")
+done < <(git ls-files --cached --others --exclude-standard '*.sh' ':!:research/**' | sort -u)
+# New unittest modules are discovered without editing this runner.
+(cd harness/tests && python3 -m unittest discover -s . -q)
 (cd python && python3 -m unittest discover -s tests -q)
-# The portable pre-check may share a workspace cache. Keep the standalone VMM
-# in its prescribed crates/seedbox-vmm/target directory.
-if [[ $(uname -s) == Linux ]]; then
-  if [[ -r /dev/kvm && -w /dev/kvm ]]; then
-    env -u CARGO_TARGET_DIR cargo test-vmm --features kvm-tests
-  else
-    echo 'acceptance: /dev/kvm is not usable; skipping the KVM-only VMM tests' >&2
-    env -u CARGO_TARGET_DIR cargo test-vmm
-  fi
+# No device probing or hardware features in the portable suite.
+if [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]]; then
+  env -u CARGO_TARGET_DIR cargo test-vmm
 fi
+# ARM policy/mock tests are portable, including on Linux x86-64.
+env -u CARGO_TARGET_DIR cargo test-arm64
+python3 kernel-arm64/test_inputs.py -q
+python3 crates/seedbox-arm64/test_compare.py -q
 cargo test --workspace --locked
 for scenario in harness/acceptance/workloads/*.yaml; do
   cargo run --quiet --locked -p seedbox -- validate "$scenario"

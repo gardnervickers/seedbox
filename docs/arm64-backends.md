@@ -173,8 +173,8 @@ instruction or recording a witness event. The backend does not infer a watchdog
 cause from cancellation, and queued cancellation may return without guest entry.
 This plumbing introduces no asynchronous watchdog or ARM cycle-proof enablement.
 Run the signed native queued-cancellation check with
-`nix develop --command python3 tools/mac-runtime/check-primitives.py`. It copies
-the test binary before signing, bounds guest execution to 20 seconds, and removes
+`nix develop --command bash harness/check.sh --require hvf`. It copies
+the test binary before signing, bounds each native test executable, and removes
 the signed copy afterward. Portable machine tests cover repeated interruptions
 with a pending timer and the last available semantic exit-budget slot.
 
@@ -295,37 +295,29 @@ RAM and the shared page; no backend-specific bytes are filtered out.
 
 Acceptance history is in the [PR #120 description](https://github.com/gardnervickers/seedbox/pull/120).
 
-### Portable checks and Mac build
+### Portable and native checks
 
 From the project Nix shell (`nix develop`, never `path:.`):
 
 ```sh
-cargo fmt --manifest-path crates/seedbox-arm64/Cargo.toml --check
-cargo clippy --manifest-path crates/seedbox-arm64/Cargo.toml --all-targets --locked -- -D warnings
-cargo test-arm64
-python3 kernel-arm64/test_inputs.py
-python3 crates/seedbox-arm64/test_compare.py
-cargo build-arm64
-mkdir -p artifacts
-cargo test-arm64 --test hardware --no-run --message-format=json > artifacts/arm64-tests.jsonl
-arm64_test_binary="$(python3 -c 'import json; print(next(x["executable"] for x in map(json.loads, open("artifacts/arm64-tests.jsonl")) if x.get("reason") == "compiler-artifact" and x["target"]["name"] == "hardware" and x.get("executable")))')"
-bash crates/seedbox-arm64/codesign.sh
-bash crates/seedbox-arm64/codesign.sh "$arm64_test_binary"
+bash harness/check.sh portable
+bash harness/check.sh --require hvf
 ```
 
-Finish all Cargo builds before signing the CLI and test executable. Relinking
-invalidates the entitlement signature; invoke signed tests directly.
+The default command runs every available capability. It builds the ARM test
+executables with `hvf-tests`, then signs disposable copies and invokes all of
+them directly. It never needs an individual test name or `--ignored`.
 
 ### Run hardware acceptance
 
 ```sh
 export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-hres/Image"
 export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-hres/init.cpio"
-export SEEDBOX_ARM64_REPORT_DIR="$(mktemp -d "$PWD/artifacts/arm64-hres/hvf-acceptance.XXXXXX")"
-"$arm64_test_binary" --ignored --exact hvf_determinism --nocapture --test-threads=1
+bash harness/check.sh --require hvf --require guests
 ```
 
-Use a fresh report directory. The suite runs seeds 1, 1, 2 and seed 1 with host
+The runner creates and prints a fresh report directory and enables `guest-tests`.
+The suite runs seeds 1, 1, 2 and seed 1 with host
 CPU load and randomized pre-entry sleeps. It compares complete witnesses,
 checks seed sensitivity, guest sleep checks, a 200–300 us timerfd spin with an
 observed expiration, and at least one event+24 yield. Deferral counts are
@@ -357,7 +349,7 @@ cargo test-arm64 --test review_yield_masked --test review_deferred_bound
 export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-hres/Image"
 export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-hres/init.cpio"
 export SEEDBOX_ARM64_REPORT_DIR="$(mktemp -d "$PWD/artifacts/arm64-hres/kvm-acceptance.XXXXXX")"
-cargo test-arm64 --test hardware -- --ignored --exact kvm_determinism --nocapture --test-threads=1
+bash harness/check.sh --require kvm --require guests
 
 for run in 1-a 1-b 2-a 2-b; do
   crates/seedbox-arm64/target/release/seedbox-arm64 run \

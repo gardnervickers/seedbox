@@ -335,57 +335,37 @@ cannot be reproduced from source with the new flags; the next engine re-pin
 must use the new build and complete host qualification. Retained old engine
 bytes remain the inputs for their existing runs. This change updates no pins.
 
-Portable checks must pass at the PR or merge-train head before spending AMD
-host time. Use the fast pre-check on a Mac or any other non-KVM machine:
+Run every suite available on the current platform from the project Nix shell:
 
 ```sh
-bash harness/mac-check.sh main     # any local revision or branch
-bash harness/mac-check.sh          # current checkout, including local changes
+nix develop --command bash harness/check.sh
 ```
 
-Run from within the checkout on any host inside the project's Nix dev shell.
-With a revision, the script creates a detached worktree under `$TMPDIR` (or `/tmp` if unset) and
-deletes it on a pass; on failure it keeps the worktree and prints its path.
-Without a revision, it checks the existing checkout, including local changes.
-Its first stdout line is `revision: FULL_SHA`. It uses the caller's development
-shell to run, in order:
-
-- `cargo fmt -p seedbox --check`
-- `cargo clippy -p seedbox --all-targets --locked -- -D warnings`
-- `bash harness/acceptance.sh portable`
-
-The portable suite includes workspace tests, both Python unittest suites and
-YAML validation. Workspace builds share a persistent target directory at
-`$XDG_CACHE_HOME/seedbox/precheck-target` when set, otherwise
-`~/Library/Caches/seedbox/precheck-target` on macOS or
-`~/.cache/seedbox/precheck-target` elsewhere. `SEEDBOX_PRECHECK_TARGET` overrides
-that path; an existing `CARGO_TARGET_DIR` is respected when the override is unset.
-Relative overrides resolve from the invoking directory, before entering a
-revision worktree. Cargo fingerprints determine which build outputs can be reused.
-
-All steps run even if an earlier step fails. Command output goes to stderr;
-stdout ends with timed step/phase lines in `harness/host-check.sh`'s exact format:
-`printf '%-8s %s %4ss\n' STEP pass|FAIL SECONDS`, with `phase ` lines preserved.
-The gate exits 0 only if every step passes, and 1 if any step fails; setup errors
-also exit nonzero. The runner comes from the invoking checkout, so it can check
-revisions that predate the script.
-
-On macOS, the pre-check skips the Linux-only VMM tests and batch supervisor
-lifecycle tests. On Linux, the portable suite includes those tests; VMM tests
-keep their standalone target directory instead of using the workspace cache.
-The pre-check does not execute guests. VMM builds and KVM acceptance remain
-Linux host checks. After a Linux pre-check passes a committed revision, run:
+The runner discovers the native backend and host capabilities, enables the
+applicable Cargo test features, and runs every discovered test executable. It
+includes KVM tests without a PMU, shared AMD/Intel counter tests under CPU/SMT
+leases, and signed native HVF tests. Real-guest and application suites join the
+run when their inputs are available. Missing capabilities are listed explicitly;
+`--require` turns a missing capability into a setup failure.
 
 ```sh
-bash harness/host-check.sh --skip-portable REV CPU
+bash harness/check.sh portable                  # No hardware or root
+bash harness/check.sh --list                    # Show capabilities
+bash harness/check.sh --require hvf             # Require native Mac coverage
+bash harness/check.sh --require kvm --require counter
 ```
 
-This skips fmt, clippy and the portable suite (including workspace tests), while
-keeping the CLI build, VMM build (unless `SEEDBOX_VMM` selects a stored engine),
-VMM tests and AMD smoke checks. Both gates print the full SHA; match them before
-using the skip option. A Mac pass alone does not justify skipping the Linux
-portable checks. A pre-check with local changes only verifies those local
-bytes and does not establish a pass for the committed SHA.
+See [running and adding tests](docs/testing.md) for the environment matrix,
+fixture inputs, and how to add tests through Cargo or unittest discovery. New
+tests within an existing capability need no runner changes. The portable suite
+includes ARM mock/policy tests on every development host and x86 backend unit
+tests on Linux x86-64. It never opens KVM or HVF.
+
+`harness/mac-check.sh [REV]` remains a portable compatibility wrapper with
+isolated revision worktrees and its existing persistent workspace cache. A
+platform suite pass includes only the capabilities printed for that invocation.
+Engine changes still need the [merge train](docs/merge-train.md) and any
+claim-specific guest evidence.
 
 ## How execution is controlled
 
@@ -671,17 +651,11 @@ YAML without starting guests. It has no hardware tiers. The low-level batch
 runner remains available for the distinct fixtures below. Hardware results and known runtime failures
 are recorded in [docs/acceptance.md](docs/acceptance.md).
 
-`bash harness/host-check.sh --plan SHA` shows change-scoped host checks from the
-merge-base diff without executing anything. On the qualified Linux host,
-`--lanes 1,2,3` spreads the selected checks over SMT pairs `(N, N+16)`.
-Host-free selection uses an explicit allow-list; unknown paths select core.
-Other examples also require their reviewer's run list, and kernel changes keep
-the campaign warning while selecting core. Execution runs portable checks by
-default; `REV CPU` remains shorthand for `REV --lanes CPU` (1..15).
-Disk and Compose-volume rows require `SEEDBOX_DISK_KERNEL` until K2 is accepted.
-Automatic `cluster-fixed` runs only when engine inputs differ from local main;
-reviewer requirements repeat on the final status and in retained summaries.
-Use repeatable `--extra CHECK` to add reviewer checks. See [the host-check map and execution instructions](harness/smoke/README.md#change-scoped-host-checks).
+`bash harness/check.sh` runs the full set of available platform suites,
+including application run/diff/replay checks when runtime inputs are present.
+Use `--require applications` when application coverage is required. The older
+change-scoped host planner remains available for low-level fixture campaigns;
+see its [execution instructions](harness/smoke/README.md#change-scoped-host-checks).
 
 The focused race comparison records a fixed `SOURCE_DATE_EPOCH=0` for Podman image
 build metadata and requires two public preparations to have identical complete
