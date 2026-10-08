@@ -1,0 +1,94 @@
+# Running and adding tests
+
+From the project development shell, one command runs every available suite:
+
+```sh
+nix develop --command bash harness/check.sh
+```
+
+The runner reports the host and every selected or unavailable capability. It
+builds as the current user, discovers Cargo test executables, and runs them.
+Linux tests that need root use existing passwordless sudo; the runner never
+prompts or runs Cargo as root. Mac native tests run from signed disposable
+copies, after all builds have finished.
+
+```sh
+bash harness/check.sh portable                  # No virtualization or root
+bash harness/check.sh --list                    # Inspect selection without tests
+bash harness/check.sh --require hvf             # Require Mac hardware coverage
+bash harness/check.sh --require kvm             # Require KVM coverage
+bash harness/check.sh --require counter --cpu 14 # Require leased PMU coverage
+```
+
+`--require` is repeatable. Missing required capabilities exit 2; failed checks
+exit 1. Default auto mode runs all available suites and explains unavailable
+ones. A failed portable check prevents hardware execution. A selected suite
+that fails stays failed; there are no retries or fallback passes.
+
+## Environments and features
+
+| Capability | Environment | Cargo feature / coverage |
+| --- | --- | --- |
+| Portable | Any development host | Root workspace, ARM mocks/policies, Python suites, guest source checks, YAML validation; also x86 backend unit tests on Linux x86-64 |
+| `kvm` | Linux x86-64 or ARM64, usable `/dev/kvm` | Native backend `kvm-tests`; no PMU required |
+| `counter` | Linux x86-64 KVM, usable guest PMU, root | VMM `counter-tests`; exact stops, checkpoints, forks, committed logs and triggers |
+| `hvf` | Apple Silicon, macOS 15+, HVF and codesign | ARM `hvf-tests`; native CPU/state and cancellation primitives |
+| `oci` | Linux x86-64, root, Skopeo, umoci, Podman, registry access | CLI `oci-tests`; real image import and Dockerfile behavior |
+| `guests` | Native backend plus fixture kernel/initrd | Backend `guest-tests`; real guest determinism/checkpoint controls |
+| `applications` | Linux x86 KVM plus OCI/kernel inputs, or a packaged Mac runtime | CLI `application-tests`; every acceptance YAML runs twice, diff matches, replay matches, with full state |
+| `retained-run` | Linux x86-64 KVM, root, supplied retained run/store | CLI `retained-run-tests`; pause/resume replay |
+
+AMD and Intel run the same counted-execution tests. The engine selects its
+counter profile through CPUID. The test supervisor leases a free core and its
+SMT siblings, applies the AMD workaround where required, and restores exact MSR
+values after reaping every owned process. Intel uses no AMD MSR writes. This
+test selection makes no claim about untested Intel hardware or cross-host replay.
+
+Platform dependencies remain selected by Cargo target OS/architecture. Features
+add test capabilities; they do not switch the production CPU backend or pin a
+host. `counter-tests` includes `kvm-tests`. Root and standalone backend workspaces
+are invoked separately, using the existing aliases and build identities.
+
+## Guest and application inputs
+
+The default command includes these suites when their inputs are present. Use
+`--require guests`, `--require applications`, or `--require retained-run` when
+their absence should fail the job. Every run prints a fresh report directory
+under `target/check-reports/`, which survives development-shell cleanup.
+
+| Suite | Input variables | Checkout defaults |
+| --- | --- | --- |
+| x86 entropy checkpoint | `SEEDBOX_TEST_KERNEL`, `SEEDBOX_TEST_INITRD` | `artifacts/bzImage`, `artifacts/entropy-fork.cpio` |
+| ARM guest fixture | `SEEDBOX_ARM64_KERNEL`, `SEEDBOX_ARM64_INITRD` | `artifacts/arm64-hres/Image`, `artifacts/arm64-hres/init.cpio` |
+| Linux applications | `SEEDBOX_KERNEL` or `SEEDBOX_LINUX_RUNTIME_BUNDLE` | `artifacts/bzImage` or `artifacts/linux-runtime/runtime.tar.gz` |
+| Mac applications | `SEEDBOX_MAC_RUNTIME_BUNDLE` and installed Lima | `artifacts/mac-runtime/runtime.tar.gz` from `tools/mac-runtime/build-cli.sh` |
+| Pause/resume | `SEEDBOX_HOST_PAUSE_RUN`, `SEEDBOX_HOST_PAUSE_STATE` | No default retained run |
+
+Applications use a release CLI built from the current checkout. Linux runs PV
+and, where the PMU is available, counter scenarios. Mac runs ARM PV scenarios.
+Image pulls, application builds and guest execution can be substantially slower
+than native unit tests. Their assertions belong to the guest workload and public
+CLI; the test runner does not interpret application protocols.
+
+## Adding a test
+
+1. Add ordinary Rust `#[test]` functions to the appropriate crate. They run by
+   default when no special host capability is required.
+2. Gate a hardware test or test module with its existing feature, for example
+   `#[cfg(feature = "kvm-tests")]`. Retain target OS/architecture guards for
+   platform APIs. Gate helpers with the same feature. Use `required-features`
+   in `Cargo.toml` when a complete integration target needs a capability.
+3. Put Python tests in `harness/tests/test_*.py` or `python/tests/test_*.py`.
+   Standard unittest discovery finds new files. Declare genuine platform
+   requirements with `unittest.skipUnless` in the tests themselves.
+4. Add application cases as `harness/acceptance/workloads/*.yaml` with guest-owned
+   checks. Both validation and application acceptance discover new files.
+
+These additions need no runner edits. A new capability needs one feature and
+one capability selection rule. Do not register individual test names or change
+scopes from a PR's changed-file list. Hardware tests use compilation guards;
+`#[ignore]` is reserved for diagnostics outside the maintained suite.
+
+`harness/mac-check.sh [REV]` remains a portable-only compatibility wrapper for
+checking a revision in a temporary worktree. Low-level standalone world campaigns
+and reproducibility checks remain separate diagnostic tools.

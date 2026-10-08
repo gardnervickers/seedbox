@@ -19,6 +19,7 @@ batch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(batch)
 
 
+@unittest.skipUnless(sys.platform == "linux", "Linux process/affinity supervisor")
 class BatchTests(unittest.TestCase):
     def test_cpu_ranges(self):
         self.assertEqual(batch.cpu_list('14,30-31'), {14,30,31})

@@ -512,10 +512,9 @@ mod tests {
         assert_eq!(std::mem::offset_of!(HvExit, exception), 8);
         assert_eq!(std::mem::size_of::<Exception>(), 24);
     }
-    // Selected and signed explicitly by the native primitive check, never
-    // executed by portable tests or unsigned Cargo test discovery.
+    // The platform runner signs discovered HVF test executables before running.
     #[test]
-    #[ignore = "requires signed Apple Silicon hypervisor entitlement"]
+    #[cfg(feature = "hvf-tests")]
     fn canceled_entry_holds_no_instruction_and_preserves_pc() {
         unsafe extern "C" {
             fn hv_vcpus_exit(cpus: *const u64, count: u32) -> i32;
