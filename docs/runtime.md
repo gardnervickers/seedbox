@@ -525,6 +525,12 @@ root-owned mode 0444 bind mounts remounted read-only. `/dev`, `/proc`, `/sys` an
 `/etc/hosts` are reserved runtime paths. The backend supplies no host mounts,
 external network, container daemon, or host filesystem persistence to the guest.
 
+The supervisor defaults `GOMAXPROCS` to the guest's online CPU count (currently
+one vCPU per machine), unless the merged image/Compose environment already
+contains it, including an empty value. Process stop/start reuses that environment.
+Bundled Go workloads use this default instead of fixed CPU counts. This changes
+their execution and witnesses; the supervisor bytes are part of run identity.
+
 Image modes, UID/GID, symlinks and hard links are retained in newc archives.
 Device/FIFO entries, Linux extended attributes (including file capabilities/ACLs),
 files exceeding newc's 4 GiB limit, and unsupported image lifecycle metadata fail

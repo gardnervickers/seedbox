@@ -22,6 +22,7 @@
 #endif
 #include "control.h"
 #include "barrier.h"
+#include "environment.h"
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -538,6 +539,7 @@ int main(void) {
     if (chdir("/rootfs") || chroot(".") || chdir("/")) die("enter image root");
     directories("/dev", 0755); directories("/proc", 0755); directories("/sys", 0755); directories("/tmp", 01777);
     if (mount("devtmpfs", "/dev", "devtmpfs", 0, NULL) || mount("proc", "/proc", "proc", 0, NULL) || mount("sysfs", "/sys", "sysfs", 0, NULL)) die("mount guest filesystems");
+    if (seedbox_default_gomaxprocs(&environment, sysconf(_SC_NPROCESSORS_ONLN))) die("online CPU environment");
     management = open_management("/sys/class/virtio-ports", "/dev");
     write_file("/etc/hosts", hosts, strlen(hosts), 0644);
     for (char **volume = volumes; *volume; volume++) directories(*volume, 0755);
