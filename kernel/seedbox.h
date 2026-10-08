@@ -49,7 +49,7 @@ struct seedbox_time_page {
 	u64 capabilities;	/* VMM feature bits (ABI 4) */
 	u64 syscall_ns;	/* VMM plan: per-syscall cost, zero in counter mode */
 	u64 syscalls0;	/* VMM plan: syscall count used for syscall_target */
-	u64 plan_time;	/* VMM plan: t0 (tsc can lag after a watchdog split) */
+	u64 plan_time;	/* VMM plan: t0 at the last deterministic publication */
 };
 
 /* Enabled at boot in the PV clock timebase; a no-op (no branch) otherwise. */

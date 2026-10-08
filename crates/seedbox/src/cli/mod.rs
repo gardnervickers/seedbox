@@ -21,7 +21,8 @@ use seedbox::{
     store::ContentStore,
     templates::Template,
     vmm::{
-        recorded_counter, recorded_page_timer, recorded_timebase, recorded_torn_writes, VmmExecutor,
+        recorded_counter, recorded_deferred_tx, recorded_page_timer, recorded_timebase,
+        recorded_torn_writes, VmmExecutor,
     },
     Error, Result,
 };
@@ -401,6 +402,9 @@ struct RuntimeInputs {
     /// Arm clockevents through the time page (ABI 4, aimed at PV); changes run identity and results.
     #[arg(long)]
     page_timer: bool,
+    /// Defer virtio-net TX kicks to deterministic polls; changes run identity and results.
+    #[arg(long)]
+    deferred_tx: bool,
     /// Also record and compare every machine's RAM and registers, retaining per-page RAM hashes.
     #[arg(long)]
     full_state: bool,
@@ -427,7 +431,8 @@ impl RuntimeInputs {
         let executor = VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?
             .with_torn_writes(self.torn_writes)
             .with_timebase(self.timebase.into())
-            .with_page_timer(self.page_timer);
+            .with_page_timer(self.page_timer)
+            .with_deferred_tx(self.deferred_tx);
         let preparer = self.preparer(engine, store, scratch, executor.profile())?;
         Ok((preparer, executor))
     }
@@ -762,6 +767,7 @@ fn run(cli: Cli) -> Result<u8> {
             let run = defaults::run_directory(run)?;
             let previous = orchestration::inspect(&run)?;
             let timebase = recorded_timebase(&previous.identity.inputs.profile)?;
+            let deferred_tx = recorded_deferred_tx(&previous.identity.inputs.profile)?;
             let detected = CounterProfile::host();
             let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
             // Historical/incompatible records must reach the retained-proof gate
@@ -797,6 +803,7 @@ fn run(cli: Cli) -> Result<u8> {
                 )?
                 .with_timebase(timebase)
                 .with_page_timer(recorded_page_timer(profile))
+                .with_deferred_tx(deferred_tx)
                 .with_torn_writes(recorded_torn_writes(profile)?)
                 .with_unqualified_cpu(cpu.allow_unqualified_cpu)
                 .with_recorded_checkpoint(profile)?,

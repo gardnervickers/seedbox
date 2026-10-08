@@ -27,6 +27,11 @@ pub fn branch_identity(parent: &str, at: u64, seed: u64) -> String {
     format!("{:x}", h.finalize())
 }
 
+/// Bind deferred TX to the parent while retaining the legacy timebase when off.
+pub fn identity_timebase(timebase: &str, deferred_tx: bool) -> String {
+    if deferred_tx { format!("{timebase}+deferred-tx") } else { timebase.to_owned() }
+}
+
 /// Replace artifact paths with their bytes' hashes: relocation is not semantic.
 /// Performance settings and output paths live outside the world config.
 /// Page timer is semantic but adds hash bytes only when enabled for compatibility.
@@ -96,6 +101,17 @@ mod tests {
             parent_identity(&cfg, 7, "engine", "counter", false, |_| Ok("changed".into())).unwrap()
         );
         assert_ne!(parent, parent_identity(&cfg, 7, "engine", "pv", false, |_| Ok("content".into())).unwrap());
+        for timebase in ["counter", "pv"] {
+            let off = identity_timebase(timebase, false);
+            assert_eq!(off, timebase);
+            let on = identity_timebase(timebase, true);
+            assert_eq!(on, format!("{timebase}+deferred-tx"));
+            let ordinary = parent_identity(&cfg, 7, "engine", &off, false, |_| Ok("content".into())).unwrap();
+            let deferred = parent_identity(&cfg, 7, "engine", &on, false, |_| Ok("content".into())).unwrap();
+            assert_ne!(ordinary, deferred);
+            assert_ne!(branch_identity(&ordinary, 10, 20), branch_identity(&deferred, 10, 20));
+            assert_eq!(deferred, parent_identity(&moved, 7, "engine", &on, false, |_| Ok("content".into())).unwrap());
+        }
         let id = branch_identity(&parent, 10, 20);
         assert_eq!(id, branch_identity(&parent, 10, 20));
         assert_ne!(id, branch_identity(&parent, 11, 20));
@@ -111,11 +127,22 @@ mod tests {
             ("counter", "ddc73738e0276b920d0f971f0434f5a348956718de53493db605d4df7b4dc935"),
             ("pv", "b8a5964827e10b048a4aad62e9628615146b70078ee369b9bfcf4f2f41590cfc"),
         ] {
-            let off = parent_identity(&cfg, 7, "engine", timebase, false, |_| Ok("content".into())).unwrap();
+            let off = parent_identity(&cfg, 7, "engine", &identity_timebase(timebase, false), false, |_| Ok("content".into())).unwrap();
             assert_eq!(off, legacy, "{timebase}");
             let on = parent_identity(&cfg, 7, "engine", timebase, true, |_| Ok("content".into())).unwrap();
             assert_ne!(on, off, "{timebase}");
             assert_ne!(branch_identity(&on, 10, 20), branch_identity(&off, 10, 20), "{timebase}");
+            let mut parents = std::collections::BTreeSet::new();
+            let mut branches = std::collections::BTreeSet::new();
+            for page_timer in [false, true] {
+                for deferred_tx in [false, true] {
+                    let parent = parent_identity(&cfg, 7, "engine", &identity_timebase(timebase, deferred_tx), page_timer, |_| Ok("content".into())).unwrap();
+                    branches.insert(branch_identity(&parent, 10, 20));
+                    parents.insert(parent);
+                }
+            }
+            assert_eq!(parents.len(), 4, "{timebase}");
+            assert_eq!(branches.len(), 4, "{timebase}");
         }
     }
 }
