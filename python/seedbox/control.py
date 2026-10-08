@@ -210,7 +210,7 @@ class World:
             raise ProtocolError("partition response lacks an opaque handle")
         return Partition(result["handle"], effect)
 
-    def shape(self, from_, to, *, latency, jitter=0, loss_ppm=0):
+    def shape(self, from_, to, *, latency, jitter=0, loss_ppm=0, bandwidth_bps=None, queue_bound=None):
         """Apply an absolute directed policy; latency and jitter are nanoseconds."""
         if isinstance(from_, str) or isinstance(to, str):
             raise ValueError("shape sides must be sequences of targets")
@@ -219,7 +219,16 @@ class World:
                 raise ValueError(f"{name} must be an integer in [0, {maximum}]")
         if jitter >= latency or latency + jitter > 3_600_000_000_000:
             raise ValueError("jitter must be less than latency; their sum must not exceed one hour")
-        result, effect = self._call("shape", **{"from": [_target(t) for t in from_], "to": [_target(t) for t in to], "latency_ns": latency, "jitter_ns": jitter, "loss_ppm": loss_ppm})
+        policy = {"from": [_target(t) for t in from_], "to": [_target(t) for t in to], "latency_ns": latency, "jitter_ns": jitter, "loss_ppm": loss_ppm}
+        if bandwidth_bps is not None:
+            if type(bandwidth_bps) is not int or not 1 <= bandwidth_bps <= 2**64 - 1:
+                raise ValueError("bandwidth_bps must be a positive u64 integer")
+            policy["bandwidth_bps"] = bandwidth_bps
+        if queue_bound is not None:
+            if bandwidth_bps is None or type(queue_bound) is not int or not 0 <= queue_bound <= 2**64 - 1:
+                raise ValueError("queue_bound must be a nonnegative u64 integer and requires bandwidth_bps")
+            policy["queue_bound_ns"] = queue_bound
+        result, effect = self._call("shape", **policy)
         if not isinstance(result.get("handle"), str) or not result["handle"]:
             self.close()
             raise ProtocolError("shape response lacks an opaque handle")
@@ -253,7 +262,7 @@ class World:
         if not isinstance(partition, (Partition, Shape, ConnectionDrop)):
             raise TypeError("heal expects a fault handle returned by this API")
         result, effect = self._call("heal", handle=partition.handle)
-        return result if isinstance(partition, ConnectionDrop) else effect
+        return result if isinstance(partition, ConnectionDrop) or "queue_counts" in result else effect
 
 
     def _arm_console(self, source, marker, match_timeout, fault):

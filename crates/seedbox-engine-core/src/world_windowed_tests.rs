@@ -5,6 +5,7 @@ use super::*;
 use crate::world::{release, reseed_checkpoint, WorldSnapshot};
 use crate::world_mock::*;
 use seedbox_control::{Action, Plan};
+use sha2::Digest;
 
 fn run(w: &mut World<Mock>, duration: u64, end_on: Option<&str>) -> Result<&'static str, String> {
     segment(w, &Value::Null, duration, end_on, None, None, true)
@@ -85,6 +86,55 @@ fn configure_control(w: &mut World<Mock>) {
         w.early,
     )
     .unwrap();
+}
+
+#[test]
+fn bandwidth_tail_drop_and_nominal_counts_are_identical_across_worker_counts() {
+    let mut reference = None;
+    for workers in [0, 1, 2, 4] {
+        let mut w = world(&["a", "b"]);
+        w.early = 0;
+        let names = vec!["a".into(), "b".into()];
+        w.faults.links = crate::links::Links::from_config(
+            1,
+            &names,
+            &json!({"latency_ns":10,"bandwidth_bps":1_000_000_000_000u64,"queue_bound_ns":12}),
+        )
+        .unwrap();
+        let mut frame = vec![0; 1500];
+        frame[5] = 1;
+        let mut send = Step::new(5, Stop::Sent);
+        send.frames = vec![frame.clone(), frame.clone()];
+        let mut later = Step::new(17, Stop::Sent);
+        later.frames = vec![frame];
+        w.machines[0].steps.extend([send, later]);
+        assert_eq!(
+            run_with(&mut w, 45, None, workers, Duration::ZERO)
+                .unwrap()
+                .0,
+            "duration"
+        );
+        assert_eq!(w.delivered, 2);
+        assert_eq!(w.dropped, 1);
+        assert_eq!(
+            w.network_snapshot(),
+            json!({"a->b":{"delivered":2,"partition_dropped":0,"receiver_dropped":0,"queue_dropped":1}})
+        );
+        assert!(machine_trace(&w, "b").contains(&"b:frame:27".into()));
+        assert!(machine_trace(&w, "b").contains(&"b:frame:39".into()));
+        let mut h = sha2::Sha256::new();
+        w.faults.network_witness(&mut h);
+        let observed = (
+            w.network_snapshot(),
+            h.finalize().to_vec(),
+            machine_trace(&w, "b"),
+        );
+        if let Some(expected) = &reference {
+            assert_eq!(&observed, expected);
+        } else {
+            reference = Some(observed);
+        }
+    }
 }
 
 fn partition(handle: &str) -> Action {

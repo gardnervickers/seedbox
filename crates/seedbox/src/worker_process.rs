@@ -456,6 +456,8 @@ mod tests {
                     name: "private".into(),
                     latency_ns: 100_000,
                     jitter_ns: 20_000,
+                    bandwidth_bps: None,
+                    queue_bound_ns: None,
                 },
                 schedule: &Schedule {
                     timer_jitter_ns: 50_000,

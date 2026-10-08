@@ -270,6 +270,8 @@ fn triggered_partition_dominates_live_shape_and_heal_reveals_it() {
             latency_ns: 30,
             jitter_ns: 0,
             loss_ppm: 0,
+            bandwidth_bps: None,
+            queue_bound_ns: None,
         },
     })
     .unwrap();
@@ -282,7 +284,7 @@ fn triggered_partition_dominates_live_shape_and_heal_reveals_it() {
     assert_eq!(t.records[0].fault_id, Some(2));
     let mut reference = f.links.clone();
     assert_eq!(
-        f.links.decide(0, 1, 130, f.blocked(0, 1)),
+        f.links.decide(0, 1, 130, 1500, f.blocked(0, 1)),
         links::Outcome::Cut
     );
     f.append(Plan {
@@ -297,8 +299,8 @@ fn triggered_partition_dominates_live_shape_and_heal_reveals_it() {
     f.apply_due(140);
     assert_eq!(f.active_handles(), vec!["shape"]);
     assert_eq!(
-        f.links.decide(0, 1, 140, f.blocked(0, 1)),
-        reference.decide(0, 1, 140, false)
+        f.links.decide(0, 1, 140, 1500, f.blocked(0, 1)),
+        reference.decide(0, 1, 140, 1500, false)
     );
     assert_eq!(f.links.policy((0, 1)).latency_ns, 30);
     assert!(f.error.is_none());

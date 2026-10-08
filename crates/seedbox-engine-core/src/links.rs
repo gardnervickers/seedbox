@@ -10,8 +10,21 @@ pub struct Policy {
     pub latency_ns: u64,
     pub jitter_ns: u64,
     pub loss_ppm: u64,
+    /// None is infinite bandwidth; measured over the transmitted Ethernet bytes.
+    pub bandwidth_bps: Option<u64>,
+    /// Maximum send-to-departure time, including this frame's serialization.
+    pub queue_bound_ns: Option<u64>,
 }
 impl Policy {
+    pub fn validate_bandwidth(self) -> Result<(), String> {
+        if self.bandwidth_bps == Some(0) {
+            return Err("bandwidth_bps must be positive".into());
+        }
+        if self.queue_bound_ns.is_some() && self.bandwidth_bps.is_none() {
+            return Err("queue_bound_ns requires bandwidth_bps".into());
+        }
+        Ok(())
+    }
     pub fn validate(self, floor: u64) -> Result<(), String> {
         if self.latency_ns < floor {
             return Err("latency_ns below global latency".into());
@@ -29,7 +42,25 @@ impl Policy {
         if self.loss_ppm > 1_000_000 {
             return Err("loss_ppm exceeds 1000000".into());
         }
-        Ok(())
+        self.validate_bandwidth()
+    }
+}
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct QueueCounts {
+    pub matched: u64,
+    pub queue_dropped: u64,
+    pub delayed_max_ns: u64,
+}
+impl QueueCounts {
+    fn record(&mut self, delay: u64, dropped: bool) {
+        self.matched += 1;
+        self.queue_dropped += u64::from(dropped);
+        self.delayed_max_ns = self.delayed_max_ns.max(delay);
+    }
+    fn witness(self, h: &mut Sha256) {
+        for n in [self.matched, self.queue_dropped, self.delayed_max_ns] {
+            h.update(n.to_le_bytes());
+        }
     }
 }
 #[derive(Clone)]
@@ -37,6 +68,7 @@ pub struct Layer {
     pub handle: String,
     pub pairs: BTreeSet<Pair>,
     pub policy: Policy,
+    pub queue_counts: QueueCounts,
 }
 #[derive(Clone)]
 pub struct Links {
@@ -44,6 +76,10 @@ pub struct Links {
     pub baselines: BTreeMap<Pair, Policy>,
     pub layers: BTreeMap<u32, Layer>,
     pub last: BTreeMap<Pair, u64>,
+    pub last_depart: BTreeMap<Pair, u64>,
+    pub queue_counts: BTreeMap<Pair, QueueCounts>,
+    /// Retained after healing, including a bandwidth shape with no traffic.
+    bandwidth_used: bool,
     /// A shape layer has been applied at some point in this run.
     pub shaped: bool,
     loss: BTreeMap<Pair, Rng>,
@@ -53,6 +89,7 @@ pub struct Links {
 pub enum Outcome {
     Cut,
     Lost,
+    QueueDropped,
     Deliver(u64),
 }
 impl Links {
@@ -67,17 +104,23 @@ impl Links {
         if global.jitter_ns >= global.latency_ns || global.loss_ppm > 1_000_000 {
             return Err("invalid global link policy".into());
         }
+        global.validate_bandwidth()?;
         for (&(a, b), policy) in &baselines {
             if a >= names.len() || b >= names.len() {
                 return Err("invalid baseline pair".into());
             }
             policy.validate(global.latency_ns)?;
         }
+        let bandwidth_used = global.bandwidth_bps.is_some()
+            || baselines.values().any(|p| p.bandwidth_bps.is_some());
         let mut links = Self {
             global,
             baselines,
             layers: BTreeMap::new(),
             last: BTreeMap::new(),
+            last_depart: BTreeMap::new(),
+            queue_counts: BTreeMap::new(),
+            bandwidth_used,
             shaped: false,
             loss: BTreeMap::new(),
             jitter: BTreeMap::new(),
@@ -100,6 +143,8 @@ impl Links {
             latency_ns,
             jitter_ns,
             loss_ppm: 0,
+            bandwidth_bps: optional_u64(net, "bandwidth_bps")?,
+            queue_bound_ns: optional_u64(net, "queue_bound_ns")?,
         };
         let mut baselines = BTreeMap::new();
         if let Some(raw) = net.get("links") {
@@ -128,6 +173,8 @@ impl Links {
                             .map(|v| v.as_u64().ok_or("invalid loss_ppm"))
                             .transpose()?
                             .unwrap_or(0),
+                        bandwidth_bps: optional_u64(link, "bandwidth_bps")?,
+                        queue_bound_ns: optional_u64(link, "queue_bound_ns")?,
                     };
                     policy.validate(global.latency_ns)?;
                     Ok(((index("from")?, index("to")?), policy))
@@ -169,7 +216,7 @@ impl Links {
     }
     /// The run has baseline overrides or has applied a shape layer.
     pub fn in_use(&self) -> bool {
-        self.shaped || !self.baselines.is_empty()
+        self.shaped || !self.baselines.is_empty() || self.bandwidth_used
     }
     pub fn policy(&self, pair: Pair) -> Policy {
         self.layers
@@ -192,12 +239,14 @@ impl Links {
             return Err("duplicate active shape".into());
         }
         self.shaped = true;
+        self.bandwidth_used |= policy.bandwidth_bps.is_some();
         self.layers.insert(
             id,
             Layer {
                 handle,
                 pairs,
                 policy,
+                queue_counts: QueueCounts::default(),
             },
         );
         Ok(())
@@ -215,7 +264,7 @@ impl Links {
         self.loss.get_mut(&(src, dst)).unwrap().next();
         self.jitter.get_mut(&(src, dst)).unwrap().next();
     }
-    pub fn decide(&mut self, src: usize, dst: usize, send: u64, cut: bool) -> Outcome {
+    pub fn decide(&mut self, src: usize, dst: usize, send: u64, bytes: usize, cut: bool) -> Outcome {
         if cut {
             return Outcome::Cut;
         }
@@ -227,8 +276,28 @@ impl Links {
         if (loss as u128) * 1_000_000 < (policy.loss_ppm as u128) << 64 {
             return Outcome::Lost;
         }
+        // Bandwidth uses no randomness, and is evaluated after the established
+        // loss/jitter draws. Dropped candidates reserve neither clock.
+        let depart = if let Some(rate) = policy.bandwidth_bps {
+            let service = (bytes as u128 * 8_000_000_000).div_ceil(rate as u128);
+            let depart = u64::try_from(service).ok().and_then(|service|
+                send.max(self.last_depart.get(&pair).copied().unwrap_or(0)).checked_add(service));
+            let delay = depart.map(|t| t - send).unwrap_or(u64::MAX);
+            let dropped = depart.is_none()
+                || policy.queue_bound_ns.is_some_and(|bound| delay > bound)
+                || depart.and_then(|t| t.checked_add(policy.latency_ns)?.checked_add(jitter)).is_none()
+                || self.last.get(&pair) == Some(&u64::MAX);
+            self.queue_counts.entry(pair).or_default().record(delay, dropped);
+            if let Some(layer) = self.layers.values_mut().rev().find(|l| l.pairs.contains(&pair)) {
+                layer.queue_counts.record(delay, dropped);
+            }
+            if dropped { return Outcome::QueueDropped; }
+            let depart = depart.expect("checked departure");
+            self.last_depart.insert(pair, depart);
+            depart
+        } else { send };
         let arrival =
-            (send + policy.latency_ns + jitter).max(self.last.get(&pair).copied().unwrap_or(0) + 1);
+            (depart + policy.latency_ns + jitter).max(self.last.get(&pair).copied().unwrap_or(0) + 1);
         self.last.insert(pair, arrival);
         Outcome::Deliver(arrival)
     }
@@ -266,7 +335,32 @@ impl Links {
             }
             policy(h, layer.policy);
         }
+        // Append nothing for historical unlimited policies, even with shapes.
+        if self.bandwidth_used {
+            h.update(b"seedbox-link-bandwidth-v1");
+            fn bandwidth(h: &mut Sha256, p: Policy) {
+                h.update(p.bandwidth_bps.unwrap_or(0).to_le_bytes());
+                h.update([u8::from(p.queue_bound_ns.is_some())]);
+                if let Some(bound) = p.queue_bound_ns { h.update(bound.to_le_bytes()); }
+            }
+            bandwidth(h, self.global);
+            h.update((self.baselines.len() as u64).to_le_bytes());
+            for (&pair, &p) in &self.baselines { pair_hash(h, pair); bandwidth(h, p); }
+            h.update((self.layers.len() as u64).to_le_bytes());
+            for (&id, layer) in &self.layers {
+                h.update(id.to_le_bytes());
+                bandwidth(h, layer.policy);
+                layer.queue_counts.witness(h);
+            }
+            h.update((self.last_depart.len() as u64).to_le_bytes());
+            for (&pair, &depart) in &self.last_depart { pair_hash(h, pair); h.update(depart.to_le_bytes()); }
+            h.update((self.queue_counts.len() as u64).to_le_bytes());
+            for (&pair, &counts) in &self.queue_counts { pair_hash(h, pair); counts.witness(h); }
+        }
     }
+}
+fn optional_u64(value: &Value, key: &str) -> Result<Option<u64>, String> {
+    value.get(key).map(|v| v.as_u64().ok_or_else(|| format!("invalid {key}"))).transpose()
 }
 pub fn pair_hash(h: &mut Sha256, (a, b): Pair) {
     h.update((a as u64).to_le_bytes());
@@ -300,6 +394,8 @@ mod tests {
             latency_ns,
             jitter_ns,
             loss_ppm,
+            bandwidth_bps: None,
+            queue_bound_ns: None,
         }
     }
     fn links(p: Policy) -> Links {
@@ -328,11 +424,11 @@ mod tests {
         let mut l = links(policy(10, 0, 0));
         l.shape(1, "s".into(), BTreeSet::from([(0, 1)]), policy(100, 0, 0))
             .unwrap();
-        assert_eq!(l.decide(0, 1, 10, false), Outcome::Deliver(110));
-        assert_eq!(l.decide(1, 0, 10, false), Outcome::Deliver(20));
+        assert_eq!(l.decide(0, 1, 10, 1500, false), Outcome::Deliver(110));
+        assert_eq!(l.decide(1, 0, 10, 1500, false), Outcome::Deliver(20));
         l.heal("s");
-        assert_eq!(l.decide(0, 1, 11, false), Outcome::Deliver(111));
-        assert_eq!(l.decide(0, 1, 12, false), Outcome::Deliver(112));
+        assert_eq!(l.decide(0, 1, 11, 1500, false), Outcome::Deliver(111));
+        assert_eq!(l.decide(0, 1, 12, 1500, false), Outcome::Deliver(112));
     }
     #[test]
     fn loss_endpoints_and_middle_consume_exactly_two_independent_draws() {
@@ -352,7 +448,7 @@ mod tests {
                     last = (n + 10 + j).max(last + 1);
                     Outcome::Deliver(last)
                 };
-                assert_eq!(l.decide(0, 1, n, false), expected);
+                assert_eq!(l.decide(0, 1, n, 1500, false), expected);
                 assert_eq!(draws(&l, (0, 1)), (n + 1, n + 1));
                 assert_eq!(l.last.get(&(0, 1)).copied().unwrap_or(0), last);
             }
@@ -367,11 +463,11 @@ mod tests {
     fn cuts_consume_no_draws_and_unrelated_traffic_does_not_change_samples() {
         let mut l = links(policy(10, 9, 500_000));
         let mut reference = l.clone();
-        assert_eq!(l.decide(0, 1, 0, true), Outcome::Cut);
+        assert_eq!(l.decide(0, 1, 0, 1500, true), Outcome::Cut);
         assert_eq!(draws(&l, (0, 1)), (0, 0));
         for n in 0..32 {
-            l.decide(0, 2, n, false);
-            assert_eq!(l.decide(0, 1, n, false), reference.decide(0, 1, n, false));
+            l.decide(0, 2, n, 1500, false);
+            assert_eq!(l.decide(0, 1, n, 1500, false), reference.decide(0, 1, n, 1500, false));
         }
     }
     #[test]
@@ -383,7 +479,7 @@ mod tests {
         assert!(candidates(1, [0; 6], &macs).is_empty());
         let mut l = links(policy(10, 0, 1_000_000));
         for dst in candidates(1, [0xff; 6], &macs) {
-            assert_eq!(l.decide(1, dst, 10, false), Outcome::Lost);
+            assert_eq!(l.decide(1, dst, 10, 1500, false), Outcome::Lost);
         }
         assert_eq!(draws(&l, (1, 0)), (1, 1));
         assert_eq!(draws(&l, (1, 2)), (1, 1));
@@ -398,12 +494,12 @@ mod tests {
             BTreeMap::from([((0, 1), policy(20, 9, 500_000))]),
         )
         .unwrap();
-        l.decide(0, 1, 10, false);
+        l.decide(0, 1, 10, 1500, false);
         let snapshot = l.clone();
-        let expected = l.decide(0, 1, 11, false);
-        l.decide(0, 1, 12, false);
+        let expected = l.decide(0, 1, 11, 1500, false);
+        l.decide(0, 1, 12, 1500, false);
         l = snapshot;
-        assert_eq!(l.decide(0, 1, 11, false), expected);
+        assert_eq!(l.decide(0, 1, 11, 1500, false), expected);
         let last = l.last.clone();
         let baselines = l.baselines.clone();
         l.reseed(42, &names());
@@ -421,7 +517,7 @@ mod tests {
         let l = links(policy(10, 0, 0));
         let original = hash(&l);
         let mut changed = l.clone();
-        changed.decide(0, 1, 1, false);
+        changed.decide(0, 1, 1, 1500, false);
         assert_ne!(hash(&changed), original);
         let mut changed = l.clone();
         changed.last.insert((0, 1), 42);
@@ -440,7 +536,7 @@ mod tests {
     fn only_baselines_or_an_applied_shape_put_links_in_use() {
         let mut l = links(policy(10, 0, 0));
         assert!(!l.in_use());
-        l.decide(0, 1, 1, false);
+        l.decide(0, 1, 1, 1500, false);
         assert!(!l.in_use());
         l.shape(1, "s".into(), BTreeSet::from([(0, 1)]), policy(20, 0, 0))
             .unwrap();
@@ -448,5 +544,112 @@ mod tests {
         assert!(l.in_use(), "a healed shape still shaped the run");
         let based = Links::new(1, &names(), policy(10, 0, 0), BTreeMap::from([((0, 1), policy(20, 0, 0))])).unwrap();
         assert!(based.in_use());
+    }
+    fn rate(bound: Option<u64>) -> Policy {
+        Policy { bandwidth_bps: Some(1_000_000), queue_bound_ns: bound, ..policy(1_000_000, 0, 0) }
+    }
+    fn hash(l: &Links) -> Vec<u8> {
+        let mut h = Sha256::new();
+        l.witness(&mut h);
+        h.finalize().to_vec()
+    }
+    #[test]
+    fn bandwidth_serializes_actual_bytes_per_direction_with_ceiling_rounding() {
+        let mut l = links(policy(1_000_000, 0, 0));
+        l.shape(1, "rate".into(), BTreeSet::from([(0, 1)]), rate(None)).unwrap();
+        assert_eq!(l.decide(0, 1, 0, 1500, false), Outcome::Deliver(13_000_000));
+        assert_eq!(l.decide(0, 1, 0, 1500, false), Outcome::Deliver(25_000_000));
+        assert_eq!(l.decide(1, 0, 0, 1500, false), Outcome::Deliver(1_000_000));
+        let mut fractional = links(Policy { bandwidth_bps: Some(3_000_000_000), ..rate(None) });
+        assert_eq!(fractional.decide(0, 1, 0, 1, false), Outcome::Deliver(1_000_003));
+    }
+    #[test]
+    fn tail_drop_is_strict_and_reserves_neither_departure_nor_fifo_arrival() {
+        for bound in [12_000_000, 23_999_999, 24_000_000] {
+            let mut l = links(rate(Some(bound)));
+            assert_eq!(l.decide(0, 1, 0, 1500, false), Outcome::Deliver(13_000_000));
+            let expected = if bound < 24_000_000 { Outcome::QueueDropped } else { Outcome::Deliver(25_000_000) };
+            assert_eq!(l.decide(0, 1, 0, 1500, false), expected);
+            assert_eq!(l.last_depart[&(0, 1)], if bound < 24_000_000 {12_000_000} else {24_000_000});
+            assert_eq!(l.last[&(0, 1)], if bound < 24_000_000 {13_000_000} else {25_000_000});
+            assert_eq!(draws(&l, (0, 1)), (2, 2));
+            assert_eq!(l.queue_counts[&(0, 1)], QueueCounts {matched:2, queue_dropped:u64::from(bound<24_000_000), delayed_max_ns:24_000_000});
+            if bound < 24_000_000 {
+                assert_eq!(l.decide(0, 1, 12_000_000, 1500, false), Outcome::Deliver(25_000_000));
+            }
+        }
+        assert_eq!(links(rate(Some(0))).decide(0, 1, 0, 1, false), Outcome::QueueDropped);
+    }
+    #[test]
+    fn bandwidth_never_changes_existing_draw_order_or_cut_and_selected_drop_semantics() {
+        let p = Policy { loss_ppm: 500_000, jitter_ns: 100_000, ..rate(Some(12_000_000)) };
+        let mut l = links(p);
+        let mut reference = links(Policy {bandwidth_bps:None, queue_bound_ns:None, ..p});
+        for send in 0..128 {
+            if send % 7 == 0 { l.selected_drop(0,1); reference.selected_drop(0,1); }
+            let actual = l.decide(0,1,send,1500,send%11==0);
+            let old = reference.decide(0,1,send,1500,send%11==0);
+            assert_eq!(matches!(actual,Outcome::Lost), matches!(old,Outcome::Lost));
+            assert_eq!(matches!(actual,Outcome::Cut), matches!(old,Outcome::Cut));
+            assert_eq!(draws(&l,(0,1)), draws(&reference,(0,1)));
+        }
+        assert_eq!(l.stream_sample((0,1)), reference.stream_sample((0,1)));
+        let mut excluded = links(rate(None));
+        assert_eq!(excluded.decide(0,1,0,1500,true),Outcome::Cut);
+        excluded.selected_drop(0,1);
+        assert!(excluded.last_depart.is_empty());
+        assert!(excluded.queue_counts.is_empty());
+        let mut lost = links(Policy {loss_ppm:1_000_000,..rate(None)});
+        assert_eq!(lost.decide(0,1,0,1500,false),Outcome::Lost);
+        assert!(lost.last_depart.is_empty());
+    }
+    #[test]
+    fn snapshot_reseed_heal_and_rate_changes_preserve_committed_backlog_and_witness_state() {
+        let mut l = links(policy(1_000_000,0,0));
+        l.shape(1,"slow".into(),BTreeSet::from([(0,1)]),rate(None)).unwrap();
+        l.decide(0,1,0,1500,false);
+        l.shape(2,"fast".into(),BTreeSet::from([(0,1)]),Policy {bandwidth_bps:Some(2_000_000),..rate(None)}).unwrap();
+        assert_eq!(l.decide(0,1,0,1500,false),Outcome::Deliver(19_000_000));
+        let snapshot=l.clone();
+        l.heal("fast");
+        assert_eq!(l.decide(0,1,0,1500,false),Outcome::Deliver(31_000_000));
+        let expected=hash(&l);
+        l=snapshot.clone();
+        l.heal("fast"); l.decide(0,1,0,1500,false);
+        assert_eq!(hash(&l),expected);
+        let depart=l.last_depart.clone(); let counts=l.queue_counts.clone();
+        l.reseed(42,&names());
+        assert_eq!(l.last_depart,depart); assert_eq!(l.queue_counts,counts);
+        l.heal("slow");
+        assert_eq!(l.decide(0,1,0,1500,false),Outcome::Deliver(31_000_001));
+        assert_eq!(l.last_depart,depart);
+        for variant in 0..4 {
+            let mut changed=snapshot.clone();
+            match variant {
+                0=>changed.layers.get_mut(&2).unwrap().policy.queue_bound_ns=Some(20_000_000),
+                1=>{changed.last_depart.insert((0,1),19_000_000);},
+                2=>changed.queue_counts.get_mut(&(0,1)).unwrap().queue_dropped+=1,
+                _=>changed.layers.get_mut(&2).unwrap().queue_counts.matched+=1,
+            }
+            assert_ne!(hash(&changed),hash(&snapshot));
+        }
+        assert!(links(rate(None)).in_use(),"global rate must fold network state into the world witness");
+    }
+    #[test]
+    fn bandwidth_configuration_and_timestamp_overflow_are_bounded() {
+        for net in [
+            serde_json::json!({"bandwidth_bps":0}),
+            serde_json::json!({"bandwidth_bps":1.5}),
+            serde_json::json!({"queue_bound_ns":1}),
+            serde_json::json!({"bandwidth_bps":1,"queue_bound_ns":-1}),
+            serde_json::json!({"links":[{"from":"a","to":"b","latency_ns":1_000_000,"bandwidth_bps":0}]}),
+        ] { assert!(Links::from_config(1,&names(),&net).is_err(),"{net}"); }
+        assert!(Policy {bandwidth_bps:Some(0),..rate(None)}.validate(1).is_err());
+        assert!(Policy {bandwidth_bps:None,..rate(Some(1))}.validate(1).is_err());
+        let mut l=links(rate(None));
+        assert_eq!(l.decide(0,1,u64::MAX,1500,false),Outcome::QueueDropped);
+        assert!(l.last_depart.is_empty()); assert!(l.last.is_empty());
+        let mut l=links(Policy {bandwidth_bps:Some(1),..rate(None)});
+        assert_eq!(l.decide(0,1,0,usize::MAX,false),Outcome::QueueDropped);
     }
 }

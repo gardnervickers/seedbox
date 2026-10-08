@@ -41,6 +41,8 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
             name: "private".into(),
             latency_ns: 100_000,
             jitter_ns: 20_000,
+            bandwidth_bps: None,
+            queue_bound_ns: None,
         },
         schedule: &Schedule {
             timer_jitter_ns: 50_000,
@@ -658,6 +660,8 @@ fn baseline_links_resolve_service_names_to_prepared_machines() {
             latency_ns: 200_000,
             jitter_ns: 10_000,
             loss_ppm: 500_000,
+            bandwidth_bps: None,
+            queue_bound_ns: None,
         });
         let request = ExecutionRequest {
             network: &network,
@@ -667,6 +671,19 @@ fn baseline_links_resolve_service_names_to_prepared_machines() {
             vmm::world(&request).unwrap()["network"]["links"],
             json!([{"from":"server-machine","to":"client-machine","latency_ns":200_000,"jitter_ns":10_000,"loss_ppm":500_000}])
         );
+        network.bandwidth_bps = Some(10_000_000);
+        network.queue_bound_ns = Some(20_000_000);
+        network.links[0].bandwidth_bps = Some(1_000_000);
+        network.links[0].queue_bound_ns = Some(12_000_000);
+        let world = vmm::world(&ExecutionRequest {
+            network: &network,
+            ..*base
+        })
+        .unwrap();
+        assert_eq!(world["network"]["bandwidth_bps"], 10_000_000);
+        assert_eq!(world["network"]["queue_bound_ns"], 20_000_000);
+        assert_eq!(world["network"]["links"][0]["bandwidth_bps"], 1_000_000);
+        assert_eq!(world["network"]["links"][0]["queue_bound_ns"], 12_000_000);
         network.links[0].from = "missing".into();
         assert!(vmm::world(&ExecutionRequest {
             network: &network,
@@ -716,11 +733,24 @@ fn shape_transcripts_validate_handle_timing_absolute_policy_and_directed_sides()
         raw["faults"] = json!([{"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":a,"action":"shape","machine":null,"status":"applied","detail":"handle=p1"}]);
         let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
         assert_eq!(result.faults[0].action, "shape");
+        let mut finite = raw.clone();
+        for (key, value) in [
+            ("bandwidth_bps", json!(1_000_000)),
+            ("queue_bound_ns", json!(12_000_000)),
+        ] {
+            finite["control_history"][0]["request"][key] = value.clone();
+            finite["faults"][0]["request"][key] = value;
+        }
+        assert!(vmm::report(&serde_json::to_vec(&finite).unwrap(), &request).is_ok());
+        finite["faults"][0]["request"]["bandwidth_bps"] = json!(2_000_000);
+        assert!(vmm::report(&serde_json::to_vec(&finite).unwrap(), &request).is_err());
         assert!(result.faults[0].service.is_empty());
         for (key, value) in [
             ("latency_ns", json!(99_999)),
             ("jitter_ns", json!(200_000)),
             ("loss_ppm", json!(1_000_001)),
+            ("bandwidth_bps", json!(0)),
+            ("queue_bound_ns", json!(12_000_000)),
             ("from", json!([])),
             ("to", json!([{"service":"server"}])),
         ] {

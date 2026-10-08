@@ -388,7 +388,9 @@ fn directed_baselines_validate_services_pairs_floor_jitter_and_loss_at_json_path
             to: "workload".into(),
             latency_ns: 1_000_000,
             jitter_ns: 0,
-            loss_ppm: 0
+            loss_ppm: 0,
+            bandwidth_bps: None,
+            queue_bound_ns: None,
         }
     );
     assert!(parse_link("{from: server, to: workload, latency: 2ms, jitter: 1ms, loss_ppm: 1000000}, {from: workload, to: server, latency: 1ms}").is_ok());
