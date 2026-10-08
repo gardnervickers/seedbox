@@ -197,7 +197,8 @@ class CargoTests(unittest.TestCase):
     def test_alias_remaps_a_portable_debug_fixture_without_affecting_plain_builds(self):
         # Compile a tiny portable library, not the Linux-only VMM. This exercises
         # Cargo's path-source metadata as well as DWARF/file! remapping. Use the
-        # production dependency path and symlink so removing the fix fails here.
+        # production in-workspace package and shared source path, so removing
+        # that isolation fails here even when source paths are remapped.
         production = HARNESS.parent / 'crates/seedbox-vmm'
         manifest = tomllib.loads((production / 'Cargo.toml').read_text())
         root_manifest = tomllib.loads((HARNESS.parent / 'Cargo.toml').read_text())
@@ -205,9 +206,15 @@ class CargoTests(unittest.TestCase):
         for key in ('serde', 'serde_json'):
             self.assertEqual(manifest['workspace']['dependencies'][key],
                              root_manifest['workspace']['dependencies'][key])
-        control_path = manifest['dependencies']['seedbox-control']['path']
+        control_dependency = manifest['dependencies']['seedbox-control']
+        control_path = control_dependency['path']
+        control_manifest = tomllib.loads((production / control_path / 'Cargo.toml').read_text())
+        self.assertEqual(control_dependency['package'], control_manifest['package']['name'])
+        shared_source = control_manifest['lib']['path']
+        self.assertEqual((production / control_path / shared_source).resolve(),
+                         (HARNESS.parent / 'crates/seedbox-control/src/lib.rs').resolve())
         def metadata(log):
-            return dict(re.findall(r'--crate-name (\S+).*? -C metadata=(\w+)', log))
+            return {name: value for name, value in re.findall(r'--crate-name (\S+).*? -C metadata=(\w+)', log) if not name.startswith('build_script_')}
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve()
             binaries = []
@@ -226,7 +233,7 @@ edition = "2021"
 publish = false
 '''
                 (root / 'Cargo.toml').write_text('''[workspace]
-members = ["crates/seedbox-control"]
+members = ["crates/seedbox-control", "crates/seedbox"]
 exclude = ["crates/seedbox-vmm"]
 ''' + package_keys)
                 dep = root / 'crates/seedbox-control'
@@ -238,33 +245,74 @@ edition.workspace = true
 publish.workspace = true
 ''')
                 (dep / 'src/lib.rs').write_text("pub fn source() -> &'static str { file!() }\n")
-                if (production / 'seedbox-control').is_symlink():
-                    (crate / 'seedbox-control').symlink_to(os.readlink(production / 'seedbox-control'))
+                # Mirror the production package boundary while retaining one
+                # shared source file, also used by the ordinary root package.
+                isolated = crate / control_path
+                isolated.mkdir(parents=True)
+                (isolated / 'Cargo.toml').write_text(
+                    '[package]\nname = ' + json.dumps(control_dependency['package']) +
+                    '\nversion.workspace = true\nedition.workspace = true\npublish.workspace = true\n' +
+                    '[lib]\nname = ' + json.dumps(control_manifest['lib']['name']) +
+                    '\npath = ' + json.dumps(shared_source) + '\n')
+                # Use the same watched source layout, including the build script,
+                # so this checks metadata and bytes after the cache fix too.
+                source = isolated / shared_source
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.symlink_to(os.path.relpath(dep / 'src/lib.rs', source.parent))
+                build_script = control_manifest['package']['build']
+                shutil.copy2(production / control_path / build_script, isolated / build_script)
+                manifest_text = (isolated / 'Cargo.toml').read_text()
+                (isolated / 'Cargo.toml').write_text(manifest_text.replace('[package]\n', '[package]\nbuild = ' + json.dumps(build_script) + '\n'))
+                dependency = ('seedbox-control = { package = ' +
+                              json.dumps(control_dependency['package']) +
+                              ', path = ' + json.dumps(control_path) + ' }')
                 fixture_manifest = '''[package]
 name = "seedbox-vmm"
 version = "0.1.0"
 edition = "2021"
 [dependencies]
-seedbox-control = { path = CONTROL_PATH }
+CONTROL_DEPENDENCY
 [workspace]
 ''' + package_keys + '''
 [profile.release]
 debug = 1
 '''
-                fixture_manifest = fixture_manifest.replace('CONTROL_PATH', json.dumps(control_path))
+                fixture_manifest = fixture_manifest.replace('CONTROL_DEPENDENCY', dependency)
                 (crate / 'Cargo.toml').write_text(fixture_manifest)
-                (crate / 'Cargo.lock').write_text('''version = 4
+                fixture_lock = '''version = 4
 [[package]]
-name = "seedbox-control"
+name = "seedbox-vmm-control"
 version = "0.1.0"
 [[package]]
 name = "seedbox-vmm"
 version = "0.1.0"
-dependencies = ["seedbox-control"]
-''')
+dependencies = ["seedbox-vmm-control"]
+'''
+                (crate / 'Cargo.lock').write_text(fixture_lock)
                 (crate / 'src/lib.rs').write_text(
                     "pub fn source() -> &'static str { seedbox_control::source() }\n")
+                consumer = root / 'crates/seedbox'
+                (consumer / 'src').mkdir(parents=True)
+                (consumer / 'Cargo.toml').write_text('''[package]
+name = "seedbox"
+version.workspace = true
+edition.workspace = true
+[dependencies]
+seedbox-control = { path = "../seedbox-control" }
+seedbox-vmm = { path = "../seedbox-vmm" }
+''')
+                (consumer / 'src/lib.rs').write_text(
+                    "pub fn sources() -> [&'static str; 2] { "
+                    "[seedbox_control::source(), seedbox_vmm::source()] }\n")
                 env = dict(os.environ, CARGO_TARGET_DIR=str(base / 'unrelated-target'))
+                # The combined graph must resolve both control packages sharing
+                # the same schema source without a Cargo lockfile identity clash.
+                combined = subprocess.run(
+                    ['cargo', 'build', '--offline', '--manifest-path', str(root / 'Cargo.toml'),
+                     '--target-dir', str(base / 'combined-target')],
+                    cwd=root, env=env, capture_output=True, text=True)
+                self.assertEqual(combined.returncode, 0, combined.stderr)
+                self.assertNotIn('vmm-rustc.py', combined.stderr)
                 # A preexisting ordinary release build must not be reused by
                 # the alias after enabling path remapping.
                 warm = subprocess.run(
@@ -291,13 +339,16 @@ dependencies = ["seedbox-control"]
                 # Negative control: the direct sibling dependency must still
                 # reproduce the metadata blocker, even through the wrapper.
                 (crate / 'Cargo.toml').write_text(fixture_manifest.replace(
-                    json.dumps(control_path), '"../seedbox-control"'))
+                    dependency, 'seedbox-control = { path = "../seedbox-control" }'))
+                (crate / 'Cargo.lock').write_text(
+                    fixture_lock.replace('seedbox-vmm-control', 'seedbox-control'))
                 external = subprocess.run(['cargo', 'build-vmm', '--offline', '-v'],
                                           cwd=root, env=env, capture_output=True, text=True)
                 self.assertEqual(external.returncode, 0, external.stderr)
                 external_metadatas.append(metadata(external.stderr))
                 external_binaries.append((crate / 'target/release/libseedbox_vmm.rlib').read_bytes())
                 (crate / 'Cargo.toml').write_text(fixture_manifest)
+                (crate / 'Cargo.lock').write_text(fixture_lock)
             details = f'per-crate -C metadata: {metadatas}'
             self.assertEqual(metadatas[0], metadatas[1], details)
             self.assertEqual(binaries[0], binaries[1], details)

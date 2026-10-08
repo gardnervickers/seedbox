@@ -6,32 +6,20 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_FRAME: usize = 16384;
 pub const MAX_TRANSPORT_FRAME: usize = MAX_FRAME + 64;
-/// Frame only actual UART transmissions, excluding divisor-register writes.
+/// Frame actual transport bytes; adapters exclude register-only writes.
 #[derive(Default, Clone)]
 pub struct ManagementFramer {
     line: Vec<u8>,
 }
 impl ManagementFramer {
-    pub fn write(
-        &mut self,
-        uart: &mut crate::devices::Uart,
-        off: u16,
-        byte: u8,
-    ) -> Result<Option<Vec<u8>>, String> {
-        let before = uart.out.len();
-        uart.write(off, byte)?;
-        if uart.out.len() == before {
-            return Ok(None);
-        }
-        self.byte(byte)
-    }
-    fn byte(&mut self,byte:u8)->Result<Option<Vec<u8>>,String> {
+    /// Accept a byte only after its transport actually transmits it.
+    pub fn transmitted_byte(&mut self,byte:u8)->Result<Option<Vec<u8>>,String> {
         if byte==b'\n' {let line=std::mem::take(&mut self.line);return Ok(line.starts_with(b"SBX_RPC1 ").then_some(line));}
         if self.line.len()>=MAX_TRANSPORT_FRAME {return Err("management frame too large".into())}
         self.line.push(byte);Ok(None)
     }
     pub fn receive(&mut self,bytes:&[u8])->Result<Vec<Vec<u8>>,String> {
-        let mut frames=Vec::new();for byte in bytes {if let Some(frame)=self.byte(*byte)? {frames.push(frame);}}Ok(frames)
+        let mut frames=Vec::new();for byte in bytes {if let Some(frame)=self.transmitted_byte(*byte)? {frames.push(frame);}}Ok(frames)
 
     }
 }
@@ -273,6 +261,17 @@ impl Control {
         line: &[u8],
         max_time: u64,
     ) -> Result<(), String> {
+        self.request_with_support(machine, time, line, max_time, |_| true)
+    }
+    /// Reject unsupported operations before allocating handles or planning effects.
+    pub fn request_with_support(
+        &mut self,
+        machine: usize,
+        time: u64,
+        line: &[u8],
+        max_time: u64,
+        supports: impl Fn(&Operation) -> bool,
+    ) -> Result<(), String> {
         if self.controller != Some(machine) {
             return Err("control request from unauthorized machine".into());
         }
@@ -315,13 +314,17 @@ impl Control {
         self.last_public = public;
         self.last_relay = relay;
         let request: Result<Request, _> = serde_json::from_str(payload);
+        let mut unsupported = false;
         let (operation, plan, result, effect, error) = match request {
             Ok(request) => {
                 let operation = request.operation;
-                match self.plan(&operation, admitted) {
+                if !supports(&operation) {
+                    unsupported = true;
+                    (Some(operation), None, json!({}), admitted, Some("operation is not supported by this backend".into()))
+                } else { match self.plan(&operation, admitted) {
                     Ok((p, r, e)) => (Some(operation), p, r, e, None),
                     Err(error) => (Some(operation), None, json!({}), admitted, Some(error)),
-                }
+                }}
             }
             Err(error) => (
                 None,
@@ -346,7 +349,7 @@ impl Control {
             operation,
             result,
             error,
-            error_code: None,
+            error_code: unsupported.then_some("unsupported"),
             fatal: false,
         });
         Ok(())

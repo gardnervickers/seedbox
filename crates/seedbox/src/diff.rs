@@ -135,6 +135,16 @@ struct Evidence {
     world: Option<ContentDigest>,
 }
 
+#[derive(Deserialize)]
+struct ReportHeader {
+    report_version: u32,
+    #[serde(default)]
+    timebase: Option<String>,
+    seed: u64,
+    #[serde(default)]
+    counter_profile: Option<String>,
+}
+
 fn bad(path: &Path, error: impl std::fmt::Display) -> Error {
     Error::Setup(format!(
         "diff {}: {error}; use an intact retained run directory (import bundles first)",
@@ -161,10 +171,34 @@ fn load(directory: &Path) -> Result<Evidence> {
         if bytes.len() > 256 * 1024 * 1024 {
             return Err(bad(&path, "report exceeds 256 MiB"));
         }
-        let raw: VmmReport = serde_json::from_slice(&bytes).map_err(|e| bad(&path, e))?;
-        if raw.report_version != 1 {
+        let profile = &record.identity.inputs.profile;
+        let executable = crate::engine::recorded_launch(profile).map_err(|e| bad(&path, e))?;
+        let arm_world = executable == crate::engine::ExecutableKind::ArmWorld;
+        if (profile.backend == "seedbox-hvf") != arm_world {
+            return Err(bad(
+                &path,
+                "HVF backend and ARM executable descriptor disagree",
+            ));
+        }
+        let header: ReportHeader = serde_json::from_slice(&bytes).map_err(|e| bad(&path, e))?;
+        if header.report_version != if arm_world { 2 } else { 1 } {
             return Err(bad(&path, "unsupported VMM report version"));
         }
+        if arm_world {
+            if header.timebase.as_deref() != Some("arm64-pv-world-v1") {
+                return Err(bad(
+                    &path,
+                    "HVF report timebase disagrees with executable profile",
+                ));
+            }
+            if header.seed != record.identity.seed {
+                return Err(bad(&path, "VMM report seed disagrees with manifest"));
+            }
+            if header.counter_profile.is_some() {
+                return Err(bad(&path, "HVF report has an unexpected counter profile"));
+            }
+        }
+        let raw: VmmReport = serde_json::from_slice(&bytes).map_err(|e| bad(&path, e))?;
         if world.as_ref().is_some_and(|w| w != &raw.world_witness) {
             return Err(bad(&path, "world witness disagrees with manifest"));
         }
@@ -566,6 +600,122 @@ mod tests {
     use super::*;
     use crate as sb;
     include!("../tests/support/diff_fixture.rs");
+
+    fn arm_fixture() -> sb::orchestration::RunRecord {
+        let mut record = fixture();
+        record.identity.inputs.profile.backend = "seedbox-hvf".into();
+        record.identity.inputs.profile.semantic_parameters = sb::engine::arm_parameters();
+        record
+    }
+
+    fn arm_report() -> Value {
+        let mut report = raw_report();
+        report["report_version"] = 2.into();
+        report["timebase"] = "arm64-pv-world-v1".into();
+        report
+    }
+
+    fn arm_report_error(record: &mut sb::orchestration::RunRecord, report: &Value) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        write_fixture(&dir.path().join("arm"), record, Some(report), None);
+        diff(&dir.path().join("arm"), &dir.path().join("arm"))
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn native_hvf_reports_require_the_arm_descriptor_and_matching_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = arm_report();
+        write_fixture(
+            &dir.path().join("a"),
+            &mut arm_fixture(),
+            Some(&report),
+            None,
+        );
+        write_fixture(
+            &dir.path().join("b"),
+            &mut arm_fixture(),
+            Some(&report),
+            None,
+        );
+        assert_eq!(
+            diff(&dir.path().join("a"), &dir.path().join("b"))
+                .unwrap()
+                .status,
+            Status::Match
+        );
+
+        let mut record = arm_fixture();
+        record.identity.inputs.profile.backend = "seedbox-kvm".into();
+        let error = arm_report_error(&mut record, &report);
+        assert!(
+            error.contains("HVF backend and ARM executable descriptor disagree"),
+            "{error}"
+        );
+
+        let mut record = arm_fixture();
+        record.identity.inputs.profile.semantic_parameters =
+            BTreeMap::from([("memory_mb".into(), "512".into())]);
+        let error = arm_report_error(&mut record, &report);
+        assert!(
+            error.contains("HVF backend and ARM executable descriptor disagree"),
+            "{error}"
+        );
+
+        // Descriptive clock capability metadata does not gate report decoding.
+        let mut descriptive = arm_fixture();
+        descriptive
+            .identity
+            .inputs
+            .profile
+            .semantic_parameters
+            .insert("engine_timebase".into(), "future-capabilities".into());
+        write_fixture(
+            &dir.path().join("descriptive"),
+            &mut descriptive,
+            Some(&report),
+            None,
+        );
+        assert_eq!(
+            diff(
+                &dir.path().join("descriptive"),
+                &dir.path().join("descriptive")
+            )
+            .unwrap()
+            .status,
+            Status::Match
+        );
+
+        let mut wrong_version = report.clone();
+        wrong_version["report_version"] = 1.into();
+        let error = arm_report_error(&mut arm_fixture(), &wrong_version);
+        assert!(error.contains("unsupported VMM report version"), "{error}");
+
+        let mut wrong_timebase = report.clone();
+        wrong_timebase["timebase"] = "pv".into();
+        let error = arm_report_error(&mut arm_fixture(), &wrong_timebase);
+        assert!(
+            error.contains("HVF report timebase disagrees with executable profile"),
+            "{error}"
+        );
+
+        let mut wrong_seed = report.clone();
+        wrong_seed["seed"] = 1.into();
+        let error = arm_report_error(&mut arm_fixture(), &wrong_seed);
+        assert!(
+            error.contains("VMM report seed disagrees with manifest"),
+            "{error}"
+        );
+
+        let mut counter_profile = report;
+        counter_profile["counter_profile"] = "zen3-v1".into();
+        let error = arm_report_error(&mut arm_fixture(), &counter_profile);
+        assert!(
+            error.contains("HVF report has an unexpected counter profile"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn ram_pages_are_read_where_the_vmm_writes_them() {

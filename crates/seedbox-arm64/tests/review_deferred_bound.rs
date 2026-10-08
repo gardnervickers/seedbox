@@ -60,7 +60,7 @@ impl<const DELIVER: bool, const REARM: bool> Backend for G<DELIVER, REARM> {
         self.sys.insert(r.0, v);
         Ok(())
     }
-    fn run(&mut self) -> Result<Stop> {
+    fn run(&mut self) -> Result<RunStop> {
         let mmio = |addr, data| Exit::Mmio {
             addr,
             len: 8,
@@ -73,7 +73,8 @@ impl<const DELIVER: bool, const REARM: bool> Backend for G<DELIVER, REARM> {
             return Ok(Stop {
                 pc: 0x4008_000c,
                 exit: mmio(EVENT_ADDR, 200),
-            });
+            }
+            .into());
         }
         let exit = match self.step {
             0 => mmio(EVENT_ADDR + 32, ABI),
@@ -119,7 +120,8 @@ impl<const DELIVER: bool, const REARM: bool> Backend for G<DELIVER, REARM> {
         Ok(Stop {
             pc: 0x4008_0000 + 4 * self.step as u64,
             exit,
-        })
+        }
+        .into())
     }
     fn complete(&mut self, _: Option<u64>) -> Result<()> {
         Ok(())

@@ -141,14 +141,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "seedbox-control"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "seedbox-vmm"
 version = "0.1.0"
 dependencies = [
@@ -156,7 +148,26 @@ dependencies = [
  "kvm-bindings",
  "kvm-ioctls",
  "libc",
- "seedbox-control",
+ "seedbox-vmm-control",
+ "seedbox-vmm-engine-core",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "seedbox-vmm-control"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "seedbox-vmm-engine-core"
+version = "0.1.0"
+dependencies = [
+ "seedbox-vmm-control",
  "serde",
  "serde_json",
  "sha2",

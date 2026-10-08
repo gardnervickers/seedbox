@@ -215,3 +215,35 @@ fn queue_configuration_rejects_bad_sizes_selectors_and_unnegotiated_features() {
     assert_eq!(d.read(0x070) & 8, 0);
     assert!(d.write(&mut m, 0x070, 12).is_err());
 }
+
+#[test]
+fn cloned_console_restores_transport_backlog_and_exact_dma_journal_order() {
+    let mut g = Guest::open();
+    g.device.dirty.clear();
+    let first = g.post(0, 0, &[0; 3], true);
+    g.device.receive(&mut g.ram, b"abcdef").unwrap();
+    let saved = (g.device.clone(), g.ram.clone(), g.avail);
+    let second = g.post(0, 1, &[0; 8], true);
+    assert!(g.write(0x050, 0).irq);
+    let expected_ram = g.ram.clone();
+    let expected_dirty = vec![
+        (first, 3),
+        (base(0) + 0x304, 8),
+        (base(0) + 0x302, 2),
+        (second, 3),
+        (base(0) + 0x30c, 8),
+        (base(0) + 0x302, 2),
+    ];
+    assert_eq!(g.device.dirty, expected_dirty);
+    g.device = saved.0;
+    g.ram = saved.1;
+    g.avail = saved.2;
+    assert_eq!(g.device.pending_rx_bytes(), 3);
+    assert_eq!(g.post(0, 1, &[0; 8], true), second);
+    assert!(g.write(0x050, 0).irq);
+    assert_eq!(g.ram, expected_ram);
+    assert_eq!(g.device.dirty, expected_dirty);
+    assert_eq!(g.device.pending_rx_bytes(), 0);
+    assert_eq!(g.device.read(0x070), 15);
+    assert_eq!(g.device.read(0x060), 1);
+}

@@ -1,14 +1,13 @@
 //! PV clock primitive with an optional external world horizon.
 //!
-//! Setting a horizon requires a stopped guest. Machine still runs its fixture
-//! to poweroff: this primitive does not integrate a world stopping policy or
-//! admit the initial boot/handshake clock against an external horizon.
+//! Setting a horizon requires a stopped guest. Machine republishes it before
+//! entry and returns to its world owner when the boundary is reached.
 
 use crate::{
     timebase::{Publication, Timebase},
     Result,
 };
-#[derive(Default, Debug)]
+#[derive(Default, Debug, serde::Serialize)]
 pub struct PvClock {
     now: u64,
     deadline: Option<u64>,
@@ -40,8 +39,14 @@ impl PvClock {
     pub fn ack(&mut self) {
         self.pending = false;
     }
+    pub fn deadline(&self) -> Option<u64> {
+        self.deadline
+    }
     pub fn is_pending(&self) -> bool {
         self.pending
+    }
+    pub fn at_horizon(&self) -> bool {
+        self.horizon == Some(self.now)
     }
     pub fn clock_read(&mut self) -> Result<u64> {
         let next = self.now.checked_add(1).ok_or("PV clock overflow")?;

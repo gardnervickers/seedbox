@@ -1,497 +1,58 @@
-//! virtio-net over virtio-mmio (version 2), split virtqueues, no offloads.
-//! Queue 0 receives, queue 1 transmits. All DMA happens on the world thread
-//! while the guest is stopped.
-
-use std::collections::VecDeque;
-
-const HDR: usize = 12; // virtio_net_hdr with num_buffers (VERSION_1)
-const QSIZE: u16 = 256;
-const BACKLOG: usize = 256;
-/// Deferred TX must be serviced at least this often while simulated time moves.
-pub const TX_POLL_NS: u64 = 50_000;
-
-pub fn poll_limit(now: u64, limit: u64, deferred: bool) -> u64 {
-    if deferred { limit.min(now.saturating_add(TX_POLL_NS)) } else { limit }
-}
-const VIRTIO_RING_F_EVENT_IDX: u32 = 1 << 29;
-const FEATURES_OK: u32 = 8;
-const VRING_AVAIL_F_NO_INTERRUPT: u16 = 1;
-const VRING_USED_F_NO_NOTIFY: u16 = 1;
-
-#[derive(Default, Clone)]
-struct Queue {
-    num: u16,
-    ready: bool,
-    desc: u64,
-    avail: u64,
-    used: u64,
-    last_avail: u16,
-    used_idx: u16,
-}
-
-/// Receiver acceptance and IRQ notification are independent. A frame queued
-/// in the bounded device backlog is accepted without an immediate interrupt.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ReceiveOutcome {
-    pub accepted: bool,
-    pub irq: bool,
-}
-
-pub struct WriteOutcome {
-    pub irq: bool,
-    pub frames: Vec<Vec<u8>>,
-}
-
+//! KVM network adapter: guest address base, DMA journal and shared device state.
+use seedbox_engine_core::virtio_mmio::{Transport,Spec,Policy as MmioPolicy,Effect};
+use seedbox_engine_core::virtio_network::{Network,Policy,Stats,EVENT_IDX};
+pub use seedbox_engine_core::virtio_network::{Received as ReceiveOutcome,Notified as WriteOutcome,poll_limit,TX_POLL_NS};
 #[derive(Clone)]
-pub struct VirtioNet {
-    mac: [u8; 6],
-    dev_sel: u32,
-    drv_sel: u32,
-    drv_features: [u32; 2],
-    queue_sel: u32,
-    q: [Queue; 2],
-    status: u32,
-    isr: u32,
-    backlog: VecDeque<Vec<u8>>,
-    pub tx_frames: u64,
-    pub rx_frames: u64,
-    pub rx_dropped: u64,
-    /// Report-only counters; never included in execution witnesses.
-    pub doorbell_exits: u64,
-    pub suppressed_interrupts: u64,
-    /// Semantic run setting, preserved across device resets.
-    pub deferred_tx: bool,
-    /// Report-only observations, never used for service decisions.
-    pub tx_polled_at_boundary: u64,
-    pub tx_polled: u64,
-    pub tx_pickup_samples: u64,
-    pub tx_pickup_delay_upper_ns_sum: u128,
-    pub tx_pickup_delay_upper_ns_max: u64,
-    // Last deterministic observation of an empty TX queue. The ordinary guest
-    // avail store is untrapped: its timestamp lies between this and pickup.
-    tx_empty_at: Option<u64>,
-    /// Guest memory ranges (start, len) written by the device since last taken.
-    pub dirty: Vec<(usize, usize)>,
-}
-
-fn rd16(m: &[u8], a: u64) -> u16 {
-    let a = a as usize;
-    u16::from_le_bytes(m[a..a + 2].try_into().unwrap())
-}
-fn rd32(m: &[u8], a: u64) -> u32 {
-    let a = a as usize;
-    u32::from_le_bytes(m[a..a + 4].try_into().unwrap())
-}
-fn rd64(m: &[u8], a: u64) -> u64 {
-    let a = a as usize;
-    u64::from_le_bytes(m[a..a + 8].try_into().unwrap())
-}
-fn wr16(m: &mut [u8], a: u64, v: u16) {
-    let a = a as usize;
-    m[a..a + 2].copy_from_slice(&v.to_le_bytes());
-}
-fn wr32(m: &mut [u8], a: u64, v: u32) {
-    let a = a as usize;
-    m[a..a + 4].copy_from_slice(&v.to_le_bytes());
-}
-
-struct Desc {
-    addr: u64,
-    len: u32,
-    flags: u16,
-    next: u16,
-}
-
-fn vring_need_event(event: u16, new: u16, old: u16) -> bool {
-    new.wrapping_sub(event).wrapping_sub(1) < new.wrapping_sub(old)
-}
-
-impl Queue {
-    fn desc(&self, m: &[u8], i: u16) -> Desc {
-        let a = self.desc + 16 * i as u64;
-        Desc {
-            addr: rd64(m, a),
-            len: rd32(m, a + 8),
-            flags: rd16(m, a + 12),
-            next: rd16(m, a + 14),
-        }
-    }
-    fn pending(&self, m: &[u8]) -> bool {
-        self.ready && rd16(m, self.avail + 2) != self.last_avail
-    }
-    fn interrupt(&self, m: &[u8], event_idx: bool, old_used: u16) -> bool {
-        if event_idx {
-            vring_need_event(rd16(m, self.avail + 4 + 2 * self.num as u64), self.used_idx, old_used)
-        } else {
-            rd16(m, self.avail) & VRING_AVAIL_F_NO_INTERRUPT == 0
-        }
-    }
-    fn suppress_notify(&self, m: &mut [u8], dirty: &mut Vec<(usize, usize)>, suppress: bool) {
-        let flags = rd16(m, self.used);
-        let next = if suppress { flags | VRING_USED_F_NO_NOTIFY } else { flags & !VRING_USED_F_NO_NOTIFY };
-        if next != flags {
-            wr16(m, self.used, next);
-            dirty.push((self.used as usize, 2));
-        }
-    }
-    fn finish_drain(&self, m: &mut [u8], dirty: &mut Vec<(usize, usize)>, event_idx: bool) -> bool {
-        // Arm kicks before re-reading avail->idx. The guest is stopped, so
-        // both operations occur at this deterministic device-service point.
-        if event_idx {
-            // The trailing u16 follows all num used elements, not used_idx.
-            // Keep this threshold while the guest runs; flags are ignored.
-            let a = self.used + 4 + 8 * self.num as u64;
-            if rd16(m, a) != self.last_avail {
-                wr16(m, a, self.last_avail);
-                dirty.push((a as usize, 2));
-            }
-        } else {
-            self.suppress_notify(m, dirty, false);
-        }
-        self.pending(m)
-    }
-    fn defer_notify(&self, m: &mut [u8], dirty: &mut Vec<(usize, usize)>, event_idx: bool) {
-        if !self.ready { return; }
-        if event_idx {
-            let a = self.used + 4 + 8 * self.num as u64;
-            // At most num heads can be outstanding, including across u16 wrap.
-            // None crosses this threshold before the next deterministic poll.
-            let event = self.last_avail.wrapping_add(self.num);
-            if rd16(m, a) != event {
-                wr16(m, a, event);
-                dirty.push((a as usize, 2));
-            }
-        } else {
-            self.suppress_notify(m, dirty, true);
-        }
-    }
-    fn pop(&mut self, m: &[u8]) -> Option<u16> {
-        if !self.pending(m) {
-            return None;
-        }
-        let head = rd16(m, self.avail + 4 + 2 * (self.last_avail % self.num) as u64);
-        self.last_avail = self.last_avail.wrapping_add(1);
-        Some(head)
-    }
-    fn push_used(&mut self, m: &mut [u8], dirty: &mut Vec<(usize, usize)>, head: u16, len: u32) {
-        let e = self.used + 4 + 8 * (self.used_idx % self.num) as u64;
-        wr32(m, e, head as u32);
-        wr32(m, e + 4, len);
-        self.used_idx = self.used_idx.wrapping_add(1);
-        wr16(m, self.used + 2, self.used_idx);
-        dirty.push((e as usize, 8));
-        dirty.push((self.used as usize + 2, 2));
-    }
-}
-
+pub struct VirtioNet { transport:Transport, model:Network, pub dirty:Vec<(usize,usize)> }
 impl VirtioNet {
-    pub fn new(mac: [u8; 6]) -> Self {
-        Self {
-            mac,
-            dev_sel: 0,
-            drv_sel: 0,
-            drv_features: [0; 2],
-            queue_sel: 0,
-            q: Default::default(),
-            status: 0,
-            isr: 0,
-            backlog: VecDeque::new(),
-            tx_frames: 0,
-            rx_frames: 0,
-            rx_dropped: 0,
-            doorbell_exits: 0,
-            suppressed_interrupts: 0,
-            deferred_tx: false,
-            tx_polled_at_boundary: 0,
-            tx_polled: 0,
-            tx_pickup_samples: 0,
-            tx_pickup_delay_upper_ns_sum: 0,
-            tx_pickup_delay_upper_ns_max: 0,
-            tx_empty_at: None,
-            dirty: Vec::new(),
-        }
-    }
-
-    pub fn pending_tx(&self, m: &[u8]) -> bool { self.q[1].pending(m) }
-
-    pub fn event_idx(&self) -> bool {
-        self.status & FEATURES_OK != 0 && self.drv_features[0] & VIRTIO_RING_F_EVENT_IDX != 0
-    }
-
-    fn interrupt(&mut self, m: &[u8], queue: usize, old_used: u16) -> bool {
-        if self.q[queue].used_idx == old_used { return false; }
-        let irq = self.q[queue].interrupt(m, self.event_idx(), old_used);
-        if irq { self.isr |= 1; } else { self.suppressed_interrupts += 1; }
-        irq
-    }
-
-    fn config(&self, off: u64) -> u8 {
-        match off {
-            0..=5 => self.mac[off as usize],
-            _ => 0,
-        }
-    }
-
-    pub fn read(&mut self, off: u64) -> u32 {
-        let qs = self.queue_sel as usize;
-        match off {
-            0x000 => 0x7472_6976,
-            0x004 => 2,
-            0x008 => 1,
-            0x00c => 0x5345_4544,
-            0x010 => match self.dev_sel {
-                0 => (1 << 5) | VIRTIO_RING_F_EVENT_IDX, // VIRTIO_NET_F_MAC, EVENT_IDX
-                1 => 1,      // VIRTIO_F_VERSION_1
-                _ => 0,
-            },
-            0x034 => {
-                if qs < 2 {
-                    QSIZE as u32
-                } else {
-                    0
-                }
-            }
-            0x044 => {
-                if qs < 2 {
-                    self.q[qs].ready as u32
-                } else {
-                    0
-                }
-            }
-            0x060 => self.isr,
-            0x070 => self.status,
-            0x0fc => 0,
-            o if o >= 0x100 => {
-                let b = o - 0x100;
-                u32::from_le_bytes([
-                    self.config(b),
-                    self.config(b + 1),
-                    self.config(b + 2),
-                    self.config(b + 3),
-                ])
-            }
-            _ => 0,
-        }
-    }
-
-    pub fn write(&mut self, m: &mut [u8], off: u64, v: u32) -> WriteOutcome {
-        let event_idx = self.event_idx();
-        let mut out = WriteOutcome {
-            irq: false,
-            frames: Vec::new(),
-        };
-        let qs = (self.queue_sel as usize).min(1);
-        match off {
-            0x014 => self.dev_sel = v,
-            0x020 => {
-                if self.drv_sel < 2 {
-                    self.drv_features[self.drv_sel as usize] = v;
-                }
-            }
-            0x024 => self.drv_sel = v,
-            0x030 => self.queue_sel = v,
-            0x038 => self.q[qs].num = (v as u16).min(QSIZE).max(1),
-            0x044 => {
-                let q = &mut self.q[qs];
-                q.ready = v == 1;
-                q.last_avail = 0;
-                q.used_idx = 0;
-                if q.ready && event_idx {
-                    q.suppress_notify(m, &mut self.dirty, false);
-                    q.finish_drain(m, &mut self.dirty, true);
-                }
-                if q.ready && qs == 1 && self.deferred_tx {
-                    q.defer_notify(m, &mut self.dirty, event_idx);
-                }
-            }
-            0x050 => {
-                self.doorbell_exits += 1;
-                match v {
-                    1 => out = self.transmit(m),
-                    0 => out.irq = self.drain(m),
-                    _ => {}
-                }
-            },
-            0x064 => self.isr &= !v,
-            0x070 => {
-                self.status = v;
-                if v == 0 {
-                    let dirty = std::mem::take(&mut self.dirty);
-                    let deferred_tx = self.deferred_tx;
-                    *self = Self::new(self.mac);
-                    self.deferred_tx = deferred_tx;
-                    self.dirty = dirty;
-                }
-            }
-            0x080 => self.q[qs].desc = (self.q[qs].desc & !0xffff_ffff) | v as u64,
-            0x084 => self.q[qs].desc = (self.q[qs].desc & 0xffff_ffff) | (v as u64) << 32,
-            0x090 => self.q[qs].avail = (self.q[qs].avail & !0xffff_ffff) | v as u64,
-            0x094 => self.q[qs].avail = (self.q[qs].avail & 0xffff_ffff) | (v as u64) << 32,
-            0x0a0 => self.q[qs].used = (self.q[qs].used & !0xffff_ffff) | v as u64,
-            0x0a4 => self.q[qs].used = (self.q[qs].used & 0xffff_ffff) | (v as u64) << 32,
-            _ => {}
-        }
-        if self.deferred_tx { let event_idx = self.event_idx();self.q[1].defer_notify(m, &mut self.dirty, event_idx); }
-        if out.irq {
-            self.isr |= 1;
-        }
-        out
-    }
-
-    fn transmit(&mut self, m: &mut [u8]) -> WriteOutcome {
-        let event_idx = self.event_idx();
-        let old_used = self.q[1].used_idx;
-        let mut out = WriteOutcome { irq: false, frames: Vec::new() };
-        while self.q[1].pending(m) {
-            if !event_idx { self.q[1].suppress_notify(m, &mut self.dirty, true); }
-            while let Some(head) = self.q[1].pop(m) {
-                let mut bytes = Vec::new();
-                let mut i = head;
-                loop {
-                    let d = self.q[1].desc(m, i);
-                    let a = d.addr as usize;
-                    bytes.extend_from_slice(&m[a..a + d.len as usize]);
-                    if d.flags & 1 == 0 { break; }
-                    i = d.next;
-                }
-                self.q[1].push_used(m, &mut self.dirty, head, 0);
-                if bytes.len() > HDR {
-                    out.frames.push(bytes[HDR..].to_vec());
-                    self.tx_frames += 1;
-                }
-            }
-            if self.deferred_tx {
-                self.q[1].defer_notify(m, &mut self.dirty, event_idx);
-                if !self.q[1].pending(m) { break; }
-            } else if !self.q[1].finish_drain(m, &mut self.dirty, event_idx) { break; }
-        }
-        out.irq = self.interrupt(m, 1, old_used);
-        out
-    }
-
-    /// Poll only at deterministic stops, including after RX delivery and before
-    /// a slice boundary or halt. Legacy RX and non-deferred TX retain
-    /// kick-driven service when EVENT_IDX is not negotiated.
-    pub fn poll(&mut self, m: &mut [u8]) -> WriteOutcome {
-        if !self.event_idx() && !self.deferred_tx { return WriteOutcome { irq: false, frames: Vec::new() }; }
-        // Legacy RX remains kick-driven, even with deferred TX enabled.
-        let rx_irq = self.event_idx() && self.drain(m);
-        let mut out = self.transmit(m);
-        out.irq |= rx_irq;
-        if self.deferred_tx { let event_idx = self.event_idx();self.q[1].defer_notify(m, &mut self.dirty, event_idx); }
-        out
-    }
-
-    fn pickup_stats(&mut self, m: &[u8], now: u64, packets: u64) {
-        if let Some(empty) = self.tx_empty_at {
-            let upper = now.saturating_sub(empty);
-            self.tx_pickup_samples += packets;
-            self.tx_pickup_delay_upper_ns_sum += upper as u128 * packets as u128;
-            self.tx_pickup_delay_upper_ns_max = self.tx_pickup_delay_upper_ns_max.max(if packets > 0 { upper } else { 0 });
-        }
-        if self.q[1].ready && !self.q[1].pending(m) { self.tx_empty_at = Some(now); }
-    }
-
-    pub fn poll_at(&mut self, m: &mut [u8], now: u64, boundary: bool) -> WriteOutcome {
-        let before = self.tx_frames;
-        let out = self.poll(m);
-        let packets = self.tx_frames - before;
-        self.tx_polled += packets;
-        if boundary { self.tx_polled_at_boundary += packets; }
-        self.pickup_stats(m, now, packets);
-        out
-    }
-
-    pub fn write_at(&mut self, m: &mut [u8], off: u64, v: u32, now: u64) -> WriteOutcome {
-        let before = self.tx_frames;
-        let out = self.write(m, off, v);
-        self.pickup_stats(m, now, self.tx_frames.saturating_sub(before));
-        out
-    }
-
-    fn put_frame(&mut self, m: &mut [u8], frame: &[u8]) -> bool {
-        let Some(head) = self.q[0].pop(m) else {
-            return false;
-        };
-        let mut data = vec![0u8; HDR];
-        data[10] = 1; // num_buffers
-        data.extend_from_slice(frame);
-        let mut written = 0usize;
-        let mut i = head;
-        loop {
-            let d = self.q[0].desc(m, i);
-            if d.flags & 2 != 0 {
-                let n = (d.len as usize).min(data.len() - written);
-                let a = d.addr as usize;
-                m[a..a + n].copy_from_slice(&data[written..written + n]);
-                self.dirty.push((a, n));
-                written += n;
-            }
-            if d.flags & 1 == 0 || written == data.len() {
-                break;
-            }
-            i = d.next;
-        }
-        self.q[0].push_used(m, &mut self.dirty, head, written as u32);
-        self.rx_frames += 1;
-        true
-    }
-
-    fn drain(&mut self, m: &mut [u8]) -> bool {
-        if self.backlog.is_empty() || !self.q[0].pending(m) {
-            return false;
-        }
-        let event_idx = self.event_idx();
-        let old_used = self.q[0].used_idx;
-        loop {
-            if !event_idx { self.q[0].suppress_notify(m, &mut self.dirty, true); }
-            while let Some(f) = self.backlog.front() {
-                let f = f.clone();
-                if !self.put_frame(m, &f) {
-                    break;
-                }
-                self.backlog.pop_front();
-            }
-            let pending = self.q[0].finish_drain(m, &mut self.dirty, event_idx);
-            if self.backlog.is_empty() || !pending {
-                break;
-            }
-        }
-        self.interrupt(m, 0, old_used)
-    }
-
-    /// Deliver an inbound frame now, reporting acceptance separately from IRQ.
-    pub fn receive(&mut self, m: &mut [u8], frame: &[u8]) -> ReceiveOutcome {
-        if !self.q[0].ready {
-            self.rx_dropped += 1;
-            return ReceiveOutcome::default();
-        }
-        let old_used = self.q[0].used_idx;
-        if !self.backlog.is_empty() || !self.put_frame(m, frame) {
-            if self.backlog.len() >= BACKLOG {
-                self.rx_dropped += 1;
-                return ReceiveOutcome::default();
-            }
-            self.backlog.push_back(frame.to_vec());
-            return ReceiveOutcome {
-                accepted: true,
-                irq: false,
-            };
-        }
-        if self.event_idx() {
-            self.q[0].finish_drain(m, &mut self.dirty, true);
-        }
-        let irq = self.interrupt(m, 0, old_used);
-        ReceiveOutcome {
-            accepted: true,
-            irq,
-        }
-    }
+ pub fn new(mac:[u8;6])->Self {Self{transport:Transport::new(Spec{device_id:1,features:[1<<5|EVENT_IDX,1]},2,MmioPolicy::Network),model:Network::new(mac,Policy::Network),dirty:Vec::new()}}
+ pub fn stats(&self)->&Stats {self.model.stats()}
+ pub fn set_deferred_tx(&mut self,enabled:bool) {self.model.set_deferred_tx(enabled)}
+ pub fn deferred_tx(&self)->bool {self.model.deferred_tx()}
+ pub fn event_idx(&self)->bool {self.model.event_idx(&self.transport)}
+ pub fn report(&self)->serde_json::Value {self.model.report(&self.transport)}
+ pub fn pending_tx(&self,m:&[u8])->Result<bool,String> {self.model.pending_tx(&self.transport,m,0)}
+ pub fn read(&mut self,off:u64)->u32 {
+  if off>=0x100 {let mac=self.model.mac();let byte=|o:u64|mac.get(o as usize).copied().unwrap_or(0);let b=off-0x100;u32::from_le_bytes([byte(b),byte(b+1),byte(b+2),byte(b+3)])}else{self.transport.read(off)}
+ }
+ pub fn write(&mut self,m:&mut[u8],off:u64,v:u32)->Result<WriteOutcome,String> {
+  if off==0x50 {self.model.doorbell();}
+  let out=match self.transport.write(off,v)? {
+   Effect::None=>WriteOutcome::default(),
+   Effect::Reset=>{self.model.reset();WriteOutcome::default()},
+   Effect::Notify(index)=>self.model.notify(&mut self.transport,m,0,index,|a,n|self.dirty.push((a,n)))?,
+  };
+  self.model.after_write(&self.transport,m,0,off,|a,n|self.dirty.push((a,n)))?;
+  Ok(out)
+ }
+ pub fn poll(&mut self,m:&mut[u8])->Result<WriteOutcome,String> {self.model.poll(&mut self.transport,m,0,|a,n|self.dirty.push((a,n)))}
+ pub fn poll_at(&mut self,m:&mut[u8],now:u64,boundary:bool)->Result<WriteOutcome,String> {
+  let before=self.stats().tx_frames;
+  let out=self.poll(m)?;
+  self.model.pickup_stats(&self.transport,m,0,now,self.model.stats().tx_frames-before,Some(boundary))?;
+  Ok(out)
+ }
+ pub fn write_at(&mut self,m:&mut[u8],off:u64,v:u32,now:u64)->Result<WriteOutcome,String> {
+  let before=self.stats().tx_frames;
+  let out=self.write(m,off,v)?;
+  self.model.pickup_stats(&self.transport,m,0,now,self.model.stats().tx_frames.saturating_sub(before),None)?;
+  Ok(out)
+ }
+ pub fn receive(&mut self,m:&mut[u8],frame:&[u8])->Result<ReceiveOutcome,String> {self.model.receive(&mut self.transport,m,0,frame,|a,n|self.dirty.push((a,n)))}
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seedbox_engine_core::virtqueue::{Queue,need_event as vring_need_event};
+    const QSIZE:u16=256;
+    const HDR:usize=12;
+    const VIRTIO_RING_F_EVENT_IDX:u32=EVENT_IDX;
+    const VRING_AVAIL_F_NO_INTERRUPT:u16=1;
+    const VRING_USED_F_NO_NOTIFY:u16=1;
+    fn rd16(m:&[u8],a:u64)->u16 {u16::from_le_bytes(m[a as usize..a as usize+2].try_into().unwrap())}
+    fn rd32(m:&[u8],a:u64)->u32 {u32::from_le_bytes(m[a as usize..a as usize+4].try_into().unwrap())}
+    fn wr16(m:&mut[u8],a:u64,v:u16) {m[a as usize..a as usize+2].copy_from_slice(&v.to_le_bytes());}
+    fn wr32(m:&mut[u8],a:u64,v:u32) {m[a as usize..a as usize+4].copy_from_slice(&v.to_le_bytes());}
 
     const DESC: u64 = 0x100;
     const AVAIL: u64 = 0x200;
@@ -507,7 +68,7 @@ mod tests {
         fn new(queue: usize) -> Self {
             let mut g = Self { net: VirtioNet::new([2, 0, 0, 0, 0, 1]), m: vec![0; 4096], queue };
             for (off, value) in [(0x030, queue as u32), (0x038, 2), (0x080, DESC as u32), (0x090, AVAIL as u32), (0x0a0, USED as u32), (0x044, 1)] {
-                g.net.write(&mut g.m, off, value);
+                g.net.write(&mut g.m, off, value).unwrap();
             }
             g
         }
@@ -525,7 +86,7 @@ mod tests {
             wr16(&mut self.m, AVAIL + 2, idx.wrapping_add(1));
         }
         fn notify(&mut self) -> WriteOutcome {
-            self.net.write(&mut self.m, 0x050, self.queue as u32)
+            self.net.write(&mut self.m, 0x050, self.queue as u32).unwrap()
         }
     }
 
@@ -536,7 +97,7 @@ mod tests {
         for flags in [0, VRING_AVAIL_F_NO_INTERRUPT, 2, 3] {
             let mut g = Guest::new(1);
             for current in [flags, flags ^ VRING_AVAIL_F_NO_INTERRUPT] {
-                g.net.write(&mut g.m, 0x064, 1);
+                g.net.write(&mut g.m, 0x064, 1).unwrap();
                 wr16(&mut g.m, AVAIL, current);
                 let mut packet = vec![0; HDR];
                 packet.extend_from_slice(b"frame");
@@ -546,7 +107,7 @@ mod tests {
                 assert_eq!(out.irq, irq);
                 assert_eq!(g.net.read(0x060), u32::from(irq));
                 assert_eq!(out.frames, [b"frame".to_vec()]);
-                assert_eq!(rd16(&g.m, USED + 2) as u64, g.net.tx_frames);
+                assert_eq!(rd16(&g.m, USED + 2) as u64, g.net.stats().tx_frames);
                 assert_eq!(rd16(&g.m, USED), 0);
             }
         }
@@ -558,21 +119,21 @@ mod tests {
             for flags in [0, VRING_AVAIL_F_NO_INTERRUPT, 2, 3] {
                 let mut g = Guest::new(0);
                 for current in [flags, flags ^ VRING_AVAIL_F_NO_INTERRUPT] {
-                    g.net.write(&mut g.m, 0x064, 1);
+                    g.net.write(&mut g.m, 0x064, 1).unwrap();
                     wr16(&mut g.m, AVAIL, current);
                     let irq = current & VRING_AVAIL_F_NO_INTERRUPT == 0;
                     if backlogged {
-                        assert_eq!(g.net.receive(&mut g.m, b"frame"), ReceiveOutcome { accepted: true, irq: false });
+                        assert_eq!(g.net.receive(&mut g.m, b"frame").unwrap(), ReceiveOutcome { accepted: true, irq: false });
                         g.post(&[]);
                         assert_eq!(g.notify().irq, irq);
                     } else {
                         g.post(&[]);
-                        assert_eq!(g.net.receive(&mut g.m, b"frame"), ReceiveOutcome { accepted: true, irq });
+                        assert_eq!(g.net.receive(&mut g.m, b"frame").unwrap(), ReceiveOutcome { accepted: true, irq });
                     }
                     assert_eq!(g.net.read(0x060), u32::from(irq));
-                    assert_eq!(rd16(&g.m, USED + 2) as u64, g.net.rx_frames);
-                    assert_eq!(g.net.rx_dropped, 0);
-                    assert!(g.net.backlog.is_empty());
+                    assert_eq!(rd16(&g.m, USED + 2) as u64, g.net.stats().rx_frames);
+                    assert_eq!(g.net.stats().rx_dropped, 0);
+                    assert!(g.net.model.projection()["backlog"].as_array().unwrap().is_empty());
                     assert_eq!(rd16(&g.m, USED), 0);
                 }
             }
@@ -580,26 +141,75 @@ mod tests {
     }
 
     #[test]
-    fn no_notify_is_set_during_drain_and_cleared_before_a_fresh_pending_check() {
+    fn legacy_tx_drain_observes_suppression_and_rechecks_after_clearing_it() {
         let mut g = Guest::new(1);
         wr16(&mut g.m, USED, 2); // Preserve unrelated flag bits.
-        g.post(&[0; HDR]);
-        g.net.q[1].suppress_notify(&mut g.m, &mut g.net.dirty, true);
-        assert_eq!(rd16(&g.m, USED), 2 | VRING_USED_F_NO_NOTIFY);
-        assert_eq!(g.net.q[1].pop(&g.m), Some(0));
-        g.net.q[1].push_used(&mut g.m, &mut g.net.dirty, 0, 0);
-        assert_eq!(rd16(&g.m, USED), 2 | VRING_USED_F_NO_NOTIFY);
-        assert_eq!(g.net.q[1].pop(&g.m), None);
-        // Model a newly published head between the empty observation and
-        // re-enabling notifications, without introducing host concurrency.
-        g.post(&[0; HDR]);
-        assert!(g.net.q[1].finish_drain(&mut g.m, &mut g.net.dirty, false));
+        let mut first = vec![0; HDR];
+        first.extend_from_slice(b"first");
+        g.post(&first);
+        let memory = g.m.as_mut_ptr();
+        let mut observed_flags = Vec::new();
+        let mut injected = false;
+        let out = g
+            .net
+            .model
+            .notify(&mut g.net.transport, &mut g.m, 0, 1, |address, len| {
+                if address == USED as usize && len == 2 {
+                    // The callback runs immediately after the guest-visible flag write.
+                    let flags = unsafe { u16::from_le_bytes([*memory.add(USED as usize), *memory.add(USED as usize + 1)]) };
+                    observed_flags.push(flags);
+                    if flags == 2 && !injected {
+                        // Publish a fresh request exactly as the drain clears NO_NOTIFY,
+                        // before arm_notify rechecks avail->idx.
+                        let d = (DESC + 16) as usize;
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(0x480u64.to_le_bytes().as_ptr(), memory.add(d), 8);
+                            std::ptr::copy_nonoverlapping((HDR as u32 + 5).to_le_bytes().as_ptr(), memory.add(d + 8), 4);
+                            std::ptr::copy_nonoverlapping(0u16.to_le_bytes().as_ptr(), memory.add(d + 12), 2);
+                            std::ptr::copy_nonoverlapping(1u16.to_le_bytes().as_ptr(), memory.add((AVAIL + 6) as usize), 2);
+                            std::ptr::copy_nonoverlapping(2u16.to_le_bytes().as_ptr(), memory.add((AVAIL + 2) as usize), 2);
+                            std::ptr::copy_nonoverlapping(b"second".as_ptr(), memory.add(0x48c), 6);
+                        }
+                        injected = true;
+                    }
+                }
+                g.net.dirty.push((address, len));
+            })
+            .unwrap();
+        assert_eq!(out.frames, [b"first".to_vec(), b"secon".to_vec()]);
+        assert!(out.irq);
+        assert!(injected);
+        assert_eq!(observed_flags, [3, 2, 3, 2]);
         assert_eq!(rd16(&g.m, USED), 2);
-        assert_eq!(g.net.dirty, [(USED as usize, 2), (USED as usize + 4, 8), (USED as usize + 2, 2), (USED as usize, 2)]);
-        g.net.q[1].suppress_notify(&mut g.m, &mut g.net.dirty, true);
-        assert_eq!(g.net.q[1].pop(&g.m), Some(1));
-        assert!(!g.net.q[1].finish_drain(&mut g.m, &mut g.net.dirty, false));
-        assert_eq!(rd16(&g.m, USED), 2);
+        assert_eq!(rd16(&g.m, USED + 2), 2);
+        assert_eq!(g.net.stats().tx_frames, 2);
+        assert_eq!(g.net.dirty.iter().filter(|&&(a, n)| a == USED as usize && n == 2).count(), 4);
+    }
+
+    #[test]
+    fn kvm_rx_truncates_to_posted_buffer_and_completes_the_prefix() {
+        for (capacity, expected_len) in [(0, 0), (11, 11), (12, 12), (1530, 1530), (1630, 1612)] {
+            for (flags, expected_irq) in [(0, true), (VRING_AVAIL_F_NO_INTERRUPT, false)] {
+                let mut g = Guest::new(0);
+                g.post(&[]);
+                wr32(&mut g.m, DESC + 8, capacity as u32);
+                wr16(&mut g.m, AVAIL, flags);
+                let frame = vec![0x5a; 1600];
+                let received = g.net.receive(&mut g.m, &frame).unwrap();
+
+                assert_eq!(received, ReceiveOutcome { accepted: true, irq: expected_irq });
+                assert_eq!(rd32(&g.m, USED + 8), expected_len as u32);
+                assert_eq!(rd16(&g.m, USED + 2), 1);
+                let mut packet = vec![0; HDR];
+                packet[10] = 1;
+                packet.extend_from_slice(&frame);
+                assert_eq!(&g.m[0x400..0x400 + expected_len], &packet[..expected_len]);
+                assert_eq!(g.net.dirty, [(0x400, expected_len), (USED as usize + 4, 8), (USED as usize + 2, 2)]);
+                assert_eq!(g.net.stats().rx_frames, 1);
+                assert!(g.net.model.projection()["backlog"].as_array().unwrap().is_empty());
+                assert_eq!(g.net.read(0x060), u32::from(expected_irq));
+            }
+        }
     }
 
     #[test]
@@ -608,13 +218,13 @@ mod tests {
             let mut g = Guest::new(0);
             wr16(&mut g.m, USED, 2);
             for frame in [b"first".as_slice(), b"second".as_slice()].into_iter().take(frames) {
-                assert_eq!(g.net.receive(&mut g.m, frame), ReceiveOutcome { accepted: true, irq: false });
+                assert_eq!(g.net.receive(&mut g.m, frame).unwrap(), ReceiveOutcome { accepted: true, irq: false });
             }
             for _ in 0..buffers { g.post(&[]); }
             assert!(g.notify().irq);
-            assert_eq!(g.net.rx_frames, frames.min(buffers) as u64);
-            assert_eq!(g.net.backlog.len(), frames.saturating_sub(buffers));
-            assert_eq!(g.net.q[0].pending(&g.m), buffers > frames);
+            assert_eq!(g.net.stats().rx_frames, frames.min(buffers) as u64);
+            assert_eq!(g.net.model.projection()["backlog"].as_array().unwrap().len(), frames.saturating_sub(buffers));
+            assert_eq!(g.net.transport.queues[0].pending(&g.m,0).unwrap(), buffers > frames);
             assert_eq!(&g.m[0x400 + HDR..0x400 + HDR + 5], b"first");
             assert_eq!(rd16(&g.m, USED), 2);
             assert_eq!(g.net.dirty.first(), Some(&(USED as usize, 2)));
@@ -627,7 +237,7 @@ mod tests {
     fn unready_notifications_do_not_access_guest_rings() {
         let mut net = VirtioNet::new([2, 0, 0, 0, 0, 1]);
         for queue in [0, 1] {
-            let out = net.write(&mut [], 0x050, queue);
+            let out = net.write(&mut [], 0x050, queue).unwrap();
             assert!(!out.irq);
             assert!(out.frames.is_empty());
         }
@@ -635,31 +245,31 @@ mod tests {
     }
 
     fn negotiate(g: &mut Guest) {
-        g.net.write(&mut g.m, 0x020, (1 << 5) | VIRTIO_RING_F_EVENT_IDX);
-        g.net.write(&mut g.m, 0x024, 1);
-        g.net.write(&mut g.m, 0x020, 1);
-        g.net.write(&mut g.m, 0x070, 15);
+        g.net.write(&mut g.m, 0x020, (1 << 5) | VIRTIO_RING_F_EVENT_IDX).unwrap();
+        g.net.write(&mut g.m, 0x024, 1).unwrap();
+        g.net.write(&mut g.m, 0x020, 1).unwrap();
+        g.net.write(&mut g.m, 0x070, 15).unwrap();
     }
 
     #[test]
     fn event_idx_is_offered_negotiated_and_reset() {
         let mut g = Guest::new(1);
         assert_eq!(g.net.read(0x010), (1 << 5) | VIRTIO_RING_F_EVENT_IDX);
-        g.net.write(&mut g.m, 0x014, 1);
+        g.net.write(&mut g.m, 0x014, 1).unwrap();
         assert_eq!(g.net.read(0x010), 1);
-        g.net.write(&mut g.m, 0x020, VIRTIO_RING_F_EVENT_IDX);
+        g.net.write(&mut g.m, 0x020, VIRTIO_RING_F_EVENT_IDX).unwrap();
         assert!(!g.net.event_idx()); // FEATURES_OK has not been accepted yet.
         negotiate(&mut g);
         assert!(g.net.event_idx());
         wr16(&mut g.m, USED, VRING_USED_F_NO_NOTIFY);
         wr16(&mut g.m, USED + 20, 42);
-        g.net.write(&mut g.m, 0x044, 1);
+        g.net.write(&mut g.m, 0x044, 1).unwrap();
         assert_eq!(rd16(&g.m, USED), 0);
         assert_eq!(rd16(&g.m, USED + 20), 0);
         assert!(g.net.dirty.contains(&(USED as usize + 20, 2)));
-        g.net.write(&mut g.m, 0x070, 0);
+        g.net.write(&mut g.m, 0x070, 0).unwrap();
         assert!(!g.net.event_idx());
-        assert!(!g.net.poll(&mut []).irq);
+        assert!(!g.net.poll(&mut []).unwrap().irq);
     }
 
     #[test]
@@ -685,15 +295,15 @@ mod tests {
             for consumed in [65535, 0, 1] {
                 q.last_avail = consumed;
                 wr16(&mut m, q.avail + 2, consumed);
-                assert!(!q.finish_drain(&mut m, &mut dirty, true));
+                assert!(!q.arm_notify(&mut m,0,true,false,|a,n|dirty.push((a,n))).unwrap());
                 assert_eq!(rd16(&m, a), consumed);
                 assert_eq!(dirty.pop(), Some((a as usize, 2)));
                 assert_eq!(rd16(&m, a - 2), 0xa5a5);
                 assert_eq!(rd16(&m, a + 2), 0xa5a5);
-                assert!(!q.finish_drain(&mut m, &mut dirty, true));
+                assert!(!q.arm_notify(&mut m,0,true,false,|a,n|dirty.push((a,n))).unwrap());
                 assert!(dirty.is_empty());
                 wr16(&mut m, q.avail + 2, consumed.wrapping_add(1));
-                assert!(q.finish_drain(&mut m, &mut dirty, true));
+                assert!(q.arm_notify(&mut m,0,true,false,|a,n|dirty.push((a,n))).unwrap());
                 assert!(vring_need_event(rd16(&m, a), consumed.wrapping_add(1), consumed));
             }
         }
@@ -708,7 +318,7 @@ mod tests {
                     for (event, irq) in [(old, true), (old.wrapping_add(1), false), (old.wrapping_sub(1), false)] {
                         let mut g = Guest::new(queue);
                         negotiate(&mut g);
-                        g.net.q[queue].used_idx = old;
+                        g.net.transport.queues[queue].used_idx = old;
                         wr16(&mut g.m, AVAIL, VRING_AVAIL_F_NO_INTERRUPT);
                         wr16(&mut g.m, AVAIL + 4 + 2 * 2, event);
                         let received = if queue == 1 {
@@ -718,12 +328,12 @@ mod tests {
                             assert_eq!(out.frames, [b"frame".to_vec()]);
                             out.irq
                         } else if backlogged {
-                            assert!(g.net.receive(&mut g.m, b"frame").accepted);
+                            assert!(g.net.receive(&mut g.m, b"frame").unwrap().accepted);
                             g.post(&[]);
                             g.notify().irq
                         } else {
                             g.post(&[]);
-                            let out = g.net.receive(&mut g.m, b"frame");
+                            let out = g.net.receive(&mut g.m, b"frame").unwrap();
                             assert!(out.accepted);
                             out.irq
                         };
@@ -731,15 +341,15 @@ mod tests {
                         assert_eq!(g.net.read(0x060), u32::from(irq));
                         assert_eq!(rd16(&g.m, USED + 2), old.wrapping_add(1));
                         assert_eq!(rd16(&g.m, USED + 4 + 8 * 2), 1);
-                        assert_eq!(g.net.suppressed_interrupts, u64::from(!irq));
+                        assert_eq!(g.net.stats().suppressed_interrupts, u64::from(!irq));
                         assert_eq!(rd16(&g.m, USED), 0);
                         // Acknowledge, change the threshold and complete again.
-                        g.net.write(&mut g.m, 0x064, 1);
+                        g.net.write(&mut g.m, 0x064, 1).unwrap();
                         wr16(&mut g.m, AVAIL + 4 + 2 * 2, old.wrapping_add(1));
                         if queue == 1 {
                             g.post(&[0; HDR]);assert!(g.notify().irq);
                         } else {
-                            g.post(&[]);assert!(g.net.receive(&mut g.m, b"next").irq);
+                            g.post(&[]);assert!(g.net.receive(&mut g.m, b"next").unwrap().irq);
                         }
                     }
                 }
@@ -755,7 +365,7 @@ mod tests {
                 negotiate(&mut g);
                 wr16(&mut g.m, AVAIL + 8, event);
                 if queue == 0 {
-                    for _ in 0..2 { assert!(g.net.receive(&mut g.m, b"frame").accepted); }
+                    for _ in 0..2 { assert!(g.net.receive(&mut g.m, b"frame").unwrap().accepted); }
                 }
                 for _ in 0..2 { g.post(&[0; HDR + 5]); }
                 assert_eq!(g.notify().irq, event < 2);
@@ -771,39 +381,39 @@ mod tests {
             let mut tx = Guest::new(1);
             let mut rx = Guest::new(0);
             if event_idx { negotiate(&mut tx);negotiate(&mut rx); }
-            assert!(rx.net.receive(&mut rx.m, b"frame").accepted);
+            assert!(rx.net.receive(&mut rx.m, b"frame").unwrap().accepted);
             let mut packet = vec![0; HDR];packet.extend_from_slice(b"frame");
             tx.post(&packet);rx.post(&[]);
-            let out = tx.net.poll(&mut tx.m);
+            let out = tx.net.poll(&mut tx.m).unwrap();
             assert_eq!(out.irq, event_idx);
             assert_eq!(out.frames.len(), usize::from(event_idx));
-            assert_eq!(rx.net.poll(&mut rx.m).irq, event_idx);
-            assert_eq!(tx.net.tx_frames, u64::from(event_idx));
-            assert_eq!(rx.net.rx_frames, u64::from(event_idx));
-            assert_eq!(tx.net.doorbell_exits, 0);
-            assert_eq!(rx.net.doorbell_exits, 0);
-            assert!(!tx.net.poll(&mut tx.m).irq);
-            assert!(!rx.net.poll(&mut rx.m).irq);
+            assert_eq!(rx.net.poll(&mut rx.m).unwrap().irq, event_idx);
+            assert_eq!(tx.net.stats().tx_frames, u64::from(event_idx));
+            assert_eq!(rx.net.stats().rx_frames, u64::from(event_idx));
+            assert_eq!(tx.net.stats().doorbell_exits, 0);
+            assert_eq!(rx.net.stats().doorbell_exits, 0);
+            assert!(!tx.net.poll(&mut tx.m).unwrap().irq);
+            assert!(!rx.net.poll(&mut rx.m).unwrap().irq);
             if !event_idx { assert!(tx.notify().irq);assert!(rx.notify().irq); }
         }
         let mut g = Guest::new(1);negotiate(&mut g);
-        g.net.q[1].ready = false;
-        assert!(g.net.poll(&mut []).frames.is_empty());
-        assert!(!g.net.poll(&mut []).irq);
+        g.net.transport.queues[1].ready = false;
+        assert!(g.net.poll(&mut []).unwrap().frames.is_empty());
+        assert!(!g.net.poll(&mut []).unwrap().irq);
     }
     #[test]
     fn deferred_tx_suppresses_lone_and_full_ring_kicks_across_wrap() {
         for event_idx in [false, true] {
             let mut g = Guest::new(1);
             if event_idx { negotiate(&mut g); }
-            g.net.deferred_tx = true;
+            g.net.set_deferred_tx(true);
             // Test boot-time arming as well as re-arming after drains.
-            g.net.write(&mut g.m, 0x044, 1);
+            g.net.write(&mut g.m, 0x044, 1).unwrap();
             for start in [0, u16::MAX - 1, u16::MAX] {
-                g.net.q[1].last_avail = start;
-                g.net.q[1].used_idx = start;
+                g.net.transport.queues[1].last_avail = start;
+                g.net.transport.queues[1].used_idx = start;
                 wr16(&mut g.m, AVAIL + 2, start);
-                g.net.poll_at(&mut g.m, 100, false);
+                g.net.poll_at(&mut g.m, 100, false).unwrap();
                 let mut packet = vec![0; HDR];packet.extend_from_slice(b"frame");
                 for n in 1..=2 {
                     g.post(&packet);
@@ -814,21 +424,21 @@ mod tests {
                         assert_ne!(rd16(&g.m, USED) & VRING_USED_F_NO_NOTIFY, 0);
                     }
                 }
-                let out = g.net.poll_at(&mut g.m, 250, true);
+                let out = g.net.poll_at(&mut g.m, 250, true).unwrap();
                 assert_eq!(out.frames, [b"frame".to_vec(), b"frame".to_vec()]);
                 assert_eq!(rd16(&g.m, USED + 2), start.wrapping_add(2));
-                assert!(!g.net.pending_tx(&g.m));
+                assert!(!g.net.pending_tx(&g.m).unwrap());
                 if event_idx {
                     assert_eq!(rd16(&g.m, USED + 4 + 8 * 2), start.wrapping_add(4));
                 } else { assert_ne!(rd16(&g.m, USED) & VRING_USED_F_NO_NOTIFY, 0); }
             }
-            assert_eq!(g.net.doorbell_exits, 0);
-            assert_eq!(g.net.tx_polled_at_boundary, 6);
-            assert_eq!(g.net.tx_pickup_samples, 6);
-            assert_eq!(g.net.tx_pickup_delay_upper_ns_sum, 900);
-            assert_eq!(g.net.tx_pickup_delay_upper_ns_max, 150);
-            g.net.write(&mut g.m, 0x070, 0);
-            assert!(g.net.deferred_tx, "device reset must retain the run's TX mode");
+            assert_eq!(g.net.stats().doorbell_exits, 0);
+            assert_eq!(g.net.stats().tx_polled_at_boundary, 6);
+            assert_eq!(g.net.stats().tx_pickup_samples, 6);
+            assert_eq!(g.net.stats().tx_pickup_delay_upper_ns_sum, 900);
+            assert_eq!(g.net.stats().tx_pickup_delay_upper_ns_max, 150);
+            g.net.write(&mut g.m, 0x070, 0).unwrap();
+            assert!(g.net.deferred_tx(), "device reset must retain the run's TX mode");
         }
     }
 
@@ -837,35 +447,35 @@ mod tests {
         for event_idx in [false, true] {
             let mut g = Guest::new(1);
             if event_idx { negotiate(&mut g); }
-            g.net.deferred_tx = true;
+            g.net.set_deferred_tx(true);
             for n in 0..10 {
-                g.net.poll_at(&mut g.m, n * 100, false);
+                g.net.poll_at(&mut g.m, n * 100, false).unwrap();
                 let old = rd16(&g.m, AVAIL + 2);
                 let mut packet = vec![0; HDR];packet.extend_from_slice(b"frame");
                 g.post(&packet);
                 if event_idx {
                     assert!(!vring_need_event(rd16(&g.m, USED + 4 + 8 * 2), old.wrapping_add(1), old));
                 } else { assert_ne!(rd16(&g.m, USED) & VRING_USED_F_NO_NOTIFY, 0); }
-                assert_eq!(g.net.poll_at(&mut g.m, n * 100 + 50, true).frames, [b"frame".to_vec()]);
+                assert_eq!(g.net.poll_at(&mut g.m, n * 100 + 50, true).unwrap().frames, [b"frame".to_vec()]);
             }
-            assert_eq!(g.net.doorbell_exits, 0);
-            assert_eq!(g.net.tx_polled_at_boundary, 10);
-            assert_eq!(g.net.tx_pickup_delay_upper_ns_sum, 500);
-            assert_eq!(g.net.tx_pickup_delay_upper_ns_max, 50);
+            assert_eq!(g.net.stats().doorbell_exits, 0);
+            assert_eq!(g.net.stats().tx_polled_at_boundary, 10);
+            assert_eq!(g.net.stats().tx_pickup_delay_upper_ns_sum, 500);
+            assert_eq!(g.net.stats().tx_pickup_delay_upper_ns_max, 50);
         }
     }
 
     #[test]
     fn deferred_legacy_tx_does_not_change_rx_polling_or_notification_flags() {
         let mut g = Guest::new(0);
-        g.net.deferred_tx = true;
-        assert!(g.net.receive(&mut g.m, b"frame").accepted);
+        g.net.set_deferred_tx(true);
+        assert!(g.net.receive(&mut g.m, b"frame").unwrap().accepted);
         g.post(&[]);
-        assert!(!g.net.poll_at(&mut g.m, 100, true).irq);
-        assert_eq!(g.net.rx_frames, 0);
+        assert!(!g.net.poll_at(&mut g.m, 100, true).unwrap().irq);
+        assert_eq!(g.net.stats().rx_frames, 0);
         assert_eq!(rd16(&g.m, USED), 0);
         assert!(g.notify().irq);
-        assert_eq!(g.net.rx_frames, 1);
+        assert_eq!(g.net.stats().rx_frames, 1);
         assert_eq!(rd16(&g.m, USED), 0);
     }
 
@@ -878,13 +488,13 @@ mod tests {
                 let mut packet = vec![0; HDR];packet.extend_from_slice(b"frame");
                 g.post(&packet);
                 let mut raw = g.net.clone();let mut memory = g.m.clone();
-                let expected = raw.write(&mut memory, off, value);
-                let observed = g.net.write_at(&mut g.m, off, value, 100);
+                let expected = raw.write(&mut memory, off, value).unwrap();
+                let observed = g.net.write_at(&mut g.m, off, value, 100).unwrap();
                 assert_eq!((observed.irq, observed.frames), (expected.irq, expected.frames));
                 assert_eq!(g.m, memory);
                 assert_eq!(g.net.dirty, raw.dirty);
-                assert_eq!(g.net.isr, raw.isr);
-                assert_eq!(g.net.tx_frames, raw.tx_frames);
+                assert_eq!(g.net.transport.isr, raw.transport.isr);
+                assert_eq!(g.net.stats().tx_frames, raw.stats().tx_frames);
             }
         }
     }

@@ -1,21 +1,6 @@
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/connections.rs"]
-mod connections;
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/faults.rs"]
-mod faults;
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/links.rs"]
-mod links;
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/rng.rs"]
-mod rng;
 use links::Outcome;
 use seedbox_control::{Action, Plan};
+use seedbox_engine_core::{connections, faults, links};
 use sha2::{Digest, Sha256};
 
 fn frame(port: u16, reverse: bool, seq: u32, ack: u32, flags: u8) -> Vec<u8> {

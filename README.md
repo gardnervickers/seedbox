@@ -8,15 +8,14 @@ interrupt timing.
 
 ## Quick start
 
-`validate`, `init`, `inspect`, `diff`, `logs`, `export` and `import` run on Linux or macOS. `run`,
-`explore` and `replay` need the
-qualified host (see [host requirements](#host-requirements)) and root.
+`validate`, `init`, `inspect`, `diff`, `logs`, `export` and `import` run on Linux
+or macOS. `run`, `explore` and `replay` use the qualified Linux KVM host as root,
+or the development native HVF backend on an Apple Silicon Mac.
 
 ```sh
 nix develop                          # Rust, OCI tools, static BusyBox, musl
 bash kernel/build.sh                 # guest kernel -> ~/seedbox-sim/artifacts/bzImage
 cargo build --release                # target/release/seedbox
-cargo build-vmm                      # crates/seedbox-vmm/target/release/seedbox-vmm (alias)
 
 cargo run -- validate examples/etcd
 sudo -E env PATH="$PATH" target/release/seedbox run examples/etcd
@@ -28,6 +27,36 @@ cargo run -- logs .seedbox/runs/ATTEMPT --machine client --stream console --sinc
 cargo run -- diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
 ```
 
+For a Linux x86-64 CLI with the guest kernel and static helpers included, use
+`bash tools/linux-runtime/build-cli.sh` inside the development shell. The resulting
+executable needs no guest-asset paths or runtime compiler. OCI preparation still
+uses the installed Skopeo, umoci and builder. This packaging path requires final
+Linux merge-train validation; the portable Mac tests validate its readers and
+resolution rules. See [Linux packaging](tools/linux-runtime/README.md).
+
+On Apple Silicon, build the signed CLI and its preparation payload once:
+
+```sh
+nix develop
+bash tools/mac-runtime/build-cli.sh
+target/release/seedbox doctor
+target/release/seedbox run PROJECT
+target/release/seedbox replay .seedbox/runs/ATTEMPT
+```
+
+The Mac CLI packages the ARM guest kernel and static helpers. It automatically
+owns a Linux preparation VM for the existing OCI tools, stops it before running,
+and executes application machines natively under HVF. Replay uses retained bytes
+without starting that preparation VM. No runtime compiler or separate VMM path
+is needed. Images must support `linux/arm64`; memory is limited to 3072 MiB per
+service. Mac execution remains a development backend with distinct admission.
+The guest supervisor defaults an unset `GOMAXPROCS` to the guest CPU count.
+New Mac profiles release initially parked guests at seeded per-service offsets,
+capped at 1 ms and the network lookahead. The profile and report bind this
+policy; its release phase stays within the configured absolute simulated-time
+limit.
+See [the Mac workflow](tools/mac-runtime/README.md).
+
 `seedbox run` with no arguments runs the Compose project in the current
 directory. Every runtime input has a default, so no flags are required:
 
@@ -37,24 +66,24 @@ directory. Every runtime input has a default, so no flags are required:
 | Directed link baselines | no overrides; global latency/jitter and zero loss | `x-seedbox.network.links` |
 | Connection selectors | disabled; discover and select through the guest control API | `world.connections`, `world.drop_connection` |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
-| Deferred TX kicks | off; service TX as in the current engine | `--deferred-tx` (prepare/run/explore) |
-| Runtime checkpoint | absent; ordinary execution | `--checkpoint-at-ns T --branch-seed B` (run only; B=P continues without reseeding; no environment backing) |
-| Timebase | `counter` (retired guest branches) | `--timebase` (prepare/run/explore) |
-| Page timer | off; ABI-4 clockevent stores, aimed at PV | `--page-timer` (prepare/run/explore) |
+| Deferred TX kicks (Linux KVM) | off; service TX as in the current engine | `--deferred-tx` (prepare/run/explore) |
+| Runtime checkpoint (Linux KVM) | absent; ordinary execution | `--checkpoint-at-ns T --branch-seed B` (run only; B=P continues without reseeding; no environment backing) |
+| Timebase | Linux: `counter` (retired guest branches); Mac: `pv` | `--timebase` (prepare/run/explore) |
+| Page timer (Linux KVM) | off; ABI-4 clockevent stores, aimed at PV | `--page-timer` (prepare/run/explore) |
 | Exploration count | `1` | `--count` |
-| Exploration workers | `1`, sequential execution | `--workers` (1..32; automatic CPU selection for parallel execution) |
+| Exploration workers | `1`, sequential execution; Mac currently requires `1` | `--workers` (1..32; Linux automatic CPU selection for parallel execution) |
 | Torn disk writes | off (drop all unflushed sectors on crash) | `--torn-writes` |
-| CPU | first free core other than CPU 0's, under the shared lease | `--cpu`, `SEEDBOX_CPU` |
-| Guest kernel | `bzImage` in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`, `./artifacts`, then `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
-| VMM | `seedbox-vmm` next to an installed `seedbox`, then this checkout's `cargo build-vmm` output, then on `PATH`; `cargo run` builds it if missing | `--vmm`, `SEEDBOX_VMM` |
-| Guest supervisor | built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl | `--guest-init`, `SEEDBOX_GUEST_INIT` |
-| BusyBox | `SEEDBOX_BUSYBOX` (set by `nix develop`), then a static `busybox` on `PATH` | `--busybox` |
-| mke2fs (only for named volumes) | `SEEDBOX_MKE2FS` (set by `nix develop`), then a static `mke2fs` on `PATH` | `--mke2fs` |
+| CPU | Linux: first free core other than CPU 0's, under the shared lease; Mac: automatic HVF scheduling | `--cpu`, `SEEDBOX_CPU` (Linux only) |
+| Guest kernel | Mac: packaged ARM64 `Image`; Linux: configured `$SEEDBOX_ARTIFACTS`/`$SEEDBOX_WORK/artifacts`, then packaged `bzImage`, then `./artifacts` and `~/seedbox-sim/artifacts` for the user and any sudo caller | `--kernel`, `SEEDBOX_KERNEL` |
+| VMM | the platform engine linked into `seedbox`; runtime commands never invoke Cargo | `--vmm`, `SEEDBOX_VMM` (Linux legacy standalone engine) |
+| Guest supervisor | packaged on Mac or in the Linux asset build; otherwise built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl on Linux | `--guest-init`, `SEEDBOX_GUEST_INIT` |
+| BusyBox | packaged on Mac; Linux: `SEEDBOX_BUSYBOX` (set by `nix develop`), then packaged BusyBox, then a static `busybox` on `PATH` | `--busybox` |
+| mke2fs (only for named volumes) | packaged on Mac; Linux: `SEEDBOX_MKE2FS` (set by `nix develop`), then packaged mke2fs, then a static `mke2fs` on `PATH` | `--mke2fs` |
 | Build epoch | absent; preserve the builder's ordinary timestamp policy | `--build-epoch` (prepare/run/explore; no environment backing) |
 | Engine and guest kernel | any built engine and kernel are admitted; the run records their hashes | `--vmm`, `--kernel` |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
 | Diff inputs | Two required retained run directories; no runtime inputs or state lookup | positional `RUN_A RUN_B` |
-| Per-page RAM evidence | off; under `--full-state`, retain `output/machines/NAME.pages` beside machine traces | existing `--full-state` |
+| Per-page RAM evidence (Linux) | off; under `--full-state`, retain `output/machines/NAME.pages` beside machine traces | existing `--full-state` |
 | Log selection | All indexed machines and both streams, with no time bounds; raw bytes on stdout (`--json` for metadata) | `logs RUN --machine NAME --stream console --since-ns N --until-ns N` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
 
@@ -89,6 +118,28 @@ Engines and guest kernels are not pinned: any built engine and kernel are
 admitted, and each run records their hashes. `--allow-dev-engine` is still accepted and has no effect.
 The host checks are the KVM and perf capabilities the engine needs; CPU model,
 microcode and CPUID are not pinned.
+
+`seedbox --version` reports the simulator version. Development builds identify
+their source commit as `0.1.0-dev+COMMIT`, with `.dirty` for staged or unstaged
+tracked changes. Missing or malformed source revisions report `-dev+unknown`. Only
+a checkout with no tracked changes at a matching release tag uses the release
+label. The label does not grant runtime qualification. Untracked build inputs
+remain covered by retained hashes. New runs retain the complete
+`seedbox` executable and its worker protocol; replay launches those
+retained bytes even after the installed CLI is upgraded. The executable hash is
+an internal integrity reference, so equal version labels never substitute for
+equal bytes. Existing runs without a worker descriptor retain the standalone
+VMM contract. The combined executable has its own engine identity and needs
+separate runtime evidence. Every built engine and guest kernel is admitted;
+`--allow-dev-engine` remains a compatibility no-op.
+
+The ARM application engine is linked into the Mac CLI. Both platform adapters
+use the shared world coordinator, including connection selectors and committed
+console triggers; ARM arbitrary snapshot/fork reuse remains unsupported. Its PV world identity,
+boot-layout evidence and HVF host admission are distinct from the existing ARM
+fixture and x86 KVM profiles. Mac defaults use packaged Image, supervisor,
+BusyBox and mke2fs, with `linux/arm64` as the image platform. `--cpu`, `--vmm`
+and `--allow-unqualified-cpu` remain Linux-only; Mac exploration is serial.
 
 `seedbox run --torn-writes` enables seeded partial survival of unflushed
 512-byte disk sectors on crash. It is recorded in run identity and replayed
@@ -217,7 +268,10 @@ rebuilt OCI images to have identical bytes.
 | Path | Contents |
 | --- | --- |
 | [`crates/seedbox/`](crates/seedbox/README.md) | Configuration, OCI preparation, orchestration and the `seedbox` CLI |
-| `crates/seedbox-vmm/` | KVM VMM and world scheduler (`seedbox-vmm`); its own workspace and lockfile, because its binary hash is the run's engine identity |
+| `crates/seedbox-vmm/` | KVM world engine linked into the Linux x86-64 CLI; isolated standalone workspace and lockfile for low-level fixtures |
+| `crates/seedbox-engine-core/` | Canonical deterministic policies, bounded virtio queues, shared MMIO transport, console/block/network models, PV cycle proof and the shared world coordinator |
+| `crates/seedbox-arm64/` | ARM PV machines, native HVF application world, and isolated fixture workspace |
+| `tools/mac-runtime/` | Signed Mac CLI build and packaged Linux preparation workflow |
 | `examples/` | Compose applications: etcd, Redis, [TCP faults/recovery](examples/faults/README.md), and [one-service MinIO conditional writes](examples/minio/README.md) (MinIO runtime qualification pending) |
 | `kernel/` | Guest kernel patch, config and build script (Linux 6.12.112) |
 | `guest/` | Generic OCI guest supervisor plus low-level guest fixtures and builders |
@@ -236,11 +290,25 @@ entry through `_addRpathPrefix`; real library and Nix store paths remain intact.
 Other Cargo builds and their target directories are unaffected.
 The wrapper's content hash is included in Cargo's compiler fingerprint, so
 enabling or editing it invalidates cached VMM artifacts and dependencies.
-The shared `seedbox-control` source is reached through
-`crates/seedbox-vmm/seedbox-control`, a symlink inside the VMM workspace. Cargo
+The shared `seedbox-control` source is compiled by
+`crates/seedbox-vmm/control/Cargo.toml`, a small package inside the VMM workspace. Cargo
 then hashes its path relative to that workspace instead of the checkout's
 absolute path when computing crate metadata. The VMM's inherited workspace
-package and dependency keys match the root workspace.
+package and dependency keys match the root workspace. Its distinct package name
+also lets the combined CLI use the same protocol source without Cargo path-ID
+collisions; the schema is not copied.
+The canonical `seedbox-engine-core` policies use the same package isolation via
+both backends' `engine-core` packages. Their directory links and source watchers
+cover every policy module, including added files. Canonical and wrapper build
+scripts also track the automatic build-only checkout input from `.cargo/config.toml`,
+so a shared cache cannot reuse another checkout's code merely because its timestamps
+are older. Run Cargo from the checkout root (including standalone aliases) for caching.
+Without matching config, the source is safely rebuilt on every invocation. The CLI
+build script follows the same rule for Git provenance, embedded supervisor inputs
+and the Mac runtime bundle. It resolves inputs from Cargo's runtime package directory,
+even when the script executable was cached in another checkout. This input stays in the build scripts. Portable tests import the core
+crate directly; UART register admission remains in the KVM adapter. Moving these
+sources changes engine bytes and requires final Linux merge-train validation.
 
 On Linux in the project dev shell, run
 `bash harness/check-vmm-reproducible.sh [REV]` (default `HEAD`). It builds two

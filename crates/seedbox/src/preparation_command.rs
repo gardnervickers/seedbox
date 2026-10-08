@@ -50,12 +50,25 @@ pub(crate) fn inspect_native_builder(requested: &Path) -> Result<NativeBuilder> 
         ))
     })?);
     let native_hash = fs::read(&native).map(|b| ContentDigest::of(&b)).ok();
+    // Each pair identifies the launcher and native executable from the pinned
+    // project flake. Architecture changes executable bytes and closure paths.
+    let (qualified_launch, qualified_native) = if cfg!(target_arch = "aarch64") {
+        (
+            "b3cc1fb6472ec3b0e3ffe2ddd317de30becd9151a879000b13a6d9e773960a30",
+            "5d963d69a73f5e7e37f56b0e6677f1dc7e5fc2ebcd806c46ecbad65f91e22709",
+        )
+    } else {
+        (
+            "e6af7244c45039a6e91ab6b3800c66115516fefeba325503b756856c10d62e84",
+            "678a185b5553ef52c0e8b0b5adbc240c99202600a328f25ddeae71cbbcac0de2",
+        )
+    };
     let admitted = cfg!(target_os = "linux")
         && launcher.starts_with("/nix/store")
-        && launch_hash.hex() == "e6af7244c45039a6e91ab6b3800c66115516fefeba325503b756856c10d62e84"
-        && native_hash.as_ref().is_some_and(|h| {
-            h.hex() == "678a185b5553ef52c0e8b0b5adbc240c99202600a328f25ddeae71cbbcac0de2"
-        });
+        && launch_hash.hex() == qualified_launch
+        && native_hash
+            .as_ref()
+            .is_some_and(|h| h.hex() == qualified_native);
     Ok(NativeBuilder {
         launcher,
         native,
@@ -339,6 +352,9 @@ impl PreparationContext {
         command.stdout(Stdio::null()).stderr(Stdio::null());
         let finish = Arc::new(AtomicBool::new(false));
         let done = finish.clone();
+        #[cfg(test)]
+        let test_timeout_window =
+            (phase == "test-timeout-window").then(|| self.directory.join("release-child"));
         let drain = std::thread::spawn(move || -> std::io::Result<(u64, u64, bool)> {
             let mut seen = 0u64;
             let mut retained = 0u64;
@@ -369,9 +385,16 @@ impl PreparationContext {
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                         ) =>
                     {
-                        if done.load(Ordering::Acquire) {
-                            break;
+                        #[cfg(test)]
+                        if let Some(release) = &test_timeout_window {
+                            // Force cleanup to finish after read timed out, before its result is observed.
+                            fs::write(release, b"exit now")?;
+                            let deadline = Instant::now() + Duration::from_secs(3);
+                            while !done.load(Ordering::Acquire) && Instant::now() < deadline {
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
                         }
+                        // Retry until EOF or the bounded post-finish drain deadline.
                     }
                     Err(e) => return Err(e),
                 }
@@ -380,6 +403,9 @@ impl PreparationContext {
             Ok((retained, seen - retained, complete))
         });
         let required_done = finish.clone();
+        #[cfg(test)]
+        let test_required_timeout_window =
+            (phase == "test-timeout-stdout").then(|| self.directory.join("release-child"));
         let required_drain = required_stream.map(|mut reader| {
             std::thread::spawn(move || -> std::io::Result<(Vec<u8>, u64, bool)> {
                 let mut value = Vec::new();
@@ -411,9 +437,18 @@ impl PreparationContext {
                                 std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                             ) =>
                         {
-                            if required_done.load(Ordering::Acquire) {
-                                break;
+                            #[cfg(test)]
+                            if let Some(release) = &test_required_timeout_window {
+                                // Force cleanup to finish after read timed out, before its result is observed.
+                                fs::write(release, b"exit now")?;
+                                let deadline = Instant::now() + Duration::from_secs(3);
+                                while !required_done.load(Ordering::Acquire)
+                                    && Instant::now() < deadline
+                                {
+                                    std::thread::sleep(Duration::from_millis(1));
+                                }
                             }
+                            // Retry until EOF or the bounded post-finish drain deadline.
                         }
                         Err(e) => return Err(e),
                     }
@@ -1230,5 +1265,74 @@ mod tests {
             .path()
             .join("preserved-evidence/probe-tag-cleanup.json")
             .exists());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod drain_race_tests {
+    use super::*;
+    #[test]
+    fn delayed_timeout_observation_after_child_exit() {
+        let _process_creation = PROCESS_TEST_LOCK.lock().unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let context =
+            PreparationContext::new(root.join("evidence"), CancellationToken::default()).unwrap();
+        let result = context.run(
+            Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "while [ ! -e \"$1\" ]; do sleep 0.01; done; printf 'copy failed'; exit 7",
+                    "fixture",
+                ])
+                .arg(context.directory.join("release-child")),
+            "test-timeout-window",
+            None,
+            false,
+            false,
+        );
+        let receipt = fs::read_to_string(root.join("evidence/test-timeout-window.json")).unwrap();
+        let receipt: serde_json::Value = serde_json::from_str(&receipt).unwrap();
+        assert_eq!(receipt["reaped"], true);
+        assert_eq!(receipt["output_complete"], true);
+        assert!(
+            matches!(result, Err(Error::Execution(_))),
+            "completed child should retain execution failure, not false cleanup uncertainty"
+        );
+        assert_eq!(
+            fs::read(root.join("evidence/test-timeout-window.log")).unwrap(),
+            b"copy failed"
+        );
+    }
+    #[test]
+    fn delayed_required_stdout_timeout_after_child_exit() {
+        let _process_creation = PROCESS_TEST_LOCK.lock().unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let context =
+            PreparationContext::new(root.join("evidence"), CancellationToken::default()).unwrap();
+        let mut bytes = Vec::new();
+        let result = context.run_owned(
+            Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "while [ ! -e \"$1\" ]; do sleep 0.01; done; printf 'fixture-v1'; exit 0",
+                    "fixture",
+                ])
+                .arg(context.directory.join("release-child")),
+            "test-timeout-stdout",
+            None,
+            false,
+            false,
+            Some(&mut bytes),
+        );
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.join("evidence/test-timeout-stdout.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["reaped"], true);
+        assert_eq!(receipt["output_complete"], true);
+        assert!(result.is_ok());
+        assert_eq!(bytes, b"fixture-v1");
     }
 }

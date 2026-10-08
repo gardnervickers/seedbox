@@ -1,24 +1,5 @@
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/connections.rs"]
-mod connections;
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/links.rs"]
-mod links;
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/rng.rs"]
-mod rng;
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/triggers.rs"]
-mod triggers;
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/faults.rs"]
-mod faults;
 use seedbox_control::{Action, MAX_TRIGGERS};
+use seedbox_engine_core::{faults, links, triggers};
 use triggers::Triggers;
 
 fn action(id: &str) -> Action {

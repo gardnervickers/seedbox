@@ -11,6 +11,7 @@ pub mod bundle;
 pub mod config;
 pub mod counter;
 pub mod diff;
+pub mod engine;
 pub mod execution;
 pub mod exploration;
 pub mod guest;
@@ -19,14 +20,21 @@ mod host;
 pub mod host_control;
 pub mod image;
 pub mod logs;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod mac;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub mod mac_runtime;
 pub mod oci;
 pub mod orchestration;
 pub mod preparation;
 mod preparation_command;
 mod retained;
+pub mod runtime_assets;
 pub mod store;
 pub mod templates;
 pub mod vmm;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod worker_process;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

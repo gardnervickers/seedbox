@@ -57,204 +57,42 @@ pub fn syscall_ns(rng: &mut crate::rng::Rng) -> u64 {
     let spread = SYSCALL_NS * SPEED_SPREAD_PCT / 100;
     SYSCALL_NS - spread + rng.below(2 * spread + 1)
 }
-/// Steps one spin check may take before it gives up.
-const PROBE_STEPS: usize = 4096;
+use seedbox_engine_core::pv_progress::{PvProgress, ProbeMachine, ProgressContext, Accounting, Comparison, LandingPlan, Decision, Exit as ProgressExit};
 
 pub struct PvClock {
-    /// Held for its timer.
     _watchdog: Watchdog,
-    /// A natural exit happened since the last watchdog tick.
-    progressed: bool,
-    /// Ticks to let pass before the next check, after checks that found no
-    /// spin in a run that still has made no exit (doubling each time).
-    skip: u32,
-    backoff: u32,
+    progress: PvProgress<Key, Saved>,
     syscalls0: u64,
     remaining: u64,
-    /// The running machine's syscall cost.
     syscall_ns: u64,
-    probe: Option<Probe>,
-    /// The vCPU stands at a step landing the probe has not seen yet.
-    landed: bool,
-    /// Fail rather than run on after this many checks found no spin (tests).
     pub max_false_alarms: u64,
 }
-
-/// A step landing: RIP, then the general registers and flags.
 type Key = (u64, [u64; 17]);
-
-struct Probe {
-    /// Captured before the first step, kept across candidate cycles.
-    last: Option<u64>,
-    phase: Phase,
-}
-
-impl Probe {
-    fn new() -> Self {
-        Self { last: None, phase: Phase::Search { saved: None, keys: Vec::new(), power: 1, steps: 0 } }
-    }
-
-    fn clock_progress(probe: &mut Option<Self>, last: u64, stats: &mut super::Stats) -> bool {
-        let Some(p) = probe.as_mut() else { return false; };
-        if last == *p.last.get_or_insert(last) {
-            return false;
-        }
-        *probe = None;
-        stats.spin_false += 1;
-        stats.spin_clock_progress += 1;
-        true
-    }
-}
-
-enum Phase {
-    /// Brent's cycle search. `saved` is the reference state, taken at the
-    /// landing `keys[0]`; `keys` holds every landing since. The reference
-    /// moves to the current landing whenever `keys` reaches `power`
-    /// landings, and `power` doubles. A cycle of `n` landings is found once
-    /// the reference is in it and `power >= n`, wherever the search began.
-    Search { saved: Option<Box<Saved>>, keys: Vec<Key>, power: usize, steps: usize },
-    /// A proven cycle: step to its canonical landing, `target`.
-    Canon { target: Key, left: usize },
-}
-
 impl PvClock {
-    /// `watchdog`: host CPU time with no exit before a run is checked for a
-    /// spin. Performance only.
     pub fn new(watchdog: Duration) -> Result<Self, String> {
-        Ok(Self {
-            _watchdog: Watchdog::new(watchdog)?,
-            progressed: true,
-            skip: 0,
-            backoff: 0,
-            syscalls0: 0,
-            remaining: 0,
-            syscall_ns: SYSCALL_NS,
-            probe: None,
-            landed: false,
-            max_false_alarms: u64::MAX,
-        })
+        Ok(Self { _watchdog: Watchdog::new(watchdog)?, progress: PvProgress::new(), syscalls0: 0, remaining: 0, syscall_ns: SYSCALL_NS, max_false_alarms: u64::MAX })
     }
 
-    /// Probes finish inside run_until; no spin-search reference survives a
-    /// committed scheduler boundary. Page fields and syscall cost live in Machine.
+    /// No architecture probe may survive a committed checkpoint boundary.
     pub fn checkpoint_boundary(&self) -> Result<(), String> {
-        if self.probe.is_some() {return Err("PV checkpoint inside a spin probe".into());}
+        if self.progress.hold_watchdog() { return Err("PV checkpoint inside a spin probe".into()); }
         Ok(())
     }
 
-    /// Scratch for the next KVM_RUN is overwritten by prepare/start. Watchdog
-    /// phase and backoff are host performance state, recreated after restore.
+    /// Recreate host-only watchdog and probe scratch after restoring a machine.
     pub fn restore_boundary(&mut self) -> Result<(), String> {
-        self.probe=None;self.landed=false;self.progressed=true;
-        self.skip=0;self.backoff=0;self.syscalls0=0;self.remaining=0;
-        self.syscall_ns=SYSCALL_NS;
+        self.progress = PvProgress::new();
+        self.syscalls0 = 0; self.remaining = 0; self.syscall_ns = SYSCALL_NS;
         self._watchdog.hold(false)
     }
 
-    /// One probe step at a landing. `None`: the check gave up, run freely.
-    fn probe_step(&mut self, m: &mut Machine) -> Result<Option<Prepared>, String> {
-        let regs = unsafe { m.vcpu.get_kvm_run().s.regs.regs };
-        let key = key(&regs);
-        match self.probe.as_ref().unwrap().phase {
-            Phase::Search { .. } => {
-                if Probe::clock_progress(&mut self.probe, m.page_get(1), &mut m.stats) {
-                    return Ok(None);
-                }
-            }
-            Phase::Canon { .. } => {}
-        }
-        let mut probe = self.probe.take().unwrap();
-        let next = match probe.phase {
-            Phase::Search { mut saved, mut keys, power, steps } => {
-                if steps >= PROBE_STEPS {
-                    m.stats.spin_false += 1;
-                    return Ok(None);
-                }
-                let steps = steps + 1;
-                // Equal keys are necessary for equal states; compare the
-                // whole state only then.
-                let back = match saved.as_mut() {
-                    Some(s) if key == keys[0] => s.same(m)?,
-                    _ => false,
-                };
-                if back {
-                    // The guest is back in the reference state: it repeats
-                    // this cycle forever, and `keys` is one pass of it, with
-                    // its least period (the first return). Its landings are
-                    // the same on every pass, so the least one is a point we
-                    // reach whichever pass we noticed on.
-                    let target = *keys.iter().min().unwrap();
-                    if keys.iter().filter(|&&k| k == target).count() > 1 {
-                        return Err(format!(
-                            "{}: spin cycle at rip {:#x} has no unique canonical point (equal registers at two points of it)",
-                            m.name, target.0
-                        ));
-                    }
-                    if key == target {
-                        return Ok(Some(Prepared::Idle));
-                    }
-                    Phase::Canon { target, left: keys.len() }
-                } else if saved.is_none() || keys.len() >= power {
-                    let power = if saved.is_none() { 1 } else { power * 2 };
-                    Phase::Search { saved: Some(Box::new(Saved::take(m)?)), keys: vec![key], power, steps }
-                } else {
-                    keys.push(key);
-                    Phase::Search { saved, keys, power, steps }
-                }
-            }
-            Phase::Canon { target, left } => {
-                if key == target {
-                    return Ok(Some(Prepared::Idle));
-                }
-                if left == 0 {
-                    return Err(format!("{}: lost the spin cycle at rip {:#x}", m.name, target.0));
-                }
-                Phase::Canon { target, left: left - 1 }
-            }
-        };
-        if m.arm_step()? {
-            // The next landing is a cap on straight-line code, so where it
-            // falls depends on where stepping began: no canonical point.
-            m.stats.spin_false += 1;
-            return Ok(None);
-        }
-        probe.phase = next;
-        self.probe = Some(probe);
-        Ok(Some(Prepared::Run))
-    }
-
-    /// The work of `prepare` (see there).
     fn plan(&mut self, m: &mut Machine, remaining: u64, soft: u64, legal: bool) -> Result<Prepared, String> {
         self.remaining = remaining;
         self.syscall_ns = m.syscall_ns;
-        if self.probe.is_some() {
-            let step = if std::mem::take(&mut self.landed) {
-                self.probe_step(m)?
-            } else {
-                // Some other signal interrupted the step. Where the vCPU
-                // stopped may be a landing it did not report (see `prepare`),
-                // so give the check up: the next one starts afresh.
-                self.probe = None;
-                m.stats.spin_false += 1;
-                None
-            };
-            match step {
-                Some(Prepared::Idle) => {
-                    self.probe = None;
-                    return Ok(Prepared::Idle);
-                }
-                Some(p) => return Ok(p),
-                None => {
-                    if m.stats.spin_false >= self.max_false_alarms {
-                        return Err(format!(
-                            "{}: {} spin checks found no cycle; first differences: {:?}",
-                            m.name, m.stats.spin_false, m.stats.spin_mismatch
-                        ));
-                    }
-                    self.backoff = (self.backoff * 2).clamp(1, 1 << 10);
-                    self.skip = self.backoff;
-                }
-            }
+        match self.progress.prepare(m, self.max_false_alarms)? {
+            Decision::Idle => return Ok(Prepared::Idle),
+            Decision::Step => return Ok(Prepared::Run),
+            Decision::Resume => (),
         }
         m.set_stepping(false)?;
         // An ABI-4 arm is a sequence of guest loads/stores, not an atomic
@@ -272,6 +110,30 @@ impl PvClock {
         }
         Ok(Prepared::Run)
     }
+}
+fn accounting(stats: &mut super::Stats) -> Accounting<'_> {
+    Accounting { probes: &mut stats.spin_probes, false_alarms: &mut stats.spin_false, clock_progress: &mut stats.spin_clock_progress, mismatches: &mut stats.spin_mismatch }
+}
+impl ProgressContext for Machine {
+    fn name(&self) -> &str { &self.name }
+    fn accounting(&mut self) -> Accounting<'_> { accounting(&mut self.stats) }
+}
+impl ProbeMachine for Machine {
+    type Key = Key;
+    type Saved = Saved;
+    const PC_NAME: &'static str = "rip";
+    fn pc(key: &Key) -> u64 { key.0 }
+    fn key(&mut self) -> Result<Key,String> { Ok(key(&unsafe { self.vcpu.get_kvm_run().s.regs.regs })) }
+    fn clock_marker(&self) -> u64 { self.page_get(1) }
+    fn save(&mut self) -> Result<Saved,String> { Saved::take(self) }
+    fn compare(&mut self, saved: &mut Saved) -> Result<Comparison,String> { saved.difference(self) }
+    fn arm_next_landing(&mut self) -> Result<LandingPlan,String> { Ok(if self.arm_step()? { LandingPlan::PlannerCap } else { LandingPlan::Exact }) }
+    fn clear_debugger(&mut self) -> Result<(),String> { self.set_stepping(false) }
+}
+struct JudgeContext<'a> { name: &'a str, stats: &'a mut super::Stats }
+impl ProgressContext for JudgeContext<'_> {
+    fn name(&self) -> &str { self.name }
+    fn accounting(&mut self) -> Accounting<'_> { accounting(self.stats) }
 }
 
 fn key(r: &kvm_bindings::kvm_regs) -> Key {
@@ -294,7 +156,7 @@ impl Timebase for PvClock {
         // code breakpoint at the same instruction, so a tick there stops the
         // vCPU on a landing without reporting it, and stepping on past it
         // would miscount the cycle. Ticks wait until the check ends.
-        self._watchdog.hold(self.probe.is_some())?;
+        self._watchdog.hold(self.progress.hold_watchdog())?;
         prepared
     }
     fn start(&mut self, syscalls: u64) -> u64 {
@@ -311,36 +173,14 @@ impl Timebase for PvClock {
     }
 
     fn judge(&mut self, j: Judge<'_>, run: &Run) -> Result<Verdict, String> {
-        if run.interrupted {
-            // A watchdog tick. Two in a row with no exit between: check.
-            if self.skip > 0 {
-                self.skip -= 1;
-            } else if self.probe.is_none() && !std::mem::take(&mut self.progressed) {
-                j.stats.spin_probes += 1;
-                self.probe = Some(Probe::new());
-                self.landed = true;
-            }
-            return Ok(Verdict::Advance { legal: false });
-        }
-        if run.debug {
-            if self.probe.is_none() {
-                return Err(format!("{}: debug exit outside a spin check", j.name));
-            }
-            self.landed = true;
-            return Ok(Verdict::Advance { legal: false });
-        }
-        self.progressed = true;
-        self.backoff = 0;
-        self.skip = 0;
-        if self.probe.take().is_some() {
-            j.stats.spin_false += 1;
-        }
-        Ok(Verdict::Advance { legal: true })
+        let exit = if run.interrupted { ProgressExit::Watchdog } else if run.debug { ProgressExit::Landing } else { ProgressExit::Natural };
+        let legal = self.progress.judge(exit, &mut JudgeContext { name: j.name, stats: j.stats })?;
+        Ok(Verdict::Advance { legal })
     }
 }
 
 /// The machine state a cycle check compares.
-struct Saved {
+pub struct Saved {
     cpu: VcpuState,
     page: Box<[u8; 4096]>,
     /// A copy of RAM, when no dirty log tracks it.
@@ -367,9 +207,9 @@ impl Saved {
         Ok(Self { cpu, page: page_copy(m), ram, written: Vec::new() })
     }
 
-    /// Whether the machine is back in this state; if not, the first part
-    /// that differs is counted in the machine's stats.
-    fn same(&mut self, m: &mut Machine) -> Result<bool, String> {
+    /// Compare the stopped architectural state. Shared proof policy records
+    /// the first mismatch in this machine's accounting.
+    fn difference(&mut self, m: &mut Machine) -> Result<Comparison, String> {
         let mut cpu = VcpuState::new(m.msrs.clone());
         cpu.save(&m.vcpu, "spin check")?;
         let page = page_copy(m);
@@ -390,13 +230,7 @@ impl Saved {
                 }
             },
         };
-        match part {
-            None => Ok(true),
-            Some(part) => {
-                *m.stats.spin_mismatch.entry(part).or_default() += 1;
-                Ok(false)
-            }
-        }
+        Ok(match part { None => Comparison::Equal, Some(part) => Comparison::Different(part) })
     }
 }
 
@@ -472,50 +306,6 @@ mod tests {
     use super::super::{BootSpec, Stop, INITRD_ADDR};
     use super::*;
     use kvm_ioctls::Kvm;
-
-    /// A saved search reference needs no live vCPU for clock-progress checks.
-    fn search() -> Phase {
-        let saved = Saved {
-            cpu: VcpuState::new(kvm_bindings::Msrs::from_entries(&[]).unwrap()),
-            page: Box::new([0; 4096]),
-            ram: None,
-            written: Vec::new(),
-        };
-        Phase::Search { saved: Some(Box::new(saved)), keys: vec![(0x100000, [0; 17])], power: 2, steps: 2 }
-    }
-
-    #[test]
-    fn clock_progress_abandons_search_before_the_step_limit() {
-        for phase in [Phase::Search { saved: None, keys: Vec::new(), power: 1, steps: 1 }, search()] {
-            let mut stats = super::super::Stats::default();
-            let mut probe = Some(Probe::new());
-            assert!(!Probe::clock_progress(&mut probe, 100, &mut stats));
-            probe.as_mut().unwrap().phase = phase;
-            assert!(!Probe::clock_progress(&mut probe, 100, &mut stats), "an unchanged clock must allow probing");
-            assert_eq!((stats.spin_false, stats.spin_clock_progress), (0, 0));
-            assert!(Probe::clock_progress(&mut probe, 200, &mut stats), "a clock read must abandon even an incomplete candidate");
-            assert!(probe.is_none());
-            assert_eq!((stats.spin_false, stats.spin_clock_progress), (1, 1));
-            assert!(!Probe::clock_progress(&mut probe, 200, &mut stats));
-            assert_eq!((stats.spin_false, stats.spin_clock_progress), (1, 1), "count each abandoned probe once");
-        }
-    }
-
-    #[test]
-    fn clock_baseline_survives_candidate_changes_and_resets_for_a_new_probe() {
-        let mut stats = super::super::Stats::default();
-        let mut probe = Some(Probe::new());
-        assert!(!Probe::clock_progress(&mut probe, 200, &mut stats));
-        probe.as_mut().unwrap().phase = search();
-        assert!(!Probe::clock_progress(&mut probe, 200, &mut stats));
-        probe.as_mut().unwrap().phase = Phase::Search { saved: None, keys: Vec::new(), power: 4, steps: 4 };
-        assert!(!Probe::clock_progress(&mut probe, 200, &mut stats));
-        assert_eq!(probe.as_ref().unwrap().last, Some(200));
-        assert!(Probe::clock_progress(&mut probe, 100, &mut stats), "any difference from the start must give up");
-        probe = Some(Probe::new());
-        assert!(!Probe::clock_progress(&mut probe, 100, &mut stats), "a later probe captures its own baseline");
-        assert_eq!((stats.spin_false, stats.spin_clock_progress), (1, 1));
-    }
 
     #[test]
     #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]

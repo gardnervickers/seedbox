@@ -4,12 +4,23 @@
 //! `SEEDBOX_*` environment variable) and otherwise searches conventional
 //! locations. A failed search names every place it looked and how to fix it.
 
-use seedbox::{store::ContentStore, Error, Result};
+// Linux input resolvers remain covered by portable tests; native Mac inputs
+// come from the embedded preparation package.
+#![cfg_attr(all(target_os = "macos", target_arch = "aarch64"), allow(dead_code))]
+
+use seedbox::{
+    runtime_assets::{AssetSelection, RuntimeAssets},
+    store::ContentStore,
+    Error, Result,
+};
 use std::{
     env,
     path::{Path, PathBuf},
-    process::Command,
 };
+
+#[cfg(test)]
+#[path = "../../tests/support/linux_assets.rs"]
+mod linux_asset_fixtures;
 
 const COMPOSE_FILES: [&str; 4] = [
     "compose.yaml",
@@ -33,39 +44,157 @@ pub fn compose_file(path: &Path) -> Result<PathBuf> {
         })
 }
 
-/// The guest kernel: `$SEEDBOX_ARTIFACTS/bzImage` or
-/// `$SEEDBOX_WORK/artifacts/bzImage`, as written by `kernel/build.sh`, then
-/// `./artifacts/bzImage`, then the build script's default work directory in
-/// the home of the current user or the user who invoked sudo.
-pub fn kernel(explicit: Option<PathBuf>) -> Result<PathBuf> {
-    if let Some(path) = explicit {
-        return existing("--kernel", path);
-    }
-    let mut searched = Vec::new();
-    if let Some(artifacts) = env::var_os("SEEDBOX_ARTIFACTS") {
-        searched.push(PathBuf::from(artifacts));
-    }
-    if let Some(work) = env::var_os("SEEDBOX_WORK") {
-        searched.push(PathBuf::from(work).join("artifacts"));
-    }
-    searched.push(PathBuf::from("artifacts"));
-    // Under sudo, HOME is root's; the kernel was built in the caller's home.
-    for home in [env::var_os("HOME").map(PathBuf::from), sudo_home()]
-        .into_iter()
-        .flatten()
-    {
-        let artifacts = home.join("seedbox-sim/artifacts");
-        if !searched.contains(&artifacts) {
-            searched.push(artifacts);
+/// Caller-selected locations precede the package; checkout and home searches
+/// remain fallbacks for development binaries without a packaged runtime.
+struct KernelLocations {
+    configured: Vec<PathBuf>,
+    incidental: Vec<PathBuf>,
+}
+impl KernelLocations {
+    fn from_environment() -> Self {
+        let mut configured = Vec::new();
+        if let Some(artifacts) = env::var_os("SEEDBOX_ARTIFACTS") {
+            configured.push(PathBuf::from(artifacts).join("bzImage"));
+        }
+        if let Some(work) = env::var_os("SEEDBOX_WORK") {
+            configured.push(PathBuf::from(work).join("artifacts/bzImage"));
+        }
+        let mut incidental = vec![PathBuf::from("artifacts/bzImage")];
+        for home in [env::var_os("HOME").map(PathBuf::from), sudo_home()]
+            .into_iter()
+            .flatten()
+        {
+            let kernel = home.join("seedbox-sim/artifacts/bzImage");
+            if !incidental.contains(&kernel) {
+                incidental.push(kernel);
+            }
+        }
+        Self {
+            configured,
+            incidental,
         }
     }
-    let searched: Vec<_> = searched.iter().map(|dir| dir.join("bzImage")).collect();
-    first_file(&searched).ok_or_else(|| {
-        missing(
-            "guest kernel",
-            &searched,
-            "build one with `bash kernel/build.sh`, or pass --kernel or set SEEDBOX_KERNEL",
-        )
+    fn resolve(&self, explicit: Option<PathBuf>, packaged: Option<PathBuf>) -> Result<PathBuf> {
+        if let Some(path) = explicit {
+            return existing("--kernel", path);
+        }
+        let mut searched = self.configured.clone();
+        searched.extend(packaged);
+        searched.extend(self.incidental.iter().cloned());
+        first_file(&searched).ok_or_else(|| missing(
+            "guest kernel", &searched,
+            "install a packaged seedbox, build one with `bash kernel/build.sh`, or pass --kernel or set SEEDBOX_KERNEL",
+        ))
+    }
+}
+
+/// Legacy development resolver; the shared Linux resolver also supplies the
+/// packaged fallback while retaining its extraction owner.
+#[cfg(test)]
+fn kernel(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    KernelLocations::from_environment().resolve(explicit, None)
+}
+
+#[derive(Default)]
+pub struct LinuxOverrides {
+    pub kernel: Option<PathBuf>,
+    pub init: Option<PathBuf>,
+    pub busybox: Option<PathBuf>,
+    pub mke2fs: Option<PathBuf>,
+}
+/// Keep `assets` alive while any of these package paths are used. The doctor
+/// selects only the kernel and never needs a store or preparation inputs.
+pub struct LinuxRuntime {
+    pub kernel: PathBuf,
+    pub init: Option<PathBuf>,
+    pub busybox: Option<PathBuf>,
+    pub mke2fs: Option<PathBuf>,
+    pub assets: Option<RuntimeAssets>,
+}
+fn selected_input(
+    explicit: Option<PathBuf>,
+    packaged: Option<PathBuf>,
+    flag: &str,
+) -> Result<Option<PathBuf>> {
+    explicit
+        .or(packaged)
+        .map(|path| existing(flag, path))
+        .transpose()
+}
+
+/// Sole Linux CLI resolution boundary for doctor, prepare, run and explore.
+pub fn linux_runtime(
+    overrides: LinuxOverrides,
+    parent: &Path,
+    selection: AssetSelection,
+    store: Option<&ContentStore>,
+) -> Result<LinuxRuntime> {
+    resolve_linux_runtime(
+        overrides,
+        parent,
+        selection,
+        store,
+        KernelLocations::from_environment(),
+        RuntimeAssets::embedded,
+    )
+}
+fn resolve_linux_runtime(
+    overrides: LinuxOverrides,
+    parent: &Path,
+    selection: AssetSelection,
+    store: Option<&ContentStore>,
+    locations: KernelLocations,
+    load_assets: impl FnOnce(&Path, AssetSelection) -> Result<Option<RuntimeAssets>>,
+) -> Result<LinuxRuntime> {
+    // Check all caller overrides before opening or validating a package.
+    for (flag, path) in [
+        ("--kernel", &overrides.kernel),
+        ("--guest-init", &overrides.init),
+        ("--busybox", &overrides.busybox),
+        ("--mke2fs", &overrides.mke2fs),
+    ] {
+        if let Some(path) = path {
+            existing(flag, path.clone())?;
+        }
+    }
+    let kernel_needs_package =
+        overrides.kernel.is_none() && first_file(&locations.configured).is_none();
+    let all = matches!(selection, AssetSelection::All);
+    let needs_package = kernel_needs_package
+        || (all
+            && (overrides.init.is_none()
+                || overrides.busybox.is_none()
+                || overrides.mke2fs.is_none()));
+    let assets = if needs_package {
+        load_assets(parent, selection)?
+    } else {
+        None
+    };
+    let input = |name| assets.as_ref().map(|assets| assets.input(name));
+    let kernel = locations.resolve(overrides.kernel, input("bzImage"))?;
+    let (init, busybox, mke2fs) = if all {
+        let store =
+            store.ok_or_else(|| Error::Setup("Linux preparation needs a content store".into()))?;
+        let init = selected_input(overrides.init, input("compose-init"), "--guest-init")?
+            .map(Ok)
+            .unwrap_or_else(|| guest_init(None, store, parent))?;
+        let busybox = selected_input(overrides.busybox, input("busybox"), "--busybox")?
+            .map(Ok)
+            .unwrap_or_else(|| busybox(None))?;
+        let mke2fs = match selected_input(overrides.mke2fs, input("mke2fs"), "--mke2fs")? {
+            Some(path) => Some(path),
+            None => mke2fs(None)?,
+        };
+        (Some(init), Some(busybox), mke2fs)
+    } else {
+        (None, None, None)
+    };
+    Ok(LinuxRuntime {
+        kernel,
+        init,
+        busybox,
+        mke2fs,
+        assets,
     })
 }
 
@@ -82,98 +211,17 @@ fn sudo_home() -> Option<PathBuf> {
     Some(PathBuf::from(std::ffi::OsStr::from_bytes(home.to_bytes())))
 }
 
-/// The VMM: `seedbox-vmm` next to this executable (an installed pair), then
-/// this checkout's `cargo build-vmm` output, then on `PATH`. Under `cargo run`
-/// in this checkout, a missing VMM is built exactly as `cargo build-vmm` does.
+/// The VMM is linked into this executable. An explicit path selects the legacy
+/// standalone worker contract for development and historical runs.
 pub fn engine(explicit: Option<PathBuf>) -> Result<PathBuf> {
-    resolve_engine(explicit, true)
-}
-
-/// Resolve the ordinary VMM candidates without invoking cargo or installing it.
-pub fn engine_lookup(explicit: Option<PathBuf>) -> Result<PathBuf> {
-    resolve_engine(explicit, false)
-}
-
-fn resolve_engine(explicit: Option<PathBuf>, allow_build: bool) -> Result<PathBuf> {
     if let Some(path) = explicit {
         return existing("--vmm", path);
     }
-    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent();
-    let vmm = crates.unwrap_or(Path::new(".")).join("seedbox-vmm");
-    let built = vmm.join("target/release/seedbox-vmm");
-    // Without a known executable path, only that one candidate is skipped.
-    let mut searched = engine_candidates(env::current_exe().ok().as_deref(), &built);
-    if let Some(path) = first_file(&searched).or_else(|| on_path("seedbox-vmm")) {
-        return Ok(path);
-    }
-    if let Some(path) = build_if_allowed(allow_build, || {
-        if let Some(cargo) = cargo_run_here() {
-            build_engine(&cargo, &vmm)?;
-            if built.is_file() {
-                return Ok(Some(built));
-            }
-        }
-        Ok(None)
-    })? {
-        return Ok(path);
-    }
-    searched.push(PathBuf::from("$PATH/seedbox-vmm"));
-    Err(missing(
-        "VMM",
-        &searched,
-        "build it with `cargo build-vmm`, or pass --vmm or set SEEDBOX_VMM",
-    ))
-}
-
-fn build_if_allowed(
-    allow_build: bool,
-    build: impl FnOnce() -> Result<Option<PathBuf>>,
-) -> Result<Option<PathBuf>> {
-    if allow_build {
-        build()
-    } else {
-        Ok(None)
-    }
-}
-
-/// Where to look for the VMM, in order: next to `exe`, then `built`. A cargo
-/// profile directory (it holds `.cargo-lock`) never receives the VMM, which
-/// builds in its own workspace, so a `seedbox-vmm` found there is stale.
-fn engine_candidates(exe: Option<&Path>, built: &Path) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(directory) = exe
-        .and_then(Path::parent)
-        .filter(|dir| !dir.join(".cargo-lock").exists())
-    {
-        candidates.push(directory.join("seedbox-vmm"));
-    }
-    candidates.push(built.to_owned());
-    candidates
-}
-
-/// The cargo running this binary, when it was started by `cargo run` (or a
-/// test) in this checkout rather than by an unrelated cargo project.
-fn cargo_run_here() -> Option<std::ffi::OsString> {
-    let manifest = env::var_os("CARGO_MANIFEST_DIR")?;
-    (Path::new(&manifest) == Path::new(env!("CARGO_MANIFEST_DIR")))
-        .then(|| env::var_os("CARGO"))
-        .flatten()
-}
-
-/// Build the VMM through its alias, including its isolated compiler wrapper.
-fn build_engine(cargo: &std::ffi::OsStr, vmm: &Path) -> Result<()> {
-    eprintln!("seedbox-vmm not built; building it with `cargo build-vmm`");
-    let status = Command::new(cargo)
-        .arg("build-vmm")
-        .current_dir(vmm.join("../.."))
-        .status()
-        .map_err(|error| Error::Setup(format!("running cargo to build seedbox-vmm: {error}")))?;
-    if !status.success() {
-        return Err(Error::Setup(
-            "building seedbox-vmm failed (see cargo output above)".into(),
-        ));
-    }
-    Ok(())
+    env::current_exe().map_err(|error| {
+        Error::Setup(format!(
+            "cannot locate the built-in VMM executable: {error}; reinstall seedbox or pass --vmm"
+        ))
+    })
 }
 
 /// The static guest supervisor: the copy embedded at build time, written to
@@ -327,55 +375,248 @@ pub fn preparation_tool(path: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    #[test]
-    fn auto_build_uses_the_vmm_alias_from_the_checkout_root() {
-        use std::os::unix::fs::PermissionsExt;
+    use super::*;
 
+    #[test]
+    fn linux_kernel_precedence_keeps_configured_paths_ahead_of_package() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let vmm = root.join("crates/seedbox-vmm");
-        std::fs::create_dir_all(&vmm).unwrap();
-        let cargo = root.join("fake-cargo");
-        std::fs::write(
-            &cargo,
-            "#!/bin/sh\npwd -P > build-command\nprintf '%s\\n' \"$@\" >> build-command\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
-        super::build_engine(cargo.as_os_str(), &vmm).unwrap();
+        let explicit = directory.path().join("explicit");
+        let configured = directory.path().join("configured");
+        let packaged = directory.path().join("packaged");
+        let incidental = directory.path().join("incidental");
+        for path in [&explicit, &configured, &packaged, &incidental] {
+            std::fs::write(path, b"kernel").unwrap();
+        }
+        let locations = KernelLocations {
+            configured: vec![
+                directory.path().join("missing-configured"),
+                configured.clone(),
+            ],
+            incidental: vec![incidental.clone()],
+        };
         assert_eq!(
-            std::fs::read_to_string(root.join("build-command")).unwrap(),
-            format!("{}\nbuild-vmm\n", root.display())
+            locations
+                .resolve(Some(explicit.clone()), Some(packaged.clone()))
+                .unwrap(),
+            explicit
         );
-        std::fs::write(&cargo, "#!/bin/sh\nexit 1\n").unwrap();
         assert_eq!(
-            super::build_engine(cargo.as_os_str(), &vmm)
+            locations.resolve(None, Some(packaged.clone())).unwrap(),
+            configured
+        );
+        std::fs::remove_file(&configured).unwrap();
+        assert_eq!(
+            locations.resolve(None, Some(packaged.clone())).unwrap(),
+            packaged
+        );
+        std::fs::remove_file(&packaged).unwrap();
+        assert_eq!(locations.resolve(None, Some(packaged)).unwrap(), incidental);
+        assert_eq!(
+            locations
+                .resolve(
+                    Some(directory.path().join("missing-explicit")),
+                    Some(incidental)
+                )
                 .unwrap_err()
                 .to_string(),
-            "building seedbox-vmm failed (see cargo output above)"
+            format!(
+                "--kernel {}: not found",
+                directory.path().join("missing-explicit").display()
+            )
         );
     }
 
     #[test]
-    fn lookup_only_never_invokes_the_missing_engine_builder() {
-        let invoked = std::cell::Cell::new(false);
-        let result = super::build_if_allowed(false, || {
-            invoked.set(true);
-            Err(seedbox::Error::Setup("builder must not run".into()))
-        })
-        .unwrap();
-        assert!(result.is_none());
-        assert!(!invoked.get());
-        assert!(super::build_if_allowed(true, || {
-            invoked.set(true);
-            Err(seedbox::Error::Setup("existing build path".into()))
-        })
-        .is_err());
-        assert!(invoked.get());
+    fn linux_helper_overrides_precede_injected_packaged_inputs() {
+        let explicit = tempfile::NamedTempFile::new().unwrap();
+        let packaged = tempfile::NamedTempFile::new().unwrap();
+        for flag in ["--guest-init", "--busybox", "--mke2fs"] {
+            assert_eq!(
+                selected_input(
+                    Some(explicit.path().into()),
+                    Some(packaged.path().into()),
+                    flag
+                )
+                .unwrap(),
+                Some(explicit.path().into())
+            );
+            assert_eq!(
+                selected_input(None, Some(packaged.path().into()), flag).unwrap(),
+                Some(packaged.path().into())
+            );
+            let missing = packaged.path().with_extension("missing");
+            assert_eq!(
+                selected_input(Some(missing.clone()), Some(packaged.path().into()), flag)
+                    .unwrap_err()
+                    .to_string(),
+                format!("{flag} {}: not found", missing.display())
+            );
+            assert!(selected_input(None, None, flag).unwrap().is_none());
+        }
     }
 
-    use super::*;
+    #[test]
+    fn linux_all_explicit_inputs_skip_package_installation() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        let path = Some(input.path().to_owned());
+        let store = ContentStore::new(directory.path().join("objects"));
+        let resolved = resolve_linux_runtime(
+            LinuxOverrides {
+                kernel: path.clone(),
+                init: path.clone(),
+                busybox: path.clone(),
+                mke2fs: path.clone(),
+            },
+            directory.path(),
+            AssetSelection::All,
+            Some(&store),
+            KernelLocations {
+                configured: Vec::new(),
+                incidental: Vec::new(),
+            },
+            |_, _| panic!("explicit inputs must not install a package"),
+        )
+        .unwrap();
+        assert_eq!(resolved.kernel, input.path());
+        assert_eq!(resolved.init, path);
+        assert_eq!(resolved.busybox, path);
+        assert_eq!(resolved.mke2fs, path);
+        assert!(resolved.assets.is_none());
+        assert!(!directory.path().join("objects").exists());
+    }
+
+    #[test]
+    fn linux_doctor_resolves_only_kernel_without_store_or_helpers() {
+        let directory = tempfile::tempdir().unwrap();
+        let kernel = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        let resolved = resolve_linux_runtime(
+            LinuxOverrides::default(),
+            directory.path(),
+            AssetSelection::Kernel,
+            None,
+            KernelLocations {
+                configured: vec![kernel.path().into()],
+                incidental: Vec::new(),
+            },
+            |_, _| panic!("configured kernel must not install a package"),
+        )
+        .unwrap();
+        assert_eq!(resolved.kernel, kernel.path());
+        assert!(resolved.init.is_none() && resolved.busybox.is_none() && resolved.mke2fs.is_none());
+        assert!(resolved.assets.is_none());
+    }
+
+    #[test]
+    fn linux_invalid_explicit_helper_fails_before_package_installation() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing-busybox");
+        let result = resolve_linux_runtime(
+            LinuxOverrides {
+                busybox: Some(missing.clone()),
+                ..Default::default()
+            },
+            directory.path(),
+            AssetSelection::All,
+            None,
+            KernelLocations {
+                configured: Vec::new(),
+                incidental: Vec::new(),
+            },
+            |_, _| panic!("bad explicit inputs must fail before package installation"),
+        );
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            format!("--busybox {}: not found", missing.display())
+        );
+    }
+
+    #[test]
+    fn linux_mixed_overrides_keep_package_alive_through_preparer_retention() {
+        let directory = tempfile::tempdir().unwrap();
+        let kernel = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        let init = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        let store = ContentStore::new(directory.path().join("objects"));
+        let bytes = linux_asset_fixtures::package();
+        let resolved = resolve_linux_runtime(
+            LinuxOverrides {
+                kernel: Some(kernel.path().into()),
+                init: Some(init.path().into()),
+                ..Default::default()
+            },
+            directory.path(),
+            AssetSelection::All,
+            Some(&store),
+            KernelLocations {
+                configured: Vec::new(),
+                incidental: Vec::new(),
+            },
+            |parent, selection| {
+                RuntimeAssets::install(&bytes, parent, "x86_64-linux", selection).map(Some)
+            },
+        )
+        .unwrap();
+        assert_eq!(resolved.kernel, kernel.path());
+        assert_eq!(resolved.init.as_deref(), Some(init.path()));
+        let assets = resolved.assets.unwrap();
+        assert_eq!(resolved.busybox, Some(assets.input("busybox")));
+        assert_eq!(resolved.mke2fs, Some(assets.input("mke2fs")));
+        let root = assets.input("bzImage").parent().unwrap().to_owned();
+        assert!(!directory.path().join("objects").exists());
+        let preparer = super::super::backends::Preparer::Linux(Box::new(
+            super::super::backends::LinuxPreparer {
+                inputs: seedbox::preparation::OciPreparer {
+                    kernel: resolved.kernel,
+                    engine: kernel.path().into(),
+                    init: resolved.init.unwrap(),
+                    busybox: resolved.busybox.unwrap(),
+                    mke2fs: resolved.mke2fs,
+                    tools: seedbox::oci::OciTools::default(),
+                    profile: seedbox::execution::ExecutionProfile {
+                        backend: "portable-fixture".into(),
+                        engine: seedbox::store::ContentDigest::of(b"engine"),
+                        witness_mode: seedbox::execution::WitnessMode::Exits,
+                        semantic_parameters: Default::default(),
+                    },
+                },
+                _assets: Some(assets),
+            },
+        ));
+        let digest = store.put_file(&preparer.busybox).unwrap();
+        assert!(root.is_dir());
+        assert!(preparer.mke2fs.as_ref().unwrap().is_file());
+        drop(preparer);
+        assert!(!root.exists());
+        assert_eq!(store.read(&digest).unwrap(), linux_asset_fixtures::elf());
+    }
+
+    #[test]
+    fn linux_doctor_package_is_kernel_only_and_dropped_after_probe_scope() {
+        let directory = tempfile::tempdir().unwrap();
+        let bytes = linux_asset_fixtures::package();
+        let runtime = resolve_linux_runtime(
+            LinuxOverrides::default(),
+            directory.path(),
+            AssetSelection::Kernel,
+            None,
+            KernelLocations {
+                configured: Vec::new(),
+                incidental: Vec::new(),
+            },
+            |parent, selection| {
+                assert_eq!(selection, AssetSelection::Kernel);
+                RuntimeAssets::install(&bytes, parent, "x86_64-linux", selection).map(Some)
+            },
+        )
+        .unwrap();
+        let root = runtime.kernel.parent().unwrap().to_owned();
+        assert!(runtime.kernel.is_file());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        assert!(runtime.init.is_none() && runtime.busybox.is_none() && runtime.mke2fs.is_none());
+        drop(runtime);
+        assert!(!root.exists());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
 
     #[test]
     fn compose_directory_resolves_to_its_compose_file() {
@@ -413,24 +654,8 @@ mod tests {
     }
 
     #[test]
-    fn installed_vmm_wins_but_cargo_profile_dirs_are_skipped() {
-        let directory = tempfile::tempdir().unwrap();
-        let built = directory.path().join("checkout/seedbox-vmm");
-        let installed = directory.path().join("bin");
-        std::fs::create_dir(&installed).unwrap();
-        assert_eq!(
-            engine_candidates(Some(&installed.join("seedbox")), &built),
-            [installed.join("seedbox-vmm"), built.clone()]
-        );
-        let profile = directory.path().join("target/debug");
-        std::fs::create_dir_all(&profile).unwrap();
-        std::fs::write(profile.join(".cargo-lock"), "").unwrap();
-        let only_built = std::slice::from_ref(&built);
-        assert_eq!(
-            engine_candidates(Some(&profile.join("seedbox")), &built),
-            only_built
-        );
-        assert_eq!(engine_candidates(None, &built), only_built);
+    fn engine_defaults_to_the_current_executable() {
+        assert_eq!(engine(None).unwrap(), env::current_exe().unwrap());
     }
 
     #[test]

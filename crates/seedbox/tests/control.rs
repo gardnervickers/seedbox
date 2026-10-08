@@ -1,31 +1,11 @@
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/connections.rs"]
-mod connections;
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/triggers.rs"]
-mod triggers;
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/links.rs"]
-mod links;
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/rng.rs"]
-mod rng;
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/control.rs"]
-mod control;
+#[path = "../../seedbox-vmm/src/management_uart.rs"]
+mod management_uart;
+use seedbox_engine_core::{control, faults, links};
 #[allow(dead_code)]
 #[allow(clippy::manual_div_ceil)]
 #[rustfmt::skip]
 #[path = "../../seedbox-vmm/src/devices.rs"]
 mod devices;
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/faults.rs"]
-mod faults;
 use serde_json::json;
 fn names() -> Vec<String> {
     vec!["scenario".into(), "client".into(), "server".into()]
@@ -244,22 +224,28 @@ fn rejected_or_missing_real_process_effect_is_fatal() {
 fn actual_uart_divisor_bytes_do_not_contaminate_committed_request_frames() {
     let mut uart = devices::Uart::default();
     let mut framer = control::ManagementFramer::default();
-    framer.write(&mut uart, 3, 0x80).unwrap();
+    management_uart::write(&mut framer, &mut uart, 3, 0x80).unwrap();
     // Base-register writes while DLAB is set never reach the RPC wire.
     for byte in b"SBX_RPC1 99 1 bad\n" {
-        assert!(framer.write(&mut uart, 0, *byte).unwrap().is_none());
+        assert!(management_uart::write(&mut framer, &mut uart, 0, *byte)
+            .unwrap()
+            .is_none());
     }
     assert!(uart.out.is_empty());
-    framer.write(&mut uart, 3, 3).unwrap();
+    management_uart::write(&mut framer, &mut uart, 3, 3).unwrap();
     for byte in b"SEEDBOX_EFFECT id=1\n" {
-        assert!(framer.write(&mut uart, 0, *byte).unwrap().is_none());
+        assert!(management_uart::write(&mut framer, &mut uart, 0, *byte)
+            .unwrap()
+            .is_none());
     }
     let line = b"SBX_RPC1 1 1 {\"version\":1,\"id\":1,\"op\":\"now\"}";
     for byte in line {
-        assert!(framer.write(&mut uart, 0, *byte).unwrap().is_none());
+        assert!(management_uart::write(&mut framer, &mut uart, 0, *byte)
+            .unwrap()
+            .is_none());
     }
     assert_eq!(
-        framer.write(&mut uart, 0, b'\n').unwrap(),
+        management_uart::write(&mut framer, &mut uart, 0, b'\n').unwrap(),
         Some(line.to_vec())
     );
 }
@@ -1141,5 +1127,49 @@ fn arm_rejections_and_pending_arm_cutoff_remain_correlated() {
         if admitted {
             assert_eq!(c.log[0]["result"]["trigger_id"], 1);
         }
+    }
+}
+
+#[test]
+fn unsupported_operations_reply_without_planning_handles_or_faults() {
+    let operations = [
+        json!({"op":"connections","from":{"service":"client"},"to":{"service":"server"}}),
+        json!({"op":"drop_connection","connection":{"from":"client","to":"server","src_addr":"10.0.0.1","dst_addr":"10.0.0.2","src_port":1000,"dst_port":2000,"incarnation":1}}),
+        json!({"op":"arm_trigger","source":{"service":"client"},"marker":[65],"match_timeout_ns":100,"fault":{"action":"partition","left":[{"service":"client"}],"right":[{"service":"server"}]}}),
+        json!({"op":"cancel_trigger","trigger_id":1}),
+    ];
+    for mut body in operations {
+        let mut c = control();
+        let mut f = faults::Faults::new(vec![], names()).unwrap();
+        body["version"] = 1.into();
+        body["id"] = 1.into();
+        c.request_with_support(
+            0,
+            100,
+            format!("SBX_RPC1 1 1 {body}").as_bytes(),
+            115,
+            |_| false,
+        )
+        .unwrap();
+        let pending = c.pending.as_ref().unwrap();
+        assert!(pending.plan.is_none());
+        assert_eq!(pending.result, json!({}));
+        assert_eq!(pending.error_code, Some("unsupported"));
+        assert!(c.triggers.records.is_empty());
+        assert!(c.apply_boundary(&mut f, 120).unwrap().is_none());
+        let bytes = c.apply_boundary(&mut f, 140).unwrap().unwrap();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        let reply: serde_json::Value =
+            serde_json::from_str(text.splitn(4, ' ').nth(3).unwrap()).unwrap();
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["error"]["code"], "unsupported");
+        assert!(reply.get("result").is_none());
+        c.mark_delivered(140).unwrap();
+        assert!(complete(&c));
+        assert!(f.log.is_empty());
+        // A rejected trigger/selector must not consume the next ordinary handle.
+        request(&mut c, 2, 150, json!({"version":1,"id":2,"op":"partition","left":[{"service":"client"}],"right":[{"service":"server"}]})).unwrap();
+        let pending = c.pending.as_ref().unwrap();
+        assert_eq!(pending.result["handle"], "p1");
     }
 }

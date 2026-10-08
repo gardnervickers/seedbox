@@ -62,13 +62,13 @@ pub fn set_paused(run: &Path, paused: bool) -> Result<Status> {
 }
 
 /// Own the live endpoint locator for exactly one executor child lifetime.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) struct Endpoint {
     directory: tempfile::TempDir,
     reference: std::path::PathBuf,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl Endpoint {
     pub(crate) fn new(output: &Path) -> Result<Self> {
         let endpoint = Self {
@@ -89,7 +89,7 @@ impl Endpoint {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl Drop for Endpoint {
     fn drop(&mut self) {
         if let Err(error) = fs::remove_file(&self.reference) {

@@ -58,10 +58,35 @@ pub struct Stop {
     pub pc: u64,
     pub exit: Exit,
 }
+/// A host interruption is not a guest exit: it owns no held instruction and
+/// must bypass clock reconciliation, IRQ delivery, semantic budgets and witness.
+/// The cause is deliberately unspecified until the backend can authenticate it.
+#[derive(Clone, Debug)]
+pub enum RunStop {
+    Guest(Stop),
+    Interrupted,
+}
+impl From<Stop> for RunStop {
+    fn from(stop: Stop) -> Self {
+        Self::Guest(stop)
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum DirtyPages {
     Unsupported,
     Bitmap { page_size: usize, words: Vec<u64> },
+}
+
+/// Explicit stopped architectural inventory, with no host handles or raw exit
+/// structures. GIC bytes use the backend's documented stable state format.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendState {
+    pub core: Vec<u64>,
+    pub system: std::collections::BTreeMap<u16, u64>,
+    pub simd: Vec<[u8; 16]>,
+    pub gic_cpu: std::collections::BTreeMap<u16, u64>,
+    pub gic: Vec<u8>,
 }
 
 /// One VM and one vCPU, confined to the creating thread. `run` is synchronous;
@@ -84,10 +109,14 @@ pub trait Backend: Sized {
     fn get_gic_dist(&self, _offset: u16) -> Result<u64> {
         Err("GIC register inventory unsupported".into())
     }
-    fn run(&mut self) -> Result<Stop>;
+    /// Enter once. Interrupted stops hold no operation; do not call complete().
+    fn run(&mut self) -> Result<RunStop>;
     fn complete(&mut self, read: Option<u64>) -> Result<()>;
     fn inject_spi(&mut self, intid: u32, level: bool) -> Result<()>;
     fn dirty_pages(&self, slot: u32) -> Result<DirtyPages>;
+    fn state(&self) -> Result<BackendState> {
+        Err("complete stopped backend state is unavailable".into())
+    }
 }
 
 pub(crate) fn core_index(reg: CoreReg) -> Result<u32> {

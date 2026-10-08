@@ -48,6 +48,12 @@ impl Memory {
         std::slice::from_raw_parts(self.as_ptr(), self.len)
     }
     /// # Safety
+    /// Guest stopped; no outstanding host reference to RAM. The callback
+    /// bounds the mutable borrow to a single stopped-device transaction.
+    pub unsafe fn with_bytes_mut<T>(&self, operation: impl FnOnce(&mut [u8]) -> T) -> T {
+        operation(std::slice::from_raw_parts_mut(self.as_ptr(), self.len))
+    }
+    /// # Safety
     /// Guest stopped; no outstanding host references to the affected bytes.
     pub unsafe fn write(&self, offset: usize, bytes: &[u8]) -> Result<()> {
         if offset

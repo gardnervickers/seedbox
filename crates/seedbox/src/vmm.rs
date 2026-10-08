@@ -14,10 +14,7 @@ use std::{
     path::Path,
 };
 
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/checkpoint.rs"]
-mod checkpoint;
+use seedbox_engine_core::checkpoint;
 /// Execution failure whose VMM stderr may be excerpted by the CLI.
 pub const VMM_FAILURE_MESSAGE: &str = "VMM failed; see vmm.stderr";
 
@@ -46,6 +43,8 @@ pub struct DoctorReport {
     pub cpu: u32,
     pub cpus: Vec<u32>,
     pub engine: ContentDigest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub simulator_version: Option<String>,
     pub kernel: ContentDigest,
     pub observations: Vec<crate::admission::CoreObservation>,
 }
@@ -57,6 +56,104 @@ struct AdmissionProbe {
 }
 
 impl VmmExecutor {
+    /// Detect the launch contract of an explicitly supplied executable.
+    pub fn new_detected(
+        engine: &Path,
+        store: &ContentStore,
+        cpu: Option<u32>,
+        memory_mb: u32,
+        witness_mode: WitnessMode,
+        counter: CounterProfile,
+    ) -> Result<Self> {
+        Self::new(engine, store, cpu, memory_mb, witness_mode, counter)?
+            .with_detected_contract(store, engine)
+    }
+
+    /// Preserve simulation settings and use the replacement's own argv contract.
+    /// Normal replay uses `from_retained` without probing or rewriting metadata.
+    pub fn from_override(
+        engine: &Path,
+        store: &ContentStore,
+        profile: ExecutionProfile,
+        cpu: Option<u32>,
+        counter: CounterProfile,
+    ) -> Result<Self> {
+        Self::from_retained(engine, store, profile, cpu, counter)?
+            .with_detected_contract(store, engine)
+    }
+
+    /// Detect a retained executable after resolving other inputs.
+    /// `supplied_path` identifies the original --vmm value in diagnostics.
+    pub fn with_detected_contract(
+        mut self,
+        store: &ContentStore,
+        supplied_path: &Path,
+    ) -> Result<Self> {
+        // Probe the retained copy, so the metadata describes the bytes we run.
+        let scratch = tempfile::tempdir()?;
+        let engine = store.materialize(&self.profile.engine, scratch.path())?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o500))?;
+        let version = crate::worker_process::replacement_version(&engine, supplied_path)?;
+        for key in crate::engine::DESCRIPTOR_FIELDS {
+            self.profile.semantic_parameters.remove(key);
+        }
+        if let Some(version) = version {
+            self.profile.semantic_parameters.extend(BTreeMap::from([
+                (
+                    "engine_executable_kind".into(),
+                    crate::engine::INTERNAL_WORKER_V1.into(),
+                ),
+                ("simulator_version".into(), version),
+                ("host_os".into(), "linux".into()),
+                ("host_arch".into(), "x86_64".into()),
+                ("guest_arch".into(), "x86_64".into()),
+                ("engine_backend".into(), "kvm".into()),
+                ("engine_timebase".into(), "counter-pv-v1".into()),
+            ]));
+        }
+        Ok(self)
+    }
+
+    /// Retain this Seedbox executable and explicitly record its worker contract.
+    pub fn new_internal(
+        engine: &Path,
+        store: &ContentStore,
+        cpu: Option<u32>,
+        memory_mb: u32,
+        witness_mode: WitnessMode,
+        counter: CounterProfile,
+    ) -> Result<Self> {
+        let descriptor = crate::engine::internal_parameters()?;
+        let mut executor = Self::new(engine, store, cpu, memory_mb, witness_mode, counter)?;
+        executor.profile.semantic_parameters.extend(descriptor);
+        Ok(executor)
+    }
+
+    /// Preserve retained metadata exactly, without detecting a new launch contract.
+    /// A replacement executable changes only
+    /// its digest, so the orchestrator can retain profile/admission rejection.
+    pub fn from_retained(
+        engine: &Path,
+        store: &ContentStore,
+        mut profile: ExecutionProfile,
+        cpu: Option<u32>,
+        counter: CounterProfile,
+    ) -> Result<Self> {
+        profile.engine = store.put_file(engine)?;
+        Ok(Self {
+            cpu,
+            counter,
+            allow_unqualified: false,
+            profile,
+            performance: BTreeMap::from([
+                ("SEEDBOX_MARGIN".into(), "adaptive".into()),
+                ("SEEDBOX_UNDO".into(), "256".into()),
+            ]),
+            admission: Default::default(),
+        })
+    }
+
     pub fn new(
         engine: &Path,
         store: &ContentStore,
@@ -175,6 +272,24 @@ impl VmmExecutor {
             WitnessMode::Exits,
             CounterProfile::Zen,
         )?;
+        Self::doctor_executor(executor, kernel)
+    }
+
+    /// Inspect the built-in worker without storing bytes or invoking it.
+    pub fn doctor_internal(engine: &Path, kernel: &Path, cpu: Option<u32>) -> Result<DoctorReport> {
+        let descriptor = crate::engine::internal_parameters()?;
+        let mut executor = Self::from_engine_digest(
+            crate::admission::file_digest(engine)?,
+            cpu,
+            1024,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )?;
+        executor.profile.semantic_parameters.extend(descriptor);
+        Self::doctor_executor(executor, kernel)
+    }
+
+    fn doctor_executor(executor: Self, kernel: &Path) -> Result<DoctorReport> {
         crate::admission::validate_profile(&executor.profile)?;
         let kernel = crate::admission::file_digest(kernel)?;
         Self::doctor_counter(crate::counter::CounterProfile::host()?)?;
@@ -221,6 +336,11 @@ impl VmmExecutor {
                 .map(|observation| observation.cpu)
                 .collect(),
             engine: self.profile.engine.clone(),
+            simulator_version: self
+                .profile
+                .semantic_parameters
+                .get("simulator_version")
+                .cloned(),
             kernel,
             observations: probe.observations,
         })
@@ -518,6 +638,35 @@ fn with_capacity<T>(
     check(&reservations)
 }
 
+/// Build the retained executable's launch contract without consulting the host.
+pub(crate) fn engine_command(
+    engine: &Path,
+    profile: &ExecutionProfile,
+) -> Result<std::process::Command> {
+    let mut command = std::process::Command::new(engine);
+    match crate::engine::recorded_launch(profile)? {
+        crate::engine::ExecutableKind::Standalone => {}
+        crate::engine::ExecutableKind::InternalWorker => {
+            command.args(["__engine", crate::engine::INTERNAL_WORKER_V1]);
+        }
+        crate::engine::ExecutableKind::ArmWorld => {
+            command.args(["__engine", "arm64-world-v1"]);
+            return Ok(command);
+        }
+    }
+    let timebase = recorded_timebase(profile)?;
+    if timebase != Timebase::Counter {
+        command.arg("--timebase").arg(timebase.name());
+    }
+    if recorded_page_timer(profile) {
+        command.arg("--page-timer");
+    }
+    if recorded_deferred_tx(profile)? {
+        command.arg("--deferred-tx");
+    }
+    Ok(command)
+}
+
 /// Missing page timer means the legacy port transport.
 pub fn recorded_page_timer(profile: &ExecutionProfile) -> bool {
     profile
@@ -697,11 +846,18 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
         "machines":machines,"control":control,
         "control_channel":"virtio-console-v1",
     });
+    let lookahead = request
+        .network
+        .latency_ns
+        .saturating_sub(request.network.jitter_ns);
+    if let Some(skew) = crate::engine::arm_launch_skew(&request.prepared.profile, lookahead)? {
+        world["launch_skew_ns"] = json!(skew);
+    }
     if recorded_torn_writes(&request.prepared.profile)? {
-        world[DISK_LOSS] = json!({
-            "sector_bytes": 512,
-            "survival_probability": 0.5,
-        });
+        world[DISK_LOSS] = match request.prepared.profile.semantic_parameters.get(DISK_LOSS) {
+            Some(model) => json!(model), // The retained historical worker owns its disk semantics.
+            None => json!({"sector_bytes": 512, "survival_probability": 0.5}),
+        };
     }
     if let Some(checkpoint) = checkpoint_metadata(request, &world)? {
         world["checkpoint"] = checkpoint;
@@ -1455,6 +1611,31 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
             "VMM counted with a different branch counter profile than the recorded {expected}"
         )));
     }
+    checked_report(raw, request)
+}
+
+/// The ARM adapter validates its own version, boot layout and PV identity
+/// before sharing outcome/control correlation checks with the existing engine.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) fn report_hvf(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionReport> {
+    let raw: VmmReport = serde_json::from_slice(bytes)?;
+    if raw.report_version != 2 || raw.seed != request.seed || raw.counter_profile.is_some() {
+        return Err(Error::Integrity(
+            "HVF application report version/seed/timebase mismatch".into(),
+        ));
+    }
+    crate::mac::validate_report(bytes, request)?;
+    checked_report(raw, request)
+}
+
+fn checked_report(raw: VmmReport, request: &ExecutionRequest<'_>) -> Result<ExecutionReport> {
+    let timebase = if crate::engine::recorded_launch(&request.prepared.profile)?
+        == crate::engine::ExecutableKind::ArmWorld
+    {
+        Timebase::Pv
+    } else {
+        recorded_timebase(&request.prepared.profile)?
+    };
     let names: BTreeSet<_> = raw.machines.iter().map(|machine| &machine.name).collect();
     if names.len() != raw.machines.len() || names != request.prepared.guests.keys().collect() {
         return Err(Error::Integrity("VMM report machine set mismatch".into()));
@@ -1680,66 +1861,7 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
 mod linux {
     use super::*;
     use crate::host::HostLease;
-    use std::{
-        fs,
-        os::unix::{fs::PermissionsExt, process::CommandExt},
-        process::{Child, Command},
-        time::{Duration, Instant},
-    };
-
-    // VMM is a single-process engine. Keep its unreaped leader owned until the
-    // final process-group signal, including when it has already exited.
-    struct OwnedChild(Option<Child>);
-    impl OwnedChild {
-        fn stop(&mut self) -> Result<()> {
-            if let Some(child) = &mut self.0 {
-                let killed = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
-                if killed != 0
-                    && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-                {
-                    return Err(std::io::Error::last_os_error().into());
-                }
-                child.wait()?;
-                self.0 = None;
-            }
-            Ok(())
-        }
-        fn exited(&self) -> Result<Option<bool>> {
-            let child = self.0.as_ref().unwrap();
-            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-            if unsafe {
-                libc::waitid(
-                    libc::P_PID,
-                    child.id(),
-                    &mut info,
-                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-                )
-            } != 0
-            {
-                let error = std::io::Error::last_os_error();
-                if error.kind() == std::io::ErrorKind::Interrupted {
-                    return Ok(None);
-                }
-                return Err(error.into());
-            }
-            Ok(unsafe {
-                (info.si_pid() != 0)
-                    .then(|| info.si_code == libc::CLD_EXITED && info.si_status() == 0)
-            })
-        }
-    }
-    impl Drop for OwnedChild {
-        fn drop(&mut self) {
-            // An owned live child must never outlive its host-state guard.
-            // Retry interrupted waits before the guard can restore MSRs.
-            while self.0.is_some() {
-                if let Err(error) = self.stop() {
-                    eprintln!("seedbox: waiting for VMM cleanup: {error}");
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        }
-    }
+    use std::{fs, os::unix::process::CommandExt};
 
     pub(super) fn execute(
         backend: &VmmExecutor,
@@ -1757,65 +1879,16 @@ mod linux {
             return Err(Error::Execution("CPU exceeds affinity mask".into()));
         }
         let timebase = recorded_timebase(&backend.profile)?;
-        let world = world(&request)?;
-        let world_path = request.output.join("world.json");
-        fs::write(&world_path, serde_json::to_vec_pretty(&world)?)?;
-        let engine = request
-            .artifacts
-            .get(&backend.profile.engine)
-            .ok_or_else(|| Error::Integrity("missing retained VMM".into()))?;
-        fs::set_permissions(engine, fs::Permissions::from_mode(0o500))?;
-        let report_path = request.output.join("vmm.json");
-        let endpoint = crate::host_control::Endpoint::new(request.output)?;
-        let mut command = Command::new(engine);
-        command
-            .arg("--config")
-            .arg(&world_path)
-            .arg("--seed")
-            .arg(request.seed.to_string())
-            .arg("--out")
-            .arg(request.output.join(MACHINE_OUTPUT_DIR));
-        if timebase != Timebase::Counter {
-            command.arg("--timebase").arg(timebase.name());
-        }
-        if recorded_page_timer(&backend.profile) {
-            command.arg("--page-timer");
-        }
-        if recorded_deferred_tx(&backend.profile)? {
-            command.arg("--deferred-tx");
-        }
-        command.arg("--host-control").arg(endpoint.socket());
-        command
-            .arg("--stream-console")
-            // Bound observation metadata to at most 40 MiB across all streams.
-            .arg("--log-chunk-limit")
-            .arg(
-                (1_048_576 / (2 * request.prepared.guests.len()))
-                    .min(65_536)
-                    .to_string(),
-            )
-            .arg("--console-limit")
-            .arg((1024 * 1024 * 1024 / (2 * request.prepared.guests.len())).to_string());
-        if backend.profile.witness_mode == WitnessMode::FullState {
-            command.arg("--digest");
-        }
-        // Do not inherit hidden performance/semantic VMM environment settings.
-        command.env_clear().envs(request.performance_parameters);
-        command
-            .stdout(fs::File::create(&report_path)?)
-            .stderr(fs::File::create(request.output.join("vmm.stderr"))?);
-        let incomplete = |reason| ExecutionReport {
-            timebase: Some(timebase),
-            reason,
-            workload_exit: None,
-            witness: None,
-            full_state: None,
-            faults: vec![],
-            detail: None,
-            engine_qualification: None,
-        };
+        use crate::worker_process::{incomplete, WorkerLaunch};
+        let mut launch = WorkerLaunch::prepare(&request)?;
+        // Performance values are explicit; hidden process settings stay cleared.
+        launch.command.envs(request.performance_parameters);
+
         if request.cancellation.is_cancelled() {
-            return Ok(incomplete(StopReason::Cancelled));
+            return Ok(incomplete(
+                StopReason::Cancelled,
+                recorded_timebase(&backend.profile)?,
+            ));
         }
         let static_evidence = backend
             .admission
@@ -1882,10 +1955,7 @@ mod linux {
             )?;
         }
         unsafe {
-            command.pre_exec(move || {
-                if libc::setpgid(0, 0) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
+            launch.command.pre_exec(move || {
                 let mut set: libc::cpu_set_t = std::mem::zeroed();
                 libc::CPU_ZERO(&mut set);
                 libc::CPU_SET(cpu as usize, &mut set);
@@ -1895,25 +1965,12 @@ mod linux {
                 Ok(())
             });
         }
-        let started = Instant::now();
-        let mut child = OwnedChild(Some(command.spawn()?));
-        let completion = loop {
-            if request.cancellation.is_cancelled() {
-                break Ok(incomplete(StopReason::Cancelled));
-            }
-            if let Some(success) = child.exited()? {
-                break if success {
-                    report(&fs::read(&report_path)?, &request)
-                } else {
-                    Err(Error::Execution(VMM_FAILURE_MESSAGE.into()))
-                };
-            }
-            if started.elapsed() >= Duration::from_nanos(request.limits.wall_time_ns) {
-                break Ok(incomplete(StopReason::WallTimeLimit));
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        child.stop()?;
+        // Declared after the lease: every error path finishes process cleanup
+        // before releasing the leased CPU or restoring MSRs.
+        let child = launch.spawn()?;
+        let completion = child.wait(request.cancellation, request.limits.wall_time_ns, |bytes| {
+            report(bytes, &request)
+        });
         lease.restore()?;
         if workaround.is_some() {
             fs::write(
@@ -1929,6 +1986,429 @@ mod linux {
 mod doctor_tests {
     use super::*;
     use crate::admission::{required_policy, CoreObservation};
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    #[test]
+    fn internal_world_refusal_precedes_retention_or_input_reading() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store_path = temporary.path().join("objects");
+        let store = ContentStore::new(&store_path);
+        let missing = temporary.path().join("missing");
+        let expected = "built-in Compose world execution requires Linux x86-64; ARM world integration is not available yet";
+        let result = VmmExecutor::new_internal(
+            &missing,
+            &store,
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        );
+        assert_eq!(result.unwrap_err().to_string(), expected);
+        assert!(!store_path.exists());
+        assert_eq!(
+            VmmExecutor::doctor_internal(&missing, &missing, None)
+                .unwrap_err()
+                .to_string(),
+            expected
+        );
+        assert!(!store_path.exists());
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn internal_doctor_reports_simulator_version_without_new_qualification() {
+        let temporary = tempfile::tempdir().unwrap();
+        let executable = temporary.path().join("worker");
+        std::fs::write(&executable, b"combined executable").unwrap();
+        let store = ContentStore::new(temporary.path().join("objects"));
+        let kernel = ContentDigest::of(b"kernel");
+        let executor = VmmExecutor::new_internal(
+            &executable,
+            &store,
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap();
+        let report = executor
+            .doctor_report(
+                kernel,
+                AdmissionProbe {
+                    cpu: Some(8),
+                    observations: vec![observed(8)],
+                    result: Ok(()),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            report.simulator_version.as_deref(),
+            Some(crate::engine::SIMULATOR_VERSION)
+        );
+        assert!(serde_json::to_value(report)
+            .unwrap()
+            .get("engine_qualification")
+            .is_none());
+    }
+
+    #[test]
+    fn replay_preserves_historical_policy_data_without_current_defaults() {
+        let temporary = tempfile::tempdir().unwrap();
+        let executable = temporary.path().join("retained-worker");
+        std::fs::write(&executable, b"retained executable").unwrap();
+        let store = ContentStore::new(temporary.path().join("objects"));
+        let mut profile = VmmExecutor::from_engine_digest(
+            ContentDigest::of(b"retained executable"),
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap()
+        .profile;
+        profile.semantic_parameters.remove("host_policy");
+        profile.semantic_parameters.insert(
+            crate::admission::ENGINE_QUALIFICATION.into(),
+            "dev-unpinned".into(),
+        );
+        let before = serde_json::to_vec(&profile).unwrap();
+        let executor =
+            VmmExecutor::from_retained(&executable, &store, profile, None, CounterProfile::Zen)
+                .unwrap()
+                .with_unqualified_cpu(true);
+        assert_eq!(serde_json::to_vec(&executor.profile).unwrap(), before);
+        crate::admission::validate_profile(&executor.profile).unwrap();
+        assert_eq!(
+            crate::engine::recorded_launch(&executor.profile).unwrap(),
+            crate::engine::ExecutableKind::Standalone
+        );
+    }
+
+    #[test]
+    fn explicit_override_uses_replacement_contract_in_both_directions() {
+        let _lock = crate::preparation_command::PROCESS_TEST_LOCK
+            .lock()
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let combined = directory.path().join("combined");
+        let standalone = directory.path().join("standalone");
+        std::fs::write(
+            &combined,
+            b"#!/bin/sh\nprintf 'seedbox 0.2.0-replacement\\n'\n",
+        )
+        .unwrap();
+        std::fs::write(&standalone, b"#!/bin/sh\nexit 2\n").unwrap();
+        let store = ContentStore::new(directory.path().join("store"));
+        let original = VmmExecutor::new(
+            &standalone,
+            &store,
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap()
+        .with_timebase(Timebase::Pv)
+        .with_page_timer(true)
+        .with_deferred_tx(true)
+        .with_torn_writes(true);
+        let combined = VmmExecutor::from_override(
+            &combined,
+            &store,
+            original.profile.clone(),
+            None,
+            CounterProfile::Zen,
+        )
+        .unwrap();
+        assert_eq!(
+            combined.profile.semantic_parameters["simulator_version"],
+            "0.2.0-replacement"
+        );
+        assert_eq!(
+            engine_command(Path::new("engine"), &combined.profile)
+                .unwrap()
+                .get_args()
+                .collect::<Vec<_>>(),
+            [
+                "__engine",
+                crate::engine::INTERNAL_WORKER_V1,
+                "--timebase",
+                "pv",
+                "--page-timer",
+                "--deferred-tx"
+            ]
+        );
+        assert!(recorded_torn_writes(&combined.profile).unwrap());
+        let standalone = VmmExecutor::from_override(
+            &standalone,
+            &store,
+            combined.profile,
+            None,
+            CounterProfile::Zen,
+        )
+        .unwrap();
+        assert_eq!(standalone.profile, original.profile);
+        assert_eq!(
+            engine_command(Path::new("engine"), &standalone.profile)
+                .unwrap()
+                .get_args()
+                .collect::<Vec<_>>(),
+            ["--timebase", "pv", "--page-timer", "--deferred-tx"]
+        );
+        // Explicit fresh runs perform the same detection; retained replay does not.
+        let detected = VmmExecutor::new_detected(
+            &directory.path().join("combined"),
+            &store,
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap();
+        assert_eq!(
+            detected.profile.semantic_parameters["engine_executable_kind"],
+            crate::engine::INTERNAL_WORKER_V1
+        );
+    }
+
+    #[test]
+    fn retained_worker_launch_preserves_timer_and_deferred_tx_options() {
+        let executor = VmmExecutor::from_engine_digest(
+            ContentDigest::of(b"engine"),
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap()
+        .with_timebase(Timebase::Pv)
+        .with_page_timer(true)
+        .with_deferred_tx(true);
+        for internal in [false, true] {
+            let mut profile = executor.profile.clone();
+            if internal {
+                profile.semantic_parameters.extend(BTreeMap::from([
+                    (
+                        "engine_executable_kind".into(),
+                        crate::engine::INTERNAL_WORKER_V1.into(),
+                    ),
+                    (
+                        "simulator_version".into(),
+                        crate::engine::SIMULATOR_VERSION.into(),
+                    ),
+                    ("host_os".into(), "linux".into()),
+                    ("host_arch".into(), "x86_64".into()),
+                    ("guest_arch".into(), "x86_64".into()),
+                    ("engine_backend".into(), "kvm".into()),
+                    ("engine_timebase".into(), "counter-pv-v1".into()),
+                ]));
+            }
+            let retained: ExecutionProfile =
+                serde_json::from_slice(&serde_json::to_vec(&profile).unwrap()).unwrap();
+            let command = engine_command(Path::new("retained-engine"), &retained).unwrap();
+            let mut expected = Vec::new();
+            if internal {
+                expected.extend(["__engine", crate::engine::INTERNAL_WORKER_V1]);
+            }
+            expected.extend(["--timebase", "pv", "--page-timer", "--deferred-tx"]);
+            assert_eq!(command.get_args().collect::<Vec<_>>(), expected);
+            profile
+                .semantic_parameters
+                .insert("deferred_tx".into(), "false".into());
+            assert!(engine_command(Path::new("retained-engine"), &profile).is_err());
+        }
+    }
+
+    #[test]
+    fn counter_and_pv_retain_identity_and_replay_through_worker_contract() {
+        use crate::engine::{recorded_launch, ExecutableKind, INTERNAL_WORKER_V1};
+        let temporary = tempfile::tempdir().unwrap();
+        let executable = temporary.path().join("retained-worker");
+        std::fs::write(&executable, b"combined executable").unwrap();
+        let store = ContentStore::new(temporary.path().join("objects"));
+        let mut profiles = Vec::new();
+        for timebase in [Timebase::Counter, Timebase::Pv] {
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            let executor = VmmExecutor::new_internal(
+                &executable,
+                &store,
+                None,
+                512,
+                WitnessMode::Exits,
+                CounterProfile::Zen,
+            )
+            .unwrap();
+            // A retained Linux profile is inspectable on a Mac without host admission.
+            #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+            let executor = {
+                let mut executor = VmmExecutor::new(
+                    &executable,
+                    &store,
+                    None,
+                    512,
+                    WitnessMode::Exits,
+                    CounterProfile::Zen,
+                )
+                .unwrap();
+                executor.profile.semantic_parameters.extend(BTreeMap::from([
+                    ("engine_executable_kind".into(), INTERNAL_WORKER_V1.into()),
+                    (
+                        "simulator_version".into(),
+                        crate::engine::SIMULATOR_VERSION.into(),
+                    ),
+                    ("host_os".into(), "linux".into()),
+                    ("host_arch".into(), "x86_64".into()),
+                    ("guest_arch".into(), "x86_64".into()),
+                    ("engine_backend".into(), "kvm".into()),
+                    ("engine_timebase".into(), "counter-pv-v1".into()),
+                ]));
+                executor
+            };
+            let executor = executor.with_timebase(timebase);
+            assert_eq!(
+                recorded_launch(&executor.profile).unwrap(),
+                ExecutableKind::InternalWorker
+            );
+            assert_eq!(recorded_timebase(&executor.profile).unwrap(), timebase);
+            assert_eq!(
+                executor
+                    .profile
+                    .semantic_parameters
+                    .contains_key("timebase"),
+                timebase == Timebase::Pv
+            );
+            let bytes = serde_json::to_vec(&executor.profile).unwrap();
+            let retained: ExecutionProfile = serde_json::from_slice(&bytes).unwrap();
+            let replay = VmmExecutor::from_retained(
+                &executable,
+                &store,
+                retained,
+                Some(8),
+                CounterProfile::Zen,
+            )
+            .unwrap();
+            assert_eq!(serde_json::to_vec(&replay.profile).unwrap(), bytes);
+            let expected = if timebase == Timebase::Pv {
+                vec!["__engine", INTERNAL_WORKER_V1, "--timebase", "pv"]
+            } else {
+                vec!["__engine", INTERNAL_WORKER_V1]
+            };
+            for profile in [&executor.profile, &replay.profile] {
+                let command = engine_command(&executable, profile).unwrap();
+                assert_eq!(command.get_program(), executable.as_os_str());
+                assert_eq!(command.get_args().collect::<Vec<_>>(), expected);
+                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                {
+                    let mut args = vec!["seedbox".to_owned()];
+                    args.extend(
+                        command
+                            .get_args()
+                            .skip(2)
+                            .map(|arg| arg.to_str().unwrap().to_owned()),
+                    );
+                    args.extend(
+                        ["--config", "world.json", "--seed", "7", "--out", "output"]
+                            .map(str::to_owned),
+                    );
+                    let options = seedbox_vmm::WorkerOptions::from_args(
+                        &args,
+                        seedbox_vmm::PerformanceOptions::default(),
+                    )
+                    .unwrap();
+                    assert_eq!(options.pv_clock, timebase == Timebase::Pv);
+                }
+            }
+            profiles.push(executor.profile);
+        }
+        let mut pv_as_counter = profiles.pop().unwrap();
+        pv_as_counter.semantic_parameters.remove("timebase");
+        assert_eq!(pv_as_counter, profiles[0]);
+        // #89 owns timebase even for historical standalone profiles.
+        let legacy = VmmExecutor::new(
+            &executable,
+            &store,
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap();
+        for timebase in [Timebase::Counter, Timebase::Pv] {
+            let executor = legacy.clone().with_timebase(timebase);
+            assert_eq!(
+                recorded_launch(&executor.profile).unwrap(),
+                ExecutableKind::Standalone
+            );
+        }
+    }
+
+    #[test]
+    fn recorded_descriptor_is_data_and_unknown_timebases_still_fail() {
+        let temporary = tempfile::tempdir().unwrap();
+        let executable = temporary.path().join("old-worker");
+        std::fs::write(&executable, b"retained worker").unwrap();
+        let store = ContentStore::new(temporary.path().join("objects"));
+        let mut profile = VmmExecutor::new(
+            &executable,
+            &store,
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap()
+        .profile;
+        profile.semantic_parameters.extend(BTreeMap::from([
+            (
+                "engine_executable_kind".into(),
+                crate::engine::INTERNAL_WORKER_V1.into(),
+            ),
+            ("simulator_version".into(), "0.1.0-dev.1".into()),
+            ("host_os".into(), "linux".into()),
+            ("host_arch".into(), "x86_64".into()),
+            ("guest_arch".into(), "x86_64".into()),
+            ("engine_backend".into(), "kvm".into()),
+            ("timebase".into(), "counted-branches-v1".into()),
+        ]));
+        let original = serde_json::to_vec(&profile).unwrap();
+        let executor = VmmExecutor::from_retained(
+            &executable,
+            &store,
+            profile.clone(),
+            None,
+            CounterProfile::Zen,
+        )
+        .unwrap();
+        assert_eq!(serde_json::to_vec(&executor.profile).unwrap(), original);
+        assert_eq!(
+            crate::engine::recorded_launch(&executor.profile).unwrap(),
+            crate::engine::ExecutableKind::InternalWorker
+        );
+        assert!(recorded_timebase(&executor.profile).is_err());
+    }
+
+    #[test]
+    fn replay_override_changes_only_retained_executable_digest() {
+        let temporary = tempfile::tempdir().unwrap();
+        let executable = temporary.path().join("replacement-worker");
+        std::fs::write(&executable, b"replacement executable").unwrap();
+        let store = ContentStore::new(temporary.path().join("objects"));
+        let profile = VmmExecutor::from_engine_digest(
+            ContentDigest::of(b"original executable"),
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap()
+        .profile;
+        let mut expected = profile.clone();
+        expected.engine = ContentDigest::of(b"replacement executable");
+        let executor =
+            VmmExecutor::from_retained(&executable, &store, profile, None, CounterProfile::Zen)
+                .unwrap();
+        assert_eq!(executor.profile, expected);
+    }
 
     #[test]
     fn capacity_admission_holds_all_reservations_and_releases_them_on_every_exit() {
@@ -2131,6 +2611,8 @@ mod doctor_tests {
                 .unwrap();
             let json = serde_json::to_value(report).unwrap();
             assert!(json["engine_qualification"].is_null());
+            assert!(json.get("simulator_version").is_none());
+            assert!(json.get("qualified").is_none());
         }
     }
 

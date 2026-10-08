@@ -1,12 +1,5 @@
+use seedbox_engine_core::disk;
 // Exercise the actual retained-disk model on portable hosts, without KVM.
-#[allow(dead_code, clippy::manual_is_multiple_of)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/disk.rs"]
-mod disk;
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/rng.rs"]
-mod rng;
 
 #[test]
 fn disk_fault_model_is_parameterized_without_a_wire_name() {
@@ -36,5 +29,5 @@ fn committed_torn_disk_world_uses_disk_loss_object() {
 
 #[allow(dead_code)]
 #[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/checkpoint.rs"]
+#[path = "../../seedbox-engine-core/src/checkpoint.rs"]
 mod checkpoint;

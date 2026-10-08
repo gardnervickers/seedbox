@@ -27,6 +27,170 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn mac_rejects_linux_cpu_options_before_preparation_or_state_creation() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("compose.yaml"), "name: mac-options\nservices:\n  app: {image: example/app}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n").unwrap();
+    for command in ["run", "explore", "doctor"] {
+        for flags in [&["--cpu", "1"][..], &["--allow-unqualified-cpu"][..]] {
+            let mut args = vec![command];
+            args.extend(flags);
+            let output = seedbox(&args, directory.path());
+            assert_eq!(output.status.code(), Some(2), "{args:?}");
+            assert!(output.stdout.is_empty(), "{args:?}");
+            assert_eq!(
+                stderr(&output),
+                "error: --cpu and --allow-unqualified-cpu require Linux KVM; omit them on Mac\n",
+                "{args:?}"
+            );
+            assert!(!directory.path().join(".seedbox").exists(), "{args:?}");
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn mac_explore_rejects_multiple_workers_before_state_or_runtime_setup() {
+    let directory = tempfile::tempdir().unwrap();
+    assert!(seedbox(&["init", "demo"], directory.path())
+        .status
+        .success());
+    let project = directory.path().join("demo");
+
+    let help = seedbox(&["help", "explore"], &project);
+    assert!(help.status.success());
+    assert!(String::from_utf8_lossy(&help.stdout).contains(
+        "Maximum active attempts; Mac supports only 1. Omit --cpu for Linux parallel execution"
+    ));
+    assert!(String::from_utf8_lossy(&help.stdout).contains("[default: 1]"));
+
+    let output = seedbox_with(&["explore", "--workers", "2"], &project, None);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        stderr(&output),
+        "error: --workers: Mac exploration supports one worker; use --workers 1 or omit it\n"
+    );
+    assert!(!project.join(".seedbox").exists());
+}
+
+#[test]
+fn version_and_help_describe_the_builtin_engine_without_exposing_worker_dispatch() {
+    let directory = tempfile::tempdir().unwrap();
+
+    let version = seedbox(&["--version"], directory.path());
+    assert!(version.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&version.stdout),
+        format!("seedbox {}\n", seedbox::engine::SIMULATOR_VERSION)
+    );
+    assert!(version.stderr.is_empty());
+
+    let root_help = seedbox(&["--help"], directory.path());
+    assert!(root_help.status.success());
+    let help = String::from_utf8_lossy(&root_help.stdout);
+    assert!(!help.contains("__engine"), "{help}");
+    assert!(!help.contains("seedbox-internal-worker-v1"), "{help}");
+    assert!(!help.contains("arm64-fixture-v1"), "{help}");
+
+    let run_help = seedbox(&["help", "run"], directory.path());
+    assert!(run_help.status.success());
+    let help = String::from_utf8_lossy(&run_help.stdout);
+    assert!(help.contains("--vmm"), "{help}");
+    assert!(help.contains("legacy standalone VMM"), "{help}");
+    assert!(help.contains("engine built into seedbox"), "{help}");
+}
+
+#[test]
+fn internal_dispatch_rejects_missing_and_unknown_contracts_before_cli_state_setup() {
+    let directory = tempfile::tempdir().unwrap();
+    for args in [&["__engine"][..], &["__engine", "unknown-contract"]] {
+        let output = seedbox(args, directory.path());
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert!(
+            stderr(&output).contains("internal engine contract"),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+        assert!(!directory.path().join(".seedbox").exists(), "{args:?}");
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn internal_worker_requires_config_without_state_or_external_tools() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let tools = root.join("tools");
+    fs::create_dir(&tools).unwrap();
+    let marker = root.join("tool-called");
+    let cargo = tools.join("cargo");
+    fs::write(
+        &cargo,
+        format!(
+            "#!/bin/sh\necho invoked >> '{}'\nexit 0\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_seedbox"))
+        .args(["__engine", "seedbox-internal-worker-v1"])
+        .current_dir(root)
+        .env_clear()
+        .env("HOME", root)
+        .env("TMPDIR", root)
+        .env("PATH", &tools)
+        .env("CARGO", &cargo)
+        .env("CARGO_MANIFEST_DIR", env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(output.stdout.is_empty());
+    assert!(
+        stderr(&output).contains("--config required"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!marker.exists(), "worker invoked external cargo");
+    assert!(!root.join(".seedbox").exists());
+}
+
+#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn arm_fixture_contract_uses_the_shared_fixture_argument_parser() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = seedbox(
+        &[
+            "__engine",
+            "arm64-fixture-v1",
+            "run",
+            "--kernel",
+            "kernel",
+            "--initrd",
+            "initrd",
+            "--seed",
+            "not-a-seed",
+        ],
+        directory.path(),
+    );
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(output.stdout.is_empty());
+    assert!(stderr(&output).contains("--seed"), "{}", stderr(&output));
+    assert!(!stderr(&output).contains("requires Linux arm64"));
+    assert!(!directory.path().join(".seedbox").exists());
+}
+
 #[test]
 fn host_pause_commands_acknowledge_boundaries_and_reject_inactive_runs() {
     let directory = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
@@ -311,7 +475,7 @@ fn run_without_a_kernel_lists_where_it_looked() {
         stderr(&output),
         format!(
             "error: no guest kernel found; searched:\n  artifacts/bzImage\n  \
-             {home}/seedbox-sim/artifacts/bzImage\nbuild one with `bash kernel/build.sh`, \
+             {home}/seedbox-sim/artifacts/bzImage\ninstall a packaged seedbox, build one with `bash kernel/build.sh`, \
              or pass --kernel or set SEEDBOX_KERNEL\n"
         )
     );
@@ -784,9 +948,14 @@ fn doctor_bad_inputs_execute_no_tools_and_create_no_state_even_with_cargo_enviro
     }
     fs::write(root.join("engine"), b"unsupported engine").unwrap();
     let output = seedbox(&["doctor", "--vmm", "engine", "--kernel", "kernel"], root);
-    // Any engine is admitted; doctor goes on to refuse on host readiness instead.
+    // Any engine is admitted; doctor still requires a supported, ready host.
     assert_eq!(output.status.code(), Some(2));
     assert!(!stderr(&output).contains("engine is outside"));
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    assert_eq!(
+        stderr(&output),
+        "error: --vmm requires Linux KVM; use the built-in Mac engine\n"
+    );
     assert!(!marker.exists());
     assert!(output.stdout.is_empty());
 }
@@ -838,9 +1007,15 @@ fn doctor_dev_opt_in_keeps_host_refusal_and_creates_no_state() {
         }
         let output = seedbox(&args, dir.path());
         assert_eq!(output.status.code(), Some(2));
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         assert_eq!(
             stderr(&output),
             "error: run and replay require the qualified Linux KVM host\n"
+        );
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        assert_eq!(
+            stderr(&output),
+            "error: --vmm requires Linux KVM; use the built-in Mac engine\n"
         );
         assert!(output.stdout.is_empty());
         assert!(!dir.path().join(".seedbox").exists());
@@ -1738,7 +1913,12 @@ fn checkpoint_flags_are_paired_typed_and_documented() {
         None,
     );
     assert_eq!(result.status.code(), Some(2));
-    assert_eq!(stderr(&result), "error: --checkpoint-at-ns must be before the simulated time limit; choose an earlier checkpoint\n");
+    let expected = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "error: --checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac\n"
+    } else {
+        "error: --checkpoint-at-ns must be before the simulated time limit; choose an earlier checkpoint\n"
+    };
+    assert_eq!(stderr(&result), expected);
     assert!(!dir.path().join(".seedbox").exists());
     let accepted = seedbox_with(
         &[
@@ -1755,7 +1935,11 @@ fn checkpoint_flags_are_paired_typed_and_documented() {
     );
     assert_eq!(
         stderr(&accepted),
-        "error: --vmm /checkpoint-missing-vmm: not found\n"
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            "error: --checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac\n"
+        } else {
+            "error: --vmm /checkpoint-missing-vmm: not found\n"
+        }
     );
 }
 
@@ -1767,7 +1951,7 @@ fn timebase_help_values_and_replay_uses_only_the_recorded_choice() {
         assert!(help.status.success());
         let help = String::from_utf8_lossy(&help.stdout);
         assert!(help.contains("--timebase <TIMEBASE>"));
-        assert!(help.contains("[default: counter]"));
+        assert!(help.contains("[default: pv on Mac; counter on Linux]"));
         assert!(help.contains("Count retired guest branches with the host PMU"));
         assert!(help.contains("Advance time at guest exits, syscalls and clock reads"));
         let bad = seedbox(&[command, "--timebase", "future"], directory.path());
@@ -1791,10 +1975,14 @@ fn timebase_help_values_and_replay_uses_only_the_recorded_choice() {
                 directory.path(),
             );
             assert_eq!(output.status.code(), Some(2));
-            assert_eq!(
-                stderr(&output),
+            let expected = if cfg!(all(target_os = "macos", target_arch = "aarch64"))
+                && value == "counter"
+            {
+                "error: --timebase counter requires Linux KVM; use --timebase pv or omit it on Mac\n"
+            } else {
                 "error: Compose file no-such.yaml: not found\n"
-            );
+            };
+            assert_eq!(stderr(&output), expected);
         }
     }
 }
@@ -1874,6 +2062,48 @@ fn replay_rejects_unknown_recorded_timebase_before_host_checks() {
     assert!(String::from_utf8_lossy(&inspect.stdout).contains("timebase: future"));
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn mac_counter_timebase_is_rejected_before_preparation() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("compose.yaml"), "name: mac-timebase\nservices:\n  app:\n    image: busybox:1.37.0\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app, exit_code: 0}\n").unwrap();
+    for command in ["run", "explore"] {
+        let output = seedbox(&[command, ".", "--timebase", "counter"], directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(
+            stderr(&output),
+            "error: --timebase counter requires Linux KVM; use --timebase pv or omit it on Mac\n"
+        );
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn mac_linux_only_runtime_modes_fail_before_state_or_preparation() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(directory.path().join("compose.yaml"), "name: mac-modes\nservices:\n  app:\n    image: busybox:1.37.0\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app, exit_code: 0}\n").unwrap();
+    for (args, expected) in [
+        (
+            vec!["run", ".", "--page-timer"],
+            "error: --page-timer and --deferred-tx require Linux KVM; omit them on Mac\n",
+        ),
+        (
+            vec!["run", ".", "--deferred-tx"],
+            "error: --page-timer and --deferred-tx require Linux KVM; omit them on Mac\n",
+        ),
+        (
+            vec!["run", ".", "--checkpoint-at-ns", "1", "--branch-seed", "2"],
+            "error: --checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac\n",
+        ),
+    ] {
+        let output = seedbox(&args, directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(stderr(&output), expected);
+        assert!(output.stdout.is_empty());
+        assert!(!directory.path().join(".seedbox").exists());
+    }
+}
+
 #[test]
 fn page_timer_is_an_opt_in_runtime_flag_and_replay_accepts_no_override() {
     let directory = tempfile::tempdir().unwrap();
@@ -1904,10 +2134,12 @@ fn deferred_tx_help_is_presence_only_and_replay_uses_the_recorded_mode() {
         }
         let output = seedbox(&args, directory.path());
         assert_eq!(output.status.code(), Some(2));
-        assert_eq!(
-            stderr(&output),
+        let expected = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            "error: --page-timer and --deferred-tx require Linux KVM; omit them on Mac\n"
+        } else {
             "error: Compose file no-such.yaml: not found\n"
-        );
+        };
+        assert_eq!(stderr(&output), expected);
     }
     let help = seedbox(&["help", "replay"], directory.path());
     assert!(!String::from_utf8_lossy(&help.stdout).contains("--deferred-tx"));

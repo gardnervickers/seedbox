@@ -36,8 +36,11 @@ unsafe extern "C" {
     fn hv_vcpu_get_sys_reg(cpu: u64, reg: u16, value: *mut u64) -> i32;
     fn hv_vcpu_set_sys_reg(cpu: u64, reg: u16, value: u64) -> i32;
     fn hv_vcpu_set_vtimer_mask(cpu: u64, masked: bool) -> i32;
+    fn hv_vcpu_get_simd_fp_reg(cpu: u64, reg: u32, value: *mut SimdValue) -> i32;
     fn os_release(object: *mut c_void);
 }
+#[repr(C, align(16))]
+struct SimdValue([u8; 16]);
 fn check(op: &str, status: i32) -> Result<()> {
     if status == 0 {
         Ok(())
@@ -272,19 +275,19 @@ impl Backend for Hvf {
     fn get_gic_dist(&self, offset: u16) -> Result<u64> {
         gic_dist(offset)
     }
-    fn run(&mut self) -> Result<Stop> {
+    fn run(&mut self) -> Result<RunStop> {
         if self.pending.is_some() {
             return Err("run before completing held HVF exit".into());
         }
-        let raw = loop {
-            unsafe {
-                check("hv_vcpu_run", hv_vcpu_run(self.cpu()?))?;
-            }
-            let raw = unsafe { *self.exit };
-            if raw.reason != 0 {
-                break raw;
-            } // canceled: no semantic event
-        };
+        unsafe {
+            check("hv_vcpu_run", hv_vcpu_run(self.cpu()?))?;
+        }
+        let raw = unsafe { *self.exit };
+        if raw.reason == 0 {
+            // No architectural instruction is held. In particular a queued
+            // cancel may return without entering at all; never complete PC+4.
+            return Ok(RunStop::Interrupted);
+        }
         if raw.reason == 2 {
             return Err("VTIMER_ACTIVATED: hardware timer leaked into PV guest".into());
         }
@@ -348,7 +351,7 @@ impl Backend for Hvf {
             sign_extend,
             wide,
         });
-        Ok(Stop { pc, exit })
+        Ok(Stop { pc, exit }.into())
     }
     fn complete(&mut self, read: Option<u64>) -> Result<()> {
         let p = self.pending.take().ok_or("no HVF exit to complete")?;
@@ -391,6 +394,97 @@ impl Backend for Hvf {
     fn dirty_pages(&self, _: u32) -> Result<DirtyPages> {
         Ok(DirtyPages::Unsupported)
     }
+    fn state(&self) -> Result<BackendState> {
+        let cpu = self.cpu()?;
+        let mut core = Vec::new();
+        for reg in 0..=34 {
+            let mut value = 0;
+            unsafe {
+                check(
+                    "state hv_vcpu_get_reg",
+                    hv_vcpu_get_reg(cpu, reg, &mut value),
+                )?;
+            }
+            core.push(value);
+        }
+        let mut simd = Vec::new();
+        for reg in 0..32 {
+            let mut value = SimdValue([0; 16]);
+            unsafe {
+                check(
+                    "state hv_vcpu_get_simd_fp_reg",
+                    hv_vcpu_get_simd_fp_reg(cpu, reg, &mut value),
+                )?;
+            }
+            simd.push(value.0);
+        }
+        let mut system = BTreeMap::new();
+        // EL1/EL0 state supported by the macOS 15 API. EL2, SVE, SME, PMU and
+        // architectural timer execution are not exposed by this guest profile.
+        // TVAL is derived from host counter time and is deliberately not read.
+        for reg in [
+            0x8010, 0x8012, 0xc000, 0xc005, 0xc020, 0xc021, 0xc028, 0xc029, 0xc030, 0xc031, 0xc038,
+            0xc039, 0xc03a, 0xc080, 0xc081, 0xc082, 0xc100, 0xc101, 0xc102, 0xc108, 0xc109, 0xc10a,
+            0xc10b, 0xc110, 0xc111, 0xc112, 0xc113, 0xc118, 0xc119, 0xc200, 0xc201, 0xc208, 0xc288,
+            0xc289, 0xc290, 0xc300, 0xc3a0, 0xc510, 0xc518, 0xc600, 0xc681, 0xc684, 0xc708, 0xd000,
+            0xde82, 0xde83, 0xdf19, 0xdf1a, 0xe208, 0xdf11, 0xdf12,
+        ] {
+            system.insert(reg, self.get_sys_reg(SysReg(reg))?);
+        }
+        let dfr = system[&0xc028];
+        for (field, base) in [(12, 0x8004u16), (20, 0x8006u16)] {
+            let count = ((dfr >> field) & 15) + 1;
+            for index in 0..count {
+                for reg in [base + index as u16 * 8, base + index as u16 * 8 + 1] {
+                    system.insert(reg, self.get_sys_reg(SysReg(reg))?);
+                }
+            }
+        }
+        let mut gic_cpu = BTreeMap::new();
+        let mut gic = Vec::new();
+        unsafe {
+            let get_icc: unsafe extern "C" fn(u64, u16, *mut u64) -> i32 =
+                std::mem::transmute(symbol(c"hv_gic_get_icc_reg")?);
+            for reg in [
+                0xc230, 0xc643, 0xc644, 0xc648, 0xc65b, 0xc663, 0xc664, 0xc665, 0xc666, 0xc667,
+            ] {
+                let mut value = 0;
+                check("state hv_gic_get_icc_reg", get_icc(cpu, reg, &mut value))?;
+                gic_cpu.insert(reg, value);
+            }
+            let create: unsafe extern "C" fn() -> *mut c_void =
+                std::mem::transmute(symbol(c"hv_gic_state_create")?);
+            let size: unsafe extern "C" fn(*mut c_void, *mut usize) -> i32 =
+                std::mem::transmute(symbol(c"hv_gic_state_get_size")?);
+            let data: unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32 =
+                std::mem::transmute(symbol(c"hv_gic_state_get_data")?);
+            let state = create();
+            if state.is_null() {
+                return Err("hv_gic_state_create returned null".into());
+            }
+            let result = (|| {
+                let mut len = 0;
+                check("state hv_gic_state_get_size", size(state, &mut len))?;
+                if len == 0 || len > 4 << 20 {
+                    return Err("invalid serialized GIC state size".into());
+                }
+                gic.resize(len, 0);
+                check(
+                    "state hv_gic_state_get_data",
+                    data(state, gic.as_mut_ptr().cast()),
+                )
+            })();
+            os_release(state);
+            result?;
+        }
+        Ok(BackendState {
+            core,
+            system,
+            simd,
+            gic_cpu,
+            gic,
+        })
+    }
 }
 impl Drop for Hvf {
     fn drop(&mut self) {
@@ -417,5 +511,49 @@ mod tests {
         assert_eq!(std::mem::size_of::<HvExit>(), 32);
         assert_eq!(std::mem::offset_of!(HvExit, exception), 8);
         assert_eq!(std::mem::size_of::<Exception>(), 24);
+    }
+    // Selected and signed explicitly by the native primitive check, never
+    // executed by portable tests or unsigned Cargo test discovery.
+    #[test]
+    #[ignore = "requires signed Apple Silicon hypervisor entitlement"]
+    fn canceled_entry_holds_no_instruction_and_preserves_pc() {
+        unsafe extern "C" {
+            fn hv_vcpus_exit(cpus: *const u64, count: u32) -> i32;
+        }
+        let mut backend = Hvf::create().unwrap();
+        let memory = Rc::new(Memory::new(crate::PAGE_SIZE).unwrap());
+        // HVC #0 is a guaranteed finite natural exit once the queued cancel
+        // has returned. It must still execute at the original PC.
+        unsafe {
+            memory.write(0, &0xd400_0002u32.to_le_bytes()).unwrap();
+        }
+        backend.map_memory(0, crate::RAM_BASE, memory).unwrap();
+        backend.create_vcpu().unwrap();
+        backend.set_reg(CoreReg::Pstate, 0x3c5).unwrap();
+        backend.set_reg(CoreReg::Pc, crate::RAM_BASE).unwrap();
+        let cpu = backend.cpu().unwrap();
+        for _ in 0..3 {
+            unsafe {
+                check("test hv_vcpus_exit", hv_vcpus_exit(&cpu, 1)).unwrap();
+            }
+            assert!(matches!(backend.run().unwrap(), RunStop::Interrupted));
+            assert_eq!(backend.get_reg(CoreReg::Pc).unwrap(), crate::RAM_BASE);
+            assert_eq!(
+                backend.complete(None).unwrap_err(),
+                "no HVF exit to complete"
+            );
+        }
+        let RunStop::Guest(stop) = backend.run().unwrap() else {
+            panic!("stale cancellation survived its observed stop");
+        };
+        assert_eq!(stop.pc, crate::RAM_BASE);
+        assert!(matches!(stop.exit, Exit::Hvc { imm: 0 }));
+        assert_eq!(backend.get_reg(CoreReg::Pc).unwrap(), crate::RAM_BASE + 4);
+        assert!(backend
+            .run()
+            .unwrap_err()
+            .contains("before completing held HVF exit"));
+        backend.complete(None).unwrap();
+        assert_eq!(backend.get_reg(CoreReg::Pc).unwrap(), crate::RAM_BASE + 4);
     }
 }

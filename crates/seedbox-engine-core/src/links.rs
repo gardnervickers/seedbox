@@ -162,7 +162,8 @@ impl Links {
             }
         }
     }
-    #[cfg(test)]
+    /// Advance both named streams for deterministic diagnostics and acceptance.
+    #[doc(hidden)]
     pub fn stream_sample(&mut self, pair: Pair) -> (u64,u64) {
         (self.loss.get_mut(&pair).unwrap().next(),self.jitter.get_mut(&pair).unwrap().next())
     }

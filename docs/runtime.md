@@ -31,7 +31,7 @@ next action before T. Charged I/O may still owe time: its response and device
 effect are already committed, and restoring keeps the debt without repeating
 the effect. Boot forks still require every machine parked.
 
-The CLI and engine share `crates/seedbox-vmm/src/checkpoint.rs`. Parent identity
+The CLI and engine share `crates/seedbox-engine-core/src/checkpoint.rs`. Parent identity
 uses the versioned `seedbox-world-parent-v2` domain, config with checkpoint
 metadata removed, kernel/initrd/disk paths replaced by content hashes, engine
 hash, timebase and parent seed. An enabled page timer adds an explicit semantic
@@ -164,14 +164,44 @@ From the repository root:
 nix develop
 bash kernel/build.sh
 cargo build --release --locked
-cargo build-vmm
 ```
 
-`cargo build-vmm` builds the VMM in its own workspace with its own lockfile, so
-the engine binary, and the engine hash recorded in every run, does not depend on
-which cargo command built it or what else was built with it. It still depends on
-the toolchain, `RUSTFLAGS` and the checkout's absolute path, which debug
-information embeds.
+A maintainer can instead run `bash tools/linux-runtime/build-cli.sh` in that
+shell to include the x86-64 guest kernel, supervisor, BusyBox and mke2fs in the
+release executable. The package includes license notices and source/build
+provenance. The existing pinned kernel/supervisor builders produce these assets;
+no compiler or guest-asset download is invoked at runtime. Skopeo, umoci and the
+Docker-compatible builder remain host preparation dependencies. See
+[the Linux package workflow](../tools/linux-runtime/README.md). Linux package
+execution and reproducibility remain final merge-train checks.
+
+The platform VMM is linked into `seedbox`; ordinary runtime commands do not
+compile or find a separate executable. `cargo build-vmm` and `cargo test-vmm`
+remain isolated standalone aliases for low-level fixtures. Their compiler
+wrapper remaps build paths and removes the shell's synthetic checkout RPATH.
+The linked executable uses the workspace lockfile and has its own engine identity.
+
+New profiles record simulator version, host and guest architectures, backend,
+`engine_timebase = "counter-pv-v1"` (the worker clock capability) and an explicit
+internal-worker contract. The separate `timebase` parameter selects PV; counter
+remains represented by omission, as for standalone engines. The content store retains
+the complete executable, including its signature on macOS. Replay launches that
+retained executable with the saved contract and metadata, without replacing its
+version with the installed CLI's version. No manifest or bundle format changes
+are needed. Historical profiles with no descriptor still invoke their retained
+standalone VMM directly. Unknown executable kinds fail before execution;
+recorded platform and version metadata do not restrict development replay. Every built engine and guest kernel is admitted, with
+exact bytes retained for replay; `--allow-dev-engine` is a compatibility no-op.
+Native execution and witness equivalence still need host evidence. Apple Silicon
+also supports the native development ARM Compose backend described below.
+
+Development versions carry the Git source commit (`0.1.0-dev+COMMIT`) and a
+`.dirty` suffix for staged or unstaged tracked changes. Missing or malformed source revisions
+report `-dev+unknown`; a matching release tag with no tracked changes
+is required for a release label. Untracked build inputs remain covered by
+retained hashes. This readable label does not replace exact retained bytes or
+qualify a new runtime. The Mac maintainer build propagates source provenance into
+its exported Linux helper without copying Git history.
 
 The `seedbox` build embeds the static guest supervisor from `guest/compose-init.c`,
 compiled with the shell's musl compiler (`SEEDBOX_STATIC_CC`, or `musl-gcc`).
@@ -180,7 +210,7 @@ example the output of `bash guest/build-compose.sh FILE`.
 
 Preparation requires `skopeo`, `umoci`, and a Docker-compatible builder (the shell
 supplies Podman). Rootful unpacking preserves image ownership and modes. Run on
-the supported Linux amd64 host; Darwin is for configuration and portable tests.
+the supported Linux amd64 host, or use the packaged private preparation VM on Mac.
 
 `skopeo` selects Linux amd64 and copies the original platform-specific manifest
 and blobs with preserved digests. Seedbox verifies descriptor hashes and sizes,
@@ -232,6 +262,41 @@ guarantee or an image reproducibility guarantee.
 
 ## Preparation, execution, and replay
 
+Apple Silicon uses the native development HVF application backend. Enter
+`nix develop` and run `bash tools/mac-runtime/build-cli.sh` to produce the signed
+CLI with its ARM kernel, static helpers and Linux preparation tools embedded.
+Use `target/release/seedbox run PROJECT` and
+`target/release/seedbox replay RUN`, without host root or
+separate binary paths. The owned preparation VM stops before HVF execution;
+replay never starts it. Runtime commands never invoke Rust. See
+[the full Mac workflow](../tools/mac-runtime/README.md).
+
+Mac profiles retain their own executable descriptor, ARM boot placement,
+PV entropy/timer policy, guest-kernel hash and HVF CPU/OS observations.
+Full-state capture includes native CPU/SIMD/GIC state and application devices.
+Reports must match the actual application inputs and supported guest shape.
+HVF CPU/OS observations are diagnostic data; missing or changed observations
+and old qualification markers do not block replay. Live execution still probes
+the HVF capabilities it needs.
+Connection discovery/selectors and committed console triggers use the shared
+coordinator on Mac. Console matching observes future bytes at their first
+committed stop. Both backends retain committed-time console and management
+indexes for `seedbox logs`, including time filters and bundle transfer. Per-page
+RAM evidence remains Linux-only; Mac retains whole-state hashes. Full arbitrary ARM
+snapshot/restore and release from a deterministic time park remain unsupported.
+
+This remains unqualified development evidence. ARM images, 64..3072 MiB per
+guest and one exploration worker are required; PMU/core options apply to Linux.
+The supervisor defaults `GOMAXPROCS` to the guest's online CPU count (one for
+the generated etcd example), while preserving explicit overrides. New ARM
+profiles park initial guests at the shared launch barrier, then release them
+at seeded per-name offsets capped by `min(1 ms, network lookahead)`. The cap
+keeps causal packets and RPC triggers from preceding the latest release, and
+the phase stays within the existing absolute simulated-time limit. The numeric
+`arm_launch_max_skew_ns` cap is retained as data and defaults to 1 ms for new
+runs; replay clips it to network lookahead. `initial_launch` records the release
+evidence. Profiles without a numeric cap keep their earlier release behavior.
+
 After building the binaries above, as root with the Nix tools on PATH
 (`sudo -E env PATH="$PATH" ...` from the Nix shell):
 
@@ -246,14 +311,27 @@ seedbox=./target/release/seedbox
 ```
 
 Every input has a default; `seedbox help run` lists them with their overrides.
-The kernel is found in `$SEEDBOX_ARTIFACTS`, `$SEEDBOX_WORK/artifacts`,
-`./artifacts` or `~/seedbox-sim/artifacts` (also in the invoking user's home
-under sudo). The VMM is found next to an installed `seedbox`, then in this
-checkout's `cargo build-vmm` output, then on `PATH`. A `seedbox` inside cargo's
-`target/` directories, like the one above, uses the `cargo build-vmm` output.
-The guest supervisor is built into `seedbox`, and BusyBox comes from
-`SEEDBOX_BUSYBOX`. A missing input fails before preparation starts and names
-every location searched.
+On Linux, explicit flags and their `SEEDBOX_*` path overrides take precedence.
+The kernel then searches configured `$SEEDBOX_ARTIFACTS` and
+`$SEEDBOX_WORK/artifacts`, the packaged kernel, `./artifacts`, and
+`~/seedbox-sim/artifacts` (also in the invoking user's home under sudo).
+A missing configured directory preserves the development search; an explicit
+missing `--kernel` fails immediately. For the supervisor, BusyBox and mke2fs,
+packaged bytes precede the existing compiled-in supervisor or static tools on
+PATH. Unbundled development builds keep those existing fallbacks. A package
+integrity error is reported instead of silently selecting unrelated files.
+
+Package validation and extraction use a private temporary directory held through
+preparation and input retention, then removed on success, error or cancellation.
+Doctor uses the same kernel selection and validates the package while extracting
+only the kernel; it creates no state directory and performs no OCI preparation.
+Random temporary paths do not enter run identity: retained bytes do. Replay
+continues to use the recorded executable, kernel and initramfs exclusively;
+missing or corrupt retained inputs never fall back to the installed package.
+
+The VMM defaults to the engine linked into `seedbox`; `--vmm` explicitly selects
+the legacy standalone contract. A missing input fails before preparation starts
+and names every location searched.
 
 Zen execution performs host admission before OCI work: an AMD x86-64 CPU with the
 KVM and perf capabilities the engine needs (see
@@ -419,6 +497,10 @@ record's `engine_qualification` parameter is kept as data and does not block rep
 
 Replay defaults to the retained engine. An explicit `--vmm NEW_BINARY
 --allow-engine-change` permits a fresh identity and witness comparison with it.
+The replacement is probed once for its launch contract: a combined Seedbox CLI
+uses its internal worker entrypoint, while a standalone VMM receives worker flags
+directly. The new run retains that contract; ordinary replay uses it without
+probing. Memory, clock, fault and other simulation settings remain unchanged.
 Replay does not require registry access, a builder, or the original Compose files.
 
 Run exits are 0 for PASS, 1 for FAIL, 2 for ERROR, 3 for INCOMPLETE, and 124 for

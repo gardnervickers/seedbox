@@ -1,6 +1,9 @@
 # Seedbox simulation example
 
-This project is self-contained. The etcd and Redis templates passed real workloads,
+This project is self-contained. Use the same commands on Linux x86-64 KVM or
+Apple Silicon HVF after building the packaged CLI for that platform. Linux
+execution requires root and KVM access; Mac execution uses the current user.
+The etcd and Redis templates passed real workloads,
 intentional failure controls, and exact replays on the supported Linux amd64 AMD Zen
 workstation with the controlled Seedbox kernel and 1024 MiB RAM per service.
 See the repository's `docs/acceptance.md` for the tested image/kernel hashes.
@@ -16,18 +19,27 @@ in a Dockerfile and describes three registry-image members in Compose. The Redis
 template builds a dependency-free Rust workload that checks PING, SET acknowledgements,
 and exact GET values. Both use the Rust Seedbox configuration/orchestration APIs.
 
-On the supported Linux amd64 host, after building Seedbox in `nix develop`,
-from this directory:
+From this directory, with the packaged `seedbox` executable on `PATH`:
 
 ```sh
 seedbox validate
+seedbox doctor
 seedbox run
-seedbox run --timebase pv
-seedbox explore --count 2 --timebase pv
 seedbox inspect .seedbox/runs/ATTEMPT --json
+seedbox logs .seedbox/runs/ATTEMPT --machine client --stream console
 seedbox replay .seedbox/runs/ATTEMPT
 seedbox diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
+seedbox explore --count 2
 ```
+
+The Linux maintainer build `bash tools/linux-runtime/build-cli.sh` from the
+Seedbox checkout includes the guest kernel, supervisor, BusyBox and mke2fs in
+one executable. Explicit runtime-input flags and their environment path overrides
+still win. Configured artifact directories precede the packaged kernel;
+packaged assets precede incidental checkout/home/PATH defaults. Skopeo, umoci
+and the image builder remain installed preparation tools. Unbundled developer
+builds keep the existing input search. Package execution on Linux remains a
+final merge-train check. Replay uses only retained inputs after an upgrade.
 
 On a VMM failure, text output from `run`, `replay`, `explore` and `inspect`
 prints up to five non-empty lines from the final 8 KiB of the attempt's
@@ -35,20 +47,45 @@ prints up to five non-empty lines from the final 8 KiB of the attempt's
 logs do not change the outcome; retained records and `--json` output are unchanged.
 `inspect` keeps the recorded `error:` line on stdout alongside the run status.
 
-Preparation unpacks images with root ownership and runs before the execution CPU
+On Linux, preparation unpacks images with root ownership and runs before the execution CPU
 lease. Admission briefly checks an eligible core first and releases all temporary
 resources before preparation.
-`run` picks a free CPU and finds the guest kernel and VMM by default; see
+`run` picks a free CPU, finds the guest kernel and uses its linked VMM; see
 `seedbox help run`. Run/replay must be invoked with the required KVM/MSR access;
 see the repository's `docs/runtime.md` for setup and limits. `--margin` and
 `--undo` control PMU approach and stepping performance without changing results.
+`seedbox --version` reports the simulator version. New runs retain the whole
+executable for replay, so an installed CLI upgrade does not replace the recorded
+engine. No separate VMM build or runtime compiler invocation is needed. Every
+built engine and guest kernel is admitted; `--allow-dev-engine` remains a
+compatibility no-op. Native replay evidence remains separate.
+Apple Silicon builds also support native ARM Compose execution through the shared
+world coordinator, including connection selectors and committed console triggers.
+Arbitrary ARM snapshot/fork reuse remains unsupported. Build once with
+`nix develop` and `bash tools/mac-runtime/build-cli.sh` from the Seedbox checkout.
+The signed CLI packages the ARM kernel and static helpers and automatically owns
+a Linux VM for preparation with Skopeo/umoci/Podman. That VM stops before native
+HVF execution; replay uses only retained bytes and never starts it. No runtime
+compiler or extra VMM path is needed.
+Images must support `linux/arm64`, RAM is limited to 3072 MiB per guest, and
+exploration is serial. CPU/PMU flags apply to Linux. Mac profiles have distinct
+PV time, boot-layout and device inputs. HVF host observations are diagnostics
+and do not restrict replay.
+The supervisor defaults Go workers to the guest's CPU count (one in the etcd
+template), while preserving an explicit `GOMAXPROCS` value.
+New Mac profiles release initial guests through a seeded launch barrier, with
+per-service offsets capped by a retained numeric value (1 ms by default) and
+network lookahead. Replay uses that value and remains inside the configured
+absolute simulated-time limit.
+The native PV backend requires cooperative guest boundaries; four Go workers
+stalled in the Mac example and are not validated.
 `--torn-writes` opts into seeded partial survival of unflushed 512-byte disk
 sectors on machine crash (off by default). It is part of run identity and replay
 restores it automatically. It applies only to retained disks; this template
 currently uses RAM-backed storage. See `docs/runtime.md` for the disk contract.
 
 `run`, `prepare` and `explore` accept `--timebase counter|pv` to choose
-semantic guest progress (default `counter`), with no environment override. Counter counts retired guest branches; PV compute
+semantic guest progress (default `counter` on Linux; Mac uses only PV), with no environment override. Counter counts retired guest branches; PV compute
 between exits costs no virtual time, and time advances at guest exits, syscalls
 and clock reads. The choice changes run identity and results. Counter is omitted
 from semantic parameters to preserve existing identities; PV is retained as
@@ -155,8 +192,8 @@ See the repository's `docs/runtime.md` for bounded preparation evidence and limi
 To share a retained run, use `seedbox export .seedbox/runs/ATTEMPT -o run.seedbox.tar`.
 On Linux or macOS, `seedbox import run.seedbox.tar --state imported` prints a new run
 directory that `seedbox inspect` can read. Replay that directory with
-`seedbox replay IMPORTED_RUN --state imported` on the qualified AMD Linux host
-using a compatible installed Seedbox release. No original checkout, registry or
+`seedbox replay IMPORTED_RUN --state imported` on a compatible host for the
+recorded backend, using a compatible installed Seedbox release. No original checkout, registry or
 image rebuild is needed. Bundles preserve retained logs and visible omissions;
 output omitted by the original capture policy is not transferred. Export/import
 never replace existing data; the default transfer cap is 32 GiB for unique objects
@@ -188,8 +225,8 @@ Run/replay check that the host has the KVM and perf capabilities the engine
 needs; CPU model, microcode, CPUID, engine and kernel bytes are not pinned.
 Passing on a second machine is not cross-host qualification.
 
-Check the host and installed engine/kernel with `seedbox doctor` (Linux KVM,
-root) before running. It uses the normal CPU/runtime defaults without building,
+Check the host and installed engine/kernel with `seedbox doctor` (Linux KVM as
+root, or Apple Silicon Mac as the current user) before running. It uses the normal CPU/runtime defaults without building,
 preparing images or starting guests. `VALID` means execution-profile compatibility,
 not cross-host replay qualification; `--json` shows the admitted observations.
 
@@ -207,7 +244,8 @@ Compare two retained run directories on Linux or macOS with `seedbox diff RUN_A
 RUN_B [--json]`. Import bundles first. Diff reports world and machine witnesses,
 changed identity/semantic fields, full-state parts such as RAM and disk, and the
 first differing retained trace or terminal record (including state parts).
-`seedbox run --full-state` retains per-page RAM evidence for diff and replay diagnostics; see [docs/runtime.md](https://github.com/gardnervickers/seedbox/blob/main/docs/runtime.md#compare-retained-runs).
+`seedbox run --full-state` compares whole-machine state; Linux additionally retains
+per-page RAM evidence for diff and replay diagnostics. See [docs/runtime.md](https://github.com/gardnervickers/seedbox/blob/main/docs/runtime.md#compare-retained-runs).
 Ordinary runs do not retain exit traces; terminal times cannot locate an
 earlier divergence. Missing evidence and omissions stay explicit. Exit 0 MATCH
 means equality of compared evidence, not replay qualification; DIFFERENT exits 1,

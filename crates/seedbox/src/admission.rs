@@ -77,6 +77,7 @@ pub const ENGINE_QUALIFICATION: &str = "engine_qualification";
 
 pub fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
     crate::vmm::recorded_counter(profile)?;
+    crate::vmm::recorded_deferred_tx(profile)?;
     let policy = required_policy();
     for (name, value) in [
         ("guest_abi", &policy.guest_abi),
@@ -152,7 +153,7 @@ fn validate_fields(o: &CoreObservation, require_perf: bool) -> Result<()> {
 }
 
 // Retain static observations on refusal; no perf event is attempted until every
-// static field (including complete ordered CPUID) is valid. Final validation uses
+// static capability is valid. Final validation uses
 // that same order, so an unattempted event cannot conceal the original failure.
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
 fn probe_disabled_perf<T>(

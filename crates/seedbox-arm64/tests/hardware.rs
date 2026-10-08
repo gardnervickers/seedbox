@@ -216,6 +216,25 @@ fn hvf_cpu_features() {
     cpu_features::<seedbox_arm64::backend::hvf::Hvf>();
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+#[ignore = "requires signed test executable and macOS 15+ HVF"]
+fn hvf_stopped_state() {
+    use seedbox_arm64::backend::{hvf::Hvf, CoreReg};
+    let mut backend = Hvf::create().unwrap();
+    backend.create_vcpu().unwrap();
+    seedbox_arm64::machine::configure_cpu_features(&mut backend).unwrap();
+    backend.set_reg(CoreReg::X(3), 0x12345678).unwrap();
+    let first = backend.state().unwrap();
+    let second = backend.state().unwrap();
+    assert_eq!(first, second, "stopped state must not contain host time");
+    assert_eq!(first.core[3], 0x12345678);
+    assert_eq!(first.simd.len(), 32);
+    assert!(!first.gic.is_empty());
+    backend.set_reg(CoreReg::X(3), 9).unwrap();
+    assert_ne!(first, backend.state().unwrap());
+}
+
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 #[test]
 #[ignore = "requires arm64 KVM/vGICv3"]

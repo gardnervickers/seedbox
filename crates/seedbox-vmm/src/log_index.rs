@@ -51,20 +51,18 @@ impl Index {
     /// Close the burst and flush at every world-slice return, including errors.
     pub fn finish(&mut self) {
         self.close();
-        if let Some(file)=self.file.as_mut() {if file.flush().is_err() {self.failed=true;}}
+        if self.file.as_mut().is_some_and(|file|file.flush().is_err()) {self.failed=true;}
     }
     pub fn capture(&mut self,end:u64,time:u64,incarnation:u32,order:&mut u64) {
         if end<=self.seen {return;}
         let offset=self.seen;
         self.seen=end;
-        if !self.failed && self.pending {
-            if let Some(last)=self.records.last_mut() {
+        if let Some(last)=self.records.last_mut().filter(|_|!self.failed && self.pending) {
                 // Only the latest machine-wide burst can grow. Keep its first
                 // byte's time even when later bytes advance time in this slice.
                 if last[1]==incarnation as u64 && last[2].checked_add(1)==Some(*order) && last[3]+last[4]==offset {
                     last[4]=end-last[3];return;
                 }
-            }
         }
         self.close();
         let record=[time,incarnation as u64,*order,offset,end-offset];

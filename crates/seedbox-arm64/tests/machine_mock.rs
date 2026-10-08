@@ -8,6 +8,7 @@ struct Fake<
     const HIDE_DEBUG: bool = false,
     const DEBUG_READ: bool = false,
     const UNKNOWN_DEBUG: bool = false,
+    const INTERRUPTIONS: u32 = 0,
 > {
     step: usize,
     regs: [u64; 34],
@@ -19,6 +20,7 @@ struct Fake<
     dfr0: u64,
     ignore_feature_write: bool,
     reject_feature_write: bool,
+    interruptions_left: u32,
 }
 impl<
         const D: u64,
@@ -28,7 +30,8 @@ impl<
         const H: bool,
         const R: bool,
         const U: bool,
-    > Backend for Fake<D, C, T, I, H, R, U>
+        const J: u32,
+    > Backend for Fake<D, C, T, I, H, R, U, J>
 {
     fn create() -> Result<Self> {
         Ok(Self {
@@ -42,6 +45,7 @@ impl<
             mmfr0: 0x0100_1000_0000_0023,
             ignore_feature_write: false,
             reject_feature_write: false,
+            interruptions_left: J,
         })
     }
     fn map_memory(&mut self, slot: u32, _: u64, m: Rc<Memory>) -> Result<()> {
@@ -111,11 +115,17 @@ impl<
         }
         Ok(())
     }
-    fn run(&mut self) -> Result<Stop> {
+    fn run(&mut self) -> Result<RunStop> {
         assert_eq!(self.mmfr0, 0x0000_1000_0000_0023);
         assert_eq!(self.mpidr, 0x8000_0000);
         assert_eq!(self.dfr0, 0x10305006);
         assert!(!self.held);
+        if self.step == 4 && self.interruptions_left != 0 {
+            // last already reached the timer deadline at step 2, but only the
+            // next natural exit may reconcile it. These stops own no I/O.
+            self.interruptions_left -= 1;
+            return Ok(RunStop::Interrupted);
+        }
         self.held = true;
         let mmio = |addr, data| Exit::Mmio {
             addr,
@@ -188,7 +198,8 @@ impl<
         Ok(Stop {
             pc: 0x40080000 + self.step as u64 * 4,
             exit,
-        })
+        }
+        .into())
     }
     fn complete(&mut self, _: Option<u64>) -> Result<()> {
         assert!(self.held);
@@ -343,4 +354,38 @@ fn topology_and_pmu_require_exact_readback() {
         backend.reject_feature_write = true;
         assert!(configure_cpu_features(&mut backend).is_err());
     }
+}
+
+#[test]
+fn host_interruptions_leave_pending_timer_time_io_and_witness_unchanged() {
+    fn run<const N: u32>() -> (seedbox_arm64::witness::Report, usize) {
+        let mut kernel = [0; 64];
+        kernel[56..60].copy_from_slice(b"ARM\x64");
+        kernel[16..24].copy_from_slice(&4096u64.to_le_bytes());
+        let mut entries = 0;
+        let report =
+            Machine::<Fake<0, 0, 0, false, false, false, false, N>>::new(&kernel, b"cpio", 1)
+                .unwrap()
+                .run(|| entries += 1)
+                .unwrap();
+        (report, entries)
+    }
+    let (baseline, entries) = run::<0>();
+    fn compare<const N: u32>(baseline: &seedbox_arm64::witness::Report, entries: usize) {
+        let (interrupted, actual_entries) = run::<N>();
+        assert_eq!(
+            actual_entries,
+            entries + N as usize,
+            "every interruption must return through the caller liveness hook"
+        );
+        assert_eq!(interrupted.trace, baseline.trace);
+        assert_eq!(interrupted.virtual_ns, baseline.virtual_ns);
+        assert_eq!(interrupted.exits, baseline.exits);
+        assert_eq!(interrupted.witness, baseline.witness);
+        assert_eq!(interrupted.ram_hash, baseline.ram_hash);
+        assert_eq!(interrupted.console_hash, baseline.console_hash);
+    }
+    compare::<1>(&baseline, entries);
+    compare::<31>(&baseline, entries);
+    compare::<1025>(&baseline, entries);
 }

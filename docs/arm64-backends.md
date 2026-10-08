@@ -2,8 +2,10 @@
 
 `crates/seedbox-arm64` and `kernel-arm64` are isolated from the production x86
 engine. The [quickstart below](#experimental-arm64-quickstart)
-contains Mac setup and input verification. This is a single-CPU fixture backend,
-not Compose application support.
+contains Mac fixture setup and input verification. The library also provides
+an application personality connected to the shared world coordinator. The public
+Compose CLI selects this native backend on Apple Silicon; the standalone
+quickstart below continues to run the isolated fixture.
 
 ## Application groundwork
 
@@ -23,18 +25,32 @@ fixture addresses, command line and FDT bytes. Portable tests freeze those
 bytes, reject overlapping or out-of-range inputs before VM creation, and
 check an automatically placed 20 MiB archive with a mock backend.
 
-`PvClock::set_horizon` provides the clock primitive for a future world
+`PvClock::set_horizon` provides the clock primitive for the application world
 scheduler. A finite horizon limits publication, yields and idle jumps;
 reaching it leaves future timers armed and produces no timer interrupt.
 Invalid updates or guest timestamps beyond that horizon fail without
 changing the clock. `None` retains the fixture's original policy. Callers
 must stop the guest before changing its horizon.
 
-The machine run loop does not yet accept world horizons. Initial PV-handshake
-clock reconciliation, cooperative machine stops, network/control/disk devices,
-multi-process HVF workers, guest supervisor support and retained-run integration
-remain work for Compose execution. The CLI still runs only the isolated
-fixture. Same-input native HVF fixture regression passes at `d9dc6f5`: all
+`Machine::run_until` reconciles the initial handshake, republishes clock bounds
+and returns a cooperative stop at the horizon without consuming a future timer.
+The application personality adds virtio network, control console and optional
+block devices. The shared coordinator serializes one native worker per machine
+through stamped, validated stopped observations; no ARM scheduler loop is duplicated.
+The [coordinator contract](world-coordinator.md) defines effect ordering, process
+cleanup and unsupported snapshot/fork operations. Crash and
+reboot retain the disk's surviving sectors and give each incarnation its own
+seeded entropy. Host process scheduling never advances virtual time.
+
+Application evidence records boot layout, kernel/archive hashes, timer policy
+and actual control-channel transfers. Full-state mode covers RAM, CPU/SIMD/GIC,
+clock, UART and device state. The world records its horizons and pending network
+and control state; it cannot emit the fixture's format-1 report. The application
+kernel uses a dedicated supervisor device accessible only to PID 1, with no raw
+physical-memory mapping. Build it with `kernel-arm64/build.sh --application`.
+
+The standalone CLI still runs only the isolated fixture. Same-input native HVF
+fixture regression passes at `d9dc6f5`: all
 eight CLI and hardware-suite boots match #120's complete same-seed witnesses,
 including host load and randomized entry sleeps. The application layout and
 finite horizon APIs retain portable/mock coverage. [PR #129](https://github.com/gardnervickers/seedbox/pull/129)
@@ -149,6 +165,19 @@ x86 VMM here.
 
 ### Exit and completion semantics
 
+`Backend::run` returns `RunStop::Guest(Stop)` or `RunStop::Interrupted`.
+HVF cancellation and ARM KVM INTR/EINTR return to the machine owner without a held
+instruction. The machine re-enters through its liveness hook without reading or
+publishing PV time, injecting IRQs, spending the guest-exit budget, completing an
+instruction or recording a witness event. The backend does not infer a watchdog
+cause from cancellation, and queued cancellation may return without guest entry.
+This plumbing introduces no asynchronous watchdog or ARM cycle-proof enablement.
+Run the signed native queued-cancellation check with
+`nix develop --command python3 tools/mac-runtime/check-primitives.py`. It copies
+the test binary before signing, bounds guest execution to 20 seconds, and removes
+the signed copy afterward. Portable machine tests cover repeated interruptions
+with a pending timer and the last available semantic exit-budget slot.
+
 `Exit` includes `Mmio { addr, len, write, data, reg }`, `Hvc { imm }`, `Wfi`,
 `SysReg` and `Other(raw)`. `Stop.pc` always identifies the trapping instruction.
 HVC APIs report the next PC; both adapters subtract four for the recorded stop
@@ -228,8 +257,12 @@ Clockevent u64 writes: offset 0 arms an absolute deadline (zero cancels); 8
 acknowledges and lowers the IRQ; 16 declares idle; 24 yields at the published
 clock bound; 32 performs the ABI-2 handshake. Idle with an armed deadline jumps
 to it and raises SPI 40 while stopped. New IRQ assertions require PSTATE.I to
-be clear. Masked level assertions are retained in Machine and delivered at the
-next unmasked semantic exit; deassertions cancel any queued assertion. Debug
+be clear and no other source to be asserted. Machine retains other level
+assertions until the active source deasserts and an unmasked semantic exit occurs;
+it drains one pending source in interrupt-ID order. Deassertions cancel any
+queued assertion. This prevents a second hardware-pending IRQ from skidding
+after the first handler unmasks, which would change the interrupted PC and
+Linux interrupt entropy state. Full-state evidence includes the asserted source. Debug
 unlock completions do not flush pending lines. The idle helper unmasks IRQs and
 executes ISB before the MMIO rendezvous, then restores its incoming mask.
 A polling yield restores and unmasks IRQs, executes ISB, writes event+24, then

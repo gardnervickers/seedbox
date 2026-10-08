@@ -1,6 +1,5 @@
-# Run from the repository root. The VMM is its own workspace (see
-# crates/seedbox-vmm/Cargo.toml) and builds into crates/seedbox-vmm/target,
-# where a `seedbox` run from this checkout finds it.
+# Run from the repository root. These isolated standalone engines support
+# low-level fixtures. The public CLI links its platform engine directly.
 [alias]
 # Apply the wrapper to these invocations and their dependencies only.
 # Do not move it (or target-dir) into [build]: other engines have separate identities.
@@ -8,3 +7,8 @@ build-vmm = "build --release --locked --manifest-path crates/seedbox-vmm/Cargo.t
 test-vmm = "test --release --locked --manifest-path crates/seedbox-vmm/Cargo.toml --target-dir crates/seedbox-vmm/target --config build.rustc-wrapper='harness/vmm-rustc.py'"
 build-arm64 = "build --release --locked --manifest-path crates/seedbox-arm64/Cargo.toml --target-dir crates/seedbox-arm64/target"
 test-arm64 = "test --release --locked --manifest-path crates/seedbox-arm64/Cargo.toml --target-dir crates/seedbox-arm64/target"
+
+# Build-only checkout input for shared-source package watchers. Cargo otherwise
+# reuses relative dep-info across worktrees even when older sources differ.
+[env]
+SEEDBOX_BUILD_ROOT = { value = ".", relative = true, force = true }

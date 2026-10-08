@@ -28,8 +28,8 @@ cargo run -- validate etcd-demo --json
 cargo run -- inspect .seedbox/runs/<attempt> --json
 ```
 
-The crate is independent of the Linux-only VMM crate and builds on the flake's
-Darwin and Linux development hosts. The workspace lockfile is checked in. Validation
+The CLI links the platform VMM through target-specific dependencies and builds
+on the flake's Darwin and Linux development hosts. The workspace lockfile is checked in. Validation
 does not start guests, access registries, build images, or acquire a host lease.
 It does check the existence of referenced local Dockerfiles and config files.
 `--json` prints the resolved environment, so its output may contain values the

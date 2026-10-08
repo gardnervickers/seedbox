@@ -7,14 +7,34 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 ## Workspace
 
 - `crates/seedbox` is the default package: `cargo run -- <command>` runs the CLI.
+  Use `cargo run --release -- <command>` or the release executable for guest runs;
+  the bundled engine uses the CLI build profile.
+- Linux x86-64 asset builds use `bash tools/linux-runtime/build-cli.sh` inside
+  `nix develop`. The optional `SEEDBOX_LINUX_RUNTIME_BUNDLE` build input embeds
+  only guest kernel/static helpers plus notices/provenance. Runtime extraction
+  stays bounded and private, with an owned lifetime through input retention.
+  CLI resolution owns environment lookup; the library receives explicit inputs.
+  Doctor extracts only the selected kernel and never creates state/prepares
+  images. Replay must not substitute installed package bytes for retained inputs.
+  Linux package execution/reproducibility requires the final merge train.
+- Apple Silicon application builds use `bash tools/mac-runtime/build-cli.sh`
+  inside `nix develop`. It packages the audited ARM kernel, static helpers and
+  Linux preparation tools into the signed CLI. Runtime preparation owns a
+  private Lima VM and stops it before native HVF execution; replay must never
+  start that VM or invoke Cargo. Mac application profiles use `arm64-world-v1`
+  with their actual guest inputs and diagnostic HVF host observations. CLI
+  platform selection lives in `cli/backends.rs`; the library
+  receives explicit inputs and cancellation.
 - `crates/seedbox-vmm` is Linux-only and deliberately **not** a workspace member.
   It is its own workspace with its own `Cargo.lock`, because cargo unifies
-  dependency features across one build: building it alongside other crates
-  would change its binary, and so the engine hash of every run. Build and test
-  it from the repository root with the aliases in `.cargo/config.toml`:
+  dependency features across one build. The public CLI links its library only
+  on Linux x86-64 and retains the complete CLI executable as the new engine.
+  Standalone low-level fixtures keep a separate lockfile and identity. Build
+  and test those from the repository root with the aliases in `.cargo/config.toml`:
   `cargo build-vmm` and `cargo test-vmm`. Both already pass `--locked`; adding
-  it again is an error. It builds into `crates/seedbox-vmm/target`, where a
-  `seedbox` run from the checkout finds it. Don't set a global
+  it again is an error. It builds into `crates/seedbox-vmm/target`. Public
+  runtime commands never invoke Cargo or search for a separate VMM by default.
+  Don't set a global
   `target-dir` in `.cargo/config.toml`: cargo applies it by current directory,
   so it would also move standalone crate builds and break their scripts.
   These two aliases select `harness/vmm-rustc.py` for path remapping and removal
@@ -36,18 +56,77 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   acceptance uses `seedbox run` / `seedbox replay` directly; do not add a host
   scenario runner. `kernel/` and `guest/` hold guest build inputs.
 
+## Shared engine policies, queues and transport
+
+`crates/seedbox-engine-core` owns deterministic RNG, disk, links, connection,
+trigger, fault, control and network-counter policies, plus bounded split-ring
+validation/completion, modern virtio MMIO register transitions and console/block/network models. It has no CPU backend or
+UART dependency. Adapters pass actual transmitted bytes to its management framer;
+legacy PC divisor-register writes remain in `seedbox-vmm/src/management_uart.rs`.
+Keep mechanical policy moves separate from behavioral changes.
+
+Queue adapters supply the guest physical RAM base and retain their existing
+length, direction and diagnostic policy. ARM queue field names and serialization
+order remain part of retained state evidence. KVM console and block completion
+feed every used-ring write to their existing dirty-range journals; do not drop
+or reorder those entries. The shared MMIO transport serves ARM devices and KVM
+console/block/network; its compatibility profiles are documented in
+`docs/virtio-transport.md`. Preserve error precedence, cursor resets and the
+explicit ARM state projection. Adapters handle typed Notify/Reset effects and
+retain model-reset ownership. The shared console owns handshake, backlogs, counters
+and queue processing; adapters supply GPA base, dirty callbacks and event projection.
+Preserve partial-error mutation and IRQ timing documented in `docs/virtio-console.md`.
+The shared block model owns request decoding, disk effects and DMA, with descriptor
+profiles and partial-error semantics in `docs/virtio-block.md`. Use explicit disk
+and statistics accessors in platform callers.
+The shared network model owns packet DMA, backlogs and counters; preserve the
+profile-specific admission, partial-error and IRQ order in `docs/virtio-network.md`.
+The core PV progress engine owns watchdog policy and cycle proof; architecture
+adapters supply stepping and complete comparison primitives. Preserve the
+proof/diagnostic boundary in `docs/progress-proof.md`; ARM support must not assume
+a PMU or treat an unsupported dirty log as proof that RAM is unchanged.
+The shared world coordinator owns scheduling, routing, control/trigger/fault
+ordering, lifecycle policy and world snapshots. Machine adapters embed its single
+`MachineState` and supply stopped execution and physical lifecycle operations.
+Keep hard limits exact, including owed I/O; preserve the lifecycle commit sites
+relative to fallible architecture actions. See `docs/world-coordinator.md`.
+ARM uses this same coordinator through stopped, stamped worker primitives; no
+second world scheduler belongs in the worker. Cold run/replay require no snapshot.
+A failed crash transaction poisons the retained World and terminates owned worker
+transports; retries must fail before any worker activity.
+
+The standalone backends compile the canonical sources through their in-workspace
+`engine-core` packages, with distinct package names just like their control
+packages. Each `src` link points to the canonical directory; its build script
+watches that whole directory, including new modules. Canonical and wrapper build
+scripts track the automatic build-only `SEEDBOX_BUILD_ROOT` from `.cargo/config.toml`
+to invalidate a reused target when switching checkouts, even if source timestamps
+predate the cache. Run Cargo from the checkout root for caching; missing or unrelated
+config safely forces a source rebuild on every invocation, including older checkouts.
+The CLI `build-runtime.rs` uses the same invalidation and resolves Git and guest
+inputs from the runtime package directory. Keep this input out of library sources
+and runtime identity.
+Keep inherited package and
+dependency keys aligned across workspaces. These inputs change engine bytes and
+require final Linux reproducibility/merge-train validation. Portable tests import
+the canonical crate; do not restore sibling source inclusion for these policies.
+
 ## Identity and determinism
 
 - The VMM binary's hash, the guest kernel, the guest supervisor
-  (`guest/compose-init.c`, embedded by `crates/seedbox/build.rs`) and the
+  (`guest/compose-init.c`, embedded by `crates/seedbox/build-runtime.rs`) and the
   semantic parameters together make up a run's identity. Any change to
   `crates/seedbox-vmm` produces a new engine: its source, its `Cargo.toml` or
   lockfile, its `[profile.release]`, or even reformatting (which moves panic
   line numbers; `crates/seedbox-vmm/rustfmt.toml` disables formatting). Build
-  it only with `cargo build-vmm`. Don't tidy the VMM as a side effect of other
+  standalone fixtures only with `cargo build-vmm`. The linked CLI uses the
+  root lockfile and records an explicit internal-worker contract and simulator
+  version; historical profiles without it retain the standalone launch contract.
+  Platform/version/qualification metadata never gates development replay.
+  Don't tidy the VMM as a side effect of other
   work. `crates/seedbox-control/**`, `harness/vmm-rustc.py` and the VMM alias
   flags in `.cargo/config.toml` also determine engine bytes and identity. The
-  VMM reaches the shared control crate through its in-workspace symlink so
+  VMM reaches the shared control source through its in-workspace control package so
   Cargo's crate metadata does not hash an absolute checkout path; its inherited
   workspace package and dependency keys must match the root workspace.
 - Performance settings (`--margin`, `--undo`) must never change results.
@@ -96,7 +175,9 @@ The CLI lives in `crates/seedbox/src/cli/`:
 - `defaults.rs`: how each runtime input is found when no flag is given.
 - `signals.rs`: cancellation.
 
-`src/main.rs` only calls `cli::main()`. The library (everything else in `src/`)
+`src/main.rs` dispatches the private retained worker before calling `cli::main()`.
+`engine_worker.rs` is a process boundary alongside the public CLI. The library
+(everything else in `src/`)
 never parses arguments or reads environment variables, and prints only cleanup
 failures from `Drop` that it cannot return. The CLI is that boundary.
 
@@ -204,8 +285,8 @@ deliberately change one.
   The last one is copied into every project `seedbox init` creates.
 
 `doctor` shares execution admission and guest-kernel/VMM defaults; host-kernel
-bytes are not checked. VMM resolution is lookup-only and must never trigger the
-cargo auto-build fallback. Success reports
+bytes are not checked. VMM resolution is lookup-only and must never invoke a
+compiler or launch the worker. Success reports
 only the exact cleaned-up probe observations and selected core; the library does
 not read arguments/environment or print. It creates no state/run and never prepares
 images or executes guests. Compatibility readiness is not replay qualification.

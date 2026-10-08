@@ -1,6 +1,9 @@
-//! Experimental single-vCPU arm64 PV machine. No production x86 dependencies.
+//! ARM64 PV machines and a native application world. Each machine has one vCPU;
+//! portable network, control, fault and disk policies are shared with x86.
+pub mod application;
 pub mod backend;
 pub mod boot;
+pub mod cli;
 pub mod devices;
 pub mod diagnostics;
 pub mod fdt;
@@ -9,6 +12,14 @@ pub mod memory;
 pub mod pv;
 pub mod timebase;
 pub mod witness;
+
+// One policy implementation is compiled through this backend's isolated package.
+pub use seedbox_engine_core::disk;
+pub(crate) use seedbox_engine_core::{control, faults, links, network_counters, rng};
+
+#[rustfmt::skip]
+#[path = "../../seedbox-vmm/src/host_control.rs"]
+pub(crate) mod host_control;
 
 pub type Result<T> = std::result::Result<T, String>;
 

@@ -1,20 +1,5 @@
+use seedbox_engine_core::{faults, links};
 // Exercise the host fixture's JSON through the actual portable VMM modules.
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/connections.rs"]
-mod connections;
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/links.rs"]
-mod links;
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/rng.rs"]
-mod rng;
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../seedbox-vmm/src/faults.rs"]
-mod faults;
 
 use links::{Links, Outcome, Policy};
 use serde_json::Value;

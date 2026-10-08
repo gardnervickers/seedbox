@@ -20,7 +20,8 @@ use std::{
     process::{Command, Stdio},
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OciTools {
     pub skopeo: PathBuf,
     pub umoci: PathBuf,
@@ -140,6 +141,24 @@ impl OciTools {
         context_options: Option<(&crate::preparation::PreparationContext, &str)>,
         frozen: Option<&FrozenContext>,
     ) -> Result<ImportedImage> {
+        self.import_frozen_for_arch(
+            service,
+            directory,
+            store,
+            context_options,
+            frozen,
+            crate::guest::Architecture::Amd64,
+        )
+    }
+    pub(crate) fn import_frozen_for_arch(
+        &self,
+        service: &Service,
+        directory: &Path,
+        store: &ContentStore,
+        context_options: Option<(&crate::preparation::PreparationContext, &str)>,
+        frozen: Option<&FrozenContext>,
+        architecture: crate::guest::Architecture,
+    ) -> Result<ImportedImage> {
         if matches!(service.source, ImageSource::Build { .. }) {
             self.validate_build_epoch()?;
         }
@@ -252,7 +271,7 @@ impl OciTools {
                     cmd.args([
                         "build",
                         "--platform",
-                        "linux/amd64",
+                        architecture.platform(),
                         "--tag",
                         &tag,
                         "--file",
@@ -311,7 +330,7 @@ impl OciTools {
                     "--override-os",
                     "linux",
                     "--override-arch",
-                    "amd64",
+                    architecture.oci_name(),
                     "copy",
                     "--preserve-digests",
                 ])
@@ -322,7 +341,7 @@ impl OciTools {
             false,
             false,
         )?;
-        let image = import_metadata(&raw, service, store)?;
+        let image = import_metadata_for_arch(&raw, service, store, architecture)?;
         provenance.insert(
             "resolved-manifest".into(),
             format!("sha256:{}", image.manifest.hex()),
@@ -366,6 +385,15 @@ pub fn import_metadata(
     service: &Service,
     store: &ContentStore,
 ) -> Result<PreparedImage> {
+    import_metadata_for_arch(raw, service, store, crate::guest::Architecture::Amd64)
+}
+
+pub fn import_metadata_for_arch(
+    raw: &Path,
+    service: &Service,
+    store: &ContentStore,
+    architecture: crate::guest::Architecture,
+) -> Result<PreparedImage> {
     let manifest_bytes = fs::read(raw.join("manifest.json"))?;
     let manifest: Manifest = serde_json::from_slice(&manifest_bytes)?;
     if manifest.schema_version != 2 {
@@ -385,8 +413,11 @@ pub fn import_metadata(
     }
     let config_digest = retain_descriptor(raw, &manifest.config, store)?;
     let config: ImageConfig = serde_json::from_slice(&store.read(&config_digest)?)?;
-    if config.os != "linux" || config.architecture != "amd64" {
-        return Err(Error::Integrity("image must be linux/amd64".into()));
+    if config.os != "linux" || config.architecture != architecture.oci_name() {
+        return Err(Error::Integrity(format!(
+            "image must be {}",
+            architecture.platform()
+        )));
     }
     for field in ["OnBuild", "Healthcheck"] {
         if let Some(value) = config.config.get(field) {
