@@ -528,6 +528,8 @@ pub fn recorded_timebase(profile: &ExecutionProfile) -> Result<Timebase> {
     match profile.semantic_parameters.get("timebase").map(String::as_str) {
         None | Some("counter") => Ok(Timebase::Counter),
         Some("pv") => Ok(Timebase::Pv),
+        Some("counted-branches-v1")
+            if crate::engine::recorded_launch(profile)? == crate::engine::ExecutableKind::InternalWorker => Ok(Timebase::Counter),
         Some(value) => Err(Error::Integrity(format!(
             "recorded --timebase {value}: expected counter or pv; use a run recorded with a supported timebase"
         ))),
@@ -2087,6 +2089,66 @@ mod doctor_tests {
                 ExecutableKind::Standalone
             );
         }
+    }
+
+    #[test]
+    fn original_internal_worker_replay_keeps_its_descriptor_and_counter_clock() {
+        let temporary = tempfile::tempdir().unwrap();
+        let executable = temporary.path().join("old-worker");
+        std::fs::write(&executable, b"retained worker").unwrap();
+        let store = ContentStore::new(temporary.path().join("objects"));
+        let mut profile = VmmExecutor::new(
+            &executable,
+            &store,
+            None,
+            512,
+            WitnessMode::Exits,
+            CounterProfile::Zen,
+        )
+        .unwrap()
+        .profile;
+        profile.semantic_parameters.extend(BTreeMap::from([
+            (
+                "engine_executable_kind".into(),
+                crate::engine::INTERNAL_WORKER_V1.into(),
+            ),
+            ("simulator_version".into(), "0.1.0-dev.1".into()),
+            ("host_os".into(), "linux".into()),
+            ("host_arch".into(), "x86_64".into()),
+            ("guest_arch".into(), "x86_64".into()),
+            ("engine_backend".into(), "kvm".into()),
+            ("timebase".into(), "counted-branches-v1".into()),
+        ]));
+        let original = serde_json::to_vec(&profile).unwrap();
+        let executor = VmmExecutor::from_retained(
+            &executable,
+            &store,
+            profile.clone(),
+            None,
+            CounterProfile::Zen,
+        )
+        .unwrap();
+        assert_eq!(serde_json::to_vec(&executor.profile).unwrap(), original);
+        assert_eq!(
+            crate::engine::recorded_launch(&executor.profile).unwrap(),
+            crate::engine::ExecutableKind::InternalWorker
+        );
+        assert_eq!(
+            recorded_timebase(&executor.profile).unwrap(),
+            Timebase::Counter
+        );
+        for (key, value) in [
+            ("engine_timebase", "counter-pv-v1"),
+            ("engine_backend", "hvf"),
+            ("guest_arch", "aarch64"),
+        ] {
+            let mut invalid = profile.clone();
+            invalid.semantic_parameters.insert(key.into(), value.into());
+            assert!(crate::engine::recorded_launch(&invalid).is_err());
+            assert!(recorded_timebase(&invalid).is_err());
+        }
+        profile.semantic_parameters.remove("timebase");
+        assert!(crate::engine::recorded_launch(&profile).is_err());
     }
 
     #[test]
