@@ -352,6 +352,9 @@ impl PreparationContext {
         command.stdout(Stdio::null()).stderr(Stdio::null());
         let finish = Arc::new(AtomicBool::new(false));
         let done = finish.clone();
+        #[cfg(test)]
+        let test_timeout_window =
+            (phase == "test-timeout-window").then(|| self.directory.join("release-child"));
         let drain = std::thread::spawn(move || -> std::io::Result<(u64, u64, bool)> {
             let mut seen = 0u64;
             let mut retained = 0u64;
@@ -382,9 +385,16 @@ impl PreparationContext {
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                         ) =>
                     {
-                        if done.load(Ordering::Acquire) {
-                            break;
+                        #[cfg(test)]
+                        if let Some(release) = &test_timeout_window {
+                            // Force cleanup to finish after read timed out, before its result is observed.
+                            fs::write(release, b"exit now")?;
+                            let deadline = Instant::now() + Duration::from_secs(3);
+                            while !done.load(Ordering::Acquire) && Instant::now() < deadline {
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
                         }
+                        // Retry until EOF or the bounded post-finish drain deadline.
                     }
                     Err(e) => return Err(e),
                 }
@@ -393,6 +403,9 @@ impl PreparationContext {
             Ok((retained, seen - retained, complete))
         });
         let required_done = finish.clone();
+        #[cfg(test)]
+        let test_required_timeout_window =
+            (phase == "test-timeout-stdout").then(|| self.directory.join("release-child"));
         let required_drain = required_stream.map(|mut reader| {
             std::thread::spawn(move || -> std::io::Result<(Vec<u8>, u64, bool)> {
                 let mut value = Vec::new();
@@ -424,9 +437,18 @@ impl PreparationContext {
                                 std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                             ) =>
                         {
-                            if required_done.load(Ordering::Acquire) {
-                                break;
+                            #[cfg(test)]
+                            if let Some(release) = &test_required_timeout_window {
+                                // Force cleanup to finish after read timed out, before its result is observed.
+                                fs::write(release, b"exit now")?;
+                                let deadline = Instant::now() + Duration::from_secs(3);
+                                while !required_done.load(Ordering::Acquire)
+                                    && Instant::now() < deadline
+                                {
+                                    std::thread::sleep(Duration::from_millis(1));
+                                }
                             }
+                            // Retry until EOF or the bounded post-finish drain deadline.
                         }
                         Err(e) => return Err(e),
                     }
@@ -1243,5 +1265,74 @@ mod tests {
             .path()
             .join("preserved-evidence/probe-tag-cleanup.json")
             .exists());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod drain_race_tests {
+    use super::*;
+    #[test]
+    fn delayed_timeout_observation_after_child_exit() {
+        let _process_creation = PROCESS_TEST_LOCK.lock().unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let context =
+            PreparationContext::new(root.join("evidence"), CancellationToken::default()).unwrap();
+        let result = context.run(
+            Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "while [ ! -e \"$1\" ]; do sleep 0.01; done; printf 'copy failed'; exit 7",
+                    "fixture",
+                ])
+                .arg(context.directory.join("release-child")),
+            "test-timeout-window",
+            None,
+            false,
+            false,
+        );
+        let receipt = fs::read_to_string(root.join("evidence/test-timeout-window.json")).unwrap();
+        let receipt: serde_json::Value = serde_json::from_str(&receipt).unwrap();
+        assert_eq!(receipt["reaped"], true);
+        assert_eq!(receipt["output_complete"], true);
+        assert!(
+            matches!(result, Err(Error::Execution(_))),
+            "completed child should retain execution failure, not false cleanup uncertainty"
+        );
+        assert_eq!(
+            fs::read(root.join("evidence/test-timeout-window.log")).unwrap(),
+            b"copy failed"
+        );
+    }
+    #[test]
+    fn delayed_required_stdout_timeout_after_child_exit() {
+        let _process_creation = PROCESS_TEST_LOCK.lock().unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let context =
+            PreparationContext::new(root.join("evidence"), CancellationToken::default()).unwrap();
+        let mut bytes = Vec::new();
+        let result = context.run_owned(
+            Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "while [ ! -e \"$1\" ]; do sleep 0.01; done; printf 'fixture-v1'; exit 0",
+                    "fixture",
+                ])
+                .arg(context.directory.join("release-child")),
+            "test-timeout-stdout",
+            None,
+            false,
+            false,
+            Some(&mut bytes),
+        );
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.join("evidence/test-timeout-stdout.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["reaped"], true);
+        assert_eq!(receipt["output_complete"], true);
+        assert!(result.is_ok());
+        assert_eq!(bytes, b"fixture-v1");
     }
 }
