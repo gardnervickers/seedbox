@@ -1578,11 +1578,16 @@ impl Machine {
                 // The exit still borrows vcpu: use only the disjoint fields.
                 let last = unsafe { std::ptr::read_volatile(self.page.add(1)) };
                 let exit_time = advance_time(self.time, last.saturating_sub(self.time), hard)?;
-                if self.page_timer.enabled {
+                if self.pv_clock || self.page_timer.enabled {
                     // In particular HLT must adopt at its full exit time, not
-                    // at a watchdog landing's partial syscall-only time.
+                    // at a watchdog landing's partial syscall-only time. A
+                    // stop that left the guest's clock ahead of ours could be
+                    // given a next limit below time the guest already read;
+                    // a timer armed here must count from that clock too.
                     self.stats.time_by[Cause::ClockReads as usize] += exit_time - self.time;
                     self.time = exit_time;
+                }
+                if self.page_timer.enabled {
                     let word = unsafe { std::ptr::read_volatile(self.page.add(PAGE_TIMER_DEADLINE)) };
                     if self.page_timer.pickup(word, &mut self.pit, self.time)? { self.pic.raise(0); }
                     timer_latency(&mut self.pit, &mut self.pit_exact, self.timer_rng.as_mut(), self.timer_jitter, self.exact_timer_ppm);
@@ -2128,6 +2133,30 @@ mod net_poll_tests {
                 assert_eq!(net.tx_polled_at_boundary, u64::from((event_idx || deferred) && site != "entry"), "{case}");
                 assert!(net.dirty.is_empty(), "{case}"); // Machine adopted all DMA writes.
             }
+        }
+    }
+    #[test]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM on a Linux x86-64 host")]
+    fn pv_stop_adopts_the_guest_clock() {
+        let kvm = Kvm::new().unwrap();
+        for arm in [false, true] {
+            // Read the clock 5 ms ahead of the VMM, optionally arm one PIT
+            // tick through port 0x530, halt. The stop's time, which the world
+            // plans the next limit from, and any deadline follow that clock.
+            let mut code = vec![0xc7, 0x05, 0x08, 0x00, 0x00, 0xd0];
+            code.extend_from_slice(&5_000_000u32.to_le_bytes());
+            if arm { code.extend_from_slice(&[0xb8, 1, 0, 0, 0, 0xba, 0x30, 0x05, 0, 0, 0x66, 0xef]); }
+            code.push(0xf4);
+            let mut kernel = vec![0; 1024];kernel[0x1f1] = 1;kernel.extend(code);
+            let spec = BootSpec { kernel: &kernel, initrd: &[], cmdline: String::new(), mem: INITRD_ADDR + 0x100000,
+                rng_seed: [0; 32], mac: None, control_channel: false, disk: None,
+                undo_margin: 0, barrier: false, pv_clock: true, page_timer: false};
+            let mut m = Machine::new(&kvm, "pv-stop", &spec).unwrap();
+            let mut frames = Vec::new();
+            let mut stop = m.run_until(&mut Natural, 10_000_000, 0, &mut frames).unwrap();
+            while stop == Stop::Reached { stop = m.run_until(&mut Natural, 10_000_000, 0, &mut frames).unwrap(); }
+            assert!(m.time >= 5_000_000, "arm={arm} time {}", m.time);
+            assert!(m.pit.deadline.is_none_or(|d| d > 5_000_000), "arm={arm} {:?}", m.pit.deadline);
         }
     }
     #[test]
