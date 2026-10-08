@@ -1,13 +1,8 @@
-//! Versioned host readiness for the frozen engine52eb CPUID/PMU policy.
-//! Matching another machine admits compatibility; it is not replay qualification.
+//! Host readiness: the KVM and perf capabilities the engine needs on this core.
+//! It does not pin CPU models, microcode, CPUID, engines or kernels.
 use crate::{execution::ExecutionProfile, store::ContentDigest, Error, Result};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, io::Read, path::Path};
-
-pub const POLICY_VERSION: &str = "amd-zen3-engine52eb-v1";
-pub const ENGINE: &str = "52eb41490f521a0104ea4ab06297cbdbdd7bc9a68261febf6c5cc19854bacdcf";
-pub const GUEST_KERNEL: &str = "e8ece7cba2d5fc4924da83e39cc672ae2516c117f8f76ecfa04aeaa98e697847";
-const HOST_KERNEL: &str = "66111c2888091bd64e96e71a6a9e831ab5496d6c6272add5d81490396bfa3cdc";
+use std::{io::Read, path::Path};
 
 /// Bound input hashing before any OCI preparation or host state changes.
 pub fn file_digest(path: &Path) -> Result<ContentDigest> {
@@ -50,58 +45,10 @@ pub struct CpuidEntry {
     pub padding: [u32; 3],
 }
 
-/// Frozen engine52eb guest_cpuid filter, unchanged from engine168ad; no sorting or omissions.
-pub fn effective_cpuid(raw: &[CpuidEntry]) -> Vec<CpuidEntry> {
-    let mut entries = raw.to_vec();
-    for e in &mut entries {
-        match (e.function, e.index) {
-            (1, _) => {
-                e.ebx = (e.ebx & 0xffff) | (1 << 16);
-                e.ecx &= !(1 << 30 | 1 << 31 | 1 << 24 | 1 << 21 | 1 << 3);
-                e.edx &= !(1 << 9);
-            }
-            (6, _) => e.ecx &= !1,
-            (7, 0) => {
-                e.ebx &= !(1 << 18 | 1 << 4 | 1 << 11);
-                e.ecx &= !(1 << 22 | 1 << 5);
-            }
-            (0xb, _) | (0x1f, _) | (0x8000001e, _) | (0x80000022, _) => {
-                e.eax = 0;
-                e.ebx = 0;
-                e.ecx = 0;
-                e.edx = 0;
-            }
-            (4, _) | (0x8000001d, _) => e.eax &= !(0x3f << 26),
-            (0x80000001, _) => e.ecx &= !(1 << 2 | 1 << 23),
-            (0x80000007, _) => e.edx = 1 << 8,
-            (0x80000008, _) => {
-                e.ecx &= !0xff;
-                e.ebx &= !(1 << 4);
-            }
-            (f, _) if (0x4000_0000..0x5000_0000).contains(&f) => {
-                e.eax = 0;
-                e.ebx = 0;
-                e.ecx = 0;
-                e.edx = 0;
-            }
-            _ => {}
-        }
-    }
-    entries
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequiredPolicy {
-    pub version: String,
     pub architecture: String,
     pub vendor: String,
-    pub family: u32,
-    pub model: u32,
-    pub stepping: u32,
-    pub microcode: u64,
-    pub host_kernel: String,
-    pub engine: String,
-    pub guest_kernel: String,
     pub guest_abi: String,
     pub control_channel: String,
     pub kvm_api: i32,
@@ -109,26 +56,12 @@ pub struct RequiredPolicy {
     pub guest_debug: i32,
     pub sync_regs_required: i32,
     pub perf_type: u32,
-    pub perf_config: u64,
-    pub perf_flags: u64,
-    pub perf_period: u64,
-    pub perf_read_format: u64,
-    /// Source-derived expected table; actual guest observation is still required.
-    pub effective_cpuid: Vec<CpuidEntry>,
 }
 
-pub fn required_policy() -> Result<RequiredPolicy> {
-    Ok(RequiredPolicy {
-        version: POLICY_VERSION.into(),
+pub fn required_policy() -> RequiredPolicy {
+    RequiredPolicy {
         architecture: "x86_64".into(),
         vendor: "AuthenticAMD".into(),
-        family: 25,
-        model: 33,
-        stepping: 0,
-        microcode: 0xa20102e,
-        host_kernel: HOST_KERNEL.into(),
-        engine: ENGINE.into(),
-        guest_kernel: GUEST_KERNEL.into(),
         guest_abi: "oci-init-v1".into(),
         control_channel: "virtio-console-v1".into(),
         kvm_api: 12,
@@ -136,106 +69,21 @@ pub fn required_policy() -> Result<RequiredPolicy> {
         guest_debug: 1,
         sync_regs_required: 3,
         perf_type: 4,
-        perf_config: 0x5100d1,
-        perf_flags: 1 | (1 << 2) | (1 << 19),
-        perf_period: 1 << 62,
-        perf_read_format: 3,
-        effective_cpuid: serde_json::from_str(include_str!("admission/engine168ad-cpuid.json"))?,
-    })
+    }
 }
 
-pub fn bindings() -> Result<BTreeMap<String, String>> {
-    let fields = serde_json::to_string(&required_policy()?)?;
-    Ok(BTreeMap::from([
-        ("host_policy".into(), POLICY_VERSION.into()),
-        (
-            "host_policy_fingerprint".into(),
-            ContentDigest::of(fields.as_bytes()).hex().to_owned(),
-        ),
-        ("host_policy_fields".into(), fields),
-    ]))
-}
-
+/// Older runs recorded this marker in their identity; it is carried as data only.
 pub const ENGINE_QUALIFICATION: &str = "engine_qualification";
-pub const DEV_UNPINNED: &str = "dev-unpinned";
-
-pub fn is_dev_engine(profile: &ExecutionProfile) -> bool {
-    profile
-        .semantic_parameters
-        .get(ENGINE_QUALIFICATION)
-        .map(String::as_str)
-        == Some(DEV_UNPINNED)
-}
-
-pub fn artifacts_unpinned(profile: &ExecutionProfile, kernel: &ContentDigest) -> bool {
-    profile.engine.hex() != ENGINE || kernel.hex() != GUEST_KERNEL
-}
-
-/// Validate the complete artifact pair, including kernel-only development runs.
-/// The profile-only validator cannot establish whether both artifacts are pinned.
-pub fn validate_artifacts(profile: &ExecutionProfile, kernel: &ContentDigest) -> Result<()> {
-    validate_profile(profile)?;
-    if is_dev_engine(profile) {
-        if !artifacts_unpinned(profile, kernel) {
-            return Err(Error::Integrity(
-                "dev-unpinned marker requires an unpinned engine or guest kernel".into(),
-            ));
-        }
-        Ok(())
-    } else {
-        validate_kernel(kernel)
-    }
-}
-
-/// Retained development runs require explicit permission on every replay.
-pub fn admit_artifacts(
-    profile: &ExecutionProfile,
-    kernel: &ContentDigest,
-    allow_dev_engine: bool,
-) -> Result<()> {
-    validate_artifacts(profile, kernel)?;
-    if is_dev_engine(profile) && !allow_dev_engine {
-        return Err(Error::Setup(
-            "unqualified dev engine; pass --allow-dev-engine to replay these retained artifacts"
-                .into(),
-        ));
-    }
-    Ok(())
-}
 
 pub fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
-    let counter = crate::vmm::recorded_counter(profile)?;
-    if counter != crate::counter::CounterProfile::Zen
-        && profile
-            .semantic_parameters
-            .keys()
-            .any(|k| k.starts_with("host_policy"))
-    {
-        return Err(Error::Integrity(
-            "unqualified counter cannot carry qualified AMD host policy bindings".into(),
-        ));
-    }
-    let required_bindings = if counter == crate::counter::CounterProfile::Zen {
-        bindings()?
-    } else {
-        BTreeMap::new()
-    };
-    for (name, required) in required_bindings {
-        match profile.semantic_parameters.get(&name) {
-            None => return Err(Error::Integrity(format!("host admission proof missing: {name}; use the retained previous CLI only for historical evidence"))),
-            Some(actual) if actual != &required => return Err(Error::Integrity(format!("host admission proof incompatible: {name}"))),
-            _ => {}
-        }
-    }
-    let policy = required_policy()?;
+    crate::vmm::recorded_counter(profile)?;
+    let policy = required_policy();
     for (name, value) in [
         ("guest_abi", &policy.guest_abi),
         ("control_channel", &policy.control_channel),
     ] {
         if profile.semantic_parameters.get(name) != Some(value) {
-            return Err(Error::Integrity(format!(
-                "{name} is outside the admitted host policy"
-            )));
+            return Err(Error::Integrity(format!("unsupported {name}")));
         }
     }
     let memory = profile
@@ -245,25 +93,6 @@ pub fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
     if memory.is_none_or(|value| !(64..=65536).contains(&value)) {
         return Err(Error::Integrity(
             "admitted profile requires memory_mb in 64..65536".into(),
-        ));
-    }
-    if let Some(marker) = profile.semantic_parameters.get(ENGINE_QUALIFICATION) {
-        if marker != DEV_UNPINNED {
-            return Err(Error::Integrity(format!(
-                "unknown engine_qualification {marker}"
-            )));
-        }
-    }
-    if profile.engine.hex() != ENGINE && !is_dev_engine(profile) {
-        return Err(Error::Integrity("engine is outside the admitted host policy; no engine-change override bypass is available".into()));
-    }
-    Ok(())
-}
-
-pub fn validate_kernel(kernel: &ContentDigest) -> Result<()> {
-    if kernel.hex() != GUEST_KERNEL {
-        return Err(Error::Integrity(
-            "guest kernel is outside the admitted host policy".into(),
         ));
     }
     Ok(())
@@ -278,8 +107,6 @@ pub struct CoreObservation {
     pub model: u32,
     pub stepping: u32,
     pub microcode: u64,
-    pub booted_kernel: String,
-    pub current_kernel: String,
     pub kvm_api: i32,
     pub immediate_exit: i32,
     pub guest_debug: i32,
@@ -296,18 +123,10 @@ pub fn validate_observation(o: &CoreObservation) -> Result<()> {
 }
 
 fn validate_fields(o: &CoreObservation, require_perf: bool) -> Result<()> {
-    let p = required_policy()?;
+    let p = required_policy();
     let checks = [
         (o.architecture == p.architecture, "architecture"),
         (o.vendor == p.vendor, "CPU vendor"),
-        (o.family == p.family, "CPU family"),
-        (o.model == p.model, "CPU model"),
-        (o.stepping == p.stepping, "CPU stepping"),
-        (o.microcode == p.microcode, "microcode"),
-        (
-            o.booted_kernel == p.host_kernel && o.current_kernel == p.host_kernel,
-            "host kernel bytes",
-        ),
         (o.kvm_api == p.kvm_api, "KVM API"),
         (
             o.immediate_exit == p.immediate_exit,
@@ -319,10 +138,6 @@ fn validate_fields(o: &CoreObservation, require_perf: bool) -> Result<()> {
             "KVM sync-register capability",
         ),
         (
-            effective_cpuid(&o.raw_cpuid) == p.effective_cpuid,
-            "complete effective CPUID policy",
-        ),
-        (
             o.perf_type == p.perf_type
                 && (!require_perf || (o.perf_disabled_open && o.perf_error.is_none())),
             "disabled exact-event perf readiness",
@@ -330,7 +145,7 @@ fn validate_fields(o: &CoreObservation, require_perf: bool) -> Result<()> {
     ];
     for (valid, field) in checks {
         if !valid {
-            return Err(Error::Setup(format!("CPU {}: unsupported or drifted {field}; restore the admitted profile before execution", o.cpu)));
+            return Err(Error::Setup(format!("CPU {}: unsupported {field}", o.cpu)));
         }
     }
     Ok(())
@@ -522,19 +337,18 @@ pub(crate) fn check_unqualified(
 #[cfg(test)]
 mod cleanup_tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::{cell::RefCell, rc::Rc};
     fn static_observation() -> CoreObservation {
-        let p = required_policy().unwrap();
+        let p = required_policy();
         CoreObservation {
             cpu: 8,
             architecture: p.architecture,
             vendor: p.vendor,
-            family: p.family,
-            model: p.model,
-            stepping: p.stepping,
-            microcode: p.microcode,
-            booted_kernel: p.host_kernel.clone(),
-            current_kernel: p.host_kernel,
+            family: 25,
+            model: 33,
+            stepping: 0,
+            microcode: 0,
             kvm_api: p.kvm_api,
             immediate_exit: p.immediate_exit,
             guest_debug: p.guest_debug,
@@ -543,15 +357,15 @@ mod cleanup_tests {
             perf_disabled_open: false,
             perf_error: None,
             workaround_msr: 0,
-            raw_cpuid: p.effective_cpuid,
+            raw_cpuid: Vec::new(),
         }
     }
     #[test]
-    fn static_cpuid_refusal_is_honest_and_does_not_attempt_perf() {
+    fn static_capability_refusal_is_honest_and_does_not_attempt_perf() {
         use std::cell::Cell;
         let attempted = Cell::new(false);
         let mut observation = static_observation();
-        observation.raw_cpuid[0].flags ^= 1;
+        observation.immediate_exit = 0;
         let original = validate_fields(&observation, false)
             .unwrap_err()
             .to_string();
@@ -564,7 +378,7 @@ mod cleanup_tests {
         assert!(observed.perf_error.is_none());
         let final_error = validate_observation(&observed).unwrap_err().to_string();
         assert_eq!(final_error, original);
-        assert!(final_error.contains("complete effective CPUID policy"));
+        assert!(final_error.contains("KVM immediate-exit capability"));
     }
     #[test]
     fn actual_perf_open_refusal_preserves_its_cause_and_cleanup_precedence() {
@@ -586,7 +400,7 @@ mod cleanup_tests {
             .contains("disabled exact-event perf readiness"));
 
         let mut static_refusal = static_observation();
-        static_refusal.raw_cpuid[0].flags ^= 1;
+        static_refusal.immediate_exit = 0;
         let result = scoped_probe(
             (),
             || {
@@ -610,16 +424,16 @@ mod cleanup_tests {
                 return Err(Error::Setup("later sibling collection failed".into()));
             }
             let mut o = static_observation();
-            o.raw_cpuid[0].flags ^= 1;
+            o.immediate_exit = 0;
             Ok(o)
         });
         assert_eq!(attempted, [8]);
         assert_eq!(observations.len(), 1);
-        assert_eq!(observations[0].raw_cpuid[0].flags, 1);
+        assert_eq!(observations[0].immediate_exit, 0);
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("complete effective CPUID policy"));
+            .contains("KVM immediate-exit capability"));
     }
     #[test]
     fn first_sibling_cleanup_failure_wins_and_later_collection_is_not_attempted() {
@@ -635,7 +449,7 @@ mod cleanup_tests {
                 (),
                 || {
                     let mut o = static_observation();
-                    o.raw_cpuid[0].flags ^= 1;
+                    o.immediate_exit = 0;
                     Ok(o)
                 },
                 |_| {
@@ -654,7 +468,7 @@ mod cleanup_tests {
     #[test]
     fn evidence_failure_cannot_replace_static_or_cleanup_refusal_or_admit_success() {
         let mut drift = static_observation();
-        drift.raw_cpuid[0].flags ^= 1;
+        drift.immediate_exit = 0;
         let static_refusal = validate_observation(&drift);
         let cleanup_refusal = scoped_probe(
             (),
@@ -662,7 +476,7 @@ mod cleanup_tests {
             |_| Err(Error::Execution("restore readback differs".into())),
         );
         for (admission, cause) in [
-            (static_refusal, "complete effective CPUID policy"),
+            (static_refusal, "KVM immediate-exit capability"),
             (cleanup_refusal, "host preflight cleanup failed"),
         ] {
             let mut published = false;
@@ -698,7 +512,7 @@ mod cleanup_tests {
     fn selected_disabled_events_match_frozen_counting_fields_and_close_before_restore() {
         use crate::counter::CounterProfile;
         use std::{io::Read, os::unix::net::UnixStream, time::Duration};
-        let policy = required_policy().unwrap();
+        let policy = required_policy();
         let vmm = include_str!("../../seedbox-vmm/src/counter.rs");
         assert!(vmm.contains("&attr, 0, -1, -1, 0")); // Sole deliberate syscall difference is CLOEXEC8.
         for (counter, event) in [
@@ -719,22 +533,7 @@ mod cleanup_tests {
                 (4, event, 1 << 62, 3, 1 | (1 << 2) | (1 << 19), 8)
             );
             if counter == CounterProfile::Zen {
-                assert_eq!(
-                    (
-                        spec.kind,
-                        spec.config,
-                        spec.period,
-                        spec.read_format,
-                        spec.flags
-                    ),
-                    (
-                        policy.perf_type,
-                        policy.perf_config,
-                        policy.perf_period,
-                        policy.perf_read_format,
-                        policy.perf_flags
-                    )
-                );
+                assert_eq!(spec.kind, policy.perf_type);
             }
             let (mut reader, writer) = UnixStream::pair().unwrap();
             reader

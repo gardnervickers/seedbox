@@ -1,5 +1,6 @@
 //! Linux system queries only: no VM creation, MSR write, event enable or signals.
 use super::*;
+use std::collections::BTreeMap;
 use std::{
     fs::{self, File},
     io::Read,
@@ -106,30 +107,6 @@ fn text(path: &str) -> Result<String> {
     }
     Ok(data)
 }
-fn kernel(path: &str) -> Result<String> {
-    let mut file =
-        File::open(path).map_err(|e| Error::Setup(format!("host admission {path}: {e}")))?;
-    use sha2::{Digest, Sha256};
-    let mut hash = Sha256::new();
-    let mut chunk = [0; 65536];
-    let mut size = 0;
-    loop {
-        let n = file
-            .read(&mut chunk)
-            .map_err(|e| Error::Setup(format!("host admission {path}: {e}")))?;
-        if n == 0 {
-            break;
-        }
-        size += n;
-        if size > 256 * 1024 * 1024 {
-            return Err(Error::Setup(format!(
-                "host admission {path}: kernel exceeds read bound"
-            )));
-        }
-        hash.update(&chunk[..n]);
-    }
-    Ok(format!("{:x}", hash.finalize()))
-}
 fn query(file: &File, command: libc::c_ulong, argument: libc::c_ulong) -> Result<i32> {
     let result = unsafe { libc::ioctl(file.as_raw_fd(), command, argument) };
     if result < 0 {
@@ -141,7 +118,7 @@ fn query(file: &File, command: libc::c_ulong, argument: libc::c_ulong) -> Result
     Ok(result)
 }
 
-// Matches frozen engine52eb counter.rs::PerfAttr; no enable/fcntl/mmap follows.
+// Matches frozen engine391f counter.rs::PerfAttr; no enable/fcntl/mmap follows.
 #[repr(C)]
 #[derive(Default)]
 struct PerfAttr {
@@ -268,8 +245,6 @@ fn collect(cpu: u32) -> Result<CoreObservation> {
         stepping: number("stepping")?,
         microcode: u64::from_str_radix(microcode, 16)
             .map_err(|_| Error::Setup(format!("CPU {cpu} invalid microcode")))?,
-        booted_kernel: kernel("/run/booted-system/kernel")?,
-        current_kernel: kernel("/run/current-system/kernel")?,
         kvm_api: query(&kvm, 0xae00, 0)?,
         immediate_exit: query(&kvm, 0xae03, 136)?,
         guest_debug: query(&kvm, 0xae03, 23)?,

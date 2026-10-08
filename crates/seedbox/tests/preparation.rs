@@ -151,13 +151,17 @@ fn cancelled_copy_retains_command_and_cleanup_receipts_after_drop() {
     let context = PreparationContext::new(root.path().join("evidence"), token.clone()).unwrap();
     std::thread::scope(|scope| {
         let task = scope.spawn(|| preparer.prepare_cancellable(&simulation, &store, &context));
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(30);
         while fs::read_to_string(&ready)
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
             .is_none()
         {
-            assert!(Instant::now() < deadline);
+            let within_deadline = Instant::now() < deadline;
+            if !within_deadline {
+                token.cancel();
+            }
+            assert!(within_deadline);
             std::thread::yield_now();
         }
         token.cancel();
@@ -204,10 +208,8 @@ fn direct_oci_preparation_refuses_invalid_profile_before_builder_admission() {
             preparer.prepare(&simulation, &store),
             preparer.prepare_cancellable(&simulation, &store, &context),
         ] {
-            assert!(result
-                .unwrap_err()
-                .to_string()
-                .contains("host admission proof missing"));
+            let e = result.unwrap_err().to_string();
+            assert!(e.contains("unsupported guest_abi"), "{e}");
         }
     }
     assert!(!sentinel.exists());

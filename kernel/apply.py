@@ -75,6 +75,21 @@ edit(
 )
 edit("arch/x86/kernel/x86_init.c", "#include <asm/iommu.h>\n", "#include <asm/iommu.h>\n#include <asm/seedbox.h>\n")
 
+# Activate the time page before TSC-based delays and sched_clock start using
+# it. A permanent fixmap works before memremap/the allocator are available;
+# unlike an early_memremap slot, it needs no later unmap/remap handoff.
+edit(
+    "arch/x86/include/asm/fixmap.h",
+    "\tFIX_EARLYCON_MEM_BASE,\n",
+    "\tFIX_EARLYCON_MEM_BASE,\n\tFIX_SEEDBOX_TIME,\n",
+)
+edit("arch/x86/kernel/setup.c", "#include <asm/proto.h>\n", "#include <asm/proto.h>\n#include <asm/seedbox.h>\n")
+edit(
+    "arch/x86/kernel/setup.c",
+    "\ttsc_early_init();\n",
+    "\tseedbox_time_init();\n\ttsc_early_init();\n",
+)
+
 # Interrupt masking and acknowledgment through the shared page. The VMM's
 # 8259 keeps no in-service state, so masking a line is its acknowledgment.
 pic_ports = (

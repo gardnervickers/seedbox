@@ -77,6 +77,15 @@ CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/cluster-fork.json fo
 With `boot.fork_at_ns` instead, the world forks at a simulated time rather
 than at the guests' barrier: every machine parks at its first deterministic
 point at or after that time, so boot and application startup are both shared.
+The x86 time page is u64-indexed: fields 0–5 retain the counter ABI;
+`pv_clock`, `bound`, and `syscall_target` occupy 6, 7, and 8;
+`entropy_gen` occupies 9 and the four entropy words occupy 10–13. Both
+`SEEDBOX_ABI` and `ABI_PAGE_RESEED` are 3. The checkpoint and dedicated
+time-page digest retain only fields 0–5 (`PAGE_FIELDS = 6`). The VMM never
+writes fields 6–8 in counter mode; it writes fields 9–13 only when releasing
+a parked time fork with ABI >= 3. Full world-fork snapshots still copy the
+whole page so later seeds restore the original generation.
+
 No guest cooperation is needed. On a guest kernel with time page ABI 3, the
 engine writes the seed's entropy into the time page at the release and the
 kernel mixes it in and reseeds its CRNG before its next random output, so
@@ -103,8 +112,8 @@ guest/build-initramfs.sh artifacts/entropy-fork.cpio guest/entropy-fork.init art
 ```
 
 The ignored runtime-checkpoint entropy test also uses this initramfs, alongside
-an ABI 3 kernel at `artifacts/bzImage`. Runtime checkpoints (PR #103) depend on
-the time-page reseed hook from PR #93; see the
+the current K2/ABI-3 kernel at `artifacts/bzImage`. Runtime checkpoints use
+main's reseed hook (PV fields 6–8, generation 9, entropy 10–13); see the
 [checkpoint design](../../docs/runtime.md#runtime-checkpoint-design-experimental).
 
 The `scenario` partitions these fixtures use are older than the runtime fault
@@ -220,8 +229,8 @@ CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/net-crash-fork.json 
 
 A machine's `disk` gives it a virtio-blk disk at `/dev/vda`:
 `{"size_mib": N}` for a zeroed disk, or `{"image": PATH}` for a raw image
-(relative to the config; with `size_mib` too, it must be that size). Its
-semantics (`disk.rs`, model `flush-stable/drop-all-unflushed/v1`):
+(relative to the config; with `size_mib` too, it must be that size). Its default
+semantics (`disk.rs`) drop every unflushed sector on crash:
 
 - The device offers a write cache with FLUSH and no native FUA, as virtio 1.2
   defines it, so Linux runs it in writeback mode and emulates FUA with a
@@ -237,7 +246,7 @@ semantics (`disk.rs`, model `flush-stable/drop-all-unflushed/v1`):
   nothing is written to host storage.
 - A fork restore puts the whole disk back, both layers.
 
-Each machine's report has a `disk` object: the model, capacity, the base
+Each machine's report has a `disk` object: `fault_model`, capacity, the base
 image's SHA-256 (null for a zeroed disk), a `digest` of both layers, their sizes and request counts.
 The disk's digest feeds the world witness, and with `--digest` it is the
 `disk` part of the machine's state digest. Each crashed incarnation reports
@@ -270,12 +279,15 @@ for s in 1010 1011; do CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worl
 CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/disk-crash-fork.json disk-fork-loop "1009" --digest --fork-seeds 1010,1011
 ```
 
-For seeded torn writes, set the world's top-level `disk_loss` to
-`flush-stable/seeded-latest-sector-512-half/disk-loss-machine-incarnation/v1`.
+For seeded torn writes, set the world's top-level `disk_loss` object to
+`{"sector_bytes": 512, "survival_probability": 0.5}`.
 [`disk-ext4-torn.json`](disk-ext4-torn.json) enables it for the same fsync ledger.
 Each latest unflushed 512-byte sector survives with probability 1/2, with its own
 machine/incarnation RNG domain. Stable data remains unless overwritten by a
-surviving sector; older overwritten volatile versions are not candidates. See
+surviving sector; older overwritten volatile versions are not candidates. Compose
+runs retain this policy as `disk_loss_sector_bytes` and
+`disk_loss_survival_probability` profile parameters; low-level reports expose it
+as each disk's `fault_model`. See
 [the full contract](../../docs/runtime.md#disk-crash-policy).
 
 On the qualified Linux host, run the fixture with repeated and distinct seeds:
@@ -292,3 +304,123 @@ and a filesystem journal commit can already have flushed it. This fixture's
 seed variation and ext4 recovery under the new policy remain hardware acceptance
 checks; portable disk-model tests do not establish them. The raw `blkprobe` crash
 fixture explicitly expects drop-all loss and is not an oracle for this policy.
+
+## Directed-link policy controls
+
+`harness/run-links.sh` runs six low-level broadcast-probe controls on the AMD
+host. `shaped.json` and `plain.json`, and the full probe's C source and init,
+retain the experiment inputs from `14aab0c`: L1/L2 repeat the full shaped world;
+P1/M1 compare the full plain world on the PR and base engines. Prior train/3
+witness prefixes were `ca9a7f6d` and `b66611d2`, respectively; a new train must
+verify equality again, since its engine bytes determine identity.
+
+Only U1/U2 use `shaped-tol-short.json`, with default undo (U1) and undo off
+(U2), identical world/initrd/seed, and retained 600-second safety timeouts. The
+performance target is **U2 below 300 seconds**, with U1 == U2. The previous
+1 ms global latency, 200 us tolerance and 4 ms probe gap produced 2,845 U1
+precise stops and a 564-second U2 run. Shortening the 2.5 s duration cap alone
+would not help: `end_on_exit: a` normally ends execution near 1.2 s.
+
+The short world now raises **every latency by 9 ms**: global 10 ms, a->b baseline
+12 ms, old/new shape layers 14/17 ms, and loss layers 10 ms. This preserves
+relative delays and keeps every policy above the global scheduling floor. Its
+5 ms `stop_tolerance_ns` gives both a 5 ms early world window
+(`min(global_latency / 2, tolerance)`) and a 5 ms late timer window. These
+are semantic world inputs, applied identically to U1 and U2; undo remains a
+performance-only variant. No engine or full L/P fixture bytes change.
+
+All 16 fault IDs, actions, handles, jitter/loss settings and times stay in order
+from 0.3 to 1.0 s. Each machine's world `cmdline` sets
+`seedbox.link_gap_ns=1000000`; `link-short.init` reads it, retaining its old 4 ms
+default when absent. The 1.1 s end and a's 0.1 s reporting grace stay fixed.
+This restores an estimated
+**340 uncut lossmid sends** over 0.6–0.7 and 0.76–1.0 s, with 500 us jitter and
+50% loss (the old 4 ms gap allowed only 85). The 100 ms after the final heal
+exceeds the longest shaped delay, 17 ms. The unchanged 2.5 s cap leaves reporting
+headroom. Actual send counts and completed reports remain host evidence; a
+scheduled candidate count is not a measured guest send count.
+
+### Short-world stop budget
+
+Most precise stops in the old short world came from the **cross-machine
+horizon**, not the probe: a slice is capped by the earliest other machine's key
+plus global latency (`crates/seedbox-vmm/src/main.rs`), and the probe's busy
+polling gives no natural exit before that cap. With a 1 ms horizon and a 200 us
+early window, slices ended between sends by stepping. The 10 ms horizon and 5 ms
+windows cover several 1 ms send gaps, so the next natural send or device exit
+usually ends the slice first. `precise_stops` counts entries into stepping; the
+engine's `--trace` does not record why a stepping entry began.
+
+Measured on the AMD host (main b6e9809, PR #127 at 47cfb5e):
+
+| World | U1 precise stops | U1 rollbacks | U1 seconds | U2 seconds |
+| --- | --- | --- | --- | --- |
+| 1 ms latency, 200 us tolerance, 4 ms probe gap | 2,845 | not recorded | 30 | 564 |
+| 10 ms latency, 5 ms tolerance, 1 ms probe gap | 433 | 3 | 33.0 | 118.5 |
+
+U1 and U2 share world witness b0427503f6428b12 and network witness
+32838ac9f494e2fb, with loss on c->a and c->b, the c|a cut counted both ways, all
+16 faults applied in order and no reorders. `links.py` fails U1 if it records no
+rollbacks, so the pair always exercises undo.
+
+Run the pair with `RUNS="U1 U2"` through `harness/run-links.sh` on two free
+physical cores with idle SMT siblings. U2 is a fresh same-seed run with undo off,
+not a replay of U1.
+
+`harness/links.py` derives full-world sender-stamp window expectations from the
+retained world JSON, using cut precedence, highest live shape ID and heal by
+handle. Window 45 of a<-c (4.5–4.6 s) is still lossmid: healing the cut at 4.5 s
+does not heal lossmid until 4.7 s. A packet's arrival cannot shift its reported
+window, since the probe indexes receipts by the sender's stamp.
+
+The prior checker already expected 50% receipts there. Train/3's 207/400 receipts,
+1.004 ms minimum and 1.25 ms mean satisfy that plan; #97 alone reproduced the
+same tuple (world witness `ca9a7f6d`, network witness `bf975406`). Its 1.64 ms
+maximum exceeded the old 1.6 ms cap because sender stamping precedes `sendto`
+and receiver timing follows `recv`, including both kernels and concurrent bursts.
+Jittered windows now keep a loose 200 us receipt allowance (1.7 ms for window 45).
+Count, floor and mean checks remain; fixed-delay receipt tails stay diagnostic.
+
+When a full shaped lane has a `network.jsonl` of routed-frame records, the
+analyzer checks it exactly. Each line is a JSON object with machine names `src` and
+`dst`, and integer `send_ns` and `arrival_ns`. Include **every queued frame**,
+including boot/ARP traffic, in routing order, not receipt order; omit cut/lost
+frames, which reserve no FIFO arrival. The bound is
+`max(send_ns + latency_ns + jitter_ns, link_last + 1)`, with a lower bound of
+`max(send_ns + latency_ns, link_last + 1)`. Thus delay decreases can preserve an
+old FIFO tail, but a FIFO extension is exactly one nanosecond. At least one c->a
+arrival must be present in routed-time window 45. A present file that is empty,
+invalid or out of bounds fails the analyzer. An absent file is a SKIP: the
+portable `crates/seedbox/tests/link_worlds.rs` covers the exact bounds instead,
+by driving the production `links.rs` and `faults.rs` through `shaped.json` and
+checking nominal arrivals in window 45. Synthetic portable tests cover both
+inclusive boundaries and one-nanosecond violations; the Rust fixture tests still
+exercise production `Faults`/`Links` directly.
+
+**Capture limitation:** this engine's `--trace` emits machine/device exits, not
+routed send/arrival pairs. Its network report retains only a witness digest,
+not the inputs needed to recover those times. The runner retains the device
+traces and copies `network.jsonl` if an external capture supplies it in the run
+output. `NETWORK_TRACE_ROOT` can instead point to same-run captures under
+`L1/network.jsonl` and `L2/network.jsonl`. Such captures must come from the exact
+runs being analyzed; a model-generated trace or a different run is not engine
+evidence. No route capture is implemented here, since changing the engine is
+outside this follow-up's scope, so on the host L1/L2 report the exact-bound
+check as covered by `link_worlds.rs`. The host lanes still check witnesses,
+counters, fault application, FIFO receipt order and the receipt-time plan.
+
+Run selected lanes concurrently, one distinct physical core per lane:
+
+```sh
+RUNS="L1 U1" CPUS="14 15" SHA=<fixture-commit> MAIN=<base-commit> bash harness/run-links.sh
+```
+
+Omit `RUNS` to select L1 L2 P1 M1 U1 U2, and supply six `CPUS` in that order.
+Unknown/duplicate lane names, duplicate CPUs and missing cores are errors before
+host work. Each lane keeps the existing CPU/SMT lease and MSR restoration in
+`batch.py`; SMT siblings must be idle. A subset checks its own lane evidence and
+prints SKIP for pair comparisons whose partner was not selected. All children
+are joined, including after failure, before analysis and cleanup. Interruption
+waits for bounded lane completion before deleting temporary builds. Each
+invocation owns fresh temporary build and results directories. Results are kept
+under `~/seedbox-link60-results/run.*`; shared results are never removed.

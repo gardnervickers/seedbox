@@ -17,6 +17,12 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   `seedbox` run from the checkout finds it. Don't set a global
   `target-dir` in `.cargo/config.toml`: cargo applies it by current directory,
   so it would also move standalone crate builds and break their scripts.
+  These two aliases select `harness/vmm-rustc.py` for path remapping and removal
+  of the Nix dev shell's synthetic checkout RPATH; keep that wrapper isolated
+  from other builds. Keep release debug info enabled. On Linux, verify committed
+  inputs with `bash harness/check-vmm-reproducible.sh [REV]` in the dev shell.
+  The wrapper includes its content hash in Cargo's compiler fingerprint to
+  invalidate older unremapped builds and later wrapper revisions.
 - New crates go in `crates/<name>/` and inherit `version`, `edition` and
   `publish` from `[workspace.package]`. Put a dependency used by two or more
   workspace crates in `[workspace.dependencies]`. Commit both lockfiles.
@@ -39,13 +45,35 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   lockfile, its `[profile.release]`, or even reformatting (which moves panic
   line numbers; `crates/seedbox-vmm/rustfmt.toml` disables formatting). Build
   it only with `cargo build-vmm`. Don't tidy the VMM as a side effect of other
-  work.
+  work. `crates/seedbox-control/**`, `harness/vmm-rustc.py` and the VMM alias
+  flags in `.cargo/config.toml` also determine engine bytes and identity. The
+  VMM reaches the shared control crate through its in-workspace symlink so
+  Cargo's crate metadata does not hash an absolute checkout path; its inherited
+  workspace package and dependency keys must match the root workspace.
 - Performance settings (`--margin`, `--undo`) must never change results.
 
 ## Checks
 
 Engine PRs that need host evidence go through a merge train
 ([docs/merge-train.md](docs/merge-train.md)).
+
+Portable checks must pass at the PR or merge-train head before spending AMD
+host time. `bash harness/mac-check.sh REV` is the fast pre-check for a Mac or
+any other non-KVM machine; it also works on the host. Run inside the project's
+Nix dev shell. Omit `REV` to check the current checkout, including local changes.
+The steps are fmt, clippy and `harness/acceptance.sh portable`, which includes
+workspace tests and both Python unittest suites (plus VMM tests on Linux).
+The first stdout line is `revision: FULL_SHA`, followed by the host check's
+timed step/phase summary format. Workspace builds use a persistent cache under
+`$XDG_CACHE_HOME`, or `~/Library/Caches` on macOS and `~/.cache` elsewhere;
+override it with `SEEDBOX_PRECHECK_TARGET` or `CARGO_TARGET_DIR`. A revision uses
+a temporary detached worktree under `$TMPDIR`, deleted on a pass; a failure keeps it and prints
+its path. Any failed step makes the gate exit nonzero; all steps still run.
+After a Linux pre-check pass, `bash harness/host-check.sh --skip-portable REV CPU` skips fmt,
+clippy and the portable suite (including workspace tests), while retaining VMM
+build/tests and host-specific checks. A Mac pass alone does not justify the skip.
+Match the full SHA printed by both gates.
+See [contributor checks](README.md#contributor-checks).
 
 Run these before committing:
 
@@ -109,8 +137,7 @@ deliberately change one.
    (image pulls, builds, CPU leases). Fail fast. `run` and `explore` check immutable runtime
    inputs and backend host admission before
    preparation; no transient perf descriptor, affinity or CPU reservation survives
-   that check. Replay validates retained host-policy proof before live admission,
-   so old/missing proof is a retained NOT_COMPARABLE rejection before execution.
+   that check.
 5. Add it to the defaults table in README.md's quick start.
 
 ### Help text
@@ -134,6 +161,9 @@ deliberately change one.
   `WORD: detail`, where `WORD` is the SCREAMING_SNAKE_CASE serde name
   produced by `word()` (`PASS`, `MATCH`, `VALID`, `CREATED`, ...). Any
   further lines are lowercase `key: value` (`replay: MATCH`, `error: ...`).
+- `logs` without `--json` writes only the selected raw bytes to stdout, with no
+  decoration or added newlines. Its lowercase `logs:` status and `omission:`
+  diagnostics go to stderr; `--json` includes chunk metadata and `bytes_hex`.
 - Scripts find the run directory with `sed -n 's/^[A-Z]*: //p'` over both
   output streams of `run` and `replay`. Exactly one line may match
   `^[A-Z]*: `, and it must be `OUTCOME: run-directory`.
@@ -173,8 +203,9 @@ deliberately change one.
   defaults table), docs/runtime.md, and `crates/seedbox/templates/README.md`.
   The last one is copied into every project `seedbox init` creates.
 
-`doctor` shares execution admission and kernel/VMM defaults, with lookup-only VMM
-resolution: it must never trigger the cargo auto-build fallback. Success reports
+`doctor` shares execution admission and guest-kernel/VMM defaults; host-kernel
+bytes are not checked. VMM resolution is lookup-only and must never trigger the
+cargo auto-build fallback. Success reports
 only the exact cleaned-up probe observations and selected core; the library does
 not read arguments/environment or print. It creates no state/run and never prepares
 images or executes guests. Compatibility readiness is not replay qualification.

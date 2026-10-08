@@ -10,15 +10,17 @@ use seedbox::{
     counter::CounterProfile,
     diff,
     execution::{
-        CancellationToken, ExecutionBackend, ExecutionProfile, PreparationBackend, WitnessMode,
+        CancellationToken, ExecutionBackend, ExecutionProfile, PreparationBackend, Timebase,
+        WitnessMode,
     },
     exploration::{self, ExploreOptions},
+    logs,
     oci::OciTools,
     orchestration::{self, Orchestrator, Outcome, ReplayOptions, ReplayStatus, RunOptions},
     preparation::OciPreparer,
     store::ContentStore,
     templates::Template,
-    vmm::{recorded_counter, recorded_torn_writes, VmmExecutor},
+    vmm::{recorded_counter, recorded_timebase, recorded_torn_writes, VmmExecutor},
     Error, Result,
 };
 use signals::Signals;
@@ -33,8 +35,15 @@ Exit status:
   1    FAIL, replay MISMATCH, or diff DIFFERENT
   2    ERROR, a replay that is NOT_COMPARABLE, or a usage or setup error
   3    INCOMPLETE (wall-time limit or cancelled)
+       A cancelled or incomplete replay reports 2 (NOT_COMPARABLE)
   124  TIMEOUT (simulated-time limit)";
 
+const HOST_CONTROL_HELP: &str = "\
+Host execution control:
+  seedbox pause RUN     Wait for a host slice-boundary pause
+  seedbox resume RUN    Resume the same live world
+Pause preserves guest time and witnesses. Wall-time limits and cancellation remain active.
+The executing attempt has an output/host-control locator; replay uses its new attempt.";
 const VMM_FAILURE_HELP: &str = "Text VMM failures also show up to 5 non-empty lines from the final 8 KiB of output/vmm.stderr on stderr; JSON output is unchanged.";
 
 #[derive(Parser)]
@@ -60,7 +69,7 @@ enum Command {
         #[arg(long, value_enum, default_value_t = TemplateArg::Etcd)]
         template: TemplateArg,
     },
-    /// Check a Compose file against the supported subset, without images or guests.
+    /// Check Compose services and directed network policies, without images or guests.
     Validate {
         #[command(flatten)]
         compose: ComposeArg,
@@ -167,6 +176,18 @@ enum Command {
         #[command(flatten)]
         performance: Performance,
     },
+    /// Pause host execution at a slice boundary (Linux KVM host, same user or root).
+    #[command(after_help = HOST_CONTROL_HELP)]
+    Pause {
+        /// Directory of the executing run or replay attempt.
+        run: PathBuf,
+    },
+    /// Resume host execution from a paused slice boundary (Linux KVM host, same user or root).
+    #[command(after_help = HOST_CONTROL_HELP)]
+    Resume {
+        /// Directory of the executing run or replay attempt.
+        run: PathBuf,
+    },
     /// Export a recorded run and its retained inputs and logs.
     Export {
         /// Run directory, as printed by run or replay.
@@ -188,7 +209,7 @@ enum Command {
         #[command(flatten)]
         transfer: Transfer,
     },
-    /// Compare retained run evidence without executing guests.
+    /// Compare retained run evidence, including terminal state parts, without executing guests.
     #[command(after_help = EXIT_CODES)]
     Diff {
         /// First retained run directory.
@@ -196,6 +217,26 @@ enum Command {
         /// Second retained run directory.
         run_b: PathBuf,
         /// Print exactly one comparison report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show committed-time logs as raw bytes without executing guests.
+    Logs {
+        /// Retained run directory.
+        run: PathBuf,
+        /// Select one machine from the retained run.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Select the console or management stream [default: both].
+        #[arg(long, value_enum)]
+        stream: Option<LogStream>,
+        /// Include chunks whose first byte commits at or after this simulated nanosecond.
+        #[arg(long)]
+        since_ns: Option<u64>,
+        /// Include chunks whose first byte commits before this simulated nanosecond.
+        #[arg(long)]
+        until_ns: Option<u64>,
+        /// Print one JSON document with lossless hexadecimal payloads.
         #[arg(long)]
         json: bool,
     },
@@ -211,6 +252,22 @@ enum Command {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum LogStream {
+    /// Raw COM1 console bytes.
+    Console,
+    /// Raw management transport bytes.
+    Mgmt,
+}
+impl From<LogStream> for logs::Stream {
+    fn from(value: LogStream) -> Self {
+        match value {
+            LogStream::Console => Self::Console,
+            LogStream::Mgmt => Self::Mgmt,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum TemplateArg {
     /// Three-member etcd cluster with an acknowledgement-ledger checker.
     Etcd,
@@ -223,6 +280,23 @@ impl From<TemplateArg> for Template {
         match template {
             TemplateArg::Etcd => Template::Etcd,
             TemplateArg::Redis => Template::Redis,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum TimebaseArg {
+    /// Count retired guest branches with the host PMU.
+    Counter,
+    /// Advance time at guest exits, syscalls and clock reads.
+    Pv,
+}
+
+impl From<TimebaseArg> for Timebase {
+    fn from(timebase: TimebaseArg) -> Self {
+        match timebase {
+            TimebaseArg::Counter => Self::Counter,
+            TimebaseArg::Pv => Self::Pv,
         }
     }
 }
@@ -249,7 +323,7 @@ struct CpuArg {
     /// Run even when this CPU's branch counter profile is unqualified; its results are unverified.
     #[arg(long)]
     allow_unqualified_cpu: bool,
-    /// Allow unpinned engines or guest kernels; their results are unqualified.
+    /// No effect: every built engine and guest kernel is admitted. Kept so existing scripts parse.
     #[arg(long)]
     allow_dev_engine: bool,
 }
@@ -319,7 +393,10 @@ struct RuntimeInputs {
     /// Guest RAM per service, in MiB.
     #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(64..=65536))]
     memory_mb: u32,
-    /// Also record and compare every machine's RAM and registers.
+    /// Timebase for guest progress; changes run identity and results.
+    #[arg(long, value_enum, default_value_t = TimebaseArg::Counter)]
+    timebase: TimebaseArg,
+    /// Also record and compare every machine's RAM and registers, retaining per-page RAM hashes.
     #[arg(long)]
     full_state: bool,
     /// Keep a seeded subset of unflushed disk sectors on crash (512-byte atomicity; off by default).
@@ -343,7 +420,8 @@ impl RuntimeInputs {
             WitnessMode::Exits
         };
         let executor = VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?
-            .with_torn_writes(self.torn_writes);
+            .with_torn_writes(self.torn_writes)
+            .with_timebase(self.timebase.into());
         let preparer = self.preparer(engine, store, scratch, executor.profile())?;
         Ok((preparer, executor))
     }
@@ -445,6 +523,16 @@ pub fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<u8> {
     match cli.command {
+        Command::Pause { run } => {
+            let status = seedbox::host_control::set_paused(&run, true)?;
+            println!("{}: {}", word(&status), run.display());
+            Ok(0)
+        }
+        Command::Resume { run } => {
+            let status = seedbox::host_control::set_paused(&run, false)?;
+            println!("{}: {}", word(&status), run.display());
+            Ok(0)
+        }
         Command::Init {
             directory,
             template,
@@ -475,20 +563,11 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Doctor { cpu, inputs, json } => {
             let engine = defaults::engine_lookup(inputs.vmm)?;
             let kernel = defaults::kernel(inputs.kernel)?;
-            let report = VmmExecutor::doctor_with_dev_engine(
-                &engine,
-                &kernel,
-                cpu.cpu,
-                cpu.allow_dev_engine,
-            )?;
+            let report = VmmExecutor::doctor(&engine, &kernel, cpu.cpu)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!("VALID: compatible execution profile");
-                if report.engine_qualification.is_some() {
-                    println!("dev engine: unqualified");
-                }
-                println!("policy: {}", report.policy_version);
                 println!("cpu: {}", report.cpu);
                 println!(
                     "cpus: {}",
@@ -557,11 +636,6 @@ fn run(cli: Cli) -> Result<u8> {
                 inputs.backends(&store, cpu.cpu, counter, scratch.path())?;
             cpu.admit(detected?)?;
             let executor = executor.with_unqualified_cpu(cpu.allow_unqualified_cpu);
-            let executor = if cpu.allow_dev_engine {
-                executor.with_dev_engine(true, &seedbox::admission::file_digest(&preparer.kernel)?)
-            } else {
-                executor
-            };
             let executor = match (checkpoint_at_ns, branch_seed) {
                 (Some(at), Some(branch)) => executor.with_checkpoint(at, branch),
                 _ => executor,
@@ -624,11 +698,6 @@ fn run(cli: Cli) -> Result<u8> {
             }
             cpu.admit(detected?)?;
             let executor = executor.with_unqualified_cpu(cpu.allow_unqualified_cpu);
-            let executor = if cpu.allow_dev_engine {
-                executor.with_dev_engine(true, &seedbox::admission::file_digest(&preparer.kernel)?)
-            } else {
-                executor
-            };
             preparer.profile = executor.profile();
             let executor = performance.apply(executor)?;
             // Exploration retains any backend admission refusal in its batch checkpoint.
@@ -686,17 +755,12 @@ fn run(cli: Cli) -> Result<u8> {
         } => {
             let run = defaults::run_directory(run)?;
             let previous = orchestration::inspect(&run)?;
+            let timebase = recorded_timebase(&previous.identity.inputs.profile)?;
             let detected = CounterProfile::host();
             let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
             // Historical/incompatible records must reach the retained-proof gate
             // and remain captured as NOT_COMPARABLE before querying this host.
-            if seedbox::admission::admit_artifacts(
-                &previous.identity.inputs.profile,
-                &previous.identity.inputs.kernel,
-                cpu.allow_dev_engine,
-            )
-            .is_ok()
-            {
+            if seedbox::admission::validate_profile(&previous.identity.inputs.profile).is_ok() {
                 cpu.admit(detected?)?;
                 same_counter(
                     &run,
@@ -725,9 +789,9 @@ fn run(cli: Cli) -> Result<u8> {
                     profile.witness_mode.clone(),
                     counter,
                 )?
+                .with_timebase(timebase)
                 .with_torn_writes(recorded_torn_writes(profile)?)
                 .with_unqualified_cpu(cpu.allow_unqualified_cpu)
-                .with_dev_engine(cpu.allow_dev_engine, &previous.identity.inputs.kernel)
                 .with_recorded_checkpoint(profile)?,
             )?;
             let cancellation = CancellationToken::default();
@@ -826,6 +890,9 @@ fn run(cli: Cli) -> Result<u8> {
                 );
                 for machine in &comparison.machines {
                     println!("machine: {}", serde_json::to_string(machine)?);
+                    if let Some(pages) = &machine.ram_pages {
+                        diagnostics::ram_pages(&machine.machine, pages);
+                    }
                 }
                 println!(
                     "first record: {}",
@@ -849,6 +916,62 @@ fn run(cli: Cli) -> Result<u8> {
                 diff::Status::Different => 1,
             })
         }
+        Command::Logs {
+            run,
+            machine,
+            stream,
+            since_ns,
+            until_ns,
+            json,
+        } => {
+            let run = defaults::run_directory(run)?;
+            let mut reader = logs::Reader::open(
+                &run,
+                &logs::Filter {
+                    machine,
+                    stream: stream.map(Into::into),
+                    since_ns,
+                    until_ns,
+                },
+            )?;
+            use std::io::Write;
+            let mut output = std::io::BufWriter::new(std::io::stdout().lock());
+            if json {
+                writeln!(
+                    output,
+                    "{{\n  \"status\": {},\n  \"omissions\": {},\n  \"chunks\": [",
+                    serde_json::to_string(&reader.report.status)?,
+                    serde_json::to_string_pretty(&reader.report.omissions)?
+                )?;
+            } else {
+                let mut diagnostics = std::io::stderr().lock();
+                writeln!(diagnostics, "logs: {}", run.display())?;
+                for (name, reason) in &reader.report.omissions {
+                    writeln!(
+                        diagnostics,
+                        "omission: {}",
+                        serde_json::to_string(&(name, reason))?
+                    )?;
+                }
+            }
+            for index in 0..reader.report.chunks.len() {
+                if json {
+                    output.write_all(b"    ")?;
+                    reader.write_chunk_json(index, &mut output)?;
+                    if index + 1 < reader.report.chunks.len() {
+                        output.write_all(b",")?;
+                    }
+                    output.write_all(b"\n")?;
+                } else {
+                    reader.copy_chunk(index, &mut output)?;
+                }
+            }
+            if json {
+                writeln!(output, "  ]\n}}")?;
+            }
+            output.flush()?;
+            Ok(0)
+        }
         Command::Inspect { run, json } => {
             let run = defaults::run_directory(run)?;
             let record = orchestration::inspect(&run)?;
@@ -862,13 +985,9 @@ fn run(cli: Cli) -> Result<u8> {
                 record.attempt,
                 record.identity.seed
             );
+            print_timebase(&record);
             if let Some(replay) = record.replay {
-                let label = if seedbox::admission::is_dev_engine(&record.identity.inputs.profile) {
-                    " (unqualified dev engine)"
-                } else {
-                    ""
-                };
-                println!("replay: {}{label}", word(&replay.status));
+                println!("replay: {}", word(&replay.status));
             }
             if let Some(error) = record.error {
                 println!("error: {error}");
@@ -917,20 +1036,14 @@ fn same_counter(run: &Path, recorded: CounterProfile, host: CounterProfile) -> R
 fn report(run: &orchestration::Run) -> u8 {
     // Scripts parse the run directory from this one `OUTCOME: path` line.
     println!("{}: {}", word(&run.record.outcome), run.directory.display());
-    if seedbox::admission::is_dev_engine(&run.record.identity.inputs.profile) {
-        println!("engine_qualification: dev-unpinned (unqualified dev engine)");
-    }
+    print_timebase(&run.record);
     if let Some(error) = &run.record.error {
         eprintln!("{error}");
         diagnostics::vmm_failure(&run.directory, error);
     }
     if let Some(replay) = &run.record.replay {
-        let label = if seedbox::admission::is_dev_engine(&run.record.identity.inputs.profile) {
-            " (unqualified dev engine)"
-        } else {
-            ""
-        };
-        println!("replay: {}{label}", word(&replay.status));
+        println!("replay: {}", word(&replay.status));
+        diagnostics::replay_pages(replay);
         return match replay.status {
             ReplayStatus::Match => 0,
             ReplayStatus::Mismatch => 1,
@@ -1014,6 +1127,18 @@ fn usage(who: libc::c_int) -> Option<libc::rusage> {
     } else {
         None
     }
+}
+
+fn print_timebase(record: &orchestration::RunRecord) {
+    let timebase = record
+        .identity
+        .inputs
+        .profile
+        .semantic_parameters
+        .get("timebase")
+        .map(String::as_str)
+        .unwrap_or("counter");
+    println!("timebase: {timebase}");
 }
 
 fn print_omissions(record: &orchestration::RunRecord) {

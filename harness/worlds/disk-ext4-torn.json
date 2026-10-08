@@ -1,5 +1,8 @@
 {
-  "disk_loss": "flush-stable/seeded-latest-sector-512-half/disk-loss-machine-incarnation/v1",
+  "disk_loss": {
+    "sector_bytes": 512,
+    "survival_probability": 0.5
+  },
   "kernel": "../../artifacts/bzImage",
   "mem_mb": 256,
   "duration_ns": 20000000000,

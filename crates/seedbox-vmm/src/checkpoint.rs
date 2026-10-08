@@ -33,6 +33,7 @@ pub fn parent_identity(
     cfg: &Value,
     seed: u64,
     engine: &str,
+    timebase: &str,
     mut digest: impl FnMut(&str) -> Result<String, String>,
 ) -> Result<String, String> {
     let mut cfg = cfg.clone();
@@ -49,8 +50,9 @@ pub fn parent_identity(
         }
     }
     let mut h = Sha256::new();
-    h.update(b"seedbox-world-parent-v1\0");
+    h.update(b"seedbox-world-parent-v2\0");
     h.update(engine.as_bytes());
+    h.update(timebase.as_bytes());
     h.update(seed.to_le_bytes());
     h.update(serde_json::to_vec(&cfg).map_err(|e| e.to_string())?);
     Ok(format!("{:x}", h.finalize()))
@@ -72,24 +74,25 @@ mod tests {
     #[test]
     fn identity_binds_parent_time_seed_and_content_not_paths() {
         let cfg = json!({"kernel":"a", "machines":[{"initrd":"b","disk":{"image":"c"}}]});
-        let parent = parent_identity(&cfg, 7, "engine", |_| Ok("content".into())).unwrap();
+        let parent = parent_identity(&cfg, 7, "engine", "counter", |_| Ok("content".into())).unwrap();
         let moved = json!({"kernel":"x", "machines":[{"initrd":"y","disk":{"image":"z"}}]});
         assert_eq!(
             parent,
-            parent_identity(&moved, 7, "engine", |_| Ok("content".into())).unwrap()
+            parent_identity(&moved, 7, "engine", "counter", |_| Ok("content".into())).unwrap()
         );
         assert_ne!(
             parent,
-            parent_identity(&cfg, 8, "engine", |_| Ok("content".into())).unwrap()
+            parent_identity(&cfg, 8, "engine", "counter", |_| Ok("content".into())).unwrap()
         );
         assert_ne!(
             parent,
-            parent_identity(&cfg, 7, "changed", |_| Ok("content".into())).unwrap()
+            parent_identity(&cfg, 7, "changed", "counter", |_| Ok("content".into())).unwrap()
         );
         assert_ne!(
             parent,
-            parent_identity(&cfg, 7, "engine", |_| Ok("changed".into())).unwrap()
+            parent_identity(&cfg, 7, "engine", "counter", |_| Ok("changed".into())).unwrap()
         );
+        assert_ne!(parent, parent_identity(&cfg, 7, "engine", "pv", |_| Ok("content".into())).unwrap());
         let id = branch_identity(&parent, 10, 20);
         assert_eq!(id, branch_identity(&parent, 10, 20));
         assert_ne!(id, branch_identity(&parent, 11, 20));

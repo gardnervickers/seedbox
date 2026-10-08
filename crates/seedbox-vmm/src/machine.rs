@@ -1,9 +1,10 @@
 //! One x86-64 Linux machine: a KVM VM with one vCPU, run only by the world
-//! thread. Guest progress is measured in retired conditional branches; the
-//! machine can be stopped at an exact branch count (precise preemption).
+//! thread. Its timebase (see `timebase.rs`) says how guest progress becomes
+//! virtual time: retired conditional branches with exact counted stops
+//! (precise preemption), or the PV clock, where time moves only at exits.
 
 use crate::boundary::{advance_time, hard_limit, io_charge, PendingIo};
-use crate::timebase::{Judge, Run, Timebase, Verdict};
+use crate::timebase::{Judge, Prepared, Run, Timebase, Verdict};
 #[cfg(test)]
 use crate::counter::Counter;
 use crate::profile::CounterProfile;
@@ -21,6 +22,7 @@ use std::os::fd::AsRawFd;
 use std::time::Instant;
 
 mod counted;
+pub mod pv;
 
 pub const TIME_PAGE: u64 = 0xd000_0000;
 pub const NET_MMIO: u64 = 0xd000_1000;
@@ -40,11 +42,31 @@ const PAGE_NET_ISR: usize = 5;
 pub const PAGE_FIELDS: usize = 6;
 /// Fork entropy (ABI 3): written by the VMM only while the world is parked,
 /// so undo checkpoints need not carry them.
-const PAGE_ENTROPY_GEN: usize = 6;
-const PAGE_ENTROPY: usize = 7;
+const PAGE_ENTROPY_GEN: usize = 9;
+const PAGE_ENTROPY: usize = 10;
 const PAGE_ENTROPY_FIELDS: usize = 4;
 /// Guest ABI from which the kernel reseeds its CRNG from the page.
 pub const ABI_PAGE_RESEED: u64 = 3;
+/// PV clock fields, written by the VMM and outside `PAGE_FIELDS` (they are
+/// zero in the counter timebase, whose checkpoints and digests skip them).
+const PAGE_PV_CLOCK: usize = 6;
+const PAGE_BOUND: usize = 7;
+const PAGE_SYSCALL_TARGET: usize = 8;
+
+// Pin every extension word without extending the checkpoint/digest prefix.
+const _: () = {
+    assert!(PAGE_FIELDS == 6);
+    assert!(PAGE_PV_CLOCK == 6);
+    assert!(PAGE_BOUND == 7);
+    assert!(PAGE_SYSCALL_TARGET == 8);
+    assert!(PAGE_ENTROPY_GEN == 9);
+    assert!(PAGE_ENTROPY == 10);
+    assert!(PAGE_ENTROPY + 1 == 11);
+    assert!(PAGE_ENTROPY + 2 == 12);
+    assert!(PAGE_ENTROPY + 3 == 13);
+    assert!(PAGE_ENTROPY_FIELDS == 4);
+    assert!(ABI_PAGE_RESEED == 3);
+};
 
 pub struct BootSpec<'a> {
     pub kernel: &'a [u8],
@@ -60,6 +82,8 @@ pub struct BootSpec<'a> {
     pub undo_margin: u64,
     /// The guest parks at its launch barrier until the world releases it.
     pub barrier: bool,
+    /// The machine runs under the PV clock timebase (no host perf counter).
+    pub pv_clock: bool,
 }
 
 /// Port of the launch barrier, see guest/barrier.h.
@@ -91,6 +115,8 @@ pub struct MachineSnapshot {
     rtc_index: u8,
     com1: Uart,
     com2: Uart,
+    log_order: u64,
+    observe_console: bool,
     management_framer: crate::control::ManagementFramer,
     net: Option<VirtioNet>,
     channel: Option<VirtioConsole>,
@@ -98,6 +124,7 @@ pub struct MachineSnapshot {
     control_dma_bytes: u64,
     control_tx_bytes: u64,
     pv: bool,
+    syscall_ns: u64,
     abi: u64,
     armed_wake: u64,
     pit_exact: bool,
@@ -192,6 +219,67 @@ pub struct Stats {
     pub soft_undos: u64,
     /// Of the soft misses, those with no syscall in the run (provably harmless).
     pub soft_misses_clean: u64,
+    /// PV clock: watchdog checks of a run with no exit, those that proved a
+    /// spin (a state cycle, then treated as idle), and the rest.
+    pub spin_probes: u64,
+    pub spin_idles: u64,
+    pub spin_false: u64,
+    /// Of the false alarms, probes abandoned as soon as the guest clock moved.
+    pub spin_clock_progress: u64,
+    /// Per state part, cycle checks that failed first on it.
+    pub spin_mismatch: std::collections::BTreeMap<String, u64>,
+    /// Virtual time advanced, by cause (see `Cause`).
+    pub time_by: [u64; 5],
+    /// Report-only timer diagnostics. Writes to the PIT or port 0x530, and
+    /// of those, writes that found the old deadline already due (with how
+    /// far past due, and the syscalls charged in that run).
+    pub timer_writes: u64,
+    pub timer_overdue: u64,
+    pub timer_overdue_max_ns: u64,
+    pub timer_write_syscalls_max: u64,
+    /// Guest clock (`page.last`) against VMM time at timer writes, sends
+    /// and halts (`Site`).
+    pub skew: [Skew; 3],
+}
+
+/// Where `Stats::skew` was sampled.
+pub enum Site {
+    Timer,
+    Sent,
+    Halt,
+}
+
+impl Site {
+    pub const NAMES: [&'static str; 3] = ["timer_write", "sent", "halt"];
+}
+
+/// Guest clock minus VMM time: how often and how far ahead or behind.
+#[derive(Default, Debug, Clone)]
+pub struct Skew {
+    pub n: u64,
+    pub ahead: u64,
+    pub ahead_max_ns: u64,
+    pub behind: u64,
+    pub behind_max_ns: u64,
+}
+
+/// Why virtual time moved, for `Stats::time_by`.
+#[derive(Clone, Copy)]
+pub enum Cause {
+    /// The timebase's progress: branches, or charged syscalls (PV).
+    Progress,
+    /// Guest clock reads (time page or port).
+    ClockReads,
+    /// The guest waited at a PV clock bound.
+    ClockBound,
+    /// I/O cost paid.
+    Io,
+    /// Halted, parked or waiting for the world.
+    Idle,
+}
+
+impl Cause {
+    pub const NAMES: [&'static str; 5] = ["progress", "clock_reads", "clock_bound", "io", "idle"];
 }
 
 pub struct Machine {
@@ -216,8 +304,11 @@ pub struct Machine {
     rtc_index: u8,
     pub com1: Uart,
     pub com2: Uart,
+    log_order: u64,
     pub fault_effects: Vec<(u32, u64, bool)>,
     pub control_requests: Vec<(u64, Vec<u8>)>,
+    pub observe_console: bool,
+    pub committed_console: Option<(u64,u8)>,
     management_framer: crate::control::ManagementFramer,
     pub net: Option<VirtioNet>,
     pub channel: Option<VirtioConsole>,
@@ -243,6 +334,8 @@ pub struct Machine {
     last_plan: (u64, Vec<u64>),
     pub tolerance: u64,
     pub timer_jitter: u64,
+    /// PV clock: virtual time one syscall costs on this machine.
+    pub syscall_ns: u64,
     pub timer_rng: Option<crate::rng::Rng>,
     pub margin: u64,
     /// Recompute `margin` from the recent guest branch rate.
@@ -270,6 +363,7 @@ pub struct Machine {
     /// Per-seed words the guest reads after its release.
     entropy: [u32; ENTROPY_WORDS],
     entropy_read: usize,
+    pv_clock: bool,
     /// The MSR list a fork snapshot saves.
     msrs: Msrs,
     pub stats: Stats,
@@ -342,13 +436,18 @@ fn guest_cpuid(kvm: &Kvm) -> Result<CpuId, String> {
 
 impl Machine {
     pub fn new(kvm: &Kvm, name: &str, spec: &BootSpec) -> Result<Self, String> {
-        let profile = crate::profile::host()?;
+        // The PV clock needs no counter, so no qualified host CPU; the
+        // profile is then never consulted.
+        let profile = if spec.pv_clock { &crate::profile::ZEN } else { crate::profile::host()? };
         if !kvm.check_extension(kvm_ioctls::Cap::ImmediateExit) {
             return Err("KVM immediate-exit capability required for I/O completion".into());
         }
         let mem_size = spec.mem;
         let mem = map(mem_size)?;
         let page = map(4096)?;
+        if spec.pv_clock {
+            unsafe { std::ptr::write_volatile(page.cast::<u64>().add(PAGE_PV_CLOCK), 1) };
+        }
         let m = unsafe { std::slice::from_raw_parts_mut(mem, mem_size) };
         let k = spec.kernel;
         let setup = (k[0x1f1] as usize + 1) * 512;
@@ -477,8 +576,10 @@ impl Machine {
             rtc_index: 0,
             com1: Uart::default(),
             com2: Uart::default(),
+            log_order: 0,
             fault_effects: Vec::new(),
             control_requests: Vec::new(),
+            observe_console:false, committed_console:None,
             management_framer: crate::control::ManagementFramer::default(),
             net,
             channel: spec.control_channel.then(VirtioConsole::new),
@@ -499,6 +600,7 @@ impl Machine {
             last_plan: (0, Vec::new()),
             tolerance: 0,
             timer_jitter: 0,
+            syscall_ns: pv::SYSCALL_NS,
             timer_rng: None,
             margin: profile.margin,
             adaptive_margin: false,
@@ -514,9 +616,11 @@ impl Machine {
             barrier: spec.barrier,
             entropy: [0; ENTROPY_WORDS],
             entropy_read: 0,
+            pv_clock: spec.pv_clock,
             msrs,
             stats: Stats::default(),
-            witness: Sha256::new(),
+            // A PV clock run can never share a witness with a counter run.
+            witness: if spec.pv_clock { Sha256::new_with_prefix(b"timebase=pv") } else { Sha256::new() },
             trace: None,
         })
     }
@@ -568,7 +672,7 @@ impl Machine {
         // The parked interval passes like idle time: a timer that fell due
         // meanwhile fires now, late, so the armed deadline is ahead of the
         // clock again before the next slice computes its hard stop.
-        self.time = self.time.max(at);
+        self.advance_to(at, Cause::Idle);
         self.expire_timers()?;
         self.entropy = entropy;
         self.entropy_read = 0;
@@ -587,7 +691,7 @@ impl Machine {
     /// ABI zero is pre-boot: retain the page until the kernel announces its ABI.
     pub fn reseed_time_page(&mut self, entropy: [u32; ENTROPY_WORDS]) -> Result<(), String> {
         if self.abi != 0 && self.abi < ABI_PAGE_RESEED {
-            return Err(format!("{}: runtime checkpoint reseeding requires guest ABI 3; rebuild the kernel with PR #93", self.name));
+            return Err(format!("{}: runtime checkpoint reseeding requires guest ABI 3; rebuild the kernel from kernel/", self.name));
         }
         self.entropy = entropy;
         self.entropy_read = 0;
@@ -599,6 +703,11 @@ impl Machine {
         self.page_set(PAGE_ENTROPY_GEN, gen);
         self.record(b'S', gen);
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn published_entropy(&self) -> [u64;5] {
+        std::array::from_fn(|i|self.page_get(PAGE_ENTROPY_GEN+i))
     }
 
     /// Freeze the machine at a world boundary. Nothing about the vCPU changes:
@@ -653,8 +762,13 @@ impl Machine {
             new.out = std::mem::take(&mut old.out);
             new.output_file = old.output_file.take();
             new.output_limit = old.output_limit;
+            new.chunks = std::mem::take(&mut old.chunks);
         }
+        self.log_order = old.log_order;
         self.trace = old.trace.take();
+        // The same machine: under the PV clock it keeps its speed, or members
+        // restarted together would run in lockstep again.
+        self.syscall_ns = old.syscall_ns;
         // Flushed data survives; the disk policy chooses unflushed survivors.
         let lost = if let (Some(new), Some(blk)) = (self.blk.as_mut(), old.blk.as_ref()) {
             let (disk, lost) = blk.disk.crashed_branch(seed, identity, &old.name, old.incarnation);
@@ -683,7 +797,7 @@ impl Machine {
 
     /// Capture at a committed scheduler boundary, including unpaid I/O cost.
     pub fn snapshot(&mut self) -> Result<MachineSnapshot, String> {
-        if self.stepping || !self.fault_effects.is_empty() || !self.control_requests.is_empty() {
+        if self.stepping || !self.fault_effects.is_empty() || !self.control_requests.is_empty() || self.committed_console.is_some() {
             return Err(format!("{}: not at a fork point", self.name));
         }
         self.complete_io()?;
@@ -705,11 +819,12 @@ impl Machine {
             time: self.time, branches: self.branches, tsc_latch: self.tsc_latch, state: self.state,
             guest_exit_code: self.guest_exit_code, guest_init_error: self.guest_init_error,
             pic: self.pic.clone(), pit: self.pit.clone(), rtc_index: self.rtc_index,
-            com1: self.com1.snapshot(), com2: self.com2.snapshot(),
+            com1: self.com1.snapshot(), com2: self.com2.snapshot(), log_order: self.log_order,
+            observe_console:self.observe_console,
             management_framer: self.management_framer.clone(),
             net: self.net.clone(), channel: self.channel.clone(), blk: self.blk.clone(),
             control_dma_bytes: self.control_dma_bytes, control_tx_bytes: self.control_tx_bytes,
-            pv: self.pv, abi: self.abi, armed_wake: self.armed_wake, pit_exact: self.pit_exact, exit_req: self.exit_req,
+            pv: self.pv, syscall_ns: self.syscall_ns, abi: self.abi, armed_wake: self.armed_wake, pit_exact: self.pit_exact, exit_req: self.exit_req,
             margin: self.margin, fm: self.fm, parked: self.parked,
             stats: self.stats.clone(), witness: self.witness.clone(), undo_stats,
         })
@@ -769,8 +884,10 @@ impl Machine {
         self.rtc_index = s.rtc_index;
         self.com1.restore(&s.com1);
         self.com2.restore(&s.com2);
+        self.log_order = s.log_order;
         self.fault_effects.clear();
         self.control_requests.clear();
+        self.observe_console=s.observe_console;self.committed_console=None;
         self.management_framer = s.management_framer.clone();
         self.net = s.net.clone();
         self.channel = s.channel.clone();
@@ -778,6 +895,7 @@ impl Machine {
         self.control_dma_bytes = s.control_dma_bytes;
         self.control_tx_bytes = s.control_tx_bytes;
         self.pv = s.pv;
+        self.syscall_ns = s.syscall_ns;
         self.abi = s.abi;
         self.armed_wake = s.armed_wake;
         self.pit_exact = s.pit_exact;
@@ -798,7 +916,7 @@ impl Machine {
 
     /// Resume a halted machine at virtual time `t`.
     pub fn wake(&mut self, t: u64) {
-        self.time = self.time.max(t);
+        self.advance_to(t, Cause::Idle);
         if self.state == State::Halted {
             self.state = State::Running;
         }
@@ -821,10 +939,16 @@ impl Machine {
         if !complete {return Err("control transport receive capacity insufficient at exact delivery time".into())}
         self.control_dma_bytes+=bytes.len() as u64;Ok(())
     }
+    fn capture_output(&mut self) {
+        for uart in [&mut self.com1,&mut self.com2] {
+            uart.chunks.capture(uart.out.len() as u64,self.time,self.incarnation,&mut self.log_order);
+        }
+    }
     fn channel_output(&mut self,bytes:&[u8])->Result<bool,String> {
         if self.com2.output_limit.is_some_and(|limit|self.com2.out.len().checked_add(bytes.len()).is_none_or(|n|n>limit)){return Err("guest control output limit exceeded".into())}
         if let Some(file)=self.com2.output_file.as_mut() {use std::io::Write;file.write_all(bytes).map_err(|e|format!("control log: {e}"))?;}
         self.com2.out.extend_from_slice(bytes);self.control_tx_bytes+=bytes.len() as u64;
+        self.capture_output();
         let frames=self.management_framer.receive(bytes)?;let stop=!frames.is_empty();
         self.control_requests.extend(frames.into_iter().map(|f|(self.time,f)));Ok(stop)
     }
@@ -842,6 +966,19 @@ impl Machine {
             self.raise_net();
         }
         outcome
+    }
+
+    /// Syscalls the guest has entered (counted in the time page).
+    /// Move virtual time forward to `t` (never back) for `cause`.
+    fn advance_to(&mut self, t: u64, cause: Cause) {
+        if t > self.time {
+            self.stats.time_by[cause as usize] += t - self.time;
+            self.time = t;
+        }
+    }
+
+    pub fn syscalls(&self) -> u64 {
+        self.page_get(PAGE_SYSCALLS)
     }
 
     fn page_get(&self, i: usize) -> u64 {
@@ -918,6 +1055,19 @@ impl Machine {
         format!("{:x}", h.finalize())
     }
 
+    fn note_skew(&mut self, site: Site) {
+        let last = self.page_get(1);
+        let k = &mut self.stats.skew[site as usize];
+        k.n += 1;
+        if last > self.time {
+            k.ahead += 1;
+            k.ahead_max_ns = k.ahead_max_ns.max(last - self.time);
+        } else if last < self.time {
+            k.behind += 1;
+            k.behind_max_ns = k.behind_max_ns.max(self.time - last);
+        }
+    }
+
     fn expire_timers(&mut self) -> Result<(), String> {
         if self.pit.expire_through(self.time)? > 0 {
             self.pic.raise(0);
@@ -940,7 +1090,8 @@ impl Machine {
             if self.time == limit {
                 return Ok(false);
             }
-            self.time = pending.advance(self.time, limit, self.pit.deadline)?;
+            let t = pending.advance(self.time, limit, self.pit.deadline)?;
+            self.advance_to(t, Cause::Io);
             self.expire_timers()?;
         }
         Ok(true)
@@ -986,7 +1137,8 @@ impl Machine {
     }
 
     fn sync_from_page(&mut self, limit: u64) -> Result<(), String> {
-        self.time = self.checked_page_time(limit)?;
+        let t = self.checked_page_time(limit)?;
+        self.advance_to(t, Cause::ClockReads);
         self.sync_pic();
         Ok(())
     }
@@ -1027,6 +1179,51 @@ impl Machine {
             self.stats.step_ns += t.elapsed().as_nanos();
         }
         Ok(())
+    }
+
+    /// Arm breakpoints for one step: the next landing point the planner
+    /// finds from the current registers. Returns whether that landing is
+    /// only a cap on straight-line code, so depends on where stepping began.
+    fn arm_step(&mut self) -> Result<bool, String> {
+        self.set_stepping(true)?;
+        let (r, sr) = {
+            let run = self.vcpu.get_kvm_run();
+            unsafe { (run.s.regs.regs, run.s.regs.sregs) }
+        };
+        let mem = unsafe { std::slice::from_raw_parts(self.mem, self.mem_size) };
+        let planner = self.planner.as_mut().unwrap();
+        planner.refresh_from(&sr);
+        let (targets, capped) = planner
+            .plan_capped(mem, &r)
+            .map_err(|e| format!("{}: step plan: {e}", self.name))?;
+        Planner::arm(&self.vcpu, &targets)?;
+        self.last_plan = (r.rip, targets.clone());
+        if targets.contains(&r.rip) {
+            let mut resumed = r;
+            resumed.rflags |= 1 << 16; // RF: do not re-trigger at the current instruction
+            self.vcpu.set_regs(&resumed).map_err(|e| e.to_string())?;
+        }
+        Ok(capped)
+    }
+
+    /// The guest is in a state cycle (see `pv.rs`), at its canonical point:
+    /// idle, like HLT, until an interrupt.
+    fn spin_idle(&mut self) -> Result<Stop, String> {
+        let (rip, if_flag) = {
+            let run = self.vcpu.get_kvm_run();
+            (unsafe { run.s.regs.regs.rip }, run.if_flag)
+        };
+        self.set_stepping(false)?;
+        self.stats.spin_idles += 1;
+        self.record(b'S', rip);
+        if if_flag == 0 {
+            return Err(format!(
+                "{}: the guest spins with interrupts off at rip {rip:#x}; nothing can end the loop",
+                self.name
+            ));
+        }
+        self.state = State::Halted;
+        Ok(Stop::Halted)
     }
 
     fn inject(&mut self) {
@@ -1072,6 +1269,8 @@ impl Machine {
     ) -> Result<Stop, String> {
         let started = Instant::now();
         let r = self.run_inner(tb, limit, early, frames);
+        self.capture_output();
+        self.com1.chunks.finish();self.com2.chunks.finish();
         self.stats.run_ns += started.elapsed().as_nanos();
         r
     }
@@ -1135,7 +1334,7 @@ impl Machine {
             // Interrupt injection depends only on the distance to the stop, never
             // on the stepping margin, so it is deterministic.
             if legal {
-                if remaining > INJECT_GUARD {
+                if remaining > tb.inject_guard() {
                     self.inject();
                 } else {
                     self.vcpu.get_kvm_run().request_interrupt_window = 0;
@@ -1148,11 +1347,13 @@ impl Machine {
                 unsafe { std::ptr::write_volatile(self.page.add(2), window as u64) };
                 self.exit_req = window;
             }
-            tb.prepare(self, remaining)?;
+            let syscalls0 = self.page_get(PAGE_SYSCALLS);
+            if let Prepared::Idle = tb.prepare(self, remaining, soft)? {
+                return self.spin_idle();
+            }
             self.vcpu.get_kvm_run().kvm_valid_regs =
                 (KVM_SYNC_X86_REGS | KVM_SYNC_X86_SREGS) as u64;
-            let syscalls0 = self.page_get(PAGE_SYSCALLS);
-            let c0 = tb.start();
+            let c0 = tb.start(syscalls0);
             let t_run = Instant::now();
             let run_ptr = self.vcpu.get_kvm_run() as *mut kvm_run;
             let exit = self.vcpu.run();
@@ -1171,11 +1372,12 @@ impl Machine {
             };
             self.stats.kvm_ns[kind] += run_ns;
             self.stats.kvm_n[kind] += 1;
-            let c1 = tb.read();
+            let syscalls1 = unsafe { std::ptr::read_volatile(self.page.add(PAGE_SYSCALLS)) };
+            let c1 = tb.read(syscalls1);
             let delta = c1 - c0;
             let interrupted = matches!(&exit, Err(e) if e.errno() == libc::EINTR);
-            let syscalled =
-                unsafe { std::ptr::read_volatile(self.page.add(PAGE_SYSCALLS)) } != syscalls0;
+            let syscalled = syscalls1 != syscalls0;
+            let run_syscalls = syscalls1.wrapping_sub(syscalls0);
             let run = Run {
                 delta,
                 remaining,
@@ -1225,7 +1427,10 @@ impl Machine {
                     ));
                 }
             }
-            self.branches += delta;
+            if T::BRANCHES {
+                self.branches += delta;
+            }
+            self.stats.time_by[Cause::Progress as usize] += delta;
             self.time += delta;
             if legal {
                 // Sent/Hlt/Exited can return before the next loop synchronizes
@@ -1246,13 +1451,20 @@ impl Machine {
                     self.stats.eintr += 1;
                 }
                 Ok(VcpuExit::Debug(_)) => {}
-                Ok(VcpuExit::IoOut(0x52c, _)) => {
+                Ok(VcpuExit::IoOut(0x52c, data)) => {
                     // Requested yield: a stop if we reached the soft target,
                     // otherwise transparent (nothing observable happens).
+                    // PV clock only: 1 means the guest's clock would pass
+                    // the bound we published (`soft`); it waits for time to
+                    // move, so move it there.
+                    let v = data[0];
+                    if v == 1 && self.pv_clock {
+                        self.advance_to(soft, Cause::ClockBound);
+                    }
                     self.stats.yields += 1;
                     if self.time >= soft {
                         self.stats.yield_stops += 1;
-                        self.record(b'Y', 0);
+                        self.record(b'Y', v as u64);
                     } else {
                         legal = false;
                     }
@@ -1274,6 +1486,7 @@ impl Machine {
                     }
                     let after_io = self.time;
                     let mut control_stop = false;
+                    let console_before=self.com1.out.len();
                     match port {
                         0x3f8..=0x3ff => {
                             if port == 0x3f8
@@ -1326,15 +1539,37 @@ impl Machine {
                             if self.abi < ABI_PAGE_RESEED && self.page_get(PAGE_ENTROPY_GEN) != 0 {
                                 return Err(format!("{}: checkpoint entropy requires guest ABI 3", self.name));
                             }
+                            if self.pv_clock && self.page_get(PAGE_PV_CLOCK) != 2 {
+                                return Err(format!(
+                                    "{}: the guest kernel lacks PV clock support; rebuild it from kernel/ for the pv timebase",
+                                    self.name
+                                ));
+                            }
                             self.pv = v >= 2;
                             if self.pv {
                                 self.sync_pic();
                             }
                         }
                         0x40..=0x43 | 0x61 | 0x530 => {
+                            let hi = data.get(1).copied().unwrap_or(0);
+                            self.stats.timer_writes += 1;
+                            self.note_skew(Site::Timer);
+                            if let Some(d) = self.pit.deadline.filter(|&d| d <= now) {
+                                // The run that ends here can pass the deadline
+                                // (PV syscall charges, or counter tolerance).
+                                // Rewriting the PIT would drop that tick.
+                                let s = &mut self.stats;
+                                s.timer_overdue += 1;
+                                s.timer_overdue_max_ns = s.timer_overdue_max_ns.max(now - d);
+                                s.timer_write_syscalls_max = s.timer_write_syscalls_max.max(run_syscalls);
+                                // PV only, so counter witnesses don't move:
+                                // deliver the due tick before the write.
+                                if self.pv_clock {
+                                    self.expire_timers()?;
+                                }
+                            }
                             if port == 0x530 {
-                                let hi = data.get(1).copied().unwrap_or(0);
-                                let ticks = u16::from_le_bytes([data[0], hi]);
+                                let ticks = u16::from_le_bytes([v, hi]);
                                 self.pit.program(ticks, now);
                             } else {
                                 self.pit.write(port, v, now);
@@ -1386,6 +1621,14 @@ impl Machine {
                         }
                         _ => {}
                     }
+                    self.capture_output();
+                    if self.observe_console && self.com1.out.len()>console_before {
+                        // Judge::Rollback discarded the exit before reaching here.
+                        // Console ports have zero charge; the sink and pending KVM
+                        // response are committed once at this deterministic exit.
+                        self.committed_console=Some((after_io,v));control_stop=true;
+                        if let Some(u)=self.undo.as_mut() {u.valid=false;}
+                    }
                     self.record(b'O', (port as u64) << 8 | v as u64);
                     self.serial_edges();
                     self.pending_io = pending;
@@ -1406,6 +1649,7 @@ impl Machine {
                         0x520 => {
                             let t = self.time.max(advance_time(self.tsc_latch, 1, hard)?);
                             self.tsc_latch = t;
+                            self.stats.time_by[Cause::ClockReads as usize] += t - self.time;
                             self.time = t;
                             data.copy_from_slice(&(t as u32).to_le_bytes()[..data.len()]);
                         }
@@ -1503,6 +1747,7 @@ impl Machine {
                             }
                             if !out.frames.is_empty() {
                                 frames.extend(out.frames);
+                                self.note_skew(Site::Sent);
                                 self.set_stepping(false)?;
                                 return Ok(Stop::Sent);
                             }
@@ -1511,6 +1756,7 @@ impl Machine {
                 }
                 Ok(VcpuExit::Hlt) => {
                     self.stats.halts += 1;
+                    self.note_skew(Site::Halt);
                     self.record(b'H', 0);
                     // The world checks pending interrupts while halted.
                     self.sync_pic();
@@ -1625,8 +1871,7 @@ impl Machine {
         }
         parts.push(("msrs", hex(h)));
         let mut h = Sha256::new();
-        let fields = if self.abi >= ABI_PAGE_RESEED || self.page_get(PAGE_ENTROPY_GEN) != 0 { PAGE_ENTROPY + PAGE_ENTROPY_FIELDS } else { PAGE_FIELDS };
-        for i in 0..fields {
+        for i in 0..PAGE_FIELDS {
             h.update(self.page_get(i).to_le_bytes());
         }
         parts.push(("time_page", hex(h)));
@@ -1646,12 +1891,14 @@ impl Machine {
         (hex(all), parts)
     }
 
-    /// First 8 bytes of SHA-256 of each 4 KiB guest RAM page, for locating
-    /// differences between runs.
+    /// Headerless little-endian u64 per 4 KiB guest RAM page, in PFN order.
+    /// Each u64 is the first 8 SHA-256 bytes interpreted little-endian.
+    /// Evidence only: reads RAM without changing it or consuming RNG draws.
     pub fn page_hashes(&mut self) -> Vec<u8> {
         let mut out = Vec::new();
         for page in self.memory().chunks(4096) {
-            out.extend_from_slice(&Sha256::digest(page)[..8]);
+            let hash=u64::from_le_bytes(Sha256::digest(page)[..8].try_into().unwrap());
+            out.extend_from_slice(&hash.to_le_bytes());
         }
         out
     }
@@ -1672,7 +1919,7 @@ mod io_boundary_tests {
         else {code.push(if write {0xee} else {0xec});}
         code.extend_from_slice(&[0x85,0xc0,0x74,0x00,0xc7,0x05,0x00,0x00,0x08,0x00,0x78,0x56,0x34,0x12,0xf4]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false,pv_clock:false};
         let mut machine=Machine::new(kvm,"io-probe",&spec).unwrap();
         let mut r=machine.vcpu.get_regs().unwrap();r.rflags=0x202;machine.vcpu.set_regs(&r).unwrap();
         machine.pit.write(0x43,0x34,0);
@@ -1707,6 +1954,21 @@ mod io_boundary_tests {
                 assert_eq!(finish(&mut fresh,&mut counter),want,"port={port:#x}, write={write}, undo={undo}");
             }
         }
+    }
+
+    #[test]
+    #[ignore = "requires KVM on the qualified Linux host"]
+    fn page_capture_has_documented_format_and_preserves_ram_witness_state() {
+        let kvm=Kvm::new().unwrap();
+        let mut m=probe(&kvm,0x530,true,0);
+        let before=(m.exit_witness(),m.state_digest(),m.memory().to_vec());
+        let pages=m.page_hashes();
+        assert_eq!(pages.len(),m.mem_size/4096*8);
+        for (pfn,page) in before.2.chunks(4096).enumerate() {
+            let hash=u64::from_le_bytes(Sha256::digest(page)[..8].try_into().unwrap());
+            assert_eq!(&pages[pfn*8..pfn*8+8],&hash.to_le_bytes());
+        }
+        assert_eq!((m.exit_witness(),m.state_digest(),m.memory().to_vec()),before);
     }
 
     fn check_port(kvm: &Kvm, counter: &mut Counter, port: u16, write: bool) {
@@ -1817,7 +2079,7 @@ mod io_boundary_tests {
         let back=-(code.len() as i8+2);
         code.extend_from_slice(&[0xeb,back as u8]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false,pv_clock:false};
         let mut machine=Machine::new(kvm,"stop-probe",&spec).unwrap();
         let mut r=machine.vcpu.get_regs().unwrap();r.rflags=0x2;machine.vcpu.set_regs(&r).unwrap();
         machine.pic.set_masks(0xffff);
@@ -1987,11 +2249,67 @@ mod fork_tests {
         assert_eq!(fields["syscalls"], (PAGE_SYSCALLS, 1));
         assert_eq!(fields["pic_imr"], (PAGE_PIC_IMR, 1));
         assert_eq!(fields["net_isr"], (PAGE_NET_ISR, 1));
+        assert_eq!(fields["pv_clock"], (PAGE_PV_CLOCK, 1));
+        assert_eq!(fields["bound"], (PAGE_BOUND, 1));
+        assert_eq!(fields["syscall_target"], (PAGE_SYSCALL_TARGET, 1));
         assert_eq!(fields["entropy_gen"], (PAGE_ENTROPY_GEN, 1));
         assert_eq!(fields["entropy"], (PAGE_ENTROPY, PAGE_ENTROPY_FIELDS));
+        assert_eq!(index, 14);
+        assert_eq!(PAGE_FIELDS, PAGE_PV_CLOCK);
         assert_eq!(PAGE_ENTROPY_FIELDS * 8, ENTROPY_WORDS * 4);
         let abi: u64 = header.lines().find_map(|l| l.strip_prefix("#define SEEDBOX_ABI\t")).unwrap().trim().parse().unwrap();
         assert_eq!(abi, ABI_PAGE_RESEED);
+    }
+
+    // These tests create a vCPU but never enter the guest or open a perf event.
+    #[test]
+    #[ignore = "requires Linux x86-64 KVM"]
+    fn abi_below_3_time_forks_do_not_write_extensions_or_add_reseed_witnesses() {
+        let kvm=Kvm::new().unwrap();
+        for abi in 0..ABI_PAGE_RESEED {
+            let mut m=probe_machine(&kvm,0,false);
+            assert!((6..14).all(|i|m.page_get(i)==0),"counter boot, ABI {abi}");
+            for i in 6..14 {m.page_set(i,100+i as u64);}
+            m.abi=abi;
+            m.park().unwrap();
+            let mut witness=m.witness.clone();
+            witness.update([b'R']);
+            witness.update(m.branches.to_le_bytes());
+            witness.update(m.time.to_le_bytes());
+            witness.update(m.time.to_le_bytes());
+            // Pre-K2 exit_witness also covers pending I/O: none after park().
+            witness.update(b"pending_io");
+            witness.update([0]);
+            assert_eq!(m.release(m.time,[7;ENTROPY_WORDS]).unwrap(),Reseed::Unsupported);
+            assert!((6..14).all(|i|m.page_get(i)==100+i as u64),"ABI {abi}");
+            assert_eq!(m.exit_witness(),format!("{:x}",witness.finalize()),"ABI {abi}");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Linux x86-64 KVM"]
+    fn a_time_fork_writes_only_entropy_and_a_barrier_writes_none() {
+        let kvm=Kvm::new().unwrap();
+        for barrier in [false,true] {
+            let mut m=probe_machine(&kvm,0,barrier);
+            assert!((6..14).all(|i|m.page_get(i)==0),"counter boot");
+            m.abi=ABI_PAGE_RESEED;
+            for i in 0..14 {m.page_set(i,100+i as u64);}
+            let before:Vec<_>=(0..14).map(|i|m.page_get(i)).collect();
+            // Both release paths require a parked world, before any page write.
+            assert!(m.release(m.time,[7;ENTROPY_WORDS]).is_err());
+            assert_eq!((0..14).map(|i|m.page_get(i)).collect::<Vec<_>>(),before);
+            m.park().unwrap();
+            let how=m.release(m.time,[7;ENTROPY_WORDS]).unwrap();
+            assert_eq!(how,if barrier {Reseed::Barrier} else {Reseed::Page});
+            assert_eq!((0..9).map(|i|m.page_get(i)).collect::<Vec<_>>(),before[..9]);
+            if barrier {
+                assert_eq!((9..14).map(|i|m.page_get(i)).collect::<Vec<_>>(),before[9..14]);
+            } else {
+                assert_eq!(m.page_get(PAGE_ENTROPY_GEN),before[9]+1);
+                assert_eq!((10..14).map(|i|m.page_get(i)).collect::<Vec<_>>(),page_entropy(&[7;ENTROPY_WORDS]));
+            }
+        }
     }
 
     /// 32-bit payload through the real boot handoff: announce the launch
@@ -2006,7 +2324,7 @@ mod fork_tests {
         code.extend_from_slice(&[0xb9,0xe8,0x03,0,0, 0x49, 0x75,0xfd]);
         code.extend_from_slice(&[0xc7,0x05,0x00,0x10,0x08,0x00,0xad,0xde,0,0, 0xf4]);
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
-        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier};
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier,pv_clock:false};
         Machine::new(kvm,"fork-probe",&spec).unwrap()
     }
 
@@ -2172,10 +2490,12 @@ mod fork_tests {
             assert_eq!(&old.memory()[0x81000..0x81004],&[0xad,0xde,0,0]);
             let first=(old.branches,old.exit_witness());
             old.com1.out.extend_from_slice(b"first boot\n");
+            old.syscall_ns=937;
             let crash=old.time+100;
             let mut new=probe_machine(&kvm,undo,false);
             new.succeed(&mut old,crash,1009,None).unwrap();
             assert!(new.down && !new.paused);
+            assert_eq!(new.syscall_ns,937,"the next incarnation keeps the PV syscall cost");
             assert_eq!((new.incarnation,new.time),(1,crash));
             assert_eq!(&new.memory()[0x80000..0x80004],&[0,0,0,0]);
             assert_eq!(&new.memory()[0x81000..0x81004],&[0,0,0,0]);
@@ -2201,17 +2521,17 @@ mod fork_tests {
     #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
     fn a_reboot_applies_seeded_sector_survival_and_keeps_the_default_witness() {
         let kvm=Kvm::new().unwrap();
-        for enabled in [false,true] {
+        for fault_model in [crate::disk::DiskFaultModel { sector_bytes: crate::disk::SECTOR, survival_probability: 0.0 },crate::disk::DiskFaultModel { sector_bytes: crate::disk::SECTOR, survival_probability: 0.5 }] {
             let run=|seed| {
                 let mut old=probe_machine(&kvm,256,false);
-                let mut disk=Disk::new(None,Some(32)).unwrap().with_torn_writes(enabled);
+                let mut disk=Disk::new(None,Some(32)).unwrap().with_fault_model(fault_model);
                 disk.write(0,&[b'A';32*512]).unwrap();
                 disk.flush();
                 disk.write(0,&[b'B';32*512]).unwrap();
                 let expected=disk.crashed_seeded(seed,&old.name,old.incarnation);
                 old.blk=Some(VirtioBlk::new(disk));
                 let mut new=probe_machine(&kvm,256,false);
-                new.blk=Some(VirtioBlk::new(Disk::new(None,Some(32)).unwrap().with_torn_writes(enabled)));
+                new.blk=Some(VirtioBlk::new(Disk::new(None,Some(32)).unwrap().with_fault_model(fault_model)));
                 // The pre-policy successor witness: old witness followed by C.
                 let mut witness=new.witness.clone();
                 witness.update(old.exit_witness().as_bytes());
@@ -2233,7 +2553,7 @@ mod fork_tests {
             assert_eq!(a,run(1009));
             let b=run(1010);
             assert_eq!(a.0,b.0);
-            if enabled {assert_ne!(a.1,b.1);} else {assert_eq!(a.1,b.1);}
+            if fault_model.survival_probability>0.0 {assert_ne!(a.1,b.1);} else {assert_eq!(a.1,b.1);}
         }
     }
 
@@ -2270,6 +2590,25 @@ mod fork_tests {
     }
 
     #[test]
+    #[ignore = "requires Linux x86-64 KVM"]
+    fn runtime_checkpoint_restores_pv_fields_and_seeded_syscall_cost() {
+        let kvm=Kvm::new().unwrap();
+        let mut m=probe_machine(&kvm,0,false);
+        m.pv_clock=true;m.syscall_ns=937;m.abi=ABI_PAGE_RESEED;
+        for i in 6..14 {m.page_set(i,100+i as u64);}
+        let saved=m.snapshot().unwrap();
+        m.syscall_ns=1000;for i in 6..14 {m.page_set(i,0);}
+        m.restore(&saved).unwrap();
+        assert_eq!(m.syscall_ns,937);
+        assert_eq!((6..14).map(|i|m.page_get(i)).collect::<Vec<_>>(),(6..14).map(|i|100+i as u64).collect::<Vec<_>>());
+        let pv_fields=(6..9).map(|i|m.page_get(i)).collect::<Vec<_>>();
+        m.reseed_time_page([42;ENTROPY_WORDS]).unwrap();
+        assert_eq!((6..9).map(|i|m.page_get(i)).collect::<Vec<_>>(),pv_fields);
+        assert_eq!(m.page_get(9),110);
+        assert_eq!((10..14).map(|i|m.page_get(i)).collect::<Vec<_>>(),page_entropy(&[42;ENTROPY_WORDS]));
+    }
+
+    #[test]
     #[ignore = "requires KVM"]
     fn runtime_reseed_publishes_page_without_advancing_or_unpausing() {
         let kvm=Kvm::new().unwrap();
@@ -2277,24 +2616,177 @@ mod fork_tests {
         m.abi=ABI_PAGE_RESEED;
         m.pause().unwrap();
         let saved=m.snapshot().unwrap();
-        let before=m.state_digest().0;
+        let before=m.published_entropy();
         m.reseed_time_page([42;ENTROPY_WORDS]).unwrap();
         assert!(m.paused);assert_eq!(m.time,0);assert!(!m.parked);
         assert_eq!(m.page_get(PAGE_ENTROPY_GEN),1);
         let page=page_entropy(&[42;ENTROPY_WORDS]);
         for (i,word) in page.into_iter().enumerate() {assert_eq!(m.page_get(PAGE_ENTROPY+i),word);}
-        let branch=m.state_digest().0;
+        let branch=m.published_entropy();
         assert_ne!(branch,before);
         m.restore(&saved).unwrap();
         m.reseed_time_page([43;ENTROPY_WORDS]).unwrap();
-        assert_ne!(m.state_digest().0,branch);
+        assert_ne!(m.published_entropy(),branch);
         m.restore(&saved).unwrap();
         m.reseed_time_page([42;ENTROPY_WORDS]).unwrap();
-        assert_eq!(m.state_digest().0,branch);
+        assert_eq!(m.published_entropy(),branch);
         m.abi=2;
         assert!(m.reseed_time_page([44;ENTROPY_WORDS]).unwrap_err().contains("requires guest ABI 3"));
         m.abi=0;
         m.reseed_time_page([45;ENTROPY_WORDS]).unwrap();
         assert_eq!(m.page_get(PAGE_ENTROPY_GEN),2,"pre-boot entropy is published too");
+    }
+}
+
+#[cfg(test)]
+mod timed_log_tests {
+    use super::*;
+
+    fn output_machine(kvm:&Kvm,undo:u64)->Machine {
+        // Two console bytes and one management byte, with no intervening
+        // conditional branch: all three must have the same committed time.
+        let code=[0xb0,0x00,0xe6,0xe9,0xba,0xf8,0x02,0,0,0xb0,0xff,0xee,
+            0xb0,b'A',0xe6,0xe9,0xbb,0xe8,0x03,0,0,0x4b,0x75,0xfd,
+            0xb0,b'B',0xe6,0xe9,0xb0,0,0xe6,0xf4];
+        let mut kernel=vec![0;1024];kernel[0x1f1]=1;kernel.extend_from_slice(&code);
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:undo,barrier:false,pv_clock:false};
+        let mut m=Machine::new(kvm,"timed",&spec).unwrap();
+        let mut r=m.vcpu.get_regs().unwrap();r.rflags=2;m.vcpu.set_regs(&r).unwrap();m.pic.set_masks(0xffff);m
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn timed_logs_commit_order_and_observation_controls() {
+        let kvm=Kvm::new().unwrap();let mut counter=Counter::new().unwrap();let mut expected=None;
+        for undo in [0,16,256] {
+            for cap in [0,2,65_536] {
+                let mut m=output_machine(&kvm,undo);m.com1.chunks.limit=Some(cap);m.com2.chunks.limit=Some(cap);
+                let mut frames=Vec::new();
+                // Force an exact counted boundary inside the branch loop.
+                assert_eq!(m.run_until(&mut counter,500,0,&mut frames).unwrap(),Stop::Reached);
+                assert_eq!(m.com1.out,b"\0A");assert_eq!(m.com2.out,b"\xff");
+                if cap>0 {
+                    assert_eq!(m.com1.chunks.records,vec![[0,0,0,0,1],[0,0,2,1,1]]);
+                    assert_eq!(m.com2.chunks.records,vec![[0,0,1,0,1]]);
+                }
+                // Reading metadata and taking a full-state digest are observation only.
+                let before=m.exit_witness();if cap>0 {let _=m.state_digest();}assert_eq!(before,m.exit_witness());
+                assert_eq!(m.run_until(&mut counter,2000,0,&mut frames).unwrap(),Stop::Exited);
+                assert_eq!(m.com1.out,b"\0AB");assert_eq!(m.com2.out,b"\xff");
+                if cap>2 {assert_eq!(m.com1.chunks.records[2],[1000,0,3,2,1]);}
+                let evidence=(m.time,m.exit_witness(),m.state_digest().0,m.com1.out.clone(),m.com2.out.clone());
+                if let Some(want)=&expected {assert_eq!(&evidence,want,"undo={undo} cap={cap}");} else {expected=Some(evidence);}
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn timed_logs_survive_machine_incarnations() {
+        let kvm=Kvm::new().unwrap();let mut counter=Counter::new().unwrap();
+        let mut old=output_machine(&kvm,256);let mut frames=Vec::new();
+        assert_eq!(old.run_until(&mut counter,2000,0,&mut frames).unwrap(),Stop::Exited);
+        let mut new=output_machine(&kvm,256);new.succeed(&mut old,5000,1009,None).unwrap();new.boot_at(5000).unwrap();
+        assert_eq!(new.run_until(&mut counter,7000,0,&mut frames).unwrap(),Stop::Exited);
+        assert_eq!(new.com1.out,b"\0AB\0AB");assert_eq!(new.com2.out,b"\xff\xff");
+        assert_eq!(new.com1.chunks.records,vec![[0,0,0,0,1],[0,0,2,1,2],[5000,1,3,3,1],[5000,1,5,4,2]]);
+        assert_eq!(new.com2.chunks.records,vec![[0,0,1,0,1],[5000,1,4,1,1]]);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn runtime_checkpoint_restores_timed_log_cursor_and_order() {
+        let kvm=Kvm::new().unwrap();let mut counter=Counter::new().unwrap();
+        let mut m=output_machine(&kvm,256);let mut frames=Vec::new();
+        m.run_until(&mut counter,500,0,&mut frames).unwrap();
+        let saved=m.snapshot().unwrap();
+        m.run_until(&mut counter,2000,0,&mut frames).unwrap();
+        let want=(m.com1.out.clone(),m.com2.out.clone(),m.com1.chunks.records.clone(),m.com2.chunks.records.clone(),m.log_order);
+        for _ in 0..2 {
+            let mut fresh=output_machine(&kvm,256);fresh.restore(&saved).unwrap();
+            assert_eq!(fresh.com1.chunks.seen,saved.com1.chunks.seen);
+            assert_eq!(fresh.com2.chunks.seen,saved.com2.chunks.seen);
+            fresh.run_until(&mut counter,2000,0,&mut frames).unwrap();
+            assert_eq!((fresh.com1.out.clone(),fresh.com2.out.clone(),fresh.com1.chunks.records.clone(),fresh.com2.chunks.records.clone(),fresh.log_order),want);
+        }
+    }
+
+    // Inject a judge decision at a real KVM output exit to exercise the commit
+    // gate deterministically. This is not evidence of actual PMU skid behavior.
+    struct RejectOnce {counter:Counter,rollback:bool,first:bool}
+    impl Timebase for RejectOnce {
+        const BRANCHES:bool=true;
+        fn prepare(&mut self,m:&mut Machine,remaining:u64,soft:u64)->Result<Prepared,String> {
+            let prepared=self.counter.prepare(m,remaining,soft)?;
+            if self.first && self.rollback {m.checkpoint()?;}
+            Ok(prepared)
+        }
+        fn start(&mut self,syscalls:u64)->u64 {self.counter.start(syscalls)}
+        fn read(&mut self,_:u64)->u64 {if self.first && !self.rollback {self.counter.read()+1_000_000} else {self.counter.read()}}
+        fn inject_guard(&self)->u64 {INJECT_GUARD}
+        fn judge(&mut self,j:Judge<'_>,run:&Run)->Result<Verdict,String> {
+            if self.first {self.first=false;return Ok(if self.rollback {assert!(j.undo_valid);Verdict::Rollback} else {Verdict::Overshoot});}
+            self.counter.judge(j,run)
+        }
+    }
+    #[test]
+    #[ignore = "requires exclusive CPU/SMT lease, Zen MSR workaround and KVM"]
+    fn timed_logs_commit_gate_rejection_and_rollback() {
+        let kvm=Kvm::new().unwrap();
+        for rollback in [false,true] {
+            let mut m=output_machine(&kvm,256);
+            let mut tb=RejectOnce {counter:Counter::new().unwrap(),rollback,first:true};
+            let mut frames=Vec::new();let result=m.run_until(&mut tb,2000,0,&mut frames);
+            if rollback {
+                assert_eq!(result.unwrap(),Stop::Exited);
+                assert!(m.undo.as_ref().unwrap().stats.rollbacks>0);
+                assert_eq!(m.com1.out,b"\0AB");assert_eq!(m.com1.chunks.records,vec![[0,0,0,0,1],[0,0,2,1,2]]);
+                assert_eq!(m.com1.chunks.records[0],[0,0,0,0,1]);
+            } else {
+                assert!(result.unwrap_err().contains("overshoot"));
+                assert!(m.com1.out.is_empty());assert!(m.com1.chunks.records.is_empty());
+                assert_eq!(m.log_order,0);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod committed_trigger_tests {
+    use super::*;
+    /// Force a real KVM UART candidate through the actual rollback branch.
+    /// This is a commitment control, not a hardware counter qualification.
+    struct DiscardFirst {prepared:bool,discarded:bool}
+    impl Timebase for DiscardFirst {
+        const BRANCHES:bool=true;
+        fn prepare(&mut self,m:&mut Machine,_:u64,_:u64)->Result<Prepared,String> {
+            if !self.prepared {m.checkpoint()?;self.prepared=true;}
+            Ok(Prepared::Run)
+        }
+        fn start(&mut self,_:u64)->u64 {0}
+        fn read(&mut self,_:u64)->u64 {0}
+        fn inject_guard(&self)->u64 {INJECT_GUARD}
+        fn judge(&mut self,_:Judge<'_>,_:&Run)->Result<Verdict,String> {
+            if !self.discarded {self.discarded=true;Ok(Verdict::Rollback)} else {Ok(Verdict::Advance{legal:true})}
+        }
+    }
+    #[test]
+    #[ignore = "requires KVM"]
+    fn committed_console_discards_rolled_back_candidate_before_matcher_feed() {
+        let kvm=Kvm::new().unwrap();
+        let mut kernel=vec![0;1024];kernel[0x1f1]=1;kernel.extend_from_slice(&[0xb0,b'A',0xe6,0xe9,0xf4]);
+        let spec=BootSpec {kernel:&kernel,initrd:&[],cmdline:String::new(),mem:INITRD_ADDR+0x100000,rng_seed:[0;32],mac:None,control_channel:false,disk:None,undo_margin:256,barrier:false,pv_clock:false};
+        let mut m=Machine::new(&kvm,"source",&spec).unwrap();m.observe_console=true;
+        let mut tb=DiscardFirst{prepared:false,discarded:false};let mut frames=Vec::new();
+        assert_eq!(m.run_until(&mut tb,10,0,&mut frames).unwrap(),Stop::Control);
+        assert!(tb.discarded);assert_eq!(m.undo.as_ref().unwrap().stats.rollbacks,1);
+        assert_eq!(m.com1.out,b"A");assert_eq!(m.committed_console.take(),Some((0,b'A')));
+        // A trigger stop must retain exactly the accepted byte's timed chunk
+        // and invalidate the checkpoint before returning control to the world.
+        assert!(!m.undo.as_ref().unwrap().valid);
+        assert_eq!(m.com1.chunks.records,vec![[0,0,0,0,1]]);assert_eq!(m.log_order,1);
+        assert_eq!(m.run_until(&mut tb,10,0,&mut frames).unwrap(),Stop::Exited);
+        assert_eq!(m.committed_console,None);assert_eq!(m.com1.out,b"A");
+        assert_eq!(m.com1.chunks.records,vec![[0,0,0,0,1]]);assert_eq!(m.log_order,1);
     }
 }

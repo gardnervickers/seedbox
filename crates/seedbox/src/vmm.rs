@@ -21,13 +21,20 @@ mod checkpoint;
 /// Execution failure whose VMM stderr may be excerpted by the CLI.
 pub const VMM_FAILURE_MESSAGE: &str = "VMM failed; see vmm.stderr";
 
+/// VMM `--out` directory relative to run output; recursive retention keeps this prefix.
+pub(crate) const MACHINE_OUTPUT_DIR: &str = "machines";
+
+/// Manifest-relative page evidence, beside the VMM's per-machine traces.
+pub(crate) fn page_hash_log(machine: &str) -> String {
+    format!("{MACHINE_OUTPUT_DIR}/{machine}.pages")
+}
+
 #[derive(Clone, Debug)]
 pub struct VmmExecutor {
     /// Host CPU to pin the VMM to; `None` leases the first free eligible core.
     pub cpu: Option<u32>,
     counter: CounterProfile,
     allow_unqualified: bool,
-    allow_dev_engine: bool,
     profile: ExecutionProfile,
     performance: BTreeMap<String, String>,
     admission: std::sync::Arc<std::sync::Mutex<Vec<Vec<crate::admission::CoreObservation>>>>,
@@ -36,15 +43,11 @@ pub struct VmmExecutor {
 /// Successful compatibility observation; it is not empirical replay qualification.
 #[derive(Debug, Serialize)]
 pub struct DoctorReport {
-    pub policy_version: String,
-    pub policy_fingerprint: String,
     pub cpu: u32,
     pub cpus: Vec<u32>,
     pub engine: ContentDigest,
     pub kernel: ContentDigest,
     pub observations: Vec<crate::admission::CoreObservation>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub engine_qualification: Option<String>,
 }
 
 struct AdmissionProbe {
@@ -93,16 +96,13 @@ impl VmmExecutor {
             ("control_channel".into(), "virtio-console-v1".into()),
             ("memory_mb".into(), memory_mb.to_string()),
         ]);
-        if counter == CounterProfile::Zen {
-            semantic_parameters.extend(crate::admission::bindings()?);
-        } else {
+        if counter != CounterProfile::Zen {
             semantic_parameters.insert(COUNTER.into(), counter.name().into());
         }
         Ok(Self {
             cpu,
             counter,
             allow_unqualified: false,
-            allow_dev_engine: false,
             admission: Default::default(),
             profile: ExecutionProfile {
                 backend: "seedbox-kvm".into(),
@@ -117,19 +117,21 @@ impl VmmExecutor {
         })
     }
 
+    /// Counter is recorded by omission to preserve existing run identities.
+    pub fn with_timebase(mut self, timebase: Timebase) -> Self {
+        if timebase == Timebase::Counter {
+            self.profile.semantic_parameters.remove("timebase");
+        } else {
+            self.profile
+                .semantic_parameters
+                .insert("timebase".into(), timebase.name().into());
+        }
+        self
+    }
+
     /// Check the existing execution policy without storing inputs or starting guests.
     /// Host observations are the same bounded probe used by execution preflight.
     pub fn doctor(engine: &Path, kernel: &Path, cpu: Option<u32>) -> Result<DoctorReport> {
-        Self::doctor_with_dev_engine(engine, kernel, cpu, false)
-    }
-
-    /// Opt in to unpinned artifacts while keeping every host readiness check.
-    pub fn doctor_with_dev_engine(
-        engine: &Path,
-        kernel: &Path,
-        cpu: Option<u32>,
-        allow: bool,
-    ) -> Result<DoctorReport> {
         let executor = Self::from_engine_digest(
             crate::admission::file_digest(engine)?,
             cpu,
@@ -137,12 +139,8 @@ impl VmmExecutor {
             WitnessMode::Exits,
             CounterProfile::Zen,
         )?;
-        if !allow {
-            crate::admission::validate_profile(&executor.profile)?;
-        }
+        crate::admission::validate_profile(&executor.profile)?;
         let kernel = crate::admission::file_digest(kernel)?;
-        let executor = executor.with_dev_engine(allow, &kernel);
-        crate::admission::admit_artifacts(&executor.profile, &kernel, allow)?;
         Self::doctor_counter(crate::counter::CounterProfile::host()?)?;
         let probe = executor.probe();
         executor.doctor_report(kernel, probe)
@@ -161,27 +159,7 @@ impl VmmExecutor {
         self
     }
 
-    /// Mark only genuinely unpinned artifact pairs; permission is not identity.
-    pub fn with_dev_engine(mut self, allow: bool, kernel: &ContentDigest) -> Self {
-        self.allow_dev_engine = allow;
-        self.profile
-            .semantic_parameters
-            .remove(crate::admission::ENGINE_QUALIFICATION);
-        if allow && crate::admission::artifacts_unpinned(&self.profile, kernel) {
-            self.profile.semantic_parameters.insert(
-                crate::admission::ENGINE_QUALIFICATION.into(),
-                crate::admission::DEV_UNPINNED.into(),
-            );
-        }
-        self
-    }
-
     fn validate_execution_mode(&self) -> Result<()> {
-        if crate::admission::is_dev_engine(&self.profile) && !self.allow_dev_engine {
-            return Err(Error::Setup(
-                "unqualified dev engine; pass --allow-dev-engine to execute".into(),
-            ));
-        }
         if !self.counter.qualified() && !self.allow_unqualified {
             return Err(Error::Setup(format!(
                 "{} is unqualified; explicitly allow unqualified CPU execution",
@@ -193,13 +171,11 @@ impl VmmExecutor {
 
     fn doctor_report(&self, kernel: ContentDigest, probe: AdmissionProbe) -> Result<DoctorReport> {
         probe.result?;
-        crate::admission::admit_artifacts(&self.profile, &kernel, self.allow_dev_engine)?;
+        crate::admission::validate_profile(&self.profile)?;
         for observation in &probe.observations {
             crate::admission::validate_observation(observation)?;
         }
         Ok(DoctorReport {
-            policy_version: self.profile.semantic_parameters["host_policy"].clone(),
-            policy_fingerprint: self.profile.semantic_parameters["host_policy_fingerprint"].clone(),
             cpu: probe
                 .cpu
                 .ok_or_else(|| Error::Execution("host probe did not select a CPU".into()))?,
@@ -211,11 +187,6 @@ impl VmmExecutor {
             engine: self.profile.engine.clone(),
             kernel,
             observations: probe.observations,
-            engine_qualification: self
-                .profile
-                .semantic_parameters
-                .get(crate::admission::ENGINE_QUALIFICATION)
-                .cloned(),
         })
     }
 
@@ -313,9 +284,17 @@ impl VmmExecutor {
         if enabled {
             self.profile
                 .semantic_parameters
-                .insert(DISK_LOSS.into(), TORN_DISK_MODEL.into());
+                .insert(DISK_LOSS_SECTOR_BYTES.into(), "512".into());
+            self.profile
+                .semantic_parameters
+                .insert(DISK_LOSS_SURVIVAL_PROBABILITY.into(), "0.5".into());
         } else {
-            self.profile.semantic_parameters.remove(DISK_LOSS);
+            self.profile
+                .semantic_parameters
+                .remove(DISK_LOSS_SECTOR_BYTES);
+            self.profile
+                .semantic_parameters
+                .remove(DISK_LOSS_SURVIVAL_PROBABILITY);
         }
         self
     }
@@ -367,16 +346,30 @@ pub fn recorded_checkpoint(profile: &ExecutionProfile) -> Result<Option<(u64, u6
 
 const COUNTER: &str = "counter";
 const DISK_LOSS: &str = "disk_loss";
-/// Declares the loss policy, atomic unit, probability and dedicated RNG domain.
-pub const TORN_DISK_MODEL: &str =
-    "flush-stable/seeded-latest-sector-512-half/disk-loss-machine-incarnation/v1";
+const DISK_LOSS_SECTOR_BYTES: &str = "disk_loss_sector_bytes";
+const DISK_LOSS_SURVIVAL_PROBABILITY: &str = "disk_loss_survival_probability";
 
 /// Recover the disk policy from a retained profile, rejecting unknown semantics.
 pub fn recorded_torn_writes(profile: &ExecutionProfile) -> Result<bool> {
-    match profile.semantic_parameters.get(DISK_LOSS) {
-        None => Ok(false),
-        Some(model) if model == TORN_DISK_MODEL => Ok(true),
-        Some(model) => Err(Error::Integrity(format!("unknown disk loss model {model}"))),
+    if profile.semantic_parameters.contains_key(DISK_LOSS) {
+        return Err(Error::Integrity(
+            "legacy disk_loss semantic parameter is not replay-compatible; use the retained previous CLI for historical evidence".into(),
+        ));
+    }
+    let sector_bytes = profile.semantic_parameters.get(DISK_LOSS_SECTOR_BYTES);
+    let survival_probability = profile
+        .semantic_parameters
+        .get(DISK_LOSS_SURVIVAL_PROBABILITY);
+    if sector_bytes.is_none() && survival_probability.is_none() {
+        return Ok(false);
+    }
+    match (sector_bytes, survival_probability) {
+        (Some(sector_bytes), Some(survival_probability))
+            if sector_bytes == "512" && survival_probability == "0.5" =>
+        {
+            Ok(true)
+        }
+        _ => Err(Error::Integrity("unknown disk loss parameters".into())),
     }
 }
 
@@ -467,6 +460,17 @@ fn with_capacity<T>(
     check(&reservations)
 }
 
+/// Missing timebase means counter, including records from older engines.
+pub fn recorded_timebase(profile: &ExecutionProfile) -> Result<Timebase> {
+    match profile.semantic_parameters.get("timebase").map(String::as_str) {
+        None | Some("counter") => Ok(Timebase::Counter),
+        Some("pv") => Ok(Timebase::Pv),
+        Some(value) => Err(Error::Integrity(format!(
+            "recorded --timebase {value}: expected counter or pv; use a run recorded with a supported timebase"
+        ))),
+    }
+}
+
 impl ExecutionBackend for VmmExecutor {
     fn preflight_workers(&self, workers: u32) -> Result<()> {
         if !(1..=32).contains(&workers) {
@@ -484,7 +488,7 @@ impl ExecutionBackend for VmmExecutor {
         self.preflight_capacity(1, output)
     }
     fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {
-        crate::admission::admit_artifacts(&inputs.profile, &inputs.kernel, self.allow_dev_engine)?;
+        crate::admission::validate_profile(&inputs.profile)?;
         self.validate_execution_mode()?;
         if recorded_counter(&inputs.profile)? != self.counter {
             return Err(Error::Integrity(
@@ -598,16 +602,29 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
             Ok(machine)
         })
         .collect::<Result<Vec<_>>>()?;
+    let links = request.network.links.iter().map(|link| {
+        let machine = |service: &str| request.prepared.placement.get(service).ok_or_else(||Error::Integrity(format!("missing link placement for {service}")));
+        Ok(json!({"from":machine(&link.from)?,"to":machine(&link.to)?,"latency_ns":link.latency_ns,"jitter_ns":link.jitter_ns,"loss_ppm":link.loss_ppm}))
+    }).collect::<Result<Vec<_>>>()?;
+    let mut network =
+        json!({"latency_ns":request.network.latency_ns,"jitter_ns":request.network.jitter_ns});
+    // Absent unless used, so a world without link overrides is unchanged.
+    if !links.is_empty() {
+        network["links"] = json!(links);
+    }
     let mut world = json!({
         "kernel":artifact(&request.prepared.kernel)?, "mem_mb":memory,
         "duration_ns":request.limits.simulated_time_ns,"end_on_exit":workload_machine,
         "timer_jitter_ns":request.schedule.timer_jitter_ns,"stop_tolerance_ns":request.schedule.stop_tolerance_ns,
-        "network":{"latency_ns":request.network.latency_ns,"jitter_ns":request.network.jitter_ns},
+        "network":network,
         "machines":machines,"control":control,
         "control_channel":"virtio-console-v1",
     });
     if recorded_torn_writes(&request.prepared.profile)? {
-        world[DISK_LOSS] = json!(TORN_DISK_MODEL);
+        world[DISK_LOSS] = json!({
+            "sector_bytes": 512,
+            "survival_probability": 0.5,
+        });
     }
     if let Some(checkpoint) = checkpoint_metadata(request, &world)? {
         world["checkpoint"] = checkpoint;
@@ -628,6 +645,7 @@ fn checkpoint_metadata(request: &ExecutionRequest<'_>, world: &Value) -> Result<
         world,
         request.seed,
         request.prepared.profile.engine.hex(),
+        recorded_timebase(&request.prepared.profile)?.name(),
         |path| {
             request
                 .artifacts
@@ -660,19 +678,57 @@ struct RawFault {
     detail: String,
 }
 
+/// State parts emitted by `Machine::state_digest`: `events` is descriptive
+/// text, while every other part is a lowercase SHA-256 digest. Keep unknown
+/// part names digest-checked too, so new hashed parts remain safe to compare.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(try_from = "BTreeMap<String, String>")]
+pub(crate) struct StateDigestParts(BTreeMap<String, String>);
+
+impl StateDigestParts {
+    pub(crate) fn ram_only_difference(&self, other: &Self) -> bool {
+        self.0
+            .get("ram")
+            .zip(other.0.get("ram"))
+            .is_some_and(|(a, b)| a != b)
+            && self
+                .0
+                .iter()
+                .filter(|(k, _)| k.as_str() != "ram")
+                .eq(other.0.iter().filter(|(k, _)| k.as_str() != "ram"))
+    }
+}
+
+impl TryFrom<BTreeMap<String, String>> for StateDigestParts {
+    type Error = Error;
+
+    fn try_from(parts: BTreeMap<String, String>) -> Result<Self> {
+        for (name, value) in &parts {
+            if name != "events" {
+                ContentDigest::try_from(value.clone())?;
+            }
+        }
+        Ok(Self(parts))
+    }
+}
+
 #[derive(Deserialize)]
-struct MachineReport {
-    name: String,
-    infrastructure_error: bool,
-    guest_exit_code: Option<u8>,
-    guest_init_error: Option<u8>,
-    state_digest: Option<ContentDigest>,
+pub(crate) struct MachineReport {
+    pub(crate) name: String,
+    pub(crate) infrastructure_error: bool,
+    pub(crate) guest_exit_code: Option<u8>,
+    pub(crate) guest_init_error: Option<u8>,
+    pub(crate) state_digest: Option<ContentDigest>,
+    pub(crate) state_digest_parts: Option<StateDigestParts>,
+    pub(crate) witness: Option<ContentDigest>,
+    pub(crate) branches: Option<u64>,
+    pub(crate) pending_io: Option<Value>,
     /// Final machine state, `Exited(code)` once the VM has exited.
     #[serde(default)]
-    state: Option<String>,
+    pub(crate) state: Option<String>,
     /// Final simulated time; an exited VM's clock stops at its exit.
     #[serde(default)]
-    time_ns: Option<u64>,
+    pub(crate) time_ns: Option<u64>,
     #[serde(default)]
     crashed_incarnations: Vec<CrashedIncarnation>,
 }
@@ -681,16 +737,18 @@ struct CrashedIncarnation {
     crashed_at_ns: u64,
 }
 #[derive(Deserialize)]
-struct VmmReport {
+pub(crate) struct VmmReport {
     #[serde(default)]
     checkpoint: Option<Value>,
-    report_version: u32,
+    /// Older engines always used counter.
+    timebase: Option<String>,
+    pub(crate) report_version: u32,
     seed: u64,
     /// Absent from engines older than counter profiles, which are all Zen.
     counter_profile: Option<String>,
     outcome: String,
-    world_witness: ContentDigest,
-    machines: Vec<MachineReport>,
+    pub(crate) world_witness: ContentDigest,
+    pub(crate) machines: Vec<MachineReport>,
     #[serde(default)]
     faults: Vec<RawFault>,
     #[serde(default)]
@@ -699,6 +757,8 @@ struct VmmReport {
     control_history: Vec<Value>,
     #[serde(default)]
     control_latency_ns: Option<u64>,
+    #[serde(default)]
+    triggers: Option<Vec<seedbox_control::TriggerRecord>>,
 }
 
 #[derive(Default)]
@@ -717,6 +777,7 @@ fn validate_control_history(
     latency: Option<u64>,
     request: &ExecutionRequest<'_>,
     failed: bool,
+    trigger_plans: Vec<seedbox_control::Plan>,
 ) -> Result<ValidatedControlHistory> {
     let expected_latency = control_latency(request)?;
     let latency = latency
@@ -747,10 +808,14 @@ fn validate_control_history(
     let mut session = 0;
     let mut public_id = 0u64;
     let mut accepted = 0u64;
+    let mut next_fault_id = 1u32;
     let mut down = BTreeSet::new();
     for (i, row) in history.iter().enumerate() {
         if row["status"] == "rejected" && failed {
             continue;
+        }
+        while trigger_plans.iter().any(|plan| plan.id == next_fault_id) {
+            next_fault_id = next_fault_id.checked_add(1).ok_or_else(bad)?;
         }
         accepted += 1;
         let r = &row["request"];
@@ -827,7 +892,7 @@ fn validate_control_history(
                 if row["fault_id"].is_null() || metadata["error"]["code"] != "target_unavailable" {
                     continue;
                 }
-                if row["fault_id"].as_u64() != Some(expected.plans.len() as u64 + 1) {
+                if row["fault_id"].as_u64() != Some(u64::from(next_fault_id)) {
                     return Err(bad());
                 }
             }
@@ -843,7 +908,7 @@ fn validate_control_history(
                 }
                 continue;
             }
-            if !admitted || row["fault_id"].as_u64() != Some(expected.plans.len() as u64 + 1) {
+            if !admitted || row["fault_id"].as_u64() != Some(u64::from(next_fault_id)) {
                 return Err(bad());
             }
         }
@@ -888,6 +953,73 @@ fn validate_control_history(
                     right: right.iter().map(&resolve).collect::<Result<_>>()?,
                 }
             }
+            Operation::Shape {
+                from,
+                to,
+                latency_ns,
+                jitter_ns,
+                loss_ppm,
+            } => {
+                let handle = if response {
+                    &metadata["result"]["handle"]
+                } else {
+                    &row["plan"]["handle"]
+                };
+                let handle = handle.as_str().ok_or_else(bad)?.to_owned();
+                if handle.is_empty()
+                    || (response && e != Some(a))
+                    || latency_ns < request.network.latency_ns
+                    || jitter_ns >= latency_ns
+                    || latency_ns
+                        .checked_add(jitter_ns)
+                        .is_none_or(|n| n > 3_600_000_000_000)
+                    || loss_ppm > 1_000_000
+                {
+                    return Err(bad());
+                }
+                let from: Vec<_> = from.iter().map(&resolve).collect::<Result<_>>()?;
+                let to: Vec<_> = to.iter().map(&resolve).collect::<Result<_>>()?;
+                if from.is_empty()
+                    || to.is_empty()
+                    || from.iter().chain(&to).collect::<BTreeSet<_>>().len()
+                        != from.len() + to.len()
+                {
+                    return Err(bad());
+                }
+                Action::Shape {
+                    handle,
+                    from,
+                    to,
+                    latency_ns,
+                    jitter_ns,
+                    loss_ppm,
+                }
+            }
+            Operation::DropConnection { connection } => {
+                let handle = if response {
+                    &metadata["result"]["handle"]
+                } else {
+                    &row["plan"]["handle"]
+                };
+                let handle = handle.as_str().ok_or_else(bad)?.to_owned();
+                if handle.is_empty()
+                    || (response && e != Some(a))
+                    || connection.incarnation == 0
+                    || connection.src_port == 0
+                    || connection.dst_port == 0
+                    || resolve(&seedbox_control::Target::Machine(connection.from.clone()))?
+                        == resolve(&seedbox_control::Target::Machine(connection.to.clone()))?
+                {
+                    return Err(bad());
+                }
+                Action::DropConnection { handle, connection }
+            }
+            Operation::Connections { from, to, .. } => {
+                if e != Some(a) || resolve(&from)? == resolve(&to)? {
+                    return Err(bad());
+                }
+                continue;
+            }
             Operation::Heal { handle } => {
                 if response && e != Some(a) {
                     return Err(bad());
@@ -901,6 +1033,12 @@ fn validate_control_history(
                 continue;
             }
             Operation::Inspect {} => {
+                if e != Some(a) {
+                    return Err(bad());
+                }
+                continue;
+            }
+            Operation::ArmTrigger { .. } | Operation::CancelTrigger { .. } => {
                 if e != Some(a) {
                     return Err(bad());
                 }
@@ -924,7 +1062,7 @@ fn validate_control_history(
             return Err(bad());
         }
         let plan = Plan {
-            id: u32::try_from(expected.plans.len() + 1).map_err(|_| bad())?,
+            id: next_fault_id,
             at_ns: a,
             deadline_ns: a.checked_add(PROCESS_EFFECT_TIMEOUT_NS).ok_or_else(bad)?,
             action,
@@ -959,8 +1097,232 @@ fn validate_control_history(
             }
         }
         expected.plans.push(plan);
+        next_fault_id = next_fault_id.checked_add(1).ok_or_else(bad)?;
+    }
+    expected.plans.extend(trigger_plans);
+    expected.plans.sort_by_key(|p| p.id);
+    if expected
+        .plans
+        .iter()
+        .enumerate()
+        .any(|(i, p)| p.id as usize != i + 1)
+    {
+        return Err(bad());
     }
     Ok(expected)
+}
+
+/// Check the bounded semantic trigger records against arm/cancel RPCs and
+/// derive the sole fault each committed match may schedule. The engine owns
+/// commitment; this validator rejects malformed or uncorrelated evidence.
+fn validate_triggers(
+    records: Option<&[seedbox_control::TriggerRecord]>,
+    history: &[Value],
+    request: &ExecutionRequest<'_>,
+) -> Result<Vec<seedbox_control::Plan>> {
+    use seedbox_control::{
+        Action, Operation, Plan, Request, Target, TriggerFault, MAX_TRIGGERS, MAX_TRIGGER_MARKER,
+        PROCESS_EFFECT_TIMEOUT_NS,
+    };
+    let bad = || Error::Integrity("invalid committed trigger evidence".into());
+    if records.is_some_and(|r| r.is_empty() || r.len() > MAX_TRIGGERS) {
+        return Err(bad());
+    }
+    let records = records.unwrap_or_default();
+    let latency = control_latency(request)?;
+    let controller = request
+        .control
+        .and_then(|c| request.prepared.placement.get(&c.service));
+    let resolve = |target: &Target, fault: bool| -> Result<String> {
+        let name = match target {
+            Target::Service(s) => request.prepared.placement.get(s).ok_or_else(bad)?,
+            Target::Machine(m) => m,
+        };
+        if !request.prepared.guests.contains_key(name) || (fault && Some(name) == controller) {
+            return Err(bad());
+        }
+        Ok(name.clone())
+    };
+    let mut arms = 0;
+    let mut cancellations = BTreeMap::new();
+    for row in history {
+        let metadata = if row["response"].is_object() {
+            &row["response"]
+        } else {
+            row
+        };
+        let accepted = if row["response"].is_object() {
+            metadata["ok"] == true
+        } else {
+            row["admitted_done"] == true && row["error"].is_null()
+        };
+        if !accepted {
+            continue;
+        }
+        let op = row["request"]["op"].as_str().unwrap_or_default();
+        if op != "arm_trigger" && op != "cancel_trigger" {
+            continue;
+        }
+        let call: Request = serde_json::from_value(row["request"].clone()).map_err(|_| bad())?;
+        let at = metadata["admitted_at_ns"].as_u64().ok_or_else(bad)?;
+        match call.operation {
+            Operation::CancelTrigger { trigger_id } => {
+                if trigger_id == 0
+                    || trigger_id as usize > arms
+                    || cancellations.insert(trigger_id, at).is_some()
+                {
+                    return Err(bad());
+                }
+            }
+            Operation::ArmTrigger {
+                source,
+                marker,
+                match_timeout_ns,
+                fault,
+            } => {
+                let r = records.get(arms).ok_or_else(bad)?;
+                arms += 1;
+                if r.id as usize != arms
+                    || metadata["result"]["trigger_id"].as_u64() != Some(u64::from(r.id))
+                    || r.source != resolve(&source, false)?
+                    || r.marker != marker
+                    || marker.is_empty()
+                    || marker.len() > MAX_TRIGGER_MARKER
+                    || match_timeout_ns == 0
+                    || r.armed_at_ns != at
+                    || at.checked_add(match_timeout_ns) != Some(r.match_deadline_ns)
+                {
+                    return Err(bad());
+                }
+                let action = match fault {
+                    TriggerFault::Stop { target } => Action::Stop {
+                        machine: resolve(&target, true)?,
+                    },
+                    TriggerFault::Partition { left, right } => {
+                        let handle = metadata["result"]["handle"]
+                            .as_str()
+                            .filter(|h| !h.is_empty())
+                            .ok_or_else(bad)?
+                            .to_owned();
+                        let left = left
+                            .iter()
+                            .map(|t| resolve(t, true))
+                            .collect::<Result<Vec<_>>>()?;
+                        let right = right
+                            .iter()
+                            .map(|t| resolve(t, true))
+                            .collect::<Result<Vec<_>>>()?;
+                        let unique: BTreeSet<_> = left.iter().chain(&right).collect();
+                        if left.is_empty()
+                            || right.is_empty()
+                            || unique.len() != left.len() + right.len()
+                        {
+                            return Err(bad());
+                        }
+                        Action::Partition {
+                            handle,
+                            left,
+                            right,
+                        }
+                    }
+                };
+                if r.action != action {
+                    return Err(bad());
+                }
+            }
+            _ => return Err(bad()),
+        }
+    }
+    if arms != records.len() {
+        return Err(bad());
+    }
+    let mut plans = Vec::new();
+    for r in records {
+        let matched = r.matched_at_ns.is_some();
+        if r.prefix > r.marker.len()
+            || r.seen < r.prefix as u64
+            || r.match_deadline_ns
+                .checked_add(latency)
+                .and_then(|d| d.checked_add(PROCESS_EFFECT_TIMEOUT_NS))
+                .is_none()
+            || r.effect_at_ns.is_some() != matched
+            || (matched && r.prefix != r.marker.len())
+            || (!matched && r.prefix == r.marker.len())
+            || r.cancelled_at_ns != cancellations.get(&r.id).copied()
+            || (r.status != "rejected" && r.rejection_reason.is_some())
+        {
+            return Err(bad());
+        }
+        if let Some(m) = r.matched_at_ns {
+            if m < r.armed_at_ns
+                || m >= r.match_deadline_ns
+                || m.checked_add(latency) != r.effect_at_ns
+            {
+                return Err(bad());
+            }
+        }
+        if r.cancelled_at_ns.is_some_and(|c| {
+            c < r.armed_at_ns || c > r.match_deadline_ns || c >= request.limits.simulated_time_ns
+        }) || r
+            .cut_off_at_ns
+            .is_some_and(|c| c < r.armed_at_ns || c > request.limits.simulated_time_ns)
+        {
+            return Err(bad());
+        }
+        match r.status.as_str() {
+            "rejected"
+                if matched
+                    && r.cancelled_at_ns.is_none()
+                    && r.cut_off_at_ns.is_none()
+                    && r.fault_id.is_none()
+                    && r.effect_at_ns
+                        .is_some_and(|e| e < request.limits.simulated_time_ns)
+                    && r.rejection_reason
+                        .as_ref()
+                        .is_some_and(|reason| !reason.is_empty()) => {}
+            "fired" if matched && r.cancelled_at_ns.is_none() && r.cut_off_at_ns.is_none() => {
+                let at_ns = r.effect_at_ns.ok_or_else(bad)?;
+                if at_ns >= request.limits.simulated_time_ns {
+                    return Err(bad());
+                }
+                plans.push(Plan {
+                    id: r.fault_id.ok_or_else(bad)?,
+                    at_ns,
+                    deadline_ns: at_ns
+                        .checked_add(PROCESS_EFFECT_TIMEOUT_NS)
+                        .ok_or_else(bad)?,
+                    action: r.action.clone(),
+                });
+            }
+            "expired"
+                if !matched
+                    && r.cancelled_at_ns.is_none()
+                    && r.cut_off_at_ns.is_none()
+                    && r.match_deadline_ns < request.limits.simulated_time_ns
+                    && r.fault_id.is_none() => {}
+            "cancelled"
+                if !matched
+                    && r.cancelled_at_ns.is_some()
+                    && r.cut_off_at_ns.is_none()
+                    && r.fault_id.is_none() => {}
+            "cut_off"
+                if r.cancelled_at_ns.is_none()
+                    && r.fault_id.is_none()
+                    && r.cut_off_at_ns.is_some_and(|c| {
+                        if matched {
+                            r.effect_at_ns.is_some_and(|e| e >= c)
+                        } else {
+                            c <= r.match_deadline_ns
+                        }
+                    }) => {}
+            _ => return Err(bad()),
+        }
+    }
+    plans.sort_by_key(|p| p.at_ns);
+    if plans.windows(2).any(|p| p[0].id >= p[1].id) {
+        return Err(bad());
+    }
+    Ok(plans)
 }
 
 /// Parse the engine's structured completion report. Never infer application
@@ -978,8 +1340,19 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
     if raw.checkpoint != expected_checkpoint {
         return Err(Error::Integrity("VMM checkpoint identity mismatch".into()));
     }
+    let timebase = recorded_timebase(&request.prepared.profile)?;
+    let reported = raw.timebase.as_deref().unwrap_or("counter");
+    if reported != timebase.name() {
+        return Err(Error::Integrity(format!(
+            "VMM --timebase {reported}: does not match recorded --timebase {}",
+            timebase.name()
+        )));
+    }
     let counted = recorded_counter(&request.prepared.profile)?;
-    if counted != CounterProfile::Zen && raw.counter_profile.is_none() {
+    if timebase == Timebase::Counter
+        && counted != CounterProfile::Zen
+        && raw.counter_profile.is_none()
+    {
         return Err(Error::Integrity(
             "unqualified VMM report is missing its counter profile".into(),
         ));
@@ -1044,7 +1417,9 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
         ),
     };
     if request.control.is_none()
-        && (!raw.control_history.is_empty() || raw.control_latency_ns.is_some_and(|n| n != 0))
+        && (!raw.control_history.is_empty()
+            || raw.control_latency_ns.is_some_and(|n| n != 0)
+            || raw.triggers.is_some())
     {
         return Err(Error::Integrity("unexpected control transcript".into()));
     }
@@ -1054,6 +1429,7 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
             raw.control_latency_ns,
             request,
             raw.fault_error.is_some(),
+            validate_triggers(raw.triggers.as_deref(), &raw.control_history, request)?,
         )?
     } else {
         ValidatedControlHistory::default()
@@ -1084,6 +1460,47 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
             ));
         }
         match (fault.status.as_str(), fault.applied_at_ns) {
+            // Triggered stops have no RPC reply; unavailable effects retain
+            // the same exit/crash window and prior-down evidence as process RPCs.
+            ("unavailable", None)
+                if raw.triggers.as_ref().is_some_and(|records| {
+                    records.iter().any(|r| r.fault_id == Some(fault.id))
+                }) && matches!(plan.action, seedbox_control::Action::Stop { .. })
+                    && (raw.machines.iter().any(|m| {
+                        Some(&m.name) == fault.machine.as_ref()
+                            && ((m.state.as_deref().is_some_and(|s| {
+                                s.strip_prefix("Exited(")
+                                    .and_then(|c| c.strip_suffix(')'))
+                                    .and_then(|c| c.parse::<u8>().ok())
+                                    .is_some_and(|c| s == format!("Exited({c})"))
+                            }) && m
+                                .time_ns
+                                .is_some_and(|t| t >= plan.at_ns && t <= plan.deadline_ns))
+                                || m.crashed_incarnations.iter().any(|incarnation| {
+                                    incarnation.crashed_at_ns >= plan.at_ns
+                                        && incarnation.crashed_at_ns <= plan.deadline_ns
+                                }))
+                    }) || expected
+                        .plans
+                        .iter()
+                        .take(i)
+                        .rev()
+                        .find(|prior| {
+                            prior.action.machine() == plan.action.machine()
+                                && matches!(
+                                    prior.action,
+                                    seedbox_control::Action::Crash { .. }
+                                        | seedbox_control::Action::Reboot { .. }
+                                )
+                        })
+                        .is_some_and(|prior| {
+                            matches!(prior.action, seedbox_control::Action::Crash { .. })
+                                && prior.at_ns <= plan.at_ns
+                                && raw.faults.get(prior.id as usize - 1).is_some_and(|fault| {
+                                    fault.status == "applied"
+                                        && fault.applied_at_ns == Some(prior.at_ns)
+                                })
+                        })) => {}
             // An unavailable process fault needs a prior crash without reboot
             // at admission, or the target's exact exit/crash time in its window.
             ("unavailable", None)
@@ -1157,6 +1574,7 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
         reason = StopReason::Error;
     }
     Ok(ExecutionReport {
+        timebase: Some(timebase),
         reason,
         workload_exit,
         witness: Some(raw.world_witness),
@@ -1250,6 +1668,7 @@ mod linux {
         {
             return Err(Error::Execution("CPU exceeds affinity mask".into()));
         }
+        let timebase = recorded_timebase(&backend.profile)?;
         let world = world(&request)?;
         let world_path = request.output.join("world.json");
         fs::write(&world_path, serde_json::to_vec_pretty(&world)?)?;
@@ -1259,6 +1678,7 @@ mod linux {
             .ok_or_else(|| Error::Integrity("missing retained VMM".into()))?;
         fs::set_permissions(engine, fs::Permissions::from_mode(0o500))?;
         let report_path = request.output.join("vmm.json");
+        let endpoint = crate::host_control::Endpoint::new(request.output)?;
         let mut command = Command::new(engine);
         command
             .arg("--config")
@@ -1266,9 +1686,20 @@ mod linux {
             .arg("--seed")
             .arg(request.seed.to_string())
             .arg("--out")
-            .arg(request.output.join("machines"));
+            .arg(request.output.join(MACHINE_OUTPUT_DIR));
+        if timebase != Timebase::Counter {
+            command.arg("--timebase").arg(timebase.name());
+        }
+        command.arg("--host-control").arg(endpoint.socket());
         command
             .arg("--stream-console")
+            // Bound observation metadata to at most 40 MiB across all streams.
+            .arg("--log-chunk-limit")
+            .arg(
+                (1_048_576 / (2 * request.prepared.guests.len()))
+                    .min(65_536)
+                    .to_string(),
+            )
             .arg("--console-limit")
             .arg((1024 * 1024 * 1024 / (2 * request.prepared.guests.len())).to_string());
         if backend.profile.witness_mode == WitnessMode::FullState {
@@ -1280,6 +1711,7 @@ mod linux {
             .stdout(fs::File::create(&report_path)?)
             .stderr(fs::File::create(request.output.join("vmm.stderr"))?);
         let incomplete = |reason| ExecutionReport {
+            timebase: Some(timebase),
             reason,
             workload_exit: None,
             witness: None,
@@ -1397,7 +1829,7 @@ mod linux {
 #[cfg(test)]
 mod doctor_tests {
     use super::*;
-    use crate::admission::{required_policy, CoreObservation, ENGINE, GUEST_KERNEL};
+    use crate::admission::{required_policy, CoreObservation};
 
     #[test]
     fn capacity_admission_holds_all_reservations_and_releases_them_on_every_exit() {
@@ -1445,9 +1877,9 @@ mod doctor_tests {
     }
 
     #[test]
-    fn parallel_preflight_preserves_development_and_experimental_admission_gates() {
+    fn parallel_preflight_preserves_the_experimental_admission_gate() {
         let pinned = VmmExecutor::from_engine_digest(
-            ContentDigest::try_from(ENGINE.to_owned()).unwrap(),
+            ContentDigest::of(b"engine"),
             None,
             512,
             WitnessMode::Exits,
@@ -1461,15 +1893,6 @@ mod doctor_tests {
                 .to_string()
                 .contains("--workers: use 1..32"));
         }
-        let mut dev = pinned
-            .clone()
-            .with_dev_engine(true, &ContentDigest::of(b"dev kernel"));
-        dev.allow_dev_engine = false;
-        assert!(dev
-            .preflight_workers(2)
-            .unwrap_err()
-            .to_string()
-            .contains("--allow-dev-engine"));
         let experimental = VmmExecutor::from_engine_digest(
             pinned.profile.engine,
             None,
@@ -1486,17 +1909,15 @@ mod doctor_tests {
     }
 
     fn observed(cpu: u32) -> CoreObservation {
-        let p = required_policy().unwrap();
+        let p = required_policy();
         CoreObservation {
             cpu,
             architecture: p.architecture,
             vendor: p.vendor,
-            family: p.family,
-            model: p.model,
-            stepping: p.stepping,
-            microcode: p.microcode,
-            booted_kernel: p.host_kernel.clone(),
-            current_kernel: p.host_kernel,
+            family: 25,
+            model: 33,
+            stepping: 0,
+            microcode: 0,
             kvm_api: p.kvm_api,
             immediate_exit: p.immediate_exit,
             guest_debug: p.guest_debug,
@@ -1505,7 +1926,7 @@ mod doctor_tests {
             perf_disabled_open: true,
             perf_error: None,
             workaround_msr: 17,
-            raw_cpuid: p.effective_cpuid,
+            raw_cpuid: Vec::new(),
         }
     }
     #[test]
@@ -1542,79 +1963,83 @@ mod doctor_tests {
     }
 
     #[test]
-    fn dev_artifact_pairs_require_permission_and_consistent_markers() {
-        let pinned_engine = ContentDigest::try_from(ENGINE.to_owned()).unwrap();
-        let pinned_kernel = ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap();
-        for (engine, kernel, expected_error) in [
-            (ContentDigest::of(b"dev engine"), pinned_kernel.clone(),
-             "input integrity: engine is outside the admitted host policy; no engine-change override bypass is available"),
-            (pinned_engine.clone(), ContentDigest::of(b"dev kernel"),
-             "input integrity: guest kernel is outside the admitted host policy"),
-            (ContentDigest::of(b"dev engine"), ContentDigest::of(b"dev kernel"),
-             "input integrity: engine is outside the admitted host policy; no engine-change override bypass is available"),
+    fn any_engine_and_kernel_pair_is_admitted() {
+        let pinned_engine = ContentDigest::of(b"engine");
+        let pinned_kernel = ContentDigest::of(b"kernel");
+        for (engine, kernel) in [
+            (pinned_engine, pinned_kernel),
+            (
+                ContentDigest::of(b"dev engine"),
+                ContentDigest::of(b"kernel"),
+            ),
+            (
+                ContentDigest::of(b"dev engine"),
+                ContentDigest::of(b"dev kernel"),
+            ),
         ] {
-            let backend = VmmExecutor::from_engine_digest(engine, None, 512, WitnessMode::Exits, CounterProfile::Zen).unwrap();
-            let mut inputs = PreparedInputs {
-                profile: backend.profile(), kernel: kernel.clone(), images: BTreeMap::new(),
-                placement: BTreeMap::new(), guests: BTreeMap::new(), auxiliary: BTreeMap::new(), provenance: BTreeMap::new(),
+            let backend = VmmExecutor::from_engine_digest(
+                engine.clone(),
+                None,
+                512,
+                WitnessMode::Exits,
+                CounterProfile::Zen,
+            )
+            .unwrap();
+            let inputs = PreparedInputs {
+                profile: backend.profile(),
+                kernel: kernel.clone(),
+                images: BTreeMap::new(),
+                placement: BTreeMap::new(),
+                guests: BTreeMap::new(),
+                auxiliary: BTreeMap::new(),
+                provenance: BTreeMap::new(),
             };
-            assert_eq!(backend.validate_retained(&inputs).unwrap_err().to_string(), expected_error);
-            let dev = backend.clone().with_dev_engine(true, &kernel);
-            inputs.profile = dev.profile();
-            assert_eq!(inputs.profile.semantic_parameters[crate::admission::ENGINE_QUALIFICATION], "dev-unpinned");
-            dev.validate_retained(&inputs).unwrap();
-            assert!(backend.validate_retained(&inputs).unwrap_err().to_string().contains("--allow-dev-engine"));
-            let mut stripped = inputs.clone();
-            stripped.profile.semantic_parameters.remove(crate::admission::ENGINE_QUALIFICATION);
-            assert!(dev.validate_retained(&stripped).is_err());
-            for key in ["host_policy", "guest_abi", "control_channel", "memory_mb"] {
-                let mut wrong = inputs.clone();
-                wrong.profile.semantic_parameters.insert(key.into(), "wrong".into());
-                assert!(dev.validate_retained(&wrong).is_err());
+            assert_eq!(
+                inputs.profile.engine, engine,
+                "the run records the engine it used"
+            );
+            assert!(!inputs
+                .profile
+                .semantic_parameters
+                .contains_key(crate::admission::ENGINE_QUALIFICATION));
+            backend.validate_retained(&inputs).unwrap();
+            // Older runs carry a dev marker and policy bindings; both are only data now.
+            let mut marked = inputs.clone();
+            for key in [crate::admission::ENGINE_QUALIFICATION, "host_policy"] {
+                marked
+                    .profile
+                    .semantic_parameters
+                    .insert(key.into(), "anything".into());
             }
-            let report = dev.doctor_report(kernel, AdmissionProbe { cpu: Some(8), observations: vec![observed(8)], result: Ok(()) }).unwrap();
+            backend.validate_retained(&marked).unwrap();
+            for key in ["guest_abi", "control_channel", "memory_mb"] {
+                let mut wrong = inputs.clone();
+                wrong
+                    .profile
+                    .semantic_parameters
+                    .insert(key.into(), "wrong".into());
+                assert!(backend.validate_retained(&wrong).is_err());
+            }
+            let report = backend
+                .doctor_report(
+                    kernel,
+                    AdmissionProbe {
+                        cpu: Some(8),
+                        observations: vec![observed(8)],
+                        result: Ok(()),
+                    },
+                )
+                .unwrap();
             let json = serde_json::to_value(report).unwrap();
-            assert_eq!(json["engine_qualification"], "dev-unpinned");
-            assert!(json.get("qualified").is_none());
+            assert!(json["engine_qualification"].is_null());
         }
-        let pinned = VmmExecutor::from_engine_digest(
-            pinned_engine,
-            None,
-            512,
-            WitnessMode::Exits,
-            CounterProfile::Zen,
-        )
-        .unwrap();
-        assert_eq!(
-            pinned.profile(),
-            pinned
-                .clone()
-                .with_dev_engine(true, &pinned_kernel)
-                .profile()
-        );
-        let mut forged = pinned.profile();
-        forged.semantic_parameters.insert(
-            crate::admission::ENGINE_QUALIFICATION.into(),
-            "dev-unpinned".into(),
-        );
-        assert!(
-            crate::admission::validate_artifacts(&forged, &pinned_kernel)
-                .unwrap_err()
-                .to_string()
-                .contains("requires an unpinned")
-        );
-        forged.semantic_parameters.insert(
-            crate::admission::ENGINE_QUALIFICATION.into(),
-            "qualified".into(),
-        );
-        assert!(crate::admission::validate_profile(&forged).is_err());
     }
 
     #[test]
     fn experimental_mode_never_carries_amd_proof_and_cannot_relax_release_or_counter_checks() {
         let make = |counter| {
             VmmExecutor::from_engine_digest(
-                ContentDigest::try_from(ENGINE.to_owned()).unwrap(),
+                ContentDigest::of(b"engine"),
                 None,
                 512,
                 WitnessMode::Exits,
@@ -1644,21 +2069,12 @@ mod doctor_tests {
         }
         assert!(VmmExecutor::doctor_counter(CounterProfile::Zen).is_ok());
         let mut wrong = experimental.profile.clone();
-        wrong.engine = ContentDigest::of(b"tampered engine");
-        assert!(crate::admission::validate_profile(&wrong).is_err());
-        wrong = experimental.profile.clone();
-        wrong
-            .semantic_parameters
-            .extend(crate::admission::bindings().unwrap());
-        assert!(crate::admission::validate_profile(&wrong).is_err());
-        wrong = experimental.profile.clone();
         wrong
             .semantic_parameters
             .insert("counter".into(), "unknown".into());
         assert!(crate::admission::validate_profile(&wrong).is_err());
-        assert!(crate::admission::validate_kernel(&ContentDigest::of(b"tampered kernel")).is_err());
         let inputs = PreparedInputs {
-            kernel: ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap(),
+            kernel: ContentDigest::of(b"kernel"),
             images: BTreeMap::new(),
             placement: BTreeMap::new(),
             guests: BTreeMap::new(),
@@ -1676,18 +2092,12 @@ mod doctor_tests {
             .with_unqualified_cpu(true)
             .validate_retained(&inputs)
             .is_err());
-        let zen = make(CounterProfile::Zen);
-        let mut stripped = zen.profile.clone();
-        stripped
-            .semantic_parameters
-            .retain(|key, _| !key.starts_with("host_policy"));
-        assert!(crate::admission::validate_profile(&stripped).is_err());
     }
 
     #[test]
     fn doctor_report_preserves_actual_selected_core_and_exact_admitted_observations() {
         let executor = VmmExecutor::from_engine_digest(
-            ContentDigest::try_from(ENGINE.to_owned()).unwrap(),
+            ContentDigest::of(b"engine"),
             None,
             1024,
             WitnessMode::Exits,
@@ -1697,7 +2107,7 @@ mod doctor_tests {
         let observations = vec![observed(2), observed(18)];
         let report = executor
             .doctor_report(
-                ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap(),
+                ContentDigest::of(b"kernel"),
                 AdmissionProbe {
                     cpu: Some(18),
                     observations: observations.clone(),
@@ -1719,7 +2129,7 @@ mod doctor_tests {
     #[test]
     fn no_doctor_success_report_on_probe_cleanup_error_or_capability_drift() {
         let executor = VmmExecutor::from_engine_digest(
-            ContentDigest::try_from(ENGINE.to_owned()).unwrap(),
+            ContentDigest::of(b"engine"),
             Some(2),
             1024,
             WitnessMode::Exits,
@@ -1732,7 +2142,7 @@ mod doctor_tests {
                 observation.perf_disabled_open = false;
             }
             if case == 2 {
-                observation.raw_cpuid[0].flags ^= 1;
+                observation.immediate_exit = 0;
             }
             let result = if case == 0 {
                 Err(Error::Execution(
@@ -1743,7 +2153,7 @@ mod doctor_tests {
             };
             assert!(executor
                 .doctor_report(
-                    ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap(),
+                    ContentDigest::of(b"kernel"),
                     AdmissionProbe {
                         cpu: Some(2),
                         observations: vec![observation],

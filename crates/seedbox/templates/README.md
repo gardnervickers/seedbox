@@ -22,7 +22,8 @@ from this directory:
 ```sh
 seedbox validate
 seedbox run
-seedbox explore --count 2
+seedbox run --timebase pv
+seedbox explore --count 2 --timebase pv
 seedbox inspect .seedbox/runs/ATTEMPT --json
 seedbox replay .seedbox/runs/ATTEMPT
 seedbox diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
@@ -45,18 +46,40 @@ see the repository's `docs/runtime.md` for setup and limits. `--margin` and
 sectors on machine crash (off by default). It is part of run identity and replay
 restores it automatically. It applies only to retained disks; this template
 currently uses RAM-backed storage. See `docs/runtime.md` for the disk contract.
+
+`run`, `prepare` and `explore` accept `--timebase counter|pv` to choose
+semantic guest progress (default `counter`), with no environment override. Counter counts retired guest branches; PV compute
+between exits costs no virtual time, and time advances at guest exits, syscalls
+and clock reads. The choice changes run identity and results. Counter is omitted
+from semantic parameters to preserve existing identities; PV is retained as
+`timebase: pv`. Replay uses the recorded choice and accepts no override; unknown
+or mismatched timebases are refused, even when an engine change is allowed.
+Run/replay and inspect print `timebase: VALUE`; `inspect --json` includes the
+semantic profile and the VMM's reported `report.timebase` when available.
+Bundles preserve the timebase. PV uses no PMU counter, but the CLI retains the
+same host admission, CPU/SMT lease and Zen MSR policy for both choices.
+
 Charged timer I/O retains its full cost across scheduler boundaries; pending
 operations are included in terminal witnesses.
 
 For an experimental runtime fork, `seedbox run --checkpoint-at-ns 1000000000
---branch-seed 42 --allow-dev-engine` captures the world at one simulated second
+--branch-seed 42` captures the world at one simulated second
 and continues with branch-identity-derived simulator randomness and guest CRNG
-entropy. PR #103 depends on PR #93: use the newly built VMM and ABI 3 guest kernel.
+entropy. Use the newly built VMM and current K2/ABI-3 guest kernel.
 These are semantic options with no environment backing; replay reads them from
 the retained run. A branch seed equal to the parent seed continues without any
 reseeding. Application-owned PRNG state stays in captured RAM. The public CLI
-currently supports one checkpoint branch, without saved snapshot files or event triggers. See the
+currently supports one checkpoint branch, without saved snapshot files or event-triggered capture. See the
 repository's `docs/runtime.md` for coverage and pending KVM qualification.
+
+From another terminal, `seedbox pause RUN` pauses the host's entire world at a
+slice boundary and `seedbox resume RUN` continues it. Use the executing attempt
+directory, identifiable by `RUN/output/host-control`, with the same privileges as
+execution. Replay has a new attempt directory. Both commands wait for an engine
+acknowledgement; guest time, state and witnesses remain fixed while paused.
+Wall-time limits and cancellation remain active, and pause time counts against
+the wall limit. CPU leases remain held until execution ends. This requires a
+host-control-capable engine; see the repository's `docs/runtime.md` for details.
 
 For optional build timestamp control, `prepare`, `run` and `explore` accept
 `--build-epoch SECONDS` (0..=4294967295; default absent, no environment backing).
@@ -113,11 +136,31 @@ output omitted by the original capture policy is not transferred. Export/import
 never replace existing data; the default transfer cap is 32 GiB for unique objects
 and separately for materialized log bytes (`--max-bytes` overrides it).
 
-Run/replay enforce the versioned admitted host/engine/kernel policy. Matching a
-second machine is compatibility admission, not cross-host qualification. Old
-records stay inspectable/exportable/importable, but absent or drifted host proof
-is NOT_COMPARABLE (exit 2) in this CLI and cannot be bypassed with
-`--allow-engine-change`. A retained previous CLI is only historical evidence.
+Directed network baselines belong in `x-seedbox.network.links`, for example
+`[{from: server, to: client, latency: 20ms, jitter: 2ms, loss_ppm: 50000}]`
+using this project's service names. Each pair is unique; latency is required,
+jitter and loss default to zero. Latency cannot be below global network latency,
+jitter must be less than latency, their sum is at most one hour, and loss is an
+integer from 0 to 1000000. `seedbox validate` checks these bounds.
+
+Guest controllers can call `world.shape(["server"], ["client"], latency=20_000_000,
+jitter=2_000_000, loss_ppm=50000)` and `world.heal(handle)`. Shapes apply only in
+the requested direction. The latest live layer wins; healing reveals the prior
+policy. Partitions dominate shapes, and already routed frames retain their
+send-time decisions. Inspection includes shape handles and `loss_dropped` counters.
+Network state contributes a `network_witness` to the final world witness.
+
+Controllers can also discover directional TCP incarnations with
+`world.connections("server", "client")`, then pass an exact returned record to
+`world.drop_connection(record)`. The returned handle arms loss for that direction
+only; `world.heal(handle)` returns matched/dropped counts. Require `dropped > 0`
+when checking that a fault occurred. Reused tuples do not inherit a stale selector.
+See the repository's `docs/runtime.md` connection selector section for pagination,
+SYN/FIN/RST semantics, bounded tracking and unsupported/fragmented traffic.
+
+Run/replay check that the host has the KVM and perf capabilities the engine
+needs; CPU model, microcode, CPUID, engine and kernel bytes are not pinned.
+Passing on a second machine is not cross-host qualification.
 
 Check the host and installed engine/kernel with `seedbox doctor` (Linux KVM,
 root) before running. It uses the normal CPU/runtime defaults without building,
@@ -127,23 +170,40 @@ not cross-host replay qualification; `--json` shows the admitted observations.
 Known non-Zen counters require explicit `--allow-unqualified-cpu` for run,
 explore and replay and remain unverified. They retain exact release/counter/input
 checks and SMT ownership but carry no qualified AMD proof or AMD MSR writes.
-`doctor` refuses those counters. The source policy pins built-but-unqualified engine52eb; fresh runtime acceptance
-is still required. Disabled selected-event readiness precedes preparation and
+`doctor` refuses those counters. Disabled selected-event readiness precedes preparation and
 is rechecked under leases; it never enables a guest counter. Intel is not qualified.
 
-For unpinned development engines or guest kernels, pass `--allow-dev-engine` to
-run, explore, replay or doctor. These runs bind `engine_qualification =
-"dev-unpinned"` in identity and report, preserved by inspect and bundles. Replay
-requires the flag and the exact retained artifact hashes and labels comparisons
-`unqualified dev engine`; without it replay retains NOT_COMPARABLE naming the
-flag. Doctor prints `dev engine: unqualified` for dev artifacts. The flag with
-both pinned artifacts adds no marker. Every host/CPU/PMU/MSR/lease/ABI check
-still applies, and release qualification still requires its own acceptance.
+Engines and guest kernels are not pinned: any built engine and kernel are
+admitted, and each run records their hashes. `--allow-dev-engine` is still accepted and has no effect.
+Every host/CPU/PMU/MSR/lease/ABI check still applies.
 
 Compare two retained run directories on Linux or macOS with `seedbox diff RUN_A
 RUN_B [--json]`. Import bundles first. Diff reports world and machine witnesses,
-changed identity/semantic fields, and the first differing retained trace or terminal
-record. Ordinary runs do not retain exit traces; terminal times cannot locate an
+changed identity/semantic fields, full-state parts such as RAM and disk, and the
+first differing retained trace or terminal record (including state parts).
+`seedbox run --full-state` retains per-page RAM evidence for diff and replay diagnostics; see [docs/runtime.md](https://github.com/gardnervickers/seedbox/blob/main/docs/runtime.md#compare-retained-runs).
+Ordinary runs do not retain exit traces; terminal times cannot locate an
 earlier divergence. Missing evidence and omissions stay explicit. Exit 0 MATCH
 means equality of compared evidence, not replay qualification; DIFFERENT exits 1,
 and usage/setup or invalid evidence exits 2. No guests execute and no state is created.
+
+Read committed-time chunks with `seedbox logs RUN --machine NAME --since-ns N
+--until-ns N`. Consecutive bytes from the same machine/incarnation/stream within
+one world slice coalesce until another stream writes. Times are the first byte's
+simulated commit time, inclusive at the start and exclusive at the end. Filters
+select whole chunks, so a selected chunk can contain later bytes beyond the
+upper bound. Omit filters to read all indexed output. Stdout contains raw bytes
+in time, machine name and per-machine output order, without prefixes or added
+newlines; status and omissions go to stderr. Add `--json` for metadata and
+lossless hexadecimal (`bytes_hex`). No application log format is required.
+Check stderr or JSON `omissions` for old engines without indexes, capture bounds
+or retention limits. Indexes travel with retained logs in export/import bundles. Reading logs needs no KVM or root.
+
+For a scenario using the guest control API, the development engine supports
+`world.arm_console_stop(source, b"MARKER", target, match_timeout=1)` and
+`world.arm_console_partition(source, b"MARKER", left, right, match_timeout=1)`.
+Arm confirmation means armed; inspect the trigger and target state for the
+actual effect. `world.cancel_trigger(trigger)` cancels an unmatched trigger.
+Markers use only future committed console bytes, and effects occur at a safe
+future world barrier. See [the trigger contract](https://github.com/gardnervickers/seedbox/blob/main/docs/triggers.md)
+for bounds, deadlines and the outstanding development-engine AMD checks.
