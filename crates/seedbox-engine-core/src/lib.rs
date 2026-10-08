@@ -1,4 +1,4 @@
-//! Shared deterministic policies, independent of CPU backends and guest devices.
+//! Shared deterministic policies and guest-memory protocols, independent of CPU backends.
 //! Platform adapters supply committed events and actual transmitted bytes.
 #[allow(clippy::should_implement_trait)] // Preserve the existing RNG API during extraction.
 #[rustfmt::skip]
@@ -18,3 +18,5 @@ pub mod faults;
 pub mod control;
 #[rustfmt::skip]
 pub mod network_counters;
+
+pub mod virtqueue;

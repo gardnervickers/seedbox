@@ -9,16 +9,6 @@ const QUEUE_SIZE: u16 = 256;
 const CHAIN_LIMIT: usize = 4 << 20;
 const NET_HEADER: usize = 12;
 
-fn span(memory: &[u8], gpa: u64, len: usize) -> Result<usize> {
-    let offset = gpa
-        .checked_sub(RAM_BASE)
-        .and_then(|n| usize::try_from(n).ok())
-        .ok_or("virtio DMA address is outside RAM")?;
-    if offset.checked_add(len).is_none_or(|end| end > memory.len()) {
-        return Err("virtio DMA span is outside RAM".into());
-    }
-    Ok(offset)
-}
 fn u16_at(m: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes(m[offset..offset + 2].try_into().expect("validated DMA"))
 }
@@ -29,125 +19,27 @@ fn u64_at(m: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(m[offset..offset + 8].try_into().expect("validated DMA"))
 }
 
-#[derive(Clone, Default, Serialize)]
-struct Queue {
-    num: u16,
-    ready: bool,
-    desc: u64,
-    avail: u64,
-    used: u64,
-    last_avail: u16,
-    used_idx: u16,
+use seedbox_engine_core::virtqueue::{Chain, Diagnostics, Direction, Policy, Queue};
+
+trait ArmQueue {
+    fn chain(&self, memory: &[u8]) -> Result<Option<Chain>>;
+    fn complete(&mut self, memory: &mut [u8], chain: &Chain, len: usize);
 }
-struct Segment {
-    offset: usize,
-    len: usize,
-    writable: bool,
-}
-struct Chain {
-    head: u16,
-    segments: Vec<Segment>,
-    len: usize,
-    used: usize,
-}
-impl Queue {
+impl ArmQueue for Queue {
     fn chain(&self, memory: &[u8]) -> Result<Option<Chain>> {
-        if !self.ready {
-            return Ok(None);
-        }
-        if self.num == 0 || self.num > QUEUE_SIZE || !self.num.is_power_of_two() {
-            return Err("invalid virtio queue size".into());
-        }
-        if self.desc & 15 != 0 || self.avail & 1 != 0 || self.used & 3 != 0 {
-            return Err("unaligned virtio queue".into());
-        }
-        let desc = span(memory, self.desc, self.num as usize * 16)?;
-        let avail = span(memory, self.avail, 6 + self.num as usize * 2)?;
-        let used = span(memory, self.used, 6 + self.num as usize * 8)?;
-        let pending = u16_at(memory, avail + 2).wrapping_sub(self.last_avail);
-        if pending > self.num {
-            return Err("virtio available ring overrun".into());
-        }
-        if pending == 0 {
-            return Ok(None);
-        }
-        let head = u16_at(
+        self.validated_chain(
             memory,
-            avail + 4 + 2 * (self.last_avail % self.num) as usize,
-        );
-        let mut index = head;
-        let mut seen = vec![false; self.num as usize];
-        let mut segments = Vec::new();
-        let mut len = 0usize;
-        loop {
-            if index >= self.num || seen[index as usize] {
-                return Err("invalid/cyclic virtio descriptor chain".into());
-            }
-            seen[index as usize] = true;
-            let offset = desc + 16 * index as usize;
-            let flags = u16_at(memory, offset + 12);
-            if flags & !3 != 0 {
-                return Err("unsupported virtio descriptor flags".into());
-            }
-            let size = u32_at(memory, offset + 8) as usize;
-            len = len
-                .checked_add(size)
-                .filter(|n| *n <= CHAIN_LIMIT)
-                .ok_or("virtio chain too large")?;
-            segments.push(Segment {
-                offset: span(memory, u64_at(memory, offset), size)?,
-                len: size,
-                writable: flags & 2 != 0,
-            });
-            if flags & 1 == 0 {
-                break;
-            }
-            index = u16_at(memory, offset + 14);
-        }
-        if len == 0 {
-            return Err("empty virtio descriptor chain".into());
-        }
-        Ok(Some(Chain {
-            head,
-            segments,
-            len,
-            used,
-        }))
+            RAM_BASE,
+            Policy {
+                limit: CHAIN_LIMIT,
+                direction: Direction::Any,
+                reject_empty: true,
+                diagnostics: Diagnostics::Virtio,
+            },
+        )
     }
     fn complete(&mut self, memory: &mut [u8], chain: &Chain, len: usize) {
-        let entry = chain.used + 4 + 8 * (self.used_idx % self.num) as usize;
-        memory[entry..entry + 4].copy_from_slice(&(chain.head as u32).to_le_bytes());
-        memory[entry + 4..entry + 8].copy_from_slice(&(len as u32).to_le_bytes());
-        self.used_idx = self.used_idx.wrapping_add(1);
-        memory[chain.used + 2..chain.used + 4].copy_from_slice(&self.used_idx.to_le_bytes());
-        self.last_avail = self.last_avail.wrapping_add(1);
-    }
-}
-impl Chain {
-    fn read(&self, memory: &[u8]) -> Result<Vec<u8>> {
-        if self.segments.iter().any(|s| s.writable) {
-            return Err("virtio transmit chain is writable".into());
-        }
-        let mut bytes = Vec::with_capacity(self.len);
-        for s in &self.segments {
-            bytes.extend_from_slice(&memory[s.offset..s.offset + s.len]);
-        }
-        Ok(bytes)
-    }
-    fn write(&self, memory: &mut [u8], bytes: &[u8]) -> Result<()> {
-        if self.segments.iter().any(|s| !s.writable) || self.len < bytes.len() {
-            return Err("invalid/short virtio receive chain".into());
-        }
-        let mut written = 0usize;
-        for s in &self.segments {
-            let n = s.len.min(bytes.len() - written);
-            memory[s.offset..s.offset + n].copy_from_slice(&bytes[written..written + n]);
-            written += n;
-            if written == bytes.len() {
-                break;
-            }
-        }
-        Ok(())
+        self.complete_chain(memory, chain, len, |_, _| {});
     }
 }
 

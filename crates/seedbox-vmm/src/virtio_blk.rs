@@ -25,99 +25,18 @@ const S_IOERR: u8 = 1;
 const S_UNSUPP: u8 = 2;
 const ID: &[u8; 20] = b"seedbox-disk\0\0\0\0\0\0\0\0";
 
-#[derive(Default, Clone)]
-struct Queue {
-    num: u16,
-    ready: bool,
-    desc: u64,
-    avail: u64,
-    used: u64,
-    last_avail: u16,
-    used_idx: u16,
+use seedbox_engine_core::virtqueue::{Chain, Diagnostics, Direction, Policy, Queue};
+#[cfg(test)]
+fn rd16(m: &[u8], a: usize) -> u16 { u16::from_le_bytes(m[a..a+2].try_into().unwrap()) }
+trait BlockQueue {
+    fn next(&self, memory: &[u8]) -> Result<Option<Chain>, String>;
 }
-
-#[derive(Clone, Copy)]
-struct Segment {
-    addr: usize,
-    len: usize,
-    writable: bool,
-}
-
-fn range(memory: &[u8], address: u64, len: usize) -> Result<usize, String> {
-    let address = usize::try_from(address).map_err(|_| "disk DMA address overflow")?;
-    if address.checked_add(len).is_none_or(|end| end > memory.len()) {
-        return Err("disk DMA outside guest RAM".into());
-    }
-    Ok(address)
-}
-fn rd16(m: &[u8], a: usize) -> u16 { u16::from_le_bytes(m[a..a + 2].try_into().unwrap()) }
-fn rd32(m: &[u8], a: usize) -> u32 { u32::from_le_bytes(m[a..a + 4].try_into().unwrap()) }
-fn rd64(m: &[u8], a: usize) -> u64 { u64::from_le_bytes(m[a..a + 8].try_into().unwrap()) }
-
-impl Queue {
-    /// The next available chain, validated before any DMA: in-bounds rings
-    /// and buffers, no cycles, device-readable buffers before writable ones.
-    fn next(&self, memory: &[u8]) -> Result<Option<(u16, Vec<Segment>)>, String> {
-        if !self.ready {
-            return Ok(None);
-        }
-        if self.num == 0 || self.num > QSIZE || !self.num.is_power_of_two() {
-            return Err("invalid disk queue size".into());
-        }
-        if self.desc & 15 != 0 || self.avail & 1 != 0 || self.used & 3 != 0 {
-            return Err("unaligned disk queue".into());
-        }
-        let desc = range(memory, self.desc, self.num as usize * 16)?;
-        let avail = range(memory, self.avail, 6 + self.num as usize * 2)?;
-        range(memory, self.used, 6 + self.num as usize * 8)?;
-        let pending = rd16(memory, avail + 2).wrapping_sub(self.last_avail);
-        if pending > self.num {
-            return Err("disk available ring overrun".into());
-        }
-        if pending == 0 {
-            return Ok(None);
-        }
-        let head = rd16(memory, avail + 4 + 2 * (self.last_avail % self.num) as usize);
-        let mut i = head;
-        let mut seen = vec![false; self.num as usize];
-        let mut segments: Vec<Segment> = Vec::new();
-        let mut total = 0usize;
-        loop {
-            if i >= self.num || seen[i as usize] {
-                return Err("invalid/cyclic disk descriptor chain".into());
-            }
-            seen[i as usize] = true;
-            let d = desc + i as usize * 16;
-            let flags = rd16(memory, d + 12);
-            if flags & !3 != 0 {
-                return Err("unsupported disk descriptor flags".into());
-            }
-            let writable = flags & 2 != 0;
-            if !writable && segments.last().is_some_and(|s| s.writable) {
-                return Err("disk descriptor chain reads after it writes".into());
-            }
-            let len = rd32(memory, d + 8) as usize;
-            total = total.checked_add(len).filter(|n| *n <= LIMIT).ok_or("disk request too large")?;
-            segments.push(Segment { addr: range(memory, rd64(memory, d), len)?, len, writable });
-            if flags & 1 == 0 {
-                break;
-            }
-            i = rd16(memory, d + 14);
-        }
-        Ok(Some((head, segments)))
-    }
-
-    fn complete(&mut self, m: &mut [u8], dirty: &mut Vec<(usize, usize)>, head: u16, len: usize) {
-        // next() validated the used ring before any DMA.
-        let entry = self.used as usize + 4 + 8 * (self.used_idx % self.num) as usize;
-        m[entry..entry + 4].copy_from_slice(&(head as u32).to_le_bytes());
-        m[entry + 4..entry + 8].copy_from_slice(&(len as u32).to_le_bytes());
-        self.used_idx = self.used_idx.wrapping_add(1);
-        let index = self.used as usize + 2;
-        m[index..index + 2].copy_from_slice(&self.used_idx.to_le_bytes());
-        dirty.push((entry, 8));
-        dirty.push((index, 2));
-        self.last_avail = self.last_avail.wrapping_add(1);
+impl BlockQueue for Queue {
+    fn next(&self, memory: &[u8]) -> Result<Option<Chain>, String> {
+        self.validated_chain(memory, 0, Policy {
+            limit: LIMIT, direction: Direction::ReadThenWrite,
+            reject_empty: false, diagnostics: Diagnostics::Disk,
+        })
     }
 }
 
@@ -257,7 +176,8 @@ impl VirtioBlk {
     /// Carry out every available request in ring order.
     fn process(&mut self, m: &mut [u8]) -> Result<Notified, String> {
         let mut out = Notified::default();
-        while let Some((head, segments)) = self.q.next(m)? {
+        while let Some(chain) = self.q.next(m)? {
+            let segments = &chain.segments;
             let readable: usize = segments.iter().filter(|s| !s.writable).map(|s| s.len).sum();
             let writable: usize = segments.iter().filter(|s| s.writable).map(|s| s.len).sum();
             if readable < 16 || writable < 1 {
@@ -265,7 +185,7 @@ impl VirtioBlk {
             }
             let mut out_bytes = Vec::with_capacity(readable);
             for s in segments.iter().filter(|s| !s.writable) {
-                out_bytes.extend_from_slice(&m[s.addr..s.addr + s.len]);
+                out_bytes.extend_from_slice(&m[s.offset..s.offset + s.len]);
             }
             let kind = u32::from_le_bytes(out_bytes[0..4].try_into().unwrap());
             let sector = u64::from_le_bytes(out_bytes[8..16].try_into().unwrap());
@@ -317,17 +237,17 @@ impl VirtioBlk {
                 let n = s.len.min(left);
                 let take = n.min(data.len().saturating_sub(done));
                 if take > 0 {
-                    m[s.addr..s.addr + take].copy_from_slice(&data[done..done + take]);
-                    self.dirty.push((s.addr, take));
+                    m[s.offset..s.offset + take].copy_from_slice(&data[done..done + take]);
+                    self.dirty.push((s.offset, take));
                     done += take;
                 }
                 left -= n;
                 if left == 0 && n < s.len {
-                    m[s.addr + n] = status;
-                    self.dirty.push((s.addr + n, 1));
+                    m[s.offset + n] = status;
+                    self.dirty.push((s.offset + n, 1));
                 }
             }
-            self.q.complete(m, &mut self.dirty, head, done + 1);
+            self.q.complete_chain(m, &chain, done + 1, |a, n| self.dirty.push((a, n)));
             out.log.push((kind, sector, status));
             out.completed += 1;
             out.irq = true;

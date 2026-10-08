@@ -13,71 +13,18 @@ const PORT_READY: u16 = 3;
 const PORT_OPEN: u16 = 6;
 const PORT_NAME: u16 = 7;
 
-#[derive(Default, Clone)]
-struct Queue {
-    num: u16, ready: bool, desc: u64, avail: u64, used: u64,
-    last_avail: u16, used_idx: u16,
-}
-struct Segment { addr: usize, len: usize }
-struct Chain { head: u16, segments: Vec<Segment>, len: usize }
-
-fn range(memory: &[u8], address: u64, len: usize) -> Result<usize, String> {
-    let address = usize::try_from(address).map_err(|_| "console DMA address overflow")?;
-    if address.checked_add(len).is_none_or(|end| end > memory.len()) {
-        return Err("console DMA outside guest RAM".into());
-    }
-    Ok(address)
-}
+use seedbox_engine_core::virtqueue::{Chain, Diagnostics, Direction, Policy, Queue};
 fn rd16(m: &[u8], a: usize) -> u16 { u16::from_le_bytes(m[a..a+2].try_into().unwrap()) }
 fn rd32(m: &[u8], a: usize) -> u32 { u32::from_le_bytes(m[a..a+4].try_into().unwrap()) }
-fn rd64(m: &[u8], a: usize) -> u64 { u64::from_le_bytes(m[a..a+8].try_into().unwrap()) }
-impl Queue {
+trait ConsoleQueue {
+    fn chain(&self, memory: &[u8], writable: bool) -> Result<Option<Chain>, String>;
+}
+impl ConsoleQueue for Queue {
     fn chain(&self, memory: &[u8], writable: bool) -> Result<Option<Chain>, String> {
-        if !self.ready { return Ok(None); }
-        if self.num == 0 || self.num > QSIZE || !self.num.is_power_of_two() {
-            return Err("invalid console queue size".into());
-        }
-        if self.desc & 15 != 0 || self.avail & 1 != 0 || self.used & 3 != 0 {
-            return Err("unaligned console queue".into());
-        }
-        let desc = range(memory, self.desc, self.num as usize * 16)?;
-        let avail = range(memory, self.avail, 6 + self.num as usize * 2)?;
-        range(memory, self.used, 6 + self.num as usize * 8)?;
-        let pending = rd16(memory, avail+2).wrapping_sub(self.last_avail);
-        if pending > self.num { return Err("console available ring overrun".into()); }
-        if pending == 0 { return Ok(None); }
-        let head = rd16(memory, avail+4+2*(self.last_avail % self.num) as usize);
-        let mut i = head;
-        let mut seen = vec![false; self.num as usize];
-        let mut segments = Vec::new();
-        let mut len = 0usize;
-        loop {
-            if i >= self.num || seen[i as usize] { return Err("invalid/cyclic console descriptor chain".into()); }
-            seen[i as usize] = true;
-            let d = desc + i as usize*16;
-            let flags = rd16(memory,d+12);
-            if flags & !3 != 0 || (flags & 2 != 0) != writable {
-                return Err("unsupported console descriptor flags/direction".into());
-            }
-            let size = rd32(memory,d+8) as usize;
-            len = len.checked_add(size).filter(|n| *n <= LIMIT).ok_or("console descriptor chain too large")?;
-            segments.push(Segment { addr:range(memory,rd64(memory,d),size)?,len:size });
-            if flags & 1 == 0 { break; }
-            i = rd16(memory,d+14);
-        }
-        if len == 0 { return Err("empty console descriptor chain".into()); }
-        Ok(Some(Chain { head,segments,len }))
-    }
-    fn complete(&mut self, m: &mut [u8], dirty: &mut Vec<(usize,usize)>, head: u16, len: usize) {
-        // chain() validated the complete used ring before any DMA.
-        let entry = self.used as usize+4+8*(self.used_idx % self.num) as usize;
-        m[entry..entry+4].copy_from_slice(&(head as u32).to_le_bytes());
-        m[entry+4..entry+8].copy_from_slice(&(len as u32).to_le_bytes());
-        self.used_idx = self.used_idx.wrapping_add(1);
-        let index = self.used as usize+2;
-        m[index..index+2].copy_from_slice(&self.used_idx.to_le_bytes());
-        dirty.push((entry,8)); dirty.push((index,2));
-        self.last_avail = self.last_avail.wrapping_add(1);
+        self.validated_chain(memory, 0, Policy {
+            limit: LIMIT, direction: Direction::Uniform(writable),
+            reject_empty: true, diagnostics: Diagnostics::Console,
+        })
     }
 }
 #[derive(Default)]
@@ -139,7 +86,7 @@ impl VirtioConsole {
         let mut copied=0;
         for segment in &chain.segments {
             let n=segment.len.min(bytes.len()-copied);
-            if n>0 { m[segment.addr..segment.addr+n].copy_from_slice(&bytes[copied..copied+n]); self.dirty.push((segment.addr,n)); copied+=n; }
+            if n>0 { m[segment.offset..segment.offset+n].copy_from_slice(&bytes[copied..copied+n]); self.dirty.push((segment.offset,n)); copied+=n; }
             if copied==bytes.len() { break; }
         }
     }
@@ -149,12 +96,12 @@ impl VirtioConsole {
             let Some(chain)=self.q[2].chain(m,true)? else {break;};
             if chain.len<bytes.len() { return Err("console control receive buffer too small".into()); }
             let bytes=self.control_rx.pop_front().unwrap();
-            self.copy_in(m,&chain,&bytes); self.q[2].complete(m,&mut self.dirty,chain.head,bytes.len()); irq=true;
+            self.copy_in(m,&chain,&bytes); self.q[2].complete_chain(m,&chain,bytes.len(),|a,n|self.dirty.push((a,n))); irq=true;
         }
         while !self.rx.is_empty() && self.port_ready && self.guest_open {
             let Some(chain)=self.q[0].chain(m,true)? else {break;};
             let n=chain.len.min(self.rx.len()); let bytes:Vec<_>=self.rx.drain(..n).collect();
-            self.copy_in(m,&chain,&bytes); self.q[0].complete(m,&mut self.dirty,chain.head,n); irq=true;
+            self.copy_in(m,&chain,&bytes); self.q[0].complete_chain(m,&chain,n,|a,n|self.dirty.push((a,n))); irq=true;
         }
         if irq { self.isr|=1; } Ok(irq)
     }
@@ -191,13 +138,13 @@ impl VirtioConsole {
                 if v==1||v==3 {
                     while let Some(chain)=self.q[v as usize].chain(m,false)? {
                         let mut bytes=Vec::with_capacity(chain.len);
-                        for s in &chain.segments {bytes.extend_from_slice(&m[s.addr..s.addr+s.len]);}
+                        for s in &chain.segments {bytes.extend_from_slice(&m[s.offset..s.offset+s.len]);}
                         if v==3 {self.control(&bytes)?;} else {
                             if !self.port_ready||!self.guest_open{return Err("console transmit before port open".into());}
                             if bytes.len()>LIMIT-out.bytes.len(){return Err("console transmit batch too large".into());}
                             out.bytes.extend(bytes);
                         }
-                        self.q[v as usize].complete(m,&mut self.dirty,chain.head,0);out.irq=true;
+                        self.q[v as usize].complete_chain(m,&chain,0,|a,n|self.dirty.push((a,n)));out.irq=true;
                     }
                 }
                 out.irq|=self.drain(m)?;
