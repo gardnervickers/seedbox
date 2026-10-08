@@ -72,6 +72,8 @@ pub struct PvClock {
     landed: bool,
     /// Fail rather than run on after this many checks found no spin (tests).
     pub max_false_alarms: u64,
+    /// DIAGNOSTIC: registers at the last arm.
+    armed: Option<kvm_bindings::kvm_regs>,
 }
 
 /// A step landing: RIP, then the general registers and flags.
@@ -102,12 +104,26 @@ impl PvClock {
             probe: None,
             landed: false,
             max_false_alarms: u64::MAX,
+            armed: None,
         })
     }
 
     /// One probe step at a landing. `None`: the check gave up, run freely.
     fn probe_step(&mut self, m: &mut Machine) -> Result<Option<Prepared>, String> {
         let regs = unsafe { m.vcpu.get_kvm_run().s.regs.regs };
+        {
+            // DIAGNOSTIC: classify the landing.
+            let ioctl = m.vcpu.get_regs().map_err(|e| e.to_string())?;
+            let mut note = |k: &str| *m.stats.spin_mismatch.entry(format!("diag:{k}")).or_default() += 1;
+            if regs.rflags & (1 << 16) != 0 { note("landing_rf_sync"); }
+            if ioctl.rflags & (1 << 16) != 0 { note("landing_rf_ioctl"); }
+            if ioctl != regs { note("sync_ne_ioctl"); }
+            if let Some(a) = self.armed {
+                if a.rip == regs.rip && key(&a) == key(&regs) { note("zero_progress"); }
+            }
+            if self.armed.is_some() && !m.last_plan.1.contains(&regs.rip) { note("off_target"); }
+            note("landings");
+        }
         let key = key(&regs);
         let next = match self.probe.take().unwrap() {
             Probe::Find { mut landings, min_period, steps } => {
@@ -182,6 +198,7 @@ impl PvClock {
                 Probe::Canon { target, left: left - 1 }
             }
         };
+        self.armed = Some(regs);
         if m.arm_step()? {
             // The next landing is a cap on straight-line code, so where it
             // falls depends on where stepping began: no canonical point.
@@ -205,6 +222,7 @@ impl PvClock {
                 // so give the check up: the next one starts afresh.
                 self.probe = None;
                 m.stats.spin_false += 1;
+                *m.stats.spin_mismatch.entry("diag:eintr_in_probe".into()).or_default() += 1;
                 None
             };
             match step {
@@ -334,6 +352,7 @@ impl Saved {
         cpu.save(&m.vcpu, "spin check")?;
         let page = page_copy(m);
         let part = match self.cpu.differs(&cpu) {
+            Some(part) if part == "regs" => Some(diag_regs(self.cpu.regs(), cpu.regs())),
             Some(part) => Some(part),
             None => match self.page.iter().zip(page.iter()).position(|(a, b)| a != b) {
                 Some(at) => Some(format!("time page word {}", at / 8)),
@@ -358,6 +377,15 @@ impl Saved {
             }
         }
     }
+}
+
+/// DIAGNOSTIC (claude/pv-probe-diag, never merge): name the registers that differ.
+fn diag_regs(a: &kvm_bindings::kvm_regs, b: &kvm_bindings::kvm_regs) -> String {
+    let fa = [a.rax,a.rbx,a.rcx,a.rdx,a.rsi,a.rdi,a.rsp,a.rbp,a.r8,a.r9,a.r10,a.r11,a.r12,a.r13,a.r14,a.r15,a.rip,a.rflags];
+    let fb = [b.rax,b.rbx,b.rcx,b.rdx,b.rsi,b.rdi,b.rsp,b.rbp,b.r8,b.r9,b.r10,b.r11,b.r12,b.r13,b.r14,b.r15,b.rip,b.rflags];
+    const N: [&str; 18] = ["rax","rbx","rcx","rdx","rsi","rdi","rsp","rbp","r8","r9","r10","r11","r12","r13","r14","r15","rip","rflags"];
+    let d: Vec<String> = (0..18).filter(|&i| fa[i] != fb[i]).map(|i| format!("{}:{:#x}->{:#x}", N[i], fa[i], fb[i])).collect();
+    format!("regs[{}]", d.join(","))
 }
 
 fn page_copy(m: &Machine) -> Box<[u8; 4096]> {
@@ -527,7 +555,9 @@ mod tests {
             let mut clock = PvClock::new(Duration::from_micros(200)).unwrap();
             clock.max_false_alarms = 10;
             let mut m = machine(&kvm, &code, 0);
-            assert_eq!(m.run_until(&mut clock, 1_000_000_000, 0, &mut Vec::new()).unwrap(), Stop::Halted);
+            let stop = m.run_until(&mut clock, 1_000_000_000, 0, &mut Vec::new());
+            eprintln!("diag: probes={} false={} {:?}", m.stats.spin_probes, m.stats.spin_false, m.stats.spin_mismatch);
+            assert_eq!(stop.unwrap(), Stop::Halted);
             let r = m.vcpu.get_regs().unwrap();
             assert_eq!((r.rip, r.rcx as u32, m.time), (0x100005, 1, 0));
             assert_eq!(m.stats.spin_idles, 1);

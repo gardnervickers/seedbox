@@ -94,6 +94,11 @@ impl VcpuState {
     /// a checkpoint restores that the guest can change by running: registers,
     /// FPU/XSAVE, XCRs, MSRs other than free-running counters, and pending
     /// events (not KVM's bookkeeping flags).
+    /// DIAGNOSTIC accessor.
+    pub fn regs(&self) -> &kvm_regs {
+        &self.regs
+    }
+
     pub fn differs(&self, o: &Self) -> Option<String> {
         let (e, f) = (&self.events, &o.events);
         let events = e.exception == f.exception
