@@ -1,10 +1,11 @@
 # Compose application examples
 
-From the repository root, start Docker/Podman, then:
+From the repository root:
 
 ```sh
 nix develop
 cargo build --release
+# Start Docker/Podman for application preparation.
 ./target/release/seedbox run examples/etcd  # Mac
 # Linux: add --timebase pv
 ./target/release/seedbox replay .seedbox/runs/ATTEMPT
@@ -29,7 +30,10 @@ For intentional failure controls, set the Redis client's
 command list. The runtime suite checks FAIL plus replay MATCH for both.
 
 Each service gets a controlled Linux VM and private RAM-backed root filesystem;
-application data does not persist across fresh runs. Use the release executable, which bundles the patched Seedbox kernel. Run on
+application data does not persist across fresh runs. Use the release executable, which downloads and caches the patched kernel and
+guest helpers on first use. Private releases require `GH_TOKEN` or `GITHUB_TOKEN`;
+[manual Linux builds](../tools/runtime/README.md#build-without-private-release-access)
+are also supported. Run on
 Apple Silicon HVF or Linux KVM (`--timebase pv` avoids hardware-counter
 requirements), with at least the tested 1024 MiB per service.
 The image supplies userspace dependencies. Image versions, launch metadata and

@@ -17,7 +17,6 @@ use std::{
     process::Command,
 };
 
-include!(concat!(env!("OUT_DIR"), "/container-runtime.rs"));
 const REQUIRED: [&str; 6] = [
     "compose-init",
     "busybox",
@@ -40,25 +39,25 @@ pub struct Runtime {
     manifest: Manifest,
 }
 impl Runtime {
-    pub fn available() -> bool {
-        RUNTIME.is_some()
+    pub fn from_archive(path: &Path, cache: &Path) -> Result<Self> {
+        if fs::metadata(path)?.len() > 512 << 20 {
+            return Err(Error::Integrity(
+                "compressed runtime exceeds 512 MiB".into(),
+            ));
+        }
+        let digest = package_digest(path)?;
+        Self::install_reader(fs::File::open(path)?, digest, cache)
     }
-    pub fn embedded(cache: &Path) -> Result<Self> {
-        let bytes = RUNTIME.ok_or_else(|| {
-            Error::Setup(
-                "guest assets are absent; run cargo build --release and use target/release/seedbox"
-                    .into(),
-            )
-        })?;
-        Self::install(bytes, cache)
+    #[cfg(test)]
+    fn install(bytes: &[u8], cache: &Path) -> Result<Self> {
+        Self::install_reader(bytes, ContentDigest::of(bytes), cache)
     }
-    pub fn install(bytes: &[u8], cache: &Path) -> Result<Self> {
+    fn install_reader(source: impl Read, digest: ContentDigest, cache: &Path) -> Result<Self> {
         fs::create_dir_all(cache)?;
-        let digest = ContentDigest::of(bytes);
         let root = cache.join(digest.hex());
         if !root.exists() {
             let stage = tempfile::tempdir_in(cache)?;
-            let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
+            let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(source));
             let mut names = std::collections::BTreeSet::new();
             let mut size = 0u64;
             for entry in archive.entries()? {

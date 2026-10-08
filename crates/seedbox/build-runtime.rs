@@ -1,5 +1,5 @@
-//! Embed packaged release guest assets and the native development supervisor.
-//! Cargo delegates guest assets to the cached Linux build pipeline. Unbundled
+//! Identify released guest assets and embed the native development supervisor.
+//! Release builds never download or compile guest assets. Unbundled
 //! Linux development builds retain the musl supervisor fallback, whose user/group
 //! lookups must work without NSS modules.
 
@@ -29,17 +29,26 @@ fn main() {
         );
     }
     simulator_version(&root);
-    kernel_release(&root);
+    release_id(
+        &root,
+        "kernel/inputs.json",
+        b"seedbox-kernel-v1\0",
+        "SEEDBOX_KERNEL_RELEASE",
+    );
+    release_id(
+        &root,
+        "tools/runtime/inputs.json",
+        b"seedbox-runtime-v1\0",
+        "SEEDBOX_RUNTIME_RELEASE",
+    );
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
         && env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64")
     {
         // Only the public CLI (which also hosts retained workers) needs HVF.
         println!("cargo::rustc-link-arg-bin=seedbox=--seedbox-sign-hvf");
     }
-    // Release builds own guest assets. Debug builds remain portable for readers
-    // and unit tests and do not require a container engine.
-    let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo output directory"));
-    let bundle = output.join("runtime.tar.gz");
+    // Release builds use independent guest releases. Debug builds retain native
+    // development fallbacks for portable readers and tests.
     let release = env::var("PROFILE").as_deref() == Ok("release");
     let supported = matches!(
         (
@@ -48,48 +57,10 @@ fn main() {
         ),
         (Ok("linux"), Ok("x86_64")) | (Ok("macos"), Ok("aarch64"))
     );
-    let declaration = if release && supported {
-        for input in [
-            "flake.nix",
-            "flake.lock",
-            "nix",
-            "guest",
-            "kernel",
-            "kernel-arm64",
-            "tools/runtime",
-            "tools/linux-runtime/package.py",
-        ] {
-            println!("cargo::rerun-if-changed={}", root.join(input).display());
-        }
-        let arch = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
-            Ok("aarch64") => "arm64",
-            Ok("x86_64") => "amd64",
-            _ => panic!("unsupported guest build architecture"),
-        };
-        let status = Command::new("python3")
-            .arg(root.join("tools/runtime/build.py"))
-            .arg(&bundle)
-            .arg(arch)
-            .status()
-            .unwrap_or_else(|error| {
-                eprintln!("guest assets: cannot run python3: {error}; enter nix develop");
-                std::process::exit(1);
-            });
-        if !status.success() {
-            eprintln!("guest asset preparation failed; see build output above");
-            std::process::exit(1);
-        }
-        // Keep the large archive in static storage; a const expands at use sites
-        // and can make compiler constant evaluation consume excessive memory.
-        format!(
-            "pub static RUNTIME: Option<&[u8]> = Some(include_bytes!({:?}));\n",
-            bundle
-        )
-    } else {
-        "pub static RUNTIME: Option<&[u8]> = None;\n".into()
-    };
-    std::fs::write(output.join("container-runtime.rs"), declaration)
-        .expect("write runtime declaration");
+    println!(
+        "cargo::rustc-env=SEEDBOX_RELEASE_ASSETS={}",
+        u8::from(release && supported)
+    );
     println!("cargo::rerun-if-env-changed=SEEDBOX_LINUX_RUNTIME_BUNDLE");
     let linux_bundle = env::var_os("SEEDBOX_LINUX_RUNTIME_BUNDLE").map(PathBuf::from);
     let linux_declaration = if let Some(bundle) = linux_bundle {
@@ -110,8 +81,8 @@ fn main() {
     .unwrap();
     println!("cargo::rustc-check-cfg=cfg(seedbox_embedded_init)");
     if release && supported {
-        // The package already contains the Linux-built supervisor. Native
-        // development builds keep the legacy embedded-supervisor fallback.
+        // Release runs download Linux-built helpers. Native development builds
+        // keep the existing embedded-supervisor fallback.
         return;
     }
     let source = root.join("guest/compose-init.c");
@@ -253,26 +224,23 @@ fn on_path(name: &str) -> Option<PathBuf> {
 }
 
 /// The distribution address follows source inputs, never the host or Git HEAD.
-/// Keep this framing identical to kernel/release.py (checked by portable tests).
-fn kernel_release(root: &Path) {
+/// Keep this framing identical to the release scripts (checked by portable tests).
+fn release_id(root: &Path, manifest: &str, domain: &[u8], variable: &str) {
     use sha2::{Digest, Sha256};
     let groups: std::collections::BTreeMap<String, Vec<String>> = serde_json::from_slice(
-        &std::fs::read(root.join("kernel/inputs.json")).expect("kernel inputs"),
+        &std::fs::read(root.join(manifest)).expect("release input manifest"),
     )
-    .expect("kernel input groups");
+    .expect("release input groups");
     let names: std::collections::BTreeSet<_> = groups.into_values().flatten().collect();
     let mut hash = Sha256::new();
-    hash.update(b"seedbox-kernel-v1\0");
+    hash.update(domain);
     for name in names {
         println!("cargo::rerun-if-changed={}", root.join(&name).display());
-        let content = std::fs::read(root.join(&name)).expect("kernel recipe input");
+        let content = std::fs::read(root.join(&name)).expect("release recipe input");
         hash.update(name.as_bytes());
         hash.update([0]);
         hash.update((content.len() as u64).to_be_bytes());
         hash.update(content);
     }
-    println!(
-        "cargo::rustc-env=SEEDBOX_KERNEL_RELEASE={:x}",
-        hash.finalize()
-    );
+    println!("cargo::rustc-env={variable}={:x}", hash.finalize());
 }

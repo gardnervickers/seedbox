@@ -5,6 +5,7 @@ import json
 import importlib.util
 import os
 from pathlib import Path
+import shutil
 import tarfile
 import tempfile
 import unittest
@@ -12,7 +13,7 @@ import unittest
 
 class RuntimePackageTests(unittest.TestCase):
     def test_export_modes_and_timestamps_do_not_change_package_bytes(self):
-        script = Path(__file__).resolve().parents[2] / "tools/runtime/build.py"
+        script = Path(__file__).resolve().parents[2] / "tools/runtime/package.py"
         spec = importlib.util.spec_from_file_location("runtime_build", script)
         build = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(build)
@@ -38,7 +39,7 @@ class RuntimePackageTests(unittest.TestCase):
                     self.assertEqual(archive.extractfile(entry).read(), entry.name.encode())
 
     def test_tools_image_identity_comes_from_its_config_bytes(self):
-        script = Path(__file__).resolve().parents[2] / "tools/runtime/build.py"
+        script = Path(__file__).resolve().parents[2] / "tools/runtime/package.py"
         spec = importlib.util.spec_from_file_location("runtime_build", script)
         build = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(build)
@@ -51,3 +52,31 @@ class RuntimePackageTests(unittest.TestCase):
                     header.size = len(content)
                     archive.addfile(header, io.BytesIO(content))
             self.assertEqual(build.image_digest(path), "sha256:" + hashlib.sha256(config).hexdigest())
+
+
+    def test_kernel_changes_do_not_change_the_runtime_release(self):
+        root = Path(__file__).resolve().parents[2]
+        spec = importlib.util.spec_from_file_location("runtime_release", root / "tools/runtime/release.py")
+        release = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(release)
+        names = json.loads((root / "tools/runtime/inputs.json").read_text())["common"]
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            for name in names:
+                destination = checkout / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(root / name, destination)
+            initial = release.release_id(checkout)
+            (checkout / "nix/kernels.nix").write_text("changed kernel recipe")
+            (checkout / "kernel").mkdir()
+            (checkout / "kernel/config.options").write_text("changed kernel configuration")
+            self.assertEqual(initial, release.release_id(checkout))
+            for name in names:
+                if name == "tools/runtime/inputs.json":
+                    continue
+                with self.subTest(input=name):
+                    path = checkout / name
+                    content = path.read_bytes()
+                    path.write_bytes(content + b"\n")
+                    self.assertNotEqual(initial, release.release_id(checkout))
+                    path.write_bytes(content)

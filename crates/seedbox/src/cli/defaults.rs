@@ -5,7 +5,7 @@
 //! locations. A failed search names every place it looked and how to fix it.
 
 // Linux input resolvers remain covered by portable tests; native Mac inputs
-// come from the embedded preparation package.
+// come from the selected guest asset archive.
 #![cfg_attr(all(target_os = "macos", target_arch = "aarch64"), allow(dead_code))]
 
 use seedbox::{
@@ -130,11 +130,11 @@ pub fn linux_runtime(
     store: Option<&ContentStore>,
     cancellation: &seedbox::execution::CancellationToken,
 ) -> Result<LinuxRuntime> {
-    if crate::cli::backends::container_runtime_available() {
+    if crate::cli::backends::released_assets() {
         let all = matches!(selection, AssetSelection::All);
         let kernel = crate::cli::backends::guest_kernel(overrides.kernel, cancellation, all)?;
         let runtime = if all {
-            Some(crate::cli::backends::container_runtime()?)
+            Some(crate::cli::backends::container_runtime(None, cancellation)?)
         } else {
             None
         };

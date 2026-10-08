@@ -10,17 +10,12 @@ cargo build --release
 ./target/release/seedbox replay .seedbox/runs/ATTEMPT
 ```
 
-The release build prepares and embeds the static guest
-supervisor, BusyBox, mke2fs and a filesystem-tools container image. No second
-Seedbox executable is built. The first helper build needs network access.
-Nix owns guest assets and the minimal filesystem-tools image through
-`runtimeAssets` and `preparationImage` in `nix/runtime.nix`. Linux builds use
-Nix directly; no container engine is needed until application preparation.
-An explicit `SEEDBOX_BUILDER` build override uses the same Linux container bridge
-as Mac, for checking a particular engine.
-Unchanged guest inputs reuse `$XDG_CACHE_HOME/seedbox/assets` or
-`~/.cache/seedbox/assets`. See the [shared workflow](../mac-runtime/README.md)
-for image preparation and cache behavior.
+The release build compiles the native CLI. Guest kernels, static helpers and
+filesystem tools are built independently in native Linux CI and downloaded on
+first use. Cargo needs no container engine or guest build step. There is one
+Seedbox executable. See [guest assets](../runtime/README.md) for the independent
+release/cache contract and manual Nix fallback, and the
+[shared workflow](../mac-runtime/README.md) for container-backed preparation.
 
 PV execution requires KVM but no privileged performance-counter or MSR access.
 It should run as your ordinary user. For `/dev/kvm` permission errors, follow the
@@ -32,7 +27,7 @@ The default `counter` timebase retains its AMD/performance-counter requirements;
 select `--timebase pv` for the ordinary unprivileged workflow. Replay remembers
 the timebase and needs neither a container engine nor guest build tools.
 Debug builds and explicit legacy assets retain the native Linux development
-preparation path; the release executable is the supported packaged workflow.
+preparation path; use the release executable for application runs.
 
 The default kernel downloads on the first `run`, `explore` or `prepare`, with
 progress on stderr, and is cached under `~/.cache/seedbox/kernels` (or
@@ -43,5 +38,5 @@ environment settings do not affect release runs. `doctor` uses a cached or
 explicitly supplied kernel and never downloads one. See
 [kernel releases](../../kernel/README.md). `--build-epoch` explicitly selects the existing native preparation path
 and requires the project-Nix Podman, Skopeo and umoci tools. It still uses the
-packaged guest assets. Native extraction needs image ownership permissions;
+released guest assets. Native extraction needs image ownership permissions;
 rootless users can run `prepare` inside `podman unshare`.

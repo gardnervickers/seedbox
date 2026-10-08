@@ -42,9 +42,11 @@
       packages = nixpkgs.lib.genAttrs systems (system:
         let pkgs = import nixpkgs { inherit system; }; in {
           networkTools = pkgs.iproute2;
-        } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux
-          ((import ./nix/runtime.nix { inherit pkgs; }) //
-           (import ./nix/kernels.nix { inherit pkgs; }))
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          # Name outputs explicitly so selecting helpers never imports the kernel recipe.
+          inherit (import ./nix/runtime.nix { inherit pkgs; }) runtimeAssets preparationImage runtimeArchive runtimeSources;
+          inherit (import ./nix/kernels.nix { inherit pkgs; }) guestKernel guestKernelArchive guestKernelSources;
+        }
         );
     };
 }

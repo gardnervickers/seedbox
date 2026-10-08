@@ -1,4 +1,4 @@
-name: Guest kernels
+name: Guest assets
 
 on:
   push:
@@ -6,7 +6,11 @@ on:
     paths:
       - 'kernel/**'
       - 'kernel-arm64/**'
+      - 'guest/**'
       - 'nix/kernels.nix'
+      - 'nix/runtime.nix'
+      - 'tools/runtime/**'
+      - 'tools/linux-runtime/package.py'
       - 'flake.nix'
       - 'flake.lock'
       - '.github/workflows/kernels.yml'
@@ -14,7 +18,11 @@ on:
     paths:
       - 'kernel/**'
       - 'kernel-arm64/**'
+      - 'guest/**'
       - 'nix/kernels.nix'
+      - 'nix/runtime.nix'
+      - 'tools/runtime/**'
+      - 'tools/linux-runtime/package.py'
       - 'flake.nix'
       - 'flake.lock'
       - '.github/workflows/kernels.yml'
@@ -24,42 +32,52 @@ permissions:
   contents: read
 
 concurrency:
-  group: guest-kernels-${{ github.ref }}
+  group: guest-assets-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   plan:
     runs-on: ubuntu-24.04
     outputs:
-      tag: ${{ steps.inputs.outputs.tag }}
-      published: ${{ steps.release.outputs.result }}
+      kernel: ${{ steps.release.outputs.kernel }}
+      runtime: ${{ steps.release.outputs.runtime }}
+      releases: ${{ steps.release.outputs.releases }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - id: inputs
-        name: Identify kernel inputs
-        run: echo "tag=kernel-$(python3 kernel/release.py)" >> "$GITHUB_OUTPUT"
+        name: Identify kernel and helper inputs independently
+        run: |
+          echo "kernel=kernel-$(python3 kernel/release.py)" >> "$GITHUB_OUTPUT"
+          echo "runtime=runtime-$(python3 tools/runtime/release.py)" >> "$GITHUB_OUTPUT"
       - id: release
-        name: Reuse an existing release
+        name: Reuse published assets
         uses: actions/github-script@v9
         env:
-          KERNEL_TAG: ${{ steps.inputs.outputs.tag }}
+          KERNEL_TAG: ${{ steps.inputs.outputs.kernel }}
+          RUNTIME_TAG: ${{ steps.inputs.outputs.runtime }}
         with:
           script: |
-            try {
-              const { data } = await github.rest.repos.getReleaseByTag({
-                ...context.repo, tag: process.env.KERNEL_TAG
-              });
-              return !data.draft;
-            } catch (error) {
-              if (error.status !== 404) throw error;
-              return false;
+            const releases = [];
+            for (const kind of ['kernel', 'runtime']) {
+              const tag = process.env[`${kind.toUpperCase()}_TAG`];
+              let published = false;
+              try {
+                const { data } = await github.rest.repos.getReleaseByTag({ ...context.repo, tag });
+                published = !data.draft;
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+              core.setOutput(kind, !published);
+              if (!published) releases.push({ kind, tag });
+              core.info(`${tag}: ${published ? 'reuse published assets' : 'build both architectures'}`);
             }
+            core.setOutput('releases', JSON.stringify(releases));
 
   build:
     needs: plan
-    if: needs.plan.outputs.published != 'true'
+    if: needs.plan.outputs.kernel == 'true' || needs.plan.outputs.runtime == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -74,6 +92,9 @@ jobs:
             image: Image
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    env:
+      SYSTEM: ${{ matrix.system }}
+      ARCHITECTURE: ${{ matrix.architecture }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -82,45 +103,73 @@ jobs:
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Build kernel and diagnostics
+        if: needs.plan.outputs.kernel == 'true'
         env:
-          SYSTEM: ${{ matrix.system }}
-          ARCHITECTURE: ${{ matrix.architecture }}
           IMAGE: ${{ matrix.image }}
         run: |
           nix build ".#packages.$SYSTEM.guestKernel" --out-link kernel-output
           nix build ".#packages.$SYSTEM.guestKernelArchive" --out-link kernel-archive
-          mkdir dist
-          cp "kernel-output/$IMAGE" "dist/seedbox-kernel-$ARCHITECTURE"
-          cp kernel-archive "dist/seedbox-kernel-$ARCHITECTURE.tar.gz"
-          cd dist
-          sha256sum ./* > "$ARCHITECTURE.sha256"
+          mkdir -p dist/kernel
+          cp "kernel-output/$IMAGE" "dist/kernel/seedbox-kernel-$ARCHITECTURE"
+          cp kernel-archive "dist/kernel/seedbox-kernel-$ARCHITECTURE.tar.gz"
       - name: Include corresponding kernel source
-        if: matrix.architecture == 'x86_64'
+        if: needs.plan.outputs.kernel == 'true' && matrix.architecture == 'x86_64'
         run: |
           nix build .#guestKernelSources --out-link kernel-source
-          cp kernel-source dist/seedbox-kernel-source.tar.gz
-          cd dist
-          sha256sum seedbox-kernel-source.tar.gz > source.sha256
+          cp kernel-source dist/kernel/seedbox-kernel-source.tar.gz
+      - name: Build guest helpers and filesystem tools
+        if: needs.plan.outputs.runtime == 'true'
+        run: |
+          nix build ".#packages.$SYSTEM.runtimeArchive" --out-link runtime-archive
+          mkdir -p dist/runtime
+          cp runtime-archive "dist/runtime/seedbox-runtime-$ARCHITECTURE.tar.gz"
+          test "$(stat -Lc %s runtime-archive)" -le 536870912
+      - name: Include corresponding helper source
+        if: needs.plan.outputs.runtime == 'true' && matrix.architecture == 'x86_64'
+        run: |
+          nix build .#runtimeSources --out-link runtime-source
+          cp runtime-source dist/runtime/seedbox-runtime-source.tar.gz
+      - name: Checksum assets
+        run: |
+          for kind in kernel runtime; do
+            if [ -d "dist/$kind" ]; then
+              (cd "dist/$kind" && sha256sum ./* > "$ARCHITECTURE.sha256")
+            fi
+          done
       - uses: actions/upload-artifact@v7
+        if: needs.plan.outputs.kernel == 'true'
         with:
           name: kernel-${{ matrix.architecture }}
-          path: dist/*
+          path: dist/kernel/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        if: needs.plan.outputs.runtime == 'true'
+        with:
+          name: runtime-${{ matrix.architecture }}
+          path: dist/runtime/*
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
 
   publish:
     needs: [plan, build]
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.plan.outputs.releases != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.releases) }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     env:
-      KERNEL_TAG: ${{ needs.plan.outputs.tag }}
+      ASSET_TAG: ${{ matrix.tag }}
+      ASSET_KIND: ${{ matrix.kind }}
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: kernel-*
+          pattern: ${{ matrix.kind }}-*
           merge-multiple: true
           path: dist
       - name: Verify transferred assets
@@ -134,29 +183,34 @@ jobs:
         uses: actions/github-script@v9
         with:
           script: |
-            // Tag lookup omits draft releases; listing lets a failed upload resume.
+            // Tag lookup omits drafts; listing lets a failed upload resume.
+            const tag = process.env.ASSET_TAG;
+            const kind = process.env.ASSET_KIND;
             let release = (await github.paginate(github.rest.repos.listReleases, {
               ...context.repo, per_page: 100
-            })).find(release => release.tag_name === process.env.KERNEL_TAG);
+            })).find(release => release.tag_name === tag);
             if (!release) {
+              const contents = kind === 'kernel'
+                ? 'guest kernels, resolved configuration, ARM instruction audit'
+                : 'static guest supervisor, BusyBox, mke2fs and a Linux filesystem-tools image';
               release = (await github.rest.repos.createRelease({
                 ...context.repo,
-                tag_name: process.env.KERNEL_TAG,
+                tag_name: tag,
                 target_commitish: context.sha,
-                name: `Guest kernels ${process.env.KERNEL_TAG.slice(7, 19)}`,
-                body: `Built from ${context.sha}. Contains native ARM64 and x86-64 guest kernels, resolved configuration, ARM instruction audit, licenses, checksums and corresponding source. The tag identifies kernel source, patches, configuration and build recipe; it does not qualify or restrict runtime kernels.`,
+                name: `Guest ${kind === 'kernel' ? 'kernels' : 'helpers'} ${tag.split('-')[1].slice(0, 12)}`,
+                body: `Built from ${context.sha}. Contains native ARM64 and x86-64 ${contents}, licenses, checksums and corresponding source. The tag identifies build inputs; it does not qualify or restrict runtime overrides.`,
                 draft: true,
                 prerelease: true,
                 make_latest: 'false'
               })).data;
             }
-            if (!release.draft) throw new Error('Refusing to overwrite a published kernel release');
+            if (!release.draft) throw new Error('Refusing to overwrite a published release');
             core.setOutput('id', release.id);
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release upload "$KERNEL_TAG" dist/* --clobber
+        run: gh release upload "$ASSET_TAG" dist/* --clobber
       - name: Publish the complete release
         uses: actions/github-script@v9
         env:

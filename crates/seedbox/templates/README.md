@@ -1,19 +1,19 @@
 # Seedbox simulation example
 
-On Apple Silicon or Linux x86-64, start Docker/Podman and build Seedbox once with
-`nix develop` followed by `cargo build --release`. Static guest helpers are packaged
-automatically; Mac signing is automatic. The first run announces a guest kernel
-download and caches it for later invocations. While Seedbox is private, that
-first download needs GH_TOKEN or GITHUB_TOKEN with repository read access. Run the release executable
-with the Compose directory as its positional argument. On Linux use
-`--timebase pv` for KVM without performance-counter requirements and give your
-user read/write access to `/dev/kvm`. No Lima or manual packaging script is
-needed. Nix packages own the guest assets and the minimal filesystem-tools
-image; the normal Cargo release build embeds their outputs. Replay requires
-retained inputs, not the container engine.
+On Apple Silicon or Linux x86-64, build Seedbox once from its checkout with
+`nix develop` followed by `cargo build --release`. Cargo compiles the native CLI
+and signs it automatically on Mac. Native Linux CI builds guest assets separately.
+The first run announces downloads of the guest kernel and helper archive and
+caches them for later invocations. While Seedbox is private, first use needs
+`GH_TOKEN` or `GITHUB_TOKEN` with repository read access. Start Docker/Podman for
+application preparation, then run the release executable with this Compose
+directory as its positional argument. On Linux use `--timebase pv` for KVM
+without performance-counter requirements and give your user read/write access
+to `/dev/kvm`. No Lima or manual packaging script is needed. Replay uses retained
+inputs and needs no container engine or downloads.
 
 This project is self-contained. Use the same commands on Linux x86-64 KVM or
-Apple Silicon HVF after building the packaged CLI for that platform. Linux PV execution requires read/write access to `/dev/kvm`; Mac execution
+Apple Silicon HVF after building the release CLI for that platform. Linux PV execution requires read/write access to `/dev/kvm`; Mac execution
 uses the current user. Linux counter execution also needs privileged PMU/MSR access.
 The etcd and Redis templates passed real workloads,
 intentional failure controls, and exact replays on the supported Linux amd64 AMD Zen
@@ -37,7 +37,7 @@ in a Dockerfile and describes three registry-image members in Compose. The Redis
 template builds a dependency-free Rust workload that checks PING, SET acknowledgements,
 and exact GET values. Both use the Rust Seedbox configuration/orchestration APIs.
 
-From this directory, with the packaged `seedbox` executable on `PATH`:
+From this directory, with the release `seedbox` executable on `PATH`:
 
 ```sh
 seedbox validate
@@ -49,15 +49,25 @@ seedbox diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
 seedbox explore --count 2
 ```
 
-The Linux maintainer build `cargo build --release` from the
-Seedbox checkout includes the supervisor, BusyBox and mke2fs. The guest kernel
-is downloaded on first preparation and cached under the platform cache directory
-(`XDG_CACHE_HOME` overrides its parent). Explicit runtime-input flags and their environment path overrides
-still win. Explicit `--kernel` bypasses the download. Unbundled Linux development builds
-retain artifact-directory searches; packaged helpers precede incidental defaults. Skopeo, umoci
-and tar run in the bundled tools container; Docker/Podman supplies the endpoint. Unbundled developer
-builds keep the existing input search. Package execution on Linux remains a
-final merge-train check. Replay uses only retained inputs after an upgrade.
+The default kernel and helper archive are downloaded on first preparation and
+cached under the platform cache directory (`XDG_CACHE_HOME` overrides its parent).
+Explicit runtime flags and their environment path overrides win. `--kernel` and
+`--runtime-assets` bypass their respective downloads. Without private release
+access, use these commands from a Seedbox checkout on native Linux:
+
+```sh
+nix build .#guestKernel --out-link kernel-output
+nix build .#runtimeArchive --out-link runtime-assets.tar.gz
+```
+
+Pass `kernel-output/bzImage` through `--kernel` and the archive through
+`--runtime-assets` when running this project. On ARM64 Linux the kernel is
+`kernel-output/Image`. Mac users can copy that ARM64
+kernel and helper archive from a Linux builder, pass both paths and omit
+`--timebase pv`. Initial source builds fetch public dependencies; offline builds
+need cached inputs. Skopeo, umoci and tar run in the downloaded tools container;
+Docker/Podman supplies the endpoint. Unbundled Linux development builds retain
+existing input searches. Replay uses only retained inputs after an upgrade.
 
 On a VMM failure, text output from `run`, `replay`, `explore` and `inspect`
 prints up to five non-empty lines from the final 8 KiB of the attempt's
@@ -81,7 +91,7 @@ Apple Silicon builds also support native ARM Compose execution through the share
 world coordinator, including connection selectors and committed console triggers.
 Arbitrary ARM snapshot/fork reuse remains unsupported. Build once with
 `nix develop` and `cargo build --release` from the Seedbox checkout.
-The signed CLI packages static helpers, downloads the ARM kernel once and owns
+The signed CLI downloads and caches guest assets, and owns
 Linux filesystem-tools containers through your Docker/Podman endpoint.
 Replay uses retained bytes without that endpoint. No runtime
 compiler or extra VMM path is needed.
@@ -163,7 +173,7 @@ the wall limit. CPU leases remain held until execution ends. This requires a
 host-control-capable engine; see the repository's `docs/runtime.md` for details.
 
 On Linux, explicit `--build-epoch` selects native preparation with the
-project-Nix Podman, Skopeo and umoci tools, using the same packaged guest assets.
+project-Nix Podman, Skopeo and umoci tools, using the same released guest assets.
 Ordinary runs use container-backed preparation. Mac does not support this option.
 Native extraction needs image ownership permissions; rootless users can run
 `prepare` inside `podman unshare`.

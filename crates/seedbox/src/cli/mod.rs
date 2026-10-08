@@ -400,13 +400,16 @@ struct KvmInputs {
 struct RuntimeInputs {
     #[command(flatten)]
     kvm: KvmInputs,
-    /// Static guest supervisor [default: packaged helper, then the copy built into this binary].
+    /// Guest helper archive [default: download once and cache].
+    #[arg(long, env = "SEEDBOX_RUNTIME_ASSETS")]
+    runtime_assets: Option<PathBuf>,
+    /// Static guest supervisor [default: released helper, then the copy built into this binary].
     #[arg(long, env = "SEEDBOX_GUEST_INIT")]
     guest_init: Option<PathBuf>,
-    /// Static Linux BusyBox for the guest architecture [default: packaged helper, then busybox on PATH on Linux, if static].
+    /// Static Linux BusyBox for the guest architecture [default: released helper, then busybox on PATH on Linux, if static].
     #[arg(long, env = "SEEDBOX_BUSYBOX")]
     busybox: Option<PathBuf>,
-    /// Static Linux mke2fs for named volumes [default: packaged helper, then mke2fs on PATH on Linux, if static].
+    /// Static Linux mke2fs for named volumes [default: released helper, then mke2fs on PATH on Linux, if static].
     #[arg(long, env = "SEEDBOX_MKE2FS")]
     mke2fs: Option<PathBuf>,
     /// Container client for image preparation [default: discover a running Docker or Podman engine].
@@ -471,6 +474,7 @@ impl RuntimeInputs {
         let engine = defaults::engine(self.kvm.vmm.clone())?;
         for (flag, path) in [
             ("--kernel", &self.kvm.kernel),
+            ("--runtime-assets", &self.runtime_assets),
             ("--guest-init", &self.guest_init),
             ("--busybox", &self.busybox),
             ("--mke2fs", &self.mke2fs),
@@ -492,7 +496,7 @@ impl RuntimeInputs {
                 ));
             }
             let _ = (counter, scratch, simulation);
-            let runtime = backends::container_runtime()?;
+            let runtime = backends::container_runtime(self.runtime_assets.clone(), cancellation)?;
             let resolve = |flag, explicit: &Option<PathBuf>, name| match explicit {
                 Some(path) => defaults::existing(flag, path.clone()),
                 None => Ok(runtime.input(name)),
@@ -540,8 +544,9 @@ impl RuntimeInputs {
             .with_timebase(self.clock.timebase.unwrap_or(TimebaseArg::Counter).into())
             .with_page_timer(self.page_timer)
             .with_deferred_tx(self.deferred_tx);
-            if seedbox::container_runtime::Runtime::available() {
-                let runtime = backends::container_runtime()?;
+            if backends::released_assets() || self.runtime_assets.is_some() {
+                let runtime =
+                    backends::container_runtime(self.runtime_assets.clone(), cancellation)?;
                 let resolve = |flag, explicit: &Option<PathBuf>, name| match explicit {
                     Some(path) => defaults::existing(flag, path.clone()),
                     None => Ok(runtime.input(name)),
@@ -672,7 +677,9 @@ struct BuildOptions {
 
 impl BuildOptions {
     fn configure(&self, simulation: &config::Simulation, inputs: &mut RuntimeInputs) -> Result<()> {
-        if seedbox::container_runtime::Runtime::available() && self.build_epoch.is_none() {
+        if (backends::released_assets() || inputs.runtime_assets.is_some())
+            && self.build_epoch.is_none()
+        {
             return Ok(());
         }
         if inputs.builder == Path::new("auto") {

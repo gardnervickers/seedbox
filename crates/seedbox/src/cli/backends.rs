@@ -156,8 +156,27 @@ fn cache_home() -> Result<std::path::PathBuf> {
     Ok(cache.join("seedbox"))
 }
 
-pub fn container_runtime() -> Result<seedbox::container_runtime::Runtime> {
-    seedbox::container_runtime::Runtime::embedded(&cache_home()?.join("runtime"))
+pub fn container_runtime(
+    explicit: Option<std::path::PathBuf>,
+    cancellation: &CancellationToken,
+) -> Result<seedbox::container_runtime::Runtime> {
+    let path = match explicit {
+        Some(path) => super::defaults::existing("--runtime-assets", path)?,
+        None => release_asset(
+            seedbox::release_download::ReleaseAsset::Runtime,
+            "assets",
+            cancellation,
+            true,
+        )?,
+    };
+    seedbox::container_runtime::Runtime::from_archive(&path, &cache_home()?.join("runtime"))
+        .map_err(|error| match error {
+            seedbox::Error::Io(error) => seedbox::Error::Setup(format!(
+                "runtime assets {}: {error}; check archive and cache permissions",
+                path.display()
+            )),
+            other => other,
+        })
 }
 
 pub fn guest_kernel(
@@ -168,13 +187,35 @@ pub fn guest_kernel(
     if let Some(path) = explicit {
         return super::defaults::existing("--kernel", path);
     }
-    let cache = cache_home()?.join("kernels");
+    release_asset(
+        seedbox::release_download::ReleaseAsset::Kernel,
+        "kernel",
+        cancellation,
+        download,
+    )
+}
+
+fn release_asset(
+    asset: seedbox::release_download::ReleaseAsset,
+    prefix: &str,
+    cancellation: &CancellationToken,
+    download: bool,
+) -> Result<std::path::PathBuf> {
+    use seedbox::release_download::{ReleaseAsset, ReleaseDownload};
+    let cache = cache_home()?.join(match asset {
+        ReleaseAsset::Kernel => "kernels",
+        ReleaseAsset::Runtime => "assets",
+    });
     let architecture = std::env::consts::ARCH;
     if !download {
-        return seedbox::kernel_download::KernelDownload::cached(&cache, architecture);
+        return ReleaseDownload::cached(asset, &cache, architecture);
     }
-    if let Some(path) = seedbox::kernel_download::KernelDownload::lookup(&cache, architecture)? {
-        eprintln!("kernel: using cached guest kernel {}", path.display());
+    if let Some(path) = ReleaseDownload::lookup(asset, &cache, architecture)? {
+        eprintln!(
+            "{prefix}: using cached {} {}",
+            asset.description(),
+            path.display()
+        );
         return Ok(path);
     }
     #[cfg(target_os = "linux")]
@@ -189,16 +230,16 @@ pub fn guest_kernel(
     let agent = ureq::Agent::config_builder()
         .https_only(true)
         .user_agent(concat!("seedbox/", env!("CARGO_PKG_VERSION")))
-        .timeout_global(Some(std::time::Duration::from_secs(120)))
+        .timeout_global(Some(std::time::Duration::from_secs(600)))
         .timeout_connect(Some(std::time::Duration::from_secs(10)))
         .timeout_recv_response(Some(std::time::Duration::from_secs(15)))
         .build()
         .new_agent();
-    seedbox::kernel_download::KernelDownload::new(agent, token.as_deref())?.ensure(
+    ReleaseDownload::new(asset, agent, token.as_deref())?.ensure(
         &cache,
         architecture,
         cancellation,
-        |message| eprintln!("kernel: {message}"),
+        |message| eprintln!("{prefix}: {message}"),
     )
 }
 
@@ -236,6 +277,6 @@ pub fn preparation_progress(message: &str) {
     eprintln!("preparing: {}", message.replace('-', " "));
 }
 
-pub fn container_runtime_available() -> bool {
-    seedbox::container_runtime::Runtime::available()
+pub fn released_assets() -> bool {
+    env!("SEEDBOX_RELEASE_ASSETS") == "1"
 }

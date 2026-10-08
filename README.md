@@ -13,10 +13,10 @@ or macOS. `run`, `explore` and `replay` use Linux x86-64 KVM or the native HVF
 backend on an Apple Silicon Mac. Linux PV runs need KVM device permissions;
 counter mode also needs privileged performance-counter access.
 
-Install Nix and start a Linux Docker or Podman engine. On Mac, install Apple's
-Command Line Tools and use Docker Desktop or a running Podman machine with at
-least 4 GiB of memory assigned for the release build. On Linux,
-enable KVM and grant your user read/write access to `/dev/kvm`.
+Install Nix for the project toolchain. On Mac, also install Apple's Command Line
+Tools. Application preparation needs a running Linux Docker or Podman engine
+(Docker Desktop or a Podman machine on Mac). On Linux, enable KVM and grant your
+user read/write access to `/dev/kvm`.
 
 From the repository root:
 
@@ -35,37 +35,36 @@ cargo build --release
 ./target/release/seedbox logs .seedbox/runs/ATTEMPT --machine client --stream console
 ```
 
-The release build packages static guest helpers and Linux filesystem tools,
-and signs the Mac executable. It does not compile a kernel. On the first
-`run`, `explore` or `prepare`, Seedbox announces and downloads its guest kernel
-from a GitHub Release, verifies the SHA-256 digest and caches it. Later calls
-reuse the cached bytes without contacting GitHub. The cache lives under
-`~/Library/Caches/seedbox/kernels` on Mac or `~/.cache/seedbox/kernels` on Linux;
-`XDG_CACHE_HOME` overrides the parent directory. An explicit `--kernel` or
-`SEEDBOX_KERNEL` bypasses the download.
+The release build compiles the native CLI and signs it on Mac. It needs no
+container engine and builds no Linux guest assets. On the first `run`, `explore`
+or `prepare`, Seedbox announces downloads of its guest kernel and helper archive
+from GitHub Releases, verifies their SHA-256 digests and caches them. Later calls
+reuse the cached bytes without contacting GitHub. Caches live under
+`~/Library/Caches/seedbox` on Mac or `~/.cache/seedbox` on Linux;
+`XDG_CACHE_HOME` overrides the parent directory. Explicit `--kernel` and
+`--runtime-assets` paths bypass their respective downloads.
 
-Kernel releases are built by GitHub Actions when kernel patches, configuration,
-upstream version or build recipe change. CLI and application changes reuse the
-existing release. Because this repository is private, the first download needs
-`GH_TOKEN` or `GITHUB_TOKEN` with repository read access. See
-[kernel releases](kernel/README.md) for the build and cache contract.
+Native Linux CI builds the kernel and helpers independently, only when their
+source inputs change. CLI and application changes reuse existing releases.
+Because this repository is private, the first downloads need `GH_TOKEN` or
+`GITHUB_TOKEN` with repository read access. Without that access, build on Linux
+with `nix build .#guestKernel` and `nix build .#runtimeArchive`, then select those
+outputs with `--kernel` and `--runtime-assets`. See [kernel releases](kernel/README.md)
+and [guest assets](tools/runtime/README.md) for exact commands and cache behavior.
 
-Nix packages in `nix/runtime.nix` own the static helpers and filesystem-tools
-image. Cargo invokes Nix directly on Linux and uses a Linux build container on
-Mac, then embeds the results. The first helper build needs network access and,
-on Mac, a running container engine. Runtime image builds/pulls use your
-Docker/Podman endpoint; helper containers unpack Linux filesystems without
-extracting them onto the host. Simulation runs directly through HVF on Mac or
-KVM on Linux. Replay uses retained bytes and needs no container engine, kernel
-download, registry access or rebuild. There is no Lima dependency, separate
-packaging command or second Linux Seedbox executable.
+Runtime image builds/pulls use your Docker/Podman endpoint. A Linux helper
+container unpacks application filesystems; Seedbox reads the resulting archive
+without extracting Linux metadata onto the host. Simulation runs directly
+through HVF on Mac or KVM on Linux. Replay uses retained bytes and needs no
+container engine, downloads, registry access or rebuild. There is no Lima
+dependency, separate packaging command or second Linux Seedbox executable.
 
 Use `--builder docker` or `--builder podman` to select the client. Ordinary client
 context/connection settings apply. Mac images must support `linux/arm64`; memory
 is limited to 3072 MiB per service and exploration is serial. Linux's default
 `counter` mode retains its hardware/performance-counter requirements; `pv` is
 the ordinary unprivileged option. Debug builds support portable development;
-use the release executable for the packaged run workflow.
+use the release executable for application runs.
 See [Mac details](tools/mac-runtime/README.md) and
 [Linux details](tools/linux-runtime/README.md).
 
@@ -89,9 +88,10 @@ directory. Every runtime input has a default, so no flags are required:
 | CPU | Linux: first free core other than CPU 0's, under the shared lease; Mac: automatic HVF scheduling | `--cpu`, `SEEDBOX_CPU` (Linux only) |
 | Guest kernel | downloaded once from the matching kernel release, then cached; unbundled Linux development builds retain artifact-directory searches | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | the platform engine linked into `seedbox`; runtime commands never invoke Cargo | `--vmm`, `SEEDBOX_VMM` (Linux legacy standalone engine) |
-| Guest supervisor | packaged on Mac or in the Linux asset build; otherwise built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl on Linux | `--guest-init`, `SEEDBOX_GUEST_INIT` |
-| BusyBox | packaged on Mac; Linux: `SEEDBOX_BUSYBOX` (set by `nix develop`), then packaged BusyBox, then a static `busybox` on `PATH` | `--busybox` |
-| mke2fs (only for named volumes) | packaged on Mac; Linux: `SEEDBOX_MKE2FS` (set by `nix develop`), then packaged mke2fs, then a static `mke2fs` on `PATH` | `--mke2fs` |
+| Guest helper archive | downloaded once from the matching helper release, then cached | `--runtime-assets`, `SEEDBOX_RUNTIME_ASSETS` |
+| Guest supervisor | from the helper archive; Linux development builds also have a compiled-in musl fallback | `--guest-init`, `SEEDBOX_GUEST_INIT` |
+| BusyBox | from the helper archive; Linux development builds search static tools on `PATH` | `--busybox`, `SEEDBOX_BUSYBOX` |
+| mke2fs (only for named volumes) | from the helper archive; Linux development builds search static tools on `PATH` | `--mke2fs`, `SEEDBOX_MKE2FS` |
 | Build epoch | absent; preserve the builder's ordinary timestamp policy | `--build-epoch` (prepare/run/explore; no environment backing) |
 | Engine and guest kernel | any built engine and kernel are admitted; the run records their hashes | `--vmm`, `--kernel` |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
@@ -160,7 +160,7 @@ The ARM application engine is linked into the Mac CLI. Both platform adapters
 use the shared world coordinator, including connection selectors and committed
 console triggers; ARM arbitrary snapshot/fork reuse remains unsupported. Its PV world identity,
 boot-layout evidence and HVF host admission are distinct from the existing ARM
-fixture and x86 KVM profiles. Mac defaults use packaged Image, supervisor,
+fixture and x86 KVM profiles. Mac defaults use released Image, supervisor,
 BusyBox and mke2fs, with `linux/arm64` as the image platform. `--cpu`, `--vmm`
 and `--allow-unqualified-cpu` remain Linux-only; Mac exploration is serial.
 
@@ -276,7 +276,7 @@ supporting custom builders; the optional native timestamp policy below has a
 narrower admission requirement. See [preparation evidence and cancellation](docs/runtime.md#exploration-preparation).
 
 On Linux, explicit `--build-epoch` selects native preparation with the
-project-Nix Podman, Skopeo and umoci tools, using the same packaged guest assets.
+project-Nix Podman, Skopeo and umoci tools, using the same released guest assets.
 Ordinary runs use container-backed preparation. Mac does not support this option.
 Native extraction needs image ownership permissions; rootless users can run
 `prepare` inside `podman unshare`.

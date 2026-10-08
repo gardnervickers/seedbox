@@ -1,12 +1,16 @@
 # OCI preparation and execution
 
-On Apple Silicon or Linux x86-64, start Docker/Podman and build Seedbox once with
-`nix develop` followed by `cargo build --release`. Guest assets are prepared
-automatically and cached; Mac signing is automatic. Run the release executable
-with the Compose directory as its positional argument. On Linux use
-`--timebase pv` for KVM without performance-counter requirements and give your
-user read/write access to `/dev/kvm`. No Lima or manual packaging script is
-needed. Replay requires retained inputs, not the container engine.
+On Apple Silicon or Linux x86-64, build Seedbox once with `nix develop` followed
+by `cargo build --release`. Cargo compiles the native CLI; Mac signing is
+automatic. On first preparation, Seedbox announces and caches downloads of the
+guest kernel and helper archive built by native Linux CI. Private releases need
+`GH_TOKEN` or `GITHUB_TOKEN` with repository read access. Start Docker/Podman to
+prepare application images, then run the release executable with the Compose
+directory as its positional argument. On Linux use `--timebase pv` for KVM
+without performance-counter requirements and give your user read/write access
+to `/dev/kvm`. No Lima or manual packaging script is needed. Replay uses retained
+inputs and needs no container engine or downloads. See
+[guest assets](../tools/runtime/README.md) for the manual source-build fallback.
 
 The etcd and Redis Compose examples have passed real guest runs, failure controls
 and replay on the qualified Linux workstation. See [the acceptance record](acceptance.md)
@@ -173,9 +177,10 @@ nix develop
 cargo build --release --locked
 ```
 
-The normal release build prepares and embeds the guest kernel, static helpers
-and Linux filesystem tools automatically through Docker/Podman. The resulting
-CLI needs no extra build script or runtime compiler. Preparation uses the
+The normal release build prepares and embeds static helpers and Linux filesystem
+tools through Nix directly on Linux, or through Docker/Podman on Mac. The guest
+kernel downloads on first use. The resulting CLI needs no extra build script or
+runtime compiler. Preparation uses the
 container endpoint; use `--timebase pv` and KVM device permissions to run as your
 ordinary user. See [Linux setup](../tools/linux-runtime/README.md).
 
@@ -233,7 +238,7 @@ unqualified registry search list. `--builder docker` selects a Docker client
 instead when the host provides one.
 
 On Linux, explicit `--build-epoch` selects native preparation with the
-project-Nix Podman, Skopeo and umoci tools, using the same packaged guest assets.
+project-Nix Podman, Skopeo and umoci tools, using the same released guest assets.
 Ordinary runs use container-backed preparation. Mac does not support this option.
 Native extraction needs image ownership permissions; rootless users can run
 `prepare` inside `podman unshare`.
@@ -336,11 +341,11 @@ Release runs download their default kernel once and cache it;
 `SEEDBOX_ARTIFACTS` and `SEEDBOX_WORK` do not override it. Unbundled Linux development builds retain searches of those
 configured directories, `./artifacts`, and `~/seedbox-sim/artifacts` (also in the
 invoking user's home under sudo). An explicit missing `--kernel` fails immediately. For the supervisor, BusyBox and mke2fs,
-packaged bytes precede the existing compiled-in supervisor or static tools on
+released helpers precede the existing compiled-in supervisor or static tools on
 PATH. Unbundled development builds keep those existing fallbacks. A package
 integrity error is reported instead of silently selecting unrelated files.
 
-Guest kernels are published by the [Guest kernels workflow](../.github/workflows/kernels.yml)
+Guest kernels are published by the [Guest assets workflow](../.github/workflows/kernels.yml)
 when the inputs listed in `kernel/inputs.json` change. The release tag is a
 content-based address, not runtime admission policy: explicit kernels remain
 supported. `run`, `explore` and `prepare` report first-use downloads on stderr.
@@ -348,10 +353,18 @@ The private repository requires `GH_TOKEN` or `GITHUB_TOKEN` with read access.
 Downloads use GitHub's release-asset SHA-256, bounded streaming and an atomic
 cache install. Concurrent invocations share the download. Interrupted downloads
 never become usable cache entries. Every reuse verifies cached bytes locally;
-there is no network request on a cache hit. See [the kernel contract](../kernel/README.md).
+there is no network request on a cache hit. Without private release access,
+build with `nix build .#guestKernel` and `nix build .#runtimeArchive` on Linux,
+then select their outputs with `--kernel` and `--runtime-assets`. See
+[the guest asset workflow](../tools/runtime/README.md#build-without-private-release-access)
+and [the kernel contract](../kernel/README.md#build-without-private-release-access)
+for both architecture outputs and Mac usage. Helpers use an independent
+release identified by `tools/runtime/inputs.json`; kernel-only changes reuse it.
 
 Caches live under `~/Library/Caches/seedbox/kernels` on Mac and
 `~/.cache/seedbox/kernels` on Linux, or `$XDG_CACHE_HOME/seedbox/kernels` when set.
+Helper archives use the sibling `assets` directory and extracted tools use `runtime`.
+An explicit `--runtime-assets` or `SEEDBOX_RUNTIME_ASSETS` bypasses helper downloads.
 `doctor` looks up the cached or explicit kernel without downloading, creating
 cache/run state or performing OCI preparation. If the cache is empty, its error
 explains how to download through a run or select `--kernel PATH`. Random cache

@@ -1,8 +1,8 @@
 # Guest kernel releases
 
-The `Guest kernels` GitHub Actions workflow builds native ARM64 and x86-64 Linux
+The `Guest assets` GitHub Actions workflow builds native ARM64 and x86-64 Linux
 kernels and publishes ordinary files in this repository's Releases. It runs on
-kernel-related pull requests and pushes to `main`, and supports **Run workflow**
+asset-related pull requests and pushes to `main`, and supports **Run workflow**
 for an on-demand build on `main`. Pull requests upload temporary build artifacts;
 only `main` publishes releases. No container registry or Docker engine is involved.
 
@@ -43,3 +43,27 @@ one or creates state. Replay uses the kernel retained with the run and never
 contacts GitHub, including after kernel releases change. Release addresses and
 checksums select and verify distribution bytes; they do not restrict arbitrary
 kernels supplied with `--kernel`.
+
+
+## Build without private release access
+
+From an existing checkout on native Linux, use the same Nix recipe as CI:
+
+```sh
+nix build .#guestKernel --out-link kernel-output
+
+# Linux x86-64:
+./target/release/seedbox run examples/etcd --timebase pv --kernel ./kernel-output/bzImage
+```
+
+On ARM64 Linux the output is `kernel-output/Image`. To use it on an Apple
+Silicon Mac, copy that file to the Mac and run
+`./target/release/seedbox run examples/etcd --kernel ./Image`.
+The kernel build targets require a Linux builder; they do not run natively on
+macOS. No Seedbox GitHub credentials or release access are needed for this path.
+The first source build still fetches public Linux source and Nix dependencies;
+fully offline builds need those inputs already present.
+
+The guest helper archive is released separately. Without private release access,
+also build `nix build .#runtimeArchive` and pass its output through
+`--runtime-assets`; see [the complete manual workflow](../tools/runtime/README.md#build-without-private-release-access).

@@ -9,36 +9,33 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 - `crates/seedbox` is the default package: `cargo run -- <command>` runs the CLI.
   Use `cargo run --release -- <command>` or the release executable for guest runs;
   the bundled engine uses the CLI build profile.
-- Linux x86-64 asset builds use `cargo build --release` inside
-  `nix develop`. The optional `SEEDBOX_LINUX_RUNTIME_BUNDLE` build input embeds
-  only guest kernel/static helpers plus notices/provenance. Runtime extraction
-  stays bounded and private, with an owned lifetime through input retention.
-  CLI resolution owns environment lookup; the library receives explicit inputs.
+- Linux x86-64 and Apple Silicon application builds use `cargo build --release`
+  inside `nix develop`. Cargo builds only the native CLI and signs the Mac
+  executable with the Hypervisor entitlement. Guest assets are never built or
+  downloaded by Cargo. `nix/runtime.nix` owns `runtimeAssets`, `preparationImage`,
+  `runtimeArchive` and `runtimeSources`; `nix/kernels.nix` builds kernels separately.
+  Native Linux CI builds/publishes both architectures, with independent input
+  hashes from `tools/runtime/inputs.json` and `kernel/inputs.json`. Keep Cargo's
+  framing aligned with both `release.py` scripts. CLI/application changes and
+  kernel-only changes must not rebuild helpers. Kernel metadata lives in
+  `kernel/source.json`. The optional legacy `SEEDBOX_LINUX_RUNTIME_BUNDLE` build
+  input still embeds only guest kernel/static helpers plus notices/provenance.
+  Runtime extraction remains bounded and private. Run/prepare/explore fetch
+  missing private release assets with progress and verified atomic caching.
+  `--kernel` and `--runtime-assets` (and their environment path overrides) bypass
+  their respective downloads; manual native Linux Nix builds are documented in
+  `tools/runtime/README.md`. The CLI owns HTTP configuration, credentials, cache
+  locations and platform/default selection; library callers supply explicit inputs.
   Doctor selects only the cached or explicit kernel and never downloads, creates
-  state or prepares images. Replay must not substitute installed package bytes for retained inputs.
-  Linux package execution/reproducibility requires the final merge train.
-  `nix/runtime.nix` owns `runtimeAssets` and `preparationImage`; Cargo invokes
-  Nix directly on Linux and copies its outputs from a Linux build container on
-  Mac. `nix/kernels.nix` builds kernels independently. `kernel/inputs.json` is
-  the canonical kernel recipe input list; keep Cargo and Actions identity framing
-  aligned with `kernel/release.py`. Kernel metadata lives in `kernel/source.json`.
-  Cargo release builds never compile/download a kernel. Run/prepare/explore
-  lazily fetch the matching private GitHub release with progress and verified,
-  atomic persistent caching. The CLI supplies HTTP configuration and credentials;
-  the library never reads environment variables. Doctor is cache/override lookup
-  only, and replay never invokes the downloader.
-  Release runs use their downloaded/cached kernel unless `--kernel` or `SEEDBOX_KERNEL`
-  is explicit; legacy artifact-directory searches apply only to unbundled builds.
-  Explicit `--build-epoch` retains native project-Nix preparation using packaged
-  guest assets.
-- Apple Silicon application builds use `cargo build --release` inside
-  `nix develop`; Cargo prepares guest assets and signs only the Seedbox binary
-  target, selected by its build-script link argument. It packages static helpers and
-  Linux preparation tools into the signed CLI. Runtime preparation uses a Docker/Podman endpoint and a Linux filesystem-tools
-  container, with no second Seedbox executable. Replay must never require that
-  engine or invoke Cargo. Mac application profiles use `arm64-world-v1`
-  with their actual guest inputs and diagnostic HVF host observations. CLI
-  platform selection lives in `cli/backends.rs`; the library
+  state or prepares images. Replay uses retained bytes and never calls the
+  downloader, a compiler or container engine. Release runs ignore legacy kernel
+  artifact-directory searches; those remain for unbundled development builds.
+  Explicit `--build-epoch` retains native project-Nix preparation with released
+  guest assets. Linux package execution/reproducibility needs the final merge train.
+- Runtime preparation uses a Docker/Podman endpoint and a Linux filesystem-tools
+  container, with no second Seedbox executable. Native Mac application profiles
+  use `arm64-world-v1` with their actual guest inputs and diagnostic HVF host
+  observations. CLI platform selection lives in `cli/backends.rs`; the library
   receives explicit inputs and cancellation.
 - `crates/seedbox-vmm` is Linux-only and deliberately **not** a workspace member.
   It is its own workspace with its own `Cargo.lock`, because cargo unifies

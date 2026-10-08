@@ -11,14 +11,11 @@ let
     ln -s ${preparationTools} $out/tools
     cp ${../tools/runtime/filesystem.py} $out/filesystem.py
   '';
+  inputs = builtins.fromJSON (builtins.readFile ../tools/runtime/inputs.json);
   runtimeSource = lib.fileset.toSource {
     root = ../.;
-    fileset = lib.fileset.unions [
-      ../guest ../kernel-arm64/supervisor-io.h ../flake.lock
-      ../tools/runtime/build-assets.sh ../tools/linux-runtime/package.py
-    ];
+    fileset = lib.fileset.unions (map (name: ../. + "/${name}") inputs.common);
   };
-in {
   preparationImage = pkgs.dockerTools.buildLayeredImage {
     name = "seedbox-filesystem";
     compressor = "none";
@@ -44,4 +41,33 @@ in {
     cd source
     bash tools/runtime/build-assets.sh "$out"
   '';
+  runtimeArchive = pkgs.runCommand "seedbox-runtime-${pkgs.stdenv.hostPlatform.parsed.cpu.name}.tar.gz" {
+    nativeBuildInputs = [ pkgs.python3 ];
+  } ''
+    python3 ${../tools/runtime/package.py} ${runtimeAssets} ${preparationImage} "$out"
+  '';
+  sourceDirectory = pkgs.runCommand "seedbox-runtime-source" { } ''
+    mkdir -p "$out/upstream"
+    cp -R ${runtimeSource}/. "$out/"
+    cp ${pkgs.pkgsStatic.busybox.src} "$out/upstream/busybox.source"
+    cp ${pkgs.pkgsStatic.e2fsprogs.src} "$out/upstream/e2fsprogs.source"
+    cp ${pkgs.pkgsStatic.stdenv.cc.libc.src} "$out/upstream/musl.source"
+    cat > "$out/flake.nix" <<'EOF'
+    {
+      inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+      outputs = { nixpkgs, ... }: {
+        packages = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ]
+          (system: import ./nix/runtime.nix { pkgs = import nixpkgs { inherit system; }; });
+      };
+    }
+    EOF
+  '';
+  runtimeSources = pkgs.runCommand "seedbox-runtime-source.tar.gz" {
+    nativeBuildInputs = [ pkgs.gnutar pkgs.gzip ];
+  } ''
+    tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+      --mode='u=rwX,go=rX' -cf - -C ${sourceDirectory} . | gzip -n > "$out"
+  '';
+in {
+  inherit runtimeAssets preparationImage runtimeArchive runtimeSources;
 }

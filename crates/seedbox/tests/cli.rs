@@ -986,7 +986,7 @@ fn doctor_uses_kernel_cache_without_credentials_download_or_state() {
         };
         let ready = cache
             .join("seedbox/kernels")
-            .join(seedbox::kernel_download::RELEASE_ID)
+            .join(seedbox::release_download::KERNEL_RELEASE)
             .join("aarch64/ready");
         let run = || {
             let mut command = Command::new(env!("CARGO_BIN_EXE_seedbox"));
@@ -2312,4 +2312,71 @@ fn build_epoch_native_permissions_fail_before_state_creation() {
     assert_eq!(stderr(&output), "error: --build-epoch native extraction requires image ownership permissions; run prepare inside `podman unshare`, or omit --build-epoch to use container preparation\n");
     assert!(!root.path().join(".seedbox").exists());
     assert!(!root.path().join("prepared.json").exists());
+}
+
+#[test]
+fn runtime_assets_override_is_documented_and_missing_paths_fail_before_preparation() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    assert!(seedbox(&["init", "demo"], root).status.success());
+    let project = root.join("demo");
+    for command in ["run", "explore", "prepare"] {
+        let help = seedbox(&["help", command], root);
+        assert!(help.status.success());
+        let help = String::from_utf8_lossy(&help.stdout);
+        assert!(help.contains("--runtime-assets"), "{help}");
+        assert!(help.contains("SEEDBOX_RUNTIME_ASSETS"), "{help}");
+        assert!(help.contains("download once and cache"), "{help}");
+        let mut args = vec![command, "--runtime-assets", "missing.tar.gz"];
+        if command == "prepare" {
+            args.extend(["--output", "prepared.json"]);
+        }
+        let output = seedbox(&args, &project);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            stderr(&output),
+            "error: --runtime-assets missing.tar.gz: not found\n"
+        );
+        assert!(!project.join(".seedbox/runs").exists());
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_seedbox"))
+        .arg("run")
+        .current_dir(&project)
+        .env_clear()
+        .env("HOME", root)
+        .env("TMPDIR", root)
+        .env("PATH", "")
+        .env("SEEDBOX_RUNTIME_ASSETS", "env-missing.tar.gz")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        "error: --runtime-assets env-missing.tar.gz: not found\n"
+    );
+    for command in ["doctor", "replay"] {
+        let help = seedbox(&["help", command], root);
+        assert!(help.status.success());
+        assert!(!String::from_utf8_lossy(&help.stdout).contains("--runtime-assets"));
+    }
+}
+
+#[test]
+fn invalid_local_runtime_archive_has_path_context_without_downloads_or_tools() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    assert!(seedbox(&["init", "demo"], root).status.success());
+    let project = root.join("demo");
+    fs::write(project.join("invalid.tar.gz"), b"not an archive").unwrap();
+    let output = seedbox(&["run", "--runtime-assets", "invalid.tar.gz"], &project);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let error = stderr(&output);
+    assert!(
+        error.starts_with("error: runtime assets invalid.tar.gz:"),
+        "{error}"
+    );
+    assert!(!error.contains("downloading"), "{error}");
+    assert!(!project.join(".seedbox/runs").exists());
 }

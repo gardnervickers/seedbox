@@ -1,11 +1,9 @@
 # Build and run on Apple Silicon
 
-Install Nix and Apple's Command Line Tools. Install and start a Linux container
-engine: Docker Desktop or Podman with a running machine. The project shell
-provides Rust, Python and container clients; it does not start the engine.
-Assign at least 4 GiB of memory to the engine for the release build. For Podman,
-stop the machine, run `podman machine set --memory 4096`, and start it again.
-Seedbox checks this before building and reports the remedy if memory is too low.
+Install Nix and Apple's Command Line Tools. Application preparation needs a
+running Linux container engine: Docker Desktop or a Podman machine. The project
+shell provides Rust, Python and container clients; it does not start the engine.
+The Cargo build itself needs no running engine.
 
 From the repository root:
 
@@ -16,24 +14,25 @@ cargo build --release
 ./target/release/seedbox replay .seedbox/runs/ATTEMPT
 ```
 
-The normal release build packages the static guest supervisor, BusyBox, mke2fs
-and Linux filesystem tools. It signs the Mac CLI with the Hypervisor entitlement
-automatically after linking. It does not compile or download a kernel.
+The release build compiles the native CLI and automatically signs it with the
+Hypervisor entitlement after linking. Linux guest assets are built in native
+Linux CI, independently of Cargo.
 
-On the first `run`, `explore` or `prepare`, Seedbox reports the kernel download
-on stderr, verifies the GitHub release asset's SHA-256 and caches the bytes under
-`~/Library/Caches/seedbox/kernels` (or `$XDG_CACHE_HOME/seedbox/kernels`). Later
-calls reuse that cache offline. The private repository requires `GH_TOKEN` or
-`GITHUB_TOKEN` with read access for the first download. `--kernel PATH` skips it.
-`doctor` uses a cached or explicitly selected kernel and performs no download.
-See [kernel releases](../../kernel/README.md).
+On the first `run`, `explore` or `prepare`, Seedbox announces downloads of its
+guest kernel and helper archive on stderr, verifies GitHub's SHA-256 digests and
+caches the bytes under `~/Library/Caches/seedbox/kernels` and
+`~/Library/Caches/seedbox/assets` (or beneath `$XDG_CACHE_HOME/seedbox`). Later
+calls reuse those caches offline. The private repository requires `GH_TOKEN` or
+`GITHUB_TOKEN` with read access for first use. `--kernel PATH` and
+`--runtime-assets PATH` bypass the respective downloads. `doctor` uses only a
+cached or explicit kernel and performs no download. See
+[kernel releases](../../kernel/README.md) and
+[guest assets](../runtime/README.md), including the manual Linux build fallback.
 
-The independent kernel recipe lives in `nix/kernels.nix`. Guest helpers and the
-filesystem-tools image use `runtimeAssets` and `preparationImage` in
-`nix/runtime.nix`; Cargo copies those artifacts from one Linux build container.
-The helper cache is under `~/Library/Caches/seedbox/assets`; ordinary application
-and kernel patch changes do not rebuild the static helpers. Debug builds support
-portable development and readers; use the release executable for application runs.
+The kernel and helper recipes have independent release identities. Kernel patch
+changes reuse the helpers; helper changes reuse the kernel. Application and CLI
+changes rebuild neither. Debug builds support portable development and readers;
+use the release executable for application runs.
 
 At runtime Seedbox uses your container engine to pull or build application
 images. It freezes build contexts before building and exports resolved image

@@ -17,7 +17,7 @@ BUILD_DEPENDENCIES = "".join(
     f"{name}={json.dumps(WORKSPACE['workspace']['dependencies'][name])}\n"
     for name in CLI["build-dependencies"]
 )
-KERNEL_INPUTS = sorted({name for group in json.loads((ROOT / "kernel/inputs.json").read_text()).values() for name in group})
+ASSET_INPUTS = sorted({name for manifest in ["kernel/inputs.json", "tools/runtime/inputs.json"] for group in json.loads((ROOT / manifest).read_text()).values() for name in group})
 
 
 class BuildVersionTests(unittest.TestCase):
@@ -34,23 +34,20 @@ class BuildVersionTests(unittest.TestCase):
         (crate / "Cargo.toml").write_text(
             '[package]\nname="version-probe"\nversion="0.1.0"\nedition="2021"\nbuild="build-runtime.rs"\n[[bin]]\nname="seedbox"\npath="src/main.rs"\n[workspace]\n[build-dependencies]\n' + BUILD_DEPENDENCIES)
         (crate / "src/main.rs").write_text(
-            '''include!(concat!(env!("OUT_DIR"), "/container-runtime.rs"));
-include!(concat!(env!("OUT_DIR"), "/linux-runtime.rs"));
+            '''include!(concat!(env!("OUT_DIR"), "/linux-runtime.rs"));
 fn main() {
     if std::env::args().any(|argument| argument == "--linux-bundle") {
         match LINUX_RUNTIME {
             Some(bytes) => print!("{}", std::str::from_utf8(bytes).unwrap()),
             None => print!("<none>"),
         }
-    } else if std::env::args().any(|argument| argument == "--bundle") {
-        print!("{}", std::str::from_utf8(RUNTIME.unwrap_or(b"<none>")).unwrap());
     } else { println!("{}", env!("SEEDBOX_SIMULATOR_VERSION")); }
 }
 ''')
         (root / "tracked.txt").write_text("initial\n")
         for relative in ["crates/seedbox/build-runtime.rs", "crates/seedbox/build_version.rs",
                          "guest/compose-init.c", "guest/control.h", "guest/barrier.h", "guest/environment.h",
-                         "guest/io.h", "kernel-arm64/supervisor-io.h", *KERNEL_INPUTS]:
+                         "guest/io.h", "kernel-arm64/supervisor-io.h", *ASSET_INPUTS]:
             destination = root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / relative, destination)
@@ -149,6 +146,28 @@ fn main() {
                                         capture_output=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(f"cargo::rustc-env=SEEDBOX_SIMULATOR_VERSION={expected}\n", result.stdout)
+
+            # Exercise the actual release build script with all guest tools
+            # replaced by failures. No nested Nix/container/compiler is needed.
+            tools = temporary / "forbidden-tools"
+            tools.mkdir()
+            marker = temporary / "guest-build-invoked"
+            for name in ["nix", "docker", "podman", "python3", "cc"]:
+                executable = tools / name
+                executable.write_text(f"#!/bin/sh\necho {name} >> '{marker}'\nexit 97\n")
+                executable.chmod(0o755)
+            environment.update(PROFILE="release", PATH=str(tools),
+                               SEEDBOX_STATIC_CC=str(tools / "cc"),
+                               SEEDBOX_BUILDER=str(tools / "docker"))
+            for target_os, target_arch in [("linux", "x86_64"), ("macos", "aarch64")]:
+                with self.subTest(release_target=(target_os, target_arch)):
+                    environment.update(CARGO_CFG_TARGET_OS=target_os, CARGO_CFG_TARGET_ARCH=target_arch)
+                    result = subprocess.run([str(script)], env=environment, text=True,
+                                            capture_output=True, timeout=30)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("cargo::rustc-env=SEEDBOX_RELEASE_ASSETS=1\n", result.stdout)
+                    self.assertFalse(marker.exists(), result.stdout)
+                    self.assertFalse((temporary / "compose-init").exists())
 
     def test_normal_checkout_and_linked_worktree_track_provenance_without_noop_rebuilds(self):
         with tempfile.TemporaryDirectory(prefix="seedbox-version-test-") as directory:
@@ -290,7 +309,7 @@ fn main() {
             environment["SEEDBOX_STATIC_CC"] = str(temporary / "absent-compiler")
             binary = str(target / "debug/seedbox")
 
-            def build(expected_linux, expected_mac=None, fresh=False):
+            def build(expected_linux, fresh=False):
                 result = subprocess.run(["cargo", "build", "--offline", "-vv"],
                                         cwd=root / "crates/seedbox", env=environment, text=True,
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
@@ -300,9 +319,6 @@ fn main() {
                     self.assertNotIn("Compiling version-probe", result.stdout)
                 self.assertEqual(subprocess.check_output([binary, "--linux-bundle"], text=True),
                                  expected_linux, result.stdout)
-                if expected_mac is not None:
-                    self.assertEqual(subprocess.check_output([binary, "--bundle"], text=True),
-                                     expected_mac, result.stdout)
 
             build("<none>")
             build("<none>", fresh=True)
@@ -323,12 +339,12 @@ fn main() {
             mac = temporary / "mac-bundle"
             mac.write_text("<none>")
             environment["SEEDBOX_MAC_RUNTIME_BUNDLE"] = str(mac)
-            build("linux-second", "<none>")
+            build("linux-second")
             environment.pop("SEEDBOX_LINUX_RUNTIME_BUNDLE")
-            build("<none>", "<none>")
-            build("<none>", "<none>", fresh=True)
+            build("<none>")
+            build("<none>", fresh=True)
             environment["SEEDBOX_LINUX_RUNTIME_BUNDLE"] = str(first)
-            build("linux-first-replaced-in-place", "<none>")
+            build("linux-first-replaced-in-place")
             environment.pop("SEEDBOX_LINUX_RUNTIME_BUNDLE")
             environment.pop("SEEDBOX_MAC_RUNTIME_BUNDLE")
             build("<none>")
