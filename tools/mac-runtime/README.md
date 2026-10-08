@@ -13,25 +13,24 @@ cargo build --release
 ./target/release/seedbox replay .seedbox/runs/ATTEMPT
 ```
 
-The normal release build downloads and patches the ARM Linux kernel, builds the
-static guest supervisor and packages BusyBox and mke2fs. It also builds a Linux
-filesystem-tools image containing Skopeo, umoci, tar and Python. No second
-Seedbox executable or Rust compiler is shipped in that image. Cargo signs the
-Mac CLI with the Hypervisor entitlement automatically after linking.
+The normal release build packages the static guest supervisor, BusyBox, mke2fs
+and Linux filesystem tools. It signs the Mac CLI with the Hypervisor entitlement
+automatically after linking. It does not compile or download a kernel.
 
-The Linux build uses the `runtimeAssets` and `preparationImage` Nix packages in
-`nix/runtime.nix`. The latter uses Nix's image builder and minimal Python;
-Cargo copies these artifacts from one Linux build container. It does not
-assemble Nix closures or export a second daemon-built image itself.
+On the first `run`, `explore` or `prepare`, Seedbox reports the kernel download
+on stderr, verifies the GitHub release asset's SHA-256 and caches the bytes under
+`~/Library/Caches/seedbox/kernels` (or `$XDG_CACHE_HOME/seedbox/kernels`). Later
+calls reuse that cache offline. The private repository requires `GH_TOKEN` or
+`GITHUB_TOKEN` with read access for the first download. `--kernel PATH` skips it.
+`doctor` uses a cached or explicitly selected kernel and performs no download.
+See [kernel releases](../../kernel/README.md).
 
-Assign at least 4 GiB RAM to the container engine for guest asset builds.
-The first build needs network access and a running container engine. Unchanged
-guest inputs reuse a verified content-addressed cache under
-`~/Library/Caches/seedbox/assets` (`$XDG_CACHE_HOME/seedbox/assets` when set).
-Kernel patches, configuration, guest sources, recipes and the flake lock are
-part of the cache key. Ordinary application changes do not rebuild the kernel.
-Debug builds support portable development and readers; use the release
-executable for application runs.
+The independent kernel recipe lives in `nix/kernels.nix`. Guest helpers and the
+filesystem-tools image use `runtimeAssets` and `preparationImage` in
+`nix/runtime.nix`; Cargo copies those artifacts from one Linux build container.
+The helper cache is under `~/Library/Caches/seedbox/assets`; ordinary application
+and kernel patch changes do not rebuild the static helpers. Debug builds support
+portable development and readers; use the release executable for application runs.
 
 At runtime Seedbox uses your container engine to pull or build application
 images. It freezes build contexts before building and exports resolved image

@@ -36,7 +36,7 @@ while read -r state option; do
     echo "option $option not enabled" >&2; exit 1
   fi
 done < "$here/config.options"
-export KBUILD_BUILD_USER=seedbox KBUILD_BUILD_HOST=seedbox KBUILD_BUILD_TIMESTAMP='Thu Jan 1 00:00:00 UTC 1970' SOURCE_DATE_EPOCH=0
+export KBUILD_BUILD_USER=seedbox KBUILD_BUILD_HOST=seedbox KBUILD_BUILD_VERSION=1 KBUILD_BUILD_TIMESTAMP='Thu Jan 1 00:00:00 UTC 1970' SOURCE_DATE_EPOCH=0
 make -s -C "$src" O="$out" -j"${BUILD_JOBS:-16}" bzImage
 mkdir -p "$artifacts"
 cp "$out/arch/x86/boot/bzImage" "$artifacts/bzImage"

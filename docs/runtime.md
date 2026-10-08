@@ -274,7 +274,8 @@ guarantee or an image reproducibility guarantee.
 
 Apple Silicon uses the native development HVF application backend. Enter
 `nix develop` and run `cargo build --release` to produce the signed
-CLI with its ARM kernel, static helpers and Linux preparation tools embedded.
+CLI with static helpers and Linux preparation tools embedded. The first run
+downloads and caches the ARM guest kernel from its matching GitHub Release.
 Use `target/release/seedbox run PROJECT` and
 `target/release/seedbox replay RUN`, without host root or
 separate binary paths. Docker/Podman handles image preparation through filesystem
@@ -321,21 +322,32 @@ seedbox=./target/release/seedbox
 
 Every input has a default; `seedbox help run` lists them with their overrides.
 On Linux, explicit flags and their `SEEDBOX_*` path overrides take precedence.
-Packaged runs use their bundled kernel; `SEEDBOX_ARTIFACTS` and `SEEDBOX_WORK`
-do not override it. Unbundled Linux development builds retain searches of those
+Release runs download their default kernel once and cache it;
+`SEEDBOX_ARTIFACTS` and `SEEDBOX_WORK` do not override it. Unbundled Linux development builds retain searches of those
 configured directories, `./artifacts`, and `~/seedbox-sim/artifacts` (also in the
 invoking user's home under sudo). An explicit missing `--kernel` fails immediately. For the supervisor, BusyBox and mke2fs,
 packaged bytes precede the existing compiled-in supervisor or static tools on
 PATH. Unbundled development builds keep those existing fallbacks. A package
 integrity error is reported instead of silently selecting unrelated files.
 
-Package validation and extraction use a private temporary directory held through
-preparation and input retention, then removed on success, error or cancellation.
-Doctor uses the same kernel selection and validates the package while extracting
-only the kernel; it creates no state directory and performs no OCI preparation.
-Random temporary paths do not enter run identity: retained bytes do. Replay
-continues to use the recorded executable, kernel and initramfs exclusively;
-missing or corrupt retained inputs never fall back to the installed package.
+Guest kernels are published by the [Guest kernels workflow](../.github/workflows/kernels.yml)
+when the inputs listed in `kernel/inputs.json` change. The release tag is a
+content-based address, not runtime admission policy: explicit kernels remain
+supported. `run`, `explore` and `prepare` report first-use downloads on stderr.
+The private repository requires `GH_TOKEN` or `GITHUB_TOKEN` with read access.
+Downloads use GitHub's release-asset SHA-256, bounded streaming and an atomic
+cache install. Concurrent invocations share the download. Interrupted downloads
+never become usable cache entries. Every reuse verifies cached bytes locally;
+there is no network request on a cache hit. See [the kernel contract](../kernel/README.md).
+
+Caches live under `~/Library/Caches/seedbox/kernels` on Mac and
+`~/.cache/seedbox/kernels` on Linux, or `$XDG_CACHE_HOME/seedbox/kernels` when set.
+`doctor` looks up the cached or explicit kernel without downloading, creating
+cache/run state or performing OCI preparation. If the cache is empty, its error
+explains how to download through a run or select `--kernel PATH`. Random cache
+paths do not enter run identity: retained bytes do. Replay uses only the recorded
+executable, kernel and initramfs; missing or corrupt retained inputs never fall
+back to the cache or a fresh download.
 
 The VMM defaults to the engine linked into `seedbox`; `--vmm` explicitly selects
 the legacy standalone contract. A missing input fails before preparation starts

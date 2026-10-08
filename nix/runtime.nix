@@ -1,11 +1,6 @@
 { pkgs }:
 let
   inherit (pkgs) lib;
-  source = builtins.fromJSON (builtins.readFile ../kernel/source.json);
-  kernelSource = pkgs.fetchurl {
-    url = "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${source.version}.tar.xz";
-    sha256 = source.sha256;
-  };
   preparationTools = pkgs.buildEnv {
     name = "seedbox-preparation-tools";
     paths = with pkgs; [ skopeo umoci python3Minimal gnutar coreutils ];
@@ -19,7 +14,7 @@ let
   runtimeSource = lib.fileset.toSource {
     root = ../.;
     fileset = lib.fileset.unions [
-      ../guest ../kernel ../kernel-arm64 ../flake.lock
+      ../guest ../kernel-arm64/supervisor-io.h ../flake.lock
       ../tools/runtime/build-assets.sh ../tools/linux-runtime/package.py
     ];
   };
@@ -36,19 +31,13 @@ in {
     };
   };
   runtimeAssets = pkgs.runCommand "seedbox-guest-assets" {
-    nativeBuildInputs = with pkgs; [
-      stdenv.cc pkgsStatic.stdenv.cc binutils curl python3 gnumake
-      bc bison flex perl git xz util-linux
-    ] ++ lib.optionals pkgs.stdenv.hostPlatform.isx86_64
-      (with pkgs; [ pkg-config elfutils elfutils.dev openssl.dev ]);
+    nativeBuildInputs = with pkgs; [ pkgsStatic.stdenv.cc binutils python3 ];
     SEEDBOX_STATIC_CC = "${pkgs.pkgsStatic.stdenv.cc}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}cc";
     SEEDBOX_BUSYBOX = "${pkgs.pkgsStatic.busybox}/bin/busybox";
     SEEDBOX_MKE2FS = "${pkgs.pkgsStatic.e2fsprogs.bin}/bin/mke2fs";
     SEEDBOX_BUSYBOX_SOURCE = pkgs.pkgsStatic.busybox.src;
     SEEDBOX_E2FSPROGS_SOURCE = pkgs.pkgsStatic.e2fsprogs.src;
     SEEDBOX_MUSL_SOURCE = pkgs.pkgsStatic.stdenv.cc.libc.src;
-    SEEDBOX_KERNEL_SOURCE = kernelSource;
-    BUILD_JOBS = "4";
   } ''
     cp -R ${runtimeSource} source
     chmod -R u+w source

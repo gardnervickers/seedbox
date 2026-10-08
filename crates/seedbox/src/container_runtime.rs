@@ -18,8 +18,7 @@ use std::{
 };
 
 include!(concat!(env!("OUT_DIR"), "/container-runtime.rs"));
-const REQUIRED: [&str; 7] = [
-    "Image",
+const REQUIRED: [&str; 6] = [
     "compose-init",
     "busybox",
     "mke2fs",
@@ -44,23 +43,19 @@ impl Runtime {
     pub fn available() -> bool {
         RUNTIME.is_some()
     }
-    pub fn embedded(cache: &Path, kernel_only: bool) -> Result<Self> {
+    pub fn embedded(cache: &Path) -> Result<Self> {
         let bytes = RUNTIME.ok_or_else(|| {
             Error::Setup(
                 "guest assets are absent; run cargo build --release and use target/release/seedbox"
                     .into(),
             )
         })?;
-        Self::install(bytes, cache, kernel_only)
+        Self::install(bytes, cache)
     }
-    pub fn install(bytes: &[u8], cache: &Path, kernel_only: bool) -> Result<Self> {
+    pub fn install(bytes: &[u8], cache: &Path) -> Result<Self> {
         fs::create_dir_all(cache)?;
         let digest = ContentDigest::of(bytes);
-        let root = cache.join(format!(
-            "{}{}",
-            digest.hex(),
-            if kernel_only { "-kernel" } else { "" }
-        ));
+        let root = cache.join(digest.hex());
         if !root.exists() {
             let stage = tempfile::tempdir_in(cache)?;
             let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
@@ -84,21 +79,19 @@ impl Runtime {
                     .checked_add(entry.size())
                     .filter(|size| *size <= 2 << 30)
                     .ok_or_else(|| Error::Integrity("runtime exceeds 2 GiB".into()))?;
-                if !kernel_only || name == "Image" || name == "runtime.json" {
-                    entry.unpack(stage.path().join(name))?;
-                }
+                entry.unpack(stage.path().join(name))?;
             }
-            Self::validate(stage.path(), kernel_only)?;
+            Self::validate(stage.path())?;
             match fs::rename(stage.path(), &root) {
                 Ok(()) => (),
                 Err(_) if root.is_dir() => (),
                 Err(error) => return Err(error.into()),
             }
         }
-        let manifest = Self::validate(&root, kernel_only)?;
+        let manifest = Self::validate(&root)?;
         Ok(Self { root, manifest })
     }
-    fn validate(root: &Path, kernel_only: bool) -> Result<Manifest> {
+    fn validate(root: &Path) -> Result<Manifest> {
         if !fs::symlink_metadata(root)?.is_dir()
             || !fs::symlink_metadata(root.join("runtime.json"))?.is_file()
         {
@@ -119,9 +112,6 @@ impl Runtime {
         for (name, digest) in &manifest.files {
             if !valid_member(name) || name == "runtime.json" {
                 return Err(Error::Integrity("invalid runtime manifest path".into()));
-            }
-            if kernel_only && name != "Image" {
-                continue;
             }
             let path = root.join(name);
             if !fs::symlink_metadata(&path)?.is_file() || package_digest(&path)? != *digest {
@@ -633,17 +623,13 @@ mod tests {
         gzip.finish().unwrap()
     }
     #[test]
-    fn verified_cache_detects_replacement_and_doctor_extracts_only_kernel() {
+    fn verified_helper_cache_detects_replacement() {
         let directory = tempfile::tempdir().unwrap();
         let bytes = package(None);
-        let kernel = Runtime::install(&bytes, directory.path(), true).unwrap();
-        assert!(kernel.input("Image").is_file());
-        assert!(!kernel.input("tools-image.tar").exists());
-        assert!(!kernel.input("compose-init").exists());
-        let all = Runtime::install(&bytes, directory.path(), false).unwrap();
+        let all = Runtime::install(&bytes, directory.path()).unwrap();
         assert!(all.input("tools-image.tar").is_file());
-        fs::write(all.input("Image"), "replacement").unwrap();
-        assert!(Runtime::install(&bytes, directory.path(), false)
+        fs::write(all.input("compose-init"), "replacement").unwrap();
+        assert!(Runtime::install(&bytes, directory.path())
             .unwrap_err()
             .to_string()
             .contains("hash mismatch"));
@@ -651,8 +637,7 @@ mod tests {
     #[test]
     fn unexpected_members_never_publish_a_runtime() {
         let directory = tempfile::tempdir().unwrap();
-        let error =
-            Runtime::install(&package(Some("unexpected")), directory.path(), false).unwrap_err();
+        let error = Runtime::install(&package(Some("unexpected")), directory.path()).unwrap_err();
         assert!(error
             .to_string()
             .contains("invalid or duplicate runtime member"));

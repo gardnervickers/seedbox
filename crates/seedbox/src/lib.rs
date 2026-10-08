@@ -20,6 +20,7 @@ pub mod guest;
 mod host;
 pub mod host_control;
 pub mod image;
+pub mod kernel_download;
 pub mod logs;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod mac;

@@ -4,6 +4,12 @@ use crate::{execution::ExecutionProfile, store::ContentDigest, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::{io::Read, path::Path};
 
+/// Check KVM device permissions before a CLI downloads immutable guest inputs.
+#[cfg(target_os = "linux")]
+pub fn check_kvm_access() -> Result<()> {
+    crate::host::check_kvm_access()
+}
+
 /// Bound input hashing before any OCI preparation or host state changes.
 pub fn file_digest(path: &Path) -> Result<ContentDigest> {
     use sha2::{Digest, Sha256};

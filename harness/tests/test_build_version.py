@@ -1,14 +1,23 @@
 from fixture_files import copy_cargo_config
 """Exercise the actual provenance build script and Cargo's incremental cache."""
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import tomllib
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+WORKSPACE = tomllib.loads((ROOT / "Cargo.toml").read_text())
+CLI = tomllib.loads((ROOT / "crates/seedbox/Cargo.toml").read_text())
+BUILD_DEPENDENCIES = "".join(
+    f"{name}={json.dumps(WORKSPACE['workspace']['dependencies'][name])}\n"
+    for name in CLI["build-dependencies"]
+)
+KERNEL_INPUTS = sorted({name for group in json.loads((ROOT / "kernel/inputs.json").read_text()).values() for name in group})
 
 
 class BuildVersionTests(unittest.TestCase):
@@ -23,7 +32,7 @@ class BuildVersionTests(unittest.TestCase):
         crate = root / "crates/seedbox"
         (crate / "src").mkdir(parents=True)
         (crate / "Cargo.toml").write_text(
-            '[package]\nname="version-probe"\nversion="0.1.0"\nedition="2021"\nbuild="build-runtime.rs"\n[[bin]]\nname="seedbox"\npath="src/main.rs"\n[workspace]\n')
+            '[package]\nname="version-probe"\nversion="0.1.0"\nedition="2021"\nbuild="build-runtime.rs"\n[[bin]]\nname="seedbox"\npath="src/main.rs"\n[workspace]\n[build-dependencies]\n' + BUILD_DEPENDENCIES)
         (crate / "src/main.rs").write_text(
             '''include!(concat!(env!("OUT_DIR"), "/container-runtime.rs"));
 include!(concat!(env!("OUT_DIR"), "/linux-runtime.rs"));
@@ -41,7 +50,7 @@ fn main() {
         (root / "tracked.txt").write_text("initial\n")
         for relative in ["crates/seedbox/build-runtime.rs", "crates/seedbox/build_version.rs",
                          "guest/compose-init.c", "guest/control.h", "guest/barrier.h", "guest/environment.h",
-                         "guest/io.h", "kernel-arm64/supervisor-io.h"]:
+                         "guest/io.h", "kernel-arm64/supervisor-io.h", *KERNEL_INPUTS]:
             destination = root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / relative, destination)
@@ -108,11 +117,18 @@ fn main() {
     def test_exported_build_metadata_is_descriptive_and_never_panics(self):
         with tempfile.TemporaryDirectory(prefix="seedbox-version-export-") as directory:
             temporary = Path(directory).resolve()
-            script = temporary / "build-script"
+            # Compile the actual build script with its declared Cargo dependencies.
+            # It remains an executable so exported metadata can be exercised directly.
+            (temporary / "Cargo.toml").write_text(
+                '[package]\nname="build-script-probe"\nversion="0.1.0"\nedition="2021"\n'
+                '[[bin]]\nname="build-script"\npath=' + json.dumps(str(ROOT / "crates/seedbox/build-runtime.rs")) +
+                '\n[dependencies]\n' + BUILD_DEPENDENCIES + '[workspace]\n')
             environment = os.environ.copy()
-            environment["CARGO_PKG_VERSION"] = "0.1.0"
-            subprocess.run(["rustc", "--edition=2021", str(ROOT / "crates/seedbox/build-runtime.rs"),
-                            "-o", str(script)], env=environment, check=True, capture_output=True, timeout=120)
+            environment.pop("CARGO_BUILD_TARGET", None)
+            environment["CARGO_TARGET_DIR"] = str(temporary / "target")
+            subprocess.run(["cargo", "build", "--offline"], cwd=temporary,
+                           env=environment, check=True, capture_output=True, timeout=120)
+            script = temporary / "target/debug/build-script"
             for name in ["SEEDBOX_MAC_RUNTIME_BUNDLE", "SEEDBOX_LINUX_RUNTIME_BUNDLE", "SEEDBOX_SOURCE_DIRTY"]:
                 environment.pop(name, None)
             environment.update(CARGO_MANIFEST_DIR=str(ROOT / "crates/seedbox"),
@@ -230,11 +246,17 @@ fn main() {
                                 "digest = hashlib.sha256(b''.join(p.read_bytes() for p in inputs)).digest()\n"
                                 "pathlib.Path(sys.argv[sys.argv.index('-o') + 1]).write_bytes(digest)\n")
             compiler.chmod(0o755)
-            script = temporary / "build-script"
+            probe = temporary / "build-script-probe"
+            probe.mkdir()
+            (probe / "Cargo.toml").write_text(
+                '[package]\nname="build-script-probe"\nversion="0.1.0"\nedition="2021"\n'
+                '[[bin]]\nname="build-script"\npath=' + json.dumps(str(roots[1] / "crates/seedbox/build-runtime.rs")) +
+                '\n[dependencies]\n' + BUILD_DEPENDENCIES + '[workspace]\n')
             compile_env = environment.copy()
-            compile_env["CARGO_PKG_VERSION"] = "0.1.0"
-            subprocess.run(["rustc", "--edition=2021", str(roots[1] / "crates/seedbox/build-runtime.rs"),
-                            "-o", str(script)], env=compile_env, check=True, capture_output=True, timeout=120)
+            compile_env["CARGO_TARGET_DIR"] = str(probe / "target")
+            subprocess.run(["cargo", "build", "--offline"], cwd=probe,
+                           env=compile_env, check=True, capture_output=True, timeout=120)
+            script = probe / "target/debug/build-script"
             for root in [*roots, first, roots[2]]:
                 output = temporary / "supervisor-output"
                 output.mkdir(exist_ok=True)

@@ -14,7 +14,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 BUILD_LOG = None
-INPUTS = ['flake.nix', 'flake.lock', 'nix', 'guest', 'kernel', 'kernel-arm64', 'tools/runtime/Dockerfile', 'tools/runtime/build-assets.sh', 'tools/runtime/filesystem.py',
+INPUTS = ['flake.nix', 'flake.lock', 'nix/runtime.nix', 'nix/kernels.nix', 'guest', 'kernel-arm64/supervisor-io.h', 'tools/runtime/Dockerfile', 'tools/runtime/build-assets.sh', 'tools/runtime/filesystem.py',
           'tools/linux-runtime/package.py']
 
 
@@ -73,10 +73,6 @@ def container_assets(stage, assets, files, key, architecture):
         if found:
             raise RuntimeError('container engine unavailable; start Docker Desktop or your Podman machine and check DOCKER_HOST / CONTAINER_HOST; tried ' + ', '.join(found))
         raise RuntimeError('no Docker/Podman client found; install Docker or Podman and start its Linux engine (or enter nix develop)')
-    info = json.loads(subprocess.check_output([engine, 'info', '--format', '{{json .}}'], text=True, timeout=15))
-    memory = info.get('MemTotal', info.get('host', {}).get('memTotal', 0))
-    if memory and memory < 3 * 1024**3:
-        raise RuntimeError('guest asset builds need at least 4 GiB assigned to the container engine; increase Docker Desktop memory in Settings, or stop your Podman machine and run podman machine set --memory 4096, then start it again')
     context = stage / 'context'
     context.mkdir()
     for path in files:

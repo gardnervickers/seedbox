@@ -43,7 +43,8 @@
         let pkgs = import nixpkgs { inherit system; }; in {
           networkTools = pkgs.iproute2;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux
-          (import ./nix/runtime.nix { inherit pkgs; })
+          ((import ./nix/runtime.nix { inherit pkgs; }) //
+           (import ./nix/kernels.nix { inherit pkgs; }))
         );
     };
 }

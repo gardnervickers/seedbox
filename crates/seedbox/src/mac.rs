@@ -60,6 +60,10 @@ fn observe() -> Result<BTreeMap<String, String>> {
         ),
     ]))
 }
+/// Probe HVF before downloading immutable guest inputs; retain no VM or vCPU.
+pub fn check_host_access() -> Result<()> {
+    observe().map(|_| ())
+}
 impl MacExecutor {
     pub fn new(
         engine: &Path,

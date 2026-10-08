@@ -23,9 +23,14 @@ flate2 = "1"
 xattr = "1"
 libc.workspace = true
 signal-hook = "0.3"
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 seedbox-vmm = { path = "../seedbox-vmm" }
 
 [target.'cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))'.dependencies]
 seedbox-arm64 = { path = "../seedbox-arm64" }
+
+[build-dependencies]
+sha2.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,173 @@
+name: Guest kernels
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'kernel/**'
+      - 'kernel-arm64/**'
+      - 'nix/kernels.nix'
+      - 'flake.nix'
+      - 'flake.lock'
+      - '.github/workflows/kernels.yml'
+  pull_request:
+    paths:
+      - 'kernel/**'
+      - 'kernel-arm64/**'
+      - 'nix/kernels.nix'
+      - 'flake.nix'
+      - 'flake.lock'
+      - '.github/workflows/kernels.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guest-kernels-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.inputs.outputs.tag }}
+      published: ${{ steps.release.outputs.result }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: inputs
+        name: Identify kernel inputs
+        run: echo "tag=kernel-$(python3 kernel/release.py)" >> "$GITHUB_OUTPUT"
+      - id: release
+        name: Reuse an existing release
+        uses: actions/github-script@v9
+        env:
+          KERNEL_TAG: ${{ steps.inputs.outputs.tag }}
+        with:
+          script: |
+            try {
+              const { data } = await github.rest.repos.getReleaseByTag({
+                ...context.repo, tag: process.env.KERNEL_TAG
+              });
+              return !data.draft;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              return false;
+            }
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.published != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            architecture: x86_64
+            runner: ubuntu-24.04
+            image: bzImage
+          - system: aarch64-linux
+            architecture: aarch64
+            runner: ubuntu-24.04-arm
+            image: Image
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build kernel and diagnostics
+        env:
+          SYSTEM: ${{ matrix.system }}
+          ARCHITECTURE: ${{ matrix.architecture }}
+          IMAGE: ${{ matrix.image }}
+        run: |
+          nix build ".#packages.$SYSTEM.guestKernel" --out-link kernel-output
+          nix build ".#packages.$SYSTEM.guestKernelArchive" --out-link kernel-archive
+          mkdir dist
+          cp "kernel-output/$IMAGE" "dist/seedbox-kernel-$ARCHITECTURE"
+          cp kernel-archive "dist/seedbox-kernel-$ARCHITECTURE.tar.gz"
+          cd dist
+          sha256sum ./* > "$ARCHITECTURE.sha256"
+      - name: Include corresponding kernel source
+        if: matrix.architecture == 'x86_64'
+        run: |
+          nix build .#guestKernelSources --out-link kernel-source
+          cp kernel-source dist/seedbox-kernel-source.tar.gz
+          cd dist
+          sha256sum seedbox-kernel-source.tar.gz > source.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kernel-${{ matrix.architecture }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    needs: [plan, build]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      KERNEL_TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: kernel-*
+          merge-multiple: true
+          path: dist
+      - name: Verify transferred assets
+        run: |
+          cd dist
+          sha256sum --check ./*.sha256
+          cat ./*.sha256 > SHA256SUMS
+          rm ./*.sha256
+      - id: draft
+        name: Stage the release
+        uses: actions/github-script@v9
+        with:
+          script: |
+            let release;
+            try {
+              release = (await github.rest.repos.getReleaseByTag({
+                ...context.repo, tag: process.env.KERNEL_TAG
+              })).data;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              release = (await github.rest.repos.createRelease({
+                ...context.repo,
+                tag_name: process.env.KERNEL_TAG,
+                target_commitish: context.sha,
+                name: `Guest kernels ${process.env.KERNEL_TAG.slice(7, 19)}`,
+                body: `Built from ${context.sha}. Contains native ARM64 and x86-64 guest kernels, resolved configuration, ARM instruction audit, licenses, checksums and corresponding source. The tag identifies kernel source, patches, configuration and build recipe; it does not qualify or restrict runtime kernels.`,
+                draft: true,
+                prerelease: true,
+                make_latest: 'false'
+              })).data;
+            }
+            if (!release.draft) throw new Error('Refusing to overwrite a published kernel release');
+            core.setOutput('id', release.id);
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "$KERNEL_TAG" dist/* --clobber
+      - name: Publish the complete release
+        uses: actions/github-script@v9
+        env:
+          RELEASE_ID: ${{ steps.draft.outputs.id }}
+        with:
+          script: |
+            await github.rest.repos.updateRelease({
+              ...context.repo,
+              release_id: Number(process.env.RELEASE_ID),
+              draft: false,
+              make_latest: 'false'
+            });

@@ -84,7 +84,7 @@ enum Command {
     },
     /// Check execution-profile compatibility without images or guests (Linux KVM host; or Apple Silicon Mac).
     #[command(
-        after_help = "Success means profile compatibility, not cross-host replay qualification. Doctor never builds missing runtime inputs."
+        after_help = "Success means profile compatibility, not cross-host replay qualification. Doctor never builds or downloads missing runtime inputs; run a project first or pass --kernel."
     )]
     Doctor {
         #[command(flatten)]
@@ -387,7 +387,7 @@ impl StateArg {
 #[derive(Args)]
 #[command(next_help_heading = "Runtime inputs")]
 struct KvmInputs {
-    /// Guest kernel Image on Mac, or bzImage on Linux [default: packaged; unbundled Linux development builds search configured artifact directories].
+    /// Guest kernel Image on Mac, or bzImage on Linux [default: download once and cache; unbundled Linux development builds search artifact directories].
     #[arg(long, env = "SEEDBOX_KERNEL")]
     kernel: Option<PathBuf>,
     /// Override with a legacy standalone VMM [default: the engine built into seedbox].
@@ -469,6 +469,16 @@ impl RuntimeInputs {
     ) -> Result<(Preparer, Executor)> {
         self.validate_platform()?;
         let engine = defaults::engine(self.kvm.vmm.clone())?;
+        for (flag, path) in [
+            ("--kernel", &self.kvm.kernel),
+            ("--guest-init", &self.guest_init),
+            ("--busybox", &self.busybox),
+            ("--mke2fs", &self.mke2fs),
+        ] {
+            if let Some(path) = path {
+                defaults::existing(flag, path.clone())?;
+            }
+        }
         let witness = if self.full_state {
             WitnessMode::FullState
         } else {
@@ -482,12 +492,12 @@ impl RuntimeInputs {
                 ));
             }
             let _ = (counter, scratch, simulation);
-            let runtime = backends::container_runtime(false)?;
+            let runtime = backends::container_runtime()?;
             let resolve = |flag, explicit: &Option<PathBuf>, name| match explicit {
                 Some(path) => defaults::existing(flag, path.clone()),
                 None => Ok(runtime.input(name)),
             };
-            let kernel = resolve("--kernel", &self.kvm.kernel, "Image")?;
+            let kernel = backends::guest_kernel(self.kvm.kernel.clone(), cancellation, true)?;
             let executor = seedbox::mac::MacExecutor::new(
                 &engine,
                 &kernel,
@@ -531,7 +541,7 @@ impl RuntimeInputs {
             .with_page_timer(self.page_timer)
             .with_deferred_tx(self.deferred_tx);
             if seedbox::container_runtime::Runtime::available() {
-                let runtime = backends::container_runtime(false)?;
+                let runtime = backends::container_runtime()?;
                 let resolve = |flag, explicit: &Option<PathBuf>, name| match explicit {
                     Some(path) => defaults::existing(flag, path.clone()),
                     None => Ok(runtime.input(name)),
@@ -546,10 +556,7 @@ impl RuntimeInputs {
                         build_epoch: self.build.build_epoch,
                         ..OciTools::default()
                     },
-                    kernel: defaults::packaged_kernel(
-                        self.kvm.kernel.clone(),
-                        runtime.input("Image"),
-                    )?,
+                    kernel: backends::guest_kernel(self.kvm.kernel.clone(), cancellation, true)?,
                     init: resolve("--guest-init", &self.guest_init, "compose-init")?,
                     busybox: resolve("--busybox", &self.busybox, "busybox")?,
                     mke2fs: Some(resolve("--mke2fs", &self.mke2fs, "mke2fs")?),
@@ -575,7 +582,13 @@ impl RuntimeInputs {
                 };
                 return Ok((preparer, Executor::Linux(executor)));
             }
-            let mut preparer = self.preparer(engine.clone(), store, scratch, executor.profile())?;
+            let mut preparer = self.preparer(
+                engine.clone(),
+                store,
+                scratch,
+                executor.profile(),
+                cancellation,
+            )?;
             preparer.inputs.tools.skopeo =
                 defaults::preparation_tool(&preparer.inputs.tools.skopeo)?;
             preparer.inputs.tools.umoci = defaults::preparation_tool(&preparer.inputs.tools.umoci)?;
@@ -607,6 +620,7 @@ impl RuntimeInputs {
         store: &ContentStore,
         scratch: &Path,
         profile: ExecutionProfile,
+        cancellation: &CancellationToken,
     ) -> Result<backends::LinuxPreparer> {
         let resolved = defaults::linux_runtime(
             defaults::LinuxOverrides {
@@ -618,6 +632,7 @@ impl RuntimeInputs {
             scratch,
             seedbox::runtime_assets::AssetSelection::All,
             Some(store),
+            cancellation,
         )?;
         let mut tools = OciTools {
             docker: self.builder.clone(),
@@ -814,7 +829,7 @@ fn run(cli: Cli) -> Result<u8> {
                 let engine = defaults::engine(None)?;
                 let kernel = match inputs.kernel {
                     Some(path) => defaults::existing("--kernel", path)?,
-                    None => backends::container_runtime(true)?.input("Image"),
+                    None => backends::guest_kernel(None, &cancellation, false)?,
                 };
                 if cancellation.is_cancelled() {
                     return Err(Error::Setup("doctor cancelled".into()));
@@ -843,6 +858,7 @@ fn run(cli: Cli) -> Result<u8> {
                     scratch.path(),
                     seedbox::runtime_assets::AssetSelection::Kernel,
                     None,
+                    &cancellation,
                 )?;
                 if cancellation.is_cancelled() {
                     return Err(Error::Setup("doctor cancelled".into()));
@@ -1580,6 +1596,7 @@ mod tests {
                 &store,
                 directory.path(),
                 profile.clone(),
+                &CancellationToken::default(),
             )
             .unwrap();
         assert!(preparer._assets.is_none());

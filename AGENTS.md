@@ -14,19 +14,26 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   only guest kernel/static helpers plus notices/provenance. Runtime extraction
   stays bounded and private, with an owned lifetime through input retention.
   CLI resolution owns environment lookup; the library receives explicit inputs.
-  Doctor extracts only the selected kernel and never creates state/prepares
-  images. Replay must not substitute installed package bytes for retained inputs.
+  Doctor selects only the cached or explicit kernel and never downloads, creates
+  state or prepares images. Replay must not substitute installed package bytes for retained inputs.
   Linux package execution/reproducibility requires the final merge train.
   `nix/runtime.nix` owns `runtimeAssets` and `preparationImage`; Cargo invokes
   Nix directly on Linux and copies its outputs from a Linux build container on
-  Mac. Kernel source metadata lives in `kernel/source.json`.
-  Packaged runs use their bundled kernel unless `--kernel` or `SEEDBOX_KERNEL`
+  Mac. `nix/kernels.nix` builds kernels independently. `kernel/inputs.json` is
+  the canonical kernel recipe input list; keep Cargo and Actions identity framing
+  aligned with `kernel/release.py`. Kernel metadata lives in `kernel/source.json`.
+  Cargo release builds never compile/download a kernel. Run/prepare/explore
+  lazily fetch the matching private GitHub release with progress and verified,
+  atomic persistent caching. The CLI supplies HTTP configuration and credentials;
+  the library never reads environment variables. Doctor is cache/override lookup
+  only, and replay never invokes the downloader.
+  Release runs use their downloaded/cached kernel unless `--kernel` or `SEEDBOX_KERNEL`
   is explicit; legacy artifact-directory searches apply only to unbundled builds.
   Explicit `--build-epoch` retains native project-Nix preparation using packaged
   guest assets.
 - Apple Silicon application builds use `cargo build --release` inside
   `nix develop`; Cargo prepares guest assets and signs only the Seedbox binary
-  target, selected by its build-script link argument. It packages the audited ARM kernel, static helpers and
+  target, selected by its build-script link argument. It packages static helpers and
   Linux preparation tools into the signed CLI. Runtime preparation uses a Docker/Podman endpoint and a Linux filesystem-tools
   container, with no second Seedbox executable. Replay must never require that
   engine or invoke Cargo. Mac application profiles use `arm64-world-v1`

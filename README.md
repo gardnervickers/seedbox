@@ -34,19 +34,30 @@ cargo build --release
 ./target/release/seedbox logs .seedbox/runs/ATTEMPT --machine client --stream console
 ```
 
-The release build automatically prepares and caches the patched guest kernel
-and static helpers, packages Linux filesystem tools, and signs the Mac executable.
-Nix packages in `nix/runtime.nix` own the guest assets and filesystem-tools image;
-Cargo invokes Nix directly on Linux and uses a Linux build container on Mac,
-then embeds the results. The helper uses
-minimal Python, and Nix's image builder includes its declared tool closure.
-Mac guest asset builds need at least 4 GiB assigned to the container engine.
-The first build requires network access; Mac asset builds also require a
-running container engine. There is no separate packaging script, Lima dependency or second Linux Seedbox executable.
-Runtime image builds/pulls use your Docker/Podman endpoint; helper containers
-unpack Linux filesystems without extracting them onto the host. Simulation runs
-directly through HVF on Mac or KVM on Linux. Replay uses retained bytes and needs
-no container engine, image downloads or rebuilds.
+The release build packages static guest helpers and Linux filesystem tools,
+and signs the Mac executable. It does not compile a kernel. On the first
+`run`, `explore` or `prepare`, Seedbox announces and downloads its guest kernel
+from a GitHub Release, verifies the SHA-256 digest and caches it. Later calls
+reuse the cached bytes without contacting GitHub. The cache lives under
+`~/Library/Caches/seedbox/kernels` on Mac or `~/.cache/seedbox/kernels` on Linux;
+`XDG_CACHE_HOME` overrides the parent directory. An explicit `--kernel` or
+`SEEDBOX_KERNEL` bypasses the download.
+
+Kernel releases are built by GitHub Actions when kernel patches, configuration,
+upstream version or build recipe change. CLI and application changes reuse the
+existing release. Because this repository is private, the first download needs
+`GH_TOKEN` or `GITHUB_TOKEN` with repository read access. See
+[kernel releases](kernel/README.md) for the build and cache contract.
+
+Nix packages in `nix/runtime.nix` own the static helpers and filesystem-tools
+image. Cargo invokes Nix directly on Linux and uses a Linux build container on
+Mac, then embeds the results. The first helper build needs network access and,
+on Mac, a running container engine. Runtime image builds/pulls use your
+Docker/Podman endpoint; helper containers unpack Linux filesystems without
+extracting them onto the host. Simulation runs directly through HVF on Mac or
+KVM on Linux. Replay uses retained bytes and needs no container engine, kernel
+download, registry access or rebuild. There is no Lima dependency, separate
+packaging command or second Linux Seedbox executable.
 
 Use `--builder docker` or `--builder podman` to select the client. Ordinary client
 context/connection settings apply. Mac images must support `linux/arm64`; memory
@@ -74,7 +85,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Exploration workers | `1`, sequential execution; Mac currently requires `1` | `--workers` (1..32; Linux automatic CPU selection for parallel execution) |
 | Torn disk writes | off (drop all unflushed sectors on crash) | `--torn-writes` |
 | CPU | Linux: first free core other than CPU 0's, under the shared lease; Mac: automatic HVF scheduling | `--cpu`, `SEEDBOX_CPU` (Linux only) |
-| Guest kernel | packaged ARM64 `Image` on Mac or x86 `bzImage` on Linux; unbundled Linux development builds retain artifact-directory searches | `--kernel`, `SEEDBOX_KERNEL` |
+| Guest kernel | downloaded once from the matching kernel release, then cached; unbundled Linux development builds retain artifact-directory searches | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | the platform engine linked into `seedbox`; runtime commands never invoke Cargo | `--vmm`, `SEEDBOX_VMM` (Linux legacy standalone engine) |
 | Guest supervisor | packaged on Mac or in the Linux asset build; otherwise built into `seedbox` from [`guest/compose-init.c`](guest/compose-init.c) with musl on Linux | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | BusyBox | packaged on Mac; Linux: `SEEDBOX_BUSYBOX` (set by `nix develop`), then packaged BusyBox, then a static `busybox` on `PATH` | `--busybox` |

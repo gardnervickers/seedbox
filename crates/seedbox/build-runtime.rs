@@ -29,6 +29,7 @@ fn main() {
         );
     }
     simulator_version(&root);
+    kernel_release(&root);
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
         && env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64")
     {
@@ -249,4 +250,29 @@ fn on_path(name: &str) -> Option<PathBuf> {
     env::split_paths(&env::var_os("PATH")?)
         .map(|directory| directory.join(name))
         .find(|path| path.is_file())
+}
+
+/// The distribution address follows source inputs, never the host or Git HEAD.
+/// Keep this framing identical to kernel/release.py (checked by portable tests).
+fn kernel_release(root: &Path) {
+    use sha2::{Digest, Sha256};
+    let groups: std::collections::BTreeMap<String, Vec<String>> = serde_json::from_slice(
+        &std::fs::read(root.join("kernel/inputs.json")).expect("kernel inputs"),
+    )
+    .expect("kernel input groups");
+    let names: std::collections::BTreeSet<_> = groups.into_values().flatten().collect();
+    let mut hash = Sha256::new();
+    hash.update(b"seedbox-kernel-v1\0");
+    for name in names {
+        println!("cargo::rerun-if-changed={}", root.join(&name).display());
+        let content = std::fs::read(root.join(&name)).expect("kernel recipe input");
+        hash.update(name.as_bytes());
+        hash.update([0]);
+        hash.update((content.len() as u64).to_be_bytes());
+        hash.update(content);
+    }
+    println!(
+        "cargo::rustc-env=SEEDBOX_KERNEL_RELEASE={:x}",
+        hash.finalize()
+    );
 }

@@ -1,8 +1,10 @@
 # Seedbox simulation example
 
 On Apple Silicon or Linux x86-64, start Docker/Podman and build Seedbox once with
-`nix develop` followed by `cargo build --release`. Guest assets are prepared
-automatically and cached; Mac signing is automatic. Run the release executable
+`nix develop` followed by `cargo build --release`. Static guest helpers are packaged
+automatically; Mac signing is automatic. The first run announces a guest kernel
+download and caches it for later invocations. While Seedbox is private, that
+first download needs GH_TOKEN or GITHUB_TOKEN with repository read access. Run the release executable
 with the Compose directory as its positional argument. On Linux use
 `--timebase pv` for KVM without performance-counter requirements and give your
 user read/write access to `/dev/kvm`. No Lima or manual packaging script is
@@ -33,7 +35,6 @@ From this directory, with the packaged `seedbox` executable on `PATH`:
 
 ```sh
 seedbox validate
-seedbox doctor --timebase pv  # Linux; omit --timebase on Mac
 seedbox run --timebase pv     # Linux; omit --timebase on Mac
 seedbox inspect .seedbox/runs/ATTEMPT --json
 seedbox logs .seedbox/runs/ATTEMPT --machine client --stream console
@@ -43,10 +44,11 @@ seedbox explore --count 2
 ```
 
 The Linux maintainer build `cargo build --release` from the
-Seedbox checkout includes the guest kernel, supervisor, BusyBox and mke2fs in
-one executable. Explicit runtime-input flags and their environment path overrides
-still win. Configured artifact directories precede the packaged kernel;
-packaged assets precede incidental checkout/home/PATH defaults. Skopeo, umoci
+Seedbox checkout includes the supervisor, BusyBox and mke2fs. The guest kernel
+is downloaded on first preparation and cached under the platform cache directory
+(`XDG_CACHE_HOME` overrides its parent). Explicit runtime-input flags and their environment path overrides
+still win. Explicit `--kernel` bypasses the download. Unbundled Linux development builds
+retain artifact-directory searches; packaged helpers precede incidental defaults. Skopeo, umoci
 and tar run in the bundled tools container; Docker/Podman supplies the endpoint. Unbundled developer
 builds keep the existing input search. Package execution on Linux remains a
 final merge-train check. Replay uses only retained inputs after an upgrade.
@@ -73,7 +75,7 @@ Apple Silicon builds also support native ARM Compose execution through the share
 world coordinator, including connection selectors and committed console triggers.
 Arbitrary ARM snapshot/fork reuse remains unsupported. Build once with
 `nix develop` and `cargo build --release` from the Seedbox checkout.
-The signed CLI packages the ARM kernel and static helpers and automatically owns
+The signed CLI packages static helpers, downloads the ARM kernel once and owns
 Linux filesystem-tools containers through your Docker/Podman endpoint.
 Replay uses retained bytes without that endpoint. No runtime
 compiler or extra VMM path is needed.
@@ -242,7 +244,8 @@ needs; CPU model, microcode, CPUID, engine and kernel bytes are not pinned.
 Passing on a second machine is not cross-host qualification.
 
 Check the host and installed engine/kernel with `seedbox doctor --timebase pv`
-on Linux KVM, or `seedbox doctor` on Apple Silicon Mac, before running. It uses the normal CPU/runtime defaults without building,
+on Linux KVM, or `seedbox doctor` on Apple Silicon Mac, after the kernel is
+cached (or pass `--kernel PATH`). It uses the normal CPU/runtime defaults without building,
 preparing images or starting guests. `VALID` means execution-profile compatibility,
 not cross-host replay qualification; `--json` shows the admitted observations.
 

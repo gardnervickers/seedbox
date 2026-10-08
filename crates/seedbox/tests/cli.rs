@@ -882,7 +882,7 @@ fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
     ] {
         assert!(!text.contains(flag), "{text}");
     }
-    assert!(text.contains("Doctor never builds"));
+    assert!(text.contains("Doctor never builds or downloads"));
     let invalid_timebase = seedbox(&["doctor", "--timebase", "invalid"], root);
     assert_eq!(invalid_timebase.status.code(), Some(2));
     assert!(stderr(&invalid_timebase).contains("--timebase"));
@@ -916,6 +916,61 @@ fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
         "error: --kernel missing: not found\n"
     );
     assert!(!root.join(".seedbox").exists());
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn doctor_uses_kernel_cache_without_credentials_download_or_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    for override_cache in [false, true] {
+        let cache = if override_cache {
+            root.join("custom-cache")
+        } else {
+            root.join("Library/Caches")
+        };
+        let ready = cache
+            .join("seedbox/kernels")
+            .join(seedbox::kernel_download::RELEASE_ID)
+            .join("aarch64/ready");
+        let run = || {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_seedbox"));
+            command
+                .args(["doctor", "--json"])
+                .current_dir(root)
+                .env_clear()
+                .env("HOME", root)
+                .env("PATH", "")
+                // Doctor must not even parse HTTP credentials.
+                .env("GH_TOKEN", "invalid\ncredential");
+            if override_cache {
+                command.env("XDG_CACHE_HOME", &cache);
+            }
+            command.output().unwrap()
+        };
+        let missing = run();
+        assert_eq!(missing.status.code(), Some(2));
+        assert!(missing.stdout.is_empty());
+        assert_eq!(stderr(&missing), format!(
+            "error: guest kernel is not cached at {}; run seedbox run to download it, or pass --kernel PATH\n",
+            ready.display()
+        ));
+        assert!(!cache.exists());
+        assert!(!root.join(".seedbox").exists());
+
+        fs::create_dir_all(&ready).unwrap();
+        let corrupt = run();
+        assert_eq!(corrupt.status.code(), Some(2));
+        assert!(corrupt.stdout.is_empty());
+        assert!(stderr(&corrupt).starts_with(&format!(
+            "error: kernel cache {} is invalid:",
+            ready.display()
+        )));
+        assert!(stderr(&corrupt)
+            .contains("remove that directory and retry a run, or pass --kernel PATH"));
+        assert!(!ready.parent().unwrap().join("lock").exists());
+        assert!(!root.join(".seedbox").exists());
+    }
 }
 
 #[test]

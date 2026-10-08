@@ -37,10 +37,11 @@ def digest(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
-def notices(sources):
+def notices(sources, components=NOTICES):
     sections = []
     hashes = {}
-    for component, groups in NOTICES.items():
+    for component in components:
+        groups = NOTICES[component]
         path = sources / (component + ".source")
         if not path.is_file():
             raise ValueError(f"missing provisioned upstream source: {path}")

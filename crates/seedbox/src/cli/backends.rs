@@ -136,20 +136,70 @@ impl PreparationBackend for Preparer {
     }
 }
 
-pub fn container_runtime(kernel_only: bool) -> Result<seedbox::container_runtime::Runtime> {
-    let home = std::env::var_os("HOME").ok_or_else(|| {
-        seedbox::Error::Setup("HOME is unset; set it to your home directory".into())
-    })?;
-    let cache = std::env::var_os("XDG_CACHE_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
+fn cache_home() -> Result<std::path::PathBuf> {
+    let cache = match std::env::var_os("XDG_CACHE_HOME").filter(|s| !s.is_empty()) {
+        Some(path) => std::path::PathBuf::from(path),
+        None => {
+            let home = std::env::var_os("HOME").ok_or_else(|| {
+                seedbox::Error::Setup(
+                    "HOME is unset; set it or set XDG_CACHE_HOME to a writable cache directory"
+                        .into(),
+                )
+            })?;
             std::path::PathBuf::from(home).join(if cfg!(target_os = "macos") {
                 "Library/Caches"
             } else {
                 ".cache"
             })
-        });
-    seedbox::container_runtime::Runtime::embedded(&cache.join("seedbox/runtime"), kernel_only)
+        }
+    };
+    Ok(cache.join("seedbox"))
+}
+
+pub fn container_runtime() -> Result<seedbox::container_runtime::Runtime> {
+    seedbox::container_runtime::Runtime::embedded(&cache_home()?.join("runtime"))
+}
+
+pub fn guest_kernel(
+    explicit: Option<std::path::PathBuf>,
+    cancellation: &CancellationToken,
+    download: bool,
+) -> Result<std::path::PathBuf> {
+    if let Some(path) = explicit {
+        return super::defaults::existing("--kernel", path);
+    }
+    let cache = cache_home()?.join("kernels");
+    let architecture = std::env::consts::ARCH;
+    if !download {
+        return seedbox::kernel_download::KernelDownload::cached(&cache, architecture);
+    }
+    if let Some(path) = seedbox::kernel_download::KernelDownload::lookup(&cache, architecture)? {
+        eprintln!("kernel: using cached guest kernel {}", path.display());
+        return Ok(path);
+    }
+    #[cfg(target_os = "linux")]
+    seedbox::admission::check_kvm_access()?;
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    seedbox::mac::check_host_access()?;
+    let token = std::env::var("GH_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty()));
+    // All process-global HTTP configuration stays at this CLI boundary.
+    let agent = ureq::Agent::config_builder()
+        .https_only(true)
+        .user_agent(concat!("seedbox/", env!("CARGO_PKG_VERSION")))
+        .timeout_global(Some(std::time::Duration::from_secs(120)))
+        .timeout_connect(Some(std::time::Duration::from_secs(10)))
+        .timeout_recv_response(Some(std::time::Duration::from_secs(15)))
+        .build()
+        .new_agent();
+    seedbox::kernel_download::KernelDownload::new(agent, token.as_deref())?.ensure(
+        &cache,
+        architecture,
+        cancellation,
+        |message| eprintln!("kernel: {message}"),
+    )
 }
 
 pub fn container_client(

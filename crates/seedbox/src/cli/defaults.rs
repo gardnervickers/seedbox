@@ -95,10 +95,6 @@ fn kernel(explicit: Option<PathBuf>) -> Result<PathBuf> {
     KernelLocations::from_environment().resolve(explicit, None)
 }
 
-pub fn packaged_kernel(explicit: Option<PathBuf>, packaged: PathBuf) -> Result<PathBuf> {
-    existing("--kernel", explicit.unwrap_or(packaged))
-}
-
 #[derive(Default)]
 pub struct LinuxOverrides {
     pub kernel: Option<PathBuf>,
@@ -132,17 +128,25 @@ pub fn linux_runtime(
     parent: &Path,
     selection: AssetSelection,
     store: Option<&ContentStore>,
+    cancellation: &seedbox::execution::CancellationToken,
 ) -> Result<LinuxRuntime> {
     if crate::cli::backends::container_runtime_available() {
-        let runtime =
-            crate::cli::backends::container_runtime(matches!(selection, AssetSelection::Kernel))?;
+        let all = matches!(selection, AssetSelection::All);
+        let kernel = crate::cli::backends::guest_kernel(overrides.kernel, cancellation, all)?;
+        let runtime = if all {
+            Some(crate::cli::backends::container_runtime()?)
+        } else {
+            None
+        };
         let resolve = |flag, explicit: Option<PathBuf>, name| match explicit {
             Some(path) => existing(flag, path),
-            None => Ok(runtime.input(name)),
+            None => runtime
+                .as_ref()
+                .map(|runtime| runtime.input(name))
+                .ok_or_else(|| Error::Integrity("missing preparation helpers".into())),
         };
-        let all = matches!(selection, AssetSelection::All);
         return Ok(LinuxRuntime {
-            kernel: packaged_kernel(overrides.kernel, runtime.input("Image"))?,
+            kernel,
             init: if all {
                 Some(resolve("--guest-init", overrides.init, "compose-init")?)
             } else {
@@ -408,23 +412,6 @@ pub fn preparation_tool(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn packaged_kernel_requires_the_package_or_an_explicit_override() {
-        let directory = tempfile::tempdir().unwrap();
-        let packaged = directory.path().join("Image");
-        let explicit = directory.path().join("override");
-        std::fs::write(&packaged, b"packaged").unwrap();
-        std::fs::write(&explicit, b"explicit").unwrap();
-        assert_eq!(packaged_kernel(None, packaged.clone()).unwrap(), packaged);
-        assert_eq!(
-            packaged_kernel(Some(explicit.clone()), packaged.clone()).unwrap(),
-            explicit
-        );
-        let missing = directory.path().join("missing");
-        assert!(packaged_kernel(Some(missing.clone()), packaged.clone()).is_err());
-        assert!(packaged_kernel(None, missing).is_err());
-    }
 
     #[test]
     fn linux_kernel_precedence_keeps_configured_paths_ahead_of_package() {
