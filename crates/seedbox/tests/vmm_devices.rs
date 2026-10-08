@@ -187,7 +187,14 @@ fn tx_chains_preserve_opaque_bytes_and_complete_each_available_head_once() {
     );
     assert_eq!(
         net.dirty,
-        vec![(0x304, 8), (0x302, 2), (0x30c, 8), (0x302, 2)]
+        vec![
+            (0x300, 2),
+            (0x304, 8),
+            (0x302, 2),
+            (0x30c, 8),
+            (0x302, 2),
+            (0x300, 2)
+        ]
     );
     // The returned frames own their bytes; subsequent guest writes cannot change them.
     memory[0x500..0x900].fill(0);

@@ -37,7 +37,10 @@ metadata removed, kernel/initrd/disk paths replaced by content hashes, engine
 hash, timebase and parent seed. Branch identity binds this parent, T and B.
 The retained RunIdentity also binds T and B; it is not a second parent-identity
 scheme. Relocating inputs does not change the branch. Counter and PV parents
-have different identities. The engine recomputes the supplied CLI identity.
+have different identities. With deferred TX enabled, both sides hash
+`<timebase>+deferred-tx` in place of the timebase name, separating parent and
+branch identities and future branch RNG streams from the off mode. Off keeps
+the original timebase hash input. The engine recomputes the supplied CLI identity.
 
 Build the VMM and current K2/ABI-3 kernel from this checkout. #93 was closed;
 its reseed hook landed through #126 with PV fields at u64 indices 6–8,
@@ -534,6 +537,64 @@ and unsupported guest syscalls are compatibility failures, never workload PASS.
 and timeouts. Serial output is capped at 1 GiB total divided equally between the
 two ports of all machines; exceeding that cap fails execution. Trace recording
 is not enabled by this adapter.
+
+Each machine's `net` report includes negotiated `event_idx`, `doorbell_exits`
+(virtio-net MMIO queue-notify writes), and `suppressed_interrupts` (completion
+batches that did not request an interrupt). These diagnostics are outside the
+witness. With EVENT_IDX negotiated, the device publishes `avail_event` after
+consuming buffers and samples `used_event` for completion interrupts. It polls
+available buffers at deterministic guest stops, including slice entry after RX
+delivery, slice boundaries and halt, so suppressed kicks do not stall queues.
+Without negotiation, the existing NO_INTERRUPT/NO_NOTIFY path is retained.
+
+`prepare`, `run` and `explore` accept `--deferred-tx` (off by default), also
+accepted by the raw VMM. This is a semantic option: enabling it records
+`deferred_tx=true` in the profile and changes packet timing and run identity.
+Off omits the parameter and retains the behavior at `13b7f85`, including legacy
+kick-driven TX. Replay uses the retained setting with no override, including
+when changing engines. The engine report declares the setting; an older report
+without it means off. This change builds a new engine hash in either mode.
+
+While deferred, queue 1 publishes `avail_event=last_avail+queue_size` with
+EVENT_IDX (wrapping u16 arithmetic), or retains `VRING_USED_F_NO_NOTIFY` without
+it, including when the queue is empty. A doorbell that still arrives is serviced.
+RX retains its previous negotiation, polling and notification behavior. TX
+completes at deterministic vCPU entry/natural exits, slice boundaries, charged
+I/O boundaries and halt. Deferred slices are capped at 50 microseconds of
+simulated time, within the existing world/timer bounds. No RNG draws are added.
+
+Linux 6.12 virtnet's `free_old_xmit` stops when `virtqueue_get_buf` returns no
+completed buffer; TX callback recheck loops drain already completed work. Ring
+exhaustion and BQL stop the queue, and completion/NAPI wakes it rather than
+spinning for a new used entry. Clock/timer progress therefore reaches the bounded
+poll, and halt is polled before parking. A PV completion spin that makes no
+exits is serviced at the existing proven state cycle's canonical idle point,
+even if interrupts are disabled or suppressed; it resumes after completion.
+Host watchdog interrupts and intermediate cycle-search steps never service TX.
+As in the existing PV model, arbitrary non-repeating, clock-free loops are not
+bounded by simulated time; this option does not promise to terminate such guest
+programs. No control virtqueue is advertised.
+
+The per-machine `net` diagnostics additionally report `tx_polled` (packets
+picked up by polls), `tx_polled_at_boundary` (slice/charged-I/O/halt/proven-idle
+polls), and `tx_pickup_samples`, `tx_pickup_delay_upper_ns_mean` and
+`tx_pickup_delay_upper_ns_max`. The delay is an **upper bound**, measured from
+the last deterministic observation of an empty TX ring to pickup, weighted per
+packet. The untrapped guest avail-index store lies inside that interval; its
+exact simulated timestamp is unavailable. Samples without an earlier empty
+observation are omitted. These values measure polling latency conservatively
+and must not be presented as exact publish timestamps. Counters and timing
+observations are outside the witness; raw `output/vmm.json` retains them for the
+final machine and each crashed incarnation.
+
+Focused host tests (after `cargo build-vmm` and `cargo test-vmm`) are
+`cargo test-vmm event_idx_polls_on_entry_slice_boundary_and_halt_without_kicks -- --ignored`
+and `cargo test-vmm deferred_tx_completes_a_pv_spin_without_halt_kick_or_interrupts -- --ignored`.
+The latter compares witnesses/state across two watchdog periods. The 60 s kill
+world, PV timebase, seed 4000 needs separate option-off and option-on runs and
+same-mode replays on the AMD host. Compare doorbells, host time and the pickup
+delay bounds in the engine reports. Option-on host results are pending.
+
 
 When text output reports `execution: VMM failed; see vmm.stderr`, `run`, `replay`,
 `explore` and `inspect` also print up to five non-empty lines from the final 8 KiB

@@ -226,6 +226,11 @@ impl Orchestrator {
         if baseline.identity.inputs.profile.backend == "seedbox-kvm" {
             let recorded = crate::vmm::recorded_timebase(&baseline.identity.inputs.profile)?;
             let requested = crate::vmm::recorded_timebase(&executor.profile())?;
+            if crate::vmm::recorded_deferred_tx(&baseline.identity.inputs.profile)?
+                != crate::vmm::recorded_deferred_tx(&executor.profile())?
+            {
+                return Err(Error::Integrity("executor TX mode does not match the recorded --deferred-tx; use an executor with the recorded TX mode".into()));
+            }
             if recorded != requested {
                 return Err(Error::Integrity(format!(
                     "executor timebase {} does not match the recorded --timebase {}; use an executor with the recorded timebase",

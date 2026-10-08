@@ -1873,3 +1873,47 @@ fn replay_rejects_unknown_recorded_timebase_before_host_checks() {
     assert!(inspect.status.success(), "{}", stderr(&inspect));
     assert!(String::from_utf8_lossy(&inspect.stdout).contains("timebase: future"));
 }
+
+#[test]
+fn deferred_tx_help_is_presence_only_and_replay_uses_the_recorded_mode() {
+    let directory = tempfile::tempdir().unwrap();
+    for command in ["run", "prepare", "explore"] {
+        let help = seedbox(&["help", command], directory.path());
+        assert!(help.status.success());
+        assert!(String::from_utf8_lossy(&help.stdout).contains("--deferred-tx"));
+        let mut args = vec![command, "no-such.yaml", "--deferred-tx"];
+        if command == "prepare" {
+            args.extend(["--output", "prepared"]);
+        }
+        let output = seedbox(&args, directory.path());
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(
+            stderr(&output),
+            "error: Compose file no-such.yaml: not found\n"
+        );
+    }
+    let help = seedbox(&["help", "replay"], directory.path());
+    assert!(!String::from_utf8_lossy(&help.stdout).contains("--deferred-tx"));
+    let output = seedbox(&["replay", ".", "--deferred-tx"], directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("unexpected argument '--deferred-tx'"));
+    timebase_record(directory.path(), None);
+    let mut record = seedbox::orchestration::inspect(directory.path()).unwrap();
+    record
+        .identity
+        .inputs
+        .profile
+        .semantic_parameters
+        .insert("deferred_tx".into(), "future".into());
+    record.run_id =
+        seedbox::store::ContentDigest::of(&serde_json::to_vec(&record.identity).unwrap());
+    let checksum = seedbox::store::ContentDigest::of(&serde_json::to_vec(&record).unwrap());
+    fs::write(
+        directory.path().join("manifest.json"),
+        serde_json::to_vec(&serde_json::json!({"sha256": checksum, "record": record})).unwrap(),
+    )
+    .unwrap();
+    let output = seedbox(&["replay", "."], directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("recorded --deferred-tx future"));
+}

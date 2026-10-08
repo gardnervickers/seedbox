@@ -8,7 +8,7 @@ fn boot(marker:u8,undo:u64)->BootInputs {
     let mut code=vec![0x31,0xc0,0x74,0x00,0xb0,marker,0xe6,0xe9,0xb9,0xe8,0x03,0,0,0x49,0x75,0xfd,0xb0,0,0xe6,0xf4];
     let mut kernel=vec![0;1024];kernel[0x1f1]=1;kernel.append(&mut code);
     // RAM must cover the fixed 128 MiB initrd address even with an empty initrd.
-    BootInputs {kernel:kernel.into(),initrd:Rc::from([]),cmdline:(String::new(),String::new()),mem:0x0900_0000,mac:None,control_channel:false,disk:None,pv_clock:false,undo_margin:undo,tolerance:0,timer_jitter:0,exact_timer_ppm:0,margin:None,console_limit:None,log_chunk_limit:None}
+    BootInputs {kernel:kernel.into(),initrd:Rc::from([]),cmdline:(String::new(),String::new()),mem:0x0900_0000,mac:None,control_channel:false,disk:None,pv_clock:false,undo_margin:undo,tolerance:0,timer_jitter:0,exact_timer_ppm:0,margin:None,console_limit:None,log_chunk_limit:None,deferred_tx:false}
 }
 fn world(undo:u64,reverse:bool)->World {
     world_with_counter(undo,reverse,Counter::new().unwrap())

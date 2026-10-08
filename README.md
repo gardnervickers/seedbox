@@ -21,6 +21,8 @@ cargo build-vmm                      # crates/seedbox-vmm/target/release/seedbox
 cargo run -- validate examples/etcd
 sudo -E env PATH="$PATH" target/release/seedbox run examples/etcd
 sudo -E env PATH="$PATH" target/release/seedbox replay .seedbox/runs/ATTEMPT
+# Optional semantic mode: batch virtio-net TX until a deterministic poll.
+sudo -E env PATH="$PATH" target/release/seedbox run examples/etcd --deferred-tx
 cargo run -- inspect .seedbox/runs/ATTEMPT
 cargo run -- logs .seedbox/runs/ATTEMPT --machine client --stream console --since-ns 1000000000
 cargo run -- diff .seedbox/runs/ATTEMPT .seedbox/runs/REPLAY
@@ -35,6 +37,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Directed link baselines | no overrides; global latency/jitter and zero loss | `x-seedbox.network.links` |
 | Connection selectors | disabled; discover and select through the guest control API | `world.connections`, `world.drop_connection` |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
+| Deferred TX kicks | off; service TX as in the current engine | `--deferred-tx` (prepare/run/explore) |
 | Runtime checkpoint | absent; ordinary execution | `--checkpoint-at-ns T --branch-seed B` (run only; B=P continues without reseeding; no environment backing) |
 | Timebase | `counter` (retired guest branches) | `--timebase` (prepare/run/explore) |
 | Exploration count | `1` | `--count` |

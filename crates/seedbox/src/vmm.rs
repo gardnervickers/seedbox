@@ -117,6 +117,18 @@ impl VmmExecutor {
         })
     }
 
+    /// Defer virtio-net TX kicks to deterministic polls (semantic, off by default).
+    pub fn with_deferred_tx(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.profile
+                .semantic_parameters
+                .insert("deferred_tx".into(), "true".into());
+        } else {
+            self.profile.semantic_parameters.remove("deferred_tx");
+        }
+        self
+    }
+
     /// Counter is recorded by omission to preserve existing run identities.
     pub fn with_timebase(mut self, timebase: Timebase) -> Self {
         if timebase == Timebase::Counter {
@@ -460,6 +472,17 @@ fn with_capacity<T>(
     check(&reservations)
 }
 
+/// Older engines and profiles service TX without deferring kicks.
+pub fn recorded_deferred_tx(profile: &ExecutionProfile) -> Result<bool> {
+    match profile.semantic_parameters.get("deferred_tx").map(String::as_str) {
+        None => Ok(false),
+        Some("true") => Ok(true),
+        Some(value) => Err(Error::Integrity(format!(
+            "recorded --deferred-tx {value}: expected true or an absent parameter; use a run recorded with a supported TX mode"
+        ))),
+    }
+}
+
 /// Missing timebase means counter, including records from older engines.
 pub fn recorded_timebase(profile: &ExecutionProfile) -> Result<Timebase> {
     match profile.semantic_parameters.get("timebase").map(String::as_str) {
@@ -645,7 +668,10 @@ fn checkpoint_metadata(request: &ExecutionRequest<'_>, world: &Value) -> Result<
         world,
         request.seed,
         request.prepared.profile.engine.hex(),
-        recorded_timebase(&request.prepared.profile)?.name(),
+        &checkpoint::identity_timebase(
+            recorded_timebase(&request.prepared.profile)?.name(),
+            recorded_deferred_tx(&request.prepared.profile)?,
+        ),
         |path| {
             request
                 .artifacts
@@ -742,6 +768,8 @@ pub(crate) struct VmmReport {
     checkpoint: Option<Value>,
     /// Older engines always used counter.
     timebase: Option<String>,
+    #[serde(default)]
+    deferred_tx: bool,
     pub(crate) report_version: u32,
     seed: u64,
     /// Absent from engines older than counter profiles, which are all Zen.
@@ -1340,6 +1368,11 @@ pub fn report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<ExecutionR
     if raw.checkpoint != expected_checkpoint {
         return Err(Error::Integrity("VMM checkpoint identity mismatch".into()));
     }
+    if raw.deferred_tx != recorded_deferred_tx(&request.prepared.profile)? {
+        return Err(Error::Integrity(
+            "VMM deferred_tx does not match recorded --deferred-tx".into(),
+        ));
+    }
     let timebase = recorded_timebase(&request.prepared.profile)?;
     let reported = raw.timebase.as_deref().unwrap_or("counter");
     if reported != timebase.name() {
@@ -1689,6 +1722,9 @@ mod linux {
             .arg(request.output.join(MACHINE_OUTPUT_DIR));
         if timebase != Timebase::Counter {
             command.arg("--timebase").arg(timebase.name());
+        }
+        if recorded_deferred_tx(&backend.profile)? {
+            command.arg("--deferred-tx");
         }
         command.arg("--host-control").arg(endpoint.socket());
         command

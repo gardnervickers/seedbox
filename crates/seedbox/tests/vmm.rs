@@ -1407,6 +1407,33 @@ fn pv_reports_may_omit_unqualified_counter_profile_but_counter_reports_must_not(
 }
 
 #[test]
+fn deferred_tx_report_must_match_semantic_parameter_and_legacy_reports_mean_off() {
+    fixture(|base| {
+        for enabled in [false, true] {
+            let mut prepared = base.prepared.clone();
+            if enabled {
+                prepared
+                    .profile
+                    .semantic_parameters
+                    .insert("deferred_tx".into(), "true".into());
+            }
+            let request = ExecutionRequest {
+                prepared: &prepared,
+                ..*base
+            };
+            for reported in [None, Some(false), Some(true)] {
+                let mut raw = report();
+                if let Some(reported) = reported {
+                    raw["deferred_tx"] = json!(reported);
+                }
+                let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request);
+                assert_eq!(result.is_ok(), reported.unwrap_or(false) == enabled);
+            }
+        }
+    });
+}
+
+#[test]
 fn checkpoint_semantics_bind_parent_and_report_and_fail_closed() {
     fixture(|base| {
         assert!(vmm::world(base).unwrap().get("checkpoint").is_none());
@@ -1532,9 +1559,61 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
         .unwrap();
         assert_eq!(pv_world["checkpoint"]["parent_identity"], pv_parent);
         assert_ne!(pv_parent, parent);
+        let mut deferred_worlds = Vec::new();
+        for (timebase, off_world) in [(Timebase::Counter, &cfg), (Timebase::Pv, &pv_world)] {
+            let mut deferred_inputs = inputs.clone();
+            deferred_inputs
+                .profile
+                .semantic_parameters
+                .insert("timebase".into(), timebase.name().into());
+            deferred_inputs
+                .profile
+                .semantic_parameters
+                .insert("deferred_tx".into(), "true".into());
+            let deferred_world = vmm::world(&ExecutionRequest {
+                prepared: &deferred_inputs,
+                artifacts: &artifacts,
+                ..*base
+            })
+            .unwrap();
+            let deferred_parent = checkpoint_protocol::parent_identity(
+                &deferred_world,
+                base.seed,
+                inputs.profile.engine.hex(),
+                &format!("{}+deferred-tx", timebase.name()),
+                |path| {
+                    Ok(ContentDigest::of(&std::fs::read(path).unwrap())
+                        .hex()
+                        .to_owned())
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                deferred_world["checkpoint"]["parent_identity"],
+                deferred_parent
+            );
+            assert_ne!(
+                deferred_world["checkpoint"]["parent_identity"],
+                off_world["checkpoint"]["parent_identity"]
+            );
+            assert_ne!(
+                deferred_world["checkpoint"]["branch_identity"],
+                off_world["checkpoint"]["branch_identity"]
+            );
+            deferred_worlds.push((deferred_inputs, deferred_world));
+        }
         let relocated = dir.path().join("relocated");
         std::fs::copy(artifacts.values().next().unwrap(), &relocated).unwrap();
         *artifacts.values_mut().next().unwrap() = relocated;
+        for (deferred_inputs, original) in deferred_worlds {
+            let moved = vmm::world(&ExecutionRequest {
+                prepared: &deferred_inputs,
+                artifacts: &artifacts,
+                ..*base
+            })
+            .unwrap();
+            assert_eq!(moved["checkpoint"], original["checkpoint"]);
+        }
         inputs
             .profile
             .semantic_parameters

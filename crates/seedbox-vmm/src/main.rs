@@ -1,5 +1,6 @@
 //! Seedbox world: several Linux machines, a network fabric and a scenario,
 //! all executed by one host thread. A seed and the config fully determine the run.
+#![recursion_limit = "256"]
 
 mod boundary;
 mod checkpoint;
@@ -89,6 +90,7 @@ struct BootInputs {
     console_limit: Option<usize>,
     /// The machine runs under the PV clock timebase.
     pv_clock: bool,
+    deferred_tx: bool,
     log_chunk_limit: Option<usize>,
 }
 
@@ -146,6 +148,7 @@ fn boot_machine(kvm: &kvm_ioctls::Kvm, name: &str, b: &BootInputs, barrier: bool
         pv_clock: b.pv_clock,
     };
     let mut mach = Machine::new(kvm, name, &spec)?;
+    if let Some(net) = mach.net.as_mut() { net.deferred_tx = b.deferred_tx; }
     mach.com1.output_limit = b.console_limit;
     mach.com2.output_limit = b.console_limit;
     mach.com1.chunks.limit = b.log_chunk_limit;
@@ -365,6 +368,7 @@ impl World {
             "discarded_pending_io": old.pending_io.is_some(), "discarded_management_bytes": discarded,
             "witness": old.exit_witness(),
         });
+        summary["net"] = json!(old.net.as_ref().map(net_report));
         summary["disk_lost_sectors"] = json!(self.machines[m].succeed(&mut old, t, self.run_seed, self.branch_identity.as_deref())?);
         self.incarnations[m].push(summary);
         Ok(())
@@ -431,6 +435,7 @@ fn run() -> Result<Value, String> {
         Some("pv") => true,
         Some(other) => return Err(format!("--timebase {other}: expected counter or pv")),
     };
+    let deferred_tx = args.iter().any(|a| a == "--deferred-tx");
     // Undo-able precise stops (performance only): initial final margin, 0 = off.
     let undo_margin: u64 = match std::env::var("SEEDBOX_UNDO").as_deref() {
         Err(_) => 256,
@@ -568,6 +573,7 @@ fn run() -> Result<Value, String> {
             margin,
             console_limit,
             pv_clock,
+            deferred_tx,
             log_chunk_limit: arg(&args,"--log-chunk-limit").map(|v|v.parse::<usize>()).transpose().map_err(|e|e.to_string())?,
         };
         let seed = entropy_seed(boot_seed, &format!("boot-entropy/{}", names[i]));
@@ -653,7 +659,8 @@ fn run() -> Result<Value, String> {
         if !checkpoint_times.is_empty() {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let engine = format!("{:x}", Sha256::digest(std::fs::read(exe).map_err(|e| e.to_string())?));
-            let parent = checkpoint::parent_identity(&cfg, seed, &engine, world.clock.name(), |p| {
+            let identity_timebase = checkpoint::identity_timebase(world.clock.name(), deferred_tx);
+            let parent = checkpoint::parent_identity(&cfg, seed, &engine, &identity_timebase, |p| {
                 std::fs::read(base.join(p)).map(|bytes|format!("{:x}",Sha256::digest(bytes))).map_err(|e|format!("{p}: {e}"))
             })?;
             if let Some(expected) = cfg["checkpoint"]["parent_identity"].as_str() {
@@ -1256,6 +1263,16 @@ fn simulate_to(
     Ok(outcome)
 }
 
+/// Observations only; terminal and crashed incarnations use the same fields.
+fn net_report(n: &crate::virtio_net::VirtioNet) -> Value {
+    json!({"tx": n.tx_frames, "rx": n.rx_frames, "rx_dropped": n.rx_dropped,
+        "event_idx": n.event_idx(), "doorbell_exits": n.doorbell_exits, "suppressed_interrupts": n.suppressed_interrupts,
+        "deferred_tx": n.deferred_tx, "tx_polled": n.tx_polled, "tx_polled_at_boundary": n.tx_polled_at_boundary,
+        "tx_pickup_samples": n.tx_pickup_samples,
+        "tx_pickup_delay_upper_ns_mean": if n.tx_pickup_samples == 0 { 0 } else { (n.tx_pickup_delay_upper_ns_sum / n.tx_pickup_samples as u128) as u64 },
+        "tx_pickup_delay_upper_ns_max": n.tx_pickup_delay_upper_ns_max})
+}
+
 /// Finish a run: write consoles and build the engine report.
 #[allow(clippy::too_many_arguments)]
 fn report(
@@ -1377,7 +1394,7 @@ fn report(
             "kvm_ms_by_exit": {"eintr": s.kvm_ns[0] as f64/1e6, "debug": s.kvm_ns[1] as f64/1e6, "pio": s.kvm_ns[2] as f64/1e6, "mmio": s.kvm_ns[3] as f64/1e6, "hlt": s.kvm_ns[4] as f64/1e6, "window": s.kvm_ns[5] as f64/1e6, "other": s.kvm_ns[6] as f64/1e6},
             "kvm_n_by_exit": s.kvm_n,
             "control_channel":mach.channel.as_ref().map(|_|json!({"transport":"virtio-console-v1","tx_bytes":mach.control_tx_bytes,"rx_dma_bytes":mach.control_dma_bytes})),
-            "net": mach.net.as_ref().map(|n| json!({"tx": n.tx_frames, "rx": n.rx_frames, "rx_dropped": n.rx_dropped})),
+            "net": mach.net.as_ref().map(net_report),
         });
         row["disk"] = json!(mach.blk.as_ref().map(|b| json!({
                 "fault_model": disk::disk_fault_model_report(b.disk.fault_model()), "capacity_sectors": b.disk.capacity(), "base_sha256": b.disk.base_sha256(),
@@ -1413,6 +1430,7 @@ fn report(
         "report_version": 1,
         "seed": seed,
         "timebase": world.clock.name(),
+        "deferred_tx": world.boot.iter().any(|b| b.deferred_tx),
         "counter_profile": match world.clock { Clock::Counter(_) => Some(profile::host()?.name), Clock::Pv(_) => None },
         "outcome": outcome,
         "sim_seconds": sim_ns as f64 / 1e9,
@@ -1509,7 +1527,7 @@ mod checkpoint_tests {
         let mut kernel=vec![0u8;1024];kernel[0x1f1]=1;kernel.extend(code);
         let boot=BootInputs {kernel:kernel.into(),initrd:Rc::from([]),cmdline:(String::new(),String::new()),
             mem:0x0810_0000,mac:None,control_channel:true,disk:Some(disk::Disk::new(None,Some(8)).unwrap()),
-            undo_margin:undo,tolerance:0,timer_jitter:0,exact_timer_ppm:0,margin:None,console_limit:None,pv_clock:false,log_chunk_limit:None};
+            undo_margin:undo,tolerance:0,timer_jitter:0,exact_timer_ppm:0,margin:None,console_limit:None,pv_clock:false,log_chunk_limit:None,deferred_tx:false};
         let names=vec!["a".to_string(),"b".to_string()];
         let machines=names.iter().map(|name|boot_machine(&kvm,name,&boot,false,[0;32]).unwrap()).collect();
         World {machines,kvm,boot:vec![boot.clone(),boot],barrier:false,boot_seed:7,run_seed:7,branch_identity:None,
