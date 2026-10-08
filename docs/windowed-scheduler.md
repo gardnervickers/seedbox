@@ -147,6 +147,25 @@ expected for a different scheduler.
   test determinism, not speed.
 - `cargo test-vmm --features kvm-tests` passes.
 
+### Counter stop refinement
+
+A successful overflow can land hundreds of branches inside an undo margin
+grown by earlier overshoots, and the engine used to single-step all of them.
+The windowed scheduler makes more counted stops (656 versus 251 on `window4`),
+so this dominated its serial overhead. `machine/counted.rs` now checkpoints
+such a landing when more than 128 branches remain and approaches the same
+hard target again with a margin of `min(undo, remaining / 4)`. A rollback
+returns time to the held checkpoint, so the margin grows as before; a
+successful refinement strictly advances the checkpoint. Nothing observable
+happens at an overflow landing, so stops and witnesses are unchanged, and
+`--undo 0` and the PV timebase take their existing paths.
+
+On the 5950X (seed 7, counter, median of five whole-process runs), `window4`
+went from 7.95 to 6.01 s on one worker and 3.41 to 2.58 s on four (old
+scheduler: 5.95 s); step exits fell from 385,919 to 122,870. Kprobes found
+counter `perf_ioctl` cost (25 ms) and vCPU-migration `synchronize_rcu` calls
+(none on Linux 6.18.54) too small to explain the gap.
+
 ## Why this matters most for PV
 
 Under the counter timebase, compute costs virtual time. A busy guest
@@ -247,13 +266,10 @@ It works for any `WorldMachine`; the parallel path needs `M: Send`.
    template.
 2. **Reports.** Show the end machine's exit time beside the committed end in
    the CLI report. Today they appear only in `vmm.json`, under `scheduler`.
-3. **Sticky placement.** Each time a vCPU's `KVM_RUN` comes from a new
-   thread, KVM reassigns `vcpu->pid` and calls `synchronize_rcu()`.
-   Preferring the thread that last ran a machine, and stealing only when
-   idle, would keep the balance and drop most of that cost. Measure it once
-   the CLI passes the flags.
-4. **Counter overhead.** Measure larger windows and soft stops at natural
-   exits near `B`.
+3. **Sticky placement.** Linux 6.18.54 made no `synchronize_rcu` calls on
+   migration; measure other host kernels before changing placement.
+4. **Counter overhead.** Larger windows and soft stops at natural exits
+   near `B` would cut stepping further but change scheduler semantics.
 5. **Real workload.** Run the four-machine etcd Compose workload through
    `seedbox run` / `seedbox replay` once the CLI passes the flags.
 6. **arm64.** The adapter is generic and now covers everything the legacy
