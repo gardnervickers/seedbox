@@ -153,7 +153,7 @@ A successful overflow can land hundreds of branches inside an undo margin
 grown by earlier overshoots, and the engine used to single-step all of them.
 The windowed scheduler makes more counted stops (656 versus 251 on `window4`),
 so this dominated its serial overhead. `machine/counted.rs` now checkpoints
-such a landing when more than 128 branches remain and approaches the same
+such a landing when more than 32 branches remain and approaches the same
 hard target again with a margin of `min(undo, remaining / 4)`. A rollback
 returns time to the held checkpoint, so the margin grows as before; a
 successful refinement strictly advances the checkpoint. Nothing observable
@@ -165,6 +165,12 @@ went from 7.95 to 6.01 s on one worker and 3.41 to 2.58 s on four (old
 scheduler: 5.95 s); step exits fell from 385,919 to 122,870. Kprobes found
 counter `perf_ioctl` cost (25 ms) and vCPU-migration `synchronize_rcu` calls
 (none on Linux 6.18.54) too small to explain the gap.
+
+The initial refinement above used a 128-branch cutoff. The subsequent
+[window4 host profile](windowed-scheduler-profile.md), based on main at
+`cc2af34`, lowered it to 32 and reused verified zero-page evidence hashes.
+Five interleaved trials cover both timebases at one and four workers, with
+separate scheduler and whole-process medians, ranked costs and replay evidence.
 
 ## Why this matters most for PV
 
