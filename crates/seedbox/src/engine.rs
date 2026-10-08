@@ -57,7 +57,14 @@ pub fn recorded_launch(profile: &ExecutionProfile) -> Result<ExecutableKind> {
             "unknown engine executable kind {kind}"
         )));
     }
+    // The original v1 descriptor used timebase for its worker capability.
+    // Decode only that exact historical shape without rewriting retained input.
+    let legacy = !parameters.contains_key("engine_timebase")
+        && parameters.get("timebase").map(String::as_str) == Some("counted-branches-v1");
     for key in FIELDS {
+        if key == "engine_timebase" && legacy {
+            continue;
+        }
         if parameters.get(key).is_none_or(|value| value.is_empty()) {
             return Err(Error::Integrity(format!(
                 "engine executable descriptor missing {key}"
@@ -77,7 +84,11 @@ pub fn recorded_launch(profile: &ExecutionProfile) -> Result<ExecutableKind> {
         parameters["host_arch"].as_str(),
         parameters["guest_arch"].as_str(),
         parameters["engine_backend"].as_str(),
-        parameters["engine_timebase"].as_str(),
+        if legacy {
+            "counter-pv-v1"
+        } else {
+            parameters["engine_timebase"].as_str()
+        },
     );
     if !matches!(
         platform,
@@ -85,6 +96,16 @@ pub fn recorded_launch(profile: &ExecutionProfile) -> Result<ExecutableKind> {
     ) {
         return Err(Error::Integrity(
             "unsupported engine executable platform/backend/timebase".into(),
+        ));
+    }
+    if !legacy
+        && !matches!(
+            parameters.get("timebase").map(String::as_str),
+            None | Some("counter" | "pv")
+        )
+    {
+        return Err(Error::Integrity(
+            "conflicting engine executable timebase fields".into(),
         ));
     }
     Ok(ExecutableKind::InternalWorker)
