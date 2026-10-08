@@ -8,10 +8,11 @@ AMD workstation.
 ## When to use it
 
 A droplet spends about 7 minutes installing Nix and building before its first
-run, and each further commit adds a build of a few minutes. That only pays off
-when the workstation is busy and enough PV work is queued. Batch it: collect
-every branch, world and seed that is waiting and pass them all to one
-invocation. A single quick check of one branch is usually better queued for the
+run, and each further commit adds a build of a few minutes. Use a droplet only
+when the workstation is busy and at least 10 minutes of PV runs are queued
+(on the droplet a warm Redis run takes about 30 seconds, plus as long again
+for its replay). Batch it: collect every branch, world and seed that is
+waiting and pass them all to one invocation. Anything smaller waits for the
 workstation.
 
 ```sh
