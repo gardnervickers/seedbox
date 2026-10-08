@@ -83,7 +83,9 @@ def build(output, architecture):
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(path, dest)
                 tag = 'seedbox-tools:' + key
-                build_options = ['--platform', 'linux/' + architecture, '--build-arg', 'SOURCE_DATE_EPOCH=0']
+                version = subprocess.check_output([engine, '--version'], text=True, timeout=15)
+                build_options = ([] if 'podman' in version.lower() else ['--load']) + [
+                    '--platform', 'linux/' + architecture, '--build-arg', 'SOURCE_DATE_EPOCH=0']
                 run([engine, 'build', *build_options, '--target', 'assets', '-t', tag + '-assets',
                      '-f', context / 'tools/runtime/Dockerfile', context])
                 container_image = tag + '-assets'

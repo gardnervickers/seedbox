@@ -417,11 +417,14 @@ impl ImageTransport for ContainerPreparer {
                     "dockerfile".into(),
                     store.put_file(&frozen.root.join(relative))?,
                 );
+                let version = context.version(
+                    &self.client,
+                    &format!("{service_name}-build-client-version"),
+                )?;
                 let result = self.run(
                     context,
-                    self.command()
+                    image_build_command(&self.client, &version)
                         .args([
-                            "build",
                             "--platform",
                             architecture.platform(),
                             "--tag",
@@ -562,6 +565,17 @@ impl ImageTransport for ContainerPreparer {
         }
         operation
     }
+}
+
+// Docker's selected Buildx driver may keep successful builds only in its cache.
+// Request a local image explicitly; Podman always publishes to its image store.
+fn image_build_command(client: &Path, version: &str) -> Command {
+    let mut command = Command::new(client);
+    command.arg("build");
+    if !version.to_ascii_lowercase().contains("podman") {
+        command.arg("--load");
+    }
+    command
 }
 
 fn finish_cleanup<T>(operation: Result<T>, cleanup: Result<()>) -> Result<T> {
