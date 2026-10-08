@@ -6,8 +6,15 @@
 use std::{fs, path::Path, process::Command};
 
 fn invoke(cli: &Path, directory: &Path, name: &str, args: &[&str]) -> Result<String, String> {
+    let logfile = directory.join(format!("{name}.log"));
+    let log = fs::File::create(&logfile).map_err(|error| error.to_string())?;
+    eprintln!("application: {} / {name}", directory.display());
     let mut command = Command::new(cli);
-    command.args(args).env_remove("SEEDBOX_VMM");
+    command
+        .args(args)
+        .env_remove("SEEDBOX_VMM")
+        .stdout(log.try_clone().map_err(|error| error.to_string())?)
+        .stderr(log);
     if args.first() != Some(&"diff") {
         command.arg("--state").arg(directory.join("state"));
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -20,21 +27,16 @@ fn invoke(cli: &Path, directory: &Path, name: &str, args: &[&str]) -> Result<Str
             command.arg("--allow-unqualified-cpu");
         }
     }
-    let output = command
-        .output()
+    let status = command
+        .status()
         .map_err(|error| format!("{}: {error}", cli.display()))?;
-    let mut log = output.stdout.clone();
-    log.extend_from_slice(&output.stderr);
-    let logfile = directory.join(format!("{name}.log"));
-    fs::write(&logfile, log).map_err(|error| error.to_string())?;
-    if !output.status.success() {
-        return Err(format!(
-            "{name}: {}; see {}",
-            output.status,
-            logfile.display()
-        ));
+    if !status.success() {
+        return Err(format!("{name}: {status}; see {}", logfile.display()));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(
+        String::from_utf8_lossy(&fs::read(&logfile).map_err(|error| error.to_string())?)
+            .into_owned(),
+    )
 }
 
 fn run_directory(output: &str) -> Result<&str, String> {
@@ -81,6 +83,8 @@ fn every_application_runs_twice_and_replays() {
                     workload.to_str().unwrap(),
                     "--timebase",
                     timebase,
+                    "--build-epoch",
+                    "0",
                     "--full-state",
                 ];
                 let first = invoke(Path::new(&cli), &directory, "first", &run)?;
