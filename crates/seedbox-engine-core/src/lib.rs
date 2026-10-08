@@ -20,3 +20,5 @@ pub mod control;
 pub mod network_counters;
 
 pub mod virtqueue;
+
+pub mod virtio_mmio;

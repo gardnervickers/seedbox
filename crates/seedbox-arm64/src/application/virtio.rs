@@ -2,10 +2,8 @@
 //! Every DMA span and descriptor chain is checked before a device effect.
 use super::Event;
 use crate::{disk::Disk, Result, RAM_BASE};
-use serde::Serialize;
 use std::collections::VecDeque;
 
-const QUEUE_SIZE: u16 = 256;
 const CHAIN_LIMIT: usize = 4 << 20;
 const NET_HEADER: usize = 12;
 
@@ -19,6 +17,9 @@ fn u64_at(m: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(m[offset..offset + 8].try_into().expect("validated DMA"))
 }
 
+use seedbox_engine_core::virtio_mmio::{
+    Effect as MmioEffect, Policy as MmioPolicy, Spec, Transport,
+};
 use seedbox_engine_core::virtqueue::{Chain, Diagnostics, Direction, Policy, Queue};
 
 trait ArmQueue {
@@ -59,16 +60,6 @@ pub enum Model {
     },
     Block(Disk),
 }
-#[derive(Serialize)]
-struct Transport {
-    dev_sel: u32,
-    drv_sel: u32,
-    features: [u32; 2],
-    queue_sel: u32,
-    queues: Vec<Queue>,
-    status: u32,
-    isr: u32,
-}
 pub struct Virtio {
     transport: Transport,
     model: Model,
@@ -101,17 +92,23 @@ impl Virtio {
         Self::new(Model::Block(disk), 1)
     }
     fn new(model: Model, queues: usize) -> Self {
+        let spec = match &model {
+            Model::Net { .. } => Spec {
+                device_id: 1,
+                features: [1 << 5, 1],
+            },
+            Model::Block(_) => Spec {
+                device_id: 2,
+                features: [1 << 9, 1],
+            },
+            Model::Console { .. } => Spec {
+                device_id: 3,
+                features: [2, 1],
+            },
+        };
         Self {
             model,
-            transport: Transport {
-                dev_sel: 0,
-                drv_sel: 0,
-                features: [0; 2],
-                queue_sel: 0,
-                queues: vec![Queue::default(); queues],
-                status: 0,
-                isr: 0,
-            },
+            transport: Transport::new(spec, queues, MmioPolicy::Application),
         }
     }
     pub fn irq(&self) -> bool {
@@ -137,7 +134,8 @@ impl Virtio {
             }
             Model::Block(disk) => serde_json::json!({"kind":"block","disk":disk.digest()}),
         };
-        let bytes = serde_json::to_vec(&(&self.transport, model)).map_err(|e| e.to_string())?;
+        let bytes =
+            serde_json::to_vec(&(self.transport.projection(), model)).map_err(|e| e.to_string())?;
         Ok(crate::witness::hash(&bytes))
     }
     pub fn read(&self, offset: u64, width: u8) -> Result<u64> {
@@ -160,37 +158,7 @@ impl Virtio {
         if width != 4 || !offset.is_multiple_of(4) {
             return Err("virtio transport requires aligned 32-bit access".into());
         }
-        let queue = self.transport.queues.get(self.transport.queue_sel as usize);
-        Ok(match offset {
-            0 => 0x7472_6976,
-            4 => 2,
-            8 => match self.model {
-                Model::Net { .. } => 1,
-                Model::Block(_) => 2,
-                Model::Console { .. } => 3,
-            },
-            12 => 0x5345_4544,
-            0x10 => match self.transport.dev_sel {
-                0 => match self.model {
-                    Model::Net { .. } => 1 << 5,
-                    Model::Block(_) => 1 << 9,
-                    Model::Console { .. } => 2,
-                },
-                1 => 1,
-                _ => 0,
-            },
-            0x34 => {
-                if queue.is_some() {
-                    QUEUE_SIZE as u64
-                } else {
-                    0
-                }
-            }
-            0x44 => queue.is_some_and(|q| q.ready) as u64,
-            0x60 => self.transport.isr as u64,
-            0x70 => self.transport.status as u64,
-            _ => 0,
-        })
+        Ok(self.transport.read(offset) as u64)
     }
     fn config_byte(&self, offset: u64) -> u8 {
         match &self.model {
@@ -220,60 +188,17 @@ impl Virtio {
         if width != 4 || !offset.is_multiple_of(4) || value > u32::MAX as u64 {
             return Err("virtio transport requires aligned 32-bit writes".into());
         }
-        let value = value as u32;
-        match offset {
-            0x14 => self.transport.dev_sel = value,
-            0x20 => {
-                if self.transport.drv_sel < 2 {
-                    self.transport.features[self.transport.drv_sel as usize] = value;
-                }
+        match self.transport.write(offset, value as u32)? {
+            MmioEffect::None => (),
+            MmioEffect::Notify(index) => return self.notify(memory, index),
+            MmioEffect::Reset => {
+                let old = std::mem::replace(self, Self::console());
+                *self = match old.model {
+                    Model::Net { mac, .. } => Self::net(mac),
+                    Model::Console { .. } => Self::console(),
+                    Model::Block(disk) => Self::block(disk),
+                };
             }
-            0x24 => self.transport.drv_sel = value,
-            0x30 => self.transport.queue_sel = value,
-            0x38 | 0x44 | 0x80 | 0x84 | 0x90 | 0x94 | 0xa0 | 0xa4 => {
-                let q = self
-                    .transport
-                    .queues
-                    .get_mut(self.transport.queue_sel as usize)
-                    .ok_or("virtio queue selection out of range")?;
-                match offset {
-                    0x38 => {
-                        if value == 0 || value > QUEUE_SIZE as u32 || !value.is_power_of_two() {
-                            return Err("invalid virtio queue size".into());
-                        }
-                        q.num = value as u16;
-                    }
-                    0x44 => {
-                        if value > 1 {
-                            return Err("invalid virtio queue ready flag".into());
-                        }
-                        q.ready = value == 1;
-                        q.last_avail = 0;
-                        q.used_idx = 0;
-                    }
-                    0x80 => q.desc = (q.desc & !0xffff_ffff) | value as u64,
-                    0x84 => q.desc = (q.desc & 0xffff_ffff) | ((value as u64) << 32),
-                    0x90 => q.avail = (q.avail & !0xffff_ffff) | value as u64,
-                    0x94 => q.avail = (q.avail & 0xffff_ffff) | ((value as u64) << 32),
-                    0xa0 => q.used = (q.used & !0xffff_ffff) | value as u64,
-                    0xa4 => q.used = (q.used & 0xffff_ffff) | ((value as u64) << 32),
-                    _ => unreachable!(),
-                }
-            }
-            0x50 => return self.notify(memory, value as usize),
-            0x64 => self.transport.isr &= !value,
-            0x70 => {
-                self.transport.status = value;
-                if value == 0 {
-                    let old = std::mem::replace(self, Self::console());
-                    *self = match old.model {
-                        Model::Net { mac, .. } => Self::net(mac),
-                        Model::Console { .. } => Self::console(),
-                        Model::Block(disk) => Self::block(disk),
-                    };
-                }
-            }
-            _ => {}
         }
         Ok(Vec::new())
     }

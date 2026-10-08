@@ -10,7 +10,6 @@
 
 use crate::disk::{Disk, DiskError, SECTOR};
 
-const QSIZE: u16 = 256;
 /// Largest request, data and header included.
 const LIMIT: usize = 4 << 20;
 const F_FLUSH: u32 = 1 << 9;
@@ -26,6 +25,7 @@ const S_UNSUPP: u8 = 2;
 const ID: &[u8; 20] = b"seedbox-disk\0\0\0\0\0\0\0\0";
 
 use seedbox_engine_core::virtqueue::{Chain, Diagnostics, Direction, Policy, Queue};
+use seedbox_engine_core::virtio_mmio::{Effect, Policy as MmioPolicy, Spec, Transport};
 #[cfg(test)]
 fn rd16(m: &[u8], a: usize) -> u16 { u16::from_le_bytes(m[a..a+2].try_into().unwrap()) }
 trait BlockQueue {
@@ -56,13 +56,7 @@ pub struct BlkStats {
 #[derive(Clone)]
 pub struct VirtioBlk {
     pub disk: Disk,
-    dev_sel: u32,
-    drv_sel: u32,
-    drv_features: [u32; 2],
-    queue_sel: u32,
-    q: Queue,
-    status: u32,
-    isr: u32,
+    transport: Transport,
     pub stats: BlkStats,
     /// Guest memory ranges (start, len) written by the device since last taken.
     pub dirty: Vec<(usize, usize)>,
@@ -84,13 +78,7 @@ impl VirtioBlk {
     pub fn new(disk: Disk) -> Self {
         Self {
             disk,
-            dev_sel: 0,
-            drv_sel: 0,
-            drv_features: [0; 2],
-            queue_sel: 0,
-            q: Queue::default(),
-            status: 0,
-            isr: 0,
+            transport: Transport::new(Spec {device_id:2,features:[F_FLUSH,F_VERSION_1]},1,MmioPolicy::Block),
             stats: BlkStats::default(),
             dirty: Vec::new(),
         }
@@ -105,78 +93,33 @@ impl VirtioBlk {
     }
 
     pub fn read(&mut self, off: u64) -> u32 {
-        let q0 = self.queue_sel == 0;
-        match off {
-            0x000 => 0x7472_6976,
-            0x004 => 2,
-            0x008 => 2, // block device
-            0x00c => 0x5345_4544,
-            0x010 => match self.dev_sel {
-                0 => F_FLUSH,
-                1 => F_VERSION_1,
-                _ => 0,
-            },
-            0x034 => if q0 { QSIZE as u32 } else { 0 },
-            0x044 => (q0 && self.q.ready) as u32,
-            0x060 => self.isr,
-            0x070 => self.status,
-            0x0fc => 0,
-            o if o >= 0x100 => {
-                let b = o - 0x100;
-                u32::from_le_bytes([self.config(b), self.config(b + 1), self.config(b + 2), self.config(b + 3)])
-            }
-            _ => 0,
-        }
+        if off >= 0x100 {
+            let b = off - 0x100;
+            u32::from_le_bytes([self.config(b), self.config(b + 1), self.config(b + 2), self.config(b + 3)])
+        } else { self.transport.read(off) }
     }
 
     pub fn write(&mut self, m: &mut [u8], off: u64, v: u32) -> Result<Notified, String> {
         let mut out = Notified::default();
-        let q0 = self.queue_sel == 0;
-        match off {
-            0x014 => self.dev_sel = v,
-            0x020 => {
-                if self.drv_sel < 2 {
-                    self.drv_features[self.drv_sel as usize] = v;
-                }
+        match self.transport.write(off,v)? {
+            Effect::Notify(_) => out = self.process(m)?,
+            Effect::Reset => {
+                // Model reset retains the disk, statistics and uncollected journal.
+                let (disk, stats, dirty) = (self.disk.clone(), self.stats.clone(), std::mem::take(&mut self.dirty));
+                *self = Self::new(disk);
+                self.stats = stats;
+                self.dirty = dirty;
             }
-            0x024 => self.drv_sel = v,
-            0x030 => self.queue_sel = v,
-            0x038 if q0 => self.q.num = v as u16,
-            0x044 if q0 => {
-                self.q.ready = v == 1;
-                self.q.last_avail = 0;
-                self.q.used_idx = 0;
-            }
-            0x050 if v == 0 => out = self.process(m)?,
-            0x064 => self.isr &= !v,
-            0x070 => {
-                self.status = v;
-                if v == 0 {
-                    // Device reset: the transport starts over, the disk does not.
-                    let (disk, stats, dirty) = (self.disk.clone(), self.stats.clone(), std::mem::take(&mut self.dirty));
-                    *self = Self::new(disk);
-                    self.stats = stats;
-                    self.dirty = dirty;
-                }
-            }
-            0x080 if q0 => self.q.desc = (self.q.desc & !0xffff_ffff) | v as u64,
-            0x084 if q0 => self.q.desc = (self.q.desc & 0xffff_ffff) | (v as u64) << 32,
-            0x090 if q0 => self.q.avail = (self.q.avail & !0xffff_ffff) | v as u64,
-            0x094 if q0 => self.q.avail = (self.q.avail & 0xffff_ffff) | (v as u64) << 32,
-            0x0a0 if q0 => self.q.used = (self.q.used & !0xffff_ffff) | v as u64,
-            0x0a4 if q0 => self.q.used = (self.q.used & 0xffff_ffff) | (v as u64) << 32,
-            _ => {}
+            Effect::None => {},
         }
-        if out.irq {
-            self.isr |= 1;
-        }
+        if out.irq { self.transport.isr |= 1; }
         Ok(out)
     }
 
     /// Carry out every available request in ring order.
     fn process(&mut self, m: &mut [u8]) -> Result<Notified, String> {
         let mut out = Notified::default();
-        while let Some(chain) = self.q.next(m)? {
+        while let Some(chain) = self.transport.queues[0].next(m)? {
             let segments = &chain.segments;
             let readable: usize = segments.iter().filter(|s| !s.writable).map(|s| s.len).sum();
             let writable: usize = segments.iter().filter(|s| s.writable).map(|s| s.len).sum();
@@ -247,7 +190,7 @@ impl VirtioBlk {
                     self.dirty.push((s.offset + n, 1));
                 }
             }
-            self.q.complete_chain(m, &chain, done + 1, |a, n| self.dirty.push((a, n)));
+            self.transport.queues[0].complete_chain(m, &chain, done + 1, |a, n| self.dirty.push((a, n)));
             out.log.push((kind, sector, status));
             out.completed += 1;
             out.irq = true;
@@ -417,7 +360,7 @@ mod tests {
         g.write(1, &[7; SECTOR]);
         g.notify();
         g.dev.write(&mut g.m, 0x070, 0).unwrap();
-        assert!(!g.dev.q.ready);
+        assert!(!g.dev.transport.queues[0].ready);
         assert_eq!(g.dev.disk.volatile_sectors(), 1);
         assert_eq!(g.dev.stats.writes, 1);
     }
@@ -431,4 +374,31 @@ mod tests {
         assert_eq!(&g.m[d as usize..d as usize + 12], b"seedbox-disk");
         assert_eq!(g.at(s), S_OK);
     }
+
+    #[test]
+    fn cloned_device_repeats_dma_and_preserves_journal_across_reset() {
+        let mut g = Guest::new(8);
+        let first_status = g.write(1, &[7; SECTOR]);
+        g.notify();
+        let saved = (g.dev.clone(), g.m.clone(), g.next_desc, g.avail_idx, g.next_buf);
+        let (data, status) = g.read(1, SECTOR);
+        let expected = g.notify();
+        let memory = g.m.clone();
+        let dirty = vec![(first_status as usize,1),(USED as usize+4,8),(USED as usize+2,2),
+            (data as usize,SECTOR),(status as usize,1),(USED as usize+12,8),(USED as usize+2,2)];
+        assert_eq!(g.dev.dirty,dirty);
+        g.dev = saved.0; g.m = saved.1; g.next_desc = saved.2; g.avail_idx = saved.3; g.next_buf = saved.4;
+        assert_eq!(g.read(1,SECTOR),(data,status));
+        assert_eq!(g.notify(),expected);
+        assert_eq!(g.m,memory);
+        assert_eq!(g.dev.dirty,dirty);
+        let stats = g.dev.stats.clone();
+        let disk = g.dev.disk.digest();
+        g.dev.write(&mut g.m,0x070,0).unwrap();
+        assert_eq!(g.dev.dirty,dirty);
+        assert_eq!(g.dev.stats,stats);
+        assert_eq!(g.dev.disk.digest(),disk);
+        assert_eq!(g.dev.read(0x044),0);
+    }
+
 }
