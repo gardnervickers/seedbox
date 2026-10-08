@@ -2132,6 +2132,30 @@ mod net_poll_tests {
     }
     #[test]
     #[ignore = "requires KVM on a Linux x86-64 host"]
+    fn pv_stop_adopts_the_guest_clock() {
+        let kvm = Kvm::new().unwrap();
+        for arm in [false, true] {
+            // Read the clock 5 ms ahead of the VMM, optionally arm one PIT
+            // tick through port 0x530, halt. The stop's time, which the world
+            // plans the next limit from, and any deadline follow that clock.
+            let mut code = vec![0xc7, 0x05, 0x08, 0x00, 0x00, 0xd0];
+            code.extend_from_slice(&5_000_000u32.to_le_bytes());
+            if arm { code.extend_from_slice(&[0xb8, 1, 0, 0, 0, 0xba, 0x30, 0x05, 0, 0, 0x66, 0xef]); }
+            code.push(0xf4);
+            let mut kernel = vec![0; 1024];kernel[0x1f1] = 1;kernel.extend(code);
+            let spec = BootSpec { kernel: &kernel, initrd: &[], cmdline: String::new(), mem: INITRD_ADDR + 0x100000,
+                rng_seed: [0; 32], mac: None, control_channel: false, disk: None,
+                undo_margin: 0, barrier: false, pv_clock: true, page_timer: false};
+            let mut m = Machine::new(&kvm, "pv-stop", &spec).unwrap();
+            let mut frames = Vec::new();
+            let mut stop = m.run_until(&mut Natural, 10_000_000, 0, &mut frames).unwrap();
+            while stop == Stop::Reached { stop = m.run_until(&mut Natural, 10_000_000, 0, &mut frames).unwrap(); }
+            assert!(m.time >= 5_000_000, "arm={arm} time {}", m.time);
+            assert!(m.pit.deadline.is_none_or(|d| d > 5_000_000), "arm={arm} {:?}", m.pit.deadline);
+        }
+    }
+    #[test]
+    #[ignore = "requires KVM on a Linux x86-64 host"]
     fn deferred_tx_completes_a_pv_spin_without_halt_kick_or_interrupts() {
         use std::time::Duration;
         use super::pv::PvClock;
