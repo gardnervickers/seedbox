@@ -146,30 +146,20 @@ The guest supervisor is built into `seedbox`, and BusyBox comes from
 `SEEDBOX_BUSYBOX`. A missing input fails before preparation starts and names
 every location searched.
 
-Qualified Zen execution requires the versioned `amd-zen3-engine391f-v3` host policy in
-[host requirements](../README.md#host-requirements). Run validates immutable
-engine/guest-kernel inputs and performs host admission before OCI work; host-kernel
-bytes are not checked. Temporary core reservations, affinity and disabled
-exact-event perf descriptors are released
+Zen execution performs host admission before OCI work: an AMD x86-64 CPU with the
+KVM and perf capabilities the engine needs (see
+[host requirements](../README.md#host-requirements)). CPU model, microcode, CPUID,
+engine, guest-kernel and host-kernel bytes are not pinned. Temporary core
+reservations, affinity and disabled exact-event perf descriptors are released
 before preparation on success/error; cleanup failure refuses admission. The actual
 leased core/siblings are rechecked before any workaround MSR write or VMM spawn.
-Complete raw static/leased CPUID observations and workaround/restore diagnostics
-are retained as Seedbox-owned output. The expected filtered table is source-derived;
-it is not an actual guest-visible CPUID observation. The complete table retains
-KVM's entry order, as the unchanged engine does; live observations are never
-sorted or repaired. Correcting the earlier sorted expected table changes the full
-policy fingerprint and run identity. A prior full proof of that table remains
-NOT_COMPARABLE, with the original manifest preserved. Zero padding remains a
-strict expectation; decoded syscall traces do not measure those padding bytes.
-A static field refusal is reported before unattempted perf readiness.
+Raw static/leased CPUID observations and workaround/restore diagnostics are
+retained as Seedbox-owned output. A static capability refusal is reported before
+unattempted perf readiness.
 
-Inspect, export and import keep old manifests unchanged. Missing or drifted proof
-in an old replay produces a retained ERROR/NOT_COMPARABLE rejection with a specific
-host-admission reason and exit 2 before host execution. `--allow-engine-change`
-cannot bypass the policy. Historical use of a previous retained CLI remains
-possible and has its own evidence boundary. A second machine matching every
-required field receives compatibility admission, not cross-host qualification.
-No host-ID enrollment or application-specific output schema is added.
+Inspect, export and import keep old manifests unchanged. Run identities carry no
+host-policy proof; `host_policy*` fields in older records are kept as data and do
+not block replay.
 
 Without `--cpu`, the executor leases the first free core, in ascending order,
 among the CPUs the process may run on, skipping CPU 0's core. With `--cpu N` it
@@ -283,10 +273,8 @@ strict hard-stop check.
 
 Engines and guest kernels are not pinned: run, explore, replay and doctor admit
 any built VMM and guest kernel, and each run records their hashes in its
-identity. `--allow-dev-engine` is still accepted and has no effect. Runs recorded earlier with
-`engine_qualification = "dev-unpinned"` still replay on their exact retained
-engine and kernel, and `--allow-engine-change` cannot change their engine.
-All other admission checks remain in force.
+identity. `--allow-dev-engine` is still accepted and has no effect. An older
+record's `engine_qualification` parameter is kept as data and does not block replay.
 
 Replay defaults to the retained engine. An explicit `--vmm NEW_BINARY
 --allow-engine-change` permits a fresh identity and witness comparison with it.
@@ -800,8 +788,7 @@ state uses the retained engine/guest/kernel inputs and preserves existing
 PASS/FAIL, ERROR, INCOMPLETE, TIMEOUT and MATCH/MISMATCH meanings. It requires the
 compatible installed Seedbox release and qualified host runtime/profile. Exporting
 engine bytes does not establish cross-host or cross-backend compatibility;
-CPU/microcode, CPUID and capability drift is refused by the versioned admission
-policy; focused guest/profile acceptance remains a separate gate. Portable fixture
+missing KVM or perf capabilities are refused by host admission. Portable fixture
 replay verifies the bundle mechanism; offline application replay requires separate hardware acceptance.
 
 ### Explicit unqualified counters
@@ -809,9 +796,8 @@ replay verifies the bundle mechanism; offline application replay requires separa
 `--allow-unqualified-cpu` applies consistently to run, explore and replay. It
 permits only an explicitly selected known non-Zen counter, with a warning that
 results are unverified. Its `counter` semantic parameter identifies the
-experimental profile; qualified AMD `host_policy` fields are absent and a mixed
-profile is refused. Replay still requires the recorded counter and exact
-supported release/input bytes. The flag cannot bypass release pins, checksums,
+experimental profile. Replay still requires the recorded counter and exact
+supported release/input bytes. The flag cannot bypass checksums,
 retained-profile checks or CPU ownership. This encoding is intentional; old
 records are not silently upgraded or relabeled.
 

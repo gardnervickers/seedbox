@@ -39,15 +39,11 @@ pub struct VmmExecutor {
 /// Successful compatibility observation; it is not empirical replay qualification.
 #[derive(Debug, Serialize)]
 pub struct DoctorReport {
-    pub policy_version: String,
-    pub policy_fingerprint: String,
     pub cpu: u32,
     pub cpus: Vec<u32>,
     pub engine: ContentDigest,
     pub kernel: ContentDigest,
     pub observations: Vec<crate::admission::CoreObservation>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub engine_qualification: Option<String>,
 }
 
 struct AdmissionProbe {
@@ -96,9 +92,7 @@ impl VmmExecutor {
             ("control_channel".into(), "virtio-console-v1".into()),
             ("memory_mb".into(), memory_mb.to_string()),
         ]);
-        if counter == CounterProfile::Zen {
-            semantic_parameters.extend(crate::admission::bindings()?);
-        } else {
+        if counter != CounterProfile::Zen {
             semantic_parameters.insert(COUNTER.into(), counter.name().into());
         }
         Ok(Self {
@@ -178,8 +172,6 @@ impl VmmExecutor {
             crate::admission::validate_observation(observation)?;
         }
         Ok(DoctorReport {
-            policy_version: self.profile.semantic_parameters["host_policy"].clone(),
-            policy_fingerprint: self.profile.semantic_parameters["host_policy_fingerprint"].clone(),
             cpu: probe
                 .cpu
                 .ok_or_else(|| Error::Execution("host probe did not select a CPU".into()))?,
@@ -191,11 +183,6 @@ impl VmmExecutor {
             engine: self.profile.engine.clone(),
             kernel,
             observations: probe.observations,
-            engine_qualification: self
-                .profile
-                .semantic_parameters
-                .get(crate::admission::ENGINE_QUALIFICATION)
-                .cloned(),
         })
     }
 
@@ -1748,7 +1735,7 @@ mod linux {
 #[cfg(test)]
 mod doctor_tests {
     use super::*;
-    use crate::admission::{required_policy, CoreObservation, ENGINE, GUEST_KERNEL};
+    use crate::admission::{required_policy, CoreObservation};
 
     #[test]
     fn capacity_admission_holds_all_reservations_and_releases_them_on_every_exit() {
@@ -1798,7 +1785,7 @@ mod doctor_tests {
     #[test]
     fn parallel_preflight_preserves_the_experimental_admission_gate() {
         let pinned = VmmExecutor::from_engine_digest(
-            ContentDigest::try_from(ENGINE.to_owned()).unwrap(),
+            ContentDigest::of(b"engine"),
             None,
             512,
             WitnessMode::Exits,
@@ -1828,15 +1815,15 @@ mod doctor_tests {
     }
 
     fn observed(cpu: u32) -> CoreObservation {
-        let p = required_policy().unwrap();
+        let p = required_policy();
         CoreObservation {
             cpu,
             architecture: p.architecture,
             vendor: p.vendor,
-            family: p.family,
-            model: p.model,
-            stepping: p.stepping,
-            microcode: p.microcode,
+            family: 25,
+            model: 33,
+            stepping: 0,
+            microcode: 0,
             kvm_api: p.kvm_api,
             immediate_exit: p.immediate_exit,
             guest_debug: p.guest_debug,
@@ -1845,18 +1832,18 @@ mod doctor_tests {
             perf_disabled_open: true,
             perf_error: None,
             workaround_msr: 17,
-            raw_cpuid: p.effective_cpuid,
+            raw_cpuid: Vec::new(),
         }
     }
     #[test]
     fn any_engine_and_kernel_pair_is_admitted() {
-        let pinned_engine = ContentDigest::try_from(ENGINE.to_owned()).unwrap();
-        let pinned_kernel = ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap();
+        let pinned_engine = ContentDigest::of(b"engine");
+        let pinned_kernel = ContentDigest::of(b"kernel");
         for (engine, kernel) in [
             (pinned_engine, pinned_kernel),
             (
                 ContentDigest::of(b"dev engine"),
-                ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap(),
+                ContentDigest::of(b"kernel"),
             ),
             (
                 ContentDigest::of(b"dev engine"),
@@ -1889,14 +1876,16 @@ mod doctor_tests {
                 .semantic_parameters
                 .contains_key(crate::admission::ENGINE_QUALIFICATION));
             backend.validate_retained(&inputs).unwrap();
-            // Runs recorded before pins were removed carry the dev marker and still replay.
+            // Older runs carry a dev marker and policy bindings; both are only data now.
             let mut marked = inputs.clone();
-            marked.profile.semantic_parameters.insert(
-                crate::admission::ENGINE_QUALIFICATION.into(),
-                crate::admission::DEV_UNPINNED.into(),
-            );
+            for key in [crate::admission::ENGINE_QUALIFICATION, "host_policy"] {
+                marked
+                    .profile
+                    .semantic_parameters
+                    .insert(key.into(), "anything".into());
+            }
             backend.validate_retained(&marked).unwrap();
-            for key in ["host_policy", "guest_abi", "control_channel", "memory_mb"] {
+            for key in ["guest_abi", "control_channel", "memory_mb"] {
                 let mut wrong = inputs.clone();
                 wrong
                     .profile
@@ -1917,27 +1906,13 @@ mod doctor_tests {
             let json = serde_json::to_value(report).unwrap();
             assert!(json["engine_qualification"].is_null());
         }
-        let mut forged = VmmExecutor::from_engine_digest(
-            ContentDigest::of(b"dev engine"),
-            None,
-            512,
-            WitnessMode::Exits,
-            CounterProfile::Zen,
-        )
-        .unwrap()
-        .profile();
-        forged.semantic_parameters.insert(
-            crate::admission::ENGINE_QUALIFICATION.into(),
-            "qualified".into(),
-        );
-        assert!(crate::admission::validate_profile(&forged).is_err());
     }
 
     #[test]
     fn experimental_mode_never_carries_amd_proof_and_cannot_relax_release_or_counter_checks() {
         let make = |counter| {
             VmmExecutor::from_engine_digest(
-                ContentDigest::try_from(ENGINE.to_owned()).unwrap(),
+                ContentDigest::of(b"engine"),
                 None,
                 512,
                 WitnessMode::Exits,
@@ -1969,15 +1944,10 @@ mod doctor_tests {
         let mut wrong = experimental.profile.clone();
         wrong
             .semantic_parameters
-            .extend(crate::admission::bindings().unwrap());
-        assert!(crate::admission::validate_profile(&wrong).is_err());
-        wrong = experimental.profile.clone();
-        wrong
-            .semantic_parameters
             .insert("counter".into(), "unknown".into());
         assert!(crate::admission::validate_profile(&wrong).is_err());
         let inputs = PreparedInputs {
-            kernel: ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap(),
+            kernel: ContentDigest::of(b"kernel"),
             images: BTreeMap::new(),
             placement: BTreeMap::new(),
             guests: BTreeMap::new(),
@@ -1995,18 +1965,12 @@ mod doctor_tests {
             .with_unqualified_cpu(true)
             .validate_retained(&inputs)
             .is_err());
-        let zen = make(CounterProfile::Zen);
-        let mut stripped = zen.profile.clone();
-        stripped
-            .semantic_parameters
-            .retain(|key, _| !key.starts_with("host_policy"));
-        assert!(crate::admission::validate_profile(&stripped).is_err());
     }
 
     #[test]
     fn doctor_report_preserves_actual_selected_core_and_exact_admitted_observations() {
         let executor = VmmExecutor::from_engine_digest(
-            ContentDigest::try_from(ENGINE.to_owned()).unwrap(),
+            ContentDigest::of(b"engine"),
             None,
             1024,
             WitnessMode::Exits,
@@ -2016,7 +1980,7 @@ mod doctor_tests {
         let observations = vec![observed(2), observed(18)];
         let report = executor
             .doctor_report(
-                ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap(),
+                ContentDigest::of(b"kernel"),
                 AdmissionProbe {
                     cpu: Some(18),
                     observations: observations.clone(),
@@ -2038,7 +2002,7 @@ mod doctor_tests {
     #[test]
     fn no_doctor_success_report_on_probe_cleanup_error_or_capability_drift() {
         let executor = VmmExecutor::from_engine_digest(
-            ContentDigest::try_from(ENGINE.to_owned()).unwrap(),
+            ContentDigest::of(b"engine"),
             Some(2),
             1024,
             WitnessMode::Exits,
@@ -2051,7 +2015,7 @@ mod doctor_tests {
                 observation.perf_disabled_open = false;
             }
             if case == 2 {
-                observation.raw_cpuid[0].flags ^= 1;
+                observation.immediate_exit = 0;
             }
             let result = if case == 0 {
                 Err(Error::Execution(
@@ -2062,7 +2026,7 @@ mod doctor_tests {
             };
             assert!(executor
                 .doctor_report(
-                    ContentDigest::try_from(GUEST_KERNEL.to_owned()).unwrap(),
+                    ContentDigest::of(b"kernel"),
                     AdmissionProbe {
                         cpu: Some(2),
                         observations: vec![observation],

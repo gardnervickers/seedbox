@@ -1252,7 +1252,7 @@ fn rejected_preflight_never_prepares_and_post_preparation_drift_never_executes()
 }
 
 #[test]
-fn actual_vmm_admission_rejects_old_proof_before_execution_and_engine_override() {
+fn actual_vmm_admission_rejects_an_invalid_retained_profile_before_execution() {
     let fixture = Fixture::new();
     let original = fixture.run();
     let manifest = fs::read(original.directory.join("manifest.json")).unwrap();
@@ -1285,11 +1285,8 @@ fn actual_vmm_admission_rejects_old_proof_before_execution_and_engine_override()
             rejected.record.replay.unwrap().status,
             ReplayStatus::NotComparable
         );
-        assert!(rejected
-            .record
-            .error
-            .unwrap()
-            .contains("host admission proof missing"));
+        let e = rejected.record.error.unwrap();
+        assert!(e.contains("unsupported guest_abi"), "{e}");
         assert!(!rejected.directory.join("output").exists());
         assert_eq!(
             fs::read(original.directory.join("manifest.json")).unwrap(),
@@ -2166,7 +2163,7 @@ fn timebase_changes_identity_while_default_counter_preserves_legacy_bytes() {
     let engine = f.directory.path().join("engine");
     fs::write(&engine, b"fixture engine").unwrap();
     // The exact pre-timebase profile: no timebase parameter in its identity.
-    let mut legacy = ExecutionProfile {
+    let legacy = ExecutionProfile {
         backend: "seedbox-kvm".into(),
         engine: f.backend.profile.engine.clone(),
         witness_mode: WitnessMode::Exits,
@@ -2176,9 +2173,6 @@ fn timebase_changes_identity_while_default_counter_preserves_legacy_bytes() {
             ("memory_mb".into(), "1024".into()),
         ]),
     };
-    legacy
-        .semantic_parameters
-        .extend(seedbox::admission::bindings().unwrap());
     f.backend.profile = legacy.clone();
     f.preparer.inputs.profile = legacy;
     let before = f.run();
