@@ -197,6 +197,23 @@ impl Planner {
             | (u32::from_le_bytes([g[8], g[9], g[10], g[11]]) as u64) << 32)
     }
 
+    /// Whether the straight-line block starting at `ip` (up to its first
+    /// control transfer) executes PAUSE. Diagnostics only.
+    pub fn block_has_pause(&self, mem: &[u8], ip: u64) -> bool {
+        let mut ip = ip;
+        for _ in 0..256 {
+            let Ok(ins) = self.decode(mem, ip) else { return false };
+            if ins.mnemonic() == Mnemonic::Pause {
+                return true;
+            }
+            if ins.flow_control() != FlowControl::Next {
+                return false;
+            }
+            ip = ins.next_ip();
+        }
+        false
+    }
+
     fn decode(&self, mem: &[u8], ip: u64) -> Result<Instruction, String> {
         let mut b = [0u8; 16];
         let n = read_virt(&self.paging, mem, ip, &mut b);

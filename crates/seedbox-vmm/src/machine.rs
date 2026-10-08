@@ -228,6 +228,9 @@ pub struct Stats {
     pub spin_clock_progress: u64,
     /// Per state part, cycle checks that failed first on it.
     pub spin_mismatch: std::collections::BTreeMap<String, u64>,
+    /// Proven spin cycles by canonical RIP, privilege level and whether any
+    /// of the cycle's blocks executes PAUSE (diagnostics).
+    pub spin_sites: std::collections::BTreeMap<String, u64>,
     /// Virtual time advanced, by cause (see `Cause`).
     pub time_by: [u64; 5],
     /// Report-only timer diagnostics. Writes to the PIT or port 0x530, and

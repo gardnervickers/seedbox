@@ -181,6 +181,7 @@ impl PvClock {
                     // the same on every pass, so the least one is a point we
                     // reach whichever pass we noticed on.
                     let target = *keys.iter().min().unwrap();
+                    note_site(m, &keys, target.0);
                     if keys.iter().filter(|&&k| k == target).count() > 1 {
                         return Err(format!(
                             "{}: spin cycle at rip {:#x} has no unique canonical point (equal registers at two points of it)",
@@ -262,6 +263,15 @@ impl PvClock {
         m.page_set(PAGE_SYSCALL_TARGET, syscalls + left);
         Ok(Prepared::Run)
     }
+}
+
+/// Count a proven cycle under its canonical RIP, CPL and whether it pauses.
+fn note_site(m: &mut Machine, keys: &[Key], rip: u64) {
+    let cpl = unsafe { m.vcpu.get_kvm_run().s.regs.sregs.cs.selector } & 3;
+    let mem = unsafe { std::slice::from_raw_parts(m.mem, m.mem_size) };
+    let pause = m.planner.as_ref().is_some_and(|p| keys.iter().any(|k| p.block_has_pause(mem, k.0)));
+    let site = format!("{rip:#x} cpl{cpl} pause{}", pause as u8);
+    *m.stats.spin_sites.entry(site).or_default() += 1;
 }
 
 fn key(r: &kvm_bindings::kvm_regs) -> Key {
