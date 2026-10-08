@@ -365,7 +365,12 @@ impl Saved {
         let page = page_copy(m);
         let part = match self.cpu.differs(&cpu) {
             Some(part) => Some(part),
-            None => match self.page.iter().zip(page.iter()).position(|(a, b)| a != b) {
+            // Stage A prototype: crossings are counted but charge nothing,
+            // so a loop over several code pages would never repeat state
+            // through them alone. Leave the crossing words out of the proof.
+            None => match self.page.iter().zip(page.iter()).enumerate().position(|(i, (a, b))| {
+                a != b && !(super::PAGE_CROSSINGS * 8..(super::PAGE_CROSSING_WALKS + 1) * 8).contains(&i)
+            }) {
                 Some(at) => Some(format!("time page word {}", at / 8)),
                 None => {
                     let ram = match (&self.ram, m.undo.as_mut()) {

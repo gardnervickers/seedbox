@@ -54,9 +54,9 @@ const PAGE_BOUND: usize = 7;
 const PAGE_SYSCALL_TARGET: usize = 8;
 /// PV clock: crossings into user code pages (guest-counted), the target the
 /// VMM may publish for them, and full re-protections (diagnostic).
-const PAGE_CROSSINGS: usize = 14;
+pub(crate) const PAGE_CROSSINGS: usize = 14;
 const PAGE_CROSSING_TARGET: usize = 15;
-const PAGE_CROSSING_WALKS: usize = 16;
+pub(crate) const PAGE_CROSSING_WALKS: usize = 16;
 
 // Pin every extension word without extending the checkpoint/digest prefix.
 const _: () = {
