@@ -455,7 +455,14 @@ impl<B: Backend> Machine<B> {
         }
         while self.raw_exits < 5_000_000 {
             before_run();
-            let stop = self.backend.run()?;
+            let stop = match self.backend.run()? {
+                backend::RunStop::Guest(stop) => stop,
+                // Host stops create no Pending operation. Re-enter through
+                // before_run so cancellation/liveness remains observable, but
+                // do not read/publish PV time, deliver IRQs, complete an exit,
+                // spend a semantic budget or append a witness record.
+                backend::RunStop::Interrupted => continue,
+            };
             self.raw_exits += 1;
             if self.backend.get_sys_reg(SysReg::CNTV_CTL)? & 1 != 0 {
                 return Err("architectural virtual timer enabled: PV timer leak".into());
@@ -842,13 +849,14 @@ mod tests {
 #[cfg(test)]
 mod spi_regression {
     use super::*;
-    use crate::backend::{core_index, DirtyPages, Stop};
+    use crate::backend::{core_index, DirtyPages, RunStop};
     use std::collections::BTreeMap;
     #[derive(Default)]
     struct Fake {
         regs: BTreeMap<u32, u64>,
         sys: BTreeMap<u16, u64>,
         injected: Vec<(u32, bool)>,
+        stops: std::collections::VecDeque<RunStop>,
     }
     impl Backend for Fake {
         fn create() -> Result<Self> {
@@ -877,8 +885,10 @@ mod spi_regression {
             self.sys.insert(r.0, v);
             Ok(())
         }
-        fn run(&mut self) -> Result<Stop> {
-            Err("unexpected guest entry".into())
+        fn run(&mut self) -> Result<RunStop> {
+            self.stops
+                .pop_front()
+                .ok_or("unexpected guest entry".into())
         }
         fn complete(&mut self, _: Option<u64>) -> Result<()> {
             Ok(())
@@ -897,6 +907,30 @@ mod spi_regression {
         kernel[16..24].copy_from_slice(&4096u64.to_le_bytes());
         Machine::for_application(boot::BootSpec::fixture(&kernel, b"initrd", 1), [0; 6], None)
             .unwrap()
+    }
+    #[test]
+    fn host_interruptions_do_not_exhaust_last_semantic_exit() {
+        let mut m = machine();
+        m.ready = true;
+        m.raw_exits = 4_999_999;
+        m.backend.stops.extend([
+            RunStop::Interrupted,
+            RunStop::Interrupted,
+            backend::Stop {
+                pc: RAM_BASE,
+                exit: Exit::Wfi,
+            }
+            .into(),
+        ]);
+        let mut entries = 0;
+        assert_eq!(
+            m.run_until(10, || entries += 1).unwrap(),
+            MachineStop::Horizon { time_ns: 10 }
+        );
+        assert_eq!(entries, 3);
+        assert_eq!(m.raw_exits, 5_000_000);
+        assert_eq!(m.trace.len(), 1);
+        assert!(m.backend.injected.is_empty());
     }
     #[test]
     fn overlapping_sources_cannot_queue_a_second_hardware_irq() {

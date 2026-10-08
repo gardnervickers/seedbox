@@ -233,55 +233,51 @@ impl Backend for Kvm {
         )?;
         Ok(value as u64)
     }
-    fn run(&mut self) -> Result<Stop> {
+    fn run(&mut self) -> Result<RunStop> {
         if self.pending.is_some() {
             return Err("run before completing held KVM exit".into());
         }
-        let exit = loop {
-            match self.cpu_mut()?.run() {
-                Ok(VcpuExit::MmioRead(addr, b)) => {
-                    break Exit::Mmio {
-                        addr,
-                        len: b.len() as u8,
-                        write: false,
-                        data: 0,
-                        reg: None,
-                    }
+        let exit = match self.cpu_mut()?.run() {
+            Ok(VcpuExit::MmioRead(addr, b)) => Exit::Mmio {
+                addr,
+                len: b.len() as u8,
+                write: false,
+                data: 0,
+                reg: None,
+            },
+            Ok(VcpuExit::MmioWrite(addr, b)) => {
+                let mut data = [0; 8];
+                if b.len() > 8 {
+                    return Err("KVM MMIO exceeds 8 bytes".into());
                 }
-                Ok(VcpuExit::MmioWrite(addr, b)) => {
-                    let mut data = [0; 8];
-                    if b.len() > 8 {
-                        return Err("KVM MMIO exceeds 8 bytes".into());
-                    }
-                    data[..b.len()].copy_from_slice(b);
-                    break Exit::Mmio {
-                        addr,
-                        len: b.len() as u8,
-                        write: true,
-                        data: u64::from_le_bytes(data),
-                        reg: None,
-                    };
+                data[..b.len()].copy_from_slice(b);
+                Exit::Mmio {
+                    addr,
+                    len: b.len() as u8,
+                    write: true,
+                    data: u64::from_le_bytes(data),
+                    reg: None,
                 }
-                Ok(VcpuExit::Hypercall(h)) => {
-                    // On arm64 this union member contains SMCCC flags: bit 0
-                    // means SMC, bit 1 means a 16-bit instruction. Our ABI is HVC64.
-                    if h.longmode != 0 {
-                        return Err(format!("unexpected KVM SMCCC flags {:#x}", h.longmode));
-                    }
-                    break Exit::Hvc { imm: 0 };
-                }
-                Ok(VcpuExit::Intr) => continue,
-                Err(e) if e.errno() == libc::EINTR => continue,
-                Err(e) => return Err(format!("KVM_RUN: {e}")),
-                Ok(other) => return Err(format!("unexpected KVM exit {other:?}")),
             }
+            Ok(VcpuExit::Hypercall(h)) => {
+                // On arm64 this union member contains SMCCC flags: bit 0
+                // means SMC, bit 1 means a 16-bit instruction. Our ABI is HVC64.
+                if h.longmode != 0 {
+                    return Err(format!("unexpected KVM SMCCC flags {:#x}", h.longmode));
+                }
+                Exit::Hvc { imm: 0 }
+            }
+            Ok(VcpuExit::Intr) => return Ok(RunStop::Interrupted),
+            Err(e) if e.errno() == libc::EINTR => return Ok(RunStop::Interrupted),
+            Err(e) => return Err(format!("KVM_RUN: {e}")),
+            Ok(other) => return Err(format!("unexpected KVM exit {other:?}")),
         };
         let mut pc = self.get_reg(CoreReg::Pc)?;
         if matches!(exit, Exit::Hvc { .. }) {
             pc = pc.checked_sub(4).ok_or("invalid HVC PC")?;
         }
         self.pending = Some(exit.clone());
-        Ok(Stop { pc, exit })
+        Ok(Stop { pc, exit }.into())
     }
     fn complete(&mut self, read: Option<u64>) -> Result<()> {
         let exit = self.pending.take().ok_or("no KVM exit to complete")?;

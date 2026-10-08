@@ -1,5 +1,5 @@
 use seedbox_arm64::{
-    backend::{Backend, CoreReg, DirtyPages, Stop, SysReg},
+    backend::{Backend, CoreReg, DirtyPages, RunStop, SysReg},
     boot::{
         BootSpec, COMMAND_LINE_SIZE, DEFAULT_COMMAND_LINE, DTB_RESERVATION, GPA_LIMIT,
         MAX_RAM_BYTES,
@@ -407,7 +407,7 @@ impl Backend for CaptureBackend {
         CAPTURE.with(|capture| capture.borrow_mut().sys.insert(reg.0, value));
         Ok(())
     }
-    fn run(&mut self) -> Result<Stop> {
+    fn run(&mut self) -> Result<RunStop> {
         panic!("constructor test must not execute a guest")
     }
     fn complete(&mut self, _: Option<u64>) -> Result<()> {

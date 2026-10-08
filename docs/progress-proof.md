@@ -6,7 +6,8 @@ guest time or proves the guest idle. The engine requires no PMU.
 
 The KVM PV adapter uses this engine. ARM's current horizon clock is unchanged in
 this extraction stage: ARM still needs interrupt/debug landing and complete
-comparison primitives before it can use the same proof policy. This stage does
+comparison primitives before it can use the same proof policy. Its typed host
+interruption boundary is available without enabling asynchronous cancellation. This stage does
 not claim ARM no-exit-loop qualification or a completed shared world coordinator.
 
 ## Architecture boundary
@@ -66,3 +67,25 @@ periods and dirty/full-RAM modes. They require Linux and remain for the final me
 train. Portable policy tests do not establish hardware stepping correctness or
 state-inventory completeness. ARM requires native no-PMU guest qualification when
 its primitives are implemented.
+
+## ARM native primitive boundary
+
+Signed HVF checks confirm that a cancellation queued while stopped returns at the
+unchanged PC, holds no completion, and permits the original HVC to execute on the
+following entry. `RunStop::Interrupted` exposes that host boundary without making
+it a semantic event or an authenticated watchdog tick.
+
+Native EL1 experiments also found a transparency limit: a short exclusive-load /
+exclusive-store sequence succeeded in all ten uninterrupted runs and failed in
+all ten runs stopped at the intervening hardware breakpoint, after restoring the
+debugger overlay without changing guest RAM or general registers. A separate
+long-loop control had reservation failures without cancellation too; it does not
+isolate cancellation as their cause. Visible register and RAM equality therefore
+cannot establish complete arbitrary ARM state or debugger transparency.
+
+Ordinary ARM Linux guests retain the cooperative PV path with no newly enabled
+asynchronous watchdog or cycle proof. A future proof experiment must use an
+explicitly certified instruction scope and establish transparent landings, or
+provide a semantic solution for inaccessible reservation/event state. Rejecting
+an exclusive store after stopping cannot undo interference already introduced.
+Shared World extraction does not depend on enabling those probes.

@@ -275,19 +275,19 @@ impl Backend for Hvf {
     fn get_gic_dist(&self, offset: u16) -> Result<u64> {
         gic_dist(offset)
     }
-    fn run(&mut self) -> Result<Stop> {
+    fn run(&mut self) -> Result<RunStop> {
         if self.pending.is_some() {
             return Err("run before completing held HVF exit".into());
         }
-        let raw = loop {
-            unsafe {
-                check("hv_vcpu_run", hv_vcpu_run(self.cpu()?))?;
-            }
-            let raw = unsafe { *self.exit };
-            if raw.reason != 0 {
-                break raw;
-            } // canceled: no semantic event
-        };
+        unsafe {
+            check("hv_vcpu_run", hv_vcpu_run(self.cpu()?))?;
+        }
+        let raw = unsafe { *self.exit };
+        if raw.reason == 0 {
+            // No architectural instruction is held. In particular a queued
+            // cancel may return without entering at all; never complete PC+4.
+            return Ok(RunStop::Interrupted);
+        }
         if raw.reason == 2 {
             return Err("VTIMER_ACTIVATED: hardware timer leaked into PV guest".into());
         }
@@ -351,7 +351,7 @@ impl Backend for Hvf {
             sign_extend,
             wide,
         });
-        Ok(Stop { pc, exit })
+        Ok(Stop { pc, exit }.into())
     }
     fn complete(&mut self, read: Option<u64>) -> Result<()> {
         let p = self.pending.take().ok_or("no HVF exit to complete")?;
@@ -511,5 +511,49 @@ mod tests {
         assert_eq!(std::mem::size_of::<HvExit>(), 32);
         assert_eq!(std::mem::offset_of!(HvExit, exception), 8);
         assert_eq!(std::mem::size_of::<Exception>(), 24);
+    }
+    // Selected and signed explicitly by the native primitive check, never
+    // executed by portable tests or unsigned Cargo test discovery.
+    #[test]
+    #[ignore = "requires signed Apple Silicon hypervisor entitlement"]
+    fn canceled_entry_holds_no_instruction_and_preserves_pc() {
+        unsafe extern "C" {
+            fn hv_vcpus_exit(cpus: *const u64, count: u32) -> i32;
+        }
+        let mut backend = Hvf::create().unwrap();
+        let memory = Rc::new(Memory::new(crate::PAGE_SIZE).unwrap());
+        // HVC #0 is a guaranteed finite natural exit once the queued cancel
+        // has returned. It must still execute at the original PC.
+        unsafe {
+            memory.write(0, &0xd400_0002u32.to_le_bytes()).unwrap();
+        }
+        backend.map_memory(0, crate::RAM_BASE, memory).unwrap();
+        backend.create_vcpu().unwrap();
+        backend.set_reg(CoreReg::Pstate, 0x3c5).unwrap();
+        backend.set_reg(CoreReg::Pc, crate::RAM_BASE).unwrap();
+        let cpu = backend.cpu().unwrap();
+        for _ in 0..3 {
+            unsafe {
+                check("test hv_vcpus_exit", hv_vcpus_exit(&cpu, 1)).unwrap();
+            }
+            assert!(matches!(backend.run().unwrap(), RunStop::Interrupted));
+            assert_eq!(backend.get_reg(CoreReg::Pc).unwrap(), crate::RAM_BASE);
+            assert_eq!(
+                backend.complete(None).unwrap_err(),
+                "no HVF exit to complete"
+            );
+        }
+        let RunStop::Guest(stop) = backend.run().unwrap() else {
+            panic!("stale cancellation survived its observed stop");
+        };
+        assert_eq!(stop.pc, crate::RAM_BASE);
+        assert!(matches!(stop.exit, Exit::Hvc { imm: 0 }));
+        assert_eq!(backend.get_reg(CoreReg::Pc).unwrap(), crate::RAM_BASE + 4);
+        assert!(backend
+            .run()
+            .unwrap_err()
+            .contains("before completing held HVF exit"));
+        backend.complete(None).unwrap();
+        assert_eq!(backend.get_reg(CoreReg::Pc).unwrap(), crate::RAM_BASE + 4);
     }
 }

@@ -76,7 +76,7 @@ impl Backend for Mock {
         self.system.insert(reg.0, value);
         Ok(())
     }
-    fn run(&mut self) -> Result<Stop> {
+    fn run(&mut self) -> Result<RunStop> {
         let page = &self.memory[&1];
         let publication = unsafe { (page.word(0)?, page.word(16)?) };
         OBSERVED.with(|o| o.borrow_mut().entries.push(publication));
@@ -100,7 +100,8 @@ impl Backend for Mock {
                 return Ok(Stop {
                     pc: RAM_BASE,
                     exit: Exit::Hvc { imm: 0 },
-                });
+                }
+                .into());
             }
         };
         Ok(Stop {
@@ -112,7 +113,8 @@ impl Backend for Mock {
                 data,
                 reg: None,
             },
-        })
+        }
+        .into())
     }
     fn complete(&mut self, _: Option<u64>) -> Result<()> {
         OBSERVED.with(|o| o.borrow_mut().completions += 1);

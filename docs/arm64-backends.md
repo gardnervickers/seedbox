@@ -162,6 +162,19 @@ x86 VMM here.
 
 ### Exit and completion semantics
 
+`Backend::run` returns `RunStop::Guest(Stop)` or `RunStop::Interrupted`.
+HVF cancellation and ARM KVM INTR/EINTR return to the machine owner without a held
+instruction. The machine re-enters through its liveness hook without reading or
+publishing PV time, injecting IRQs, spending the guest-exit budget, completing an
+instruction or recording a witness event. The backend does not infer a watchdog
+cause from cancellation, and queued cancellation may return without guest entry.
+This plumbing introduces no asynchronous watchdog or ARM cycle-proof enablement.
+Run the signed native queued-cancellation check with
+`nix develop --command python3 tools/mac-runtime/check-primitives.py`. It copies
+the test binary before signing, bounds guest execution to 20 seconds, and removes
+the signed copy afterward. Portable machine tests cover repeated interruptions
+with a pending timer and the last available semantic exit-budget slot.
+
 `Exit` includes `Mmio { addr, len, write, data, reg }`, `Hvc { imm }`, `Wfi`,
 `SysReg` and `Other(raw)`. `Stop.pc` always identifies the trapping instruction.
 HVC APIs report the next PC; both adapters subtract four for the recorded stop

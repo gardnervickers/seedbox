@@ -58,7 +58,7 @@ impl<const EXTENDED: bool, const REARM: bool> Backend for G<EXTENDED, REARM> {
         self.sys.insert(r.0, v);
         Ok(())
     }
-    fn run(&mut self) -> Result<Stop> {
+    fn run(&mut self) -> Result<RunStop> {
         let mmio = |addr, data| Exit::Mmio {
             addr,
             len: 8,
@@ -222,7 +222,8 @@ impl<const EXTENDED: bool, const REARM: bool> Backend for G<EXTENDED, REARM> {
         Ok(Stop {
             pc: 0x4008_0000 + 4 * self.step as u64,
             exit,
-        })
+        }
+        .into())
     }
     fn complete(&mut self, _: Option<u64>) -> Result<()> {
         Ok(())
