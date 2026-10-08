@@ -144,6 +144,7 @@ class DispatchTests(unittest.TestCase):
             plan = dict(target='a' * 40, base='b' * 40, checks={'cluster-fixed': []}, warnings=[])
             with patch.object(host_check.sys, 'platform', 'linux'), \
                  patch.dict(host_check.os.environ, env, clear=True), \
+                 patch.object(host_check.subprocess, 'check_output', return_value=str(root) + '\n'), \
                  patch.object(host_check, 'plan_revision', return_value=plan), \
                  patch.object(host_check, 'read_pairs', side_effect=AssertionError('host probe')), \
                  patch.object(host_check, 'allocate_pairs', side_effect=AssertionError('reservation')), \
