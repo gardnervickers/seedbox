@@ -776,10 +776,6 @@ fn run(cli: Cli) -> Result<u8> {
                     println!("{}", serde_json::to_string_pretty(&report)?);
                 } else {
                     println!("VALID: compatible execution profile");
-                    if report.engine_qualification.is_some() {
-                        println!("dev engine: unqualified");
-                    }
-                    println!("policy: {}", report.policy_version);
                     println!("cpu: {}", report.cpu);
                     println!(
                         "cpus: {}",
