@@ -74,7 +74,13 @@ pub trait Timebase {
     /// Before KVM_RUN, `remaining` progress before the hard stop, and the
     /// soft stop's virtual time: arrange for the run to end in time.
     /// `legal` permits publishing guest-visible plans; watchdog/probe splits do not.
-    fn prepare(&mut self, m: &mut Machine, remaining: u64, soft: u64, legal: bool) -> Result<Prepared, String>;
+    fn prepare(
+        &mut self,
+        m: &mut Machine,
+        remaining: u64,
+        soft: u64,
+        legal: bool,
+    ) -> Result<Prepared, String>;
     /// Progress so far, read before KVM_RUN; `syscalls` is the guest's count.
     fn start(&mut self, syscalls: u64) -> u64;
     /// Progress so far, read after KVM_RUN.

@@ -116,9 +116,8 @@ the canonical crate; do not restore sibling source inclusion for these policies.
   stamp the source tree, Git revision, build flags or compiled binaries, and
   don't add compiler wrappers, reproducible-build checks, or formatting
   exceptions (`#[rustfmt::skip]`, `rustfmt.toml`) to keep engine bytes stable.
-  Reformatting, moving code and changing build flags are ordinary changes.
-  The existing skips and `crates/seedbox-vmm/rustfmt.toml` go away in one
-  `cargo fmt` pass after the shared-core refactor lands; add no new ones.
+  Reformatting, moving code and changing build flags are ordinary changes;
+  run `cargo fmt` on the VMM like any other crate.
 - The linked CLI uses the root lockfile and records an explicit internal-worker
   contract; historical profiles without it retain the standalone launch
   contract. Platform/version metadata never gates development replay.

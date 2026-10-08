@@ -1,57 +1,91 @@
 //! Block MMIO adapter; the shared model owns requests, disk effects and DMA.
 use crate::disk::Disk;
-const F_FLUSH:u32=1<<9;
-const F_VERSION_1:u32=1;
-use seedbox_engine_core::virtio_block::{Block, Policy as BlockPolicy, Stats};
+const F_FLUSH: u32 = 1 << 9;
+const F_VERSION_1: u32 = 1;
 pub use seedbox_engine_core::virtio_block::Notified;
+use seedbox_engine_core::virtio_block::{Block, Policy as BlockPolicy, Stats};
 use seedbox_engine_core::virtio_mmio::{Effect, Policy as MmioPolicy, Spec, Transport};
 #[derive(Clone)]
 pub struct VirtioBlk {
     model: Block,
     transport: Transport,
-    pub dirty: Vec<(usize,usize)>,
+    pub dirty: Vec<(usize, usize)>,
 }
 impl VirtioBlk {
     pub fn new(disk: Disk) -> Self {
-        Self { model:Block::new(disk,BlockPolicy::Block),
-            transport:Transport::new(Spec{device_id:2,features:[F_FLUSH,F_VERSION_1]},1,MmioPolicy::Block),dirty:Vec::new() }
+        Self {
+            model: Block::new(disk, BlockPolicy::Block),
+            transport: Transport::new(
+                Spec {
+                    device_id: 2,
+                    features: [F_FLUSH, F_VERSION_1],
+                },
+                1,
+                MmioPolicy::Block,
+            ),
+            dirty: Vec::new(),
+        }
     }
-    pub fn disk(&self) -> &Disk { self.model.disk() }
-    pub fn disk_mut(&mut self) -> &mut Disk { self.model.disk_mut() }
-    pub fn stats(&self) -> &Stats { self.model.stats() }
-    fn config(&self,off:u64)->u8 {
-        match off { 0..=7=>self.disk().capacity().to_le_bytes()[off as usize], _=>0 }
+    pub fn disk(&self) -> &Disk {
+        self.model.disk()
     }
-    pub fn read(&mut self,off:u64)->u32 {
-        if off>=0x100 {let b=off-0x100;u32::from_le_bytes([self.config(b),self.config(b+1),self.config(b+2),self.config(b+3)])}
-        else {self.transport.read(off)}
+    pub fn disk_mut(&mut self) -> &mut Disk {
+        self.model.disk_mut()
     }
-    pub fn write(&mut self,m:&mut[u8],off:u64,v:u32)->Result<Notified,String> {
-        match self.transport.write(off,v)? {
-            Effect::Notify(_) => {let dirty=&mut self.dirty;self.model.notify(&mut self.transport,m,0,|a,n|dirty.push((a,n)))},
+    pub fn stats(&self) -> &Stats {
+        self.model.stats()
+    }
+    fn config(&self, off: u64) -> u8 {
+        match off {
+            0..=7 => self.disk().capacity().to_le_bytes()[off as usize],
+            _ => 0,
+        }
+    }
+    pub fn read(&mut self, off: u64) -> u32 {
+        if off >= 0x100 {
+            let b = off - 0x100;
+            u32::from_le_bytes([
+                self.config(b),
+                self.config(b + 1),
+                self.config(b + 2),
+                self.config(b + 3),
+            ])
+        } else {
+            self.transport.read(off)
+        }
+    }
+    pub fn write(&mut self, m: &mut [u8], off: u64, v: u32) -> Result<Notified, String> {
+        match self.transport.write(off, v)? {
+            Effect::Notify(_) => {
+                let dirty = &mut self.dirty;
+                self.model
+                    .notify(&mut self.transport, m, 0, |a, n| dirty.push((a, n)))
+            }
             // The transport reset has completed; disk, stats and dirty journal survive.
-            Effect::Reset|Effect::None=>Ok(Notified::default()),
+            Effect::Reset | Effect::None => Ok(Notified::default()),
         }
     }
 }
 #[cfg(test)]
 use crate::disk::SECTOR;
 #[cfg(test)]
-const T_IN:u32=0;
+const T_IN: u32 = 0;
 #[cfg(test)]
-const T_OUT:u32=1;
+const T_OUT: u32 = 1;
 #[cfg(test)]
-const T_FLUSH:u32=4;
+const T_FLUSH: u32 = 4;
 #[cfg(test)]
-const T_GET_ID:u32=8;
+const T_GET_ID: u32 = 8;
 #[cfg(test)]
-const S_OK:u8=0;
+const S_OK: u8 = 0;
 #[cfg(test)]
-const S_IOERR:u8=1;
+const S_IOERR: u8 = 1;
 #[cfg(test)]
-const S_UNSUPP:u8=2;
+const S_UNSUPP: u8 = 2;
 #[cfg(test)]
-fn rd16(m:&[u8],a:usize)->u16 {u16::from_le_bytes(m[a..a+2].try_into().unwrap())}
+fn rd16(m: &[u8], a: usize) -> u16 {
+    u16::from_le_bytes(m[a..a + 2].try_into().unwrap())
+}
 
 #[cfg(test)]
 mod tests {
@@ -71,8 +105,21 @@ mod tests {
 
     impl Guest {
         fn new(sectors: u64) -> Self {
-            let mut g = Guest { m: vec![0; 1 << 20], dev: VirtioBlk::new(Disk::new(None, Some(sectors)).unwrap()), next_desc: 0, avail_idx: 0, next_buf: 0x10000 };
-            for (off, v) in [(0x030, 0), (0x038, 16), (0x080, DESC as u32), (0x090, AVAIL as u32), (0x0a0, USED as u32), (0x044, 1)] {
+            let mut g = Guest {
+                m: vec![0; 1 << 20],
+                dev: VirtioBlk::new(Disk::new(None, Some(sectors)).unwrap()),
+                next_desc: 0,
+                avail_idx: 0,
+                next_buf: 0x10000,
+            };
+            for (off, v) in [
+                (0x030, 0),
+                (0x038, 16),
+                (0x080, DESC as u32),
+                (0x090, AVAIL as u32),
+                (0x0a0, USED as u32),
+                (0x044, 1),
+            ] {
                 g.dev.write(&mut g.m, off, v).unwrap();
             }
             g
@@ -93,13 +140,15 @@ mod tests {
                 let more = k + 1 < segs.len();
                 self.m[d..d + 8].copy_from_slice(&addr.to_le_bytes());
                 self.m[d + 8..d + 12].copy_from_slice(&len.to_le_bytes());
-                self.m[d + 12..d + 14].copy_from_slice(&((w as u16) << 1 | more as u16).to_le_bytes());
+                self.m[d + 12..d + 14]
+                    .copy_from_slice(&((w as u16) << 1 | more as u16).to_le_bytes());
                 self.m[d + 14..d + 16].copy_from_slice(&((i + 1) % 16).to_le_bytes());
             }
             let slot = AVAIL as usize + 4 + 2 * (self.avail_idx % 16) as usize;
             self.m[slot..slot + 2].copy_from_slice(&(head % 16).to_le_bytes());
             self.avail_idx += 1;
-            self.m[AVAIL as usize + 2..AVAIL as usize + 4].copy_from_slice(&self.avail_idx.to_le_bytes());
+            self.m[AVAIL as usize + 2..AVAIL as usize + 4]
+                .copy_from_slice(&self.avail_idx.to_le_bytes());
             head % 16
         }
         fn header(&mut self, kind: u32, sector: u64) -> u64 {
@@ -109,12 +158,20 @@ mod tests {
             self.buf(&h)
         }
         fn write(&mut self, sector: u64, data: &[u8]) -> u64 {
-            let (h, d, s) = (self.header(T_OUT, sector), self.buf(data), self.buf(&[0xff]));
+            let (h, d, s) = (
+                self.header(T_OUT, sector),
+                self.buf(data),
+                self.buf(&[0xff]),
+            );
             self.post(&[(h, 16, false), (d, data.len() as u32, false), (s, 1, true)]);
             s
         }
         fn read(&mut self, sector: u64, len: usize) -> (u64, u64) {
-            let (h, d, s) = (self.header(T_IN, sector), self.buf(&vec![0xee; len]), self.buf(&[0xff]));
+            let (h, d, s) = (
+                self.header(T_IN, sector),
+                self.buf(&vec![0xee; len]),
+                self.buf(&[0xff]),
+            );
             self.post(&[(h, 16, false), (d, len as u32, true), (s, 1, true)]);
             (d, s)
         }
@@ -152,7 +209,10 @@ mod tests {
         let b = g.write(3, &[b'B'; SECTOR]);
         let n = g.notify();
         assert_eq!((n.completed, n.flushed, n.irq), (3, 1, true));
-        assert_eq!(n.log, [(T_OUT, 3, S_OK), (T_FLUSH, 0, S_OK), (T_OUT, 3, S_OK)]);
+        assert_eq!(
+            n.log,
+            [(T_OUT, 3, S_OK), (T_FLUSH, 0, S_OK), (T_OUT, 3, S_OK)]
+        );
         assert_eq!([g.at(a), g.at(f), g.at(b)], [S_OK; 3]);
         assert_eq!(g.used_idx(), 3);
         // Read-your-writes includes volatile data.
@@ -188,7 +248,10 @@ mod tests {
         g.post(&[(h, 16, false), (s, 1, true)]);
         let (_, read_past) = g.read(7, 2 * SECTOR);
         assert_eq!(g.notify().completed, 4);
-        assert_eq!([g.at(past_end), g.at(partial), g.at(s), g.at(read_past)], [S_IOERR, S_IOERR, S_UNSUPP, S_IOERR]);
+        assert_eq!(
+            [g.at(past_end), g.at(partial), g.at(s), g.at(read_past)],
+            [S_IOERR, S_IOERR, S_UNSUPP, S_IOERR]
+        );
         assert_eq!(g.dev.disk().digest(), before);
         assert_eq!(g.dev.stats().errors, 4);
         // Nothing left to complete: a second notify is a no-op.
@@ -205,7 +268,11 @@ mod tests {
         let mut g = Guest::new(8);
         let h = g.header(T_OUT, 0);
         g.post(&[(h, 16, false), (0xffff_ffff, 512, false)]);
-        assert!(g.dev.write(&mut g.m, 0x050, 0).unwrap_err().contains("outside guest RAM"));
+        assert!(g
+            .dev
+            .write(&mut g.m, 0x050, 0)
+            .unwrap_err()
+            .contains("outside guest RAM"));
     }
 
     #[test]
@@ -234,37 +301,59 @@ mod tests {
         let mut g = Guest::new(8);
         let first_status = g.write(1, &[7; SECTOR]);
         g.notify();
-        let saved = (g.dev.clone(), g.m.clone(), g.next_desc, g.avail_idx, g.next_buf);
+        let saved = (
+            g.dev.clone(),
+            g.m.clone(),
+            g.next_desc,
+            g.avail_idx,
+            g.next_buf,
+        );
         let (data, status) = g.read(1, SECTOR);
         let expected = g.notify();
         let memory = g.m.clone();
-        let dirty = vec![(first_status as usize,1),(USED as usize+4,8),(USED as usize+2,2),
-            (data as usize,SECTOR),(status as usize,1),(USED as usize+12,8),(USED as usize+2,2)];
-        assert_eq!(g.dev.dirty,dirty);
-        g.dev = saved.0; g.m = saved.1; g.next_desc = saved.2; g.avail_idx = saved.3; g.next_buf = saved.4;
-        assert_eq!(g.read(1,SECTOR),(data,status));
-        assert_eq!(g.notify(),expected);
-        assert_eq!(g.m,memory);
-        assert_eq!(g.dev.dirty,dirty);
+        let dirty = vec![
+            (first_status as usize, 1),
+            (USED as usize + 4, 8),
+            (USED as usize + 2, 2),
+            (data as usize, SECTOR),
+            (status as usize, 1),
+            (USED as usize + 12, 8),
+            (USED as usize + 2, 2),
+        ];
+        assert_eq!(g.dev.dirty, dirty);
+        g.dev = saved.0;
+        g.m = saved.1;
+        g.next_desc = saved.2;
+        g.avail_idx = saved.3;
+        g.next_buf = saved.4;
+        assert_eq!(g.read(1, SECTOR), (data, status));
+        assert_eq!(g.notify(), expected);
+        assert_eq!(g.m, memory);
+        assert_eq!(g.dev.dirty, dirty);
         let stats = g.dev.stats().clone();
         let disk = g.dev.disk().digest();
-        g.dev.write(&mut g.m,0x070,0).unwrap();
-        assert_eq!(g.dev.dirty,dirty);
-        assert_eq!(*g.dev.stats(),stats);
-        assert_eq!(g.dev.disk().digest(),disk);
-        assert_eq!(g.dev.read(0x044),0);
+        g.dev.write(&mut g.m, 0x070, 0).unwrap();
+        assert_eq!(g.dev.dirty, dirty);
+        assert_eq!(*g.dev.stats(), stats);
+        assert_eq!(g.dev.disk().digest(), disk);
+        assert_eq!(g.dev.read(0x044), 0);
     }
 
     #[test]
     fn mutable_disk_access_and_snapshot_keep_stable_and_volatile_layers() {
-        let mut dev=VirtioBlk::new(Disk::new(None,Some(8)).unwrap());
-        dev.disk_mut().write(0,&[1;SECTOR]).unwrap();dev.disk_mut().flush();
-        let saved=dev.clone();dev.disk_mut().write(0,&[2;SECTOR]).unwrap();
-        assert_eq!(dev.disk().volatile_sectors(),1);
-        let mut m=vec![0;4096];dev.write(&mut m,0x70,0).unwrap();
-        assert_eq!(dev.disk().volatile_sectors(),1);
-        dev=saved;let mut bytes=[0;SECTOR];dev.disk().read(0,&mut bytes).unwrap();
-        assert_eq!(bytes,[1;SECTOR]);assert_eq!(dev.disk().volatile_sectors(),0);
+        let mut dev = VirtioBlk::new(Disk::new(None, Some(8)).unwrap());
+        dev.disk_mut().write(0, &[1; SECTOR]).unwrap();
+        dev.disk_mut().flush();
+        let saved = dev.clone();
+        dev.disk_mut().write(0, &[2; SECTOR]).unwrap();
+        assert_eq!(dev.disk().volatile_sectors(), 1);
+        let mut m = vec![0; 4096];
+        dev.write(&mut m, 0x70, 0).unwrap();
+        assert_eq!(dev.disk().volatile_sectors(), 1);
+        dev = saved;
+        let mut bytes = [0; SECTOR];
+        dev.disk().read(0, &mut bytes).unwrap();
+        assert_eq!(bytes, [1; SECTOR]);
+        assert_eq!(dev.disk().volatile_sectors(), 0);
     }
-
 }
