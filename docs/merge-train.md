@@ -19,8 +19,7 @@ train: one branch, one host job, then ordinary merges with no further host time.
 3. **Run one host job.** `harness/host-check.sh` on the train head, plus the
    union of each PR's own host checks as its reviewer listed them, written as
    one script that runs independent checks at once on separate SMT pairs
-   (never CPU 0 or its sibling). Every run uses `--allow-dev-engine` until
-   the train's engine is pinned. Each PR's host list covers only what its
+   (never CPU 0 or its sibling). Each PR's host list covers only what its
    diff can affect, plus one witness-equality core, with no unrelated flag
    combinations (no undo or margin variants for a PR that doesn't touch
    stepping). Each PR's evidence is its reviewer's list. A PR that claims to
@@ -55,7 +54,7 @@ train: one branch, one host job, then ordinary merges with no further host time.
    load, or both alone. Never compare a lane's seconds with an earlier
    receipt taken at a different lane count.
 
-   A run on a dev-unpinned engine replays only on that engine, so a check of
+   A run replays on its own recorded engine, so a check of
    "the new engine reproduces the old run" is instead a fresh run on the new
    engine with its world witness compared against the old run's, plus replays
    of the new run on its own engine.
