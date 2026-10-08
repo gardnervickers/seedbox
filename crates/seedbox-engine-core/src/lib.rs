@@ -28,3 +28,5 @@ pub mod virtio_console;
 pub mod virtio_block;
 
 pub mod virtio_network;
+
+pub mod pv_progress;

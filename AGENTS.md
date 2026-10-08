@@ -74,6 +74,10 @@ and statistics accessors in platform callers. KVM net and the network model rema
 in adapters until their separately reviewed move.
 The shared network model owns packet DMA, backlogs and counters; preserve the
 profile-specific admission, partial-error and IRQ order in `docs/virtio-network.md`.
+The core PV progress engine owns watchdog policy and cycle proof; architecture
+adapters supply stepping and complete comparison primitives. Preserve the
+proof/diagnostic boundary in `docs/progress-proof.md`; ARM support must not assume
+a PMU or treat an unsupported dirty log as proof that RAM is unchanged.
 
 The standalone backends compile the canonical sources through their in-workspace
 `engine-core` packages, with distinct package names just like their control
