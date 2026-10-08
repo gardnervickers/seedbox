@@ -1,0 +1,14 @@
+name: runtime-jvm
+services:
+  jvm:
+    image: docker.io/library/eclipse-temurin:21-jdk-alpine
+    command: [java, /RuntimeHostname.java]
+    configs:
+      - {source: driver, target: /RuntimeHostname.java}
+configs:
+  driver: {file: ../driver/RuntimeHostname.java}
+x-seedbox:
+  version: 1
+  seed: 172
+  limits: {simulated_time: 60s, wall_time: 15m}
+  check: {service: jvm, exit_code: 0}

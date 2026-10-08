@@ -14,6 +14,12 @@ retained across process restart only. The repository's `docs/compatibility.md`
 describes current draft formats and version-bound runtime evidence; V0 release
 compatibility and host-proof admission remain qualification gates.
 
+Each service gets its service name as the hostname, a private `/dev` with
+64 MiB `/dev/shm` and devpts, soft/hard `nofile` limits of 1048576, and
+`vm.max_map_count=262144`. SysV IPC, POSIX message queues, seccomp and io_uring
+are enabled on both application kernels. Compose `hostname:`, `ulimits:`,
+`sysctls:` and `tty:` overrides remain unsupported. Each VM has one CPU.
+
 The etcd template packages Seedbox's existing Go acknowledgement-ledger workload
 in a Dockerfile and describes three registry-image members in Compose. The Redis
 template builds a dependency-free Rust workload that checks PING, SET acknowledgements,

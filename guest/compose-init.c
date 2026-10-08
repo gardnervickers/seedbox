@@ -24,7 +24,9 @@
 #include "barrier.h"
 #include "environment.h"
 #include <sys/mount.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -287,6 +289,49 @@ static void write_file(const char *path, const void *data, size_t size, mode_t m
     }
     if (fchmod(fd, mode) || fchown(fd, 0, 0) || close(fd)) die("finish config");
 }
+/* Open the supervisor's management channel and mount retained volumes before
+ * replacing devtmpfs. Applications get only ordinary container devices. */
+static void application_devices(void) {
+    if (mount("tmpfs", "/dev", "tmpfs", MS_NOSUID|MS_NOEXEC, "mode=0755,size=65536")) die("mount application dev");
+    const struct { const char *name; unsigned minor; } nodes[] = {
+        {"null", 3}, {"zero", 5}, {"full", 7}, {"random", 8}, {"urandom", 9}
+    };
+    for (size_t i = 0; i < sizeof(nodes)/sizeof(*nodes); i++) {
+        char path[64]; snprintf(path, sizeof(path), "/dev/%s", nodes[i].name);
+        if (mknod(path, S_IFCHR|0666, makedev(1, nodes[i].minor)) || chmod(path, 0666)) die(path);
+    }
+    if (mknod("/dev/tty", S_IFCHR|0666, makedev(5, 0)) || chmod("/dev/tty", 0666)) die("application tty");
+    directories("/dev/shm", 01777); directories("/dev/pts", 0755);
+    if (mount("tmpfs", "/dev/shm", "tmpfs", MS_NOSUID|MS_NODEV|MS_NOEXEC, "mode=1777,size=67108864")) die("mount application shm");
+    if (mount("devpts", "/dev/pts", "devpts", MS_NOSUID|MS_NOEXEC, "newinstance,ptmxmode=0666,mode=0620,gid=5")) die("mount application pts");
+    if (symlink("pts/ptmx", "/dev/ptmx") || symlink("/proc/self/fd", "/dev/fd")
+        || symlink("/proc/self/fd/0", "/dev/stdin") || symlink("/proc/self/fd/1", "/dev/stdout")
+        || symlink("/proc/self/fd/2", "/dev/stderr")) die("application device links");
+}
+static void application_hostname(const char *hostname, const char *hosts) {
+    if (sethostname(hostname, strlen(hostname))) die("application hostname");
+    char line[65];
+    int size = snprintf(line, sizeof(line), "%s\n", hostname);
+    if (size < 0 || (size_t)size >= sizeof(line)) { errno = EINVAL; die("application hostname length"); }
+    write_file("/etc/hostname", line, (size_t)size, 0644);
+    /* Preparation already includes this service's address and name. */
+    write_file("/etc/hosts", hosts, strlen(hosts), 0644);
+}
+static void application_sysctls(uint32_t max_map_count) {
+    char value[16];
+    int size = snprintf(value, sizeof(value), "%u\n", max_map_count);
+    int fd = open("/proc/sys/vm/max_map_count", O_WRONLY|O_CLOEXEC);
+    if (fd < 0) die("open vm.max_map_count");
+    /* proc sysctls are kernel interfaces, not config files: no chmod/chown. */
+    ssize_t written;
+    do { written = write(fd, value, (size_t)size); } while (written < 0 && errno == EINTR);
+    if (written != size) { if (written >= 0) errno = EIO; die("write vm.max_map_count"); }
+    if (close(fd)) die("close vm.max_map_count");
+}
+static void application_limits(void) {
+    struct rlimit limit = {.rlim_cur = 1048576, .rlim_max = 1048576};
+    if (setrlimit(RLIMIT_NOFILE, &limit)) die("application nofile limit");
+}
 static void busybox(char *const args[]) {
     pid_t pid = fork();
     if (pid < 0) die("fork network setup");
@@ -402,6 +447,7 @@ static pid_t start(void) {
         if (input < 0 || dup2(input, STDIN_FILENO) < 0) die("application stdin");
         if (input > 2) close(input);
         if (chdir(working_dir)) die("working directory");
+        application_limits();
         credentials();
         environ = environment;
         execvp(arguments[0], arguments);
@@ -550,24 +596,37 @@ int main(void) {
     directories("/dev", 0755);
     if (mount("devtmpfs", "/dev", "devtmpfs", 0, NULL)) die("mount bootstrap dev");
     int console = open("/dev/console", O_RDWR);
-    if (console >= 0) { dup2(console, 0); dup2(console, 1); dup2(console, 2); if (console > 2) close(console); }
+    if (console >= 0) {
+        /* /proc/self/fd/1 rechecks this inode's permissions on reopen, even
+         * after the console node is hidden. Non-root images need stdout too. */
+        if (fchmod(console, 0666)) die("console permissions");
+        dup2(console, 0); dup2(console, 1); dup2(console, 2); if (console > 2) close(console);
+    }
+#if defined(__aarch64__)
+    if (seedbox_retain_io("/dev/seedbox-io")) die("retain supervisor I/O");
+#endif
     recipe_fd = open("/seedbox/launch.bin", O_RDONLY|O_CLOEXEC);
     if (recipe_fd < 0) die("launch recipe");
     char magic[10]; read_exact(magic, sizeof(magic));
-    if (memcmp(magic, "SBXLAUNCH2", 10)) { errno = EINVAL; die("launch version"); }
-    char *ip = text(), *hosts = text(); user = text(); working_dir = text();
+    if (memcmp(magic, "SBXLAUNCH3", 10)) { errno = EINVAL; die("launch version"); }
+    char *ip = text(), *hosts = text(), *hostname = text(); user = text(); working_dir = text();
+    uint32_t max_map_count = count();
     arguments = list(); environment = list(); char **volumes = list(); char **disk_volumes = list();
     if (!arguments[0] || !*arguments[0]) { errno = EINVAL; die("empty executable"); }
     busybox((char *const[]){"busybox", "ip", "link", "set", "lo", "up", NULL});
     busybox((char *const[]){"busybox", "ip", "addr", "add", ip, "dev", "eth0", NULL});
     busybox((char *const[]){"busybox", "ip", "link", "set", "eth0", "up", NULL});
     mount_volumes(disk_volumes);
+    directories("/sys", 0755);
+    if (mount("sysfs", "/sys", "sysfs", 0, NULL)) die("mount bootstrap sys");
+    management = open_management("/sys/class/virtio-ports", "/dev");
     if (chdir("/rootfs") || chroot(".") || chdir("/")) die("enter image root");
     directories("/dev", 0755); directories("/proc", 0755); directories("/sys", 0755); directories("/tmp", 01777);
-    if (mount("devtmpfs", "/dev", "devtmpfs", 0, NULL) || mount("proc", "/proc", "proc", 0, NULL) || mount("sysfs", "/sys", "sysfs", 0, NULL)) die("mount guest filesystems");
+    if (mount("proc", "/proc", "proc", 0, NULL) || mount("sysfs", "/sys", "sysfs", 0, NULL)) die("mount guest filesystems");
+    application_devices();
     if (seedbox_default_gomaxprocs(&environment, sysconf(_SC_NPROCESSORS_ONLN))) die("online CPU environment");
-    management = open_management("/sys/class/virtio-ports", "/dev");
-    write_file("/etc/hosts", hosts, strlen(hosts), 0644);
+    application_hostname(hostname, hosts);
+    application_sysctls(max_map_count);
     for (char **volume = volumes; *volume; volume++) directories(*volume, 0755);
     directories(working_dir, 0755);
     uint32_t configs = count();

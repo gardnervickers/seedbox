@@ -1,10 +1,59 @@
 # Acceptance record
 
-Paths and commands below are as recorded, before the repository moved to a Cargo
+Historical paths and commands below are as recorded, before the repository moved to a Cargo
 workspace (`sim/seedbox` is now `crates/seedbox`, `sim/vmm` is `crates/seedbox-vmm`,
 and the runners are under `harness/`). The engine hashes below are for builds
 from that layout; a VMM built from `crates/seedbox-vmm` embeds different source
 paths and is a new engine, even though its source is unchanged.
+
+## 2026-10-08 — issue #172 guest runtime batch
+
+The Linux AMD/KVM workstation ran `b90a315` plus this guest batch, identified
+as `0.1.0-dev+b90a31525495.dirty`. Changes arrived as patches in a private
+worktree. Builds and executions used CPU 15/31; the x86 kernel build used fresh
+`SEEDBOX_KBUILD` and `SEEDBOX_ARTIFACTS` directories. Its requested Kconfig
+checks passed, including SysV IPC, POSIX mqueue, UTS/IPC/PID namespaces,
+UNIX98 ptys, seccomp/filter and io_uring. HPET remains enabled without ACPI.
+
+- Kernel SHA-256: `5e082c9d45778e702105367917e9bb9593af133c8374f6d1b9211112af371b44`.
+- Linked CLI engine SHA-256: `4e4afd32dc04d0c9f0d738ef9dcf9df7b4d18d60e082b87f9a64a27c3db421ca`.
+- Supervisor SHA-256: `f0c725f65ce7cb6228109730a3d136df5a04e664b70dd1d01389b09e5be42aa4`.
+
+All cases used the public `seedbox run`, seed 172 and the default counter
+timebase. `harness/acceptance/workloads/runtime.yaml` passed with 1024 MiB and
+`--full-state` as UID/GID 123/456. It exercised private devices and fd links,
+pty I/O, POSIX shared memory/semaphores/mqueue, SysV shared memory, service
+hostname lookup, the 1048576 nofile limits (including fd 65535),
+`vm.max_map_count=262144`, named-volume writes, an io_uring NOP completion and
+a seccomp allow filter. An initial failure reopening the root-owned console
+through `/dev/stdout` led to the console permission fix; the final case passed.
+
+`seedbox replay` of that retained run reported `MATCH`, with outcome, witness,
+full state and fault history all matching. World witness:
+`dc134dc639f8903bea9a69ecd51952ff718c9abdff4f2f07d5238abe8232eb1c`.
+
+The five `runtime-*.yaml` application projects passed with 2048 MiB:
+
+| Project | Guest check | Resolved Linux amd64 manifest SHA-256 |
+| --- | --- | --- |
+| `runtime-postgres.yaml` | Postgres 16 initdb, query yielding 42, POSIX DSM selection | `1a66d744c1b459e13b05a8fca341da84cb63383e99ce262210efee5a319d4551` |
+| `runtime-nginx.yaml` | nginx HTTP 200 and the access log in the retained console | `8f84ed99befc3891b8f329c5c202785278a2cfb7c25107d57fb2a134a3117433` |
+| `runtime-python.yaml` | Python 3.12 non-root spawn-based ProcessPoolExecutor | `2055081c860db8c842b663415b795b026e7e5cc63b59c5193fcc9997713ea5b8` |
+| `runtime-jvm.yaml` | Temurin 21 InetAddress.getLocalHost() resolves `jvm` | `9ececb44042a7cc91e4e6bca525c678e811c1602330a80b5f2d2fcfa0aa97c4e` |
+| `runtime-node.yaml` | Node 22 local HTTP request/response and hostname | `2c752226d477b4a886378baa95b9af252be59301b725fdb0b7e15208131505a8` |
+
+CPU 15/31 MSR readbacks after replay and the app batch matched the original
+snapshot. The standalone Linux VMM build passed; `cargo test-vmm --features
+kvm-tests` passed 89 tests, with 36 explicitly ignored exclusive-host cases.
+Fmt, strict clippy, workspace tests and portable acceptance passed on the Mac;
+the supervisor and ARM I/O descriptor lifetime tests also passed on Linux.
+
+This is scoped same-host evidence, before the final merge train. Main-versus-
+branch controls, the full host campaign and native ARM rebuild/HVF execution
+remain outstanding. TLS with a certificate minted that day needs the recorded
+wall-clock epoch follow-up; this batch leaves the boot epoch unchanged. Node
+HTTP alone does not establish the libuv io_uring path; the separate kernel
+probe proves one ring completion.
 
 ## 2026-10-06 — OCI import and Linux compilation
 

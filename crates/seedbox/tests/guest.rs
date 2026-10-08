@@ -122,6 +122,7 @@ fn binary_recipe_keeps_arguments_and_config_bytes_literal() {
         &launch,
         "10.0.0.1/24",
         "10.0.0.1 app\n",
+        "app",
         &BTreeMap::from([("/config".into(), vec![0, 255, 10])]),
     )
     .unwrap();
@@ -137,10 +138,11 @@ fn binary_recipe_keeps_arguments_and_config_bytes_literal() {
         *cursor += n;
         data
     }
-    assert_eq!(&recipe[..10], b"SBXLAUNCH2");
-    for expected in ["10.0.0.1/24", "10.0.0.1 app\n", "123:456", "/"] {
+    assert_eq!(&recipe[..10], b"SBXLAUNCH3");
+    for expected in ["10.0.0.1/24", "10.0.0.1 app\n", "app", "123:456", "/"] {
         assert_eq!(field(&recipe, &mut cursor), expected.as_bytes());
     }
+    assert_eq!(count(&recipe, &mut cursor), 262144);
     assert_eq!(count(&recipe, &mut cursor), 2);
     for expected in &launch.argv {
         assert_eq!(field(&recipe, &mut cursor), expected.as_bytes());

@@ -253,6 +253,16 @@ rules. There is no cross-call cache; custom builders and registry imports keep
 their existing preparation behavior. Failed, cancelled or cleanup-unverified
 sources are never reused as successful preparation.
 
+The shared application supervisor installs a private container-style `/dev`
+(including 64 MiB `/dev/shm`, devpts and stdio links), sets the hostname to the
+service name, raises soft/hard `nofile` to 1048576 before each exec, and sets
+`vm.max_map_count=262144`. The service hostname and sysctl default travel in
+the retained binary launch recipe; replay uses that recipe and its retained
+supervisor rather than preparing it again. See
+[guest runtime facilities](compatibility.md#guest-runtime-facilities) for
+kernel features and remaining gaps. This setup does not change the wall-clock
+epoch; `--build-epoch` still controls image build timestamps only.
+
 Each prepared application release is a captured input closure. Same-version
 deterministic execution and replay use its exact retained bytes, seed and
 qualified profile; they do not rebuild the application. Independently rebuilding
