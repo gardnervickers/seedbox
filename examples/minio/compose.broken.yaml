@@ -17,8 +17,7 @@
         "MINIO_ROOT_PASSWORD": "fixture-secret-only",
         "MINIO_CI_CD": "1",
         "MINIO_API_REQUESTS_MAX": "4",
-        "MINIO_BROWSER": "off",
-        "GOMAXPROCS": "2"
+        "MINIO_BROWSER": "off"
       }
     },
     "client": {
