@@ -148,6 +148,18 @@ impl VmmExecutor {
         self
     }
 
+    /// Page timer is recorded only when requested; off preserves legacy identities.
+    pub fn with_page_timer(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.profile
+                .semantic_parameters
+                .insert("page_timer".into(), "true".into());
+        } else {
+            self.profile.semantic_parameters.remove("page_timer");
+        }
+        self
+    }
+
     /// Whether the engine reads the host branch counter; PV does not.
     fn counted(&self) -> bool {
         recorded_timebase(&self.profile).map_or(true, |timebase| timebase == Timebase::Counter)
@@ -506,6 +518,14 @@ fn with_capacity<T>(
     check(&reservations)
 }
 
+/// Missing page timer means the legacy port transport.
+pub fn recorded_page_timer(profile: &ExecutionProfile) -> bool {
+    profile
+        .semantic_parameters
+        .get("page_timer")
+        .is_some_and(|v| v == "true")
+}
+
 /// Older engines and profiles service TX without deferring kicks.
 pub fn recorded_deferred_tx(profile: &ExecutionProfile) -> Result<bool> {
     match profile.semantic_parameters.get("deferred_tx").map(String::as_str) {
@@ -706,6 +726,7 @@ fn checkpoint_metadata(request: &ExecutionRequest<'_>, world: &Value) -> Result<
             recorded_timebase(&request.prepared.profile)?.name(),
             recorded_deferred_tx(&request.prepared.profile)?,
         ),
+        recorded_page_timer(&request.prepared.profile),
         |path| {
             request
                 .artifacts
@@ -1756,6 +1777,9 @@ mod linux {
             .arg(request.output.join(MACHINE_OUTPUT_DIR));
         if timebase != Timebase::Counter {
             command.arg("--timebase").arg(timebase.name());
+        }
+        if recorded_page_timer(&backend.profile) {
+            command.arg("--page-timer");
         }
         if recorded_deferred_tx(&backend.profile)? {
             command.arg("--deferred-tx");

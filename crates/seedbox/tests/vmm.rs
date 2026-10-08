@@ -148,6 +148,7 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
             request.seed,
             prepared.profile.engine.hex(),
             "counter",
+            false,
             |_| Ok(ContentDigest::of(b"retained input").hex().to_owned()),
         )
         .unwrap();
@@ -1482,6 +1483,96 @@ fn checkpoint_semantics_bind_parent_and_report_and_fail_closed() {
 mod checkpoint_protocol;
 
 #[test]
+fn checkpoint_timer_and_tx_modes_bind_cli_and_engine_metadata() {
+    fixture(|base| {
+        for timebase in ["counter", "pv"] {
+            let mut inputs = Vec::new();
+            let mut worlds = Vec::new();
+            for (page_timer, deferred_tx) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let mut prepared = base.prepared.clone();
+                prepared.profile.semantic_parameters.extend([
+                    ("checkpoint_at_ns".into(), "500".into()),
+                    ("checkpoint_branch_seed".into(), "42".into()),
+                    ("timebase".into(), timebase.into()),
+                ]);
+                for (key, enabled) in [("page_timer", page_timer), ("deferred_tx", deferred_tx)] {
+                    if enabled {
+                        prepared
+                            .profile
+                            .semantic_parameters
+                            .insert(key.into(), "true".into());
+                    }
+                }
+                let world = vmm::world(&ExecutionRequest {
+                    prepared: &prepared,
+                    ..*base
+                })
+                .unwrap();
+                let engine_parent = checkpoint_protocol::parent_identity(
+                    &world,
+                    base.seed,
+                    prepared.profile.engine.hex(),
+                    &checkpoint_protocol::identity_timebase(timebase, deferred_tx),
+                    page_timer,
+                    |_| Ok(ContentDigest::of(b"retained input").hex().to_owned()),
+                )
+                .unwrap();
+                assert_eq!(world["checkpoint"]["parent_identity"], engine_parent);
+                inputs.push(prepared);
+                worlds.push(world);
+            }
+            for field in ["parent_identity", "branch_identity"] {
+                let ids: std::collections::BTreeSet<_> = worlds
+                    .iter()
+                    .map(|world| world["checkpoint"][field].as_str().unwrap())
+                    .collect();
+                assert_eq!(ids.len(), 4, "{timebase} {field}");
+            }
+            for (i, prepared) in inputs.iter().enumerate() {
+                let request = ExecutionRequest { prepared, ..*base };
+                for (j, world) in worlds.iter().enumerate() {
+                    let mut raw = report();
+                    raw["timebase"] = json!(timebase);
+                    raw["deferred_tx"] = json!(prepared
+                        .profile
+                        .semantic_parameters
+                        .contains_key("deferred_tx"));
+                    raw["checkpoint"] = world["checkpoint"].clone();
+                    let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request);
+                    if i == j {
+                        assert!(result.is_ok(), "{result:?}");
+                    } else {
+                        assert!(result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("VMM checkpoint identity mismatch"));
+                    }
+                }
+            }
+            let mut restored_off = inputs.pop().unwrap();
+            restored_off
+                .profile
+                .semantic_parameters
+                .remove("page_timer");
+            restored_off
+                .profile
+                .semantic_parameters
+                .remove("deferred_tx");
+            assert_eq!(
+                vmm::world(&ExecutionRequest {
+                    prepared: &restored_off,
+                    ..*base
+                })
+                .unwrap()["checkpoint"],
+                worlds[0]["checkpoint"]
+            );
+        }
+    });
+}
+
+#[test]
 fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
     fixture(|base| {
         let dir = tempfile::tempdir().unwrap();
@@ -1526,6 +1617,7 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
             base.seed,
             inputs.profile.engine.hex(),
             "counter",
+            false,
             |path| {
                 Ok(ContentDigest::of(&std::fs::read(path).unwrap())
                     .hex()
@@ -1550,6 +1642,7 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
             base.seed,
             inputs.profile.engine.hex(),
             "pv",
+            false,
             |path| {
                 Ok(ContentDigest::of(&std::fs::read(path).unwrap())
                     .hex()
@@ -1581,6 +1674,7 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
                 base.seed,
                 inputs.profile.engine.hex(),
                 &format!("{}+deferred-tx", timebase.name()),
+                false,
                 |path| {
                     Ok(ContentDigest::of(&std::fs::read(path).unwrap())
                         .hex()

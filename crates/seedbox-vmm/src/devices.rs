@@ -151,6 +151,13 @@ impl Pit {
         self.arm0(now);
     }
 
+    /// Page clockevents are absolute, one-shot deadlines (1 GHz units).
+    pub fn program_deadline(&mut self, deadline: Option<u64>) {
+        self.deadline = deadline;
+        self.period_ns = None;
+        self.fresh = deadline.is_some();
+    }
+
     pub fn write(&mut self, port: u16, v: u8, now: u64) {
         match port {
             0x43 => {
