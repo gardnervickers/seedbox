@@ -455,6 +455,8 @@ mod safe {
         },
         sync::atomic::{AtomicU64, Ordering},
     };
+    /// An open directory. Every `*at` call below passes its fd and a
+    /// NUL-terminated `CString` that outlives the call; neither is retained.
     pub(super) struct Dir(File);
     fn c(name: &str) -> Result<CString> {
         CString::new(name).map_err(|_| bad("NUL in path"))
@@ -503,11 +505,13 @@ mod safe {
         }
         pub(super) fn child(&self, name: &str) -> Result<Self> {
             let name = c(name)?;
+            // SAFETY: see `Dir`: a valid directory fd and a live C string.
             let rc = unsafe { libc::mkdirat(self.0.as_raw_fd(), name.as_ptr(), 0o700) };
             if rc < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists
             {
                 return Err(std::io::Error::last_os_error().into());
             }
+            // SAFETY: see `Dir`.
             let fd = io(unsafe {
                 libc::openat(
                     self.0.as_raw_fd(),
@@ -515,10 +519,12 @@ mod safe {
                     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
                 )
             })?;
+            // SAFETY: openat succeeded, so `fd` is a new descriptor nothing else owns.
             Ok(Self(unsafe { File::from_raw_fd(fd) }))
         }
         pub(super) fn create(&self, name: &str) -> Result<File> {
             let name = c(name)?;
+            // SAFETY: see `Dir`.
             let fd = io(unsafe {
                 libc::openat(
                     self.0.as_raw_fd(),
@@ -531,10 +537,12 @@ mod safe {
                     0o600,
                 )
             })?;
+            // SAFETY: openat succeeded, so `fd` is a new descriptor nothing else owns.
             Ok(unsafe { File::from_raw_fd(fd) })
         }
         pub(super) fn existing_file(&self, name: &str) -> Result<Option<File>> {
             let name = c(name)?;
+            // SAFETY: see `Dir`.
             let fd = unsafe {
                 libc::openat(
                     self.0.as_raw_fd(),
@@ -549,6 +557,7 @@ mod safe {
                 }
                 return Err(e.into());
             }
+            // SAFETY: `fd` is non-negative, so openat returned a new descriptor nothing else owns.
             let file = unsafe { File::from_raw_fd(fd) };
             if !file.metadata()?.is_file() {
                 return Err(bad("existing object is not a regular file"));
@@ -566,6 +575,7 @@ mod safe {
             options: &Options,
         ) -> Result<()> {
             let name = c(object.digest.hex())?;
+            // SAFETY: see `Dir`; both directory fds are open.
             let rc = unsafe {
                 libc::linkat(
                     source.0.as_raw_fd(),
@@ -596,6 +606,8 @@ mod safe {
         pub(super) fn publish(&self, source: &Self, old: &str, new: &str) -> Result<()> {
             let old = c(old)?;
             let new = c(new)?;
+            // SAFETY: see `Dir`; both directory fds are open. RENAME_NOREPLACE
+            // takes no further pointers.
             #[cfg(target_os = "linux")]
             let rc = unsafe {
                 libc::syscall(
@@ -607,6 +619,7 @@ mod safe {
                     libc::RENAME_NOREPLACE,
                 )
             } as i32;
+            // SAFETY: as for renameat2 above.
             #[cfg(target_os = "macos")]
             let rc = unsafe {
                 libc::renameatx_np(
@@ -644,6 +657,7 @@ mod safe {
         pub(super) fn new(root: &Dir) -> Result<Self> {
             let name = unique_name("bundle");
             let raw = c(&name)?;
+            // SAFETY: see `Dir`.
             io(unsafe { libc::mkdirat(root.0.as_raw_fd(), raw.as_ptr(), 0o700) })?;
             let directory = root.child(&name)?;
             Ok(Self {
@@ -657,32 +671,42 @@ mod safe {
         struct Listing(*mut libc::DIR);
         impl Drop for Listing {
             fn drop(&mut self) {
+                // SAFETY: the stream came from a successful fdopendir and is
+                // closed exactly once, here.
                 unsafe {
                     libc::closedir(self.0);
                 }
             }
         }
         let fd = dir.0.try_clone()?.into_raw_fd();
+        // SAFETY: `fd` is a duplicate this function owns; on success the
+        // stream takes ownership of it.
         let raw = unsafe { libc::fdopendir(fd) };
         if raw.is_null() {
+            // SAFETY: fdopendir failed, so `fd` is still ours to close.
             unsafe {
                 libc::close(fd);
             }
             return Err(std::io::Error::last_os_error().into());
         }
         let listing = Listing(raw);
+        // SAFETY: `listing` holds an open directory stream.
         unsafe {
             libc::rewinddir(listing.0);
         }
         loop {
+            // SAFETY: errno is this thread's own writable int; readdir reports
+            // the end of the stream by leaving it zero.
             #[cfg(target_os = "macos")]
             unsafe {
                 *libc::__error() = 0;
             }
+            // SAFETY: as above.
             #[cfg(target_os = "linux")]
             unsafe {
                 *libc::__errno_location() = 0;
             }
+            // SAFETY: `listing` holds an open directory stream.
             let entry = unsafe { libc::readdir(listing.0) };
             if entry.is_null() {
                 let error = std::io::Error::last_os_error();
@@ -691,10 +715,14 @@ mod safe {
                 }
                 break;
             }
+            // SAFETY: `entry` is non-null and stays valid until the next
+            // readdir on this stream (recursive cleans read other streams);
+            // d_name is NUL-terminated. `name` is dropped before that readdir.
             let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
             if matches!(name.to_bytes(), b"." | b"..") {
                 continue;
             }
+            // SAFETY: see `Dir`; `name` is NUL-terminated.
             let fd = unsafe {
                 libc::openat(
                     dir.0.as_raw_fd(),
@@ -703,12 +731,15 @@ mod safe {
                 )
             };
             if fd >= 0 {
+                // SAFETY: openat returned a new descriptor nothing else owns.
                 let child = Dir(unsafe { File::from_raw_fd(fd) });
                 clean(&child)?;
+                // SAFETY: see `Dir`.
                 io(unsafe {
                     libc::unlinkat(dir.0.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR)
                 })?;
             } else {
+                // SAFETY: see `Dir`.
                 io(unsafe { libc::unlinkat(dir.0.as_raw_fd(), name.as_ptr(), 0) })?;
             }
         }
@@ -718,6 +749,7 @@ mod safe {
         fn drop(&mut self) {
             let result = clean(&self.directory).and_then(|()| {
                 let name = c(&self.name)?;
+                // SAFETY: see `Dir`.
                 io(unsafe {
                     libc::unlinkat(self.root.0.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR)
                 })
