@@ -10,7 +10,6 @@ on:
       - 'nix/kernels.nix'
       - 'nix/runtime.nix'
       - 'tools/runtime/**'
-      - 'tools/runtime/notices.py'
       - 'flake.nix'
       - 'flake.lock'
       - '.github/workflows/kernels.yml'
@@ -22,7 +21,6 @@ on:
       - 'nix/kernels.nix'
       - 'nix/runtime.nix'
       - 'tools/runtime/**'
-      - 'tools/runtime/notices.py'
       - 'flake.nix'
       - 'flake.lock'
       - '.github/workflows/kernels.yml'
@@ -55,9 +53,7 @@ jobs:
           python3 - <<'PYTHON'
           import json, os, pathlib, subprocess
           event = json.loads(pathlib.Path(os.environ['GITHUB_EVENT_PATH']).read_text())
-          base = event.get('before')
-          if not base and 'pull_request' in event:
-              base = event['pull_request']['base']['sha']
+          base = event['pull_request']['base']['sha'] if 'pull_request' in event else event.get('before')
           force = os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch' or not base or set(base) == {'0'}
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               for kind, manifest in [('kernel', 'kernel/inputs.json'), ('runtime', 'tools/runtime/inputs.json')]:
