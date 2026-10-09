@@ -100,14 +100,21 @@ class SelectionTests(unittest.TestCase):
             missing = self.linux("linux-apps", {"kvm": ""}, inputs=home)
             self.assertEqual(len(missing), 1)
             self.assertIn("set GH_TOKEN", missing[0])
-            self.assertIn(f"{directory}/.cache/seedbox/assets/x86_64/ready/runtime.tar.gz", missing[0])
+            launch = check.launch_format()
+            self.assertRegex(launch, r"^sbxlaunch\d+$")
+            self.assertIn(f"{directory}/.cache/seedbox/assets/{launch}/x86_64/ready/runtime.tar.gz", missing[0])
             self.assertEqual(self.linux("linux-apps", {"kvm": ""}, inputs={**home, "GH_TOKEN": "fixture"}), [])
             self.assertIn("requires root or passwordless sudo",
                           self.linux("linux-apps", {"kvm": ""}, root=False, inputs={**home, "GITHUB_TOKEN": "fixture"}))
             for kind, name in (("kernels", "kernel"), ("assets", "runtime.tar.gz")):
-                ready = Path(directory) / "Library/Caches/seedbox" / kind / "aarch64" / "ready"
-                ready.mkdir(parents=True)
-                (ready / name).touch()
+                # A cache from an older launch format does not count.
+                for key in ("sbxlaunch0", launch):
+                    if key == launch:
+                        with patch.object(check.shutil, "which", side_effect=lambda tool: "/fixture/podman"):
+                            self.assertTrue(check.requirements("mac-apps", "Darwin", "arm64", home))
+                    ready = Path(directory) / "Library/Caches/seedbox" / kind / key / "aarch64" / "ready"
+                    ready.mkdir(parents=True)
+                    (ready / name).touch()
             with patch.object(check.shutil, "which", side_effect=lambda tool: None):
                 self.assertEqual(check.requirements("mac-apps", "Darwin", "arm64", home), ["Docker or Podman is required"])
             with patch.object(check.shutil, "which", side_effect=lambda tool: "/fixture/podman" if tool == "podman" else None):

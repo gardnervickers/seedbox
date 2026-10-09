@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shlex
 import shutil
 import struct
@@ -110,6 +111,12 @@ def cache_home(environment, mac):
     return Path(environment.get("HOME", "~")).expanduser() / ("Library/Caches" if mac else ".cache")
 
 
+def launch_format():
+    """The release cache key the CLI built from this checkout uses (src/guest.rs)."""
+    source = (Path(__file__).resolve().parents[1] / "crates/seedbox/src/guest.rs").read_text()
+    return re.search(r'LAUNCH_MAGIC: &\[u8; \d+\] = b"(\w+)"', source).group(1).lower()
+
+
 def release_inputs(environment, mac, machine):
     """Unmet guest kernel and runtime asset sources for the release CLI."""
     if environment.get("GH_TOKEN") or environment.get("GITHUB_TOKEN"):
@@ -119,7 +126,8 @@ def release_inputs(environment, mac, machine):
     missing = []
     for key, kind, name in (("SEEDBOX_KERNEL", "kernels", "kernel"),
                             ("SEEDBOX_RUNTIME_ASSETS", "assets", "runtime.tar.gz")):
-        path = Path(environment[key]) if environment.get(key) else cache / kind / architecture / "ready" / name
+        ready = cache / kind / launch_format() / architecture / "ready" / name
+        path = Path(environment[key]) if environment.get(key) else ready
         if not path.is_file():
             missing.append(f"{key} or {path}")
     if missing:
