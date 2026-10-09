@@ -233,7 +233,7 @@ fn committed_trigger_unused_surface_preserves_witness_and_report_bytes() {
     let run = world_windowed::Run {
         cfg: &json!({}),
         duration: 2000,
-        end_on: &None,
+        end_on: None,
         fork: None,
         checkpoint: None,
         require_barrier: true,
