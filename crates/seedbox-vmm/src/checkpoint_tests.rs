@@ -76,7 +76,7 @@ fn finish(world: &mut World) -> Vec<(String, String)> {
     world
         .machines
         .iter_mut()
-        .map(|m| (m.exit_witness(), m.state_digest().0))
+        .map(|m| (m.exit_witness(), m.state_digest().unwrap().0))
         .collect()
 }
 
@@ -99,7 +99,11 @@ fn several_checkpoints_restore_nonmonotonically_and_repeat_branches() {
             "checkpoint"
         );
         let first = WorldSnapshot::take_checkpoint(&mut w).unwrap();
-        let first_state: Vec<_> = w.machines.iter_mut().map(|m| m.state_digest().0).collect();
+        let first_state: Vec<_> = w
+            .machines
+            .iter_mut()
+            .map(|m| m.state_digest().unwrap().0)
+            .collect();
         assert_eq!(
             simulate_to(
                 &mut w,
@@ -125,7 +129,7 @@ fn several_checkpoints_restore_nonmonotonically_and_repeat_branches() {
         assert_eq!(
             w.machines
                 .iter_mut()
-                .map(|m| m.state_digest().0)
+                .map(|m| m.state_digest().unwrap().0)
                 .collect::<Vec<_>>(),
             first_state
         );
@@ -451,7 +455,11 @@ fn parent_branch_continues_without_restarting_any_stream() {
         let want_timer = w.machines[0].timer_rng.as_mut().unwrap().next();
         let want = finish(&mut w);
         saved.restore_checkpoint(&mut w).unwrap();
-        let before: Vec<_> = w.machines.iter_mut().map(|m| m.state_digest().0).collect();
+        let before: Vec<_> = w
+            .machines
+            .iter_mut()
+            .map(|m| m.state_digest().unwrap().0)
+            .collect();
         let reseed = reseed_checkpoint(
             &mut w,
             &names,
@@ -465,7 +473,7 @@ fn parent_branch_continues_without_restarting_any_stream() {
         assert_eq!(
             w.machines
                 .iter_mut()
-                .map(|m| m.state_digest().0)
+                .map(|m| m.state_digest().unwrap().0)
                 .collect::<Vec<_>>(),
             before
         );
@@ -585,7 +593,7 @@ fn checkpoint_identity_keys_live_streams_and_future_incarnations() {
             timer,
             page,
             reboot_timer,
-            w.machines[0].state_digest().0,
+            w.machines[0].state_digest().unwrap().0,
         ));
     }
     assert_eq!(draws[0], draws[2]);

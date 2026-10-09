@@ -1249,16 +1249,17 @@ impl Machine {
     /// further, so vCPU state can be saved or replaced.
     fn complete_io(&mut self) -> Result<(), String> {
         self.vcpu.set_kvm_immediate_exit(1);
-        let r = self.vcpu.run().map(|e| format!("{e:?}"));
-        self.vcpu.set_kvm_immediate_exit(0);
-        match r {
+        // The exit borrows the vCPU: settle the outcome before resetting it.
+        let outcome = match self.vcpu.run() {
             Err(e) if e.errno() == libc::EINTR => Ok(()),
             Err(e) => Err(format!("{}: completing I/O: {e}", self.world.name)),
             Ok(e) => Err(format!(
-                "{}: exit while completing I/O: {e}",
+                "{}: exit while completing I/O: {e:?}",
                 self.world.name
             )),
-        }
+        };
+        self.vcpu.set_kvm_immediate_exit(0);
+        outcome
     }
 
     fn pending_io_bytes(&self) -> Vec<u8> {
@@ -1493,7 +1494,7 @@ impl Machine {
         Ok(Stop::Halted)
     }
 
-    fn inject(&mut self) {
+    fn inject(&mut self) -> Result<(), String> {
         let run = self.vcpu.get_kvm_run();
         match self.pic.pending() {
             Some(irq) if run.ready_for_interrupt_injection != 0 && run.if_flag != 0 => {
@@ -1506,7 +1507,13 @@ impl Machine {
                         &kvm_interrupt { irq: vector },
                     )
                 };
-                assert_eq!(rc, 0, "KVM_INTERRUPT");
+                if rc != 0 {
+                    return Err(format!(
+                        "{}: KVM_INTERRUPT: {}",
+                        self.world.name,
+                        std::io::Error::last_os_error()
+                    ));
+                }
                 self.vcpu.get_kvm_run().request_interrupt_window = 0;
                 self.stats.irqs += 1;
                 self.record(b'I', vector as u64);
@@ -1514,6 +1521,7 @@ impl Machine {
             Some(_) => run.request_interrupt_window = 1,
             None => run.request_interrupt_window = 0,
         }
+        Ok(())
     }
 
     fn serial_edges(&mut self) {
@@ -1626,7 +1634,7 @@ impl Machine {
             // on the stepping margin, so it is deterministic.
             if legal {
                 if remaining > tb.inject_guard() {
-                    self.inject();
+                    self.inject()?;
                 } else {
                     self.vcpu.get_kvm_run().request_interrupt_window = 0;
                 }
@@ -2198,11 +2206,12 @@ impl Machine {
     /// pending exception/interrupt/NMI state, syscall/TLS MSRs, the shared time
     /// page, RAM and any retained disk. The digest is the hash of the parts.
     /// Not covered: other MSRs, debug registers and other VMM device models.
-    pub fn state_digest(&mut self) -> (String, Vec<(&'static str, String)>) {
+    pub fn state_digest(&mut self) -> Result<(String, Vec<(&'static str, String)>), String> {
         let hex = |h: Sha256| format!("{:x}", h.finalize());
+        let e = |part: &str, err: kvm_ioctls::Error| format!("state digest {part}: {err}");
         let mut parts = Vec::new();
-        let r = self.vcpu.get_regs().unwrap();
-        let s = self.vcpu.get_sregs().unwrap();
+        let r = self.vcpu.get_regs().map_err(|x| e("regs", x))?;
+        let s = self.vcpu.get_sregs().map_err(|x| e("sregs", x))?;
         let mut h = Sha256::new();
         for v in [
             r.rax, r.rbx, r.rcx, r.rdx, r.rsi, r.rdi, r.rsp, r.rbp, r.r8, r.r9, r.r10, r.r11,
@@ -2213,12 +2222,12 @@ impl Machine {
         }
         parts.push(("regs", hex(h)));
         let mut h = Sha256::new();
-        for w in self.vcpu.get_xsave().unwrap().region {
+        for w in self.vcpu.get_xsave().map_err(|x| e("xsave", x))?.region {
             h.update(w.to_le_bytes());
         }
         parts.push(("xsave", hex(h)));
         let mut h = Sha256::new();
-        let xcrs = self.vcpu.get_xcrs().unwrap();
+        let xcrs = self.vcpu.get_xcrs().map_err(|x| e("xcrs", x))?;
         for x in &xcrs.xcrs[..xcrs.nr_xcrs as usize] {
             h.update(x.xcr.to_le_bytes());
             h.update(x.value.to_le_bytes());
@@ -2227,21 +2236,21 @@ impl Machine {
         // Event fields count only while live: KVM keeps the last exception's
         // vector/error code and the last interrupt's vector after delivery, so
         // they differ after a rollback without any guest-visible effect.
-        let e = self.vcpu.get_vcpu_events().unwrap();
-        let exception = if e.exception.injected != 0 || e.exception.pending != 0 {
+        let ev = self.vcpu.get_vcpu_events().map_err(|x| e("events", x))?;
+        let exception = if ev.exception.injected != 0 || ev.exception.pending != 0 {
             format!(
                 "{}/{}/{}/{}/{}",
-                e.exception.injected,
-                e.exception.pending,
-                e.exception.nr,
-                e.exception.has_error_code,
-                e.exception.error_code
+                ev.exception.injected,
+                ev.exception.pending,
+                ev.exception.nr,
+                ev.exception.has_error_code,
+                ev.exception.error_code
             )
         } else {
             "none".into()
         };
-        let interrupt = if e.interrupt.injected != 0 {
-            format!("{}/{}", e.interrupt.nr, e.interrupt.soft)
+        let interrupt = if ev.interrupt.injected != 0 {
+            format!("{}/{}", ev.interrupt.nr, ev.interrupt.soft)
         } else {
             "none".into()
         };
@@ -2249,7 +2258,7 @@ impl Machine {
             "events",
             format!(
                 "exc:{exception} int:{interrupt} shadow:{} nmi:{}/{}/{}",
-                e.interrupt.shadow, e.nmi.injected, e.nmi.pending, e.nmi.masked,
+                ev.interrupt.shadow, ev.nmi.injected, ev.nmi.pending, ev.nmi.masked,
             ),
         ));
         // KERNEL_GS_BASE, STAR, LSTAR, CSTAR, SFMASK, TSC_AUX, PAT, SYSENTER_*.
@@ -2272,8 +2281,9 @@ impl Machine {
                 ..Default::default()
             })
             .collect();
-        let mut msrs = Msrs::from_entries(&entries).unwrap();
-        let n = self.vcpu.get_msrs(&mut msrs).unwrap();
+        let mut msrs =
+            Msrs::from_entries(&entries).map_err(|x| format!("state digest msrs: {x:?}"))?;
+        let n = self.vcpu.get_msrs(&mut msrs).map_err(|x| e("msrs", x))?;
         let mut h = Sha256::new();
         for m in &msrs.as_slice()[..n] {
             h.update(m.index.to_le_bytes());
@@ -2301,7 +2311,7 @@ impl Machine {
         for (_, d) in &parts {
             all.update(d.as_bytes());
         }
-        (hex(all), parts)
+        Ok((hex(all), parts))
     }
 
     /// Headerless little-endian u64 per 4 KiB guest RAM page, in PFN order.
@@ -2646,7 +2656,7 @@ mod net_poll_tests {
                     Stop::Exited,
                     "{case}"
                 );
-                let evidence = (m.time, m.exit_witness(), m.state_digest());
+                let evidence = (m.time, m.exit_witness(), m.state_digest().unwrap());
                 if let Some(want) = &first {
                     assert_eq!(&evidence, want, "{case}");
                 } else {
@@ -2728,7 +2738,12 @@ mod io_boundary_tests {
                         m.run_until(counter, 10_000, 0, &mut frames).unwrap(),
                         Stop::Halted | Stop::Exited
                     ) {}
-                    (m.exit_witness(), m.state_digest().0, m.time, m.branches)
+                    (
+                        m.exit_witness(),
+                        m.state_digest().unwrap().0,
+                        m.time,
+                        m.branches,
+                    )
                 };
                 let want = finish(&mut m, &mut counter);
                 let mut fresh = probe(&kvm, port, write, undo);
@@ -2748,7 +2763,11 @@ mod io_boundary_tests {
     fn page_capture_has_documented_format_and_preserves_ram_witness_state() {
         let kvm = Kvm::new().unwrap();
         let mut m = probe(&kvm, 0x530, true, 0);
-        let before = (m.exit_witness(), m.state_digest(), m.memory().to_vec());
+        let before = (
+            m.exit_witness(),
+            m.state_digest().unwrap(),
+            m.memory().to_vec(),
+        );
         let pages = m.page_hashes();
         assert_eq!(pages.len(), m.mem.len() / 4096 * 8);
         for (pfn, page) in before.2.chunks(4096).enumerate() {
@@ -2756,7 +2775,11 @@ mod io_boundary_tests {
             assert_eq!(&pages[pfn * 8..pfn * 8 + 8], &hash.to_le_bytes());
         }
         assert_eq!(
-            (m.exit_witness(), m.state_digest(), m.memory().to_vec()),
+            (
+                m.exit_witness(),
+                m.state_digest().unwrap(),
+                m.memory().to_vec()
+            ),
             before
         );
     }
@@ -2883,7 +2906,7 @@ mod io_boundary_tests {
                     assert!(m.undo.as_ref().unwrap().stats.checkpoints > 0);
                 }
                 let checkpoint_count = m.undo.as_ref().map_or(0, |u| u.stats.checkpoints);
-                let evidence = (m.exit_witness(), m.state_digest());
+                let evidence = (m.exit_witness(), m.state_digest().unwrap());
                 // Same registers/RAM, but pending response/debt must change
                 // both the terminal exit witness and the named state part.
                 let saved = m.pending_io.clone();
@@ -2894,7 +2917,7 @@ mod io_boundary_tests {
                     } else {
                         p.remaining_ns -= 1;
                     }
-                    let changed = (m.exit_witness(), m.state_digest());
+                    let changed = (m.exit_witness(), m.state_digest().unwrap());
                     assert_ne!(changed.0, evidence.0);
                     assert_ne!(changed.1 .0, evidence.1 .0);
                     for ((name, hash), (other_name, other_hash)) in
@@ -2918,7 +2941,7 @@ mod io_boundary_tests {
                     m.run_until(&mut counter, 1000, 0, &mut frames).unwrap(),
                     Stop::Reached
                 );
-                let evidence = (m.exit_witness(), m.state_digest());
+                let evidence = (m.exit_witness(), m.state_digest().unwrap());
                 if let Some(want) = &completed {
                     assert_eq!(&evidence, want, "completed undo={undo} exact={exact}");
                 } else {
@@ -3065,7 +3088,7 @@ mod io_boundary_tests {
             let got = (
                 word(&mut m).wrapping_sub(start),
                 m.exit_witness(),
-                m.state_digest().0,
+                m.state_digest().unwrap().0,
             );
             if let Some(want) = &want {
                 assert_eq!(&got, want, "undo={undo}");
@@ -3127,7 +3150,7 @@ mod io_boundary_tests {
                     }
                 }
                 let rip = m.vcpu.get_regs().unwrap().rip;
-                let evidence = (m.time, rip, m.exit_witness(), m.state_digest().0);
+                let evidence = (m.time, rip, m.exit_witness(), m.state_digest().unwrap().0);
                 if let Some(want) = &want {
                     assert_eq!(&evidence, want, "{what}");
                 } else {
@@ -3231,7 +3254,7 @@ mod io_boundary_tests {
             );
             assert_eq!(m.branches, 1);
             assert_eq!(&m.memory()[0x80000..0x80004], &[0x78, 0x56, 0x34, 0x12]);
-            let evidence = (m.time, m.exit_witness(), m.state_digest().0);
+            let evidence = (m.time, m.exit_witness(), m.state_digest().unwrap().0);
             if let Some(want) = &want {
                 assert_eq!(&evidence, want, "undo={undo}");
             } else {
@@ -3543,7 +3566,7 @@ mod fork_tests {
         assert_eq!(&m.memory()[0x81000..0x81004], &[0xad, 0xde, 0, 0]);
         (
             m.exit_witness(),
-            m.state_digest().0,
+            m.state_digest().unwrap().0,
             m.time,
             m.branches,
             m.memory()[0x80000..0x80004].to_vec(),
@@ -3635,7 +3658,12 @@ mod fork_tests {
                 m.run_until(counter, 10_000_000, 0, &mut frames).unwrap(),
                 Stop::Exited | Stop::Halted
             ) {}
-            (m.exit_witness(), m.state_digest().0, m.time, m.branches)
+            (
+                m.exit_witness(),
+                m.state_digest().unwrap().0,
+                m.time,
+                m.branches,
+            )
         };
         for undo in [0, 256] {
             let mut cold = probe_machine(&kvm, undo, false);
@@ -3777,7 +3805,12 @@ mod fork_tests {
                 first.1,
                 "the witness covers both incarnations"
             );
-            let evidence = (first, new.time, new.exit_witness(), new.state_digest().0);
+            let evidence = (
+                first,
+                new.time,
+                new.exit_witness(),
+                new.state_digest().unwrap().0,
+            );
             if let Some(want) = &want {
                 assert_eq!(&evidence, want, "undo={undo}");
             } else {
@@ -4031,7 +4064,7 @@ mod timed_log_tests {
                 // Reading metadata and taking a full-state digest are observation only.
                 let before = m.exit_witness();
                 if cap > 0 {
-                    let _ = m.state_digest();
+                    let _ = m.state_digest().unwrap();
                 }
                 assert_eq!(before, m.exit_witness());
                 assert_eq!(
@@ -4046,7 +4079,7 @@ mod timed_log_tests {
                 let evidence = (
                     m.time,
                     m.exit_witness(),
-                    m.state_digest().0,
+                    m.state_digest().unwrap().0,
                     m.com1.out.clone(),
                     m.com2.out.clone(),
                 );

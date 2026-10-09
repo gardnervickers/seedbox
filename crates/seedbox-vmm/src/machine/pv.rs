@@ -685,7 +685,7 @@ mod tests {
                 // once without entering the guest's absent interrupt handler.
                 m.wake(wake);
                 m.expire_timers().unwrap();
-                m.inject();
+                m.inject().unwrap();
                 assert_eq!(m.stats.irqs, 1);
                 assert_eq!(m.pic.pending(), None);
                 let mut rng = m.timer_rng.as_ref().unwrap().clone();

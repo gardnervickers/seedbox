@@ -1087,7 +1087,7 @@ fn report(
         let w = mach.exit_witness();
         world_witness.update(w.as_bytes());
         let (state_digest, state_parts) = if digest {
-            let (d, parts) = mach.state_digest();
+            let (d, parts) = mach.state_digest()?;
             // The host supplies output/MACHINE_OUTPUT_DIR as --out; retention
             // preserves that directory prefix (see seedbox/src/vmm.rs).
             std::fs::write(

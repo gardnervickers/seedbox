@@ -92,12 +92,40 @@ fn read_virt(p: &Paging, mem: &[u8], gva: u64, buf: &mut [u8]) -> usize {
     done
 }
 
-const UNMAPPED: &str = "unmapped data at";
+/// Why a branch target could not be computed.
+#[derive(Debug)]
+enum TargetError {
+    /// The target is read from guest memory that is not mapped: the
+    /// instruction faults into the #PF handler before it transfers control.
+    Unmapped(u64),
+    Other(String),
+}
 
-fn read_word(p: &Paging, mem: &[u8], gva: u64, bytes: usize) -> Result<u64, String> {
+impl From<String> for TargetError {
+    fn from(e: String) -> Self {
+        Self::Other(e)
+    }
+}
+
+impl std::fmt::Display for TargetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unmapped(gva) => write!(f, "unmapped data at {gva:#x}"),
+            Self::Other(e) => f.write_str(e),
+        }
+    }
+}
+
+impl From<TargetError> for String {
+    fn from(e: TargetError) -> Self {
+        e.to_string()
+    }
+}
+
+fn read_word(p: &Paging, mem: &[u8], gva: u64, bytes: usize) -> Result<u64, TargetError> {
     let mut b = [0u8; 8];
     if read_virt(p, mem, gva, &mut b[..bytes]) != bytes {
-        return Err(format!("{UNMAPPED} {gva:#x}"));
+        return Err(TargetError::Unmapped(gva));
     }
     Ok(u64::from_le_bytes(b))
 }
@@ -215,7 +243,7 @@ impl Planner {
         mem: &[u8],
         r: &kvm_regs,
         ins: &Instruction,
-    ) -> Result<(u64, bool), String> {
+    ) -> Result<(u64, bool), TargetError> {
         const RF: u64 = 1 << 16;
         match ins.mnemonic() {
             Mnemonic::Sysret | Mnemonic::Sysretq => return Ok((r.rcx, r.r11 & RF != 0)),
@@ -234,7 +262,12 @@ impl Planner {
         self.plain_successor(mem, r, ins).map(|t| (t, false))
     }
 
-    fn plain_successor(&self, mem: &[u8], r: &kvm_regs, ins: &Instruction) -> Result<u64, String> {
+    fn plain_successor(
+        &self,
+        mem: &[u8],
+        r: &kvm_regs,
+        ins: &Instruction,
+    ) -> Result<u64, TargetError> {
         match ins.mnemonic() {
             Mnemonic::Syscall => return Ok(self.lstar),
             Mnemonic::Ret => return read_word(&self.paging, mem, r.rsp, 8),
@@ -248,15 +281,15 @@ impl Planner {
                 };
                 return read_word(&self.paging, mem, r.rsp, bytes);
             }
-            Mnemonic::Int3 => return self.handler(mem, 3),
-            Mnemonic::Int => return self.handler(mem, ins.immediate8() as u64),
+            Mnemonic::Int3 => return Ok(self.handler(mem, 3)?),
+            Mnemonic::Int => return Ok(self.handler(mem, ins.immediate8() as u64)?),
             Mnemonic::Ud0 | Mnemonic::Ud1 | Mnemonic::Ud2 => return Ok(self.ud),
             _ => {}
         }
         match ins.op0_kind() {
             OpKind::FarBranch32 => Ok(ins.far_branch32() as u64),
             OpKind::FarBranch16 => Ok(ins.far_branch16() as u64),
-            OpKind::Register => gpr(r, ins.op0_register()),
+            OpKind::Register => Ok(gpr(r, ins.op0_register())?),
             OpKind::Memory => {
                 let ea = if ins.is_ip_rel_memory_operand() {
                     ins.ip_rel_memory_address()
@@ -286,11 +319,11 @@ impl Planner {
                 };
                 read_word(&self.paging, mem, ea, bytes)
             }
-            other => Err(format!(
+            other => Err(TargetError::Other(format!(
                 "unsupported control transfer {:?} ({other:?}) at {:#x}",
                 ins.mnemonic(),
                 ins.ip()
-            )),
+            ))),
         }
     }
 
@@ -354,8 +387,8 @@ impl Planner {
                         // (a return address, jump table or IRET frame not yet
                         // faulted in): the instruction raises #PF before it
                         // transfers control, and that handler is armed below.
-                        Err(e) if e.starts_with(UNMAPPED) => break,
-                        Err(e) => return Err(e),
+                        Err(TargetError::Unmapped(_)) => break,
+                        Err(e) => return Err(e.into()),
                     };
                     if rf {
                         let mut r2 = *r;
@@ -384,8 +417,8 @@ impl Planner {
                     match self.plain_successor(mem, &r2, &ins) {
                         Ok(t) => targets.push(t),
                         // As above: it faults into the armed #PF handler.
-                        Err(e) if e.starts_with(UNMAPPED) => {}
-                        Err(e) => return Err(e),
+                        Err(TargetError::Unmapped(_)) => {}
+                        Err(e) => return Err(e.into()),
                     }
                 } else {
                     targets.push(ip); // stop before it; evaluate with real state
