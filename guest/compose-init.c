@@ -571,6 +571,25 @@ static int step_wall_clock(int64_t ns) {
     if (adjustment.time.tv_usec < 0) { adjustment.time.tv_usec += 1000000000; adjustment.time.tv_sec--; }
     return SEEDBOX_ADJTIMEX(&adjustment) < 0 ? -1 : 0;
 }
+/* Run the system clock `ppb` parts per billion fast (slow if negative), like
+ * an oscillator error. The NTP tick length scales CLOCK_REALTIME, MONOTONIC
+ * and BOOTTIME together; MONOTONIC_RAW, the TSC and the simulated time base
+ * keep their rate. ADJ_TICK moves in steps of one microsecond per USER_HZ
+ * tick and ADJ_FREQUENCY covers the remainder, so the result is absolute:
+ * zero restores the nominal rate. */
+static int set_clock_rate(int64_t ppb) {
+    if (ppb > 1000000000 || ppb < -1000000000) { errno = EINVAL; return -1; }
+    long hz = sysconf(_SC_CLK_TCK);
+    if (hz <= 0 || 1000000 % hz) { errno = EINVAL; return -1; }
+    int64_t nominal = 1000000 / hz, per_tick = 1000000000 / nominal;
+    int64_t ticks = (ppb + (ppb < 0 ? -per_tick : per_tick) / 2) / per_tick;
+    int64_t rest = ppb - ticks * per_tick;
+    struct timex adjustment = {.modes = ADJ_TICK | ADJ_FREQUENCY};
+    adjustment.tick = nominal + ticks;
+    /* freq is parts per million with a 16-bit fraction. */
+    adjustment.freq = (rest * 65536 + (rest < 0 ? -500 : 500)) / 1000;
+    return SEEDBOX_ADJTIMEX(&adjustment) < 0 ? -1 : 0;
+}
 /* SIGSTOP the application's process group, as a debugger or GC pause would;
  * its kernel keeps ACKing and accepting connections. Confirm once the group
  * leader reports the stop, leaving any exit for supervise() to reap. */
@@ -602,6 +621,7 @@ static void control(char *command, pid_t *child) {
     if (control_parse(command, &action, &id, &step)) { errno = EINVAL; die("invalid management command"); }
     int success = 0;
     if (!strcmp(action, "clock_step")) success = step_wall_clock(step) == 0;
+    else if (!strcmp(action, "clock_rate")) success = set_clock_rate(step) == 0;
     else if (!strcmp(action, "stop")) success = stop(child) == 0;
     else if (!strcmp(action, "freeze")) success = freeze(child) == 0;
     else if (!strcmp(action, "thaw")) success = thaw(child) == 0;

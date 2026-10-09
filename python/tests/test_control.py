@@ -9,7 +9,7 @@ import threading
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from seedbox import ClockSkew, Controller, FaultError, Machine, Partition, ProtocolError, Shape, Throttle, World
+from seedbox import ClockDrift, ClockSkew, Controller, FaultError, Machine, Partition, ProtocolError, Shape, Throttle, World
 
 
 def reply(request_id=1, result=None, **changes):
@@ -179,6 +179,29 @@ class ControlTests(unittest.TestCase):
                            {"offset": 1.5}, {"offset": True}, {"offset": 365 * 86_400 * 10**9 + 1}]:
                 with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                     world.clock_skew("server", **kwargs)
+        self.assertEqual(peer.requests, [])
+
+    def test_clock_drift_sends_one_rate_kind_and_returns_healable_handle(self):
+        peer = Peer(reply(result={"handle": "p1", "rate_ppb": -7}) + reply(2, {"handle": "p2", "rate_ppb": 5}) + reply(3))
+        with World(peer) as world:
+            seeded = world.clock_drift("server", max_ppb=1_000)
+            self.assertEqual(seeded, ClockDrift("p1", -7, seeded.effect))
+            fixed = world.clock_drift(Machine("db-vm"), ppb=5)
+            self.assertEqual(fixed.rate_ppb, 5)
+            world.heal(seeded)
+        self.assertEqual(peer.requests, [
+            {"version": 1, "id": 1, "op": "clock_drift", "target": {"service": "server"}, "max_rate_ppb": 1_000},
+            {"version": 1, "id": 2, "op": "clock_drift", "target": {"machine": "db-vm"}, "rate_ppb": 5},
+            {"version": 1, "id": 3, "op": "heal", "handle": "p1"},
+        ])
+
+    def test_clock_drift_rejects_invalid_local_values(self):
+        peer = Peer(b"")
+        with World(peer) as world:
+            for kwargs in [{}, {"ppb": 1, "max_ppb": 1}, {"ppb": 0}, {"max_ppb": 0}, {"max_ppb": -1},
+                           {"ppb": 1.5}, {"ppb": True}, {"ppb": -100_000_001}, {"max_ppb": 100_000_001}]:
+                with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                    world.clock_drift("server", **kwargs)
         self.assertEqual(peer.requests, [])
 
     def test_connection_discovery_drop_and_heal_preserve_explicit_zero_evidence(self):

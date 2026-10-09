@@ -1293,6 +1293,29 @@ fn validate_control_history(
                     max_offset_ns,
                 }
             }
+            Operation::ClockDrift {
+                target,
+                rate_ppb,
+                max_rate_ppb,
+            } => {
+                let handle = match (response, unavailable) {
+                    (true, false) => &metadata["result"]["handle"],
+                    (true, true) => &metadata["error"]["handle"],
+                    (false, _) => &row["plan"]["handle"],
+                };
+                let handle = handle.as_str().ok_or_else(bad)?.to_owned();
+                if handle.is_empty()
+                    || seedbox_control::validate_clock_drift(rate_ppb, max_rate_ppb).is_err()
+                {
+                    return Err(bad());
+                }
+                Action::ClockDrift {
+                    handle,
+                    machine: resolve(&target)?,
+                    rate_ppb,
+                    max_rate_ppb,
+                }
+            }
             Operation::Throttle {
                 target,
                 factor_permille,
@@ -1368,12 +1391,15 @@ fn validate_control_history(
         {
             return Err(bad());
         }
-        if let Action::ClockSkew { handle, .. } = &plan.action {
+        if let Action::ClockSkew { handle, .. } | Action::ClockDrift { handle, .. } = &plan.action {
             clocks.insert(handle.clone());
         }
         if unavailable {
             if !(plan.action.is_process()
-                || matches!(plan.action, Action::ClockSkew { .. } | Action::Heal { .. }))
+                || matches!(
+                    plan.action,
+                    Action::ClockSkew { .. } | Action::ClockDrift { .. } | Action::Heal { .. }
+                ))
                 || e.is_none_or(|e| e > plan.deadline_ns)
             {
                 return Err(bad());

@@ -816,8 +816,16 @@ applies the step with `adjtimex(ADJ_SETOFFSET)` and acknowledges it like a
 process fault; monotonic time and the virtual TSC never move. The fault row
 records the applied `offset_ns`, so offsets are part of the world witness.
 Runs without clock skew draw nothing new and keep their witnesses. See
-[the protocol](../python/PROTOCOL.md#clock-skew). Clock rate (drift) is not yet
-modeled.
+[the protocol](../python/PROTOCOL.md#clock-skew).
+
+`world.clock_drift(target, ppb=..., max_ppb=...)` makes a machine's clock run
+fast or slow by a fixed rate error, or one drawn from `[-max_ppb, max_ppb]` on
+the same `clock/<machine>` stream, up to 10%. The supervisor sets the kernel's
+NTP tick and frequency with `adjtimex`, so realtime, monotonic and boot time
+(and the timers on them) drift together while `CLOCK_MONOTONIC_RAW`, the TSC
+and simulated time do not. One drift per machine at a time; heal restores the
+nominal rate and the fault row records `rate_ppb`. Runs without drift draw
+nothing new. See [the protocol](../python/PROTOCOL.md#clock-drift).
 
 The network seed-diversity audit still finds zero default jitter and loss.
 `link/<from>/<to>` and `link-loss/<from>/<to>` each advance once per non-cut

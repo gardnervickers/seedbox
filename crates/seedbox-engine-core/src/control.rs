@@ -297,6 +297,26 @@ impl Control {
                     max_offset_ns: *max_offset_ns,
                 })
             }
+            Operation::ClockDrift {
+                target,
+                rate_ppb,
+                max_rate_ppb,
+            } => {
+                seedbox_control::validate_clock_drift(*rate_ppb, *max_rate_ppb)?;
+                let machine = self.target(target)?;
+                self.handles = self
+                    .handles
+                    .checked_add(1)
+                    .ok_or("fault handles exhausted")?;
+                let handle = format!("p{}", self.handles);
+                result = json!({"handle":handle});
+                Some(Action::ClockDrift {
+                    handle,
+                    machine,
+                    rate_ppb: *rate_ppb,
+                    max_rate_ppb: *max_rate_ppb,
+                })
+            }
             Operation::Throttle {
                 target,
                 factor_permille,
@@ -520,7 +540,9 @@ impl Control {
                     Some(Action::Pause { .. } | Action::Resume { .. }) => {
                         "target VM has exited; crash and reboot it instead"
                     }
-                    Some(Action::ClockSkew { .. }) => "target VM has exited",
+                    Some(Action::ClockSkew { .. } | Action::ClockDrift { .. }) => {
+                        "target VM has exited"
+                    }
                     Some(Action::PauseProcess { .. } | Action::ResumeProcess { .. }) => {
                         "target VM has exited; there is no process to pause or resume"
                     }
@@ -691,6 +713,11 @@ impl Control {
                         if matches!(p.operation, Some(Operation::ClockSkew { .. })) {
                             if let Some(offset) = faults.log[id as usize - 1].get("offset_ns") {
                                 p.result["offset_ns"] = offset.clone();
+                            }
+                        }
+                        if matches!(p.operation, Some(Operation::ClockDrift { .. })) {
+                            if let Some(rate) = faults.log[id as usize - 1].get("rate_ppb") {
+                                p.result["rate_ppb"] = rate.clone();
                             }
                         }
                         if matches!(p.operation, Some(Operation::Heal { .. })) {
