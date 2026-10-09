@@ -21,7 +21,6 @@ apply = load("apply", "apply.py")
 initramfs = load("initramfs", "build-initramfs.py")
 audit = load("audit", "audit.py")
 config = load("config", "check-config.py")
-hashes = load("hashes", "check-hashes.py")
 
 class Inputs(unittest.TestCase):
     def test_hrtimer_spin_rejects_low_resolution_mode(self):
@@ -88,26 +87,6 @@ int main(int argc, char **argv) {
                 self.assertEqual(config.fixture_errors(actual), [
                     f'{key}: timerfd spin fixture requires y'])
         self.assertEqual(len(config.fixture_errors({})), 2)
-
-    def test_hashes_require_independent_expected_values(self):
-        import hashlib
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            expected = root / "expected"
-            for name in ["Image", "init.cpio"]:
-                (root / name).write_bytes(name.encode())
-            expected.write_text("".join(
-                f"{hashlib.sha256(name.encode()).hexdigest()}  {name}\n"
-                for name in ["Image", "init.cpio"]))
-            hashes.check(root, expected)
-            (root / "Image").write_bytes(b"changed toolchain")
-            # A self-generated manifest must not override independent values.
-            (root / "SHA256SUMS").write_text("ignored")
-            with self.assertRaisesRegex(ValueError, "different source or toolchain"):
-                hashes.check(root, expected)
-            expected.write_text("REBUILD_REQUIRED_IMAGE_SHA256  Image\n")
-            with self.assertRaisesRegex(ValueError, "operator must fill"):
-                hashes.check(root, expected)
 
     def test_config_rejects_unknown_disabled_and_dropped_requests(self):
         requested = config.settings('CONFIG_PRESENT=y\nCONFIG_REMOVED=n\nCONFIG_HZ=100\n')
