@@ -31,6 +31,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Engine and guest kernel | any built engine and kernel are admitted; the run records their hashes | `--vmm`, `--kernel` |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
 | Diff inputs | Two required retained run directories; no runtime inputs or state lookup | positional `RUN_A RUN_B` |
+| Witness log (Linux) | always; retain `output/machines/NAME.witness-log` for diff and replay to locate the first diverging 1 ms interval | none |
 | Per-page RAM evidence (Linux) | off; under `--full-state`, retain `output/machines/NAME.pages` beside machine traces | existing `--full-state` |
 | Log selection | All indexed machines and both streams, with no time bounds; raw bytes on stdout (`--json` for metadata) | `logs RUN --machine NAME --stream console --since-ns N --until-ns N` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
