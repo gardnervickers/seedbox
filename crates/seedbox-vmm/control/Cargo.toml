@@ -1,5 +1,6 @@
 [package]
-build = "build-cache.rs"
+# Shared source-cache watcher (see that file).
+build = "../../seedbox-engine-core/build.rs"
 name = "seedbox-vmm-control"
 version.workspace = true
 edition.workspace = true

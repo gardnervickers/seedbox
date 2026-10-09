@@ -33,16 +33,31 @@ fn main() {
     // guest build, and Cargo never invokes Nix or a container engine.
     println!("cargo::rerun-if-env-changed=SEEDBOX_BUILD_HELPERS");
     println!("cargo::rerun-if-env-changed=SEEDBOX_ASSET_DIR");
+    println!("cargo::rerun-if-env-changed=SUDO_UID");
     let explicit_helpers = env::var_os("SEEDBOX_BUILD_HELPERS").map(PathBuf::from);
     let explicitly_selected = explicit_helpers.is_some();
     let helpers = if env::var("PROFILE").as_deref() == Ok("release") || explicit_helpers.is_some() {
         let path = explicit_helpers.unwrap_or_else(|| {
+            // SAFETY: this matches POSIX `uid_t geteuid(void)`; uid_t is a u32 on
+            // every Linux and macOS target Seedbox builds for.
             unsafe extern "C" {
                 fn geteuid() -> u32;
             }
             let directory = env::var_os("SEEDBOX_ASSET_DIR")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(format!("/tmp/seedbox-{}", unsafe { geteuid() })));
+                .unwrap_or_else(|| {
+                    // SAFETY: geteuid takes no arguments, cannot fail and touches no memory.
+                    let euid = unsafe { geteuid() };
+                    // Same slot as the CLI's default_asset_root (cli/backends.rs): assets
+                    // are built as the user, so `sudo cargo build` reads the invoking
+                    // user's slot. Only root follows SUDO_UID; a malformed value keeps euid.
+                    let uid = env::var("SUDO_UID")
+                        .ok()
+                        .filter(|_| euid == 0)
+                        .and_then(|uid| uid.parse::<u32>().ok())
+                        .unwrap_or(euid);
+                    PathBuf::from(format!("/tmp/seedbox-{uid}"))
+                });
             directory
                 .join(env::var("CARGO_CFG_TARGET_ARCH").expect("target architecture"))
                 .join("runtime.tar.gz")

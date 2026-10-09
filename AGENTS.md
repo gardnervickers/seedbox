@@ -94,8 +94,9 @@ transports; retries must fail before any worker activity.
 The standalone backends compile the canonical sources through their in-workspace
 `engine-core` packages, with distinct package names just like their control
 packages. Each `src` link points to the canonical directory; its build script
-watches that whole directory, including new modules. Canonical and wrapper build
-scripts track the automatic build-only `SEEDBOX_BUILD_ROOT` from `.cargo/config.toml`
+watches that whole directory, including new modules. The canonical packages and
+the VMM wrappers share one build script, `crates/seedbox-engine-core/build.rs`,
+which resolves the canonical source through the wrapper's link. Build scripts track the automatic build-only `SEEDBOX_BUILD_ROOT` from `.cargo/config.toml`
 to invalidate a reused target when switching checkouts, even if source timestamps
 predate the cache. Run Cargo from the checkout root for caching; missing or unrelated
 config safely forces a source rebuild on every invocation, including older checkouts.
