@@ -31,20 +31,23 @@ copies, after their Cargo build has finished.
 | `linux-kvm` | Linux x86-64 or ARM64, usable `/dev/kvm` | Native backend `kvm-tests`; no PMU or root required |
 | `linux-counter` | Linux x86-64 KVM, guest PMU, root | VMM `counter-tests`; exact stops, checkpoints, forks, committed logs and triggers on a leased core. Implies `linux-kvm` |
 | `linux-guests` | Linux KVM plus fixture kernel/initrd | Backend `guest-tests`; real guest determinism/checkpoint controls. Implies `linux-counter` on x86-64, `linux-kvm` on ARM64 |
-| `linux-oci` | Linux x86-64, root, Skopeo, umoci, Podman, registry access | CLI `oci-tests`; real image import and Dockerfile behavior |
-| `linux-apps` | Linux x86-64 KVM, root, OCI tools | CLI `application-tests`; every acceptance YAML runs twice, diff matches, replay matches, with full state. PV always; counter too when `linux-counter` is selected |
+| `linux-oci` | Linux x86-64, running Docker-compatible engine, registry access | CLI `oci-tests`; real image import and Dockerfile behavior. No KVM or root required |
+| `linux-apps` | Linux x86-64 KVM, root, Docker-compatible engine, built guest assets | CLI `application-tests`; every acceptance YAML runs twice, diff matches, replay matches, with full state. PV always; counter too when `linux-counter` is selected |
 | `linux-pause` | Linux x86-64 KVM, root, supplied retained run/store | CLI `retained-run-tests`; pause/resume replay |
 | `mac-hvf` | Apple Silicon, macOS 15+, HVF and codesign | ARM `hvf-tests`; native CPU/state and cancellation primitives |
 | `mac-guests` | `mac-hvf` plus ARM fixture kernel/initrd | ARM `guest-tests`. Implies `mac-hvf` |
-| `mac-apps` | `mac-hvf` plus Docker or Podman | CLI `application-tests` on ARM PV. Implies `mac-hvf` |
+| `mac-apps` | `mac-hvf` plus Docker-compatible engine, built guest assets | CLI `application-tests` on ARM PV. Implies `mac-hvf` |
 
 Groups: `linux` is `linux-kvm linux-counter linux-oci linux-apps`; `mac` is
 `mac-hvf mac-apps`. Groups hold only suites that need no hand-built fixtures, so
 the guest suites (fixture kernel and initrd, see `harness/worlds/README.md`) and
 `linux-pause` (a retained run) are always named explicitly. `--cpu` applies to `linux-counter` and `linux-apps`.
-Both apps suites need the guest kernel and runtime assets: `GH_TOKEN` or
-`GITHUB_TOKEN` for the private release download, a populated Seedbox cache, or
-`SEEDBOX_KERNEL` and `SEEDBOX_RUNTIME_ASSETS`. Otherwise they report unavailable.
+A Docker-compatible engine means `DOCKER_HOST` is set or `docker` or `podman` is
+installed. Both apps suites need the guest kernel and helper archive that
+`bash tools/build-assets.sh` writes to `/tmp/seedbox-$UID/<arch>/` (or
+`$SEEDBOX_ASSET_DIR/<arch>/`), or explicit `SEEDBOX_KERNEL` and
+`SEEDBOX_RUNTIME_ASSETS` files. Seedbox never downloads them; otherwise the
+suites report unavailable.
 
 AMD and Intel run the same counted-execution tests. The engine selects its
 counter profile through CPUID. The test supervisor leases a free core and its
@@ -60,7 +63,9 @@ are invoked separately, using their existing aliases, lockfiles and target direc
 ## Guest and application inputs
 
 Application coverage needs no local kernel or runtime bundle: the release CLI
-downloads and caches current guest assets. The low-level guest and pause suites
+Application coverage needs the guest kernel and helpers from
+`bash tools/build-assets.sh`; run it before the release CLI is built, which
+embeds the helpers. The low-level guest and pause suites
 fail with exit 2 when their fixture inputs are missing. Every hardware run prints a fresh report directory
 under `target/check-reports/`, which survives development-shell cleanup.
 
@@ -68,14 +73,13 @@ under `target/check-reports/`, which survives development-shell cleanup.
 | --- | --- | --- |
 | x86 entropy checkpoint | `SEEDBOX_TEST_KERNEL`, `SEEDBOX_TEST_INITRD` | `artifacts/bzImage`, `artifacts/entropy-fork.cpio` |
 | ARM guest fixture | `SEEDBOX_ARM64_KERNEL`, `SEEDBOX_ARM64_INITRD` | `artifacts/arm64-hres/Image`, `artifacts/arm64-hres/init.cpio` |
-| Applications | No guest-asset inputs required; optional CLI overrides remain supported | Release CLI downloads/cache, native container tools |
+| Applications | Build guest assets first; optional CLI overrides remain supported | Release CLI, Docker-compatible API |
 | Pause/resume | `SEEDBOX_HOST_PAUSE_RUN`, `SEEDBOX_HOST_PAUSE_STATE` | No default retained run |
 
 Applications use a release CLI built from the current checkout. Linux runs PV
 scenarios, plus counter scenarios when `linux-counter` is also selected. Mac runs ARM PV scenarios.
-Linux Dockerfile builds use `--build-epoch 0` for repeatable build timestamps.
-Mac uses its container builder's ordinary timestamp policy; that CLI option is
-Linux-only. Each CLI step streams to its report log and prints its progress.
+Image builds use the engine's normal layer cache on both platforms. Each CLI
+step streams to its report log and prints its progress.
 Application guests use 2048 MiB, including space for the JVM image's boot archive.
 Image pulls, application builds and guest execution can be substantially slower
 than native unit tests. Their assertions belong to the guest workload and public

@@ -12,7 +12,6 @@ import json
 import os
 from pathlib import Path
 import platform
-import re
 import shlex
 import shutil
 import struct
@@ -28,12 +27,12 @@ SUITES = {
     "linux-kvm": "Linux x86-64 or ARM64 with /dev/kvm: native backend KVM tests; no PMU or root needed.",
     "linux-counter": "Linux x86-64 KVM with a guest PMU and root: counted stops, checkpoints, forks, logs and triggers on a leased core.",
     "linux-guests": "Fixture kernel and initrd on Linux KVM (x86-64 also needs linux-counter): real guest determinism and checkpoints.",
-    "linux-oci": "Linux x86-64, root, Skopeo, umoci and Podman: real image import and Dockerfile builds.",
-    "linux-apps": "Linux x86-64 KVM, root and OCI tools: every acceptance workload run twice, diffed and replayed (PV, plus counter with linux-counter).",
+    "linux-oci": "Linux x86-64 with a running Docker-compatible engine: real image import and Dockerfile builds.",
+    "linux-apps": "Linux x86-64 KVM, root, a Docker-compatible engine and built guest assets: every acceptance workload run twice, diffed and replayed (PV, plus counter with linux-counter).",
     "linux-pause": "Linux x86-64 KVM, root and a supplied retained run: pause/resume replay.",
     "mac-hvf": "Apple Silicon with macOS 15+, Hypervisor.framework and codesign: native CPU/state and cancellation primitives.",
     "mac-guests": "mac-hvf plus the ARM fixture kernel and initrd: real guest controls.",
-    "mac-apps": "mac-hvf plus Docker or Podman: every acceptance workload on ARM PV.",
+    "mac-apps": "mac-hvf plus a Docker-compatible engine and built guest assets: every acceptance workload on ARM PV.",
 }
 # Groups hold the suites a set-up host can run with no hand-built fixtures;
 # the guest and pause suites are always named explicitly.
@@ -94,46 +93,37 @@ def privileged(prefix, command, environment):
     if not prefix:
         return command
     # sudo discards these explicit fixture paths by default. Forward only the
-    # test/runtime inputs and the release download's cache and token, not the
-    # user's general environment.
+    # test/runtime inputs, the guest asset directory and the engine socket, not
+    # the user's general environment.
     inputs = [f"{key}={value}" for key, value in environment.items()
               if key.startswith(("SEEDBOX_TEST_", "SEEDBOX_ARM64_", "SEEDBOX_HOST_PAUSE_"))
               or key in ("SEEDBOX_KERNEL", "SEEDBOX_RUNTIME_ASSETS", "SEEDBOX_BUSYBOX",
-                         "SEEDBOX_MKE2FS", "SEEDBOX_STATIC_CC", "XDG_CACHE_HOME",
-                         "GH_TOKEN", "GITHUB_TOKEN")]
+                         "SEEDBOX_MKE2FS", "SEEDBOX_STATIC_CC", "DOCKER_HOST", "SEEDBOX_ASSET_DIR")]
     return [*prefix, *inputs, *command]
 
 
-def cache_home(environment, mac):
-    """The cache directory the release CLI uses for this user (cli/backends.rs)."""
-    if environment.get("XDG_CACHE_HOME"):
-        return Path(environment["XDG_CACHE_HOME"])
-    return Path(environment.get("HOME", "~")).expanduser() / ("Library/Caches" if mac else ".cache")
+def asset_directory(environment, machine):
+    """The guest asset slot the CLI and tools/build-assets.sh share (cli/backends.rs)."""
+    root = environment.get("SEEDBOX_ASSET_DIR") or f"/tmp/seedbox-{os.geteuid()}"
+    return Path(root) / ("aarch64" if machine == "arm64" else machine)
 
 
-def launch_format():
-    """The release cache key the CLI built from this checkout uses (src/guest.rs)."""
-    source = (Path(__file__).resolve().parents[1] / "crates/seedbox/src/guest.rs").read_text()
-    return re.search(r'LAUNCH_MAGIC: &\[u8; \d+\] = b"(\w+)"', source).group(1).lower()
-
-
-def release_inputs(environment, mac, machine):
-    """Unmet guest kernel and runtime asset sources for the release CLI."""
-    if environment.get("GH_TOKEN") or environment.get("GITHUB_TOKEN"):
-        return []
-    architecture = "aarch64" if machine == "arm64" else machine
-    cache = cache_home(environment, mac) / "seedbox"
+def guest_assets(environment, machine):
+    """Unmet guest kernel and helper inputs for the release CLI; it never downloads them."""
+    slot = asset_directory(environment, machine)
     missing = []
-    for key, kind, name in (("SEEDBOX_KERNEL", "kernels", "kernel"),
-                            ("SEEDBOX_RUNTIME_ASSETS", "assets", "runtime.tar.gz")):
-        ready = cache / kind / launch_format() / architecture / "ready" / name
-        path = Path(environment[key]) if environment.get(key) else ready
+    for key, name in (("SEEDBOX_KERNEL", "kernel"), ("SEEDBOX_RUNTIME_ASSETS", "runtime.tar.gz")):
+        path = Path(environment[key]) if environment.get(key) else slot / name
         if not path.is_file():
             missing.append(f"{key} or {path}")
     if missing:
-        return ["guest assets are not available (" + ", ".join(missing) + "); "
-                "set GH_TOKEN for the private release download, or set the paths"]
+        return ["guest assets missing (" + ", ".join(missing) + "); "
+                "run bash tools/build-assets.sh, or set the paths"]
     return []
+
+
+def container_engine(environment):
+    return bool(environment.get("DOCKER_HOST")) or any(shutil.which(tool) for tool in ("docker", "podman"))
 
 
 def available_file(environment, key, default):
@@ -177,9 +167,9 @@ def requirements(suite, system, machine, environment, probe=None, can_root=False
             need(available_file(environment, key, ROOT / defaults[key]),
                  f"set {key} (default {defaults[key]} is missing)")
 
-    def oci_tools():
-        tools = [name for name in ("skopeo", "umoci", "podman") if not shutil.which(name)]
-        need(not tools, "missing tools: " + ", ".join(tools) + "; enter nix develop")
+    def engine():
+        need(container_engine(environment),
+             "no Docker-compatible engine (set DOCKER_HOST, or install Docker or Podman)")
 
     if suite == "portable":
         return missing
@@ -190,7 +180,7 @@ def requirements(suite, system, machine, environment, probe=None, can_root=False
             need(x86, "requires Linux x86-64")
         if suite != "linux-oci":  # Image import and builds need no hypervisor.
             need(not probe.get("kvm"), "/dev/kvm: " + (probe.get("kvm") or ""))
-        if suite in ("linux-counter", "linux-oci", "linux-apps", "linux-pause"):
+        if suite in ("linux-counter", "linux-apps", "linux-pause"):
             need(can_root, "requires root or passwordless sudo")
         if suite == "linux-kvm":
             need(machine in ("x86_64", "aarch64"), "requires Linux x86-64 or ARM64")
@@ -200,10 +190,10 @@ def requirements(suite, system, machine, environment, probe=None, can_root=False
             inputs(*(("SEEDBOX_TEST_KERNEL", "SEEDBOX_TEST_INITRD") if x86 else
                      ("SEEDBOX_ARM64_KERNEL", "SEEDBOX_ARM64_INITRD")))
         elif suite == "linux-oci":
-            oci_tools()
+            engine()
         elif suite == "linux-apps":
-            oci_tools()
-            missing.extend(release_inputs(environment, False, machine))
+            engine()
+            missing.extend(guest_assets(environment, machine))
         elif suite == "linux-pause":
             for key in ("SEEDBOX_HOST_PAUSE_RUN", "SEEDBOX_HOST_PAUSE_STATE"):
                 need(environment.get(key), f"set {key}")
@@ -221,8 +211,8 @@ def requirements(suite, system, machine, environment, probe=None, can_root=False
     elif suite == "mac-guests":
         inputs("SEEDBOX_ARM64_KERNEL", "SEEDBOX_ARM64_INITRD")
     elif suite == "mac-apps":
-        need(any(shutil.which(tool) for tool in ("docker", "podman")), "Docker or Podman is required")
-        missing.extend(release_inputs(environment, True, machine))
+        engine()
+        missing.extend(guest_assets(environment, machine))
     return missing
 
 
@@ -311,7 +301,7 @@ class Checks:
                 command = [binary, "--test-threads=1"]
                 if target == "applications":
                     command.append("--nocapture")
-                needs_root = package == "seedbox" and target in ("oci", "applications", "host_pause")
+                needs_root = package == "seedbox" and target in ("applications", "host_pause")
                 if counter:
                     command = [sys.executable, str(ROOT / "harness/check-counter.py"),
                                *(["--cpu", environment["SEEDBOX_TEST_CPU"]] if environment.get("SEEDBOX_TEST_CPU") else []),
@@ -401,8 +391,8 @@ def main(argv=None):
         binary = next(item["executable"] for item in binaries if item.get("executable") and item.get("target", {}).get("name") == "seedbox")
         environment["SEEDBOX_TEST_CLI"] = binary
         environment["SEEDBOX_TEST_COUNTER"] = "1" if "linux-counter" in suites else "0"
-        # Under sudo, keep the cache the readiness check inspected.
-        environment.setdefault("XDG_CACHE_HOME", str(cache_home(environment, system == "Darwin")))
+        # Under sudo the CLI's default slot would be root's; keep the one checked above.
+        environment.setdefault("SEEDBOX_ASSET_DIR", str(asset_directory(environment, machine).parent))
     packages = [("seedbox-arm64", ["cargo", "test-arm64"])]
     if system == "Linux" and machine == "x86_64":
         packages.append(("seedbox-vmm", ["cargo", "test-vmm"]))

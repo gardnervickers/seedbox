@@ -23,27 +23,14 @@ before a draft release is published. A failed upload can resume its draft;
 published release assets are never overwritten by this workflow. Kernel releases
 are prereleases and do not replace the project's latest application release.
 
-`cargo build --release` does not build or download a kernel. The first `run`,
-`explore` or `prepare` announces the latest published kernel download on stderr
-and streams it from GitHub. Because the repository is private, provide `GH_TOKEN` (or
-`GITHUB_TOKEN`) with repository read access. Tokens are not stored in the cache
-or sent to redirected asset hosts. An explicit `--kernel PATH` or
-`SEEDBOX_KERNEL` skips download and cache lookup.
+`cargo build --release` builds the native CLI. Prepare guest assets explicitly
+with `bash tools/build-assets.sh`; it places the kernel and helper archive under
+`/tmp/seedbox-UID/ARCH`. Seedbox uses these local files and never downloads a
+kernel automatically. Missing files report the build command. `--kernel PATH`
+or `SEEDBOX_KERNEL` selects a different local kernel.
 
-The cache is `~/Library/Caches/seedbox/kernels` on Mac or
-`~/.cache/seedbox/kernels` on Linux; `XDG_CACHE_HOME` overrides the parent.
-Each architecture has its own entry. Downloads are size-bounded, checked
-against GitHub's SHA-256 asset digest and installed atomically. Concurrent callers
-share a lock. Later calls verify cached bytes without contacting GitHub; removing
-the cache causes the next run to download again. Interrupted downloads never
-publish a complete entry. A corrupt entry reports its exact path and remedy.
-
-`doctor` only looks up a cached or explicitly selected kernel; it never downloads
-one or creates state. Replay uses the kernel retained with the run and never
-contacts GitHub, including after kernel releases change. There is no compiled-in
-kernel version or admission pin. To use a newer release, remove the architecture's
-cache entry or select a local file with `--kernel`. SHA-256 checks detect damaged
-downloads and cache entries.
+CI publishing remains available for future public distribution. No release ID,
+source fingerprint or kernel hash gates execution. Replay uses retained bytes.
 
 ## Build without private release access
 

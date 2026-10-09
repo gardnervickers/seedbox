@@ -72,8 +72,13 @@ class SelectionTests(unittest.TestCase):
             self.assertEqual(self.linux("linux-guests", {"kvm": "", "counter": ""}, inputs={
                 "SEEDBOX_TEST_KERNEL": str(kernel), "SEEDBOX_TEST_INITRD": str(initrd)}), [])
 
-    def test_oci_suite_needs_no_kvm(self):
-        self.assertEqual(self.linux("linux-oci", {"kvm": "no such device", "counter": "no KVM"}), [])
+    def test_oci_suite_needs_an_engine_but_no_kvm_or_root(self):
+        self.assertEqual(self.linux("linux-oci", {"kvm": "no such device", "counter": "no KVM"}, root=False), [])
+        with patch.object(check.shutil, "which", return_value=None):
+            self.assertEqual(check.requirements("linux-oci", "Linux", "x86_64", {"DOCKER_HOST": "unix:///fixture"}), [])
+            missing = check.requirements("linux-oci", "Linux", "x86_64", {})
+        self.assertEqual(len(missing), 1)
+        self.assertIn("no Docker-compatible engine", missing[0])
 
     def test_x86_only_suites_refuse_arm_linux(self):
         self.assertIn("requires Linux x86-64", self.linux("linux-oci", {"kvm": ""}, machine="aarch64"))
@@ -94,42 +99,48 @@ class SelectionTests(unittest.TestCase):
              patch.object(check.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "1\n", "")):
             self.assertEqual(check.requirements("mac-hvf", "Darwin", "arm64", {}), ["requires macOS 15+"])
 
-    def test_apps_need_a_token_cache_or_explicit_assets(self):
+    def test_apps_need_built_or_explicit_guest_assets(self):
         with tempfile.TemporaryDirectory() as directory:
-            home = {"HOME": directory}
-            missing = self.linux("linux-apps", {"kvm": ""}, inputs=home)
+            slot = {"SEEDBOX_ASSET_DIR": directory}
+            missing = self.linux("linux-apps", {"kvm": ""}, inputs=slot)
             self.assertEqual(len(missing), 1)
-            self.assertIn("set GH_TOKEN", missing[0])
-            launch = check.launch_format()
-            self.assertRegex(launch, r"^sbxlaunch\d+$")
-            self.assertIn(f"{directory}/.cache/seedbox/assets/{launch}/x86_64/ready/runtime.tar.gz", missing[0])
-            self.assertEqual(self.linux("linux-apps", {"kvm": ""}, inputs={**home, "GH_TOKEN": "fixture"}), [])
+            self.assertIn("run bash tools/build-assets.sh", missing[0])
+            self.assertIn(f"{directory}/x86_64/kernel", missing[0])
+            self.assertIn(f"{directory}/x86_64/runtime.tar.gz", missing[0])
             self.assertIn("requires root or passwordless sudo",
-                          self.linux("linux-apps", {"kvm": ""}, root=False, inputs={**home, "GITHUB_TOKEN": "fixture"}))
-            for kind, name in (("kernels", "kernel"), ("assets", "runtime.tar.gz")):
-                # A cache from an older launch format does not count.
-                for key in ("sbxlaunch0", launch):
-                    if key == launch:
-                        with patch.object(check.shutil, "which", side_effect=lambda tool: "/fixture/podman"):
-                            self.assertTrue(check.requirements("mac-apps", "Darwin", "arm64", home))
-                    ready = Path(directory) / "Library/Caches/seedbox" / kind / key / "aarch64" / "ready"
-                    ready.mkdir(parents=True)
-                    (ready / name).touch()
+                          self.linux("linux-apps", {"kvm": ""}, root=False, inputs=slot))
+            # The slot tools/build-assets.sh fills, keyed like the CLI's architecture name.
+            with patch.object(check.shutil, "which", side_effect=lambda tool: "/fixture/podman"):
+                self.assertTrue(check.requirements("mac-apps", "Darwin", "arm64", slot))
+            for architecture in ("x86_64", "aarch64"):
+                (Path(directory) / architecture).mkdir()
+                for name in ("kernel", "runtime.tar.gz"):
+                    (Path(directory) / architecture / name).touch()
+            self.assertEqual(self.linux("linux-apps", {"kvm": ""}, inputs=slot), [])
             with patch.object(check.shutil, "which", side_effect=lambda tool: None):
-                self.assertEqual(check.requirements("mac-apps", "Darwin", "arm64", home), ["Docker or Podman is required"])
+                missing = check.requirements("mac-apps", "Darwin", "arm64", slot)
+                self.assertEqual(len(missing), 1)
+                self.assertIn("no Docker-compatible engine", missing[0])
             with patch.object(check.shutil, "which", side_effect=lambda tool: "/fixture/podman" if tool == "podman" else None):
-                self.assertEqual(check.requirements("mac-apps", "Darwin", "arm64", home), [])
+                self.assertEqual(check.requirements("mac-apps", "Darwin", "arm64", slot), [])
+        with tempfile.TemporaryDirectory() as directory:
             kernel, assets = Path(directory) / "kernel", Path(directory) / "assets"
             kernel.touch()
             assets.touch()
             self.assertEqual(self.linux("linux-apps", {"kvm": ""}, inputs={
-                **home, "SEEDBOX_KERNEL": str(kernel), "SEEDBOX_RUNTIME_ASSETS": str(assets)}), [])
+                "SEEDBOX_ASSET_DIR": directory + "/empty",
+                "SEEDBOX_KERNEL": str(kernel), "SEEDBOX_RUNTIME_ASSETS": str(assets)}), [])
 
-    def test_privileged_execution_forwards_runtime_assets_cache_and_token(self):
+    def test_default_asset_slot_matches_the_cli(self):
+        self.assertEqual(check.asset_directory({}, "x86_64"), Path(f"/tmp/seedbox-{os.geteuid()}/x86_64"))
+        self.assertEqual(check.asset_directory({"SEEDBOX_ASSET_DIR": "/assets"}, "arm64"), Path("/assets/aarch64"))
+
+    def test_privileged_execution_forwards_asset_directory_and_engine(self):
         command = check.privileged(["sudo", "-n", "env"], ["/test"], {
-            "SEEDBOX_RUNTIME_ASSETS": "/assets", "XDG_CACHE_HOME": "/cache", "GH_TOKEN": "fixture"})
+            "SEEDBOX_RUNTIME_ASSETS": "/assets", "SEEDBOX_ASSET_DIR": "/slot",
+            "DOCKER_HOST": "unix:///engine", "GH_TOKEN": "fixture"})
         self.assertEqual(command, ["sudo", "-n", "env", "SEEDBOX_RUNTIME_ASSETS=/assets",
-                                   "XDG_CACHE_HOME=/cache", "GH_TOKEN=fixture", "/test"])
+                                   "SEEDBOX_ASSET_DIR=/slot", "DOCKER_HOST=unix:///engine", "/test"])
 
     def test_unmet_selected_suite_fails_before_any_build(self):
         with patch.object(check, "requirements", return_value=["no fixture host"]), \
