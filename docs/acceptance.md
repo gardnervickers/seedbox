@@ -523,3 +523,7 @@ single-member etcd fixture is preserved.
 The direct KVM results above retain their recorded engine identities; hardware
 execution was not repeated for this merge. The seed-4004 clock-bound failure is
 tracked in [issue #33](https://github.com/gardnervickers/seedbox/issues/33).
+
+The runtime application paths in the historical evidence above have since moved
+to `examples/runtimes/<runtime>/compose.yaml` (including TLS). They are optional
+examples and no longer run in default acceptance; the recorded evidence is unchanged.

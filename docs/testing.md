@@ -153,3 +153,8 @@ partitions. `volume-crash` uses the same server on a named volume and verifies
 acknowledged values after a whole-machine crash/reboot. The etcd cluster stress
 workloads are no longer in default acceptance; `examples/etcd` remains available.
 Both fixtures retain two fresh runs, full-state comparison and replay.
+
+Third-party application/runtime demonstrations live under `examples/`, including
+`examples/runtimes`, and are not executed by default acceptance. The retained
+`runtime.yaml` is our synthetic syscall/interface probe, not an application
+compatibility test. Python and BusyBox images still host the synthetic fixtures.
