@@ -195,3 +195,26 @@ Correctness controls on the same host:
   not the kernel hook, is the primary progress source.
 
 Retained runs are on the hosts named in the project notes, outside this tree.
+
+### Saved x86 vector-state representation
+
+A single-threaded x86 weak-CAS control completed one million `lock cmpxchg`
+operations with zero failures at both 1 ms and 200 ms watchdog settings. Its
+execution, clock, registers and output matched, but full RAM differed by one
+bit in a kernel task's saved XSAVE header: zero YMM state was marked present
+in one run and absent in the other. The 256-byte YMM payload was zero in both.
+This is distinct from the observable ARM store-exclusive failures.
+
+The guest kernel now canonicalizes YMM after successful task-state saves.
+It zeroes ignored payload for an absent component and clears the presence bit
+for a present all-zero component. Nonzero state is preserved. Full-state
+comparison remains unchanged.
+
+With that repair, four atomic fresh runs matched across alternating watchdog
+settings, as did replay. A vector-preservation control passed 4,000 nonzero
+checks, 4,000 zero checks and 4,000 signal returns while another process was
+runnable; its fresh runs and replay matched. The clock-drift workload also
+passed fresh comparison and replay. These controls cover the reproduced
+kernel task-save issue, not direct application XSAVE, signal-frame storage
+or other state components. Broader coverage remains tracked in
+[#242](https://github.com/gardnervickers/seedbox/issues/242).

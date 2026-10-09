@@ -240,4 +240,52 @@ append(
     "\t}\n"
     "\tlocal_irq_restore(flags);\n}\n",
 )
+# Normalize only the YMM component after a successful task-state
+# save. An absent component has zero architectural contents, regardless of
+# stale bytes left by init optimization. A present all-zero component has the
+# same meaning. Keep every nonzero component and every other feature intact.
+edit(
+    "arch/x86/kernel/fpu/xstate.h",
+    "static inline void os_xsave(struct fpstate *fpstate)",
+    "void seedbox_canonicalize_ymm(struct fpstate *fpstate);\n\n"
+    "static inline void os_xsave(struct fpstate *fpstate)",
+)
+edit(
+    "arch/x86/kernel/fpu/xstate.h",
+    "\tXSTATE_XSAVE(&fpstate->regs.xsave, lmask, hmask, err);\n\n"
+    "\t/* We should never fault when copying to a kernel buffer: */\n"
+    "\tWARN_ON_FPU(err);\n",
+    "\tXSTATE_XSAVE(&fpstate->regs.xsave, lmask, hmask, err);\n\n"
+    "\t/* We should never fault when copying to a kernel buffer: */\n"
+    "\tWARN_ON_FPU(err);\n"
+    "\tif (!err)\n\t\tseedbox_canonicalize_ymm(fpstate);\n",
+)
+anchor = "\treturn (void *)xsave + xfeature_get_offset(xcomp_bv, xfeature_nr);\n}\n"
+edit(
+    "arch/x86/kernel/fpu/xstate.c",
+    anchor,
+    anchor + """
+/* Seedbox: XINUSE may describe zero YMM state as either present or absent.
+ * Canonicalize the saved representation, without changing register values.
+ * Use the raw address because an absent component's storage can be stale.
+ * This task-save hook does not cover signal frames or application XSAVE.
+ */
+void seedbox_canonicalize_ymm(struct fpstate *fpstate)
+{
+	struct xregs_state *xsave = &fpstate->regs.xsave;
+	void *ymm;
+
+	if (!(fpstate->xfeatures & XFEATURE_MASK_YMM))
+		return;
+	ymm = __raw_xsave_addr(xsave, XFEATURE_YMM);
+	if (!ymm)
+		return;
+	if (!(xsave->header.xfeatures & XFEATURE_MASK_YMM))
+		memset(ymm, 0, xstate_sizes[XFEATURE_YMM]);
+	else if (!memchr_inv(ymm, 0, xstate_sizes[XFEATURE_YMM]))
+		xsave->header.xfeatures &= ~XFEATURE_MASK_YMM;
+}
+""",
+)
+
 print("seedbox guest changes applied")
