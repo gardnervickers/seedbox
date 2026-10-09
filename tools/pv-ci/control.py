@@ -186,7 +186,7 @@ def main():
     parser.add_argument("--key")
     parser.add_argument("--repo", default="gardnervickers/seedbox")
     parser.add_argument("--region", default="nyc3")
-    parser.add_argument("--size", default="s-4vcpu-8gb-240gb-intel")
+    parser.add_argument("--size", default="s-4vcpu-8gb-amd")
     parser.add_argument("--url-file")
     args = parser.parse_args()
     if args.command == "cleanup-runner":

@@ -23,8 +23,9 @@ jobs:
       - name: Prove the external Function can destroy an expired droplet
         env:
           DIGITALOCEAN_TOKEN: ${{ secrets.DO_CI_TOKEN }}
+          DO_REGION: ${{ vars.DO_CI_REGION || 'nyc3' }}
         run: |
-          python3 tools/pv-ci/control.py canary --size s-1vcpu-1gb \
+          python3 tools/pv-ci/control.py canary --size s-1vcpu-1gb-amd --region "$DO_REGION" \
             --tag "seedbox-pv-job-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
   cleanup:
     needs: canary
