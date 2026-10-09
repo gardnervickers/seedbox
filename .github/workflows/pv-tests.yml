@@ -90,7 +90,8 @@ jobs:
         run: nix develop --command bash harness/check.sh linux-apps --cpu 1
       - name: Bound diagnostic artifact storage
         if: always()
-        run: python3 tools/pv-ci/artifacts.py
+        # Privileged KVM tests leave root-owned manifests and logs.
+        run: sudo python3 tools/pv-ci/artifacts.py
       - uses: actions/upload-artifact@v7
         if: always()
         with:
