@@ -39,8 +39,8 @@ Seedbox finds your Docker or Podman socket, builds the example's workload oracle
 with the engine's normal cache, prepares the images, and runs the Linux guests.
 Progress appears on stderr. Set `DOCKER_HOST` if your engine uses a custom socket.
 Application progress comes from automatic binary instrumentation on both
-platforms. ARM exclusive-store retries can still cause replay mismatches or
-stalled progress; see [automatic progress and its limitations](docs/progress.md).
+platforms. ARM software reservations hide host-induced exclusive-store retries
+while preserving guest interruptions; see [automatic progress](docs/progress.md).
 
 On Linux, `--watchdog-ms 200` raises the host CPU interval (default 20 ms)
 after which a guest that makes no exits is interrupted so the engine can

@@ -10,6 +10,8 @@ use crate::{
 };
 use std::{collections::BTreeSet, rc::Rc, time::Instant};
 
+const EXCLUSIVE_EPOCH_OFFSET: usize = 40;
+
 /// A completed semantic stop, with the vCPU left stopped for the world owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MachineStop {
@@ -462,6 +464,10 @@ impl<B: Backend> Machine<B> {
     /// Deliver only at a stopped world boundary. Acceptance and interrupt
     /// assertion are distinct, so bounded network backlogs cannot lose an ACK.
     pub fn receive_frame(&mut self, bytes: &[u8]) -> Result<bool> {
+        self.application
+            .as_ref()
+            .ok_or("fixture has no network device")?;
+        self.invalidate_exclusive_reservation()?;
         let devices = self
             .application
             .as_mut()
@@ -476,6 +482,10 @@ impl<B: Backend> Machine<B> {
     }
 
     pub fn receive_control(&mut self, bytes: &[u8]) -> Result<()> {
+        self.application
+            .as_ref()
+            .ok_or("fixture has no control device")?;
+        self.invalidate_exclusive_reservation()?;
         let devices = self
             .application
             .as_mut()
@@ -603,6 +613,7 @@ impl<B: Backend> Machine<B> {
                 self.backend.complete(None)?;
                 continue;
             }
+            self.invalidate_exclusive_reservation()?;
             // All guest memory accesses happen after the synchronous exit.
             self.clock.read(unsafe { self.page.word(8)? })?;
             let console_before = self.uart.console.len();
@@ -896,6 +907,21 @@ impl<B: Backend> Machine<B> {
         }
         Ok(())
     }
+    fn invalidate_exclusive_reservation(&mut self) -> Result<()> {
+        // The kernel advances this same word on EL0 exception return. Read it
+        // rather than retaining a host copy, and invalidate before device DMA
+        // can partially mutate RAM, even if delivery subsequently fails.
+        let epoch = unsafe { self.page.word(EXCLUSIVE_EPOCH_OFFSET)? }
+            .checked_add(1)
+            .ok_or("exclusive reservation epoch overflow")?;
+        unsafe { self.page.set_word(EXCLUSIVE_EPOCH_OFFSET, epoch)? };
+        // EL1 entry code uses TPIDRRO_EL0 as scratch. Only an already stopped
+        // EL0 needs its visible epoch updated here; EL1 publishes on return.
+        if self.backend.get_reg(CoreReg::Pstate)? & 0xf == 0 {
+            self.backend.set_sys_reg(SysReg::TPIDRRO_EL0, epoch)?;
+        }
+        Ok(())
+    }
     fn publish(&mut self) -> Result<()> {
         let last = unsafe { self.page.word(8)? };
         let mut page = TimePage::from_clock(&self.clock, last, !self.deferred_spis.is_empty());
@@ -1066,6 +1092,9 @@ mod spi_regression {
     fn host_interruptions_do_not_exhaust_last_semantic_exit() {
         let mut m = machine();
         m.ready = true;
+        m.backend.set_reg(CoreReg::Pstate, 0).unwrap();
+        // Simulate an epoch already advanced by the guest kernel.
+        unsafe { m.page.set_word(EXCLUSIVE_EPOCH_OFFSET, 41).unwrap() };
         m.raw_exits = 4_999_999;
         m.backend.stops.extend([
             RunStop::Interrupted,
@@ -1085,6 +1114,72 @@ mod spi_regression {
         assert_eq!(m.raw_exits, 5_000_000);
         assert_eq!(m.trace.len(), 1);
         assert!(m.backend.injected.is_empty());
+        assert_eq!(unsafe { m.page.word(EXCLUSIVE_EPOCH_OFFSET).unwrap() }, 42);
+        assert_eq!(m.backend.get_sys_reg(SysReg::TPIDRRO_EL0).unwrap(), 42);
+    }
+    #[test]
+    fn host_interruptions_and_publication_preserve_exclusive_epoch() {
+        let mut m = machine();
+        m.backend.set_reg(CoreReg::Pstate, 0).unwrap();
+        unsafe { m.page.set_word(EXCLUSIVE_EPOCH_OFFSET, 41).unwrap() };
+        m.backend.set_sys_reg(SysReg::TPIDRRO_EL0, 41).unwrap();
+        m.backend
+            .stops
+            .extend([RunStop::Interrupted, RunStop::Interrupted]);
+        assert!(m
+            .run_until(10, || {})
+            .unwrap_err()
+            .contains("unexpected guest entry"));
+        m.publish().unwrap();
+        assert_eq!(unsafe { m.page.word(EXCLUSIVE_EPOCH_OFFSET).unwrap() }, 41);
+        assert_eq!(m.backend.get_sys_reg(SysReg::TPIDRRO_EL0).unwrap(), 41);
+    }
+    #[test]
+    fn delivery_invalidates_exclusive_epoch_and_preserves_el1_scratch() {
+        let mut m = machine();
+        m.backend.set_reg(CoreReg::Pstate, 0).unwrap();
+        // A ready receive queue with no available descriptors accepts a frame
+        // into the network backlog without requiring an IRQ or guest entry.
+        unsafe {
+            m.ram.with_bytes_mut(|ram| {
+                let net = &mut m.application.as_mut().unwrap().net;
+                for (offset, value) in [
+                    (0x30, 0),
+                    (0x38, 8),
+                    (0x80, RAM_BASE),
+                    (0x90, RAM_BASE + 0x1000),
+                    (0xa0, RAM_BASE + 0x1100),
+                    (0x44, 1),
+                ] {
+                    net.write(ram, offset, 4, value).unwrap();
+                }
+            });
+        }
+        assert!(m.receive_frame(b"frame").unwrap());
+        assert_eq!(unsafe { m.page.word(EXCLUSIVE_EPOCH_OFFSET).unwrap() }, 1);
+        assert_eq!(m.backend.get_sys_reg(SysReg::TPIDRRO_EL0).unwrap(), 1);
+        m.receive_control(b"control").unwrap();
+        assert_eq!(unsafe { m.page.word(EXCLUSIVE_EPOCH_OFFSET).unwrap() }, 2);
+        assert_eq!(m.backend.get_sys_reg(SysReg::TPIDRRO_EL0).unwrap(), 2);
+        m.backend.set_reg(CoreReg::Pstate, 0x3c5).unwrap();
+        m.backend.set_sys_reg(SysReg::TPIDRRO_EL0, 0xfeed).unwrap();
+        unsafe { m.page.set_word(EXCLUSIVE_EPOCH_OFFSET, 100).unwrap() };
+        m.receive_control(b"more").unwrap();
+        assert_eq!(unsafe { m.page.word(EXCLUSIVE_EPOCH_OFFSET).unwrap() }, 101);
+        assert_eq!(m.backend.get_sys_reg(SysReg::TPIDRRO_EL0).unwrap(), 0xfeed);
+    }
+    #[test]
+    fn exclusive_epoch_overflow_does_not_wrap() {
+        let mut m = machine();
+        unsafe { m.page.set_word(EXCLUSIVE_EPOCH_OFFSET, u64::MAX).unwrap() };
+        assert!(m
+            .invalidate_exclusive_reservation()
+            .unwrap_err()
+            .contains("epoch overflow"));
+        assert_eq!(
+            unsafe { m.page.word(EXCLUSIVE_EPOCH_OFFSET).unwrap() },
+            u64::MAX
+        );
     }
     #[test]
     fn capture_requires_completed_write_and_is_excluded_from_state_evidence() {

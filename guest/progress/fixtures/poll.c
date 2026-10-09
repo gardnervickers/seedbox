@@ -1,8 +1,7 @@
 /* Owner/waiter spinlock whose waiter polls with an exclusive load and no
- * pause, system call or clock read: the shape the progress client charges on
- * the abandoned branch (see ../progress.c). With PACKED the loop stays as
- * written and DynamoRIO packs it; otherwise an adr inside the sequence keeps
- * DynamoRIO from packing, so the client sees the split blocks. */
+ * pause, system call or clock read. Both shapes must keep making progress
+ * under translation. PACKED permits legacy DynamoRIO sequence packing;
+ * otherwise an adr inside the sequence prevents packing. */
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>

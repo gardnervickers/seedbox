@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Historical packing negative control; the guest acceptance gate is exclusives.yaml.
 # Run the exclusive-sequence fixtures natively on an aarch64 Linux host under
 # DynamoRIO with the progress client, packed and unpacked, and count the
 # progress charges (getpid) each makes. Usage: run.sh DR_DIR CLIENT_SO [GCC]

@@ -1,6 +1,5 @@
 /* A weak compare-and-swap whose failures the program observes: it counts
- * them and backs off. This is the behaviour the progress rule does not make
- * reproducible, as it is not reproducible natively either. */
+ * them and backs off, exposing retry differences in both output and state. */
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
