@@ -107,8 +107,12 @@ the canary succeeds.
    ```
 
 2. Create a private, never-versioned Spaces staging bucket (or reuse a suitable
-   existing one). Create a bucket-scoped key that can manage objects/multipart
-   uploads and read the bucket's lifecycle and versioning configuration.
+   existing one). DigitalOcean's bucket-scoped read/write keys cannot read the
+   lifecycle configuration: live verification returned `AccessDenied`. The
+   current storage preflight therefore requires a full-access Spaces key, which
+   covers all current and future Spaces buckets in that team. Approve that scope
+   explicitly and keep it in the protected `pv-ci` environment; never give it to
+   a test runner. Do not bypass the lifecycle check to use a narrower key.
 
    ```sh
    robo-gh secret set DO_SPACES_ACCESS_KEY_ID --repo gardnervickers/seedbox --env pv-ci
