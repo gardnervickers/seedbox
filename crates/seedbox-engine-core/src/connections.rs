@@ -4,6 +4,13 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 pub const CAPACITY: usize = 1024;
+/// TCP header flag bits.
+const FIN: u8 = 0x01;
+const SYN: u8 = 0x02;
+const RST: u8 = 0x04;
+const ACK: u8 = 0x10;
+/// The flags byte of a minimal Ethernet/IPv4/TCP frame, as [`reset_frame`] builds.
+const MINIMAL_TCP_FLAGS: usize = 14 + 20 + 13;
 type Endpoint = (usize, [u8; 4], u16);
 type Tuple = (Endpoint, Endpoint);
 pub type Identity = (Tuple, u64);
@@ -58,7 +65,7 @@ fn packet(frame: &[u8]) -> Option<Packet> {
     }
     let tcp = &ip[ihl..total];
     let offset = (tcp[12] >> 4) as usize * 4;
-    if offset < 20 || offset > tcp.len() || tcp[13] & 2 != 0 && tcp[13] & 5 != 0 {
+    if offset < 20 || offset > tcp.len() || tcp[13] & SYN != 0 && tcp[13] & (FIN | RST) != 0 {
         return None;
     }
     let sport = u16::from_be_bytes([tcp[0], tcp[1]]);
@@ -83,7 +90,7 @@ fn packet(frame: &[u8]) -> Option<Packet> {
 /// Construct fresh minimal headers, including IP and TCP pseudoheader checksums.
 pub fn reset_frame(frame: &[u8]) -> Option<Vec<u8>> {
     let p = packet(frame)?;
-    if p.flags & 0x16 != 0x10 {
+    if p.flags & (SYN | RST | ACK) != ACK {
         return None;
     }
     let mut reset = vec![0; 54];
@@ -104,13 +111,18 @@ pub fn reset_frame(frame: &[u8]) -> Option<Vec<u8>> {
     tcp[4..8].copy_from_slice(&p.seq.to_be_bytes());
     tcp[8..12].copy_from_slice(&p.ack.to_be_bytes());
     tcp[12] = 0x50;
-    tcp[13] = 0x14;
+    tcp[13] = RST | ACK;
     let mut pseudo = Vec::from(p.src);
     pseudo.extend_from_slice(&p.dst);
     pseudo.extend_from_slice(&[0, 6, 0, 20]);
     pseudo.extend_from_slice(tcp);
     tcp[16..18].copy_from_slice(&checksum(&pseudo).to_be_bytes());
     Some(reset)
+}
+/// Whether `frame` is a reset made by [`reset_frame`]: its fixed minimal
+/// headers put RST|ACK at a known offset.
+pub fn is_reset_frame(frame: &[u8]) -> bool {
+    frame.get(MINIMAL_TCP_FLAGS) == Some(&(RST | ACK))
 }
 fn checksum(bytes: &[u8]) -> u16 {
     let mut sum: u32 = bytes
@@ -146,7 +158,7 @@ impl Connections {
     pub fn observe(&mut self, from: usize, to: usize, frame: &[u8]) -> Option<Identity> {
         let p = packet(frame)?;
         let (tuple, dir) = key((from, p.src, p.sport), (to, p.dst, p.dport));
-        let opening = p.flags & 0x12 == 2;
+        let opening = p.flags & (SYN | ACK) == SYN;
         if opening
             && self
                 .sessions
@@ -184,7 +196,7 @@ impl Connections {
             );
         }
         let s = self.sessions.get_mut(&tuple)?;
-        if p.flags & 2 != 0 {
+        if p.flags & SYN != 0 {
             if !opening && s.syn[1 - dir].is_none_or(|seq| p.ack != seq.wrapping_add(1)) {
                 return None;
             }
@@ -193,10 +205,10 @@ impl Connections {
             }
             s.syn[dir] = Some(p.seq);
         }
-        if p.flags & 1 != 0 {
+        if p.flags & FIN != 0 {
             s.fin[dir] = true;
         }
-        if p.flags & 4 != 0 || s.fin == [true, true] {
+        if p.flags & RST != 0 || s.fin == [true, true] {
             s.closed = true;
         }
         Some((if dir == 0 { tuple } else { (tuple.1, tuple.0) }, s.id))
@@ -241,8 +253,14 @@ impl Connections {
         if self.selections.contains_key(&handle) {
             return Err("duplicate connection handle".into());
         }
-        let from = names.iter().position(|n| *n == c.from).unwrap();
-        let to = names.iter().position(|n| *n == c.to).unwrap();
+        // An available connection was built from these names.
+        let index = |name: &str| {
+            names
+                .iter()
+                .position(|n| n == name)
+                .ok_or("unknown connection machine")
+        };
+        let (from, to) = (index(&c.from)?, index(&c.to)?);
         let identity = (
             (
                 (from, c.src_addr.octets(), c.src_port),
