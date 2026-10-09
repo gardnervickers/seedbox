@@ -91,12 +91,39 @@ def privileged(prefix, command, environment):
     if not prefix:
         return command
     # sudo discards these explicit fixture paths by default. Forward only the
-    # test/runtime inputs, not the user's general environment or credentials.
+    # test/runtime inputs and the release download's cache and token, not the
+    # user's general environment.
     inputs = [f"{key}={value}" for key, value in environment.items()
               if key.startswith(("SEEDBOX_TEST_", "SEEDBOX_ARM64_", "SEEDBOX_HOST_PAUSE_"))
               or key in ("SEEDBOX_KERNEL", "SEEDBOX_RUNTIME_ASSETS", "SEEDBOX_BUSYBOX",
-                         "SEEDBOX_MKE2FS", "SEEDBOX_STATIC_CC")]
+                         "SEEDBOX_MKE2FS", "SEEDBOX_STATIC_CC", "XDG_CACHE_HOME",
+                         "GH_TOKEN", "GITHUB_TOKEN")]
     return [*prefix, *inputs, *command]
+
+
+def cache_home(environment, mac):
+    """The cache directory the release CLI uses for this user (cli/backends.rs)."""
+    if environment.get("XDG_CACHE_HOME"):
+        return Path(environment["XDG_CACHE_HOME"])
+    return Path(environment.get("HOME", "~")).expanduser() / ("Library/Caches" if mac else ".cache")
+
+
+def release_inputs(environment, mac, machine):
+    """Unmet guest kernel and runtime asset sources for the release CLI."""
+    if environment.get("GH_TOKEN") or environment.get("GITHUB_TOKEN"):
+        return []
+    architecture = "aarch64" if machine == "arm64" else machine
+    cache = cache_home(environment, mac) / "seedbox"
+    missing = []
+    for key, kind, name in (("SEEDBOX_KERNEL", "kernels", "kernel"),
+                            ("SEEDBOX_RUNTIME_ASSETS", "assets", "runtime.tar.gz")):
+        path = Path(environment[key]) if environment.get(key) else cache / kind / architecture / "ready" / name
+        if not path.is_file():
+            missing.append(f"{key} or {path}")
+    if missing:
+        return ["guest assets are not available (" + ", ".join(missing) + "); "
+                "set GH_TOKEN for the private release download, or set the paths"]
+    return []
 
 
 def available_file(environment, key, default):
@@ -165,8 +192,8 @@ def requirements(suite, system, machine, environment, probe=None, can_root=False
         elif suite == "linux-oci":
             oci_tools()
         elif suite == "linux-apps":
-            # The release CLI resolves or downloads its runtime assets itself.
             oci_tools()
+            missing.extend(release_inputs(environment, False, machine))
         elif suite == "linux-pause":
             for key in ("SEEDBOX_HOST_PAUSE_RUN", "SEEDBOX_HOST_PAUSE_STATE"):
                 need(environment.get(key), f"set {key}")
@@ -185,6 +212,7 @@ def requirements(suite, system, machine, environment, probe=None, can_root=False
         inputs("SEEDBOX_ARM64_KERNEL", "SEEDBOX_ARM64_INITRD")
     elif suite == "mac-apps":
         need(any(shutil.which(tool) for tool in ("docker", "podman")), "Docker or Podman is required")
+        missing.extend(release_inputs(environment, True, machine))
     return missing
 
 
@@ -363,6 +391,8 @@ def main(argv=None):
         binary = next(item["executable"] for item in binaries if item.get("executable") and item.get("target", {}).get("name") == "seedbox")
         environment["SEEDBOX_TEST_CLI"] = binary
         environment["SEEDBOX_TEST_COUNTER"] = "1" if "linux-counter" in suites else "0"
+        # Under sudo, keep the cache the readiness check inspected.
+        environment.setdefault("XDG_CACHE_HOME", str(cache_home(environment, system == "Darwin")))
     packages = [("seedbox-arm64", ["cargo", "test-arm64"])]
     if system == "Linux" and machine == "x86_64":
         packages.append(("seedbox-vmm", ["cargo", "test-vmm"]))

@@ -93,18 +93,35 @@ class SelectionTests(unittest.TestCase):
              patch.object(check.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "1\n", "")):
             self.assertEqual(check.requirements("mac-hvf", "Darwin", "arm64", {}), ["requires macOS 15+"])
 
-    def test_apps_need_no_prebuilt_assets(self):
-        # The release CLI resolves/downloads assets; empty artifacts cannot block apps.
-        self.assertEqual(self.linux("linux-apps", {"kvm": ""}), [])
-        self.assertIn("requires root or passwordless sudo", self.linux("linux-apps", {"kvm": ""}, root=False))
-        with patch.object(check.shutil, "which", side_effect=lambda tool: None):
-            self.assertEqual(check.requirements("mac-apps", "Darwin", "arm64", {}), ["Docker or Podman is required"])
-        with patch.object(check.shutil, "which", side_effect=lambda tool: "/fixture/podman" if tool == "podman" else None):
-            self.assertEqual(check.requirements("mac-apps", "Darwin", "arm64", {}), [])
+    def test_apps_need_a_token_cache_or_explicit_assets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = {"HOME": directory}
+            missing = self.linux("linux-apps", {"kvm": ""}, inputs=home)
+            self.assertEqual(len(missing), 1)
+            self.assertIn("set GH_TOKEN", missing[0])
+            self.assertIn(f"{directory}/.cache/seedbox/assets/x86_64/ready/runtime.tar.gz", missing[0])
+            self.assertEqual(self.linux("linux-apps", {"kvm": ""}, inputs={**home, "GH_TOKEN": "fixture"}), [])
+            self.assertIn("requires root or passwordless sudo",
+                          self.linux("linux-apps", {"kvm": ""}, root=False, inputs={**home, "GITHUB_TOKEN": "fixture"}))
+            for kind, name in (("kernels", "kernel"), ("assets", "runtime.tar.gz")):
+                ready = Path(directory) / "Library/Caches/seedbox" / kind / "aarch64" / "ready"
+                ready.mkdir(parents=True)
+                (ready / name).touch()
+            with patch.object(check.shutil, "which", side_effect=lambda tool: None):
+                self.assertEqual(check.requirements("mac-apps", "Darwin", "arm64", home), ["Docker or Podman is required"])
+            with patch.object(check.shutil, "which", side_effect=lambda tool: "/fixture/podman" if tool == "podman" else None):
+                self.assertEqual(check.requirements("mac-apps", "Darwin", "arm64", home), [])
+            kernel, assets = Path(directory) / "kernel", Path(directory) / "assets"
+            kernel.touch()
+            assets.touch()
+            self.assertEqual(self.linux("linux-apps", {"kvm": ""}, inputs={
+                **home, "SEEDBOX_KERNEL": str(kernel), "SEEDBOX_RUNTIME_ASSETS": str(assets)}), [])
 
-    def test_privileged_execution_forwards_runtime_assets(self):
-        command = check.privileged(["sudo", "-n", "env"], ["/test"], {"SEEDBOX_RUNTIME_ASSETS": "/assets"})
-        self.assertEqual(command, ["sudo", "-n", "env", "SEEDBOX_RUNTIME_ASSETS=/assets", "/test"])
+    def test_privileged_execution_forwards_runtime_assets_cache_and_token(self):
+        command = check.privileged(["sudo", "-n", "env"], ["/test"], {
+            "SEEDBOX_RUNTIME_ASSETS": "/assets", "XDG_CACHE_HOME": "/cache", "GH_TOKEN": "fixture"})
+        self.assertEqual(command, ["sudo", "-n", "env", "SEEDBOX_RUNTIME_ASSETS=/assets",
+                                   "XDG_CACHE_HOME=/cache", "GH_TOKEN=fixture", "/test"])
 
     def test_unmet_selected_suite_fails_before_any_build(self):
         with patch.object(check, "requirements", return_value=["no fixture host"]), \

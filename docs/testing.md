@@ -41,6 +41,9 @@ copies, after their Cargo build has finished.
 Groups: `linux` is `linux-kvm linux-counter linux-guests linux-oci linux-apps`;
 `mac` is `mac-hvf mac-guests mac-apps`. `linux-pause` needs a retained run and is
 never part of a group. `--cpu` applies to `linux-counter` and `linux-apps`.
+Both apps suites need the guest kernel and runtime assets: `GH_TOKEN` or
+`GITHUB_TOKEN` for the private release download, a populated Seedbox cache, or
+`SEEDBOX_KERNEL` and `SEEDBOX_RUNTIME_ASSETS`. Otherwise they report unavailable.
 
 AMD and Intel run the same counted-execution tests. The engine selects its
 counter profile through CPUID. The test supervisor leases a free core and its
