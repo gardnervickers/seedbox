@@ -19,7 +19,6 @@ batch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(batch)
 
 
-@unittest.skipUnless(sys.platform == "linux", "Linux process/affinity supervisor")
 class BatchTests(unittest.TestCase):
     def test_cpu_ranges(self):
         self.assertEqual(batch.cpu_list('14,30-31'), {14,30,31})
@@ -36,6 +35,7 @@ class BatchTests(unittest.TestCase):
             with batch.cpu_locks({14,30}, directory):
                 pass
 
+    @unittest.skipUnless(sys.platform == "linux", "Linux batch admission")
     def test_invalid_timeout_is_rejected_before_mutation(self):
         for timeout in (0, -1, float("nan"), float("inf")):
             with self.assertRaises(ValueError):
