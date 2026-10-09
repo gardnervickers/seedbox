@@ -153,6 +153,7 @@ pub fn container_runtime(
     explicit: Option<std::path::PathBuf>,
     cancellation: &CancellationToken,
 ) -> Result<seedbox::container_runtime::Runtime> {
+    let _hand_over = CacheHandOver::for_sudo_user();
     let path = match explicit {
         Some(path) => super::defaults::existing("--runtime-assets", path)?,
         None => release_asset(
@@ -162,35 +163,45 @@ pub fn container_runtime(
             true,
         )?,
     };
-    let runtime =
-        seedbox::container_runtime::Runtime::from_archive(&path, &cache_home()?.join("runtime"))
-            .map_err(|error| match error {
-                seedbox::Error::Io(error) => seedbox::Error::Setup(format!(
-                    "runtime assets {}: {error}; check archive and cache permissions",
-                    path.display()
-                )),
-                other => other,
-            })?;
-    return_cache_to_sudo_user();
-    Ok(runtime)
+    seedbox::container_runtime::Runtime::from_archive(&path, &cache_home()?.join("runtime"))
+        .map_err(|error| match error {
+            seedbox::Error::Io(error) => seedbox::Error::Setup(format!(
+                "runtime assets {}: {error}; check archive and cache permissions",
+                path.display()
+            )),
+            other => other,
+        })
 }
 
 /// Under sudo, the cache lives in the invoking user's home; leave nothing there
-/// that only root can remove. Best effort: a failure only affects cleanup.
-fn return_cache_to_sudo_user() {
-    if unsafe { libc::geteuid() } != 0 {
-        return;
+/// that only root can remove, whether the download or extraction succeeded,
+/// failed or was cancelled. Best effort: a failure only affects cleanup.
+struct CacheHandOver {
+    home: std::path::PathBuf,
+    cache: std::path::PathBuf,
+    uid: u32,
+    gid: u32,
+}
+
+impl CacheHandOver {
+    fn for_sudo_user() -> Option<Self> {
+        if unsafe { libc::geteuid() } != 0 {
+            return None;
+        }
+        let ids = |name| std::env::var(name).ok()?.parse::<u32>().ok();
+        Some(Self {
+            uid: ids("SUDO_UID")?,
+            gid: ids("SUDO_GID")?,
+            home: super::defaults::sudo_home()?,
+            cache: cache_home().ok()?,
+        })
     }
-    let ids = |name| std::env::var(name).ok()?.parse::<u32>().ok();
-    let (Some(uid), Some(gid), Some(home), Ok(cache)) = (
-        ids("SUDO_UID"),
-        ids("SUDO_GID"),
-        super::defaults::sudo_home(),
-        cache_home(),
-    ) else {
-        return;
-    };
-    hand_over(&home, &cache, uid, gid);
+}
+
+impl Drop for CacheHandOver {
+    fn drop(&mut self) {
+        hand_over(&self.home, &self.cache, self.uid, self.gid);
+    }
 }
 
 fn hand_over(home: &Path, cache: &Path, uid: u32, gid: u32) {
@@ -243,6 +254,7 @@ fn release_asset(
     download: bool,
 ) -> Result<std::path::PathBuf> {
     use seedbox::release_download::{ReleaseAsset, ReleaseDownload};
+    let _hand_over = CacheHandOver::for_sudo_user();
     let cache = cache_home()?.join(match asset {
         ReleaseAsset::Kernel => "kernels",
         ReleaseAsset::Runtime => "assets",
@@ -257,7 +269,6 @@ fn release_asset(
             asset.description(),
             path.display()
         );
-        return_cache_to_sudo_user();
         return Ok(path);
     }
     #[cfg(target_os = "linux")]
@@ -277,14 +288,12 @@ fn release_asset(
         .timeout_recv_response(Some(std::time::Duration::from_secs(15)))
         .build()
         .new_agent();
-    let path = ReleaseDownload::new(asset, agent, token.as_deref())?.ensure(
+    ReleaseDownload::new(asset, agent, token.as_deref())?.ensure(
         &cache,
         architecture,
         cancellation,
         |message| eprintln!("{prefix}: {message}"),
-    )?;
-    return_cache_to_sudo_user();
-    Ok(path)
+    )
 }
 
 pub fn container_client(
@@ -351,5 +360,35 @@ mod sudo_cache_tests {
         assert_eq!(std::fs::metadata(home.path()).unwrap().uid(), 0);
         super::hand_over(home.path(), outside.path(), 4242, 4343);
         assert_eq!(std::fs::metadata(outside.path()).unwrap().uid(), 0);
+    }
+
+    #[test]
+    fn a_failed_download_still_returns_the_cache() {
+        if unsafe { libc::geteuid() } != 0 {
+            return; // Changing ownership needs root.
+        }
+        let home = tempfile::tempdir().unwrap();
+        let cache = home.path().join(".cache/seedbox");
+        let failed_download = || -> seedbox::Result<()> {
+            let _hand_over = super::CacheHandOver {
+                home: home.path().to_path_buf(),
+                cache: cache.clone(),
+                uid: 4242,
+                gid: 4343,
+            };
+            std::fs::create_dir_all(cache.join("assets/x86_64")).unwrap();
+            std::fs::write(cache.join("assets/x86_64/.lock"), b"").unwrap();
+            Err(seedbox::Error::Setup("HTTP 404".into()))
+        };
+        assert!(failed_download().is_err());
+        for path in [
+            home.path().join(".cache"),
+            cache.clone(),
+            cache.join("assets/x86_64"),
+            cache.join("assets/x86_64/.lock"),
+        ] {
+            let metadata = std::fs::metadata(&path).unwrap();
+            assert_eq!((metadata.uid(), metadata.gid()), (4242, 4343), "{path:?}");
+        }
     }
 }
