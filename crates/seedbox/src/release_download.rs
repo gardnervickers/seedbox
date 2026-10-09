@@ -67,6 +67,9 @@ const MAX_METADATA: u64 = 1 << 20;
 struct Release {
     tag_name: String,
     draft: bool,
+    /// RFC 3339 UTC, so string order is time order.
+    #[serde(default)]
+    published_at: Option<String>,
     assets: Vec<Asset>,
 }
 #[derive(Deserialize)]
@@ -260,6 +263,7 @@ impl ReleaseDownload {
 
     fn latest_release(&self, cancellation: &CancellationToken) -> Result<Release> {
         let prefix = format!("{}-", self.asset.kind());
+        let mut newest = None;
         let mut page = 1;
         loop {
             let mut response = self.get(
@@ -275,14 +279,20 @@ impl ReleaseDownload {
                 ))
             })?;
             let count = releases.len();
-            if let Some(release) = releases
-                .into_iter()
-                .find(|release| !release.draft && release.tag_name.starts_with(&prefix))
-            {
-                return Ok(release);
+            // GitHub's list order is not publication order (older hash-named
+            // tags can sort first), so take the newest across every page.
+            for release in releases {
+                if !release.draft
+                    && release.tag_name.starts_with(&prefix)
+                    && newest
+                        .as_ref()
+                        .is_none_or(|newest: &Release| release.published_at > newest.published_at)
+                {
+                    newest = Some(release);
+                }
             }
             if count < 20 {
-                return Err(Error::Setup(format!(
+                return newest.ok_or_else(|| Error::Setup(format!(
                     "no published {} release on github.com/{REPOSITORY}; check the Guest assets workflow or pass {}",
                     self.asset.kind(), self.asset.remedy()
                 )));
@@ -446,12 +456,17 @@ mod tests {
         let kernel = kernel.to_vec();
         let metadata = serde_json::json!({
             "tag_name": format!("{}-123", asset.kind()), "draft": false,
+            "published_at": "2026-10-09T03:42:24Z",
             "assets": [{"id": 7, "name": asset.asset_name("aarch64"), "size": expected.len(),
                 "digest": format!("sha256:{}", ContentDigest::of(expected).hex())}]
         });
         let metadata = serde_json::json!([
             {"tag_name": "v0.1.0", "draft": false, "assets": []},
             {"tag_name": format!("{}-124", asset.kind()), "draft": true, "assets": []},
+            // Listed first but published earlier; its asset must not be fetched.
+            {"tag_name": format!("{}-9ea0b68", asset.kind()), "draft": false,
+                "published_at": "2026-10-09T00:24:57Z",
+                "assets": [{"id": 8, "name": asset.asset_name("aarch64"), "size": 1, "digest": null}]},
             metadata
         ])
         .to_string()
