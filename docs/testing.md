@@ -5,7 +5,7 @@ machine you are on; the runner never selects tests by probing the host.
 
 ```sh
 nix develop --command bash harness/check.sh   # portable (the default)
-bash harness/check.sh linux-kvm               # any Linux KVM host, including droplets
+bash harness/check.sh linux-kvm               # any Linux KVM host, including GitHub-hosted Ubuntu runners
 bash harness/check.sh linux --cpu 14          # the AMD host
 bash harness/check.sh mac                     # Apple Silicon
 bash harness/check.sh linux-counter --list    # check requirements, build nothing
@@ -117,3 +117,13 @@ the maintained suite.
 To check a different revision, check it out in a Git worktree and run the same
 command there. Low-level standalone world campaigns remain separate diagnostic
 tools, documented in `harness/worlds/README.md`.
+
+## Hosted PV CI
+
+The PV tests workflow runs `linux-apps` (including portable prerequisites) on
+GitHub-hosted `ubuntu-24.04` for pull requests, main pushes, and manual dispatch.
+It checks KVM VM creation before building and uses the runner Docker engine.
+Nix store and Cargo dependencies/build outputs are cached in GitHub Actions;
+guest assets are built explicitly from the checkout. Cold caches require downloads
+and builds. Jobs time out after 100 minutes and superseded runs are canceled.
+No cloud account, self-hosted runner, PMU, or external cleanup service is needed.

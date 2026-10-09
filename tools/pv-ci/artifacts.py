@@ -10,8 +10,7 @@ def collect(root):
     output = root / "target/pv-artifacts"
     output.mkdir(parents=True, exist_ok=False)
     remaining, count = LIMIT - 4096, 0
-    for source in (root / "target/check-reports", root / "target/pv-runner-diagnostics",
-                   Path("/var/lib/seedbox-runner/_diag")):
+    for source in (root / "target/check-reports",):
         if source.is_symlink() or not source.is_dir():
             continue
         for path in sorted(source.rglob("*")):
