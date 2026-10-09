@@ -2,6 +2,7 @@
 //! scenarios, with results that must not depend on the worker count or on
 //! which machine finishes a round first.
 use super::*;
+use crate::faults::RowStatus;
 use crate::world::{release, reseed_checkpoint, WorldSnapshot};
 use crate::world_mock::*;
 use seedbox_control::{Action, Plan};
@@ -21,16 +22,15 @@ fn segment(
     checkpoint: Option<u64>,
     require_barrier: bool,
 ) -> Result<&'static str, String> {
-    let end_on = end_on.map(str::to_owned);
     let run = Run {
         cfg,
         duration,
-        end_on: &end_on,
-        fork,
+        end_on,
+        fork: fork.map(Fork::from),
         checkpoint,
         require_barrier,
     };
-    simulate(w, &run, Duration::ZERO, &mut || Ok(())).map(|(word, _)| word)
+    simulate(w, &run, Duration::ZERO, &mut || Ok(())).map(|(word, _)| word.as_str())
 }
 
 fn run_with(
@@ -40,11 +40,10 @@ fn run_with(
     workers: usize,
     skew: Duration,
 ) -> Result<(&'static str, Value), String> {
-    let end_on = end_on.map(str::to_owned);
     let run = Run {
         cfg: &Value::Null,
         duration,
-        end_on: &end_on,
+        end_on,
         fork: None,
         checkpoint: None,
         require_barrier: true,
@@ -63,6 +62,7 @@ fn run_with(
             &mut || Ok(()),
         )
     }
+    .map(|(word, evidence)| (word.as_str(), evidence))
 }
 
 fn trace(w: &World<Mock>) -> Vec<String> {
@@ -122,7 +122,7 @@ fn dynamic_network_faults_and_healing_are_identical_across_worker_counts_and_sna
             run_with(w, 100, None, workers, Duration::from_micros(3)).unwrap();
             let mut h = sha2::Sha256::new();
             w.faults.network_witness(&mut h);
-            let counts = &w.faults.log[1]["network_fault_counts"];
+            let counts = &w.faults.log[1].json()["network_fault_counts"];
             for key in [
                 "reordered",
                 "duplicated",
@@ -301,7 +301,7 @@ fn control_then_trigger_then_fault_at_equal_time() {
     assert_eq!(w.control.log[0]["delivered_at_ns"], 100);
     assert_eq!(w.control.triggers.records[0].fault_id, Some(2));
     assert_eq!(w.faults.active_handles(), ["scheduled", "trigger"]);
-    assert!(w.faults.log.iter().all(|row| row["applied_at_ns"] == 50));
+    assert!(w.faults.log.iter().all(|row| row.applied_at_ns == Some(50)));
     assert!(trace(&w)
         .iter()
         .any(|l| l.starts_with("a:control/SBX_REPLY1 1 1 ") && l.ends_with(":100")));
@@ -325,7 +325,7 @@ fn equal_time_control_allocates_fault_before_trigger() {
     assert_eq!(w.control.log[0]["fault_id"], 2);
     assert_eq!(w.control.triggers.records[0].fault_id, Some(3));
     assert_eq!(w.faults.log.len(), 3);
-    assert!(w.faults.log.iter().all(|row| row["applied_at_ns"] == 50));
+    assert!(w.faults.log.iter().all(|row| row.applied_at_ns == Some(50)));
 }
 
 #[test]
@@ -370,8 +370,8 @@ fn requests_console_and_readiness_from_a_round_arm_later_boundaries() {
     );
     assert_eq!(w.faults.active_handles(), ["trigger"]);
     assert_eq!(w.faults.readiness, [json!({"machine":"b","at_ns":3})]);
-    assert_eq!(w.faults.log[0]["status"], "applied");
-    assert_eq!(w.faults.log[0]["applied_at_ns"], 50);
+    assert_eq!(w.faults.log[0].json()["status"], "applied");
+    assert_eq!(w.faults.log[0].json()["applied_at_ns"], 50);
     assert!(trace(&w).contains(&"b:control/stop 1\n:30".to_string()));
     assert_eq!(w.control.log.len(), 1);
     assert_eq!(w.control.log[0]["delivered_at_ns"], 104);
@@ -519,8 +519,8 @@ fn initial_launch_preserves_end_machine_exit_and_cancellation() {
     let run = Run {
         cfg: &Value::Null,
         duration: 20,
-        end_on: &None,
-        fork: Some(None),
+        end_on: None,
+        fork: Some(Fork::Barrier),
         checkpoint: None,
         require_barrier: false,
     };
@@ -618,7 +618,11 @@ fn a_crash_discards_management_and_a_reboot_drops_earlier_frames() {
     assert_eq!(a[0], "a:advance:6");
     assert!(!a.contains(&"a:control/old:8".to_string()));
     assert!(a.contains(&"a:frame:10".to_string()), "{a:?}");
-    assert!(w.faults.log.iter().all(|row| row["status"] == "applied"));
+    assert!(w
+        .faults
+        .log
+        .iter()
+        .all(|row| row.status == RowStatus::Applied));
 }
 
 #[test]
@@ -682,7 +686,7 @@ fn runtime_checkpoint_precedes_exact_time_fault_and_preserves_active_plan() {
         "checkpoint"
     );
     assert!(w.machines.iter().all(|m| m.time == 10));
-    assert_eq!(w.faults.log[0]["status"], "unrequested");
+    assert_eq!(w.faults.log[0].json()["status"], "unrequested");
     assert!(!w.faults.blocked(0, 1));
     let saved = WorldSnapshot::take_checkpoint(&mut w).unwrap();
     for _ in 0..2 {
@@ -957,7 +961,10 @@ fn worker_count_and_completion_order_never_change_a_world_with_faults_and_contro
             assert_eq!(w.control.log[0]["delivered_at_ns"], 4 + 60 + 60);
             assert_eq!(w.control.triggers.records[0].status, "fired");
             assert!(
-                w.faults.log.iter().all(|row| row["status"] == "applied"),
+                w.faults
+                    .log
+                    .iter()
+                    .all(|row| row.status == RowStatus::Applied),
                 "{:?}",
                 w.faults.log
             );
@@ -989,7 +996,7 @@ fn a_fault_that_fails_ends_the_run_with_its_evidence() {
     failed.effects.push((1, false));
     w.machines[1].steps.extend([ready, failed]);
     assert_eq!(run(&mut w, 100, None).unwrap(), "fault_failed");
-    assert_eq!(w.faults.log[0]["status"], "failed");
+    assert_eq!(w.faults.log[0].json()["status"], "failed");
     assert!(w.faults.error.is_some());
     // The round holding the failed effect commits; nothing runs after it.
     assert!(w.machines.iter().all(|m| m.time == 26), "{:?}", trace(&w));
@@ -1056,7 +1063,11 @@ fn throttle_applies_at_its_boundary_survives_reboot_and_heals_identically_across
             ]
         );
         assert!(w.faults.active_handles().is_empty());
-        assert!(w.faults.log.iter().all(|row| row["status"] == "applied"));
+        assert!(w
+            .faults
+            .log
+            .iter()
+            .all(|row| row.status == RowStatus::Applied));
         let observed = (throttles, w.faults.log.clone());
         if let Some(want) = &reference {
             assert_eq!(&observed, want);

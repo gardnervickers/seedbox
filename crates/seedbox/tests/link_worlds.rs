@@ -101,7 +101,7 @@ fn full_world_window_45_reveals_lossmid_after_cut_heal_and_bounds_nominal_arriva
     );
     assert!(f.error.is_none());
     assert_eq!(f.log.len(), 16);
-    for (i, log) in f.log.iter().enumerate() {
+    for (i, log) in f.log.iter().map(faults::FaultRow::json).enumerate() {
         assert_eq!(log["id"], i + 1);
         assert_eq!(log["status"], "applied");
         assert_eq!(log["applied_at_ns"], log["requested_at_ns"]);
@@ -137,7 +137,7 @@ fn short_world_applies_the_same_ordered_faults_and_exposes_at_least_300_lossmid_
     assert!(exposed >= 300);
     assert!(f.error.is_none());
     assert_eq!(f.log.len(), 16);
-    for (i, log) in f.log.iter().enumerate() {
+    for (i, log) in f.log.iter().map(faults::FaultRow::json).enumerate() {
         assert_eq!(log["id"], i + 1);
         assert_eq!(log["status"], "applied");
         assert_eq!(log["applied_at_ns"], log["requested_at_ns"]);

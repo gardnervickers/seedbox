@@ -1,12 +1,14 @@
 //! Directed, send-time link decisions. No host, device or scheduler dependencies.
 use crate::network_faults::{self, Counts, Streams};
 use crate::rng::Rng;
-use seedbox_control::NetworkFaults;
+use seedbox_control::{NetworkFaults, MAX_LINK_DELAY_NS, MAX_PPM};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub type Pair = (usize, usize);
+/// Global link latency when the network config names none: one millisecond.
+pub const DEFAULT_LATENCY_NS: u64 = 1_000_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Policy {
     pub latency_ns: u64,
@@ -37,14 +39,19 @@ impl Policy {
         if self
             .latency_ns
             .checked_add(self.jitter_ns)
-            .is_none_or(|n| n > 3_600_000_000_000)
+            .is_none_or(|n| n > MAX_LINK_DELAY_NS)
         {
             return Err("latency_ns + jitter_ns exceeds one hour".into());
         }
-        if self.loss_ppm > 1_000_000 {
-            return Err("loss_ppm exceeds 1000000".into());
+        if self.loss_ppm > MAX_PPM {
+            return Err(format!("loss_ppm exceeds {MAX_PPM}"));
         }
         self.validate_bandwidth()
+    }
+    /// A shape layer's policy and impairments, checked against the global floor.
+    pub fn validate_shape(self, floor: u64, network_faults: &NetworkFaults) -> Result<(), String> {
+        self.validate(floor)?;
+        network_faults.validate(self.latency_ns, self.jitter_ns)
     }
 }
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, serde::Serialize)]
@@ -111,7 +118,7 @@ impl Links {
     ) -> Result<Self, String> {
         // Preserve the existing global setting's bounds. The one-hour cap is
         // for overrides and shape layers; the whole-run floor is unchanged.
-        if global.jitter_ns >= global.latency_ns || global.loss_ppm > 1_000_000 {
+        if global.jitter_ns >= global.latency_ns || global.loss_ppm > MAX_PPM {
             return Err("invalid global link policy".into());
         }
         global.validate_bandwidth()?;
@@ -146,7 +153,7 @@ impl Links {
             .get("latency_ns")
             .map(|v| v.as_u64().ok_or("invalid network.latency_ns"))
             .transpose()?
-            .unwrap_or(1_000_000);
+            .unwrap_or(DEFAULT_LATENCY_NS);
         let jitter_ns = net
             .get("jitter_ns")
             .map(|v| v.as_u64().ok_or("invalid network.jitter_ns"))
@@ -248,9 +255,15 @@ impl Links {
     /// Advance both named streams for deterministic diagnostics and acceptance.
     #[doc(hidden)]
     pub fn stream_sample(&mut self, pair: Pair) -> (u64, u64) {
+        self.draw(pair)
+    }
+    /// The next loss and jitter draws of `pair`. Every ordered pair of
+    /// distinct machines has both streams from the last reseed.
+    fn draw(&mut self, pair: Pair) -> (u64, u64) {
+        let stream = "a link stream per machine pair";
         (
-            self.loss.get_mut(&pair).unwrap().next(),
-            self.jitter.get_mut(&pair).unwrap().next(),
+            self.loss.get_mut(&pair).expect(stream).next(),
+            self.jitter.get_mut(&pair).expect(stream).next(),
         )
     }
     /// The run has baseline overrides or has applied a shape layer.
@@ -283,8 +296,7 @@ impl Links {
         policy: Policy,
         network_faults: NetworkFaults,
     ) -> Result<(), String> {
-        policy.validate(self.global.latency_ns)?;
-        network_faults.validate(policy.latency_ns, policy.jitter_ns)?;
+        policy.validate_shape(self.global.latency_ns, &network_faults)?;
         if self.layers.contains_key(&id) || self.layers.values().any(|l| l.handle == handle) {
             return Err("duplicate active shape".into());
         }
@@ -315,8 +327,7 @@ impl Links {
     }
     /// A selected non-cut candidate consumes both draws without advancing FIFO.
     pub fn selected_drop(&mut self, src: usize, dst: usize) {
-        self.loss.get_mut(&(src, dst)).unwrap().next();
-        self.jitter.get_mut(&(src, dst)).unwrap().next();
+        self.draw((src, dst));
     }
     pub fn decide(
         &mut self,
@@ -331,10 +342,9 @@ impl Links {
         }
         let pair = (src, dst);
         let policy = self.policy(pair);
-        let loss = self.loss.get_mut(&pair).unwrap().next();
-        let jitter = self.jitter.get_mut(&pair).unwrap().next();
+        let (loss, jitter) = self.draw(pair);
         let jitter = ((jitter as u128 * (policy.jitter_ns as u128 + 1)) >> 64) as u64;
-        if (loss as u128) * 1_000_000 < (policy.loss_ppm as u128) << 64 {
+        if (loss as u128) * u128::from(MAX_PPM) < (policy.loss_ppm as u128) << 64 {
             return Outcome::Lost;
         }
         // Existing loss/jitter draws precede every new stream. Bursts reserve

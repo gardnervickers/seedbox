@@ -31,7 +31,7 @@ fn overlapping_handles_only_heal_their_own_links_and_order_is_stable() {
     assert_eq!(f.apply_due(15), vec![(0, b"start 6\n".to_vec())]);
     f.effect(0, 6, 16, true);
     assert!((f.error.is_none() && f.pending_boundaries() == 0));
-    assert_eq!(f.log[5]["applied_at_ns"], 16);
+    assert_eq!(f.log[5].json()["applied_at_ns"], 16);
     assert_eq!(f.next_boundary(), u64::MAX);
 }
 #[test]
@@ -54,12 +54,12 @@ fn ack_identity_machine_effect_time_deadline_and_state_fail_closed() {
     f.effect(0, 5, 14, true);
     f.effect(0, 5, 14, true);
     assert!(f.error.is_some());
-    assert_eq!(f.log[4]["status"], "failed");
+    assert_eq!(f.log[4].json()["status"], "failed");
     let mut f = fixture();
     f.apply_due(14);
     f.apply_due(24);
     assert!(f.error.is_some());
-    assert_eq!(f.log[4]["status"], "failed");
+    assert_eq!(f.log[4].json()["status"], "failed");
     let mut f = fixture();
     f.effect(0, 5, 14, true);
     assert!(f.error.is_some());
@@ -118,10 +118,7 @@ fn same_time_partition_then_heal_completes_in_author_order_before_new_sends() {
     assert!((f.error.is_none() && f.pending_boundaries() == 0));
     assert!(!f.blocked(0, 1));
     assert_eq!(
-        f.log
-            .iter()
-            .map(|r| r["action"].as_str().unwrap())
-            .collect::<Vec<_>>(),
+        f.log.iter().map(|r| r.action).collect::<Vec<_>>(),
         vec!["partition", "heal"]
     );
 }
@@ -200,14 +197,14 @@ fn process_commands_wait_for_ready_and_undispatched_acks_cannot_fulfill_them() {
     f.apply_due(10);
     f.effect(0, 1, 15, true);
     assert!(f.error.is_some());
-    assert_eq!(f.log[0]["status"], "failed");
+    assert_eq!(f.log[0].json()["status"], "failed");
     let mut f = engine::Faults::new(vec![], vec!["n1".into()]).unwrap();
     f.require_readiness();
     f.append(plan).unwrap();
     f.apply_due(10);
     f.apply_due(100);
     assert!(f.error.is_some());
-    assert_eq!(f.log[0]["status"], "failed");
+    assert_eq!(f.log[0].json()["status"], "failed");
 }
 
 #[test]
@@ -230,8 +227,8 @@ fn same_time_overlapping_cuts_heal_by_handle_and_id_without_opening_other_links(
     assert!(!faults.blocked(1, 2));
     assert!(!faults.blocked(2, 1));
     for log in &faults.log[..3] {
-        assert_eq!(log["status"], "applied");
-        assert_eq!(log["applied_at_ns"], 10);
+        assert_eq!(log.json()["status"], "applied");
+        assert_eq!(log.json()["applied_at_ns"], 10);
     }
     assert!(faults.apply_due(11).is_empty());
     assert!(faults.error.is_none());
@@ -241,7 +238,7 @@ fn same_time_overlapping_cuts_heal_by_handle_and_id_without_opening_other_links(
         assert!(!faults.blocked(0, peer));
         assert!(!faults.blocked(peer, 0));
     }
-    assert_eq!(faults.log[3]["applied_at_ns"], 11);
+    assert_eq!(faults.log[3].json()["applied_at_ns"], 11);
 }
 
 #[test]
@@ -301,9 +298,9 @@ fn lifecycle_transitions_follow_the_machine_state_and_reject_the_rest() {
         assert!(f.apply_due(at).is_empty());
         assert_eq!(f.take_lifecycle(), vec![(0, op)]);
         assert_eq!(f.life(0), life);
-        assert_eq!(f.log[i]["status"], "applied");
-        assert_eq!(f.log[i]["applied_at_ns"], at);
-        assert_eq!(f.log[i]["detail"], detail);
+        assert_eq!(f.log[i].json()["status"], "applied");
+        assert_eq!(f.log[i].json()["applied_at_ns"], at);
+        assert_eq!(f.log[i].json()["detail"], detail);
     }
     assert!(f.error.is_none());
     assert_eq!(f.next_lifecycle(0), u64::MAX);
@@ -320,8 +317,12 @@ fn lifecycle_transitions_follow_the_machine_state_and_reject_the_rest() {
             json!({"id":2,"at_ns":10,"deadline_ns":10,"action":second,"machine":"b"}),
         ]);
         f.apply_due(10);
-        let failed = if f.log[0]["status"] == "failed" { 0 } else { 1 };
-        assert_eq!(f.log[failed]["detail"], error);
+        let failed = if f.log[0].json()["status"] == "failed" {
+            0
+        } else {
+            1
+        };
+        assert_eq!(f.log[failed].json()["detail"], error);
         assert_eq!(f.error.as_deref(), Some(error));
         assert_eq!(f.take_lifecycle().len(), 1, "{first} then {second}");
     }
@@ -352,16 +353,16 @@ fn a_crash_ends_the_incarnations_process_faults_and_readiness() {
     assert_eq!(f.apply_due(10), vec![(0, b"stop 1\n".to_vec())]);
     assert!(f.apply_due(20).is_empty());
     assert_eq!(f.take_lifecycle(), vec![(0, Lifecycle::Crash)]);
-    assert_eq!(f.log[0]["status"], "unavailable");
+    assert_eq!(f.log[0].json()["status"], "unavailable");
     assert_eq!(
-        f.log[0]["detail"],
+        f.log[0].json()["detail"],
         "target machine crashed before the process effect"
     );
     assert_eq!(f.process_state(0), "Down");
     // A process fault for a machine that is down is unavailable at once.
     assert!(f.apply_due(25).is_empty());
-    assert_eq!(f.log[2]["status"], "unavailable");
-    assert_eq!(f.log[2]["detail"], "target machine is down");
+    assert_eq!(f.log[2].json()["status"], "unavailable");
+    assert_eq!(f.log[2].json()["detail"], "target machine is down");
     f.apply_due(30);
     assert_eq!(f.take_lifecycle(), vec![(0, Lifecycle::Reboot)]);
     assert_eq!(f.process_state(0), "Running");
@@ -405,7 +406,7 @@ fn equal_time_lifecycle_and_process_requests_apply_in_plan_order() {
             (0, Lifecycle::Pause)
         ]
     );
-    assert_eq!(f.log[0]["status"], "unavailable");
+    assert_eq!(f.log[0].json()["status"], "unavailable");
     assert_eq!(
         (f.process_state(0), f.process_state(1)),
         ("Paused", "Running")

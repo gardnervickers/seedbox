@@ -224,7 +224,13 @@ pub enum Step<P> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
+    /// Invalid parameters or initial machine states.
     Params(String),
+    /// The coordinator asked something impossible between rounds: an
+    /// unknown machine, a time in the committed past, or a stale plan.
+    Coordinator(String),
+    /// The router delivered to an unknown machine or twice to one.
+    Router(String),
     /// A routed event would be due inside the round that produced it.
     Causality {
         from: usize,
@@ -239,10 +245,7 @@ pub enum Error {
         limit: usize,
     },
     /// A report that breaks its assignment.
-    Report {
-        machine: usize,
-        reason: String,
-    },
+    Report { machine: usize, reason: String },
     /// A machine failed while executing; the round was not committed.
     Machine {
         machine: usize,
@@ -250,10 +253,7 @@ pub enum Error {
         message: String,
     },
     /// A worker failed outside any machine; the round was not committed.
-    Worker {
-        worker: usize,
-        message: String,
-    },
+    Worker { worker: usize, message: String },
     /// The caller's between-rounds hook failed after a commit.
     Boundary(String),
 }
@@ -261,7 +261,9 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Params(m) => write!(f, "windowed scheduler: {m}"),
+            Error::Params(m) | Error::Coordinator(m) | Error::Router(m) => {
+                write!(f, "windowed scheduler: {m}")
+            }
             Error::Causality { from, to, sent_at, at, round_end } => write!(
                 f,
                 "causality violation: machine {from} sent at {sent_at} ns to machine {to} due at {at} ns, inside the round ending at {round_end} ns"
@@ -377,10 +379,10 @@ impl<P: Clone + Hash> World<P> {
         suspended: bool,
     ) -> Result<(), Error> {
         if m >= self.machines.len() {
-            return Err(Error::Params(format!("sync of unknown machine {m}")));
+            return Err(Error::Coordinator(format!("sync of unknown machine {m}")));
         }
         if exited.is_none() && next < time {
-            return Err(Error::Params(format!(
+            return Err(Error::Coordinator(format!(
                 "machine {m}: next action {next} is before its time {time}"
             )));
         }
@@ -416,12 +418,12 @@ impl<P: Clone + Hash> World<P> {
     /// or before the committed time, so it still delivers on time.
     pub fn schedule(&mut self, to: usize, at: Time, payload: P) -> Result<(), Error> {
         if to >= self.machines.len() {
-            return Err(Error::Params(format!(
+            return Err(Error::Coordinator(format!(
                 "scheduled event for unknown machine {to}"
             )));
         }
         if self.round > 0 && at < self.committed {
-            return Err(Error::Params(format!(
+            return Err(Error::Coordinator(format!(
                 "event at {at} ns is inside the committed past"
             )));
         }
@@ -440,7 +442,7 @@ impl<P: Clone + Hash> World<P> {
     /// delivered before it.
     pub fn add_boundary(&mut self, at: Time) -> Result<(), Error> {
         if at < self.committed && self.round > 0 {
-            return Err(Error::Params(format!(
+            return Err(Error::Coordinator(format!(
                 "boundary {at} ns is in the committed past"
             )));
         }
@@ -548,13 +550,13 @@ impl<P: Clone + Hash> World<P> {
         router: &mut R,
     ) -> Result<(), Error> {
         if plan.round != self.round || self.outcome.is_some() {
-            return Err(Error::Params(format!(
+            return Err(Error::Coordinator(format!(
                 "plan for round {} is stale",
                 plan.round
             )));
         }
         if reports.len() != plan.assignments.len() {
-            return Err(Error::Params(
+            return Err(Error::Coordinator(
                 "one report is required per assignment".into(),
             ));
         }
@@ -579,7 +581,7 @@ impl<P: Clone + Hash> World<P> {
             router.route(from, sent_at, payload, &mut copies);
             for d in copies.drain(..) {
                 if d.to >= self.machines.len() {
-                    return Err(Error::Params(format!(
+                    return Err(Error::Router(format!(
                         "router delivered to unknown machine {}",
                         d.to
                     )));
@@ -607,7 +609,7 @@ impl<P: Clone + Hash> World<P> {
         let mut seen = BTreeSet::new();
         for (to, key, _) in &routed {
             if !seen.insert((*to, *key)) {
-                return Err(Error::Params(format!(
+                return Err(Error::Router(format!(
                     "router delivered output {} of machine {:?} twice to {to}",
                     key.seq, key.source
                 )));

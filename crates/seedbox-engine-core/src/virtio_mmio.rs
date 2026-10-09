@@ -4,7 +4,7 @@ use crate::virtqueue::Queue;
 use serde::Serialize;
 
 pub const QUEUE_SIZE: u16 = 256;
-const DRIVER_OK: u32 = 4;
+pub(crate) const DRIVER_OK: u32 = 4;
 const FEATURES_OK: u32 = 8;
 
 #[derive(Clone, Copy)]

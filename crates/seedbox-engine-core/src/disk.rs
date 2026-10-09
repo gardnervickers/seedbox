@@ -80,7 +80,7 @@ fn seeded_survival_branch(
     }
 }
 
-fn sector_survives(model: DiskFaultModel, rng: &mut Rng, _sector: u64, _data: &[u8]) -> bool {
+fn sector_survives(model: DiskFaultModel, rng: &mut Rng) -> bool {
     let draw = rng.next() as f64 / (u64::MAX as f64 + 1.0);
     draw < model.survival_probability
 }
@@ -131,9 +131,7 @@ impl Disk {
             (None, Some(sectors)) if sectors > 0 => (None, sectors),
             (None, _) => return Err("disk needs an image or a size".into()),
         };
-        let base_sha256 = base
-            .as_ref()
-            .map(|bytes| format!("{:x}", Sha256::digest(bytes)));
+        let base_sha256 = base.as_ref().map(crate::sha256_hex);
         Ok(Self {
             base,
             capacity,
@@ -178,9 +176,7 @@ impl Disk {
         else {
             return self.crashed();
         };
-        self.crashed_keeping(|sector, data| {
-            sector_survives(self.fault_model, &mut rng, sector, data)
-        })
+        self.crashed_keeping(|_, _| sector_survives(self.fault_model, &mut rng))
     }
 
     /// Stream a crash survivor overlay without rebasing its immutable image.
@@ -570,7 +566,7 @@ mod tests {
             for sector in 0..64 {
                 assert_eq!(
                     at(&after, sector),
-                    if sector_survives(d.fault_model, &mut rng, sector, &[b'B'; 512]) {
+                    if sector_survives(d.fault_model, &mut rng) {
                         b'B'
                     } else {
                         b'A'

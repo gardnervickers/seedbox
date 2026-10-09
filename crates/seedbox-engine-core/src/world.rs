@@ -1,8 +1,11 @@
 //! One deterministic world coordinator over stopped architecture primitives.
 //! MachineState is stored once in the real machine/proxy; it is never refreshed
 //! from an independently mutable scheduler mirror.
+use crate::network_counters::{
+    self, DELIVERED, LOSS_DROPPED, PARTITION_DROPPED, QUEUE_DROPPED, RECEIVER_DROPPED,
+};
 use crate::world_events as events;
-use crate::{control, faults, links, network_counters, rng::Rng};
+use crate::{control, faults, links, rng::Rng};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
@@ -12,6 +15,17 @@ pub enum State {
     Running,
     Halted,
     Exited(u8),
+}
+/// The text inspection and crash summaries report: `Running`, `Halted` or
+/// `Exited(code)`. Report validators parse `Exited(code)` back.
+impl std::fmt::Display for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Running => f.write_str("Running"),
+            Self::Halted => f.write_str("Halted"),
+            Self::Exited(code) => write!(f, "Exited({code})"),
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stop {
@@ -357,9 +371,12 @@ pub enum Payload {
     Serial(Vec<u8>),
     Partition { from: usize, to: usize, on: bool },
 }
-const PAUSED_INGRESS_FRAMES: u64 = 256;
 pub fn entropy_seed(seed: u64, domain: &str) -> [u8; 32] {
-    let mut rng = Rng::new(seed, domain);
+    entropy_seed_branch(seed, None, domain)
+}
+/// As [`entropy_seed`], on a checkpoint branch's stream when `identity` is set.
+pub fn entropy_seed_branch(seed: u64, identity: Option<&str>, domain: &str) -> [u8; 32] {
+    let mut rng = Rng::branch(seed, identity, domain);
     let mut out = [0u8; 32];
     for c in out.chunks_mut(8) {
         c.copy_from_slice(&rng.next().to_le_bytes());
@@ -399,7 +416,7 @@ pub struct World<M: WorldMachine> {
     pub macs: Vec<[u8; 6]>,
     pub dropped: u64,
     pub delivered: u64,
-    pub link_counts: BTreeMap<(usize, usize), [u64; 5]>,
+    pub link_counts: network_counters::LinkCounts,
     pub semantic_counts: network_counters::NetworkCounters,
     pub slices: u64,
 }
@@ -469,18 +486,8 @@ impl<M: WorldMachine> World<M> {
     pub fn network_snapshot(&self) -> Value {
         self.counter_snapshot(&self.link_counts)
     }
-    pub fn counter_snapshot(&self, counts: &BTreeMap<(usize, usize), [u64; 5]>) -> Value {
-        let snapshot:BTreeMap<_,_>=counts.iter().map(|(&(from,to),counts)|(
-            format!("{}->{}",self.machines[from].name,self.machines[to].name),
-            {
-                // Omitted while zero, so a run that loses nothing keeps main's counters.
-                let mut c=json!({"delivered":counts[0],"partition_dropped":counts[1],"receiver_dropped":counts[2]});
-                if counts[3]>0 {c["loss_dropped"]=json!(counts[3]);}
-                if counts[4]>0 {c["queue_dropped"]=json!(counts[4]);}
-                c
-            }
-        )).collect();
-        json!(snapshot)
+    pub fn counter_snapshot(&self, counts: &network_counters::LinkCounts) -> Value {
+        network_counters::snapshot(|m| &self.machines[m].name, counts)
     }
     pub fn schedule(&mut self, m: usize, t: u64, p: Payload) {
         self.seq += 1;
@@ -547,10 +554,10 @@ impl<M: WorldMachine> World<M> {
                 Payload::Frame { from, bytes } => {
                     if !mach.deliver_frame(&bytes)? {
                         self.dropped += 1;
-                        self.count_link(at, from, m, 2);
+                        self.count_link(at, from, m, RECEIVER_DROPPED);
                     } else {
                         self.delivered += 1;
-                        self.count_link(at, from, m, 0);
+                        self.count_link(at, from, m, DELIVERED);
                     }
                 }
                 Payload::Serial(b) => mach.deliver_serial(&b)?,
@@ -574,17 +581,17 @@ impl<M: WorldMachine> World<M> {
             let t = match self.faults.route(src, dst, send_time, &frame, cut) {
                 links::Outcome::Cut => {
                     self.dropped += 1;
-                    self.count_link(send_time, src, dst, 1);
+                    self.count_link(send_time, src, dst, PARTITION_DROPPED);
                     continue;
                 }
                 links::Outcome::Lost => {
                     self.dropped += 1;
-                    self.count_link(send_time, src, dst, 3);
+                    self.count_link(send_time, src, dst, LOSS_DROPPED);
                     continue;
                 }
                 links::Outcome::QueueDropped => {
                     self.dropped += 1;
-                    self.count_link(send_time, src, dst, 4);
+                    self.count_link(send_time, src, dst, QUEUE_DROPPED);
                     continue;
                 }
                 links::Outcome::Deliver(t) => t,
@@ -600,13 +607,13 @@ impl<M: WorldMachine> World<M> {
                     to.down,
                     to.paused,
                     self.paused_ingress[dst],
-                    PAUSED_INGRESS_FRAMES,
+                    events::PAUSED_INGRESS_FRAMES,
                 ) {
                     events::Arrival::Queue => {}
                     events::Arrival::Held => self.paused_ingress[dst] += 1,
                     events::Arrival::Drop => {
                         self.dropped += 1;
-                        self.count_link(t, src, dst, 2);
+                        self.count_link(t, src, dst, RECEIVER_DROPPED);
                         continue;
                     }
                 }
@@ -657,21 +664,19 @@ impl<M: WorldMachine> World<M> {
         self.strict_events[m].clear();
         let result = crash_machine(
             &mut self.machines[m],
-            &self.factory,
-            &self.boot[m],
-            self.run_seed,
-            self.branch_identity.as_deref(),
-            &mut self.control.triggers,
-            discarded,
-            &mut self.incarnations[m],
-            t,
+            Crash {
+                factory: &self.factory,
+                boot: &self.boot[m],
+                run_seed: self.run_seed,
+                branch_identity: self.branch_identity.as_deref(),
+                triggers: &mut self.control.triggers,
+                discarded,
+                incarnations: &mut self.incarnations[m],
+                at: t,
+            },
         );
         if let Err(mut error) = result {
-            for machine in &mut self.machines {
-                if let Err(cleanup) = machine.terminate_worker() {
-                    error.push_str(&format!("; {} worker cleanup: {cleanup}", machine.name));
-                }
-            }
+            terminate_workers(&mut self.machines, &mut error);
             self.failure = Some(error.clone());
             return Err(error);
         }
@@ -690,7 +695,7 @@ impl<M: WorldMachine> World<M> {
             match p {
                 Payload::Frame { from, .. } => {
                     self.dropped += 1;
-                    self.count_link(at, from, m, 2);
+                    self.count_link(at, from, m, RECEIVER_DROPPED);
                 }
                 Payload::Serial(_) => {}
                 Payload::Partition { from, to, on } => {
@@ -702,22 +707,78 @@ impl<M: WorldMachine> World<M> {
     }
 }
 
-/// Replace `slot` with its next incarnation at `t`, summarizing the one that
-/// crashed under `incarnations`. `discarded` counts the management bytes the
-/// caller dropped with the dead incarnation. On failure the predecessor's
-/// worker is terminated; the caller terminates the rest and marks the world.
-#[allow(clippy::too_many_arguments)]
+/// Append a failed worker cleanup to `error`, naming whose worker it was.
+pub(crate) fn note_cleanup(error: &mut String, whose: &str, cleanup: Result<(), String>) {
+    if let Err(cleanup) = cleanup {
+        error.push_str(&format!("; {whose} worker cleanup: {cleanup}"));
+    }
+}
+
+/// After a failed crash transaction: terminate every machine's worker,
+/// appending each cleanup failure to `error`.
+pub(crate) fn terminate_workers<'m, M: WorldMachine + 'm>(
+    machines: impl IntoIterator<Item = &'m mut M>,
+    error: &mut String,
+) {
+    for machine in machines {
+        let cleanup = machine.terminate_worker();
+        note_cleanup(error, &machine.name, cleanup);
+    }
+}
+
+/// One machine as `inspect` reports it: its exit, else its fault-model state.
+pub(crate) fn inspect_machine(
+    name: &str,
+    state: State,
+    faults: &faults::Faults,
+    m: usize,
+) -> Value {
+    let state = match state {
+        State::Exited(_) => state.to_string(),
+        State::Running | State::Halted => faults.process_state(m).to_owned(),
+    };
+    json!({ "name": name, "state": state })
+}
+
+/// The error for a runtime control request made while booting to a fork point.
+pub(crate) fn control_before_fork(machine: &str, at: u64) -> String {
+    format!(
+        "{machine}: runtime control request at {at} ns, before the fork point; fork earlier (boot.fork_at_ns)"
+    )
+}
+
+/// What [`crash_machine`] needs besides the machine's slot.
+pub(crate) struct Crash<'a, M: WorldMachine> {
+    pub factory: &'a M::Factory,
+    pub boot: &'a M::Boot,
+    pub run_seed: u64,
+    pub branch_identity: Option<&'a str>,
+    pub triggers: &'a mut crate::triggers::Triggers,
+    /// Management bytes the caller dropped with the dead incarnation.
+    pub discarded: usize,
+    /// Where the crashed incarnation's summary goes.
+    pub incarnations: &'a mut Vec<Value>,
+    /// The crash time.
+    pub at: u64,
+}
+
+/// Replace `slot` with its next incarnation at `crash.at`, summarizing the
+/// one that crashed. On failure the predecessor's worker is terminated; the
+/// caller terminates the rest and marks the world.
 pub(crate) fn crash_machine<M: WorldMachine>(
     slot: &mut M,
-    factory: &M::Factory,
-    boot: &M::Boot,
-    run_seed: u64,
-    branch_identity: Option<&str>,
-    triggers: &mut crate::triggers::Triggers,
-    discarded: usize,
-    incarnations: &mut Vec<Value>,
-    t: u64,
+    crash: Crash<'_, M>,
 ) -> Result<(), String> {
+    let Crash {
+        factory,
+        boot,
+        run_seed,
+        branch_identity,
+        triggers,
+        discarded,
+        incarnations,
+        at: t,
+    } = crash;
     let mut predecessor = None;
     let result = (|| {
         let name = slot.name.clone();
@@ -725,15 +786,11 @@ pub(crate) fn crash_machine<M: WorldMachine>(
             .incarnation
             .checked_add(1)
             .ok_or("incarnation overflow")?;
-        let mut rng = Rng::branch(
+        let seed = entropy_seed_branch(
             run_seed,
             branch_identity,
             &format!("reboot-entropy/{name}/{next}"),
         );
-        let mut seed = [0u8; 32];
-        for chunk in seed.chunks_mut(8) {
-            chunk.copy_from_slice(&rng.next().to_le_bytes());
-        }
         // A failed constructor owns cleanup of any partially booted worker.
         let mut fresh = M::boot(factory, &name, boot, false, seed)?;
         if let Err(mut error) = fresh.seed_timer_branch(
@@ -741,19 +798,23 @@ pub(crate) fn crash_machine<M: WorldMachine>(
             branch_identity,
             &format!("timer-jitter/{name}/{next}"),
         ) {
-            if let Err(cleanup) = fresh.terminate_worker() {
-                error.push_str(&format!("; fresh worker cleanup: {cleanup}"));
-            }
+            note_cleanup(&mut error, "fresh", fresh.terminate_worker());
             return Err(error);
         }
         triggers.reset_source(&name);
         let old = predecessor.insert(std::mem::replace(slot, fresh));
         let witness = old.exit_witness()?;
         let mut summary = json!({
-            "incarnation": old.incarnation, "booted_at_ns": old.booted_at, "crashed_at_ns": t,
-            "time_ns": old.time, "branches": old.branches(), "exits": old.exits(),
-            "state": format!("{:?}", old.state), "paused": old.paused,
-            "discarded_pending_io": old.owed_io().is_some(), "discarded_management_bytes": discarded,
+            "incarnation": old.incarnation,
+            "booted_at_ns": old.booted_at,
+            "crashed_at_ns": t,
+            "time_ns": old.time,
+            "branches": old.branches(),
+            "exits": old.exits(),
+            "state": old.state.to_string(),
+            "paused": old.paused,
+            "discarded_pending_io": old.owed_io().is_some(),
+            "discarded_management_bytes": discarded,
             "witness": witness,
         });
         if let Some(observations) = old.crash_observations().as_object() {
@@ -768,9 +829,7 @@ pub(crate) fn crash_machine<M: WorldMachine>(
     })();
     if let Err(mut error) = result {
         if let Some(old) = &mut predecessor {
-            if let Err(cleanup) = old.terminate_worker() {
-                error.push_str(&format!("; predecessor worker cleanup: {cleanup}"));
-            }
+            note_cleanup(&mut error, "predecessor", old.terminate_worker());
         }
         return Err(error);
     }
@@ -892,14 +951,12 @@ pub fn arm_seed<M: WorldMachine>(
     for ev in cfg["scenario"].as_array().cloned().unwrap_or_default() {
         let t = ev["at_ns"].as_u64().ok_or("scenario at_ns")?;
         if let Some(s) = ev["serial"].as_str() {
-            let m = index(ev["machine"].as_str().unwrap())?;
+            let m = index(ev["machine"].as_str().ok_or("scenario machine")?)?;
             world.schedule(m, t, Payload::Serial(s.as_bytes().to_vec()));
         }
         if let Some(p) = ev["partition"].as_array() {
-            let (a, b) = (
-                index(p[0].as_str().unwrap())?,
-                index(p[1].as_str().unwrap())?,
-            );
+            let side = |i: usize| p.get(i).and_then(Value::as_str).ok_or("scenario partition");
+            let (a, b) = (index(side(0)?)?, index(side(1)?)?);
             let on = ev["on"].as_bool().unwrap_or(true);
             // Partition state is consulted when the sender routes; apply it at the sender.
             world.schedule(a, t, Payload::Partition { from: a, to: b, on });
@@ -914,16 +971,22 @@ pub fn arm_seed<M: WorldMachine>(
             .as_array()
             .ok_or("kill_restart.members")?
             .iter()
-            .map(|v| index(v.as_str().unwrap()))
+            .map(|v| index(v.as_str().ok_or("kill_restart.members")?))
             .collect::<Result<_, _>>()?;
-        let span =
-            |k: &str| -> (u64, u64) { (g[k][0].as_u64().unwrap(), g[k][1].as_u64().unwrap()) };
-        let (gap, down) = (span("gap_ns"), span("down_ns"));
-        let end = g["end_ns"].as_u64().unwrap();
+        let field = |k: &str| g[k].as_u64().ok_or(format!("kill_restart.{k}"));
+        // An inclusive [min, max] range, drawn from as min + below(max - min + 1).
+        let span = |k: &str| match (g[k][0].as_u64(), g[k][1].as_u64()) {
+            (Some(min), Some(max)) if min <= max => Ok((min, max)),
+            _ => Err(format!("kill_restart.{k}")),
+        };
+        let (gap, down) = (span("gap_ns")?, span("down_ns")?);
+        let end = field("end_ns")?;
         let mut rng = Rng::new(seed, "scenario/kill_restart");
-        let mut t = g["start_ns"].as_u64().unwrap() + gap.0 + rng.below(gap.1 - gap.0 + 1);
+        let mut t = field("start_ns")? + gap.0 + rng.below(gap.1 - gap.0 + 1);
         while t < end {
-            let m = members[rng.below(members.len() as u64) as usize];
+            let m = *members
+                .get(rng.below(members.len() as u64) as usize)
+                .ok_or("kill_restart.members")?;
             let d = down.0 + rng.below(down.1 - down.0 + 1);
             world.schedule(m, t, Payload::Serial(b"stop\n".to_vec()));
             world.schedule(m, t + d, Payload::Serial(b"start\n".to_vec()));
@@ -1034,7 +1097,7 @@ pub struct WorldSnapshot<M: WorldMachine> {
     partitioned: BTreeMap<(usize, usize), bool>,
     dropped: u64,
     delivered: u64,
-    link_counts: BTreeMap<(usize, usize), [u64; 5]>,
+    link_counts: network_counters::LinkCounts,
     semantic_counts: network_counters::NetworkCounters,
     slices: u64,
     faults: faults::Faults,
@@ -1222,15 +1285,13 @@ pub fn drain_machine_messages<M: WorldMachine>(
         .collect::<Vec<_>>()
     {
         if until_barrier {
-            return Err(format!(
-                "{}: runtime control request at {at} ns, before the fork point; fork earlier (boot.fork_at_ns)",
-                world.machines[m].name
-            ));
+            return Err(control_before_fork(&world.machines[m].name, at));
         }
         let max_time = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
         if let Err(e) = world.control.request(m, at, &line, max_time) {
-            world.control.log.push(json!({"status":"rejected","machine":world.machines[m].name,"at_ns":at,"frame":String::from_utf8_lossy(&line),"error":e}));
-            world.control.error = Some(e);
+            world
+                .control
+                .reject_request(&world.machines[m].name, at, &line, e);
         }
     }
     Ok(())
@@ -1389,14 +1450,13 @@ fn simulate_stopped<M: WorldMachine>(
                 .map(|m| m.name.clone())
                 .collect();
             world.control.reject_unthrottleable(&unthrottleable);
-            if world.control.pending.as_ref().is_some_and(|p| {
-                !p.admitted_done
-                    && matches!(p.operation, Some(seedbox_control::Operation::Inspect {}))
-            }) {
-                world.control.pending.as_mut().unwrap().result = json!({"services":cfg["control"]["placement"],"machines":world.machines.iter().enumerate().map(|(i,m)|json!({"name":m.name,"state":if matches!(m.state,State::Exited(_)) {format!("{:?}",m.state)} else {world.faults.process_state(i).to_owned()}})).collect::<Vec<_>>(),"active_handles":world.faults.active_handles(),"network_counters":world.counter_snapshot(world.semantic_counts.counts())});
-                if let Some(evidence) = world.control.triggers.evidence()? {
-                    world.control.pending.as_mut().unwrap().result["triggers"] = evidence;
-                }
+            if world.control.wants_inspect() {
+                let machines = (world.machines.iter().enumerate())
+                    .map(|(i, m)| inspect_machine(&m.name, m.state, &world.faults, i))
+                    .collect();
+                let counters = world.counter_snapshot(world.semantic_counts.counts());
+                let services = &cfg["control"]["placement"];
+                (world.control).answer_inspect(services, machines, &world.faults, counters)?;
             }
             if let Some(bytes) = world
                 .control
@@ -1426,7 +1486,7 @@ fn simulate_stopped<M: WorldMachine>(
             let commands = world.faults.apply_due(fault_boundary);
             for i in world.faults.take_changed_network() {
                 let snapshot = world.counter_snapshot(world.semantic_counts.counts());
-                world.faults.log[i]["network_counters"] = snapshot;
+                world.faults.set_network_counters(i, snapshot);
             }
             for (target, command) in commands {
                 if world.machines[target].state == State::Halted && !world.machines[target].paused {
