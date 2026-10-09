@@ -13,28 +13,34 @@ pub fn check_kvm_access() -> Result<()> {
 /// Bound input hashing before any OCI preparation or host state changes.
 pub fn file_digest(path: &Path) -> Result<ContentDigest> {
     use sha2::{Digest, Sha256};
-    let mut file = std::fs::File::open(path)
-        .map_err(|e| Error::Setup(format!("runtime input {}: {e}", path.display())))?;
-    let mut hash = Sha256::new();
-    let mut data = [0; 65536];
-    let mut total = 0;
-    loop {
-        let n = file
-            .read(&mut data)
-            .map_err(|e| Error::Setup(format!("runtime input {}: {e}", path.display())))?;
-        if n == 0 {
-            break;
-        }
-        total += n;
-        if total > 256 * 1024 * 1024 {
-            return Err(Error::Setup(format!(
-                "runtime input {}: exceeds 256 MiB",
-                path.display()
-            )));
-        }
-        hash.update(&data[..n]);
+    let error = |e: std::io::Error| Error::Setup(format!("runtime input {}: {e}", path.display()));
+    let mut file = std::fs::File::open(path).map_err(error)?;
+    if file.metadata().map_err(error)?.len() > 256 * 1024 * 1024 {
+        return Err(Error::Setup(format!(
+            "runtime input {}: exceeds 256 MiB",
+            path.display()
+        )));
     }
-    ContentDigest::try_from(format!("{:x}", hash.finalize()))
+    crate::store::file_digest_with(&mut file, |file| {
+        let mut hash = Sha256::new();
+        let mut data = [0; 65536];
+        let mut total = 0;
+        loop {
+            let n = file.read(&mut data).map_err(error)?;
+            if n == 0 {
+                break;
+            }
+            total += n;
+            if total > 256 * 1024 * 1024 {
+                return Err(Error::Setup(format!(
+                    "runtime input {}: exceeds 256 MiB",
+                    path.display()
+                )));
+            }
+            hash.update(&data[..n]);
+        }
+        ContentDigest::try_from(format!("{:x}", hash.finalize()))
+    })
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

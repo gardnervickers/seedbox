@@ -274,7 +274,9 @@ impl ImageTransport for ContainerTransport {
         let config_digest = store.put(&config_bytes)?;
         let raw = directory.join("metadata");
         fs::create_dir(&raw)?;
-        store.materialize(&layer, &raw)?;
+        // The exported filesystem is scratch in this directory; link it rather
+        // than copying it back out of the store.
+        fs::hard_link(&rootfs, raw.join(layer.hex()))?;
         store.materialize(&config_digest, &raw)?;
         fs::write(
             raw.join("manifest.json"),
@@ -316,7 +318,7 @@ fn prefix_archive(input: &Path, output: &Path, check: &dyn Fn() -> Result<()>) -
     root.set_gid(0);
     root.set_mtime(0);
     root.set_size(0);
-    let mut scan = tar::Archive::new(fs::File::open(input)?);
+    let mut scan = tar::Archive::new(std::io::BufReader::new(fs::File::open(input)?));
     let mut found_root = false;
     for entry in scan.entries_with_seek()? {
         check()?;
@@ -329,9 +331,9 @@ fn prefix_archive(input: &Path, output: &Path, check: &dyn Fn() -> Result<()>) -
             found_root = true;
         }
     }
-    let mut result = tar::Builder::new(fs::File::create(output)?);
+    let mut result = tar::Builder::new(std::io::BufWriter::new(fs::File::create(output)?));
     result.append_data(&mut root, "rootfs", std::io::empty())?;
-    let mut input = tar::Archive::new(fs::File::open(input)?);
+    let mut input = tar::Archive::new(std::io::BufReader::new(fs::File::open(input)?));
     for entry in input.entries()? {
         check()?;
         let mut entry = entry?;
@@ -352,7 +354,7 @@ fn prefix_archive(input: &Path, output: &Path, check: &dyn Fn() -> Result<()>) -
             result.append_data(&mut header, name, &mut entry)?;
         }
     }
-    result.finish()?;
+    std::io::Write::flush(&mut result.into_inner()?)?;
     Ok(())
 }
 

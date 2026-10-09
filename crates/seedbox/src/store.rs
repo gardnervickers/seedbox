@@ -4,7 +4,7 @@ use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs,
     io::{self, Read, Seek, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
@@ -80,6 +80,34 @@ impl Stamp {
     }
 }
 
+/// Digests of files outside the store that this process hashed, by inode,
+/// with the stamp each had then. Profile construction, admission and
+/// preparation each hash the same engine and kernel; this reads them once.
+static HASHED_FILES: Mutex<BTreeMap<(u64, u64), (Stamp, ContentDigest)>> =
+    Mutex::new(BTreeMap::new());
+
+/// The digest of `file`, hashed with `hash` unless this process already
+/// hashed the same inode and its stamp is unchanged since. A file that
+/// changes while it is hashed is not remembered.
+pub(crate) fn file_digest_with(
+    file: &mut fs::File,
+    hash: impl FnOnce(&mut fs::File) -> Result<ContentDigest>,
+) -> Result<ContentDigest> {
+    let before = Stamp::of(file)?;
+    let key = (before.dev, before.ino);
+    let lock = || HASHED_FILES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((stamp, digest)) = lock().get(&key) {
+        if *stamp == before {
+            return Ok(digest.clone());
+        }
+    }
+    let digest = hash(file)?;
+    if Stamp::of(file)? == before {
+        lock().insert(key, (before, digest.clone()));
+    }
+    Ok(digest)
+}
+
 impl ContentStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
@@ -146,7 +174,7 @@ impl ContentStore {
     /// again never rewrites and syncs a second copy of it.
     pub fn put_file(&self, path: &Path) -> Result<ContentDigest> {
         let mut file = fs::File::open(path)?;
-        let digest = transfer(&mut file, &mut io::sink())?;
+        let digest = file_digest_with(&mut file, |file| transfer(file, &mut io::sink()))?;
         if let Ok(existing) = self.open(&digest) {
             // Verify the existing entry; never repair corruption implicitly.
             if self.trusted(&digest, &existing)?.is_none() {
