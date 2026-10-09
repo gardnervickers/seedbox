@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Discover host capabilities, select Cargo test features, and run native suites.
+"""Run the named platform test suites; nothing is selected by probing the host.
 
+Each suite names a platform and the Cargo test features it enables. A selected
+suite whose host requirements are missing is an error before anything builds.
 Tests belong to Cargo or unittest discovery, not a list of individual test names.
 Application assertions remain in guests; applications.rs uses run/replay directly.
 """
@@ -19,7 +21,29 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-CAPABILITIES = ("kvm", "counter", "hvf", "oci", "guests", "applications", "retained-run")
+
+SUITES = {
+    "portable": "Any host: fmt, clippy, workspace and standalone unit tests, Python suites, YAML validation.",
+    "linux-kvm": "Linux x86-64 or ARM64 with /dev/kvm: native backend KVM tests; no PMU or root needed.",
+    "linux-counter": "Linux x86-64 KVM with a guest PMU and root: counted stops, checkpoints, forks, logs and triggers on a leased core.",
+    "linux-guests": "Fixture kernel and initrd on Linux KVM (x86-64 also needs linux-counter): real guest determinism and checkpoints.",
+    "linux-oci": "Linux x86-64, root, Skopeo, umoci and Podman: real image import and Dockerfile builds.",
+    "linux-apps": "Linux x86-64 KVM, root and OCI tools: every acceptance workload run twice, diffed and replayed (PV, plus counter with linux-counter).",
+    "linux-pause": "Linux x86-64 KVM, root and a supplied retained run: pause/resume replay.",
+    "mac-hvf": "Apple Silicon with macOS 15+, Hypervisor.framework and codesign: native CPU/state and cancellation primitives.",
+    "mac-guests": "mac-hvf plus the ARM fixture kernel and initrd: real guest controls.",
+    "mac-apps": "mac-hvf plus Docker or Podman: every acceptance workload on ARM PV.",
+}
+GROUPS = {
+    "linux": ["linux-kvm", "linux-counter", "linux-guests", "linux-oci", "linux-apps"],
+    "mac": ["mac-hvf", "mac-guests", "mac-apps"],
+}
+# A suite also runs the suites its Cargo features build on.
+IMPLIES = {
+    "linux-counter": ["linux-kvm"],
+    "mac-guests": ["mac-hvf"],
+    "mac-apps": ["mac-hvf"],
+}
 
 
 def probe_linux():
@@ -80,61 +104,107 @@ def available_file(environment, key, default):
     return path if path.is_file() else None
 
 
-def discover(system, machine, environment, privileged_probe=None, can_root=False):
-    """Return an explanation for every unavailable capability; empty means ready."""
-    found = {name: "not supported on this host" for name in CAPABILITIES}
-    linux = system == "Linux"
-    if linux and machine in ("x86_64", "aarch64", "arm64"):
-        found.update(privileged_probe or probe_linux())
+def expand(names, machine):
+    """Expand groups and implied suites, keeping the documented suite order."""
+    chosen = set()
+    pending = [suite for name in names for suite in GROUPS.get(name, [name])]
+    while pending:
+        suite = pending.pop()
+        if suite in chosen:
+            continue
+        chosen.add(suite)
+        pending.extend(IMPLIES.get(suite, []))
+        if suite == "linux-guests":
+            pending.append("linux-counter" if machine == "x86_64" else "linux-kvm")
+    chosen.add("portable")
+    return [suite for suite in SUITES if suite in chosen]
+
+
+def requirements(suite, system, machine, environment, probe=None, can_root=False):
+    """Return every unmet host requirement for one suite; empty means runnable."""
+    linux, mac = system == "Linux", system == "Darwin" and machine in ("arm64", "aarch64")
+    x86 = linux and machine == "x86_64"
+    probe = probe or {}
+    missing = []
+
+    def need(condition, reason):
+        if not condition:
+            missing.append(reason)
+
+    def inputs(*keys):
+        defaults = {"SEEDBOX_TEST_KERNEL": "artifacts/bzImage",
+                    "SEEDBOX_TEST_INITRD": "artifacts/entropy-fork.cpio",
+                    "SEEDBOX_ARM64_KERNEL": "artifacts/arm64-hres/Image",
+                    "SEEDBOX_ARM64_INITRD": "artifacts/arm64-hres/init.cpio"}
+        for key in keys:
+            need(available_file(environment, key, ROOT / defaults[key]),
+                 f"set {key} (default {defaults[key]} is missing)")
+
+    def oci_tools():
         tools = [name for name in ("skopeo", "umoci", "podman") if not shutil.which(name)]
-        found["oci"] = ("CLI image-preparation tests require Linux x86-64" if machine != "x86_64" else
-                        "root or passwordless sudo is required" if not can_root else
-                        "missing tools: " + ", ".join(tools) if tools else "")
-        if machine == "x86_64" and not found["counter"] and not can_root:
-            found["counter"] = "root or passwordless sudo is required for the leased counter suite"
-    if system == "Darwin" and machine in ("arm64", "aarch64"):
+        need(not tools, "missing tools: " + ", ".join(tools) + "; enter nix develop")
+
+    if suite == "portable":
+        return missing
+    if suite.startswith("linux-"):
+        if not linux:
+            return ["requires Linux"]
+        if suite != "linux-kvm" and suite != "linux-guests":
+            need(x86, "requires Linux x86-64")
+        if suite != "linux-oci":  # Image import and builds need no hypervisor.
+            need(not probe.get("kvm"), "/dev/kvm: " + (probe.get("kvm") or ""))
+        if suite in ("linux-counter", "linux-oci", "linux-apps", "linux-pause"):
+            need(can_root, "requires root or passwordless sudo")
+        if suite == "linux-kvm":
+            need(machine in ("x86_64", "aarch64"), "requires Linux x86-64 or ARM64")
+        elif suite == "linux-counter":
+            need(not probe.get("counter"), probe.get("counter") or "")
+        elif suite == "linux-guests":
+            inputs(*(("SEEDBOX_TEST_KERNEL", "SEEDBOX_TEST_INITRD") if x86 else
+                     ("SEEDBOX_ARM64_KERNEL", "SEEDBOX_ARM64_INITRD")))
+        elif suite == "linux-oci":
+            oci_tools()
+        elif suite == "linux-apps":
+            # The release CLI resolves or downloads its runtime assets itself.
+            oci_tools()
+        elif suite == "linux-pause":
+            for key in ("SEEDBOX_HOST_PAUSE_RUN", "SEEDBOX_HOST_PAUSE_STATE"):
+                need(environment.get(key), f"set {key}")
+        return [reason for reason in missing if reason]
+    if not mac:
+        return ["requires macOS on Apple Silicon"]
+    if suite == "mac-hvf":
         version = int((platform.mac_ver()[0] or "0").split(".")[0])
+        need(version >= 15, "requires macOS 15+")
         probe = subprocess.run(["sysctl", "-n", "kern.hv_support"],
                                capture_output=True, text=True, check=False)
-        found["hvf"] = ("requires macOS 15+, Hypervisor.framework and codesign"
-                        if version < 15 or probe.stdout.strip() != "1" or not shutil.which("codesign") else "")
-        if probe.returncode != 0:
-            found["hvf"] = "sysctl kern.hv_support: " + probe.stderr.strip()
-    if machine == "x86_64" and linux:
-        kernel = available_file(environment, "SEEDBOX_TEST_KERNEL", ROOT / "artifacts/bzImage")
-        initrd = available_file(environment, "SEEDBOX_TEST_INITRD", ROOT / "artifacts/entropy-fork.cpio")
-        found["guests"] = (found["counter"] or
-                           "set SEEDBOX_TEST_KERNEL and SEEDBOX_TEST_INITRD (entropy-fork fixture)"
-                           if not kernel or not initrd else found["counter"])
-    elif machine in ("arm64", "aarch64"):
-        kernel = available_file(environment, "SEEDBOX_ARM64_KERNEL", ROOT / "artifacts/arm64-hres/Image")
-        initrd = available_file(environment, "SEEDBOX_ARM64_INITRD", ROOT / "artifacts/arm64-hres/init.cpio")
-        native = found["hvf"] if system == "Darwin" else found["kvm"]
-        found["guests"] = (native or "set SEEDBOX_ARM64_KERNEL and SEEDBOX_ARM64_INITRD"
-                           if not kernel or not initrd else native)
-    if linux and machine == "x86_64":
-        found["applications"] = found["kvm"] or found["oci"]
-    elif system == "Darwin" and machine in ("arm64", "aarch64"):
-        found["applications"] = (found["hvf"] or
-                                 ("Docker or Podman is required" if not any(
-                                     shutil.which(tool) for tool in ("docker", "podman")) else ""))
-    if linux and machine == "x86_64" and not found["kvm"]:
-        found["retained-run"] = ("set SEEDBOX_HOST_PAUSE_RUN and SEEDBOX_HOST_PAUSE_STATE"
-                                 if not all(environment.get(k) for k in ("SEEDBOX_HOST_PAUSE_RUN", "SEEDBOX_HOST_PAUSE_STATE"))
-                                 else "" if can_root else "root or passwordless sudo is required")
-    return found
+        need(probe.returncode == 0 and probe.stdout.strip() == "1",
+             "Hypervisor.framework unavailable (sysctl kern.hv_support)")
+        need(shutil.which("codesign"), "codesign not found")
+    elif suite == "mac-guests":
+        inputs("SEEDBOX_ARM64_KERNEL", "SEEDBOX_ARM64_INITRD")
+    elif suite == "mac-apps":
+        need(any(shutil.which(tool) for tool in ("docker", "podman")), "Docker or Podman is required")
+    return missing
 
 
-def features_for(package, system, machine, found):
+def features_for(package, machine, suites):
+    """Cargo test features for one package; selection depends only on the suites."""
+    def pick(pairs):
+        return [feature for suite, feature in pairs if suite in suites]
     if package == "seedbox":
-        return [feature for capability, feature in (("oci", "oci-tests"), ("applications", "application-tests"),
-                                                     ("retained-run", "retained-run-tests")) if not found[capability]]
+        return pick((("linux-oci", "oci-tests"), ("linux-apps", "application-tests"),
+                     ("mac-apps", "application-tests"), ("linux-pause", "retained-run-tests")))
     if package == "seedbox-vmm":
-        return [feature for capability, feature in (("kvm", "kvm-tests"), ("counter", "counter-tests"),
-                                                     ("guests", "guest-tests")) if not found[capability]]
-    native = "hvf" if system == "Darwin" else "kvm"
-    return ([native + "-tests"] if machine in ("arm64", "aarch64") and not found[native] else []) + (
-        ["guest-tests"] if machine in ("arm64", "aarch64") and not found["guests"] else [])
+        return pick((("linux-kvm", "kvm-tests"), ("linux-counter", "counter-tests"),
+                     ("linux-guests", "guest-tests"))) if machine == "x86_64" else []
+    linux_arm = machine in ("arm64", "aarch64")
+    features = pick((("mac-hvf", "hvf-tests"),))
+    if linux_arm:
+        features = pick((("linux-kvm", "kvm-tests"),)) + features
+        if "linux-guests" in suites or "mac-guests" in suites:
+            features.append("guest-tests")
+    return features
 
 
 def test_artifacts(output):
@@ -214,38 +284,53 @@ class Checks:
                          timeout=None if counter or target == "applications" else 1800)
 
 
+def describe():
+    width = max(map(len, [*SUITES, *GROUPS]))
+    lines = ["suites:"] + [f"  {name:<{width}}  {text}" for name, text in SUITES.items()]
+    lines += ["groups:"] + [f"  {name:<{width}}  {' '.join(members)}" for name, members in GROUPS.items()]
+    return "\n".join(lines)
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", nargs="?", choices=("auto", "portable"), default="auto")
-    parser.add_argument("--require", action="append", choices=CAPABILITIES, default=[],
-                        help="Fail if this capability is unavailable (repeatable).")
-    parser.add_argument("--cpu", type=int, help="Use this Linux CPU for the leased counter tests.")
-    parser.add_argument("--list", action="store_true", help="Show selected capabilities without building or running tests.")
+    parser = argparse.ArgumentParser(description=__doc__, epilog=describe(),
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("suites", nargs="*", metavar="SUITE",
+                        help="Suites or groups to run [default: portable].")
+    parser.add_argument("--cpu", type=int, help="Linux CPU for linux-counter and linux-apps.")
+    parser.add_argument("--list", action="store_true",
+                        help="Check the selected suites' requirements without building or running tests.")
     parser.add_argument("--probe-linux", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.probe_linux:
         print(json.dumps(probe_linux()))
         return 0
-    if args.cpu is not None and args.cpu < 0:
-        parser.error("--cpu must be nonnegative")
-    if args.mode == "portable" and args.require:
-        parser.error("--require needs auto mode")
+    unknown = [name for name in args.suites if name not in SUITES and name not in GROUPS]
+    if unknown:
+        parser.error("unknown suite: " + ", ".join(unknown) + "; see --help")
     system, machine = platform.system(), platform.machine()
+    suites = expand(args.suites or ["portable"], machine)
+    if args.cpu is not None:
+        if args.cpu < 0:
+            parser.error("--cpu must be nonnegative")
+        if not {"linux-counter", "linux-apps"} & set(suites):
+            parser.error("--cpu applies only to linux-counter and linux-apps")
     environment = os.environ.copy()
-    prefix = root_prefix() if system == "Linux" and args.mode == "auto" else None
+    hardware = [suite for suite in suites if suite != "portable"]
+    prefix = root_prefix() if system == "Linux" and hardware else None
     probe = None
-    if system == "Linux" and args.mode == "auto":
+    if system == "Linux" and hardware:
         result = subprocess.run(privileged(prefix, [sys.executable, str(Path(__file__).resolve()), "--probe-linux"], environment),
                                 capture_output=True, text=True, check=True)
         probe = json.loads(result.stdout)
-    found = (discover(system, machine, environment, probe, prefix is not None)
-             if args.mode == "auto" else {name: "portable mode" for name in CAPABILITIES})
     print(f"platform: {system}/{machine}")
-    for name, reason in found.items():
-        print(f"capability {name}: {'unavailable: ' + reason if reason else 'enabled'}")
-    missing = [name for name in args.require if found[name]]
-    if missing:
-        print("error: required capabilities unavailable: " + ", ".join(missing), file=sys.stderr)
+    unmet = {}
+    for suite in suites:
+        missing = requirements(suite, system, machine, environment, probe, prefix is not None)
+        print(f"suite {suite}: {'unavailable: ' + '; '.join(missing) if missing else 'ready'}")
+        if missing:
+            unmet[suite] = missing
+    if unmet:
+        print("error: selected suites cannot run on this host: " + ", ".join(unmet), file=sys.stderr)
         return 2
     if args.list:
         return 0
@@ -254,7 +339,7 @@ def main(argv=None):
     checks.run("clippy", ["cargo", "clippy", "-p", "seedbox", "--all-targets", "--locked", "--", "-D", "warnings"])
     checks.run("portable", ["bash", "harness/acceptance.sh", "portable"])
     # acceptance.sh already ran the root and native backend without hardware.
-    if args.mode == "portable" or checks.failed:
+    if not hardware or checks.failed:
         return int(checks.failed)
     reports_root = ROOT / "target/check-reports"
     reports_root.mkdir(parents=True, exist_ok=True)
@@ -270,21 +355,20 @@ def main(argv=None):
         if (path := available_file(environment, key, ROOT / default)) is not None:
             environment[key] = str(path)
     environment["SEEDBOX_ARM64_REPORT_DIR"] = str(reports / "arm64")
-    if not found["applications"]:
+    if {"linux-apps", "mac-apps"} & set(suites):
         output = checks.run("application-cli", ["cargo", "build", "--release", "--locked", "-p", "seedbox", "--message-format=json"], capture=True)
-        if output is not None:
-            binaries = [json.loads(line) for line in output.splitlines() if line.strip()]
-            binary = next(item["executable"] for item in binaries if item.get("executable") and item.get("target", {}).get("name") == "seedbox")
-            environment["SEEDBOX_TEST_CLI"] = binary
-            environment["SEEDBOX_TEST_COUNTER"] = "0" if found["counter"] else "1"
-        else:
-            found["applications"] = "application CLI build failed"
+        if output is None:
+            return 1
+        binaries = [json.loads(line) for line in output.splitlines() if line.strip()]
+        binary = next(item["executable"] for item in binaries if item.get("executable") and item.get("target", {}).get("name") == "seedbox")
+        environment["SEEDBOX_TEST_CLI"] = binary
+        environment["SEEDBOX_TEST_COUNTER"] = "1" if "linux-counter" in suites else "0"
     packages = [("seedbox-arm64", ["cargo", "test-arm64"])]
     if system == "Linux" and machine == "x86_64":
         packages.append(("seedbox-vmm", ["cargo", "test-vmm"]))
     packages.append(("seedbox", ["cargo", "test", "--workspace", "--locked"]))
     for package, command in packages:
-        features = features_for(package, system, machine, found)
+        features = features_for(package, machine, suites)
         if features:
             checks.cargo_tests(package, command, features, prefix,
                                counter=package == "seedbox-vmm" and "counter-tests" in features,

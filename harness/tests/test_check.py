@@ -1,4 +1,4 @@
-"""Capability selection and discovery controls; no hypervisor or MSR is opened."""
+"""Suite selection and requirement controls; no hypervisor or MSR is opened."""
 import importlib.util
 import contextlib
 import io
@@ -19,83 +19,110 @@ spec.loader.exec_module(check)
 
 class SelectionTests(unittest.TestCase):
     def setUp(self):
-        # Checkout-local artifacts must not change these capability controls.
+        # Checkout-local artifacts must not change these suite controls.
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = patch.object(check, "ROOT", Path(directory.name))
         root.start()
         self.addCleanup(root.stop)
 
-    def linux(self, probe, root=True, inputs=None):
+    def linux(self, suite, probe, root=True, inputs=None, machine="x86_64"):
         with patch.object(check.shutil, "which", return_value="/fixture/tool"):
-            return check.discover("Linux", "x86_64", inputs or {}, probe, root)
+            return check.requirements(suite, "Linux", machine, inputs or {}, probe, root)
 
-    def test_kvm_without_pmu_keeps_all_generic_kvm_tests(self):
-        found = self.linux({"kvm": "", "counter": "guest PMU unavailable"})
-        self.assertEqual(check.features_for("seedbox-vmm", "Linux", "x86_64", found), ["kvm-tests"])
-        self.assertIn("oci-tests", check.features_for("seedbox", "Linux", "x86_64", found))
-        # The release CLI resolves/downloads assets; empty artifacts cannot
-        # suppress application coverage on an otherwise capable host.
-        self.assertFalse(found["applications"])
-        self.assertIn("application-tests", check.features_for("seedbox", "Linux", "x86_64", found))
-        self.assertEqual(check.features_for("seedbox-arm64", "Linux", "x86_64", found), [])
+    def test_default_is_portable_only(self):
+        self.assertEqual(check.expand(["portable"], "x86_64"), ["portable"])
 
-    def test_amd_and_intel_use_the_same_counter_contract(self):
-        found = self.linux({"kvm": "", "counter": ""})
-        self.assertEqual(check.features_for("seedbox-vmm", "Linux", "x86_64", found),
+    def test_groups_and_implied_suites_expand_in_documented_order(self):
+        self.assertEqual(check.expand(["linux"], "x86_64"),
+                         ["portable", "linux-kvm", "linux-counter", "linux-guests", "linux-oci", "linux-apps"])
+        self.assertEqual(check.expand(["linux-guests"], "x86_64"),
+                         ["portable", "linux-kvm", "linux-counter", "linux-guests"])
+        self.assertEqual(check.expand(["linux-guests"], "aarch64"), ["portable", "linux-kvm", "linux-guests"])
+        self.assertEqual(check.expand(["mac-apps"], "arm64"), ["portable", "mac-hvf", "mac-apps"])
+
+    def test_features_follow_suites_not_host_probes(self):
+        self.assertEqual(check.features_for("seedbox-vmm", "x86_64", ["portable", "linux-kvm"]), ["kvm-tests"])
+        self.assertEqual(check.features_for("seedbox-vmm", "x86_64", check.expand(["linux-counter"], "x86_64")),
                          ["kvm-tests", "counter-tests"])
+        self.assertEqual(check.features_for("seedbox", "x86_64", ["portable", "linux-oci", "linux-pause"]),
+                         ["oci-tests", "retained-run-tests"])
+        self.assertEqual(check.features_for("seedbox-arm64", "x86_64", check.expand(["linux"], "x86_64")), [])
+        self.assertEqual(check.features_for("seedbox-arm64", "aarch64", check.expand(["linux-guests"], "aarch64")),
+                         ["kvm-tests", "guest-tests"])
+        self.assertEqual(check.features_for("seedbox-arm64", "arm64", check.expand(["mac-guests"], "arm64")),
+                         ["hvf-tests", "guest-tests"])
+        self.assertEqual(check.features_for("seedbox-vmm", "arm64", check.expand(["mac"], "arm64")), [])
 
-    def test_missing_privileges_cannot_select_root_tests(self):
-        found = self.linux({"kvm": "", "counter": ""}, root=False)
-        self.assertTrue(found["counter"])
-        self.assertTrue(found["oci"])
-        self.assertTrue(found["applications"])
-        self.assertEqual(check.features_for("seedbox-vmm", "Linux", "x86_64", found), ["kvm-tests"])
+    def test_kvm_suite_needs_no_pmu_or_root(self):
+        self.assertEqual(self.linux("linux-kvm", {"kvm": "", "counter": "guest PMU unavailable"}, root=False), [])
 
-    def test_guest_inputs_add_coverage_without_a_new_test_list(self):
+    def test_counter_suite_reports_missing_pmu_and_root(self):
+        missing = self.linux("linux-counter", {"kvm": "", "counter": "guest perf_event_open: ENOENT"}, root=False)
+        self.assertIn("guest perf_event_open: ENOENT", missing)
+        self.assertIn("requires root or passwordless sudo", missing)
+
+    def test_guest_suite_requires_its_inputs(self):
+        self.assertTrue(self.linux("linux-guests", {"kvm": "", "counter": ""}))
         with tempfile.TemporaryDirectory() as directory:
             kernel, initrd = Path(directory) / "kernel", Path(directory) / "initrd"
             kernel.touch()
             initrd.touch()
-            found = self.linux({"kvm": "", "counter": ""}, inputs={
-                "SEEDBOX_TEST_KERNEL": str(kernel), "SEEDBOX_TEST_INITRD": str(initrd)})
-            self.assertIn("guest-tests", check.features_for("seedbox-vmm", "Linux", "x86_64", found))
+            self.assertEqual(self.linux("linux-guests", {"kvm": "", "counter": ""}, inputs={
+                "SEEDBOX_TEST_KERNEL": str(kernel), "SEEDBOX_TEST_INITRD": str(initrd)}), [])
 
-    def test_arm_kvm_does_not_select_x86_counter_tests(self):
-        with patch.object(check.shutil, "which", return_value="/fixture/tool"):
-            found = check.discover("Linux", "aarch64", {},
-                                   {"kvm": "", "counter": "requires x86-64"}, True)
-        self.assertEqual(check.features_for("seedbox-arm64", "Linux", "aarch64", found), ["kvm-tests"])
-        self.assertTrue(found["oci"])
-        self.assertTrue(found["retained-run"])
+    def test_oci_suite_needs_no_kvm(self):
+        self.assertEqual(self.linux("linux-oci", {"kvm": "no such device", "counter": "no KVM"}), [])
 
-    def test_mac_selects_hvf_primitives_without_guest_inputs(self):
+    def test_x86_only_suites_refuse_arm_linux(self):
+        self.assertIn("requires Linux x86-64", self.linux("linux-oci", {"kvm": ""}, machine="aarch64"))
+        self.assertEqual(self.linux("linux-kvm", {"kvm": ""}, machine="aarch64"), [])
+
+    def test_platform_mismatch_is_unavailable(self):
+        self.assertEqual(check.requirements("mac-hvf", "Linux", "x86_64", {}), ["requires macOS on Apple Silicon"])
+        self.assertEqual(check.requirements("linux-kvm", "Darwin", "arm64", {}), ["requires Linux"])
+        self.assertEqual(check.requirements("portable", "Darwin", "arm64", {}), [])
+
+    def test_mac_hvf_requirements(self):
         with patch.object(check.platform, "mac_ver", return_value=("15.0", (), "")), \
              patch.object(check.shutil, "which", return_value="/fixture/tool"), \
              patch.object(check.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "1\n", "")):
-            found = check.discover("Darwin", "arm64", {})
-        self.assertEqual(check.features_for("seedbox-arm64", "Darwin", "arm64", found), ["hvf-tests"])
-        self.assertTrue(found["guests"])
-        self.assertTrue(found["counter"])
-        self.assertFalse(found["applications"])
-
-    def test_mac_container_client_is_required_but_lima_and_assets_are_not(self):
-        with patch.object(check.platform, "mac_ver", return_value=("15.0", (), "")), \
-             patch.object(check.shutil, "which", side_effect=lambda tool: "/fixture/tool" if tool == "codesign" else None), \
+            self.assertEqual(check.requirements("mac-hvf", "Darwin", "arm64", {}), [])
+        with patch.object(check.platform, "mac_ver", return_value=("14.6", (), "")), \
+             patch.object(check.shutil, "which", return_value="/fixture/tool"), \
              patch.object(check.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "1\n", "")):
-            found = check.discover("Darwin", "arm64", {})
-        self.assertFalse(found["hvf"])
-        self.assertEqual(found["applications"], "Docker or Podman is required")
+            self.assertEqual(check.requirements("mac-hvf", "Darwin", "arm64", {}), ["requires macOS 15+"])
 
-    def test_explicit_required_capability_cannot_silently_skip(self):
-        unavailable = {name: "no fixture capability" for name in check.CAPABILITIES}
-        with patch.object(check, "discover", return_value=unavailable), \
+    def test_apps_need_no_prebuilt_assets(self):
+        # The release CLI resolves/downloads assets; empty artifacts cannot block apps.
+        self.assertEqual(self.linux("linux-apps", {"kvm": ""}), [])
+        self.assertIn("requires root or passwordless sudo", self.linux("linux-apps", {"kvm": ""}, root=False))
+        with patch.object(check.shutil, "which", side_effect=lambda tool: None):
+            self.assertEqual(check.requirements("mac-apps", "Darwin", "arm64", {}), ["Docker or Podman is required"])
+        with patch.object(check.shutil, "which", side_effect=lambda tool: "/fixture/podman" if tool == "podman" else None):
+            self.assertEqual(check.requirements("mac-apps", "Darwin", "arm64", {}), [])
+
+    def test_privileged_execution_forwards_runtime_assets(self):
+        command = check.privileged(["sudo", "-n", "env"], ["/test"], {"SEEDBOX_RUNTIME_ASSETS": "/assets"})
+        self.assertEqual(command, ["sudo", "-n", "env", "SEEDBOX_RUNTIME_ASSETS=/assets", "/test"])
+
+    def test_unmet_selected_suite_fails_before_any_build(self):
+        with patch.object(check, "requirements", return_value=["no fixture host"]), \
              patch.object(check, "root_prefix", return_value=None), \
              patch.object(check.platform, "system", return_value="Darwin"), \
              patch.object(check.Checks, "run", side_effect=AssertionError("build before admission")), \
              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(check.main(["--list", "--require", "kvm"]), 2)
-            self.assertEqual(check.main(["--require", "kvm"]), 2)
+            self.assertEqual(check.main(["--list", "mac-hvf"]), 2)
+            self.assertEqual(check.main(["mac-hvf"]), 2)
+
+    def test_unknown_suite_and_misplaced_cpu_are_usage_errors(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                check.main(["linux-everything"])
+            self.assertEqual(raised.exception.code, 2)
+            with self.assertRaises(SystemExit) as raised:
+                check.main(["linux-kvm", "--cpu", "3"])
+            self.assertEqual(raised.exception.code, 2)
 
 
 class ExecutionTests(unittest.TestCase):

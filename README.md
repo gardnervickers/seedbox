@@ -329,34 +329,32 @@ are older. Run Cargo from the checkout root (including standalone aliases) for c
 Portable tests import the core crate directly; UART register admission remains in
 the KVM adapter.
 
-Run every suite available on the current platform from the project Nix shell:
+Run tests from the project Nix shell by naming the platform suites you want:
 
 ```sh
-nix develop --command bash harness/check.sh
+nix develop --command bash harness/check.sh   # portable (the default)
+bash harness/check.sh linux-kvm               # any Linux KVM host, including droplets
+bash harness/check.sh linux --cpu 14          # the AMD host
+bash harness/check.sh mac                     # Apple Silicon
+bash harness/check.sh linux-counter --list    # check requirements, build nothing
+bash harness/check.sh --help                  # list suites and groups
 ```
 
-The runner discovers host capabilities and Cargo test executables, enabling the
-applicable features. It includes generic KVM without a PMU, counted x86 tests
-under CPU/SMT leases, and signed native HVF tests. Application acceptance uses
-the release CLI, which downloads and caches guest assets itself. Low-level guest
-fixtures join the suite when their kernel/initrd inputs are present.
-
-```sh
-bash harness/check.sh portable                  # Compile all tests; run portable ones
-bash harness/check.sh --list                    # Show capabilities
-bash harness/check.sh --require hvf             # Require native Mac coverage
-bash harness/check.sh --require kvm --require counter
-```
+The runner never selects tests by probing the host. Every named suite runs, and
+a suite whose host requirements are missing fails with exit 2 before anything
+builds. The `linux` group covers generic KVM, counted x86 tests under CPU/SMT
+leases, guest fixtures, OCI and applications; `mac` covers signed native HVF
+tests, guest fixtures and applications. Application acceptance uses the release
+CLI, which downloads and caches guest assets itself.
 
 Portable checks must pass before hardware execution. Hardware-feature suites
 are compiled with `--no-run` during portable checks, even without virtualization.
 VMM checkpoint and trigger tests also compile by default, with conditional
-`ignore` attributes controlling execution. Missing capabilities are reported;
-repeatable `--require` arguments make missing required coverage fail.
+`ignore` attributes controlling execution.
 
 See [running and adding tests](docs/testing.md) for the matrix and fixture inputs.
 Rust and Python tests are discovered automatically; adding tests to an existing
-capability requires no runner edits. Check a different revision in a Git worktree
+suite requires no runner edits. Check a different revision in a Git worktree
 with the same entrypoint. The runner does not stamp revisions or checkout state.
 
 ## How execution is controlled

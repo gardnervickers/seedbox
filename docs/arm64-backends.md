@@ -165,7 +165,7 @@ instruction or recording a witness event. The backend does not infer a watchdog
 cause from cancellation, and queued cancellation may return without guest entry.
 This plumbing introduces no asynchronous watchdog or ARM cycle-proof enablement.
 Run the signed native queued-cancellation check with
-`nix develop --command bash harness/check.sh --require hvf`. It copies
+`nix develop --command bash harness/check.sh mac-hvf`. It copies
 the test binary before signing, bounds each native test executable, and removes
 the signed copy afterward. Portable machine tests cover repeated interruptions
 with a pending timer and the last available semantic exit-budget slot.
@@ -293,10 +293,10 @@ From the project Nix shell (`nix develop`, never `path:.`):
 
 ```sh
 bash harness/check.sh portable
-bash harness/check.sh --require hvf
+bash harness/check.sh mac-hvf
 ```
 
-The default command runs every available capability. It builds the ARM test
+`mac-hvf` builds the ARM test
 executables with `hvf-tests`, then signs disposable copies and invokes all of
 them directly. It never needs an individual test name or `--ignored`.
 
@@ -305,7 +305,7 @@ them directly. It never needs an individual test name or `--ignored`.
 ```sh
 export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-hres/Image"
 export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-hres/init.cpio"
-bash harness/check.sh --require hvf --require guests
+bash harness/check.sh mac-guests
 ```
 
 The runner creates and prints a fresh report directory and enables `guest-tests`.
@@ -340,7 +340,7 @@ cargo test-arm64 --test review_yield_masked --test review_deferred_bound
 export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-hres/Image"
 export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-hres/init.cpio"
 export SEEDBOX_ARM64_REPORT_DIR="$(mktemp -d "$PWD/artifacts/arm64-hres/kvm-acceptance.XXXXXX")"
-bash harness/check.sh --require kvm --require guests
+bash harness/check.sh linux-guests
 
 for run in 1-a 1-b 2-a 2-b; do
   crates/seedbox-arm64/target/release/seedbox-arm64 run \
