@@ -140,6 +140,29 @@ pub struct BootSpec<'a> {
     pub page_timer: bool,
 }
 
+#[cfg(test)]
+impl<'a> BootSpec<'a> {
+    /// A counter-timebase machine booting `kernel` (a test payload behind a
+    /// bzImage header) with no devices, no undo and the least RAM that holds
+    /// the initrd address.
+    pub(crate) fn test(kernel: &'a [u8]) -> Self {
+        Self {
+            kernel,
+            initrd: &[],
+            cmdline: String::new(),
+            mem: INITRD_ADDR + 0x100000,
+            rng_seed: [0; 32],
+            mac: None,
+            control_channel: false,
+            disk: None,
+            undo_margin: 0,
+            barrier: false,
+            pv_clock: false,
+            page_timer: false,
+        }
+    }
+}
+
 /// I/O ports of the guest kernel's time page protocol (kernel/seedbox.h).
 const PORT_TIME_LO: u16 = 0x520;
 const PORT_TIME_HI: u16 = 0x524;
@@ -2654,18 +2677,9 @@ mod net_poll_tests {
                 kernel[0x1f1] = 1;
                 kernel.extend(code);
                 let spec = BootSpec {
-                    kernel: &kernel,
-                    initrd: &[],
-                    cmdline: String::new(),
-                    mem: INITRD_ADDR + 0x100000,
-                    rng_seed: [0; 32],
                     mac: Some([2, 0, 0, 0, 0, 1]),
-                    control_channel: false,
-                    disk: None,
-                    undo_margin: 0,
-                    barrier: false,
                     pv_clock: true,
-                    page_timer: false,
+                    ..BootSpec::test(&kernel)
                 };
                 let mut m = Machine::new(&kvm, "net-poll", &spec).unwrap();
                 let mut r = m.vcpu.get_regs().unwrap();
@@ -2773,18 +2787,8 @@ mod net_poll_tests {
             kernel[0x1f1] = 1;
             kernel.extend(code);
             let spec = BootSpec {
-                kernel: &kernel,
-                initrd: &[],
-                cmdline: String::new(),
-                mem: INITRD_ADDR + 0x100000,
-                rng_seed: [0; 32],
-                mac: None,
-                control_channel: false,
-                disk: None,
-                undo_margin: 0,
-                barrier: false,
                 pv_clock: true,
-                page_timer: false,
+                ..BootSpec::test(&kernel)
             };
             let mut m = Machine::new(&kvm, "pv-stop", &spec).unwrap();
             let mut frames = Vec::new();
@@ -2844,18 +2848,10 @@ mod net_poll_tests {
                 kernel[0x1f1] = 1;
                 kernel.extend(code);
                 let spec = BootSpec {
-                    kernel: &kernel,
-                    initrd: &[],
-                    cmdline: String::new(),
-                    mem: INITRD_ADDR + 0x100000,
-                    rng_seed: [0; 32],
                     mac: Some([2, 0, 0, 0, 0, 1]),
-                    control_channel: false,
-                    disk: None,
-                    undo_margin: 0,
-                    barrier: false,
                     pv_clock: true,
                     page_timer,
+                    ..BootSpec::test(&kernel)
                 };
                 let mut m = Machine::new(&kvm, "tx-spin", &spec).unwrap();
                 m.abi = ABI_PAGE_TIMER;
@@ -2933,18 +2929,8 @@ mod io_boundary_tests {
         kernel[0x1f1] = 1;
         kernel.extend(code);
         let spec = BootSpec {
-            kernel: &kernel,
-            initrd: &[],
-            cmdline: String::new(),
-            mem: INITRD_ADDR + 0x100000,
-            rng_seed: [0; 32],
-            mac: None,
-            control_channel: false,
-            disk: None,
             undo_margin: undo,
-            barrier: false,
-            pv_clock: false,
-            page_timer: false,
+            ..BootSpec::test(&kernel)
         };
         let mut machine = Machine::new(kvm, "io-probe", &spec).unwrap();
         let mut r = machine.vcpu.get_regs().unwrap();
@@ -3098,14 +3084,6 @@ mod io_boundary_tests {
     }
 
     #[test]
-    #[ignore = "first unchanged failed case; requires exclusive leased KVM lane"]
-    fn first_case_preserves_boot_and_halts() {
-        let kvm = Kvm::new().unwrap();
-        let mut counter = Counter::new().unwrap();
-        check_port(&kvm, &mut counter, 0x40, true);
-    }
-
-    #[test]
     #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
     fn charged_io_completes_once_after_debt_with_no_guest_progress() {
         let kvm = Kvm::new().unwrap();
@@ -3213,18 +3191,8 @@ mod io_boundary_tests {
         kernel[0x1f1] = 1;
         kernel.extend(code);
         let spec = BootSpec {
-            kernel: &kernel,
-            initrd: &[],
-            cmdline: String::new(),
-            mem: INITRD_ADDR + 0x100000,
-            rng_seed: [0; 32],
-            mac: None,
-            control_channel: false,
-            disk: None,
             undo_margin: undo,
-            barrier: false,
-            pv_clock: false,
-            page_timer: false,
+            ..BootSpec::test(&kernel)
         };
         let mut machine = Machine::new(kvm, "stop-probe", &spec).unwrap();
         let mut r = machine.vcpu.get_regs().unwrap();
@@ -3253,18 +3221,9 @@ mod io_boundary_tests {
             kernel[0x1f1] = 1;
             kernel.extend(&code);
             let spec = BootSpec {
-                kernel: &kernel,
-                initrd: &[],
-                cmdline: String::new(),
-                mem: INITRD_ADDR + 0x100000,
-                rng_seed: [0; 32],
-                mac: None,
-                control_channel: false,
-                disk: None,
                 undo_margin: undo,
-                barrier: false,
-                pv_clock: false,
                 page_timer: true,
+                ..BootSpec::test(&kernel)
             };
             let mut m = Machine::new(&kvm, "page-rearm", &spec).unwrap();
             let mut r = m.vcpu.get_regs().unwrap();
@@ -3399,49 +3358,6 @@ mod io_boundary_tests {
                 }
             }
         }
-    }
-
-    fn halt_snapshot(m: &mut Machine, stage: &str) {
-        let regs = m.vcpu.get_regs().unwrap();
-        let sregs = m.vcpu.get_sregs().unwrap();
-        let (sync, if_flag, exit_reason) = {
-            let run = m.vcpu.get_kvm_run();
-            (unsafe { run.s.regs.regs }, run.if_flag, run.exit_reason)
-        };
-        let marker = m.memory()[0x80000..0x80004].to_vec();
-        let page: Vec<_> = (0..PAGE_FIELDS).map(|i| m.page_get(i)).collect();
-        eprintln!(
-            "{}",
-            serde_json::json!({"stage":stage,"state":format!("{:?}",m.state),"guest_exit":m.guest_exit_code,"guest_init_error":m.guest_init_error,"arch":{"rip":regs.rip,"rflags":regs.rflags,"rax":regs.rax,"rdx":regs.rdx,"rsp":regs.rsp,"cr0":sregs.cr0,"cs_base":sregs.cs.base},"sync":{"rip":sync.rip,"rflags":sync.rflags,"rax":sync.rax,"rdx":sync.rdx},"run_if_flag":if_flag,"raw_run_exit_reason":exit_reason,"pending_io":m.pending_io.as_ref().map(|p|serde_json::json!({"remaining_ns":p.remaining_ns,"port":p.port,"write":p.write,"width":p.width,"count":p.count,"bytes":p.bytes})),"time_ns":m.time,"branches":m.branches,"page":page,"marker":marker,"exits":m.stats.exits,"halts":m.stats.halts,"irqs":m.stats.irqs,"kvm_exits":m.stats.kvm_n})
-        );
-    }
-
-    #[test]
-    #[ignore = "single manager-authorized diagnostic of unchanged halt case"]
-    fn diagnose_first_halt_case() {
-        let kvm = Kvm::new().unwrap();
-        let mut counter = Counter::new().unwrap();
-        let mut m = probe(&kvm, 0x40, true, 0);
-        let mut kernel = vec![0u8; 1024];
-        kernel[0x1f1] = 1;
-        kernel.extend_from_slice(&m.memory()[0x100000..0x100000 + 26]);
-        eprintln!("fixture_kernel_sha256={:x}", Sha256::digest(&kernel));
-        halt_snapshot(&mut m, "before_first_run");
-        let mut frames = Vec::new();
-        for (limit, stage) in [
-            (500, "after_partial_500"),
-            (750, "after_partial_750"),
-            (1000, "after_completion_1000"),
-        ] {
-            let stop = m.run_until(&mut counter, limit, 0, &mut frames);
-            eprintln!("limit={limit} stop={stop:?}");
-            halt_snapshot(&mut m, stage);
-            assert_eq!(stop.unwrap(), Stop::Reached);
-        }
-        let stop = m.run_until(&mut counter, 2000, 0, &mut frames);
-        eprintln!("limit=2000 stop={stop:?}");
-        halt_snapshot(&mut m, "after_final_resume");
-        assert_eq!(stop.unwrap(), Stop::Halted);
     }
 
     /// Pause with 161 ns of I/O cost owed and a periodic timer armed: while
@@ -3763,18 +3679,9 @@ mod fork_tests {
         kernel[0x1f1] = 1;
         kernel.extend(code);
         let spec = BootSpec {
-            kernel: &kernel,
-            initrd: &[],
-            cmdline: String::new(),
-            mem: INITRD_ADDR + 0x100000,
-            rng_seed: [0; 32],
-            mac: None,
-            control_channel: false,
-            disk: None,
             undo_margin: undo,
             barrier,
-            pv_clock: false,
-            page_timer: false,
+            ..BootSpec::test(&kernel)
         };
         Machine::new(kvm, "fork-probe", &spec).unwrap()
     }
@@ -4255,18 +4162,8 @@ mod timed_log_tests {
         kernel[0x1f1] = 1;
         kernel.extend_from_slice(&code);
         let spec = BootSpec {
-            kernel: &kernel,
-            initrd: &[],
-            cmdline: String::new(),
-            mem: INITRD_ADDR + 0x100000,
-            rng_seed: [0; 32],
-            mac: None,
-            control_channel: false,
-            disk: None,
             undo_margin: undo,
-            barrier: false,
-            pv_clock: false,
-            page_timer: false,
+            ..BootSpec::test(&kernel)
         };
         let mut m = Machine::new(kvm, "timed", &spec).unwrap();
         let mut r = m.vcpu.get_regs().unwrap();
@@ -4534,18 +4431,8 @@ mod committed_trigger_tests {
         kernel[0x1f1] = 1;
         kernel.extend_from_slice(&[0xb0, b'A', 0xe6, 0xe9, 0xf4]);
         let spec = BootSpec {
-            kernel: &kernel,
-            initrd: &[],
-            cmdline: String::new(),
-            mem: INITRD_ADDR + 0x100000,
-            rng_seed: [0; 32],
-            mac: None,
-            control_channel: false,
-            disk: None,
             undo_margin: 256,
-            barrier: false,
-            pv_clock: false,
-            page_timer: false,
+            ..BootSpec::test(&kernel)
         };
         let mut m = Machine::new(&kvm, "source", &spec).unwrap();
         m.observe_console = true;

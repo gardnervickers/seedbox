@@ -1221,6 +1221,54 @@ mod progress_tests {
     }
 }
 
+/// A test world of `names` booted from `boot`, before any traffic.
+#[cfg(test)]
+fn test_world(
+    names: Vec<String>,
+    boot: Vec<BootInputs>,
+    seed: u64,
+    latency: u64,
+    clock: Clock,
+    faults: faults::Faults,
+    control: control::Control,
+) -> World {
+    let kvm = kvm_ioctls::Kvm::new().unwrap();
+    let machines = names
+        .iter()
+        .zip(&boot)
+        .map(|(name, boot)| boot_machine(&kvm, name, boot, false, [0; 32]).unwrap())
+        .collect();
+    let n = names.len();
+    World {
+        failure: None,
+        machines,
+        factory: kvm,
+        boot,
+        barrier: false,
+        boot_seed: seed,
+        run_seed: seed,
+        branch_identity: None,
+        incarnations: vec![vec![]; n],
+        paused_ingress: vec![0; n],
+        clock,
+        events: vec![BTreeMap::new(); n],
+        strict_events: vec![BTreeMap::new(); n],
+        seq: 0,
+        lookahead: latency,
+        early: 0,
+        latency,
+        partitioned: BTreeMap::new(),
+        faults,
+        control,
+        macs: (1..=n as u8).map(|i| [0, 0, 0, 0, 0, i]).collect(),
+        dropped: 0,
+        delivered: 0,
+        link_counts: BTreeMap::new(),
+        semantic_counts: network_counters::NetworkCounters::default(),
+        slices: 0,
+    }
+}
+
 #[cfg(test)]
 mod trigger_world_tests;
 

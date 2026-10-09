@@ -2,7 +2,6 @@
 use super::*;
 
 fn world(undo: u64) -> World {
-    let kvm = kvm_ioctls::Kvm::new().unwrap();
     // Increment a RAM marker on every counted loop iteration, then halt.
     let code = [
         0xb9, 0x10, 0x27, 0, 0, 0xff, 0x05, 0, 0, 8, 0, 0x49, 0x75, 0xf7, 0xf4,
@@ -30,45 +29,24 @@ fn world(undo: u64) -> World {
         deferred_tx: false,
     };
     let names = vec!["a".to_string(), "b".to_string()];
-    let machines = names
-        .iter()
-        .map(|name| boot_machine(&kvm, name, &boot, false, [0; 32]).unwrap())
-        .collect();
-    World {
-        failure: None,
-        machines,
-        factory: kvm,
-        boot: vec![boot.clone(), boot],
-        barrier: false,
-        boot_seed: 7,
-        run_seed: 7,
-        branch_identity: None,
-        incarnations: vec![vec![], vec![]],
-        paused_ingress: vec![0; 2],
-        clock: Clock::Counter(Counter::new().unwrap()),
-        events: vec![BTreeMap::new(); 2],
-        strict_events: vec![BTreeMap::new(); 2],
-        seq: 0,
-        lookahead: 100,
-        early: 0,
-        latency: 100,
-        partitioned: BTreeMap::new(),
-        faults: boot_faults(
-            &names,
-            &[],
-            100,
-            links::Links::from_config(7, &names, &json!({"latency_ns":100,"jitter_ns":10}))
-                .unwrap(),
-        )
-        .unwrap(),
-        control: control::Control::new(&Value::Null, names, 100, 0).unwrap(),
-        macs: vec![[0, 0, 0, 0, 0, 1], [0, 0, 0, 0, 0, 2]],
-        dropped: 0,
-        delivered: 0,
-        link_counts: BTreeMap::new(),
-        semantic_counts: network_counters::NetworkCounters::default(),
-        slices: 0,
-    }
+    let faults = boot_faults(
+        &names,
+        &[],
+        100,
+        links::Links::from_config(7, &names, &json!({"latency_ns":100,"jitter_ns":10})).unwrap(),
+    )
+    .unwrap();
+    let control = control::Control::new(&Value::Null, names.clone(), 100, 0).unwrap();
+    let clock = Clock::Counter(Counter::new().unwrap());
+    test_world(
+        names,
+        vec![boot.clone(), boot],
+        7,
+        100,
+        clock,
+        faults,
+        control,
+    )
 }
 
 fn finish(world: &mut World) -> Vec<(String, String)> {

@@ -416,7 +416,7 @@ impl Drop for Watchdog {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{BootSpec, Stop, INITRD_ADDR};
+    use super::super::{BootSpec, Stop};
     use super::*;
     use kvm_ioctls::Kvm;
 
@@ -453,18 +453,9 @@ mod tests {
         kernel[0x1f1] = 1;
         kernel.extend(code);
         let spec = BootSpec {
-            kernel: &kernel,
-            initrd: &[],
-            cmdline: String::new(),
-            mem: INITRD_ADDR + 0x100000,
-            rng_seed: [0; 32],
-            mac: None,
-            control_channel: false,
-            disk: None,
             undo_margin: undo,
-            barrier: false,
             pv_clock: true,
-            page_timer: false,
+            ..BootSpec::test(&kernel)
         };
         let mut m = Machine::new(kvm, "pv-probe", &spec).unwrap();
         let mut r = m.vcpu.get_regs().unwrap();
