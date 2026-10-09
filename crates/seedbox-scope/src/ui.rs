@@ -99,26 +99,25 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let run = &app.run;
+    // Time first: a long run path is truncated, never the cursor.
     let mut spans = vec![
         Span::from("seedbox-scope ").bold(),
-        Span::from(run.output.display().to_string()).dark_gray(),
-    ];
-    if let Some(seed) = run.seed {
-        spans.push(Span::from(format!("  seed {seed}")));
-    }
-    spans.push(Span::from(format!(
-        "  {}",
-        run.outcome.as_deref().unwrap_or("no report")
-    )));
-    spans.push(
         Span::from(format!(
-            "  t={} / {}",
+            "t={} / {}",
             seconds(app.at_ns),
             seconds(run.end_ns)
         ))
         .bold()
         .cyan(),
-    );
+    ];
+    if let Some(seed) = run.seed {
+        spans.push(Span::from(format!("  seed {seed}")));
+    }
+    spans.push(Span::from(format!(
+        "  {}  ",
+        run.outcome.as_deref().unwrap_or("no report")
+    )));
+    spans.push(Span::from(run.output.display().to_string()).dark_gray());
     let notes = Line::from(app.run.notes.join("; ")).dark_gray();
     frame.render_widget(Paragraph::new(vec![Line::from(spans), notes]), area);
 }

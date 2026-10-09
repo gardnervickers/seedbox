@@ -13,6 +13,7 @@ use ratatui::{
     Terminal,
 };
 use std::{
+    io::Write,
     path::{Path, PathBuf},
     process::ExitCode,
     time::{Duration, Instant},
@@ -93,11 +94,15 @@ fn run(args: Args) -> Result<(), String> {
             .draw(|f| ui::draw(f, &app))
             .map_err(|e| e.to_string())?;
         let buffer = terminal.backend().buffer();
+        let mut out = std::io::stdout().lock();
         for y in 0..buffer.area.height {
             let line: String = (0..buffer.area.width)
                 .map(|x| buffer[(x, y)].symbol())
                 .collect();
-            println!("{}", line.trim_end());
+            // A closed pipe (`| head`) just ends the output.
+            if writeln!(out, "{}", line.trim_end()).is_err() {
+                break;
+            }
         }
         return Ok(());
     }
