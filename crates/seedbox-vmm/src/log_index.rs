@@ -9,6 +9,15 @@ pub fn index_name(raw: &str) -> String {
     format!("{raw}.chunks")
 }
 
+/// Fields of an index record, in file order: the virtual time of the burst's
+/// first byte, the machine incarnation, the machine-wide burst order, and the
+/// byte offset and length in the raw log.
+const TIME: usize = 0;
+const INCARNATION: usize = 1;
+const ORDER: usize = 2;
+const OFFSET: usize = 3;
+const LENGTH: usize = 4;
+
 #[derive(Default)]
 pub struct Index {
     pub records: Vec<[u64; 5]>,
@@ -102,16 +111,21 @@ impl Index {
         {
             // Only the latest machine-wide burst can grow. Keep its first
             // byte's time even when later bytes advance time in this slice.
-            if last[1] == incarnation as u64
-                && last[2].checked_add(1) == Some(*order)
-                && last[3] + last[4] == offset
+            if last[INCARNATION] == incarnation as u64
+                && last[ORDER].checked_add(1) == Some(*order)
+                && last[OFFSET] + last[LENGTH] == offset
             {
-                last[4] = end - last[3];
+                last[LENGTH] = end - last[OFFSET];
                 return;
             }
         }
         self.close();
-        let record = [time, incarnation as u64, *order, offset, end - offset];
+        let mut record = [0; 5];
+        record[TIME] = time;
+        record[INCARNATION] = incarnation as u64;
+        record[ORDER] = *order;
+        record[OFFSET] = offset;
+        record[LENGTH] = end - offset;
         *order = order.saturating_add(1);
         if self.failed || self.records.len() >= self.limit.unwrap_or(MAX_CHUNKS).min(MAX_CHUNKS) {
             return;

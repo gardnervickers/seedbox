@@ -10,9 +10,7 @@
 use crate::machine::Mapping;
 use kvm_bindings::*;
 use kvm_ioctls::{Kvm, VcpuFd, VmFd};
-use std::os::fd::AsRawFd;
 
-const KVM_GET_DIRTY_LOG: libc::c_ulong = 0x4010_ae42;
 const PAGE: usize = 4096;
 
 #[derive(Clone, Default, Debug)]
@@ -251,17 +249,12 @@ impl Undo {
     /// Fetch (and reset) the pages written since the last fetch, by the guest
     /// or the VMM, into `log`.
     fn fetch(&mut self, vm: &VmFd) -> Result<(), String> {
-        let d = kvm_dirty_log {
-            slot: 0,
-            padding1: 0,
-            __bindgen_anon_1: kvm_dirty_log__bindgen_ty_1 {
-                dirty_bitmap: self.log.as_mut_ptr().cast(),
-            },
-        };
-        let rc = unsafe { libc::ioctl(vm.as_raw_fd(), KVM_GET_DIRTY_LOG, &d) };
-        if rc != 0 {
-            return Err(format!("dirty log: {}", std::io::Error::last_os_error()));
-        }
+        self.log = vm.get_dirty_log(0, self.size).map_err(|e| {
+            format!(
+                "dirty log: {}",
+                std::io::Error::from_raw_os_error(e.errno())
+            )
+        })?;
         for (l, v) in self.log.iter_mut().zip(self.vmm.iter_mut()) {
             *l |= std::mem::take(v);
         }

@@ -1144,13 +1144,13 @@ fn report(
                 "checkpoint_ms": u.stats.checkpoint_ns as f64 / 1e6,
                 "rollback_ms": u.stats.rollback_ns as f64 / 1e6,
             })),
-            "kvm_ms_by_exit": {"eintr": s.kvm_ns[0] as f64/1e6, "debug": s.kvm_ns[1] as f64/1e6, "pio": s.kvm_ns[2] as f64/1e6, "mmio": s.kvm_ns[3] as f64/1e6, "hlt": s.kvm_ns[4] as f64/1e6, "window": s.kvm_ns[5] as f64/1e6, "other": s.kvm_ns[6] as f64/1e6},
+            "kvm_ms_by_exit": machine::ExitKind::NAMES.iter().zip(s.kvm_ns).map(|(k, ns)| (k.to_string(), json!(ns as f64 / 1e6))).collect::<serde_json::Map<_, _>>(),
             "kvm_n_by_exit": s.kvm_n,
             "control_channel":mach.channel.as_ref().map(|_|json!({"transport":"virtio-console-v1","tx_bytes":mach.control_tx_bytes,"rx_dma_bytes":mach.control_dma_bytes})),
             "net": mach.net.as_ref().map(|n| n.report()),
         });
         row["pio_total"] = json!(
-            s.kvm_n[2]
+            s.kvm_n[machine::ExitKind::Pio as usize]
                 + world.incarnations[index]
                     .iter()
                     .filter_map(|old| old["pio_total"].as_u64())

@@ -1,5 +1,5 @@
 //! Direct KVM primitives for the shared world; no simulation loop lives here.
-use crate::machine::{Machine, MachineSnapshot};
+use crate::machine::{ExitKind, Machine, MachineSnapshot};
 use crate::{boot_machine, BootInputs, Clock};
 use seedbox_engine_core::{
     rng::Rng,
@@ -63,7 +63,7 @@ impl WorldMachine for Machine {
         Machine::succeed(self, old, at, seed, identity)
     }
     fn crash_observations(&self) -> serde_json::Value {
-        serde_json::json!({"pio_total":self.stats.kvm_n[2],"net":self.net.as_ref().map(|n|n.report())})
+        serde_json::json!({"pio_total":self.stats.kvm_n[ExitKind::Pio as usize],"net":self.net.as_ref().map(|n|n.report())})
     }
     /// Clocks hold no checkpoint state: PV probes are per machine, and
     /// `Machine::snapshot` refuses one inside a probe.

@@ -182,7 +182,7 @@ impl ProbeMachine for Machine {
         Ok(key(&unsafe { self.vcpu.get_kvm_run().s.regs.regs }))
     }
     fn clock_marker(&self) -> u64 {
-        self.page_get(1)
+        self.page_get(super::PAGE_LAST)
     }
     fn save(&mut self) -> Result<Saved, String> {
         Saved::take(self)

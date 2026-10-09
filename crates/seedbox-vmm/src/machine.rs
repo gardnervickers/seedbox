@@ -43,6 +43,10 @@ const INITRD_ADDR: usize = 0x0800_0000;
 /// than this. Part of the execution semantics: changing it changes runs.
 pub const INJECT_GUARD: u64 = 65536;
 /// Time page fields (u64 index), see kernel/seedbox.h.
+/// Virtual time the VMM publishes at each deterministic point.
+const PAGE_TSC: usize = 0;
+/// The guest clock: the last time the guest kernel read.
+const PAGE_LAST: usize = 1;
 const PAGE_SYSCALLS: usize = 3;
 const PAGE_PIC_IMR: usize = 4;
 const PAGE_NET_ISR: usize = 5;
@@ -136,8 +140,35 @@ pub struct BootSpec<'a> {
     pub page_timer: bool,
 }
 
+/// I/O ports of the guest kernel's time page protocol (kernel/seedbox.h).
+const PORT_TIME_LO: u16 = 0x520;
+const PORT_TIME_HI: u16 = 0x524;
+const PORT_TIME_READY: u16 = 0x528;
+const PORT_YIELD: u16 = 0x52c;
+pub(crate) const PORT_TIMER: u16 = 0x530;
+/// Supervisor ports the guest init writes (guest/io.h, guest/control.h).
+const PORT_EXIT: u16 = 0xf4;
+const PORT_INIT_ERROR: u16 = 0xf5;
+const PORT_EFFECT: u16 = 0xf6;
+const PORT_FAILURE: u16 = 0xf7;
 /// Port of the launch barrier, see guest/barrier.h.
 const BARRIER_PORT: u16 = 0xf8;
+/// Bochs-style debug console, an alias for COM1 output.
+const PORT_DEBUGCON: u16 = 0xe9;
+/// Legacy PC devices.
+const COM1: u16 = 0x3f8;
+const COM1_LAST: u16 = COM1 + 7;
+const COM2: u16 = 0x2f8;
+const COM2_LAST: u16 = COM2 + 7;
+const RTC_INDEX: u16 = 0x70;
+const RTC_DATA: u16 = 0x71;
+/// Legacy PC interrupt lines.
+const TIMER_IRQ: u8 = 0;
+const COM2_IRQ: u8 = 3;
+const COM1_IRQ: u8 = 4;
+/// KVM_INTERRUPT (linux/kvm.h): `_IOW(KVMIO, 0x86, struct kvm_interrupt)`;
+/// kvm-ioctls has no x86 wrapper for it.
+const KVM_INTERRUPT: libc::c_ulong = 0x4004_ae86;
 pub const ENTROPY_WORDS: usize = 8;
 
 /// Everything about one machine that a world fork puts back: vCPU, RAM, the
@@ -306,6 +337,7 @@ pub struct Stats {
     pub yields: u64,
     pub yield_stops: u64,
     pub skids: Vec<u64>,
+    /// Host time in KVM_RUN and run count, by `ExitKind`.
     pub kvm_ns: [u128; 8],
     pub kvm_n: [u64; 8],
     /// PV clock: watchdog checks of a run with no exit, those that proved a
@@ -329,6 +361,35 @@ pub struct Stats {
     /// Guest clock (`page.last`) against VMM time at timer writes, sends
     /// and halts (`Site`).
     pub skew: [Skew; 3],
+}
+
+/// How a KVM_RUN ended, for `Stats::kvm_ns` and `Stats::kvm_n`.
+#[derive(Clone, Copy)]
+pub enum ExitKind {
+    Eintr,
+    Debug,
+    Pio,
+    Mmio,
+    Hlt,
+    Window,
+    Other,
+}
+
+impl ExitKind {
+    pub const NAMES: [&'static str; 7] =
+        ["eintr", "debug", "pio", "mmio", "hlt", "window", "other"];
+
+    fn of(exit: &Result<VcpuExit<'_>, kvm_ioctls::Error>) -> Self {
+        match exit {
+            Err(_) => Self::Eintr,
+            Ok(VcpuExit::Debug(_)) => Self::Debug,
+            Ok(VcpuExit::IoOut(..)) | Ok(VcpuExit::IoIn(..)) => Self::Pio,
+            Ok(VcpuExit::MmioRead(..)) | Ok(VcpuExit::MmioWrite(..)) => Self::Mmio,
+            Ok(VcpuExit::Hlt) => Self::Hlt,
+            Ok(VcpuExit::IrqWindowOpen) => Self::Window,
+            _ => Self::Other,
+        }
+    }
 }
 
 /// Where `Stats::skew` was sampled.
@@ -1028,7 +1089,7 @@ impl Machine {
     pub fn deliver_serial(&mut self, bytes: &[u8]) {
         self.com2.rx.extend(bytes);
         if self.com2.edge() {
-            self.pic.raise(3);
+            self.pic.raise(COM2_IRQ);
         }
     }
 
@@ -1215,7 +1276,7 @@ impl Machine {
     }
 
     fn note_skew(&mut self, site: Site) {
-        let last = self.page_get(1);
+        let last = self.page_get(PAGE_LAST);
         let k = &mut self.stats.skew[site as usize];
         k.n += 1;
         if last > self.world.time {
@@ -1247,7 +1308,7 @@ impl Machine {
             &mut self.pit,
             self.world.time,
         )? {
-            self.pic.raise(0);
+            self.pic.raise(TIMER_IRQ);
         }
         timer_latency(
             &mut self.pit,
@@ -1262,7 +1323,7 @@ impl Machine {
     // Expiration consults adopted device state only, never a guest page store.
     fn expire_timers(&mut self) -> Result<(), String> {
         if self.pit.expire_through(self.world.time)? > 0 {
-            self.pic.raise(0);
+            self.pic.raise(TIMER_IRQ);
         }
         Ok(())
     }
@@ -1330,7 +1391,7 @@ impl Machine {
     }
 
     fn checked_page_time(&self, limit: u64) -> Result<u64, String> {
-        let last = self.page_get(1);
+        let last = self.page_get(PAGE_LAST);
         advance_time(self.world.time, last.saturating_sub(self.world.time), limit)
     }
 
@@ -1342,7 +1403,7 @@ impl Machine {
     }
 
     fn publish(&mut self) {
-        self.page.set(0, self.world.time);
+        self.page.set(PAGE_TSC, self.world.time);
     }
 
     fn set_stepping(&mut self, on: bool) -> Result<(), String> {
@@ -1437,10 +1498,11 @@ impl Machine {
         match self.pic.pending() {
             Some(irq) if run.ready_for_interrupt_injection != 0 && run.if_flag != 0 => {
                 let vector = self.pic.take(irq);
+                // SAFETY: KVM_INTERRUPT reads one kvm_interrupt that outlives the call.
                 let rc = unsafe {
                     libc::ioctl(
                         self.vcpu.as_raw_fd(),
-                        0x4004ae86,
+                        KVM_INTERRUPT,
                         &kvm_interrupt { irq: vector },
                     )
                 };
@@ -1456,10 +1518,10 @@ impl Machine {
 
     fn serial_edges(&mut self) {
         if self.com1.edge() {
-            self.pic.raise(4);
+            self.pic.raise(COM1_IRQ);
         }
         if self.com2.edge() {
-            self.pic.raise(3);
+            self.pic.raise(COM2_IRQ);
         }
     }
 
@@ -1618,15 +1680,7 @@ impl Machine {
                 self.sync_regs_ready = true;
             }
             let run_ns = t_run.elapsed().as_nanos();
-            let kind = match &exit {
-                Err(_) => 0,
-                Ok(VcpuExit::Debug(_)) => 1,
-                Ok(VcpuExit::IoOut(..)) | Ok(VcpuExit::IoIn(..)) => 2,
-                Ok(VcpuExit::MmioRead(..)) | Ok(VcpuExit::MmioWrite(..)) => 3,
-                Ok(VcpuExit::Hlt) => 4,
-                Ok(VcpuExit::IrqWindowOpen) => 5,
-                _ => 6,
-            };
+            let kind = ExitKind::of(&exit) as usize;
             self.stats.kvm_ns[kind] += run_ns;
             self.stats.kvm_n[kind] += 1;
             let syscalls1 = self.page.get(PAGE_SYSCALLS);
@@ -1688,7 +1742,7 @@ impl Machine {
                 // Sent/Hlt/Exited can return before the next loop synchronizes
                 // the page. Validate guest clock progress before exit effects.
                 // The exit still borrows vcpu: use only the disjoint fields.
-                let last = self.page.get(1);
+                let last = self.page.get(PAGE_LAST);
                 let exit_time =
                     advance_time(self.world.time, last.saturating_sub(self.world.time), hard)?;
                 if self.pv_clock || self.page_timer.enabled {
@@ -1706,7 +1760,7 @@ impl Machine {
                         .page_timer
                         .pickup(word, &mut self.pit, self.world.time)?
                     {
-                        self.pic.raise(0);
+                        self.pic.raise(TIMER_IRQ);
                     }
                     timer_latency(
                         &mut self.pit,
@@ -1716,7 +1770,7 @@ impl Machine {
                         self.exact_timer_ppm,
                     );
                     if self.pit.expire_through(self.world.time)? > 0 {
-                        self.pic.raise(0);
+                        self.pic.raise(TIMER_IRQ);
                     }
                 }
             }
@@ -1730,7 +1784,7 @@ impl Machine {
                     self.stats.eintr += 1;
                 }
                 Ok(VcpuExit::Debug(_)) => {}
-                Ok(VcpuExit::IoOut(0x52c, data)) => {
+                Ok(VcpuExit::IoOut(PORT_YIELD, data)) => {
                     // Requested yield: a stop if we reached the soft target,
                     // otherwise transparent (nothing observable happens).
                     // PV clock only: 1 means the guest's clock would pass
@@ -1788,8 +1842,8 @@ impl Machine {
                     let mut control_stop = false;
                     let console_before = self.com1.out.len();
                     match port {
-                        0x3f8..=0x3ff => {
-                            if port == 0x3f8 && v == b'\n' && crate::console_trace_enabled() {
+                        COM1..=COM1_LAST => {
+                            if port == COM1 && v == b'\n' && crate::console_trace_enabled() {
                                 let line_start = self
                                     .com1
                                     .out
@@ -1803,27 +1857,29 @@ impl Machine {
                                     &self.com1.out[line_start..],
                                 );
                             }
-                            self.com1.write(port - 0x3f8, v)?
+                            self.com1.write(port - COM1, v)?
                         }
-                        0x2f8..=0x2ff => {
+                        COM2..=COM2_LAST => {
                             if self.channel.is_some() {
-                                self.com2.write(port - 0x2f8, v)?;
+                                self.com2.write(port - COM2, v)?;
                             } else if let Some(line) = crate::management_uart::write(
                                 &mut self.management_framer,
                                 &mut self.com2,
-                                port - 0x2f8,
+                                port - COM2,
                                 v,
                             )? {
                                 self.world.control_requests.push((after_io, line));
                                 control_stop = true;
                             }
                         }
-                        0xf6 | 0xf7 => {
+                        PORT_EFFECT | PORT_FAILURE => {
                             let id = u32::from_le_bytes(
                                 data.try_into()
                                     .map_err(|_| "fault effect must be a 32-bit I/O write")?,
                             );
-                            self.world.fault_effects.push((id, after_io, port == 0xf6));
+                            self.world
+                                .fault_effects
+                                .push((id, after_io, port == PORT_EFFECT));
                             control_stop = true;
                         }
                         0x20 | 0x21 | 0xa0 | 0xa1 => {
@@ -1833,7 +1889,7 @@ impl Machine {
                                 self.page_set(PAGE_PIC_IMR, m);
                             }
                         }
-                        0x528 => {
+                        PORT_TIME_READY => {
                             self.abi = v as u64;
                             if self.abi < ABI_PAGE_RESEED && self.page_get(PAGE_ENTROPY_GEN) != 0 {
                                 return Err(format!(
@@ -1856,7 +1912,7 @@ impl Machine {
                                 self.sync_pic();
                             }
                         }
-                        0x40..=0x43 | 0x61 | 0x530 => {
+                        0x40..=0x43 | 0x61 | PORT_TIMER => {
                             let hi = data.get(1).copied().unwrap_or(0);
                             self.stats.timer_writes += 1;
                             self.note_skew(Site::Timer);
@@ -1875,7 +1931,7 @@ impl Machine {
                                     self.expire_timers()?;
                                 }
                             }
-                            if port == 0x530 {
+                            if port == PORT_TIMER {
                                 let ticks = u16::from_le_bytes([v, hi]);
                                 self.pit.program(ticks, now);
                             } else {
@@ -1893,9 +1949,9 @@ impl Machine {
                                 self.exact_timer_ppm,
                             );
                         }
-                        0x70 => self.rtc_index = v & 0x7f,
-                        0xe9 => self.com1.transmit(v)?,
-                        0xf4 => {
+                        RTC_INDEX => self.rtc_index = v & 0x7f,
+                        PORT_DEBUGCON => self.com1.transmit(v)?,
+                        PORT_EXIT => {
                             self.guest_exit_code = Some(v);
                             self.world.state = State::Exited(v);
                             self.record(b'X', v as u64);
@@ -1917,7 +1973,7 @@ impl Machine {
                             self.complete_io()?;
                             return Ok(Stop::Barrier);
                         }
-                        0xf5 => {
+                        PORT_INIT_ERROR => {
                             self.guest_init_error = Some(v);
                             self.world.state = State::Exited(v);
                             self.record(b'E', v as u64);
@@ -1958,14 +2014,14 @@ impl Machine {
                     // this is a KVM_EXIT_IO exit, so the `io` union member is set.
                     let descriptor = unsafe { (*run_ptr).__bindgen_anon_1.io };
                     match port {
-                        0x520 => {
+                        PORT_TIME_LO => {
                             let t = self.world.time.max(advance_time(self.tsc_latch, 1, hard)?);
                             self.tsc_latch = t;
                             self.stats.time_by[Cause::ClockReads as usize] += t - self.world.time;
                             self.world.time = t;
                             data.copy_from_slice(&(t as u32).to_le_bytes()[..data.len()]);
                         }
-                        0x524 => data.copy_from_slice(
+                        PORT_TIME_HI => data.copy_from_slice(
                             &((self.tsc_latch >> 32) as u32).to_le_bytes()[..data.len()],
                         ),
                         BARRIER_PORT if self.barrier => {
@@ -1976,11 +2032,11 @@ impl Machine {
                         }
                         _ => {
                             let v = match port {
-                                0x3f8..=0x3ff => self.com1.read(port - 0x3f8),
-                                0x2f8..=0x2ff => self.com2.read(port - 0x2f8),
+                                COM1..=COM1_LAST => self.com1.read(port - COM1),
+                                COM2..=COM2_LAST => self.com2.read(port - COM2),
                                 0x20 | 0x21 | 0xa0 | 0xa1 => self.pic.read(port),
                                 0x40..=0x42 | 0x61 => self.pit.read(port, now),
-                                0x71 => rtc_read(self.rtc_index),
+                                RTC_DATA => rtc_read(self.rtc_index),
                                 _ => 0xff,
                             };
                             data.fill(v);
@@ -2084,7 +2140,7 @@ impl Machine {
                                 self.mem.as_mut_slice(),
                                 addr - NET_MMIO,
                                 v,
-                                self.world.time.max(self.page.get(1)),
+                                self.world.time.max(self.page.get(PAGE_LAST)),
                             );
                             self.take_dma();
                             let out = out?;
@@ -3256,6 +3312,8 @@ mod fork_tests {
             fields.insert(name.to_string(), (index, count));
             index += count;
         }
+        assert_eq!(fields["tsc"], (PAGE_TSC, 1));
+        assert_eq!(fields["last"], (PAGE_LAST, 1));
         assert_eq!(fields["syscalls"], (PAGE_SYSCALLS, 1));
         assert_eq!(fields["pic_imr"], (PAGE_PIC_IMR, 1));
         assert_eq!(fields["net_isr"], (PAGE_NET_ISR, 1));
@@ -3280,6 +3338,16 @@ mod fork_tests {
             .parse()
             .unwrap();
         assert_eq!(abi, ABI_PAGE_TIMER);
+        for (name, port) in [
+            ("TIME_LO", PORT_TIME_LO),
+            ("TIME_HI", PORT_TIME_HI),
+            ("TIME_READY", PORT_TIME_READY),
+            ("YIELD", PORT_YIELD),
+            ("TIMER", PORT_TIMER),
+        ] {
+            let define = format!("#define SEEDBOX_PORT_{name}\t{port:#x}\t");
+            assert!(header.contains(&define), "{define}");
+        }
     }
 
     #[test]
