@@ -229,7 +229,7 @@ seedbox=./target/release/seedbox
 
 Every input has a default; `seedbox help run` lists them with their overrides.
 On Linux, explicit flags and their `SEEDBOX_*` path overrides take precedence.
-Guest assets are looked up under `/tmp/seedbox-UID/ARCH` on both platforms. `SEEDBOX_ASSET_DIR` overrides the parent directory. The default files are `kernel` and `runtime.tar.gz`. Explicit
+Guest assets are looked up under `/tmp/seedbox-UID/ARCH` on both platforms; under `sudo`, UID is the invoking user (`SUDO_UID`), matching where `tools/build-assets.sh` wrote them. `SEEDBOX_ASSET_DIR` overrides the parent directory. The default files are `kernel` and `runtime.tar.gz`. Explicit
 `--kernel` / `SEEDBOX_KERNEL` and `--runtime-assets` / `SEEDBOX_RUNTIME_ASSETS`
 paths override them. Missing assets report the local build command. Runtime
 commands never download them automatically. CI release publishing remains
