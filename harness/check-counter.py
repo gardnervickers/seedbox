@@ -38,7 +38,7 @@ def run_leased(command, cpu=None, timeout=1800):
         else:
             raise RuntimeError("no free CPU/SMT pair for the counter tests")
         print(f"counter CPU: {selected}; protected siblings: {protected}", flush=True)
-        state = Path(tempfile.mkdtemp(prefix="seedbox-test-msr-", dir="/tmp"))
+        state = Path(tempfile.mkdtemp(prefix="seedbox-test-msr-", dir=batch.LOCK_DIR))
         snapshot = state / "saved.json"
         try:
             previous = {sig: signal.signal(sig, interrupted)

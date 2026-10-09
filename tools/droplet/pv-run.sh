@@ -17,7 +17,7 @@ usage: tools/droplet/pv-run.sh [options]
   --ref REF          commit to test, shipped from this checkout; repeat for more [default: HEAD]
   --world PATH       Compose file or directory, relative to the repo; repeat for more [default: examples/redis]
   --seeds "N ..."    seeds to run [default: 1]
-  --kernel PATH      guest bzImage to ship [default: $SEEDBOX_KERNEL, then ~/seedbox-sim/artifacts/bzImage]
+  --kernel PATH      guest bzImage to ship [default: $SEEDBOX_KERNEL, then kernel/build.sh's output]
   --build-kernel     build the guest kernel on the droplet for each commit (needed when a REF changes kernel/)
   --size SLUG        droplet size [default: s-4vcpu-8gb-240gb-intel]
   --region SLUG      droplet region [default: nyc3]
@@ -83,7 +83,9 @@ for ref in "${refs[@]}"; do
   fi
 done
 if [ "$build_kernel" = 0 ]; then
-  kernel="${kernel:-${SEEDBOX_KERNEL:-$HOME/seedbox-sim/artifacts/bzImage}}"
+  # kernel/build.sh's default output directory.
+  built="${SEEDBOX_ARTIFACTS:-${SEEDBOX_WORK:-$HOME/seedbox-sim}/artifacts}/bzImage"
+  kernel="${kernel:-${SEEDBOX_KERNEL:-$built}}"
   [ -f "$kernel" ] || { echo "--kernel $kernel: not found; pass --kernel or --build-kernel" >&2; exit 2; }
 fi
 out="${out:-$repo/target/droplet-pv/$(date -u +%Y%m%dT%H%M%SZ)}"
@@ -142,15 +144,17 @@ for sha in "${shas[@]}"; do
     | ssh "${ssh_opts[@]}" "root@$ip" "mkdir -p /root/seedbox/$sha && tar -x -C /root/seedbox/$sha"
 done
 scp "${ssh_opts[@]}" -q "$here/remote.sh" "root@$ip:/root/pv-remote.sh"
+# remote.sh builds and runs with this kernel/build.sh work directory.
+remote_work=/root/seedbox-sim
 if [ "$build_kernel" = 0 ]; then
-  ssh "${ssh_opts[@]}" "root@$ip" 'mkdir -p /root/seedbox-sim/artifacts'
-  scp "${ssh_opts[@]}" -q "$kernel" "root@$ip:/root/seedbox-sim/artifacts/bzImage"
+  ssh "${ssh_opts[@]}" "root@$ip" "mkdir -p $remote_work/artifacts"
+  scp "${ssh_opts[@]}" -q "$kernel" "root@$ip:$remote_work/artifacts/bzImage"
 fi
 
 echo "building and running on the droplet (about 7 minutes of setup and first build, then a few minutes per extra commit)" >&2
 set +e
 ssh "${ssh_opts[@]}" "root@$ip" \
-  "SHAS='${shas[*]}' WORLDS='${worlds[*]}' SEEDS='$seeds' BUILD_KERNEL=$build_kernel bash /root/pv-remote.sh" \
+  "SHAS='${shas[*]}' WORLDS='${worlds[*]}' SEEDS='$seeds' BUILD_KERNEL=$build_kernel SEEDBOX_WORK=$remote_work bash /root/pv-remote.sh" \
   > "$out/remote.log" 2>&1
 remote=$?
 set -e

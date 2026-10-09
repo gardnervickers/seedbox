@@ -2,10 +2,12 @@
 # Droplet side of pv-run.sh: install tools once, then for each commit build it
 # and, for each world and seed, run twice, diff the pair and replay the first
 # run. Writes /root/results/summary.txt.
-# Inputs come from the environment: SHAS, WORLDS, SEEDS, BUILD_KERNEL. Each
-# commit is unpacked in /root/seedbox/<sha>.
+# Inputs come from the environment: SHAS, WORLDS, SEEDS, BUILD_KERNEL and
+# SEEDBOX_WORK (kernel/build.sh's work directory, holding artifacts/bzImage).
+# Each commit is unpacked in /root/seedbox/<sha>.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+export SEEDBOX_WORK="${SEEDBOX_WORK:-$HOME/seedbox-sim}"
 results=/root/results
 mkdir -p "$results"
 
@@ -35,7 +37,7 @@ for sha in $SHAS; do
   mkdir -p "$results/$short"
   export WORLDS SEEDS BUILD_KERNEL sha out="$results/$short" summary="$results/summary.txt"
   # Use the shipped or locally built kernel; runtime does not download assets.
-  export SEEDBOX_KERNEL=/root/seedbox-sim/artifacts/bzImage
+  export SEEDBOX_KERNEL="$SEEDBOX_WORK/artifacts/bzImage"
   (cd "/root/seedbox/$sha" && nix develop --command bash -euo pipefail -c '
     start=$(date +%s)
     {

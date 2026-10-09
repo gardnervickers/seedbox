@@ -94,7 +94,8 @@ def main():
     cpus = [int(cpu) for cpu in cpu_arg.split(",")]
     if len(set(cpus)) != len(cpus):
         raise ValueError("duplicate CPU")
-    root = Path(os.environ.get("SEEDBOX_ROOT", "/home/gvickers/seedbox-sim"))
+    # Same default as batch.sh: the checkout this script belongs to.
+    root = Path(os.environ.get("SEEDBOX_ROOT", Path(__file__).resolve().parents[1]))
     snapshot = Path(os.environ.get("SEEDBOX_MSR_STATE", root / f"msr54-saved-{cpu_arg}.json"))
     if cmd == "show":
         show(cpus)
