@@ -31,11 +31,11 @@
 //! wall-time limit. That follows from the model: such a loop waits on
 //! something only virtual time could bring.
 
-use super::{map, Machine, Mapping, PAGE_BOUND, PAGE_SYSCALLS, PAGE_SYSCALL_TARGET};
+use super::pv_plan::clock_plan;
 #[cfg(test)]
 use super::PAGE_TIMER_DEADLINE;
+use super::{map, Machine, Mapping, PAGE_BOUND, PAGE_SYSCALLS, PAGE_SYSCALL_TARGET};
 use crate::timebase::{Judge, Prepared, Run, Timebase, Verdict};
-use super::pv_plan::clock_plan;
 use crate::undo::VcpuState;
 use std::time::Duration;
 
@@ -57,7 +57,10 @@ pub fn syscall_ns(rng: &mut crate::rng::Rng) -> u64 {
     let spread = SYSCALL_NS * SPEED_SPREAD_PCT / 100;
     SYSCALL_NS - spread + rng.below(2 * spread + 1)
 }
-use seedbox_engine_core::pv_progress::{PvProgress, ProbeMachine, ProgressContext, Accounting, Comparison, LandingPlan, Decision, Exit as ProgressExit};
+use seedbox_engine_core::pv_progress::{
+    Accounting, Comparison, Decision, Exit as ProgressExit, LandingPlan, ProbeMachine,
+    ProgressContext, PvProgress,
+};
 
 /// Per-thread PV execution context: the watchdog timer and per-run scratch.
 /// Progress state belongs to each machine (`Machine::pv_progress`), so a
@@ -75,7 +78,13 @@ pub(crate) type Key = (u64, [u64; 17]);
 pub(crate) type Progress = PvProgress<Key, Saved>;
 impl PvClock {
     pub fn new(watchdog: Duration) -> Result<Self, String> {
-        Ok(Self { _watchdog: Watchdog::new(watchdog)?, syscalls0: 0, remaining: 0, syscall_ns: SYSCALL_NS, max_false_alarms: u64::MAX })
+        Ok(Self {
+            _watchdog: Watchdog::new(watchdog)?,
+            syscalls0: 0,
+            remaining: 0,
+            syscall_ns: SYSCALL_NS,
+            max_false_alarms: u64::MAX,
+        })
     }
 
     /// Probes are per machine: `Machine::snapshot` refuses one inside a probe.
@@ -86,11 +95,19 @@ impl PvClock {
     /// Recreate host-only watchdog scratch after restoring a machine;
     /// `Machine::restore` resets the machine's own progress state.
     pub fn restore_boundary(&mut self) -> Result<(), String> {
-        self.syscalls0 = 0; self.remaining = 0; self.syscall_ns = SYSCALL_NS;
+        self.syscalls0 = 0;
+        self.remaining = 0;
+        self.syscall_ns = SYSCALL_NS;
         self._watchdog.hold(false)
     }
 
-    fn plan(&mut self, m: &mut Machine, remaining: u64, soft: u64, legal: bool) -> Result<Prepared, String> {
+    fn plan(
+        &mut self,
+        m: &mut Machine,
+        remaining: u64,
+        soft: u64,
+        legal: bool,
+    ) -> Result<Prepared, String> {
         self.remaining = remaining;
         self.syscall_ns = m.syscall_ns;
         let mut progress = std::mem::take(&mut m.pv_progress);
@@ -106,7 +123,14 @@ impl PvClock {
         // transaction. Never rewrite any of its inputs at a watchdog/probe
         // landing: even a mathematically equivalent replan can tear those
         // loads, relax a previous re-arm's bound, or move an overdue target.
-        if let Some((bound, target)) = clock_plan(m.time, m.page_get(PAGE_SYSCALLS), self.syscall_ns, soft, m.page_timer.enabled, legal) {
+        if let Some((bound, target)) = clock_plan(
+            m.time,
+            m.page_get(PAGE_SYSCALLS),
+            self.syscall_ns,
+            soft,
+            m.page_timer.enabled,
+            legal,
+        ) {
             m.page_set(PAGE_BOUND, bound);
             m.page_set(PAGE_SYSCALL_TARGET, target);
             if m.page_timer.enabled {
@@ -119,28 +143,62 @@ impl PvClock {
     }
 }
 fn accounting(stats: &mut super::Stats) -> Accounting<'_> {
-    Accounting { probes: &mut stats.spin_probes, false_alarms: &mut stats.spin_false, clock_progress: &mut stats.spin_clock_progress, mismatches: &mut stats.spin_mismatch }
+    Accounting {
+        probes: &mut stats.spin_probes,
+        false_alarms: &mut stats.spin_false,
+        clock_progress: &mut stats.spin_clock_progress,
+        mismatches: &mut stats.spin_mismatch,
+    }
 }
 impl ProgressContext for Machine {
-    fn name(&self) -> &str { &self.name }
-    fn accounting(&mut self) -> Accounting<'_> { accounting(&mut self.stats) }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn accounting(&mut self) -> Accounting<'_> {
+        accounting(&mut self.stats)
+    }
 }
 impl ProbeMachine for Machine {
     type Key = Key;
     type Saved = Saved;
     const PC_NAME: &'static str = "rip";
-    fn pc(key: &Key) -> u64 { key.0 }
-    fn key(&mut self) -> Result<Key,String> { Ok(key(&unsafe { self.vcpu.get_kvm_run().s.regs.regs })) }
-    fn clock_marker(&self) -> u64 { self.page_get(1) }
-    fn save(&mut self) -> Result<Saved,String> { Saved::take(self) }
-    fn compare(&mut self, saved: &mut Saved) -> Result<Comparison,String> { saved.difference(self) }
-    fn arm_next_landing(&mut self) -> Result<LandingPlan,String> { Ok(if self.arm_step()? { LandingPlan::PlannerCap } else { LandingPlan::Exact }) }
-    fn clear_debugger(&mut self) -> Result<(),String> { self.set_stepping(false) }
+    fn pc(key: &Key) -> u64 {
+        key.0
+    }
+    fn key(&mut self) -> Result<Key, String> {
+        Ok(key(&unsafe { self.vcpu.get_kvm_run().s.regs.regs }))
+    }
+    fn clock_marker(&self) -> u64 {
+        self.page_get(1)
+    }
+    fn save(&mut self) -> Result<Saved, String> {
+        Saved::take(self)
+    }
+    fn compare(&mut self, saved: &mut Saved) -> Result<Comparison, String> {
+        saved.difference(self)
+    }
+    fn arm_next_landing(&mut self) -> Result<LandingPlan, String> {
+        Ok(if self.arm_step()? {
+            LandingPlan::PlannerCap
+        } else {
+            LandingPlan::Exact
+        })
+    }
+    fn clear_debugger(&mut self) -> Result<(), String> {
+        self.set_stepping(false)
+    }
 }
-struct JudgeContext<'a> { name: &'a str, stats: &'a mut super::Stats }
+struct JudgeContext<'a> {
+    name: &'a str,
+    stats: &'a mut super::Stats,
+}
 impl ProgressContext for JudgeContext<'_> {
-    fn name(&self) -> &str { self.name }
-    fn accounting(&mut self) -> Accounting<'_> { accounting(self.stats) }
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn accounting(&mut self) -> Accounting<'_> {
+        accounting(self.stats)
+    }
 }
 
 fn key(r: &kvm_bindings::kvm_regs) -> Key {
@@ -148,8 +206,8 @@ fn key(r: &kvm_bindings::kvm_regs) -> Key {
     (
         r.rip,
         [
-            r.rax, r.rbx, r.rcx, r.rdx, r.rsi, r.rdi, r.rsp, r.rbp, r.r8, r.r9, r.r10, r.r11, r.r12,
-            r.r13, r.r14, r.r15, rflags,
+            r.rax, r.rbx, r.rcx, r.rdx, r.rsi, r.rdi, r.rsp, r.rbp, r.r8, r.r9, r.r10, r.r11,
+            r.r12, r.r13, r.r14, r.r15, rflags,
         ],
     )
 }
@@ -157,7 +215,13 @@ fn key(r: &kvm_bindings::kvm_regs) -> Key {
 impl Timebase for PvClock {
     const BRANCHES: bool = false;
 
-    fn prepare(&mut self, m: &mut Machine, remaining: u64, soft: u64, legal: bool) -> Result<Prepared, String> {
+    fn prepare(
+        &mut self,
+        m: &mut Machine,
+        remaining: u64,
+        soft: u64,
+        legal: bool,
+    ) -> Result<Prepared, String> {
         let prepared = self.plan(m, remaining, soft, legal);
         // No tick may interrupt a probe step: an interrupt is taken before a
         // code breakpoint at the same instruction, so a tick there stops the
@@ -172,7 +236,9 @@ impl Timebase for PvClock {
     }
 
     fn read(&mut self, syscalls: u64) -> u64 {
-        (syscalls - self.syscalls0).saturating_mul(self.syscall_ns).min(self.remaining)
+        (syscalls - self.syscalls0)
+            .saturating_mul(self.syscall_ns)
+            .min(self.remaining)
     }
 
     fn inject_guard(&self) -> u64 {
@@ -180,8 +246,20 @@ impl Timebase for PvClock {
     }
 
     fn judge(&mut self, j: Judge<'_>, run: &Run) -> Result<Verdict, String> {
-        let exit = if run.interrupted { ProgressExit::Watchdog } else if run.debug { ProgressExit::Landing } else { ProgressExit::Natural };
-        let legal = j.pv_progress.judge(exit, &mut JudgeContext { name: j.name, stats: j.stats })?;
+        let exit = if run.interrupted {
+            ProgressExit::Watchdog
+        } else if run.debug {
+            ProgressExit::Landing
+        } else {
+            ProgressExit::Natural
+        };
+        let legal = j.pv_progress.judge(
+            exit,
+            &mut JudgeContext {
+                name: j.name,
+                stats: j.stats,
+            },
+        )?;
         Ok(Verdict::Advance { legal })
     }
 }
@@ -206,12 +284,20 @@ impl Saved {
                 None
             }
             None => {
-                let ram = Mapping { ptr: super::SendPtr(map(m.mem_size)?), size: m.mem_size };
+                let ram = Mapping {
+                    ptr: super::SendPtr(map(m.mem_size)?),
+                    size: m.mem_size,
+                };
                 unsafe { std::ptr::copy_nonoverlapping(m.mem.0, ram.ptr.0, m.mem_size) };
                 Some(ram)
             }
         };
-        Ok(Self { cpu, page: page_copy(m), ram, written: Vec::new() })
+        Ok(Self {
+            cpu,
+            page: page_copy(m),
+            ram,
+            written: Vec::new(),
+        })
     }
 
     /// Compare the stopped architectural state. Shared proof policy records
@@ -226,7 +312,9 @@ impl Saved {
                 Some(at) => Some(format!("time page word {}", at / 8)),
                 None => {
                     let ram = match (&self.ram, m.undo.as_mut()) {
-                        (None, Some(u)) => u.unchanged_since_sync(&m._vm, m.mem.0, &mut self.written)?,
+                        (None, Some(u)) => {
+                            u.unchanged_since_sync(&m._vm, m.mem.0, &mut self.written)?
+                        }
                         (Some(ram), _) => unsafe {
                             std::slice::from_raw_parts(ram.ptr.0, ram.size)
                                 == std::slice::from_raw_parts(m.mem.0, m.mem_size)
@@ -237,7 +325,10 @@ impl Saved {
                 }
             },
         };
-        Ok(match part { None => Comparison::Equal, Some(part) => Comparison::Different(part) })
+        Ok(match part {
+            None => Comparison::Equal,
+            Some(part) => Comparison::Different(part),
+        })
     }
 }
 
@@ -276,7 +367,10 @@ impl Watchdog {
                 tv_sec: period.as_secs() as libc::time_t,
                 tv_nsec: period.subsec_nanos() as libc::c_long,
             };
-            let spec = libc::itimerspec { it_interval: ts, it_value: ts };
+            let spec = libc::itimerspec {
+                it_interval: ts,
+                it_value: ts,
+            };
             if libc::timer_settime(timer, 0, &spec, std::ptr::null_mut()) != 0 {
                 return Err(err("arm"));
             }
@@ -292,10 +386,17 @@ impl Watchdog {
             let mut set: libc::sigset_t = std::mem::zeroed();
             libc::sigemptyset(&mut set);
             libc::sigaddset(&mut set, libc::SIGUSR2);
-            let how = if on { libc::SIG_BLOCK } else { libc::SIG_UNBLOCK };
+            let how = if on {
+                libc::SIG_BLOCK
+            } else {
+                libc::SIG_UNBLOCK
+            };
             match libc::pthread_sigmask(how, &set, std::ptr::null_mut()) {
                 0 => Ok(()),
-                e => Err(format!("pv watchdog mask: {}", std::io::Error::from_raw_os_error(e))),
+                e => Err(format!(
+                    "pv watchdog mask: {}",
+                    std::io::Error::from_raw_os_error(e)
+                )),
             }
         }
     }
@@ -347,9 +448,18 @@ mod tests {
         kernel[0x1f1] = 1;
         kernel.extend(code);
         let spec = BootSpec {
-            kernel: &kernel, initrd: &[], cmdline: String::new(), mem: INITRD_ADDR + 0x100000,
-            rng_seed: [0; 32], mac: None, control_channel: false, disk: None, undo_margin: undo, barrier: false,
-            pv_clock: true, page_timer: false,
+            kernel: &kernel,
+            initrd: &[],
+            cmdline: String::new(),
+            mem: INITRD_ADDR + 0x100000,
+            rng_seed: [0; 32],
+            mac: None,
+            control_channel: false,
+            disk: None,
+            undo_margin: undo,
+            barrier: false,
+            pv_clock: true,
+            page_timer: false,
         };
         let mut m = Machine::new(kvm, "pv-probe", &spec).unwrap();
         let mut r = m.vcpu.get_regs().unwrap();
@@ -365,7 +475,11 @@ mod tests {
         let kvm = Kvm::new().unwrap();
         let mut code = Vec::new();
         // Store a 20 us deadline and lower bound while KVM is running.
-        for (address, value) in [(0xd0000070u32, 20000u32), (0xd0000074, 0), (0xd0000038, 20000)] {
+        for (address, value) in [
+            (0xd0000070u32, 20000u32),
+            (0xd0000074, 0),
+            (0xd0000038, 20000),
+        ] {
             code.extend_from_slice(&[0xc7, 0x05]);
             code.extend_from_slice(&address.to_le_bytes());
             code.extend_from_slice(&value.to_le_bytes());
@@ -380,8 +494,14 @@ mod tests {
             m.enable_page_timer();
             m.pic.set_masks(0xffff); // Retain IRQ0 rather than entering an absent IDT.
             let mut clock = PvClock::new(watchdog).unwrap();
-            let stop = m.run_until(&mut clock, 1000000, 0, &mut Vec::new()).unwrap();
-            assert_eq!((stop, m.time), (Stop::Halted, 20000), "watchdog={watchdog:?}");
+            let stop = m
+                .run_until(&mut clock, 1000000, 0, &mut Vec::new())
+                .unwrap();
+            assert_eq!(
+                (stop, m.time),
+                (Stop::Halted, 20000),
+                "watchdog={watchdog:?}"
+            );
             assert_eq!(m.pit.deadline, None);
             m.pic.set_masks(0);
             assert_eq!(m.pic.pending(), Some(0));
@@ -403,8 +523,13 @@ mod tests {
         let mut clock = PvClock::new(Duration::from_secs(10)).unwrap();
         m.page_set(PAGE_SYSCALLS, 17);
         clock.prepare(&mut m, 100000, 100000, true).unwrap();
-        let fields = [PAGE_BOUND, PAGE_SYSCALL_TARGET, super::super::PAGE_SYSCALL_NS,
-                      super::super::PAGE_SYSCALLS0, super::super::PAGE_PLAN_TIME];
+        let fields = [
+            PAGE_BOUND,
+            PAGE_SYSCALL_TARGET,
+            super::super::PAGE_SYSCALL_NS,
+            super::super::PAGE_SYSCALLS0,
+            super::super::PAGE_PLAN_TIME,
+        ];
         let plan = fields.map(|i| m.page_get(i));
         // Simulate watchdog landings before/after an old arm is overdue.
         // Even a split between guest plan loads must keep every field fixed.
@@ -413,13 +538,24 @@ mod tests {
             m.page_set(PAGE_SYSCALLS, 24);
             for word in [5000, 20000, super::super::TIMER_DISARMED] {
                 m.page_set(PAGE_TIMER_DEADLINE, word);
-                assert!(matches!(clock.prepare(&mut m, 100000, 100000, false).unwrap(), Prepared::Run));
-                assert_eq!(fields.map(|i| m.page_get(i)), plan, "watchdog cannot tear a guest arm's plan loads");
+                assert!(matches!(
+                    clock.prepare(&mut m, 100000, 100000, false).unwrap(),
+                    Prepared::Run
+                ));
+                assert_eq!(
+                    fields.map(|i| m.page_get(i)),
+                    plan,
+                    "watchdog cannot tear a guest arm's plan loads"
+                );
                 assert_eq!(m.page_timer.seen, super::super::TIMER_DISARMED);
                 assert_eq!(m.pit.deadline, Some(10000));
                 assert_eq!(m.pic.pending(), None);
                 assert_eq!(m.timer_rng.as_ref().unwrap().counter(), 0);
-                assert_eq!(m.next_deadline(), 10000, "idle wake must ignore the raw word");
+                assert_eq!(
+                    m.next_deadline(),
+                    10000,
+                    "idle wake must ignore the raw word"
+                );
             }
         }
     }
@@ -428,14 +564,22 @@ mod tests {
     #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
     fn store_deadline_then_halt_has_the_same_wake_irq_and_witness_across_watchdogs() {
         let kvm = Kvm::new().unwrap();
-        for (spin, old, word) in [(false, None, 900000u64), (false, Some(20000), 900000),
-                                  (false, None, 20000), (false, Some(20000), super::super::TIMER_DISARMED),
-                                  (true, None, 900000)] {
+        for (spin, old, word) in [
+            (false, None, 900000u64),
+            (false, Some(20000), 900000),
+            (false, None, 20000),
+            (false, Some(20000), super::super::TIMER_DISARMED),
+            (true, None, 900000),
+        ] {
             let mut code = Vec::new();
             // Clock reads have advanced last to 30 us. Store the deadline,
             // compute for long enough to encounter watchdog splits, then HLT.
-            for (address, value) in [(0xd0000008u32, 30000u32), (0xd000000c, 0),
-                                     (0xd0000070, word as u32), (0xd0000074, (word >> 32) as u32)] {
+            for (address, value) in [
+                (0xd0000008u32, 30000u32),
+                (0xd000000c, 0),
+                (0xd0000070, word as u32),
+                (0xd0000074, (word >> 32) as u32),
+            ] {
                 code.extend_from_slice(&[0xc7, 0x05]);
                 code.extend_from_slice(&address.to_le_bytes());
                 code.extend_from_slice(&value.to_le_bytes());
@@ -446,9 +590,18 @@ mod tests {
                 code.extend_from_slice(&[0xb9, 0, 0, 0, 0x01, 0x49, 0x75, 0xfd, 0xf4]);
             }
             let mut want = None;
-            for (watchdog, undo) in [(if spin { Duration::from_millis(2) } else { Duration::from_secs(10) }, 0),
-                                      (Duration::from_micros(100), 0),
-                                      (Duration::from_micros(200), 256)] {
+            for (watchdog, undo) in [
+                (
+                    if spin {
+                        Duration::from_millis(2)
+                    } else {
+                        Duration::from_secs(10)
+                    },
+                    0,
+                ),
+                (Duration::from_micros(100), 0),
+                (Duration::from_micros(200), 256),
+            ] {
                 let mut m = machine(&kvm, &code, undo);
                 m.page_timer_requested = true;
                 m.abi = super::super::ABI_PAGE_TIMER;
@@ -462,15 +615,26 @@ mod tests {
                 // Keep IRQ0 pending until HLT: this payload has no IDT.
                 m.pic.set_masks(0xffff);
                 let mut clock = PvClock::new(watchdog).unwrap();
-                assert_eq!(m.run_until(&mut clock, 1000000, 0, &mut Vec::new()).unwrap(), Stop::Halted);
+                assert_eq!(
+                    m.run_until(&mut clock, 1000000, 0, &mut Vec::new())
+                        .unwrap(),
+                    Stop::Halted
+                );
                 assert_eq!(m.time, 30000, "idle must include page-clock progress");
                 assert_eq!(m.stats.spin_idles, u64::from(spin));
                 if watchdog < Duration::from_secs(1) {
-                    assert!(m.stats.eintr > 0, "the short watchdog must actually interrupt the guest");
+                    assert!(
+                        m.stats.eintr > 0,
+                        "the short watchdog must actually interrupt the guest"
+                    );
                 }
                 m.pic.set_masks(0);
                 let pending = old.is_some() || word <= 30000;
-                assert_eq!(m.pic.pending(), pending.then_some(0), "overdue arms must survive replacement/disarm");
+                assert_eq!(
+                    m.pic.pending(),
+                    pending.then_some(0),
+                    "overdue arms must survive replacement/disarm"
+                );
                 let adopted = m.next_deadline();
                 let wake = if pending { m.time } else { adopted };
                 if !pending {
@@ -485,8 +649,11 @@ mod tests {
                 assert_eq!(m.pic.pending(), None);
                 let mut rng = m.timer_rng.as_ref().unwrap().clone();
                 let got = (wake, adopted, m.stats.irqs, m.exit_witness(), rng.next());
-                if let Some(want) = &want { assert_eq!(&got, want, "watchdog={watchdog:?} undo={undo}"); }
-                else { want = Some(got); }
+                if let Some(want) = &want {
+                    assert_eq!(&got, want, "watchdog={watchdog:?} undo={undo}");
+                } else {
+                    want = Some(got);
+                }
             }
         }
     }
@@ -521,8 +688,11 @@ mod tests {
             code.extend_from_slice(&[0xba, 0x2c, 0x05, 0, 0, 0xb0, 1, 0xee, 0xf4]);
         }
         let mut want = None;
-        for (watchdog, undo) in [(Duration::from_secs(10), 0), (Duration::from_micros(100), 0),
-                                 (Duration::from_micros(700), 256)] {
+        for (watchdog, undo) in [
+            (Duration::from_secs(10), 0),
+            (Duration::from_micros(100), 0),
+            (Duration::from_micros(700), 256),
+        ] {
             let mut m = machine(&kvm, &code, undo);
             m.page_timer_requested = true;
             m.abi = super::super::ABI_PAGE_TIMER;
@@ -536,32 +706,68 @@ mod tests {
             for (round, (first, second)) in periods.into_iter().enumerate() {
                 let origin = start + round as u64 * 2_000_000;
                 m.wake(origin);
-                assert_eq!(m.run_until(&mut clock, origin + 1_000_000, 0, &mut Vec::new()).unwrap(), Stop::Halted);
+                assert_eq!(
+                    m.run_until(&mut clock, origin + 1_000_000, 0, &mut Vec::new())
+                        .unwrap(),
+                    Stop::Halted
+                );
                 assert_eq!(m.time, origin + first.min(second));
                 let adopted = m.next_deadline();
                 assert!((origin + second..=origin + second + 1000).contains(&adopted));
                 // A halted world does not enter KVM. Even hypothetical repeated
                 // watchdog preparation here must leave its wake and plan intact.
-                let plan = [PAGE_BOUND, PAGE_SYSCALL_TARGET, super::super::PAGE_SYSCALLS0,
-                            super::super::PAGE_PLAN_TIME].map(|i| m.page_get(i));
+                let plan = [
+                    PAGE_BOUND,
+                    PAGE_SYSCALL_TARGET,
+                    super::super::PAGE_SYSCALLS0,
+                    super::super::PAGE_PLAN_TIME,
+                ]
+                .map(|i| m.page_get(i));
                 for _ in 0..round + 1 {
-                    clock.prepare(&mut m, 2_000_000, origin + 2_000_000, false).unwrap();
+                    clock
+                        .prepare(&mut m, 2_000_000, origin + 2_000_000, false)
+                        .unwrap();
                     assert_eq!(m.next_deadline(), adopted);
-                    assert_eq!([PAGE_BOUND, PAGE_SYSCALL_TARGET, super::super::PAGE_SYSCALLS0,
-                                super::super::PAGE_PLAN_TIME].map(|i| m.page_get(i)), plan);
+                    assert_eq!(
+                        [
+                            PAGE_BOUND,
+                            PAGE_SYSCALL_TARGET,
+                            super::super::PAGE_SYSCALLS0,
+                            super::super::PAGE_PLAN_TIME
+                        ]
+                        .map(|i| m.page_get(i)),
+                        plan
+                    );
                 }
-                evidence.push((m.time, m.pic.pending(), m.pit.deadline, m.exit_witness(), m.timer_rng.as_ref().unwrap().counter()));
+                evidence.push((
+                    m.time,
+                    m.pic.pending(),
+                    m.pit.deadline,
+                    m.exit_witness(),
+                    m.timer_rng.as_ref().unwrap().counter(),
+                ));
                 m.wake(adopted);
                 m.expire_timers().unwrap();
                 m.pic.set_masks(0);
                 assert_eq!(m.pic.pending(), Some(0));
-                evidence.push((m.time, m.pic.pending(), m.pit.deadline, m.exit_witness(), m.timer_rng.as_ref().unwrap().counter()));
+                evidence.push((
+                    m.time,
+                    m.pic.pending(),
+                    m.pit.deadline,
+                    m.exit_witness(),
+                    m.timer_rng.as_ref().unwrap().counter(),
+                ));
                 m.pic.take(0);
                 m.pic.set_masks(0xffff);
             }
-            if watchdog < Duration::from_secs(1) { assert!(m.stats.eintr > 0); }
-            if let Some(want) = &want { assert_eq!(&evidence, want, "watchdog={watchdog:?} undo={undo}"); }
-            else { want = Some(evidence); }
+            if watchdog < Duration::from_secs(1) {
+                assert!(m.stats.eintr > 0);
+            }
+            if let Some(want) = &want {
+                assert_eq!(&evidence, want, "watchdog={watchdog:?} undo={undo}");
+            } else {
+                want = Some(evidence);
+            }
         }
     }
 
@@ -579,7 +785,9 @@ mod tests {
                 clock.max_false_alarms = 10;
             }
             let mut m = machine(&kvm, code, undo);
-            let stop = m.run_until(&mut clock, 1_000_000_000, 0, &mut Vec::new()).unwrap();
+            let stop = m
+                .run_until(&mut clock, 1_000_000_000, 0, &mut Vec::new())
+                .unwrap();
             let r = m.vcpu.get_regs().unwrap();
             let evidence = (m.time, r.rip, r.rcx, m.exit_witness());
             if let Some(want) = &first {
@@ -641,7 +849,11 @@ mod tests {
             let mut clock = PvClock::new(Duration::from_micros(200)).unwrap();
             clock.max_false_alarms = 10;
             let mut m = machine(&kvm, &code, 0);
-            assert_eq!(m.run_until(&mut clock, 1_000_000_000, 0, &mut Vec::new()).unwrap(), Stop::Halted);
+            assert_eq!(
+                m.run_until(&mut clock, 1_000_000_000, 0, &mut Vec::new())
+                    .unwrap(),
+                Stop::Halted
+            );
             let r = m.vcpu.get_regs().unwrap();
             assert_eq!((r.rip, r.rcx as u32, m.time), (0x100005, 1, 0));
             assert_eq!(m.stats.spin_idles, 1);
@@ -656,7 +868,10 @@ mod tests {
         assert_eq!(stop, Stop::Halted);
         assert_eq!((rip, rcx as u32), (0x100009, 0));
         assert_eq!(m.stats.spin_idles, 0);
-        assert!(m.stats.spin_probes > 0, "the loop should outlast the watchdog");
+        assert!(
+            m.stats.spin_probes > 0,
+            "the loop should outlast the watchdog"
+        );
         assert_eq!(m.stats.spin_probes, m.stats.spin_false);
     }
 }

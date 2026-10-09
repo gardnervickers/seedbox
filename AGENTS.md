@@ -128,9 +128,8 @@ the canonical crate; do not restore sibling source inclusion for these policies.
   stamp the source tree, Git revision, build flags or compiled binaries, and
   don't add compiler wrappers, reproducible-build checks, or formatting
   exceptions (`#[rustfmt::skip]`, `rustfmt.toml`) to keep engine bytes stable.
-  Reformatting, moving code and changing build flags are ordinary changes.
-  The existing skips and `crates/seedbox-vmm/rustfmt.toml` go away in one
-  `cargo fmt` pass after the shared-core refactor lands; add no new ones.
+  Reformatting, moving code and changing build flags are ordinary changes;
+  run `cargo fmt` on the VMM like any other crate.
 - The linked CLI uses the root lockfile and records an explicit internal-worker
   contract; historical profiles without it retain the standalone launch
   contract. Platform/version metadata never gates development replay.
@@ -152,10 +151,6 @@ timed step/phase summary format. Workspace builds use a persistent cache under
 override it with `SEEDBOX_PRECHECK_TARGET` or `CARGO_TARGET_DIR`. A revision uses
 a temporary detached worktree under `$TMPDIR`, deleted on a pass; a failure keeps it and prints
 its path. Any failed step makes the gate exit nonzero; all steps still run.
-After a Linux pre-check pass, `bash harness/host-check.sh --skip-portable REV CPU` skips fmt,
-clippy and the portable suite (including workspace tests), while retaining VMM
-build/tests and host-specific checks. A Mac pass alone does not justify the skip.
-Match the full SHA printed by both gates.
 See [contributor checks](README.md#contributor-checks).
 
 Run these before committing:

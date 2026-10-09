@@ -87,8 +87,7 @@ fn paused_and_resumed_replay_has_identical_witness_and_full_state() {
             .arg("replay")
             .arg(&imported)
             .arg("--state")
-            .arg(&state)
-            .arg("--allow-dev-engine");
+            .arg(&state);
         command
     };
     let baseline = record(&attempt(&replay().output().unwrap()));

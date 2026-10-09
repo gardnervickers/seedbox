@@ -889,7 +889,7 @@ fn legacy_dev_marked_runs_replay_without_a_flag_and_round_trip() {
         policy: changed,
         fixture: &f.backend,
     };
-    // Without --allow-engine-change a different engine is not comparable.
+    // Without an engine override a different engine is not comparable.
     let rejected = runner
         .replay_with_options(
             &imported.directory,

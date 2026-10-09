@@ -62,8 +62,8 @@ pub const INTEL_ICE_LAKE: CounterProfile = CounterProfile {
 /// table at rr-debugger/rr@858a9fb. Hybrid parts are refused: their E-cores
 /// have their own PMU and events.
 const SKYLAKE_MODELS: &[u32] = &[
-    0x1a, 0x1e, 0x2e, 0x25, 0x2c, 0x2f, 0x2a, 0x2d, 0x3e, 0x3a, 0x3c, 0x3f, 0x45, 0x46,
-    0x3d, 0x47, 0x4f, 0x56, 0x4e, 0x55, 0x5e, 0x8e, 0x9e, 0xa5, 0xa6,
+    0x1a, 0x1e, 0x2e, 0x25, 0x2c, 0x2f, 0x2a, 0x2d, 0x3e, 0x3a, 0x3c, 0x3f, 0x45, 0x46, 0x3d, 0x47,
+    0x4f, 0x56, 0x4e, 0x55, 0x5e, 0x8e, 0x9e, 0xa5, 0xa6,
 ];
 const ICE_LAKE_MODELS: &[u32] = &[0x6a, 0x7e, 0x86, 0x8c, 0x8d, 0xa7, 0x8f, 0xcf, 0xad];
 
@@ -97,12 +97,21 @@ fn cpu() -> (String, u32, u32, bool) {
     }
     let eax = unsafe { __cpuid(1) }.eax;
     let base = (eax >> 8) & 0xf;
-    let family = if base == 0xf { base + ((eax >> 20) & 0xff) } else { base };
+    let family = if base == 0xf {
+        base + ((eax >> 20) & 0xff)
+    } else {
+        base
+    };
     let model = if base == 0x6 || base == 0xf {
         ((eax >> 4) & 0xf) | ((eax >> 12) & 0xf0)
     } else {
         (eax >> 4) & 0xf
     };
     let hybrid = leaf0.eax >= 7 && unsafe { __cpuid_count(7, 0) }.edx & (1 << 15) != 0;
-    (String::from_utf8_lossy(&vendor).into_owned(), family, model, hybrid)
+    (
+        String::from_utf8_lossy(&vendor).into_owned(),
+        family,
+        model,
+        hybrid,
+    )
 }

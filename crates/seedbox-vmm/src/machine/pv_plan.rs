@@ -1,8 +1,17 @@
 //! Guest-visible PV plans. An enabled page arm can be interrupted between any
 //! of its loads/stores, so the whole plan stays fixed until a legal exit.
 
-pub fn clock_plan(t0: u64, s0: u64, ns: u64, soft: u64, page_timer: bool, legal: bool) -> Option<(u64, u64)> {
-    if page_timer && !legal { return None; }
+pub fn clock_plan(
+    t0: u64,
+    s0: u64,
+    ns: u64,
+    soft: u64,
+    page_timer: bool,
+    legal: bool,
+) -> Option<(u64, u64)> {
+    if page_timer && !legal {
+        return None;
+    }
     Some((soft, s0 + soft.saturating_sub(t0).div_ceil(ns).max(1)))
 }
 
@@ -12,9 +21,14 @@ mod tests {
 
     // The kernel only tightens the bound, retaining the original plan origin.
     fn arm(plan: (u64, u64), origin: (u64, u64), ns: u64, deadline: u64) -> (u64, u64) {
-        if deadline >= plan.0 { return plan; }
+        if deadline >= plan.0 {
+            return plan;
+        }
         let left = deadline.saturating_sub(origin.0);
-        (deadline, origin.1 + (left / ns + u64::from(!left.is_multiple_of(ns))).max(1))
+        (
+            deadline,
+            origin.1 + (left / ns + u64::from(!left.is_multiple_of(ns))).max(1),
+        )
     }
 
     #[test]
@@ -28,20 +42,35 @@ mod tests {
                 [origin.0, origin.0 - 1], // left=0: target remains s0+1
             ] {
                 let initial = clock_plan(origin.0, origin.1, ns, soft, true, true).unwrap();
-                let expected = arm(arm(initial, origin, ns, deadlines[0]), origin, ns, deadlines[1]);
+                let expected = arm(
+                    arm(initial, origin, ns, deadlines[0]),
+                    origin,
+                    ns,
+                    deadlines[1],
+                );
                 for split in 0..=3 {
                     let mut plan = initial;
-                    for (point, deadline) in [Some(deadlines[0]), Some(deadlines[1]), None, None].into_iter().enumerate() {
+                    for (point, deadline) in [Some(deadlines[0]), Some(deadlines[1]), None, None]
+                        .into_iter()
+                        .enumerate()
+                    {
                         if point == split {
                             // The host may have charged syscalls and read either
                             // raw arm. Neither permits a guest-visible replan.
-                            if let Some(next) = clock_plan(origin.0 + 7 * ns, origin.1 + 7, ns, soft, true, false) {
+                            if let Some(next) =
+                                clock_plan(origin.0 + 7 * ns, origin.1 + 7, ns, soft, true, false)
+                            {
                                 plan = next;
                             }
                         }
-                        if let Some(deadline) = deadline { plan = arm(plan, origin, ns, deadline); }
+                        if let Some(deadline) = deadline {
+                            plan = arm(plan, origin, ns, deadline);
+                        }
                     }
-                    assert_eq!(plan, expected, "ns={ns} split={split} deadlines={deadlines:?}");
+                    assert_eq!(
+                        plan, expected,
+                        "ns={ns} split={split} deadlines={deadlines:?}"
+                    );
                 }
             }
         }

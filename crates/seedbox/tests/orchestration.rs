@@ -1334,55 +1334,6 @@ fn actual_vmm_admission_rejects_an_invalid_retained_profile_before_execution() {
 }
 
 #[test]
-fn exploration_actual_unsupported_profile_refuses_before_all_preparation() {
-    let fixture = Fixture::new();
-    let engine = fixture.directory.path().join("unadmitted-engine");
-    fs::write(&engine, b"fixture engine").unwrap();
-    let store = ContentStore::new(fixture.directory.path().join("store"));
-    let executor = seedbox::vmm::VmmExecutor::new(
-        &engine,
-        &store,
-        None,
-        512,
-        WitnessMode::Exits,
-        seedbox::counter::CounterProfile::IntelIceLake,
-    )
-    .unwrap();
-    let batch = fixture
-        .orchestrator
-        .explore(
-            &fixture.simulation,
-            seedbox::exploration::ExploreOptions {
-                count: 3,
-                ..Default::default()
-            },
-            &fixture.preparer,
-            &executor,
-        )
-        .unwrap();
-    assert_eq!(fixture.preparer.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(fixture.backend.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(batch.outcome, Outcome::Error);
-    assert!(batch.finished);
-    assert!(batch.inputs.is_none());
-    assert!(batch.attempts.is_empty());
-    assert_eq!(batch.undispatched_count, 3);
-    assert!(batch
-        .error
-        .as_ref()
-        .unwrap()
-        .contains("explicitly allow unqualified CPU execution"));
-    assert!(!batch.directory.join("attempts").exists());
-    assert!(!batch.preparation_directory.join("setup.json").exists());
-    assert_eq!(
-        seedbox::exploration::inspect(&batch.directory)
-            .unwrap()
-            .error,
-        batch.error
-    );
-}
-
-#[test]
 fn exploration_admission_drift_stops_with_retained_partial_evidence() {
     for fail_at in [1, 2, 3] {
         let fixture = Fixture::new();

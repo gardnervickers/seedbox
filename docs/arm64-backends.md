@@ -61,13 +61,6 @@ records the validation and its scope.
 The isolated `seedbox-arm64` crate runs a single-CPU PV fixture on native Mac
 HVF or Linux arm64 KVM. It is separate from the Compose/x86 CLI.
 
-The checked-in `kernel-arm64/expected-hashes.sha256` pins the independently
-supplied `23c619e` guest rebuild. Signed native HVF acceptance passes with these
-inputs, including the one-second baseline gate and a 200,009 ns timerfd spin.
-See the [current acceptance record](https://github.com/gardnervickers/seedbox/pull/120).
-Do not derive expected hashes from the files being checked. Build-generated
-`SHA256SUMS` only checks transfer integrity.
-
 Requires an M-series Mac, macOS 15+, Xcode Command Line Tools, and Nix with
 flakes enabled. This runs the experimental single-CPU PV fixture. The Linux VM
 only builds its inputs; HVF executes the fixture directly on the Mac. Allow
@@ -106,7 +99,6 @@ limactl shell --workdir /tmp seedbox-build env BUILD_JOBS=4 \
   bash /tmp/kernel-arm64/build.sh /tmp/seedbox-arm64-inputs
 mkdir -p artifacts/arm64-mac
 limactl copy -r seedbox-build:/tmp/seedbox-arm64-inputs/. artifacts/arm64-mac/
-python3 kernel-arm64/check-hashes.py artifacts/arm64-mac || exit "$?"
 # Preserve the inputs on the Mac, then remove only this task's VM.
 limactl stop seedbox-build
 limactl delete --force seedbox-build
@@ -345,13 +337,12 @@ python3 crates/seedbox-arm64/compare.py LEFT.json RIGHT.json
 ### Linux VM KVM handoff (existing Cargo, no Nix)
 
 Linux arm64 KVM needs `/dev/kvm`, vGICv3 and the Linux 6.4+ SMCCC filter.
-Transfer the updated checkout to the VM and retain the **same** accepted Image
-and init.cpio. From the checkout root, using the VM's existing Cargo:
+Transfer the updated checkout, Image and init.cpio to the VM. From the
+checkout root, using the VM's existing Cargo:
 
 ```sh
 set -eu
 export PATH="$HOME/.cargo/bin:$PATH"
-python3 kernel-arm64/check-hashes.py artifacts/arm64-hres
 cargo build-arm64
 cargo test-arm64 --test review_yield_masked --test review_deferred_bound
 export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-hres/Image"

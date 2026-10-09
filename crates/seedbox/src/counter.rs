@@ -109,7 +109,7 @@ impl CounterProfile {
         matches!(self, Self::Zen)
     }
 
-    /// Raw event mirrored from the frozen VMM counter profile.
+    /// Raw event mirrored from the VMM counter profile.
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), test))]
     pub(crate) const fn branch_event(self) -> u64 {
         match self {

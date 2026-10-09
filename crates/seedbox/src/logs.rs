@@ -16,7 +16,6 @@ const MAX_CHUNKS: usize = 65_536;
 const MAX_TOTAL_CHUNKS: usize = 1_048_576;
 
 #[allow(dead_code)]
-#[rustfmt::skip]
 #[path = "../../seedbox-vmm/src/log_index.rs"]
 mod log_index;
 

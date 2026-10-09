@@ -122,9 +122,7 @@ boot guard, message/committed-byte draining, matcher/selector state, scheduled
 trigger effects, PV page/speed, timed-log cursor/order, lifecycle calls, disk
 survivors, branch streams and getrandom/urandom divergence. Portable tests
 check shared identity, ABI layout, replay settings and feature-off link/disk/RNG
-results and witness traces generated from main. Actual restored execution and
-whole-guest feature-off equality remain unverified on this Mac. See
-[the AMD host procedure](checkpoint-amd.md) for the exact remaining commands.
+results and witness traces generated from main.
 
 ## Disk crash policy
 
@@ -200,7 +198,7 @@ version with the installed CLI's version. No manifest or bundle format changes
 are needed. Historical profiles with no descriptor still invoke their retained
 standalone VMM directly. Unknown executable kinds fail before execution;
 recorded platform and version metadata do not restrict development replay. Every built engine and guest kernel is admitted, with
-exact bytes retained for replay; `--allow-dev-engine` is a compatibility no-op.
+exact bytes retained for replay.
 Native execution and witness equivalence still need host evidence. Apple Silicon
 also supports the native development ARM Compose backend described below.
 
@@ -399,7 +397,7 @@ protocol as `harness/batch.py`, before reading or changing MSRs. It snapshots ex
 values, sets bit 54 with readback, pins the VMM, and restores with readback only
 after reaping it. Only the Zen counter profile needs this workaround; on a host
 with another profile the executor leases the cores and leaves MSRs alone. Other
-profiles are unqualified and run only with `--allow-unqualified-cpu`. An unsuccessful restore retains `output/msr-original.json`.
+profiles are unqualified and run with a warning that results are unverified. An unsuccessful restore retains `output/msr-original.json`.
 Library cancellation and CLI SIGINT/SIGTERM/SIGHUP cause cleanup through the same
 path. SIGKILL and host loss cannot guarantee cleanup.
 
@@ -468,7 +466,7 @@ under the two models produces different identities and retained manifests.
 The semantic profile records `timebase` only for PV, preserving existing counter
 identity bytes and hashes. Replay reads the recorded choice, accepts no timebase
 override, and refuses unknown recorded values or a backend with a different
-timebase, even with `--allow-engine-change`. Bundles preserve the choice.
+timebase, even with `--vmm`. Bundles preserve the choice.
 The VMM report is checked against it; reports from older engines without a
 timebase field mean counter. Run/replay and inspect print `timebase: VALUE`.
 `inspect --json` exposes the semantic profile and, when present, the VMM's
@@ -506,7 +504,7 @@ combinations have distinct parent and branch identities, and both off retains
 the original encoding.
 
 PV uses no host PMU counter. It keeps the CPU/SMT leases but skips the counter
-profile, `--allow-unqualified-cpu`, the perf event checks and the Zen MSR
+profile, the perf event checks and the Zen MSR
 workaround, so any x86-64 KVM host can run it, and its identity carries no
 counter profile. That does not qualify additional PV hosts. The counter stop-placement description
 below applies to the default counter model; PV uses its own exit-based progress.
@@ -535,11 +533,11 @@ strict hard-stop check.
 
 Engines and guest kernels are not pinned: run, explore, replay and doctor admit
 any built VMM and guest kernel, and each run records their hashes in its
-identity. `--allow-dev-engine` is still accepted and has no effect. An older
+identity. An older
 record's `engine_qualification` parameter is kept as data and does not block replay.
 
-Replay defaults to the retained engine. An explicit `--vmm NEW_BINARY
---allow-engine-change` permits a fresh identity and witness comparison with it.
+Replay defaults to the retained engine. An explicit `--vmm NEW_BINARY`
+permits a fresh identity and witness comparison with it.
 The replacement is probed once for its launch contract: a combined Seedbox CLI
 uses its internal worker entrypoint, while a standalone VMM receives worker flags
 directly. The new run retains that contract; ordinary replay uses it without
@@ -1148,8 +1146,7 @@ witness even after healing. Without selector use, tracking contributes no witnes
 bytes or report fields and leaves legacy RNG, frame decisions and results intact.
 This changes the engine identity. Portable tests exercise the production modules;
 AMD execution, replay and observation/performance qualification remain separate.
-The finite [AMD procedure](connection-selectors-amd.md) uses the guest-owned
-`harness/acceptance/workloads/connections.yaml` fixture.
+The guest-owned fixture is `harness/acceptance/workloads/connections.yaml`.
 
 ## Bundles
 
@@ -1195,11 +1192,10 @@ replay verifies the bundle mechanism; offline application replay requires separa
 
 ### Explicit unqualified counters
 
-`--allow-unqualified-cpu` applies consistently to run, explore and replay. It
-permits only an explicitly selected known non-Zen counter, with a warning that
+Run, explore and replay accept a known non-Zen counter with a warning that
 results are unverified. Its `counter` semantic parameter identifies the
 experimental profile. Replay still requires the recorded counter and exact
-supported release/input bytes. The flag cannot bypass checksums,
+supported release/input bytes. It cannot bypass checksums,
 retained-profile checks or CPU ownership. This encoding is intentional; old
 records are not silently upgraded or relabeled.
 
@@ -1243,8 +1239,7 @@ streaming byte access. Only manifest-declared, checksum-verified evidence is
 used. An absent index never causes host receipt order or application timestamps
 to be substituted. Filtering cannot change execution or witness identity.
 Indexes share the existing retention limits and bundle transfer path; missing
-raw streams and indexes stay explicit after import. See [timed logs](timed-logs.md)
-for format bounds, a portable demo and the pending AMD validation commands.
+raw streams and indexes stay explicit after import.
 
 ## Committed console triggers
 
@@ -1252,5 +1247,4 @@ The development engine implements bounded, exactly-once console marker triggers
 through the guest control API. Arm/cancel admission, match deadlines, future
 causal effect barriers, snapshot state and witness evidence are specified in
 [the trigger contract](triggers.md). No trigger ever armed adds no report fields,
-witness bytes or console stopping points. This changes the engine and requires
-`--allow-dev-engine`; AMD KVM validation remains outstanding.
+witness bytes or console stopping points. This changes the engine.

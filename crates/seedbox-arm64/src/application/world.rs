@@ -391,7 +391,10 @@ pub fn run(options: &Options) -> Result<Value> {
 /// Queue drops are appended only when present, so a run without them keeps
 /// the four-counter witness bytes.
 fn witness_counts(counts: &BTreeMap<(usize, usize), [u64; 5]>) -> Vec<(&(usize, usize), &[u64])> {
-    counts.iter().map(|(pair, c)| (pair, if c[4] == 0 { &c[..4] } else { &c[..] })).collect()
+    counts
+        .iter()
+        .map(|(pair, c)| (pair, if c[4] == 0 { &c[..4] } else { &c[..] }))
+        .collect()
 }
 fn arm_counters(world: &world_core::World<ArmMachine>) -> Value {
     let counts: BTreeMap<_,_> = world.link_counts.iter().map(|(&(from,to),c)|

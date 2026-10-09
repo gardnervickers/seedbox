@@ -143,11 +143,10 @@ exact returned record with `world.drop_connection(record)`, then
 `world.heal(handle)` and require its `dropped` count to be positive. Discovery is
 paginated and selectors bind an observed incarnation, so tuple reuse does not
 inherit the old fault. See [connection selectors](docs/runtime.md#connection-selectors)
-for lifecycle and unsupported-traffic behavior, and the
-[AMD validation procedure](docs/connection-selectors-amd.md).
+for lifecycle and unsupported-traffic behavior.
 
 Engines and guest kernels are not pinned: any built engine and kernel are
-admitted, and each run records their hashes. `--allow-dev-engine` is still accepted and has no effect.
+admitted, and each run records their hashes.
 The host checks are the KVM and perf capabilities the engine needs; CPU model,
 microcode and CPUID are not pinned.
 
@@ -162,16 +161,15 @@ retained bytes even after the installed CLI is upgraded. The executable hash is
 an internal integrity reference, so equal version labels never substitute for
 equal bytes. Existing runs without a worker descriptor retain the standalone
 VMM contract. The combined executable has its own engine identity and needs
-separate runtime evidence. Every built engine and guest kernel is admitted;
-`--allow-dev-engine` remains a compatibility no-op.
+separate runtime evidence. Every built engine and guest kernel is admitted.
 
 The ARM application engine is linked into the Mac CLI. Both platform adapters
 use the shared world coordinator, including connection selectors and committed
 console triggers; ARM arbitrary snapshot/fork reuse remains unsupported. Its PV world identity,
 boot-layout evidence and HVF host admission are distinct from the existing ARM
 fixture and x86 KVM profiles. Mac defaults use released Image, supervisor,
-BusyBox and mke2fs, with `linux/arm64` as the image platform. `--cpu`, `--vmm`
-and `--allow-unqualified-cpu` remain Linux-only; Mac exploration is serial.
+BusyBox and mke2fs, with `linux/arm64` as the image platform. `--cpu` and `--vmm`
+remain Linux-only; Mac exploration is serial.
 
 `seedbox run --torn-writes` enables seeded partial survival of unflushed
 512-byte disk sectors on crash. It is recorded in run identity and replayed
@@ -362,7 +360,7 @@ Relative overrides resolve from the invoking directory, before entering a
 revision worktree. Cargo fingerprints determine which build outputs can be reused.
 
 All steps run even if an earlier step fails. Command output goes to stderr;
-stdout ends with timed step/phase lines in `harness/host-check.sh`'s exact format:
+stdout ends with timed step/phase lines in this format:
 `printf '%-8s %s %4ss\n' STEP pass|FAIL SECONDS`, with `phase ` lines preserved.
 The gate exits 0 only if every step passes, and 1 if any step fails; setup errors
 also exit nonzero. The runner comes from the invoking checkout, so it can check
@@ -372,17 +370,7 @@ On macOS, the pre-check skips the Linux-only VMM tests and batch supervisor
 lifecycle tests. On Linux, the portable suite includes those tests; VMM tests
 keep their standalone target directory instead of using the workspace cache.
 The pre-check does not execute guests. VMM builds and KVM acceptance remain
-Linux host checks. After a Linux pre-check passes a committed revision, run:
-
-```sh
-bash harness/host-check.sh --skip-portable REV CPU
-```
-
-This skips fmt, clippy and the portable suite (including workspace tests), while
-keeping the CLI build, VMM build (unless `SEEDBOX_VMM` selects a stored engine),
-VMM tests and AMD smoke checks. Both gates print the full SHA; match them before
-using the skip option. A Mac pass alone does not justify skipping the Linux
-portable checks. A pre-check with local changes only verifies those local
+Linux host checks. A pre-check with local changes only verifies those local
 bytes and does not establish a pass for the committed SHA.
 
 ## How execution is controlled
@@ -422,10 +410,10 @@ bytes and does not establish a pass for the committed SHA.
   records it in each run's identity, so a run replays only with the counter
   that made it. Only Zen is qualified. Non-hybrid Intel cores have profiles
   (`intel-0x5101c4` up to Comet Lake, `intel-0x5111c4` from Ice Lake) that
-  have never run on hardware; `run` and `replay` refuse them unless given
-  `--allow-unqualified-cpu`, and then warn that results are unverified.
+  have never run on hardware; `run`, `explore` and `replay` use them with a
+  warning that results are unverified.
 - `--timebase pv` reads no host perf counter, so it needs only KVM and a free
-  core: it skips the counter profile, `--allow-unqualified-cpu`, the perf event
+  core: it skips the counter profile, the perf event
   checks and the workaround MSR, and its identity records no counter profile.
   It runs on any x86-64 KVM host, including cloud VMs with nested KVM and no
   guest PMU. Hosts other than the workstation are not qualified for PV.
@@ -436,11 +424,9 @@ bytes and does not establish a pass for the committed SHA.
   it with readback, then restores the exact originals after reaping its child.
   The legacy `batch.sh` runner uses the same lease protocol.
 
-`--allow-unqualified-cpu` also applies to `explore`. This explicit non-Zen
-path is experimental: it retains the counter in identity, validates exact
+The non-Zen path is experimental: it retains the counter in identity, validates exact
 supported release inputs and applicable KVM capabilities, and holds every SMT
-lease through child cleanup. It never opens AMD workaround MSRs. `doctor` refuses an unqualified counter rather
-than reporting qualified compatibility. Disabled selected-event readiness is checked
+lease through child cleanup. It never opens AMD workaround MSRs. Disabled selected-event readiness is checked
 before preparation and again under held leases; no guest counter is enabled by
 admission. Intel determinism is not established.
 
@@ -527,10 +513,7 @@ No application schema or line framing is imposed.
 Capture is bounded and independent of the witness. Missing indexes (including
 older engines), unindexed raw suffixes, and retention omissions are explicit.
 A successful read does not claim complete logs; check stderr or JSON `omissions`.
-Bundles retain the indexes through the ordinary log policy. This source change creates a new
-**unqualified engine**; the frozen engine and release pins are unchanged.
-See [format, portable demo and AMD validation](docs/timed-logs.md) for the pending
-hardware acceptance.
+Bundles retain the indexes through the ordinary log policy.
 
 ## Sharing a retained run
 
@@ -670,32 +653,9 @@ YAML without starting guests. It has no hardware tiers. The low-level batch
 runner remains available for the distinct fixtures below. Hardware results and known runtime failures
 are recorded in [docs/acceptance.md](docs/acceptance.md).
 
-`bash harness/host-check.sh --plan SHA` shows change-scoped host checks from the
-merge-base diff without executing anything. On the qualified Linux host,
-`--lanes 1,2,3` spreads the selected checks over SMT pairs `(N, N+16)`.
-Host-free selection uses an explicit allow-list; unknown paths select core.
-Other examples also require their reviewer's run list, and kernel changes keep
-the campaign warning while selecting core. Execution runs portable checks by
-default; `REV CPU` remains shorthand for `REV --lanes CPU` (1..15).
-Disk and Compose-volume rows require `SEEDBOX_DISK_KERNEL` until K2 is accepted.
-Automatic `cluster-fixed` runs only when engine inputs differ from local main;
-reviewer requirements repeat on the final status and in retained summaries.
-Use repeatable `--extra CHECK` to add reviewer checks. See [the host-check map and execution instructions](harness/smoke/README.md#change-scoped-host-checks).
-
-The focused race comparison records a fixed `SOURCE_DATE_EPOCH=0` for Podman image
-build metadata and requires two public preparations to have identical complete
-inputs before execution. Every run must retain that same input closure. It runs four seeds, requires distinct lost-update counts
-and a positive loss, checks the atomic control, and replays a selected loss with
-complete world/machine witnesses and full state. From the project Nix shell on
-the qualified host, use `bash crates/seedbox/tests/accept-race.sh KERNEL CPU OUTPUT`
-with a reserved core and a fresh output directory. It freezes source/base inputs
-and rejects re-preparation drift; failed attempts remain in that directory.
-No retries or broader seed search are performed.
-
 The genuine historical etcd 3.5.2 failure remains separate from the planted
 checker control. Its exact engine/profile and bounded invocation without retry
-qualification remain unresolved in [issue #36](https://github.com/gardnervickers/seedbox/issues/36).
-This race check does not qualify that historical bug or the engine.
+remain unresolved in [issue #36](https://github.com/gardnervickers/seedbox/issues/36).
 
 ## One-VM network fixture
 
