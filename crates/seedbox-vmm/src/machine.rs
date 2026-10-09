@@ -427,10 +427,10 @@ impl ExitKind {
 enum Exit {
     Eintr,
     Debug,
-    IoOut(u16, Vec<u8>),
+    IoOut(u16, ExitData),
     IoIn(u16, ExitData),
     MmioRead(u64, ExitData),
-    MmioWrite(u64, Vec<u8>),
+    MmioWrite(u64, ExitData),
     Hlt,
     IrqWindowOpen,
     Shutdown,
@@ -439,14 +439,19 @@ enum Exit {
     Failed(kvm_ioctls::Error),
 }
 
-/// The response buffer of an IN or MMIO read exit, in the vCPU's kvm_run
-/// mapping, detached from the `VcpuExit` borrow of the vCPU so the exit's
-/// handler can use the whole machine.
+/// The data buffer of a port or MMIO exit, in the vCPU's kvm_run mapping,
+/// detached from the `VcpuExit` borrow of the vCPU so the exit's handler can
+/// use the whole machine without copying it.
 struct ExitData(*mut [u8]);
 
 impl ExitData {
     fn detach(data: &mut [u8]) -> Self {
         Self(data)
+    }
+
+    /// An OUT or MMIO write buffer; it is only ever read.
+    fn detach_read(data: &[u8]) -> Self {
+        Self(data as *const [u8] as *mut [u8])
     }
 
     /// # Safety
@@ -1868,10 +1873,12 @@ impl Machine {
             let exit = match exit {
                 Err(e) if e.errno() == libc::EINTR => Exit::Eintr,
                 Ok(VcpuExit::Debug(_)) => Exit::Debug,
-                Ok(VcpuExit::IoOut(port, data)) => Exit::IoOut(port, data.to_vec()),
+                Ok(VcpuExit::IoOut(port, data)) => Exit::IoOut(port, ExitData::detach_read(data)),
                 Ok(VcpuExit::IoIn(port, data)) => Exit::IoIn(port, ExitData::detach(data)),
                 Ok(VcpuExit::MmioRead(addr, data)) => Exit::MmioRead(addr, ExitData::detach(data)),
-                Ok(VcpuExit::MmioWrite(addr, data)) => Exit::MmioWrite(addr, data.to_vec()),
+                Ok(VcpuExit::MmioWrite(addr, data)) => {
+                    Exit::MmioWrite(addr, ExitData::detach_read(data))
+                }
                 Ok(VcpuExit::Hlt) => Exit::Hlt,
                 Ok(VcpuExit::IrqWindowOpen) => Exit::IrqWindowOpen,
                 Ok(VcpuExit::Shutdown) => Exit::Shutdown,
@@ -1897,28 +1904,32 @@ impl Machine {
                     None
                 }
                 Exit::Debug => None,
-                Exit::IoOut(PORT_YIELD, data) => {
-                    if !self.guest_yield(data[0], soft) {
+                Exit::IoOut(PORT_YIELD, mut data) => {
+                    // SAFETY: no KVM_RUN since the exit (see `ExitData`).
+                    let value = unsafe { data.get() }[0];
+                    if !self.guest_yield(value, soft) {
                         // A page arm can lower the clock/syscall budget below
                         // the previous soft bound. This is a legal pickup.
                         legal = self.page_timer.enabled;
                     }
                     None
                 }
-                Exit::IoOut(port, data) => {
+                Exit::IoOut(port, mut data) => {
                     // SAFETY: `run_ptr` is the vCPU's live kvm_run mapping, and
                     // this is a KVM_EXIT_IO exit, so the `io` union member is set.
                     let io = unsafe { (*run_ptr).__bindgen_anon_1.io };
-                    self.pio_out(port, &data, (io.size, io.count), now, run_syscalls)?
+                    // SAFETY: no KVM_RUN since the exit; the handler does not run
+                    // the vCPU, and charged I/O copies what it keeps.
+                    let data = unsafe { data.get() };
+                    self.pio_out(port, data, (io.size, io.count), now, run_syscalls)?
                 }
                 Exit::IoIn(port, mut out) => {
                     // SAFETY: as for `IoOut`.
                     let io = unsafe { (*run_ptr).__bindgen_anon_1.io };
-                    // SAFETY: no KVM_RUN since the exit (see `ExitData`).
-                    let mut data = unsafe { out.get() }.to_vec();
-                    self.pio_in(port, &mut data, (io.size, io.count), hard, now)?;
-                    // SAFETY: as above; the handler does not run the vCPU.
-                    unsafe { out.get() }.copy_from_slice(&data);
+                    // SAFETY: no KVM_RUN since the exit (see `ExitData`); the
+                    // handler does not run the vCPU.
+                    let data = unsafe { out.get() };
+                    self.pio_in(port, data, (io.size, io.count), hard, now)?;
                     None
                 }
                 Exit::MmioRead(addr, mut out) => {
@@ -1931,7 +1942,11 @@ impl Machine {
                     self.record(b'r', addr);
                     None
                 }
-                Exit::MmioWrite(addr, data) => self.mmio_write(addr, &data, frames)?,
+                Exit::MmioWrite(addr, mut data) => {
+                    // SAFETY: as for `IoOut`.
+                    let data = unsafe { data.get() };
+                    self.mmio_write(addr, data, frames)?
+                }
                 Exit::Hlt => Some(self.halt(deferred, frames)?),
                 Exit::IrqWindowOpen => {
                     self.stats.window_exits += 1;
