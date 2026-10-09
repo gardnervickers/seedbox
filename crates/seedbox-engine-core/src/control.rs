@@ -271,6 +271,26 @@ impl Control {
                     connection: connection.clone(),
                 })
             }
+            Operation::Throttle {
+                target,
+                factor_permille,
+            } => {
+                if !seedbox_control::THROTTLE_PERMILLE.contains(factor_permille) {
+                    return Err("factor_permille must be in [1000, 1000000]".into());
+                }
+                let machine = self.target(target)?;
+                self.handles = self
+                    .handles
+                    .checked_add(1)
+                    .ok_or("fault handles exhausted")?;
+                let handle = format!("p{}", self.handles);
+                result = json!({"handle":handle});
+                Some(Action::Throttle {
+                    handle,
+                    machine,
+                    factor_permille: *factor_permille,
+                })
+            }
             Operation::Heal { handle } => {
                 if handle.is_empty() {
                     return Err("handle must be nonempty string".into());
@@ -483,6 +503,22 @@ impl Control {
                 p.effect = Some(p.admitted);
                 p.error = Some(message.into());
                 p.error_code = Some("target_unavailable");
+            }
+        }
+    }
+    /// Throttle only machines whose timebase charges CPU work by a speed.
+    pub fn reject_unthrottleable(&mut self, unsupported: &[String]) {
+        if let Some(p) = self.pending.as_mut() {
+            if !p.admitted_done
+                && p.plan.as_ref().is_some_and(|plan| {
+                    matches!(&plan.action, Action::Throttle { machine, .. } if unsupported.contains(machine))
+                })
+            {
+                p.plan = None;
+                p.effect = Some(p.admitted);
+                p.result = json!({});
+                p.error = Some("throttle needs the x86 pv timebase".into());
+                p.error_code = Some("unsupported");
             }
         }
     }

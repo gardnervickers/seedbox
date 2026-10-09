@@ -113,6 +113,16 @@ impl WorldMachine for Machine {
         self.syscall_ns = crate::machine::pv::syscall_ns(&mut Rng::new(seed, domain));
         Ok(())
     }
+    fn supports_throttle(&self) -> bool {
+        self.pv_clock
+    }
+    fn throttle(&mut self, factor_permille: u64) -> Result<(), String> {
+        if !self.pv_clock {
+            return Err("throttle needs the pv timebase".into());
+        }
+        self.throttle_permille = Some(factor_permille);
+        Ok(())
+    }
     fn branches(&self) -> u64 {
         self.branches
     }

@@ -9,7 +9,7 @@ import threading
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from seedbox import Controller, FaultError, Machine, Partition, ProtocolError, Shape, World
+from seedbox import Controller, FaultError, Machine, Partition, ProtocolError, Shape, Throttle, World
 
 
 def reply(request_id=1, result=None, **changes):
@@ -75,6 +75,24 @@ class ControlTests(unittest.TestCase):
                         with self.assertRaises(ValueError):
                             getattr(world, op)(target)
         self.assertEqual(peer.requests, [])
+
+    def test_throttle_sends_permille_and_heals_its_handle(self):
+        peer = Peer(reply(result={"handle": "p3"}) + reply(2))
+        with World(peer) as world:
+            slow = world.throttle("server", 2.5)
+            self.assertEqual(slow, Throttle("p3", slow.effect))
+            self.assertEqual(world.heal(slow).effect_at_ns, 30)
+        self.assertEqual(peer.requests, [
+            {"version": 1, "id": 1, "op": "throttle", "target": {"service": "server"},
+             "factor_permille": 2500},
+            {"version": 1, "id": 2, "op": "heal", "handle": "p3"}])
+        with World(Peer(b"")) as world:
+            for factor in (0.5, 1000.5, 1.0001, True, "x", float("inf")):
+                with self.subTest(factor=factor), self.assertRaises(ValueError):
+                    world.throttle("server", factor)
+        peer = Peer(reply(result={}))
+        with World(peer) as world, self.assertRaises(ProtocolError):
+            world.throttle(Machine("server-vm"), 1)
 
     def test_optional_response_details_do_not_relax_required_version(self):
         peer = Peer(reply(result={"now_ns": 30, "extra_result_detail": "opaque"},

@@ -24,6 +24,10 @@ with World.connect() as world:
     world.sleep(1)
     world.heal(overlap)
 
+    slow = world.throttle("server", 4)  # Slow but alive (x86 pv timebase).
+    world.sleep(1)
+    world.heal(slow)
+
     world.pause("server")   # Freeze its whole machine while others run.
     world.sleep(1)
     world.resume("server")
@@ -66,6 +70,12 @@ A partition dominates a shape, and in-flight decisions remain fixed. `Controller
 is also exported as an alias for `World`. `now_ns()` reads simulated time; `inspect()` returns
 topology, machine state, active handles and packet counters. Strings name services;
 use `Machine("prepared-name")` when explicitly targeting a machine.
+
+`throttle(target, factor)` returns a `Throttle` accepted by `heal`. Until
+healed, the machine's simulated CPU work costs `factor` times its seeded speed,
+so it keeps answering, slowly. It needs the x86 `pv` timebase; elsewhere it
+raises `FaultError` with code `unsupported`. See
+[slow machines](PROTOCOL.md#slow-machines).
 
 Whole-machine operations take effect at admission without a guest acknowledgement.
 Pause freezes CPU and devices; resume continues them with missed timer ticks

@@ -99,6 +99,7 @@ Common fields are `version: 1`, `id`, and `op`. Targets are typed objects:
 | `shape` | `from`, `to`: nonempty disjoint typed-target arrays; `latency_ns`, `jitter_ns`, `loss_ppm`: integers; optional `bandwidth_bps`, `queue_bound_ns`, `network_faults` below | `{"handle":"opaque value"}` |
 | `connections` | `from`, `to`: distinct typed targets; `after`: optional unsigned incarnation cursor (default 0) | `connections`: up to 32 directional records; `next_after`: last returned incarnation (or input cursor) |
 | `drop_connection` | `connection`: one exact discovery record | `{"handle":"opaque value"}` after arming selected loss |
+| `throttle` | `target`: a typed target; `factor_permille`: integer in `[1000, 1000000]` | `{"handle":"opaque value"}` |
 | `heal` | `handle`: a previously returned handle | `{}` for a plain link or partition; `queue_counts` for bandwidth; `network_fault_counts` for impairments; `{"matched": N, "dropped": N}` for a connection handle |
 | `inspect` | None | `services`, `machines`, `active_handles`, `network_counters`; `triggers` only after an arm |
 | `arm_trigger` | `source`: typed target; `marker`: 1..=256 byte integers; `match_timeout_ns`: positive u64; `fault`: typed trigger fault below | `{"trigger_id": N}`; also `handle` for a partition |
@@ -286,6 +287,30 @@ fault must require `dropped > 0`. `matched` includes packets masked by a partiti
 `dropped` excludes them. Overlapping connection handles each count their matched
 drops, and healing one leaves others active. A stale active handle never follows
 a reused tuple; it remains healable with its accumulated evidence.
+
+### Slow machines
+
+`throttle` makes a machine slow but alive: until its handle is healed, the
+machine's simulated CPU work costs `factor_permille / 1000` times its seeded
+speed. It takes effect at admission and shares the fault handle counter;
+`heal` restores the seeded speed and returns `{}`. Only the x86 `pv` timebase
+supports it: there each syscall is charged the machine's `syscall_ns`, already
+drawn per machine from `pv-speed/<machine>` within 10% of 1000 ns, and the
+throttle multiplies that drawn value (rounding up). The draw itself is
+unchanged and the throttle adds no RNG draws. The counter timebase and ARM
+return `unsupported` without a fault.
+
+A machine has at most one active throttle; a second returns `invalid_state`.
+A throttle survives machine pause, and a crashed machine's next incarnation
+boots throttled while the handle is active. The guest's PV clock page keeps the
+cost its current timer arm was planned with, so a throttle or heal starts
+charging at the machine's next legal plan rather than mid-arm. The factor and
+handle are fault plan entries in the retained evidence, so replay restores them.
+The Python API is `slow = world.throttle("server", 4)` (factors from 1 to 1000
+in steps of 0.001) and `world.heal(slow)`.
+`harness/acceptance/workloads/slow-machine.yaml` (run with `--timebase pv`)
+checks that a fixed amount of syscall work takes about four times as long while
+throttled and returns to its earlier duration after the heal.
 
 See [connection classification](../docs/runtime.md#connection-selectors) for TCP
 lifecycle, bounded eviction, unsupported traffic and send-time semantics.
