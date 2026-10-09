@@ -1095,6 +1095,24 @@ fn report(
                 mach.page_hashes(),
             )
             .map_err(|e| e.to_string())?;
+            // DIAGNOSTIC (fable/ram-page-diag, never for merge): a sparse raw
+            // copy of guest RAM next to the page hashes, zero pages skipped.
+            {
+                use std::io::{Seek, SeekFrom, Write};
+                let name = mach.world.name.clone();
+                let memory = mach.memory();
+                let mut file = std::fs::File::create(format!("{out}/{name}.ram"))
+                    .map_err(|e| e.to_string())?;
+                file.set_len(memory.len() as u64)
+                    .map_err(|e| e.to_string())?;
+                for (i, page) in memory.chunks(4096).enumerate() {
+                    if page.iter().any(|b| *b != 0) {
+                        file.seek(SeekFrom::Start((i * 4096) as u64))
+                            .map_err(|e| e.to_string())?;
+                        file.write_all(page).map_err(|e| e.to_string())?;
+                    }
+                }
+            }
             let parts: serde_json::Map<String, Value> = parts
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), json!(v)))
