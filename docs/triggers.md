@@ -6,8 +6,6 @@ reaches this stream through the ordinary supervisor. Markers are opaque bytes;
 no log JSON, protocol decoding, packet counts, host log tailing or application
 commit inference is involved. COM2 and virtio management traffic are excluded.
 Network/control event selectors and connection-selected triggers are deferred.
-This changes the engine. Use `--allow-dev-engine`; the release policy and kernel
-pins have not changed. These controls do not qualify this development engine.
 
 `World.arm_console_stop(source, marker, target, match_timeout=seconds)` and
 `World.arm_console_partition(source, marker, left, right, match_timeout=seconds)`
