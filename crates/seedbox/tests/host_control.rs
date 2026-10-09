@@ -1,5 +1,4 @@
 // Exercise the actual slice-boundary gate on Darwin as well as Linux.
-#[rustfmt::skip]
 #[path = "../../seedbox-vmm/src/host_control.rs"]
 mod engine;
 
