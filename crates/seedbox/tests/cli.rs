@@ -70,6 +70,14 @@ fn mac_explore_rejects_multiple_workers_before_state_or_runtime_setup() {
         "error: --workers: Mac exploration supports one worker; use --workers 1 or omit it\n"
     );
     assert!(!project.join(".seedbox").exists());
+
+    let output = seedbox_with(&["explore", "--fork"], &project, None);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        "error: --fork requires Linux KVM; omit it on Mac\n"
+    );
+    assert!(!project.join(".seedbox").exists());
 }
 
 #[test]
@@ -598,6 +606,7 @@ fn explore_bounds_and_help_are_public_before_runtime_inputs_or_state() {
             && text.contains("Exit status:")
     );
     assert!(text.contains("--workers"));
+    assert!(text.contains("--fork") && text.contains("launch barrier"));
     fs::write(project.join("compose.yaml"),"services:\n  a: {image: example/a}\nx-seedbox:\n  version: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: a}\n").unwrap();
     let missing = seedbox(&["explore"], &project);
     assert_eq!(

@@ -1069,6 +1069,27 @@ fails. A backend that cannot complete owned cleanup prevents a prompt return; no
 unrelated process or service is stopped. Cancellation races may leave an already
 finished PASS/FAIL beside cancelled INCOMPLETE attempts and undispatched seeds.
 
+### Forking each seed from one boot
+
+`explore --fork` (Linux KVM) records `boot_seed` = FIRST in every attempt's
+semantic profile. Each attempt then boots every machine under the boot seed,
+parks it at its launch barrier and releases its own seed from there, with the
+start stagger as the release skew (see [seed diversity
+defaults](#seed-diversity-defaults)). Because every attempt boots the same
+world, a worker runs a batch of consecutive seeds in one engine process: it
+boots once, keeps the world at the barrier and restores it before each later
+seed (the engine's `--fork-seeds`). A batch is `ceil(COUNT / WORKERS)` seeds, at
+most 64; `fork_batch` and `boot_seed` in `exploration.json` record both, and
+`peak_running` counts busy workers rather than seeds. Each seed still gets its
+own run directory, logs and manifest, with `output/fork.json` naming its batch,
+and `seedbox replay` of any attempt boots under the recorded boot seed alone
+and must MATCH. Batching and `--workers` never change a seed's result. What no
+longer varies by seed is everything before the barrier: kernel boot,
+supervisor setup and boot-time kernel randomness; each seed reseeds the
+kernel CRNG at its release. A batch shares one wall-time budget of
+`limits.wall_time` times its seed count, and an engine failure in a batch
+fails all of its seeds. Without `--fork`, explore is unchanged.
+
 Preparation diagnostics belong to the caller, surviving preparer/scratch destruction.
 Raw phase output is capped at 4 MiB per file and 64 MiB total. Bounded prefixes are retained
 while the rest is drained, with exact observed omission counts/reasons. An output

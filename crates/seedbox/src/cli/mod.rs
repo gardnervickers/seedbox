@@ -146,6 +146,9 @@ enum Command {
         /// Maximum active attempts; Mac supports only 1. Omit --cpu for Linux parallel execution.
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=32))]
         workers: u32,
+        /// Boot every seed under the first seed, park it at the launch barrier and fork each seed from there, one boot per worker batch (Linux KVM).
+        #[arg(long)]
+        fork: bool,
         /// Print exactly one exploration report as JSON.
         #[arg(long)]
         json: bool,
@@ -1017,6 +1020,7 @@ fn run(cli: Cli) -> Result<u8> {
             seed,
             count,
             workers,
+            fork,
             json,
             cpu,
             state,
@@ -1034,9 +1038,16 @@ fn run(cli: Cli) -> Result<u8> {
                 seed,
                 count,
                 workers,
+                fork,
                 cancellation: cancellation.clone(),
             };
-            exploration::bounds(&simulation, &options)?;
+            let (first, _) = exploration::bounds(&simulation, &options)?;
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            if fork {
+                return Err(Error::Setup(
+                    "--fork requires Linux KVM; omit it on Mac".into(),
+                ));
+            }
             if workers > 1 && cpu.cpu.is_some() {
                 return Err(Error::Setup("--workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU".into()));
             }
@@ -1073,6 +1084,11 @@ fn run(cli: Cli) -> Result<u8> {
                     .map(Into::into)
                     .unwrap_or(Timebase::Counter),
             )?;
+            let executor = if fork {
+                executor.with_boot_seed(first)?
+            } else {
+                executor
+            };
             preparer.profile = executor.profile();
             let executor = performance.apply(executor)?;
             // Exploration retains any backend admission refusal in its batch checkpoint.
@@ -1084,6 +1100,9 @@ fn run(cli: Cli) -> Result<u8> {
                 println!("{}: {}", word(&result.outcome), result.directory.display());
                 println!("seeds: {}..={}", result.first_seed, result.last_seed);
                 println!("workers: {}", result.workers);
+                if let Some(seed) = result.boot_seed {
+                    println!("boot-seed: {seed}");
+                }
                 println!("peak-running: {}", result.peak_running);
                 println!(
                     "active-attempt-seconds: {:.3}",

@@ -150,6 +150,34 @@ fn start_stagger_parks_at_the_launch_barrier_under_the_run_seed() {
 }
 
 #[test]
+fn recorded_boot_seed_boots_every_seed_under_it() {
+    fixture(|base| {
+        let mut prepared = base.prepared.clone();
+        prepared
+            .profile
+            .semantic_parameters
+            .insert("boot_seed".into(), "7".into());
+        let request = ExecutionRequest {
+            prepared: &prepared,
+            ..*base
+        };
+        // Without a stagger every seed is released at the latest barrier time.
+        assert_eq!(
+            vmm::world(&request).unwrap()["boot"],
+            json!({"seed": 7, "release_skew_ns": 0})
+        );
+        assert_eq!(vmm::recorded_boot_seed(&prepared.profile).unwrap(), Some(7));
+        for invalid in ["", "07", "-1", "x"] {
+            prepared
+                .profile
+                .semantic_parameters
+                .insert("boot_seed".into(), invalid.into());
+            assert!(vmm::recorded_boot_seed(&prepared.profile).is_err());
+        }
+    });
+}
+
+#[test]
 fn current_parts_accept_text_events_and_validate_digests() {
     fixture(|request| {
         let mut raw = report();

@@ -31,6 +31,15 @@ impl Executor {
             )),
         }
     }
+    pub fn with_boot_seed(self, seed: u64) -> Result<Self> {
+        match self {
+            Self::Linux(executor) => Ok(Self::Linux(executor.with_boot_seed(seed))),
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            Self::Mac(_) => Err(seedbox::Error::Setup(
+                "--fork requires Linux KVM; omit it on Mac".into(),
+            )),
+        }
+    }
     pub fn performance(self, margin: &str, undo: u64) -> Result<Self> {
         match self {
             Self::Linux(e) => Ok(Self::Linux(e.with_margin(margin)?.with_undo(undo)?)),
@@ -73,6 +82,21 @@ impl ExecutionBackend for Executor {
             }
         );
         self.backend().execute(request)
+    }
+    fn execute_forked(&self, requests: Vec<ExecutionRequest<'_>>) -> Vec<Result<ExecutionReport>> {
+        if let Some(request) = requests.first() {
+            eprintln!(
+                "running: starting {} machines through {} for {} seeds",
+                request.prepared.guests.len(),
+                if cfg!(target_os = "macos") {
+                    "HVF"
+                } else {
+                    "KVM"
+                },
+                requests.len()
+            );
+        }
+        self.backend().execute_forked(requests)
     }
 }
 

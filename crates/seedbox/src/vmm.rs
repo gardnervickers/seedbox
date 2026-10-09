@@ -429,6 +429,16 @@ impl VmmExecutor {
         self
     }
 
+    /// Boot every attempt under `seed` and fork it at the launch barrier, so
+    /// seeds sharing a boot seed can run from one boot. Recorded in each run's
+    /// profile, so replay boots the same way without an override.
+    pub fn with_boot_seed(mut self, seed: u64) -> Self {
+        self.profile
+            .semantic_parameters
+            .insert(BOOT_SEED.into(), seed.to_string());
+        self
+    }
+
     /// Reconstruct checkpoint settings from retained inputs during replay.
     pub fn with_recorded_checkpoint(self, profile: &ExecutionProfile) -> Result<Self> {
         Ok(match recorded_checkpoint(profile)? {
@@ -501,6 +511,23 @@ pub fn recorded_checkpoint(profile: &ExecutionProfile) -> Result<Option<(u64, u6
             "incomplete checkpoint semantic parameters".into(),
         )),
     }
+}
+
+const BOOT_SEED: &str = "boot_seed";
+
+/// The boot seed of a forked exploration attempt, if any.
+pub fn recorded_boot_seed(profile: &ExecutionProfile) -> Result<Option<u64>> {
+    profile
+        .semantic_parameters
+        .get(BOOT_SEED)
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .ok()
+                .filter(|seed| &seed.to_string() == value)
+                .ok_or_else(|| Error::Integrity("invalid boot_seed semantic parameter".into()))
+        })
+        .transpose()
 }
 
 const COUNTER: &str = "counter";
@@ -707,6 +734,35 @@ impl ExecutionBackend for VmmExecutor {
     fn performance_parameters(&self) -> BTreeMap<String, String> {
         self.performance.clone()
     }
+    fn execute_forked(&self, requests: Vec<ExecutionRequest<'_>>) -> Vec<Result<ExecutionReport>> {
+        // Only a recorded boot seed makes a lone run of each seed boot the
+        // same world, so only then may the seeds share one boot.
+        let shared = requests.len() > 1
+            && recorded_boot_seed(&self.profile).is_ok_and(|seed| seed.is_some());
+        if !shared {
+            return requests
+                .into_iter()
+                .map(|request| self.execute(request))
+                .collect();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            linux::execute_forked(self, &requests).unwrap_or_else(|error| {
+                let error = error.to_string();
+                requests
+                    .iter()
+                    .map(|_| Err(Error::Execution(error.clone())))
+                    .collect()
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            requests
+                .into_iter()
+                .map(|request| self.execute(request))
+                .collect()
+        }
+    }
     fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
         #[cfg(target_os = "linux")]
         {
@@ -848,9 +904,12 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
     // A start stagger boots every machine under the run seed, parks it at its
     // launch barrier and releases each one up to the stagger later, drawn
     // from its release/<machine> stream. Zero keeps the unparked cold run.
-    if request.schedule.start_stagger_ns > 0 {
+    // A forked exploration attempt boots under its recorded boot seed
+    // instead, so every attempt shares the world at the barrier.
+    let boot_seed = recorded_boot_seed(&request.prepared.profile)?;
+    if boot_seed.is_some() || request.schedule.start_stagger_ns > 0 {
         world["boot"] = json!({
-            "seed": request.seed,
+            "seed": boot_seed.unwrap_or(request.seed),
             "release_skew_ns": request.schedule.start_stagger_ns,
         });
     }
@@ -1871,6 +1930,105 @@ mod linux {
         backend: &VmmExecutor,
         request: ExecutionRequest<'_>,
     ) -> Result<ExecutionReport> {
+        run_worker(
+            backend,
+            &request,
+            &[],
+            request.limits.wall_time_ns,
+            |bytes| report(bytes, &request),
+            |stopped| stopped,
+        )
+    }
+
+    /// Boot once under the recorded boot seed and release each request's seed
+    /// from the barrier in one worker. The engine writes each seed's output
+    /// under `seed-N/`; each moves to its own request's output, with its own
+    /// report, so every attempt retains and replays like a lone run.
+    pub(super) fn execute_forked(
+        backend: &VmmExecutor,
+        requests: &[ExecutionRequest<'_>],
+    ) -> Result<Vec<Result<ExecutionReport>>> {
+        let (primary, rest) = requests
+            .split_first()
+            .ok_or_else(|| Error::Execution("empty forked execution".into()))?;
+        for request in rest {
+            backend.validate_retained(request.prepared)?;
+            backend.preflight(Some(request.output))?;
+            if request.prepared.profile != backend.profile {
+                return Err(Error::Integrity("execution profile mismatch".into()));
+            }
+            fs::write(
+                request.output.join("world.json"),
+                serde_json::to_vec_pretty(&world(request)?)?,
+            )?;
+        }
+        let seeds: Vec<u64> = rest.iter().map(|request| request.seed).collect();
+        let wall_time_ns = primary
+            .limits
+            .wall_time_ns
+            .saturating_mul(requests.len() as u64);
+        run_worker(
+            backend,
+            primary,
+            &seeds,
+            wall_time_ns,
+            |bytes| split_forked(bytes, requests),
+            |stopped| requests.iter().map(|_| Ok(stopped.clone())).collect(),
+        )
+    }
+
+    /// Move each seed's engine output to its own request and check its report.
+    fn split_forked(
+        bytes: &[u8],
+        requests: &[ExecutionRequest<'_>],
+    ) -> Result<Vec<Result<ExecutionReport>>> {
+        let batch: Value = serde_json::from_slice(bytes)?;
+        let reports = batch["seeds"]
+            .as_array()
+            .filter(|reports| reports.len() == requests.len())
+            .ok_or_else(|| {
+                Error::Integrity("forked VMM report lacks one report per seed".into())
+            })?;
+        let primary = requests[0].output;
+        let booted = primary.join("fork-boot");
+        fs::rename(primary.join(MACHINE_OUTPUT_DIR), &booted)?;
+        let stderr = primary.join("vmm.stderr");
+        let mut results = Vec::new();
+        for (index, (request, raw)) in requests.iter().zip(reports).enumerate() {
+            results.push((|| {
+                fs::rename(
+                    booted.join(format!("seed-{}", request.seed)),
+                    request.output.join(MACHINE_OUTPUT_DIR),
+                )?;
+                let bytes = serde_json::to_vec_pretty(raw)?;
+                fs::write(request.output.join("vmm.json"), &bytes)?;
+                if index > 0 {
+                    fs::copy(&stderr, request.output.join("vmm.stderr"))?;
+                }
+                fs::write(
+                    request.output.join("fork.json"),
+                    serde_json::to_vec_pretty(&json!({
+                        "boot": batch["boot"], "index": index,
+                        "seeds": requests.iter().map(|r| r.seed).collect::<Vec<_>>(),
+                    }))?,
+                )?;
+                report(&bytes, request)
+            })());
+        }
+        // What remains is the boot's own console prefix, which every seed's
+        // console already starts with.
+        fs::remove_dir_all(&booted)?;
+        Ok(results)
+    }
+
+    fn run_worker<T>(
+        backend: &VmmExecutor,
+        request: &ExecutionRequest<'_>,
+        fork_seeds: &[u64],
+        wall_time_ns: u64,
+        parse: impl FnOnce(&[u8]) -> Result<T>,
+        stopped: impl FnOnce(ExecutionReport) -> T,
+    ) -> Result<T> {
         backend.validate_retained(request.prepared)?;
         backend.preflight(Some(request.output))?;
         if request.prepared.profile != backend.profile {
@@ -1884,15 +2042,19 @@ mod linux {
         }
         let timebase = recorded_timebase(&backend.profile)?;
         use crate::worker_process::{incomplete, WorkerLaunch};
-        let mut launch = WorkerLaunch::prepare(&request)?;
+        let mut launch = WorkerLaunch::prepare(request)?;
         // Performance values are explicit; hidden process settings stay cleared.
         launch.command.envs(request.performance_parameters);
+        if !fork_seeds.is_empty() {
+            let seeds: Vec<String> = fork_seeds.iter().map(u64::to_string).collect();
+            launch.command.arg("--fork-seeds").arg(seeds.join(","));
+        }
 
         if request.cancellation.is_cancelled() {
-            return Ok(incomplete(
+            return Ok(stopped(incomplete(
                 StopReason::Cancelled,
                 recorded_timebase(&backend.profile)?,
-            ));
+            )));
         }
         let static_evidence = backend
             .admission
@@ -1953,9 +2115,7 @@ mod linux {
         // Declared after the lease: every error path finishes process cleanup
         // before releasing the leased CPU or restoring MSRs.
         let child = launch.spawn()?;
-        let completion = child.wait(request.cancellation, request.limits.wall_time_ns, |bytes| {
-            report(bytes, &request)
-        });
+        let completion = child.wait(request.cancellation, wall_time_ns, parse, stopped);
         lease.restore()?;
         if workaround.is_some() {
             fs::write(
@@ -1964,6 +2124,116 @@ mod linux {
             )?;
         }
         completion
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::config::{Check, Limits, Network, Schedule};
+
+        #[test]
+        fn forked_output_moves_to_each_seed_with_its_own_report() {
+            let digest = ContentDigest::of(b"retained input");
+            let prepared = PreparedInputs {
+                wall_clock_epoch: None,
+                kernel: digest.clone(),
+                images: BTreeMap::new(),
+                placement: BTreeMap::from([("client".into(), "client".into())]),
+                guests: BTreeMap::from([("client".into(), digest.clone())]),
+                profile: ExecutionProfile {
+                    backend: "seedbox-kvm".into(),
+                    engine: digest.clone(),
+                    witness_mode: WitnessMode::Exits,
+                    semantic_parameters: BTreeMap::from([
+                        ("memory_mb".into(), "512".into()),
+                        ("boot_seed".into(), "10".into()),
+                    ]),
+                },
+                auxiliary: BTreeMap::new(),
+                provenance: BTreeMap::new(),
+            };
+            let limits = Limits {
+                simulated_time_ns: 1_000_000_000,
+                wall_time_ns: 5_000_000_000,
+            };
+            let network = Network {
+                links: vec![],
+                name: "private".into(),
+                latency_ns: 100_000,
+                jitter_ns: 0,
+                bandwidth_bps: None,
+                queue_bound_ns: None,
+            };
+            let schedule = Schedule::default();
+            let check = Check {
+                service: "client".into(),
+                exit_code: 0,
+            };
+            let artifacts = BTreeMap::new();
+            let cancellation = CancellationToken::default();
+            let performance = BTreeMap::new();
+            let outputs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+            let requests: Vec<_> = [10, 11]
+                .into_iter()
+                .zip(&outputs)
+                .map(|(seed, output)| ExecutionRequest {
+                    seed,
+                    limits: &limits,
+                    network: &network,
+                    schedule: &schedule,
+                    control: None,
+                    check: &check,
+                    prepared: &prepared,
+                    artifacts: &artifacts,
+                    output: output.path(),
+                    cancellation: &cancellation,
+                    performance_parameters: &performance,
+                })
+                .collect();
+            let engine = outputs[0].path().join(MACHINE_OUTPUT_DIR);
+            for seed in [10, 11] {
+                fs::create_dir_all(engine.join(format!("seed-{seed}"))).unwrap();
+                fs::write(
+                    engine.join(format!("seed-{seed}/client.console")),
+                    format!("seed {seed}"),
+                )
+                .unwrap();
+            }
+            fs::write(engine.join("client.console"), "boot").unwrap();
+            fs::write(outputs[0].path().join("vmm.stderr"), "diagnostic").unwrap();
+            let report = |seed: u64| {
+                let witness = ContentDigest::of(&seed.to_le_bytes());
+                json!({"report_version":1,"seed":seed,"outcome":"end_machine_exited","world_witness":witness,
+                    "machines":[{"name":"client","guest_exit_code":0,"guest_init_error":null,"infrastructure_error":false}]})
+            };
+            let batch =
+                json!({"report_version":1,"boot":{"seed":10},"seeds":[report(10), report(11)]});
+            let results = split_forked(&serde_json::to_vec(&batch).unwrap(), &requests).unwrap();
+            for ((seed, output), result) in [10_u64, 11].iter().zip(&outputs).zip(results) {
+                let result = result.unwrap();
+                assert_eq!(result.witness, Some(ContentDigest::of(&seed.to_le_bytes())));
+                let path = output.path();
+                assert_eq!(
+                    fs::read_to_string(path.join(MACHINE_OUTPUT_DIR).join("client.console"))
+                        .unwrap(),
+                    format!("seed {seed}")
+                );
+                let retained: Value =
+                    serde_json::from_slice(&fs::read(path.join("vmm.json")).unwrap()).unwrap();
+                assert_eq!(retained["seed"], *seed);
+                assert_eq!(
+                    fs::read_to_string(path.join("vmm.stderr")).unwrap(),
+                    "diagnostic"
+                );
+                let fork: Value =
+                    serde_json::from_slice(&fs::read(path.join("fork.json")).unwrap()).unwrap();
+                assert_eq!(fork["seeds"], json!([10, 11]));
+            }
+            assert!(!outputs[0].path().join("fork-boot").exists());
+            // A report per seed is required.
+            let short = json!({"report_version":1,"seeds":[report(10)]});
+            assert!(split_forked(&serde_json::to_vec(&short).unwrap(), &requests).is_err());
+        }
     }
 }
 

@@ -259,6 +259,7 @@ impl ExecutionBackend for MacExecutor {
             request.cancellation,
             request.limits.wall_time_ns,
             |bytes| crate::vmm::report_hvf(bytes, &request),
+            |stopped| stopped,
         )
     }
 }

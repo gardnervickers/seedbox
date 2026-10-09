@@ -223,6 +223,8 @@ then executes a finite consecutive seed sequence with one worker by default.
 (omit `--cpu` and `SEEDBOX_CPU`); all N eligible physical cores and siblings must be
 available and admitted before preparation. Admission refusal
 retains batch ERROR without preparation or seed dispatch; each seed rechecks its host.
+`--fork` (Linux KVM) boots once per worker batch and forks each seed from the
+launch barrier; each seed still retains its own run and replays alone.
 Each run retains its ordinary manifest and replay inputs under the printed batch
 path. FAIL and witnessed simulated TIMEOUT continue; infrastructure errors and
 cancellation stop. Count defaults to 1 and seed to the Compose seed. `--json` prints

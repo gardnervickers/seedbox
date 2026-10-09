@@ -194,6 +194,16 @@ pub trait ExecutionBackend: Send + Sync {
         BTreeMap::new()
     }
     fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport>;
+    /// Execute requests that differ only in seed and output, in order, with
+    /// one result per request. A backend that records a shared boot may boot
+    /// once and fork each seed from it; every result must equal executing that
+    /// request alone. The default executes them one at a time.
+    fn execute_forked(&self, requests: Vec<ExecutionRequest<'_>>) -> Vec<Result<ExecutionReport>> {
+        requests
+            .into_iter()
+            .map(|request| self.execute(request))
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

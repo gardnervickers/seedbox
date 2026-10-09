@@ -222,15 +222,18 @@ pub(crate) struct RunningWorker {
 }
 
 impl RunningWorker {
-    pub(crate) fn wait(
+    /// `parse_report` reads a finished worker's report; `stopped` turns the
+    /// cancellation or wall-time report into the same result type.
+    pub(crate) fn wait<T>(
         mut self,
         cancellation: &CancellationToken,
         wall_time_ns: u64,
-        parse_report: impl FnOnce(&[u8]) -> Result<ExecutionReport>,
-    ) -> Result<ExecutionReport> {
+        parse_report: impl FnOnce(&[u8]) -> Result<T>,
+        stopped: impl FnOnce(ExecutionReport) -> T,
+    ) -> Result<T> {
         let completion = (|| loop {
             if cancellation.is_cancelled() {
-                return Ok(incomplete(StopReason::Cancelled, self.timebase));
+                return Ok(stopped(incomplete(StopReason::Cancelled, self.timebase)));
             }
             if let Some(success) = self.process.exited()? {
                 return if success {
@@ -240,7 +243,10 @@ impl RunningWorker {
                 };
             }
             if self.started.elapsed() >= Duration::from_nanos(wall_time_ns) {
-                return Ok(incomplete(StopReason::WallTimeLimit, self.timebase));
+                return Ok(stopped(incomplete(
+                    StopReason::WallTimeLimit,
+                    self.timebase,
+                )));
             }
             std::thread::sleep(Duration::from_millis(10));
         })();
@@ -603,9 +609,14 @@ mod tests {
                 token.cancel();
             }
             let report = child
-                .wait(&token, 1, |_| {
-                    panic!("unfinished worker report must not be read")
-                })
+                .wait(
+                    &token,
+                    1,
+                    |_| -> Result<ExecutionReport> {
+                        panic!("unfinished worker report must not be read")
+                    },
+                    |stopped| stopped,
+                )
                 .unwrap();
             assert_eq!(
                 report.reason,
@@ -636,9 +647,14 @@ mod tests {
                 drop(child);
             } else {
                 let error = child
-                    .wait(&CancellationToken::default(), 5_000_000_000, |_| {
-                        Err(Error::Integrity("invalid test report".into()))
-                    })
+                    .wait(
+                        &CancellationToken::default(),
+                        5_000_000_000,
+                        |_| -> Result<ExecutionReport> {
+                            Err(Error::Integrity("invalid test report".into()))
+                        },
+                        |stopped| stopped,
+                    )
                     .unwrap_err();
                 assert!(error.to_string().contains("invalid test report"));
             }

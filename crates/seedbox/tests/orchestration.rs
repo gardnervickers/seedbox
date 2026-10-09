@@ -1046,6 +1046,7 @@ fn exploration_bounds_fail_before_state_and_huge_count_is_lazy() {
                 seed: Some(0),
                 count: u64::MAX,
                 workers: 1,
+                fork: false,
                 cancellation: token,
             },
             &fixture.preparer,
@@ -1838,6 +1839,7 @@ fn parallel_cleanup_uncertainty_cancels_owned_sibling_without_dispatching_pendin
                         seed: Some(10),
                         count: 5,
                         workers: 2,
+                        fork: false,
                         cancellation: caller.clone(),
                     },
                     &fixture.preparer,
@@ -1895,6 +1897,7 @@ fn parallel_staggered_external_cancellation_keeps_completed_running_and_pending_
                         seed: Some(10),
                         count: 6,
                         workers: 2,
+                        fork: false,
                         cancellation: caller.clone(),
                     },
                     &fixture.preparer,
@@ -2444,4 +2447,115 @@ fn deferred_tx_is_semantic_only_when_on_and_replay_cannot_switch_modes() {
         }
     }
     assert_ne!(ids[0], ids[1]);
+}
+
+/// Records which seeds each backend call received; `short` drops the last
+/// result of a forked call.
+struct Forking<'a> {
+    inner: &'a Backend,
+    batches: std::sync::Mutex<Vec<Vec<u64>>>,
+    short: bool,
+}
+impl ExecutionBackend for Forking<'_> {
+    fn preflight_workers(&self, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn profile(&self) -> ExecutionProfile {
+        self.inner.profile()
+    }
+    fn performance_parameters(&self) -> BTreeMap<String, String> {
+        self.inner.performance_parameters()
+    }
+    fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
+        self.batches.lock().unwrap().push(vec![request.seed]);
+        self.inner.execute(request)
+    }
+    fn execute_forked(&self, requests: Vec<ExecutionRequest<'_>>) -> Vec<Result<ExecutionReport>> {
+        self.batches
+            .lock()
+            .unwrap()
+            .push(requests.iter().map(|r| r.seed).collect());
+        let mut results: Vec<_> = requests
+            .into_iter()
+            .map(|request| self.inner.execute(request))
+            .collect();
+        if self.short {
+            results.pop();
+        }
+        results
+    }
+}
+
+fn explore_forking(
+    fixture: &Fixture,
+    fork: bool,
+    workers: u32,
+    short: bool,
+) -> (seedbox::exploration::Exploration, Vec<Vec<u64>>) {
+    let backend = Forking {
+        inner: &fixture.backend,
+        batches: Default::default(),
+        short,
+    };
+    let batch = fixture
+        .orchestrator
+        .explore(
+            &fixture.simulation,
+            seedbox::exploration::ExploreOptions {
+                seed: Some(10),
+                count: 5,
+                workers,
+                fork,
+                ..Default::default()
+            },
+            &fixture.preparer,
+            &backend,
+        )
+        .unwrap();
+    let mut batches = backend.batches.into_inner().unwrap();
+    batches.sort();
+    (batch, batches)
+}
+
+#[test]
+fn fork_hands_each_worker_consecutive_seeds_without_changing_any_result() {
+    let fixture = worker_fixture();
+    let (forked, batches) = explore_forking(&fixture, true, 2, false);
+    assert_eq!(batches, vec![vec![10, 11, 12], vec![13, 14]]);
+    assert_eq!(forked.fork_batch, Some(3));
+    assert!(forked.peak_running <= 2);
+    assert_eq!(forked.counts.pass, 5);
+    let (serial, singles) = explore_forking(&fixture, false, 1, false);
+    assert_eq!(singles, (10..15).map(|seed| vec![seed]).collect::<Vec<_>>());
+    assert_eq!(serial.fork_batch, None);
+    assert!(serde_json::to_value(&serial)
+        .unwrap()
+        .get("fork_batch")
+        .is_none());
+    for (a, b) in forked.attempts.iter().zip(&serial.attempts) {
+        assert_eq!((a.index, a.seed), (b.index, b.seed));
+        let forked = inspect(a.directory.as_ref().unwrap()).unwrap();
+        let serial = inspect(b.directory.as_ref().unwrap()).unwrap();
+        assert_ne!(forked.attempt, serial.attempt);
+        assert_eq!(forked.identity, serial.identity);
+        assert_eq!(forked.run_id, serial.run_id);
+        assert_eq!(forked.report, serial.report);
+        assert_eq!(forked.outcome, serial.outcome);
+        assert_eq!(forked.logs, serial.logs);
+    }
+}
+
+#[test]
+fn fork_attempt_without_a_backend_result_is_an_error() {
+    let fixture = worker_fixture();
+    let (batch, _) = explore_forking(&fixture, true, 1, true);
+    // The first batch loses its last result, which stops the exploration.
+    assert_eq!(batch.counts.pass, 4);
+    assert_eq!(batch.counts.error, 1);
+    assert!(batch.attempts[4]
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("too few forked results"));
+    assert_eq!(batch.outcome, Outcome::Error);
 }

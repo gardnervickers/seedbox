@@ -24,6 +24,10 @@ pub struct ExploreOptions {
     pub count: u64,
     /// Maximum active attempts; concurrency is excluded from run identity.
     pub workers: u32,
+    /// Hand each worker consecutive seeds in one batch, so a backend that
+    /// records a boot seed boots once per batch and forks each seed from it.
+    /// Batching never changes a seed's result.
+    pub fork: bool,
     pub cancellation: CancellationToken,
 }
 impl Default for ExploreOptions {
@@ -32,10 +36,14 @@ impl Default for ExploreOptions {
             seed: None,
             count: 1,
             workers: 1,
+            fork: false,
             cancellation: CancellationToken::default(),
         }
     }
 }
+
+/// The most seeds one boot serves, so progress stays visible on long batches.
+pub const MAX_FORK_BATCH: u64 = 64;
 /// Resolve inclusive bounds before any preparation, state creation or lease.
 pub fn bounds(simulation: &Simulation, options: &ExploreOptions) -> Result<(u64, u64)> {
     if !(1..=32).contains(&options.workers) {
@@ -106,6 +114,13 @@ pub struct Exploration {
     pub last_seed: u64,
     pub count: u64,
     pub workers: u32,
+    /// The recorded boot seed every attempt forks from, when exploring with fork.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_seed: Option<u64>,
+    /// Seeds handed to one worker at a time; each batch shares one boot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_batch: Option<u64>,
+    /// Peak busy workers. A batch counts once, since its seeds run in turn.
     pub peak_running: u32,
     /// Sum of whole attempt wall durations, including admission/materialization.
     /// This is not a measurement of physical-core lease time or CPU time.
@@ -173,6 +188,8 @@ impl Orchestrator {
             last_seed: last,
             count: options.count,
             workers: options.workers,
+            boot_seed: None,
+            fork_batch: None,
             peak_running: 0,
             active_attempt_seconds: 0.0,
             configuration: simulation.clone(),
@@ -231,13 +248,25 @@ impl Orchestrator {
                 self.0.cancel();
             }
         }
-        let workers = u64::from(options.workers).min(options.count) as usize;
+        let batch_size = if options.fork {
+            options
+                .count
+                .div_ceil(u64::from(options.workers))
+                .clamp(1, MAX_FORK_BATCH)
+        } else {
+            1
+        };
+        if options.fork {
+            batch.boot_seed = crate::vmm::recorded_boot_seed(&profile)?;
+            batch.fork_batch = Some(batch_size);
+        }
+        let workers = u64::from(options.workers).min(options.count.div_ceil(batch_size)) as usize;
         std::thread::scope(|scope| -> Result<()> {
             let _cleanup = CancelOnExit(cancellation.clone());
             let (completed, results) = mpsc::channel();
             let mut dispatch = Vec::new();
             for worker in 0..workers {
-                let (sender, jobs) = mpsc::channel::<(usize, u64, PathBuf)>();
+                let (sender, jobs) = mpsc::channel::<Vec<(usize, u64, PathBuf)>>();
                 dispatch.push(sender);
                 let completed = completed.clone();
                 let cancellation = cancellation.clone();
@@ -245,39 +274,68 @@ impl Orchestrator {
                 let performance = &performance;
                 std::thread::Builder::new()
                     .spawn_scoped(scope, move || {
-                        while let Ok((index, seed, subtree)) = jobs.recv() {
+                        while let Ok(jobs) = jobs.recv() {
                             let at = Instant::now();
-                            let result = if cancellation.is_cancelled() {
-                                Ok(None)
+                            let results = if cancellation.is_cancelled() {
+                                jobs.iter().map(|_| Ok(None)).collect()
                             } else {
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    Orchestrator::new(self.store.clone(), subtree)
-                                        .with_log_policy(self.log_policy.clone())
-                                        .run_prepared(
-                                            simulation,
-                                            RunOptions {
-                                                seed: Some(seed),
-                                                cancellation: cancellation.clone(),
-                                            },
-                                            inputs.clone(),
-                                            executor,
-                                        )
+                                    let orchestrator = |subtree: &PathBuf| {
+                                        Orchestrator::new(self.store.clone(), subtree.clone())
+                                            .with_log_policy(self.log_policy.clone())
+                                    };
+                                    if let [(_, seed, subtree)] = jobs.as_slice() {
+                                        return vec![orchestrator(subtree)
+                                            .run_prepared(
+                                                simulation,
+                                                RunOptions {
+                                                    seed: Some(*seed),
+                                                    cancellation: cancellation.clone(),
+                                                },
+                                                inputs.clone(),
+                                                executor,
+                                            )
+                                            .map(Some)];
+                                    }
+                                    let attempts: Vec<_> = jobs
+                                        .iter()
+                                        .map(|(_, seed, subtree)| (orchestrator(subtree), *seed))
+                                        .collect();
+                                    Orchestrator::run_prepared_forked(
+                                        &attempts,
+                                        simulation,
+                                        inputs,
+                                        executor,
+                                        &cancellation,
+                                    )
+                                    .into_iter()
+                                    .map(|run| run.map(Some))
+                                    .collect()
                                 }))
                                 .unwrap_or_else(|_| {
-                                    Err(Error::Execution(
-                                        "exploration worker panicked; cleanup cannot be verified"
-                                            .into(),
-                                    ))
+                                    jobs.iter()
+                                        .map(|_| {
+                                            Err(Error::Execution(
+                                                "exploration worker panicked; cleanup cannot be verified"
+                                                    .into(),
+                                            ))
+                                        })
+                                        .collect()
                                 })
-                                .map(Some)
                             };
-                            if must_stop(&result, performance) {
-                                cancellation.cancel();
+                            // A batch's seeds run in turn; each is charged an equal share.
+                            let elapsed = at.elapsed().as_secs_f64() / jobs.len().max(1) as f64;
+                            let mut disconnected = false;
+                            for ((index, _, _), result) in jobs.iter().zip(results) {
+                                if must_stop(&result, performance) {
+                                    cancellation.cancel();
+                                }
+                                if completed.send((worker, *index, elapsed, result)).is_err() {
+                                    disconnected = true;
+                                    break;
+                                }
                             }
-                            if completed
-                                .send((worker, index, at.elapsed().as_secs_f64(), result))
-                                .is_err()
-                            {
+                            if disconnected {
                                 break;
                             }
                         }
@@ -288,6 +346,8 @@ impl Orchestrator {
             }
             drop(completed);
             let mut idle: Vec<usize> = (0..workers).rev().collect();
+            let mut outstanding = vec![0_u64; workers];
+            let mut busy = 0_u32;
             let mut running = 0_u32;
             let mut next = 0_u64;
             let mut stopped = false;
@@ -318,32 +378,39 @@ impl Orchestrator {
                     let worker = idle
                         .pop()
                         .ok_or_else(|| Error::Integrity("idle worker disappeared".into()))?;
-                    let seed = first
-                        .checked_add(next)
-                        .ok_or_else(|| Error::Integrity("validated seed range overflow".into()))?;
-                    let subtree = directory.join("attempts").join(seed.to_string());
-                    let index = batch.attempts.len();
-                    batch.attempts.push(Attempt {
-                        index: next,
-                        finished: false,
-                        seed,
-                        subtree: subtree.clone(),
-                        directory: None,
-                        outcome: None,
-                        error: None,
-                        elapsed_seconds: None,
-                    });
+                    let take = batch_size.min(options.count - next);
+                    let mut jobs = Vec::new();
+                    for _ in 0..take {
+                        let seed = first.checked_add(next).ok_or_else(|| {
+                            Error::Integrity("validated seed range overflow".into())
+                        })?;
+                        let subtree = directory.join("attempts").join(seed.to_string());
+                        let index = batch.attempts.len();
+                        batch.attempts.push(Attempt {
+                            index: next,
+                            finished: false,
+                            seed,
+                            subtree: subtree.clone(),
+                            directory: None,
+                            outcome: None,
+                            error: None,
+                            elapsed_seconds: None,
+                        });
+                        jobs.push((index, seed, subtree));
+                        next += 1;
+                    }
                     batch.counts = OutcomeCounts::from_attempts(&batch.attempts);
-                    batch.undispatched_count -= 1;
-                    running += 1;
-                    batch.peak_running = batch.peak_running.max(running);
+                    batch.undispatched_count -= take;
+                    running += take as u32;
+                    outstanding[worker] = take;
+                    busy += 1;
+                    batch.peak_running = batch.peak_running.max(busy);
                     batch.total_seconds = began.elapsed().as_secs_f64();
                     // The attempt's ownership/index is durable before dispatch.
                     batch.checkpoint()?;
-                    dispatch[worker].send((index, seed, subtree)).map_err(|_| {
+                    dispatch[worker].send(jobs).map_err(|_| {
                         Error::Execution("exploration worker disconnected before dispatch".into())
                     })?;
-                    next += 1;
                     continue;
                 }
                 if running == 0 {
@@ -352,7 +419,11 @@ impl Orchestrator {
                 match results.recv_timeout(Duration::from_millis(10)) {
                     Ok((worker, index, elapsed, result)) => {
                         running -= 1;
-                        idle.push(worker);
+                        outstanding[worker] -= 1;
+                        if outstanding[worker] == 0 {
+                            busy -= 1;
+                            idle.push(worker);
+                        }
                         let stop = must_stop(&result, &performance);
                         let attempt = batch.attempts.get_mut(index).ok_or_else(|| {
                             Error::Integrity("exploration attempt disappeared".into())

@@ -289,13 +289,98 @@ impl Orchestrator {
         baseline: Option<&RunRecord>,
         allow_engine_change: bool,
     ) -> Result<Run> {
+        let mut pending = self.begin(identity, executor, allow_engine_change, baseline)?;
+        let started = Instant::now();
+        let execution = match pending.ready(executor, cancellation) {
+            Ok(None) => executor.execute(pending.request(cancellation)),
+            Ok(Some(early)) => Ok(early),
+            Err(error) => Err(error),
+        };
+        let execution = guard(execution, cancellation, started, 1, &pending.record);
+        self.finish(pending, execution, baseline)
+    }
+
+    /// Run seeds of one prepared simulation through one backend call, one
+    /// orchestrator (and so one run directory) per seed. A backend that boots
+    /// once and forks each seed may serve them all from one boot; each run is
+    /// recorded and replays exactly as if it ran alone.
+    pub fn run_prepared_forked(
+        attempts: &[(Orchestrator, u64)],
+        simulation: &Simulation,
+        inputs: &PreparedInputs,
+        executor: &dyn ExecutionBackend,
+        cancellation: &CancellationToken,
+    ) -> Vec<Result<Run>> {
+        let mut pending = Vec::new();
+        let mut results: Vec<Option<Result<Run>>> = Vec::new();
+        for (orchestrator, seed) in attempts {
+            let identity = RunIdentity {
+                version: FORMAT_VERSION,
+                seed: *seed,
+                configuration: simulation.clone(),
+                inputs: inputs.clone(),
+            };
+            match orchestrator.begin(identity, executor, false, None) {
+                Ok(mut run) => {
+                    let early = run.ready(executor, cancellation);
+                    results.push(None);
+                    pending.push((results.len() - 1, orchestrator, run, early));
+                }
+                Err(error) => results.push(Some(Err(error))),
+            }
+        }
+        let started = Instant::now();
+        let batch: Vec<usize> = pending
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, _, _, early))| matches!(early, Ok(None)))
+            .map(|(i, _)| i)
+            .collect();
+        let requests = batch
+            .iter()
+            .map(|&i| pending[i].2.request(cancellation))
+            .collect();
+        let mut executed = executor.execute_forked(requests).into_iter();
+        let count = batch.len() as u64;
+        for (i, (slot, orchestrator, run, early)) in pending.into_iter().enumerate() {
+            let execution = match early {
+                Ok(Some(report)) => Ok(report),
+                Err(error) => Err(error),
+                Ok(None) if batch.contains(&i) => {
+                    let execution = executed.next().unwrap_or_else(|| {
+                        Err(Error::Execution(
+                            "execution backend returned too few forked results".into(),
+                        ))
+                    });
+                    guard(execution, cancellation, started, count, &run.record)
+                }
+                Ok(None) => Err(Error::Integrity("forked attempt was not dispatched".into())),
+            };
+            results[slot] = Some(orchestrator.finish(run, execution, None));
+        }
+        results
+            .into_iter()
+            .map(|result| {
+                result.unwrap_or_else(|| Err(Error::Integrity("forked attempt lost".into())))
+            })
+            .collect()
+    }
+
+    /// Create the run directory and its durable INCOMPLETE record.
+    fn begin(
+        &self,
+        identity: RunIdentity,
+        executor: &dyn ExecutionBackend,
+        allow_engine_change: bool,
+        baseline: Option<&RunRecord>,
+    ) -> Result<Pending> {
         let run_id = self.store.put(&serde_json::to_vec(&identity)?)?;
         fs::create_dir_all(&self.runs)?;
         let directory = tempfile::Builder::new()
             .prefix(&format!("{}-", &run_id.hex()[..16]))
             .tempdir_in(&self.runs)?
             .keep();
-        let mut record = RunRecord {
+        let record = RunRecord {
             run_id,
             attempt: directory
                 .file_name()
@@ -317,57 +402,28 @@ impl Orchestrator {
         // A killed process leaves a durable INCOMPLETE record, never a PASS.
         write_record(&directory, &record)?;
         let output = directory.join("output");
-        let execution = (|| -> Result<ExecutionReport> {
-            executor.validate_retained(&record.identity.inputs)?;
-            validate_inputs(&record.identity, executor)?;
-            fs::create_dir(&output)?;
-            executor.preflight(Some(&output))?;
-            let mut artifacts = BTreeMap::new();
-            for digest in record.identity.inputs.digests() {
-                if !artifacts.contains_key(digest) {
-                    artifacts.insert(
-                        digest.clone(),
-                        self.store.materialize(digest, &directory.join("inputs"))?,
-                    );
-                }
-            }
-            if cancellation.is_cancelled() {
-                return Ok(ExecutionReport {
-                    timebase: None,
-                    reason: StopReason::Cancelled,
-                    workload_exit: None,
-                    witness: None,
-                    full_state: None,
-                    faults: vec![],
-                    detail: Some("cancelled before execution".into()),
-                    engine_qualification: None,
-                });
-            }
-            let start = Instant::now();
-            let mut report = executor.execute(ExecutionRequest {
-                seed: record.identity.seed,
-                limits: &record.identity.configuration.limits,
-                network: &record.identity.configuration.network,
-                schedule: &record.identity.configuration.schedule,
-                control: record.identity.configuration.control.as_ref(),
-                check: &record.identity.configuration.check,
-                prepared: &record.identity.inputs,
-                artifacts: &artifacts,
-                output: &output,
-                cancellation,
-                performance_parameters: &record.performance_parameters,
-            })?;
-            // A backend must enforce its own deadline so blocking calls terminate.
-            // This additional guard prevents a late return from being a success.
-            if cancellation.is_cancelled() {
-                report.reason = StopReason::Cancelled;
-            } else if start.elapsed().as_nanos()
-                >= u128::from(record.identity.configuration.limits.wall_time_ns)
-            {
-                report.reason = StopReason::WallTimeLimit;
-            }
-            Ok(report)
-        })();
+        Ok(Pending {
+            store: self.store.clone(),
+            directory,
+            record,
+            output,
+            artifacts: BTreeMap::new(),
+        })
+    }
+
+    /// Record the execution result, retain logs and compare with a baseline.
+    fn finish(
+        &self,
+        pending: Pending,
+        execution: Result<ExecutionReport>,
+        baseline: Option<&RunRecord>,
+    ) -> Result<Run> {
+        let Pending {
+            directory,
+            mut record,
+            output,
+            ..
+        } = pending;
         match execution {
             Ok(mut report) => {
                 report.engine_qualification = record
@@ -407,6 +463,90 @@ impl Orchestrator {
         write_record(&directory, &record)?;
         Ok(Run { directory, record })
     }
+}
+
+/// A run whose directory and INCOMPLETE record exist, before execution.
+struct Pending {
+    store: ContentStore,
+    directory: PathBuf,
+    record: RunRecord,
+    output: PathBuf,
+    artifacts: BTreeMap<ContentDigest, PathBuf>,
+}
+
+impl Pending {
+    /// Validate and materialize inputs. `Some` is a report that ends the run
+    /// without executing it.
+    fn ready(
+        &mut self,
+        executor: &dyn ExecutionBackend,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<ExecutionReport>> {
+        executor.validate_retained(&self.record.identity.inputs)?;
+        validate_inputs(&self.record.identity, executor)?;
+        fs::create_dir(&self.output)?;
+        executor.preflight(Some(&self.output))?;
+        for digest in self.record.identity.inputs.digests() {
+            if !self.artifacts.contains_key(digest) {
+                self.artifacts.insert(
+                    digest.clone(),
+                    self.store
+                        .materialize(digest, &self.directory.join("inputs"))?,
+                );
+            }
+        }
+        if cancellation.is_cancelled() {
+            return Ok(Some(ExecutionReport {
+                timebase: None,
+                reason: StopReason::Cancelled,
+                workload_exit: None,
+                witness: None,
+                full_state: None,
+                faults: vec![],
+                detail: Some("cancelled before execution".into()),
+                engine_qualification: None,
+            }));
+        }
+        Ok(None)
+    }
+
+    fn request<'a>(&'a self, cancellation: &'a CancellationToken) -> ExecutionRequest<'a> {
+        let identity = &self.record.identity;
+        ExecutionRequest {
+            seed: identity.seed,
+            limits: &identity.configuration.limits,
+            network: &identity.configuration.network,
+            schedule: &identity.configuration.schedule,
+            control: identity.configuration.control.as_ref(),
+            check: &identity.configuration.check,
+            prepared: &identity.inputs,
+            artifacts: &self.artifacts,
+            output: &self.output,
+            cancellation,
+            performance_parameters: &self.record.performance_parameters,
+        }
+    }
+}
+
+/// A backend must enforce its own deadline so blocking calls terminate. This
+/// additional guard prevents a late return from being a success. `runs`
+/// seeds executed together share `runs` times one run's wall-time limit.
+fn guard(
+    execution: Result<ExecutionReport>,
+    cancellation: &CancellationToken,
+    started: Instant,
+    runs: u64,
+    record: &RunRecord,
+) -> Result<ExecutionReport> {
+    let mut report = execution?;
+    if cancellation.is_cancelled() {
+        report.reason = StopReason::Cancelled;
+    } else if started.elapsed().as_nanos()
+        >= u128::from(record.identity.configuration.limits.wall_time_ns) * u128::from(runs.max(1))
+    {
+        report.reason = StopReason::WallTimeLimit;
+    }
+    Ok(report)
 }
 
 fn validate_inputs(identity: &RunIdentity, executor: &dyn ExecutionBackend) -> Result<()> {
