@@ -73,6 +73,11 @@ Image pulls, application builds and guest execution can be substantially slower
 than native unit tests. Their assertions belong to the guest workload and public
 CLI; the test runner does not interpret application protocols.
 
+Rebuild runtime inputs after changes to guest code, kernel configuration, or the
+Linux preparation worker. `tools/linux-runtime/build-cli.sh` and
+`tools/mac-runtime/build-cli.sh` package inputs from the current checkout. An
+older kernel or bundle can boot successfully while missing new guest features.
+
 ## Adding a test
 
 1. Add ordinary Rust `#[test]` functions to the appropriate crate. They run by
