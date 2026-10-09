@@ -150,6 +150,12 @@ pub enum Operation {
         #[serde(default, skip_serializing_if = "NetworkFaults::is_off")]
         network_faults: NetworkFaults,
     },
+    /// Charge the machine's simulated CPU work `factor_permille / 1000` times
+    /// its seeded cost until healed.
+    Throttle {
+        target: Target,
+        factor_permille: u64,
+    },
     Heal {
         handle: String,
     },
@@ -274,6 +280,12 @@ pub enum Action {
     Heal {
         handle: String,
     },
+    /// Scale the machine's seeded CPU cost until the handle is healed.
+    Throttle {
+        handle: String,
+        machine: String,
+        factor_permille: u64,
+    },
     /// Freeze the machine's CPU and devices; the world goes on.
     Pause {
         machine: String,
@@ -302,6 +314,7 @@ impl Action {
             Self::Partition { .. } => "partition",
             Self::Shape { .. } => "shape",
             Self::Heal { .. } => "heal",
+            Self::Throttle { .. } => "throttle",
             Self::Pause { .. } => "pause",
             Self::Resume { .. } => "resume",
             Self::Crash { .. } => "crash",
@@ -317,7 +330,8 @@ impl Action {
             | Self::Pause { machine }
             | Self::Resume { machine }
             | Self::Crash { machine }
-            | Self::Reboot { machine } => Some(machine),
+            | Self::Reboot { machine }
+            | Self::Throttle { machine, .. } => Some(machine),
             _ => None,
         }
     }
@@ -332,6 +346,9 @@ impl Action {
         )
     }
 }
+/// Throttle factors, in thousandths: from unchanged to a thousand times slower.
+pub const THROTTLE_PERMILLE: std::ops::RangeInclusive<u64> = 1_000..=1_000_000;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Plan {
     pub id: u32,

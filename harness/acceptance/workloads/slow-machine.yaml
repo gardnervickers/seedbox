@@ -1,0 +1,26 @@
+# Run with --timebase pv: the throttle scales the PV clock's per-syscall charge.
+name: slow-machine
+services:
+  worker:
+    image: docker.io/library/python:3.13-alpine
+    entrypoint: [python3, /scenario/slow_machine.py, worker]
+    configs:
+      - {source: driver, target: /scenario/slow_machine.py}
+  scenario:
+    image: docker.io/library/python:3.13-alpine
+    entrypoint: [python3, /scenario/slow_machine.py, scenario]
+    configs:
+      - {source: driver, target: /scenario/slow_machine.py}
+      - {source: api-package, target: /scenario/seedbox/__init__.py}
+      - {source: api-control, target: /scenario/seedbox/control.py}
+configs:
+  driver: {file: ../driver/slow_machine.py}
+  api-package: {file: ../../../python/seedbox/__init__.py}
+  api-control: {file: ../../../python/seedbox/control.py}
+x-seedbox:
+  version: 1
+  seed: 196
+  limits: {simulated_time: 60s, wall_time: 10m}
+  network: {latency: 1ms, jitter: 0ns}
+  control: {service: scenario}
+  check: {service: scenario, exit_code: 0}

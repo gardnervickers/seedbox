@@ -1014,3 +1014,74 @@ fn an_event_already_due_is_delivered_even_when_the_machine_stands_past_the_slice
         assert!(w.events[0].is_empty());
     }
 }
+
+#[test]
+fn throttle_applies_at_its_boundary_survives_reboot_and_heals_identically_across_workers() {
+    let mut reference = None;
+    for workers in [0, 1, 2, 4] {
+        let mut w = world(&["a", "b"]);
+        for (at, action) in [
+            (
+                10,
+                json!({"action":"throttle","handle":"t","machine":"b","factor_permille":4000}),
+            ),
+            (20, json!({"action":"crash","machine":"b"})),
+            (25, json!({"action":"reboot","machine":"b"})),
+            (30, json!({"action":"heal","handle":"t"})),
+        ] {
+            let mut action = action;
+            action["id"] = json!(0);
+            action["at_ns"] = json!(at);
+            action["deadline_ns"] = json!(at);
+            w.faults
+                .append(serde_json::from_value(action).unwrap())
+                .unwrap();
+        }
+        for at in [5, 15, 27, 35] {
+            w.machines[1].steps.push_back(Step::new(at, Stop::Sent));
+        }
+        run_with(&mut w, 60, None, workers, Duration::from_micros(3)).unwrap();
+        let throttles: Vec<String> = machine_trace(&w, "b")
+            .into_iter()
+            .filter(|line| line.contains(":throttle/"))
+            .collect();
+        // Each change lands with the machine at its exact boundary; the
+        // crash's fresh incarnation is throttled again.
+        assert_eq!(
+            throttles,
+            [
+                "b:throttle/4000:10",
+                "b:throttle/4000:20",
+                "b:throttle/1000:30"
+            ]
+        );
+        assert!(w.faults.active_handles().is_empty());
+        assert!(w.faults.log.iter().all(|row| row["status"] == "applied"));
+        let observed = (throttles, w.faults.log.clone());
+        if let Some(want) = &reference {
+            assert_eq!(&observed, want);
+        } else {
+            reference = Some(observed);
+        }
+    }
+}
+
+#[test]
+fn throttle_of_an_unsupported_machine_is_a_recoverable_unsupported_error() {
+    let mut w = world(&["a", "b"]);
+    configure_control(&mut w);
+    w.machines[1].throttleable = false;
+    let request =
+        json!({"version":1,"id":1,"op":"throttle","target":{"machine":"b"},"factor_permille":2000});
+    w.control
+        .request(0, 0, format!("SBX_RPC1 1 1 {request}").as_bytes(), 0)
+        .unwrap();
+    assert_eq!(run(&mut w, 120, None).unwrap(), "duration");
+    let response = &w.control.log[0]["response"];
+    assert_eq!(response["error"]["code"], "unsupported", "{response}");
+    assert!(w.faults.log.is_empty());
+    assert!(w.control.error.is_none());
+    assert!(!machine_trace(&w, "b")
+        .iter()
+        .any(|l| l.contains("throttle")));
+}

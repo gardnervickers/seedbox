@@ -562,7 +562,11 @@ impl<M: WorldMachine> Coord<'_, M> {
                     self.failure = Some(error.clone());
                     return Err(error);
                 }
+                if let Some(factor) = self.faults.throttle(m) {
+                    guests[m].m.throttle(factor)?;
+                }
             }
+            faults::Lifecycle::Throttle(factor) => guests[m].m.throttle(factor)?,
             faults::Lifecycle::Reboot => {
                 // Frames that reached it before `t` belonged to the dead
                 // NIC and are dropped; later ones arrive normally.
@@ -665,6 +669,12 @@ impl<M: WorldMachine> Coord<'_, M> {
                     .map(|g| g.m.name.clone())
                     .collect();
                 self.control.reject_unavailable(&exited);
+                let unthrottleable: Vec<String> = guests
+                    .iter()
+                    .filter(|g| !g.m.supports_throttle())
+                    .map(|g| g.m.name.clone())
+                    .collect();
+                self.control.reject_unthrottleable(&unthrottleable);
                 if self.control.pending.as_ref().is_some_and(|p| {
                     !p.admitted_done
                         && matches!(p.operation, Some(seedbox_control::Operation::Inspect {}))

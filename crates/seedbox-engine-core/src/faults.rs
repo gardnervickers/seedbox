@@ -39,6 +39,8 @@ pub enum Lifecycle {
     Resume,
     Crash,
     Reboot,
+    /// Charge CPU work at this many thousandths of the seeded speed.
+    Throttle(u64),
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Event {
@@ -65,6 +67,8 @@ pub struct Faults {
     lifecycle: Vec<(usize, Lifecycle)>,
     pub readiness: Vec<Value>,
     handles: BTreeMap<String, BTreeSet<(usize, usize)>>,
+    /// Active throttle handles: machine and factor in thousandths.
+    throttles: BTreeMap<String, (usize, u64)>,
     cuts: BTreeMap<(usize, usize), usize>,
     names: Vec<String>,
     changed_network: Vec<usize>,
@@ -104,6 +108,7 @@ impl Faults {
             lifecycle: vec![],
             readiness: vec![],
             handles: BTreeMap::new(),
+            throttles: BTreeMap::new(),
             cuts: BTreeMap::new(),
             names,
             changed_network: vec![],
@@ -137,7 +142,20 @@ impl Faults {
             | Action::Pause { machine }
             | Action::Resume { machine }
             | Action::Crash { machine }
-            | Action::Reboot { machine } => {
+            | Action::Reboot { machine }
+            | Action::Throttle { machine, .. } => {
+                if let Action::Throttle {
+                    handle,
+                    factor_permille,
+                    ..
+                } = &plan.action
+                {
+                    if handle.is_empty()
+                        || !seedbox_control::THROTTLE_PERMILLE.contains(factor_permille)
+                    {
+                        return Err("invalid throttle handle/factor".into());
+                    }
+                }
                 target = Some(
                     self.names
                         .iter()
@@ -315,8 +333,17 @@ impl Faults {
             .chain(self.links.layers.values().map(|l| l.handle.clone()))
             .collect();
         handles.extend(self.connections.selections.keys().cloned());
+        handles.extend(self.throttles.keys().cloned());
         handles.sort();
         handles
+    }
+    /// The factor of machine `m`'s active throttle, if any. A rebooted
+    /// incarnation takes it on again.
+    pub fn throttle(&self, m: usize) -> Option<u64> {
+        self.throttles
+            .values()
+            .find(|(machine, _)| *machine == m)
+            .map(|(_, factor)| *factor)
     }
     pub fn process_state(&self, machine: usize) -> &'static str {
         match self.life[machine] {
@@ -366,6 +393,9 @@ impl Faults {
             }
             Action::Reboot { .. } if self.life[index] != Life::Down => {
                 Some("target machine is not down")
+            }
+            Action::Throttle { .. } if self.throttle(index).is_some() => {
+                Some("target machine is already throttled")
             }
             _ => None,
         }
@@ -678,7 +708,39 @@ impl Faults {
                                 format!("handle={handle}; armed; in-flight frames retained"),
                             );
                         }
+                        Action::Throttle {
+                            handle,
+                            factor_permille,
+                            ..
+                        } => {
+                            let m = self.entries[i].target.unwrap();
+                            if self.active_handles().contains(&handle) {
+                                self.fail(i, "duplicate active handle".into());
+                                continue;
+                            }
+                            if self.throttle(m).is_some() {
+                                self.fail(i, "target machine is already throttled".into());
+                                continue;
+                            }
+                            self.throttles.insert(handle.clone(), (m, factor_permille));
+                            self.applied(
+                                i,
+                                now,
+                                format!("handle={handle}; factor_permille={factor_permille}"),
+                            );
+                            self.lifecycle
+                                .push((m, Lifecycle::Throttle(factor_permille)));
+                        }
                         Action::Heal { handle } => {
+                            if let Some((m, _)) = self.throttles.remove(&handle) {
+                                self.applied(
+                                    i,
+                                    now,
+                                    format!("handle={handle}; seeded speed restored"),
+                                );
+                                self.lifecycle.push((m, Lifecycle::Throttle(1_000)));
+                                continue;
+                            }
                             if let Some(selection) = self.connections.selections.remove(&handle) {
                                 self.log[i]["selection_counts"] = json!({"matched":selection.matched,"dropped":selection.dropped});
                                 self.applied(

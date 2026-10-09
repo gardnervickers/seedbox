@@ -57,6 +57,12 @@ pub fn syscall_ns(rng: &mut crate::rng::Rng) -> u64 {
     let spread = SYSCALL_NS * SPEED_SPREAD_PCT / 100;
     SYSCALL_NS - spread + rng.below(2 * spread + 1)
 }
+
+/// The cost a throttle charges: the seeded `syscall_ns` times
+/// `factor_permille / 1000`, rounded up so a throttle never speeds a machine up.
+pub fn throttled_ns(syscall_ns: u64, factor_permille: u64) -> u64 {
+    syscall_ns.saturating_mul(factor_permille).div_ceil(1000)
+}
 use seedbox_engine_core::pv_progress::{
     Accounting, Comparison, Decision, Exit as ProgressExit, LandingPlan, ProbeMachine,
     ProgressContext, PvProgress,
@@ -109,7 +115,17 @@ impl PvClock {
         legal: bool,
     ) -> Result<Prepared, String> {
         self.remaining = remaining;
-        self.syscall_ns = m.syscall_ns;
+        self.syscall_ns = match m.throttle_permille {
+            None => m.syscall_ns,
+            // An enabled page arm keeps the cost it was armed with until the
+            // next legal plan, so a throttle or heal starts charging there.
+            Some(_)
+                if m.page_timer.enabled && !legal && m.page_get(super::PAGE_SYSCALL_NS) != 0 =>
+            {
+                m.page_get(super::PAGE_SYSCALL_NS)
+            }
+            Some(factor) => throttled_ns(m.syscall_ns, factor),
+        };
         let mut progress = std::mem::take(&mut m.pv_progress);
         let decision = progress.prepare(m, self.max_false_alarms);
         m.pv_progress = progress;
@@ -506,6 +522,39 @@ mod tests {
             m.pic.set_masks(0);
             assert_eq!(m.pic.pending(), Some(0));
         }
+    }
+
+    #[test]
+    fn throttled_cost_scales_the_seeded_speed_and_rounds_up() {
+        assert_eq!(throttled_ns(937, 1000), 937);
+        assert_eq!(throttled_ns(937, 2500), 2343);
+        assert_eq!(throttled_ns(1100, 1_000_000), 1_100_000);
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
+    fn a_throttle_and_its_heal_charge_from_the_next_legal_plan() {
+        let kvm = Kvm::new().unwrap();
+        let mut m = machine(&kvm, &[0xf4], 0);
+        m.page_timer_requested = true;
+        m.abi = super::super::ABI_PAGE_TIMER;
+        m.enable_page_timer();
+        m.syscall_ns = 937;
+        let mut clock = PvClock::new(Duration::from_secs(10)).unwrap();
+        m.page_set(PAGE_SYSCALLS, 17);
+        let mut charge = |m: &mut Machine, legal: bool| {
+            clock.prepare(m, 1_000_000, 1_000_000, legal).unwrap();
+            clock.start(17);
+            (clock.read(27), m.page_get(super::super::PAGE_SYSCALL_NS))
+        };
+        assert_eq!(charge(&mut m, true), (9370, 937));
+        m.throttle_permille = Some(4000);
+        // A watchdog landing keeps the cost the guest's arm was planned with.
+        assert_eq!(charge(&mut m, false), (9370, 937));
+        assert_eq!(charge(&mut m, true), (37480, 3748));
+        m.throttle_permille = Some(1000);
+        assert_eq!(charge(&mut m, false), (37480, 3748));
+        assert_eq!(charge(&mut m, true), (9370, 937));
     }
 
     #[test]
