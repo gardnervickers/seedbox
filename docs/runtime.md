@@ -251,6 +251,20 @@ arbitrary builds: pin base resolution and control external build inputs yourself
 Every original manifest, config and layer remains retained; changing a merged
 rootfs in a later layer cannot remove earlier varying input bytes.
 
+Compose preparation records one `wall_clock_epoch` (Unix seconds) in the
+prepared inputs and each `SBXLAUNCH4` boot recipe. It defaults to
+the time after all image builds/imports finish; explicit `--build-epoch` also
+sets this value. Linux cannot set a wall clock earlier than the guest's uptime,
+so an explicit epoch below 86400 (such as 0) still clamps build timestamps but
+records a guest epoch of 86400. A build epoch earlier than a
+certificate minted during the build makes that certificate not yet valid. The shared supervisor sets `CLOCK_REALTIME` before the launch
+barrier on x86 and arm64. Replay uses retained bytes and never samples the host
+clock. New preparations can change witnesses; replay of recorded inputs is
+unchanged. Both application kernels support unprivileged user namespaces,
+including UID/GID maps and nested mount, PID, network, IPC and UTS namespaces.
+The supervisor recursively mounts the image at the namespace root before
+entering it, preserving named volumes and allowing `CLONE_NEWUSER`.
+
 Within one preparation call, services declaring the same frozen build source
 on the admitted native Podman path share build/import/unpack work. Each service
 still resolves its own launch overrides and packages its own guest recipe.
@@ -266,8 +280,7 @@ service name, raises soft/hard `nofile` to 1048576 before each exec, and sets
 the retained binary launch recipe; replay uses that recipe and its retained
 supervisor rather than preparing it again. See
 [guest runtime facilities](compatibility.md#guest-runtime-facilities) for
-kernel features and remaining gaps. This setup does not change the wall-clock
-epoch; `--build-epoch` still controls image build timestamps only.
+kernel features and remaining gaps. The recorded wall-clock epoch is described below.
 
 Each prepared application release is a captured input closure. Same-version
 deterministic execution and replay use its exact retained bytes, seed and
@@ -352,9 +365,13 @@ and [the kernel contract](../kernel/README.md#build-without-private-release-acce
 for both architecture outputs and Mac usage. Helpers use an independent
 release identified by `tools/runtime/inputs.json`; kernel-only changes reuse it.
 
-Caches live under `~/Library/Caches/seedbox/kernels` on Mac and
-`~/.cache/seedbox/kernels` on Linux, or `$XDG_CACHE_HOME/seedbox/kernels` when set.
-Helper archives use the sibling `assets` directory and extracted tools use `runtime`.
+Caches live under `~/Library/Caches/seedbox/kernels/sbxlaunch4` on Mac and
+`~/.cache/seedbox/kernels/sbxlaunch4` on Linux, or under `$XDG_CACHE_HOME/seedbox`
+when set. Helper archives use `assets/sbxlaunch4` and extracted tools use `runtime`.
+The last directory is the boot-recipe format this build writes: a build with a new
+format downloads again rather than reusing older guest assets. If the latest helper
+release's supervisor predates that format, the run stops with an error and drops the
+downloaded helper and kernel, so a later run retries once newer assets are published.
 An explicit `--runtime-assets` or `SEEDBOX_RUNTIME_ASSETS` bypasses helper downloads.
 `doctor` looks up the cached or explicit kernel without downloading, creating
 cache/run state or performing OCI preparation. If the cache is empty, its error

@@ -488,7 +488,11 @@ impl RuntimeInputs {
                 ));
             }
             let _ = (counter, scratch, simulation);
-            let runtime = backends::container_runtime(self.runtime_assets.clone(), cancellation)?;
+            let runtime = backends::container_runtime(
+                self.runtime_assets.clone(),
+                self.guest_init.is_some(),
+                cancellation,
+            )?;
             let resolve = |flag, explicit: &Option<PathBuf>, name| match explicit {
                 Some(path) => defaults::existing(flag, path.clone()),
                 None => Ok(runtime.input(name)),
@@ -537,8 +541,11 @@ impl RuntimeInputs {
             .with_page_timer(self.page_timer)
             .with_deferred_tx(self.deferred_tx);
             if backends::released_assets() || self.runtime_assets.is_some() {
-                let runtime =
-                    backends::container_runtime(self.runtime_assets.clone(), cancellation)?;
+                let runtime = backends::container_runtime(
+                    self.runtime_assets.clone(),
+                    self.guest_init.is_some(),
+                    cancellation,
+                )?;
                 let resolve = |flag, explicit: &Option<PathBuf>, name| match explicit {
                     Some(path) => defaults::existing(flag, path.clone()),
                     None => Ok(runtime.input(name)),
@@ -662,7 +669,7 @@ impl RuntimeInputs {
 #[derive(Args, Clone, Copy)]
 #[command(next_help_heading = "Preparation")]
 struct BuildOptions {
-    /// Clamp new build-layer timestamps to this Unix epoch (Podman) [default: absent].
+    /// Set the guest wall-clock epoch and clamp new build-layer timestamps (Podman) [default: preparation time for guest clock].
     #[arg(long, allow_hyphen_values = true, value_parser = clap::value_parser!(u32))]
     build_epoch: Option<u32>,
 }

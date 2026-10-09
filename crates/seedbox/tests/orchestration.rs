@@ -106,6 +106,7 @@ impl Fixture {
             semantic_parameters: BTreeMap::from([("kernel_abi".into(), "v1".into())]),
         };
         let inputs = PreparedInputs {
+            wall_clock_epoch: None,
             kernel,
             profile: profile.clone(),
             placement: BTreeMap::from([("workload".into(), "workload".into())]),
@@ -181,18 +182,22 @@ impl Fixture {
 
 #[test]
 fn run_retains_inputs_result_logs_and_replay_does_not_prepare_again() {
-    let fixture = Fixture::new();
-    let first = fixture.run();
-    assert_eq!(first.record.outcome, Outcome::Pass);
-    assert_eq!(inspect(&first.directory).unwrap(), first.record);
-    assert_eq!(first.record.logs.len(), 1);
-    fs::remove_file(&fixture.simulation.source).unwrap();
-    let fresh = fixture.replay(&first);
-    assert_eq!(fresh.record.run_id, first.record.run_id);
-    assert_ne!(fresh.directory, first.directory);
-    assert_eq!(fresh.record.replay.unwrap().status, ReplayStatus::Match);
-    assert_eq!(fixture.preparer.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(fixture.backend.calls.load(Ordering::SeqCst), 2);
+    for epoch in [None, Some(0), Some(1791500000)] {
+        let mut fixture = Fixture::new();
+        fixture.preparer.inputs.wall_clock_epoch = epoch;
+        let first = fixture.run();
+        assert_eq!(first.record.identity.inputs.wall_clock_epoch, epoch);
+        assert_eq!(first.record.outcome, Outcome::Pass);
+        assert_eq!(inspect(&first.directory).unwrap(), first.record);
+        assert_eq!(first.record.logs.len(), 1);
+        fs::remove_file(&fixture.simulation.source).unwrap();
+        let fresh = fixture.replay(&first);
+        assert_eq!(fresh.record.run_id, first.record.run_id);
+        assert_ne!(fresh.directory, first.directory);
+        assert_eq!(fresh.record.replay.unwrap().status, ReplayStatus::Match);
+        assert_eq!(fixture.preparer.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.backend.calls.load(Ordering::SeqCst), 2);
+    }
 }
 
 #[test]

@@ -186,6 +186,7 @@ impl OciPreparer {
         let mut provenance = BTreeMap::new();
         let mut frozen_contexts = BTreeMap::<PathBuf, FrozenContext>::new();
         let mut imported_sources = BTreeMap::new();
+        let mut launches = Vec::new();
         for (name, service) in &simulation.services {
             if let Some(context) = context {
                 context.check()?;
@@ -287,12 +288,30 @@ impl OciPreparer {
             if let Some(context) = context {
                 context.check()?;
             }
+            launches.push((name, service, mounts, imported));
+        }
+        // Sample once after image builds: certificates minted during preparation
+        // must already be valid when applications start. Replay retains this value.
+        // A build epoch below guest uptime (such as 0) still clamps layers;
+        // the guest clock starts at the earliest time Linux accepts instead.
+        let wall_clock_epoch = match self.tools.build_epoch {
+            Some(epoch) => epoch.max(crate::guest::MIN_WALL_CLOCK_EPOCH),
+            None => u32::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|error| Error::Setup(format!("prepare wall clock: {error}")))?
+                    .as_secs(),
+            )
+            .map_err(|_| Error::Setup("prepare wall clock exceeds supported Unix epoch".into()))?,
+        };
+        for (name, service, mounts, imported) in launches {
             let recipe = launch_recipe(
                 &imported.image.launch,
                 &format!("{}/24", addresses[name]),
                 &hosts,
                 name,
                 &mounts,
+                wall_clock_epoch,
             )?;
             let archive = temporary.path().join(format!("{name}.cpio"));
             // Package only retained bootstrap bytes. The source paths may be
@@ -337,6 +356,7 @@ impl OciPreparer {
             );
         }
         Ok(PreparedInputs {
+            wall_clock_epoch: Some(wall_clock_epoch),
             kernel,
             images,
             guests,

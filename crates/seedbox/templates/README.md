@@ -198,6 +198,20 @@ or append `--plant, missing` to the etcd client's command list. The expected res
 is FAIL; a fresh replay must reproduce that FAIL with MATCH. Nonempty fault
 schedules remain unsupported until their guest effect timing is verified.
 
+Compose preparation records one `wall_clock_epoch` (Unix seconds) in the
+prepared inputs and each `SBXLAUNCH4` boot recipe. It defaults to
+the time after all image builds/imports finish; explicit `--build-epoch` also
+sets this value. Linux cannot set a wall clock earlier than the guest's uptime,
+so an explicit epoch below 86400 (such as 0) still clamps build timestamps but
+records a guest epoch of 86400. A build epoch earlier than a
+certificate minted during the build makes that certificate not yet valid. The shared supervisor sets `CLOCK_REALTIME` before the launch
+barrier on x86 and arm64. Replay uses retained bytes and never samples the host
+clock. New preparations can change witnesses; replay of recorded inputs is
+unchanged. Both application kernels support unprivileged user namespaces,
+including UID/GID maps and nested mount, PID, network, IPC and UTS namespaces.
+The supervisor recursively mounts the image at the namespace root before
+entering it, preserving named volumes and allowing `CLONE_NEWUSER`.
+
 `explore` validates runtime inputs and host admission before its one preparation,
 then executes a finite consecutive seed sequence with one worker by default.
 `--workers N` (1..32) bounds parallel attempts and requires automatic CPU selection

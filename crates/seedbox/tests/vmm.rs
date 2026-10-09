@@ -10,6 +10,7 @@ use std::{collections::BTreeMap, path::Path};
 fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
     let hash = ContentDigest::of(b"retained input");
     let prepared = PreparedInputs {
+        wall_clock_epoch: None,
         kernel: hash.clone(),
         images: BTreeMap::new(),
         placement: BTreeMap::from([

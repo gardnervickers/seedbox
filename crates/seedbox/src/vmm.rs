@@ -2527,6 +2527,7 @@ mod doctor_tests {
             )
             .unwrap();
             let inputs = PreparedInputs {
+                wall_clock_epoch: None,
                 profile: backend.profile(),
                 kernel: kernel.clone(),
                 images: BTreeMap::new(),
@@ -2634,6 +2635,7 @@ mod doctor_tests {
             .insert("counter".into(), "unknown".into());
         assert!(crate::admission::validate_profile(&wrong).is_err());
         let inputs = PreparedInputs {
+            wall_clock_epoch: None,
             kernel: ContentDigest::of(b"kernel"),
             images: BTreeMap::new(),
             placement: BTreeMap::new(),

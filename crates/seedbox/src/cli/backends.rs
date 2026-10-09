@@ -149,10 +149,14 @@ fn cache_home() -> Result<std::path::PathBuf> {
     Ok(cache.join("seedbox"))
 }
 
+/// `explicit_init` skips the supervisor check: the archive's copy is unused.
 pub fn container_runtime(
     explicit: Option<std::path::PathBuf>,
+    explicit_init: bool,
     cancellation: &CancellationToken,
 ) -> Result<seedbox::container_runtime::Runtime> {
+    use seedbox::release_download::ReleaseAsset;
+    let explicit_assets = explicit.is_some();
     let _hand_over = CacheHandOver::for_sudo_user();
     let path = match explicit {
         Some(path) => super::defaults::existing("--runtime-assets", path)?,
@@ -163,14 +167,61 @@ pub fn container_runtime(
             true,
         )?,
     };
-    seedbox::container_runtime::Runtime::from_archive(&path, &cache_home()?.join("runtime"))
-        .map_err(|error| match error {
-            seedbox::Error::Io(error) => seedbox::Error::Setup(format!(
-                "runtime assets {}: {error}; check archive and cache permissions",
+    let runtime =
+        seedbox::container_runtime::Runtime::from_archive(&path, &cache_home()?.join("runtime"))
+            .map_err(|error| match error {
+                seedbox::Error::Io(error) => seedbox::Error::Setup(format!(
+                    "runtime assets {}: {error}; check archive and cache permissions",
+                    path.display()
+                )),
+                other => other,
+            })?;
+    if !explicit_init && !speaks_launch_format(&runtime.input("compose-init"))? {
+        let magic = String::from_utf8_lossy(seedbox::guest::LAUNCH_MAGIC);
+        if explicit_assets {
+            return Err(seedbox::Error::Setup(format!(
+                "--runtime-assets {}: its guest supervisor predates {magic}; rebuild the assets from this checkout",
                 path.display()
-            )),
-            other => other,
+            )));
+        }
+        // The latest release predates this build. Drop it and its kernel so
+        // the next run downloads again once newer assets are published.
+        let architecture = std::env::consts::ARCH;
+        for asset in [ReleaseAsset::Runtime, ReleaseAsset::Kernel] {
+            let ready = release_cache(asset)?.join(architecture).join("ready");
+            match std::fs::remove_dir_all(&ready) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(seedbox::Error::Setup(format!(
+                        "remove stale cache {}: {error}; delete it and retry",
+                        ready.display()
+                    )))
+                }
+                _ => (),
+            }
+        }
+        return Err(seedbox::Error::Setup(format!(
+            "the latest published guest assets predate {magic}; wait for the Guest assets workflow on main, or pass --runtime-assets, --guest-init and --kernel built from this checkout"
+        )));
+    }
+    Ok(runtime)
+}
+
+fn speaks_launch_format(init: &Path) -> Result<bool> {
+    let bytes = std::fs::read(init)?;
+    let magic = seedbox::guest::LAUNCH_MAGIC;
+    Ok(bytes.windows(magic.len()).any(|window| window == magic))
+}
+
+/// Caches are keyed by the boot recipe format, so a build that writes a new
+/// format never reuses guest assets downloaded for an older one.
+fn release_cache(asset: seedbox::release_download::ReleaseAsset) -> Result<std::path::PathBuf> {
+    use seedbox::release_download::ReleaseAsset;
+    Ok(cache_home()?
+        .join(match asset {
+            ReleaseAsset::Kernel => "kernels",
+            ReleaseAsset::Runtime => "assets",
         })
+        .join(String::from_utf8_lossy(seedbox::guest::LAUNCH_MAGIC).to_lowercase()))
 }
 
 /// Under sudo, the cache lives in the invoking user's home; leave nothing there
@@ -253,12 +304,9 @@ fn release_asset(
     cancellation: &CancellationToken,
     download: bool,
 ) -> Result<std::path::PathBuf> {
-    use seedbox::release_download::{ReleaseAsset, ReleaseDownload};
+    use seedbox::release_download::ReleaseDownload;
     let _hand_over = CacheHandOver::for_sudo_user();
-    let cache = cache_home()?.join(match asset {
-        ReleaseAsset::Kernel => "kernels",
-        ReleaseAsset::Runtime => "assets",
-    });
+    let cache = release_cache(asset)?;
     let architecture = std::env::consts::ARCH;
     if !download {
         return ReleaseDownload::cached(asset, &cache, architecture);
@@ -332,6 +380,21 @@ pub fn preparation_progress(message: &str) {
 
 pub fn released_assets() -> bool {
     env!("SEEDBOX_RELEASE_ASSETS") == "1"
+}
+
+#[cfg(test)]
+mod launch_format_tests {
+    #[test]
+    fn supervisor_must_carry_the_current_launch_magic() {
+        let directory = tempfile::tempdir().unwrap();
+        let init = directory.path().join("compose-init");
+        std::fs::write(&init, b"\x7fELF..SBXLAUNCH3..").unwrap();
+        assert!(!super::speaks_launch_format(&init).unwrap());
+        let mut current = b"\x7fELF..".to_vec();
+        current.extend_from_slice(seedbox::guest::LAUNCH_MAGIC);
+        std::fs::write(&init, current).unwrap();
+        assert!(super::speaks_launch_format(&init).unwrap());
+    }
 }
 
 #[cfg(test)]

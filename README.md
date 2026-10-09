@@ -39,7 +39,10 @@ The release build compiles the native CLI and signs it on Mac. It needs no
 container engine and builds no Linux guest assets. On the first `run`, `explore`
 or `prepare`, Seedbox announces downloads of its guest kernel and helper archive
 from the latest guest releases on GitHub, verifies their SHA-256 digests and
-caches them. Later calls reuse the cached bytes without contacting GitHub. Caches live under
+caches them. Later calls reuse the cached bytes without contacting GitHub. Caches are
+kept per boot-recipe format (currently `sbxlaunch4`), so a build that writes a new
+format downloads again; if the latest release still predates it, the run stops with
+an error and discards that download. Caches live under
 `~/Library/Caches/seedbox` on Mac or `~/.cache/seedbox` on Linux;
 `XDG_CACHE_HOME` overrides the parent directory. Explicit `--kernel` and
 `--runtime-assets` paths bypass their respective downloads.
@@ -96,7 +99,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Guest supervisor | from the helper archive; Linux development builds also have a compiled-in musl fallback | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | BusyBox | from the helper archive; Linux development builds search static tools on `PATH` | `--busybox`, `SEEDBOX_BUSYBOX` |
 | mke2fs (only for named volumes) | from the helper archive; Linux development builds search static tools on `PATH` | `--mke2fs`, `SEEDBOX_MKE2FS` |
-| Build epoch | absent; preserve the builder's ordinary timestamp policy | `--build-epoch` (prepare/run/explore; no environment backing) |
+| Build epoch | absent; preserve build timestamps and set guest clock to preparation time | `--build-epoch` (prepare/run/explore; no environment backing) |
 | Engine and guest kernel | any built engine and kernel are admitted; the run records their hashes | `--vmm`, `--kernel` |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
 | Diff inputs | Two required retained run directories; no runtime inputs or state lookup | positional `RUN_A RUN_B` |
@@ -294,6 +297,20 @@ change inputs. Replay uses the complete retained application release closure
 without this option; deterministic execution does not require independently
 rebuilt OCI images to have identical bytes.
 
+
+Compose preparation records one `wall_clock_epoch` (Unix seconds) in the
+prepared inputs and each `SBXLAUNCH4` boot recipe. It defaults to
+the time after all image builds/imports finish; explicit `--build-epoch` also
+sets this value. Linux cannot set a wall clock earlier than the guest's uptime,
+so an explicit epoch below 86400 (such as 0) still clamps build timestamps but
+records a guest epoch of 86400. A build epoch earlier than a
+certificate minted during the build makes that certificate not yet valid. The shared supervisor sets `CLOCK_REALTIME` before the launch
+barrier on x86 and arm64. Replay uses retained bytes and never samples the host
+clock. New preparations can change witnesses; replay of recorded inputs is
+unchanged. Both application kernels support unprivileged user namespaces,
+including UID/GID maps and nested mount, PID, network, IPC and UTS namespaces.
+The supervisor recursively mounts the image at the namespace root before
+entering it, preserving named volumes and allowing `CLONE_NEWUSER`.
 
 ## Layout
 
