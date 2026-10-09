@@ -162,14 +162,62 @@ pub fn container_runtime(
             true,
         )?,
     };
-    seedbox::container_runtime::Runtime::from_archive(&path, &cache_home()?.join("runtime"))
-        .map_err(|error| match error {
-            seedbox::Error::Io(error) => seedbox::Error::Setup(format!(
-                "runtime assets {}: {error}; check archive and cache permissions",
-                path.display()
-            )),
-            other => other,
-        })
+    let runtime =
+        seedbox::container_runtime::Runtime::from_archive(&path, &cache_home()?.join("runtime"))
+            .map_err(|error| match error {
+                seedbox::Error::Io(error) => seedbox::Error::Setup(format!(
+                    "runtime assets {}: {error}; check archive and cache permissions",
+                    path.display()
+                )),
+                other => other,
+            })?;
+    return_cache_to_sudo_user();
+    Ok(runtime)
+}
+
+/// Under sudo, the cache lives in the invoking user's home; leave nothing there
+/// that only root can remove. Best effort: a failure only affects cleanup.
+fn return_cache_to_sudo_user() {
+    if unsafe { libc::geteuid() } != 0 {
+        return;
+    }
+    let ids = |name| std::env::var(name).ok()?.parse::<u32>().ok();
+    let (Some(uid), Some(gid), Some(home), Ok(cache)) = (
+        ids("SUDO_UID"),
+        ids("SUDO_GID"),
+        super::defaults::sudo_home(),
+        cache_home(),
+    ) else {
+        return;
+    };
+    hand_over(&home, &cache, uid, gid);
+}
+
+fn hand_over(home: &Path, cache: &Path, uid: u32, gid: u32) {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(relative) = cache.strip_prefix(home) else {
+        return;
+    };
+    // Directories root created between the home and the cache, then the cache.
+    let mut path = home.to_path_buf();
+    let mut paths = Vec::new();
+    for component in relative.components() {
+        path.push(component);
+        paths.push(path.clone());
+    }
+    paths.extend(
+        walkdir::WalkDir::new(cache)
+            .min_depth(1)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.into_path()),
+    );
+    for path in paths {
+        if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.uid() == 0) {
+            let _ = std::os::unix::fs::lchown(&path, Some(uid), Some(gid));
+        }
+    }
 }
 
 pub fn guest_kernel(
@@ -209,6 +257,7 @@ fn release_asset(
             asset.description(),
             path.display()
         );
+        return_cache_to_sudo_user();
         return Ok(path);
     }
     #[cfg(target_os = "linux")]
@@ -228,12 +277,14 @@ fn release_asset(
         .timeout_recv_response(Some(std::time::Duration::from_secs(15)))
         .build()
         .new_agent();
-    ReleaseDownload::new(asset, agent, token.as_deref())?.ensure(
+    let path = ReleaseDownload::new(asset, agent, token.as_deref())?.ensure(
         &cache,
         architecture,
         cancellation,
         |message| eprintln!("{prefix}: {message}"),
-    )
+    )?;
+    return_cache_to_sudo_user();
+    Ok(path)
 }
 
 pub fn container_client(
@@ -272,4 +323,33 @@ pub fn preparation_progress(message: &str) {
 
 pub fn released_assets() -> bool {
     env!("SEEDBOX_RELEASE_ASSETS") == "1"
+}
+
+#[cfg(test)]
+mod sudo_cache_tests {
+    use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn root_created_cache_entries_go_to_the_sudo_user() {
+        if unsafe { libc::geteuid() } != 0 {
+            return; // Changing ownership needs root.
+        }
+        let home = tempfile::tempdir().unwrap();
+        let cache = home.path().join(".cache/seedbox");
+        std::fs::create_dir_all(cache.join("kernels/x86_64/ready")).unwrap();
+        std::fs::write(cache.join("kernels/x86_64/ready/kernel"), b"k").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        super::hand_over(home.path(), &cache, 4242, 4343);
+        for path in [
+            home.path().join(".cache"),
+            cache.clone(),
+            cache.join("kernels/x86_64/ready/kernel"),
+        ] {
+            let metadata = std::fs::metadata(&path).unwrap();
+            assert_eq!((metadata.uid(), metadata.gid()), (4242, 4343), "{path:?}");
+        }
+        assert_eq!(std::fs::metadata(home.path()).unwrap().uid(), 0);
+        super::hand_over(home.path(), outside.path(), 4242, 4343);
+        assert_eq!(std::fs::metadata(outside.path()).unwrap().uid(), 0);
+    }
 }
