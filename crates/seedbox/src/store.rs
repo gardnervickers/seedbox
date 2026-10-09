@@ -98,13 +98,32 @@ impl ContentStore {
     }
 
     /// Retain arbitrarily large artifacts with a bounded 64 KiB transfer buffer.
-    pub fn put_reader(&self, mut reader: impl Read) -> Result<ContentDigest> {
+    pub fn put_reader(&self, reader: impl Read) -> Result<ContentDigest> {
+        self.put_reader_with(reader, true)
+    }
+
+    /// Retain a run's own evidence (identity, logs) without syncing it. A host
+    /// crash can lose such an object, and a record that names it then fails
+    /// verification as an integrity error; it is never silently wrong. Inputs
+    /// that later runs replay from keep using the synced `put*` calls.
+    pub fn put_unsynced(&self, bytes: &[u8]) -> Result<ContentDigest> {
+        self.put_reader_with(bytes, false)
+    }
+
+    /// `put_unsynced` for a file.
+    pub fn put_file_unsynced(&self, path: &Path) -> Result<ContentDigest> {
+        self.put_reader_with(fs::File::open(path)?, false)
+    }
+
+    fn put_reader_with(&self, mut reader: impl Read, durable: bool) -> Result<ContentDigest> {
         let directory = self.root.join("sha256");
         fs::create_dir_all(&directory)?;
         let mut temp = tempfile::NamedTempFile::new_in(&directory)?;
         let digest = transfer(&mut reader, &mut temp)?;
         let path = self.path(&digest);
-        temp.as_file().sync_all()?;
+        if durable {
+            temp.as_file().sync_all()?;
+        }
         match temp.persist_noclobber(&path) {
             Ok(_) => {}
             Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {}
