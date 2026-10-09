@@ -232,6 +232,8 @@ impl Orchestrator {
             }
         }
         let workers = u64::from(options.workers).min(options.count) as usize;
+        // Attempts hard-link one verified read-only copy of each input.
+        let shared_inputs = directory.join("inputs");
         std::thread::scope(|scope| -> Result<()> {
             let _cleanup = CancelOnExit(cancellation.clone());
             let (completed, results) = mpsc::channel();
@@ -243,6 +245,7 @@ impl Orchestrator {
                 let cancellation = cancellation.clone();
                 let inputs = &inputs;
                 let performance = &performance;
+                let shared_inputs = &shared_inputs;
                 std::thread::Builder::new()
                     .spawn_scoped(scope, move || {
                         while let Ok((index, seed, subtree)) = jobs.recv() {
@@ -251,17 +254,20 @@ impl Orchestrator {
                                 Ok(None)
                             } else {
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    Orchestrator::new(self.store.clone(), subtree)
-                                        .with_log_policy(self.log_policy.clone())
-                                        .run_prepared(
-                                            simulation,
-                                            RunOptions {
-                                                seed: Some(seed),
-                                                cancellation: cancellation.clone(),
-                                            },
-                                            inputs.clone(),
-                                            executor,
-                                        )
+                                    Orchestrator {
+                                        shared_inputs: Some(shared_inputs.clone()),
+                                        ..Orchestrator::new(self.store.clone(), subtree)
+                                    }
+                                    .with_log_policy(self.log_policy.clone())
+                                    .run_prepared(
+                                        simulation,
+                                        RunOptions {
+                                            seed: Some(seed),
+                                            cancellation: cancellation.clone(),
+                                        },
+                                        inputs.clone(),
+                                        executor,
+                                    )
                                 }))
                                 .unwrap_or_else(|_| {
                                     Err(Error::Execution(
