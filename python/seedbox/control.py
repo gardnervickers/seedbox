@@ -56,6 +56,12 @@ class Shape:
 
 
 @dataclass(frozen=True)
+class Throttle:
+    handle: str
+    effect: Effect
+
+
+@dataclass(frozen=True)
 class ConnectionDrop:
     handle: str
     effect: Effect
@@ -192,6 +198,14 @@ class World:
         """Return after successful exec; application readiness remains its own check."""
         return self._call("restart", target=_target(target))[1]
 
+    def pause_process(self, target):
+        """SIGSTOP the application's process group; its kernel keeps ACKing and accepting connections."""
+        return self._call("pause_process", target=_target(target))[1]
+
+    def resume_process(self, target):
+        """SIGCONT a process group frozen by pause_process()."""
+        return self._call("resume_process", target=_target(target))[1]
+
     def pause(self, target):
         """Freeze the target's whole machine; other machines keep running."""
         return self._call("pause", target=_target(target))[1]
@@ -305,9 +319,29 @@ class World:
             raise ProtocolError("clock_skew response lacks an opaque handle or offset")
         return ClockSkew(result["handle"], result["offset_ns"], effect)
 
+    def throttle(self, target, factor):
+        """Make the target's machine `factor` times slower until healed (x86 pv timebase).
+
+        Simulated CPU work (each syscall's charge) costs `factor` times the
+        machine's seeded speed; factors run from 1 to 1000 in steps of 0.001.
+        """
+        if isinstance(factor, bool):
+            raise ValueError("throttle factor must be a number from 1 to 1000")
+        try:
+            permille = Decimal(str(factor)) * 1000
+        except InvalidOperation as error:
+            raise ValueError("invalid throttle factor") from error
+        if not permille.is_finite() or permille != permille.to_integral_value() or not 1000 <= permille <= 1_000_000:
+            raise ValueError("throttle factor must be from 1 to 1000 in steps of 0.001")
+        result, effect = self._call("throttle", target=_target(target), factor_permille=int(permille))
+        if not isinstance(result.get("handle"), str) or not result["handle"]:
+            self.close()
+            raise ProtocolError("throttle response lacks an opaque handle")
+        return Throttle(result["handle"], effect)
+
     def heal(self, partition):
         """Release this handle only; prior shape layers or overlapping cuts remain."""
-        if not isinstance(partition, (Partition, Shape, ConnectionDrop, ClockSkew)):
+        if not isinstance(partition, (Partition, Shape, ConnectionDrop, ClockSkew, Throttle)):
             raise TypeError("heal expects a fault handle returned by this API")
         result, effect = self._call("heal", handle=partition.handle)
         return result if isinstance(partition, ConnectionDrop) or "queue_counts" in result or "network_fault_counts" in result else effect

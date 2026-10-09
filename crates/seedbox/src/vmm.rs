@@ -691,6 +691,14 @@ impl ExecutionBackend for VmmExecutor {
     fn preflight(&self, output: Option<&Path>) -> Result<()> {
         self.preflight_capacity(1, output)
     }
+    /// The engine runs the retained executable and reads only the kernel and
+    /// each machine's guest image; image layers stay in the store.
+    fn runtime_inputs<'a>(&self, inputs: &'a PreparedInputs) -> Vec<&'a ContentDigest> {
+        [&inputs.profile.engine, &inputs.kernel]
+            .into_iter()
+            .chain(inputs.guests.values())
+            .collect()
+    }
     fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {
         crate::admission::validate_profile(&inputs.profile)?;
         if self.counted() && recorded_counter(&inputs.profile)? != self.counter {
@@ -1151,6 +1159,12 @@ fn validate_control_history(
             Operation::Restart { target } => Action::Restart {
                 machine: resolve(&target)?,
             },
+            Operation::PauseProcess { target } => Action::PauseProcess {
+                machine: resolve(&target)?,
+            },
+            Operation::ResumeProcess { target } => Action::ResumeProcess {
+                machine: resolve(&target)?,
+            },
             Operation::Pause { target } => Action::Pause {
                 machine: resolve(&target)?,
             },
@@ -1279,6 +1293,28 @@ fn validate_control_history(
                     max_offset_ns,
                 }
             }
+            Operation::Throttle {
+                target,
+                factor_permille,
+            } => {
+                let handle = if response {
+                    &metadata["result"]["handle"]
+                } else {
+                    &row["plan"]["handle"]
+                };
+                let handle = handle.as_str().ok_or_else(bad)?.to_owned();
+                if handle.is_empty()
+                    || (response && e != Some(a))
+                    || !seedbox_control::THROTTLE_PERMILLE.contains(&factor_permille)
+                {
+                    return Err(bad());
+                }
+                Action::Throttle {
+                    handle,
+                    machine: resolve(&target)?,
+                    factor_permille,
+                }
+            }
             Operation::Heal { handle } => {
                 // A clock heal waits for its guest effect; other heals apply at admission.
                 if response && e != Some(a) && !clocks.contains(&handle) {
@@ -1336,13 +1372,9 @@ fn validate_control_history(
             clocks.insert(handle.clone());
         }
         if unavailable {
-            if !matches!(
-                plan.action,
-                Action::Stop { .. }
-                    | Action::Restart { .. }
-                    | Action::ClockSkew { .. }
-                    | Action::Heal { .. }
-            ) || e.is_none_or(|e| e > plan.deadline_ns)
+            if !(plan.action.is_process()
+                || matches!(plan.action, Action::ClockSkew { .. } | Action::Heal { .. }))
+                || e.is_none_or(|e| e > plan.deadline_ns)
             {
                 return Err(bad());
             }

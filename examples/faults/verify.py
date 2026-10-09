@@ -217,7 +217,7 @@ def verify_control_cases(run):
                 witness=report["witness"], run=str(run))
 
 
-LIFECYCLE_ERRORS = ["invalid_state"] * 6 + ["target_unavailable"]
+LIFECYCLE_ERRORS = ["invalid_state"] * 7 + ["target_unavailable"]
 
 
 def verify_lifecycle_cases(run):
@@ -225,17 +225,20 @@ def verify_lifecycle_cases(run):
     assert report["workload_exit"] == {"service":"scenario", "code":0}
     faults = world["faults"]
     assert [(f["action"], f["status"]) for f in faults] == [
+        ("pause_process", "applied"), ("resume_process", "applied"),
         ("pause", "applied"), ("resume", "applied"), ("crash", "applied"),
         ("stop", "unavailable"), ("reboot", "applied")], faults
     assert all(f["machine"] == "server" for f in faults), faults
-    pause, resume, crash, _, reboot = (f["applied_at_ns"] for f in faults)
-    assert pause < resume < crash < reboot
+    freeze, thaw, pause, resume, crash, _, reboot = (f["applied_at_ns"] for f in faults)
+    # Process pause is acknowledged by the supervisor, after admission.
+    assert all(f["applied_at_ns"] > f["requested_at_ns"] for f in faults[:2]), faults
+    assert freeze < thaw < pause < resume < crash < reboot
     transcript = world["control_history"]
     errors = [entry["response"]["error"]["code"] for entry in transcript if not entry["response"]["ok"]]
     assert errors == LIFECYCLE_ERRORS, errors
     states = [machine["state"] for entry in transcript if entry["request"]["op"] == "inspect"
               for machine in entry["response"]["result"]["machines"] if machine["name"] == "server"]
-    assert states == ["Paused", "Running", "Down", "Running"], states
+    assert states == ["Frozen", "Running", "Paused", "Running", "Down", "Running"], states
     server = next(machine for machine in world["machines"] if machine["name"] == "server")
     assert server["incarnation"] == 1 and server["booted_at_ns"] == reboot, server
     crashed = server["crashed_incarnations"]
@@ -244,10 +247,10 @@ def verify_lifecycle_cases(run):
     assert console.count("TARGET_SOCKET absent") == 2, console
     scenario = (run / "output/machines/scenario.console").read_text()
     results = re.findall(r"^LIFECYCLE_CASES_RESULT (.+)$", scenario, re.M)
-    expected = {"errors":errors, "held_until_resume":True, "silent_while_down":True, "fresh_boot":True}
+    expected = {"errors":errors, "hung_while_frozen":True, "held_until_resume":True, "silent_while_down":True, "fresh_boot":True}
     assert len(results) == 1 and json.loads(results[0]) == expected, scenario
     return dict(case="lifecycle_cases", outcome="PASS", errors=errors,
-                applied_at_ns=dict(pause=pause, resume=resume, crash=crash, reboot=reboot),
+                applied_at_ns=dict(pause_process=freeze, resume_process=thaw, pause=pause, resume=resume, crash=crash, reboot=reboot),
                 witness=report["witness"], run=str(run))
 
 

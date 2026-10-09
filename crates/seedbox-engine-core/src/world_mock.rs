@@ -46,6 +46,7 @@ pub(crate) struct Mock {
     pub(crate) irq: bool,
     pub(crate) timer: u64,
     pub(crate) bad: Option<&'static str>,
+    pub(crate) throttleable: bool,
 }
 #[derive(Clone)]
 pub(crate) struct Saved {
@@ -75,6 +76,7 @@ impl Mock {
             irq: false,
             timer: u64::MAX,
             bad: None,
+            throttleable: true,
         }
     }
     fn record(&self, kind: &str) {
@@ -204,6 +206,13 @@ impl WorldMachine for Mock {
         true
     }
     fn seed_speed(&mut self, _: u64, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn supports_throttle(&self) -> bool {
+        self.throttleable
+    }
+    fn throttle(&mut self, factor_permille: u64) -> Result<(), String> {
+        self.record(&format!("throttle/{factor_permille}"));
         Ok(())
     }
     fn branches(&self) -> u64 {

@@ -24,6 +24,14 @@ with World.connect() as world:
     world.sleep(1)
     world.heal(overlap)
 
+    slow = world.throttle("server", 4)  # Slow but alive (x86 pv timebase).
+    world.sleep(1)
+    world.heal(slow)
+
+    world.pause_process("server")   # SIGSTOP: its kernel keeps ACKing.
+    world.sleep(1)
+    world.resume_process("server")
+
     world.pause("server")   # Freeze its whole machine while others run.
     world.sleep(1)
     world.resume("server")
@@ -45,7 +53,7 @@ including loops, conditionals and calls to application clients. A controller is
 outside the fault model; keep it separate from the services being stopped or
 partitioned or shaped. Closing the connection does not silently heal outstanding handles.
 
-`stop`, `restart`, `pause`, `resume`, `crash`, `reboot`, link-handle `heal`, and `sleep` return an `Effect` containing request,
+`stop`, `restart`, `pause_process`, `resume_process`, `pause`, `resume`, `crash`, `reboot`, link-handle `heal`, and `sleep` return an `Effect` containing request,
 admission, effect and reply timestamps. `partition` returns a `Partition` with
 its opaque handle and effect. `shape(from_, to, latency=..., jitter=0, loss_ppm=0)`
 returns a `Shape` accepted by `heal`; latency and jitter are nanosecond integers.
@@ -71,6 +79,22 @@ is also exported as an alias for `World`. `now_ns()` reads simulated time; `insp
 topology, machine state, active handles and packet counters. Strings name services;
 use `Machine("prepared-name")` when explicitly targeting a machine.
 
+`throttle(target, factor)` returns a `Throttle` accepted by `heal`. Until
+healed, the machine's simulated CPU work costs `factor` times its seeded speed,
+so it keeps answering, slowly. It needs the x86 `pv` timebase; elsewhere it
+raises `FaultError` with code `unsupported`. See
+[slow machines](PROTOCOL.md#slow-machines).
+
+`pause_process` freezes only the application: the supervisor sends SIGSTOP to
+its process group and confirms once the group leader has stopped, like `stop`
+confirms after the reap. The machine's kernel keeps running, so peers' TCP
+connections stay up and new connections are still accepted into the backlog,
+but requests hang instead of failing. This is a GC pause or Jepsen's `:pause`;
+a lease holder wakes up believing it still holds its lease. `resume_process`
+sends SIGCONT. `inspect()` shows a frozen application as `Frozen`. Pausing a
+stopped or frozen application, or resuming one that is not frozen, raises
+`invalid_state`; `stop` kills a frozen application as usual.
+
 Whole-machine operations take effect at admission without a guest acknowledgement.
 Pause freezes CPU and devices; resume continues them with missed timer ticks
 firing once, late. Crash destroys RAM, sockets and queued I/O and sends nothing
@@ -87,6 +111,7 @@ valid. Restarting a running application or stopping one twice raises a recoverab
 for pause, paused→running for resume, running or paused→down for crash, and
 down→running for reboot; other transitions raise `invalid_state` without a fault,
 as do stop and restart of a paused machine.
+Process pause follows the same paused-machine, down and exited rules as stop.
 Stop/restart and pause/resume of an exited VM raise `target_unavailable`; crash
 and reboot of one are allowed subject to the machine transition rules. A
 stop/restart admitted while down, or still pending when the machine crashes,

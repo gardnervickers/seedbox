@@ -148,6 +148,12 @@ impl Control {
             Operation::Restart { target } => Some(Action::Restart {
                 machine: self.target(target)?,
             }),
+            Operation::PauseProcess { target } => Some(Action::PauseProcess {
+                machine: self.target(target)?,
+            }),
+            Operation::ResumeProcess { target } => Some(Action::ResumeProcess {
+                machine: self.target(target)?,
+            }),
             Operation::Pause { target } => Some(Action::Pause {
                 machine: self.target(target)?,
             }),
@@ -289,6 +295,26 @@ impl Control {
                     machine,
                     offset_ns: *offset_ns,
                     max_offset_ns: *max_offset_ns,
+                })
+            }
+            Operation::Throttle {
+                target,
+                factor_permille,
+            } => {
+                if !seedbox_control::THROTTLE_PERMILLE.contains(factor_permille) {
+                    return Err("factor_permille must be in [1000, 1000000]".into());
+                }
+                let machine = self.target(target)?;
+                self.handles = self
+                    .handles
+                    .checked_add(1)
+                    .ok_or("fault handles exhausted")?;
+                let handle = format!("p{}", self.handles);
+                result = json!({"handle":handle});
+                Some(Action::Throttle {
+                    handle,
+                    machine,
+                    factor_permille: *factor_permille,
                 })
             }
             Operation::Heal { handle } => {
@@ -479,17 +505,15 @@ impl Control {
         if let Some(p) = self.pending.as_mut() {
             if !p.admitted_done
                 && p.plan.as_ref().is_some_and(|plan| {
-                    matches!(
-                        plan.action,
-                        Action::Stop { .. }
-                            | Action::Restart { .. }
-                            | Action::Pause { .. }
-                            | Action::Resume { .. }
-                            | Action::ClockSkew { .. }
-                    ) && plan
-                        .action
-                        .machine()
-                        .is_some_and(|name| exited.iter().any(|n| n == name))
+                    (plan.action.is_process()
+                        || matches!(
+                            plan.action,
+                            Action::Pause { .. } | Action::Resume { .. } | Action::ClockSkew { .. }
+                        ))
+                        && plan
+                            .action
+                            .machine()
+                            .is_some_and(|name| exited.iter().any(|n| n == name))
                 })
             {
                 let message = match p.plan.as_ref().map(|plan| &plan.action) {
@@ -497,12 +521,31 @@ impl Control {
                         "target VM has exited; crash and reboot it instead"
                     }
                     Some(Action::ClockSkew { .. }) => "target VM has exited",
+                    Some(Action::PauseProcess { .. } | Action::ResumeProcess { .. }) => {
+                        "target VM has exited; there is no process to pause or resume"
+                    }
                     _ => "target VM has exited; restart only starts a stopped process",
                 };
                 p.plan = None;
                 p.effect = Some(p.admitted);
                 p.error = Some(message.into());
                 p.error_code = Some("target_unavailable");
+            }
+        }
+    }
+    /// Throttle only machines whose timebase charges CPU work by a speed.
+    pub fn reject_unthrottleable(&mut self, unsupported: &[String]) {
+        if let Some(p) = self.pending.as_mut() {
+            if !p.admitted_done
+                && p.plan.as_ref().is_some_and(|plan| {
+                    matches!(&plan.action, Action::Throttle { machine, .. } if unsupported.contains(machine))
+                })
+            {
+                p.plan = None;
+                p.effect = Some(p.admitted);
+                p.result = json!({});
+                p.error = Some("throttle needs the x86 pv timebase".into());
+                p.error_code = Some("unsupported");
             }
         }
     }
