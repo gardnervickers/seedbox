@@ -86,7 +86,37 @@ impl ExecutionBackend for Backend {
     }
 }
 
+/// The fixture's backend with only `execute` replaced, so profile and
+/// performance parameters stay those of the fixture.
+struct Executing<'a, F> {
+    backend: &'a Backend,
+    execute: F,
+}
+impl<F> ExecutionBackend for Executing<'_, F>
+where
+    F: Fn(ExecutionRequest<'_>) -> Result<ExecutionReport> + Send + Sync,
+{
+    fn profile(&self) -> ExecutionProfile {
+        self.backend.profile()
+    }
+    fn performance_parameters(&self) -> BTreeMap<String, String> {
+        self.backend.performance_parameters()
+    }
+    fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
+        (self.execute)(request)
+    }
+}
+
 impl Fixture {
+    fn executing<F>(&self, execute: F) -> Executing<'_, F>
+    where
+        F: Fn(ExecutionRequest<'_>) -> Result<ExecutionReport> + Send + Sync,
+    {
+        Executing {
+            backend: &self.backend,
+            execute,
+        }
+    }
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("compose.yaml");
@@ -928,35 +958,26 @@ fn machine_lifecycle_effects_pass_and_replay_with_their_service() {
 #[test]
 fn exploration_freezes_full_closure_and_continues_failure_and_witnessed_timeout() {
     use seedbox::exploration::ExploreOptions;
-    struct Sequence<'a>(&'a Fixture);
-    impl ExecutionBackend for Sequence<'_> {
-        fn profile(&self) -> ExecutionProfile {
-            self.0.backend.profile()
-        }
-        fn performance_parameters(&self) -> BTreeMap<String, String> {
-            self.0.backend.performance_parameters()
-        }
-        fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
-            let seed = request.seed;
-            // Sources disappear after preparation. Every next run must materialize
-            // the original complete closure and keep its provenance unchanged.
-            if seed == 10 {
-                fs::remove_file(&self.0.simulation.source)?;
-            }
-            let mut report = self.0.backend.execute(request)?;
-            if seed == 11 {
-                report.workload_exit.as_mut().unwrap().code = 3;
-            }
-            if seed == 12 {
-                report.reason = StopReason::SimulatedTimeLimit;
-            }
-            if seed == 13 {
-                return Err(Error::Execution("real retained backend error".into()));
-            }
-            Ok(report)
-        }
-    }
     let fixture = Fixture::new();
+    let sequence = fixture.executing(|request| {
+        let seed = request.seed;
+        // Sources disappear after preparation. Every next run must materialize
+        // the original complete closure and keep its provenance unchanged.
+        if seed == 10 {
+            fs::remove_file(&fixture.simulation.source)?;
+        }
+        let mut report = fixture.backend.execute(request)?;
+        if seed == 11 {
+            report.workload_exit.as_mut().unwrap().code = 3;
+        }
+        if seed == 12 {
+            report.reason = StopReason::SimulatedTimeLimit;
+        }
+        if seed == 13 {
+            return Err(Error::Execution("real retained backend error".into()));
+        }
+        Ok(report)
+    });
     let batch = fixture
         .orchestrator
         .explore(
@@ -967,7 +988,7 @@ fn exploration_freezes_full_closure_and_continues_failure_and_witnessed_timeout(
                 ..Default::default()
             },
             &fixture.preparer,
-            &Sequence(&fixture),
+            &sequence,
         )
         .unwrap();
     assert_eq!(fixture.preparer.calls.load(Ordering::SeqCst), 1);
@@ -1060,28 +1081,19 @@ fn exploration_bounds_fail_before_state_and_huge_count_is_lazy() {
 #[test]
 fn exploration_corrupt_frozen_blob_retains_error_without_repreparing() {
     use seedbox::exploration::ExploreOptions;
-    struct Corrupt<'a>(&'a Fixture);
-    impl ExecutionBackend for Corrupt<'_> {
-        fn profile(&self) -> ExecutionProfile {
-            self.0.backend.profile()
-        }
-        fn performance_parameters(&self) -> BTreeMap<String, String> {
-            self.0.backend.performance_parameters()
-        }
-        fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
-            let report = self.0.backend.execute(request)?;
-            fs::write(
-                self.0
-                    .directory
-                    .path()
-                    .join("store/sha256")
-                    .join(self.0.preparer.inputs.kernel.hex()),
-                b"corrupted actual retained bytes",
-            )?;
-            Ok(report)
-        }
-    }
     let fixture = Fixture::new();
+    let corrupt = fixture.executing(|request| {
+        let report = fixture.backend.execute(request)?;
+        fs::write(
+            fixture
+                .directory
+                .path()
+                .join("store/sha256")
+                .join(fixture.preparer.inputs.kernel.hex()),
+            b"corrupted actual retained bytes",
+        )?;
+        Ok(report)
+    });
     let batch = fixture
         .orchestrator
         .explore(
@@ -1091,7 +1103,7 @@ fn exploration_corrupt_frozen_blob_retains_error_without_repreparing() {
                 ..Default::default()
             },
             &fixture.preparer,
-            &Corrupt(&fixture),
+            &corrupt,
         )
         .unwrap();
     assert_eq!(batch.outcome, Outcome::Error);
@@ -1107,35 +1119,18 @@ fn exploration_corrupt_frozen_blob_retains_error_without_repreparing() {
 fn exploration_active_run_is_durable_incomplete_then_cancellation_stops_dispatch() {
     use seedbox::exploration::ExploreOptions;
     use std::sync::{mpsc, Mutex};
-    struct Blocked<'a> {
-        fixture: &'a Fixture,
-        ready: mpsc::Sender<std::path::PathBuf>,
-        resume: Mutex<mpsc::Receiver<()>>,
-    }
-    impl ExecutionBackend for Blocked<'_> {
-        fn profile(&self) -> ExecutionProfile {
-            self.fixture.backend.profile()
-        }
-        fn performance_parameters(&self) -> BTreeMap<String, String> {
-            self.fixture.backend.performance_parameters()
-        }
-        fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
-            self.ready
-                .send(request.output.parent().unwrap().to_owned())
-                .unwrap();
-            self.resume.lock().unwrap().recv().unwrap();
-            self.fixture.backend.execute(request)
-        }
-    }
     let fixture = Fixture::new();
     let token = CancellationToken::default();
     let (ready_tx, ready_rx) = mpsc::channel();
-    let (resume_tx, resume_rx) = mpsc::channel();
-    let backend = Blocked {
-        fixture: &fixture,
-        ready: ready_tx,
-        resume: Mutex::new(resume_rx),
-    };
+    let (resume_tx, resume_rx) = mpsc::channel::<()>();
+    let resume = Mutex::new(resume_rx);
+    let backend = fixture.executing(|request| {
+        ready_tx
+            .send(request.output.parent().unwrap().to_owned())
+            .unwrap();
+        resume.lock().unwrap().recv().unwrap();
+        fixture.backend.execute(request)
+    });
     std::thread::scope(|scope| {
         let cancellation = token.clone();
         let task = scope.spawn(|| {
@@ -1156,14 +1151,7 @@ fn exploration_active_run_is_durable_incomplete_then_cancellation_stops_dispatch
         let directory = ready_rx.recv().unwrap();
         let before = inspect(&directory).unwrap();
         assert_eq!(before.outcome, Outcome::Incomplete);
-        let exploration = directory
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap();
-        let partial = seedbox::exploration::inspect(exploration).unwrap();
+        let partial = seedbox::exploration::inspect(batch_of(&directory)).unwrap();
         assert!(!partial.finished);
         assert_eq!(partial.outcome, Outcome::Incomplete);
         assert_eq!(partial.attempts.len(), 1);
@@ -1179,34 +1167,16 @@ fn exploration_active_run_is_durable_incomplete_then_cancellation_stops_dispatch
 #[test]
 fn exploration_checkpoint_failure_leaves_real_committed_run_and_no_later_dispatch() {
     use seedbox::exploration::ExploreOptions;
-    struct BreakCheckpoint<'a>(&'a Fixture);
-    impl ExecutionBackend for BreakCheckpoint<'_> {
-        fn profile(&self) -> ExecutionProfile {
-            self.0.backend.profile()
-        }
-        fn performance_parameters(&self) -> BTreeMap<String, String> {
-            self.0.backend.performance_parameters()
-        }
-        fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
-            let exploration = request
-                .output
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap();
-            fs::rename(
-                exploration.join("exploration.json"),
-                exploration.join("before.json"),
-            )?;
-            fs::create_dir(exploration.join("exploration.json"))?;
-            self.0.backend.execute(request)
-        }
-    }
     let fixture = Fixture::new();
+    let break_checkpoint = fixture.executing(|request| {
+        let exploration = batch_of(request.output.parent().unwrap());
+        fs::rename(
+            exploration.join("exploration.json"),
+            exploration.join("before.json"),
+        )?;
+        fs::create_dir(exploration.join("exploration.json"))?;
+        fixture.backend.execute(request)
+    });
     assert!(fixture
         .orchestrator
         .explore(
@@ -1216,7 +1186,7 @@ fn exploration_checkpoint_failure_leaves_real_committed_run_and_no_later_dispatc
                 ..Default::default()
             },
             &fixture.preparer,
-            &BreakCheckpoint(&fixture)
+            &break_checkpoint
         )
         .is_err());
     assert_eq!(fixture.backend.calls.load(Ordering::SeqCst), 1);
@@ -1651,16 +1621,7 @@ impl ExecutionBackend for ControlledWorkers<'_> {
                 }
             }
             WorkerControl::BreakCheckpoint => {
-                let batch = request
-                    .output
-                    .parent()
-                    .unwrap()
-                    .parent()
-                    .unwrap()
-                    .parent()
-                    .unwrap()
-                    .parent()
-                    .unwrap();
+                let batch = batch_of(request.output.parent().unwrap());
                 fs::rename(batch.join("exploration.json"), batch.join("before.json"))?;
                 fs::create_dir(batch.join("exploration.json"))?;
             }
@@ -1712,6 +1673,7 @@ fn worker_ready(
         .recv_timeout(WORKER_WAIT)
         .expect("worker did not start")
 }
+/// The exploration directory three levels above one of its run directories.
 fn batch_of(run: &std::path::Path) -> &std::path::Path {
     run.parent().unwrap().parent().unwrap().parent().unwrap()
 }

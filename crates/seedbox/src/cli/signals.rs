@@ -13,8 +13,9 @@ impl Signals {
             signal_hook::consts::SIGHUP,
         ] {
             let token = token.clone();
-            // The callback performs only an atomic store; cleanup happens in
-            // normal executor code after the VMM is stopped and reaped.
+            // SAFETY: the callback performs only an atomic store, which is
+            // async-signal-safe; cleanup happens in normal executor code
+            // after the VMM is stopped and reaped.
             handlers
                 .0
                 .push(unsafe { signal_hook::low_level::register(signal, move || token.cancel()) }?);

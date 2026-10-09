@@ -105,6 +105,39 @@ fn binary_preservation_filters_equal_time_and_incarnations() {
 }
 
 #[test]
+fn whole_report_writers_keep_the_cli_bytes() {
+    let tmp = tempfile::tempdir().unwrap();
+    fixtures::make(tmp.path());
+    let mut reader = Reader::open(tmp.path(), &Filter::default()).unwrap();
+    let mut raw = Vec::new();
+    reader.write_raw(&mut raw).unwrap();
+    assert_eq!(raw, b"\0\xff\xfeA\nB");
+    // The document the CLI assembled by hand before `write_json` existed.
+    let mut expected = format!(
+        "{{\n  \"status\": {},\n  \"omissions\": {},\n  \"chunks\": [\n",
+        serde_json::to_string(&reader.report.status).unwrap(),
+        serde_json::to_string_pretty(&reader.report.omissions).unwrap()
+    )
+    .into_bytes();
+    let count = reader.report.chunks.len();
+    for index in 0..count {
+        expected.extend_from_slice(b"    ");
+        reader.write_chunk_json(index, &mut expected).unwrap();
+        if index + 1 < count {
+            expected.push(b',');
+        }
+        expected.push(b'\n');
+    }
+    expected.extend_from_slice(b"  ]\n}\n");
+    let mut json = Vec::new();
+    reader.write_json(&mut json).unwrap();
+    assert_eq!(
+        String::from_utf8(json).unwrap(),
+        String::from_utf8(expected).unwrap()
+    );
+}
+
+#[test]
 fn reject_corrupt_truncated_out_of_bounds_and_disordered_indexes_before_filtering() {
     for bytes in [
         b"SBLOG002".to_vec(),

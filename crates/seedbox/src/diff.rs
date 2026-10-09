@@ -1,7 +1,9 @@
 //! Offline comparison of existing retained evidence; never executes a guest.
 
 use crate::{
+    limits::{exceeds, read_bounded},
     orchestration::{self, RunRecord},
+    retained,
     store::ContentDigest,
     vmm::{page_hash_log, MachineReport, StateDigestParts, VmmReport},
     Error, Result,
@@ -146,11 +148,12 @@ struct ReportHeader {
 }
 
 fn bad(path: &Path, error: impl std::fmt::Display) -> Error {
-    Error::Setup(format!(
-        "diff {}: {error}; use an intact retained run directory (import bundles first)",
-        path.display()
-    ))
+    retained::bad("diff", path, error)
 }
+
+/// The engine report is metadata, not an arbitrarily large trace.
+const REPORT_LIMIT: u64 = 256 * 1024 * 1024;
+const TRACE_LINE_LIMIT: u64 = 64 * 1024;
 
 fn log(directory: &Path, record: &RunRecord, name: &str) -> Result<Option<File>> {
     crate::retained::log(directory, record, name, "diff")
@@ -163,14 +166,7 @@ fn load(directory: &Path) -> Result<Evidence> {
     let mut machines = BTreeMap::new();
     if let Some(file) = log(directory, &record, "vmm.json")? {
         let path = directory.join("output/vmm.json");
-        // The engine report is metadata, not an arbitrarily large trace.
-        let mut bytes = Vec::new();
-        file.take(256 * 1024 * 1024 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|e| bad(&path, e))?;
-        if bytes.len() > 256 * 1024 * 1024 {
-            return Err(bad(&path, "report exceeds 256 MiB"));
-        }
+        let bytes = read_bounded(file, REPORT_LIMIT, "report").map_err(|e| bad(&path, e))?;
         let profile = &record.identity.inputs.profile;
         let executable = crate::engine::recorded_launch(profile).map_err(|e| bad(&path, e))?;
         let arm_world = executable == crate::engine::ExecutableKind::ArmWorld;
@@ -545,11 +541,11 @@ fn compare_pages(a: impl Read, b: impl Read) -> Result<PageHashDiff> {
 // Existing engine trace format: kind branches time_ns extra(hex) rip(hex).
 fn next_trace(reader: &mut impl BufRead) -> Result<Option<Record>> {
     let mut line = String::new();
-    if reader.take(65537).read_line(&mut line)? == 0 {
+    if reader.take(TRACE_LINE_LIMIT + 1).read_line(&mut line)? == 0 {
         return Ok(None);
     }
-    if line.len() > 65536 {
-        return Err(Error::Integrity("trace record exceeds 64 KiB".into()));
+    if line.len() as u64 > TRACE_LINE_LIMIT {
+        return Err(Error::Integrity(exceeds("trace record", TRACE_LINE_LIMIT)));
     }
     let fields: Vec<_> = line.split_whitespace().collect();
     let invalid = || {

@@ -3,7 +3,7 @@
 //! Image file metadata and hard links are preserved; only Seedbox-owned bootstrap
 //! files have normalized timestamps. The image runs at the guest mount namespace root.
 
-use crate::{image::Launch, Error, Result};
+use crate::{image::Launch, limits::exceeds, Error, Result};
 use std::{
     collections::BTreeMap,
     fs,
@@ -145,9 +145,11 @@ pub fn launch_recipe(
     Ok(bytes)
 }
 
+const FIELD_LIMIT: u64 = 16 * 1024 * 1024;
+
 fn field(output: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
-    if bytes.len() > 16 * 1024 * 1024 {
-        return Err(Error::Execution("launch field exceeds 16 MiB".into()));
+    if bytes.len() as u64 > FIELD_LIMIT {
+        return Err(Error::Execution(exceeds("launch field", FIELD_LIMIT)));
     }
     output.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     output.extend_from_slice(bytes);
@@ -286,7 +288,7 @@ impl<W: Write> Newc<W> {
             let relative = item
                 .path()
                 .strip_prefix(root)
-                .unwrap()
+                .map_err(|_| Error::Execution("image path outside its root".into()))?
                 .to_str()
                 .ok_or_else(|| Error::Execution("non-UTF-8 image filename".into()))?;
             let name = if relative.is_empty() {

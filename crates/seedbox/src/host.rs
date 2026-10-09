@@ -108,6 +108,7 @@ fn try_locks(cpus: &BTreeSet<u32>, directory: &Path) -> Result<Option<Vec<File>>
             return Err(Error::Execution("CPU lease is not a regular file".into()));
         }
         // Same sorted, nonblocking flock protocol as harness/batch.py.
+        // SAFETY: `file` is open for the duration of the call.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             let error = std::io::Error::last_os_error();
             if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
@@ -122,7 +123,8 @@ fn try_locks(cpus: &BTreeSet<u32>, directory: &Path) -> Result<Option<Vec<File>>
 
 #[cfg(target_os = "linux")]
 fn sysfs(path: &str) -> Result<String> {
-    fs::read_to_string(path).map_err(|error| Error::Setup(format!("{path}: {error}")))
+    use crate::Context;
+    fs::read_to_string(path).context(Error::Setup, path)
 }
 
 #[cfg(target_os = "linux")]
@@ -141,11 +143,14 @@ fn siblings(cpu: u32) -> Result<BTreeSet<u32>> {
 /// CPUs this process may run on (respects `taskset` and cgroup cpusets).
 #[cfg(target_os = "linux")]
 fn allowed_cpus() -> Result<BTreeSet<u32>> {
+    // SAFETY: cpu_set_t is a plain bit array; all-zero is the empty set.
     let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    // SAFETY: the size passed is the size of the writable mask.
     if unsafe { libc::sched_getaffinity(0, std::mem::size_of_val(&set), &mut set) } != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
     Ok((0..libc::CPU_SETSIZE as u32)
+        // SAFETY: every index is below CPU_SETSIZE.
         .filter(|cpu| unsafe { libc::CPU_ISSET(*cpu as usize, &set) })
         .collect())
 }

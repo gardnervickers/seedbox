@@ -17,7 +17,9 @@ impl Affinity {
         if cpu >= libc::CPU_SETSIZE as u32 {
             return Err(Error::Setup("CPU exceeds affinity mask".into()));
         }
+        // SAFETY: cpu_set_t is a plain bit array; all-zero is the empty set.
         let mut original = unsafe { std::mem::zeroed() };
+        // SAFETY: the size passed is the size of the writable mask.
         if unsafe { libc::sched_getaffinity(0, std::mem::size_of_val(&original), &mut original) }
             != 0
         {
@@ -26,11 +28,14 @@ impl Affinity {
                 std::io::Error::last_os_error()
             )));
         }
+        // SAFETY: as for `original`.
         let mut pinned = unsafe { std::mem::zeroed() };
+        // SAFETY: `cpu` was checked against CPU_SETSIZE above.
         unsafe {
             libc::CPU_ZERO(&mut pinned);
             libc::CPU_SET(cpu as usize, &mut pinned);
         }
+        // SAFETY: the size passed is the size of the mask.
         if unsafe { libc::sched_setaffinity(0, std::mem::size_of_val(&pinned), &pinned) } != 0 {
             return Err(Error::Setup(format!(
                 "CPU {cpu} temporary affinity: {}",
@@ -48,6 +53,7 @@ impl Affinity {
             checked_affinity_restore(
                 &expected,
                 || {
+                    // SAFETY: the size passed is the size of the saved mask.
                     if unsafe {
                         libc::sched_setaffinity(
                             0,
@@ -64,7 +70,9 @@ impl Affinity {
                     Ok(())
                 },
                 || {
+                    // SAFETY: as for `original` in `pin`.
                     let mut restored = unsafe { std::mem::zeroed() };
+                    // SAFETY: the size passed is the size of the writable mask.
                     if unsafe {
                         libc::sched_getaffinity(0, std::mem::size_of_val(&restored), &mut restored)
                     } != 0
@@ -84,6 +92,7 @@ impl Affinity {
 }
 fn affinity_bits(mask: &libc::cpu_set_t) -> Vec<u32> {
     (0..libc::CPU_SETSIZE as u32)
+        // SAFETY: every index is below CPU_SETSIZE.
         .filter(|cpu| unsafe { libc::CPU_ISSET(*cpu as usize, mask) })
         .collect()
 }
@@ -99,7 +108,7 @@ fn text(path: &str) -> Result<String> {
     let mut data = String::new();
     File::open(path)
         .and_then(|file| file.take(2 * 1024 * 1024 + 1).read_to_string(&mut data))
-        .map_err(|e| Error::Setup(format!("host admission {path}: {e}")))?;
+        .context(Error::Setup, format_args!("host admission {path}"))?;
     if data.len() > 2 * 1024 * 1024 {
         return Err(Error::Setup(format!(
             "host admission {path}: exceeds read bound"
@@ -108,6 +117,8 @@ fn text(path: &str) -> Result<String> {
     Ok(data)
 }
 fn query(file: &File, command: libc::c_ulong, argument: libc::c_ulong) -> Result<i32> {
+    // SAFETY: callers pass only KVM_GET_API_VERSION and KVM_CHECK_EXTENSION,
+    // whose argument is an integer, never a pointer.
     let result = unsafe { libc::ioctl(file.as_raw_fd(), command, argument) };
     if result < 0 {
         return Err(Error::Setup(format!(
@@ -141,6 +152,8 @@ fn open_disabled_perf(spec: DisabledCounterSpec) -> Result<File> {
         flags: spec.flags,
         ..Default::default()
     };
+    // SAFETY: `attr` is a live perf_event_attr whose `size` field is its own
+    // size; the kernel only reads it.
     let fd = unsafe { libc::syscall(libc::SYS_perf_event_open, &attr, 0, -1, -1, spec.open_flags) }
         as i32;
     if fd < 0 {
@@ -150,10 +163,12 @@ fn open_disabled_perf(spec: DisabledCounterSpec) -> Result<File> {
             std::io::Error::last_os_error()
         )));
     }
+    // SAFETY: perf_event_open succeeded, so `fd` is a new descriptor nothing else owns.
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 fn collect(cpu: u32, counter: crate::counter::CounterProfile) -> Result<CoreObservation> {
+    // SAFETY: sched_getcpu takes no arguments.
     if unsafe { libc::sched_getcpu() } != cpu as i32 {
         return Err(Error::Execution("preflight CPU affinity changed".into()));
     }
@@ -207,10 +222,12 @@ fn collect(cpu: u32, counter: crate::counter::CounterProfile) -> Result<CoreObse
         .read(true)
         .write(true)
         .open("/dev/kvm")
-        .map_err(|e| Error::Setup(format!("/dev/kvm admission: {e}")))?;
+        .context(Error::Setup, "/dev/kvm admission")?;
     // KVM UAPI header plus at most 1024 complete 40-byte entries, aligned for ioctl.
     let mut words = vec![0u64; 1 + 1024 * 5];
     words[0] = 1024;
+    // SAFETY: KVM_GET_SUPPORTED_CPUID writes at most `words[0]` 40-byte
+    // entries after the 8-byte header, and `words` has room for exactly that.
     if unsafe {
         libc::ioctl(
             kvm.as_raw_fd(),
@@ -229,6 +246,8 @@ fn collect(cpu: u32, counter: crate::counter::CounterProfile) -> Result<CoreObse
         return Err(Error::Setup("KVM CPUID capacity exceeded".into()));
     }
     let raw_cpuid = (0..count)
+        // SAFETY: `index < count <= 1024`, so the entry lies inside `words`; the
+        // u64 buffer is suitably aligned and CpuidEntry is plain data.
         .map(|index| unsafe {
             words
                 .as_ptr()
