@@ -4,10 +4,10 @@ use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs,
-    io::{self, Read, Write},
-    os::unix::fs::MetadataExt,
+    io::{self, Read, Seek, Write},
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -52,6 +52,9 @@ pub struct ContentStore {
     /// Objects this process hashed, with the file identity they had then.
     /// Clones share it, so exploration workers verify each object once.
     verified: Arc<Mutex<HashMap<ContentDigest, Stamp>>>,
+    /// Shared copies made by `materialize_linked`, with the identity each had
+    /// when this process wrote it. Holding the lock serializes their creation.
+    shared: Arc<Mutex<HashMap<PathBuf, Stamp>>>,
 }
 
 /// What any write, truncate, rename over or chmod of an object changes.
@@ -77,11 +80,40 @@ impl Stamp {
     }
 }
 
+/// Digests of files outside the store that this process hashed, by inode,
+/// with the stamp each had then. Profile construction, admission and
+/// preparation each hash the same engine and kernel; this reads them once.
+static HASHED_FILES: Mutex<BTreeMap<(u64, u64), (Stamp, ContentDigest)>> =
+    Mutex::new(BTreeMap::new());
+
+/// The digest of `file`, hashed with `hash` unless this process already
+/// hashed the same inode and its stamp is unchanged since. A file that
+/// changes while it is hashed is not remembered.
+pub(crate) fn file_digest_with(
+    file: &mut fs::File,
+    hash: impl FnOnce(&mut fs::File) -> Result<ContentDigest>,
+) -> Result<ContentDigest> {
+    let before = Stamp::of(file)?;
+    let key = (before.dev, before.ino);
+    let lock = || HASHED_FILES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((stamp, digest)) = lock().get(&key) {
+        if *stamp == before {
+            return Ok(digest.clone());
+        }
+    }
+    let digest = hash(file)?;
+    if Stamp::of(file)? == before {
+        lock().insert(key, (before, digest.clone()));
+    }
+    Ok(digest)
+}
+
 impl ContentStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
             verified: Arc::default(),
+            shared: Arc::default(),
         }
     }
 
@@ -94,16 +126,42 @@ impl ContentStore {
     }
 
     /// Retain arbitrarily large artifacts with a bounded 64 KiB transfer buffer.
-    pub fn put_reader(&self, mut reader: impl Read) -> Result<ContentDigest> {
+    pub fn put_reader(&self, reader: impl Read) -> Result<ContentDigest> {
+        self.put_reader_with(reader, true)
+    }
+
+    /// Retain a run's own evidence (identity, logs) without syncing it. A host
+    /// crash can lose such an object, and a record that names it then fails
+    /// verification as an integrity error; it is never silently wrong. Putting
+    /// the same bytes unsynced again replaces such an object. Inputs
+    /// that later runs replay from keep using the synced `put*` calls.
+    pub fn put_unsynced(&self, bytes: &[u8]) -> Result<ContentDigest> {
+        self.put_reader_with(bytes, false)
+    }
+
+    /// `put_unsynced` for a file.
+    pub fn put_file_unsynced(&self, path: &Path) -> Result<ContentDigest> {
+        self.put_reader_with(fs::File::open(path)?, false)
+    }
+
+    fn put_reader_with(&self, mut reader: impl Read, durable: bool) -> Result<ContentDigest> {
         let directory = self.root.join("sha256");
         fs::create_dir_all(&directory)?;
         let mut temp = tempfile::NamedTempFile::new_in(&directory)?;
         let digest = transfer(&mut reader, &mut temp)?;
         let path = self.path(&digest);
-        temp.as_file().sync_all()?;
+        if durable {
+            temp.as_file().sync_all()?;
+        }
         match temp.persist_noclobber(&path) {
             Ok(_) => {}
-            Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                // A host crash can leave an unsynced object named but short.
+                // These bytes hash to the digest, so put them in its place.
+                if !durable && self.verify(&digest).is_err() {
+                    e.file.persist(&path).map_err(|e| e.error)?;
+                }
+            }
             Err(e) => return Err(e.error.into()),
         }
         // Verify an existing entry too; never repair corruption implicitly.
@@ -111,8 +169,41 @@ impl ContentStore {
         Ok(digest)
     }
 
+    /// Like `put_reader`, but an object already in the store is only read:
+    /// the file is hashed first, so retaining the same engine, kernel or image
+    /// again never rewrites and syncs a second copy of it.
     pub fn put_file(&self, path: &Path) -> Result<ContentDigest> {
-        self.put_reader(fs::File::open(path)?)
+        let mut file = fs::File::open(path)?;
+        let digest = file_digest_with(&mut file, |file| transfer(file, &mut io::sink()))?;
+        if let Ok(existing) = self.open(&digest) {
+            // Verify the existing entry; never repair corruption implicitly.
+            if self.trusted(&digest, &existing)?.is_none() {
+                self.verify(&digest)?;
+            }
+            return Ok(digest);
+        }
+        file.seek(io::SeekFrom::Start(0))?;
+        self.put_reader(file)
+    }
+
+    /// The object a named record points at, if the record exists and is
+    /// well formed. Records name slow derivations, such as an exported image
+    /// filesystem; the object they point at is verified when it is read.
+    pub fn record(&self, name: &ContentDigest) -> Option<ContentDigest> {
+        let text = fs::read_to_string(self.root.join("records").join(name.hex())).ok()?;
+        ContentDigest::try_from(text).ok()
+    }
+
+    /// Point a named record at an object. Records are not synced: after a
+    /// host crash a record is at worst missing or unreadable, which is a miss.
+    pub fn set_record(&self, name: &ContentDigest, target: &ContentDigest) -> Result<()> {
+        let directory = self.root.join("records");
+        fs::create_dir_all(&directory)?;
+        let mut temp = tempfile::NamedTempFile::new_in(&directory)?;
+        temp.write_all(target.hex().as_bytes())?;
+        temp.persist(directory.join(name.hex()))
+            .map_err(|e| e.error)?;
+        Ok(())
     }
 
     pub fn read(&self, digest: &ContentDigest) -> Result<Vec<u8>> {
@@ -212,8 +303,60 @@ impl ContentStore {
             }
             None => self.copy_to(digest, &mut temp)?,
         }
-        temp.persist_noclobber(&path).map_err(|e| e.error)?;
+        let mut copy = temp.persist_noclobber(&path).map_err(|e| e.error)?;
+        // The copy holds exactly the object's bytes, so a later put_file or
+        // file_digest of it needs no second read.
+        file_digest_with(&mut copy, |_| Ok(digest.clone()))?;
         Ok(path)
+    }
+
+    /// Like `materialize`, but copies each object once into `shared` and
+    /// hard-links that read-only copy into `directory`. Exploration attempts
+    /// use it so a batch copies its engine and images once, not per seed.
+    ///
+    /// The shared copy is reused only while both it and the store object are
+    /// unchanged since this process verified them; otherwise it is replaced
+    /// through `materialize`, which hashes again. Without hard links (another
+    /// filesystem) this falls back to a private copy.
+    pub fn materialize_linked(
+        &self,
+        digest: &ContentDigest,
+        shared: &Path,
+        directory: &Path,
+    ) -> Result<PathBuf> {
+        let source = shared.join(digest.hex());
+        let mut copies = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        let reusable = match (copies.get(&source), fs::File::open(&source)) {
+            (Some(stamp), Ok(copy)) => {
+                Stamp::of(&copy)? == *stamp && self.trusted(digest, &self.open(digest)?)?.is_some()
+            }
+            _ => false,
+        };
+        if !reusable {
+            copies.remove(&source);
+            match fs::remove_file(&source) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
+            let copy = self.materialize(digest, shared)?;
+            // Read-only for every attempt; the engine copy also needs execute.
+            fs::set_permissions(&copy, fs::Permissions::from_mode(0o500))?;
+            copies.insert(copy, Stamp::of(&fs::File::open(&source)?)?);
+        }
+        fs::create_dir_all(directory)?;
+        let path = directory.join(digest.hex());
+        match fs::hard_link(&source, &path) {
+            // Linking changes the copy's ctime; remember the new identity.
+            Ok(()) => {
+                copies.insert(source.clone(), Stamp::of(&fs::File::open(&source)?)?);
+                Ok(path)
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(e.into()),
+            Err(_) => {
+                drop(copies);
+                self.materialize(digest, directory)
+            }
+        }
     }
 }
 

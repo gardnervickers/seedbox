@@ -40,11 +40,12 @@ impl Executor {
             )),
         }
     }
-    pub fn performance(self, margin: &str, undo: u64) -> Result<Self> {
+    /// Watchdog interval is a Linux setting; the Mac engine ignores it.
+    pub fn performance(self, watchdog_ms: u64) -> Result<Self> {
         match self {
-            Self::Linux(e) => Ok(Self::Linux(e.with_margin(margin)?.with_undo(undo)?)),
+            Self::Linux(e) => Ok(Self::Linux(e.with_watchdog_ms(watchdog_ms)?)),
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            Self::Mac(e) => Ok(Self::Mac(e.with_performance(margin, undo))),
+            Self::Mac(e) => Ok(Self::Mac(e)),
         }
     }
     fn backend(&self) -> &dyn ExecutionBackend {
@@ -150,6 +151,7 @@ impl PreparationBackend for Preparer {
                 docker: self.inputs.docker.clone(),
                 cancellation: context.cancellation.clone(),
                 progress: preparation_progress,
+                export_cache: Some(self.inputs.profile.engine.clone()),
             },
         )
     }

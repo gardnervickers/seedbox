@@ -8,9 +8,9 @@ the orchestration API can be called directly by future simulation schedulers.
 
 The checked-in [etcd](../../examples/etcd/compose.yaml) and
 [Redis](../../examples/redis/compose.yaml) examples passed real KVM workloads and
-intentional-failure replays on the supported workstation. Full-state replay,
-changed-margin replay, deterministic timeout, wall expiry, SIGTERM cancellation,
-lease contention and exact MSR restoration were also exercised. See the
+intentional-failure replays on a Linux KVM host. Full-state replay,
+changed-watchdog replay, deterministic timeout, wall expiry, SIGTERM cancellation
+and lease contention were also exercised. See the
 [acceptance record](../../docs/acceptance.md) and [runtime instructions](../../docs/runtime.md) for exact
 inputs and limits. The runtime process and network API is described in
 [the fault operations section](#structured-faults) and [recovery examples](../../examples/faults/README.md).
@@ -151,7 +151,7 @@ hashes, and source/build provenance. Changing an identity input produces a new i
 Performance settings returned by `ExecutionBackend::performance_parameters` are
 recorded per attempt and passed explicitly to execution, but excluded from identity
 and profile matching. Only settings that never change the witness belong there
-(e.g. `SEEDBOX_MARGIN` and `SEEDBOX_UNDO`). Each execution receives a distinct
+(e.g. `SEEDBOX_WATCHDOG_MS`). Each execution receives a distinct
 attempt directory even when its identity is the same. Source paths remain as
 provenance in the manifest; the executor receives verified private artifact copies
 and cannot obtain original paths from its request.

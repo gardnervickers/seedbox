@@ -25,7 +25,15 @@ pub struct DoctorReport {
     pub observations: BTreeMap<String, String>,
 }
 
+/// Hypervisor.framework holds one VM per process, so concurrent exploration
+/// attempts must take turns probing from the CLI; each engine worker process
+/// then owns its own VM.
+static PROBE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn observe() -> Result<BTreeMap<String, String>> {
+    let _probe = PROBE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut backend = Hvf::create().map_err(Error::Setup)?;
     backend.create_vcpu().map_err(Error::Setup)?;
     seedbox_arm64::machine::configure_cpu_features(&mut backend).map_err(Error::Setup)?;
@@ -129,13 +137,6 @@ impl MacExecutor {
             performance: BTreeMap::new(),
         })
     }
-    pub fn with_performance(mut self, margin: &str, undo: u64) -> Self {
-        self.performance = BTreeMap::from([
-            ("SEEDBOX_MARGIN".into(), margin.into()),
-            ("SEEDBOX_UNDO".into(), undo.to_string()),
-        ]);
-        self
-    }
     pub fn doctor(engine: &Path, kernel: &Path) -> Result<DoctorReport> {
         validate_kernel(kernel, 3072)?;
         Ok(DoctorReport {
@@ -221,6 +222,14 @@ impl ExecutionBackend for MacExecutor {
     fn performance_parameters(&self) -> BTreeMap<String, String> {
         self.performance.clone()
     }
+    /// Every attempt is its own signed engine process with its own HVF VM, so
+    /// the Mac needs no core reservation: admit the range, then probe HVF once.
+    fn preflight_workers(&self, workers: u32) -> Result<()> {
+        if !(1..=32).contains(&workers) {
+            return Err(Error::Setup("--workers: use 1..32".into()));
+        }
+        self.preflight(None)
+    }
     fn preflight(&self, output: Option<&Path>) -> Result<()> {
         validate_profile(&self.profile)?;
         let observations = observe()?;
@@ -253,7 +262,7 @@ impl ExecutionBackend for MacExecutor {
         self.preflight(Some(request.output))?;
         use crate::worker_process::{incomplete, WorkerLaunch};
         if request.cancellation.is_cancelled() {
-            return Ok(incomplete(StopReason::Cancelled, Timebase::Pv));
+            return Ok(incomplete(StopReason::Cancelled));
         }
         WorkerLaunch::prepare(&request)?.spawn()?.wait(
             request.cancellation,
@@ -515,6 +524,27 @@ mod process_tests {
             engine: ContentDigest::of(b"engine"),
             witness_mode: WitnessMode::FullState,
             semantic_parameters: parameters,
+        }
+    }
+    #[test]
+    fn preflight_workers_admits_the_linux_range_without_core_reservation() {
+        let executor = MacExecutor {
+            profile: profile(),
+            performance: BTreeMap::new(),
+        };
+        for workers in [0, 33] {
+            assert_eq!(
+                executor.preflight_workers(workers).unwrap_err().to_string(),
+                "--workers: use 1..32"
+            );
+        }
+        // In range, admission is the ordinary HVF probe; a host without HVF
+        // access reports that, never a worker-count refusal.
+        for workers in [1, 2, 32] {
+            match executor.preflight_workers(workers) {
+                Ok(()) => {}
+                Err(error) => assert!(!error.to_string().contains("--workers"), "{error}"),
+            }
         }
     }
     #[test]

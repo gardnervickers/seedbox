@@ -164,8 +164,64 @@ fn list(output: &mut Vec<u8>, items: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Check the private runtime before importing application images. Only regular,
+/// relative files are accepted; extraction never follows archive links.
+pub(crate) fn validate_progress(path: &Path, architecture: Architecture) -> Result<()> {
+    check_progress(path, Some(architecture))
+}
+fn check_progress(path: &Path, architecture: Option<Architecture>) -> Result<()> {
+    let bad = || {
+        Error::Setup(format!(
+            "invalid progress bundle {}; rebuild with bash tools/build-assets.sh",
+            path.display()
+        ))
+    };
+    let file = fs::File::open(path).map_err(|_| bad())?;
+    let mut total = 0u64;
+    let mut names = std::collections::BTreeSet::new();
+    for entry in tar::Archive::new(file).entries()? {
+        let mut entry = entry?;
+        let name = entry.path()?.into_owned();
+        if !entry.header().entry_type().is_file()
+            || name.as_os_str().is_empty()
+            || name.to_str().is_none()
+            || name
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
+            || !names.insert(name.clone())
+        {
+            return Err(bad());
+        }
+        total = total
+            .checked_add(entry.size())
+            .filter(|n| *n <= 128 << 20)
+            .ok_or_else(bad)?;
+        if let Some(arch) = architecture {
+            if name == Path::new("bin64/drrun") || name == Path::new("libseedbox_progress.so") {
+                let mut header = [0; 20];
+                entry.read_exact(&mut header).map_err(|_| bad())?;
+                if &header[..6] != b"\x7fELF\x02\x01" || header[18..20] != arch.elf_machine() {
+                    return Err(bad());
+                }
+            }
+        }
+    }
+    for required in [
+        "bin64/drrun",
+        "libseedbox_progress.so",
+        "lib64/release/libdynamorio.so",
+        "ext/lib64/release/libdrmgr.so",
+        "ext/lib64/release/libdrreg.so",
+    ] {
+        if !names.contains(Path::new(required)) {
+            return Err(bad());
+        }
+    }
+    Ok(())
+}
+
 pub fn build_initramfs(rootfs: &Path, init: &Path, recipe: &[u8], output: &Path) -> Result<()> {
-    build_initramfs_with(rootfs, init, None, recipe, output)
+    build_initramfs_with(rootfs, init, None, None, recipe, output)
 }
 
 /// As `build_initramfs`, also packaging `mke2fs` for a machine whose
@@ -174,14 +230,18 @@ pub fn build_initramfs_with(
     rootfs: &Path,
     init: &Path,
     mke2fs: Option<&Path>,
+    progress: Option<&Path>,
     recipe: &[u8],
     output: &Path,
 ) -> Result<()> {
-    let mut archive = Newc::new(fs::File::create(output)?);
+    let mut archive = Newc::new(io::BufWriter::new(fs::File::create(output)?));
     archive.owned("seedbox", 0o040755, &[])?;
     archive.owned("init", 0o100755, &fs::read(init)?)?;
     if let Some(mke2fs) = mke2fs {
         archive.owned("seedbox/mke2fs", 0o100755, &fs::read(mke2fs)?)?;
+    }
+    if let Some(progress) = progress {
+        archive.progress(progress)?;
     }
     archive.owned("seedbox/launch.bin", 0o100400, recipe)?;
     archive.tree(rootfs, "rootfs")?;
@@ -194,14 +254,18 @@ pub fn build_initramfs_from_tar(
     rootfs: &Path,
     init: &Path,
     mke2fs: Option<&Path>,
+    progress: Option<&Path>,
     recipe: &[u8],
     output: &Path,
 ) -> Result<()> {
-    let mut archive = Newc::new(fs::File::create(output)?);
+    let mut archive = Newc::new(io::BufWriter::new(fs::File::create(output)?));
     archive.owned("seedbox", 0o040755, &[])?;
     archive.owned("init", 0o100755, &fs::read(init)?)?;
     if let Some(path) = mke2fs {
         archive.owned("seedbox/mke2fs", 0o100755, &fs::read(path)?)?;
+    }
+    if let Some(progress) = progress {
+        archive.progress(progress)?;
     }
     archive.owned("seedbox/launch.bin", 0o100400, recipe)?;
     archive.tar_tree(rootfs)?;
@@ -373,6 +437,39 @@ impl<W: Write> Newc<W> {
         Ok(())
     }
 
+    fn progress(&mut self, path: &Path) -> Result<()> {
+        check_progress(path, None)?;
+        let mut directories = std::collections::BTreeSet::new();
+        self.owned("seedbox/progress", 0o040755, &[])?;
+        for entry in tar::Archive::new(fs::File::open(path)?).entries()? {
+            let mut entry = entry?;
+            let path = entry.path()?.into_owned();
+            let mut parents: Vec<_> = path
+                .ancestors()
+                .skip(1)
+                .filter(|p| !p.as_os_str().is_empty())
+                .collect();
+            parents.reverse();
+            for parent in parents {
+                if directories.insert(parent.to_owned()) {
+                    self.owned(
+                        &format!("seedbox/progress/{}", parent.display()),
+                        0o040755,
+                        &[],
+                    )?;
+                }
+            }
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes)?;
+            self.owned(
+                &format!("seedbox/progress/{}", path.display()),
+                0o100000 | (entry.header().mode()? & 0o755),
+                &bytes,
+            )?;
+        }
+        Ok(())
+    }
+
     fn tar_tree(&mut self, path: &Path) -> Result<()> {
         let invalid = || Error::Integrity("invalid Linux root filesystem archive".into());
         let name = |path: std::path::PathBuf| -> Result<String> {
@@ -390,7 +487,7 @@ impl<W: Write> Newc<W> {
         // emits sorted tar entries with each hard-link target preceding its links.
         let mut links = BTreeMap::<String, u32>::new();
         let mut seen = std::collections::BTreeSet::new();
-        for entry in tar::Archive::new(fs::File::open(path)?).entries()? {
+        for entry in tar::Archive::new(io::BufReader::new(fs::File::open(path)?)).entries()? {
             let entry = entry?;
             let key = name(entry.path()?.into_owned())?;
             if !seen.insert(key.clone()) {
@@ -406,7 +503,7 @@ impl<W: Write> Newc<W> {
             }
         }
         let mut inodes = BTreeMap::new();
-        for entry in tar::Archive::new(fs::File::open(path)?).entries()? {
+        for entry in tar::Archive::new(io::BufReader::new(fs::File::open(path)?)).entries()? {
             let mut entry = entry?;
             let key = name(entry.path()?.into_owned())?;
             let header = entry.header();

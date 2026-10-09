@@ -71,6 +71,101 @@ struct ImageConfig {
     config: serde_json::Value,
 }
 
+#[derive(Deserialize)]
+struct ImageTimes {
+    created: Option<String>,
+    #[serde(default)]
+    history: Vec<HistoryTime>,
+}
+
+#[derive(Deserialize)]
+struct HistoryTime {
+    created: Option<String>,
+}
+
+/// The latest `created` time in an image config and its history, in Unix seconds.
+/// A builder stamps these after each step runs, so anything a build step minted
+/// (such as a certificate) is no later than this. None when no time is recorded.
+pub fn image_created_epoch(config: &[u8]) -> Result<Option<i64>> {
+    let times: ImageTimes = serde_json::from_slice(config)?;
+    let mut latest = None;
+    for created in times.created.iter().chain(
+        times
+            .history
+            .iter()
+            .filter_map(|entry| entry.created.as_ref()),
+    ) {
+        let seconds = rfc3339_seconds(created).ok_or_else(|| {
+            Error::Integrity(format!(
+                "image config created time {created:?} is not RFC 3339"
+            ))
+        })?;
+        latest = latest.max(Some(seconds));
+    }
+    Ok(latest)
+}
+
+/// Whole Unix seconds of an RFC 3339 timestamp; fractional seconds are dropped.
+fn rfc3339_seconds(text: &str) -> Option<i64> {
+    let number = |range: std::ops::Range<usize>| -> Option<i64> {
+        let digits = text.get(range)?;
+        digits
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| digits.parse().ok())?
+    };
+    let bytes = text.as_bytes();
+    if bytes.len() < 20
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !matches!(bytes[10], b'T' | b't' | b' ')
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return None;
+    }
+    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+    let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+    let mut rest = &text[19..];
+    if let Some(fraction) = rest.strip_prefix('.') {
+        let digits = fraction.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 {
+            return None;
+        }
+        rest = &fraction[digits..];
+    }
+    let offset = match rest {
+        "Z" | "z" => 0,
+        _ if rest.len() == 6 && rest.as_bytes()[3] == b':' => {
+            let hours = rest.get(1..3)?.parse::<i64>().ok()?;
+            let minutes = rest.get(4..6)?.parse::<i64>().ok()?;
+            let sign = match rest.as_bytes()[0] {
+                b'+' => 1,
+                b'-' => -1,
+                _ => return None,
+            };
+            sign * (hours * 3600 + minutes * 60)
+        }
+        _ => return None,
+    };
+    // Days from the civil date (proleptic Gregorian), after Howard Hinnant.
+    let shifted = if month <= 2 { year - 1 } else { year };
+    let era = shifted.div_euclid(400);
+    let year_of_era = shifted - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146097 + day_of_era - 719468;
+    Some(days * 86400 + hour * 3600 + minute * 60 + second - offset)
+}
+
 /// Verify a single-platform manifest and its complete compressed input closure.
 /// Kept separate from transport/extraction for testability and OCI producers.
 pub fn import_metadata(
@@ -176,4 +271,48 @@ fn retain_descriptor(
         )));
     }
     Ok(actual)
+}
+
+#[cfg(test)]
+mod created_time_tests {
+    use super::*;
+
+    #[test]
+    fn rfc3339_times_become_unix_seconds() {
+        for (text, seconds) in [
+            ("1970-01-01T00:00:00Z", 0),
+            ("1970-01-02T00:00:00Z", 86400),
+            ("2026-10-09T04:05:33Z", 1_791_518_733),
+            ("2026-10-09T04:05:33.987654321Z", 1_791_518_733),
+            ("2026-10-09T06:05:33+02:00", 1_791_518_733),
+            ("2026-10-08T23:05:33-05:00", 1_791_518_733),
+            ("2000-02-29T00:00:00Z", 951_782_400),
+            ("0001-01-01T00:00:00Z", -62_135_596_800),
+        ] {
+            assert_eq!(rfc3339_seconds(text), Some(seconds), "{text}");
+        }
+        for text in [
+            "",
+            "2026-10-09",
+            "2026-10-09T04:05:33",
+            "2026-13-09T04:05:33Z",
+            "2026-10-09T04:05:33.Z",
+            "2026-10-09T04:05:33+0200",
+            "２026-10-09T04:05:33Z",
+        ] {
+            assert_eq!(rfc3339_seconds(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn image_epoch_is_the_latest_config_or_history_time() {
+        let config = br#"{"created":"2026-10-09T04:00:00Z","history":[
+            {"created":"2025-01-01T00:00:00Z"},{"created":"2026-10-09T04:05:33.5Z"},{}]}"#;
+        assert_eq!(image_created_epoch(config).unwrap(), Some(1_791_518_733));
+        assert_eq!(image_created_epoch(b"{}").unwrap(), None);
+        assert!(matches!(
+            image_created_epoch(br#"{"created":"yesterday"}"#),
+            Err(Error::Integrity(_))
+        ));
+    }
 }

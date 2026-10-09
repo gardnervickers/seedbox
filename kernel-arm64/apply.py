@@ -46,6 +46,13 @@ def changes(root, application=False):
         return body(s, "time_init", "\tof_clk_init(NULL);\n\tseedbox_time_init();\n\ttick_setup_hrtimer_broadcast();\n\tlpj_fine = 1000000000UL / HZ;")
     edit("arch/arm64/kernel/time.c", time)
     edit("arch/arm64/kernel/process.c", counter_access)
+    def syscall(s):
+        s = replace(s, "#include <asm/syscall.h>",
+                    "#include <asm/syscall.h>\n#include <asm/seedbox.h>")
+        return replace(s, "\tadd_random_kstack_offset();",
+                       "\tseedbox_syscall_progress();\n\tadd_random_kstack_offset();")
+    edit("arch/arm64/kernel/syscall.c", syscall)
+
     def generic_timer(s):
         # The driver is off; still route all generic helpers to PV (traps etc.).
         start = s.index("#else", s.index("#ifdef CONFIG_ARM_ARCH_TIMER"))

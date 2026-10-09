@@ -18,6 +18,7 @@ let
       else flag
     ) old.configureFlags;
   });
+  progress = import ./progress.nix { inherit pkgs; };
   runtimeAssets = pkgs.runCommand "seedbox-guest-assets" {
     nativeBuildInputs = with pkgs; [ pkgsStatic.stdenv.cc binutils python3 ];
     SEEDBOX_STATIC_CC = "${pkgs.pkgsStatic.stdenv.cc}/bin/${pkgs.pkgsStatic.stdenv.cc.targetPrefix}cc";
@@ -29,6 +30,7 @@ let
     chmod -R u+w source
     cd source
     bash tools/runtime/build-assets.sh "$out"
+    cp ${progress} "$out/progress.tar"
   '';
   runtimeArchive = pkgs.runCommand "seedbox-runtime-${pkgs.stdenv.hostPlatform.parsed.cpu.name}.tar.gz" {
     nativeBuildInputs = [ pkgs.python3 ];
@@ -40,6 +42,8 @@ let
     cp -R ${runtimeSource}/. "$out/"
     cp ${pkgs.pkgsStatic.e2fsprogs.src} "$out/upstream/e2fsprogs.source"
     cp ${pkgs.pkgsStatic.stdenv.cc.libc.src} "$out/upstream/musl.source"
+    cp ${progress.sdk} "$out/upstream/dynamorio-sdk.tar.gz"
+    cp ${progress.glibcSource} "$out/upstream/glibc.source"
     cat > "$out/flake.nix" <<'EOF'
     {
       inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";

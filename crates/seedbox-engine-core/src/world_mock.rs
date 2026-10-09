@@ -215,9 +215,6 @@ impl WorldMachine for Mock {
         self.record(&format!("throttle/{factor_permille}"));
         Ok(())
     }
-    fn branches(&self) -> u64 {
-        0
-    }
     fn exits(&self) -> u64 {
         0
     }

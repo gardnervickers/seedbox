@@ -1,29 +1,24 @@
 //! One x86-64 Linux machine: a KVM VM with one vCPU, run only by the world
-//! thread. Its timebase (see `timebase.rs`) says how guest progress becomes
-//! virtual time: retired conditional branches with exact counted stops
-//! (precise preemption), or the PV clock, where time moves only at exits.
+//! thread. Guest progress becomes virtual time through the PV clock (see
+//! `pv.rs`): time moves only at exits, syscalls and guest clock reads.
 
 use crate::boundary::{advance_time, hard_limit, io_charge, PendingIo};
-#[cfg(test)]
-use crate::counter::Counter;
 use crate::devices::{rtc_read, Pic, Pit, Uart};
 use crate::disk::Disk;
-use crate::profile::CounterProfile;
-use crate::stepper::Planner;
-use crate::timebase::{Judge, Prepared, Run, Timebase, Verdict};
-use crate::undo::{Undo, UndoStats, VcpuState};
+use crate::shadow::{Shadow, ShadowStats, VcpuState};
 use crate::virtio_blk::VirtioBlk;
 use crate::virtio_console::VirtioConsole;
 use crate::virtio_net::{ReceiveOutcome, VirtioNet};
+use crate::witness_log::WitnessLog;
 use kvm_bindings::*;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 use sha2::{Digest, Sha256};
 use std::os::fd::AsRawFd;
 use std::time::Instant;
 
-mod counted;
 pub mod pv;
 mod pv_plan;
+use pv::PvClock;
 
 pub const TIME_PAGE: u64 = 0xd000_0000;
 pub const NET_MMIO: u64 = 0xd000_1000;
@@ -33,23 +28,19 @@ pub const CHANNEL_IRQ: u8 = 6;
 pub const BLK_MMIO: u64 = 0xd000_2000;
 pub const BLK_IRQ: u8 = 7;
 const INITRD_ADDR: usize = 0x0800_0000;
-/// Pending interrupts are injected only when the next stop is further away
-/// than this. Part of the execution semantics: changing it changes runs.
-pub const INJECT_GUARD: u64 = 65536;
 /// Time page fields (u64 index), see kernel/seedbox.h.
 const PAGE_SYSCALLS: usize = 3;
 const PAGE_PIC_IMR: usize = 4;
 const PAGE_NET_ISR: usize = 5;
 pub const PAGE_FIELDS: usize = 6;
-/// Fork entropy (ABI 3): written by the VMM only while the world is parked,
-/// so undo checkpoints need not carry them.
+/// Fork entropy (ABI 3): written by the VMM only while the world is parked.
 const PAGE_ENTROPY_GEN: usize = 9;
 const PAGE_ENTROPY: usize = 10;
 const PAGE_ENTROPY_FIELDS: usize = 4;
 /// Guest ABI from which the kernel reseeds its CRNG from the page.
 pub const ABI_PAGE_RESEED: u64 = 3;
-/// PV clock fields, written by the VMM and outside `PAGE_FIELDS` (they are
-/// zero in the counter timebase, whose checkpoints and digests skip them).
+/// PV clock fields, written by the VMM and outside `PAGE_FIELDS` (checkpoints
+/// and digests skip them; the clock restores them itself).
 const PAGE_PV_CLOCK: usize = 6;
 const PAGE_BOUND: usize = 7;
 const PAGE_SYSCALL_TARGET: usize = 8;
@@ -143,12 +134,8 @@ pub struct BootSpec<'a> {
     pub control_channel: bool,
     /// The retained disk this incarnation boots with, as virtio-blk.
     pub disk: Option<Disk>,
-    /// Final overflow margin for undo-able precise stops; 0 disables them.
-    pub undo_margin: u64,
     /// The guest parks at its launch barrier until the world releases it.
     pub barrier: bool,
-    /// The machine runs under the PV clock timebase (no host perf counter).
-    pub pv_clock: bool,
     pub page_timer: bool,
 }
 
@@ -167,7 +154,6 @@ pub struct MachineSnapshot {
     entropy_read: usize,
     page: Box<[u8; 4096]>,
     cpu: VcpuState,
-    branches: u64,
     tsc_latch: u64,
     guest_exit_code: Option<u8>,
     guest_init_error: Option<u8>,
@@ -188,14 +174,12 @@ pub struct MachineSnapshot {
     throttle_permille: Option<u64>,
     abi: u64,
     page_timer: PageTimer,
-    armed_wake: u64,
     pit_exact: bool,
     exit_req: bool,
-    margin: u64,
-    fm: u64,
     stats: Stats,
     witness: Sha256,
-    undo_stats: Option<UndoStats>,
+    witness_log: WitnessLog,
+    shadow_stats: ShadowStats,
 }
 
 use seedbox_engine_core::world::MachineState;
@@ -235,31 +219,14 @@ pub struct Stats {
     pub irqs: u64,
     pub window_exits: u64,
     pub eintr: u64,
-    pub precise_stops: u64,
-    pub steps: u64,
-    pub step_ns: u128,
     pub run_ns: u128,
-    pub skid_max: u64,
     pub yields: u64,
     pub yield_stops: u64,
-    pub skids: Vec<u64>,
     pub kvm_ns: [u128; 8],
     pub kvm_n: [u64; 8],
-    /// Runs that passed a soft stop with the yield window closed and could
-    /// not be undone (a syscall there would have been a missed stop).
-    pub soft_misses: u64,
-    pub soft_undos: u64,
-    /// Of the soft misses, those with no syscall in the run (provably harmless).
-    pub soft_misses_clean: u64,
-    /// PV clock: watchdog checks of a run with no exit, those that proved a
-    /// spin (a state cycle, then treated as idle), and the rest.
-    pub spin_probes: u64,
-    pub spin_idles: u64,
-    pub spin_false: u64,
-    /// Of the false alarms, probes abandoned as soon as the guest clock moved.
-    pub spin_clock_progress: u64,
-    /// Per state part, cycle checks that failed first on it.
-    pub spin_mismatch: std::collections::BTreeMap<String, u64>,
+    /// Stalls reported: runs with no exit for long enough that the watchdog
+    /// printed where the guest was.
+    pub stalls: u64,
     /// Virtual time advanced, by cause (see `Cause`).
     pub time_by: [u64; 5],
     /// Report-only timer diagnostics. Writes to the PIT or port 0x530, and
@@ -298,7 +265,7 @@ pub struct Skew {
 /// Why virtual time moved, for `Stats::time_by`.
 #[derive(Clone, Copy)]
 pub enum Cause {
-    /// The timebase's progress: branches, or charged syscalls (PV).
+    /// Charged syscalls.
     Progress,
     /// Guest clock reads (time page or port).
     ClockReads,
@@ -316,13 +283,11 @@ impl Cause {
 
 pub struct Machine {
     pub world: MachineState,
-    profile: &'static CounterProfile,
     _vm: VmFd,
     vcpu: VcpuFd,
     mem: SendPtr<u8>,
     mem_size: usize,
     page: SendPtr<u64>,
-    pub branches: u64,
     pub pending_io: Option<PendingIo>,
     tsc_latch: u64,
     /// Only an explicit guest exit-port write is a workload exit. KVM errors
@@ -341,24 +306,15 @@ pub struct Machine {
     pub blk: Option<VirtioBlk>,
     pub control_dma_bytes: u64,
     pub control_tx_bytes: u64,
-    stepping: bool,
-    /// Seeded from authoritative ioctls or a successful synchronized KVM exit.
-    sync_regs_ready: bool,
-    #[cfg(test)]
-    require_io_checkpoint: bool,
-    planner: Option<Planner>,
     exit_req: bool,
     /// The guest uses the shared page for interrupt masks and status (ABI 2).
     pv: bool,
     /// Guest ABI version announced on the time page port (0 before then).
     abi: u64,
     page_timer: PageTimer,
-    armed_wake: u64,
     /// The pending timer deadline must be delivered at its exact time.
     pit_exact: bool,
     pub exact_timer_ppm: u64,
-    /// Last breakpoint plan, for overshoot diagnostics.
-    last_plan: (u64, Vec<u64>),
     pub tolerance: u64,
     pub timer_jitter: u64,
     /// PV clock: virtual time one syscall costs on this machine.
@@ -366,31 +322,24 @@ pub struct Machine {
     /// A throttle fault's factor on `syscall_ns`, in thousandths. `None`
     /// until the first throttle, so unthrottled runs charge exactly as before.
     pub throttle_permille: Option<u64>,
-    /// PV watchdog and spin-probe state. It belongs to the machine, not the
-    /// thread's clock, so it never carries between machines.
-    pub(crate) pv_progress: pv::Progress,
+    /// Consecutive watchdog interruptions since the last natural exit.
+    stall_ticks: u64,
     pub timer_rng: Option<crate::rng::Rng>,
-    pub margin: u64,
-    /// Recompute `margin` from the recent guest branch rate.
-    pub adaptive_margin: bool,
-    step_started: Option<Instant>,
-    /// Undo-able precise stops: checkpoint before the final approach, roll
-    /// back on overshoot. `undo_margin` is the initial final margin, `fm` the
-    /// current one (grown after rollbacks, reset at deterministic points).
-    pub undo: Option<Box<Undo>>,
-    undo_margin: u64,
-    fm: u64,
+    /// Shadow RAM with a dirty log: a fork restore copies back only the
+    /// pages written since the fork point.
+    pub shadow: Box<Shadow>,
     /// The initial guest uses the launch-barrier boot protocol.
     barrier: bool,
     /// Per-seed words the guest reads after its release.
     entropy: [u32; ENTROPY_WORDS],
     entropy_read: usize,
-    pub(crate) pv_clock: bool,
     page_timer_requested: bool,
     /// The MSR list a fork snapshot saves.
     msrs: Msrs,
     pub stats: Stats,
     pub witness: Sha256,
+    /// Periodic witness samples; diagnostic only, never hashed.
+    pub witness_log: WitnessLog,
     pub trace: Option<std::io::BufWriter<std::fs::File>>,
 }
 
@@ -469,24 +418,46 @@ fn guest_cpuid(kvm: &Kvm) -> Result<CpuId, String> {
     Ok(c)
 }
 
+/// Count consecutive watchdog interruptions of a run with no exit and, at
+/// each doubling past the first few, say where the guest is. A diagnostic
+/// only: it changes nothing the guest or the witness sees.
+#[allow(clippy::too_many_arguments)]
+fn note_watchdog(
+    stall_ticks: &mut u64,
+    stats: &mut Stats,
+    name: &str,
+    time: u64,
+    rip: u64,
+    interrupted: bool,
+    period: std::time::Duration,
+) {
+    if !interrupted {
+        *stall_ticks = 0;
+        return;
+    }
+    *stall_ticks += 1;
+    if *stall_ticks >= 32 && stall_ticks.is_power_of_two() {
+        stats.stalls += 1;
+        eprintln!(
+            "{name}: no guest exit for {} ms of host CPU time at rip {rip:#x} (virtual time {time} ns)",
+            (period * *stall_ticks as u32).as_millis(),
+        );
+    }
+}
+
 impl Machine {
     pub fn new(kvm: &Kvm, name: &str, spec: &BootSpec) -> Result<Self, String> {
-        // The PV clock needs no counter, so no host PMU; the
-        // profile is then never consulted.
-        let profile = if spec.pv_clock {
-            &crate::profile::ZEN
-        } else {
-            crate::profile::host()?
-        };
         if !kvm.check_extension(kvm_ioctls::Cap::ImmediateExit) {
             return Err("KVM immediate-exit capability required for I/O completion".into());
         }
         let mem_size = spec.mem;
         let mem = map(mem_size)?;
+        // Fewer, larger host faults while the guest touches fresh RAM. The
+        // guest sees the same zeroed memory; only host paging changes.
+        unsafe { libc::madvise(mem.cast(), mem_size, libc::MADV_HUGEPAGE) };
         let page = map(4096)?;
-        if spec.pv_clock {
-            unsafe { std::ptr::write_volatile(page.cast::<u64>().add(PAGE_PV_CLOCK), 1) };
-        }
+        // Tell the kernel to run its PV clock; it answers 2 on the ABI port.
+        unsafe { std::ptr::write_volatile(page.cast::<u64>().add(PAGE_PV_CLOCK), 1) };
         let m = unsafe { std::slice::from_raw_parts_mut(mem, mem_size) };
         let k = spec.kernel;
         let setup = (k[0x1f1] as usize + 1) * 512;
@@ -523,11 +494,7 @@ impl Machine {
         unsafe {
             vm.set_user_memory_region(kvm_userspace_memory_region {
                 slot: 0,
-                flags: if spec.undo_margin > 0 {
-                    KVM_MEM_LOG_DIRTY_PAGES
-                } else {
-                    0
-                },
+                flags: KVM_MEM_LOG_DIRTY_PAGES,
                 guest_phys_addr: 0,
                 memory_size: mem_size as u64,
                 userspace_addr: mem as u64,
@@ -584,26 +551,19 @@ impl Machine {
         })
         .map_err(|e| e.to_string())?;
         let net = spec.mac.map(VirtioNet::new);
-        let msrs = crate::undo::msr_list(kvm, &vcpu)?;
-        let undo = if spec.undo_margin > 0 {
-            let mut u = Undo::new(kvm, &vcpu, mem_size)?;
-            // Everything loaded so far was written by the VMM.
-            u.mark(0, 0x100000);
-            u.mark(0x100000, k.len() - setup);
-            u.mark(INITRD_ADDR, spec.initrd.len());
-            Some(Box::new(u))
-        } else {
-            None
-        };
+        let msrs = crate::shadow::msr_list(kvm, &vcpu)?;
+        let mut shadow = Shadow::new(mem_size)?;
+        // Everything loaded so far was written by the VMM.
+        shadow.mark(0, 0x100000);
+        shadow.mark(0x100000, k.len() - setup);
+        shadow.mark(INITRD_ADDR, spec.initrd.len());
         Ok(Self {
             world: MachineState::new(name.to_string()),
-            profile,
             _vm: vm,
             vcpu,
             mem: SendPtr(mem),
             mem_size,
             page: SendPtr(page.cast()),
-            branches: 0,
             pending_io: None,
             tsc_latch: 0,
             guest_exit_code: None,
@@ -620,44 +580,27 @@ impl Machine {
             blk: spec.disk.clone().map(VirtioBlk::new),
             control_dma_bytes: 0,
             control_tx_bytes: 0,
-            stepping: false,
-            sync_regs_ready: false,
-            #[cfg(test)]
-            require_io_checkpoint: false,
-            planner: None,
             exit_req: false,
             pv: false,
             abi: 0,
             page_timer: PageTimer::new(),
-            armed_wake: 0,
             pit_exact: false,
             exact_timer_ppm: 0,
-            last_plan: (0, Vec::new()),
             tolerance: 0,
             timer_jitter: 0,
             syscall_ns: pv::SYSCALL_NS,
             throttle_permille: None,
-            pv_progress: pv::Progress::new(),
+            stall_ticks: 0,
             timer_rng: None,
-            margin: profile.margin,
-            adaptive_margin: false,
-            step_started: None,
-            undo,
-            undo_margin: spec.undo_margin,
-            fm: spec.undo_margin,
+            shadow: Box::new(shadow),
             barrier: spec.barrier,
             entropy: [0; ENTROPY_WORDS],
             entropy_read: 0,
-            pv_clock: spec.pv_clock,
             page_timer_requested: spec.page_timer,
             msrs,
             stats: Stats::default(),
-            // A PV clock run can never share a witness with a counter run.
-            witness: if spec.pv_clock {
-                Sha256::new_with_prefix(b"timebase=pv")
-            } else {
-                Sha256::new()
-            },
+            witness: Sha256::new(),
+            witness_log: WitnessLog::default(),
             trace: None,
         })
     }
@@ -677,14 +620,14 @@ impl Machine {
             let rip = self.vcpu.get_regs().map(|r| r.rip).unwrap_or(0);
             let _ = writeln!(
                 t,
-                "{} {} {} {:x} {:x}",
-                kind as char, self.branches, self.world.time, extra, rip
+                "{} {} {:x} {:x}",
+                kind as char, self.world.time, extra, rip
             );
         }
         self.witness.update([kind]);
-        self.witness.update(self.branches.to_le_bytes());
         self.witness.update(self.world.time.to_le_bytes());
         self.witness.update(extra.to_le_bytes());
+        self.witness_log.record(self.world.time, &self.witness);
     }
 
     /// Earliest internal event (timer) for a halted machine.
@@ -774,7 +717,7 @@ impl Machine {
     /// one, which is built but not booted: the console and management logs
     /// and their sinks, the trace, and the event witness, so the final
     /// witness covers every incarnation. Nothing else crosses: RAM, device
-    /// queues, KVM's I/O state and the undo checkpoint die with the VM.
+    /// queues and KVM's I/O state die with the VM.
     /// Returns the number of volatile sectors lost, or None without a disk.
     pub fn succeed(
         &mut self,
@@ -795,6 +738,7 @@ impl Machine {
         }
         self.log_order = old.log_order;
         self.trace = old.trace.take();
+        self.witness_log = std::mem::take(&mut old.witness_log);
         // The same machine: under the PV clock it keeps its speed, or members
         // restarted together would run in lockstep again.
         self.syscall_ns = old.syscall_ns;
@@ -817,7 +761,6 @@ impl Machine {
     /// rather than one the guest announced. It must owe no I/O cost.
     pub fn park(&mut self) -> Result<(), String> {
         self.world.check_park(self.pending_io.is_some())?;
-        self.set_stepping(false)?;
         // As at the launch barrier: finish any exit KVM still owes, so a cold
         // run and a restored fork resume from identical vCPU state.
         self.complete_io()?;
@@ -828,29 +771,21 @@ impl Machine {
 
     /// Capture at a committed scheduler boundary, including unpaid I/O cost.
     pub fn snapshot(&mut self) -> Result<MachineSnapshot, String> {
-        if self.stepping
-            || !self.world.fault_effects.is_empty()
+        if !self.world.fault_effects.is_empty()
             || !self.world.control_requests.is_empty()
             || self.world.committed_console.is_some()
         {
             return Err(format!("{}: not at a fork point", self.world.name));
         }
-        // No architecture probe may survive a committed checkpoint boundary.
-        if self.pv_progress.hold_watchdog() {
-            return Err("PV checkpoint inside a spin probe".into());
-        }
         self.complete_io()?;
         let mut cpu = VcpuState::new(self.msrs.clone());
         cpu.save(&self.vcpu, "fork")?;
-        let undo_stats = self.undo.as_ref().map(|u| u.stats.clone());
         let ram = Mapping {
             ptr: SendPtr(map(self.mem_size)?),
             size: self.mem_size,
         };
         unsafe { std::ptr::copy_nonoverlapping(self.mem.0, ram.ptr.0, self.mem_size) };
-        if let Some(u) = self.undo.as_mut() {
-            u.fork_point(&self._vm, self.mem.0)?;
-        }
+        self.shadow.fork_point(&self._vm, self.mem.0)?;
         let mut page = Box::new([0u8; 4096]);
         unsafe { std::ptr::copy_nonoverlapping(self.page.0 as *const u8, page.as_mut_ptr(), 4096) };
         Ok(MachineSnapshot {
@@ -858,7 +793,6 @@ impl Machine {
             page,
             cpu,
             world: self.world.clone(),
-            branches: self.branches,
             tsc_latch: self.tsc_latch,
             pending_io: self.pending_io.clone(),
             timer_rng: self.timer_rng.clone(),
@@ -883,14 +817,12 @@ impl Machine {
             throttle_permille: self.throttle_permille,
             abi: self.abi,
             page_timer: self.page_timer,
-            armed_wake: self.armed_wake,
             pit_exact: self.pit_exact,
             exit_req: self.exit_req,
-            margin: self.margin,
-            fm: self.fm,
             stats: self.stats.clone(),
             witness: self.witness.clone(),
-            undo_stats,
+            witness_log: self.witness_log.clone(),
+            shadow_stats: self.shadow.stats.clone(),
         })
     }
 
@@ -902,30 +834,20 @@ impl Machine {
         // overwritten below, and a vCPU that cannot run any more (shutdown)
         // is overwritten just the same.
         let _ = self.complete_io();
-        self.set_stepping(false)?;
-        // Host-only watchdog and probe scratch starts over at the fork point.
-        self.pv_progress = pv::Progress::new();
-        let pages = match self.undo.as_mut() {
+        self.stall_ticks = 0;
+        let pages = if !self.shadow.holds_fork_point() {
             // A machine rebuilt for this restore (the run rebooted it) has
             // held no fork point yet: copy everything, then hold one here.
-            Some(u) if !u.holds_fork_point() => {
-                unsafe { std::ptr::copy_nonoverlapping(s.ram.ptr.0, self.mem.0, self.mem_size) };
-                u.mark(0, self.mem_size);
-                u.fork_point(&self._vm, self.mem.0)?;
-                u.stats = s.undo_stats.clone().unwrap_or_default();
-                (self.mem_size / 4096) as u64
-            }
-            Some(u) => {
-                let pages = u.return_to_fork(&self._vm, self.mem.0, s.ram.ptr.0)?;
-                // Each seed reports its own undo work on top of the boot's.
-                u.stats = s.undo_stats.clone().unwrap_or_default();
-                pages
-            }
-            None => {
-                unsafe { std::ptr::copy_nonoverlapping(s.ram.ptr.0, self.mem.0, self.mem_size) };
-                (self.mem_size / 4096) as u64
-            }
+            unsafe { std::ptr::copy_nonoverlapping(s.ram.ptr.0, self.mem.0, self.mem_size) };
+            self.shadow.mark(0, self.mem_size);
+            self.shadow.fork_point(&self._vm, self.mem.0)?;
+            (self.mem_size / 4096) as u64
+        } else {
+            self.shadow
+                .return_to_fork(&self._vm, self.mem.0, s.ram.ptr.0)?
         };
+        // Each seed reports its own shadow work on top of the boot's.
+        self.shadow.stats = s.shadow_stats.clone();
         unsafe { std::ptr::copy_nonoverlapping(s.page.as_ptr(), self.page.0 as *mut u8, 4096) };
         let (regs, sregs) = s.cpu.restore(&self.vcpu, "fork restore")?;
         // Refresh KVM's exit outputs (interrupt flag, injection readiness and
@@ -936,9 +858,7 @@ impl Machine {
         run.request_interrupt_window = 0;
         run.s.regs.regs = regs;
         run.s.regs.sregs = sregs;
-        self.sync_regs_ready = true;
         self.world = s.world.clone();
-        self.branches = s.branches;
         self.tsc_latch = s.tsc_latch;
         self.pending_io = s.pending_io.clone();
         self.timer_rng = s.timer_rng.clone();
@@ -962,15 +882,13 @@ impl Machine {
         self.throttle_permille = s.throttle_permille;
         self.abi = s.abi;
         self.page_timer = s.page_timer;
-        self.armed_wake = s.armed_wake;
         self.pit_exact = s.pit_exact;
         self.exit_req = s.exit_req;
-        self.margin = s.margin;
-        self.fm = s.fm;
         self.entropy = s.entropy;
         self.entropy_read = s.entropy_read;
         self.stats = s.stats.clone();
         self.witness = s.witness.clone();
+        self.witness_log = s.witness_log.clone();
         Ok(pages)
     }
 
@@ -1108,36 +1026,21 @@ impl Machine {
         }
     }
 
-    /// Account device writes to guest RAM for the undo shadow.
+    /// Account device writes to guest RAM for the shadow's dirty log.
     fn take_dma(&mut self) {
         if let Some(n) = self.net.as_mut() {
-            match self.undo.as_mut() {
-                Some(u) => {
-                    for (a, l) in n.dirty.drain(..) {
-                        u.mark(a, l);
-                    }
-                }
-                None => n.dirty.clear(),
+            for (a, l) in n.dirty.drain(..) {
+                self.shadow.mark(a, l);
             }
         }
         if let Some(channel) = self.channel.as_mut() {
-            match self.undo.as_mut() {
-                Some(undo) => {
-                    for (address, length) in channel.dirty.drain(..) {
-                        undo.mark(address, length);
-                    }
-                }
-                None => channel.dirty.clear(),
+            for (address, length) in channel.dirty.drain(..) {
+                self.shadow.mark(address, length);
             }
         }
         if let Some(blk) = self.blk.as_mut() {
-            match self.undo.as_mut() {
-                Some(u) => {
-                    for (a, l) in blk.dirty.drain(..) {
-                        u.mark(a, l);
-                    }
-                }
-                None => blk.dirty.clear(),
+            for (a, l) in blk.dirty.drain(..) {
+                self.shadow.mark(a, l);
             }
         }
     }
@@ -1195,7 +1098,7 @@ impl Machine {
 
     // Adoption is an observable effect: call only at a legal exit or a world
     // boundary, after accounting for that point's guest clock progress. Never
-    // call from a timebase prepare/plan or a watchdog/probe landing.
+    // call from the clock's prepare or a watchdog landing.
     fn sync_page_timer(&mut self) -> Result<(), String> {
         if !self.page_timer.enabled {
             return Ok(());
@@ -1247,48 +1150,6 @@ impl Machine {
         Ok(true)
     }
 
-    fn checkpoint(&mut self) -> Result<(), String> {
-        let t = Instant::now();
-        self.complete_io()?;
-        let page: [u64; PAGE_FIELDS] = std::array::from_fn(|i| self.page_get(i));
-        let timer_deadline = self
-            .page_timer
-            .enabled
-            .then(|| self.page_get(PAGE_TIMER_DEADLINE));
-        let u = self.undo.as_mut().unwrap();
-        u.timer_deadline = timer_deadline;
-        u.save(&self._vm, &self.vcpu, self.mem.0)?;
-        u.page = page;
-        u.time = self.world.time;
-        u.branches = self.branches;
-        u.exit_req = self.exit_req;
-        u.stats.checkpoint_ns += t.elapsed().as_nanos();
-        Ok(())
-    }
-
-    fn rollback(&mut self) -> Result<(), String> {
-        let t = Instant::now();
-        self.complete_io()?;
-        let u = self.undo.as_mut().unwrap();
-        let (regs, sregs) = u.restore(&self._vm, &self.vcpu, self.mem.0)?;
-        for i in 0..PAGE_FIELDS {
-            unsafe { std::ptr::write_volatile(self.page.0.add(i), u.page[i]) };
-        }
-        if let Some(deadline) = u.timer_deadline {
-            unsafe { std::ptr::write_volatile(self.page.0.add(PAGE_TIMER_DEADLINE), deadline) };
-        }
-        self.world.time = u.time;
-        self.branches = u.branches;
-        self.exit_req = u.exit_req;
-        u.stats.rollback_ns += t.elapsed().as_nanos();
-        // The planner reads registers from the run structure.
-        let run = self.vcpu.get_kvm_run();
-        run.s.regs.regs = regs;
-        run.s.regs.sregs = sregs;
-        self.sync_regs_ready = true;
-        Ok(())
-    }
-
     fn checked_page_time(&self, limit: u64) -> Result<u64, String> {
         let last = unsafe { std::ptr::read_volatile(self.page.0.add(1)) };
         advance_time(self.world.time, last.saturating_sub(self.world.time), limit)
@@ -1303,91 +1164,6 @@ impl Machine {
 
     fn publish(&mut self) {
         unsafe { std::ptr::write_volatile(self.page.0, self.world.time) };
-    }
-
-    fn set_stepping(&mut self, on: bool) -> Result<(), String> {
-        if on == self.stepping {
-            return Ok(());
-        }
-        if on {
-            // The mmap starts with zeroed synchronization fields, even after
-            // KVM_SET_REGS/SREGS configured the actual guest. A first short
-            // slice must not RF-resume those zeroes as the boot state.
-            if !self.sync_regs_ready {
-                let regs = self
-                    .vcpu
-                    .get_regs()
-                    .map_err(|e| format!("initial step registers: {e}"))?;
-                let sregs = self
-                    .vcpu
-                    .get_sregs()
-                    .map_err(|e| format!("initial step system registers: {e}"))?;
-                let run = self.vcpu.get_kvm_run();
-                run.s.regs.regs = regs;
-                run.s.regs.sregs = sregs;
-                self.sync_regs_ready = true;
-            }
-            let mem = unsafe { std::slice::from_raw_parts(self.mem.0, self.mem_size) };
-            self.planner = Some(Planner::load(&self.vcpu, mem)?);
-        } else {
-            self.vcpu
-                .set_guest_debug(&kvm_guest_debug::default())
-                .map_err(|e| format!("guest debug: {e}"))?;
-            self.planner = None;
-        }
-        self.stepping = on;
-        if on {
-            self.stats.precise_stops += 1;
-            self.step_started = Some(Instant::now());
-        } else if let Some(t) = self.step_started.take() {
-            self.stats.step_ns += t.elapsed().as_nanos();
-        }
-        Ok(())
-    }
-
-    /// Arm breakpoints for one step: the next landing point the planner
-    /// finds from the current registers. Returns whether that landing is
-    /// only a cap on straight-line code, so depends on where stepping began.
-    fn arm_step(&mut self) -> Result<bool, String> {
-        self.set_stepping(true)?;
-        let (r, sr) = {
-            let run = self.vcpu.get_kvm_run();
-            unsafe { (run.s.regs.regs, run.s.regs.sregs) }
-        };
-        let mem = unsafe { std::slice::from_raw_parts(self.mem.0, self.mem_size) };
-        let planner = self.planner.as_mut().unwrap();
-        planner.refresh_from(&sr);
-        let (targets, capped) = planner
-            .plan_capped(mem, &r)
-            .map_err(|e| format!("{}: step plan: {e}", self.world.name))?;
-        Planner::arm(&self.vcpu, &targets)?;
-        self.last_plan = (r.rip, targets.clone());
-        if targets.contains(&r.rip) {
-            let mut resumed = r;
-            resumed.rflags |= 1 << 16; // RF: do not re-trigger at the current instruction
-            self.vcpu.set_regs(&resumed).map_err(|e| e.to_string())?;
-        }
-        Ok(capped)
-    }
-
-    /// The guest is in a state cycle (see `pv.rs`), at its canonical point:
-    /// idle, like HLT, until an interrupt.
-    fn spin_idle(&mut self) -> Result<Stop, String> {
-        let (rip, if_flag) = {
-            let run = self.vcpu.get_kvm_run();
-            (unsafe { run.s.regs.regs.rip }, run.if_flag)
-        };
-        self.set_stepping(false)?;
-        self.stats.spin_idles += 1;
-        self.record(b'S', rip);
-        if if_flag == 0 {
-            return Err(format!(
-                "{}: the guest spins with interrupts off at rip {rip:#x}; nothing can end the loop",
-                self.world.name
-            ));
-        }
-        self.world.state = State::Halted;
-        Ok(Stop::Halted)
     }
 
     fn inject(&mut self) {
@@ -1424,15 +1200,15 @@ impl Machine {
     /// Run to the first deterministic point at or after `limit - early` (at
     /// the latest an exact stop at `limit`), or until the guest halts, exits or
     /// sends frames. Never runs past `limit`.
-    pub fn run_until<T: Timebase>(
+    pub fn run_until(
         &mut self,
-        tb: &mut T,
+        clock: &mut PvClock,
         limit: u64,
         early: u64,
         frames: &mut Vec<Vec<u8>>,
     ) -> Result<Stop, String> {
         let started = Instant::now();
-        let r = self.run_inner(tb, limit, early, frames);
+        let r = self.run_inner(clock, limit, early, frames);
         self.capture_output();
         self.com1.chunks.finish();
         self.com2.chunks.finish();
@@ -1440,17 +1216,16 @@ impl Machine {
         r
     }
 
-    fn run_inner<T: Timebase>(
+    fn run_inner(
         &mut self,
-        tb: &mut T,
+        clock: &mut PvClock,
         limit: u64,
         early: u64,
         frames: &mut Vec<Vec<u8>>,
     ) -> Result<Stop, String> {
         // Invariant: entered at a deterministic point. Guest-visible state (time
         // page, interrupts, timer expiry) changes only at deterministic points:
-        // natural exits and exact counted stops, never
-        // at overflow landings or intermediate single steps.
+        // natural exits, never at watchdog landings.
         let deferred = self.net.as_ref().is_some_and(|n| n.deferred_tx());
         let poll_end = crate::virtio_net::poll_limit(self.world.time, limit, deferred);
         // A new polling deadline is exact. The world's early-stop allowance
@@ -1463,26 +1238,17 @@ impl Machine {
             .min(limit);
         let mut legal = true;
         loop {
-            if self.pending_io.is_some() {
-                if !self.drain_io(limit)? {
-                    self.set_stepping(false)?;
-                    // Charged I/O can split at an exact slice boundary too.
-                    if self.poll_net(frames, true)? {
-                        self.note_skew(Site::Sent);
-                        return Ok(Stop::Sent);
-                    }
-                    return Ok(Stop::Reached);
+            if self.pending_io.is_some() && !self.drain_io(limit)? {
+                // Charged I/O can split at an exact slice boundary too.
+                if self.poll_net(frames, true)? {
+                    self.note_skew(Site::Sent);
+                    return Ok(Stop::Sent);
                 }
+                return Ok(Stop::Reached);
             }
             if legal {
-                // Observable effects follow; a held checkpoint no longer
-                // describes the machine.
-                if let Some(u) = self.undo.as_mut() {
-                    u.valid = false;
-                }
-                self.fm = self.undo_margin;
-                // Guest clock reads can advance time independently of the PMU.
-                // Check before expiring timers or accepting the slice boundary.
+                // Guest clock reads can advance time between exits. Check
+                // before expiring timers or accepting the slice boundary.
                 if self.page_timer.enabled {
                     self.expire_timers()?;
                 }
@@ -1495,98 +1261,51 @@ impl Machine {
                 self.sync_page_timer()?;
                 self.expire_timers()?;
                 // Also runs on slice entry after world RX delivery. Never poll
-                // at overflow landings or intermediate precision steps.
+                // at watchdog landings.
                 if self.poll_net(frames, self.world.time >= slice_end)? {
                     self.note_skew(Site::Sent);
-                    self.set_stepping(false)?;
                     return Ok(Stop::Sent);
                 }
                 if self.world.time >= slice_end {
-                    self.set_stepping(false)?;
                     return Ok(Stop::Reached);
                 }
                 self.publish();
             }
             // Stop at the first natural exit at or after `soft` and below
-            // `hard`, otherwise by an exact counted stop at `hard`. Two rules combine: the slice
-            // ends in [slice_end, limit], and a timer due at `pit` fires in
-            // [pit, pit + tolerance] (exactly at `pit` if so drawn). Neither
-            // passes `limit`, the world's causal boundary. Syscalls are not
-            // stopping points, so no yield window is requested: a natural exit
-            // is never skipped, whatever the overflow skid.
+            // `hard`: the guest exits by itself when its clock would pass the
+            // bound published from `soft`, or at the syscall that reaches it.
+            // Two rules combine: the slice ends in [slice_end, limit], and a
+            // timer due at `pit` fires in [pit, pit + tolerance] (exactly at
+            // `pit` if so drawn). Neither passes `limit`, the world's causal
+            // boundary.
             let pit = self.pit.deadline.unwrap_or(u64::MAX);
             let soft = slice_end.min(pit);
             let hard = hard_limit(limit, self.pit.deadline, self.pit_exact, self.tolerance);
             let remaining = hard - self.world.time;
-            // Interrupt injection depends only on the distance to the stop, never
-            // on the stepping margin, so it is deterministic.
+            // Interrupt injection depends only on the distance to the stop,
+            // so it is deterministic.
             if legal {
-                if remaining > tb.inject_guard() {
+                if remaining > 0 {
                     self.inject();
                 } else {
                     self.vcpu.get_kvm_run().request_interrupt_window = 0;
                 }
             }
-            let rem_soft = soft.saturating_sub(self.world.time);
-            let windowed = false;
-            let window = false;
-            if window != self.exit_req {
-                unsafe { std::ptr::write_volatile(self.page.0.add(2), window as u64) };
-                self.exit_req = window;
+            if self.exit_req {
+                unsafe { std::ptr::write_volatile(self.page.0.add(2), 0) };
+                self.exit_req = false;
             }
             let syscalls0 = self.page_get(PAGE_SYSCALLS);
-            if let Prepared::Idle = tb.prepare(self, remaining, soft, legal)? {
-                if self.page_timer.enabled {
-                    // A proven cycle's canonical landing is deterministic, unlike the
-                    // watchdog and intermediate probe steps that found it.
-                    self.sync_from_page(hard)?;
-                    self.sync_page_timer()?;
-                    self.expire_timers()?;
-                }
-                // A proven PV cycle is deterministic; watchdog landings are not.
-                // Complete pending TX before declaring a completion waiter idle,
-                // including with interrupts disabled or suppressed by the guest.
-                if deferred {
-                    // Device DMA must not cross a checkpoint held during the
-                    // cycle proof, just as at any other deterministic stop.
-                    if let Some(u) = self.undo.as_mut() {
-                        u.valid = false;
-                    }
-                    self.fm = self.undo_margin;
-                    self.set_stepping(false)?;
-                    let memory = unsafe { std::slice::from_raw_parts(self.mem.0, self.mem_size) };
-                    let pending = self
-                        .net
-                        .as_ref()
-                        .map(|n| n.pending_tx(memory))
-                        .transpose()?
-                        .unwrap_or(false);
-                    if self.poll_net(frames, true)? {
-                        self.note_skew(Site::Sent);
-                        return Ok(Stop::Sent);
-                    }
-                    if pending {
-                        legal = true;
-                        continue;
-                    }
-                }
-                return self.spin_idle();
-            }
+            clock.prepare(self, remaining, soft, legal)?;
             self.vcpu.get_kvm_run().kvm_valid_regs =
                 (KVM_SYNC_X86_REGS | KVM_SYNC_X86_SREGS) as u64;
-            let c0 = tb.start(syscalls0);
+            clock.start(syscalls0);
             let t_run = Instant::now();
             let run_ptr = self.vcpu.get_kvm_run() as *mut kvm_run;
             let exit = self.vcpu.run();
-            // Requested validity bits alone are not initialized output. A
-            // successful run with both bits set provides the synchronized state.
-            if exit.is_ok() {
-                self.sync_regs_ready = true;
-            }
             let run_ns = t_run.elapsed().as_nanos();
             let kind = match &exit {
                 Err(_) => 0,
-                Ok(VcpuExit::Debug(_)) => 1,
                 Ok(VcpuExit::IoOut(..)) | Ok(VcpuExit::IoIn(..)) => 2,
                 Ok(VcpuExit::MmioRead(..)) | Ok(VcpuExit::MmioWrite(..)) => 3,
                 Ok(VcpuExit::Hlt) => 4,
@@ -1596,64 +1315,21 @@ impl Machine {
             self.stats.kvm_ns[kind] += run_ns;
             self.stats.kvm_n[kind] += 1;
             let syscalls1 = unsafe { std::ptr::read_volatile(self.page.0.add(PAGE_SYSCALLS)) };
-            let c1 = tb.read(syscalls1);
-            let delta = c1 - c0;
+            let delta = clock.read(syscalls1);
             let interrupted = matches!(&exit, Err(e) if e.errno() == libc::EINTR);
-            let syscalled = syscalls1 != syscalls0;
             let run_syscalls = syscalls1.wrapping_sub(syscalls0);
-            let run = Run {
-                delta,
-                remaining,
-                rem_soft,
-                windowed,
-                window,
+            // A watchdog interruption is not a deterministic point: the run
+            // resumes without publishing, injecting or adopting anything.
+            legal = !interrupted;
+            note_watchdog(
+                &mut self.stall_ticks,
+                &mut self.stats,
+                &self.world.name,
+                self.world.time,
+                unsafe { (*run_ptr).s.regs.regs.rip },
                 interrupted,
-                debug: matches!(exit, Ok(VcpuExit::Debug(_))),
-                run_ns,
-                syscalled,
-            };
-            let judge = Judge {
-                name: &self.world.name,
-                stepping: self.stepping,
-                pv: self.pv,
-                undo_valid: self.undo.as_ref().is_some_and(|u| u.valid),
-                fm: &mut self.fm,
-                margin: &mut self.margin,
-                adaptive_margin: self.adaptive_margin,
-                armed_wake: self.armed_wake,
-                profile: self.profile,
-                stats: &mut self.stats,
-                pv_progress: &mut self.pv_progress,
-            };
-            match tb.judge(judge, &run)? {
-                Verdict::Advance { legal: l } => legal = l,
-                Verdict::Rollback => {
-                    drop(exit);
-                    self.rollback()?;
-                    legal = false;
-                    continue;
-                }
-                Verdict::Overshoot => {
-                    let what = exit
-                        .as_ref()
-                        .map(|e| format!("{e:?}"))
-                        .unwrap_or_else(|e| e.to_string());
-                    drop(exit);
-                    let r = self.vcpu.get_regs().ok();
-                    return Err(format!(
-                        "overshoot on {}: {} branches past stop target (stepping={} exit={} rip={:#x?} last_plan={:x?})",
-                        self.world.name,
-                        delta - remaining,
-                        self.stepping,
-                        what,
-                        r.map(|r| r.rip),
-                        self.last_plan,
-                    ));
-                }
-            }
-            if T::BRANCHES {
-                self.branches += delta;
-            }
+                clock.period(),
+            );
             self.stats.time_by[Cause::Progress as usize] += delta;
             self.world.time += delta;
             if legal {
@@ -1663,15 +1339,13 @@ impl Machine {
                 let last = unsafe { std::ptr::read_volatile(self.page.0.add(1)) };
                 let exit_time =
                     advance_time(self.world.time, last.saturating_sub(self.world.time), hard)?;
-                if self.pv_clock || self.page_timer.enabled {
-                    // In particular HLT must adopt at its full exit time, not
-                    // at a watchdog landing's partial syscall-only time. A
-                    // stop that left the guest's clock ahead of ours could be
-                    // given a next limit below time the guest already read;
-                    // a timer armed here must count from that clock too.
-                    self.stats.time_by[Cause::ClockReads as usize] += exit_time - self.world.time;
-                    self.world.time = exit_time;
-                }
+                // In particular HLT must adopt at its full exit time, not
+                // at a watchdog landing's partial syscall-only time. A
+                // stop that left the guest's clock ahead of ours could be
+                // given a next limit below time the guest already read;
+                // a timer armed here must count from that clock too.
+                self.stats.time_by[Cause::ClockReads as usize] += exit_time - self.world.time;
+                self.world.time = exit_time;
                 if self.page_timer.enabled {
                     let word =
                         unsafe { std::ptr::read_volatile(self.page.0.add(PAGE_TIMER_DEADLINE)) };
@@ -1694,23 +1368,19 @@ impl Machine {
                 }
             }
             self.stats.exits += 1;
-            if self.stepping {
-                self.stats.steps += 1;
-            }
             let now = self.world.time;
             match exit {
                 Err(e) if e.errno() == libc::EINTR => {
                     self.stats.eintr += 1;
                 }
-                Ok(VcpuExit::Debug(_)) => {}
                 Ok(VcpuExit::IoOut(0x52c, data)) => {
                     // Requested yield: a stop if we reached the soft target,
                     // otherwise transparent (nothing observable happens).
-                    // PV clock only: 1 means the guest's clock would pass
-                    // the bound we published (`soft`); it waits for time to
-                    // move, so move it there.
+                    // 1 means the guest's clock would pass the bound we
+                    // published (`soft`); it waits for time to move, so move
+                    // it there.
                     let v = data[0];
-                    if v == 1 && self.pv_clock {
+                    if v == 1 {
                         let bound = if self.page_timer.enabled {
                             self.page_get(PAGE_BOUND).min(soft)
                         } else {
@@ -1748,13 +1418,6 @@ impl Machine {
                     } else {
                         None
                     };
-                    #[cfg(test)]
-                    if charge > 0 && self.require_io_checkpoint {
-                        assert!(
-                            self.undo.as_ref().is_some_and(|u| u.valid),
-                            "charged access must begin with the real held checkpoint"
-                        );
-                    }
                     let after_io = self.world.time;
                     let mut control_stop = false;
                     let console_before = self.com1.out.len();
@@ -1770,7 +1433,6 @@ impl Machine {
                                     .unwrap_or(0);
                                 crate::emit_console_trace(
                                     self.world.time,
-                                    self.branches,
                                     &self.com1.out[line_start..],
                                 );
                             }
@@ -1812,9 +1474,9 @@ impl Machine {
                                     self.world.name
                                 ));
                             }
-                            if self.pv_clock && self.page_get(PAGE_PV_CLOCK) != 2 {
+                            if self.page_get(PAGE_PV_CLOCK) != 2 {
                                 return Err(format!(
-                                    "{}: the guest kernel lacks PV clock support; rebuild it from kernel/ for the pv timebase",
+                                    "{}: the guest kernel lacks PV clock support; rebuild it from kernel/",
                                     self.world.name
                                 ));
                             }
@@ -1833,18 +1495,15 @@ impl Machine {
                             self.note_skew(Site::Timer);
                             if let Some(d) = self.pit.deadline.filter(|&d| d <= now) {
                                 // The run that ends here can pass the deadline
-                                // (PV syscall charges, or counter tolerance).
-                                // Rewriting the PIT would drop that tick.
+                                // (syscall charges). Rewriting the PIT would
+                                // drop that tick.
                                 let s = &mut self.stats;
                                 s.timer_overdue += 1;
                                 s.timer_overdue_max_ns = s.timer_overdue_max_ns.max(now - d);
                                 s.timer_write_syscalls_max =
                                     s.timer_write_syscalls_max.max(run_syscalls);
-                                // PV only, so counter witnesses don't move:
-                                // deliver the due tick before the write.
-                                if self.pv_clock {
-                                    self.expire_timers()?;
-                                }
+                                // Deliver the due tick before the write.
+                                self.expire_timers()?;
                             }
                             if port == 0x530 {
                                 let ticks = u16::from_le_bytes([v, hi]);
@@ -1870,7 +1529,6 @@ impl Machine {
                             self.guest_exit_code = Some(v);
                             self.world.state = State::Exited(v);
                             self.record(b'X', v as u64);
-                            self.set_stepping(false)?;
                             return Ok(Stop::Exited);
                         }
                         BARRIER_PORT if self.barrier => {
@@ -1882,7 +1540,6 @@ impl Machine {
                             }
                             self.world.parked = true;
                             self.record(b'B', 0);
-                            self.set_stepping(false)?;
                             // Finish the port write now, so the machine is
                             // parked in a state a fork can save and restore.
                             self.complete_io()?;
@@ -1892,32 +1549,21 @@ impl Machine {
                             self.guest_init_error = Some(v);
                             self.world.state = State::Exited(v);
                             self.record(b'E', v as u64);
-                            self.set_stepping(false)?;
                             return Ok(Stop::Exited);
                         }
                         _ => {}
                     }
                     self.capture_output();
                     if self.world.observe_console && self.com1.out.len() > console_before {
-                        // Judge::Rollback discarded the exit before reaching here.
                         // Console ports have zero charge; the sink and pending KVM
                         // response are committed once at this deterministic exit.
                         self.world.committed_console = Some((after_io, v));
                         control_stop = true;
-                        if let Some(u) = self.undo.as_mut() {
-                            u.valid = false;
-                        }
                     }
                     self.record(b'O', (port as u64) << 8 | v as u64);
                     self.serial_edges();
                     self.pending_io = pending;
-                    if charge > 0 {
-                        if let Some(u) = self.undo.as_mut() {
-                            u.valid = false;
-                        }
-                    }
                     if control_stop {
-                        self.set_stepping(false)?;
                         return Ok(Stop::Control);
                     }
                 }
@@ -1970,11 +1616,6 @@ impl Machine {
                     self.record(b'i', port as u64);
                     self.serial_edges();
                     self.pending_io = pending;
-                    if charge > 0 {
-                        if let Some(u) = self.undo.as_mut() {
-                            u.valid = false;
-                        }
-                    }
                 }
                 Ok(VcpuExit::MmioRead(addr, data)) => {
                     self.stats.mmio += 1;
@@ -2018,7 +1659,6 @@ impl Machine {
                                 self.pic.raise(CHANNEL_IRQ);
                             }
                             if self.channel_output(&output.bytes)? {
-                                self.set_stepping(false)?;
                                 return Ok(Stop::Control);
                             }
                         }
@@ -2029,13 +1669,6 @@ impl Machine {
                         if let Some(b) = self.blk.as_mut() {
                             let done = b.write(m, addr - BLK_MMIO, v)?;
                             self.take_dma();
-                            if done.completed > 0 {
-                                // The disk changed outside guest RAM: no rollback
-                                // may cross this point.
-                                if let Some(u) = self.undo.as_mut() {
-                                    u.valid = false;
-                                }
-                            }
                             // Each request, in completion order: the trace shows
                             // where every FLUSH falls among the writes.
                             for (kind, sector, status) in done.log {
@@ -2069,7 +1702,6 @@ impl Machine {
                             if !out.frames.is_empty() {
                                 frames.extend(out.frames);
                                 self.note_skew(Site::Sent);
-                                self.set_stepping(false)?;
                                 return Ok(Stop::Sent);
                             }
                         }
@@ -2081,7 +1713,6 @@ impl Machine {
                     self.record(b'H', 0);
                     // The world checks pending interrupts while halted.
                     self.sync_pic();
-                    self.set_stepping(false)?;
                     if deferred && self.poll_net(frames, true)? {
                         self.note_skew(Site::Sent);
                         return Ok(Stop::Sent);
@@ -2103,7 +1734,6 @@ impl Machine {
                 }
                 Ok(VcpuExit::Shutdown) => {
                     self.world.state = State::Exited(0xff);
-                    self.set_stepping(false)?;
                     return Ok(Stop::Exited);
                 }
                 Ok(other) => return Err(format!("{}: unexpected exit {other:?}", self.world.name)),
@@ -2269,34 +1899,6 @@ fn ram_page_hashes_match_full_hashes_for_zero_changed_and_short_pages() {
 mod net_poll_tests {
     use super::*;
 
-    // All exits in these tiny payloads are natural, with no PMU or host-time
-    // stepping. Test the machine's service wiring, not counter qualification.
-    struct Natural;
-    impl Timebase for Natural {
-        const BRANCHES: bool = false;
-        fn prepare(
-            &mut self,
-            _: &mut Machine,
-            _: u64,
-            _: u64,
-            _: bool,
-        ) -> Result<Prepared, String> {
-            Ok(Prepared::Run)
-        }
-        fn start(&mut self, _: u64) -> u64 {
-            0
-        }
-        fn read(&mut self, _: u64) -> u64 {
-            0
-        }
-        fn inject_guard(&self) -> u64 {
-            INJECT_GUARD
-        }
-        fn judge(&mut self, _: Judge<'_>, _: &Run) -> Result<Verdict, String> {
-            Ok(Verdict::Advance { legal: true })
-        }
-    }
-
     #[test]
     #[cfg_attr(
         not(feature = "kvm-tests"),
@@ -2331,9 +1933,7 @@ mod net_poll_tests {
                     mac: Some([2, 0, 0, 0, 0, 1]),
                     control_channel: false,
                     disk: None,
-                    undo_margin: 0,
                     barrier: false,
-                    pv_clock: true,
                     page_timer: false,
                 };
                 let mut m = Machine::new(&kvm, "net-poll", &spec).unwrap();
@@ -2370,13 +1970,18 @@ mod net_poll_tests {
                     (500, 0)
                 };
                 let stop = m
-                    .run_until(&mut Natural, limit, early, &mut frames)
+                    .run_until(
+                        &mut PvClock::new(std::time::Duration::from_millis(20)).unwrap(),
+                        limit,
+                        early,
+                        &mut frames,
+                    )
                     .unwrap();
                 if site == "bounded_slice" {
                     assert_eq!(
                         m.time,
                         if deferred {
-                            crate::virtio_net::TX_POLL_NS
+                            seedbox_engine_core::virtio_network::TX_POLL_NS
                         } else {
                             limit - early
                         },
@@ -2450,19 +2055,27 @@ mod net_poll_tests {
                 mac: None,
                 control_channel: false,
                 disk: None,
-                undo_margin: 0,
                 barrier: false,
-                pv_clock: true,
                 page_timer: false,
             };
             let mut m = Machine::new(&kvm, "pv-stop", &spec).unwrap();
             let mut frames = Vec::new();
             let mut stop = m
-                .run_until(&mut Natural, 10_000_000, 0, &mut frames)
+                .run_until(
+                    &mut PvClock::new(std::time::Duration::from_millis(20)).unwrap(),
+                    10_000_000,
+                    0,
+                    &mut frames,
+                )
                 .unwrap();
             while stop == Stop::Reached {
                 stop = m
-                    .run_until(&mut Natural, 10_000_000, 0, &mut frames)
+                    .run_until(
+                        &mut PvClock::new(std::time::Duration::from_millis(20)).unwrap(),
+                        10_000_000,
+                        0,
+                        &mut frames,
+                    )
                     .unwrap();
             }
             assert!(m.time >= 5_000_000, "arm={arm} time {}", m.time);
@@ -2473,115 +2086,13 @@ mod net_poll_tests {
             );
         }
     }
-    #[test]
-    #[cfg_attr(
-        not(feature = "kvm-tests"),
-        ignore = "requires KVM on a Linux x86-64 host"
-    )]
-    fn deferred_tx_completes_a_pv_spin_without_halt_kick_or_interrupts() {
-        use super::pv::PvClock;
-        use std::time::Duration;
-        let kvm = Kvm::new().unwrap();
-        for (event_idx, page_timer) in [(false, false), (true, false), (false, true), (true, true)]
-        {
-            let mut first = None;
-            for ms in [2, 7] {
-                let case = format!("site=pv_spin event_idx={event_idx} page_timer={page_timer} deferred=true watchdog_ms={ms}");
-                // Publish TX, then busy-wait for used->idx with interrupts off.
-                // The stable cycle is serviced at its canonical point; never
-                // service at the host-time watchdog or a probe landing.
-                let mut code = vec![
-                    0xc7, 0x05, 0x02, 0x20, 0x08, 0x00, 1, 0, 0, 0, 0x66, 0x83, 0x3d, 0x02, 0x30,
-                    0x08, 0, 0, 0x74, 0xf6, 0xf4,
-                ];
-                if page_timer {
-                    // Store clock progress and an arm before publishing TX.
-                    let mut stores = Vec::new();
-                    for (address, value) in [
-                        (0xd0000008u32, 12300u32),
-                        (0xd0000070, 40000),
-                        (0xd0000074, 0),
-                    ] {
-                        stores.extend_from_slice(&[0xc7, 0x05]);
-                        stores.extend_from_slice(&address.to_le_bytes());
-                        stores.extend_from_slice(&value.to_le_bytes());
-                    }
-                    stores.extend(code);
-                    code = stores;
-                }
-                let mut kernel = vec![0; 1024];
-                kernel[0x1f1] = 1;
-                kernel.extend(code);
-                let spec = BootSpec {
-                    kernel: &kernel,
-                    initrd: &[],
-                    cmdline: String::new(),
-                    mem: INITRD_ADDR + 0x100000,
-                    rng_seed: [0; 32],
-                    mac: Some([2, 0, 0, 0, 0, 1]),
-                    control_channel: false,
-                    disk: None,
-                    undo_margin: 0,
-                    barrier: false,
-                    pv_clock: true,
-                    page_timer,
-                };
-                let mut m = Machine::new(&kvm, "tx-spin", &spec).unwrap();
-                m.abi = ABI_PAGE_TIMER;
-                m.enable_page_timer();
-                let memory = unsafe { std::slice::from_raw_parts_mut(m.mem.0, m.mem_size) };
-                let net = m.net.as_mut().unwrap();
-                net.set_deferred_tx(true);
-                for (off, v) in [
-                    (0x020, if event_idx { 1 << 29 } else { 0 }),
-                    (0x070, 15),
-                    (0x030, 1),
-                    (0x038, 1),
-                    (0x080, 0x81000),
-                    (0x090, 0x82000),
-                    (0x0a0, 0x83000),
-                    (0x044, 1),
-                ] {
-                    net.write(memory, off, v).unwrap();
-                }
-                memory[0x81000..0x81008].copy_from_slice(&0x84000u64.to_le_bytes());
-                memory[0x81008..0x8100c].copy_from_slice(&17u32.to_le_bytes());
-                memory[0x8400c..0x84011].copy_from_slice(b"frame");
-                memory[0x82000..0x82002].copy_from_slice(&1u16.to_le_bytes()); // NO_INTERRUPT
-                memory[0x82006..0x82008].copy_from_slice(&1u16.to_le_bytes()); // used_event
-                let mut tb = PvClock::new(Duration::from_millis(ms)).unwrap();
-                tb.max_false_alarms = 10;
-                let mut frames = Vec::new();
-                assert_eq!(
-                    m.run_until(&mut tb, 1_000_000, 0, &mut frames).unwrap(),
-                    Stop::Sent,
-                    "{case}"
-                );
-                assert_eq!(frames, [b"frame".to_vec()], "{case}");
-                assert_eq!(m.time, if page_timer { 12300 } else { 0 }, "{case}");
-                assert_eq!(m.pit.deadline, page_timer.then_some(40000), "{case}");
-                assert_eq!(m.net.as_ref().unwrap().stats().doorbell_exits, 0, "{case}");
-                assert_eq!(
-                    m.run_until(&mut tb, 1_000_000, 0, &mut frames).unwrap(),
-                    Stop::Exited,
-                    "{case}"
-                );
-                let evidence = (m.time, m.exit_witness(), m.state_digest());
-                if let Some(want) = &first {
-                    assert_eq!(&evidence, want, "{case}");
-                } else {
-                    first = Some(evidence);
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod io_boundary_tests {
     use super::*;
 
-    fn probe(kvm: &Kvm, port: u16, write: bool, undo: u64) -> Machine {
+    fn probe(kvm: &Kvm, port: u16, write: bool) -> Machine {
         // A minimal 32-bit payload using the real Linux boot handoff path.
         // After one charged I/O: conditional branch, marker store, HLT.
         let value = if port == 0x530 { 1u32 } else { 0x1234u32 };
@@ -2610,9 +2121,7 @@ mod io_boundary_tests {
             mac: None,
             control_channel: false,
             disk: None,
-            undo_margin: undo,
             barrier: false,
-            pv_clock: false,
             page_timer: false,
         };
         let mut machine = Machine::new(kvm, "io-probe", &spec).unwrap();
@@ -2627,47 +2136,10 @@ mod io_boundary_tests {
     }
 
     #[test]
-    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
-    fn runtime_checkpoint_keeps_unpaid_io_without_repeating_its_effect() {
-        let kvm = Kvm::new().unwrap();
-        let mut counter = Counter::new().unwrap();
-        for undo in [0, 256] {
-            for (port, write) in [(0x40, false), (0x43, true), (0x530, true)] {
-                let mut m = probe(&kvm, port, write, undo);
-                let mut frames = Vec::new();
-                assert_eq!(
-                    m.run_until(&mut counter, 500, 0, &mut frames).unwrap(),
-                    Stop::Reached
-                );
-                let pending = m.pending_io.clone();
-                assert!(pending.is_some());
-                let saved = m.snapshot().unwrap();
-                let finish = |m: &mut Machine, counter: &mut Counter| {
-                    let mut frames = Vec::new();
-                    while !matches!(
-                        m.run_until(counter, 10_000, 0, &mut frames).unwrap(),
-                        Stop::Halted | Stop::Exited
-                    ) {}
-                    (m.exit_witness(), m.state_digest().0, m.time, m.branches)
-                };
-                let want = finish(&mut m, &mut counter);
-                let mut fresh = probe(&kvm, port, write, undo);
-                fresh.restore(&saved).unwrap();
-                assert_eq!(fresh.pending_io, pending);
-                assert_eq!(
-                    finish(&mut fresh, &mut counter),
-                    want,
-                    "port={port:#x}, write={write}, undo={undo}"
-                );
-            }
-        }
-    }
-
-    #[test]
     #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM on a Linux host")]
     fn page_capture_has_documented_format_and_preserves_ram_witness_state() {
         let kvm = Kvm::new().unwrap();
-        let mut m = probe(&kvm, 0x530, true, 0);
+        let mut m = probe(&kvm, 0x530, true);
         let before = (m.exit_witness(), m.state_digest(), m.memory().to_vec());
         let pages = m.page_hashes();
         assert_eq!(pages.len(), m.mem_size / 4096 * 8);
@@ -2679,514 +2151,6 @@ mod io_boundary_tests {
             (m.exit_witness(), m.state_digest(), m.memory().to_vec()),
             before
         );
-    }
-
-    fn check_port(kvm: &Kvm, counter: &mut Counter, port: u16, write: bool) {
-        let mut m = probe(kvm, port, write, 0);
-        let initial = m.vcpu.get_regs().unwrap();
-        assert_eq!(initial.rip, 0x100000);
-        assert_eq!(initial.rsp, 0x90000);
-        assert_ne!(initial.rflags & 0x200, 0);
-        let mut frames = Vec::new();
-        assert_eq!(
-            m.run_until(counter, 500, 0, &mut frames).unwrap(),
-            Stop::Reached
-        );
-        assert_eq!(m.time, 500);
-        let live = m.vcpu.get_regs().unwrap();
-        assert_eq!(live.rsp, initial.rsp);
-        assert_ne!(live.rflags & 0x200, 0);
-        assert_eq!(live.rip, 0x100000 + 10);
-        assert_eq!(m.stats.kvm_n[1], 0, "unintended zero-memory boot execution");
-        assert_eq!(m.branches, 0);
-        let p = m.pending_io.clone().unwrap();
-        assert_eq!(p.remaining_ns, 500);
-        assert_eq!(p.port, port);
-        assert_eq!(p.write, write);
-        assert_eq!(p.width, if port == 0x530 { 2 } else { 1 });
-        assert_eq!(p.count, 1);
-        let clock = m.page_get(0);
-        let window = m.page_get(2);
-        let exits = m.stats.exits;
-        let count = counter.read_fast();
-        assert_eq!(
-            m.run_until(counter, 750, 0, &mut frames).unwrap(),
-            Stop::Reached
-        );
-        assert_eq!(m.pending_io.as_ref().unwrap().remaining_ns, 250);
-        assert_eq!(m.pending_io.as_ref().unwrap().bytes, p.bytes);
-        assert_eq!(m.page_get(0), clock);
-        assert_eq!(m.page_get(2), window);
-        assert_eq!(m.stats.exits, exits);
-        assert_eq!(m.stats.irqs, 0);
-        assert_eq!(&m.memory()[0x80000..0x80004], &[0, 0, 0, 0]);
-        // Completion changes the pending architectural I/O state once,
-        // while neither counted guest branches nor virtual cost advance.
-        assert_eq!(
-            m.run_until(counter, 1000, 0, &mut frames).unwrap(),
-            Stop::Reached
-        );
-        assert_eq!(m.time, 1000);
-        assert_eq!(m.branches, 0);
-        assert_eq!(counter.read_fast(), count);
-        assert!(m.pending_io.is_none());
-        assert_eq!(m.stats.exits, exits);
-        let complete = m.vcpu.get_regs().unwrap();
-        assert_eq!(complete.rsp, initial.rsp);
-        assert_ne!(complete.rflags & 0x200, 0);
-        assert_eq!(
-            complete.rip,
-            0x100000 + 10 + if port == 0x530 { 2 } else { 1 }
-        );
-        assert_eq!(&m.memory()[0x80000..0x80004], &[0, 0, 0, 0]);
-        if !write {
-            assert_eq!(m.vcpu.get_regs().unwrap().rax as u8, p.bytes[0]);
-        }
-        if port == 0x40 && !write {
-            assert_eq!(m.pit.read(0x40, 1000), 0x12);
-        }
-        assert_eq!(
-            m.run_until(counter, 2000, 0, &mut frames).unwrap(),
-            Stop::Halted
-        );
-        assert_eq!(m.branches, 1);
-        assert_eq!(&m.memory()[0x80000..0x80004], &[0x78, 0x56, 0x34, 0x12]);
-    }
-
-    #[test]
-    #[ignore = "first unchanged failed case; requires exclusive leased KVM lane"]
-    fn first_case_preserves_boot_and_halts() {
-        let kvm = Kvm::new().unwrap();
-        let mut counter = Counter::new().unwrap();
-        check_port(&kvm, &mut counter, 0x40, true);
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
-    fn charged_io_completes_once_after_debt_with_no_guest_progress() {
-        let kvm = Kvm::new().unwrap();
-        let mut counter = Counter::new().unwrap();
-        let ports = [
-            (0x40, true),
-            (0x41, true),
-            (0x42, true),
-            (0x43, true),
-            (0x61, true),
-            (0x530, true),
-            (0x40, false),
-            (0x41, false),
-            (0x42, false),
-            (0x61, false),
-        ];
-        for (port, write) in ports {
-            check_port(&kvm, &mut counter, port, write);
-        }
-        let mut pending = None;
-        let mut completed = None;
-        for undo in [0, 16, 256] {
-            for exact in [false, true] {
-                let mut m = probe(&kvm, 0x530, true, undo);
-                m.pit_exact = exact;
-                m.require_io_checkpoint = undo > 0;
-                let mut frames = Vec::new();
-                assert_eq!(
-                    m.run_until(&mut counter, 839, 0, &mut frames).unwrap(),
-                    Stop::Reached
-                );
-                assert_eq!(m.time, 839);
-                assert_eq!(m.pending_io.as_ref().unwrap().remaining_ns, 161);
-                assert_eq!(m.pic.pending(), Some(0));
-                assert_eq!(m.pit.deadline, Some(1678));
-                assert_eq!(m.stats.irqs, 0);
-                assert!(!m.undo.as_ref().is_some_and(|u| u.valid));
-                if undo > 0 {
-                    assert!(m.undo.as_ref().unwrap().stats.checkpoints > 0);
-                }
-                let checkpoint_count = m.undo.as_ref().map_or(0, |u| u.stats.checkpoints);
-                let evidence = (m.exit_witness(), m.state_digest());
-                // Same registers/RAM, but pending response/debt must change
-                // both the terminal exit witness and the named state part.
-                let saved = m.pending_io.clone();
-                for data_change in [false, true] {
-                    let p = m.pending_io.as_mut().unwrap();
-                    if data_change {
-                        p.bytes[0] ^= 1;
-                    } else {
-                        p.remaining_ns -= 1;
-                    }
-                    let changed = (m.exit_witness(), m.state_digest());
-                    assert_ne!(changed.0, evidence.0);
-                    assert_ne!(changed.1 .0, evidence.1 .0);
-                    for ((name, hash), (other_name, other_hash)) in
-                        evidence.1 .1.iter().zip(&changed.1 .1)
-                    {
-                        assert_eq!(name, other_name);
-                        if *name == "pending_io" {
-                            assert_ne!(hash, other_hash);
-                        } else {
-                            assert_eq!(hash, other_hash);
-                        }
-                    }
-                    m.pending_io = saved.clone();
-                }
-                if let Some(want) = &pending {
-                    assert_eq!(&evidence, want, "pending undo={undo} exact={exact}");
-                } else {
-                    pending = Some(evidence);
-                }
-                assert_eq!(
-                    m.run_until(&mut counter, 1000, 0, &mut frames).unwrap(),
-                    Stop::Reached
-                );
-                let evidence = (m.exit_witness(), m.state_digest());
-                if let Some(want) = &completed {
-                    assert_eq!(&evidence, want, "completed undo={undo} exact={exact}");
-                } else {
-                    completed = Some(evidence);
-                }
-                assert_eq!(m.time, 1000);
-                assert_eq!(m.branches, 0);
-                assert!(m.pending_io.is_none());
-                assert_eq!(
-                    m.undo.as_ref().map_or(0, |u| u.stats.checkpoints),
-                    checkpoint_count
-                );
-            }
-        }
-    }
-
-    /// A 32-bit loop of 1000 conditional branches, optionally followed by an
-    /// uncharged OUT to port 0x80 (a natural exit), with interrupts masked.
-    fn loop_probe(kvm: &Kvm, natural_exit: bool, undo: u64) -> Machine {
-        // outer: mov ebx,1000; inner: dec ebx; jnz inner; [out 0x80,al]; jmp outer
-        let mut code = vec![0xbb, 0xe8, 0x03, 0x00, 0x00, 0x4b, 0x75, 0xfd];
-        if natural_exit {
-            code.extend_from_slice(&[0xe6, 0x80]);
-        }
-        let back = -(code.len() as i8 + 2);
-        code.extend_from_slice(&[0xeb, back as u8]);
-        let mut kernel = vec![0u8; 1024];
-        kernel[0x1f1] = 1;
-        kernel.extend(code);
-        let spec = BootSpec {
-            kernel: &kernel,
-            initrd: &[],
-            cmdline: String::new(),
-            mem: INITRD_ADDR + 0x100000,
-            rng_seed: [0; 32],
-            mac: None,
-            control_channel: false,
-            disk: None,
-            undo_margin: undo,
-            barrier: false,
-            pv_clock: false,
-            page_timer: false,
-        };
-        let mut machine = Machine::new(kvm, "stop-probe", &spec).unwrap();
-        let mut r = machine.vcpu.get_regs().unwrap();
-        r.rflags = 0x2;
-        machine.vcpu.set_regs(&r).unwrap();
-        machine.pic.set_masks(0xffff);
-        machine
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
-    fn an_overdue_arm_replaced_by_a_page_store_does_not_depend_on_undo() {
-        let kvm = Kvm::new().unwrap();
-        let mut counter = Counter::new().unwrap();
-        // mov ecx,280000; dec ecx; jnz; store deadline 900000 to word 14; hlt
-        let mut code = vec![0xb9, 0xc0, 0x45, 0x04, 0x00, 0x49, 0x75, 0xfd];
-        for (address, value) in [(0xd0000070u32, 900_000u32), (0xd0000074, 0)] {
-            code.extend_from_slice(&[0xc7, 0x05]);
-            code.extend_from_slice(&address.to_le_bytes());
-            code.extend_from_slice(&value.to_le_bytes());
-        }
-        code.push(0xf4);
-        let mut want = None;
-        for undo in [0, 16, 256] {
-            let mut kernel = vec![0u8; 1024];
-            kernel[0x1f1] = 1;
-            kernel.extend(&code);
-            let spec = BootSpec {
-                kernel: &kernel,
-                initrd: &[],
-                cmdline: String::new(),
-                mem: INITRD_ADDR + 0x100000,
-                rng_seed: [0; 32],
-                mac: None,
-                control_channel: false,
-                disk: None,
-                undo_margin: undo,
-                barrier: false,
-                pv_clock: false,
-                page_timer: true,
-            };
-            let mut m = Machine::new(&kvm, "page-rearm", &spec).unwrap();
-            let mut r = m.vcpu.get_regs().unwrap();
-            r.rflags = 0x202;
-            m.vcpu.set_regs(&r).unwrap();
-            m.abi = ABI_PAGE_TIMER;
-            m.enable_page_timer();
-            m.tolerance = 200_000;
-            m.pit.program_deadline(Some(100_000)); // D = 100k, hard = 300k, exit at ~280k
-            m.pic.set_masks(0xffff);
-            assert_eq!(
-                m.run_until(&mut counter, 1_000_000, 0, &mut Vec::new())
-                    .unwrap(),
-                Stop::Halted
-            );
-            m.pic.set_masks(0);
-            let got = (m.time, m.pic.pending(), m.pit.deadline, m.exit_witness());
-            if let Some(want) = &want {
-                assert_eq!(&got, want, "undo={undo}");
-            } else {
-                want = Some(got);
-            }
-        }
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
-    fn refined_counter_approaches_preserve_ram_and_exact_stops() {
-        let kvm = Kvm::new().unwrap();
-        let mut counter = Counter::new().unwrap();
-        let mut want = None;
-        // A 4096 margin leaves more than 32 branches after a landing with any
-        // plausible skid, so that run must refine at least once.
-        for undo in [0, 16, 32, 64, 128, 256, 1024, 4096] {
-            let mut m = loop_probe(&kvm, false, undo);
-            // Increment a RAM word on every branch. A refinement that kept
-            // registers but lost RAM would count some iterations twice.
-            // outer: mov ebx,1000; inner: inc dword [0x80000]; dec ebx; jnz inner; jmp outer
-            let code = [
-                0xbb, 0xe8, 0x03, 0x00, 0x00, 0xff, 0x05, 0x00, 0x00, 0x08, 0x00, 0x4b, 0x75, 0xf7,
-                0xeb, 0xf0,
-            ];
-            m.memory()[0x100000..0x100000 + code.len()].copy_from_slice(&code);
-            let word = |m: &mut Machine| {
-                u32::from_le_bytes(m.memory()[0x80000..0x80004].try_into().unwrap())
-            };
-            let start = word(&mut m);
-            m.adaptive_margin = true;
-            assert_eq!(
-                m.run_until(&mut counter, 1_000_000, 0, &mut Vec::new())
-                    .unwrap(),
-                Stop::Reached
-            );
-            assert_eq!(m.time, 1_000_000);
-            assert_eq!(m.branches, 1_000_000);
-            if undo == 4096 {
-                assert!(
-                    m.undo.as_ref().unwrap().stats.checkpoints >= 2,
-                    "undo={undo}: no refined approach"
-                );
-            }
-            let got = (
-                word(&mut m).wrapping_sub(start),
-                m.exit_witness(),
-                m.state_digest().0,
-            );
-            if let Some(want) = &want {
-                assert_eq!(&got, want, "undo={undo}");
-            } else {
-                want = Some(got);
-            }
-        }
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
-    fn stops_at_natural_exits_or_exact_hard_counts_without_yields() {
-        let kvm = Kvm::new().unwrap();
-        let mut counter = Counter::new().unwrap();
-        // (exits, limit, early): no natural exit, so an exact counted stop at
-        // the hard target; an exit every 1000 branches with soft below hard,
-        // so the first exit at or after soft; and soft == hard with an exit
-        // exactly on the hard count, which must stop before that exit.
-        let cases = [
-            (false, 300_000, 150_000),
-            (true, 300_000, 150_000),
-            (true, 150_000, 0),
-        ];
-        for (exits, limit, early) in cases {
-            let mut want = None;
-            for undo in [0, 16, 256] {
-                let mut m = loop_probe(&kvm, exits, undo);
-                // The fixed margin can be shorter than a skid in this loop.
-                m.adaptive_margin = true;
-                let mut frames = Vec::new();
-                assert_eq!(
-                    m.run_until(&mut counter, limit, early, &mut frames)
-                        .unwrap(),
-                    Stop::Reached
-                );
-                let what = format!("exits={exits} limit={limit} early={early} undo={undo}");
-                assert_eq!(m.page_get(2), 0, "{what}: a yield window was requested");
-                assert_eq!(m.stats.yields, 0);
-                match (exits, early) {
-                    (false, _) => assert_eq!(m.time, limit, "{what}"),
-                    (true, 0) => {
-                        assert_eq!(m.time, limit, "{what}");
-                        assert_eq!(
-                            m.stats.pio,
-                            limit / 1000 - 1,
-                            "{what}: ran the exit at the hard count"
-                        );
-                    }
-                    (true, _) => {
-                        assert!(
-                            m.time >= limit - early && m.time < limit - early + 1001,
-                            "{what} time={}",
-                            m.time
-                        );
-                        assert_eq!(
-                            m.stats.precise_stops, 0,
-                            "{what}: counted stop despite a natural exit"
-                        );
-                    }
-                }
-                let rip = m.vcpu.get_regs().unwrap().rip;
-                let evidence = (m.time, rip, m.exit_witness(), m.state_digest().0);
-                if let Some(want) = &want {
-                    assert_eq!(&evidence, want, "{what}");
-                } else {
-                    want = Some(evidence);
-                }
-            }
-        }
-    }
-
-    fn halt_snapshot(m: &mut Machine, stage: &str) {
-        let regs = m.vcpu.get_regs().unwrap();
-        let sregs = m.vcpu.get_sregs().unwrap();
-        let (sync, if_flag, exit_reason) = {
-            let run = m.vcpu.get_kvm_run();
-            (unsafe { run.s.regs.regs }, run.if_flag, run.exit_reason)
-        };
-        let marker = m.memory()[0x80000..0x80004].to_vec();
-        let page: Vec<_> = (0..PAGE_FIELDS).map(|i| m.page_get(i)).collect();
-        eprintln!(
-            "{}",
-            serde_json::json!({"stage":stage,"state":format!("{:?}",m.state),"guest_exit":m.guest_exit_code,"guest_init_error":m.guest_init_error,"arch":{"rip":regs.rip,"rflags":regs.rflags,"rax":regs.rax,"rdx":regs.rdx,"rsp":regs.rsp,"cr0":sregs.cr0,"cs_base":sregs.cs.base},"sync":{"rip":sync.rip,"rflags":sync.rflags,"rax":sync.rax,"rdx":sync.rdx},"run_if_flag":if_flag,"raw_run_exit_reason":exit_reason,"pending_io":m.pending_io.as_ref().map(|p|serde_json::json!({"remaining_ns":p.remaining_ns,"port":p.port,"write":p.write,"width":p.width,"count":p.count,"bytes":p.bytes})),"time_ns":m.time,"branches":m.branches,"page":page,"marker":marker,"exits":m.stats.exits,"halts":m.stats.halts,"irqs":m.stats.irqs,"kvm_exits":m.stats.kvm_n})
-        );
-    }
-
-    #[test]
-    #[ignore = "single manager-authorized diagnostic of unchanged halt case"]
-    fn diagnose_first_halt_case() {
-        let kvm = Kvm::new().unwrap();
-        let mut counter = Counter::new().unwrap();
-        let mut m = probe(&kvm, 0x40, true, 0);
-        let mut kernel = vec![0u8; 1024];
-        kernel[0x1f1] = 1;
-        kernel.extend_from_slice(&m.memory()[0x100000..0x100000 + 26]);
-        eprintln!("fixture_kernel_sha256={:x}", Sha256::digest(&kernel));
-        halt_snapshot(&mut m, "before_first_run");
-        let mut frames = Vec::new();
-        for (limit, stage) in [
-            (500, "after_partial_500"),
-            (750, "after_partial_750"),
-            (1000, "after_completion_1000"),
-        ] {
-            let stop = m.run_until(&mut counter, limit, 0, &mut frames);
-            eprintln!("limit={limit} stop={stop:?}");
-            halt_snapshot(&mut m, stage);
-            assert_eq!(stop.unwrap(), Stop::Reached);
-        }
-        let stop = m.run_until(&mut counter, 2000, 0, &mut frames);
-        eprintln!("limit=2000 stop={stop:?}");
-        halt_snapshot(&mut m, "after_final_resume");
-        assert_eq!(stop.unwrap(), Stop::Halted);
-    }
-
-    /// Pause with 161 ns of I/O cost owed and a periodic timer armed: while
-    /// paused nothing runs and nothing is paid. Resumed later, the missed
-    /// ticks fire once, late, in phase, and the debt is paid from the resume.
-    #[test]
-    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
-    fn a_pause_keeps_owed_io_cost_and_resumes_in_timer_phase() {
-        let kvm = Kvm::new().unwrap();
-        let mut counter = Counter::new().unwrap();
-        let mut want = None;
-        for undo in [0, 16, 256] {
-            let mut m = probe(&kvm, 0x530, true, undo);
-            let mut frames = Vec::new();
-            assert_eq!(
-                m.run_until(&mut counter, 839, 0, &mut frames).unwrap(),
-                Stop::Reached
-            );
-            assert_eq!(m.pending_io.as_ref().unwrap().remaining_ns, 161);
-            assert_eq!(m.pit.deadline, Some(1678));
-            m.pause().unwrap();
-            assert!(m.pause().is_err());
-            let rip = m.vcpu.get_regs().unwrap().rip;
-            m.resume(5000).unwrap();
-            assert!(m.resume(5000).is_err());
-            assert_eq!(m.time, 5000);
-            assert_eq!(m.pit.deadline, Some(1678 + 4 * 839), "undo={undo}");
-            assert_eq!(
-                m.pending_io.as_ref().unwrap().remaining_ns,
-                161,
-                "debt kept while paused"
-            );
-            assert_eq!(
-                (m.branches, m.vcpu.get_regs().unwrap().rip, m.stats.irqs),
-                (0, rip, 0)
-            );
-            assert_eq!(
-                m.run_until(&mut counter, 5100, 0, &mut frames).unwrap(),
-                Stop::Reached
-            );
-            assert_eq!(m.pending_io.as_ref().unwrap().remaining_ns, 61);
-            assert_eq!(
-                m.run_until(&mut counter, 5161, 0, &mut frames).unwrap(),
-                Stop::Reached
-            );
-            assert!(m.pending_io.is_none());
-            assert_eq!(m.branches, 0);
-            assert_eq!(
-                m.run_until(&mut counter, 7000, 0, &mut frames).unwrap(),
-                Stop::Halted
-            );
-            assert_eq!(m.branches, 1);
-            assert_eq!(&m.memory()[0x80000..0x80004], &[0x78, 0x56, 0x34, 0x12]);
-            let evidence = (m.time, m.exit_witness(), m.state_digest().0);
-            if let Some(want) = &want {
-                assert_eq!(&evidence, want, "undo={undo}");
-            } else {
-                want = Some(evidence);
-            }
-        }
-    }
-
-    /// Pause once the debt is paid but before the guest runs on: resuming
-    /// later runs exactly what an unpaused machine runs, just later.
-    #[test]
-    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
-    fn a_pause_with_no_debt_runs_on_unchanged_after_resume() {
-        let kvm = Kvm::new().unwrap();
-        let mut counter = Counter::new().unwrap();
-        for undo in [0, 256] {
-            let mut m = probe(&kvm, 0x61, false, undo);
-            let mut frames = Vec::new();
-            assert_eq!(
-                m.run_until(&mut counter, 1000, 0, &mut frames).unwrap(),
-                Stop::Reached
-            );
-            assert!(m.pending_io.is_none());
-            let rax = m.vcpu.get_regs().unwrap().rax;
-            m.pause().unwrap();
-            m.resume(3000).unwrap();
-            assert_eq!(m.vcpu.get_regs().unwrap().rax, rax);
-            assert_eq!(
-                m.run_until(&mut counter, 5000, 0, &mut frames).unwrap(),
-                Stop::Halted
-            );
-            assert_eq!(m.branches, 1);
-            assert!(m.time >= 3000 && m.time < 5000);
-            assert_eq!(&m.memory()[0x80000..0x80004], &[0x78, 0x56, 0x34, 0x12]);
-        }
     }
 }
 
@@ -3260,9 +2224,9 @@ mod fork_tests {
 
     #[test]
     #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
-    fn page_timer_negotiation_and_undo_restore_the_separate_page_word() {
+    fn page_timer_negotiation_and_sync_use_the_separate_page_word() {
         let kvm = Kvm::new().unwrap();
-        let mut m = probe_machine(&kvm, 256, false);
+        let mut m = probe_machine(&kvm, false);
         for requested in [false, true] {
             for abi in 0..=ABI_PAGE_TIMER {
                 m.page_timer_requested = requested;
@@ -3285,22 +2249,8 @@ mod fork_tests {
         }
         m.page_set(PAGE_TIMER_DEADLINE, 10000);
         m.sync_page_timer().unwrap();
-        m.checkpoint().unwrap();
-        m.page_set(PAGE_TIMER_DEADLINE, 20000);
-        // Speculative guest stores are not adopted before a legal landing.
-        m.rollback().unwrap();
-        assert_eq!(m.page_get(PAGE_TIMER_DEADLINE), 10000);
         assert_eq!(m.next_deadline(), 10000);
         m.page_set(PAGE_TIMER_DEADLINE, TIMER_DISARMED);
-        m.checkpoint().unwrap();
-        m.page_set(PAGE_TIMER_DEADLINE, 30000);
-        m.rollback().unwrap();
-        assert_eq!(m.page_get(PAGE_TIMER_DEADLINE), TIMER_DISARMED);
-        assert_eq!(
-            m.next_deadline(),
-            10000,
-            "unadopted disarm cannot change idle wake time"
-        );
         m.sync_page_timer().unwrap();
         assert_eq!(m.next_deadline(), TIMER_DISARMED);
         assert_eq!(m.pit.deadline, None);
@@ -3312,11 +2262,9 @@ mod fork_tests {
     fn abi_below_3_time_forks_do_not_write_extensions_or_add_reseed_witnesses() {
         let kvm = Kvm::new().unwrap();
         for abi in 0..ABI_PAGE_RESEED {
-            let mut m = probe_machine(&kvm, 0, false);
-            assert!(
-                (6..14).all(|i| m.page_get(i) == 0),
-                "counter boot, ABI {abi}"
-            );
+            let mut m = probe_machine(&kvm, false);
+            assert_eq!(m.page_get(PAGE_PV_CLOCK), 1, "fresh boot, ABI {abi}");
+            assert!((7..14).all(|i| m.page_get(i) == 0), "fresh boot, ABI {abi}");
             for i in 6..14 {
                 m.page_set(i, 100 + i as u64);
             }
@@ -3324,7 +2272,6 @@ mod fork_tests {
             m.park().unwrap();
             let mut witness = m.witness.clone();
             witness.update([b'R']);
-            witness.update(m.branches.to_le_bytes());
             witness.update(m.time.to_le_bytes());
             witness.update(m.time.to_le_bytes());
             // Pre-K2 exit_witness also covers pending I/O: none after park().
@@ -3351,8 +2298,9 @@ mod fork_tests {
     fn a_time_fork_writes_only_entropy_and_a_barrier_writes_none() {
         let kvm = Kvm::new().unwrap();
         for barrier in [false, true] {
-            let mut m = probe_machine(&kvm, 0, barrier);
-            assert!((6..14).all(|i| m.page_get(i) == 0), "counter boot");
+            let mut m = probe_machine(&kvm, barrier);
+            assert_eq!(m.page_get(PAGE_PV_CLOCK), 1, "fresh boot");
+            assert!((7..14).all(|i| m.page_get(i) == 0), "fresh boot");
             m.abi = ABI_PAGE_RESEED;
             for i in 0..14 {
                 m.page_set(i, 100 + i as u64);
@@ -3390,14 +2338,7 @@ mod fork_tests {
         }
     }
 
-    /// 32-bit payload through the real boot handoff: announce the launch
-    /// barrier, read one entropy word into a marker, spin 1000 counted
-    /// branches, write a second page, halt.
-    fn barrier_machine(kvm: &Kvm, undo: u64) -> Machine {
-        probe_machine(kvm, undo, true)
-    }
-
-    fn probe_machine(kvm: &Kvm, undo: u64, barrier: bool) -> Machine {
+    fn probe_machine(kvm: &Kvm, barrier: bool) -> Machine {
         let mut code = vec![
             0xb8, 1, 0, 0, 0, 0xba, 0xf8, 0, 0, 0, 0xef, 0xed, 0xa3, 0x00, 0x00, 0x08, 0x00,
         ];
@@ -3415,397 +2356,17 @@ mod fork_tests {
             mac: None,
             control_channel: false,
             disk: None,
-            undo_margin: undo,
             barrier,
-            pv_clock: false,
             page_timer: false,
         };
         Machine::new(kvm, "fork-probe", &spec).unwrap()
-    }
-
-    fn to_barrier(m: &mut Machine, counter: &mut Counter) {
-        let mut frames = Vec::new();
-        assert_eq!(
-            m.run_until(counter, 1_000_000, 0, &mut frames).unwrap(),
-            Stop::Barrier
-        );
-        assert!(m.parked);
-    }
-
-    fn released(
-        m: &mut Machine,
-        counter: &mut Counter,
-        word: u32,
-    ) -> (String, String, u64, u64, Vec<u8>) {
-        let at = m.time + 10;
-        m.release(at, [word; ENTROPY_WORDS]).unwrap();
-        let mut frames = Vec::new();
-        loop {
-            match m.run_until(counter, 10_000_000, 0, &mut frames).unwrap() {
-                Stop::Exited | Stop::Halted => break,
-                Stop::Reached => {}
-                other => panic!("unexpected stop {other:?}"),
-            }
-        }
-        assert_eq!(&m.memory()[0x80000..0x80004], &word.to_le_bytes());
-        assert_eq!(&m.memory()[0x81000..0x81004], &[0xad, 0xde, 0, 0]);
-        (
-            m.exit_witness(),
-            m.state_digest().0,
-            m.time,
-            m.branches,
-            m.memory()[0x80000..0x80004].to_vec(),
-        )
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
-    fn a_restored_fork_matches_a_cold_run_and_seeds_differ() {
-        let kvm = Kvm::new().unwrap();
-        let mut counter = Counter::new().unwrap();
-        for undo in [0, 256] {
-            let mut cold = barrier_machine(&kvm, undo);
-            to_barrier(&mut cold, &mut counter);
-            let want = released(&mut cold, &mut counter, 7);
-            assert!(want.3 >= 1000, "spin loop branches counted");
-
-            let mut m = barrier_machine(&kvm, undo);
-            to_barrier(&mut m, &mut counter);
-            let snapshot = m.snapshot().unwrap();
-            assert_eq!(
-                released(&mut m, &mut counter, 7),
-                want,
-                "first seed after taking a snapshot, undo={undo}"
-            );
-            let pages = m.restore(&snapshot).unwrap();
-            assert!(pages >= 2, "marker pages copied back, undo={undo}");
-            assert!(m.parked);
-            assert_eq!(&m.memory()[0x80000..0x80004], &[0, 0, 0, 0]);
-            let other = released(&mut m, &mut counter, 9);
-            // Both seeds take the same path, and the event witness records
-            // port reads without their values, so only the state differs.
-            assert_eq!(other.0, want.0);
-            assert_ne!(other.1, want.1);
-            assert_eq!(other.4, 9u32.to_le_bytes());
-            m.restore(&snapshot).unwrap();
-            assert_eq!(
-                released(&mut m, &mut counter, 7),
-                want,
-                "seed restored from the fork, undo={undo}"
-            );
-        }
-    }
-
-    /// A machine released later than it parked (another machine parked
-    /// later, or a release skew), with its timer due in between: the timer
-    /// fires late at the release instead of leaving the next slice a hard
-    /// stop behind its clock.
-    #[test]
-    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
-    fn a_release_past_an_armed_timer_fires_it_and_runs_on() {
-        let kvm = Kvm::new().unwrap();
-        let mut counter = Counter::new().unwrap();
-        for undo in [0, 256] {
-            let mut m = barrier_machine(&kvm, undo);
-            to_barrier(&mut m, &mut counter);
-            let parked = m.time;
-            // Periodic channel 0 armed at the barrier, as a guest's tick is.
-            m.pit.write(0x43, 0x34, parked);
-            m.pit.program(12, parked);
-            let period = m.pit.deadline.unwrap() - parked;
-            m.release(parked + 4 * period + period / 2, [7; ENTROPY_WORDS])
-                .unwrap();
-            // Four ticks fell due while parked; they fire as one late IRQ0
-            // (masked in this probe) and the next is armed past the release.
-            assert_eq!(m.pit.deadline, Some(parked + 5 * period), "undo={undo}");
-            let mut frames = Vec::new();
-            while !matches!(
-                m.run_until(&mut counter, parked + 10_000_000, 0, &mut frames)
-                    .unwrap(),
-                Stop::Exited | Stop::Halted
-            ) {}
-            assert_eq!(&m.memory()[0x81000..0x81004], &[0xad, 0xde, 0, 0]);
-        }
-    }
-
-    /// Fork at a simulated time inside the spin loop instead of at the guest's
-    /// barrier (the port write and read are then ordinary unknown ports).
-    #[test]
-    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
-    fn a_fork_at_a_simulated_time_matches_a_cold_run() {
-        let kvm = Kvm::new().unwrap();
-        let mut counter = Counter::new().unwrap();
-        let finish = |m: &mut Machine, counter: &mut Counter| {
-            let at = m.time + 10;
-            m.release(at, [0; ENTROPY_WORDS]).unwrap();
-            let mut frames = Vec::new();
-            while !matches!(
-                m.run_until(counter, 10_000_000, 0, &mut frames).unwrap(),
-                Stop::Exited | Stop::Halted
-            ) {}
-            (m.exit_witness(), m.state_digest().0, m.time, m.branches)
-        };
-        for undo in [0, 256] {
-            let mut cold = probe_machine(&kvm, undo, false);
-            let mut frames = Vec::new();
-            assert_eq!(
-                cold.run_until(&mut counter, 500, 0, &mut frames).unwrap(),
-                Stop::Reached
-            );
-            assert_eq!(cold.time, 500);
-            cold.park().unwrap();
-            let want = finish(&mut cold, &mut counter);
-
-            let mut m = probe_machine(&kvm, undo, false);
-            assert_eq!(
-                m.run_until(&mut counter, 500, 0, &mut frames).unwrap(),
-                Stop::Reached
-            );
-            m.park().unwrap();
-            let snapshot = m.snapshot().unwrap();
-            assert_eq!(
-                finish(&mut m, &mut counter),
-                want,
-                "first run after a snapshot, undo={undo}"
-            );
-            m.restore(&snapshot).unwrap();
-            assert_eq!(m.time, 500);
-            assert_eq!(
-                finish(&mut m, &mut counter),
-                want,
-                "restored fork, undo={undo}"
-            );
-        }
-    }
-
-    /// A seed that crashed a machine leaves a later incarnation in a new VM,
-    /// so the next seed restores into a freshly built machine that holds no
-    /// fork point: a full copy, after which it holds one and later restores
-    /// take the cheap path again. Every restore must match the cold run.
-    #[test]
-    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
-    fn a_fork_restores_into_a_freshly_built_machine() {
-        let kvm = Kvm::new().unwrap();
-        let mut counter = Counter::new().unwrap();
-        for undo in [0, 256] {
-            let mut cold = barrier_machine(&kvm, undo);
-            to_barrier(&mut cold, &mut counter);
-            let want = released(&mut cold, &mut counter, 7);
-
-            let mut m = barrier_machine(&kvm, undo);
-            to_barrier(&mut m, &mut counter);
-            let snapshot = m.snapshot().unwrap();
-            drop(m);
-            let mut fresh = barrier_machine(&kvm, undo);
-            if undo > 0 {
-                assert!(!fresh.undo.as_ref().unwrap().holds_fork_point());
-            }
-            let pages = fresh.restore(&snapshot).unwrap();
-            assert_eq!(
-                pages,
-                (fresh.mem_size / 4096) as u64,
-                "full copy, undo={undo}"
-            );
-            assert!(fresh.parked);
-            assert_eq!(
-                released(&mut fresh, &mut counter, 7),
-                want,
-                "restored into a fresh machine, undo={undo}"
-            );
-            if undo > 0 {
-                assert!(fresh.undo.as_ref().unwrap().holds_fork_point());
-            }
-            let pages = fresh.restore(&snapshot).unwrap();
-            if undo > 0 {
-                assert!(
-                    pages < (fresh.mem_size / 4096) as u64,
-                    "only written pages copied back"
-                );
-            }
-            assert_eq!(
-                released(&mut fresh, &mut counter, 7),
-                want,
-                "second restore, undo={undo}"
-            );
-        }
-    }
-
-    fn to_halt(m: &mut Machine, counter: &mut Counter, limit: u64) {
-        let mut frames = Vec::new();
-        while !matches!(
-            m.run_until(counter, limit, 0, &mut frames).unwrap(),
-            Stop::Exited | Stop::Halted
-        ) {}
-    }
-
-    /// Crash a machine and boot its next incarnation from the same inputs:
-    /// fresh RAM, the program runs again from its first instruction at the
-    /// reboot time, and the logs and witness carry across.
-    #[test]
-    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
-    fn a_crashed_machine_reboots_fresh_from_its_boot_inputs() {
-        let kvm = Kvm::new().unwrap();
-        let mut counter = Counter::new().unwrap();
-        let mut want = None;
-        for undo in [0, 256] {
-            let mut old = probe_machine(&kvm, undo, false);
-            to_halt(&mut old, &mut counter, 1_000_000);
-            assert_eq!(&old.memory()[0x81000..0x81004], &[0xad, 0xde, 0, 0]);
-            let first = (old.branches, old.exit_witness());
-            old.com1.out.extend_from_slice(b"first boot\n");
-            old.syscall_ns = 937;
-            let crash = old.world.time + 100;
-            let mut new = probe_machine(&kvm, undo, false);
-            new.succeed(&mut old, crash, 1009, None).unwrap();
-            assert!(new.down && !new.paused);
-            assert_eq!(
-                new.syscall_ns, 937,
-                "the next incarnation keeps the PV syscall cost"
-            );
-            assert_eq!((new.incarnation, new.time), (1, crash));
-            assert_eq!(&new.memory()[0x80000..0x80004], &[0, 0, 0, 0]);
-            assert_eq!(&new.memory()[0x81000..0x81004], &[0, 0, 0, 0]);
-            assert_eq!(new.com1.out, b"first boot\n");
-            assert!(old.com1.out.is_empty());
-            drop(old);
-            assert!(new.boot_at(crash - 1).is_err());
-            new.boot_at(crash + 1000).unwrap();
-            assert!(new.boot_at(crash + 1000).is_err());
-            let rip = new.vcpu.get_regs().unwrap().rip;
-            assert_eq!(
-                rip, 0x100000,
-                "the new incarnation starts at the kernel entry"
-            );
-            to_halt(&mut new, &mut counter, crash + 1_000_000);
-            assert_eq!(&new.memory()[0x81000..0x81004], &[0xad, 0xde, 0, 0]);
-            assert_eq!(new.branches, first.0, "same program, counted from zero");
-            assert!(new.time > crash + 1000);
-            assert_ne!(
-                new.exit_witness(),
-                first.1,
-                "the witness covers both incarnations"
-            );
-            let evidence = (first, new.time, new.exit_witness(), new.state_digest().0);
-            if let Some(want) = &want {
-                assert_eq!(&evidence, want, "undo={undo}");
-            } else {
-                want = Some(evidence);
-            }
-        }
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
-    fn a_reboot_applies_seeded_sector_survival_and_keeps_the_default_witness() {
-        let kvm = Kvm::new().unwrap();
-        for fault_model in [
-            crate::disk::DiskFaultModel {
-                sector_bytes: crate::disk::SECTOR,
-                survival_probability: 0.0,
-            },
-            crate::disk::DiskFaultModel {
-                sector_bytes: crate::disk::SECTOR,
-                survival_probability: 0.5,
-            },
-        ] {
-            let run = |seed| {
-                let mut old = probe_machine(&kvm, 256, false);
-                let mut disk = Disk::new(None, Some(32))
-                    .unwrap()
-                    .with_fault_model(fault_model);
-                disk.write(0, &[b'A'; 32 * 512]).unwrap();
-                disk.flush();
-                disk.write(0, &[b'B'; 32 * 512]).unwrap();
-                let expected = disk.crashed_seeded(seed, &old.world.name, old.world.incarnation);
-                old.blk = Some(VirtioBlk::new(disk));
-                let mut new = probe_machine(&kvm, 256, false);
-                new.blk = Some(VirtioBlk::new(
-                    Disk::new(None, Some(32))
-                        .unwrap()
-                        .with_fault_model(fault_model),
-                ));
-                // The pre-policy successor witness: old witness followed by C.
-                let mut witness = new.witness.clone();
-                witness.update(old.exit_witness().as_bytes());
-                witness.update([b'C']);
-                witness.update(new.branches.to_le_bytes());
-                witness.update(1000u64.to_le_bytes());
-                witness.update(1000u64.to_le_bytes());
-                witness.update(b"pending_io");
-                witness.update(new.pending_io_bytes());
-                assert_eq!(
-                    new.succeed(&mut old, 1000, seed, None).unwrap(),
-                    Some(expected.1)
-                );
-                assert_eq!(new.exit_witness(), format!("{:x}", witness.finalize()));
-                let disk = new.blk.as_ref().unwrap().disk();
-                assert_eq!(disk.digest(), expected.0.digest());
-                assert_eq!(disk.volatile_sectors(), 0);
-                assert_eq!(new.blk.as_ref().unwrap().stats().writes, 0);
-                (new.exit_witness(), disk.digest())
-            };
-            let a = run(1009);
-            assert_eq!(a, run(1009));
-            let b = run(1010);
-            assert_eq!(a.0, b.0);
-            if fault_model.survival_probability > 0.0 {
-                assert_ne!(a.1, b.1);
-            } else {
-                assert_eq!(a.1, b.1);
-            }
-        }
-    }
-
-    /// A crash keeps exactly the flushed disk writes: the next incarnation
-    /// boots with the stable layer, a fresh virtio-blk transport, and none of
-    /// the volatile writes. A fork restore puts the whole disk back.
-    #[test]
-    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
-    fn a_reboot_keeps_flushed_disk_writes_only() {
-        let kvm = Kvm::new().unwrap();
-        let with_disk =
-            |m: &mut Machine| m.blk = Some(VirtioBlk::new(Disk::new(None, Some(8)).unwrap()));
-        let mut counter = Counter::new().unwrap();
-        let mut old = probe_machine(&kvm, 256, false);
-        with_disk(&mut old);
-        to_halt(&mut old, &mut counter, 1_000_000);
-        let snap = old.snapshot().unwrap();
-        let disk = old.blk.as_mut().unwrap().disk_mut();
-        disk.write(0, &[b'A'; 512]).unwrap();
-        disk.flush();
-        disk.write(0, &[b'B'; 512]).unwrap();
-        disk.write(1, &[b'C'; 512]).unwrap();
-        let mut new = probe_machine(&kvm, 256, false);
-        with_disk(&mut new);
-        assert_eq!(new.succeed(&mut old, 1000, 1009, None).unwrap(), Some(2));
-        let disk = new.blk.as_ref().unwrap().disk();
-        let mut buf = [0u8; 1024];
-        disk.read(0, &mut buf).unwrap();
-        assert_eq!((buf[0], buf[512]), (b'A', 0));
-        assert_eq!((disk.stable_sectors(), disk.volatile_sectors()), (1, 0));
-        assert_eq!(
-            new.blk.as_ref().unwrap().stats().writes,
-            0,
-            "a fresh transport"
-        );
-        assert_eq!(
-            old.blk.as_ref().unwrap().disk().volatile_sectors(),
-            2,
-            "the old incarnation is untouched"
-        );
-        old.restore(&snap).unwrap();
-        assert_eq!(
-            old.blk.as_ref().unwrap().disk().digest(),
-            Disk::new(None, Some(8)).unwrap().digest()
-        );
     }
 
     #[test]
     #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
     fn runtime_checkpoint_restores_pv_fields_and_seeded_syscall_cost() {
         let kvm = Kvm::new().unwrap();
-        let mut m = probe_machine(&kvm, 0, false);
-        m.pv_clock = true;
+        let mut m = probe_machine(&kvm, false);
         m.syscall_ns = 937;
         m.abi = ABI_PAGE_RESEED;
         for i in 6..14 {
@@ -3836,7 +2397,7 @@ mod fork_tests {
     #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
     fn runtime_reseed_publishes_page_without_advancing_or_unpausing() {
         let kvm = Kvm::new().unwrap();
-        let mut m = probe_machine(&kvm, 0, false);
+        let mut m = probe_machine(&kvm, false);
         m.abi = ABI_PAGE_RESEED;
         m.pause().unwrap();
         let saved = m.snapshot().unwrap();
@@ -3870,345 +2431,6 @@ mod fork_tests {
             2,
             "pre-boot entropy is published too"
         );
-    }
-}
-
-#[cfg(test)]
-mod timed_log_tests {
-    use super::*;
-
-    fn output_machine(kvm: &Kvm, undo: u64) -> Machine {
-        // Two console bytes and one management byte, with no intervening
-        // conditional branch: all three must have the same committed time.
-        let code = [
-            0xb0, 0x00, 0xe6, 0xe9, 0xba, 0xf8, 0x02, 0, 0, 0xb0, 0xff, 0xee, 0xb0, b'A', 0xe6,
-            0xe9, 0xbb, 0xe8, 0x03, 0, 0, 0x4b, 0x75, 0xfd, 0xb0, b'B', 0xe6, 0xe9, 0xb0, 0, 0xe6,
-            0xf4,
-        ];
-        let mut kernel = vec![0; 1024];
-        kernel[0x1f1] = 1;
-        kernel.extend_from_slice(&code);
-        let spec = BootSpec {
-            kernel: &kernel,
-            initrd: &[],
-            cmdline: String::new(),
-            mem: INITRD_ADDR + 0x100000,
-            rng_seed: [0; 32],
-            mac: None,
-            control_channel: false,
-            disk: None,
-            undo_margin: undo,
-            barrier: false,
-            pv_clock: false,
-            page_timer: false,
-        };
-        let mut m = Machine::new(kvm, "timed", &spec).unwrap();
-        let mut r = m.vcpu.get_regs().unwrap();
-        r.rflags = 2;
-        m.vcpu.set_regs(&r).unwrap();
-        m.pic.set_masks(0xffff);
-        m
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
-    fn timed_logs_commit_order_and_observation_controls() {
-        let kvm = Kvm::new().unwrap();
-        let mut counter = Counter::new().unwrap();
-        let mut expected = None;
-        for undo in [0, 16, 256] {
-            for cap in [0, 2, 65_536] {
-                let mut m = output_machine(&kvm, undo);
-                m.com1.chunks.limit = Some(cap);
-                m.com2.chunks.limit = Some(cap);
-                let mut frames = Vec::new();
-                // Force an exact counted boundary inside the branch loop.
-                assert_eq!(
-                    m.run_until(&mut counter, 500, 0, &mut frames).unwrap(),
-                    Stop::Reached
-                );
-                assert_eq!(m.com1.out, b"\0A");
-                assert_eq!(m.com2.out, b"\xff");
-                if cap > 0 {
-                    assert_eq!(
-                        m.com1.chunks.records,
-                        vec![[0, 0, 0, 0, 1], [0, 0, 2, 1, 1]]
-                    );
-                    assert_eq!(m.com2.chunks.records, vec![[0, 0, 1, 0, 1]]);
-                }
-                // Reading metadata and taking a full-state digest are observation only.
-                let before = m.exit_witness();
-                if cap > 0 {
-                    let _ = m.state_digest();
-                }
-                assert_eq!(before, m.exit_witness());
-                assert_eq!(
-                    m.run_until(&mut counter, 2000, 0, &mut frames).unwrap(),
-                    Stop::Exited
-                );
-                assert_eq!(m.com1.out, b"\0AB");
-                assert_eq!(m.com2.out, b"\xff");
-                if cap > 2 {
-                    assert_eq!(m.com1.chunks.records[2], [1000, 0, 3, 2, 1]);
-                }
-                let evidence = (
-                    m.time,
-                    m.exit_witness(),
-                    m.state_digest().0,
-                    m.com1.out.clone(),
-                    m.com2.out.clone(),
-                );
-                if let Some(want) = &expected {
-                    assert_eq!(&evidence, want, "undo={undo} cap={cap}");
-                } else {
-                    expected = Some(evidence);
-                }
-            }
-        }
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
-    fn timed_logs_survive_machine_incarnations() {
-        let kvm = Kvm::new().unwrap();
-        let mut counter = Counter::new().unwrap();
-        let mut old = output_machine(&kvm, 256);
-        let mut frames = Vec::new();
-        assert_eq!(
-            old.run_until(&mut counter, 2000, 0, &mut frames).unwrap(),
-            Stop::Exited
-        );
-        let mut new = output_machine(&kvm, 256);
-        new.succeed(&mut old, 5000, 1009, None).unwrap();
-        new.boot_at(5000).unwrap();
-        assert_eq!(
-            new.run_until(&mut counter, 7000, 0, &mut frames).unwrap(),
-            Stop::Exited
-        );
-        assert_eq!(new.com1.out, b"\0AB\0AB");
-        assert_eq!(new.com2.out, b"\xff\xff");
-        assert_eq!(
-            new.com1.chunks.records,
-            vec![
-                [0, 0, 0, 0, 1],
-                [0, 0, 2, 1, 2],
-                [5000, 1, 3, 3, 1],
-                [5000, 1, 5, 4, 2]
-            ]
-        );
-        assert_eq!(
-            new.com2.chunks.records,
-            vec![[0, 0, 1, 0, 1], [5000, 1, 4, 1, 1]]
-        );
-    }
-
-    #[test]
-    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
-    fn runtime_checkpoint_restores_timed_log_cursor_and_order() {
-        let kvm = Kvm::new().unwrap();
-        let mut counter = Counter::new().unwrap();
-        let mut m = output_machine(&kvm, 256);
-        let mut frames = Vec::new();
-        m.run_until(&mut counter, 500, 0, &mut frames).unwrap();
-        let saved = m.snapshot().unwrap();
-        m.run_until(&mut counter, 2000, 0, &mut frames).unwrap();
-        let want = (
-            m.com1.out.clone(),
-            m.com2.out.clone(),
-            m.com1.chunks.records.clone(),
-            m.com2.chunks.records.clone(),
-            m.log_order,
-        );
-        for _ in 0..2 {
-            let mut fresh = output_machine(&kvm, 256);
-            fresh.restore(&saved).unwrap();
-            assert_eq!(fresh.com1.chunks.seen, saved.com1.chunks.seen);
-            assert_eq!(fresh.com2.chunks.seen, saved.com2.chunks.seen);
-            fresh.run_until(&mut counter, 2000, 0, &mut frames).unwrap();
-            assert_eq!(
-                (
-                    fresh.com1.out.clone(),
-                    fresh.com2.out.clone(),
-                    fresh.com1.chunks.records.clone(),
-                    fresh.com2.chunks.records.clone(),
-                    fresh.log_order
-                ),
-                want
-            );
-        }
-    }
-
-    // Inject a judge decision at a real KVM output exit to exercise the commit
-    // gate deterministically. This is not evidence of actual PMU skid behavior.
-    struct RejectOnce {
-        counter: Counter,
-        rollback: bool,
-        first: bool,
-    }
-    impl Timebase for RejectOnce {
-        const BRANCHES: bool = true;
-        fn prepare(
-            &mut self,
-            m: &mut Machine,
-            remaining: u64,
-            soft: u64,
-            legal: bool,
-        ) -> Result<Prepared, String> {
-            let prepared = self.counter.prepare(m, remaining, soft, legal)?;
-            if self.first && self.rollback {
-                m.checkpoint()?;
-            }
-            Ok(prepared)
-        }
-        fn start(&mut self, syscalls: u64) -> u64 {
-            self.counter.start(syscalls)
-        }
-        fn read(&mut self, _: u64) -> u64 {
-            if self.first && !self.rollback {
-                self.counter.read() + 1_000_000
-            } else {
-                self.counter.read()
-            }
-        }
-        fn inject_guard(&self) -> u64 {
-            INJECT_GUARD
-        }
-        fn judge(&mut self, j: Judge<'_>, run: &Run) -> Result<Verdict, String> {
-            if self.first {
-                self.first = false;
-                return Ok(if self.rollback {
-                    assert!(j.undo_valid);
-                    Verdict::Rollback
-                } else {
-                    Verdict::Overshoot
-                });
-            }
-            self.counter.judge(j, run)
-        }
-    }
-    #[test]
-    #[cfg_attr(not(feature = "counter-tests"), ignore = "requires counter-tests")]
-    fn timed_logs_commit_gate_rejection_and_rollback() {
-        let kvm = Kvm::new().unwrap();
-        for rollback in [false, true] {
-            let mut m = output_machine(&kvm, 256);
-            let mut tb = RejectOnce {
-                counter: Counter::new().unwrap(),
-                rollback,
-                first: true,
-            };
-            let mut frames = Vec::new();
-            let result = m.run_until(&mut tb, 2000, 0, &mut frames);
-            if rollback {
-                assert_eq!(result.unwrap(), Stop::Exited);
-                assert!(m.undo.as_ref().unwrap().stats.rollbacks > 0);
-                assert_eq!(m.com1.out, b"\0AB");
-                assert_eq!(
-                    m.com1.chunks.records,
-                    vec![[0, 0, 0, 0, 1], [0, 0, 2, 1, 2]]
-                );
-                assert_eq!(m.com1.chunks.records[0], [0, 0, 0, 0, 1]);
-            } else {
-                assert!(result.unwrap_err().contains("overshoot"));
-                assert!(m.com1.out.is_empty());
-                assert!(m.com1.chunks.records.is_empty());
-                assert_eq!(m.log_order, 0);
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod committed_trigger_tests {
-    use super::*;
-    /// Force a real KVM UART candidate through the actual rollback branch.
-    /// This is a commitment control, not a hardware counter qualification.
-    struct DiscardFirst {
-        prepared: bool,
-        discarded: bool,
-    }
-    impl Timebase for DiscardFirst {
-        const BRANCHES: bool = true;
-        fn prepare(
-            &mut self,
-            m: &mut Machine,
-            _: u64,
-            _: u64,
-            _: bool,
-        ) -> Result<Prepared, String> {
-            if !self.prepared {
-                m.checkpoint()?;
-                self.prepared = true;
-            }
-            Ok(Prepared::Run)
-        }
-        fn start(&mut self, _: u64) -> u64 {
-            0
-        }
-        fn read(&mut self, _: u64) -> u64 {
-            0
-        }
-        fn inject_guard(&self) -> u64 {
-            INJECT_GUARD
-        }
-        fn judge(&mut self, _: Judge<'_>, _: &Run) -> Result<Verdict, String> {
-            if !self.discarded {
-                self.discarded = true;
-                Ok(Verdict::Rollback)
-            } else {
-                Ok(Verdict::Advance { legal: true })
-            }
-        }
-    }
-    #[test]
-    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM")]
-    fn committed_console_discards_rolled_back_candidate_before_matcher_feed() {
-        let kvm = Kvm::new().unwrap();
-        let mut kernel = vec![0; 1024];
-        kernel[0x1f1] = 1;
-        kernel.extend_from_slice(&[0xb0, b'A', 0xe6, 0xe9, 0xf4]);
-        let spec = BootSpec {
-            kernel: &kernel,
-            initrd: &[],
-            cmdline: String::new(),
-            mem: INITRD_ADDR + 0x100000,
-            rng_seed: [0; 32],
-            mac: None,
-            control_channel: false,
-            disk: None,
-            undo_margin: 256,
-            barrier: false,
-            pv_clock: false,
-            page_timer: false,
-        };
-        let mut m = Machine::new(&kvm, "source", &spec).unwrap();
-        m.observe_console = true;
-        let mut tb = DiscardFirst {
-            prepared: false,
-            discarded: false,
-        };
-        let mut frames = Vec::new();
-        assert_eq!(
-            m.run_until(&mut tb, 10, 0, &mut frames).unwrap(),
-            Stop::Control
-        );
-        assert!(tb.discarded);
-        assert_eq!(m.undo.as_ref().unwrap().stats.rollbacks, 1);
-        assert_eq!(m.com1.out, b"A");
-        assert_eq!(m.committed_console.take(), Some((0, b'A')));
-        // A trigger stop must retain exactly the accepted byte's timed chunk
-        // and invalidate the checkpoint before returning control to the world.
-        assert!(!m.undo.as_ref().unwrap().valid);
-        assert_eq!(m.com1.chunks.records, vec![[0, 0, 0, 0, 1]]);
-        assert_eq!(m.log_order, 1);
-        assert_eq!(
-            m.run_until(&mut tb, 10, 0, &mut frames).unwrap(),
-            Stop::Exited
-        );
-        assert_eq!(m.committed_console, None);
-        assert_eq!(m.com1.out, b"A");
-        assert_eq!(m.com1.chunks.records, vec![[0, 0, 0, 0, 1]]);
-        assert_eq!(m.log_order, 1);
     }
 }
 

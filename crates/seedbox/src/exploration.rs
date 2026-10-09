@@ -261,6 +261,8 @@ impl Orchestrator {
             batch.fork_batch = Some(batch_size);
         }
         let workers = u64::from(options.workers).min(options.count.div_ceil(batch_size)) as usize;
+        // Attempts hard-link one verified read-only copy of each input.
+        let shared_inputs = directory.join("inputs");
         std::thread::scope(|scope| -> Result<()> {
             let _cleanup = CancelOnExit(cancellation.clone());
             let (completed, results) = mpsc::channel();
@@ -272,6 +274,7 @@ impl Orchestrator {
                 let cancellation = cancellation.clone();
                 let inputs = &inputs;
                 let performance = &performance;
+                let shared_inputs = &shared_inputs;
                 std::thread::Builder::new()
                     .spawn_scoped(scope, move || {
                         while let Ok(jobs) = jobs.recv() {
@@ -281,8 +284,11 @@ impl Orchestrator {
                             } else {
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     let orchestrator = |subtree: &PathBuf| {
-                                        Orchestrator::new(self.store.clone(), subtree.clone())
-                                            .with_log_policy(self.log_policy.clone())
+                                        Orchestrator {
+                                            shared_inputs: Some(shared_inputs.clone()),
+                                            ..Orchestrator::new(self.store.clone(), subtree.clone())
+                                        }
+                                        .with_log_policy(self.log_policy.clone())
                                     };
                                     if let [(_, seed, subtree)] = jobs.as_slice() {
                                         return vec![orchestrator(subtree)

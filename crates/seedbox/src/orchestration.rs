@@ -75,6 +75,9 @@ pub struct ReplayComparison {
     pub fault_history_matches: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ram_pages: Option<crate::diff::RamPageReport>,
+    /// Where the witness logs first disagree; diagnostic only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub divergence: Option<crate::diff::DivergenceReport>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +128,8 @@ pub struct Orchestrator {
     pub(crate) store: ContentStore,
     pub(crate) runs: PathBuf,
     pub(crate) log_policy: LogPolicy,
+    /// Where exploration attempts share one read-only copy of each input.
+    pub(crate) shared_inputs: Option<PathBuf>,
 }
 
 impl Orchestrator {
@@ -133,6 +138,7 @@ impl Orchestrator {
             store,
             runs: runs.into(),
             log_policy: LogPolicy::default(),
+            shared_inputs: None,
         }
     }
 
@@ -222,28 +228,19 @@ impl Orchestrator {
         options: ReplayOptions,
     ) -> Result<Run> {
         let baseline = inspect(directory)?;
-        // Refuse timebase drift before creating an attempt or executing anything.
-        if baseline.identity.inputs.profile.backend == "seedbox-kvm" {
-            let recorded = crate::vmm::recorded_timebase(&baseline.identity.inputs.profile)?;
-            let requested = crate::vmm::recorded_timebase(&executor.profile())?;
-            if crate::vmm::recorded_deferred_tx(&baseline.identity.inputs.profile)?
+        // Refuse TX-mode drift before creating an attempt or executing anything.
+        if baseline.identity.inputs.profile.backend == "seedbox-kvm"
+            && crate::vmm::recorded_deferred_tx(&baseline.identity.inputs.profile)?
                 != crate::vmm::recorded_deferred_tx(&executor.profile())?
-            {
-                return Err(Error::Integrity("executor TX mode does not match the recorded --deferred-tx; use an executor with the recorded TX mode".into()));
-            }
-            if recorded != requested {
-                return Err(Error::Integrity(format!(
-                    "executor timebase {} does not match the recorded --timebase {}; use an executor with the recorded timebase",
-                    requested.name(), recorded.name()
-                )));
-            }
+        {
+            return Err(Error::Integrity("executor TX mode does not match the recorded --deferred-tx; use an executor with the recorded TX mode".into()));
         }
         let mut identity = baseline.identity.clone();
         if options.allow_engine_change {
             let replacement = executor.profile();
             identity.inputs.profile.engine = replacement.engine;
             // A new executable can use different argv without changing the
-            // simulation's retained memory, timebase, faults or other settings.
+            // simulation's retained memory, faults or other settings.
             for key in crate::engine::DESCRIPTOR_FIELDS {
                 identity.inputs.profile.semantic_parameters.remove(key);
                 if let Some(value) = replacement.semantic_parameters.get(key) {
@@ -263,18 +260,26 @@ impl Orchestrator {
             options.allow_engine_change,
         )?;
         if let Some(comparison) = &mut run.record.replay {
-            if comparison.status == ReplayStatus::Mismatch
-                && comparison.full_state_matches == Some(false)
-            {
+            if comparison.status == ReplayStatus::Mismatch {
                 // Optional evidence must never replace the execution verdict.
-                comparison.ram_pages = Some(
-                    crate::diff::replay_ram_pages(directory, &run.directory).unwrap_or_else(
-                        |error| crate::diff::RamPageReport {
-                            machines: BTreeMap::new(),
+                comparison.divergence = Some(
+                    crate::diff::replay_divergence(directory, &run.directory).unwrap_or_else(
+                        |error| crate::diff::DivergenceReport {
+                            divergence: None,
                             limitations: vec![error.to_string()],
                         },
                     ),
                 );
+                if comparison.full_state_matches == Some(false) {
+                    comparison.ram_pages = Some(
+                        crate::diff::replay_ram_pages(directory, &run.directory).unwrap_or_else(
+                            |error| crate::diff::RamPageReport {
+                                machines: BTreeMap::new(),
+                                limitations: vec![error.to_string()],
+                            },
+                        ),
+                    );
+                }
                 write_record(&run.directory, &run.record)?;
             }
         }
@@ -376,7 +381,7 @@ impl Orchestrator {
         allow_engine_change: bool,
         baseline: Option<&RunRecord>,
     ) -> Result<Pending> {
-        let run_id = self.store.put(&serde_json::to_vec(&identity)?)?;
+        let run_id = self.store.put_unsynced(&serde_json::to_vec(&identity)?)?;
         fs::create_dir_all(&self.runs)?;
         let directory = tempfile::Builder::new()
             .prefix(&format!("{}-", &run_id.hex()[..16]))
@@ -410,6 +415,7 @@ impl Orchestrator {
             record,
             output,
             artifacts: BTreeMap::new(),
+            shared_inputs: self.shared_inputs.clone(),
         })
     }
 
@@ -467,6 +473,7 @@ struct Pending {
     record: RunRecord,
     output: PathBuf,
     artifacts: BTreeMap<ContentDigest, PathBuf>,
+    shared_inputs: Option<PathBuf>,
 }
 
 impl Pending {
@@ -483,16 +490,16 @@ impl Pending {
         executor.preflight(Some(&self.output))?;
         for digest in executor.runtime_inputs(&self.record.identity.inputs) {
             if !self.artifacts.contains_key(digest) {
-                self.artifacts.insert(
-                    digest.clone(),
-                    self.store
-                        .materialize(digest, &self.directory.join("inputs"))?,
-                );
+                let inputs = self.directory.join("inputs");
+                let path = match &self.shared_inputs {
+                    Some(shared) => self.store.materialize_linked(digest, shared, &inputs)?,
+                    None => self.store.materialize(digest, &inputs)?,
+                };
+                self.artifacts.insert(digest.clone(), path);
             }
         }
         if cancellation.is_cancelled() {
             return Ok(Some(ExecutionReport {
-                timebase: None,
                 reason: StopReason::Cancelled,
                 workload_exit: None,
                 witness: None,
@@ -710,6 +717,7 @@ fn compare(baseline: &RunRecord, fresh: &RunRecord) -> ReplayComparison {
         full_state_matches,
         fault_history_matches,
         ram_pages: None,
+        divergence: None,
     }
 }
 
@@ -786,7 +794,9 @@ fn retain_logs(
                     ),
                 );
             } else {
-                record.logs.insert(relative, store.put_file(&path)?);
+                record
+                    .logs
+                    .insert(relative, store.put_file_unsynced(&path)?);
                 *retained_bytes += size;
             }
         } else {

@@ -1,7 +1,7 @@
 //! KVM network adapter: guest address base, DMA journal and shared device state.
 use seedbox_engine_core::virtio_mmio::{Effect, Policy as MmioPolicy, Spec, Transport};
 pub use seedbox_engine_core::virtio_network::{
-    poll_limit, Notified as WriteOutcome, Received as ReceiveOutcome, TX_POLL_NS,
+    poll_limit, Notified as WriteOutcome, Received as ReceiveOutcome,
 };
 use seedbox_engine_core::virtio_network::{Network, Policy, Stats, EVENT_IDX};
 #[derive(Clone)]
@@ -34,12 +34,14 @@ impl VirtioNet {
     pub fn deferred_tx(&self) -> bool {
         self.model.deferred_tx()
     }
+    #[cfg(test)]
     pub fn event_idx(&self) -> bool {
         self.model.event_idx(&self.transport)
     }
     pub fn report(&self) -> serde_json::Value {
         self.model.report(&self.transport)
     }
+    #[cfg(test)]
     pub fn pending_tx(&self, m: &[u8]) -> Result<bool, String> {
         self.model.pending_tx(&self.transport, m, 0)
     }
@@ -771,7 +773,10 @@ mod tests {
     #[test]
     fn deferred_poll_bound_is_semantic_and_off_keeps_the_original_limit() {
         assert_eq!(poll_limit(100, 1_000_000, false), 1_000_000);
-        assert_eq!(poll_limit(100, 1_000_000, true), 100 + TX_POLL_NS);
+        assert_eq!(
+            poll_limit(100, 1_000_000, true),
+            100 + seedbox_engine_core::virtio_network::TX_POLL_NS
+        );
         assert_eq!(poll_limit(100, 500, true), 500);
         assert_eq!(poll_limit(u64::MAX - 1, u64::MAX, true), u64::MAX);
     }

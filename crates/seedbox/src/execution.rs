@@ -2,9 +2,9 @@
 //!
 //! Backends must enforce simulated/wall limits, honor cancellation, isolate their
 //! output, and release any host reservation after stopping guests. A hardware
-//! backend must acquire the shared host reservation *before* changing CPU/MSR
-//! state, and restore it on normal return and catchable interruption. Neither a
-//! preparer nor the orchestrator is permitted to perform these host mutations.
+//! backend must acquire the shared host reservation *before* pinning a guest
+//! to a core, and release it on normal return and catchable interruption. Neither
+//! a preparer nor the orchestrator is permitted to perform these host mutations.
 
 use crate::{
     config::{Check, Limits, Network, Schedule, Simulation},
@@ -31,26 +31,6 @@ pub struct ExecutionProfile {
     pub witness_mode: WitnessMode,
     /// Semantic settings (e.g. kernel ABI). Schedule controls live in Simulation.
     pub semantic_parameters: BTreeMap<String, String>,
-}
-
-/// How guest progress advances virtual time.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Timebase {
-    /// Count retired guest branches with the host PMU.
-    #[default]
-    Counter,
-    /// Advance time at guest exits, syscalls and clock reads.
-    Pv,
-}
-
-impl Timebase {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Counter => "counter",
-            Self::Pv => "pv",
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,9 +224,6 @@ pub struct FaultEvent {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionReport {
-    /// Execution timebase; absent in older records or other backends.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timebase: Option<Timebase>,
     pub reason: StopReason,
     pub workload_exit: Option<WorkloadExit>,
     pub witness: Option<ContentDigest>,

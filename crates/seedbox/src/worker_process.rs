@@ -4,9 +4,7 @@
 
 use crate::{
     engine::ExecutableKind,
-    execution::{
-        CancellationToken, ExecutionReport, ExecutionRequest, StopReason, Timebase, WitnessMode,
-    },
+    execution::{CancellationToken, ExecutionReport, ExecutionRequest, StopReason, WitnessMode},
     host_control::Endpoint,
     Error, Result,
 };
@@ -101,9 +99,8 @@ fn replacement_version_with_timeout(
     }
 }
 
-pub(crate) fn incomplete(reason: StopReason, timebase: Timebase) -> ExecutionReport {
+pub(crate) fn incomplete(reason: StopReason) -> ExecutionReport {
     ExecutionReport {
-        timebase: Some(timebase),
         reason,
         workload_exit: None,
         witness: None,
@@ -119,7 +116,6 @@ pub(crate) struct WorkerLaunch {
     report: PathBuf,
     endpoint: Endpoint,
     spawn_fix: &'static str,
-    timebase: Timebase,
 }
 
 impl WorkerLaunch {
@@ -128,7 +124,11 @@ impl WorkerLaunch {
             .artifacts
             .get(&request.prepared.profile.engine)
             .ok_or_else(|| Error::Integrity("missing retained engine executable".into()))?;
-        fs::set_permissions(engine, fs::Permissions::from_mode(0o500))?;
+        // A shared exploration copy is already 0500; chmod would change its
+        // ctime and make the store replace it for every attempt.
+        if fs::metadata(engine)?.permissions().mode() & 0o7777 != 0o500 {
+            fs::set_permissions(engine, fs::Permissions::from_mode(0o500))?;
+        }
         let world = request.output.join("world.json");
         fs::write(
             &world,
@@ -138,11 +138,6 @@ impl WorkerLaunch {
         let endpoint = Endpoint::new(request.output)?;
         let kind = crate::engine::recorded_launch(&request.prepared.profile)?;
         let mut command = crate::vmm::engine_command(engine, &request.prepared.profile)?;
-        let timebase = if kind == ExecutableKind::ArmWorld {
-            Timebase::Pv
-        } else {
-            crate::vmm::recorded_timebase(&request.prepared.profile)?
-        };
         let spawn_fix = match kind {
             ExecutableKind::Standalone => "check the retained executable and host setup",
             ExecutableKind::InternalWorker => "use the retained CLI executable for this host",
@@ -186,7 +181,6 @@ impl WorkerLaunch {
             report,
             endpoint,
             spawn_fix,
-            timebase,
         })
     }
 
@@ -205,7 +199,6 @@ impl WorkerLaunch {
             process: OwnedProcess(Some(child)),
             report: self.report,
             started,
-            timebase: self.timebase,
             _endpoint: self.endpoint,
         })
     }
@@ -216,7 +209,6 @@ pub(crate) struct RunningWorker {
     process: OwnedProcess,
     report: PathBuf,
     started: Instant,
-    timebase: Timebase,
     _endpoint: Endpoint,
 }
 
@@ -232,7 +224,7 @@ impl RunningWorker {
     ) -> Result<T> {
         let completion = (|| loop {
             if cancellation.is_cancelled() {
-                return Ok(stopped(incomplete(StopReason::Cancelled, self.timebase)));
+                return Ok(stopped(incomplete(StopReason::Cancelled)));
             }
             if let Some(success) = self.process.exited()? {
                 return if success {
@@ -242,10 +234,7 @@ impl RunningWorker {
                 };
             }
             if self.started.elapsed() >= Duration::from_nanos(wall_time_ns) {
-                return Ok(stopped(incomplete(
-                    StopReason::WallTimeLimit,
-                    self.timebase,
-                )));
+                return Ok(stopped(incomplete(StopReason::WallTimeLimit)));
             }
             std::thread::sleep(Duration::from_millis(10));
         })();
@@ -384,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_launch_uses_recorded_dispatch_clock_and_retention_limits() {
+    fn prepared_launch_uses_recorded_dispatch_and_retention_limits() {
         use crate::{
             config::{Check, Limits, Network, Schedule},
             execution::{ExecutionProfile, PreparedInputs},
@@ -401,15 +390,12 @@ mod tests {
             ("host_arch".into(), "x86_64".into()),
             ("guest_arch".into(), "x86_64".into()),
             ("engine_backend".into(), "kvm".into()),
-            ("engine_timebase".into(), "counter-pv-v1".into()),
+            ("engine_timebase".into(), "pv-v1".into()),
         ]);
-        for (kind, clock) in [
-            (ExecutableKind::Standalone, None),
-            (ExecutableKind::Standalone, Some("counter")),
-            (ExecutableKind::Standalone, Some("pv")),
-            (ExecutableKind::InternalWorker, Some("counter")),
-            (ExecutableKind::InternalWorker, Some("pv")),
-            (ExecutableKind::ArmWorld, Some("pv")),
+        for kind in [
+            ExecutableKind::Standalone,
+            ExecutableKind::InternalWorker,
+            ExecutableKind::ArmWorld,
         ] {
             let directory = tempfile::tempdir().unwrap();
             let engine = directory.path().join("retained-engine");
@@ -420,9 +406,6 @@ mod tests {
                 ExecutableKind::InternalWorker => internal.clone(),
                 ExecutableKind::ArmWorld => crate::engine::arm_parameters(),
             };
-            if let Some(clock) = clock {
-                semantic_parameters.insert("timebase".into(), clock.into());
-            }
             semantic_parameters.insert("memory_mb".into(), "512".into());
             let prepared = PreparedInputs {
                 wall_clock_epoch: None,
@@ -500,14 +483,7 @@ mod tests {
                     .position(|arg| *arg == flag)
                     .map(|i| args[i + 1])
             };
-            assert_eq!(
-                option("--timebase"),
-                if kind != ExecutableKind::ArmWorld && clock == Some("pv") {
-                    Some("pv")
-                } else {
-                    None
-                }
-            );
+            assert!(!args.contains(&"--timebase"));
             assert_eq!(
                 option("--out"),
                 Some(
@@ -532,14 +508,6 @@ mod tests {
                 kind != ExecutableKind::ArmWorld
             );
             assert!(args.contains(&"--digest"));
-            assert_eq!(
-                launch.timebase,
-                if kind == ExecutableKind::ArmWorld || clock == Some("pv") {
-                    Timebase::Pv
-                } else {
-                    Timebase::Counter
-                }
-            );
             assert_eq!(serde_json::to_vec(&prepared.profile).unwrap(), original);
             drop(launch);
             assert!(!directory.path().join("host-control").exists());
@@ -560,7 +528,6 @@ mod tests {
             report,
             endpoint: Endpoint::new(output).unwrap(),
             spawn_fix: "test worker",
-            timebase: Timebase::Counter,
         }
         .spawn()
         .unwrap()

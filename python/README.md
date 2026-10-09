@@ -24,7 +24,7 @@ with World.connect() as world:
     world.sleep(1)
     world.heal(overlap)
 
-    slow = world.throttle("server", 4)  # Slow but alive (x86 pv timebase).
+    slow = world.throttle("server", 4)  # Slow but alive (x86 only).
     world.sleep(1)
     world.heal(slow)
 
@@ -70,6 +70,14 @@ Each fault uses an independent seeded stream and healing returns
 `network_fault_counts`. See [parameters and draw order](PROTOCOL.md#dynamic-network-impairments)
 and `harness/acceptance/workloads/network-faults.yaml` for packet and socket checks.
 It changes only the directed pairs, with the highest live fault ID taking precedence.
+`clock_skew(target, offset=...)` or `clock_skew(target, max_offset=...)` steps
+that machine's wall clock by a fixed or seeded nanosecond offset and returns a
+`ClockSkew` (`handle`, `offset_ns`) accepted by `heal`; monotonic time is
+unchanged. See [clock skew](PROTOCOL.md#clock-skew).
+`clock_drift(target, ppb=...)` or `clock_drift(target, max_ppb=...)` runs that
+machine's clock fast or slow by a fixed or seeded rate in parts per billion and
+returns a `ClockDrift` (`handle`, `rate_ppb`) accepted by `heal`. See
+[clock drift](PROTOCOL.md#clock-drift).
 A partition dominates a shape, and in-flight decisions remain fixed. `Controller`
 is also exported as an alias for `World`. `now_ns()` reads simulated time; `inspect()` returns
 topology, machine state, active handles and packet counters. Strings name services;
@@ -77,7 +85,7 @@ use `Machine("prepared-name")` when explicitly targeting a machine.
 
 `throttle(target, factor)` returns a `Throttle` accepted by `heal`. Until
 healed, the machine's simulated CPU work costs `factor` times its seeded speed,
-so it keeps answering, slowly. It needs the x86 `pv` timebase; elsewhere it
+so it keeps answering, slowly. It is x86-only; elsewhere it
 raises `FaultError` with code `unsupported`. See
 [slow machines](PROTOCOL.md#slow-machines).
 
@@ -128,7 +136,7 @@ world.heal(trigger.partition)  # After its effect; inactive handles are rejected
 
 Use `arm_console_stop()` for a future process stop and `cancel_trigger()` for
 an unmatched arm. These consume only future committed plain console bytes;
-confirmation means armed. See [the contract and AMD handoff](../docs/triggers.md).
+confirmation means armed. See [the contract and host handoff](../docs/triggers.md).
 
 `connections(from_, to, after=0)` returns a live page of up to 32 directional TCP
 incarnations plus a `next_after` cursor. Pass one exact record to

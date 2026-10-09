@@ -1,11 +1,10 @@
-//! Linux system queries only: no VM creation, MSR write, event enable or signals.
+//! Linux system queries only: no VM creation or signals.
 use super::*;
 use std::collections::BTreeMap;
 use std::{
     fs::{self, File},
     io::Read,
-    os::fd::{AsRawFd, FromRawFd},
-    os::unix::fs::FileExt,
+    os::fd::AsRawFd,
 };
 
 struct Affinity {
@@ -118,42 +117,7 @@ fn query(file: &File, command: libc::c_ulong, argument: libc::c_ulong) -> Result
     Ok(result)
 }
 
-// Matches the VMM counter.rs::PerfAttr; no enable/fcntl/mmap follows.
-#[repr(C)]
-#[derive(Default)]
-struct PerfAttr {
-    kind: u32,
-    size: u32,
-    config: u64,
-    period: u64,
-    sample_type: u64,
-    read_format: u64,
-    flags: u64,
-    rest: [u64; 10],
-}
-fn open_disabled_perf(spec: DisabledCounterSpec) -> Result<File> {
-    let attr = PerfAttr {
-        kind: spec.kind,
-        size: std::mem::size_of::<PerfAttr>() as u32,
-        config: spec.config,
-        period: spec.period,
-        read_format: spec.read_format,
-        flags: spec.flags,
-        ..Default::default()
-    };
-    let fd = unsafe { libc::syscall(libc::SYS_perf_event_open, &attr, 0, -1, -1, spec.open_flags) }
-        as i32;
-    if fd < 0 {
-        return Err(Error::Setup(format!(
-            "disabled exact-event perf admission {:#x}: {}; run as root on a supported KVM host",
-            spec.config,
-            std::io::Error::last_os_error()
-        )));
-    }
-    Ok(unsafe { File::from_raw_fd(fd) })
-}
-
-fn collect(cpu: u32, counter: crate::counter::CounterProfile) -> Result<CoreObservation> {
+fn collect(cpu: u32) -> Result<CoreObservation> {
     if unsafe { libc::sched_getcpu() } != cpu as i32 {
         return Err(Error::Execution("preflight CPU affinity changed".into()));
     }
@@ -181,28 +145,6 @@ fn collect(cpu: u32, counter: crate::counter::CounterProfile) -> Result<CoreObse
             .parse()
             .map_err(|_| Error::Setup(format!("CPU {cpu} invalid {name}")))
     };
-    let mut original = [0; 8];
-    if let Some(workaround) = counter.workaround() {
-        let msr_path = format!("/dev/cpu/{cpu}/msr");
-        let msr = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&msr_path)
-            .map_err(|e| {
-                Error::Setup(format!(
-                    "{msr_path}: {e}; run as root with the msr module loaded"
-                ))
-            })?;
-        if msr
-            .read_at(&mut original, workaround.register)
-            .map_err(|e| Error::Setup(format!("{msr_path}: {e}; restore admitted MSR access")))?
-            != 8
-        {
-            return Err(Error::Setup(format!(
-                "{msr_path}: short workaround MSR read"
-            )));
-        }
-    }
     let kvm = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -251,36 +193,12 @@ fn collect(cpu: u32, counter: crate::counter::CounterProfile) -> Result<CoreObse
         immediate_exit: query(&kvm, 0xae03, 136)?,
         guest_debug: query(&kvm, 0xae03, 23)?,
         sync_regs: query(&kvm, 0xae03, 74)?,
-        perf_type: text("/sys/bus/event_source/devices/cpu/type")?
-            .trim()
-            .parse()
-            .map_err(|_| Error::Setup("invalid CPU PMU type".into()))?,
-        perf_disabled_open: false,
-        perf_error: None,
-        workaround_msr: u64::from_le_bytes(original),
         raw_cpuid,
     })
 }
 
-pub(super) fn observe(
-    cpu: u32,
-    counter: crate::counter::CounterProfile,
-) -> Result<CoreObservation> {
+pub(super) fn observe(cpu: u32) -> Result<CoreObservation> {
     let affinity = Affinity::pin(cpu)?;
-    scoped_probe(
-        affinity,
-        || {
-            // The shared check preserves static evidence and closes any disabled
-            // event descriptor before affinity restoration.
-            if crate::counter::CounterProfile::host()? != counter {
-                return Err(Error::Setup(format!(
-                    "CPU {cpu}: branch counter differs from selected profile"
-                )));
-            }
-            Ok(probe_disabled_perf(collect(cpu, counter)?, || {
-                probe_selected_event(counter, open_disabled_perf)
-            }))
-        },
-        Affinity::restore,
-    )
+    // Every descriptor the probe opens closes before affinity restoration.
+    scoped_probe(affinity, || collect(cpu), Affinity::restore)
 }

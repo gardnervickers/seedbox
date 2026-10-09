@@ -1,6 +1,6 @@
 # Merge trains
 
-The AMD host is the bottleneck for engine PRs. Instead of one host run per PR,
+The Linux KVM host is the bottleneck for engine PRs. Instead of one host run per PR,
 PRs whose review is clean and whose only missing piece is host evidence ride a
 train: one branch, one host job, then ordinary merges with no further host time.
 
@@ -21,8 +21,8 @@ train: one branch, one host job, then ordinary merges with no further host time.
    one script that runs independent checks at once on separate SMT pairs
    (never CPU 0 or its sibling). Each PR's host list covers only what its
    diff can affect, plus one witness-equality core, with no unrelated flag
-   combinations (no undo or margin variants for a PR that doesn't touch
-   stepping). Each PR's evidence is its reviewer's list. A PR that claims to
+   combinations (no `--watchdog-ms` variants for a PR that doesn't touch
+   the watchdog). Each PR's evidence is its reviewer's list. A PR that claims to
    be witness-neutral must show witnesses equal to the train before it. A PR
    that changes witnesses on purpose has its reviewer name the fixtures that
    move, and every other fixture must still be equal. Compose runs must PASS
@@ -46,7 +46,7 @@ train: one branch, one host job, then ordinary merges with no further host time.
    Builds that finish before any lane starts may use the idle lane cores;
    builds that overlap running lanes use core 1. Lane cores are a
    parameter of the train script, so a train can start beside a straggler on
-   whatever cores are free. Any undo-off or margin check uses a short world
+   whatever cores are free. Any performance-setting check uses a short world
    and a timeout of 600 s or less.
 
    Timings compare only like with like: two arms of a timing comparison (a

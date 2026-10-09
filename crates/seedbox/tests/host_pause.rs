@@ -1,5 +1,5 @@
 //! Hardware acceptance using exact retained inputs, with the ordinary CLI owning
-//! admission, CPU/SMT leases, wall limits, cancellation and MSR restoration.
+//! admission, CPU/SMT leases, wall limits and cancellation.
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use std::{
