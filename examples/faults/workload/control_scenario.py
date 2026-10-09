@@ -17,7 +17,7 @@ def ready():
             time.sleep(0.02)
 
 
-def run(address, no_faults=False):
+def run(address, no_faults=False, batch=None):
     errors = []
     def rejected(operation, code):
         try:

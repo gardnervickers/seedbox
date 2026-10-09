@@ -56,6 +56,8 @@ pub struct Faults {
     waiting_ready: Vec<BTreeSet<u32>>,
     ready: Vec<bool>,
     stopped: Vec<bool>,
+    /// The application's process group is SIGSTOPped; its machine runs on.
+    frozen: Vec<bool>,
     life: Vec<Life>,
     /// Outstanding lifecycle requests per machine, by time: nothing may be
     /// delivered early to a machine across one of these.
@@ -96,6 +98,7 @@ impl Faults {
             waiting_ready: vec![BTreeSet::new(); count],
             ready: vec![true; count],
             stopped: vec![false; count],
+            frozen: vec![false; count],
             life: vec![Life::Up; count],
             lifecycle_at: vec![BTreeSet::new(); count],
             lifecycle: vec![],
@@ -129,6 +132,8 @@ impl Faults {
         match &plan.action {
             Action::Stop { machine }
             | Action::Restart { machine }
+            | Action::PauseProcess { machine }
+            | Action::ResumeProcess { machine }
             | Action::Pause { machine }
             | Action::Resume { machine }
             | Action::Crash { machine }
@@ -318,6 +323,7 @@ impl Faults {
             Life::Paused => "Paused",
             Life::Down => "Down",
             Life::Up if self.stopped[machine] => "Stopped",
+            Life::Up if self.frozen[machine] => "Frozen",
             Life::Up => "Running",
         }
     }
@@ -333,14 +339,21 @@ impl Faults {
         let index = self.names.iter().position(|name| name == machine)?;
         match action {
             // Down targets are admitted so process faults resolve as unavailable.
-            Action::Stop { .. } | Action::Restart { .. } if self.life[index] == Life::Down => None,
+            action if action.is_process() && self.life[index] == Life::Down => None,
             // A paused guest cannot acknowledge; its deadline would fail the run.
-            Action::Stop { .. } | Action::Restart { .. } if self.life[index] == Life::Paused => {
+            action if action.is_process() && self.life[index] == Life::Paused => {
                 Some("target machine is paused")
             }
             Action::Stop { .. } if self.stopped[index] => Some("target process is already stopped"),
             Action::Restart { .. } if !self.stopped[index] => {
                 Some("restart requires a stopped target process")
+            }
+            Action::PauseProcess { .. } if self.stopped[index] => Some("target process is stopped"),
+            Action::PauseProcess { .. } if self.frozen[index] => {
+                Some("target process is already paused")
+            }
+            Action::ResumeProcess { .. } if !self.frozen[index] => {
+                Some("target process is not paused")
             }
             Action::Pause { .. } if self.life[index] != Life::Up => {
                 Some("target machine is not running")
@@ -509,6 +522,7 @@ impl Faults {
         }
         self.ready[m] = false;
         self.stopped[m] = false;
+        self.frozen[m] = false;
     }
     /// Readiness is the reserved success id0; process commands wait for it.
     pub fn management_ready(&mut self, m: usize, time: u64, latency: u64) -> Result<(), String> {
@@ -546,12 +560,7 @@ impl Faults {
                 Event::Dispatch => {
                     if self.entries[i].status == Status::Waiting {
                         if let Some(m) = self.entries[i].target {
-                            let action =
-                                if matches!(self.entries[i].plan.action, Action::Restart { .. }) {
-                                    "start"
-                                } else {
-                                    "stop"
-                                };
+                            let action = command(&self.entries[i].plan.action);
                             self.entries[i].dispatched = true;
                             commands.push((m, format!("{action} {id}\n").into_bytes()));
                         }
@@ -561,14 +570,18 @@ impl Faults {
                     self.entries[i].status = Status::Waiting;
                     self.log[i]["status"] = json!("requested");
                     match self.entries[i].plan.action.clone() {
-                        Action::Stop { .. } | Action::Restart { .. }
-                            if self.entries[i]
-                                .target
-                                .is_some_and(|m| self.life[m] == Life::Down) =>
+                        action
+                            if action.is_process()
+                                && self.entries[i]
+                                    .target
+                                    .is_some_and(|m| self.life[m] == Life::Down) =>
                         {
                             self.unavailable(i, now, "target machine is down");
                         }
-                        Action::Stop { .. } | Action::Restart { .. } => {
+                        Action::Stop { .. }
+                        | Action::Restart { .. }
+                        | Action::PauseProcess { .. }
+                        | Action::ResumeProcess { .. } => {
                             self.boundaries.insert((
                                 self.entries[i].plan.deadline_ns,
                                 id,
@@ -576,14 +589,7 @@ impl Faults {
                             ));
                             if let Some(m) = self.entries[i].target {
                                 if self.ready[m] {
-                                    let action = if matches!(
-                                        self.entries[i].plan.action,
-                                        Action::Restart { .. }
-                                    ) {
-                                        "start"
-                                    } else {
-                                        "stop"
-                                    };
+                                    let action = command(&self.entries[i].plan.action);
                                     self.entries[i].dispatched = true;
                                     commands.push((m, format!("{action} {id}\n").into_bytes()));
                                 } else {
@@ -793,7 +799,15 @@ impl Faults {
             return;
         }
         if success {
-            self.stopped[machine] = matches!(self.entries[i].plan.action, Action::Stop { .. });
+            match self.entries[i].plan.action {
+                Action::Stop { .. } => {
+                    self.stopped[machine] = true;
+                    self.frozen[machine] = false;
+                }
+                Action::PauseProcess { .. } => self.frozen[machine] = true,
+                Action::ResumeProcess { .. } => self.frozen[machine] = false,
+                _ => self.stopped[machine] = false,
+            }
             self.applied(
                 i,
                 time,
@@ -802,6 +816,16 @@ impl Faults {
         } else {
             self.fail(i, format!("guest rejected fault {id}"));
         }
+    }
+}
+
+/// The supervisor's management verb for a process fault.
+fn command(action: &Action) -> &'static str {
+    match action {
+        Action::Restart { .. } => "start",
+        Action::PauseProcess { .. } => "freeze",
+        Action::ResumeProcess { .. } => "thaw",
+        _ => "stop",
     }
 }
 
