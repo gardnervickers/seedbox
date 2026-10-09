@@ -29,6 +29,7 @@ impl VirtioBlk {
     pub fn disk(&self) -> &Disk {
         self.model.disk()
     }
+    #[cfg(test)]
     pub fn disk_mut(&mut self) -> &mut Disk {
         self.model.disk_mut()
     }

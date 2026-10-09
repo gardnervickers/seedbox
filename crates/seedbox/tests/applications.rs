@@ -26,6 +26,21 @@ fn invoke(cli: &Path, directory: &Path, name: &str, args: &[&str]) -> Result<Str
         .status()
         .map_err(|error| format!("{}: {error}", cli.display()))?;
     if !status.success() {
+        // CI keeps only the console, so show the end of the failing log there.
+        let text = fs::read(&logfile).map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+        if let Ok(text) = &text {
+            let lines: Vec<_> = text.lines().collect();
+            let tail = &lines[lines.len().saturating_sub(80)..];
+            eprintln!(
+                "--- {name} failed; last {} lines of {}:",
+                tail.len(),
+                logfile.display()
+            );
+            for line in tail {
+                eprintln!("{line}");
+            }
+            eprintln!("--- end of {name}");
+        }
         return Err(format!("{name}: {status}; see {}", logfile.display()));
     }
     Ok(
@@ -59,43 +74,29 @@ fn every_application_runs_twice_and_replays() {
         .collect();
     workloads.sort();
     assert!(!workloads.is_empty());
-    let timebases = if std::env::var("SEEDBOX_TEST_COUNTER").as_deref() == Ok("1") {
-        vec!["pv", "counter"]
-    } else {
-        vec!["pv"]
-    };
     let mut failures = Vec::new();
     for workload in workloads {
-        for timebase in &timebases {
-            let directory = Path::new(&reports)
-                .join("applications")
-                .join(workload.file_stem().unwrap())
-                .join(timebase);
-            fs::create_dir_all(&directory).unwrap();
-            let check = || -> Result<(), String> {
-                let run = [
-                    "run",
-                    workload.to_str().unwrap(),
-                    "--timebase",
-                    timebase,
-                    "--full-state",
-                ];
-                let first = invoke(Path::new(&cli), &directory, "first", &run)?;
-                let second = invoke(Path::new(&cli), &directory, "second", &run)?;
-                let first = run_directory(&first)?;
-                let second = run_directory(&second)?;
-                invoke(
-                    Path::new(&cli),
-                    &directory,
-                    "diff",
-                    &["diff", first, second],
-                )?;
-                invoke(Path::new(&cli), &directory, "replay", &["replay", first])?;
-                Ok(())
-            };
-            if let Err(error) = check() {
-                failures.push(format!("{} ({timebase}): {error}", workload.display()));
-            }
+        let directory = Path::new(&reports)
+            .join("applications")
+            .join(workload.file_stem().unwrap());
+        fs::create_dir_all(&directory).unwrap();
+        let check = || -> Result<(), String> {
+            let run = ["run", workload.to_str().unwrap(), "--full-state"];
+            let first = invoke(Path::new(&cli), &directory, "first", &run)?;
+            let second = invoke(Path::new(&cli), &directory, "second", &run)?;
+            let first = run_directory(&first)?;
+            let second = run_directory(&second)?;
+            invoke(
+                Path::new(&cli),
+                &directory,
+                "diff",
+                &["diff", first, second],
+            )?;
+            invoke(Path::new(&cli), &directory, "replay", &["replay", first])?;
+            Ok(())
+        };
+        if let Err(error) = check() {
+            failures.push(format!("{}: {error}", workload.display()));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

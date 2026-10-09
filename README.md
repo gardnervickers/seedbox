@@ -38,8 +38,14 @@ The asset command prints the directory containing `kernel`. You can also omit
 Seedbox finds your Docker or Podman socket, builds the example's workload oracle
 with the engine's normal cache, prepares the images, and runs the Linux guests.
 Progress appears on stderr. Set `DOCKER_HOST` if your engine uses a custom socket.
-On Linux, add `--timebase pv` if you want KVM execution without performance-counter
-hardware or permissions. Mac uses PV automatically.
+Application progress comes from automatic binary instrumentation on both
+platforms. ARM exclusive-store retries can still cause replay mismatches or
+stalled progress; see [automatic progress and its limitations](docs/progress.md).
+
+On Linux, `--watchdog-ms 200` raises the host CPU interval (default 20 ms)
+after which a guest that makes no exits is interrupted so the engine can
+report where it is stuck. It changes performance only and can also be set on
+`replay` or `explore`.
 
 **The kernel is the only separate guest asset.** The release executable embeds
 its supervisor and filesystem tool. No private GitHub access or runtime guest
@@ -119,14 +125,14 @@ entering it, preserving named volumes and allowing `CLONE_NEWUSER`.
 | --- | --- |
 | [`crates/seedbox/`](crates/seedbox/README.md) | Configuration, OCI preparation, orchestration and the `seedbox` CLI |
 | `crates/seedbox-vmm/` | KVM world engine linked into the Linux x86-64 CLI; isolated standalone workspace and lockfile for low-level fixtures |
-| `crates/seedbox-engine-core/` | Canonical deterministic policies, bounded virtio queues, shared MMIO transport, console/block/network models, PV cycle proof, the shared world coordinator and the [windowed scheduler](docs/windowed-scheduler.md) |
+| `crates/seedbox-engine-core/` | Canonical deterministic policies, bounded virtio queues, shared MMIO transport, console/block/network models, the shared world coordinator and the [windowed scheduler](docs/windowed-scheduler.md) |
 | `crates/seedbox-arm64/` | ARM PV machines, native HVF application world, and isolated fixture workspace |
 | `tools/mac-runtime/` | Mac signing and platform notes |
 | `examples/` | Compose applications: etcd, Redis, [TCP faults/recovery](examples/faults/README.md), and [one-service MinIO conditional writes](examples/minio/README.md) (MinIO runtime qualification pending) |
 | `kernel/` | Guest kernel patch, config and build script (Linux 6.12.112) |
 | `guest/` | Generic OCI guest supervisor plus low-level guest fixtures and builders |
 | `docs/` | [Vision](docs/vision.md), [runtime instructions](docs/runtime.md), [backends](docs/backends.md), [acceptance record](docs/acceptance.md) |
-| `harness/` | YAML acceptance scenarios, portable checks, low-level world fixtures and their batch runner ([migration map](harness/worlds/README.md)), `msr54.py` |
+| `harness/` | YAML acceptance scenarios, portable checks, low-level world fixtures and their batch runner ([migration map](harness/worlds/README.md)) |
 | [`tools/mac-tcg/`](tools/mac-tcg/README.md) | Experimental local Mac TCG runner and tests; separate from the production KVM backend |
 
 ## Contributor checks

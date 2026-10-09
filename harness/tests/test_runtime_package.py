@@ -19,7 +19,7 @@ class RuntimePackageTests(unittest.TestCase):
             for mode, timestamp in ((0o600, 1234), (0o755, 5678)):
                 assets = root / str(mode)
                 assets.mkdir()
-                for name in ("NOTICE.txt", "compose-init", "mke2fs"):
+                for name in ("NOTICE.txt", "compose-init", "mke2fs", "progress.tar"):
                     path = assets / name
                     path.write_bytes(name.encode())
                     path.chmod(mode)
@@ -43,7 +43,7 @@ class RuntimePackageTests(unittest.TestCase):
             root = Path(directory)
             guest = root / "guest"
             guest.mkdir()
-            names = ["compose-init", "mke2fs", "NOTICE.txt"]
+            names = ["compose-init", "mke2fs", "NOTICE.txt", "progress.tar"]
             for name in names:
                 path = guest / name
                 path.write_bytes(name.encode())

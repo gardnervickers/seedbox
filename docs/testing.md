@@ -6,15 +6,15 @@ machine you are on; the runner never selects tests by probing the host.
 ```sh
 nix develop --command bash harness/check.sh   # portable (the default)
 bash harness/check.sh linux-kvm               # any Linux KVM host, including GitHub-hosted Ubuntu runners
-bash harness/check.sh linux --cpu 14          # the AMD host
+bash harness/check.sh linux --cpu 14          # a Linux KVM host
 bash harness/check.sh mac                     # Apple Silicon
-bash harness/check.sh linux-counter --list    # check requirements, build nothing
+bash harness/check.sh linux-apps --list       # check requirements, build nothing
 bash harness/check.sh --help                  # list suites and groups
 ```
 
 `portable` always runs first, and a portable failure stops hardware execution.
 Every named suite then runs. If a named suite's host requirements are missing
-(no `/dev/kvm`, no guest PMU, no root, missing tools or fixture inputs), the
+(no `/dev/kvm`, no root, missing tools or fixture inputs), the
 runner prints why and exits 2 before building anything. Failed checks exit 1.
 There are no retries, fallback passes or silently skipped suites.
 
@@ -28,20 +28,19 @@ copies, after their Cargo build has finished.
 | Suite | Platform and requirements | Cargo feature / coverage |
 | --- | --- | --- |
 | `portable` | Any development host | Root workspace, ARM mocks/policies, Python suites, guest source checks, YAML validation; also x86 backend unit tests on Linux x86-64 |
-| `linux-kvm` | Linux x86-64 or ARM64, usable `/dev/kvm` | Native backend `kvm-tests`; no PMU or root required |
-| `linux-counter` | Linux x86-64 KVM, guest PMU, root | VMM `counter-tests`; exact stops, checkpoints, forks, committed logs and triggers on a leased core. Implies `linux-kvm` |
-| `linux-guests` | Linux KVM plus fixture kernel/initrd | Backend `guest-tests`; real guest determinism/checkpoint controls. Implies `linux-counter` on x86-64, `linux-kvm` on ARM64 |
+| `linux-kvm` | Linux x86-64 or ARM64, usable `/dev/kvm` | Native backend `kvm-tests`; no root required |
+| `linux-guests` | Linux KVM plus fixture kernel/initrd | Backend `guest-tests`; real guest determinism/checkpoint controls. Implies `linux-kvm` |
 | `linux-oci` | Linux x86-64, running Docker-compatible engine, registry access | CLI `oci-tests`; real image import and Dockerfile behavior. No KVM required; runs under sudo when available, as the CLI does for application runs |
-| `linux-apps` | Linux x86-64 KVM, root, Docker-compatible engine, built guest assets | CLI `application-tests`; every acceptance YAML runs twice, diff matches, replay matches, with full state. PV always; counter too when `linux-counter` is selected |
+| `linux-apps` | Linux x86-64 KVM, root, Docker-compatible engine, built guest assets | CLI `application-tests`; every acceptance YAML runs twice, diff matches, replay matches, with full state |
 | `linux-pause` | Linux x86-64 KVM, root, supplied retained run/store | CLI `retained-run-tests`; pause/resume replay |
 | `mac-hvf` | Apple Silicon, macOS 15+, HVF and codesign | ARM `hvf-tests`; native CPU/state and cancellation primitives |
 | `mac-guests` | `mac-hvf` plus ARM fixture kernel/initrd | ARM `guest-tests`. Implies `mac-hvf` |
 | `mac-apps` | `mac-hvf` plus Docker-compatible engine, built guest assets | CLI `application-tests` on ARM PV. Implies `mac-hvf` |
 
-Groups: `linux` is `linux-kvm linux-counter linux-oci linux-apps`; `mac` is
+Groups: `linux` is `linux-kvm linux-oci linux-apps`; `mac` is
 `mac-hvf mac-apps`. Groups hold only suites that need no hand-built fixtures, so
 the guest suites (fixture kernel and initrd, see `harness/worlds/README.md`) and
-`linux-pause` (a retained run) are always named explicitly. `--cpu` applies to `linux-counter` and `linux-apps`.
+`linux-pause` (a retained run) are always named explicitly. `--cpu` applies to `linux-apps`.
 A Docker-compatible engine means `DOCKER_HOST` is set or `docker` or `podman` is
 installed. Both apps suites need the guest kernel and helper archive that
 `bash tools/build-assets.sh` writes to `/tmp/seedbox-$UID/<arch>/` (or
@@ -49,15 +48,13 @@ installed. Both apps suites need the guest kernel and helper archive that
 `SEEDBOX_RUNTIME_ASSETS` files. Seedbox never downloads them; otherwise the
 suites report unavailable.
 
-AMD and Intel run the same counted-execution tests. The engine selects its
-counter profile through CPUID. The test supervisor leases a free core and its
-SMT siblings, applies the AMD workaround where required, and restores exact MSR
-values after reaping every owned process. Intel uses no AMD MSR writes. This
-test selection makes no claim about untested Intel hardware or cross-host replay.
+The test supervisor leases a free core and its SMT siblings for application
+runs and releases them after reaping every owned process. This test selection
+makes no claim about cross-host replay.
 
 Platform dependencies remain selected by Cargo target OS/architecture. Features
 enable test execution; they do not switch the production CPU backend or pin a
-host. `counter-tests` includes `kvm-tests`. Root and standalone backend workspaces
+host. `guest-tests` includes `kvm-tests`. Root and standalone backend workspaces
 are invoked separately, using their existing aliases, lockfiles and target directories.
 
 ## Guest and application inputs
@@ -76,8 +73,7 @@ under `target/check-reports/`, which survives development-shell cleanup.
 | Applications | Build guest assets first; optional CLI overrides remain supported | Release CLI, Docker-compatible API |
 | Pause/resume | `SEEDBOX_HOST_PAUSE_RUN`, `SEEDBOX_HOST_PAUSE_STATE` | No default retained run |
 
-Applications use a release CLI built from the current checkout. Linux runs PV
-scenarios, plus counter scenarios when `linux-counter` is also selected. Mac runs ARM PV scenarios.
+Applications use a release CLI built from the current checkout.
 Image builds use the engine's normal layer cache on both platforms. Each CLI
 step streams to its report log and prints its progress.
 Application guests use 2048 MiB, including space for the JVM image's boot archive.
@@ -126,7 +122,7 @@ It checks KVM VM creation before building and uses the runner Docker engine.
 Nix store and Cargo dependencies/build outputs are cached in GitHub Actions;
 guest assets are built explicitly from the checkout. Cold caches require downloads
 and builds. Jobs time out after 100 minutes and superseded runs are canceled.
-No cloud account, self-hosted runner, PMU, or external cleanup service is needed.
+No cloud account, self-hosted runner or external cleanup service is needed.
 
 The Nix cache key covers the locked toolchain and all kernel/helper recipes.
 The development shell and guest assets are GC-rooted; unreferenced Nix paths are

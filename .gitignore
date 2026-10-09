@@ -18,3 +18,5 @@ target/
 **/*.oci.tar
 
 **/image.oci.tar.*
+
+# DBI reports and generated experiment contexts belong outside source control.

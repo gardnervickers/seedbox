@@ -6,8 +6,7 @@ From the repository root:
 nix develop
 cargo build --release
 # Start Docker/Podman for application preparation.
-./target/release/seedbox run examples/etcd  # Mac
-# Linux: add --timebase pv
+./target/release/seedbox run examples/etcd
 ./target/release/seedbox replay .seedbox/runs/ATTEMPT
 ```
 
@@ -33,8 +32,7 @@ Each service gets a controlled Linux VM and private RAM-backed root filesystem;
 application data does not persist across fresh runs. Build guest assets explicitly
 with `bash tools/build-assets.sh` and use the release executable; runtime commands
 never download guest assets. See [asset build instructions](../tools/runtime/README.md). Run on
-Apple Silicon HVF or Linux KVM (`--timebase pv` avoids hardware-counter
-requirements), with at least the tested 1024 MiB per service.
+Apple Silicon HVF or Linux KVM, with at least the tested 1024 MiB per service.
 The image supplies userspace dependencies. Image versions, launch metadata and
 filesystem layers are resolved and retained before execution.
 

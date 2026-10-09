@@ -6,7 +6,7 @@ If a Linux source build is needed, the existing aliases are `cargo build --relea
 
 ## Stage and validate
 
-Bind these paths and the selected CPU to the artifacts under test; use fresh writable evidence/input/project directories. Record revision, artifact hashes, host/profile observations, full command logs and elapsed times, and verify CPU/MSR/lease cleanup after each guest job. Stop on uncertain cleanup. Preparation happens in each `run`; there is no standalone prepared-input adapter. Retain each run's complete OCI/config/layers/archives/provenance, even if variants rebuild differently.
+Bind these paths and the selected CPU to the artifacts under test; use fresh writable evidence/input/project directories. Record revision, artifact hashes, host/profile observations, full command logs and elapsed times, and verify CPU/lease cleanup after each guest job. Stop on uncertain cleanup. Preparation happens in each `run`; there is no standalone prepared-input adapter. Retain each run's complete OCI/config/layers/archives/provenance, even if variants rebuild differently.
 
 ```bash
 set -euo pipefail

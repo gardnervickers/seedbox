@@ -7,7 +7,7 @@ import tarfile
 
 def package(assets, output):
     """Archive file roles, not the container client's local chmod/umask policy."""
-    members = [assets / name for name in ('compose-init', 'mke2fs', 'NOTICE.txt')]
+    members = [assets / name for name in ('compose-init', 'mke2fs', 'NOTICE.txt', 'progress.tar')]
     if sum(path.stat().st_size for path in members) > 2 << 30:
         raise ValueError('runtime exceeds 2 GiB')
     with output.open('wb') as raw:

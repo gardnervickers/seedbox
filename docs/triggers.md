@@ -38,8 +38,8 @@ has already stopped its target before the trigger's effect time.
    slice boundaries change scheduling even if the trigger never fires. Arming
    and the resulting trigger state are recorded in the transcript, so replay
    reproduces the same scheduling and is unaffected. The
-   accepted device effect and pending KVM response are irrevocable; undo cannot
-   cross this exit. Completing KVM's held I/O later does not emit the byte again.
+   accepted device effect and pending KVM response are irrevocable. Completing
+   KVM's held I/O later does not emit the byte again.
    Timer-port I/O is not an observation surface: a peer's already-sampled
    response and remaining charge survive a trigger boundary unchanged.
 3. Match time is the committed time of the final byte. Each trigger matches

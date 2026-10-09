@@ -66,16 +66,10 @@ impl WorldMachine for Machine {
         serde_json::json!({"pio_total":self.stats.kvm_n[2],"net":self.net.as_ref().map(|n|n.report())})
     }
     fn checkpoint_boundary(clock: &Self::Clock) -> Result<(), String> {
-        if let Clock::Pv(clock) = clock {
-            clock.checkpoint_boundary()?;
-        }
-        Ok(())
+        clock.checkpoint_boundary()
     }
     fn restore_boundary(clock: &mut Self::Clock) -> Result<(), String> {
-        if let Clock::Pv(clock) = clock {
-            clock.restore_boundary()?;
-        }
-        Ok(())
+        clock.restore_boundary()
     }
     fn reseed_guest(&mut self, entropy: [u32; 8]) -> Result<(), String> {
         self.reseed_time_page(entropy)
@@ -114,17 +108,11 @@ impl WorldMachine for Machine {
         Ok(())
     }
     fn supports_throttle(&self) -> bool {
-        self.pv_clock
+        true
     }
     fn throttle(&mut self, factor_permille: u64) -> Result<(), String> {
-        if !self.pv_clock {
-            return Err("throttle needs the pv timebase".into());
-        }
         self.throttle_permille = Some(factor_permille);
         Ok(())
-    }
-    fn branches(&self) -> u64 {
-        self.branches
     }
     fn exits(&self) -> u64 {
         self.stats.exits
@@ -147,9 +135,6 @@ impl WorldMachine for Machine {
         request: SliceRequest,
         frames: &mut Vec<Vec<u8>>,
     ) -> Result<Stop, String> {
-        match clock {
-            Clock::Counter(c) => self.run_until(c, request.hard_limit, request.early_slack, frames),
-            Clock::Pv(p) => self.run_until(p, request.hard_limit, request.early_slack, frames),
-        }
+        self.run_until(clock, request.hard_limit, request.early_slack, frames)
     }
 }

@@ -29,8 +29,7 @@ checks detect corruption, not authenticity against someone rewriting the store.
 
 Inspection and transfer of an accepted format need no guest execution. Execution
 additionally requires verified input bytes and a host with the capabilities the
-recorded profile needs (for the `counter` timebase, an AMD Zen KVM host with
-guest perf counting). Replay runs the engine retained in the run directory;
+recorded profile needs (KVM or HVF access). Replay runs the engine retained in the run directory;
 records are never rewritten. Host admission checks capabilities only: #142 and
 #143 removed the engine, kernel, CPU and host-policy pins, so older records'
 extra admission parameters are kept as data and not enforced. A readable v2
@@ -70,8 +69,10 @@ named volumes before installing this layout.
 
 The hostname and `/etc/hostname` are the Compose service name, and `/etc/hosts`
 contains the service's assigned address alongside its peers. Before every exec,
-including process restart, the supervisor sets both `RLIMIT_NOFILE` limits to
-1048576 before dropping image credentials. `vm.max_map_count` defaults to
+including process restart, the supervisor sets both `RLIMIT_NOFILE` limits so
+that the application sees 1048576, before dropping image credentials. The real
+limit is 96 higher, with `fs.nr_open` raised to match: DynamoRIO reserves that
+many descriptors at the top of the range for itself and reports the rest. `vm.max_map_count` defaults to
 262144 and is recorded alongside the hostname in the retained `SBXLAUNCH3`
 launch recipe. Compose `hostname:`, `ulimits:`, and `sysctls:` overrides remain
 unsupported. `memlock` keeps its kernel default.

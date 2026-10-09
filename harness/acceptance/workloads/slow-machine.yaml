@@ -1,4 +1,4 @@
-# Run with --timebase pv: the throttle scales the PV clock's per-syscall charge.
+# The throttle scales the PV clock's per-syscall charge.
 name: slow-machine
 services:
   worker:
