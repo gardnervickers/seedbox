@@ -1,0 +1,12 @@
+name: dbi-jit
+services:
+  app:
+    build: .
+    command: [node, --single-threaded, --predictable, --random-seed=1, /experiment/workload.js, "100000000"]
+x-seedbox:
+  version: 1
+  seed: 1009
+  wall_clock_epoch: 1791504000
+  machine: {memory_mb: 2048}
+  limits: {simulated_time: 300s, wall_time: 180s}
+  check: {service: app, exit_code: 0}

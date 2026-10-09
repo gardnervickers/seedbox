@@ -77,6 +77,19 @@ again:
 	return v;
 }
 
+/*
+ * cpu_relax/rep_nop can run with locks held and interrupts disabled. Reuse the
+ * bounded clock-read path: no allocation, scheduling, locking or interrupt
+ * enabling. Before PV activation (and in counter mode) this is a no-op.
+ * The vCPU can stop at the bound with IF clear; IRQ delivery remains deferred
+ * until the kernel permits it, exactly as for an ordinary kernel clock read.
+ */
+noinstr void seedbox_cpu_relax(void)
+{
+	if (static_branch_unlikely(&seedbox_pv_clock))
+		(void)seedbox_rdtsc();
+}
+
 bool seedbox_emulate_user_tsc(struct pt_regs *regs)
 {
 	unsigned char buf[MAX_INSN_SIZE];

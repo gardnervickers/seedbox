@@ -318,6 +318,23 @@ impl<B: Backend> Machine<B> {
         Ok(self)
     }
 
+    /// Stopped-memory diagnostics with the same compact page format as KVM.
+    /// These hashes are not included in execution witnesses.
+    pub fn write_application_page_hashes(&self, output: &mut dyn std::io::Write) -> Result<()> {
+        use sha2::{Digest, Sha256};
+        let zero = [0u8; 4096];
+        let zero_hash = Sha256::digest(zero);
+        for page in unsafe { self.ram.bytes() }.chunks(4096) {
+            let digest = if page == zero {
+                zero_hash
+            } else {
+                Sha256::digest(page)
+            };
+            output.write_all(&digest[..8]).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
     /// A stopped application boundary. The world records its finite horizons
     /// separately; this inventory covers every machine-owned continuation.
     pub fn application_evidence(&self, full_state: bool) -> Result<application::Evidence> {

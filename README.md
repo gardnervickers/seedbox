@@ -38,8 +38,14 @@ The asset command prints the directory containing `kernel`. You can also omit
 Seedbox finds your Docker or Podman socket, builds the example's workload oracle
 with the engine's normal cache, prepares the images, and runs the Linux guests.
 Progress appears on stderr. Set `DOCKER_HOST` if your engine uses a custom socket.
-On Linux, add `--timebase pv` if you want KVM execution without performance-counter
-hardware or permissions. Mac uses PV automatically.
+This draft uses PV with automatic binary instrumentation on both platforms.
+It is not ready to merge: ARM exclusive-store retries can diverge even without
+translation. See [the migration findings](docs/automatic-progress.md).
+
+On Linux PV, `--pv-watchdog-ms 200` increases the host CPU interval between
+spin-detection observations from the default 20 ms. It can reduce probing
+overhead for instrumented workloads, at the cost of slower idle-loop detection.
+It changes performance only and can also be set on `replay` or `explore`.
 
 **The kernel is the only separate guest asset.** The release executable embeds
 its supervisor and filesystem tool. No private GitHub access or runtime guest

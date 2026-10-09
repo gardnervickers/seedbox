@@ -10,8 +10,12 @@
     "guest/compose-init.c",
     "guest/barrier.h",
     "guest/control.h",
-    "guest/environment.h",
     "guest/io.h",
-    "kernel-arm64/supervisor-io.h"
+    "kernel-arm64/supervisor-io.h",
+    "nix/progress.nix",
+    "guest/progress/progress.c",
+    "guest/progress/CMakeLists.txt",
+    "guest/progress/package.py",
+    "guest/progress-launch.h"
   ]
 }

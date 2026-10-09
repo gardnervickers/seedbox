@@ -10,6 +10,12 @@ comparison primitives before it can use the same proof policy. Its typed host
 interruption boundary is available without enabling asynchronous cancellation. This stage does
 not claim ARM no-exit-loop qualification or a completed shared world coordinator.
 
+The x86 kernel's `cpu_relax`/`rep_nop` hook now uses bounded PV clock reads to
+provide progress in ordinary kernel polling loops. This does not cover arbitrary
+assembly PAUSE instructions, userspace loops or a binary translator's internal
+execution. Keep the proof fallback until those coverage boundaries are resolved.
+`--pv-watchdog-ms` adjusts its observation interval without changing guest time.
+
 ## Architecture boundary
 
 `ProbeMachine` supplies a stable ordered landing key, a guest clock marker,

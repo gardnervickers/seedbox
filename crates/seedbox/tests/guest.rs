@@ -190,7 +190,8 @@ fn linux_tar_preserves_ownership_modes_hardlinks_and_symlinks_without_host_extra
     let helper = temporary.path().join("helper");
     fs::write(&helper, b"helper").unwrap();
     let output = temporary.path().join("guest.cpio");
-    seedbox::guest::build_initramfs_from_tar(&input, &helper, None, b"recipe", &output).unwrap();
+    seedbox::guest::build_initramfs_from_tar(&input, &helper, None, None, b"recipe", &output)
+        .unwrap();
     let bytes = fs::read(&output).unwrap();
     let mut at = 0;
     let mut entries = std::collections::BTreeMap::new();
@@ -251,6 +252,7 @@ fn linux_tar_cannot_replace_seedbox_bootstrap_or_reference_missing_hardlinks() {
         let error = seedbox::guest::build_initramfs_from_tar(
             &input,
             &helper,
+            None,
             None,
             b"",
             &temporary.path().join("bad.cpio"),

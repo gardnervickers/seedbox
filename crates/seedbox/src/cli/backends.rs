@@ -31,9 +31,13 @@ impl Executor {
             )),
         }
     }
-    pub fn performance(self, margin: &str, undo: u64) -> Result<Self> {
+    pub fn performance(self, margin: &str, undo: u64, pv_watchdog_ms: u64) -> Result<Self> {
         match self {
-            Self::Linux(e) => Ok(Self::Linux(e.with_margin(margin)?.with_undo(undo)?)),
+            Self::Linux(e) => Ok(Self::Linux(
+                e.with_margin(margin)?
+                    .with_undo(undo)?
+                    .with_pv_watchdog_ms(pv_watchdog_ms)?,
+            )),
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             Self::Mac(e) => Ok(Self::Mac(e.with_performance(margin, undo))),
         }

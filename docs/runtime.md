@@ -210,8 +210,8 @@ snapshot/restore and release from a deterministic time park remain unsupported.
 
 This remains unqualified development evidence. ARM images, 64..3072 MiB per
 guest and one exploration worker are required; PMU/core options apply to Linux.
-The supervisor defaults `GOMAXPROCS` to the guest's online CPU count (one for
-the generated etcd example), while preserving explicit overrides. New ARM
+The supervisor preserves the image and Compose environment without adding
+application-specific defaults such as `GOMAXPROCS`. New ARM
 profiles park initial guests at the shared launch barrier, then release them
 at seeded per-name offsets capped by `min(1 ms, network lookahead)`. The cap
 keeps causal packets and RPC triggers from preceding the latest release, and
@@ -221,13 +221,13 @@ runs; replay clips it to network lookahead. `initial_launch` records the release
 evidence. Profiles without a numeric cap keep their earlier release behavior.
 
 After the release build, run as your current user with KVM device access on
-Linux. Use PV to avoid the additional counter-mode privileges:
+Linux. New runs use PV without performance-counter privileges:
 
 ```sh
 seedbox=./target/release/seedbox
 
-"$seedbox" prepare examples/redis --output prepared.json --timebase pv
-"$seedbox" run examples/redis --timebase pv
+"$seedbox" prepare examples/redis --output prepared.json
+"$seedbox" run examples/redis
 "$seedbox" inspect .seedbox/runs/ATTEMPT --json
 "$seedbox" replay .seedbox/runs/ATTEMPT
 ```
@@ -333,11 +333,13 @@ does not establish hardware witness invariance or qualify the new engine.
 
 ## Execution settings
 
-`run`, `prepare` and `explore` accept `--timebase counter|pv`, defaulting to `counter`.
-This is a semantic choice with no environment override. Counter time advances
-with retired guest branches; PV compute between exits costs no virtual time,
-with progress charged at guest exits, syscalls and clock reads. The same seed
-under the two models produces different identities and retained manifests.
+New `run`, `prepare` and `explore` operations use PV with automatic binary
+instrumentation; the public timebase selector is removed in this draft. The
+client charges progress every 10,000 translated block entries per thread,
+including shared libraries and JIT code, without recompiling applications.
+This migration is incomplete: ARM replay and removal of the internal counter
+implementation remain blocked. See [findings and review questions](automatic-progress.md).
+
 The semantic profile records `timebase` only for PV, preserving existing counter
 identity bytes and hashes. Replay reads the recorded choice, accepts no timebase
 override, and refuses unknown recorded values or a backend with a different
@@ -382,13 +384,20 @@ PV uses no host PMU counter. It keeps the CPU/SMT leases but skips the counter
 profile, the perf event checks and the Zen MSR
 workaround, so any x86-64 KVM host can run it, and its identity carries no
 counter profile. That does not qualify additional PV hosts. The counter stop-placement description
-below applies to the default counter model; PV uses its own exit-based progress.
+below describes the retained legacy implementation; new runs use instrumented PV.
 
 `--state` chooses the content store and attempts root (default `.seedbox`).
 `x-seedbox.machine.memory_mb` defaults to 1024 MiB per service and is a semantic parameter; `--full-state` requests RAM/register
 digests and retains per-page RAM hashes (format below). Preparation checks a conservative archive boot-memory floor before acquiring
 a CPU lease. Application memory can require a larger value; the etcd image failed
 to unpack at 512 MiB and passed at 1024 MiB. `--margin` and `--undo` are recorded per attempt and do not change identity.
+`--pv-watchdog-ms` sets the Linux PV watchdog interval in host CPU milliseconds
+(default 20; range 1..60000). Like margin/undo it is passed explicitly to the
+worker and recorded per attempt, outside semantic identity. The public CLI does
+not inherit `SEEDBOX_PV_WATCHDOG_MS`. Longer intervals reduce probe overhead but
+delay recognition of idle loops; they never advance guest time. Counter mode
+and Mac ignore this Linux PV setting.
+
 `--undo` defaults to 256 branches; zero disables undo and 16 exercises a smaller
 margin. The accepted range is 0..262144. Both settings are passed explicitly to
 the retained engine, without inheriting VMM environment variables. `--margin`

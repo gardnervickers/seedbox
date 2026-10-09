@@ -58,6 +58,7 @@ DECLARE_STATIC_KEY_FALSE(seedbox_pv_clock);
 struct pt_regs;
 extern struct seedbox_time_page *seedbox_page;
 unsigned long long seedbox_rdtsc(void);
+void seedbox_cpu_relax(void);
 bool seedbox_emulate_user_tsc(struct pt_regs *regs);
 unsigned long seedbox_tsc_khz(void);
 void __init seedbox_time_init(void);

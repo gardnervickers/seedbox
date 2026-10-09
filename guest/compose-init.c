@@ -25,7 +25,7 @@
 #endif
 #include "control.h"
 #include "barrier.h"
-#include "environment.h"
+#include "progress-launch.h"
 #include <sys/mount.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -487,7 +487,26 @@ static pid_t start(void) {
         application_limits();
         credentials();
         environ = environment;
-        execvp(arguments[0], arguments);
+        arguments = seedbox_script_arguments(arguments);
+        if (!arguments) die("resolve application interpreter");
+        size_t count = 0;
+        while (arguments[count]) ++count;
+        char **instrumented = calloc(count + 8, sizeof(*instrumented));
+        if (!instrumented) die("instrumentation arguments");
+        size_t prefix = 0;
+        instrumented[prefix++] = "/seedbox/progress/bin64/drrun";
+        instrumented[prefix++] = "-opt_speed";
+        instrumented[prefix++] = "-disable_traces";
+#if defined(__aarch64__)
+        /* Preserve exclusive-monitor regions. DynamoRIO 11.3's conversion
+         * to CAS hangs in static musl's exit locks on ARM. */
+        instrumented[prefix++] = "-no_ldstex2cas";
+#endif
+        instrumented[prefix++] = "-c";
+        instrumented[prefix++] = "/seedbox/progress/libseedbox_progress.so";
+        instrumented[prefix++] = "--";
+        for (size_t i = 0; i < count; ++i) instrumented[i + prefix] = arguments[i];
+        execv(instrumented[0], instrumented);
         die("exec application");
     }
     close(launch_error[1]);
@@ -710,6 +729,11 @@ int main(void) {
     directories("/sys", 0755);
     if (mount("sysfs", "/sys", "sysfs", 0, NULL)) die("mount bootstrap sys");
     management = open_management("/sys/class/virtio-ports", "/dev");
+    plain_path("/rootfs/seedbox/progress");
+    directories("/rootfs/seedbox/progress", 0755);
+    if (mount("/seedbox/progress", "/rootfs/seedbox/progress", NULL, MS_BIND, NULL)
+        || mount(NULL, "/rootfs/seedbox/progress", NULL,
+                 MS_BIND|MS_REMOUNT|MS_RDONLY|MS_NOSUID|MS_NODEV, NULL)) die("mount progress runtime");
     /* Linux rejects CLONE_NEWUSER from a chroot. Cover the mount namespace's
      * root with the image first, including its already-mounted named volumes;
      * then make the process root refer to that same mount root. Bootstrap
@@ -720,7 +744,6 @@ int main(void) {
     directories("/dev", 0755); directories("/proc", 0755); directories("/sys", 0755); directories("/tmp", 01777);
     if (mount("proc", "/proc", "proc", 0, NULL) || mount("sysfs", "/sys", "sysfs", 0, NULL)) die("mount guest filesystems");
     application_devices();
-    if (seedbox_default_gomaxprocs(&environment, sysconf(_SC_NPROCESSORS_ONLN))) die("online CPU environment");
     application_hostname(hostname, hosts);
     application_sysctls(max_map_count);
     for (char **volume = volumes; *volume; volume++) directories(*volume, 0755);

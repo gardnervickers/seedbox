@@ -478,6 +478,16 @@ impl VmmExecutor {
             .insert("SEEDBOX_UNDO".into(), branches.to_string());
         Ok(self)
     }
+
+    /// Host CPU interval between PV watchdog observations; does not change guest time.
+    pub fn with_pv_watchdog_ms(mut self, milliseconds: u64) -> Result<Self> {
+        if !(1..=60000).contains(&milliseconds) {
+            return Err(Error::Setup("--pv-watchdog-ms must be 1..60000".into()));
+        }
+        self.performance
+            .insert("SEEDBOX_PV_WATCHDOG_MS".into(), milliseconds.to_string());
+        Ok(self)
+    }
 }
 
 /// Checkpoints are optional, but partial or malformed retained settings fail closed.
@@ -2563,6 +2573,15 @@ mod doctor_tests {
             CounterProfile::Zen,
         )
         .unwrap();
+        let slower_watchdog = ordinary.clone().with_pv_watchdog_ms(200).unwrap();
+        assert_eq!(slower_watchdog.profile(), ordinary.profile());
+        assert_eq!(
+            slower_watchdog.performance_parameters()["SEEDBOX_PV_WATCHDOG_MS"],
+            "200"
+        );
+        for invalid in [0, 60001] {
+            assert!(ordinary.clone().with_pv_watchdog_ms(invalid).is_err());
+        }
         let branch = ordinary.clone().with_checkpoint(500, 42);
         assert_eq!(
             branch.performance_parameters(),

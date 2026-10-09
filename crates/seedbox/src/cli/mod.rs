@@ -55,8 +55,8 @@ const VMM_FAILURE_HELP: &str = "Text VMM failures also show up to 5 non-empty li
     about = "Deterministic simulation of Compose applications on real Linux machines",
     long_about = "Deterministic simulation of Compose applications on real Linux machines.\n\n\
                   A seed plus the retained inputs regenerate the same execution. \
-                  `run` and `replay` support Linux x86-64 KVM (PV needs KVM device access; \
-                  counter also needs PMU/MSR access), or native HVF on Apple Silicon Mac."
+                  `run` and `replay` support Linux x86-64 KVM (KVM device access) \
+                  or native HVF on Apple Silicon Mac."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -88,8 +88,6 @@ enum Command {
     Doctor {
         #[command(flatten)]
         cpu: CpuArg,
-        #[command(flatten)]
-        clock: TimebaseArgs,
         /// Print the admitted observations as JSON.
         #[arg(long)]
         json: bool,
@@ -281,30 +279,6 @@ impl From<TemplateArg> for Template {
     }
 }
 
-#[derive(Clone, Copy, ValueEnum)]
-enum TimebaseArg {
-    /// Count retired guest branches with the host PMU.
-    Counter,
-    /// Advance time at guest exits, syscalls and clock reads.
-    Pv,
-}
-
-#[derive(Args)]
-struct TimebaseArgs {
-    /// Timebase for guest progress; changes run identity and results [default: pv on Mac; counter on Linux].
-    #[arg(long, value_enum)]
-    timebase: Option<TimebaseArg>,
-}
-
-impl From<TimebaseArg> for Timebase {
-    fn from(timebase: TimebaseArg) -> Self {
-        match timebase {
-            TimebaseArg::Counter => Self::Counter,
-            TimebaseArg::Pv => Self::Pv,
-        }
-    }
-}
-
 #[derive(Args)]
 struct ComposeArg {
     /// Compose file, or a directory containing compose.yaml.
@@ -400,9 +374,7 @@ struct RuntimeInputs {
     /// Static Linux mke2fs for named volumes [default: embedded guest helper].
     #[arg(long, env = "SEEDBOX_MKE2FS")]
     mke2fs: Option<PathBuf>,
-    #[command(flatten)]
-    clock: TimebaseArgs,
-    /// Also record and compare every machine's RAM and registers (Linux also retains per-page hashes).
+    /// Also record and compare every machine's RAM and registers (also retains per-page hashes).
     #[arg(long)]
     full_state: bool,
 }
@@ -414,12 +386,6 @@ impl RuntimeInputs {
             if self.kvm.vmm.is_some() {
                 return Err(Error::Setup(
                     "--vmm requires Linux KVM; use the built-in Mac engine".into(),
-                ));
-            }
-            if matches!(self.clock.timebase, Some(TimebaseArg::Counter)) {
-                return Err(Error::Setup(
-                    "--timebase counter requires Linux KVM; use --timebase pv or omit it on Mac"
-                        .into(),
                 ));
             }
         }
@@ -457,14 +423,7 @@ impl RuntimeInputs {
             WitnessMode::Exits
         };
         let kernel = backends::guest_kernel(self.kvm.kernel.clone())?;
-        let runtime = if self.runtime_assets.is_some()
-            || self.guest_init.is_none()
-            || self.mke2fs.is_none()
-        {
-            Some(backends::guest_assets(self.runtime_assets.clone())?)
-        } else {
-            None
-        };
+        let runtime = Some(backends::guest_assets(self.runtime_assets.clone())?);
         let resolve = |flag, explicit: &Option<PathBuf>, name| match explicit {
             Some(path) => defaults::existing(flag, path.clone()),
             None => runtime
@@ -504,7 +463,7 @@ impl RuntimeInputs {
             Executor::Linux(
                 executor
                     .with_torn_writes(simulation.disk.torn_writes)
-                    .with_timebase(self.clock.timebase.unwrap_or(TimebaseArg::Counter).into())
+                    .with_timebase(Timebase::Pv)
                     .with_page_timer(machine.page_timer)
                     .with_deferred_tx(machine.deferred_tx),
             )
@@ -514,6 +473,7 @@ impl RuntimeInputs {
             kernel,
             engine,
             init: resolve("--guest-init", &self.guest_init, "compose-init")?,
+            progress: resolve("--runtime-assets", &None, "progress.tar")?,
             mke2fs: Some(resolve("--mke2fs", &self.mke2fs, "mke2fs")?),
             profile: executor.profile(),
         };
@@ -551,6 +511,9 @@ struct Performance {
     /// Initial undo margin in branches; 0 disables undo.
     #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u64).range(0..=1 << 18))]
     undo: u64,
+    /// PV spin-probe watchdog interval in host CPU milliseconds (Linux KVM).
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u64).range(1..=60000))]
+    pv_watchdog_ms: u64,
 }
 
 fn parse_margin(value: &str) -> std::result::Result<String, String> {
@@ -576,7 +539,7 @@ fn execution_counter() -> Result<CounterProfile> {
 
 impl Performance {
     fn apply(&self, executor: Executor) -> Result<Executor> {
-        executor.performance(&self.margin, self.undo)
+        executor.performance(&self.margin, self.undo, self.pv_watchdog_ms)
     }
 }
 
@@ -640,19 +603,11 @@ fn run(cli: Cli) -> Result<u8> {
             }
             Ok(0)
         }
-        Command::Doctor {
-            cpu,
-            clock,
-            inputs,
-            json,
-        } => {
+        Command::Doctor { cpu, inputs, json } => {
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             {
-                if matches!(clock.timebase, Some(TimebaseArg::Counter)) {
-                    return Err(Error::Setup("--timebase counter requires Linux KVM; use --timebase pv or omit it on Mac".into()));
-                }
                 cpu.admit(Ok(CounterProfile::Zen), Timebase::Pv)?;
                 if let Some(path) = inputs.vmm.as_ref() {
                     defaults::existing("--vmm", path.clone())?;
@@ -693,15 +648,10 @@ fn run(cli: Cli) -> Result<u8> {
                         &engine,
                         kernel,
                         cpu.cpu,
-                        clock.timebase.unwrap_or(TimebaseArg::Counter).into(),
+                        Timebase::Pv,
                     )?
                 } else {
-                    VmmExecutor::doctor_with_timebase(
-                        &engine,
-                        kernel,
-                        cpu.cpu,
-                        clock.timebase.unwrap_or(TimebaseArg::Counter).into(),
-                    )?
+                    VmmExecutor::doctor_with_timebase(&engine, kernel, cpu.cpu, Timebase::Pv)?
                 };
                 if json {
                     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -809,14 +759,7 @@ fn run(cli: Cli) -> Result<u8> {
             if cancellation.is_cancelled() {
                 return Err(Error::PreparationCancelled);
             }
-            cpu.admit(
-                detected,
-                inputs
-                    .clock
-                    .timebase
-                    .map(Into::into)
-                    .unwrap_or(Timebase::Counter),
-            )?;
+            cpu.admit(detected, Timebase::Pv)?;
             let executor = match (checkpoint_at_ns, branch_seed) {
                 (Some(at), Some(branch)) => executor.with_checkpoint(at, branch)?,
                 _ => executor,
@@ -876,14 +819,7 @@ fn run(cli: Cli) -> Result<u8> {
             if cancellation.is_cancelled() {
                 return Err(Error::PreparationCancelled);
             }
-            cpu.admit(
-                detected,
-                inputs
-                    .clock
-                    .timebase
-                    .map(Into::into)
-                    .unwrap_or(Timebase::Counter),
-            )?;
+            cpu.admit(detected, Timebase::Pv)?;
             preparer.profile = executor.profile();
             let executor = performance.apply(executor)?;
             // Exploration retains any backend admission refusal in its batch checkpoint.

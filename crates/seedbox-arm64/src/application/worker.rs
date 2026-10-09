@@ -141,6 +141,8 @@ pub enum Operation {
     },
     Evidence {
         full_state: bool,
+        #[serde(default)]
+        ram_pages: Option<PathBuf>,
     },
     CrashExport {
         run_seed: u64,
@@ -351,8 +353,16 @@ pub fn serve<B: Backend>(input: &mut impl Read, output: &mut impl Write) -> Resu
                     vm.seed_timer(seed, &domain)?;
                     Ok(Answer::Ready)
                 }
-                Operation::Evidence { full_state } => {
-                    Ok(Answer::Evidence(vm.application_evidence(full_state)?))
+                Operation::Evidence {
+                    full_state,
+                    ram_pages,
+                } => {
+                    let evidence = vm.application_evidence(full_state)?;
+                    if let Some(path) = ram_pages {
+                        let mut output = std::fs::File::create(path).map_err(|e| e.to_string())?;
+                        vm.write_application_page_hashes(&mut output)?;
+                    }
+                    Ok(Answer::Evidence(evidence))
                 }
                 Operation::CrashExport {
                     run_seed,
@@ -761,7 +771,7 @@ impl OwnedWorker {
                     }
                 }
             }
-            if let (Operation::Evidence { full_state }, Answer::Evidence(evidence)) =
+            if let (Operation::Evidence { full_state, .. }, Answer::Evidence(evidence)) =
                 (&request.operation, &response.answer)
             {
                 validate_evidence(evidence, observation, *full_state)?;

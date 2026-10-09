@@ -34,6 +34,27 @@ shutil.copy(here / "seedbox.c", src / "arch/x86/kernel/seedbox.c")
 shutil.copy(here / "seedbox.h", src / "arch/x86/include/asm/seedbox.h")
 edit("arch/x86/kernel/Makefile", "obj-y\t\t\t+= ebda.o\n", "obj-y\t\t\t+= ebda.o\nobj-y\t\t\t+= seedbox.o\n")
 
+# Kernel relaxation loops make bounded PV progress even without a syscall or
+# clock read. Keep userspace vDSO and boot/decompressor PAUSE instructions raw.
+# Hook rep_nop as well as cpu_relax callers; inline assembly PAUSE elsewhere
+# remains outside this coverage and is not a reason to remove cycle detection.
+edit(
+    "arch/x86/include/asm/vdso/processor.h",
+    "/* REP NOP (PAUSE) is a good thing to insert into busy-wait loops. */",
+    "#if !defined(BUILD_VDSO) && !defined(__DISABLE_EXPORTS) && !defined(_SETUP)\n"
+    "extern void seedbox_cpu_relax(void);\n"
+    "#endif\n\n"
+    "/* REP NOP (PAUSE) is a good thing to insert into busy-wait loops. */",
+)
+edit(
+    "arch/x86/include/asm/vdso/processor.h",
+    '\tasm volatile("rep; nop" ::: "memory");\n',
+    '\tasm volatile("rep; nop" ::: "memory");\n'
+    "#if !defined(BUILD_VDSO) && !defined(__DISABLE_EXPORTS) && !defined(_SETUP)\n"
+    "\tseedbox_cpu_relax();\n"
+    "#endif\n",
+)
+
 # Kernel TSC reads return VMM-published virtual time. The vDSO and the boot
 # decompressor keep the raw instruction (user mode traps via CR4.TSD).
 edit(

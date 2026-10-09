@@ -1,0 +1,6 @@
+FROM docker.io/library/python:3.13-alpine
+COPY client/client /client
+COPY pause.py /scenario/pause.py
+COPY seedbox /scenario/seedbox
+ENV PYTHONUNBUFFERED=1
+ENTRYPOINT ["python3", "/scenario/pause.py"]

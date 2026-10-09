@@ -396,6 +396,11 @@ fn bad_values_are_usage_errors() {
     for (args, expected) in [
         (&["run", "--margin", "0"][..], "positive branch count"),
         (&["run", "--undo", "999999999"], "not in 0..=262144"),
+        (&["run", "--pv-watchdog-ms", "0"], "--pv-watchdog-ms"),
+        (
+            &["replay", "missing", "--pv-watchdog-ms", "60001"],
+            "--pv-watchdog-ms",
+        ),
         (&["run", "--cpu", "5000"], "not in 0..1024"),
         (
             &["init", "x", "--template", "bogus"],
@@ -410,6 +415,26 @@ fn bad_values_are_usage_errors() {
             stderr(&output)
         );
     }
+}
+
+#[test]
+fn pv_watchdog_is_an_explicit_performance_option() {
+    let directory = tempfile::tempdir().unwrap();
+    for command in ["run", "replay", "explore"] {
+        let output = seedbox(&["help", command], directory.path());
+        assert!(output.status.success());
+        let help = String::from_utf8(output.stdout).unwrap();
+        assert!(help.contains("--pv-watchdog-ms"), "{help}");
+        assert!(help.contains("[default: 20]"), "{help}");
+        assert!(!help.contains("SEEDBOX_PV_WATCHDOG_MS"), "{help}");
+    }
+    let accepted = seedbox(
+        &["replay", "missing", "--pv-watchdog-ms", "200"],
+        directory.path(),
+    );
+    assert_eq!(accepted.status.code(), Some(2));
+    assert!(!stderr(&accepted).contains("unexpected argument"));
+    assert!(stderr(&accepted).contains("missing"));
 }
 
 /// A project plus empty stand-ins for every runtime input but BusyBox.
@@ -804,7 +829,7 @@ fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
     assert!(help.status.success());
     let text = String::from_utf8(help.stdout).unwrap();
     assert!(text.contains("Linux KVM host"));
-    for flag in ["--cpu", "--kernel", "--vmm", "--timebase", "--json"] {
+    for flag in ["--cpu", "--kernel", "--vmm", "--json"] {
         assert!(text.contains(flag), "{text}");
     }
     for flag in [
@@ -820,16 +845,6 @@ fn doctor_help_ranges_and_missing_inputs_follow_cli_contract() {
     let invalid_timebase = seedbox(&["doctor", "--timebase", "invalid"], root);
     assert_eq!(invalid_timebase.status.code(), Some(2));
     assert!(stderr(&invalid_timebase).contains("--timebase"));
-    let pv_missing = seedbox(&["doctor", "--timebase", "pv", "--vmm", "missing"], root);
-    assert_eq!(stderr(&pv_missing), "error: --vmm missing: not found\n");
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    {
-        let counter = seedbox(&["doctor", "--timebase", "counter"], root);
-        assert_eq!(
-            stderr(&counter),
-            "error: --timebase counter requires Linux KVM; use --timebase pv or omit it on Mac\n"
-        );
-    }
     let invalid = seedbox(&["doctor", "--cpu", "1024"], root);
     assert_eq!(invalid.status.code(), Some(2));
     assert!(stderr(&invalid).contains("--cpu"));
@@ -1883,45 +1898,16 @@ fn checkpoint_flags_are_paired_typed_and_documented() {
 }
 
 #[test]
-fn timebase_help_values_and_replay_uses_only_the_recorded_choice() {
+fn timebase_is_no_longer_a_public_mode() {
     let directory = tempfile::tempdir().unwrap();
-    for command in ["run", "prepare", "explore"] {
+    for command in ["run", "prepare", "explore", "doctor", "replay"] {
         let help = seedbox(&["help", command], directory.path());
         assert!(help.status.success());
-        let help = String::from_utf8_lossy(&help.stdout);
-        assert!(help.contains("--timebase <TIMEBASE>"));
-        assert!(help.contains("[default: pv on Mac; counter on Linux]"));
-        assert!(help.contains("Count retired guest branches with the host PMU"));
-        assert!(help.contains("Advance time at guest exits, syscalls and clock reads"));
-        let bad = seedbox(&[command, "--timebase", "future"], directory.path());
-        assert_eq!(bad.status.code(), Some(2));
-        assert!(stderr(&bad).contains("--timebase <TIMEBASE>"));
-        assert!(stderr(&bad).contains("possible values: counter, pv"));
-    }
-    let help = seedbox(&["help", "replay"], directory.path());
-    assert!(help.status.success());
-    assert!(!String::from_utf8_lossy(&help.stdout).contains("--timebase"));
-    let override_attempt = seedbox(&["replay", ".", "--timebase", "pv"], directory.path());
-    assert_eq!(override_attempt.status.code(), Some(2));
-    assert!(stderr(&override_attempt).contains("unexpected argument '--timebase'"));
-    assert!(seedbox(&["init", "demo"], directory.path())
-        .status
-        .success());
-    for command in ["run", "explore"] {
+        assert!(!String::from_utf8_lossy(&help.stdout).contains("--timebase"));
         for value in ["counter", "pv"] {
-            let output = seedbox(
-                &[command, "no-such.yaml", "--timebase", value],
-                directory.path(),
-            );
+            let output = seedbox(&[command, "--timebase", value], directory.path());
             assert_eq!(output.status.code(), Some(2));
-            let expected = if cfg!(all(target_os = "macos", target_arch = "aarch64"))
-                && value == "counter"
-            {
-                "error: --timebase counter requires Linux KVM; use --timebase pv or omit it on Mac\n"
-            } else {
-                "error: Compose file no-such.yaml: not found\n"
-            };
-            assert_eq!(stderr(&output), expected);
+            assert!(stderr(&output).contains("unexpected argument '--timebase'"));
         }
     }
 }
@@ -1999,21 +1985,6 @@ fn replay_rejects_unknown_recorded_timebase_before_host_checks() {
     let inspect = seedbox(&["inspect", "."], directory.path());
     assert!(inspect.status.success(), "{}", stderr(&inspect));
     assert!(String::from_utf8_lossy(&inspect.stdout).contains("timebase: future"));
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-#[test]
-fn mac_counter_timebase_is_rejected_before_preparation() {
-    let directory = tempfile::tempdir().unwrap();
-    fs::write(directory.path().join("compose.yaml"), "name: mac-timebase\nservices:\n  app:\n    image: busybox:1.37.0\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app, exit_code: 0}\n").unwrap();
-    for command in ["run", "explore"] {
-        let output = seedbox(&[command, ".", "--timebase", "counter"], directory.path());
-        assert_eq!(output.status.code(), Some(2));
-        assert_eq!(
-            stderr(&output),
-            "error: --timebase counter requires Linux KVM; use --timebase pv or omit it on Mac\n"
-        );
-    }
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

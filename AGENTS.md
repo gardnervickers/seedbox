@@ -109,7 +109,7 @@ the canonical crate; do not restore sibling source inclusion for these policies.
 ## Determinism
 
 - A run's witness and a `seedbox replay` MATCH are how determinism is checked.
-  Performance settings (`--margin`, `--undo`) must never change results.
+  Performance settings (`--margin`, `--undo`, `--pv-watchdog-ms`) must never change results.
 - Determinism is about results, not source or build bytes. Don't hash or
   stamp the source tree, Git revision, build flags or compiled binaries, and
   don't add compiler wrappers, reproducible-build checks, or formatting
@@ -267,8 +267,8 @@ deliberately change one.
   defaults table), docs/runtime.md, and `crates/seedbox/templates/README.md`.
   The last one is copied into every project `seedbox init` creates.
 
-`doctor --timebase pv` shares PV KVM permission and CPU-reservation admission;
-counter doctor retains its perf/MSR checks. Both use guest-kernel/VMM defaults; host-kernel
+`doctor` uses PV KVM permission and CPU-reservation admission in this draft.
+It uses guest-kernel/VMM defaults; host-kernel
 bytes are not checked. VMM resolution is lookup-only and must never invoke a
 compiler or launch the worker. Success reports
 only the exact cleaned-up probe observations and selected core; the library does
@@ -285,10 +285,13 @@ images or executes guests. Compatibility readiness is not replay qualification.
 - Old runs replay on the engine executable retained in the run directory. To
   compare across engine changes, make a fresh run and check its witness against
   the old run's.
-- The default `counter` timebase needs an AMD Zen KVM host with guest perf
-  counting. `--timebase pv` needs only KVM, so it also runs on cloud VMs with
-  nested KVM and no PMU. `.github/workflows/pv-tests.yml` runs PV checks on
-  GitHub-hosted Ubuntu x86-64 runners.
+- This draft selects instrumented PV for new CLI runs and removes the public
+  timebase selector. Internal counter execution has not yet been removed.
+  ARM exclusive-store retry nondeterminism blocks the migration; see
+  `docs/automatic-progress.md`. Do not require application-specific flags or
+  environment overrides to make replay succeed.
+  `.github/workflows/pv-tests.yml` runs PV checks on GitHub-hosted Ubuntu
+  x86-64 runners.
 - `crates/seedbox-vmm` builds only on Linux x86-64, so a Mac pre-check covers
   none of it. A VMM change needs `cargo build-vmm` and
   `cargo test-vmm --features kvm-tests` on a Linux KVM host. Without the
