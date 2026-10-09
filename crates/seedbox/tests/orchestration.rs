@@ -2593,3 +2593,29 @@ fn exploration_attempts_link_one_shared_copy_of_each_input() {
         assert_eq!(count, shared_count);
     }
 }
+
+#[test]
+fn put_file_of_a_retained_object_reads_it_without_rewriting_it() {
+    use std::os::unix::fs::MetadataExt;
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("engine");
+    fs::write(&source, b"retained engine bytes").unwrap();
+    let store = ContentStore::new(directory.path().join("store"));
+    let digest = store.put_file(&source).unwrap();
+    let object = directory.path().join("store/sha256").join(digest.hex());
+    let before = fs::metadata(&object).unwrap();
+    // Another process (a fresh store) verifies the existing object and keeps it.
+    let fresh = ContentStore::new(directory.path().join("store"));
+    assert_eq!(fresh.put_file(&source).unwrap(), digest);
+    let after = fs::metadata(&object).unwrap();
+    assert_eq!(
+        (before.ino(), before.ctime_nsec()),
+        (after.ino(), after.ctime_nsec())
+    );
+    // A corrupted existing object is never repaired or accepted.
+    fs::write(&object, b"retained engine byteX").unwrap();
+    assert!(fresh.put_file(&source).is_err());
+    assert!(ContentStore::new(directory.path().join("store"))
+        .put_file(&source)
+        .is_err());
+}
