@@ -95,7 +95,7 @@ pub(crate) fn archive(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(Error::Setup(format!("{}: {error}", ignore.display()))),
     };
-    let mut tar = tar::Builder::new(fs::File::create(output)?);
+    let mut tar = tar::Builder::new(std::io::BufWriter::new(fs::File::create(output)?));
     tar.follow_symlinks(false);
     let mut total = 0u64;
     for entry in walkdir::WalkDir::new(root)
@@ -151,7 +151,7 @@ pub(crate) fn archive(
         }
         tar.append_path_with_name(path, name)?;
     }
-    tar.finish()?;
+    std::io::Write::flush(&mut tar.into_inner()?)?;
     Ok(())
 }
 #[cfg(test)]
