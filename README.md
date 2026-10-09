@@ -302,47 +302,18 @@ rebuilt OCI images to have identical bytes.
 
 ## Contributor checks
 
-`cargo build-vmm` and `cargo test-vmm` select `harness/vmm-rustc.py` only for
-the standalone VMM build and its dependencies. It remaps checkout, home/Cargo
-registry and rustc sysroot source paths, keeps release `debug = 1`, and removes
-the Nix dev shell's synthetic `outputs/out/lib` RPATH. Nix stdenv adds that
-entry through `_addRpathPrefix`; real library and Nix store paths remain intact.
-Other Cargo builds and their target directories are unaffected.
-The wrapper's content hash is included in Cargo's compiler fingerprint, so
-enabling or editing it invalidates cached VMM artifacts and dependencies.
 The shared `seedbox-control` source is compiled by
-`crates/seedbox-vmm/control/Cargo.toml`, a small package inside the VMM workspace. Cargo
-then hashes its path relative to that workspace instead of the checkout's
-absolute path when computing crate metadata. The VMM's inherited workspace
-package and dependency keys match the root workspace. Its distinct package name
-also lets the combined CLI use the same protocol source without Cargo path-ID
-collisions; the schema is not copied.
+`crates/seedbox-vmm/control/Cargo.toml`, a small package inside the VMM workspace.
+Its distinct package name lets the combined CLI use the same protocol source
+without Cargo path-ID collisions; the schema is not copied.
 The canonical `seedbox-engine-core` policies use the same package isolation via
 both backends' `engine-core` packages. Their directory links and source watchers
 cover every policy module, including added files. Canonical and wrapper build
 scripts also track the automatic build-only checkout input from `.cargo/config.toml`,
 so a shared cache cannot reuse another checkout's code merely because its timestamps
 are older. Run Cargo from the checkout root (including standalone aliases) for caching.
-Without matching config, the source is safely rebuilt on every invocation. The CLI
-build script follows the same rule for Git provenance, embedded supervisor inputs
-and the Mac runtime bundle. It resolves inputs from Cargo's runtime package directory,
-even when the script executable was cached in another checkout. This input stays in the build scripts. Portable tests import the core
-crate directly; UART register admission remains in the KVM adapter. Moving these
-sources changes engine bytes and requires final Linux merge-train validation.
-
-On Linux in the project dev shell, run
-`bash harness/check-vmm-reproducible.sh [REV]` (default `HEAD`). It builds two
-fresh archives of the same commit at different temporary paths, compares SHA-256,
-rejects embedded checkout, HOME, CARGO_HOME and rustc sysroot paths, prints
-per-crate `-C metadata` and differing embedded paths on mismatch,
-and removes both checkouts on success or failure. It needs neither KVM nor root.
-Equality assumes the same pinned toolchain, libraries and build options; this
-does not establish reproducibility across different toolchains.
-
-These flags change every engine hash. Existing pinned/accepted engine hashes
-cannot be reproduced from source with the new flags; the next engine re-pin
-must use the new build and complete host qualification. Retained old engine
-bytes remain the inputs for their existing runs. This change updates no pins.
+Portable tests import the core crate directly; UART register admission remains in
+the KVM adapter.
 
 Portable checks must pass at the PR or merge-train head before spending AMD
 host time. Use the fast pre-check on a Mac or any other non-KVM machine:

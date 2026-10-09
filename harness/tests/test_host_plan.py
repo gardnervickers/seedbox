@@ -58,7 +58,6 @@ class MapTests(unittest.TestCase):
                 ('flake.nix', 'toolchain'), ('flake.lock', 'toolchain'),
                 ('rust-toolchain.toml', 'toolchain'), ('Cargo.lock', 'toolchain'),
                 ('.cargo/config.toml', 'toolchain'),
-                ('harness/vmm-rustc.py', 'toolchain'),
                 ('crates/seedbox-control/Cargo.toml', 'toolchain'),
                 ('harness/batch.sh', 'batch runner')):
             with self.subTest(path=path):
@@ -165,7 +164,7 @@ class MapTests(unittest.TestCase):
                 plan = host_plan.select_checks({'r': [path]})
                 self.assertEqual(set(plan['checks']), {'core'})
         for path in ('crates/seedbox-vmm/Cargo.lock', 'guest/compose-init.c', 'flake.lock',
-                     'harness/vmm-rustc.py', 'crates/seedbox-control/Cargo.toml',
+                     'crates/seedbox-control/Cargo.toml',
                      'crates/seedbox-control/src/lib.rs'):
             with self.subTest(path=path):
                 self.assertIn('cluster-fixed', host_plan.select_checks({'r': [path]})['checks'])
@@ -433,8 +432,8 @@ class GitPlannerTests(unittest.TestCase):
         self.assertFalse(plan['engine_changed'])
         self.assertNotIn('cluster-fixed', plan['checks'])
 
-    def test_wrapper_and_control_are_engine_inputs_compared_with_main(self):
-        for path in ('harness/vmm-rustc.py', 'crates/seedbox-control/Cargo.toml',
+    def test_control_is_an_engine_input_compared_with_main(self):
+        for path in ('crates/seedbox-control/Cargo.toml',
                      'crates/seedbox-control/src/lib.rs'):
             with self.subTest(path=path):
                 self.commit(path, 'original')
