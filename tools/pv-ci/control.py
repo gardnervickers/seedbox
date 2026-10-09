@@ -116,15 +116,39 @@ def provision(api, github, args):
         raise
 
 
+def image_slot(api, *, reclaim=False):
+    """Never create a third image, including pending imports (serialized workflows)."""
+    resources = sweeper.images(api)
+    if len(resources) < 2:
+        return
+    if len(resources) > 2:
+        raise RuntimeError("two-image cap exceeded; wait for independent cleanup")
+    in_use = {d.get("image", {}).get("id") for d in sweeper.droplets(api)}
+    candidates = sorted((i for i in resources if i.get("status") == "available"
+                         and i["id"] not in in_use), key=lambda i: i["created_at"])
+    if not candidates:
+        raise RuntimeError("two-image cap reached; no unused completed image can be replaced")
+    if not reclaim:
+        return
+    path = f"/images/{candidates[0]['id']}"
+    deadline = time.monotonic() + 120
+    while not sweeper.delete_resource(api, path):
+        if time.monotonic() >= deadline:
+            raise RuntimeError("old image deletion not confirmed; refusing a third image")
+        time.sleep(5)
+    # Also require list visibility to agree; an ambiguous result fails closed.
+    if len(sweeper.images(api)) >= 2:
+        raise RuntimeError("image inventory still full after deletion; refusing a third image")
+
+
 def import_image(api, args):
     healthy(api)
     name = f"seedbox-pv-{args.key}-{attempt()}"
     if any(i["name"] == name for i in sweeper.images(api)):
         raise RuntimeError("this image import already exists; do not retry an ambiguous creation")
-    if len(sweeper.images(api)) >= 3:
-        raise RuntimeError("three managed images already exist; cleanup must finish before importing")
     with open(args.url_file) as stream:
         url = stream.read().strip()
+    image_slot(api, reclaim=True)
     # URL contains temporary Spaces credentials; never print it or API bodies.
     response = api.request("POST", "/images", {
         "name": f"seedbox-pv-{args.key}-{attempt()}",
@@ -204,8 +228,7 @@ def main():
         healthy(api)
         needed = matching_image(api, args) is None
         if needed:
-            if len(sweeper.images(api)) >= 3:
-                raise RuntimeError("managed image limit reached")
+            image_slot(api)
             budget.reserve(api, attempt(), int(time.time()), image=True)
         output("needed", str(needed).lower())
     elif args.command == "canary":

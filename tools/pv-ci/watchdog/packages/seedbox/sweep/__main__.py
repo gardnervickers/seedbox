@@ -92,12 +92,18 @@ def delete(api, droplet_id):
 
 def image_victims(resources, active, now):
     in_use = {d.get("image", {}).get("id") for d in active}
+    keep = {i["id"] for i in resources if i["id"] in in_use}
+    pending = sorted((i for i in resources if i.get("status") != "available"
+                      and timestamp(i["created_at"]) + IMAGE_IMPORT_LIFETIME > now),
+                     key=lambda i: i["created_at"], reverse=True)
     available = sorted((i for i in resources if i.get("status") == "available"),
                        key=lambda i: i["created_at"], reverse=True)
-    keep = {i["id"] for i in available[:2]} | in_use
-    return [i for i in resources if i["id"] not in keep and
-            (i.get("status") == "available" or
-             timestamp(i["created_at"]) + IMAGE_IMPORT_LIFETIME <= now)]
+    # Pending imports consume a slot too. Never delete an in-use image even if
+    # someone bypassed the controller and created more than two active images.
+    for resource in pending + available:
+        if len(keep) < 2:
+            keep.add(resource["id"])
+    return [i for i in resources if i["id"] not in keep]
 
 
 def heartbeat_age(api, now):

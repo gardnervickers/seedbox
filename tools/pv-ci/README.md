@@ -40,7 +40,7 @@ spending cap. Do not use the CI credentials for other provisioning code.
 | Concurrency | Image, canary and test workflows share `seedbox-pv-cloud`; the controller also refuses when a managed droplet exists. This relies on using these serialized workflows, not an atomic cloud-wide lock. |
 | Droplet lifetime | Two-hour expiration attached atomically at creation; independent cleanup every minute. Local runner limit 110 minutes; test job timeout 100 minutes. |
 | Image builds | At most two attempts/day and eight/month; each build job has a 120-minute timeout. Reuse matching images. |
-| Image storage | Keep two successful images, protect any in-use image, and admit no new import while three managed images exist. Failed/pending imports expire after two hours, even if GitHub was canceled. |
+| Image storage | Maximum two managed images, including pending imports. Before importing a replacement, delete the oldest unused completed image and confirm its absence. Stop if both slots are protected; never delete an in-use image. Failed/pending imports expire after two hours, even if GitHub was canceled. |
 | Upload staging | Maximum 8 GiB compressed image. Require an unversioned bucket with verified one-day object expiration and incomplete multipart abort rules before building/uploading. |
 | Diagnostics | At most 64 MiB/job, 8 MiB/file, 128 files, retained seven days. Full VM disks are omitted; export them separately when needed. |
 

@@ -161,11 +161,40 @@ class LifecycleTests(unittest.TestCase):
                   image(5, "pending", "1970-01-01T02:30:00Z")]
         api = FakeAPI(images=images)
         sweep.sweep(api, 10000)
-        self.assertEqual([i["id"] for i in api.images], [2, 3, 5])
+        self.assertEqual([i["id"] for i in api.images], [3, 5])
 
     def test_image_used_by_active_droplet_is_not_pruned(self):
         images = [{"id": i, "status": "available", "created_at": str(i)} for i in range(3)]
-        self.assertEqual(sweep.image_victims(images, [{"image": {"id": 0}}], 10000), [])
+        self.assertEqual([i["id"] for i in sweep.image_victims(
+            images, [{"image": {"id": 0}}], 10000)], [1])
+
+    def test_image_import_reclaims_one_slot_before_creation(self):
+        images = [{"id": i, "name": "seedbox-pv-test", "status": "available",
+                   "created_at": str(i)} for i in (1, 2)]
+        api = FakeAPI(images=images)
+        control.image_slot(api)  # Planning must not discard rollback images.
+        self.assertEqual(len(api.images), 2)
+        control.image_slot(api, reclaim=True)
+        self.assertEqual([i["id"] for i in api.images], [2])
+
+    def test_image_slot_preserves_in_use_and_pending_images(self):
+        images = [{"id": 1, "name": "seedbox-pv-test", "status": "available", "created_at": "1"},
+                  {"id": 2, "name": "seedbox-pv-test", "status": "pending", "created_at": "2"}]
+        active = droplet()
+        active["image"] = {"id": 1}
+        api = FakeAPI(resources=[active], images=images)
+        with self.assertRaisesRegex(RuntimeError, "no unused"):
+            control.image_slot(api, reclaim=True)
+        self.assertFalse(api.calls)
+
+    def test_unconfirmed_image_deletion_blocks_import(self):
+        images = [{"id": i, "name": "seedbox-pv-test", "status": "available",
+                   "created_at": str(i)} for i in (1, 2)]
+        api = FakeAPI(images=images, deletion_confirmed=False)
+        with patch.object(control.time, "monotonic", side_effect=[0, 121]):
+            with self.assertRaisesRegex(RuntimeError, "refusing a third"):
+                control.image_slot(api, reclaim=True)
+        self.assertEqual(len(api.images), 2)
 
     def test_canary_requires_observed_existence_then_absence_after_expiry(self):
         for early_absence in (True, False):
