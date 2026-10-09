@@ -547,7 +547,7 @@ pub fn parse_for_architecture(
     // Seeds diverge in frame timing by default; an explicit 0 turns it off.
     network.jitter_ns = match ext.get("network").and_then(|v| v.get("jitter")) {
         Some(v) => duration(v, "$.x-seedbox.network.jitter", true)?,
-        None => network.latency_ns / DEFAULT_NETWORK_JITTER_DIVISOR,
+        None => 0,
     };
     if network.jitter_ns >= network.latency_ns {
         return invalid("$.x-seedbox.network.jitter", "must be less than latency");
@@ -625,7 +625,7 @@ pub fn parse_for_architecture(
         }
     }
     let mut schedule = Schedule {
-        timer_jitter_ns: DEFAULT_TIMER_JITTER_NS,
+        timer_jitter_ns: 0,
         stop_tolerance_ns: 0,
         // A very short simulation keeps most of its time after the release.
         start_stagger_ns: DEFAULT_START_STAGGER_NS.min(limits.simulated_time_ns / 2),
