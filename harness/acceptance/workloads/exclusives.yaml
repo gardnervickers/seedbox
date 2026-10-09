@@ -1,0 +1,12 @@
+name: exclusives
+services:
+  check:
+    build:
+      context: ../../../guest/progress/fixtures
+      dockerfile: Dockerfile
+x-seedbox:
+  version: 1
+  machine: {memory_mb: 1024}
+  seed: 1009
+  limits: {simulated_time: 10s, wall_time: 120s}
+  check: {service: check, exit_code: 0}

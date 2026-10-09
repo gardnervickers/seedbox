@@ -32,79 +32,80 @@ until the world's wall-time limit; the host watchdog (`--watchdog-ms`)
 interrupts such a run to report on stderr where the guest is stuck, then
 resumes it, so it changes only how soon the report appears, never a result.
 
-## ARM limitations and partial mitigation
+## ARM software reservations
 
-**General ARM determinism is not established.** A single guest CPU does not
-prevent host interruptions from causing spurious `STXR` failures. An application
-can observe those failures directly through an LL/SC retry counter, weak CAS or
-backoff. Even an otherwise invisible retry can change the client's TLS budget
-and the placement of progress charges. The translator's own code and kernel
-LL/SC sequences also remain outside the client's coverage.
+The ARM guest and translator implement a software exclusive reservation. A host
+interrupt can clear the physical exclusive monitor without any observable guest
+exception, so passing the hardware `STXR` failure directly to the application
+would make weak CAS, retry counters and progress accounting nondeterministic.
 
-The supervisor uses `-no_ldstex2cas -unsafe_build_ldstex`. Packing keeps supported
-exclusive sequences together and reduces instrumentation-induced failures.
-DynamoRIO cannot pack every sequence: PC-relative instructions, long regions and
-register pressure can prevent it. Its alternative exclusive-to-CAS conversion
-remains disabled because of correctness problems described below.
+`nix/dynamorio.nix` builds the ARM core and register-management extensions with
+`guest/progress/dynamorio-exclusives.patch`; x86 continues to use the upstream
+SDK core. The supervisor enables `-ldstex2cas` on ARM. Packing and the client's
+block-local retry exclusions are no longer used: every application block is
+charged, including split exclusive sequences and polling loops.
 
-The client applies a limited, block-local mitigation:
+The protocol relies on the existing single guest CPU:
 
-- It skips the entry charge when a block starts with an exclusive load or a
-  packed `ldstex` instruction, or contains a store-exclusive or `CLREX` before
-  any exclusive load. Ordinary successor blocks retain their entry charge.
-- If an unpacked load-starting block branches backward before any exclusive
-  store, it charges the taken branch. That allows simple abandoned-reservation
-  polls to advance time.
-- A packed poll may loop internally without a charge. The client reports
-  recognized cases on stderr, but cannot make the owner wake on virtual time.
+1. The kernel advances an epoch at every return to EL0, after signal/scheduling
+   work and before restoring user registers. It clears the physical monitor and
+   publishes the epoch in `TPIDRRO_EL0`. The epoch lives at byte 40 of the shared
+   PV page; the stopped VMM also advances it at semantic exits and before device
+   delivery, including delivery that can partially modify memory before failing.
+   Host interruptions, ordinary publication and backend debug-unlock maintenance
+   leave it unchanged. VMM updates of `TPIDRRO_EL0` are restricted to stopped EL0;
+   kernel entry code can continue to use that register as scratch at EL1.
+2. A translated exclusive load records the epoch before loading, together with
+   its address, value and size. The same-block optimization is disabled because
+   a guest exception can interrupt even a single translated block. Overlapping
+   address/destination registers are saved before the load overwrites them.
+3. A translated exclusive store checks address and size and consumes the saved
+   reservation. Its commit loop takes a physical exclusive reservation, compares
+   the value, reads the live epoch, and attempts the physical exclusive store.
+   Epoch validation is inside every physical attempt, closing the race between
+   the check and the store. There are no intervening memory accesses inside the
+   physical pair. A changed epoch or value fails the application store. A lost
+   physical reservation with unchanged guest state retries internally, below
+   application control flow and progress accounting.
+4. `CLREX` invalidates the software reservation. Every attempted store consumes
+   it, including mismatched stores. `WZR` status uses a private scratch register
+   so physical retries still complete deterministically. Fault reconstruction
+   preserves the original full status register, other borrowed registers and
+   the application PC. Successful stores retain their actual zero/one status.
 
-This is not a control-flow proof. An intermediate block in a split sequence,
-retry work outside the recognized blocks, or a different retry target can still
-change accounting or insert instrumentation inside a reservation. Looking back
-sixteen adjacent instructions cannot establish the incoming control flow, so
-that heuristic has been removed. Neither a successful workload nor equal syscall
-counts proves these cases safe. A loop outside progress coverage can stall until
-the wall-time limit; the diagnostic watchdog does not advance guest time.
+Fault restoration also bounds drreg's TLS spill-slot lookup to the public slot
+range. Upstream's out-of-range arithmetic can mistake private translator slots
+for public client slots and overwrite correctly restored application registers.
+The paired-store fault regression exercises this interaction with the counting
+client enabled.
 
-The fixtures under `guest/progress/fixtures/` are native ARM Linux diagnostics
-for packed/unpacked polls, split sequences and observable weak-CAS failures.
-They do not assert replay determinism. In particular, their native owner thread
-can wake on host time even when a Seedbox guest owner would remain asleep.
+The translator virtualizes application reads of `TPIDRRO_EL0` to Linux's native
+64-bit value of zero; applications do not see the epoch or supply any settings.
+The protocol covers translated shared libraries and JIT code as well as static
+binaries. A progress syscall between application load/store instructions is a
+real guest boundary and may cause a deterministic failed store. The aim is
+repeatable execution, not a promise that applications observe zero retries.
 
-## Independent ARM follow-up
+The kernel's two futex LL/SC helpers retry physical failures locally rather than
+exhausting a 128-attempt budget and reaching `-EAGAIN`/`cond_resched`. Fault fixups,
+value-mismatch exits and memory barriers remain intact. The audited native
+DynamoRIO atomics and enabled ARM kernel atomic helpers likewise retry physical
+failures internally; they are outside application block counting.
 
-Tracked in [#241](https://github.com/gardnervickers/seedbox/issues/241).
+`harness/acceptance/workloads/exclusives.yaml` exercises a weak-CAS counter on
+both architectures. On ARM it also checks all exclusive widths, pairs, address
+overlap, consumed reservations, `CLREX`, syscall/ABA invalidation, discarded
+loads/status, stack and reserved-register operands, and signal contexts for
+faulting single/pair stores. Normal acceptance
+runs it twice and compares full state, then replays it. The assembly fixtures
+live under `guest/progress/fixtures/`. The older `run.sh` remains a native
+upstream packing diagnostic, not the acceptance gate for this protocol.
 
-Two concrete DynamoRIO 11.3.0-1 conversion problems have been reproduced on
-Apple Silicon using minimal static ARM programs:
+The investigation is tracked in [#241](https://github.com/gardnervickers/seedbox/issues/241).
+Kernel polling that never reaches a PV operation can still stall virtual time;
+this reservation protocol does not add kernel progress instrumentation.
 
-1. For an overlapping load such as `LDAXR W3, [X3]`, the converter saves the
-   reservation address after the load overwrites X3. Static musl's exit lock
-   uses this shape and retries forever. Saving the address before the load
-   fixes the minimal reproducer and lets the static-musl program finish. A
-   same-compiler rebuild without the patch still hangs.
-2. After a successful store-exclusive, a second store-exclusive without a new
-   load must fail. The converter can reuse its saved reservation and succeed.
-   The minimal test passes natively and fails under stock conversion.
-
-The first repair is small and confirmed; it is not a general determinism fix.
-Value comparison alone also cannot represent reservation loss across a guest
-interrupt or an ABA write. A software reservation must be consumed, honor
-`CLREX`, and be invalidated at the relevant guest exception and scheduling
-boundaries. Checking an epoch before a CAS has a race if the guest switches
-between the check and the store. The eventual commit operation must close that
-race, preserve fault behavior and memory ordering, and hide host retries from
-both the application and the progress budget.
-
-Controlling the guest kernel gives us places to implement that contract without
-translating the entire kernel. A kernel exception/return hook plus a protected
-commit sequence is a candidate, not yet a validated design. Linux 6.12.112 also
-contains explicit LL/SC in `arch/arm64/include/asm/futex.h`, including bounded
-retries that can return `-EAGAIN`; enabling LSE alone does not replace that inline
-assembly. Kernel coverage and translator-internal atomics need separate audits.
-No application-specific flags or environment changes are an acceptable fix.
-
-## Reproducer
+## Original reproducer and baseline evidence
 
 This fixture removes Node, JIT and threads from the question. It increments one
 integer with `LDXR`/`STXR` and counts failed stores; the conditional branch
