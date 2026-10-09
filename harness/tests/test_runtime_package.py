@@ -1,7 +1,4 @@
 """Identical guest bytes must not inherit Docker/Podman export permissions."""
-import hashlib
-import io
-import json
 import importlib.util
 import os
 from pathlib import Path
@@ -22,18 +19,18 @@ class RuntimePackageTests(unittest.TestCase):
             for mode, timestamp in ((0o600, 1234), (0o755, 5678)):
                 assets = root / str(mode)
                 assets.mkdir()
-                for name in ("Image", "compose-init", "runtime.json"):
+                for name in ("NOTICE.txt", "compose-init", "mke2fs"):
                     path = assets / name
                     path.write_bytes(name.encode())
                     path.chmod(mode)
                     os.utime(path, (timestamp, timestamp))
                 output = root / (str(mode) + ".tar.gz")
-                build.write_package(assets, output)
+                build.package(assets, output)
                 packages.append(output)
             self.assertEqual(packages[0].read_bytes(), packages[1].read_bytes())
             with tarfile.open(packages[0]) as archive:
                 for entry in archive:
-                    self.assertEqual(entry.mode, 0o755 if entry.name == "compose-init" else 0o644)
+                    self.assertEqual(entry.mode, 0o755 if entry.name in {"compose-init", "mke2fs"} else 0o644)
                     self.assertEqual((entry.uid, entry.gid, entry.mtime), (0, 0, 0))
                     self.assertEqual(archive.extractfile(entry).read(), entry.name.encode())
 
@@ -46,11 +43,13 @@ class RuntimePackageTests(unittest.TestCase):
             root = Path(directory)
             guest = root / "guest"
             guest.mkdir()
-            names = ["compose-init", "mke2fs", "NOTICE.txt", "provenance.json"]
+            names = ["compose-init", "mke2fs", "NOTICE.txt"]
             for name in names:
                 path = guest / name
                 path.write_bytes(name.encode())
                 path.chmod(0o444)
+            (guest / "runtime.json").write_text("obsolete hash manifest")
+            (guest / "provenance.json").write_text("obsolete provenance")
             guest.chmod(0o555)
             output = root / "runtime.tar.gz"
             try:
@@ -59,8 +58,6 @@ class RuntimePackageTests(unittest.TestCase):
             finally:
                 guest.chmod(0o700)
             with tarfile.open(output) as archive:
-                manifest = json.load(archive.extractfile("runtime.json"))
-                self.assertNotIn("image", manifest)
+                self.assertEqual(set(archive.getnames()), set(names))
                 for name in names:
-                    content = archive.extractfile(name).read()
-                    self.assertEqual(manifest["files"][name], hashlib.sha256(content).hexdigest())
+                    self.assertEqual(archive.extractfile(name).read(), name.encode())

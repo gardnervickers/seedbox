@@ -20,6 +20,9 @@ archive in Seedbox; the archive is no longer needed to run that executable.
 Seedbox extracts its embedded helpers into a private per-invocation temporary
 directory and removes that extraction when finished. Only the kernel remains
 a separate runtime file.
+Helper archives contain only `compose-init`, `mke2fs`, and upstream `NOTICE.txt`.
+No helper hash manifest or provenance metadata is required. Archive extraction
+still checks member names, types, duplicates, required files, and size limits.
 Nix and the container engine retain their own ordinary build/image storage.
 
 The first build needs public source downloads, but no private GitHub credentials.

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Read upstream notices without extracting source archive paths."""
-import hashlib
 import tarfile
 
 NOTICES = {
@@ -9,20 +8,13 @@ NOTICES = {
 }
 
 
-def digest(path):
-    with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
-
-
 def notices(sources, components=NOTICES):
     sections = []
-    hashes = {}
     for component in components:
         groups = NOTICES[component]
         path = sources / (component + ".source")
         if not path.is_file():
             raise ValueError(f"missing provisioned upstream source: {path}")
-        hashes[component] = {"sha256": digest(path)}
         with tarfile.open(path, "r:*") as archive:
             # Upstream archives have a single top-level source directory. Do
             # not extract trees or follow archived links to discover licenses.
@@ -48,4 +40,4 @@ def notices(sources, components=NOTICES):
     result = b"\n".join(sections)
     if len(result) > 8 << 20:
         raise ValueError("combined actual upstream notices exceed 8 MiB")
-    return result, hashes
+    return result

@@ -1,5 +1,4 @@
 """The helper build retains actual notices from upstream source archives."""
-import hashlib
 import importlib.util
 import io
 from pathlib import Path
@@ -27,15 +26,14 @@ def source_archive(path, name, kind="file"):
 
 
 class RuntimeNoticeTests(unittest.TestCase):
-    def test_actual_notice_bytes_and_source_hashes_are_retained(self):
+    def test_actual_notice_bytes_are_retained(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for component in notices.NOTICES:
                 source_archive(root / (component + ".source"), component)
-            text, sources = notices.notices(root)
+            text = notices.notices(root)
             for component in notices.NOTICES:
                 self.assertIn(f"Synthetic {component} parser-test notice".encode(), text)
-                self.assertEqual(sources[component]["sha256"], hashlib.sha256((root / (component + ".source")).read_bytes()).hexdigest())
 
     def test_missing_or_linked_notice_is_rejected_without_extraction(self):
         for kind in ("missing", "symlink"):
