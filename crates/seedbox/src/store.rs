@@ -104,7 +104,8 @@ impl ContentStore {
 
     /// Retain a run's own evidence (identity, logs) without syncing it. A host
     /// crash can lose such an object, and a record that names it then fails
-    /// verification as an integrity error; it is never silently wrong. Inputs
+    /// verification as an integrity error; it is never silently wrong. Putting
+    /// the same bytes unsynced again replaces such an object. Inputs
     /// that later runs replay from keep using the synced `put*` calls.
     pub fn put_unsynced(&self, bytes: &[u8]) -> Result<ContentDigest> {
         self.put_reader_with(bytes, false)
@@ -126,7 +127,13 @@ impl ContentStore {
         }
         match temp.persist_noclobber(&path) {
             Ok(_) => {}
-            Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                // A host crash can leave an unsynced object named but short.
+                // These bytes hash to the digest, so put them in its place.
+                if !durable && self.verify(&digest).is_err() {
+                    e.file.persist(&path).map_err(|e| e.error)?;
+                }
+            }
             Err(e) => return Err(e.error.into()),
         }
         // Verify an existing entry too; never repair corruption implicitly.
