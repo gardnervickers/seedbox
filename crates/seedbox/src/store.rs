@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs,
-    io::{self, Read, Write},
+    io::{self, Read, Seek, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -115,8 +115,21 @@ impl ContentStore {
         Ok(digest)
     }
 
+    /// Like `put_reader`, but an object already in the store is only read:
+    /// the file is hashed first, so retaining the same engine, kernel or image
+    /// again never rewrites and syncs a second copy of it.
     pub fn put_file(&self, path: &Path) -> Result<ContentDigest> {
-        self.put_reader(fs::File::open(path)?)
+        let mut file = fs::File::open(path)?;
+        let digest = transfer(&mut file, &mut io::sink())?;
+        if let Ok(existing) = self.open(&digest) {
+            // Verify the existing entry; never repair corruption implicitly.
+            if self.trusted(&digest, &existing)?.is_none() {
+                self.verify(&digest)?;
+            }
+            return Ok(digest);
+        }
+        file.seek(io::SeekFrom::Start(0))?;
+        self.put_reader(file)
     }
 
     pub fn read(&self, digest: &ContentDigest) -> Result<Vec<u8>> {
