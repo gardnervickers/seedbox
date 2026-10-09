@@ -235,7 +235,7 @@ fn resolve_linux_runtime(
 }
 
 /// The home directory of the user who invoked sudo, if any.
-fn sudo_home() -> Option<PathBuf> {
+pub(crate) fn sudo_home() -> Option<PathBuf> {
     use std::{ffi::CStr, ffi::CString, os::unix::ffi::OsStrExt};
     let user = CString::new(env::var_os("SUDO_USER")?.as_bytes()).ok()?;
     // getpwnam is not thread-safe; the CLI calls this before starting threads.
