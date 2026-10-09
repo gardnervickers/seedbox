@@ -23,8 +23,7 @@ This establishes those image versions, not compatibility with arbitrary OCI imag
 
 Production preparation uses one service per VM, with private RAM-backed storage
 retained across process restart only. The repository's `docs/compatibility.md`
-describes current draft formats and version-bound runtime evidence; V0 release
-compatibility and host-proof admission remain qualification gates.
+describes current draft formats and compatibility boundaries.
 
 Each service gets its service name as the hostname, a private `/dev` with
 64 MiB `/dev/shm` and devpts, soft/hard `nofile` limits of 1048576, and
