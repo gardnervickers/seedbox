@@ -237,12 +237,75 @@ impl Clock {
     }
 }
 
+/// Guest image bytes. Boot copies a mapped image into guest RAM straight
+/// from the page cache instead of reading it into the heap first.
+pub(crate) enum GuestImage {
+    Mapped { ptr: *const u8, len: usize },
+    Owned(Vec<u8>),
+}
+
+impl GuestImage {
+    fn open(path: &str) -> std::io::Result<Self> {
+        use std::os::fd::AsRawFd;
+        let file = std::fs::File::open(path)?;
+        let len = usize::try_from(file.metadata()?.len())
+            .map_err(|_| std::io::Error::other("file too large"))?;
+        if len == 0 {
+            return Ok(Self::Owned(Vec::new()));
+        }
+        // SAFETY: a fresh private read-only mapping of an open file; retained
+        // inputs are read-only and nothing writes them while a run executes.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self::Mapped {
+            ptr: ptr.cast(),
+            len,
+        })
+    }
+}
+
+impl From<Vec<u8>> for GuestImage {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::Owned(bytes)
+    }
+}
+
+impl std::ops::Deref for GuestImage {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            // SAFETY: `ptr` maps `len` readable bytes until drop.
+            Self::Mapped { ptr, len } => unsafe { std::slice::from_raw_parts(*ptr, *len) },
+            Self::Owned(bytes) => bytes,
+        }
+    }
+}
+
+impl Drop for GuestImage {
+    fn drop(&mut self) {
+        if let Self::Mapped { ptr, len } = self {
+            unsafe { libc::munmap(*ptr as *mut libc::c_void, *len) };
+        }
+    }
+}
+
 /// Everything a machine boots from. A reboot starts a new incarnation from
 /// exactly these inputs, with its own entropy and timer seeds.
 #[derive(Clone)]
 pub struct BootInputs {
     kernel: Rc<[u8]>,
-    initrd: Rc<[u8]>,
+    initrd: Rc<GuestImage>,
     /// The command line before and after the launch barrier flag.
     cmdline: (String, String),
     mem: usize,
@@ -606,15 +669,13 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
     let mut machines = Vec::new();
     let mut macs = Vec::new();
     let mut boots = Vec::new();
-    let mut initrds: BTreeMap<String, Rc<[u8]>> = BTreeMap::new();
+    let mut initrds: BTreeMap<String, Rc<GuestImage>> = BTreeMap::new();
     for (i, mc) in cfg["machines"].as_array().unwrap().iter().enumerate() {
         let ipath = path(&mc["initrd"]).to_string_lossy().to_string();
         if !initrds.contains_key(&ipath) {
             initrds.insert(
                 ipath.clone(),
-                std::fs::read(&ipath)
-                    .map_err(|e| format!("{ipath}: {e}"))?
-                    .into(),
+                Rc::new(GuestImage::open(&ipath).map_err(|e| format!("{ipath}: {e}"))?),
             );
         }
         let mac = [0x52, 0x54, 0x00, 0x00, 0x00, i as u8 + 1];
