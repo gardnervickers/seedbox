@@ -890,8 +890,30 @@ pub fn replay_readiness(
 }
 
 /// [`SeedPlan::check_after`] for a world document held as JSON.
+/// The ARM worker checks its raw world document before decoding the plan, so
+/// this reads only the timed fields and names any missing one.
 pub fn check_plan_after(cfg: &Value, from: u64) -> Result<(), String> {
-    SeedPlanConfig::from_value(cfg)?.plan().check_after(from)
+    let mut times = Vec::new();
+    for key in ["faults", "scenario"] {
+        for (i, ev) in cfg[key].as_array().into_iter().flatten().enumerate() {
+            times.push((format!("{key}[{i}].at_ns"), ev["at_ns"].as_u64()));
+        }
+    }
+    if cfg["kill_restart"].is_object() {
+        times.push((
+            "kill_restart.start_ns".into(),
+            cfg["kill_restart"]["start_ns"].as_u64(),
+        ));
+    }
+    for (what, t) in times {
+        let t = t.ok_or(format!("{what} required"))?;
+        if t < from {
+            return Err(format!(
+                "{what} {t} is before the fork point {from}; in a forked world it must be at or after the release (boot.fork_at_ns or the launch barrier, plus boot.release_skew_ns)"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Install everything the run seed decides apart from the machines: link

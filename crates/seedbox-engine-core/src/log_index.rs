@@ -39,8 +39,8 @@ impl ChunkRecord {
             self.offset,
             self.length,
         ];
-        for (chunk, value) in bytes.chunks_exact_mut(8).zip(fields) {
-            chunk.copy_from_slice(&value.to_le_bytes());
+        for (chunk, value) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(fields) {
+            *chunk = value.to_le_bytes();
         }
         bytes
     }
