@@ -40,7 +40,7 @@ spending cap. Do not use the CI credentials for other provisioning code.
 | Concurrency | Image, canary and test workflows share `seedbox-pv-cloud`; the controller also refuses when a managed droplet exists. This relies on using these serialized workflows, not an atomic cloud-wide lock. |
 | Droplet lifetime | Two-hour expiration attached atomically at creation; independent cleanup every minute. Local runner limit 110 minutes; test job timeout 100 minutes. |
 | Image builds | At most two attempts/day and eight/month; each build job has a 120-minute timeout. Reuse matching images. |
-| Image storage | Keep two successful images, protect any in-use image, and admit no new import while three managed images exist. Failed/pending imports expire after two hours, even if GitHub was canceled. |
+| Image storage | Maximum two managed images, including pending imports. Before importing a replacement, delete the oldest unused completed image and confirm its absence. Stop if both slots are protected; never delete an in-use image. Failed/pending imports expire after two hours, even if GitHub was canceled. |
 | Upload staging | Maximum 8 GiB compressed image. Require an unversioned bucket with verified one-day object expiration and incomplete multipart abort rules before building/uploading. |
 | Diagnostics | At most 64 MiB/job, 8 MiB/file, 128 files, retained seven days. Full VM disks are omitted; export them separately when needed. |
 
@@ -107,8 +107,12 @@ the canary succeeds.
    ```
 
 2. Create a private, never-versioned Spaces staging bucket (or reuse a suitable
-   existing one). Create a bucket-scoped key that can manage objects/multipart
-   uploads and read the bucket's lifecycle and versioning configuration.
+   existing one). DigitalOcean's bucket-scoped read/write keys cannot read the
+   lifecycle configuration: live verification returned `AccessDenied`. The
+   current storage preflight therefore requires a full-access Spaces key, which
+   covers all current and future Spaces buckets in that team. Approve that scope
+   explicitly and keep it in the protected `pv-ci` environment; never give it to
+   a test runner. Do not bypass the lifecycle check to use a narrower key.
 
    ```sh
    robo-gh secret set DO_SPACES_ACCESS_KEY_ID --repo gardnervickers/seedbox --env pv-ci
