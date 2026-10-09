@@ -136,25 +136,19 @@ fn world_worker(executable: OsString, args: Vec<OsString>) -> ExitCode {
                     .map_err(|_| "worker argument is not UTF-8".to_owned())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let undo = std::env::var("SEEDBOX_UNDO").ok();
-        let margin = std::env::var("SEEDBOX_MARGIN").ok();
-        let performance =
-            seedbox_vmm::PerformanceOptions::parse(undo.as_deref(), margin.as_deref())?;
-        let mut options = seedbox_vmm::WorkerOptions::from_args(&args, performance)?;
-        if options.pv_clock {
-            if let Ok(value) = std::env::var("SEEDBOX_PV_WATCHDOG_MS") {
-                options.performance.pv_watchdog_ms = value
-                    .parse()
-                    .map_err(|e| format!("SEEDBOX_PV_WATCHDOG_MS: {e}"))?;
-            }
+        let mut performance = seedbox_vmm::PerformanceOptions::default();
+        if let Ok(value) = std::env::var("SEEDBOX_WATCHDOG_MS") {
+            performance.watchdog_ms = value
+                .parse()
+                .map_err(|e| format!("SEEDBOX_WATCHDOG_MS: {e}"))?;
         }
+        let mut options = seedbox_vmm::WorkerOptions::from_args(&args, performance)?;
         if std::env::var_os("SEEDBOX_TRACE_CONSOLE").is_some() {
             options.console_trace = Some(|trace| {
                 eprintln!(
-                    "[host {:.3}s guest {:.6}s br {}] {}",
+                    "[host {:.3}s guest {:.6}s] {}",
                     trace.host_seconds,
                     trace.guest_seconds,
-                    trace.branches,
                     String::from_utf8_lossy(trace.line)
                 );
             });

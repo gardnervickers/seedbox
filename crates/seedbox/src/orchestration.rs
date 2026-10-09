@@ -228,28 +228,19 @@ impl Orchestrator {
         options: ReplayOptions,
     ) -> Result<Run> {
         let baseline = inspect(directory)?;
-        // Refuse timebase drift before creating an attempt or executing anything.
-        if baseline.identity.inputs.profile.backend == "seedbox-kvm" {
-            let recorded = crate::vmm::recorded_timebase(&baseline.identity.inputs.profile)?;
-            let requested = crate::vmm::recorded_timebase(&executor.profile())?;
-            if crate::vmm::recorded_deferred_tx(&baseline.identity.inputs.profile)?
+        // Refuse TX-mode drift before creating an attempt or executing anything.
+        if baseline.identity.inputs.profile.backend == "seedbox-kvm"
+            && crate::vmm::recorded_deferred_tx(&baseline.identity.inputs.profile)?
                 != crate::vmm::recorded_deferred_tx(&executor.profile())?
-            {
-                return Err(Error::Integrity("executor TX mode does not match the recorded --deferred-tx; use an executor with the recorded TX mode".into()));
-            }
-            if recorded != requested {
-                return Err(Error::Integrity(format!(
-                    "executor timebase {} does not match the recorded --timebase {}; use an executor with the recorded timebase",
-                    requested.name(), recorded.name()
-                )));
-            }
+        {
+            return Err(Error::Integrity("executor TX mode does not match the recorded --deferred-tx; use an executor with the recorded TX mode".into()));
         }
         let mut identity = baseline.identity.clone();
         if options.allow_engine_change {
             let replacement = executor.profile();
             identity.inputs.profile.engine = replacement.engine;
             // A new executable can use different argv without changing the
-            // simulation's retained memory, timebase, faults or other settings.
+            // simulation's retained memory, faults or other settings.
             for key in crate::engine::DESCRIPTOR_FIELDS {
                 identity.inputs.profile.semantic_parameters.remove(key);
                 if let Some(value) = replacement.semantic_parameters.get(key) {
@@ -349,7 +340,6 @@ impl Orchestrator {
             }
             if cancellation.is_cancelled() {
                 return Ok(ExecutionReport {
-                    timebase: None,
                     reason: StopReason::Cancelled,
                     workload_exit: None,
                     witness: None,

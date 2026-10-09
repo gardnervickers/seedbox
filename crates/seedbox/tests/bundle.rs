@@ -127,10 +127,9 @@ impl Fixture {
         };
         let backend = Backend {
             profile,
-            performance: BTreeMap::from([("SEEDBOX_UNDO".into(), "256".into())]),
+            performance: BTreeMap::from([("SEEDBOX_WATCHDOG_MS".into(), "20".into())]),
             extra_logs: BTreeMap::new(),
             report: ExecutionReport {
-                timebase: None,
                 reason: StopReason::Completed,
                 workload_exit: Some(WorkloadExit {
                     service: "workload".into(),
@@ -834,28 +833,22 @@ fn timed_indexes_and_explicit_omissions_round_trip_without_original_output() {
 }
 
 #[test]
-fn pv_timebase_round_trips_with_identity_and_report_then_replays() {
+fn kvm_profile_round_trips_with_identity_and_report_then_replays() {
     let mut f = Fixture::new();
     f.backend.profile.backend = "seedbox-kvm".into();
-    f.backend
-        .profile
-        .semantic_parameters
-        .insert("timebase".into(), "pv".into());
     f.preparer.inputs.profile = f.backend.profile.clone();
-    f.backend.report.timebase = Some(Timebase::Pv);
     let run = f.run();
     let archive = export(&f, &run);
     let state = f.directory.path().join("imported");
     let imported = bundle::import(&archive, &state, &Options::default()).unwrap();
     assert_eq!(imported.record, run.record);
-    assert_eq!(
-        imported.record.identity.inputs.profile.semantic_parameters["timebase"],
-        "pv"
-    );
-    assert_eq!(
-        imported.record.report.as_ref().unwrap().timebase,
-        Some(Timebase::Pv)
-    );
+    assert!(!imported
+        .record
+        .identity
+        .inputs
+        .profile
+        .semantic_parameters
+        .contains_key("timebase"));
     let replay = Orchestrator::new(ContentStore::new(state.join("objects")), state.join("runs"))
         .replay(
             &imported.directory,

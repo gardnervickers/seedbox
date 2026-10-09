@@ -19,7 +19,7 @@ exploration, portable bundles, snapshots, reverse debugging and `verify`
 remain future work tracked in issue #25.
 
 The architecture stays as it is: real Linux machines on KVM, one host thread per
-world, virtual time from counted guest progress, and seeds that choose every
+world, virtual time from charged guest progress, and seeds that choose every
 scheduling, timing and fault decision.
 
 ## Division of labour

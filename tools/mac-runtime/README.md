@@ -22,5 +22,4 @@ See the [etcd quick start](../../README.md#quick-start).
 Guest memory is 64..3072 MiB per service. `explore --workers N` (1..32) runs N
 seeds at once, each in its own engine process and HVF VM, with no core
 reservation; results never depend on the worker count. Arbitrary ARM
-snapshot/fork reuse remains unsupported. Mac uses the PV
-timebase. `--cpu`, `--vmm` and the `x-seedbox.machine` `page_timer` and `deferred_tx` options are Linux-only.
+snapshot/fork reuse remains unsupported. `--cpu`, `--vmm` and the `x-seedbox.machine` `page_timer` and `deferred_tx` options are Linux-only.

@@ -8,27 +8,19 @@ use backends::{Executor, Preparer};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use seedbox::{
-    bundle, config,
-    counter::CounterProfile,
-    diff,
-    execution::{CancellationToken, ExecutionBackend, PreparationBackend, Timebase, WitnessMode},
+    bundle, config, diff,
+    execution::{CancellationToken, ExecutionBackend, PreparationBackend, WitnessMode},
     exploration::{self, ExploreOptions},
     logs,
     orchestration::{self, Orchestrator, Outcome, ReplayOptions, ReplayStatus, RunOptions},
     preparation::OciPreparer,
     store::ContentStore,
     templates::Template,
-    vmm::{
-        recorded_counter, recorded_deferred_tx, recorded_page_timer, recorded_timebase,
-        recorded_torn_writes, VmmExecutor,
-    },
+    vmm::{recorded_deferred_tx, recorded_page_timer, recorded_torn_writes, VmmExecutor},
     Error, Result,
 };
 use signals::Signals;
-use std::{
-    path::{Path, PathBuf},
-    process::ExitCode,
-};
+use std::{path::PathBuf, process::ExitCode};
 
 const EXIT_CODES: &str = "\
 Exit status:
@@ -308,19 +300,14 @@ struct CpuArg {
 }
 
 impl CpuArg {
-    /// Refuse a missing host branch counter.
-    /// PV reads no counter, so it admits any KVM host.
-    fn admit(&self, detected: Result<CounterProfile>, timebase: Timebase) -> Result<()> {
+    /// `--cpu` pins a KVM core; the Mac engine selects no core.
+    fn admit(&self) -> Result<()> {
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         if self.cpu.is_some() {
             return Err(Error::Setup(
                 "--cpu requires Linux KVM; omit it on Mac".into(),
             ));
         }
-        if timebase == Timebase::Pv {
-            return Ok(());
-        }
-        detected?;
         Ok(())
     }
 }
@@ -397,8 +384,7 @@ impl RuntimeInputs {
         &self,
         store: &ContentStore,
         cpu: Option<u32>,
-        counter: CounterProfile,
-        scratch: &Path,
+        scratch: &std::path::Path,
         simulation: &config::Simulation,
         cancellation: &CancellationToken,
     ) -> Result<(Preparer, Executor)> {
@@ -437,7 +423,6 @@ impl RuntimeInputs {
         };
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         let executor = {
-            let _ = counter;
             if cpu.is_some() {
                 return Err(Error::Setup(
                     "--cpu requires Linux KVM; omit it on Mac".into(),
@@ -455,15 +440,14 @@ impl RuntimeInputs {
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         let executor = {
             let executor = if self.kvm.vmm.is_some() {
-                VmmExecutor::new(&engine, store, cpu, machine.memory_mb, witness, counter)?
+                VmmExecutor::new(&engine, store, cpu, machine.memory_mb, witness)?
                     .with_detected_contract(store, &engine)?
             } else {
-                VmmExecutor::new_internal(&engine, store, cpu, machine.memory_mb, witness, counter)?
+                VmmExecutor::new_internal(&engine, store, cpu, machine.memory_mb, witness)?
             };
             Executor::Linux(
                 executor
                     .with_torn_writes(simulation.disk.torn_writes)
-                    .with_timebase(Timebase::Pv)
                     .with_page_timer(machine.page_timer)
                     .with_deferred_tx(machine.deferred_tx),
             )
@@ -501,45 +485,18 @@ fn validate_machine(simulation: &config::Simulation) -> Result<()> {
     Ok(())
 }
 
-/// Stop-placement settings: they change speed, never results.
+/// Host-side execution settings: they change speed, never results.
 #[derive(Args)]
 #[command(next_help_heading = "Performance (never changes results)")]
 struct Performance {
-    /// PMU approach and stepping distance in branches: a count or `adaptive`.
-    #[arg(long, default_value = "adaptive", value_parser = parse_margin)]
-    margin: String,
-    /// Initial undo margin in branches; 0 disables undo.
-    #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u64).range(0..=1 << 18))]
-    undo: u64,
-    /// PV spin-probe watchdog interval in host CPU milliseconds (Linux KVM).
+    /// Watchdog interval in milliseconds; never changes results.
     #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u64).range(1..=60000))]
-    pv_watchdog_ms: u64,
-}
-
-fn parse_margin(value: &str) -> std::result::Result<String, String> {
-    match value.parse::<u64>() {
-        _ if value == "adaptive" => Ok(value.into()),
-        Ok(branches) if branches > 0 => Ok(value.into()),
-        _ => Err("expected `adaptive` or a positive branch count".into()),
-    }
-}
-
-// This value only routes the Linux constructor. The Mac profile contains no
-// branch-counter identity and admission is performed by its HVF backend.
-fn execution_counter() -> Result<CounterProfile> {
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    {
-        Ok(CounterProfile::Zen)
-    }
-    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-    {
-        CounterProfile::host()
-    }
+    watchdog_ms: u64,
 }
 
 impl Performance {
     fn apply(&self, executor: Executor) -> Result<Executor> {
-        executor.performance(&self.margin, self.undo, self.pv_watchdog_ms)
+        executor.performance(self.watchdog_ms)
     }
 }
 
@@ -606,9 +563,9 @@ fn run(cli: Cli) -> Result<u8> {
         Command::Doctor { cpu, inputs, json } => {
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
+            cpu.admit()?;
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             {
-                cpu.admit(Ok(CounterProfile::Zen), Timebase::Pv)?;
                 if let Some(path) = inputs.vmm.as_ref() {
                     defaults::existing("--vmm", path.clone())?;
                     if let Some(kernel) = inputs.kernel.as_ref() {
@@ -644,20 +601,14 @@ fn run(cli: Cli) -> Result<u8> {
                 let kernel_path = backends::guest_kernel(inputs.kernel)?;
                 let kernel = &kernel_path;
                 let report = if internal {
-                    VmmExecutor::doctor_internal_with_timebase(
-                        &engine,
-                        kernel,
-                        cpu.cpu,
-                        Timebase::Pv,
-                    )?
+                    VmmExecutor::doctor_internal(&engine, kernel, cpu.cpu)?
                 } else {
-                    VmmExecutor::doctor_with_timebase(&engine, kernel, cpu.cpu, Timebase::Pv)?
+                    VmmExecutor::doctor(&engine, kernel, cpu.cpu)?
                 };
                 if json {
                     println!("{}", serde_json::to_string_pretty(&report)?);
                 } else {
                     println!("VALID: compatible execution profile");
-                    println!("timebase: {}", report.timebase.name());
                     println!("cpu: {}", report.cpu);
                     println!(
                         "cpus: {}",
@@ -694,17 +645,10 @@ fn run(cli: Cli) -> Result<u8> {
             validate_machine(&simulation)?;
             let (store, _) = state.open()?;
             let scratch = tempfile::tempdir()?;
-            let counter = CounterProfile::host().unwrap_or(CounterProfile::Zen);
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
-            let (preparer, _) = inputs.backends(
-                &store,
-                None,
-                counter,
-                scratch.path(),
-                &simulation,
-                &cancellation,
-            )?;
+            let (preparer, _) =
+                inputs.backends(&store, None, scratch.path(), &simulation, &cancellation)?;
             if cancellation.is_cancelled() {
                 return Err(Error::PreparationCancelled);
             }
@@ -727,8 +671,7 @@ fn run(cli: Cli) -> Result<u8> {
             inputs,
             performance,
         } => {
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            cpu.admit(Ok(CounterProfile::Zen), Timebase::Pv)?;
+            cpu.admit()?;
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             if checkpoint_at_ns.is_some() || branch_seed.is_some() {
                 return Err(Error::Setup(
@@ -744,22 +687,13 @@ fn run(cli: Cli) -> Result<u8> {
             }
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
-            let detected = execution_counter();
-            let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
-            let (mut preparer, executor) = inputs.backends(
-                &store,
-                cpu.cpu,
-                counter,
-                scratch.path(),
-                &simulation,
-                &cancellation,
-            )?;
+            let (mut preparer, executor) =
+                inputs.backends(&store, cpu.cpu, scratch.path(), &simulation, &cancellation)?;
             if cancellation.is_cancelled() {
                 return Err(Error::PreparationCancelled);
             }
-            cpu.admit(detected, Timebase::Pv)?;
             let executor = match (checkpoint_at_ns, branch_seed) {
                 (Some(at), Some(branch)) => executor.with_checkpoint(at, branch)?,
                 _ => executor,
@@ -802,24 +736,14 @@ fn run(cli: Cli) -> Result<u8> {
             if workers > 1 && cpu.cpu.is_some() {
                 return Err(Error::Setup("--workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU".into()));
             }
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            cpu.admit(Ok(CounterProfile::Zen), Timebase::Pv)?;
+            cpu.admit()?;
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
-            let detected = execution_counter();
-            let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
-            let (mut preparer, executor) = inputs.backends(
-                &store,
-                cpu.cpu,
-                counter,
-                scratch.path(),
-                &simulation,
-                &cancellation,
-            )?;
+            let (mut preparer, executor) =
+                inputs.backends(&store, cpu.cpu, scratch.path(), &simulation, &cancellation)?;
             if cancellation.is_cancelled() {
                 return Err(Error::PreparationCancelled);
             }
-            cpu.admit(detected, Timebase::Pv)?;
             preparer.profile = executor.profile();
             let executor = performance.apply(executor)?;
             // Exploration retains any backend admission refusal in its batch checkpoint.
@@ -877,31 +801,11 @@ fn run(cli: Cli) -> Result<u8> {
             let run = defaults::run_directory(run)?;
             let previous = orchestration::inspect(&run)?;
             let is_mac = previous.identity.inputs.profile.backend == "seedbox-hvf";
-            let timebase = if is_mac {
-                Timebase::Pv
-            } else {
-                recorded_timebase(&previous.identity.inputs.profile)?
-            };
             let deferred_tx = if is_mac {
                 false
             } else {
                 recorded_deferred_tx(&previous.identity.inputs.profile)?
             };
-            let detected = execution_counter();
-            let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
-            // Historical/incompatible records must reach the retained-input validation
-            // and remain captured as NOT_COMPARABLE before querying this host.
-            if !is_mac
-                && timebase == Timebase::Counter
-                && seedbox::admission::validate_profile(&previous.identity.inputs.profile).is_ok()
-            {
-                cpu.admit(detected, timebase)?;
-                same_counter(
-                    &run,
-                    recorded_counter(&previous.identity.inputs.profile)?,
-                    counter,
-                )?;
-            }
             let (store, orchestrator) = state.open()?;
             let scratch = tempfile::tempdir()?;
             let profile = &previous.identity.inputs.profile;
@@ -913,7 +817,7 @@ fn run(cli: Cli) -> Result<u8> {
             let executor = if profile.backend == "seedbox-hvf" {
                 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
                 {
-                    cpu.admit(Ok(counter), Timebase::Pv)?;
+                    cpu.admit()?;
                     Executor::Mac(seedbox::mac::MacExecutor::from_retained(
                         &engine,
                         &store,
@@ -928,13 +832,12 @@ fn run(cli: Cli) -> Result<u8> {
                 }
             } else {
                 let executor = if override_engine {
-                    VmmExecutor::from_override(&engine, &store, profile.clone(), cpu.cpu, counter)?
+                    VmmExecutor::from_override(&engine, &store, profile.clone(), cpu.cpu)?
                 } else {
-                    VmmExecutor::from_retained(&engine, &store, profile.clone(), cpu.cpu, counter)?
+                    VmmExecutor::from_retained(&engine, &store, profile.clone(), cpu.cpu)?
                 };
                 Executor::Linux(
                     executor
-                        .with_timebase(timebase)
                         .with_page_timer(recorded_page_timer(profile))
                         .with_deferred_tx(deferred_tx)
                         .with_torn_writes(recorded_torn_writes(profile)?)
@@ -1140,7 +1043,6 @@ fn run(cli: Cli) -> Result<u8> {
                 record.attempt,
                 record.identity.seed
             );
-            print_timebase(&record);
             if let Some(replay) = record.replay {
                 println!("replay: {}", word(&replay.status));
             }
@@ -1151,20 +1053,6 @@ fn run(cli: Cli) -> Result<u8> {
             Ok(0)
         }
     }
-}
-
-/// A run replays only with the branch counter it was recorded with.
-fn same_counter(run: &Path, recorded: CounterProfile, host: CounterProfile) -> Result<()> {
-    if recorded == host {
-        return Ok(());
-    }
-    Err(Error::Setup(format!(
-        "{}: recorded with the {} branch counter, but this host has {}; \
-         replay it on a host with the same counter",
-        run.display(),
-        recorded.name(),
-        host.name()
-    )))
 }
 
 /// Print a finished run and return its exit status (see `EXIT_CODES`).
@@ -1181,7 +1069,6 @@ fn report(run: &orchestration::Run) -> u8 {
     {
         println!("simulator: {version}");
     }
-    print_timebase(&run.record);
     if let Some(error) = &run.record.error {
         eprintln!("{error}");
         diagnostics::vmm_failure(&run.directory, error);
@@ -1275,52 +1162,8 @@ fn usage(who: libc::c_int) -> Option<libc::rusage> {
     }
 }
 
-fn print_timebase(record: &orchestration::RunRecord) {
-    let timebase = record
-        .identity
-        .inputs
-        .profile
-        .semantic_parameters
-        .get("timebase")
-        .map(String::as_str)
-        .unwrap_or("counter");
-    println!("timebase: {timebase}");
-}
-
 fn print_omissions(record: &orchestration::RunRecord) {
     if !record.omitted_logs.is_empty() {
         println!("omitted files: {}", record.omitted_logs.len());
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn replay_on_another_vendor_names_both_counters() {
-        let run = Path::new("/runs/abc");
-        assert!(same_counter(run, CounterProfile::Zen, CounterProfile::Zen).is_ok());
-        let error =
-            same_counter(run, CounterProfile::Zen, CounterProfile::IntelIceLake).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "/runs/abc: recorded with the amd-zen branch counter, but this host has \
-             intel-0x5111c4; replay it on a host with the same counter"
-        );
-    }
-
-    #[test]
-    fn counter_mode_requires_a_profile_and_pv_does_not() {
-        let cpu = CpuArg { cpu: None };
-        let missing = || Err(Error::Setup("no branch counter profile".into()));
-        assert!(cpu.admit(missing(), Timebase::Pv).is_ok());
-        assert!(cpu
-            .admit(Ok(CounterProfile::IntelIceLake), Timebase::Pv)
-            .is_ok());
-        assert!(cpu.admit(missing(), Timebase::Counter).is_err());
-        assert!(cpu
-            .admit(Ok(CounterProfile::IntelIceLake), Timebase::Counter)
-            .is_ok());
     }
 }

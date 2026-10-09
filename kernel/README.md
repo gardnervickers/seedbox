@@ -4,7 +4,7 @@ On x86 PV, kernel `cpu_relax()`/`rep_nop()` calls charge one bounded virtual
 clock read (100 ns) after PAUSE. This allows polling loops to reach virtual
 timer and scheduler boundaries with application locks held. The hook preserves
 interrupt masking and does not schedule or acquire locks. It is inactive before
-PV activation and in counter mode. The decompressor, setup code and userspace
+PV activation. The decompressor, setup code and userspace
 vDSO retain raw PAUSE. Handwritten assembly and userspace runtime internals are
 not covered; cycle detection remains available. This changes the new kernel's
 PV execution semantics; old runs continue using their retained kernel.
@@ -49,7 +49,7 @@ From an existing checkout on native Linux, use the same Nix recipe as CI:
 nix build .#guestKernel --out-link kernel-output
 
 # Linux x86-64:
-./target/release/seedbox run examples/etcd --timebase pv --kernel ./kernel-output/bzImage
+./target/release/seedbox run examples/etcd --kernel ./kernel-output/bzImage
 ```
 
 On ARM64 Linux the output is `kernel-output/Image`. To use it on an Apple

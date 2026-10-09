@@ -17,8 +17,7 @@ thread.
 
 The question this prototype answers: can several machines of one world run
 concurrently, with results identical for any worker count, and does that
-make timebases whose virtual time ignores host compute (PV, or an
-instruction-count timebase) worth running?
+make a PV clock, whose virtual time ignores host compute, worth running?
 
 ## Contract
 
@@ -104,7 +103,7 @@ A round costs roughly 10 µs of synchronization on the rayon pool. Windows
 of 100 µs or more amortize it. The default 1 ms latency gives 0.5–1 ms
 windows.
 
-### AMD host (5950X, `nixos`)
+### Linux KVM host (5950X, `nixos`)
 
 `harness/windowed-matrix.sh KERNEL VMM CPUS` reproduces the thread-count
 agreement as root in the dev shell, with the worlds in
@@ -117,15 +116,14 @@ this one became the default.
 Guest `a` then exits. The world uses 1 ms latency with 100 µs jitter and a
 2 ms stop tolerance, so windows are 0.5 ms. The guest kernel is built from
 `kernel/` at this revision. Each world ran with seed 7 and `--digest`, with
-the VMM pinned by `taskset`, workers pinned with `--machine-cpus` to CPUs
-4–7, and the Zen MSR workaround set on those cores and their siblings.
+the VMM pinned by `taskset` and workers pinned with `--machine-cpus` to CPUs
+4–7.
 
-| Timebase | Old scheduler | Windowed, 1 worker | 2 workers | 3 workers | 4 workers | 4 workers, reversed |
-| --- | --- | --- | --- | --- | --- | --- |
-| PV | 3.24 s | 3.26 s | 1.72 s | 1.62 s | 0.99 s | 1.83 s |
-| Counter | 4.61 s | 6.86 s | 3.86 s | 3.23 s | 2.31 s | 3.00 s |
+| Old scheduler | Windowed, 1 worker | 2 workers | 3 workers | 4 workers | 4 workers, reversed |
+| --- | --- | --- | --- | --- | --- |
+| 3.24 s | 3.26 s | 1.72 s | 1.62 s | 0.99 s | 1.83 s |
 
-All windowed runs of a timebase agree on world, network and full-state
+All windowed runs agree on world, network and full-state
 witnesses, guest output, machine times and the committed end. That includes
 "reversed", which has `SEEDBOX_WINDOWED_SKEW_US=300` delaying machine `i`
 by `(4 - i) × 300 µs` per run. Machines moved between pool threads up to
@@ -136,62 +134,28 @@ expected for a different scheduler.
 
 - **Legacy path unchanged** at the time of measurement: the same worlds
   under the old scheduler gave the same world witnesses as the VMM at
-  `6d4f443` (#169's head), for PV and counter.
-- **PV:** windowed execution costs nothing serially, and four threads run
+  `6d4f443` (#169's head).
+- Windowed execution costs nothing serially, and four threads run
   3.3× faster than the old scheduler.
-- **Counter:** serial windowed is 40% slower than the old scheduler. Every
-  machine takes a counted stop at every round end, where the old scheduler
-  let the lagging machine run up to its horizon. Four threads still beat the
-  old scheduler by 2.0×. Larger windows (more latency or less early) or
-  stops at natural exits would cut that overhead.
 - **Three workers** for four machines show the cost of a straggler round:
   one thread runs two machines.
 - **Reversed rows** include 300–1200 µs of artificial sleep per round; they
   test determinism, not speed.
 - `cargo test-vmm --features kvm-tests` passes.
 
-### Counter stop refinement
-
-A successful overflow can land hundreds of branches inside an undo margin
-grown by earlier overshoots, and the engine used to single-step all of them.
-The windowed scheduler makes more counted stops (656 versus 251 on `window4`),
-so this dominated its serial overhead. `machine/counted.rs` now checkpoints
-such a landing when more than 32 branches remain and approaches the same
-hard target again with a margin of `min(undo, remaining / 4)`. A rollback
-returns time to the held checkpoint, so the margin grows as before; a
-successful refinement strictly advances the checkpoint. Nothing observable
-happens at an overflow landing, so stops and witnesses are unchanged, and
-`--undo 0` and the PV timebase take their existing paths.
-
-On the 5950X (seed 7, counter, median of five whole-process runs), `window4`
-went from 7.95 to 6.01 s on one worker and 3.41 to 2.58 s on four (old
-scheduler: 5.95 s); step exits fell from 385,919 to 122,870. Kprobes found
-counter `perf_ioctl` cost (25 ms) and vCPU-migration `synchronize_rcu` calls
-(none on Linux 6.18.54) too small to explain the gap.
-
-The initial refinement above used a 128-branch cutoff. The subsequent
-[window4 host profile](windowed-scheduler-profile.md), based on main at
-`cc2af34`, lowered it to 32 and reused verified zero-page evidence hashes.
-Five interleaved trials cover both timebases at one and four workers, with
+The [window4 host profile](windowed-scheduler-profile.md), based on main at
+`cc2af34`, has five interleaved trials at one and four workers, with
 separate scheduler and whole-process medians, ranked costs and replay evidence.
 
-## Why this matters most for PV
-
-Under the counter timebase, compute costs virtual time. A busy guest
-reaches `B` after a bounded amount of host work, and every round ends in a
-counted stop: an overflow approach, plus breakpoint stepping or undo. That
-per-round stop cost determines whether counted windows pay. Counted
-execution also needs an exclusive, SMT-protected PMU core per worker.
+## Why this matters for PV
 
 Under PV, compute costs no virtual time. A compute-heavy guest spends host
 time while its virtual clock stands still, and today every other machine
 waits for it on the single world thread. That is exactly the work
-concurrent windows overlap. PV also needs no PMU and no exclusive core, and
-it runs nested, so workers are cheap on ordinary cloud VMs. Expected PV
-speedup approaches `min(workers, busy machines)`, limited by the slowest
-machine in each window. The scheduler does not depend on the timebase. Any
-timebase whose time depends only on guest execution, such as instruction
-counting, benefits the same way.
+concurrent windows overlap. PV needs no exclusive core and runs nested, so
+workers are cheap on ordinary cloud VMs. Expected speedup approaches
+`min(workers, busy machines)`, limited by the slowest machine in each window.
+The scheduler does not depend on the clock model.
 
 ## Integration
 
@@ -201,7 +165,7 @@ It works for any `WorldMachine`; the parallel path needs `M: Send`.
 - **Work-stealing pool.** `window::run_parallel` runs each round's
   assignments on a rayon pool. The parallel collect is the round barrier.
   Idle threads take the next machine, so a machine can run on a different
-  thread every round. Each thread creates its context (the timebase) on
+  thread every round. Each thread creates its context (the clock) on
   itself with `broadcast`, and drops it there after the run. A context must
   therefore hold no per-machine state that affects results.
 - **Machine-local loop.** `Guest::run` loops around `WorldMachine::advance`.
@@ -247,18 +211,16 @@ It works for any `WorldMachine`; the parallel path needs `M: Send`.
   `world.strict_events`, so the report's network witness covers them.
 - **x86 VMM.**
   - `Machine` is `Send`, and the disk's shared base image is now an `Arc`.
-  - Each pool thread opens its own `Counter` or `PvClock` and pins itself to
-    its `--machine-cpus` entry.
-  - Counter overflow accounting is thread-local (`counter.rs`), so another
-    thread's overflow cannot cause a re-arm.
+  - Each pool thread opens its own `PvClock` and pins itself to its
+    `--machine-cpus` entry.
   - PV watchdog and spin-probe state (`PvProgress`) belongs to each
     `Machine`, not to the thread's `PvClock`. The clock keeps only the
     watchdog timer and per-run scratch, so no machine's watchdog or probe
     decisions carry into another's run on the same thread. A checkpoint
     inside a probe is refused by `Machine::snapshot`, and `Machine::restore`
     resets the state.
-  - Only the owning raw pointers (guest RAM, time page, snapshot mappings,
-    the undo shadow) are `Send`, through the `SendPtr` newtype, so `Machine`
+  - Only the owning raw pointers (guest RAM, time page, snapshot mappings)
+    are `Send`, through the `SendPtr` newtype, so `Machine`
     is `Send` by derivation. A future non-`Send` field still fails to
     compile.
 - **Scope.** `--machine-workers` and `--machine-cpus` apply to every run.
@@ -268,8 +230,8 @@ It works for any `WorldMachine`; the parallel path needs `M: Send`.
 ## Remaining plan
 
 1. **CLI.** `--machine-workers N` is performance-only and
-   overridable on replay. The executor leases `N` SMT-protected cores for
-   the counter timebase, or any `N` CPUs for PV, and passes `--machine-cpus`.
+   overridable on replay. The executor leases `N` CPUs and passes
+   `--machine-cpus`.
    Neither can be combined with `explore --workers > 1` or with the
    unsupported features. Update help, README, runtime docs and the project
    template.
@@ -277,11 +239,9 @@ It works for any `WorldMachine`; the parallel path needs `M: Send`.
    the CLI report. Today they appear only in `vmm.json`, under `scheduler`.
 3. **Sticky placement.** Linux 6.18.54 made no `synchronize_rcu` calls on
    migration; measure other host kernels before changing placement.
-4. **Counter overhead.** Larger windows and soft stops at natural exits
-   near `B` would cut stepping further but change scheduler semantics.
-5. **Real workload.** Run the four-machine etcd Compose workload through
+4. **Real workload.** Run the four-machine etcd Compose workload through
    `seedbox run` / `seedbox replay` once the CLI passes the flags.
-6. **Legacy loop.** With arm64 on the windowed scheduler, `world::simulate`
+5. **Legacy loop.** With arm64 on the windowed scheduler, `world::simulate`
    and `simulate_launch` have no backend caller; move their remaining tests
    onto the windowed adapter and delete the loop.
 

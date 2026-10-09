@@ -4,7 +4,10 @@ Historical paths and commands below are as recorded, before the repository moved
 workspace (`sim/seedbox` is now `crates/seedbox`, `sim/vmm` is `crates/seedbox-vmm`,
 and the runners are under `harness/`). The engine hashes below are for builds
 from that layout; a VMM built from `crates/seedbox-vmm` embeds different source
-paths and is a new engine, even though its source is unchanged.
+paths and is a new engine, even though its source is unchanged. Entries that
+mention the counter timebase, `--margin`, `--undo` or MSR restoration predate
+the removal of counter mode; those settings no longer exist, and runs recorded
+with them do not replay on the current engine.
 
 ## 2026-10-08 — recorded guest epoch and unprivileged namespaces
 

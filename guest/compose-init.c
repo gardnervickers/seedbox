@@ -498,9 +498,14 @@ static pid_t start(void) {
         instrumented[prefix++] = "-opt_speed";
         instrumented[prefix++] = "-disable_traces";
 #if defined(__aarch64__)
-        /* Preserve exclusive-monitor regions. DynamoRIO 11.3's conversion
-         * to CAS hangs in static musl's exit locks on ARM. */
+        /* Keep exclusive-monitor regions as written and packed into one
+         * macro-instruction wherever DynamoRIO can: the client then counts
+         * nothing inside a sequence, so a store-exclusive that fails because a
+         * host interrupt cleared the monitor stays invisible (see
+         * guest/progress/progress.c). DynamoRIO 11.3's conversion to CAS
+         * hangs in static musl's exit locks on ARM. */
         instrumented[prefix++] = "-no_ldstex2cas";
+        instrumented[prefix++] = "-unsafe_build_ldstex";
 #endif
         instrumented[prefix++] = "-c";
         instrumented[prefix++] = "/seedbox/progress/libseedbox_progress.so";

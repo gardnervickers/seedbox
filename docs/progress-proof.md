@@ -2,7 +2,7 @@
 
 `seedbox-engine-core::pv_progress` owns watchdog admission, backoff and cycle
 proof. A host timer requests an observation; elapsed host time never advances
-guest time or proves the guest idle. The engine requires no PMU.
+guest time or proves the guest idle.
 
 The KVM PV adapter uses this engine. ARM's current horizon clock is unchanged in
 this extraction stage: ARM still needs interrupt/debug landing and complete
@@ -14,7 +14,7 @@ The x86 kernel's `cpu_relax`/`rep_nop` hook now uses bounded PV clock reads to
 provide progress in ordinary kernel polling loops. This does not cover arbitrary
 assembly PAUSE instructions, userspace loops or a binary translator's internal
 execution. Keep the proof fallback until those coverage boundaries are resolved.
-`--pv-watchdog-ms` adjusts its observation interval without changing guest time.
+`--watchdog-ms` adjusts its observation interval without changing guest time.
 
 ## Architecture boundary
 
@@ -71,7 +71,7 @@ handling; the corresponding tests must fail.
 KVM's existing real-guest tests remain in its adapter and exercise varying watchdog
 periods and dirty/full-RAM modes. They require Linux and remain for the final merge
 train. Portable policy tests do not establish hardware stepping correctness or
-state-inventory completeness. ARM requires native no-PMU guest qualification when
+state-inventory completeness. ARM requires native guest qualification when
 its primitives are implemented.
 
 ## ARM native primitive boundary

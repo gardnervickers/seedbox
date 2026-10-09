@@ -60,7 +60,7 @@ Linux acceptance; see [acceptance.md](acceptance.md) for the tested profiles and
 Process restart and whole-machine restart must not be
 conflated when storage behavior is defined in #3.
 
-Preparation never starts a guest or changes CPU/MSR state. It should complete all
+Preparation never starts a guest or reserves a CPU. It should complete all
 downloads/builds before acquiring any scarce hardware reservation. Source/build
 provenance must identify actual context, Dockerfile and builder inputs, including
 dirty local source when applicable. Replay consumes retained artifacts and must
@@ -94,7 +94,7 @@ actively enforce the deadline and observe the cancellation token.
 For hardware, reuse the lease protocol already implemented by `harness/batch.py`
 (`cpu_locks` and `run_batch`, merged on main). Acquire exclusive nonblocking `flock`
 locks on `/tmp/seedbox-msr-cpu-<N>.lock` for every selected core and its SMT siblings,
-in ascending CPU order, before any MSR mutation. Open without following symlinks,
+in ascending CPU order, before starting any guest. Open without following symlinks,
 keep file descriptors open through cleanup, and do not unlink the lock files. A
 Rust executor uses these same files and advisory locks; a separate
 `/run` namespace would not coordinate with the existing supervisor.
@@ -145,13 +145,10 @@ it is never offered as a production execution option.
 from execution and lists version-bound evidence. Reader/writer compatibility
 promises remain undecided.
 
-The tested profile is Linux/KVM on the AMD Ryzen 5950X workstation, with the Zen
-SpeculativeLockMap workaround verified for the leased cores and SMT siblings.
 Guest kernel, supervisor, engine and semantic settings are run identity inputs.
-Host admission checks only the capabilities the engine needs (an AMD x86-64 CPU
-with the required KVM and perf support for the `counter` timebase; KVM alone for
-`--timebase pv`). It is not a pin list: a host that passes it can run, but
-same-seed equality across hosts is not established.
+Host admission checks only the capabilities the engine needs (KVM access on
+Linux x86-64, Hypervisor.framework on Apple Silicon). It is not a pin list: a
+host that passes it can run, but same-seed equality across hosts is not established.
 
 Clock and entropy evidence admits the tested workloads, not arbitrary Linux
 images or JVM/JIT programs. Broader instruction, CPU-feature, clock and entropy
@@ -171,9 +168,7 @@ instead. `harness/worlds/rdrand.json` and `rdrand-raw.json` show both cases. Ret
 10x speedup and 100-microsecond stop targets are not acceptance requirements.
 
 Process restart retains guest tmpfs data. It does not model machine reboot,
-power loss, durable block devices or volatile versus flushed writes. Undo
-checkpoints are private precise-stop recovery state, not complete VM/world
-snapshots or a public reverse-execution interface. These capabilities require
+power loss, durable block devices or volatile versus flushed writes. These capabilities require
 explicit device, storage, RNG, event, controller and incarnation coverage.
 The Kafka litmus in #6 needs a declared storage-loss model; a process kill
 alone does not lose the OS cache. Stale callbacks and commands must not affect

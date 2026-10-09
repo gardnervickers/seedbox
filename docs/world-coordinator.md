@@ -11,8 +11,7 @@ scheduler inside the worker.
 `WorldMachine` supplies physical boot, stopped execution, delivery, CPU/RAM
 capture and restoration, and architecture consequences of lifecycle operations.
 The clock, factory, boot inputs and snapshot types are opaque to the coordinator.
-No shared coordinator operation assumes a PMU. Transport-facing primitives are
-fallible. Timer reseeding uses the same explicit seed/domain as KVM, while ARM
+Transport-facing primitives are fallible. Timer reseeding uses the same explicit seed/domain as KVM, while ARM
 declares fixed PV cost rather than inventing randomized syscall-speed support.
 
 ## One machine record

@@ -73,8 +73,8 @@ The shared network model owns packet DMA, backlogs and counters; preserve the
 profile-specific admission, partial-error and IRQ order in `docs/virtio-network.md`.
 The core PV progress engine owns watchdog policy and cycle proof; architecture
 adapters supply stepping and complete comparison primitives. Preserve the
-proof/diagnostic boundary in `docs/progress-proof.md`; ARM support must not assume
-a PMU or treat an unsupported dirty log as proof that RAM is unchanged.
+proof/diagnostic boundary in `docs/progress-proof.md`; ARM support must not treat
+an unsupported dirty log as proof that RAM is unchanged.
 The shared world coordinator owns scheduling, routing, control/trigger/fault
 ordering, lifecycle policy and world snapshots. Machine adapters embed its single
 `MachineState` and supply stopped execution and physical lifecycle operations.
@@ -109,7 +109,7 @@ the canonical crate; do not restore sibling source inclusion for these policies.
 ## Determinism
 
 - A run's witness and a `seedbox replay` MATCH are how determinism is checked.
-  Performance settings (`--margin`, `--undo`, `--pv-watchdog-ms`) must never change results.
+  Performance settings (`--watchdog-ms`, `--machine-workers`) must never change results.
 - Determinism is about results, not source or build bytes. Don't hash or
   stamp the source tree, Git revision, build flags or compiled binaries, and
   don't add compiler wrappers, reproducible-build checks, or formatting
@@ -129,11 +129,11 @@ Run the suites for your platform inside `nix develop` before committing:
 
 ```sh
 bash harness/check.sh                 # portable
-bash harness/check.sh linux --cpu 14  # AMD KVM host
+bash harness/check.sh linux --cpu 14  # Linux KVM host
 bash harness/check.sh mac             # Apple Silicon
 ```
 
-Suites are named, never auto-detected: `portable`, `linux-kvm`, `linux-counter`,
+Suites are named, never auto-detected: `portable`, `linux-kvm`,
 `linux-guests`, `linux-oci`, `linux-apps`, `linux-pause`, `mac-hvf`,
 `mac-guests`, `mac-apps`, plus the `linux` and `mac` groups. `portable` compiles
 every feature-gated test with `--no-run` and executes only portable tests; it
@@ -146,8 +146,8 @@ See [docs/testing.md](docs/testing.md) for features, discovery and fixture input
 Keep VMM engine tests compiled by default; conditional `ignore` attributes enable
 hardware execution through features. Other feature-gated tests must be built by
 the portable `--no-run` checks. Add no per-test registration lists. The runner
-builds as the current user, signs disposable HVF test copies, and uses scoped
-CPU/SMT/MSR cleanup for counted tests. Check other revisions in a Git worktree;
+builds as the current user, signs disposable HVF test copies, and leases a
+CPU/SMT pair for application tests. Check other revisions in a Git worktree;
 do not stamp Git revisions or checkout cleanliness in the runner.
 
 ## CLI
@@ -200,7 +200,7 @@ deliberately change one.
 4. Resolve it in `RuntimeInputs::backends` or earlier, before any slow work
    (image pulls, builds, CPU leases). Fail fast. `run` and `explore` check immutable runtime
    inputs and backend host admission before
-   preparation; no transient perf descriptor, affinity or CPU reservation survives
+   preparation; no transient affinity or CPU reservation survives
    that check.
 5. Add it to the defaults table in README.md's quick start.
 
@@ -267,8 +267,8 @@ deliberately change one.
   defaults table), docs/runtime.md, and `crates/seedbox/templates/README.md`.
   The last one is copied into every project `seedbox init` creates.
 
-`doctor` uses PV KVM permission and CPU-reservation admission in this draft.
-It uses guest-kernel/VMM defaults; host-kernel
+`doctor` checks KVM device access, the CPU reservation and the guest
+kernel/VMM/runtime inputs. It uses guest-kernel/VMM defaults; host-kernel
 bytes are not checked. VMM resolution is lookup-only and must never invoke a
 compiler or launch the worker. Success reports
 only the exact cleaned-up probe observations and selected core; the library does
@@ -285,12 +285,10 @@ images or executes guests. Compatibility readiness is not replay qualification.
 - Old runs replay on the engine executable retained in the run directory. To
   compare across engine changes, make a fresh run and check its witness against
   the old run's.
-- This draft selects instrumented PV for new CLI runs and removes the public
-  timebase selector. Internal counter execution has not yet been removed.
-  ARM exclusive-store retry nondeterminism blocks the migration; see
-  `docs/automatic-progress.md`. Do not require application-specific flags or
-  environment overrides to make replay succeed.
-  `.github/workflows/pv-tests.yml` runs PV checks on GitHub-hosted Ubuntu
+- There is one engine mode: PV time with automatic application progress
+  from binary instrumentation (`docs/progress.md`). Do not require
+  application-specific flags or environment overrides to make replay succeed.
+  `.github/workflows/pv-tests.yml` runs its checks on GitHub-hosted Ubuntu
   x86-64 runners.
 - `crates/seedbox-vmm` builds only on Linux x86-64, so a Mac pre-check covers
   none of it. A VMM change needs `cargo build-vmm` and

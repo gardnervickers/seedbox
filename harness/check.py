@@ -7,14 +7,12 @@ Tests belong to Cargo or unittest discovery, not a list of individual test names
 Application assertions remain in guests; applications.rs uses run/replay directly.
 """
 import argparse
-import ctypes
 import json
 import os
 from pathlib import Path
 import platform
 import shlex
 import shutil
-import struct
 import subprocess
 import sys
 import tempfile
@@ -24,11 +22,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 SUITES = {
     "portable": "Any host: fmt, clippy, workspace and standalone unit tests, Python suites, YAML validation.",
-    "linux-kvm": "Linux x86-64 or ARM64 with /dev/kvm: native backend KVM tests; no PMU or root needed.",
-    "linux-counter": "Linux x86-64 KVM with a guest PMU and root: counted stops, checkpoints, forks, logs and triggers on a leased core.",
-    "linux-guests": "Fixture kernel and initrd on Linux KVM (x86-64 also needs linux-counter): real guest determinism and checkpoints.",
+    "linux-kvm": "Linux x86-64 or ARM64 with /dev/kvm: native backend KVM tests; no root needed.",
+    "linux-guests": "Fixture kernel and initrd on Linux KVM: real guest determinism and checkpoints.",
     "linux-oci": "Linux x86-64 with a running Docker-compatible engine: real image import and Dockerfile builds.",
-    "linux-apps": "Linux x86-64 KVM, root, a Docker-compatible engine and built guest assets: every acceptance workload run twice, diffed and replayed (PV, plus counter with linux-counter).",
+    "linux-apps": "Linux x86-64 KVM, root, a Docker-compatible engine and built guest assets: every acceptance workload run twice, diffed and replayed.",
     "linux-pause": "Linux x86-64 KVM, root and a supplied retained run: pause/resume replay.",
     "mac-hvf": "Apple Silicon with macOS 15+, Hypervisor.framework and codesign: native CPU/state and cancellation primitives.",
     "mac-guests": "mac-hvf plus the ARM fixture kernel and initrd: real guest controls.",
@@ -37,19 +34,19 @@ SUITES = {
 # Groups hold the suites a set-up host can run with no hand-built fixtures;
 # the guest and pause suites are always named explicitly.
 GROUPS = {
-    "linux": ["linux-kvm", "linux-counter", "linux-oci", "linux-apps"],
+    "linux": ["linux-kvm", "linux-oci", "linux-apps"],
     "mac": ["mac-hvf", "mac-apps"],
 }
 # A suite also runs the suites its Cargo features build on.
 IMPLIES = {
-    "linux-counter": ["linux-kvm"],
+    "linux-guests": ["linux-kvm"],
     "mac-guests": ["mac-hvf"],
     "mac-apps": ["mac-hvf"],
 }
 
 
 def probe_linux():
-    """Open/close KVM and a disabled guest-only PMU event, never execute guests."""
+    """Open/close KVM, never execute guests."""
     import fcntl
     result = {}
     try:
@@ -62,20 +59,6 @@ def probe_linux():
         result["kvm"] = ""
     except OSError as error:
         result["kvm"] = str(error)
-    result["counter"] = "requires Linux x86-64 KVM with a guest PMU"
-    if platform.machine() == "x86_64" and not result["kvm"]:
-        # PERF_COUNT_HW_BRANCH_INSTRUCTIONS tests guest PMU availability. The
-        # engine still selects and tests its exact vendor-specific raw event.
-        attr = ctypes.create_string_buffer(128)
-        struct.pack_into("IIQQQQQ", attr, 0, 0, 128, 5, 1 << 62, 0, 3,
-                         1 | (1 << 2) | (1 << 19))
-        libc = ctypes.CDLL(None, use_errno=True)
-        fd = libc.syscall(298, ctypes.byref(attr), 0, -1, -1, 8)
-        if fd >= 0:
-            os.close(fd)
-            result["counter"] = ""
-        else:
-            result["counter"] = f"guest perf_event_open: {os.strerror(ctypes.get_errno())}"
     return result
 
 
@@ -173,8 +156,6 @@ def expand(names, machine):
             continue
         chosen.add(suite)
         pending.extend(IMPLIES.get(suite, []))
-        if suite == "linux-guests":
-            pending.append("linux-counter" if machine == "x86_64" else "linux-kvm")
     chosen.add("portable")
     return [suite for suite in SUITES if suite in chosen]
 
@@ -212,12 +193,10 @@ def requirements(suite, system, machine, environment, probe=None, can_root=False
             need(x86, "requires Linux x86-64")
         if suite != "linux-oci":  # Image import and builds need no hypervisor.
             need(not probe.get("kvm"), "/dev/kvm: " + (probe.get("kvm") or ""))
-        if suite in ("linux-counter", "linux-apps", "linux-pause"):
+        if suite in ("linux-apps", "linux-pause"):
             need(can_root, "requires root or passwordless sudo")
         if suite == "linux-kvm":
             need(machine in ("x86_64", "aarch64"), "requires Linux x86-64 or ARM64")
-        elif suite == "linux-counter":
-            need(not probe.get("counter"), probe.get("counter") or "")
         elif suite == "linux-guests":
             inputs(*(("SEEDBOX_TEST_KERNEL", "SEEDBOX_TEST_INITRD") if x86 else
                      ("SEEDBOX_ARM64_KERNEL", "SEEDBOX_ARM64_INITRD")))
@@ -258,7 +237,7 @@ def features_for(package, machine, suites):
         return pick((("linux-oci", "oci-tests"), ("linux-apps", "application-tests"),
                      ("mac-apps", "application-tests"), ("linux-pause", "retained-run-tests")))
     if package == "seedbox-vmm":
-        return pick((("linux-kvm", "kvm-tests"), ("linux-counter", "counter-tests"),
+        return pick((("linux-kvm", "kvm-tests"),
                      ("linux-guests", "guest-tests"))) if machine == "x86_64" else []
     linux_arm = machine in ("arm64", "aarch64")
     features = pick((("mac-hvf", "hvf-tests"),))
@@ -311,7 +290,7 @@ class Checks:
         print(f"{name}: {'PASS' if passed else 'FAIL'} ({time.monotonic()-started:.1f}s)", flush=True)
         return output if capture and passed else passed if not capture else None
 
-    def cargo_tests(self, package, command, features, prefix, *, counter=False, sign=False):
+    def cargo_tests(self, package, command, features, prefix, *, sign=False):
         environment = self.environment.copy()
         if package != "seedbox":
             environment.pop("CARGO_TARGET_DIR", None)
@@ -337,14 +316,10 @@ class Checks:
                     command.append("--nocapture")
                 # oci uses the engine the way the root CLI does in applications.
                 needs_root = package == "seedbox" and target in ("applications", "host_pause", "oci")
-                if counter:
-                    command = [sys.executable, str(ROOT / "harness/check-counter.py"),
-                               *(["--cpu", environment["SEEDBOX_TEST_CPU"]] if environment.get("SEEDBOX_TEST_CPU") else []),
-                               "--", *command]
-                if counter or needs_root or (package in ("seedbox-arm64", "seedbox-vmm") and "kvm-tests" in features):
+                if needs_root or (package in ("seedbox-arm64", "seedbox-vmm") and "kvm-tests" in features):
                     command = privileged(prefix, command, environment)
                 self.run(package + "/" + target, command, environment=environment,
-                         timeout=None if counter or target == "applications" else 1800)
+                         timeout=None if target == "applications" else 1800)
 
 
 def describe():
@@ -359,7 +334,7 @@ def main(argv=None):
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("suites", nargs="*", metavar="SUITE",
                         help="Suites or groups to run [default: portable].")
-    parser.add_argument("--cpu", type=int, help="Linux CPU for linux-counter and linux-apps.")
+    parser.add_argument("--cpu", type=int, help="Linux CPU for linux-apps.")
     parser.add_argument("--list", action="store_true",
                         help="Check the selected suites' requirements without building or running tests.")
     parser.add_argument("--probe-linux", action="store_true", help=argparse.SUPPRESS)
@@ -375,8 +350,8 @@ def main(argv=None):
     if args.cpu is not None:
         if args.cpu < 0:
             parser.error("--cpu must be nonnegative")
-        if not {"linux-counter", "linux-apps"} & set(suites):
-            parser.error("--cpu applies only to linux-counter and linux-apps")
+        if "linux-apps" not in suites:
+            parser.error("--cpu applies only to linux-apps")
     environment = os.environ.copy()
     hardware = [suite for suite in suites if suite != "portable"]
     prefix = root_prefix() if system == "Linux" and hardware else None
@@ -425,7 +400,6 @@ def main(argv=None):
         binaries = [json.loads(line) for line in output.splitlines() if line.strip()]
         binary = next(item["executable"] for item in binaries if item.get("executable") and item.get("target", {}).get("name") == "seedbox")
         environment["SEEDBOX_TEST_CLI"] = binary
-        environment["SEEDBOX_TEST_COUNTER"] = "1" if "linux-counter" in suites else "0"
         # Under sudo the CLI's default slot would be root's; keep the one checked above.
         environment.setdefault("SEEDBOX_ASSET_DIR", str(asset_directory(environment, machine).parent))
     packages = [("seedbox-arm64", ["cargo", "test-arm64"])]
@@ -436,7 +410,6 @@ def main(argv=None):
         features = features_for(package, machine, suites)
         if features:
             checks.cargo_tests(package, command, features, prefix,
-                               counter=package == "seedbox-vmm" and "counter-tests" in features,
                                sign=package == "seedbox-arm64" and "hvf-tests" in features)
     return int(checks.failed)
 

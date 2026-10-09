@@ -89,7 +89,6 @@ pub struct FirstRecord {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WitnessSample {
     pub time_ns: u64,
-    pub branches: u64,
     /// Witness records hashed so far; one per trace line.
     pub records: u64,
     /// First eight witness bytes, as 16 hex digits.
@@ -131,7 +130,7 @@ pub struct DiffReport {
     pub limitations: Vec<String>,
 }
 
-// Select semantic machine fields explicitly: scheduling/performance counters and
+// Select semantic machine fields explicitly: scheduling/performance statistics and
 // host timings in vmm.json are deliberately excluded.
 #[derive(Clone, Debug, Default, Serialize)]
 struct Machine {
@@ -140,7 +139,6 @@ struct Machine {
     state_digest_parts: Option<StateDigestParts>,
     state: Option<String>,
     time_ns: Option<u64>,
-    branches: Option<u64>,
     guest_exit_code: Option<u8>,
     guest_init_error: Option<u8>,
     infrastructure_error: Option<bool>,
@@ -155,7 +153,6 @@ impl From<MachineReport> for Machine {
             state_digest_parts: report.state_digest_parts,
             state: report.state,
             time_ns: report.time_ns,
-            branches: report.branches,
             guest_exit_code: report.guest_exit_code,
             guest_init_error: report.guest_init_error,
             infrastructure_error: Some(report.infrastructure_error),
@@ -175,8 +172,6 @@ struct ReportHeader {
     #[serde(default)]
     timebase: Option<String>,
     seed: u64,
-    #[serde(default)]
-    counter_profile: Option<String>,
 }
 
 fn bad(path: &Path, error: impl std::fmt::Display) -> Error {
@@ -227,9 +222,6 @@ fn load(directory: &Path) -> Result<Evidence> {
             }
             if header.seed != record.identity.seed {
                 return Err(bad(&path, "VMM report seed disagrees with manifest"));
-            }
-            if header.counter_profile.is_some() {
-                return Err(bad(&path, "HVF report has an unexpected counter profile"));
             }
         }
         let raw: VmmReport = serde_json::from_slice(&bytes).map_err(|e| bad(&path, e))?;
@@ -296,7 +288,6 @@ fn compare_values(a: &impl Serialize, b: &impl Serialize) -> Result<Vec<Differen
 fn terminal(machine: &Machine) -> Option<Record> {
     if machine.state.is_none()
         && machine.time_ns.is_none()
-        && machine.branches.is_none()
         && machine.guest_exit_code.is_none()
         && machine.guest_init_error.is_none()
         && machine.infrastructure_error.is_none()
@@ -309,7 +300,7 @@ fn terminal(machine: &Machine) -> Option<Record> {
         time_ns: machine.time_ns,
         kind: "terminal".into(),
         value: serde_json::json!({
-            "state": machine.state, "time_ns": machine.time_ns, "branches": machine.branches,
+            "state": machine.state, "time_ns": machine.time_ns,
             "guest_exit_code": machine.guest_exit_code, "guest_init_error": machine.guest_init_error,
             "infrastructure_error": machine.infrastructure_error, "pending_io": machine.pending_io,
             "state_digest_parts": machine.state_digest_parts,
@@ -498,8 +489,8 @@ pub(crate) fn witness_log(machine: &str) -> String {
     format!("{}/{machine}.witness-log", crate::vmm::MACHINE_OUTPUT_DIR)
 }
 
-/// Engine witness-log entry: little-endian u64 time_ns, branches, records, witness prefix.
-const SAMPLE_BYTES: usize = 32;
+/// Engine witness-log entry: little-endian u64 time_ns, records, witness prefix.
+const SAMPLE_BYTES: usize = 24;
 
 fn next_sample(reader: &mut impl Read) -> std::io::Result<Option<WitnessSample>> {
     let mut entry = [0; SAMPLE_BYTES];
@@ -519,9 +510,8 @@ fn next_sample(reader: &mut impl Read) -> std::io::Result<Option<WitnessSample>>
     let field = |i: usize| u64::from_le_bytes(entry[i * 8..i * 8 + 8].try_into().unwrap());
     Ok(Some(WitnessSample {
         time_ns: field(0),
-        branches: field(1),
-        records: field(2),
-        witness: format!("{:016x}", field(3)),
+        records: field(1),
+        witness: format!("{:016x}", field(2)),
     }))
 }
 
@@ -719,7 +709,7 @@ fn compare_pages(a: impl Read, b: impl Read) -> Result<PageHashDiff> {
     Ok(result)
 }
 
-// Existing engine trace format: kind branches time_ns extra(hex) rip(hex).
+// Engine trace format: kind time_ns extra(hex) rip(hex).
 fn next_trace(reader: &mut impl BufRead) -> Result<Option<Record>> {
     let mut line = String::new();
     if reader.take(65537).read_line(&mut line)? == 0 {
@@ -730,21 +720,18 @@ fn next_trace(reader: &mut impl BufRead) -> Result<Option<Record>> {
     }
     let fields: Vec<_> = line.split_whitespace().collect();
     let invalid = || {
-        Error::Integrity(
-            "invalid trace record: expected kind branches time_ns extra(hex) rip(hex)".into(),
-        )
+        Error::Integrity("invalid trace record: expected kind time_ns extra(hex) rip(hex)".into())
     };
-    if fields.len() != 5 || fields[0].len() != 1 {
+    if fields.len() != 4 || fields[0].len() != 1 {
         return Err(invalid());
     }
-    let branches = fields[1].parse::<u64>().map_err(|_| invalid())?;
-    let time_ns = fields[2].parse::<u64>().map_err(|_| invalid())?;
-    let extra = u64::from_str_radix(fields[3], 16).map_err(|_| invalid())?;
-    let rip = u64::from_str_radix(fields[4], 16).map_err(|_| invalid())?;
+    let time_ns = fields[1].parse::<u64>().map_err(|_| invalid())?;
+    let extra = u64::from_str_radix(fields[2], 16).map_err(|_| invalid())?;
+    let rip = u64::from_str_radix(fields[3], 16).map_err(|_| invalid())?;
     Ok(Some(Record {
         time_ns: Some(time_ns),
         kind: fields[0].into(),
-        value: serde_json::json!({"kind":fields[0], "branches":branches, "time_ns":time_ns, "extra":extra, "rip":rip}),
+        value: serde_json::json!({"kind":fields[0], "time_ns":time_ns, "extra":extra, "rip":rip}),
     }))
 }
 fn trace_diff(machine: &str, a: impl Read, b: impl Read) -> Result<Option<FirstRecord>> {
@@ -882,14 +869,6 @@ mod tests {
         let error = arm_report_error(&mut arm_fixture(), &wrong_seed);
         assert!(
             error.contains("VMM report seed disagrees with manifest"),
-            "{error}"
-        );
-
-        let mut counter_profile = report;
-        counter_profile["counter_profile"] = "zen3-v1".into();
-        let error = arm_report_error(&mut arm_fixture(), &counter_profile);
-        assert!(
-            error.contains("HVF report has an unexpected counter profile"),
             "{error}"
         );
     }
@@ -1066,13 +1045,13 @@ mod tests {
                 &dir.path().join("a"),
                 &mut fixture(),
                 Some(&a),
-                Some(b"I 1 2 3 4\n"),
+                Some(b"I 1 2 3\n"),
             );
             write_fixture(
                 &dir.path().join("b"),
                 &mut fixture(),
                 Some(&b),
-                Some(b"H 1 2 3 4\n"),
+                Some(b"H 1 2 3\n"),
             );
             let first = diff(&dir.path().join("a"), &dir.path().join("b"))
                 .unwrap()
@@ -1091,7 +1070,7 @@ mod tests {
         a["machines"].as_array_mut().unwrap().push(second);
         let mut b = a.clone();
         b["machines"][0]["run_ms"] = 999.into();
-        b["machines"][0]["undo"] = serde_json::json!({"rollbacks":999});
+        b["machines"][0]["shadow"] = serde_json::json!({"synced_pages":999, "restored_pages":1});
         b["machines"].as_array_mut().unwrap().reverse();
         assert_eq!(pair(&a, &b).1.status, Status::Match);
     }
@@ -1189,23 +1168,22 @@ mod tests {
 
     #[test]
     fn traces_report_first_changed_or_missing_record_and_validate_remainder() {
-        let a = b"I 1 2 3 4\nH 5 6 7 8\n";
-        let b = b"I 1 2 3 4\nP 5 9 7 8\n";
+        let a = b"I 1 2 3\nH 5 6 7\n";
+        let b = b"I 1 2 3\nP 9 6 7\n";
         let first = trace_diff("m", &a[..], &b[..]).unwrap().unwrap();
         assert_eq!(first.record, Some(2));
         assert_eq!(first.a.unwrap().kind, "H");
         assert_eq!(first.b.unwrap().time_ns, Some(9));
-        let first = trace_diff("m", &a[..], &b[..10]).unwrap().unwrap();
+        let first = trace_diff("m", &a[..], &b[..8]).unwrap().unwrap();
         assert_eq!(first.record, Some(2));
         assert!(first.b.is_none());
-        assert!(trace_diff("m", &a[..], &b"P 1 2 3 4\nbad\n"[..]).is_err());
+        assert!(trace_diff("m", &a[..], &b"P 1 2 3\nbad\n"[..]).is_err());
         assert!(trace_diff("m", &a[..], &a[..]).unwrap().is_none());
     }
 
     fn sample(time_ns: u64, records: u64, witness: u64) -> WitnessSample {
         WitnessSample {
             time_ns,
-            branches: time_ns / 2,
             records,
             witness: format!("{witness:016x}"),
         }
@@ -1213,16 +1191,8 @@ mod tests {
 
     #[test]
     fn witness_logs_report_first_differing_sample_and_validate_remainder() {
-        let a = witness_log_bytes(&[
-            [0, 0, 1, 7],
-            [1_000_050, 500_025, 9, 8],
-            [2_000_000, 1_000_000, 20, 9],
-        ]);
-        let b = witness_log_bytes(&[
-            [0, 0, 1, 7],
-            [1_000_050, 500_025, 9, 8],
-            [2_000_000, 1_000_000, 20, 10],
-        ]);
+        let a = witness_log_bytes(&[[0, 1, 7], [1_000_050, 9, 8], [2_000_000, 20, 9]]);
+        let b = witness_log_bytes(&[[0, 1, 7], [1_000_050, 9, 8], [2_000_000, 20, 10]]);
         assert!(compare_logs("m", &a[..], &a[..]).unwrap().is_none());
         let d = compare_logs("m", &a[..], &b[..]).unwrap().unwrap();
         assert_eq!(d.sample, 3);
@@ -1230,13 +1200,13 @@ mod tests {
         assert_eq!(d.a, Some(sample(2_000_000, 20, 9)));
         assert_eq!(d.b.unwrap().witness, "000000000000000a");
         // A log that ends early differs at its end; a first sample can differ.
-        let d = compare_logs("m", &a[..], &b[..64]).unwrap().unwrap();
+        let d = compare_logs("m", &a[..], &b[..48]).unwrap().unwrap();
         assert_eq!((d.sample, d.b), (3, None));
-        let d = compare_logs("m", &b[32..], &a[..]).unwrap().unwrap();
+        let d = compare_logs("m", &b[24..], &a[..]).unwrap().unwrap();
         assert_eq!((d.sample, d.last_match), (1, None));
         // A torn entry is an error even after the first difference.
-        assert!(compare_logs("m", &a[..], &b[..95]).is_err());
-        assert!(compare_logs("m", &b[..], &a[..95]).is_err());
+        assert!(compare_logs("m", &a[..], &b[..71]).is_err());
+        assert!(compare_logs("m", &b[..], &a[..71]).is_err());
     }
 
     #[test]
@@ -1276,8 +1246,8 @@ mod tests {
     fn diff_reports_witness_log_divergence_and_one_sided_logs() {
         let dir = tempfile::tempdir().unwrap();
         let name = "machines/workload.witness-log";
-        let x = witness_log_bytes(&[[0, 0, 1, 7], [1_000_000, 9, 4, 8]]);
-        let y = witness_log_bytes(&[[0, 0, 1, 7], [1_000_000, 9, 4, 6]]);
+        let x = witness_log_bytes(&[[0, 1, 7], [1_000_000, 4, 8]]);
+        let y = witness_log_bytes(&[[0, 1, 7], [1_000_000, 4, 6]]);
         for (side, log) in [("a", Some(&x[..])), ("b", Some(&y[..])), ("c", None)] {
             write_fixture_logs(
                 &dir.path().join(side),

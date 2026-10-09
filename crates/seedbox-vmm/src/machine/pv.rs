@@ -1,18 +1,19 @@
-//! The PV clock timebase: no host perf counter. Compute between exits costs
-//! no virtual time (the infinite-CPU model); time moves only at
+//! The PV clock: no host perf counter. Compute between exits costs no
+//! virtual time (the infinite-CPU model); time moves only at
 //!
 //! - exits the guest makes anyway (I/O, MMIO, HLT), with their usual costs,
-//! - guest clock reads, `SEEDBOX_PV_READ_NS` (100 ns) each, against 1 ns in
-//!   the counter timebase, where branches move time between reads
-//!   (`seedbox_rdtsc`),
+//! - guest clock reads, `SEEDBOX_PV_READ_NS` (100 ns) each (`seedbox_rdtsc`),
 //! - syscalls, counted by the guest in the time page, each costing the
 //!   machine's `Machine::syscall_ns`: `SYSCALL_NS` scaled by a seeded
 //!   per-machine speed (see `syscall_ns`).
 //!
 //! So a run needs no counted stop: the guest kernel exits by itself when its
 //! clock would pass the soft stop (the `bound` we publish) or at the syscall
-//! that reaches it (`syscall_target`), both behind a static key that is off in
-//! the counter timebase. Every exit is a deterministic point.
+//! that reaches it (`syscall_target`). Every exit is a deterministic point.
+//! Application code makes progress through the guest's automatic
+//! instrumentation (guest/progress), which charges a syscall every 10,000
+//! translated blocks per thread, and the kernel's syscall and `cpu_relax`
+//! hooks.
 //!
 //! A loop with no exit at all would never end and never let time move. A
 //! watchdog (host CPU time, a performance setting) catches a run with no exit
@@ -34,10 +35,17 @@
 use super::pv_plan::clock_plan;
 #[cfg(test)]
 use super::PAGE_TIMER_DEADLINE;
-use super::{map, Machine, Mapping, PAGE_BOUND, PAGE_SYSCALLS, PAGE_SYSCALL_TARGET};
-use crate::timebase::{Judge, Prepared, Run, Timebase, Verdict};
-use crate::undo::VcpuState;
+use super::{Machine, PAGE_BOUND, PAGE_SYSCALLS, PAGE_SYSCALL_TARGET};
+use crate::shadow::VcpuState;
 use std::time::Duration;
+
+/// What `PvClock::prepare` decided for the next entry.
+pub enum Prepared {
+    /// Enter the guest.
+    Run,
+    /// Don't: the guest is spinning in a state cycle and is idle, like HLT.
+    Idle,
+}
 
 /// Nominal virtual time one syscall costs. Part of the PV clock's semantics.
 pub const SYSCALL_NS: u64 = 1000;
@@ -228,10 +236,11 @@ fn key(r: &kvm_bindings::kvm_regs) -> Key {
     )
 }
 
-impl Timebase for PvClock {
-    const BRANCHES: bool = false;
-
-    fn prepare(
+impl PvClock {
+    /// Before KVM_RUN, with `remaining` progress before the hard stop and the
+    /// soft stop's virtual time: arrange for the run to end in time. `legal`
+    /// permits publishing guest-visible plans; watchdog/probe splits do not.
+    pub(crate) fn prepare(
         &mut self,
         m: &mut Machine,
         remaining: u64,
@@ -246,47 +255,46 @@ impl Timebase for PvClock {
         self._watchdog.hold(m.pv_progress.hold_watchdog())?;
         prepared
     }
-    fn start(&mut self, syscalls: u64) -> u64 {
+    /// The guest's syscall count before KVM_RUN.
+    pub(crate) fn start(&mut self, syscalls: u64) {
         self.syscalls0 = syscalls;
-        0
     }
 
-    fn read(&mut self, syscalls: u64) -> u64 {
+    /// Progress made by the run, from the syscall count after KVM_RUN.
+    pub(crate) fn read(&mut self, syscalls: u64) -> u64 {
         (syscalls - self.syscalls0)
             .saturating_mul(self.syscall_ns)
             .min(self.remaining)
     }
 
-    fn inject_guard(&self) -> u64 {
-        0
-    }
-
-    fn judge(&mut self, j: Judge<'_>, run: &Run) -> Result<Verdict, String> {
-        let exit = if run.interrupted {
+    /// Judge a finished run: whether its end is a deterministic point.
+    /// `interrupted`: KVM_RUN returned EINTR (a watchdog tick); `debug`: the
+    /// exit was a breakpoint landing.
+    pub(crate) fn judge(
+        &mut self,
+        progress: &mut Progress,
+        name: &str,
+        stats: &mut super::Stats,
+        interrupted: bool,
+        debug: bool,
+    ) -> Result<bool, String> {
+        let exit = if interrupted {
             ProgressExit::Watchdog
-        } else if run.debug {
+        } else if debug {
             ProgressExit::Landing
         } else {
             ProgressExit::Natural
         };
-        let legal = j.pv_progress.judge(
-            exit,
-            &mut JudgeContext {
-                name: j.name,
-                stats: j.stats,
-            },
-        )?;
-        Ok(Verdict::Advance { legal })
+        progress.judge(exit, &mut JudgeContext { name, stats })
     }
 }
 
-/// The machine state a cycle check compares.
+/// The machine state a cycle check compares. RAM is compared through the
+/// machine's shadow: only the pages written since this state was taken.
 pub struct Saved {
     cpu: VcpuState,
     page: Box<[u8; 4096]>,
-    /// A copy of RAM, when no dirty log tracks it.
-    ram: Option<Mapping>,
-    /// With a dirty log: the pages written since this state was taken.
+    /// The pages written since this state was taken.
     written: Vec<u64>,
 }
 
@@ -294,24 +302,10 @@ impl Saved {
     fn take(m: &mut Machine) -> Result<Self, String> {
         let mut cpu = VcpuState::new(m.msrs.clone());
         cpu.save(&m.vcpu, "spin check")?;
-        let ram = match m.undo.as_mut() {
-            Some(u) => {
-                u.sync(&m._vm, m.mem.0)?;
-                None
-            }
-            None => {
-                let ram = Mapping {
-                    ptr: super::SendPtr(map(m.mem_size)?),
-                    size: m.mem_size,
-                };
-                unsafe { std::ptr::copy_nonoverlapping(m.mem.0, ram.ptr.0, m.mem_size) };
-                Some(ram)
-            }
-        };
+        m.shadow.sync(&m._vm, m.mem.0)?;
         Ok(Self {
             cpu,
             page: page_copy(m),
-            ram,
             written: Vec::new(),
         })
     }
@@ -327,16 +321,9 @@ impl Saved {
             None => match self.page.iter().zip(page.iter()).position(|(a, b)| a != b) {
                 Some(at) => Some(format!("time page word {}", at / 8)),
                 None => {
-                    let ram = match (&self.ram, m.undo.as_mut()) {
-                        (None, Some(u)) => {
-                            u.unchanged_since_sync(&m._vm, m.mem.0, &mut self.written)?
-                        }
-                        (Some(ram), _) => unsafe {
-                            std::slice::from_raw_parts(ram.ptr.0, ram.size)
-                                == std::slice::from_raw_parts(m.mem.0, m.mem_size)
-                        },
-                        (None, None) => return Err("spin check: RAM not saved".into()),
-                    };
+                    let ram = m
+                        .shadow
+                        .unchanged_since_sync(&m._vm, m.mem.0, &mut self.written)?;
                     (!ram).then(|| "ram".to_string())
                 }
             },
@@ -440,7 +427,7 @@ mod tests {
                 let mut code = vec![0xb8];
                 code.extend_from_slice(&(abi as u32).to_le_bytes());
                 code.extend_from_slice(&[0xba, 0x28, 0x05, 0, 0, 0xef, 0xf4]);
-                let mut m = machine(&kvm, &code, 0);
+                let mut m = machine(&kvm, &code);
                 m.page_timer_requested = requested;
                 m.page_set(super::super::PAGE_PV_CLOCK, 2);
                 m.pic.set_masks(0xffff);
@@ -459,7 +446,7 @@ mod tests {
     }
 
     /// A 32-bit payload at the kernel entry, interrupts enabled and unmasked.
-    fn machine(kvm: &Kvm, code: &[u8], undo: u64) -> Machine {
+    fn machine(kvm: &Kvm, code: &[u8]) -> Machine {
         let mut kernel = vec![0u8; 1024];
         kernel[0x1f1] = 1;
         kernel.extend(code);
@@ -472,9 +459,7 @@ mod tests {
             mac: None,
             control_channel: false,
             disk: None,
-            undo_margin: undo,
             barrier: false,
-            pv_clock: true,
             page_timer: false,
         };
         let mut m = Machine::new(kvm, "pv-probe", &spec).unwrap();
@@ -504,7 +489,7 @@ mod tests {
         code.extend_from_slice(&[0xb9, 0, 0, 0, 0x01, 0x49, 0x75, 0xfd]);
         code.extend_from_slice(&[0xba, 0x2c, 0x05, 0, 0, 0xb0, 1, 0xee, 0xf4]);
         for watchdog in [Duration::from_secs(10), Duration::from_micros(100)] {
-            let mut m = machine(&kvm, &code, 0);
+            let mut m = machine(&kvm, &code);
             m.page_timer_requested = true;
             m.abi = super::super::ABI_PAGE_TIMER;
             m.enable_page_timer();
@@ -535,7 +520,7 @@ mod tests {
     #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
     fn a_throttle_and_its_heal_charge_from_the_next_legal_plan() {
         let kvm = Kvm::new().unwrap();
-        let mut m = machine(&kvm, &[0xf4], 0);
+        let mut m = machine(&kvm, &[0xf4]);
         m.page_timer_requested = true;
         m.abi = super::super::ABI_PAGE_TIMER;
         m.enable_page_timer();
@@ -561,7 +546,7 @@ mod tests {
     #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires Linux x86-64 KVM")]
     fn watchdog_plans_do_not_adopt_expire_or_draw_page_timer_latency() {
         let kvm = Kvm::new().unwrap();
-        let mut m = machine(&kvm, &[0xf4], 0);
+        let mut m = machine(&kvm, &[0xf4]);
         m.page_timer_requested = true;
         m.abi = super::super::ABI_PAGE_TIMER;
         m.enable_page_timer();
@@ -639,19 +624,16 @@ mod tests {
                 code.extend_from_slice(&[0xb9, 0, 0, 0, 0x01, 0x49, 0x75, 0xfd, 0xf4]);
             }
             let mut want = None;
-            for (watchdog, undo) in [
-                (
-                    if spin {
-                        Duration::from_millis(2)
-                    } else {
-                        Duration::from_secs(10)
-                    },
-                    0,
-                ),
-                (Duration::from_micros(100), 0),
-                (Duration::from_micros(200), 256),
+            for watchdog in [
+                if spin {
+                    Duration::from_millis(2)
+                } else {
+                    Duration::from_secs(10)
+                },
+                Duration::from_micros(100),
+                Duration::from_micros(200),
             ] {
-                let mut m = machine(&kvm, &code, undo);
+                let mut m = machine(&kvm, &code);
                 m.page_timer_requested = true;
                 m.abi = super::super::ABI_PAGE_TIMER;
                 m.enable_page_timer();
@@ -699,7 +681,7 @@ mod tests {
                 let mut rng = m.timer_rng.as_ref().unwrap().clone();
                 let got = (wake, adopted, m.stats.irqs, m.exit_witness(), rng.next());
                 if let Some(want) = &want {
-                    assert_eq!(&got, want, "watchdog={watchdog:?} undo={undo}");
+                    assert_eq!(&got, want, "watchdog={watchdog:?}");
                 } else {
                     want = Some(got);
                 }
@@ -737,12 +719,12 @@ mod tests {
             code.extend_from_slice(&[0xba, 0x2c, 0x05, 0, 0, 0xb0, 1, 0xee, 0xf4]);
         }
         let mut want = None;
-        for (watchdog, undo) in [
-            (Duration::from_secs(10), 0),
-            (Duration::from_micros(100), 0),
-            (Duration::from_micros(700), 256),
+        for watchdog in [
+            Duration::from_secs(10),
+            Duration::from_micros(100),
+            Duration::from_micros(700),
         ] {
-            let mut m = machine(&kvm, &code, undo);
+            let mut m = machine(&kvm, &code);
             m.page_timer_requested = true;
             m.abi = super::super::ABI_PAGE_TIMER;
             m.enable_page_timer();
@@ -813,34 +795,33 @@ mod tests {
                 assert!(m.stats.eintr > 0);
             }
             if let Some(want) = &want {
-                assert_eq!(&evidence, want, "watchdog={watchdog:?} undo={undo}");
+                assert_eq!(&evidence, want, "watchdog={watchdog:?}");
             } else {
                 want = Some(evidence);
             }
         }
     }
 
-    /// Run to the first stop under several watchdog periods and undo
-    /// settings; all must agree. Returns the stop, rip, rcx and the machine.
+    /// Run to the first stop under several watchdog periods; all must agree. Returns the stop, rip, rcx and the machine.
     /// `idle`: the guest should go idle, so fail after a few checks that
     /// find no cycle rather than spin until the test times out.
     fn run(code: &[u8], idle: bool) -> (Stop, u64, u64, Machine) {
         let kvm = Kvm::new().unwrap();
         let mut first: Option<(u64, u64, u64, String)> = None;
         let mut last = None;
-        for (ms, undo) in [(2, 256), (7, 0), (3, 0)] {
+        for ms in [2, 7, 3] {
             let mut clock = PvClock::new(Duration::from_millis(ms)).unwrap();
             if idle {
                 clock.max_false_alarms = 10;
             }
-            let mut m = machine(&kvm, code, undo);
+            let mut m = machine(&kvm, code);
             let stop = m
                 .run_until(&mut clock, 1_000_000_000, 0, &mut Vec::new())
                 .unwrap();
             let r = m.vcpu.get_regs().unwrap();
             let evidence = (m.time, r.rip, r.rcx, m.exit_witness());
             if let Some(want) = &first {
-                assert_eq!(&evidence, want, "watchdog {ms} ms undo {undo}");
+                assert_eq!(&evidence, want, "watchdog {ms} ms");
             } else {
                 first = Some(evidence);
             }
@@ -897,7 +878,7 @@ mod tests {
         for _ in 0..20 {
             let mut clock = PvClock::new(Duration::from_micros(200)).unwrap();
             clock.max_false_alarms = 10;
-            let mut m = machine(&kvm, &code, 0);
+            let mut m = machine(&kvm, &code);
             assert_eq!(
                 m.run_until(&mut clock, 1_000_000_000, 0, &mut Vec::new())
                     .unwrap(),

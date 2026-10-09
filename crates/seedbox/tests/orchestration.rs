@@ -132,10 +132,9 @@ impl Fixture {
         };
         let backend = Backend {
             profile,
-            performance: BTreeMap::from([("SEEDBOX_UNDO".into(), "256".into())]),
+            performance: BTreeMap::from([("SEEDBOX_WATCHDOG_MS".into(), "20".into())]),
             extra_logs: BTreeMap::new(),
             report: ExecutionReport {
-                timebase: None,
                 reason: StopReason::Completed,
                 workload_exit: Some(WorkloadExit {
                     service: "workload".into(),
@@ -685,7 +684,7 @@ fn performance_changes_are_recorded_without_changing_identity_or_bypassing_compa
     fixture
         .backend
         .performance
-        .insert("SEEDBOX_UNDO".into(), "16".into());
+        .insert("SEEDBOX_WATCHDOG_MS".into(), "200".into());
     let replay = fixture.replay(&first);
     assert_eq!(replay.record.run_id, first.record.run_id);
     assert_ne!(
@@ -1320,15 +1319,8 @@ fn actual_vmm_admission_rejects_an_invalid_retained_profile_before_execution() {
     let engine = fixture.directory.path().join("retained-engine");
     fs::write(&engine, b"fixture engine").unwrap();
     let store = ContentStore::new(fixture.directory.path().join("store"));
-    let executor = seedbox::vmm::VmmExecutor::new(
-        &engine,
-        &store,
-        None,
-        512,
-        WitnessMode::Exits,
-        seedbox::counter::CounterProfile::Zen,
-    )
-    .unwrap();
+    let executor =
+        seedbox::vmm::VmmExecutor::new(&engine, &store, None, 512, WitnessMode::Exits).unwrap();
     for allow_engine_change in [false, true] {
         let rejected = fixture
             .orchestrator
@@ -2068,7 +2060,6 @@ fn worker_capacity_and_serial_default_refuse_before_preparation_and_bounds_are_l
         Some(4),
         512,
         WitnessMode::Exits,
-        seedbox::counter::CounterProfile::Zen,
     )
     .unwrap();
     assert!(executor
@@ -2196,16 +2187,13 @@ fn checkpoint_identity_replays_retained_semantics() {
 }
 
 #[test]
-fn timebase_changes_identity_while_default_counter_preserves_legacy_bytes() {
-    use seedbox::{
-        counter::CounterProfile,
-        vmm::{self, VmmExecutor},
-    };
+fn kvm_executor_profile_records_no_timebase_and_matches_legacy_identity_bytes() {
+    use seedbox::vmm::VmmExecutor;
     let mut f = Fixture::new();
     let store = ContentStore::new(f.directory.path().join("store"));
     let engine = f.directory.path().join("engine");
     fs::write(&engine, b"fixture engine").unwrap();
-    // The exact pre-timebase profile: no timebase parameter in its identity.
+    // The exact profile of a run with no mode parameters in its identity.
     let legacy = ExecutionProfile {
         backend: "seedbox-kvm".into(),
         engine: f.backend.profile.engine.clone(),
@@ -2219,160 +2207,36 @@ fn timebase_changes_identity_while_default_counter_preserves_legacy_bytes() {
     f.backend.profile = legacy.clone();
     f.preparer.inputs.profile = legacy;
     let before = f.run();
-    let executor = VmmExecutor::new(
-        &engine,
-        &store,
-        None,
-        1024,
-        WitnessMode::Exits,
-        CounterProfile::Zen,
-    )
-    .unwrap();
+    let executor = VmmExecutor::new(&engine, &store, None, 1024, WitnessMode::Exits).unwrap();
     assert_eq!(executor.profile(), before.record.identity.inputs.profile);
-    for executor in [
-        executor.clone(),
-        executor.clone().with_timebase(Timebase::Counter),
-    ] {
-        f.backend.profile = executor.profile();
-        f.preparer.inputs.profile = executor.profile();
-        let counter = f.run();
-        assert_eq!(counter.record.run_id, before.record.run_id);
-        assert_eq!(
-            serde_json::to_vec(&counter.record.identity).unwrap(),
-            serde_json::to_vec(&before.record.identity).unwrap()
-        );
-        assert!(!counter
-            .record
-            .identity
-            .inputs
-            .profile
-            .semantic_parameters
-            .contains_key("timebase"));
-        assert_eq!(
-            vmm::recorded_timebase(&counter.record.identity.inputs.profile).unwrap(),
-            Timebase::Counter
-        );
-    }
-    let pv = executor.with_timebase(Timebase::Pv);
-    f.backend.profile = pv.profile();
-    f.preparer.inputs.profile = pv.profile();
+    assert!(!executor
+        .profile()
+        .semantic_parameters
+        .contains_key("timebase"));
+    f.backend.profile = executor.profile();
+    f.preparer.inputs.profile = executor.profile();
     let run = f.run();
-    assert_eq!(run.record.identity.seed, before.record.identity.seed);
-    assert_ne!(run.record.run_id, before.record.run_id);
-    assert_ne!(
-        fs::read(run.directory.join("manifest.json")).unwrap(),
-        fs::read(before.directory.join("manifest.json")).unwrap()
-    );
+    assert_eq!(run.record.run_id, before.record.run_id);
     assert_eq!(
-        inspect(&run.directory)
-            .unwrap()
-            .identity
-            .inputs
-            .profile
-            .semantic_parameters["timebase"],
-        "pv"
+        serde_json::to_vec(&run.record.identity).unwrap(),
+        serde_json::to_vec(&before.record.identity).unwrap()
     );
-    // Old counter reports omit the field; adding it must not change replay comparison.
-    let counter = pv.clone().with_timebase(Timebase::Counter);
-    f.backend.profile = counter.profile();
-    f.backend.report.timebase = Some(Timebase::Counter);
     let replay = f
         .orchestrator
         .replay(&before.directory, &f.backend, &CancellationToken::default())
         .unwrap();
     assert_eq!(replay.record.replay.unwrap().status, ReplayStatus::Match);
     assert_eq!(replay.record.run_id, before.record.run_id);
-    // Switching back removes the parameter, restoring the original profile.
-    assert_eq!(
-        pv.with_timebase(Timebase::Counter).profile(),
-        before.record.identity.inputs.profile
-    );
-}
-
-#[test]
-fn replay_refuses_timebase_drift_and_unknown_values_before_execution() {
-    for (recorded, requested) in [
-        ("pv", "counter"),
-        ("counter", "pv"),
-        ("future", "counter"),
-        ("pv", "future"),
-    ] {
-        let mut f = Fixture::new();
-        f.backend.profile.backend = "seedbox-kvm".into();
-        if recorded != "counter" {
-            f.backend
-                .profile
-                .semantic_parameters
-                .insert("timebase".into(), recorded.into());
-        }
-        f.preparer.inputs.profile = f.backend.profile.clone();
-        let run = f.run();
-        f.backend.profile.semantic_parameters.remove("timebase");
-        if requested != "counter" {
-            f.backend
-                .profile
-                .semantic_parameters
-                .insert("timebase".into(), requested.into());
-        }
-        for allow_engine_change in [false, true] {
-            let error = f
-                .orchestrator
-                .replay_with_options(
-                    &run.directory,
-                    &f.backend,
-                    ReplayOptions {
-                        allow_engine_change,
-                        ..Default::default()
-                    },
-                )
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains("--timebase"), "{error}");
-            if recorded != "future" && requested != "future" {
-                assert!(
-                    error.contains(&format!("executor timebase {requested}")),
-                    "{error}"
-                );
-                assert!(!error.contains("replay --timebase"), "{error}");
-            }
-            assert!(
-                error.contains(if recorded == "future" || requested == "future" {
-                    "future"
-                } else {
-                    requested
-                }),
-                "{error}"
-            );
-            assert_eq!(f.backend.calls.load(Ordering::SeqCst), 1);
-            assert_eq!(
-                fs::read_dir(f.directory.path().join("runs"))
-                    .unwrap()
-                    .count(),
-                1
-            );
-        }
-    }
 }
 
 #[test]
 fn page_timer_is_recorded_only_when_enabled_and_replays_from_the_profile() {
-    use seedbox::{
-        counter::CounterProfile,
-        vmm::{recorded_page_timer, VmmExecutor},
-    };
+    use seedbox::vmm::{recorded_page_timer, VmmExecutor};
     let mut f = Fixture::new();
     let store = ContentStore::new(f.directory.path().join("store"));
     let engine = f.directory.path().join("engine");
     fs::write(&engine, b"fixture engine").unwrap();
-    let executor = VmmExecutor::new(
-        &engine,
-        &store,
-        None,
-        1024,
-        WitnessMode::Exits,
-        CounterProfile::Zen,
-    )
-    .unwrap();
+    let executor = VmmExecutor::new(&engine, &store, None, 1024, WitnessMode::Exits).unwrap();
     f.backend.profile = executor.profile();
     f.preparer.inputs.profile = executor.profile();
     let before = f.run();
@@ -2414,20 +2278,12 @@ fn page_timer_is_recorded_only_when_enabled_and_replays_from_the_profile() {
 
 #[test]
 fn deferred_tx_is_semantic_only_when_on_and_replay_cannot_switch_modes() {
-    use seedbox::{counter::CounterProfile, vmm::VmmExecutor};
+    use seedbox::vmm::VmmExecutor;
     let mut f = Fixture::new();
     let store = ContentStore::new(f.directory.path().join("store"));
     let engine = f.directory.path().join("engine");
     fs::write(&engine, b"fixture engine").unwrap();
-    let off = VmmExecutor::new(
-        &engine,
-        &store,
-        None,
-        1024,
-        WitnessMode::Exits,
-        CounterProfile::Zen,
-    )
-    .unwrap();
+    let off = VmmExecutor::new(&engine, &store, None, 1024, WitnessMode::Exits).unwrap();
     assert_eq!(off.profile(), off.clone().with_deferred_tx(false).profile());
     let on = off.clone().with_deferred_tx(true);
     assert_eq!(on.profile().semantic_parameters["deferred_tx"], "true");

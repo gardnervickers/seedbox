@@ -6,8 +6,7 @@ From the repository root:
 nix develop
 cargo build --release
 # Start Docker/Podman for application preparation.
-./target/release/seedbox run examples/etcd  # Mac
-# Linux: add --timebase pv
+./target/release/seedbox run examples/etcd
 ./target/release/seedbox replay .seedbox/runs/ATTEMPT
 ```
 
@@ -34,8 +33,7 @@ application data does not persist across fresh runs. Use the release executable,
 guest helpers on first use. Private releases require `GH_TOKEN` or `GITHUB_TOKEN`;
 [manual Linux builds](../tools/runtime/README.md#build-without-private-release-access)
 are also supported. Run on
-Apple Silicon HVF or Linux KVM (`--timebase pv` avoids hardware-counter
-requirements), with at least the tested 1024 MiB per service.
+Apple Silicon HVF or Linux KVM, with at least the tested 1024 MiB per service.
 The image supplies userspace dependencies. Image versions, launch metadata and
 filesystem layers are resolved and retained before execution.
 

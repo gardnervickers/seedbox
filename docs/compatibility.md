@@ -29,8 +29,7 @@ checks detect corruption, not authenticity against someone rewriting the store.
 
 Inspection and transfer of an accepted format need no guest execution. Execution
 additionally requires verified input bytes and a host with the capabilities the
-recorded profile needs (for the `counter` timebase, an AMD Zen KVM host with
-guest perf counting). Replay runs the engine retained in the run directory;
+recorded profile needs (KVM or HVF access). Replay runs the engine retained in the run directory;
 records are never rewritten. Host admission checks capabilities only: #142 and
 #143 removed the engine, kernel, CPU and host-policy pins, so older records'
 extra admission parameters are kept as data and not enforced. A readable v2

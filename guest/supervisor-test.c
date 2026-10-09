@@ -30,6 +30,7 @@ static int application_execv(const char *path, char *const argv[]) {
     size_t index = 3;
 #if defined(__aarch64__)
     assert(!strcmp(argv[index++], "-no_ldstex2cas"));
+    assert(!strcmp(argv[index++], "-unsafe_build_ldstex"));
 #endif
     assert(!strcmp(argv[index++], "-c"));
     assert(!strcmp(argv[index++], "/seedbox/progress/libseedbox_progress.so"));

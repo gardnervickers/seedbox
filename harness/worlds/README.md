@@ -37,9 +37,8 @@ and identities.
 | `entropy-barrier.json` | The same guest forked at its launch barrier instead (see below) |
 | `window2.json`, `window4.json` | Windowed-scheduler evidence: guests hash memory while pinging a neighbour; run by `harness/windowed-matrix.sh` ([design](../../docs/windowed-scheduler.md)) |
 
-`batch.sh`, `batch.py` and `msr54.py` still run these fixtures with shared CPU/SMT
-leases and verified MSR restoration. Runtime lifecycle tests also use their CPU
-topology/readback helpers. `guest/build-netns.sh` still needs `build-client.sh`,
+`batch.sh` and `batch.py` still run these fixtures with shared CPU/SMT
+leases. Runtime lifecycle tests also use their CPU topology helpers. `guest/build-netns.sh` still needs `build-client.sh`,
 `build-initramfs.sh`, `cluster.init`, `single.init`, `network.sh`, `members.sh`,
 `netprobe.c` and `sbx.c` for the one-VM/multi-VM comparison. The raw boot/network
 fixtures use the same initramfs builder. These dependencies are not replaced by
@@ -64,8 +63,7 @@ barrier and nothing after it.
 
 `--fork-seeds A,B,...` runs further seeds in the same engine process. The
 engine keeps the world at the barrier and restores it before each later seed
-instead of booting again; with undo on, only pages written since the barrier
-are copied back. Each seed's report and consoles go to `OUT/seed-N/`, and the
+instead of booting again. Each seed's report and consoles go to `OUT/seed-N/`, and the
 JSON on stdout lists them under `seeds`. A restored seed must match a run of
 that seed alone, byte for byte: compare `world_witness` and, with `--digest`,
 each machine's `state_digest`.
@@ -78,12 +76,12 @@ CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/cluster-fork.json fo
 With `boot.fork_at_ns` instead, the world forks at a simulated time rather
 than at the guests' barrier: every machine parks at its first deterministic
 point at or after that time, so boot and application startup are both shared.
-The x86 time page is u64-indexed: fields 0–5 retain the counter ABI;
+The x86 time page is u64-indexed: fields 0–5 retain the original ABI;
 `pv_clock`, `bound`, and `syscall_target` occupy 6, 7, and 8;
 `entropy_gen` occupies 9 and the four entropy words occupy 10–13. Both
 `SEEDBOX_ABI` and `ABI_PAGE_RESEED` are 3. The checkpoint and dedicated
-time-page digest retain only fields 0–5 (`PAGE_FIELDS = 6`). The VMM never
-writes fields 6–8 in counter mode; it writes fields 9–13 only when releasing
+time-page digest retain only fields 0–5 (`PAGE_FIELDS = 6`). The VMM
+writes fields 9–13 only when releasing
 a parked time fork with ABI >= 3. Full world-fork snapshots still copy the
 whole page so later seeds restore the original generation.
 
@@ -167,7 +165,7 @@ otherwise used):
 | --- | --- | --- |
 | `pause` | running | The vCPU and its devices stop. RAM, registers, device state and any unpaid I/O cost are kept as they are. |
 | `resume` | paused | The machine continues at `at_ns`. Timer ticks that fell due while it was paused fire once, late, keeping their phase, and its held frames are delivered before it runs. |
-| `crash` | running or paused | The VM is destroyed: RAM, devices and their queues, KVM's I/O state, management commands queued for it and the undo checkpoint. |
+| `crash` | running or paused | The VM is destroyed: RAM, devices and their queues, KVM's I/O state, management commands queued for it. |
 | `reboot` | down | A new incarnation boots at `at_ns` from the same kernel, initrd and command line, with entropy and timer jitter drawn from the run seed for that incarnation. It never waits at a launch barrier. |
 
 Any other transition (resuming a running machine, rebooting one that is not
@@ -215,13 +213,11 @@ flushed writes.
 
 `net-pause.json` pauses `b` from 2 s to 3.5 s while `a` pings it, and
 `net-crash.json` crashes `b` at 2 s and reboots it at 2.5 s. Check that a run
-repeats exactly, and that `SEEDBOX_UNDO=0` and a fixed `SEEDBOX_MARGIN` give
-the same witnesses. `net-crash-fork.json` adds a time fork, so a crash in one
+repeats exactly. `net-crash-fork.json` adds a time fork, so a crash in one
 seed is followed by a restore for the next:
 
 ```sh
 CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/net-crash.json crash "1009 1009" --digest
-CPU0=14 SEEDBOX_UNDO=0 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/net-crash.json crash-undo0 "1009" --digest
 for s in 1010 1011; do CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/net-crash-fork.json crash-fork-cold "$s" --digest; done
 CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/net-crash-fork.json crash-fork-loop "1009" --digest --fork-seeds 1010,1011
 ```
@@ -275,7 +271,6 @@ a kernel with `VIRTIO_BLK` and `EXT4_FS` (`kernel/config.options`).
 
 ```sh
 for w in disk-nocrash disk-crash disk-ext4-crash; do CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/$w.json $w "1009 1009" --digest --trace; done
-CPU0=14 SEEDBOX_UNDO=0 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/disk-crash.json disk-crash-undo0 "1009" --digest
 for s in 1010 1011; do CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/disk-crash-fork.json disk-fork-cold "$s" --digest; done
 CPU0=14 SEEDBOX_TIMEOUT=300 harness/batch.sh harness/worlds/disk-crash-fork.json disk-fork-loop "1009" --digest --fork-seeds 1010,1011
 ```

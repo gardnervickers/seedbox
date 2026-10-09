@@ -11,7 +11,6 @@ import subprocess
 from generate import generate
 from verify import verify, verify_cutoff, verify_early_request, verify_control_cases, verify_lifecycle_cases
 
-MSR_EVIDENCE = []
 RUN_EVIDENCE = []
 COMMAND_EVIDENCE = []
 OUTPUT = None
@@ -34,14 +33,14 @@ def reserve_output(directory, init_paths):
     # Exclusive creation also protects against two launchers racing after the
     # directory check. OUTPUT stays unset if an existing attempt owns this file.
     with (candidate / "acceptance.json").open("x") as report:
-        json.dump({"status":"running","runs":[],"msr_readback":[],"commands":[]},report)
+        json.dump({"status":"running","runs":[],"commands":[]},report)
         report.write("\n")
     return candidate
 
 def persist_evidence(error=None):
     if OUTPUT is None:
         return
-    contents = {"status":STATUS,"runs":RUN_EVIDENCE,"msr_readback":MSR_EVIDENCE,"commands":COMMAND_EVIDENCE}
+    contents = {"status":STATUS,"runs":RUN_EVIDENCE,"commands":COMMAND_EVIDENCE}
     if error is not None:
         contents["error"] = str(error)
     temporary = OUTPUT / "acceptance.json.tmp"
@@ -127,33 +126,13 @@ def control_project(projects, name="control-cases", scenario="control_scenario.p
 RUN = re.compile(r"^(?:PASS|FAIL|ERROR|TIMEOUT|INCOMPLETE): (.+)$", re.M)
 
 def checked_run(command):
-    """Assert scoped host-state restoration even when a run fails."""
-    cpu = int(command[command.index("--cpu") + 1])
-    topology = Path(f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list").read_text().strip()
-    siblings = []
-    for item in topology.split(","):
-        span = list(map(int,item.split("-")))
-        siblings.extend(range(span[0],span[-1]+1))
-    def snapshot():
-        values = {}
-        for sibling in siblings:
-            fd = os.open(f"/dev/cpu/{sibling}/msr",os.O_RDONLY)
-            try:
-                value = os.pread(fd,8,0xc0011020)
-                assert len(value) == 8, "short MSR read"
-                values[str(sibling)] = int.from_bytes(value,"little")
-            finally:
-                os.close(fd)
-        return values
+    """Run one CLI command, retaining its output as evidence even when it fails."""
     number = len(COMMAND_EVIDENCE) + 1
     logs = OUTPUT / "commands"
     logs.mkdir(exist_ok=True)
     stdout_path, stderr_path = logs / f"{number:02}.stdout", logs / f"{number:02}.stderr"
     command_record = {"command":command,"stdout":str(stdout_path),"stderr":str(stderr_path),"status":"running"}
     COMMAND_EVIDENCE.append(command_record)
-    before = snapshot()
-    msr_record = {"command":command,"before":before,"after":None,"restored":None}
-    MSR_EVIDENCE.append(msr_record)
     persist_evidence()
     try:
         with stdout_path.open("w") as stdout, stderr_path.open("w") as stderr:
@@ -170,10 +149,7 @@ def checked_run(command):
         command_record.update(status="completed",returncode=returncode)
         return subprocess.CompletedProcess(command,returncode,stdout_path.read_text(),stderr_path.read_text())
     finally:
-        after = snapshot()
-        msr_record.update(after=after,restored=before == after)
         persist_evidence()
-        assert before == after, "host MSR restoration mismatch"
 
 def execute(command, expected_code):
     result = checked_run(command)
@@ -197,7 +173,6 @@ def main():
     p.add_argument("--rejecting-guest-init", help="same supervisor compiled with -DSEEDBOX_REJECT_EFFECTS for the explicit rejection control")
     p.add_argument("--delayed-guest-init", help="supervisor compiled with -DSEEDBOX_TEST_READY_DELAY_NS=4000000000ULL for readiness and cutoff checks")
     p.add_argument("--seed", type=int, default=1009)
-    p.add_argument("--margin", default="98304")
     a = p.parse_args()
     OUTPUT = reserve_output(a.output,[a.guest_init,a.negative_guest_init,a.rejecting_guest_init,a.delayed_guest_init])
     def interrupt(_signal, _frame):
@@ -210,7 +185,7 @@ def main():
     if a.delayed_guest_init:
         focused_projects(projects)
     common = ["--kernel", a.kernel, "--vmm", a.vmm, "--guest-init", a.guest_init,
-              "--cpu", str(a.cpu), "--state", a.state, "--margin", a.margin]
+              "--cpu", str(a.cpu), "--state", a.state]
     evidence = RUN_EVIDENCE
     for variant, status, faulted in (("fixed", "PASS", True), ("broken", "FAIL", True), ("broken-no-faults", "PASS", False)):
         run = execute([a.seedbox, "run", str(projects / variant / "compose.yaml"), *common], 0 if status == "PASS" else 1)
@@ -257,12 +232,11 @@ def main():
                                 "--state", a.state], 0)
     evidence.append(verify_lifecycle_cases(lifecycle_replay))
     persist_evidence()
-    # One performance variant, where machine replacement meets stepping: undo off
-    # (no checkpoint across a crash or reboot) with a fixed margin, which is only
-    # read with undo off. Other replays use the default settings.
+    # One performance variant: a different watchdog period. Other replays use
+    # the default settings.
     lifecycle_varied = execute([a.seedbox, "replay", str(lifecycle_run), "--cpu", str(a.cpu), "--state", a.state,
-                                "--undo", "0", "--margin", "16384"], 0)
-    evidence.append(dict(verify_lifecycle_cases(lifecycle_varied), performance_variant="undo off, margin 16384"))
+                                "--watchdog-ms", "5"], 0)
+    evidence.append(dict(verify_lifecycle_cases(lifecycle_varied), performance_variant="watchdog 5 ms"))
     persist_evidence()
     STATUS = "passed"
     persist_evidence()

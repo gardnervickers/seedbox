@@ -339,12 +339,12 @@ a reused tuple; it remains healable with its accumulated evidence.
 `throttle` makes a machine slow but alive: until its handle is healed, the
 machine's simulated CPU work costs `factor_permille / 1000` times its seeded
 speed. It takes effect at admission and shares the fault handle counter;
-`heal` restores the seeded speed and returns `{}`. Only the x86 `pv` timebase
-supports it: there each syscall is charged the machine's `syscall_ns`, already
+`heal` restores the seeded speed and returns `{}`. Only x86 supports it:
+there each syscall is charged the machine's `syscall_ns`, already
 drawn per machine from `pv-speed/<machine>` within 10% of 1000 ns, and the
 throttle multiplies that drawn value (rounding up). The draw itself is
-unchanged and the throttle adds no RNG draws. The counter timebase and ARM
-return `unsupported` without a fault.
+unchanged and the throttle adds no RNG draws. ARM returns `unsupported`
+without a fault.
 
 A machine has at most one active throttle; a second returns `invalid_state`.
 A throttle survives machine pause, and a crashed machine's next incarnation
@@ -354,8 +354,7 @@ charging at the machine's next legal plan rather than mid-arm. The factor and
 handle are fault plan entries in the retained evidence, so replay restores them.
 The Python API is `slow = world.throttle("server", 4)` (factors from 1 to 1000
 in steps of 0.001) and `world.heal(slow)`.
-`harness/acceptance/workloads/slow-machine.yaml` (run with `--timebase pv`)
-checks that a fixed amount of syscall work takes about four times as long while
+`harness/acceptance/workloads/slow-machine.yaml` checks that a fixed amount of syscall work takes about four times as long while
 throttled and returns to its earlier duration after the heal.
 
 See [connection classification](../docs/runtime.md#connection-selectors) for TCP
@@ -416,15 +415,15 @@ The caller receives the response after normal guest scheduling resumes, so its
 next instruction may execute later than `R`. A requested sleep includes the two
 RPC delivery intervals; it is a lower bound on elapsed simulated time. Admission
 and replies never derive their timestamp from host wall time or a performance
-margin. Calls whose timing extends beyond the run limit remain pending and are
+setting. Calls whose timing extends beyond the run limit remain pending and are
 recorded as `cut_off` at termination. Process commands wait for the target
 supervisor's readiness signal. If readiness arrives after admission, dispatch is
 scheduled one control-latency interval after that signal; the original deadline
 still applies.
 
 Request order, handles, effects, replies and packet counters are retained in the
-execution evidence. Performance settings such as undo margin must not change this
-history. The controller's Python source, its binding, and its image are retained
+execution evidence. Performance settings such as the watchdog interval must not
+change this history. The controller's Python source, its binding, and its image are retained
 with the run so replay executes the same inputs.
 
 ## Committed console trigger extension (development engine)
@@ -448,6 +447,6 @@ effects. `inspect.triggers` and terminal `vmm.json.triggers` contain the same
 canonical matcher/effect records, with cutoff added at termination. The world
 witness includes those records only when triggers have been used.
 
-The full [time/commitment contract and AMD controls](../docs/triggers.md) define
+The full [time/commitment contract and host controls](../docs/triggers.md) define
 tie order, snapshots, discarded candidates and charged-I/O boundaries. Plain
 console bytes do not establish an accepted PUT or any application commit.

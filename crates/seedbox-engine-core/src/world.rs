@@ -241,7 +241,6 @@ pub trait WorldMachine: Deref<Target = MachineState> + DerefMut + Sized {
     fn throttle(&mut self, _factor_permille: u64) -> Result<(), String> {
         Err("throttle is unsupported by this backend".into())
     }
-    fn branches(&self) -> u64;
     fn exits(&self) -> u64;
     fn exit_witness(&mut self) -> Result<String, String>;
     /// Idempotently poison, close and reap owned worker transport without another
@@ -751,7 +750,7 @@ pub(crate) fn crash_machine<M: WorldMachine>(
         let witness = old.exit_witness()?;
         let mut summary = json!({
             "incarnation": old.incarnation, "booted_at_ns": old.booted_at, "crashed_at_ns": t,
-            "time_ns": old.time, "branches": old.branches(), "exits": old.exits(),
+            "time_ns": old.time, "exits": old.exits(),
             "state": format!("{:?}", old.state), "paused": old.paused,
             "discarded_pending_io": old.owed_io().is_some(), "discarded_management_bytes": discarded,
             "witness": witness,

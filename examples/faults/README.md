@@ -78,9 +78,7 @@ python3 examples/faults/run.py \
 The harness checks fixed PASS, broken FAIL, broken-without-faults PASS, and replay
 of all three. Replays use the default performance settings; only the
 lifecycle case varies them (below). It uses 512 MiB per guest to accommodate the
-Python image and 2 ms stop tolerance. Runs are not silently retried. Every
-run and replay checks restoration of the workaround MSR on every CPU sibling,
-retaining its before and after values.
+Python image and 2 ms stop tolerance. Runs are not silently retried.
 
 Raw `output/vmm.json` retains the fault effects, control request/response history,
 simulated timing, and network counters. Counters must show continuing drops after
@@ -127,8 +125,7 @@ all four recoverable errors and the absence of an infrastructure ERROR.
 Use `verify.py RUN --focused control-cases` to inspect this evidence separately.
 
 The lifecycle-cases scenario runs next. It is replayed with the default settings
-and again with `--undo 0 --margin 16384` (the margin is read only with undo off);
-both must MATCH. It first pauses only the server's process (SIGSTOP) with one
+and again with a different `--watchdog-ms`; both must MATCH. It first pauses only the server's process (SIGSTOP) with one
 connection established and another opened while it is frozen: both requests
 hang with no FIN or RST, and both are answered after `resume_process`. It then
 pauses the whole server machine while an established connection sends a request: nothing

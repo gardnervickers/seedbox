@@ -394,12 +394,10 @@ fn setup_errors_name_the_missing_input_and_the_fix() {
 fn bad_values_are_usage_errors() {
     let directory = tempfile::tempdir().unwrap();
     for (args, expected) in [
-        (&["run", "--margin", "0"][..], "positive branch count"),
-        (&["run", "--undo", "999999999"], "not in 0..=262144"),
-        (&["run", "--pv-watchdog-ms", "0"], "--pv-watchdog-ms"),
+        (&["run", "--watchdog-ms", "0"][..], "--watchdog-ms"),
         (
-            &["replay", "missing", "--pv-watchdog-ms", "60001"],
-            "--pv-watchdog-ms",
+            &["replay", "missing", "--watchdog-ms", "60001"],
+            "--watchdog-ms",
         ),
         (&["run", "--cpu", "5000"], "not in 0..1024"),
         (
@@ -418,23 +416,45 @@ fn bad_values_are_usage_errors() {
 }
 
 #[test]
-fn pv_watchdog_is_an_explicit_performance_option() {
+fn watchdog_is_the_only_explicit_performance_option() {
     let directory = tempfile::tempdir().unwrap();
     for command in ["run", "replay", "explore"] {
         let output = seedbox(&["help", command], directory.path());
         assert!(output.status.success());
         let help = String::from_utf8(output.stdout).unwrap();
-        assert!(help.contains("--pv-watchdog-ms"), "{help}");
+        assert!(
+            help.contains("Performance (never changes results)"),
+            "{help}"
+        );
+        assert!(help.contains("--watchdog-ms"), "{help}");
         assert!(help.contains("[default: 20]"), "{help}");
-        assert!(!help.contains("SEEDBOX_PV_WATCHDOG_MS"), "{help}");
+        assert!(!help.contains("SEEDBOX_WATCHDOG_MS"), "{help}");
+        for removed in ["--pv-watchdog-ms", "--margin", "--undo", "--timebase"] {
+            assert!(!help.contains(removed), "{help}");
+        }
     }
     let accepted = seedbox(
-        &["replay", "missing", "--pv-watchdog-ms", "200"],
+        &["replay", "missing", "--watchdog-ms", "200"],
         directory.path(),
     );
     assert_eq!(accepted.status.code(), Some(2));
     assert!(!stderr(&accepted).contains("unexpected argument"));
     assert!(stderr(&accepted).contains("missing"));
+    for (flag, value) in [
+        ("--pv-watchdog-ms", "20"),
+        ("--margin", "adaptive"),
+        ("--undo", "0"),
+    ] {
+        for command in ["run", "replay", "explore"] {
+            let output = seedbox(&[command, "missing", flag, value], directory.path());
+            assert_eq!(output.status.code(), Some(2));
+            assert!(
+                stderr(&output).contains(&format!("unexpected argument '{flag}'")),
+                "{}",
+                stderr(&output)
+            );
+        }
+    }
 }
 
 /// A project plus empty stand-ins for every runtime input but BusyBox.
@@ -779,7 +799,6 @@ fn old_records_stay_inspectable_and_transferable() {
         omitted_logs: BTreeMap::new(),
         outcome: Outcome::Pass,
         report: Some(ExecutionReport {
-            timebase: None,
             reason: StopReason::Completed,
             workload_exit: Some(WorkloadExit {
                 service: "workload".into(),
@@ -965,7 +984,7 @@ fn doctor_dev_opt_in_keeps_host_refusal_and_creates_no_state() {
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         assert_eq!(
             stderr(&output),
-            "error: branch counter detection requires an x86-64 host\n"
+            "error: host admission requires Linux x86_64 KVM; use an admitted host\n"
         );
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         assert_eq!(
@@ -1219,8 +1238,7 @@ mod diff_tests {
             ),
         )
         .unwrap();
-        let expected_stdout =
-            format!("ERROR: fixture (seed 0)\ntimebase: counter\nerror: {error}\n");
+        let expected_stdout = format!("ERROR: fixture (seed 0)\nerror: {error}\n");
         let output = seedbox(&["inspect", "failed"], root);
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout), expected_stdout);
@@ -1271,13 +1289,13 @@ mod diff_tests {
             &root.join("a"),
             &mut fixture(),
             Some(&raw_report()),
-            Some(b"I 1 2 3 4\nH 5 6 7 8\n"),
+            Some(b"I 1 2 3\nH 5 6 7\n"),
         );
         write_fixture(
             &root.join("b"),
             &mut fixture(),
             Some(&raw_report()),
-            Some(b"I 1 2 3 4\nP 5 9 7 8\n"),
+            Some(b"I 1 2 3\nP 9 6 7\n"),
         );
         let output = seedbox(&["diff", "a", "a"], root);
         assert_eq!(output.status.code(), Some(0));
@@ -1362,7 +1380,7 @@ mod diff_tests {
         let root = dir.path();
         let mut b = fixture();
         b.identity.seed = 77;
-        write_fixture(&root.join("a"), &mut fixture(), None, Some(b"I 1 2 3 4\n"));
+        write_fixture(&root.join("a"), &mut fixture(), None, Some(b"I 1 2 3\n"));
         write_fixture(&root.join("b"), &mut b, None, None);
         let output = seedbox(&["diff", "a", "b", "--json"], root);
         assert_eq!(output.status.code(), Some(1));
@@ -1409,7 +1427,7 @@ mod diff_tests {
         write_fixture(&root.join("a"), &mut fixture(), None, Some(b"bad\n"));
         let output = seedbox(&["diff", "a", "a"], root);
         assert_eq!(output.status.code(), Some(2));
-        assert_eq!(stderr(&output), "error: diff a: machines/workload.trace compared with a: input integrity: invalid trace record: expected kind branches time_ns extra(hex) rip(hex); use an intact retained run directory (import bundles first)\n");
+        assert_eq!(stderr(&output), "error: diff a: machines/workload.trace compared with a: input integrity: invalid trace record: expected kind time_ns extra(hex) rip(hex); use an intact retained run directory (import bundles first)\n");
     }
 
     #[cfg(unix)]
@@ -1450,7 +1468,7 @@ mod diff_tests {
             &root.join("original"),
             &mut record,
             Some(&raw_report()),
-            Some(b"I 1 2 3 4\n"),
+            Some(b"I 1 2 3\n"),
         );
         store
             .put(&serde_json::to_vec(&record.identity).unwrap())
@@ -1912,27 +1930,12 @@ fn timebase_is_no_longer_a_public_mode() {
     }
 }
 
-fn timebase_record(directory: &Path, timebase: Option<&str>) {
+fn kvm_record(directory: &Path) {
     use seedbox::{orchestration::RunRecord, store::ContentDigest};
     let fixture: serde_json::Value =
         serde_json::from_slice(include_bytes!("fixtures/formats/synthetic-c84-v2.json")).unwrap();
     let mut record: RunRecord = serde_json::from_value(fixture["record"].clone()).unwrap();
     record.identity.inputs.profile.backend = "seedbox-kvm".into();
-    if let Some(value) = timebase {
-        record
-            .identity
-            .inputs
-            .profile
-            .semantic_parameters
-            .insert("timebase".into(), value.into());
-    }
-    if let Some(report) = &mut record.report {
-        report.timebase = match timebase {
-            Some("pv") => Some(seedbox::execution::Timebase::Pv),
-            None => Some(seedbox::execution::Timebase::Counter),
-            _ => None,
-        };
-    }
     record.run_id = ContentDigest::of(&serde_json::to_vec(&record.identity).unwrap());
     let checksum = ContentDigest::of(&serde_json::to_vec(&record).unwrap());
     fs::write(
@@ -1943,48 +1946,33 @@ fn timebase_record(directory: &Path, timebase: Option<&str>) {
 }
 
 #[test]
-fn inspect_shows_timebase_and_json_preserves_library_fields() {
+fn inspect_prints_no_timebase_and_json_preserves_library_fields() {
     let directory = tempfile::tempdir().unwrap();
-    for (parameter, value) in [(None, "counter"), (Some("pv"), "pv")] {
-        timebase_record(directory.path(), parameter);
-        let output = seedbox(&["inspect", "."], directory.path());
-        assert!(output.status.success(), "{}", stderr(&output));
-        assert!(String::from_utf8_lossy(&output.stdout).contains(&format!("\ntimebase: {value}\n")));
-        let text = String::from_utf8_lossy(&output.stdout);
-        assert_eq!(
-            text.lines()
-                .filter(|line| line
-                    .split_once(": ")
-                    .is_some_and(|(word, _)| !word.is_empty()
-                        && word.bytes().all(|byte| byte.is_ascii_uppercase())))
-                .count(),
-            1
-        );
-        let output = seedbox(&["inspect", ".", "--json"], directory.path());
-        assert!(output.status.success(), "{}", stderr(&output));
-        assert!(output.stderr.is_empty());
-        let record: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(record["report"]["timebase"], value);
-        assert_eq!(
-            record["identity"]["inputs"]["profile"]["semantic_parameters"]["timebase"].as_str(),
-            parameter
-        );
-    }
-}
-
-#[test]
-fn replay_rejects_unknown_recorded_timebase_before_host_checks() {
-    let directory = tempfile::tempdir().unwrap();
-    timebase_record(directory.path(), Some("future"));
-    let output = seedbox(&["replay", "."], directory.path());
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(stderr(&output), "error: input integrity: recorded --timebase future: expected counter or pv; use a run recorded with a supported timebase\n");
-    assert!(output.stdout.is_empty());
-    assert!(!directory.path().join(".seedbox").exists());
-    // Inspection remains available for diagnosing unsupported recorded values.
-    let inspect = seedbox(&["inspect", "."], directory.path());
-    assert!(inspect.status.success(), "{}", stderr(&inspect));
-    assert!(String::from_utf8_lossy(&inspect.stdout).contains("timebase: future"));
+    kvm_record(directory.path());
+    let output = seedbox(&["inspect", "."], directory.path());
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(!text.contains("timebase"), "{text}");
+    assert_eq!(
+        text.lines()
+            .filter(|line| line
+                .split_once(": ")
+                .is_some_and(|(word, _)| !word.is_empty()
+                    && word.bytes().all(|byte| byte.is_ascii_uppercase())))
+            .count(),
+        1
+    );
+    let output = seedbox(&["inspect", ".", "--json"], directory.path());
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(output.stderr.is_empty());
+    let record: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(record["report"].get("timebase").is_none());
+    assert!(record["report"]["reason"].is_string());
+    assert!(
+        record["identity"]["inputs"]["profile"]["semantic_parameters"]
+            .get("timebase")
+            .is_none()
+    );
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -2018,7 +2006,7 @@ fn mac_linux_only_runtime_modes_fail_before_state_or_preparation() {
 #[test]
 fn replay_rejects_an_unknown_recorded_deferred_tx_mode() {
     let directory = tempfile::tempdir().unwrap();
-    timebase_record(directory.path(), None);
+    kvm_record(directory.path());
     let mut record = seedbox::orchestration::inspect(directory.path()).unwrap();
     record
         .identity

@@ -20,4 +20,3 @@ target/
 **/image.oci.tar.*
 
 # DBI reports and generated experiment contexts belong outside source control.
-/tools/dbi-spike/results/

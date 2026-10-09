@@ -21,9 +21,9 @@ compared directly. Set `x-seedbox.wall_clock_epoch` (Unix seconds, at least
 86400) in the Compose file to choose the start time. Replay always retains the
 original guest clock.
 
-## Linux PV performance
+## Linux performance
 
-`seedbox run --pv-watchdog-ms 200` increases the host CPU interval
+`seedbox run --watchdog-ms 200` increases the host CPU interval
 between spin-detection observations (default 20 ms, range 1..60000). It can reduce
 probing overhead but delays idle-loop detection. The option also works with
 `replay` and `explore`, changes no simulation results, and is ignored by Mac. Set it explicitly; the CLI does not inherit watchdog environment

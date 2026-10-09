@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Linux KVM acceptance. This DOES start guests and temporarily set the scoped
-# MSR workaround through the Rust executor. Run only after OCI acceptance.
+# Linux KVM acceptance. This DOES start guests on a leased core through the
+# Rust executor. Run only after OCI acceptance.
 # Usage (Nix shell): bash crates/seedbox/tests/accept-runtime.sh KERNEL CPU OUTPUT [lifecycle|faults]
 set -euo pipefail
 test "$(uname -s)" = Linux

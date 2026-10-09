@@ -24,7 +24,7 @@ with World.connect() as world:
     world.sleep(1)
     world.heal(overlap)
 
-    slow = world.throttle("server", 4)  # Slow but alive (x86 pv timebase).
+    slow = world.throttle("server", 4)  # Slow but alive (x86 only).
     world.sleep(1)
     world.heal(slow)
 
@@ -85,7 +85,7 @@ use `Machine("prepared-name")` when explicitly targeting a machine.
 
 `throttle(target, factor)` returns a `Throttle` accepted by `heal`. Until
 healed, the machine's simulated CPU work costs `factor` times its seeded speed,
-so it keeps answering, slowly. It needs the x86 `pv` timebase; elsewhere it
+so it keeps answering, slowly. It is x86-only; elsewhere it
 raises `FaultError` with code `unsupported`. See
 [slow machines](PROTOCOL.md#slow-machines).
 
@@ -136,7 +136,7 @@ world.heal(trigger.partition)  # After its effect; inactive handles are rejected
 
 Use `arm_console_stop()` for a future process stop and `cancel_trigger()` for
 an unmatched arm. These consume only future committed plain console bytes;
-confirmation means armed. See [the contract and AMD handoff](../docs/triggers.md).
+confirmation means armed. See [the contract and host handoff](../docs/triggers.md).
 
 `connections(from_, to, after=0)` returns a live page of up to 32 directional TCP
 incarnations plus a `next_after` cursor. Pass one exact record to

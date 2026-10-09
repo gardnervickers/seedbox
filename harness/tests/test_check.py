@@ -1,4 +1,4 @@
-"""Suite selection and requirement controls; no hypervisor or MSR is opened."""
+"""Suite selection and requirement controls; no hypervisor is opened."""
 import importlib.util
 import contextlib
 import io
@@ -38,17 +38,17 @@ class SelectionTests(unittest.TestCase):
 
     def test_groups_and_implied_suites_expand_in_documented_order(self):
         self.assertEqual(check.expand(["linux"], "x86_64"),
-                         ["portable", "linux-kvm", "linux-counter", "linux-oci", "linux-apps"])
+                         ["portable", "linux-kvm", "linux-oci", "linux-apps"])
         self.assertEqual(check.expand(["mac"], "arm64"), ["portable", "mac-hvf", "mac-apps"])
         self.assertEqual(check.expand(["linux-guests"], "x86_64"),
-                         ["portable", "linux-kvm", "linux-counter", "linux-guests"])
+                         ["portable", "linux-kvm", "linux-guests"])
         self.assertEqual(check.expand(["linux-guests"], "aarch64"), ["portable", "linux-kvm", "linux-guests"])
         self.assertEqual(check.expand(["mac-apps"], "arm64"), ["portable", "mac-hvf", "mac-apps"])
 
     def test_features_follow_suites_not_host_probes(self):
         self.assertEqual(check.features_for("seedbox-vmm", "x86_64", ["portable", "linux-kvm"]), ["kvm-tests"])
-        self.assertEqual(check.features_for("seedbox-vmm", "x86_64", check.expand(["linux-counter"], "x86_64")),
-                         ["kvm-tests", "counter-tests"])
+        self.assertEqual(check.features_for("seedbox-vmm", "x86_64", check.expand(["linux-guests"], "x86_64")),
+                         ["kvm-tests", "guest-tests"])
         self.assertEqual(check.features_for("seedbox", "x86_64", ["portable", "linux-oci", "linux-pause"]),
                          ["oci-tests", "retained-run-tests"])
         self.assertEqual(check.features_for("seedbox-arm64", "x86_64", check.expand(["linux"], "x86_64")), [])
@@ -58,25 +58,24 @@ class SelectionTests(unittest.TestCase):
                          ["hvf-tests", "guest-tests"])
         self.assertEqual(check.features_for("seedbox-vmm", "arm64", check.expand(["mac"], "arm64")), [])
 
-    def test_kvm_suite_needs_no_pmu_or_root(self):
-        self.assertEqual(self.linux("linux-kvm", {"kvm": "", "counter": "guest PMU unavailable"}, root=False), [])
+    def test_kvm_suite_needs_no_root(self):
+        self.assertEqual(self.linux("linux-kvm", {"kvm": ""}, root=False), [])
 
-    def test_counter_suite_reports_missing_pmu_and_root(self):
-        missing = self.linux("linux-counter", {"kvm": "", "counter": "guest perf_event_open: ENOENT"}, root=False)
-        self.assertIn("guest perf_event_open: ENOENT", missing)
+    def test_apps_suite_reports_missing_root(self):
+        missing = self.linux("linux-apps", {"kvm": ""}, root=False)
         self.assertIn("requires root or passwordless sudo", missing)
 
     def test_guest_suite_requires_its_inputs(self):
-        self.assertTrue(self.linux("linux-guests", {"kvm": "", "counter": ""}))
+        self.assertTrue(self.linux("linux-guests", {"kvm": ""}))
         with tempfile.TemporaryDirectory() as directory:
             kernel, initrd = Path(directory) / "kernel", Path(directory) / "initrd"
             kernel.touch()
             initrd.touch()
-            self.assertEqual(self.linux("linux-guests", {"kvm": "", "counter": ""}, inputs={
+            self.assertEqual(self.linux("linux-guests", {"kvm": ""}, inputs={
                 "SEEDBOX_TEST_KERNEL": str(kernel), "SEEDBOX_TEST_INITRD": str(initrd)}), [])
 
     def test_oci_suite_needs_an_engine_but_no_kvm_or_root(self):
-        self.assertEqual(self.linux("linux-oci", {"kvm": "no such device", "counter": "no KVM"}, root=False), [])
+        self.assertEqual(self.linux("linux-oci", {"kvm": "no such device"}, root=False), [])
         with patch.object(check.shutil, "which", return_value=None), \
                 patch.object(check, "engine_sockets", return_value=[]):
             self.assertEqual(check.requirements("linux-oci", "Linux", "x86_64", {"DOCKER_HOST": "unix:///fixture"}), [])

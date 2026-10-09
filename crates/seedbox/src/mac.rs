@@ -137,13 +137,6 @@ impl MacExecutor {
             performance: BTreeMap::new(),
         })
     }
-    pub fn with_performance(mut self, margin: &str, undo: u64) -> Self {
-        self.performance = BTreeMap::from([
-            ("SEEDBOX_MARGIN".into(), margin.into()),
-            ("SEEDBOX_UNDO".into(), undo.to_string()),
-        ]);
-        self
-    }
     pub fn doctor(engine: &Path, kernel: &Path) -> Result<DoctorReport> {
         validate_kernel(kernel, 3072)?;
         Ok(DoctorReport {
@@ -269,7 +262,7 @@ impl ExecutionBackend for MacExecutor {
         self.preflight(Some(request.output))?;
         use crate::worker_process::{incomplete, WorkerLaunch};
         if request.cancellation.is_cancelled() {
-            return Ok(incomplete(StopReason::Cancelled, Timebase::Pv));
+            return Ok(incomplete(StopReason::Cancelled));
         }
         WorkerLaunch::prepare(&request)?.spawn()?.wait(
             request.cancellation,
