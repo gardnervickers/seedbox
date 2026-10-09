@@ -607,7 +607,7 @@ fn execution_counter() -> Result<CounterProfile> {
     if MAC {
         Ok(CounterProfile::Zen)
     } else {
-        CounterProfile::host()
+        seedbox::counter::host()
     }
 }
 
@@ -853,7 +853,7 @@ fn prepare(
     let simulation = compose.load()?;
     validate_machine(&simulation)?;
     let (store, _) = state.open()?;
-    let counter = CounterProfile::host().unwrap_or(CounterProfile::Zen);
+    let counter = seedbox::counter::host().unwrap_or(CounterProfile::Zen);
     let cancellation = CancellationToken::default();
     let _signals = Signals::register(&cancellation)?;
     let (preparer, _) = inputs.backends(&store, None, counter, &simulation, &cancellation)?;

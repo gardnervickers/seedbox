@@ -15,7 +15,7 @@
 //! runs under each, and their witnesses never match.
 
 use crate::machine::Machine;
-use crate::profile::CounterProfile;
+use crate::profile::CounterTuning;
 
 /// One guest run as the run loop saw it.
 pub struct Run {
@@ -39,7 +39,7 @@ pub struct Judge<'a> {
     pub margin: &'a mut u64,
     pub adaptive_margin: bool,
     pub armed_wake: u64,
-    pub profile: &'static CounterProfile,
+    pub profile: &'static CounterTuning,
     pub stats: &'a mut crate::machine::Stats,
     /// The machine's PV watchdog and probe state.
     pub pv_progress: &'a mut crate::machine::pv::Progress,

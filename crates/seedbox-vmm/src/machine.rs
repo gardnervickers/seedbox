@@ -8,7 +8,7 @@ use crate::boundary::{advance_time, hard_limit, io_charge, PendingIo, PORT_TIMER
 use crate::counter::Counter;
 use crate::devices::{rtc_read, Pic, Pit, Uart};
 use crate::disk::Disk;
-use crate::profile::CounterProfile;
+use crate::profile::CounterTuning;
 use crate::stepper::Planner;
 use crate::timebase::{Judge, Prepared, Run, Timebase, Verdict};
 use crate::undo::{Undo, UndoStats, VcpuState};
@@ -494,7 +494,7 @@ impl Cause {
 
 pub struct Machine {
     pub world: MachineState,
-    profile: &'static CounterProfile,
+    profile: &'static CounterTuning,
     _vm: VmFd,
     vcpu: VcpuFd,
     /// Guest RAM, from guest physical address 0.
