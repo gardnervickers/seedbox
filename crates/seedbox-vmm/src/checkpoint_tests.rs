@@ -12,7 +12,7 @@ fn world(undo: u64) -> World {
     kernel.extend(code);
     let boot = BootInputs {
         kernel: kernel.into(),
-        initrd: Rc::from([]),
+        initrd: Rc::new(Vec::new().into()),
         cmdline: (String::new(), String::new()),
         mem: 0x0810_0000,
         mac: None,
@@ -787,9 +787,11 @@ fn runtime_checkpoint_getrandom_and_urandom_repeat_and_diverge() {
     boot.kernel = std::fs::read(input("SEEDBOX_TEST_KERNEL", "artifacts/bzImage"))
         .unwrap()
         .into();
-    boot.initrd = std::fs::read(input("SEEDBOX_TEST_INITRD", "artifacts/entropy-fork.cpio"))
-        .unwrap()
-        .into();
+    boot.initrd = Rc::new(
+        std::fs::read(input("SEEDBOX_TEST_INITRD", "artifacts/entropy-fork.cpio"))
+            .unwrap()
+            .into(),
+    );
     boot.mem = 256 * 1024 * 1024;
     boot.disk = None;
     boot.control_channel = false;
