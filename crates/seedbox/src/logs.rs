@@ -3,6 +3,7 @@
 //! Equal times are ordered by machine name, then the machine's output sequence
 //! across both streams.
 use crate::{orchestration, retained, Error, Result};
+use seedbox_engine_core::log_index::{self, ChunkRecord, MAGIC, MAX_CHUNKS, RECORD_BYTES};
 use serde::Serialize;
 use std::{
     collections::BTreeMap,
@@ -11,13 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const MAGIC: &[u8; 8] = b"SBLOG001";
-const MAX_CHUNKS: usize = 65_536;
 const MAX_TOTAL_CHUNKS: usize = 1_048_576;
-
-#[allow(dead_code)]
-#[path = "../../seedbox-vmm/src/log_index.rs"]
-mod log_index;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -118,13 +113,18 @@ impl Reader {
                     continue;
                 };
                 let size = index.metadata().map_err(|e| bad(directory, e))?.len();
-                if size < 8 || size > 8 + 40 * MAX_CHUNKS as u64 || (size - 8) % 40 != 0 {
+                let header = MAGIC.len() as u64;
+                let record_bytes = RECORD_BYTES as u64;
+                if size < header
+                    || size > header + record_bytes * MAX_CHUNKS as u64
+                    || !(size - header).is_multiple_of(record_bytes)
+                {
                     return Err(bad(
                         directory,
                         format!("{index_name}: truncated or oversized chunk index"),
                     ));
                 }
-                let mut magic = [0; 8];
+                let mut magic = [0; MAGIC.len()];
                 index
                     .read_exact(&mut magic)
                     .map_err(|e| bad(directory, e))?;
@@ -149,20 +149,22 @@ impl Reader {
                 }
                 let mut end = 0u64;
                 let mut previous = None;
-                for _ in 0..(size - 8) / 40 {
+                for _ in 0..(size - header) / record_bytes {
                     total += 1;
                     if total > MAX_TOTAL_CHUNKS {
                         return Err(bad(directory, "chunk indexes exceed total record bound"));
                     }
-                    let mut bytes = [0; 40];
+                    let mut bytes = [0; RECORD_BYTES];
                     index
                         .read_exact(&mut bytes)
                         .map_err(|e| bad(directory, e))?;
-                    let mut fields = [0u64; 5];
-                    for (field, bytes) in fields.iter_mut().zip(bytes.as_chunks::<8>().0) {
-                        *field = u64::from_le_bytes(*bytes);
-                    }
-                    let [time, incarnation, order, offset, length] = fields;
+                    let ChunkRecord {
+                        time_ns: time,
+                        incarnation,
+                        order,
+                        offset,
+                        length,
+                    } = ChunkRecord::from_bytes(&bytes);
                     let next = offset.checked_add(length);
                     if incarnation > u32::MAX as u64
                         || offset != end

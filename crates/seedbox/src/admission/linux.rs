@@ -291,7 +291,7 @@ pub(super) fn observe(
         || {
             // The shared check preserves static evidence and closes any disabled
             // event descriptor before affinity restoration.
-            if crate::counter::CounterProfile::host()? != counter {
+            if crate::counter::host()? != counter {
                 return Err(Error::Setup(format!(
                     "CPU {cpu}: branch counter differs from selected profile"
                 )));

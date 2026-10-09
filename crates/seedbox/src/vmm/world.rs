@@ -30,14 +30,7 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
     if request.prepared.guests.is_empty() || request.prepared.guests.len() > 254 {
         return Err(Error::Integrity("expected 1..254 prepared machines".into()));
     }
-    let memory: u32 = request
-        .prepared
-        .profile
-        .semantic_parameters
-        .get("memory_mb")
-        .ok_or_else(|| Error::Integrity("profile missing memory_mb".into()))?
-        .parse()
-        .map_err(|_| Error::Integrity("invalid memory_mb".into()))?;
+    let memory = request.prepared.profile.semantic_parameters.memory_mb;
     let artifact = |digest: &ContentDigest| {
         let path = request.artifacts.get(digest).ok_or_else(|| {
             Error::Integrity(format!("missing verified artifact {}", digest.hex()))
@@ -110,20 +103,17 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
         "timer_jitter_ns":request.schedule.timer_jitter_ns,"stop_tolerance_ns":request.schedule.stop_tolerance_ns,
         "network":network,
         "machines":machines,"control":control,
-        "control_channel":"virtio-console-v1",
+        "control_channel":request.prepared.profile.semantic_parameters.control_channel.name(),
     });
     let lookahead = request
         .network
         .latency_ns
         .saturating_sub(request.network.jitter_ns);
-    if let Some(skew) = crate::engine::arm_launch_skew(&request.prepared.profile, lookahead)? {
+    if let Some(skew) = crate::engine::arm_launch_skew(&request.prepared.profile, lookahead) {
         world["launch_skew_ns"] = json!(skew);
     }
-    if recorded_torn_writes(&request.prepared.profile)? {
-        world[DISK_LOSS] = match request.prepared.profile.semantic_parameters.get(DISK_LOSS) {
-            Some(model) => json!(model), // The retained historical worker owns its disk semantics.
-            None => json!({"sector_bytes": 512, "survival_probability": 0.5}),
-        };
+    if request.prepared.profile.semantic_parameters.torn_writes {
+        world["disk_loss"] = json!({"sector_bytes": 512, "survival_probability": 0.5});
     }
     if let Some(checkpoint) = checkpoint_metadata(request, &world)? {
         world["checkpoint"] = checkpoint;

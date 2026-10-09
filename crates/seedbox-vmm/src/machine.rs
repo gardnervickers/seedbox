@@ -8,7 +8,7 @@ use crate::boundary::{advance_time, hard_limit, io_charge, PendingIo, PORT_TIMER
 use crate::counter::Counter;
 use crate::devices::{rtc_read, Pic, Pit, Uart};
 use crate::disk::Disk;
-use crate::profile::CounterProfile;
+use crate::profile::CounterTuning;
 use crate::stepper::Planner;
 use crate::timebase::{Judge, Prepared, Run, Timebase, Verdict};
 use crate::undo::{Undo, UndoStats, VcpuState};
@@ -500,7 +500,7 @@ impl Cause {
 
 pub struct Machine {
     pub world: MachineState,
-    profile: &'static CounterProfile,
+    profile: &'static CounterTuning,
     _vm: VmFd,
     vcpu: VcpuFd,
     /// Guest RAM, from guest physical address 0.
@@ -855,12 +855,14 @@ impl Machine {
     fn record(&mut self, kind: u8, extra: u64) {
         if let Some(t) = self.trace.as_mut() {
             use std::io::Write;
-            let rip = self.vcpu.get_regs().map(|r| r.rip).unwrap_or(0);
-            let _ = writeln!(
-                t,
-                "{} {} {} {:x} {:x}",
-                kind as char, self.branches, self.world.time, extra, rip
-            );
+            let record = seedbox_engine_core::trace::TraceRecord {
+                kind,
+                branches: self.branches,
+                time_ns: self.world.time,
+                extra,
+                rip: self.vcpu.get_regs().map(|r| r.rip).unwrap_or(0),
+            };
+            let _ = writeln!(t, "{record}");
         }
         self.witness.update([kind]);
         self.witness.update(self.branches.to_le_bytes());
@@ -2630,6 +2632,16 @@ fn ram_page_hashes_match_full_hashes_for_zero_changed_and_short_pages() {
     }
 }
 
+/// Index records as `[time, incarnation, order, offset, length]` rows for assertions.
+#[cfg(test)]
+pub(crate) fn chunk_rows(index: &crate::devices::log_index::Index) -> Vec<[u64; 5]> {
+    index
+        .records
+        .iter()
+        .map(|r| [r.time_ns, r.incarnation, r.order, r.offset, r.length])
+        .collect()
+}
+
 #[cfg(test)]
 mod net_poll_tests {
     use super::*;
@@ -4211,10 +4223,13 @@ mod timed_log_tests {
                 assert_eq!(m.com2.out, b"\xff");
                 if cap > 0 {
                     assert_eq!(
-                        m.com1.chunks.records,
+                        crate::machine::chunk_rows(&m.com1.chunks),
                         vec![[0, 0, 0, 0, 1], [0, 0, 2, 1, 1]]
                     );
-                    assert_eq!(m.com2.chunks.records, vec![[0, 0, 1, 0, 1]]);
+                    assert_eq!(
+                        crate::machine::chunk_rows(&m.com2.chunks),
+                        vec![[0, 0, 1, 0, 1]]
+                    );
                 }
                 // Reading metadata and taking a full-state digest are observation only.
                 let before = m.exit_witness();
@@ -4229,7 +4244,10 @@ mod timed_log_tests {
                 assert_eq!(m.com1.out, b"\0AB");
                 assert_eq!(m.com2.out, b"\xff");
                 if cap > 2 {
-                    assert_eq!(m.com1.chunks.records[2], [1000, 0, 3, 2, 1]);
+                    assert_eq!(
+                        crate::machine::chunk_rows(&m.com1.chunks)[2],
+                        [1000, 0, 3, 2, 1]
+                    );
                 }
                 let evidence = (
                     m.time,
@@ -4268,7 +4286,7 @@ mod timed_log_tests {
         assert_eq!(new.com1.out, b"\0AB\0AB");
         assert_eq!(new.com2.out, b"\xff\xff");
         assert_eq!(
-            new.com1.chunks.records,
+            crate::machine::chunk_rows(&new.com1.chunks),
             vec![
                 [0, 0, 0, 0, 1],
                 [0, 0, 2, 1, 2],
@@ -4277,7 +4295,7 @@ mod timed_log_tests {
             ]
         );
         assert_eq!(
-            new.com2.chunks.records,
+            crate::machine::chunk_rows(&new.com2.chunks),
             vec![[0, 0, 1, 0, 1], [5000, 1, 4, 1, 1]]
         );
     }
@@ -4295,8 +4313,8 @@ mod timed_log_tests {
         let want = (
             m.com1.out.clone(),
             m.com2.out.clone(),
-            m.com1.chunks.records.clone(),
-            m.com2.chunks.records.clone(),
+            crate::machine::chunk_rows(&m.com1.chunks),
+            crate::machine::chunk_rows(&m.com2.chunks),
             m.log_order,
         );
         for _ in 0..2 {
@@ -4309,8 +4327,8 @@ mod timed_log_tests {
                 (
                     fresh.com1.out.clone(),
                     fresh.com2.out.clone(),
-                    fresh.com1.chunks.records.clone(),
-                    fresh.com2.chunks.records.clone(),
+                    crate::machine::chunk_rows(&fresh.com1.chunks),
+                    crate::machine::chunk_rows(&fresh.com2.chunks),
                     fresh.log_order
                 ),
                 want
@@ -4384,10 +4402,13 @@ mod timed_log_tests {
                 assert!(m.undo.as_ref().unwrap().stats.rollbacks > 0);
                 assert_eq!(m.com1.out, b"\0AB");
                 assert_eq!(
-                    m.com1.chunks.records,
+                    crate::machine::chunk_rows(&m.com1.chunks),
                     vec![[0, 0, 0, 0, 1], [0, 0, 2, 1, 2]]
                 );
-                assert_eq!(m.com1.chunks.records[0], [0, 0, 0, 0, 1]);
+                assert_eq!(
+                    crate::machine::chunk_rows(&m.com1.chunks)[0],
+                    [0, 0, 0, 0, 1]
+                );
             } else {
                 assert!(result.unwrap_err().contains("overshoot"));
                 assert!(m.com1.out.is_empty());
@@ -4469,7 +4490,10 @@ mod committed_trigger_tests {
         // A trigger stop must retain exactly the accepted byte's timed chunk
         // and invalidate the checkpoint before returning control to the world.
         assert!(!m.undo.as_ref().unwrap().valid);
-        assert_eq!(m.com1.chunks.records, vec![[0, 0, 0, 0, 1]]);
+        assert_eq!(
+            crate::machine::chunk_rows(&m.com1.chunks),
+            vec![[0, 0, 0, 0, 1]]
+        );
         assert_eq!(m.log_order, 1);
         assert_eq!(
             m.run_until(&mut tb, 10, 0, &mut frames).unwrap(),
@@ -4477,7 +4501,10 @@ mod committed_trigger_tests {
         );
         assert_eq!(m.committed_console, None);
         assert_eq!(m.com1.out, b"A");
-        assert_eq!(m.com1.chunks.records, vec![[0, 0, 0, 0, 1]]);
+        assert_eq!(
+            crate::machine::chunk_rows(&m.com1.chunks),
+            vec![[0, 0, 0, 0, 1]]
+        );
         assert_eq!(m.log_order, 1);
     }
 }

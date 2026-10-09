@@ -419,22 +419,12 @@ mod tests {
     fn prepared_launch_uses_recorded_dispatch_clock_and_retention_limits() {
         use crate::{
             config::{Check, Limits, Network, Schedule},
-            execution::{ExecutionProfile, PreparedInputs},
+            execution::{Backend, Clock, ExecutionProfile, PreparedInputs, SemanticParameters},
             store::ContentDigest,
         };
         use std::collections::BTreeMap;
-        let internal = BTreeMap::from([
-            (
-                "engine_executable_kind".into(),
-                crate::engine::INTERNAL_WORKER_V1.into(),
-            ),
-            ("simulator_version".into(), "0.1.0-dev.1".into()),
-            ("host_os".into(), "linux".into()),
-            ("host_arch".into(), "x86_64".into()),
-            ("guest_arch".into(), "x86_64".into()),
-            ("engine_backend".into(), "kvm".into()),
-            ("engine_timebase".into(), "counter-pv-v1".into()),
-        ]);
+        let internal =
+            crate::engine::kvm_descriptor(ExecutableKind::InternalWorker, "0.1.0-dev.1".into());
         for (kind, clock) in [
             (ExecutableKind::Standalone, None),
             (ExecutableKind::Standalone, Some("counter")),
@@ -447,15 +437,15 @@ mod tests {
             let engine = directory.path().join("retained-engine");
             fs::write(&engine, b"never execute this fixture").unwrap();
             let hash = ContentDigest::of(b"retained input");
-            let mut semantic_parameters = match kind {
-                ExecutableKind::Standalone => BTreeMap::new(),
-                ExecutableKind::InternalWorker => internal.clone(),
-                ExecutableKind::ArmWorld => crate::engine::arm_parameters(),
+            let mut semantic_parameters = SemanticParameters::new(512);
+            semantic_parameters.engine = match kind {
+                ExecutableKind::Standalone => None,
+                ExecutableKind::InternalWorker => Some(internal.clone()),
+                ExecutableKind::ArmWorld => Some(crate::engine::arm_descriptor()),
             };
-            if let Some(clock) = clock {
-                semantic_parameters.insert("timebase".into(), clock.into());
+            if clock == Some("pv") {
+                semantic_parameters.clock = Clock::Pv;
             }
-            semantic_parameters.insert("memory_mb".into(), "512".into());
             let prepared = PreparedInputs {
                 wall_clock_epoch: None,
                 kernel: hash.clone(),
@@ -470,11 +460,10 @@ mod tests {
                 ]),
                 profile: ExecutionProfile {
                     backend: if kind == ExecutableKind::ArmWorld {
-                        "seedbox-hvf"
+                        Backend::Hvf
                     } else {
-                        "seedbox-kvm"
-                    }
-                    .into(),
+                        Backend::Kvm
+                    },
                     engine: hash.clone(),
                     witness_mode: WitnessMode::FullState,
                     semantic_parameters,
@@ -526,7 +515,7 @@ mod tests {
             let dispatch: &[&str] = match kind {
                 ExecutableKind::Standalone => &[],
                 ExecutableKind::InternalWorker => &["__engine", crate::engine::INTERNAL_WORKER_V1],
-                ExecutableKind::ArmWorld => &["__engine", "arm64-world-v1"],
+                ExecutableKind::ArmWorld => &["__engine", crate::engine::ARM_WORLD_V1],
             };
             assert_eq!(&args[..dispatch.len()], dispatch);
             let out = directory.path().join(crate::vmm::MACHINE_OUTPUT_DIR);

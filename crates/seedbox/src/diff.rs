@@ -8,6 +8,7 @@ use crate::{
     vmm::{page_hash_log, MachineReport, StateDigestParts, VmmReport},
     Error, Result,
 };
+use seedbox_engine_core::trace::{InvalidTraceRecord, TraceRecord};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -170,7 +171,7 @@ fn load(directory: &Path) -> Result<Evidence> {
         let profile = &record.identity.inputs.profile;
         let executable = crate::engine::recorded_launch(profile).map_err(|e| bad(&path, e))?;
         let arm_world = executable == crate::engine::ExecutableKind::ArmWorld;
-        if (profile.backend == "seedbox-hvf") != arm_world {
+        if (profile.backend == crate::execution::Backend::Hvf) != arm_world {
             return Err(bad(
                 &path,
                 "HVF backend and ARM executable descriptor disagree",
@@ -181,7 +182,7 @@ fn load(directory: &Path) -> Result<Evidence> {
             return Err(bad(&path, "unsupported VMM report version"));
         }
         if arm_world {
-            if header.timebase.as_deref() != Some("arm64-pv-world-v1") {
+            if header.timebase.as_deref() != Some(crate::engine::ARM_REPORT_TIMEBASE) {
                 return Err(bad(
                     &path,
                     "HVF report timebase disagrees with executable profile",
@@ -466,17 +467,18 @@ fn page_file(directory: &Path, evidence: &Evidence, name: &str) -> Result<Option
     let Some(file) = log(directory, &evidence.record, name)? else {
         return Ok(None);
     };
-    let expected = evidence
+    let memory_mb = evidence
         .record
         .identity
         .inputs
         .profile
         .semantic_parameters
-        .get("memory_mb")
-        .and_then(|m| m.parse::<u64>().ok())
-        .filter(|m| *m > 0)
-        .and_then(|m| m.checked_mul(2048))
-        .ok_or_else(|| bad(directory, "page hashes require recorded memory_mb"))?;
+        .memory_mb;
+    if memory_mb == 0 {
+        return Err(bad(directory, "page hashes require recorded memory_mb"));
+    }
+    // One 8-byte hash per 4 KiB page.
+    let expected = u64::from(memory_mb) * 2048;
     if file.metadata().map_err(|e| bad(directory, e))?.len() != expected {
         return Err(bad(
             &directory.join("output").join(name),
@@ -538,7 +540,6 @@ fn compare_pages(a: impl Read, b: impl Read) -> Result<PageHashDiff> {
     Ok(result)
 }
 
-// Existing engine trace format: kind branches time_ns extra(hex) rip(hex).
 fn next_trace(reader: &mut impl BufRead) -> Result<Option<Record>> {
     let mut line = String::new();
     if reader.take(TRACE_LINE_LIMIT + 1).read_line(&mut line)? == 0 {
@@ -547,23 +548,20 @@ fn next_trace(reader: &mut impl BufRead) -> Result<Option<Record>> {
     if line.len() as u64 > TRACE_LINE_LIMIT {
         return Err(Error::Integrity(exceeds("trace record", TRACE_LINE_LIMIT)));
     }
-    let fields: Vec<_> = line.split_whitespace().collect();
-    let invalid = || {
-        Error::Integrity(
-            "invalid trace record: expected kind branches time_ns extra(hex) rip(hex)".into(),
-        )
-    };
-    if fields.len() != 5 || fields[0].len() != 1 {
-        return Err(invalid());
-    }
-    let branches = fields[1].parse::<u64>().map_err(|_| invalid())?;
-    let time_ns = fields[2].parse::<u64>().map_err(|_| invalid())?;
-    let extra = u64::from_str_radix(fields[3], 16).map_err(|_| invalid())?;
-    let rip = u64::from_str_radix(fields[4], 16).map_err(|_| invalid())?;
+    let TraceRecord {
+        kind,
+        branches,
+        time_ns,
+        extra,
+        rip,
+    } = line
+        .parse()
+        .map_err(|e: InvalidTraceRecord| Error::Integrity(e.to_string()))?;
+    let kind = char::from(kind).to_string();
     Ok(Some(Record {
         time_ns: Some(time_ns),
-        kind: fields[0].into(),
-        value: serde_json::json!({"kind":fields[0], "branches":branches, "time_ns":time_ns, "extra":extra, "rip":rip}),
+        value: serde_json::json!({"kind":kind, "branches":branches, "time_ns":time_ns, "extra":extra, "rip":rip}),
+        kind,
     }))
 }
 fn trace_diff(machine: &str, a: impl Read, b: impl Read) -> Result<Option<FirstRecord>> {
@@ -599,15 +597,17 @@ mod tests {
 
     fn arm_fixture() -> sb::orchestration::RunRecord {
         let mut record = fixture();
-        record.identity.inputs.profile.backend = "seedbox-hvf".into();
-        record.identity.inputs.profile.semantic_parameters = sb::engine::arm_parameters();
+        record.identity.inputs.profile.backend = sb::execution::Backend::Hvf;
+        let parameters = &mut record.identity.inputs.profile.semantic_parameters;
+        parameters.engine = Some(sb::engine::arm_descriptor());
+        parameters.clock = sb::execution::Clock::Pv;
         record
     }
 
     fn arm_report() -> Value {
         let mut report = raw_report();
         report["report_version"] = 2.into();
-        report["timebase"] = "arm64-pv-world-v1".into();
+        report["timebase"] = sb::engine::ARM_REPORT_TIMEBASE.into();
         report
     }
 
@@ -643,7 +643,7 @@ mod tests {
         );
 
         let mut record = arm_fixture();
-        record.identity.inputs.profile.backend = "seedbox-kvm".into();
+        record.identity.inputs.profile.backend = sb::execution::Backend::Kvm;
         let error = arm_report_error(&mut record, &report);
         assert!(
             error.contains("HVF backend and ARM executable descriptor disagree"),
@@ -652,7 +652,7 @@ mod tests {
 
         let mut record = arm_fixture();
         record.identity.inputs.profile.semantic_parameters =
-            BTreeMap::from([("memory_mb".into(), "512".into())]);
+            sb::execution::SemanticParameters::new(512);
         let error = arm_report_error(&mut record, &report);
         assert!(
             error.contains("HVF backend and ARM executable descriptor disagree"),
@@ -661,12 +661,15 @@ mod tests {
 
         // Descriptive clock capability metadata does not gate report decoding.
         let mut descriptive = arm_fixture();
-        descriptive
+        if let Some(engine) = &mut descriptive
             .identity
             .inputs
             .profile
             .semantic_parameters
-            .insert("engine_timebase".into(), "future-capabilities".into());
+            .engine
+        {
+            engine.engine_timebase = "future-capabilities".into();
+        }
         write_fixture(
             &dir.path().join("descriptive"),
             &mut descriptive,
@@ -983,11 +986,7 @@ mod tests {
         b.identity.seed = 2;
         b.identity.inputs.kernel = ContentDigest::of(b"kernel");
         b.identity.inputs.profile.engine = ContentDigest::of(b"engine");
-        b.identity
-            .inputs
-            .profile
-            .semantic_parameters
-            .insert("memory_mb".into(), "1024".into());
+        b.identity.inputs.profile.semantic_parameters.memory_mb = 1024;
         write_fixture(&dir.path().join("b"), &mut b, None, None);
         let result = diff(&dir.path().join("a"), &dir.path().join("b")).unwrap();
         let paths: Vec<_> = result

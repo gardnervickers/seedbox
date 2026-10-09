@@ -4,7 +4,7 @@
 use crate::limits::read_bounded;
 use crate::{
     config::Simulation,
-    execution::{ExecutionProfile, PreparationBackend, PreparedInputs},
+    execution::{Backend, ExecutionProfile, PreparationBackend, PreparedInputs},
     guest::{build_initramfs_with, launch_recipe, minimum_memory_mb},
     store::ContentStore,
     Error, Result,
@@ -29,7 +29,7 @@ pub use crate::preparation_command::PreparationContext;
 
 impl PreparationBackend for OciPreparer {
     fn validate_runtime_inputs(&self) -> Result<()> {
-        if self.profile.backend == "seedbox-kvm" {
+        if self.profile.backend == Backend::Kvm {
             crate::admission::validate_profile(&self.profile)?;
             if crate::admission::file_digest(&self.engine)? != self.profile.engine {
                 return Err(Error::Integrity(
@@ -106,7 +106,7 @@ impl OciPreparer {
             context.check()?;
         }
         let kernel = store.put_file(&self.kernel)?;
-        if self.profile.backend == "seedbox-kvm" {
+        if self.profile.backend == Backend::Kvm {
             crate::admission::validate_profile(&self.profile)?;
         }
         let engine = store.put_file(&self.engine)?;
@@ -250,12 +250,7 @@ impl OciPreparer {
                     crate::guest::build_initramfs_from_tar(root, &init, mke2fs, &recipe, &archive)?
                 }
             }
-            let memory_mb = self
-                .profile
-                .semantic_parameters
-                .get("memory_mb")
-                .and_then(|value| value.parse::<u32>().ok())
-                .ok_or_else(|| Error::Integrity("OCI profile missing memory_mb".into()))?;
+            let memory_mb = self.profile.semantic_parameters.memory_mb;
             let minimum = minimum_memory_mb(fs::metadata(&archive)?.len())?;
             if memory_mb < minimum {
                 return Err(Error::Execution(format!("service {name}: {memory_mb} MiB guest RAM is below the archive boot floor of {minimum} MiB; increase x-seedbox.machine.memory_mb (application memory may require more)")));

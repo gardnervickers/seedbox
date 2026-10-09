@@ -246,7 +246,7 @@ remain runtime qualification gates.
 
 - x86-64 AMD Zen host with KVM, run as root (guest-only perf counting).
   Seedbox picks a branch counter profile from CPUID at startup
-  (`crates/seedbox/src/counter.rs`, `crates/seedbox-vmm/src/profile.rs`) and
+  (`crates/seedbox-engine-core/src/branch_counter.rs`) and
   records it in each run's identity, so a run replays only with the counter
   that made it. Only Zen is qualified. Non-hybrid Intel cores have profiles
   (`intel-0x5101c4` up to Comet Lake, `intel-0x5111c4` from Ice Lake) that
@@ -396,11 +396,9 @@ exit clock is accounted. A halted machine wakes from the adopted deadline
 timebase, an earlier page arm waits for the next exit and may fire late by up
 to a slice. One-shot stop/restart
 uses page disarm and avoids PIT mode port writes.
-The requested semantic parameter is retained
-as `page_timer: true` only when enabled. Replay restores it without an override.
-Timer jitter uses the existing seeded stream. This changes enabled-run timing
-and witnesses; omission preserves the existing identity encoding for the same
-engine and kernel inputs.
+The profile records `page_timer: true|false`. Replay restores it without an override.
+Timer jitter uses the existing seeded stream. Enabling it changes run timing
+and witnesses.
 Checkpoint parent identities also bind the page timer only when enabled,
 preventing checkpoint reuse across timer modes while preserving feature-off hashes.
 This composes with deferred TX's `+deferred-tx` timebase suffix: all four option

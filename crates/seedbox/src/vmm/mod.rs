@@ -104,23 +104,9 @@ impl VmmExecutor {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o500))?;
         let version = crate::worker_process::replacement_version(&engine, supplied_path)?;
-        for key in crate::engine::DESCRIPTOR_FIELDS {
-            self.profile.semantic_parameters.remove(key);
-        }
-        if let Some(version) = version {
-            self.profile.semantic_parameters.extend(BTreeMap::from([
-                (
-                    "engine_executable_kind".into(),
-                    crate::engine::INTERNAL_WORKER_V1.into(),
-                ),
-                ("simulator_version".into(), version),
-                ("host_os".into(), "linux".into()),
-                ("host_arch".into(), "x86_64".into()),
-                ("guest_arch".into(), "x86_64".into()),
-                ("engine_backend".into(), "kvm".into()),
-                ("engine_timebase".into(), "counter-pv-v1".into()),
-            ]));
-        }
+        self.profile.semantic_parameters.engine = version.map(|version| {
+            crate::engine::kvm_descriptor(crate::engine::ExecutableKind::InternalWorker, version)
+        });
         Ok(self)
     }
 
@@ -133,9 +119,9 @@ impl VmmExecutor {
         witness_mode: WitnessMode,
         counter: CounterProfile,
     ) -> Result<Self> {
-        let descriptor = crate::engine::internal_parameters()?;
+        let descriptor = crate::engine::internal_descriptor()?;
         let mut executor = Self::new(engine, store, cpu, memory_mb, witness_mode, counter)?;
-        executor.profile.semantic_parameters.extend(descriptor);
+        executor.profile.semantic_parameters.engine = Some(descriptor);
         Ok(executor)
     }
 
@@ -193,20 +179,16 @@ impl VmmExecutor {
                 "guest memory must be 64..65536 MiB".into(),
             ));
         }
-        let mut semantic_parameters = BTreeMap::from([
-            ("guest_abi".into(), "oci-init-v1".into()),
-            ("control_channel".into(), "virtio-console-v1".into()),
-            ("memory_mb".into(), memory_mb.to_string()),
-        ]);
-        if counter != CounterProfile::Zen {
-            semantic_parameters.insert(COUNTER.into(), counter.name().into());
-        }
+        let semantic_parameters = SemanticParameters {
+            clock: Clock::Counter(counter),
+            ..SemanticParameters::new(memory_mb)
+        };
         Ok(Self {
             cpu,
             counter,
             admission: Default::default(),
             profile: ExecutionProfile {
-                backend: "seedbox-kvm".into(),
+                backend: Backend::Kvm,
                 engine,
                 witness_mode,
                 semantic_parameters,
@@ -217,50 +199,25 @@ impl VmmExecutor {
 
     /// Defer virtio-net TX kicks to deterministic polls (semantic, off by default).
     pub fn with_deferred_tx(mut self, enabled: bool) -> Self {
-        if enabled {
-            self.profile
-                .semantic_parameters
-                .insert("deferred_tx".into(), "true".into());
-        } else {
-            self.profile.semantic_parameters.remove("deferred_tx");
-        }
+        self.profile.semantic_parameters.deferred_tx = enabled;
         self
     }
 
-    /// Counter is recorded by omission to preserve existing run identities.
     /// PV reads no branch counter, so its identity carries no counter profile.
     pub fn with_timebase(mut self, timebase: Timebase) -> Self {
-        self.profile.semantic_parameters.remove(COUNTER);
-        if timebase == Timebase::Counter {
-            self.profile.semantic_parameters.remove("timebase");
-            if self.counter != CounterProfile::Zen {
-                self.profile
-                    .semantic_parameters
-                    .insert(COUNTER.into(), self.counter.name().into());
-            }
-        } else {
-            self.profile
-                .semantic_parameters
-                .insert("timebase".into(), timebase.name().into());
-        }
+        self.profile.semantic_parameters.clock = Clock::new(timebase, self.counter);
         self
     }
 
-    /// Page timer is recorded only when requested; off preserves legacy identities.
+    /// Read guest timer deadlines from the time page (semantic, off by default).
     pub fn with_page_timer(mut self, enabled: bool) -> Self {
-        if enabled {
-            self.profile
-                .semantic_parameters
-                .insert("page_timer".into(), "true".into());
-        } else {
-            self.profile.semantic_parameters.remove("page_timer");
-        }
+        self.profile.semantic_parameters.page_timer = enabled;
         self
     }
 
     /// Whether the engine reads the host branch counter; PV does not.
     fn counted(&self) -> bool {
-        recorded_timebase(&self.profile).map_or(true, |timebase| timebase == Timebase::Counter)
+        self.profile.timebase() == Timebase::Counter
     }
 
     /// Check the existing execution policy without storing inputs or starting guests.
@@ -298,7 +255,7 @@ impl VmmExecutor {
         cpu: Option<u32>,
         timebase: Timebase,
     ) -> Result<DoctorReport> {
-        let descriptor = crate::engine::internal_parameters()?;
+        let descriptor = crate::engine::internal_descriptor()?;
         let mut executor = Self::from_engine_digest(
             crate::admission::file_digest(engine)?,
             cpu,
@@ -306,7 +263,7 @@ impl VmmExecutor {
             WitnessMode::Exits,
             CounterProfile::Zen,
         )?;
-        executor.profile.semantic_parameters.extend(descriptor);
+        executor.profile.semantic_parameters.engine = Some(descriptor);
         Self::doctor_executor(executor.with_timebase(timebase), kernel)
     }
 
@@ -330,11 +287,7 @@ impl VmmExecutor {
                             cpu: reservation.cpu,
                             cpus: reservation.cpus.iter().copied().collect(),
                             engine: executor.profile.engine.clone(),
-                            simulator_version: executor
-                                .profile
-                                .semantic_parameters
-                                .get("simulator_version")
-                                .cloned(),
+                            simulator_version: executor.simulator_version(),
                             kernel: kernel.clone(),
                             observations: Vec::new(),
                         });
@@ -361,7 +314,7 @@ impl VmmExecutor {
             crate::admission::validate_observation(observation)?;
         }
         Ok(DoctorReport {
-            timebase: recorded_timebase(&self.profile)?,
+            timebase: self.profile.timebase(),
             cpu: probe
                 .cpu
                 .ok_or_else(|| Error::Execution("host probe did not select a CPU".into()))?,
@@ -371,11 +324,7 @@ impl VmmExecutor {
                 .map(|observation| observation.cpu)
                 .collect(),
             engine: self.profile.engine.clone(),
-            simulator_version: self
-                .profile
-                .semantic_parameters
-                .get("simulator_version")
-                .cloned(),
+            simulator_version: self.simulator_version(),
             kernel,
             observations: probe.observations,
         })
@@ -423,42 +372,22 @@ impl VmmExecutor {
 
     /// Bind a runtime checkpoint and its branch seed into retained semantics.
     pub fn with_checkpoint(mut self, at_ns: u64, branch_seed: u64) -> Self {
-        self.profile
-            .semantic_parameters
-            .insert("checkpoint_at_ns".into(), at_ns.to_string());
-        self.profile
-            .semantic_parameters
-            .insert("checkpoint_branch_seed".into(), branch_seed.to_string());
+        self.profile.semantic_parameters.checkpoint = Some(Checkpoint { at_ns, branch_seed });
         self
-    }
-
-    /// Reconstruct checkpoint settings from retained inputs during replay.
-    pub fn with_recorded_checkpoint(self, profile: &ExecutionProfile) -> Result<Self> {
-        Ok(match recorded_checkpoint(profile)? {
-            Some((at, seed)) => self.with_checkpoint(at, seed),
-            None => self,
-        })
     }
 
     /// Seeded survival of the latest unflushed 512-byte sectors on crash.
-    /// Off is represented by omission to preserve existing profile bytes.
     pub fn with_torn_writes(mut self, enabled: bool) -> Self {
-        if enabled {
-            self.profile
-                .semantic_parameters
-                .insert(DISK_LOSS_SECTOR_BYTES.into(), "512".into());
-            self.profile
-                .semantic_parameters
-                .insert(DISK_LOSS_SURVIVAL_PROBABILITY.into(), "0.5".into());
-        } else {
-            self.profile
-                .semantic_parameters
-                .remove(DISK_LOSS_SECTOR_BYTES);
-            self.profile
-                .semantic_parameters
-                .remove(DISK_LOSS_SURVIVAL_PROBABILITY);
-        }
+        self.profile.semantic_parameters.torn_writes = enabled;
         self
+    }
+
+    fn simulator_version(&self) -> Option<String> {
+        self.profile
+            .semantic_parameters
+            .engine
+            .as_ref()
+            .map(|engine| engine.simulator_version.clone())
     }
 
     pub fn with_margin(mut self, margin: &str) -> Result<Self> {
@@ -486,7 +415,6 @@ impl VmmExecutor {
 /// Checkpoints are optional, but partial or malformed retained settings fail closed.
 impl VmmExecutor {
     fn preflight_capacity(&self, workers: u32, output: Option<&Path>) -> Result<()> {
-        recorded_checkpoint(&self.profile)?;
         crate::admission::validate_profile(&self.profile)?;
         if !self.counted() {
             return self.uncounted_preflight(workers);
@@ -572,7 +500,7 @@ pub(crate) fn engine_command(
             command.args(["__engine", crate::engine::INTERNAL_WORKER_V1]);
         }
         crate::engine::ExecutableKind::ArmWorld => {
-            command.args(["__engine", "arm64-world-v1"]);
+            command.args(["__engine", crate::engine::ARM_WORLD_V1]);
         }
     }
     Ok(command)

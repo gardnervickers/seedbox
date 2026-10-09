@@ -222,38 +222,16 @@ impl Orchestrator {
         options: ReplayOptions,
     ) -> Result<Run> {
         let baseline = inspect(directory)?;
-        // Refuse timebase drift before creating an attempt or executing anything.
-        if baseline.identity.inputs.profile.backend == "seedbox-kvm" {
-            let recorded = crate::vmm::recorded_timebase(&baseline.identity.inputs.profile)?;
-            let requested = crate::vmm::recorded_timebase(&executor.profile())?;
-            if crate::vmm::recorded_deferred_tx(&baseline.identity.inputs.profile)?
-                != crate::vmm::recorded_deferred_tx(&executor.profile())?
-            {
-                return Err(Error::Integrity("executor TX mode does not match the recorded --deferred-tx; use an executor with the recorded TX mode".into()));
-            }
-            if recorded != requested {
-                return Err(Error::Integrity(format!(
-                    "executor timebase {} does not match the recorded --timebase {}; use an executor with the recorded timebase",
-                    requested.name(), recorded.name()
-                )));
-            }
-        }
+        // Refuse settings drift before creating an attempt or executing anything.
+        let requested = executor.profile();
+        drift(&baseline.identity.inputs.profile, &requested)?;
         let mut identity = baseline.identity.clone();
         if options.allow_engine_change {
-            let replacement = executor.profile();
-            identity.inputs.profile.engine = replacement.engine;
+            identity.inputs.profile.engine = requested.engine;
             // A new executable can use different argv without changing the
             // simulation's retained memory, timebase, faults or other settings.
-            for key in crate::engine::DESCRIPTOR_FIELDS {
-                identity.inputs.profile.semantic_parameters.remove(key);
-                if let Some(value) = replacement.semantic_parameters.get(key) {
-                    identity
-                        .inputs
-                        .profile
-                        .semantic_parameters
-                        .insert(key.into(), value.clone());
-                }
-            }
+            identity.inputs.profile.semantic_parameters.engine =
+                requested.semantic_parameters.engine;
         }
         let mut run = self.execute(
             identity,
@@ -655,4 +633,31 @@ fn retain_logs(
         }
     }
     Ok(())
+}
+
+/// Name the first result-changing setting where a KVM executor differs from
+/// the recorded run. The executable descriptor may differ; it only selects argv.
+/// Other mismatches are recorded as a not-comparable attempt by `execute`.
+fn drift(recorded: &ExecutionProfile, requested: &ExecutionProfile) -> Result<()> {
+    if recorded.backend != Backend::Kvm {
+        return Ok(());
+    }
+    let (was, now) = (
+        &recorded.semantic_parameters,
+        &requested.semantic_parameters,
+    );
+    let Some(&first) = was.differences(now).first() else {
+        return Ok(());
+    };
+    Err(Error::Integrity(match first {
+        "clock" if recorded.timebase() != requested.timebase() => format!(
+            "executor timebase {} does not match the recorded --timebase {}; use an executor with the recorded timebase",
+            requested.timebase().name(),
+            recorded.timebase().name()
+        ),
+        "deferred_tx" => "executor TX mode does not match the recorded --deferred-tx; use an executor with the recorded TX mode".into(),
+        setting => format!(
+            "executor {setting} does not match the recorded run; use an executor with the recorded settings"
+        ),
+    }))
 }

@@ -12,17 +12,16 @@ use seedbox::{
     bundle, config,
     counter::CounterProfile,
     diff,
-    execution::{CancellationToken, ExecutionBackend, PreparationBackend, Timebase, WitnessMode},
+    execution::{
+        Backend, CancellationToken, ExecutionBackend, PreparationBackend, Timebase, WitnessMode,
+    },
     exploration::{self, ExploreOptions},
     logs,
     orchestration::{self, Orchestrator, Outcome, ReplayOptions, ReplayStatus, RunOptions},
     preparation::OciPreparer,
     store::ContentStore,
     templates::Template,
-    vmm::{
-        recorded_counter, recorded_deferred_tx, recorded_page_timer, recorded_timebase,
-        recorded_torn_writes, VmmExecutor,
-    },
+    vmm::{recorded_counter, VmmExecutor},
     Error, Result,
 };
 use signals::Signals;
@@ -609,7 +608,7 @@ fn execution_counter() -> Result<CounterProfile> {
     if MAC {
         Ok(CounterProfile::Zen)
     } else {
-        CounterProfile::host()
+        seedbox::counter::host()
     }
 }
 
@@ -855,7 +854,7 @@ fn prepare(
     let simulation = compose.load()?;
     validate_machine(&simulation)?;
     let (store, _) = state.open()?;
-    let counter = CounterProfile::host().unwrap_or(CounterProfile::Zen);
+    let counter = seedbox::counter::host().unwrap_or(CounterProfile::Zen);
     let cancellation = CancellationToken::default();
     let _signals = Signals::register(&cancellation)?;
     let (preparer, _) = inputs.backends(&store, None, counter, &simulation, &cancellation)?;
@@ -999,17 +998,8 @@ fn replay(
     let run = defaults::run_directory(run)?;
     let previous = orchestration::inspect(&run)?;
     let profile = &previous.identity.inputs.profile;
-    let is_mac = profile.backend == "seedbox-hvf";
-    let timebase = if is_mac {
-        Timebase::Pv
-    } else {
-        recorded_timebase(profile)?
-    };
-    let deferred_tx = if is_mac {
-        false
-    } else {
-        recorded_deferred_tx(profile)?
-    };
+    let is_mac = profile.backend == Backend::Hvf;
+    let timebase = profile.timebase();
     let detected = execution_counter();
     let counter = *detected.as_ref().unwrap_or(&CounterProfile::Zen);
     // Historical/incompatible records must reach the retained-input validation
@@ -1044,19 +1034,12 @@ fn replay(
             ));
         }
     } else {
-        let executor = if allow_engine_change {
+        // The recorded profile carries every semantic setting.
+        Executor::Linux(if allow_engine_change {
             VmmExecutor::from_override(&engine, &store, profile.clone(), cpu.cpu, counter)?
         } else {
             VmmExecutor::from_retained(&engine, &store, profile.clone(), cpu.cpu, counter)?
-        };
-        Executor::Linux(
-            executor
-                .with_timebase(timebase)
-                .with_page_timer(recorded_page_timer(profile))
-                .with_deferred_tx(deferred_tx)
-                .with_torn_writes(recorded_torn_writes(profile)?)
-                .with_recorded_checkpoint(profile)?,
-        )
+        })
     };
     let executor = performance.apply(executor)?;
     let cancellation = CancellationToken::default();
@@ -1236,15 +1219,15 @@ fn same_counter(run: &Path, recorded: CounterProfile, host: CounterProfile) -> R
 fn report(run: &orchestration::Run) -> u8 {
     // Scripts parse the run directory from this one `OUTCOME: path` line.
     output::status(&output::word(&run.record.outcome), run.directory.display());
-    if let Some(version) = run
+    if let Some(engine) = &run
         .record
         .identity
         .inputs
         .profile
         .semantic_parameters
-        .get("simulator_version")
+        .engine
     {
-        output::field("simulator", version);
+        output::field("simulator", &engine.simulator_version);
     }
     print_timebase(&run.record);
     if let Some(error) = &run.record.error {
@@ -1334,15 +1317,7 @@ fn usage(who: libc::c_int) -> Option<libc::rusage> {
 }
 
 fn print_timebase(record: &orchestration::RunRecord) {
-    let timebase = record
-        .identity
-        .inputs
-        .profile
-        .semantic_parameters
-        .get("timebase")
-        .map(String::as_str)
-        .unwrap_or("counter");
-    output::field("timebase", timebase);
+    output::field("timebase", record.identity.inputs.profile.timebase().name());
 }
 
 fn print_omissions(record: &orchestration::RunRecord) {

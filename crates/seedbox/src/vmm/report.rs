@@ -798,13 +798,7 @@ pub(super) fn checked_report(
     raw: VmmReport,
     request: &ExecutionRequest<'_>,
 ) -> Result<ExecutionReport> {
-    let timebase = if crate::engine::recorded_launch(&request.prepared.profile)?
-        == crate::engine::ExecutableKind::ArmWorld
-    {
-        Timebase::Pv
-    } else {
-        recorded_timebase(&request.prepared.profile)?
-    };
+    let timebase = request.prepared.profile.timebase();
     let names: BTreeSet<_> = raw.machines.iter().map(|machine| &machine.name).collect();
     if names.len() != raw.machines.len() || names != request.prepared.guests.keys().collect() {
         return Err(Error::Integrity("VMM report machine set mismatch".into()));

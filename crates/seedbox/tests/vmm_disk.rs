@@ -26,7 +26,3 @@ fn committed_torn_disk_world_uses_disk_loss_object() {
     assert_eq!(model.survival_probability, 0.5);
     assert!(world["disk_loss"].is_object());
 }
-
-#[allow(dead_code)]
-#[path = "../../seedbox-engine-core/src/checkpoint.rs"]
-mod checkpoint;

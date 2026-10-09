@@ -1,9 +1,4 @@
-#[path = "../../seedbox-vmm/src/management_uart.rs"]
-mod management_uart;
 use seedbox_engine_core::{control, faults, links};
-#[allow(dead_code)]
-#[path = "../../seedbox-vmm/src/devices.rs"]
-mod devices;
 use serde_json::json;
 fn names() -> Vec<String> {
     vec!["scenario".into(), "client".into(), "server".into()]
@@ -216,36 +211,6 @@ fn rejected_or_missing_real_process_effect_is_fatal() {
         assert!(!c.has_undelivered_reply());
         assert!(!complete(&c));
     }
-}
-
-#[test]
-fn actual_uart_divisor_bytes_do_not_contaminate_committed_request_frames() {
-    let mut uart = devices::Uart::default();
-    let mut framer = control::ManagementFramer::default();
-    management_uart::write(&mut framer, &mut uart, 3, 0x80).unwrap();
-    // Base-register writes while DLAB is set never reach the RPC wire.
-    for byte in b"SBX_RPC1 99 1 bad\n" {
-        assert!(management_uart::write(&mut framer, &mut uart, 0, *byte)
-            .unwrap()
-            .is_none());
-    }
-    assert!(uart.out.is_empty());
-    management_uart::write(&mut framer, &mut uart, 3, 3).unwrap();
-    for byte in b"SEEDBOX_EFFECT id=1\n" {
-        assert!(management_uart::write(&mut framer, &mut uart, 0, *byte)
-            .unwrap()
-            .is_none());
-    }
-    let line = b"SBX_RPC1 1 1 {\"version\":1,\"id\":1,\"op\":\"now\"}";
-    for byte in line {
-        assert!(management_uart::write(&mut framer, &mut uart, 0, *byte)
-            .unwrap()
-            .is_none());
-    }
-    assert_eq!(
-        management_uart::write(&mut framer, &mut uart, 0, b'\n').unwrap(),
-        Some(line.to_vec())
-    );
 }
 
 #[test]

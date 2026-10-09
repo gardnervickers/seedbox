@@ -703,10 +703,10 @@ fn old_records_stay_inspectable_and_transferable() {
         wall_clock_epoch: None,
         kernel: object.clone(),
         profile: ExecutionProfile {
-            backend: "seedbox-kvm".into(),
+            backend: Backend::Kvm,
             engine: object.clone(),
             witness_mode: WitnessMode::Exits,
-            semantic_parameters: BTreeMap::from([("memory_mb".into(), "512".into())]),
+            semantic_parameters: SemanticParameters::new(512),
         },
         placement: BTreeMap::from([("workload".into(), "workload".into())]),
         guests: BTreeMap::from([("workload".into(), object.clone())]),
@@ -1037,7 +1037,7 @@ mod diff_tests {
             if update_digest {
                 right.logs.insert("machines/server.pages".into(), sb::store::ContentDigest::of(b"broken"));
             }
-            if remove_memory { right.identity.inputs.profile.semantic_parameters.remove("memory_mb"); }
+            if remove_memory { right.identity.inputs.profile.semantic_parameters.memory_mb = 0; }
             write_fixture(&root.join("b"), &mut right, Some(&b), None);
             let output = seedbox(&["diff", "a", "b", "--json"], root);
             assert_eq!(output.status.code(), Some(2));
@@ -1606,25 +1606,24 @@ mod timed_logs {
 }
 
 #[allow(dead_code)]
-#[path = "../../seedbox-vmm/src/output_layout.rs"]
-mod checkpoint_layout;
-#[allow(dead_code)]
-#[path = "../../seedbox-vmm/src/log_index.rs"]
-mod checkpoint_log_producer;
-
-#[allow(dead_code)]
 mod checkpoint_evidence {
     use super::*;
-    use super::{checkpoint_layout as checkpoint, checkpoint_log_producer as producer};
     use seedbox as sb;
+    use seedbox_engine_core::{log_index as producer, output_layout as checkpoint};
     use std::io::Write;
     include!("support/diff_fixture.rs");
 
     fn branch_record(seed: u64) -> sb::orchestration::RunRecord {
         let mut record = fixture();
-        let parameters = &mut record.identity.inputs.profile.semantic_parameters;
-        parameters.insert("checkpoint_at_ns".into(), "20".into());
-        parameters.insert("checkpoint_branch_seed".into(), seed.to_string());
+        record
+            .identity
+            .inputs
+            .profile
+            .semantic_parameters
+            .checkpoint = Some(sb::execution::Checkpoint {
+            at_ns: 20,
+            branch_seed: seed,
+        });
         record
     }
 
@@ -1918,32 +1917,43 @@ fn timebase_help_values_and_replay_uses_only_the_recorded_choice() {
     }
 }
 
+#[allow(dead_code)]
+mod record_fixture {
+    use seedbox as sb;
+    include!("support/diff_fixture.rs");
+
+    pub(super) fn record() -> sb::orchestration::RunRecord {
+        fixture()
+    }
+}
+
+/// A retained counter or PV run; any other clock value is written as recorded.
 fn timebase_record(directory: &Path, timebase: Option<&str>) {
-    use seedbox::{orchestration::RunRecord, store::ContentDigest};
-    let fixture: serde_json::Value =
-        serde_json::from_slice(include_bytes!("fixtures/formats/synthetic-c84-v2.json")).unwrap();
-    let mut record: RunRecord = serde_json::from_value(fixture["record"].clone()).unwrap();
-    record.identity.inputs.profile.backend = "seedbox-kvm".into();
-    if let Some(value) = timebase {
-        record
-            .identity
-            .inputs
-            .profile
-            .semantic_parameters
-            .insert("timebase".into(), value.into());
+    use seedbox::{
+        execution::{Clock, Timebase},
+        store::ContentDigest,
+    };
+    let mut record = record_fixture::record();
+    if timebase == Some("pv") {
+        record.identity.inputs.profile.semantic_parameters.clock = Clock::Pv;
     }
     if let Some(report) = &mut record.report {
         report.timebase = match timebase {
-            Some("pv") => Some(seedbox::execution::Timebase::Pv),
-            None => Some(seedbox::execution::Timebase::Counter),
+            Some("pv") => Some(Timebase::Pv),
+            None => Some(Timebase::Counter),
             _ => None,
         };
     }
     record.run_id = ContentDigest::of(&serde_json::to_vec(&record.identity).unwrap());
     let checksum = ContentDigest::of(&serde_json::to_vec(&record).unwrap());
+    let mut manifest = serde_json::json!({"sha256": checksum, "record": record});
+    if let Some(value) = timebase.filter(|value| *value != "pv") {
+        manifest["record"]["identity"]["inputs"]["profile"]["semantic_parameters"]["clock"] =
+            value.into();
+    }
     fs::write(
         directory.join("manifest.json"),
-        serde_json::to_vec(&serde_json::json!({"sha256": checksum, "record": record})).unwrap(),
+        serde_json::to_vec(&manifest).unwrap(),
     )
     .unwrap();
 }
@@ -1972,8 +1982,12 @@ fn inspect_shows_timebase_and_json_preserves_library_fields() {
         let record: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(record["report"]["timebase"], value);
         assert_eq!(
-            record["identity"]["inputs"]["profile"]["semantic_parameters"]["timebase"].as_str(),
-            parameter
+            record["identity"]["inputs"]["profile"]["semantic_parameters"]["clock"],
+            if parameter == Some("pv") {
+                serde_json::json!("pv")
+            } else {
+                serde_json::json!({"counter": "amd-zen"})
+            }
         );
     }
 }
@@ -1984,13 +1998,17 @@ fn replay_rejects_unknown_recorded_timebase_before_host_checks() {
     timebase_record(directory.path(), Some("future"));
     let output = seedbox(&["replay", "."], directory.path());
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(stderr(&output), "error: input integrity: recorded --timebase future: expected counter or pv; use a run recorded with a supported timebase\n");
+    assert!(
+        stderr(&output).contains("unknown variant `future`"),
+        "{}",
+        stderr(&output)
+    );
     assert!(output.stdout.is_empty());
     assert!(!directory.path().join(".seedbox").exists());
-    // Inspection remains available for diagnosing unsupported recorded values.
+    // The identity is typed, so inspection rejects the record the same way.
     let inspect = seedbox(&["inspect", "."], directory.path());
-    assert!(inspect.status.success(), "{}", stderr(&inspect));
-    assert!(String::from_utf8_lossy(&inspect.stdout).contains("timebase: future"));
+    assert_eq!(inspect.status.code(), Some(2));
+    assert!(stderr(&inspect).contains("unknown variant `future`"));
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -2041,24 +2059,19 @@ fn mac_linux_only_runtime_modes_fail_before_state_or_preparation() {
 fn replay_rejects_an_unknown_recorded_deferred_tx_mode() {
     let directory = tempfile::tempdir().unwrap();
     timebase_record(directory.path(), None);
-    let mut record = seedbox::orchestration::inspect(directory.path()).unwrap();
-    record
-        .identity
-        .inputs
-        .profile
-        .semantic_parameters
-        .insert("deferred_tx".into(), "future".into());
-    record.run_id =
-        seedbox::store::ContentDigest::of(&serde_json::to_vec(&record.identity).unwrap());
-    let checksum = seedbox::store::ContentDigest::of(&serde_json::to_vec(&record).unwrap());
-    fs::write(
-        directory.path().join("manifest.json"),
-        serde_json::to_vec(&serde_json::json!({"sha256": checksum, "record": record})).unwrap(),
-    )
-    .unwrap();
+    let path = directory.path().join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    manifest["record"]["identity"]["inputs"]["profile"]["semantic_parameters"]["deferred_tx"] =
+        "future".into();
+    fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     let output = seedbox(&["replay", "."], directory.path());
     assert_eq!(output.status.code(), Some(2));
-    assert!(stderr(&output).contains("recorded --deferred-tx future"));
+    assert!(
+        stderr(&output).contains("invalid type: string \"future\", expected a boolean"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]

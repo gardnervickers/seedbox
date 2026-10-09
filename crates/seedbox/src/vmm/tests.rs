@@ -67,7 +67,7 @@ fn replay_preserves_historical_policy_data_without_current_defaults() {
     let executable = temporary.path().join("retained-worker");
     std::fs::write(&executable, b"retained executable").unwrap();
     let store = ContentStore::new(temporary.path().join("objects"));
-    let mut profile = VmmExecutor::from_engine_digest(
+    let profile = VmmExecutor::from_engine_digest(
         ContentDigest::of(b"retained executable"),
         None,
         512,
@@ -76,7 +76,6 @@ fn replay_preserves_historical_policy_data_without_current_defaults() {
     )
     .unwrap()
     .profile;
-    profile.semantic_parameters.remove("host_policy");
     let before = serde_json::to_vec(&profile).unwrap();
     let executor =
         VmmExecutor::from_retained(&executable, &store, profile, None, CounterProfile::Zen)
@@ -126,7 +125,13 @@ fn explicit_override_uses_replacement_contract_in_both_directions() {
     )
     .unwrap();
     assert_eq!(
-        combined.profile.semantic_parameters["simulator_version"],
+        combined
+            .profile
+            .semantic_parameters
+            .engine
+            .as_ref()
+            .unwrap()
+            .simulator_version,
         "0.2.0-replacement"
     );
     assert_eq!(
@@ -144,7 +149,7 @@ fn explicit_override_uses_replacement_contract_in_both_directions() {
             deferred_tx: true,
         }
     );
-    assert!(recorded_torn_writes(&combined.profile).unwrap());
+    assert!(combined.profile.semantic_parameters.torn_writes);
     let standalone = VmmExecutor::from_override(
         &standalone,
         &store,
@@ -172,8 +177,8 @@ fn explicit_override_uses_replacement_contract_in_both_directions() {
     )
     .unwrap();
     assert_eq!(
-        detected.profile.semantic_parameters["engine_executable_kind"],
-        crate::engine::INTERNAL_WORKER_V1
+        crate::engine::recorded_launch(&detected.profile).unwrap(),
+        crate::engine::ExecutableKind::InternalWorker
     );
 }
 
@@ -193,21 +198,10 @@ fn retained_worker_launch_preserves_timer_and_deferred_tx_options() {
     for internal in [false, true] {
         let mut profile = executor.profile.clone();
         if internal {
-            profile.semantic_parameters.extend(BTreeMap::from([
-                (
-                    "engine_executable_kind".into(),
-                    crate::engine::INTERNAL_WORKER_V1.into(),
-                ),
-                (
-                    "simulator_version".into(),
-                    crate::engine::SIMULATOR_VERSION.into(),
-                ),
-                ("host_os".into(), "linux".into()),
-                ("host_arch".into(), "x86_64".into()),
-                ("guest_arch".into(), "x86_64".into()),
-                ("engine_backend".into(), "kvm".into()),
-                ("engine_timebase".into(), "counter-pv-v1".into()),
-            ]));
+            profile.semantic_parameters.engine = Some(crate::engine::kvm_descriptor(
+                crate::engine::ExecutableKind::InternalWorker,
+                crate::engine::SIMULATOR_VERSION.into(),
+            ));
         }
         let retained: ExecutionProfile =
             serde_json::from_slice(&serde_json::to_vec(&profile).unwrap()).unwrap();
@@ -225,10 +219,10 @@ fn retained_worker_launch_preserves_timer_and_deferred_tx_options() {
                 deferred_tx: true,
             }
         );
-        profile
-            .semantic_parameters
-            .insert("deferred_tx".into(), "false".into());
-        assert!(recorded_features(&profile).is_err());
+        // Recorded flags are booleans; a string is not a TX mode.
+        let mut json = serde_json::to_value(&profile).unwrap();
+        json["semantic_parameters"]["deferred_tx"] = "false".into();
+        assert!(serde_json::from_value::<ExecutionProfile>(json).is_err());
     }
 }
 
@@ -263,18 +257,10 @@ fn counter_and_pv_retain_identity_and_replay_through_worker_contract() {
                 CounterProfile::Zen,
             )
             .unwrap();
-            executor.profile.semantic_parameters.extend(BTreeMap::from([
-                ("engine_executable_kind".into(), INTERNAL_WORKER_V1.into()),
-                (
-                    "simulator_version".into(),
-                    crate::engine::SIMULATOR_VERSION.into(),
-                ),
-                ("host_os".into(), "linux".into()),
-                ("host_arch".into(), "x86_64".into()),
-                ("guest_arch".into(), "x86_64".into()),
-                ("engine_backend".into(), "kvm".into()),
-                ("engine_timebase".into(), "counter-pv-v1".into()),
-            ]));
+            executor.profile.semantic_parameters.engine = Some(crate::engine::kvm_descriptor(
+                crate::engine::ExecutableKind::InternalWorker,
+                crate::engine::SIMULATOR_VERSION.into(),
+            ));
             executor
         };
         let executor = executor.with_timebase(timebase);
@@ -284,11 +270,8 @@ fn counter_and_pv_retain_identity_and_replay_through_worker_contract() {
         );
         assert_eq!(recorded_timebase(&executor.profile).unwrap(), timebase);
         assert_eq!(
-            executor
-                .profile
-                .semantic_parameters
-                .contains_key("timebase"),
-            timebase == Timebase::Pv
+            executor.profile.semantic_parameters.clock,
+            Clock::new(timebase, CounterProfile::Zen)
         );
         let bytes = serde_json::to_vec(&executor.profile).unwrap();
         let retained: ExecutionProfile = serde_json::from_slice(&bytes).unwrap();
@@ -308,7 +291,7 @@ fn counter_and_pv_retain_identity_and_replay_through_worker_contract() {
         profiles.push(executor.profile);
     }
     let mut pv_as_counter = profiles.pop().unwrap();
-    pv_as_counter.semantic_parameters.remove("timebase");
+    pv_as_counter.semantic_parameters.clock = Clock::Counter(CounterProfile::Zen);
     assert_eq!(pv_as_counter, profiles[0]);
     // #89 owns timebase even for historical standalone profiles.
     let legacy = VmmExecutor::new(
@@ -345,18 +328,10 @@ fn recorded_descriptor_is_data_and_unknown_timebases_still_fail() {
     )
     .unwrap()
     .profile;
-    profile.semantic_parameters.extend(BTreeMap::from([
-        (
-            "engine_executable_kind".into(),
-            crate::engine::INTERNAL_WORKER_V1.into(),
-        ),
-        ("simulator_version".into(), "0.1.0-dev.1".into()),
-        ("host_os".into(), "linux".into()),
-        ("host_arch".into(), "x86_64".into()),
-        ("guest_arch".into(), "x86_64".into()),
-        ("engine_backend".into(), "kvm".into()),
-        ("timebase".into(), "counted-branches-v1".into()),
-    ]));
+    profile.semantic_parameters.engine = Some(crate::engine::kvm_descriptor(
+        crate::engine::ExecutableKind::InternalWorker,
+        "0.1.0-dev.1".into(),
+    ));
     let original = serde_json::to_vec(&profile).unwrap();
     let executor = VmmExecutor::from_retained(
         &executable,
@@ -371,7 +346,9 @@ fn recorded_descriptor_is_data_and_unknown_timebases_still_fail() {
         crate::engine::recorded_launch(&executor.profile).unwrap(),
         crate::engine::ExecutableKind::InternalWorker
     );
-    assert!(recorded_timebase(&executor.profile).is_err());
+    let mut json = serde_json::to_value(&profile).unwrap();
+    json["semantic_parameters"]["clock"] = "counted-branches-v1".into();
+    assert!(serde_json::from_value::<ExecutionProfile>(json).is_err());
 }
 
 #[test]
@@ -498,21 +475,10 @@ fn replay_reconstructs_checkpoint_profile_without_performance_changes() {
         ordinary.performance_parameters()
     );
     assert_eq!(
-        ordinary
-            .clone()
-            .with_recorded_checkpoint(&branch.profile())
-            .unwrap()
-            .profile(),
-        branch.profile()
+        recorded_checkpoint(&branch.profile()).unwrap(),
+        Some((500, 42))
     );
-    assert_eq!(
-        ordinary
-            .clone()
-            .with_recorded_checkpoint(&ordinary.profile())
-            .unwrap()
-            .profile(),
-        ordinary.profile()
-    );
+    assert_eq!(recorded_checkpoint(&ordinary.profile()).unwrap(), None);
 }
 
 #[test]
@@ -553,20 +519,13 @@ fn any_engine_and_kernel_pair_is_admitted() {
             "the run records the engine it used"
         );
         backend.validate_retained(&inputs).unwrap();
-        // Older runs carry policy bindings; they are only data now.
-        let mut marked = inputs.clone();
-        marked
-            .profile
-            .semantic_parameters
-            .insert("host_policy".into(), "anything".into());
-        backend.validate_retained(&marked).unwrap();
+        let mut small = inputs.clone();
+        small.profile.semantic_parameters.memory_mb = 32;
+        assert!(backend.validate_retained(&small).is_err());
         for key in ["guest_abi", "control_channel", "memory_mb"] {
-            let mut wrong = inputs.clone();
-            wrong
-                .profile
-                .semantic_parameters
-                .insert(key.into(), "wrong".into());
-            assert!(backend.validate_retained(&wrong).is_err());
+            let mut json = serde_json::to_value(&inputs.profile).unwrap();
+            json["semantic_parameters"][key] = "wrong".into();
+            assert!(serde_json::from_value::<ExecutionProfile>(json).is_err());
         }
         let report = backend
             .doctor_report(
@@ -595,7 +554,7 @@ fn pv_carries_no_counter_profile_and_needs_no_counter_admission() {
     )
     .unwrap();
     let pv = intel.clone().with_timebase(Timebase::Pv);
-    assert!(!pv.profile.semantic_parameters.contains_key(COUNTER));
+    assert_eq!(pv.profile.semantic_parameters.clock, Clock::Pv);
     assert_eq!(recorded_counter(&pv.profile).unwrap(), CounterProfile::Zen);
     let zen_pv = VmmExecutor::from_engine_digest(
         ContentDigest::of(b"engine"),
@@ -624,21 +583,14 @@ fn experimental_mode_never_carries_amd_proof_and_cannot_relax_release_or_counter
         .unwrap()
     };
     let experimental = make(CounterProfile::IntelIceLake);
-    assert!(!experimental
-        .profile
-        .semantic_parameters
-        .keys()
-        .any(|key| key.starts_with("host_policy")));
     assert_eq!(
         recorded_counter(&experimental.profile).unwrap(),
         CounterProfile::IntelIceLake
     );
     assert!(crate::admission::validate_profile(&experimental.profile).is_ok());
-    let mut wrong = experimental.profile.clone();
-    wrong
-        .semantic_parameters
-        .insert("counter".into(), "unknown".into());
-    assert!(crate::admission::validate_profile(&wrong).is_err());
+    let mut json = serde_json::to_value(&experimental.profile).unwrap();
+    json["semantic_parameters"]["clock"]["counter"] = "unknown".into();
+    assert!(serde_json::from_value::<ExecutionProfile>(json).is_err());
     let inputs = PreparedInputs {
         wall_clock_epoch: None,
         kernel: ContentDigest::of(b"kernel"),
