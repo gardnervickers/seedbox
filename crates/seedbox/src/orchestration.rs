@@ -290,13 +290,15 @@ impl Orchestrator {
         allow_engine_change: bool,
     ) -> Result<Run> {
         let mut pending = self.begin(identity, executor, allow_engine_change, baseline)?;
-        let started = Instant::now();
         let execution = match pending.ready(executor, cancellation) {
-            Ok(None) => executor.execute(pending.request(cancellation)),
+            Ok(None) => {
+                let started = Instant::now();
+                let execution = executor.execute(pending.request(cancellation));
+                guard(execution, cancellation, started, 1, &pending.record)
+            }
             Ok(Some(early)) => Ok(early),
             Err(error) => Err(error),
         };
-        let execution = guard(execution, cancellation, started, 1, &pending.record);
         self.finish(pending, execution, baseline)
     }
 
