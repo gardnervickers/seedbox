@@ -253,36 +253,30 @@ fn committed_trigger_unused_surface_preserves_witness_and_report_bytes() {
     let outcome = simulate(&mut w, &json!({}), 2000, &None, None, &mut None).unwrap();
     let out = std::env::temp_dir().join(format!("seedbox-trigger-unused-{}", std::process::id()));
     std::fs::create_dir(&out).unwrap();
-    let before = report(
-        &mut w,
+    let run = world_windowed::Run {
+        cfg: &json!({}),
+        duration: 2000,
+        end_on: &None,
+        fork: None,
+        checkpoint: None,
+        require_barrier: true,
+    };
+    let finished = || Finished {
         outcome,
-        1009,
-        &[],
-        1.0,
-        true,
-        out.to_str().unwrap(),
-        2000,
-        &None,
-    )
-    .unwrap();
+        scheduler: Value::Null,
+        seed: 1009,
+        kills: &[],
+        host_seconds: 1.0,
+        out: out.to_str().unwrap(),
+    };
+    let before = report(&mut w, &run, true, finished()).unwrap();
     w.control
         .triggers
         .committed("a", 100, b'x', 50, 100)
         .unwrap();
     w.control.triggers.reset_source("a");
     w.control.triggers.cut_off(2000);
-    let after = report(
-        &mut w,
-        outcome,
-        1009,
-        &[],
-        1.0,
-        true,
-        out.to_str().unwrap(),
-        2000,
-        &None,
-    )
-    .unwrap();
+    let after = report(&mut w, &run, true, finished()).unwrap();
     assert!(after.get("triggers").is_none());
     assert_eq!(
         serde_json::to_vec(&before).unwrap(),

@@ -598,6 +598,16 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
     if seeds.len() > 1 && options.trace {
         return Err("--trace cannot be combined with --fork-seeds".into());
     }
+    // One scheduler segment of this world: to its end, its fork point or a checkpoint.
+    let (cfg_ref, end_on_ref) = (&cfg, &end_on);
+    let segment = move |fork, checkpoint| world_windowed::Run {
+        cfg: cfg_ref,
+        duration,
+        end_on: end_on_ref,
+        fork,
+        checkpoint,
+        require_barrier: true,
+    };
     let kvm = kvm_ioctls::Kvm::new().map_err(|e| format!("kvm: {e}"))?;
     let kernel: Rc<[u8]> = kernel.into();
     let margin = options.performance.margin;
@@ -668,28 +678,7 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
         let seed = entropy_seed(boot_seed, &format!("boot-entropy/{}", names[i]));
         let mut mach = boot_machine(&kvm, &names[i], &boot, barrier, seed)?;
         boots.push(boot);
-        if options.stream_console {
-            mach.com1.output_file = Some(
-                std::fs::File::create(format!("{out}/{}.console", names[i]))
-                    .map_err(|error| error.to_string())?,
-            );
-            mach.com2.output_file = Some(
-                std::fs::File::create(format!("{out}/{}.mgmt", names[i]))
-                    .map_err(|error| error.to_string())?,
-            );
-        }
-        mach.com1
-            .chunks
-            .open(&devices::log_index::index_name(&format!(
-                "{out}/{}.console",
-                names[i]
-            )));
-        mach.com2
-            .chunks
-            .open(&devices::log_index::index_name(&format!(
-                "{out}/{}.mgmt",
-                names[i]
-            )));
+        open_outputs(&mut mach, &out, options.stream_console)?;
         mach.timer_rng = Some(Rng::new(boot_seed, &format!("timer-jitter/{}", names[i])));
         mach.syscall_ns =
             machine::pv::syscall_ns(&mut Rng::new(boot_seed, &format!("pv-speed/{}", names[i])));
@@ -798,14 +787,7 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
                 if i > 0 {
                     origin.as_ref().unwrap().restore_checkpoint(&mut world)?;
                 }
-                let run = world_windowed::Run {
-                    cfg: &cfg,
-                    duration,
-                    end_on: &end_on,
-                    fork: None,
-                    checkpoint: Some(at),
-                    require_barrier: true,
-                };
+                let run = segment(None, Some(at));
                 let (outcome, _) = simulate_windowed(&mut world, &run, options, &mut host_control)?;
                 if outcome != "checkpoint" {
                     return Err(format!("checkpoint at {at} ns not reached: {outcome}"));
@@ -826,32 +808,22 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
                         *at,
                         branch_seed,
                     );
-                    checkpoint_output(&mut world, &dir, options.stream_console)?;
+                    reopen_outputs(&mut world, &dir, options.stream_console)?;
                     let started = Instant::now();
-                    let run = world_windowed::Run {
-                        cfg: &cfg,
-                        duration,
-                        end_on: &end_on,
-                        fork: None,
-                        checkpoint: None,
-                        require_barrier: true,
-                    };
-                    let (outcome, evidence) =
+                    let run = segment(None, None);
+                    let (outcome, scheduler) =
                         simulate_windowed(&mut world, &run, options, &mut host_control)?;
                     // The public report's seed remains the parent seed; the
                     // semantic branch seed and identity have explicit fields.
-                    let mut r = report(
-                        &mut world,
+                    let finished = Finished {
                         outcome,
+                        scheduler,
                         seed,
-                        &kills,
-                        started.elapsed().as_secs_f64(),
-                        digest,
-                        &dir,
-                        duration,
-                        &end_on,
-                    )?;
-                    r["scheduler"] = evidence;
+                        kills: &kills,
+                        host_seconds: started.elapsed().as_secs_f64(),
+                        out: &dir,
+                    };
+                    let mut r = report(&mut world, &run, digest, finished)?;
                     r["checkpoint"] = json!({"at_ns":at,"branch_seed":branch_seed,"parent_identity":parent,
                         "branch_identity":identity});
                     r["checkpoint_reseed"] = json!(reseed);
@@ -864,41 +836,26 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
             return Ok(json!({"report_version":1,"parent_identity":parent,"checkpoints":reports}));
         }
         let started = Instant::now();
-        let run = world_windowed::Run {
-            cfg: &cfg,
-            duration,
-            end_on: &end_on,
-            fork: None,
-            checkpoint: None,
-            require_barrier: true,
-        };
-        let (outcome, evidence) = simulate_windowed(&mut world, &run, options, &mut host_control)?;
-        let host_seconds = started.elapsed().as_secs_f64();
-        let mut r = report(
-            &mut world,
+        let run = segment(None, None);
+        let (outcome, scheduler) = simulate_windowed(&mut world, &run, options, &mut host_control)?;
+        let finished = Finished {
             outcome,
+            scheduler,
             seed,
-            &kills,
-            host_seconds,
-            digest,
-            &out,
-            duration,
-            &end_on,
-        )?;
-        r["scheduler"] = evidence;
-        return Ok(r);
+            kills: &kills,
+            host_seconds: started.elapsed().as_secs_f64(),
+            out: &out,
+        };
+        return report(&mut world, &run, digest, finished);
     }
 
     let started = Instant::now();
-    let boot_run = world_windowed::Run {
-        cfg: &cfg,
-        duration,
-        end_on: &end_on,
-        fork: Some(fork_at),
-        checkpoint: None,
-        require_barrier: true,
-    };
-    simulate_windowed(&mut world, &boot_run, options, &mut host_control)?;
+    simulate_windowed(
+        &mut world,
+        &segment(Some(fork_at), None),
+        options,
+        &mut host_control,
+    )?;
     let barrier_ns = world
         .machines
         .iter()
@@ -928,64 +885,21 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
             out.clone()
         };
         if seeds.len() > 1 {
-            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            if !stream {
-                for mach in &mut world.machines {
-                    mach.com1
-                        .chunks
-                        .open(&devices::log_index::index_name(&format!(
-                            "{dir}/{}.console",
-                            mach.world.name
-                        )));
-                    mach.com2
-                        .chunks
-                        .open(&devices::log_index::index_name(&format!(
-                            "{dir}/{}.mgmt",
-                            mach.world.name
-                        )));
-                }
-            }
-            if stream {
-                for mach in world.machines.iter_mut() {
-                    for (uart, ext) in [(&mut mach.com1, "console"), (&mut mach.com2, "mgmt")] {
-                        use std::io::Write;
-                        let mut file =
-                            std::fs::File::create(format!("{dir}/{}.{ext}", mach.world.name))
-                                .map_err(|e| e.to_string())?;
-                        file.write_all(&uart.out).map_err(|e| e.to_string())?;
-                        uart.output_file = Some(file);
-                        uart.chunks.open(&devices::log_index::index_name(&format!(
-                            "{dir}/{}.{ext}",
-                            mach.world.name
-                        )));
-                    }
-                }
-            }
+            reopen_outputs(&mut world, &dir, stream)?;
         }
         let started = Instant::now();
         let (kills, reseed) = release(&mut world, &cfg, &names, seed, release_skew)?;
-        let run = world_windowed::Run {
-            cfg: &cfg,
-            duration,
-            end_on: &end_on,
-            fork: None,
-            checkpoint: None,
-            require_barrier: true,
-        };
-        let (outcome, evidence) = simulate_windowed(&mut world, &run, options, &mut host_control)?;
-        let host_seconds = started.elapsed().as_secs_f64();
-        let mut r = report(
-            &mut world,
+        let run = segment(None, None);
+        let (outcome, scheduler) = simulate_windowed(&mut world, &run, options, &mut host_control)?;
+        let finished = Finished {
             outcome,
+            scheduler,
             seed,
-            &kills,
-            host_seconds,
-            digest,
-            &dir,
-            duration,
-            &end_on,
-        )?;
-        r["scheduler"] = evidence;
+            kills: &kills,
+            host_seconds: started.elapsed().as_secs_f64(),
+            out: &dir,
+        };
+        let mut r = report(&mut world, &run, digest, finished)?;
         r["boot"] = json!({
             "seed": boot_seed, "barrier_ns": barrier_ns, "fork_at_ns": fork_at, "release_skew_ns": release_skew,
             "boot_host_seconds": boot_host_seconds, "forked": i > 0,
@@ -1005,35 +919,58 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
     }))
 }
 
-fn checkpoint_output(world: &mut World, out: &str, stream: bool) -> Result<(), String> {
-    std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
-    for mach in &mut world.machines {
-        for (uart, ext) in [(&mut mach.com1, "console"), (&mut mach.com2, "mgmt")] {
-            uart.output_file = uart.chunks.reopen_stream(
-                &format!("{out}/{}.{ext}", mach.world.name),
-                &uart.out,
-                stream,
-            )?;
-        }
+/// Open a machine's console and management logs under `out`: their chunk
+/// indexes and, when streaming, the raw logs, which start with the bytes the
+/// machine has already written.
+fn open_outputs(mach: &mut Machine, out: &str, stream: bool) -> Result<(), String> {
+    for (uart, ext) in [(&mut mach.com1, "console"), (&mut mach.com2, "mgmt")] {
+        uart.output_file = uart.chunks.reopen_stream(
+            &format!("{out}/{}.{ext}", mach.world.name),
+            &uart.out,
+            stream,
+        )?;
     }
     Ok(())
 }
 
+/// Move every machine's logs to a new output directory `out`, for a branch.
+fn reopen_outputs(world: &mut World, out: &str, stream: bool) -> Result<(), String> {
+    std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
+    for mach in &mut world.machines {
+        open_outputs(mach, out, stream)?;
+    }
+    Ok(())
+}
+
+/// How one run segment ended, for its report.
+struct Finished<'a> {
+    outcome: &'static str,
+    /// The scheduler's report section.
+    scheduler: Value,
+    seed: u64,
+    kills: &'a [Value],
+    host_seconds: f64,
+    /// Where the consoles (and with `--digest` page hashes) are written.
+    out: &'a str,
+}
+
 /// Finish a run: write consoles and build the engine report.
-#[allow(clippy::too_many_arguments)]
 fn report(
     world: &mut World,
-    outcome: &str,
-    seed: u64,
-    kills: &[Value],
-    host_seconds: f64,
+    run: &world_windowed::Run,
     digest: bool,
-    out: &str,
-    duration: u64,
-    end_on: &Option<String>,
+    finished: Finished,
 ) -> Result<Value, String> {
+    let Finished {
+        outcome,
+        scheduler,
+        seed,
+        kills,
+        host_seconds,
+        out,
+    } = finished;
     let slices = world.slices;
-    world.finish(outcome, duration, end_on)?;
+    world.finish(outcome, run.duration, run.end_on)?;
     let trigger_evidence = world.control.triggers.evidence()?;
     let fault_error = world.faults.error.clone().or(world.control.error.clone());
     let mut network_hash = Sha256::new();
@@ -1216,6 +1153,7 @@ fn report(
     if let Some(evidence) = trigger_evidence {
         result["triggers"] = evidence;
     }
+    result["scheduler"] = scheduler;
     Ok(result)
 }
 
