@@ -854,7 +854,15 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
                 };
                 let (outcome, _) = simulate_windowed(&mut world, &run, options, &mut host_control)?;
                 if outcome != "checkpoint" {
-                    return Err(format!("checkpoint at {at} ns not reached: {outcome}"));
+                    let ended = world
+                        .machines
+                        .iter()
+                        .map(|m| m.world.time)
+                        .max()
+                        .unwrap_or(0);
+                    return Err(format!(
+                        "checkpoint at {at} ns not reached: the world ended ({outcome}) at {ended} ns; choose an earlier checkpoint"
+                    ));
                 }
                 held.push((at, WorldSnapshot::take_checkpoint(&mut world)?));
             }
