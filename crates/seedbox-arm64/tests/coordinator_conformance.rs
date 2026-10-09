@@ -40,6 +40,8 @@ impl Fixture {
         let script = format!(
             r#"#!/usr/bin/env python3
 import os, struct, sys
+if sys.argv[1:] == ['--probe']:
+    sys.exit(0)
 with open({:?}, 'w') as pid:
     pid.write(str(os.getpid()))
 with open({:?}, 'wb', buffering=0) as requests:
@@ -66,6 +68,27 @@ with open({:?}, 'wb', buffering=0) as requests:
         let executable = self.path("worker");
         fs::write(&executable, script).unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        // A child forked by a concurrent test may still hold our write descriptor
+        // until it execs, so exec fails with ETXTBSY. Nothing reopens the script
+        // for writing, so once one exec succeeds every later spawn will too.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match std::process::Command::new(&executable)
+                .arg("--probe")
+                .status()
+            {
+                Ok(status) => {
+                    assert!(status.success(), "worker probe: {status}");
+                    break;
+                }
+                Err(error)
+                    if error.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("worker probe {}: {error}", executable.display()),
+            }
+        }
         executable
     }
     fn wait_for_requests(&self) -> u64 {

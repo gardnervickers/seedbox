@@ -134,7 +134,11 @@ pub fn linux_runtime(
         let all = matches!(selection, AssetSelection::All);
         let kernel = crate::cli::backends::guest_kernel(overrides.kernel, cancellation, all)?;
         let runtime = if all {
-            Some(crate::cli::backends::container_runtime(None, cancellation)?)
+            Some(crate::cli::backends::container_runtime(
+                None,
+                overrides.init.is_some(),
+                cancellation,
+            )?)
         } else {
             None
         };

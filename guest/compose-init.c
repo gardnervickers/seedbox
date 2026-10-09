@@ -608,9 +608,10 @@ int main(void) {
     recipe_fd = open("/seedbox/launch.bin", O_RDONLY|O_CLOEXEC);
     if (recipe_fd < 0) die("launch recipe");
     char magic[10]; read_exact(magic, sizeof(magic));
-    if (memcmp(magic, "SBXLAUNCH3", 10)) { errno = EINVAL; die("launch version"); }
+    if (memcmp(magic, "SBXLAUNCH4", 10)) { errno = EINVAL; die("launch version"); }
     char *ip = text(), *hosts = text(), *hostname = text(); user = text(); working_dir = text();
     uint32_t max_map_count = count();
+    struct timespec wall_clock = {.tv_sec = count(), .tv_nsec = 0};
     arguments = list(); environment = list(); char **volumes = list(); char **disk_volumes = list();
     if (!arguments[0] || !*arguments[0]) { errno = EINVAL; die("empty executable"); }
     busybox((char *const[]){"busybox", "ip", "link", "set", "lo", "up", NULL});
@@ -620,7 +621,13 @@ int main(void) {
     directories("/sys", 0755);
     if (mount("sysfs", "/sys", "sysfs", 0, NULL)) die("mount bootstrap sys");
     management = open_management("/sys/class/virtio-ports", "/dev");
-    if (chdir("/rootfs") || chroot(".") || chdir("/")) die("enter image root");
+    /* Linux rejects CLONE_NEWUSER from a chroot. Cover the mount namespace's
+     * root with the image first, including its already-mounted named volumes;
+     * then make the process root refer to that same mount root. Bootstrap
+     * device/management handles are already retained above. */
+    if (mount("/rootfs", "/rootfs", NULL, MS_BIND|MS_REC, NULL)
+        || chdir("/rootfs") || mount(".", "/", NULL, MS_MOVE, NULL)
+        || chroot(".") || chdir("/")) die("enter image mount root");
     directories("/dev", 0755); directories("/proc", 0755); directories("/sys", 0755); directories("/tmp", 01777);
     if (mount("proc", "/proc", "proc", 0, NULL) || mount("sysfs", "/sys", "sysfs", 0, NULL)) die("mount guest filesystems");
     application_devices();
@@ -641,6 +648,7 @@ int main(void) {
     relay_socket("/proc/cmdline", "/run/seedbox/control.sock");
     /* Everything before this point is fixed by the boot seed; the application
      * starts after the world is released under the run seed. */
+    if (clock_settime(CLOCK_REALTIME, &wall_clock)) die("set recorded wall clock");
     if (seedbox_launch_barrier("/proc/cmdline", "/dev/urandom")) die("launch barrier");
     watch_children();
     pid_t child = start();

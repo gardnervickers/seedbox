@@ -467,7 +467,7 @@ fn guest_cpuid(kvm: &Kvm) -> Result<CpuId, String> {
 
 impl Machine {
     pub fn new(kvm: &Kvm, name: &str, spec: &BootSpec) -> Result<Self, String> {
-        // The PV clock needs no counter, so no qualified host CPU; the
+        // The PV clock needs no counter, so no host PMU; the
         // profile is then never consulted.
         let profile = if spec.pv_clock {
             &crate::profile::ZEN
@@ -2657,10 +2657,7 @@ mod io_boundary_tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(feature = "kvm-tests"),
-        ignore = "requires KVM on the qualified Linux host"
-    )]
+    #[cfg_attr(not(feature = "kvm-tests"), ignore = "requires KVM on a Linux host")]
     fn page_capture_has_documented_format_and_preserves_ram_witness_state() {
         let kvm = Kvm::new().unwrap();
         let mut m = probe(&kvm, 0x530, true, 0);

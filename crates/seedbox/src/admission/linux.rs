@@ -131,9 +131,6 @@ struct PerfAttr {
     flags: u64,
     rest: [u64; 10],
 }
-fn disabled_perf() -> Result<File> {
-    open_disabled_perf(disabled_counter_spec(crate::counter::CounterProfile::Zen))
-}
 fn open_disabled_perf(spec: DisabledCounterSpec) -> Result<File> {
     let attr = PerfAttr {
         kind: spec.kind,
@@ -156,7 +153,7 @@ fn open_disabled_perf(spec: DisabledCounterSpec) -> Result<File> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-fn collect(cpu: u32) -> Result<CoreObservation> {
+fn collect(cpu: u32, counter: crate::counter::CounterProfile) -> Result<CoreObservation> {
     if unsafe { libc::sched_getcpu() } != cpu as i32 {
         return Err(Error::Execution("preflight CPU affinity changed".into()));
     }
@@ -184,28 +181,33 @@ fn collect(cpu: u32) -> Result<CoreObservation> {
             .parse()
             .map_err(|_| Error::Setup(format!("CPU {cpu} invalid {name}")))
     };
-    let msr_path = format!("/dev/cpu/{cpu}/msr");
-    let msr = fs::OpenOptions::new()
+    let mut original = [0; 8];
+    if let Some(workaround) = counter.workaround() {
+        let msr_path = format!("/dev/cpu/{cpu}/msr");
+        let msr = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&msr_path)
+            .map_err(|e| {
+                Error::Setup(format!(
+                    "{msr_path}: {e}; run as root with the msr module loaded"
+                ))
+            })?;
+        if msr
+            .read_at(&mut original, workaround.register)
+            .map_err(|e| Error::Setup(format!("{msr_path}: {e}; restore admitted MSR access")))?
+            != 8
+        {
+            return Err(Error::Setup(format!(
+                "{msr_path}: short workaround MSR read"
+            )));
+        }
+    }
+    let kvm = fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(&msr_path)
-        .map_err(|e| {
-            Error::Setup(format!(
-                "{msr_path}: {e}; run as root with the msr module loaded"
-            ))
-        })?;
-    let mut original = [0; 8];
-    if msr
-        .read_at(&mut original, 0xc0011020)
-        .map_err(|e| Error::Setup(format!("{msr_path}: {e}; restore admitted MSR access")))?
-        != 8
-    {
-        return Err(Error::Setup(format!(
-            "{msr_path}: short workaround MSR read"
-        )));
-    }
-    let kvm =
-        File::open("/dev/kvm").map_err(|e| Error::Setup(format!("/dev/kvm admission: {e}")))?;
+        .open("/dev/kvm")
+        .map_err(|e| Error::Setup(format!("/dev/kvm admission: {e}")))?;
     // KVM UAPI header plus at most 1024 complete 40-byte entries, aligned for ioctl.
     let mut words = vec![0u64; 1 + 1024 * 5];
     words[0] = 1024;
@@ -260,50 +262,24 @@ fn collect(cpu: u32) -> Result<CoreObservation> {
     })
 }
 
-pub(super) fn observe(cpu: u32) -> Result<CoreObservation> {
+pub(super) fn observe(
+    cpu: u32,
+    counter: crate::counter::CounterProfile,
+) -> Result<CoreObservation> {
     let affinity = Affinity::pin(cpu)?;
     scoped_probe(
         affinity,
         || {
-            // The shared gate preserves static evidence and closes any disabled
+            // The shared check preserves static evidence and closes any disabled
             // event descriptor before affinity restoration.
-            Ok(probe_disabled_perf(collect(cpu)?, disabled_perf))
-        },
-        Affinity::restore,
-    )
-}
-
-pub(super) fn check_unqualified(cpu: u32, counter: crate::counter::CounterProfile) -> Result<()> {
-    let affinity = Affinity::pin(cpu)?;
-    scoped_probe(
-        affinity,
-        || {
-            if unsafe { libc::sched_getcpu() } != cpu as i32
-                || crate::counter::CounterProfile::host()? != counter
-            {
+            if crate::counter::CounterProfile::host()? != counter {
                 return Err(Error::Setup(format!(
                     "CPU {cpu}: branch counter differs from selected profile"
                 )));
             }
-            let kvm = fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open("/dev/kvm")
-                .map_err(|e| {
-                    Error::Setup(format!(
-                        "/dev/kvm experimental execution: {e}; enable KVM and run as root"
-                    ))
-                })?;
-            if query(&kvm, 0xae00, 0)? != 12
-                || query(&kvm, 0xae03, 136)? < 1
-                || query(&kvm, 0xae03, 23)? < 1
-                || query(&kvm, 0xae03, 74)? & 3 != 3
-            {
-                return Err(Error::Setup(format!(
-                    "CPU {cpu}: required KVM capabilities unavailable for experimental execution"
-                )));
-            }
-            probe_selected_event(counter, open_disabled_perf)
+            Ok(probe_disabled_perf(collect(cpu, counter)?, || {
+                probe_selected_event(counter, open_disabled_perf)
+            }))
         },
         Affinity::restore,
     )

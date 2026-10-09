@@ -1,7 +1,7 @@
 //! Deterministic initramfs assembly around an imported image filesystem.
 //!
 //! Image file metadata and hard links are preserved; only Seedbox-owned bootstrap
-//! files have normalized timestamps. The image runs in a chroot inside the guest.
+//! files have normalized timestamps. The image runs at the guest mount namespace root.
 
 use crate::{image::Launch, Error, Result};
 use std::{
@@ -87,6 +87,13 @@ pub fn minimum_memory_mb(archive_bytes: u64) -> Result<u32> {
         .map_err(|_| Error::Execution("guest memory estimate exceeds supported range".into()))
 }
 
+/// The boot recipe format this build writes; the guest supervisor must accept it.
+pub const LAUNCH_MAGIC: &[u8; 10] = b"SBXLAUNCH4";
+
+/// Linux rejects a CLOCK_REALTIME earlier than the guest's uptime, so an epoch
+/// below this would stop every guest at the launch barrier.
+pub const MIN_WALL_CLOCK_EPOCH: u32 = 86400;
+
 /// This binary recipe is consumed by the small static Linux guest init. Length
 /// prefixes avoid shell evaluation of command, environment or config contents.
 pub fn launch_recipe(
@@ -95,13 +102,20 @@ pub fn launch_recipe(
     hosts: &str,
     hostname: &str,
     configs: &BTreeMap<String, Vec<u8>>,
+    wall_clock_epoch: u32,
 ) -> Result<Vec<u8>> {
-    let mut bytes = b"SBXLAUNCH3".to_vec();
+    if wall_clock_epoch < MIN_WALL_CLOCK_EPOCH {
+        return Err(Error::Setup(format!(
+            "wall-clock epoch {wall_clock_epoch} is below {MIN_WALL_CLOCK_EPOCH}; the guest kernel cannot set a time earlier than its uptime"
+        )));
+    }
+    let mut bytes = LAUNCH_MAGIC.to_vec();
     for value in [ip, hosts, hostname, &launch.user, &launch.working_dir] {
         field(&mut bytes, value.as_bytes())?;
     }
     // A guest-wide default per service VM, retained with the launch inputs.
     bytes.extend_from_slice(&262144_u32.to_le_bytes()); // vm.max_map_count
+    bytes.extend_from_slice(&wall_clock_epoch.to_le_bytes());
     list(&mut bytes, &launch.argv)?;
     list(
         &mut bytes,

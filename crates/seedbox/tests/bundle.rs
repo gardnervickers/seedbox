@@ -98,6 +98,7 @@ impl Fixture {
             semantic_parameters: BTreeMap::from([("kernel_abi".into(), "v1".into())]),
         };
         let inputs = PreparedInputs {
+            wall_clock_epoch: None,
             kernel,
             profile: profile.clone(),
             placement: BTreeMap::from([("workload".into(), "workload".into())]),
