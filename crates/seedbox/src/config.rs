@@ -628,7 +628,7 @@ pub fn parse_for_architecture(
         timer_jitter_ns: DEFAULT_TIMER_JITTER_NS,
         stop_tolerance_ns: 0,
         // A very short simulation keeps most of its time after the release.
-        start_stagger_ns: DEFAULT_START_STAGGER_NS.min(limits.simulated_time_ns / 2),
+        start_stagger_ns: 0,
     };
     if let Some(raw) = ext.get("schedule") {
         let options = fields(
