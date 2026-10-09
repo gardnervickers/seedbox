@@ -1,5 +1,6 @@
 /* Management ABI: action SP nonzero decimal request ID LF, where `clock_step`
- * adds SP and a signed decimal nanosecond step. Uncorrelated legacy
+ * adds SP and a signed decimal nanosecond step and `clock_rate` adds SP and a
+ * signed decimal rate in parts per billion. Uncorrelated legacy
  * commands remain available for existing raw-world fixtures, with ID zero.
  * A success-port OUTL with ID zero announces supervisor readiness once the
  * management terminal and initial application are ready for commands. */
@@ -26,7 +27,8 @@ static int control_decimal(const char *p, uint64_t limit, uint64_t *out) {
     return 0;
 }
 /* `clock_step ID NS` also carries a signed decimal nanosecond step for the
- * guest's CLOCK_REALTIME; other commands carry none. */
+ * guest's CLOCK_REALTIME, and `clock_rate ID PPB` the system clock's rate
+ * error; other commands carry no argument. */
 static int control_parse(char *command, char **action, uint32_t *id, int64_t *step) {
     *id = 0; *step = 0; *action = command;
     char *space = strchr(command, ' '), *argument = NULL;
@@ -38,7 +40,7 @@ static int control_parse(char *command, char **action, uint32_t *id, int64_t *st
         if (control_decimal(space, UINT32_MAX, &value) || !value) return -1;
         *id = (uint32_t)value;
     }
-    if (!strcmp(*action, "clock_step")) {
+    if (!strcmp(*action, "clock_step") || !strcmp(*action, "clock_rate")) {
         if (!*id || !argument) return -1;
         int negative = *argument == '-';
         uint64_t magnitude;

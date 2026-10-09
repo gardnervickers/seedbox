@@ -66,6 +66,10 @@ It changes only the directed pairs, with the highest live fault ID taking preced
 that machine's wall clock by a fixed or seeded nanosecond offset and returns a
 `ClockSkew` (`handle`, `offset_ns`) accepted by `heal`; monotonic time is
 unchanged. See [clock skew](PROTOCOL.md#clock-skew).
+`clock_drift(target, ppb=...)` or `clock_drift(target, max_ppb=...)` runs that
+machine's clock fast or slow by a fixed or seeded rate in parts per billion and
+returns a `ClockDrift` (`handle`, `rate_ppb`) accepted by `heal`. See
+[clock drift](PROTOCOL.md#clock-drift).
 A partition dominates a shape, and in-flight decisions remain fixed. `Controller`
 is also exported as an alias for `World`. `now_ns()` reads simulated time; `inspect()` returns
 topology, machine state, active handles and packet counters. Strings name services;

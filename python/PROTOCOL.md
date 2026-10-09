@@ -100,6 +100,7 @@ Common fields are `version: 1`, `id`, and `op`. Targets are typed objects:
 | `connections` | `from`, `to`: distinct typed targets; `after`: optional unsigned incarnation cursor (default 0) | `connections`: up to 32 directional records; `next_after`: last returned incarnation (or input cursor) |
 | `drop_connection` | `connection`: one exact discovery record | `{"handle":"opaque value"}` after arming selected loss |
 | `clock_skew` | `target`: a typed target; exactly one of `offset_ns` (nonzero signed integer) or `max_offset_ns` (positive integer), each at most one year | `{"handle":"opaque value","offset_ns":N}` after the guest steps its wall clock |
+| `clock_drift` | `target`: a typed target; exactly one of `rate_ppb` (nonzero signed integer) or `max_rate_ppb` (positive integer), each at most 100000000 (10%) | `{"handle":"opaque value","rate_ppb":N}` after the guest sets its clock rate |
 | `heal` | `handle`: a previously returned handle | `{}` for a plain link or partition; `queue_counts` for bandwidth; `network_fault_counts` for impairments; `{"matched": N, "dropped": N}` for a connection handle |
 | `inspect` | None | `services`, `machines`, `active_handles`, `network_counters`; `triggers` only after an arm |
 | `arm_trigger` | `source`: typed target; `marker`: 1..=256 byte integers; `match_timeout_ns`: positive u64; `fault`: typed trigger fault below | `{"trigger_id": N}`; also `handle` for a partition |
@@ -193,6 +194,22 @@ admission without contacting the guest. Targets must be running: a paused or
 down machine is an `invalid_state` admission error, and healing a skew that is
 not yet acknowledged is too. Python: `world.clock_skew(target, offset=None,
 max_offset=None)` returns a `ClockSkew` with `handle` and `offset_ns`.
+
+### Clock drift
+
+`clock_drift` makes one machine's system clock run `rate_ppb` parts per billion
+fast (slow if negative), like an oscillator error. The supervisor sets the rate
+with one absolute `adjtimex(ADJ_TICK|ADJ_FREQUENCY)`: whole 100 ppm tick steps
+plus a frequency remainder. `CLOCK_REALTIME`, `CLOCK_MONOTONIC` and
+`CLOCK_BOOTTIME` drift together, so timers and sleeps on the machine drift too;
+`CLOCK_MONOTONIC_RAW`, the TSC and simulated time keep the nominal rate. With
+`max_rate_ppb` the rate is drawn uniformly from `[-max, max]` on the same
+`clock/<machine>` stream as a seeded skew, at the admission boundary and only
+then; a fixed `rate_ppb` draws nothing. A machine has one drift at a time: a
+second one before the first is healed is `invalid_state`. `heal` restores the
+nominal rate and waits for the guest, and a crash ends the drift like a skew.
+Python: `world.clock_drift(target, ppb=None, max_ppb=None)` returns a
+`ClockDrift` with `handle` and `rate_ppb`.
 
 ### Dynamic network impairments
 

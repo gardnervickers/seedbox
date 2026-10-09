@@ -888,6 +888,77 @@ fn clock_skew_transcripts_bind_handle_offset_bounds_and_guest_effect_times() {
 }
 
 #[test]
+fn clock_drift_transcripts_bind_handle_rate_bounds_and_guest_effect_times() {
+    fixture(|base| {
+        let mut prepared = base.prepared.clone();
+        let hash = prepared.kernel.clone();
+        prepared
+            .placement
+            .insert("scenario".into(), "scenario-machine".into());
+        prepared
+            .guests
+            .insert("scenario-machine".into(), hash.clone());
+        let check = Check {
+            service: "scenario".into(),
+            exit_code: 0,
+        };
+        let control = seedbox::config::Control {
+            service: "scenario".into(),
+        };
+        let request = ExecutionRequest {
+            prepared: &prepared,
+            check: &check,
+            control: Some(&control),
+            ..*base
+        };
+        let latency = vmm::world(&request).unwrap()["control"]["latency_ns"]
+            .as_u64()
+            .unwrap();
+        let t = 10_000_000;
+        let a = t + latency;
+        let e = a + 1_000;
+        let t2 = e + latency + 1;
+        let a2 = t2 + latency;
+        let e2 = a2 + 2_000;
+        let mut raw = report();
+        raw["machines"].as_array_mut().unwrap().push(json!({"name":"scenario-machine","guest_exit_code":0,"guest_init_error":null,"infrastructure_error":false,"state_digest":hash}));
+        raw["control_latency_ns"] = json!(latency);
+        let call = json!({"version":1,"id":1,"op":"clock_drift","target":{"service":"server"},"max_rate_ppb":1_000_000});
+        let heal = json!({"version":1,"id":2,"op":"heal","handle":"p1"});
+        let plan = json!({"id":1,"at_ns":a,"deadline_ns":a+5_000_000_000u64,"action":"clock_drift","handle":"p1","machine":"server-machine","max_rate_ppb":1_000_000});
+        let heal_plan = json!({"id":2,"at_ns":a2,"deadline_ns":a2+5_000_000_000u64,"action":"heal","handle":"p1"});
+        raw["control_history"] = json!([
+            {"relay_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":{"handle":"p1","rate_ppb":-4321},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":e,"replied_at_ns":e+latency},"delivered_at_ns":e+latency},
+            {"relay_id":2,"request":heal,"response":{"version":1,"id":2,"ok":true,"result":{},"requested_at_ns":t2,"admitted_at_ns":a2,"effect_at_ns":e2,"replied_at_ns":e2+latency},"delivered_at_ns":e2+latency}
+        ]);
+        raw["faults"] = json!([
+            {"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":e,"action":"clock_drift","machine":"server-machine","status":"applied","detail":"handle=p1; guest clock rate set to -4321 ppb","rate_ppb":-4321},
+            {"id":2,"request":heal_plan,"requested_at_ns":a2,"applied_at_ns":e2,"action":"heal","machine":null,"status":"applied","detail":"handle=p1; guest clock rate set to 0 ppb","rate_ppb":0}
+        ]);
+        let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
+        assert_eq!(result.faults[0].action, "clock_drift");
+        assert_eq!(result.faults[0].service, "server");
+        assert_eq!(result.faults[0].applied_at_ns, e);
+        assert_eq!(result.faults[1].applied_at_ns, e2);
+        for (key, value) in [
+            ("max_rate_ppb", json!(0)),
+            ("max_rate_ppb", json!(100_000_001)),
+            ("rate_ppb", json!(5)),
+            ("target", json!({"service":"scenario"})),
+        ] {
+            let mut bad = raw.clone();
+            bad["control_history"][0]["request"][key] = value;
+            assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        }
+        for handle in [json!(""), json!(null), json!("p2")] {
+            let mut bad = raw.clone();
+            bad["control_history"][0]["response"]["result"]["handle"] = handle;
+            assert!(vmm::report(&serde_json::to_vec(&bad).unwrap(), &request).is_err());
+        }
+    });
+}
+
+#[test]
 fn connection_selector_transcripts_bind_exact_machine_tuple_incarnation_and_time() {
     fixture(|base| {
         let mut prepared = base.prepared.clone();

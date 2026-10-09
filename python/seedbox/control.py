@@ -7,6 +7,7 @@ from typing import Optional
 
 MAX_FRAME = 16_384
 MAX_CLOCK_OFFSET_NS = 365 * 86_400 * 1_000_000_000
+MAX_CLOCK_RATE_PPB = 100_000_000
 DEFAULT_SOCKET = "/run/seedbox/control.sock"
 
 
@@ -65,6 +66,13 @@ class ConnectionDrop:
 class ClockSkew:
     handle: str
     offset_ns: int
+    effect: Effect
+
+
+@dataclass(frozen=True)
+class ClockDrift:
+    handle: str
+    rate_ppb: int
     effect: Effect
 
 
@@ -305,9 +313,33 @@ class World:
             raise ProtocolError("clock_skew response lacks an opaque handle or offset")
         return ClockSkew(result["handle"], result["offset_ns"], effect)
 
+    def clock_drift(self, target, *, ppb=None, max_ppb=None):
+        """Run the target machine's clock fast (or slow if negative) by a rate error.
+
+        Pass exactly one of a fixed nonzero signed ``ppb`` or a positive
+        ``max_ppb``, in parts per billion, each at most 10%. With ``max_ppb``
+        the simulator draws the rate uniformly from [-max_ppb, max_ppb] on the
+        machine's seeded clock stream. Realtime and monotonic time drift
+        together; CLOCK_MONOTONIC_RAW keeps the simulated rate. A machine has
+        one drift at a time. Returns after the guest has set its rate;
+        heal() restores the nominal rate.
+        """
+        if (ppb is None) == (max_ppb is None):
+            raise ValueError("clock_drift needs exactly one of ppb or max_ppb")
+        value = ppb if ppb is not None else max_ppb
+        if type(value) is not int or value == 0 or abs(value) > MAX_CLOCK_RATE_PPB or (max_ppb is not None and value < 0):
+            raise ValueError(f"ppb must be a nonzero integer and max_ppb positive, each at most {MAX_CLOCK_RATE_PPB}")
+        arguments = {"target": _target(target)}
+        arguments["rate_ppb" if ppb is not None else "max_rate_ppb"] = value
+        result, effect = self._call("clock_drift", **arguments)
+        if not isinstance(result.get("handle"), str) or not result["handle"] or type(result.get("rate_ppb")) is not int:
+            self.close()
+            raise ProtocolError("clock_drift response lacks an opaque handle or rate")
+        return ClockDrift(result["handle"], result["rate_ppb"], effect)
+
     def heal(self, partition):
         """Release this handle only; prior shape layers or overlapping cuts remain."""
-        if not isinstance(partition, (Partition, Shape, ConnectionDrop, ClockSkew)):
+        if not isinstance(partition, (Partition, Shape, ConnectionDrop, ClockSkew, ClockDrift)):
             raise TypeError("heal expects a fault handle returned by this API")
         result, effect = self._call("heal", handle=partition.handle)
         return result if isinstance(partition, ConnectionDrop) or "queue_counts" in result or "network_fault_counts" in result else effect

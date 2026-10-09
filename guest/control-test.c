@@ -16,8 +16,15 @@ int main(void) {
         assert(!control_parse(clocks[i],&action,&id,&step));
         assert(!strcmp(action, "clock_step") && id == 7 + i && step == steps[i]);
     }
+    char rates[][64] = {"clock_rate 3 -100000000", "clock_rate 4 0", "clock_rate 5 25"};
+    int64_t ppbs[] = {-100000000, 0, 25};
+    for (unsigned i=0;i<3;i++) {
+        assert(!control_parse(rates[i],&action,&id,&step));
+        assert(!strcmp(action, "clock_rate") && id == 3 + i && step == ppbs[i]);
+    }
     char bad[][64] = {"stop 0","stop 01","start -1","start 4294967296","stop 1 extra","stop  1","go 1","start ","start 184467440737095516160",
                       "clock_step","clock_step 1","clock_step 1 ","clock_step 1 -0","clock_step 1 +5","clock_step 1 05","clock_step 1 1x",
-                      "clock_step 1 9223372036854775808","clock_step 1 -9223372036854775809","clock_step 0 5","clock_step 1 5 6","stop 1 5"};
+                      "clock_step 1 9223372036854775808","clock_step 1 -9223372036854775809","clock_step 0 5","clock_step 1 5 6","stop 1 5",
+                      "clock_rate","clock_rate 1","clock_rate 1 -0","clock_rate 1 +5","clock_rate 0 5","clock_rate 1 5 6"};
     for (unsigned i=0;i<sizeof(bad)/sizeof(*bad);i++) assert(control_parse(bad[i],&action,&id,&step));
 }
