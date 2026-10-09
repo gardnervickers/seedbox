@@ -28,6 +28,10 @@ pub struct Simulation {
     pub limits: Limits,
     pub check: Check,
     pub seed: Option<u64>,
+    /// Guest CLOCK_REALTIME at launch, in Unix seconds; None derives it from
+    /// the prepared images' build times.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock_epoch: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -428,7 +432,15 @@ pub fn parse_for_architecture(
         get(top, "x-seedbox"),
         "$.x-seedbox",
         &[
-            "version", "seed", "limits", "network", "schedule", "faults", "control", "check",
+            "version",
+            "seed",
+            "wall_clock_epoch",
+            "limits",
+            "network",
+            "schedule",
+            "faults",
+            "control",
+            "check",
         ],
     )?;
     if get(ext, "version").as_u64() != Some(1) {
@@ -605,6 +617,24 @@ pub fn parse_for_architecture(
             })
         })
         .transpose()?;
+    let wall_clock_epoch = ext
+        .get("wall_clock_epoch")
+        .map(|v| {
+            v.as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|n| *n >= crate::guest::MIN_WALL_CLOCK_EPOCH)
+                .ok_or_else(|| {
+                    validation(
+                        "$.x-seedbox.wall_clock_epoch",
+                        &format!(
+                            "expected Unix seconds in [{}, {}]",
+                            crate::guest::MIN_WALL_CLOCK_EPOCH,
+                            u32::MAX
+                        ),
+                    )
+                })
+        })
+        .transpose()?;
     Ok(Simulation {
         name,
         source: source.to_owned(),
@@ -619,6 +649,7 @@ pub fn parse_for_architecture(
             exit_code,
         },
         seed,
+        wall_clock_epoch,
     })
 }
 

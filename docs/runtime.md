@@ -1091,11 +1091,18 @@ witness bytes or console stopping points. This changes the engine.
 Preparation records one wall_clock_epoch after image builds/imports finish.
 The SBXLAUNCH4 recipe carries it to the supervisor, which sets CLOCK_REALTIME
 before the launch barrier on x86 and ARM64. Replay uses the retained value.
-New preparations may have different wall-clock epochs and witnesses. Use
-`--wall-clock-epoch SECS` on prepare, run, or explore to give independent runs
-the same guest Unix time. Values below 86400 (the minimum supported Unix epoch) are clamped to
-86400. This changes guest results, has no environment override,
-and does not alter image-layer timestamps. Replay always uses the retained epoch.
+`x-seedbox.wall_clock_epoch` in the Compose file sets it: an integer number of
+Unix seconds in [86400, 4294967295], because Linux cannot set a wall clock
+earlier than the guest's uptime; any other value is a
+`$.x-seedbox.wall_clock_epoch` validation error. Otherwise it is the latest
+RFC 3339 `created` time in any prepared image's config or history, and at least
+86400. Builders stamp those times after each step, so a certificate minted
+during a build is already valid. Preparation never samples the host clock, so
+independent fresh runs of the same images start at the same guest Unix time and
+can be compared directly; rebuilt images can change the epoch and witnesses.
+The epoch is a simulation parameter, so it has no CLI flag or environment
+override, and it does not alter image-layer timestamps. Replay always uses the
+retained epoch.
 Both application kernels support unprivileged user namespaces. The supervisor
 recursively mounts the image at the namespace root before entering it, preserving
 named volumes and allowing CLONE_NEWUSER.

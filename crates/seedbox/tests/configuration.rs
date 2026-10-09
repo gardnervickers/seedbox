@@ -19,6 +19,9 @@ fn validates_and_normalizes_the_authoring_subset() {
     assert_eq!(sim.network.jitter_ns, 200_000);
     assert_eq!(sim.services["workload"].platform, "linux/amd64");
     assert_eq!(sim.services["workload"].entrypoint, None);
+    assert_eq!(sim.wall_clock_epoch, None);
+    let pinned = parse(&BASE.replace("seed: 1009", "seed: 1009\n  wall_clock_epoch: 1791518733"));
+    assert_eq!(pinned.unwrap().wall_clock_epoch, Some(1_791_518_733));
 }
 
 #[test]
@@ -102,6 +105,18 @@ fn unknown_and_unsupported_fields_are_errors_at_their_paths() {
         ),
         (BASE.replace("seed: 1009", "seed: -1"), "$.x-seedbox.seed"),
         (BASE.replace("seed: 1009", "seed: true"), "$.x-seedbox.seed"),
+        (
+            BASE.replace("seed: 1009", "seed: 1009\n  wall_clock_epoch: 86399"),
+            "$.x-seedbox.wall_clock_epoch",
+        ),
+        (
+            BASE.replace("seed: 1009", "seed: 1009\n  wall_clock_epoch: 4294967296"),
+            "$.x-seedbox.wall_clock_epoch",
+        ),
+        (
+            BASE.replace("seed: 1009", "seed: 1009\n  wall_clock_epoch: 2026-10-09"),
+            "$.x-seedbox.wall_clock_epoch",
+        ),
         (
             BASE.replace("latency: 1ms", "latency: 200us"),
             "$.x-seedbox.network.jitter",
