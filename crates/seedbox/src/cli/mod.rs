@@ -142,7 +142,7 @@ enum Command {
         /// Number of consecutive seeds to execute.
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..))]
         count: u64,
-        /// Maximum active attempts; Mac supports only 1. Omit --cpu for Linux parallel execution.
+        /// Maximum active attempts. Omit --cpu for Linux parallel execution.
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=32))]
         workers: u32,
         /// Print exactly one exploration report as JSON.
@@ -858,13 +858,6 @@ fn run(cli: Cli) -> Result<u8> {
             exploration::bounds(&simulation, &options)?;
             if workers > 1 && cpu.cpu.is_some() {
                 return Err(Error::Setup("--workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU".into()));
-            }
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-            if workers > 1 {
-                return Err(Error::Setup(
-                    "--workers: Mac exploration supports one worker; use --workers 1 or omit it"
-                        .into(),
-                ));
             }
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             cpu.admit(Ok(CounterProfile::Zen), Timebase::Pv)?;
