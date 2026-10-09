@@ -150,6 +150,8 @@ The CLI lives in `crates/seedbox/src/cli/`:
 
 - `mod.rs`: argument definitions, dispatch and output.
 - `defaults.rs`: how each runtime input is found when no flag is given.
+- `backends.rs`: platform backend selection and guest-asset lookup.
+- `diagnostics.rs`: excerpts of local execution diagnostics for text output.
 - `signals.rs`: cancellation.
 
 `src/main.rs` dispatches the private retained worker before calling `cli::main()`.
@@ -242,9 +244,9 @@ deliberately change one.
   run bash tools/build-assets.sh`.
 - Never let a bare `io::Error` from a user-supplied path or a spawned program
   reach the user. Check the path first (`existing`), or add context as
-  `oci::spawn_error` does.
-- Exit codes are a fixed contract (`EXIT_CODES`, README.md, docs/runtime.md,
-  and the acceptance scripts): 0 PASS/MATCH, 1 FAIL/MISMATCH/DIFFERENT, 2
+  `WorkerLaunch::spawn` (`worker_process.rs`) and `host::msr_error` do.
+- Exit codes are a fixed contract (`EXIT_CODES`, docs/cli-reference.md,
+  docs/runtime.md, and the acceptance scripts): 0 PASS/MATCH, 1 FAIL/MISMATCH/DIFFERENT, 2
   ERROR/NOT_COMPARABLE/usage/setup, 3 INCOMPLETE, 124 TIMEOUT. Don't change
   what a code means. A new code must be added to all four places.
 

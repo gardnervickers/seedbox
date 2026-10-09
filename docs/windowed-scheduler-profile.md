@@ -84,8 +84,8 @@ CLI/ARM work. All performance settings remain excluded from semantic results.
 
 - `cargo fmt -p seedbox --check`,
   `cargo clippy -p seedbox --all-targets --locked -- -D warnings`, and
-  `cargo test --workspace --locked` pass on the Mac. The portable gate,
-  `CARGO_TARGET_DIR=$PWD/target bash harness/mac-check.sh`, also passes,
+  `cargo test --workspace --locked` pass on the Mac. The portable gate of the
+  time (since replaced by `bash harness/check.sh portable`) also passes,
   including 161 harness Python tests and 17 API Python tests.
 - Linux `cargo build-vmm`, `cargo test-vmm` and
   `cargo test-vmm --features kvm-tests` pass. The KVM suite reports 90 passed,
