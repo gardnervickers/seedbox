@@ -75,7 +75,7 @@ impl MacExecutor {
     ) -> Result<Self> {
         if !(64..=3072).contains(&memory_mb) {
             return Err(Error::Setup(
-                "--memory-mb: ARM guests require 64..3072 MiB".into(),
+                "x-seedbox.machine.memory_mb: ARM guests require 64..3072 MiB".into(),
             ));
         }
         validate_kernel(kernel, memory_mb)?;
@@ -162,7 +162,7 @@ fn validate_kernel(kernel: &Path, memory_mb: u32) -> Result<()> {
     )
     .map_err(|e| {
         Error::Setup(format!(
-            "--kernel {}: {e}; provide an ARM64 Image that fits --memory-mb",
+            "--kernel {}: {e}; provide an ARM64 Image that fits x-seedbox.machine.memory_mb",
             kernel.display()
         ))
     })?;
