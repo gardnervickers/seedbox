@@ -5,9 +5,10 @@ use crate::{
     orchestration::{self, RunRecord},
     retained,
     store::ContentDigest,
-    vmm::{page_hash_log, MachineReport, StateDigestParts, VmmReport},
+    vmm::{page_hash_log, ReportMachines, StateDigestParts},
     Error, Result,
 };
+use seedbox_engine_core::report::{MachineOutcome, MachineState, PendingIo};
 use seedbox_engine_core::trace::{InvalidTraceRecord, TraceRecord};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -106,30 +107,60 @@ pub struct DiffReport {
 struct Machine {
     witness: Option<ContentDigest>,
     state_digest: Option<ContentDigest>,
-    state_digest_parts: Option<StateDigestParts>,
-    state: Option<String>,
+    #[serde(flatten)]
+    end: Terminal,
+}
+
+/// A machine's end state, which a terminal record compares.
+#[derive(Clone, Debug, Default, Serialize)]
+struct Terminal {
+    state: Option<MachineState>,
     time_ns: Option<u64>,
     branches: Option<u64>,
     guest_exit_code: Option<u8>,
     guest_init_error: Option<u8>,
     infrastructure_error: Option<bool>,
-    pending_io: Option<Value>,
+    pending_io: Option<PendingIo>,
+    state_digest_parts: Option<StateDigestParts>,
 }
 
-impl From<MachineReport> for Machine {
-    fn from(report: MachineReport) -> Self {
-        Self {
-            witness: report.witness,
-            state_digest: report.state_digest,
-            state_digest_parts: report.state_digest_parts,
-            state: report.state,
-            time_ns: report.time_ns,
-            branches: report.branches,
-            guest_exit_code: report.guest_exit_code,
-            guest_init_error: report.guest_init_error,
-            infrastructure_error: Some(report.infrastructure_error),
-            pending_io: report.pending_io,
-        }
+impl Terminal {
+    fn is_empty(&self) -> bool {
+        self.state.is_none()
+            && self.time_ns.is_none()
+            && self.branches.is_none()
+            && self.guest_exit_code.is_none()
+            && self.guest_init_error.is_none()
+            && self.infrastructure_error.is_none()
+            && self.pending_io.is_none()
+            && self.state_digest_parts.is_none()
+    }
+}
+
+impl TryFrom<MachineOutcome> for Machine {
+    type Error = Error;
+
+    fn try_from(report: MachineOutcome) -> Result<Self> {
+        Ok(Self {
+            witness: Some(ContentDigest::try_from(report.witness)?),
+            state_digest: report
+                .state_digest
+                .map(ContentDigest::try_from)
+                .transpose()?,
+            end: Terminal {
+                state: Some(report.state),
+                time_ns: Some(report.time_ns),
+                branches: report.branches,
+                guest_exit_code: report.guest_exit_code,
+                guest_init_error: report.guest_init_error,
+                infrastructure_error: Some(report.infrastructure_error),
+                pending_io: report.pending_io,
+                state_digest_parts: report
+                    .state_digest_parts
+                    .map(StateDigestParts::try_from)
+                    .transpose()?,
+            },
+        })
     }
 }
 struct Evidence {
@@ -195,14 +226,15 @@ fn load(directory: &Path) -> Result<Evidence> {
                 return Err(bad(&path, "HVF report has an unexpected counter profile"));
             }
         }
-        let raw: VmmReport = serde_json::from_slice(&bytes).map_err(|e| bad(&path, e))?;
+        let raw: ReportMachines = serde_json::from_slice(&bytes).map_err(|e| bad(&path, e))?;
         if world.as_ref().is_some_and(|w| w != &raw.world_witness) {
             return Err(bad(&path, "world witness disagrees with manifest"));
         }
         world = Some(raw.world_witness);
         for entry in raw.machines {
             let name = entry.name.clone();
-            if machines.insert(name, Machine::from(entry)).is_some() {
+            let machine = Machine::try_from(entry).map_err(|e| bad(&path, e))?;
+            if machines.insert(name, machine).is_some() {
                 return Err(bad(&path, "duplicate machine name"));
             }
         }
@@ -257,26 +289,13 @@ fn compare_values(a: &impl Serialize, b: &impl Serialize) -> Result<Vec<Differen
     Ok(out)
 }
 fn terminal(machine: &Machine) -> Option<Record> {
-    if machine.state.is_none()
-        && machine.time_ns.is_none()
-        && machine.branches.is_none()
-        && machine.guest_exit_code.is_none()
-        && machine.guest_init_error.is_none()
-        && machine.infrastructure_error.is_none()
-        && machine.pending_io.is_none()
-        && machine.state_digest_parts.is_none()
-    {
+    if machine.end.is_empty() {
         return None;
     }
     Some(Record {
-        time_ns: machine.time_ns,
+        time_ns: machine.end.time_ns,
         kind: "terminal".into(),
-        value: serde_json::json!({
-            "state": machine.state, "time_ns": machine.time_ns, "branches": machine.branches,
-            "guest_exit_code": machine.guest_exit_code, "guest_init_error": machine.guest_init_error,
-            "infrastructure_error": machine.infrastructure_error, "pending_io": machine.pending_io,
-            "state_digest_parts": machine.state_digest_parts,
-        }),
+        value: serde_json::to_value(&machine.end).ok()?,
     })
 }
 fn time(record: &FirstRecord) -> u64 {
@@ -457,9 +476,10 @@ fn ram_only(a: &Machine, b: &Machine) -> bool {
         .zip(b.state_digest.as_ref())
         .is_some_and(|(a, b)| a != b);
     digests_differ
-        && a.state_digest_parts
+        && a.end
+            .state_digest_parts
             .as_ref()
-            .zip(b.state_digest_parts.as_ref())
+            .zip(b.end.state_digest_parts.as_ref())
             .is_some_and(|(a, b)| a.ram_only_difference(b))
 }
 

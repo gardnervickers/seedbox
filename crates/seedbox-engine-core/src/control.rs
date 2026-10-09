@@ -1,6 +1,8 @@
 //! Language-neutral runtime control. Fixed latency is semantic, never selected
 //! from host performance or another machine's observed progress.
+use crate::world_config::ControlConfig;
 use seedbox_control::{Action, Header, Operation, Plan, Request, Target};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -118,27 +120,33 @@ pub struct Control {
     undelivered_reply: bool,
 }
 impl Control {
+    /// Build from a world document's `control` object held as JSON; `null`
+    /// has no controller.
     pub fn new(
         config: &Value,
         names: Vec<String>,
         lookahead: u64,
         early: u64,
     ) -> Result<Self, String> {
-        let controller = if config.is_null() {
-            None
-        } else {
-            Some(
+        let config =
+            Option::<ControlConfig>::deserialize(config).map_err(|e| format!("control: {e}"))?;
+        Self::from_config(config.as_ref(), names, lookahead, early)
+    }
+    pub fn from_config(
+        config: Option<&ControlConfig>,
+        names: Vec<String>,
+        lookahead: u64,
+        early: u64,
+    ) -> Result<Self, String> {
+        let controller = config
+            .map(|c| {
                 names
                     .iter()
-                    .position(|n| Some(n.as_str()) == config["machine"].as_str())
-                    .ok_or("unknown control machine")?,
-            )
-        };
-        let latency = if controller.is_some() {
-            config["latency_ns"].as_u64().ok_or("control latency")?
-        } else {
-            0
-        };
+                    .position(|n| *n == c.machine)
+                    .ok_or("unknown control machine")
+            })
+            .transpose()?;
+        let latency = config.map_or(0, |c| c.latency_ns);
         if controller.is_some()
             && latency
                 < lookahead
@@ -147,11 +155,7 @@ impl Control {
         {
             return Err("control latency below causal lookahead".into());
         }
-        let placement = if controller.is_some() {
-            serde_json::from_value(config["placement"].clone()).map_err(|_| "control placement")?
-        } else {
-            BTreeMap::new()
-        };
+        let placement = config.map(|c| c.placement.clone()).unwrap_or_default();
         Ok(Self {
             controller,
             latency,
@@ -825,13 +829,12 @@ impl Control {
     /// nominal network counters.
     pub fn answer_inspect(
         &mut self,
-        services: &Value,
         machines: Vec<Value>,
         faults: &crate::faults::Faults,
         network_counters: Value,
     ) -> Result<(), String> {
         let mut result = json!({
-            "services": services,
+            "services": self.placement,
             "machines": machines,
             "active_handles": faults.active_handles(),
             "network_counters": network_counters,

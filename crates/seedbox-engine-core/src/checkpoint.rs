@@ -1,6 +1,7 @@
 //! Semantic checkpoint selection and branch identity. No host state or RNG draws.
-use serde_json::Value;
+use crate::world_config::WorldConfig;
 use sha2::{Digest, Sha256};
+use std::path::Path;
 
 /// Check runtime checkpoint times: strictly increasing and before `duration`.
 pub fn check_times(times: &[u64], duration: u64) -> Result<(), String> {
@@ -36,26 +37,29 @@ pub fn identity_timebase(timebase: &str, deferred_tx: bool) -> String {
 
 /// Replace artifact paths with their bytes' hashes: relocation is not semantic.
 /// Performance settings and output paths live outside the world config.
-/// Page timer is semantic but adds hash bytes only when enabled for compatibility.
+/// Page timer is semantic but adds hash bytes only when enabled.
+///
+/// The CLI and the engine both hash the typed world document, without its
+/// `checkpoint`, so they agree whatever the document's bytes on disk.
+///
+/// `engine` is the engine executable's digest. Binding a compiled binary
+/// means a rebuild changes the identity; whether to keep it is the
+/// checkpoint design's decision, not this function's.
 pub fn parent_identity(
-    cfg: &Value,
+    cfg: &WorldConfig,
     seed: u64,
     engine: &str,
     timebase: &str,
     page_timer: bool,
-    mut digest: impl FnMut(&str) -> Result<String, String>,
+    mut digest: impl FnMut(&Path) -> Result<String, String>,
 ) -> Result<String, String> {
     let mut cfg = cfg.clone();
-    cfg.as_object_mut()
-        .ok_or("config must be an object")?
-        .remove("checkpoint");
-    let kernel = cfg["kernel"].as_str().ok_or("kernel required")?;
-    cfg["kernel"] = Value::String(digest(kernel)?);
-    for m in cfg["machines"].as_array_mut().ok_or("machines required")? {
-        let initrd = m["initrd"].as_str().ok_or("initrd required")?;
-        m["initrd"] = Value::String(digest(initrd)?);
-        if let Some(path) = m["disk"]["image"].as_str() {
-            m["disk"]["image"] = Value::String(digest(path)?);
+    cfg.checkpoint = None;
+    cfg.kernel = digest(&cfg.kernel)?.into();
+    for m in &mut cfg.machines {
+        m.initrd = digest(&m.initrd)?.into();
+        if let Some(image) = m.disk.as_mut().and_then(|d| d.image.as_mut()) {
+            *image = digest(image)?.into();
         }
     }
     let mut h = Sha256::new();
@@ -73,7 +77,12 @@ pub fn parent_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+
+    fn world(kernel: &str, initrd: &str, image: &str) -> WorldConfig {
+        serde_json::from_value(serde_json::json!({"kernel":kernel,
+            "machines":[{"name":"a","initrd":initrd,"disk":{"image":image}}]}))
+        .unwrap()
+    }
 
     #[test]
     fn times_reject_duplicate_reversed_and_duration_boundaries() {
@@ -86,7 +95,7 @@ mod tests {
 
     #[test]
     fn identity_binds_parent_time_seed_and_content_not_paths() {
-        let cfg = json!({"kernel":"a", "machines":[{"initrd":"b","disk":{"image":"c"}}]});
+        let cfg = world("a", "b", "c");
         let parent = parent_identity(
             &cfg,
             7,
@@ -96,7 +105,7 @@ mod tests {
             |_| Ok("content".into()),
         )
         .unwrap();
-        let moved = json!({"kernel":"x", "machines":[{"initrd":"y","disk":{"image":"z"}}]});
+        let moved = world("x", "y", "z");
         assert_eq!(
             parent,
             parent_identity(&moved, 7, "engine", "counter", false, |_| Ok(
@@ -166,19 +175,9 @@ mod tests {
     }
 
     #[test]
-    fn page_timer_binds_parent_and_preserves_pre_change_off_identity() {
-        let cfg = json!({"kernel":"a", "machines":[{"initrd":"b","disk":{"image":"c"}}]});
-        // Pre-page-timer parent hashes with the same engine and artifact bytes.
-        for (timebase, legacy) in [
-            (
-                "counter",
-                "ddc73738e0276b920d0f971f0434f5a348956718de53493db605d4df7b4dc935",
-            ),
-            (
-                "pv",
-                "b8a5964827e10b048a4aad62e9628615146b70078ee369b9bfcf4f2f41590cfc",
-            ),
-        ] {
+    fn page_timer_and_deferred_tx_bind_the_parent() {
+        let cfg = world("a", "b", "c");
+        for timebase in ["counter", "pv"] {
             let off = parent_identity(
                 &cfg,
                 7,
@@ -188,7 +187,6 @@ mod tests {
                 |_| Ok("content".into()),
             )
             .unwrap();
-            assert_eq!(off, legacy, "{timebase}");
             let on = parent_identity(&cfg, 7, "engine", timebase, true, |_| Ok("content".into()))
                 .unwrap();
             assert_ne!(on, off, "{timebase}");

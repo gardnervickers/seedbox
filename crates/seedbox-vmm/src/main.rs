@@ -123,7 +123,7 @@ impl Args {
     }
 }
 
-fn run(args: Args) -> Result<serde_json::Value, String> {
+fn run(args: Args) -> Result<seedbox_vmm::RunReport, String> {
     let mut request = args.request()?;
     let trace = DebugEnv::from_env(|name| std::env::var_os(name))?.apply(&mut request);
     seedbox_vmm::run(&request, trace)

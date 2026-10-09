@@ -48,7 +48,7 @@ fn world(undo: u64) -> World {
 }
 
 fn finish(world: &mut World) -> Vec<(String, String)> {
-    simulate(world, &json!({}), 20_000, &None, None, &mut None).unwrap();
+    simulate(world, 20_000, &None, None, &mut None).unwrap();
     world
         .machines
         .iter_mut()
@@ -62,16 +62,7 @@ fn several_checkpoints_restore_nonmonotonically_and_repeat_branches() {
     for undo in [0, 256] {
         let mut w = world(undo);
         assert_eq!(
-            simulate_to(
-                &mut w,
-                &json!({}),
-                20_000,
-                &None,
-                None,
-                Some(500),
-                &mut None
-            )
-            .unwrap(),
+            simulate_to(&mut w, 20_000, &None, None, Some(500), &mut None).unwrap(),
             "checkpoint"
         );
         let first = WorldSnapshot::take_checkpoint(&mut w).unwrap();
@@ -81,16 +72,7 @@ fn several_checkpoints_restore_nonmonotonically_and_repeat_branches() {
             .map(|m| m.state_digest().unwrap().0)
             .collect();
         assert_eq!(
-            simulate_to(
-                &mut w,
-                &json!({}),
-                20_000,
-                &None,
-                None,
-                Some(800),
-                &mut None
-            )
-            .unwrap(),
+            simulate_to(&mut w, 20_000, &None, None, Some(800), &mut None).unwrap(),
             "checkpoint"
         );
         let second = WorldSnapshot::take_checkpoint(&mut w).unwrap();
@@ -160,16 +142,7 @@ fn checkpoint_keeps_lifecycle_disk_network_control_and_rng_state() {
             )
             .unwrap();
         assert_eq!(
-            simulate_to(
-                &mut w,
-                &json!({}),
-                20_000,
-                &None,
-                None,
-                Some(500),
-                &mut None
-            )
-            .unwrap(),
+            simulate_to(&mut w, 20_000, &None, None, Some(500), &mut None).unwrap(),
             "checkpoint"
         );
         w.schedule(
@@ -341,46 +314,19 @@ fn checkpoint_restores_pending_compose_lifecycle_calls() {
                 })
                 .unwrap();
         }
-        simulate_to(
-            &mut w,
-            &json!({}),
-            20_000,
-            &None,
-            None,
-            Some(500),
-            &mut None,
-        )
-        .unwrap();
+        simulate_to(&mut w, 20_000, &None, None, Some(500), &mut None).unwrap();
         let request = format!(
             "SBX_RPC1 1 1 {}",
             json!({"version":1,"id":1,"op":op,"target":{"service":"b"}})
         );
         w.control.request(0, 500, request.as_bytes(), 500).unwrap();
-        simulate_to(
-            &mut w,
-            &json!({}),
-            20_000,
-            &None,
-            None,
-            Some(1000),
-            &mut None,
-        )
-        .unwrap();
+        simulate_to(&mut w, 20_000, &None, None, Some(1000), &mut None).unwrap();
         let saved = WorldSnapshot::take_checkpoint(&mut w).unwrap();
         let mut results = Vec::new();
         for _ in 0..2 {
             saved.restore_checkpoint(&mut w).unwrap();
             assert_eq!(w.control.boundary(), 1500);
-            simulate_to(
-                &mut w,
-                &json!({}),
-                20_000,
-                &None,
-                None,
-                Some(1600),
-                &mut None,
-            )
-            .unwrap();
+            simulate_to(&mut w, 20_000, &None, None, Some(1600), &mut None).unwrap();
             assert!(w.control.pending.as_ref().unwrap().error.is_none());
             let m = &w.machines[1];
             assert_eq!(m.paused, op == "pause");
@@ -413,16 +359,7 @@ fn parent_branch_continues_without_restarting_any_stream() {
     for undo in [0, 256] {
         let mut w = world(undo);
         let names = vec!["a".to_string(), "b".to_string()];
-        simulate_to(
-            &mut w,
-            &json!({}),
-            20_000,
-            &None,
-            None,
-            Some(500),
-            &mut None,
-        )
-        .unwrap();
+        simulate_to(&mut w, 20_000, &None, None, Some(500), &mut None).unwrap();
         w.faults.links.stream_sample((0, 1));
         w.machines[0].timer_rng = Some(Rng::new(7, "timer"));
         w.machines[0].timer_rng.as_mut().unwrap().next();
@@ -471,16 +408,7 @@ fn checkpoint_drains_fault_effects_and_control_requests_before_capture() {
         0,
     )
     .unwrap();
-    simulate_to(
-        &mut w,
-        &json!({}),
-        20_000,
-        &None,
-        None,
-        Some(500),
-        &mut None,
-    )
-    .unwrap();
+    simulate_to(&mut w, 20_000, &None, None, Some(500), &mut None).unwrap();
     // Model messages produced by the last slice before the scheduler
     // considers T. A direct snapshot is unsafe; simulate_to drains them.
     w.machines[0].fault_effects.push((0, 499, true));
@@ -490,16 +418,7 @@ fn checkpoint_drains_fault_effects_and_control_requests_before_capture() {
     ));
     assert!(WorldSnapshot::take_checkpoint(&mut w).is_err());
     assert_eq!(
-        simulate_to(
-            &mut w,
-            &json!({}),
-            20_000,
-            &None,
-            None,
-            Some(500),
-            &mut None
-        )
-        .unwrap(),
+        simulate_to(&mut w, 20_000, &None, None, Some(500), &mut None).unwrap(),
         "checkpoint"
     );
     assert!(w.machines[0].fault_effects.is_empty());
@@ -606,28 +525,10 @@ fn checkpoint_keeps_partial_matchers_selectors_and_pending_trigger_effects() {
         .triggers
         .committed("a", 301, b'b', 100, 301)
         .unwrap();
-    simulate_to(
-        &mut w,
-        &json!({}),
-        20_000,
-        &None,
-        None,
-        Some(500),
-        &mut None,
-    )
-    .unwrap();
+    simulate_to(&mut w, 20_000, &None, None, Some(500), &mut None).unwrap();
     // The last byte from the last completed slice has not reached the matcher yet.
     w.machines[0].committed_console = Some((499, b'a'));
-    simulate_to(
-        &mut w,
-        &json!({}),
-        20_000,
-        &None,
-        None,
-        Some(500),
-        &mut None,
-    )
-    .unwrap();
+    simulate_to(&mut w, 20_000, &None, None, Some(500), &mut None).unwrap();
     assert_eq!(w.control.triggers.records[0].prefix, 3);
     assert_eq!(w.control.triggers.records[1].status, "expired");
     let mut syn = vec![0u8; 54];
@@ -685,30 +586,12 @@ fn checkpoint_keeps_partial_matchers_selectors_and_pending_trigger_effects() {
             .unwrap();
         assert_eq!(w.control.triggers.boundary(), 600);
         let matched = WorldSnapshot::take_checkpoint(&mut w).unwrap();
-        simulate_to(
-            &mut w,
-            &json!({}),
-            20_000,
-            &None,
-            None,
-            Some(700),
-            &mut None,
-        )
-        .unwrap();
+        simulate_to(&mut w, 20_000, &None, None, Some(700), &mut None).unwrap();
         let want = w.control.triggers.evidence().unwrap();
         let faults = w.faults.log.clone();
         matched.restore_checkpoint(&mut w).unwrap();
         assert_eq!(w.control.triggers.boundary(), 600);
-        simulate_to(
-            &mut w,
-            &json!({}),
-            20_000,
-            &None,
-            None,
-            Some(700),
-            &mut None,
-        )
-        .unwrap();
+        simulate_to(&mut w, 20_000, &None, None, Some(700), &mut None).unwrap();
         assert_eq!(w.control.triggers.evidence().unwrap(), want);
         assert_eq!(w.faults.log, faults);
         assert!(w.faults.blocked(0, 1));
@@ -798,16 +681,7 @@ fn runtime_checkpoint_getrandom_and_urandom_repeat_and_diverge() {
     w.lookahead = 1_000_000;
     w.latency = 1_000_000;
     assert_eq!(
-        simulate_to(
-            &mut w,
-            &json!({}),
-            duration,
-            &None,
-            None,
-            Some(at),
-            &mut None
-        )
-        .unwrap(),
+        simulate_to(&mut w, duration, &None, None, Some(at), &mut None).unwrap(),
         "checkpoint"
     );
     for m in &w.machines {
@@ -828,7 +702,7 @@ fn runtime_checkpoint_getrandom_and_urandom_repeat_and_diverge() {
         )
         .unwrap();
         assert!(report.iter().all(|r| r["reseed"] == "time_page"));
-        simulate(&mut w, &json!({}), duration, &None, None, &mut None).unwrap();
+        simulate(&mut w, duration, &None, None, &mut None).unwrap();
         outputs.push(
             w.machines
                 .iter()

@@ -28,21 +28,21 @@ pub struct DiskFaultModel {
     pub survival_probability: f64,
 }
 
+/// [`fault_model`] for a world document's `disk_loss` held as JSON.
 pub fn parse_disk_fault_model(value: &Value) -> Result<DiskFaultModel, &'static str> {
-    let model = if value.is_null() {
-        DiskFaultModel {
-            sector_bytes: SECTOR,
-            survival_probability: 0.0,
-        }
-    } else {
-        serde_json::from_value(value.clone()).map_err(|_| "unknown disk_loss parameters")?
-    };
-    validate_disk_fault_model(model)?;
-    Ok(model)
+    let model =
+        Option::<DiskFaultModel>::deserialize(value).map_err(|_| "unknown disk_loss parameters")?;
+    fault_model(model)
 }
 
-pub fn disk_fault_model_report(model: DiskFaultModel) -> Value {
-    serde_json::to_value(model).unwrap()
+/// A world's crash-loss policy: absent drops every unflushed sector.
+pub fn fault_model(model: Option<DiskFaultModel>) -> Result<DiskFaultModel, &'static str> {
+    let model = model.unwrap_or(DiskFaultModel {
+        sector_bytes: SECTOR,
+        survival_probability: 0.0,
+    });
+    validate_disk_fault_model(model)?;
+    Ok(model)
 }
 
 fn validate_disk_fault_model(model: DiskFaultModel) -> Result<(), &'static str> {

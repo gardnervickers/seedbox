@@ -2,16 +2,16 @@ use seedbox_engine_core::{faults, links};
 // Exercise the host fixture's JSON through the actual portable VMM modules.
 
 use links::{Links, Outcome, Policy};
-use serde_json::Value;
+use seedbox_engine_core::world_config::WorldConfig;
 
 fn fixture(text: &str) -> faults::Faults {
-    let world: Value = serde_json::from_str(text).unwrap();
+    let world: WorldConfig = serde_json::from_str(text).unwrap();
     let names = ["a", "b", "c"]
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let links = Links::from_config(1, &names, &world["network"]).unwrap();
-    faults::Faults::with_links(world["faults"].as_array().unwrap().clone(), names, links).unwrap()
+    let links = Links::from_network(1, &names, &world.network.unwrap_or_default()).unwrap();
+    faults::Faults::with_plans(world.faults, names, links).unwrap()
 }
 
 #[test]
