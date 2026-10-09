@@ -142,3 +142,6 @@ artifacts are capped at 64 MiB per run and expire after seven days.
 CI disables Cargo debug information and incremental compilation to keep the three
 workspace builds within hosted-runner disk limits. It also removes preinstalled
 Android, .NET and Swift SDKs that Seedbox does not use before building.
+The separate Guest assets workflow also caches Nix builds per architecture and
+recipe, so repeated PR updates reuse kernels and helpers instead of rebuilding
+them. Its x86 job can also restore the PV job's Nix cache when available.
