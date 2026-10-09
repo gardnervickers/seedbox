@@ -178,6 +178,11 @@ container is created, so engine-injected files never enter the guest filesystem.
 The retained image
 manifest describes this flattened filesystem snapshot, not the original registry
 layers. Replay uses the snapshot and never contacts the engine.
+The content store records which snapshot each engine produced for an
+immutable image ID, so a later preparation by the same Seedbox engine reuses
+that snapshot instead of exporting and merging the image again. Builds and
+pulls still go through the engine. A record whose objects are missing is
+ignored; the image is exported again.
 
 Exported Linux ownership, modes, links and case-sensitive paths are processed as
 archive metadata without extracting guest paths on the host. Unsupported extended

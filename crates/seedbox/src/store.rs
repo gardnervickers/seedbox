@@ -186,6 +186,26 @@ impl ContentStore {
         self.put_reader(file)
     }
 
+    /// The object a named record points at, if the record exists and is
+    /// well formed. Records name slow derivations, such as an exported image
+    /// filesystem; the object they point at is verified when it is read.
+    pub fn record(&self, name: &ContentDigest) -> Option<ContentDigest> {
+        let text = fs::read_to_string(self.root.join("records").join(name.hex())).ok()?;
+        ContentDigest::try_from(text).ok()
+    }
+
+    /// Point a named record at an object. Records are not synced: after a
+    /// host crash a record is at worst missing or unreadable, which is a miss.
+    pub fn set_record(&self, name: &ContentDigest, target: &ContentDigest) -> Result<()> {
+        let directory = self.root.join("records");
+        fs::create_dir_all(&directory)?;
+        let mut temp = tempfile::NamedTempFile::new_in(&directory)?;
+        temp.write_all(target.hex().as_bytes())?;
+        temp.persist(directory.join(name.hex()))
+            .map_err(|e| e.error)?;
+        Ok(())
+    }
+
     pub fn read(&self, digest: &ContentDigest) -> Result<Vec<u8>> {
         // Convenience for small metadata only. File artifacts must use copy_to
         // or materialize; don't accidentally allocate a guest image in RAM.
@@ -283,7 +303,10 @@ impl ContentStore {
             }
             None => self.copy_to(digest, &mut temp)?,
         }
-        temp.persist_noclobber(&path).map_err(|e| e.error)?;
+        let mut copy = temp.persist_noclobber(&path).map_err(|e| e.error)?;
+        // The copy holds exactly the object's bytes, so a later put_file or
+        // file_digest of it needs no second read.
+        file_digest_with(&mut copy, |_| Ok(digest.clone()))?;
         Ok(path)
     }
 

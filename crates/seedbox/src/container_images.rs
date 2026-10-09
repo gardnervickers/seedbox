@@ -5,7 +5,7 @@ use crate::{
     execution::CancellationToken,
     guest::Architecture,
     oci::{ImageTransport, ImportedImage, RootFilesystem},
-    store::ContentStore,
+    store::{ContentDigest, ContentStore},
     Error, Result,
 };
 use bollard::{
@@ -21,6 +21,10 @@ pub struct ContainerTransport {
     pub docker: Docker,
     pub cancellation: CancellationToken,
     pub progress: fn(&str),
+    /// Engine digest that keys reuse of an image's exported filesystem. An
+    /// image ID names fixed content, so the same engine merging the same
+    /// image yields the same bytes. `None` exports every time.
+    pub export_cache: Option<ContentDigest>,
 }
 fn setup(error: impl std::fmt::Display) -> Error {
     Error::Setup(format!("container image preparation: {error}"))
@@ -52,12 +56,14 @@ impl ContainerTransport {
             }
         }
     }
-    async fn prepare(
+    /// Pull or build the service's image; returns the engine client and the
+    /// image's immutable reference.
+    async fn resolve(
         &self,
         service: &Service,
         directory: &Path,
         architecture: Architecture,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<(Docker, String)> {
         self.check()?;
         let docker = self.docker.clone().negotiate_version().await.map_err(|error| Error::Setup(format!(
             "cannot connect to a Docker-compatible engine: {error}; start Docker or Podman, or set DOCKER_HOST to its API socket")))?;
@@ -221,8 +227,17 @@ impl ContainerTransport {
         {
             return Err(setup(format!("image must be {}", architecture.platform())));
         }
+        Ok((docker, image))
+    }
+    async fn export(
+        &self,
+        docker: &Docker,
+        image: &str,
+        directory: &Path,
+    ) -> Result<serde_json::Value> {
+        self.check()?;
         (self.progress)("exporting image layers");
-        let mut stream = docker.export_image(&image);
+        let mut stream = docker.export_image(image);
         let archive = directory.join("image.tar");
         let mut file = tokio::fs::File::create(&archive).await?;
         let mut size = 0u64;
@@ -263,20 +278,45 @@ impl ImageTransport for ContainerTransport {
             .enable_all()
             .build()
             .map_err(setup)?;
-        let mut config = runtime.block_on(self.prepare(service, directory, architecture))?;
-        let rootfs = directory.join("filesystem.tar");
-        let layer = store.put_file(&rootfs)?;
-        // This is an OCI-shaped snapshot of the engine's resolved filesystem,
-        // not a claim to be the registry's original layered manifest.
-        config["rootfs"] =
-            serde_json::json!({"type":"layers", "diff_ids":[format!("sha256:{}", layer.hex())]});
-        let config_bytes = serde_json::to_vec(&config)?;
-        let config_digest = store.put(&config_bytes)?;
+        let (docker, image) = runtime.block_on(self.resolve(service, directory, architecture))?;
+        let record = self.export_cache.as_ref().map(|engine| {
+            ContentDigest::of(
+                serde_json::json!(["image-export", engine, architecture.platform(), image])
+                    .to_string()
+                    .as_bytes(),
+            )
+        });
         let raw = directory.join("metadata");
         fs::create_dir(&raw)?;
-        // The exported filesystem is scratch in this directory; link it rather
-        // than copying it back out of the store.
-        fs::hard_link(&rootfs, raw.join(layer.hex()))?;
+        let (config_bytes, layer, rootfs) = match record
+            .as_ref()
+            .and_then(|record| cached_export(store, record))
+        {
+            Some((config_bytes, layer)) => {
+                (self.progress)("reusing exported image layers");
+                let rootfs = store.materialize(&layer, &raw)?;
+                (config_bytes, layer, rootfs)
+            }
+            None => {
+                let mut config = runtime.block_on(self.export(&docker, &image, directory))?;
+                let rootfs = directory.join("filesystem.tar");
+                let layer = store.put_file(&rootfs)?;
+                // This is an OCI-shaped snapshot of the engine's resolved filesystem,
+                // not a claim to be the registry's original layered manifest.
+                config["rootfs"] = serde_json::json!({"type":"layers", "diff_ids":[format!("sha256:{}", layer.hex())]});
+                let config_bytes = serde_json::to_vec(&config)?;
+                let config_digest = store.put(&config_bytes)?;
+                if let Some(record) = &record {
+                    store.set_record(record, &config_digest)?;
+                }
+                // The exported filesystem is scratch in this directory; link it rather
+                // than copying it back out of the store.
+                let linked = raw.join(layer.hex());
+                fs::hard_link(&rootfs, &linked)?;
+                (config_bytes, layer, linked)
+            }
+        };
+        let config_digest = store.put(&config_bytes)?;
         store.materialize(&config_digest, &raw)?;
         fs::write(
             raw.join("manifest.json"),
@@ -296,6 +336,20 @@ impl ImageTransport for ContainerTransport {
             provenance: BTreeMap::new(),
         })
     }
+}
+
+/// The config bytes and filesystem object a recorded export points at, when both
+/// are still in the store. Anything else is a miss and exports again.
+fn cached_export(store: &ContentStore, record: &ContentDigest) -> Option<(Vec<u8>, ContentDigest)> {
+    let config = store.read(&store.record(record)?).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&config).ok()?;
+    let [layer] = value["rootfs"]["diff_ids"].as_array()?.as_slice() else {
+        return None;
+    };
+    let layer =
+        ContentDigest::try_from(layer.as_str()?.strip_prefix("sha256:")?.to_owned()).ok()?;
+    store.size(&layer).ok()?;
+    Some((config, layer))
 }
 
 /// Prefix metadata only. Guest filesystem paths are never extracted on the host.
@@ -526,6 +580,7 @@ mod tests {
                 .unwrap(),
                 cancellation: token,
                 progress: |_| {},
+                export_cache: None,
             };
             let store = ContentStore::new(directory.path().join("store"));
             let result = transport.import(
@@ -554,5 +609,101 @@ mod tests {
             let requests = server.join().unwrap();
             assert!(requests.iter().all(|request| request.starts_with("GET ")));
         }
+    }
+
+    #[test]
+    fn a_recorded_export_is_reused_for_the_same_engine_and_image() {
+        let mut tar = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o755);
+        header.set_mtime(0);
+        header.set_size(3);
+        tar.append_data(&mut header, "app", &b"app"[..]).unwrap();
+        let layer = tar.into_inner().unwrap();
+        let config = br#"{"os":"linux","architecture":"amd64","config":{"Cmd":["/app"]}}"#;
+        let manifest = br#"[{"Config":"config.json","Layers":["layer.tar"]}]"#;
+        let mut image = tar::Builder::new(Vec::new());
+        for (name, bytes) in [
+            ("manifest.json", &manifest[..]),
+            ("config.json", &config[..]),
+            ("layer.tar", &layer[..]),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o644);
+            header.set_size(bytes.len() as u64);
+            image.append_data(&mut header, name, bytes).unwrap();
+        }
+        let export = image.into_inner().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let exports = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let served = exports.clone();
+        std::thread::spawn(move || {
+            for connection in listener.incoming() {
+                let mut connection = connection.unwrap();
+                let mut reader = std::io::BufReader::new(connection.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap() > 0 && line != "\r\n" {
+                    line.clear();
+                }
+                let body = if request.contains("/version ") {
+                    br#"{"ApiVersion":"1.44","Version":"test"}"#.to_vec()
+                } else if request.contains("/get?") {
+                    served.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    export.clone()
+                } else {
+                    br#"{"Id":"sha256:test","Os":"linux","Architecture":"amd64"}"#.to_vec()
+                };
+                let _ = write!(
+                    connection,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = connection.write_all(&body);
+            }
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let simulation = crate::config::parse("name: fixture\nservices:\n  app: {image: example/app}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n", &directory.path().join("compose.yaml"), &BTreeMap::new()).unwrap();
+        let store = ContentStore::new(directory.path().join("store"));
+        let import = |engine: &[u8], name: &str| {
+            let transport = ContainerTransport {
+                docker: Docker::connect_with_http(
+                    &format!("http://{address}"),
+                    10,
+                    bollard::API_DEFAULT_VERSION,
+                )
+                .unwrap(),
+                cancellation: CancellationToken::default(),
+                progress: |_| {},
+                export_cache: Some(ContentDigest::of(engine)),
+            };
+            let imported = transport
+                .import(
+                    &simulation.services["app"],
+                    &directory.path().join(name),
+                    &store,
+                    None,
+                    Architecture::Amd64,
+                )
+                .unwrap();
+            let RootFilesystem::Archive(path) = &imported.rootfs else {
+                panic!("expected archive")
+            };
+            (imported.image, fs::read(path).unwrap())
+        };
+        let exported = import(b"engine", "first");
+        assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let reused = import(b"engine", "second");
+        assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(reused, exported);
+        // Another engine exports again rather than trusting this one's merge.
+        assert_eq!(import(b"other engine", "third"), exported);
+        assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 2);
+        // A record whose objects are gone is a miss, not an error.
+        fs::remove_dir_all(directory.path().join("store/sha256")).unwrap();
+        assert_eq!(import(b"engine", "fourth"), exported);
+        assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 }

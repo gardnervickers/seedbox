@@ -46,6 +46,7 @@ impl PreparationBackend for OciPreparer {
                 docker: self.docker.clone(),
                 cancellation: Default::default(),
                 progress: |_| {},
+                export_cache: Some(self.profile.engine.clone()),
             },
         )
     }
@@ -65,6 +66,7 @@ impl PreparationBackend for OciPreparer {
                 docker: self.docker.clone(),
                 cancellation: context.cancellation.clone(),
                 progress: |_| {},
+                export_cache: Some(self.profile.engine.clone()),
             },
         )
     }
