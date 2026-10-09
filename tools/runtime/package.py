@@ -47,9 +47,10 @@ def image_digest(path):
 def package(guest, tools, output):
     with tempfile.TemporaryDirectory(prefix='seedbox-runtime-') as directory:
         assets = Path(directory) / 'assets'
-        shutil.copytree(guest, assets)
-        # copytree keeps the read-only Nix store directory mode.
-        assets.chmod(0o700)
+        assets.mkdir()
+        # Nix outputs are read-only; stage file bytes without their directory modes.
+        for path in guest.iterdir():
+            shutil.copyfile(path, assets / path.name)
         shutil.copyfile(tools, assets / 'tools-image.tar')
         image = image_digest(assets / 'tools-image.tar')
         records = {path.name: digest(path)
