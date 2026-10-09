@@ -400,9 +400,6 @@ struct RuntimeInputs {
     /// Static Linux mke2fs for named volumes [default: embedded guest helper].
     #[arg(long, env = "SEEDBOX_MKE2FS")]
     mke2fs: Option<PathBuf>,
-    /// Guest Unix time in seconds, clamped to the minimum supported epoch [default: host time after image preparation].
-    #[arg(long)]
-    wall_clock_epoch: Option<u32>,
     #[command(flatten)]
     clock: TimebaseArgs,
     /// Also record and compare every machine's RAM and registers (Linux also retains per-page hashes).
@@ -513,7 +510,6 @@ impl RuntimeInputs {
             )
         };
         let inputs = OciPreparer {
-            wall_clock_epoch: self.wall_clock_epoch,
             docker: backends::container_engine()?,
             kernel,
             engine,

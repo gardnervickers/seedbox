@@ -26,7 +26,6 @@ fn fixture(root: &Path) -> (OciPreparer, config::Simulation, ContentStore) {
         semantic_parameters: BTreeMap::from([("memory_mb".into(), "1024".into())]),
     };
     let preparer = OciPreparer {
-        wall_clock_epoch: None,
         kernel,
         engine,
         init: helper,
@@ -120,12 +119,13 @@ fn preparation_retains_kernel_before_transport_changes_source() {
 }
 
 #[test]
-fn preparation_records_one_epoch_after_import_and_retains_it() {
+fn preparation_derives_the_epoch_from_image_build_times_unless_compose_sets_it() {
+    // Each image config records its own build time; the latest one wins.
     struct Transport;
     impl seedbox::oci::ImageTransport for Transport {
         fn import(
             &self,
-            _service: &seedbox::config::Service,
+            service: &seedbox::config::Service,
             directory: &Path,
             store: &ContentStore,
             _context: Option<(&PreparationContext, &str)>,
@@ -138,7 +138,14 @@ fn preparation_records_one_epoch_after_import_and_retains_it() {
                 image: seedbox::execution::PreparedImage {
                     manifest: store.put(b"manifest")?,
                     config: store.put(
-                        br#"{"os":"linux","architecture":"amd64","config":{"Cmd":["/app"]}}"#,
+                        format!(
+                            r#"{{"os":"linux","architecture":"amd64","config":{{"Cmd":["/app"]}},"created":"2026-01-01T00:00:00Z","history":[{{"created":"{}"}}]}}"#,
+                            match &service.source {
+                                config::ImageSource::Registry { reference } if reference == "example/late" => "2026-10-09T04:05:33.5Z",
+                                _ => "2026-10-01T00:00:00Z",
+                            }
+                        )
+                        .as_bytes(),
                     )?,
                     layers: vec![],
                     launch: seedbox::image::Launch {
@@ -157,25 +164,19 @@ fn preparation_records_one_epoch_after_import_and_retains_it() {
         }
     }
     let root = tempfile::tempdir().unwrap();
-    let (mut preparer, mut simulation, store) = fixture(root.path());
-    simulation
-        .services
-        .insert("other".into(), simulation.services["app"].clone());
+    let (preparer, mut simulation, store) = fixture(root.path());
+    let mut late = simulation.services["app"].clone();
+    late.source = config::ImageSource::Registry {
+        reference: "example/late".into(),
+    };
+    simulation.services.insert("other".into(), late);
     let context =
         PreparationContext::new(root.path().join("evidence"), CancellationToken::default())
             .unwrap();
-    let now = || {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-    };
-    let before = now();
     let prepared = preparer
         .prepare_with_transport(&simulation, &store, &context, &Transport)
         .unwrap();
-    let epoch = u64::from(prepared.wall_clock_epoch.unwrap());
-    assert!((before..=now()).contains(&epoch));
+    assert_eq!(prepared.wall_clock_epoch, Some(1_791_518_733));
     let json = serde_json::to_vec(&prepared).unwrap();
     let retained: seedbox::execution::PreparedInputs = serde_json::from_slice(&json).unwrap();
     assert_eq!(retained, prepared);
@@ -192,28 +193,30 @@ fn preparation_records_one_epoch_after_import_and_retains_it() {
         .as_object()
         .unwrap()
         .contains_key("wall_clock_epoch"));
-    for requested in [0, 1_800_000_000, u32::MAX] {
-        preparer.wall_clock_epoch = Some(requested);
+    for requested in [None, Some(86400), Some(1_800_000_000), Some(u32::MAX)] {
+        simulation.wall_clock_epoch = requested;
+        let label = requested.map_or("derived".into(), |epoch| epoch.to_string());
         let context = PreparationContext::new(
-            root.path().join(format!("epoch-{requested}")),
+            root.path().join(format!("epoch-{label}")),
             Default::default(),
         )
         .unwrap();
-        let prepared = preparer
+        let first = preparer
             .prepare_with_transport(&simulation, &store, &context, &Transport)
             .unwrap();
-        let epoch = u64::from(requested.max(seedbox::guest::MIN_WALL_CLOCK_EPOCH));
-        assert_eq!(prepared.wall_clock_epoch, Some(epoch as u32));
+        let epoch = requested.unwrap_or(1_791_518_733);
+        assert_eq!(first.wall_clock_epoch, Some(epoch));
+        assert_eq!(requested.is_none(), first.guests == prepared.guests);
         let second_context = PreparationContext::new(
-            root.path().join(format!("epoch-{requested}-second")),
+            root.path().join(format!("epoch-{label}-second")),
             Default::default(),
         )
         .unwrap();
         let second = preparer
             .prepare_with_transport(&simulation, &store, &second_context, &Transport)
             .unwrap();
-        assert_eq!(prepared, second);
-        for digest in prepared.guests.values() {
+        assert_eq!(first, second);
+        for digest in first.guests.values() {
             let archive = store.read(digest).unwrap();
             let start = archive
                 .windows(10)
@@ -227,7 +230,7 @@ fn preparation_records_one_epoch_after_import_and_retains_it() {
             }
             cursor += 4; // max_map_count
             assert_eq!(
-                u32::from_le_bytes(archive[cursor..cursor + 4].try_into().unwrap()) as u64,
+                u32::from_le_bytes(archive[cursor..cursor + 4].try_into().unwrap()),
                 epoch
             );
         }

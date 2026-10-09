@@ -87,8 +87,8 @@ common syscalls remain separate work.
 Each VM exposes one CPU. Seastar applications such as ScyllaDB and Redpanda
 need `--smp 1`; DPDK must select only guest CPU 0. JVM GC, tokio worker counts
 and Go parallelism reflect that CPU count. Real SMP remains out of scope.
-The shared supervisor now applies a recorded preparation-time wall-clock epoch
-on both architectures. User namespaces are enabled in both application configs.
+The shared supervisor now applies a recorded wall-clock epoch, derived from the
+prepared images or set by `x-seedbox.wall_clock_epoch`, on both architectures. User namespaces are enabled in both application configs.
 CPU feature baselines and cross-host replay remain unproven.
 
 `seedbox run harness/acceptance/workloads/runtime.yaml` exercises the actual

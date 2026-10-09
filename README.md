@@ -47,9 +47,11 @@ build is needed. Locally built kernels live under `/tmp/seedbox-UID/ARCH` (the i
 if the OS removes them. Seedbox never downloads kernels automatically.
 
 
-To compare independent fresh runs, pass the same `--wall-clock-epoch SECS`
-(Unix seconds) to each run. Otherwise guest time starts at host time after image
-preparation. Replay always retains the original guest clock.
+Guest time starts at the latest build time recorded in the prepared images, so
+independent fresh runs of the same images start at the same time and can be
+compared directly. Set `x-seedbox.wall_clock_epoch` (Unix seconds, at least
+86400) in the Compose file to choose the start time. Replay always retains the
+original guest clock.
 
 ### Your application
 
@@ -98,15 +100,15 @@ need them; clearing temporary build assets does not remove run data.
 | Design and direction | [Vision](docs/vision.md) |
 
 Compose preparation records one `wall_clock_epoch` (Unix seconds) in the
-prepared inputs and each `SBXLAUNCH4` boot recipe. It defaults to
-the time after all image builds/imports finish; explicit `--build-epoch` also
-sets this value. Linux cannot set a wall clock earlier than the guest's uptime,
-so an explicit epoch below 86400 (such as 0) still clamps build timestamps but
-records a guest epoch of 86400. A build epoch earlier than a
-certificate minted during the build makes that certificate not yet valid. The shared supervisor sets `CLOCK_REALTIME` before the launch
-barrier on x86 and arm64. Replay uses retained bytes and never samples the host
-clock. New preparations can change witnesses; replay of recorded inputs is
-unchanged. Both application kernels support unprivileged user namespaces,
+prepared inputs and each `SBXLAUNCH4` boot recipe. `x-seedbox.wall_clock_epoch`
+sets it explicitly (at least 86400, because Linux cannot set a wall clock earlier
+than the guest's uptime). Otherwise it is the latest `created` time in any
+prepared image's config or history, and at least 86400. Builders stamp those
+times after each step, so a certificate minted during a build is already valid,
+and the same images always start at the same time on every host; preparation
+never samples the host clock. The shared supervisor sets `CLOCK_REALTIME` before
+the launch barrier on x86 and arm64. Replay uses retained bytes. Rebuilt images
+can change the epoch and witnesses; replay of recorded inputs is unchanged. Both application kernels support unprivileged user namespaces,
 including UID/GID maps and nested mount, PID, network, IPC and UTS namespaces.
 The supervisor recursively mounts the image at the namespace root before
 entering it, preserving named volumes and allowing `CLONE_NEWUSER`.
