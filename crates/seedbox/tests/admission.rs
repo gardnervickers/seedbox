@@ -1,6 +1,5 @@
 //! Synthetic readiness tests; no KVM/perf/MSR activity.
 use seedbox::{admission::*, execution::*, store::ContentDigest};
-use std::collections::BTreeMap;
 
 fn observed() -> CoreObservation {
     let p = required_policy();
@@ -28,14 +27,10 @@ fn observed() -> CoreObservation {
 }
 fn profile() -> ExecutionProfile {
     ExecutionProfile {
-        backend: "seedbox-kvm".into(),
+        backend: Backend::Kvm,
         engine: ContentDigest::of(b"any engine"),
         witness_mode: WitnessMode::Exits,
-        semantic_parameters: BTreeMap::from([
-            ("guest_abi".into(), "oci-init-v1".into()),
-            ("control_channel".into(), "virtio-console-v1".into()),
-            ("memory_mb".into(), "512".into()),
-        ]),
+        semantic_parameters: SemanticParameters::new(512),
     }
 }
 
@@ -75,25 +70,27 @@ fn every_missing_engine_capability_is_rejected() {
 }
 
 #[test]
-fn any_engine_is_admitted_and_older_records_keep_their_extra_parameters() {
+fn any_engine_is_admitted_and_settings_are_decoded_strictly() {
     let p = profile();
     validate_profile(&p).unwrap();
-    let mut older = p.clone();
-    for key in [
-        "host_policy",
-        "host_policy_fingerprint",
-        "host_policy_fields",
-    ] {
-        older
-            .semantic_parameters
-            .insert(key.into(), "recorded by an older CLI".into());
-    }
-    validate_profile(&older).unwrap();
-    for key in ["guest_abi", "control_channel", "memory_mb"] {
+    for memory_mb in [63, 65537] {
         let mut wrong = p.clone();
-        wrong.semantic_parameters.insert(key.into(), "wrong".into());
-        assert!(validate_profile(&wrong).is_err());
-        wrong.semantic_parameters.remove(key);
+        wrong.semantic_parameters.memory_mb = memory_mb;
         assert!(validate_profile(&wrong).is_err());
     }
+    let json = serde_json::to_value(&p).unwrap();
+    for key in ["guest_abi", "control_channel", "memory_mb"] {
+        let mut wrong = json.clone();
+        wrong["semantic_parameters"][key] = "wrong".into();
+        assert!(serde_json::from_value::<ExecutionProfile>(wrong.clone()).is_err());
+        wrong["semantic_parameters"]
+            .as_object_mut()
+            .unwrap()
+            .remove(key);
+        assert!(serde_json::from_value::<ExecutionProfile>(wrong).is_err());
+    }
+    // Parameters an older CLI recorded are not part of this format.
+    let mut older = json;
+    older["semantic_parameters"]["host_policy"] = "recorded by an older CLI".into();
+    assert!(serde_json::from_value::<ExecutionProfile>(older).is_err());
 }

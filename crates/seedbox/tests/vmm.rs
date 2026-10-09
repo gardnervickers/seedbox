@@ -1,5 +1,6 @@
 use seedbox::{
     config::{Check, Limits, Network, Schedule},
+    counter::CounterProfile,
     execution::*,
     store::ContentDigest,
     vmm,
@@ -22,10 +23,10 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
             ("client-machine".into(), hash.clone()),
         ]),
         profile: ExecutionProfile {
-            backend: "seedbox-kvm".into(),
+            backend: Backend::Kvm,
             engine: hash.clone(),
             witness_mode: WitnessMode::FullState,
-            semantic_parameters: BTreeMap::from([("memory_mb".into(), "512".into())]),
+            semantic_parameters: SemanticParameters::new(512),
         },
         auxiliary: BTreeMap::new(),
         provenance: BTreeMap::new(),
@@ -76,12 +77,9 @@ fn initial_arm_launch_uses_numeric_cap_and_network_bound() {
     fixture(|base| {
         assert!(vmm::world(base).unwrap().get("launch_skew_ns").is_none());
         let mut prepared = base.prepared.clone();
-        prepared.profile.backend = "seedbox-hvf".into();
-        prepared
-            .profile
-            .semantic_parameters
-            .extend(seedbox::engine::arm_parameters());
-        // Old ARM profiles keep their original world config for replay.
+        prepared.profile.backend = Backend::Hvf;
+        prepared.profile.semantic_parameters.engine = Some(seedbox::engine::arm_descriptor());
+        prepared.profile.semantic_parameters.clock = Clock::Pv;
         let request = ExecutionRequest {
             prepared: &prepared,
             ..*base
@@ -90,42 +88,22 @@ fn initial_arm_launch_uses_numeric_cap_and_network_bound() {
             .unwrap()
             .get("launch_skew_ns")
             .is_none());
-        prepared.profile.semantic_parameters.extend([
-            ("arm_launch_policy".into(), "seeded-barrier-v1".into()),
-            ("arm_launch_max_skew_ns".into(), "1000000".into()),
-        ]);
-        let request = ExecutionRequest {
-            prepared: &prepared,
-            ..*base
-        };
-        assert_eq!(vmm::world(&request).unwrap()["launch_skew_ns"], 80_000);
-        prepared
-            .profile
-            .semantic_parameters
-            .remove("arm_launch_policy");
-        let request = ExecutionRequest {
-            prepared: &prepared,
-            ..*base
-        };
-        assert_eq!(vmm::world(&request).unwrap()["launch_skew_ns"], 80_000);
-        prepared
-            .profile
-            .semantic_parameters
-            .insert("arm_launch_max_skew_ns".into(), "0".into());
-        let request = ExecutionRequest {
-            prepared: &prepared,
-            ..*base
-        };
-        assert_eq!(vmm::world(&request).unwrap()["launch_skew_ns"], 0);
-        prepared
-            .profile
-            .semantic_parameters
-            .insert("arm_launch_max_skew_ns".into(), "NaN".into());
-        let request = ExecutionRequest {
-            prepared: &prepared,
-            ..*base
-        };
-        assert!(vmm::world(&request).is_err());
+        for (cap, expected) in [(1_000_000, 80_000), (0, 0)] {
+            prepared.profile.semantic_parameters.hvf = Some(HvfParameters {
+                boot_policy: String::new(),
+                entropy_policy: String::new(),
+                device_policy: String::new(),
+                host_release: String::new(),
+                cpu_features: String::new(),
+                guest_kernel: ContentDigest::of(b"kernel"),
+                launch_max_skew_ns: cap,
+            });
+            let request = ExecutionRequest {
+                prepared: &prepared,
+                ..*base
+            };
+            assert_eq!(vmm::world(&request).unwrap()["launch_skew_ns"], expected);
+        }
     });
 }
 
@@ -191,14 +169,10 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
             ..*request
         })
         .unwrap();
-        prepared
-            .profile
-            .semantic_parameters
-            .insert("checkpoint_at_ns".into(), "500".into());
-        prepared
-            .profile
-            .semantic_parameters
-            .insert("checkpoint_branch_seed".into(), "42".into());
+        prepared.profile.semantic_parameters.checkpoint = Some(Checkpoint {
+            at_ns: 500,
+            branch_seed: 42,
+        });
         let checkpoint_world = vmm::world(&ExecutionRequest {
             prepared: &prepared,
             ..*request
@@ -1215,10 +1189,7 @@ fn unavailable_at_admission_requires_prior_crash_without_intervening_reboot() {
 fn counter_identity_requires_an_attributable_matching_engine_report() {
     fixture(|base| {
         let mut inputs = base.prepared.clone();
-        inputs
-            .profile
-            .semantic_parameters
-            .insert("counter".into(), "intel-0x5111c4".into());
+        inputs.profile.semantic_parameters.clock = Clock::Counter(CounterProfile::IntelIceLake);
         let request = ExecutionRequest {
             prepared: &inputs,
             ..*base
@@ -1229,15 +1200,9 @@ fn counter_identity_requires_an_attributable_matching_engine_report() {
         assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
         raw["counter_profile"] = json!("intel-0x5111c4");
         assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
-        inputs
-            .profile
-            .semantic_parameters
-            .insert("counter".into(), "unknown".into());
-        let request = ExecutionRequest {
-            prepared: &inputs,
-            ..*base
-        };
-        assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
+        let mut json = serde_json::to_value(&inputs.profile).unwrap();
+        json["semantic_parameters"]["clock"]["counter"] = "unknown".into();
+        assert!(serde_json::from_value::<ExecutionProfile>(json).is_err());
     });
 }
 
@@ -1413,7 +1378,7 @@ fn committed_trigger_reports_correlate_arms_effects_cancellation_and_cutoff() {
 
 #[test]
 fn torn_writes_are_recorded_replayed_and_omitted_when_disabled() {
-    use seedbox::{counter::CounterProfile, store::ContentStore};
+    use seedbox::store::ContentStore;
     let dir = tempfile::tempdir().unwrap();
     let engine = dir.path().join("engine");
     std::fs::write(&engine, b"engine").unwrap();
@@ -1428,35 +1393,16 @@ fn torn_writes_are_recorded_replayed_and_omitted_when_disabled() {
     )
     .unwrap();
     let original = executor.profile();
-    // Off adds nothing; the host policy parameters #83 records stay as they are.
-    assert!(!original
-        .semantic_parameters
-        .contains_key("disk_loss_sector_bytes"));
-    assert_eq!(original.semantic_parameters["memory_mb"], "512");
-    let encoded = serde_json::to_vec(&original).unwrap();
-    assert!(!vmm::recorded_torn_writes(&original).unwrap());
-    assert_eq!(
-        serde_json::to_vec(&executor.clone().with_torn_writes(false).profile()).unwrap(),
-        encoded
-    );
+    assert!(!original.semantic_parameters.torn_writes);
+    assert_eq!(original.semantic_parameters.memory_mb, 512);
+    assert_eq!(executor.clone().with_torn_writes(false).profile(), original);
     let enabled = executor.clone().with_torn_writes(true);
     let recorded: ExecutionProfile =
         serde_json::from_slice(&serde_json::to_vec(&enabled.profile()).unwrap()).unwrap();
+    assert!(recorded.semantic_parameters.torn_writes);
+    assert_ne!(recorded, original);
     assert_eq!(
-        recorded.semantic_parameters["disk_loss_sector_bytes"],
-        "512"
-    );
-    assert_eq!(
-        recorded.semantic_parameters["disk_loss_survival_probability"],
-        "0.5"
-    );
-    assert_ne!(serde_json::to_vec(&recorded).unwrap(), encoded);
-    let replay = executor
-        .clone()
-        .with_torn_writes(vmm::recorded_torn_writes(&recorded).unwrap());
-    assert_eq!(replay.profile(), recorded);
-    assert_eq!(
-        replay.performance_parameters(),
+        enabled.performance_parameters(),
         executor.performance_parameters()
     );
     assert_eq!(enabled.with_torn_writes(false).profile(), original);
@@ -1465,7 +1411,7 @@ fn torn_writes_are_recorded_replayed_and_omitted_when_disabled() {
         let original_world = vmm::world(base).unwrap();
         assert!(original_world.get("disk_loss").is_none());
         let mut prepared = base.prepared.clone();
-        prepared.profile = recorded;
+        prepared.profile.semantic_parameters.torn_writes = true;
         let request = ExecutionRequest {
             prepared: &prepared,
             ..*base
@@ -1482,27 +1428,10 @@ fn torn_writes_are_recorded_replayed_and_omitted_when_disabled() {
             serde_json::to_vec(&world).unwrap(),
             serde_json::to_vec(&original_world).unwrap()
         );
-        prepared
-            .profile
-            .semantic_parameters
-            .insert("disk_loss_survival_probability".into(), "2.0".into());
-        assert!(vmm::recorded_torn_writes(&prepared.profile)
-            .unwrap_err()
-            .to_string()
-            .contains("unknown disk loss parameters"));
-        let request = ExecutionRequest {
-            prepared: &prepared,
-            ..*base
-        };
-        assert!(vmm::world(&request).is_err());
-
-        let mut legacy = original.clone();
-        legacy.semantic_parameters.insert(
-            "disk_loss".into(),
-            "flush-stable/seeded-latest-sector-512-half/disk-loss-machine-incarnation/v1".into(),
-        );
-        let error = vmm::recorded_torn_writes(&legacy).unwrap_err().to_string();
-        assert!(error.contains("legacy disk_loss semantic parameter"));
+        // The disk model of older identities is not part of this format.
+        let mut legacy = serde_json::to_value(&original).unwrap();
+        legacy["semantic_parameters"]["disk_loss_survival_probability"] = "2.0".into();
+        assert!(serde_json::from_value::<ExecutionProfile>(legacy).is_err());
     });
 }
 
@@ -1513,12 +1442,7 @@ fn timebase_reports_validate_recorded_semantics_and_accept_legacy_counter_report
         assert_eq!(legacy.timebase, Some(Timebase::Counter));
         for timebase in [Timebase::Counter, Timebase::Pv] {
             let mut prepared = base.prepared.clone();
-            if timebase == Timebase::Pv {
-                prepared
-                    .profile
-                    .semantic_parameters
-                    .insert("timebase".into(), "pv".into());
-            }
+            prepared.profile.semantic_parameters.clock = Clock::new(timebase, CounterProfile::Zen);
             let request = ExecutionRequest {
                 prepared: &prepared,
                 ..*base
@@ -1548,32 +1472,19 @@ fn timebase_reports_validate_recorded_semantics_and_accept_legacy_counter_report
                 timebase == Timebase::Counter
             );
         }
-        let mut prepared = base.prepared.clone();
-        prepared
-            .profile
-            .semantic_parameters
-            .insert("timebase".into(), "future".into());
-        let error = vmm::recorded_timebase(&prepared.profile)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("recorded --timebase future: expected counter or pv"));
+        let mut json = serde_json::to_value(&base.prepared.profile).unwrap();
+        json["semantic_parameters"]["clock"] = "future".into();
+        assert!(serde_json::from_value::<ExecutionProfile>(json).is_err());
     });
 }
 
 #[test]
 fn pv_reports_may_omit_counter_profile_but_counter_reports_must_not() {
-    use seedbox::counter::CounterProfile;
     fixture(|base| {
         let mut prepared = base.prepared.clone();
-        prepared
-            .profile
-            .semantic_parameters
-            .insert("counter".into(), CounterProfile::IntelSkylake.name().into());
-        for timebase in [Timebase::Counter, Timebase::Pv] {
-            prepared
-                .profile
-                .semantic_parameters
-                .insert("timebase".into(), timebase.name().into());
+        for clock in [Clock::Counter(CounterProfile::IntelSkylake), Clock::Pv] {
+            prepared.profile.semantic_parameters.clock = clock;
+            let timebase = clock.timebase();
             let request = ExecutionRequest {
                 prepared: &prepared,
                 ..*base
@@ -1589,6 +1500,7 @@ fn pv_reports_may_omit_counter_profile_but_counter_reports_must_not() {
                     .contains("VMM report is missing its counter profile"));
             } else {
                 assert_eq!(parsed.unwrap().timebase, Some(Timebase::Pv));
+                continue;
             }
             raw["counter_profile"] = json!(CounterProfile::IntelSkylake.name());
             assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
@@ -1606,12 +1518,7 @@ fn deferred_tx_report_must_match_semantic_parameter_and_legacy_reports_mean_off(
     fixture(|base| {
         for enabled in [false, true] {
             let mut prepared = base.prepared.clone();
-            if enabled {
-                prepared
-                    .profile
-                    .semantic_parameters
-                    .insert("deferred_tx".into(), "true".into());
-            }
+            prepared.profile.semantic_parameters.deferred_tx = enabled;
             let request = ExecutionRequest {
                 prepared: &prepared,
                 ..*base
@@ -1633,15 +1540,13 @@ fn checkpoint_semantics_bind_parent_and_report_and_fail_closed() {
     fixture(|base| {
         assert!(vmm::world(base).unwrap().get("checkpoint").is_none());
         let mut inputs = base.prepared.clone();
-        inputs
-            .profile
-            .semantic_parameters
-            .insert("checkpoint_at_ns".into(), "500".into());
-        assert!(vmm::recorded_checkpoint(&inputs.profile).is_err());
-        inputs
-            .profile
-            .semantic_parameters
-            .insert("checkpoint_branch_seed".into(), "42".into());
+        let mut json = serde_json::to_value(&inputs.profile).unwrap();
+        json["semantic_parameters"]["checkpoint"] = json!({"at_ns": 500});
+        assert!(serde_json::from_value::<ExecutionProfile>(json).is_err());
+        inputs.profile.semantic_parameters.checkpoint = Some(Checkpoint {
+            at_ns: 500,
+            branch_seed: 42,
+        });
         let request = ExecutionRequest {
             prepared: &inputs,
             ..*base
@@ -1663,11 +1568,9 @@ fn checkpoint_semantics_bind_parent_and_report_and_fail_closed() {
         assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
         raw["checkpoint"]["branch_seed"] = json!(43);
         assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
-        inputs
-            .profile
-            .semantic_parameters
-            .insert("checkpoint_at_ns".into(), "0500".into());
-        assert!(vmm::recorded_checkpoint(&inputs.profile).is_err());
+        let mut json = serde_json::to_value(&inputs.profile).unwrap();
+        json["semantic_parameters"]["checkpoint"]["at_ns"] = "0500".into();
+        assert!(serde_json::from_value::<ExecutionProfile>(json).is_err());
     });
 }
 
@@ -1681,19 +1584,18 @@ fn checkpoint_timer_and_tx_modes_bind_cli_and_engine_metadata() {
                 [(false, false), (true, false), (false, true), (true, true)]
             {
                 let mut prepared = base.prepared.clone();
-                prepared.profile.semantic_parameters.extend([
-                    ("checkpoint_at_ns".into(), "500".into()),
-                    ("checkpoint_branch_seed".into(), "42".into()),
-                    ("timebase".into(), timebase.into()),
-                ]);
-                for (key, enabled) in [("page_timer", page_timer), ("deferred_tx", deferred_tx)] {
-                    if enabled {
-                        prepared
-                            .profile
-                            .semantic_parameters
-                            .insert(key.into(), "true".into());
-                    }
-                }
+                let parameters = &mut prepared.profile.semantic_parameters;
+                parameters.checkpoint = Some(Checkpoint {
+                    at_ns: 500,
+                    branch_seed: 42,
+                });
+                parameters.clock = if timebase == "pv" {
+                    Clock::Pv
+                } else {
+                    Clock::Counter(CounterProfile::Zen)
+                };
+                parameters.page_timer = page_timer;
+                parameters.deferred_tx = deferred_tx;
                 let world = vmm::world(&ExecutionRequest {
                     prepared: &prepared,
                     ..*base
@@ -1724,10 +1626,7 @@ fn checkpoint_timer_and_tx_modes_bind_cli_and_engine_metadata() {
                 for (j, world) in worlds.iter().enumerate() {
                     let mut raw = report();
                     raw["timebase"] = json!(timebase);
-                    raw["deferred_tx"] = json!(prepared
-                        .profile
-                        .semantic_parameters
-                        .contains_key("deferred_tx"));
+                    raw["deferred_tx"] = json!(prepared.profile.semantic_parameters.deferred_tx);
                     raw["checkpoint"] = world["checkpoint"].clone();
                     let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request);
                     if i == j {
@@ -1741,14 +1640,8 @@ fn checkpoint_timer_and_tx_modes_bind_cli_and_engine_metadata() {
                 }
             }
             let mut restored_off = inputs.pop().unwrap();
-            restored_off
-                .profile
-                .semantic_parameters
-                .remove("page_timer");
-            restored_off
-                .profile
-                .semantic_parameters
-                .remove("deferred_tx");
+            restored_off.profile.semantic_parameters.page_timer = false;
+            restored_off.profile.semantic_parameters.deferred_tx = false;
             assert_eq!(
                 vmm::world(&ExecutionRequest {
                     prepared: &restored_off,
@@ -1769,28 +1662,17 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
         std::fs::write(&input, b"retained input").unwrap();
         let mut artifacts = BTreeMap::from([(ContentDigest::of(b"retained input"), input)]);
         let mut inputs = base.prepared.clone();
-        inputs
-            .profile
-            .semantic_parameters
-            .insert("checkpoint_at_ns".into(), "500".into());
-        inputs
-            .profile
-            .semantic_parameters
-            .insert("checkpoint_branch_seed".into(), "42".into());
+        inputs.profile.semantic_parameters.checkpoint = Some(Checkpoint {
+            at_ns: 500,
+            branch_seed: 42,
+        });
         let ordinary = vmm::world(&ExecutionRequest {
             prepared: &inputs,
             artifacts: &artifacts,
             ..*base
         })
         .unwrap();
-        inputs
-            .profile
-            .semantic_parameters
-            .insert("disk_loss_sector_bytes".into(), "512".into());
-        inputs
-            .profile
-            .semantic_parameters
-            .insert("disk_loss_survival_probability".into(), "0.5".into());
+        inputs.profile.semantic_parameters.torn_writes = true;
         let cfg = vmm::world(&ExecutionRequest {
             prepared: &inputs,
             artifacts: &artifacts,
@@ -1816,10 +1698,7 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
         .unwrap();
         assert_eq!(cfg["checkpoint"]["parent_identity"], parent);
         let mut pv_inputs = inputs.clone();
-        pv_inputs
-            .profile
-            .semantic_parameters
-            .insert("timebase".into(), "pv".into());
+        pv_inputs.profile.semantic_parameters.clock = Clock::Pv;
         let pv_world = vmm::world(&ExecutionRequest {
             prepared: &pv_inputs,
             artifacts: &artifacts,
@@ -1844,14 +1723,9 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
         let mut deferred_worlds = Vec::new();
         for (timebase, off_world) in [(Timebase::Counter, &cfg), (Timebase::Pv, &pv_world)] {
             let mut deferred_inputs = inputs.clone();
-            deferred_inputs
-                .profile
-                .semantic_parameters
-                .insert("timebase".into(), timebase.name().into());
-            deferred_inputs
-                .profile
-                .semantic_parameters
-                .insert("deferred_tx".into(), "true".into());
+            deferred_inputs.profile.semantic_parameters.clock =
+                Clock::new(timebase, CounterProfile::Zen);
+            deferred_inputs.profile.semantic_parameters.deferred_tx = true;
             let deferred_world = vmm::world(&ExecutionRequest {
                 prepared: &deferred_inputs,
                 artifacts: &artifacts,
@@ -1897,14 +1771,10 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
             .unwrap();
             assert_eq!(moved["checkpoint"], original["checkpoint"]);
         }
-        inputs
-            .profile
-            .semantic_parameters
-            .insert("checkpoint_at_ns".into(), "600".into());
-        inputs
-            .profile
-            .semantic_parameters
-            .insert("checkpoint_branch_seed".into(), "43".into());
+        inputs.profile.semantic_parameters.checkpoint = Some(Checkpoint {
+            at_ns: 600,
+            branch_seed: 43,
+        });
         let moved = vmm::world(&ExecutionRequest {
             prepared: &inputs,
             artifacts: &artifacts,
@@ -1929,7 +1799,7 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
 
 #[test]
 fn explicit_combined_cli_is_retained_with_its_actual_version() {
-    use seedbox::{counter::CounterProfile, store::ContentStore};
+    use seedbox::store::ContentStore;
     let directory = tempfile::tempdir().unwrap();
     let store = ContentStore::new(directory.path().join("store"));
     let binary = Path::new(env!("CARGO_BIN_EXE_seedbox"));
@@ -1949,13 +1819,14 @@ fn explicit_combined_cli_is_retained_with_its_actual_version() {
     )
     .unwrap();
     let profile = executor.profile();
+    let descriptor = profile.semantic_parameters.engine.as_ref().unwrap();
     assert_eq!(
-        profile.semantic_parameters["simulator_version"],
+        descriptor.simulator_version,
         version.trim().strip_prefix("seedbox ").unwrap()
     );
     assert_eq!(
-        profile.semantic_parameters["engine_executable_kind"],
-        seedbox::engine::INTERNAL_WORKER_V1
+        descriptor.kind,
+        seedbox::engine::ExecutableKind::InternalWorker
     );
     assert_eq!(
         profile.engine,

@@ -21,12 +21,9 @@ pub enum Architecture {
 }
 impl Architecture {
     pub fn from_profile(profile: &crate::execution::ExecutionProfile) -> Result<Self> {
-        match profile
-            .semantic_parameters
-            .get("guest_arch")
-            .map(String::as_str)
-        {
-            None if profile.backend != "seedbox-hvf" => Ok(Self::Amd64),
+        let engine = profile.semantic_parameters.engine.as_ref();
+        match engine.map(|engine| engine.guest_arch.as_str()) {
+            None if profile.backend != crate::execution::Backend::Hvf => Ok(Self::Amd64),
             Some("x86_64") => Ok(Self::Amd64),
             Some("aarch64") => Ok(Self::Arm64),
             value => Err(Error::Integrity(format!(

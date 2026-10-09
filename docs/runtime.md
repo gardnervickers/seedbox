@@ -114,17 +114,13 @@ results and witness traces generated from main.
 
 `x-seedbox.disk.torn_writes: true` enables torn writes (off by default). Off retains the
 `flush-stable/drop-all-unflushed/v1` model: crashes drop all unflushed sectors.
-The omitted setting adds no profile or world JSON field and leaves the existing
-disk digest and witness inputs unchanged. Building the modified VMM still changes
-the engine binary hash, as every VMM source change does.
+Off adds no world JSON field and leaves the existing disk digest and witness
+inputs unchanged.
 
-When enabled, the profile retains semantic parameters
-`disk_loss_sector_bytes = "512"` and
-`disk_loss_survival_probability = "0.5"`; each disk report carries the same
-numeric policy under `disk.fault_model`. Replay restores this policy from the
-retained profile; there is no replay override or environment variable. A retained
-legacy profile containing the old `disk_loss` semantic parameter is rejected as
-not replay-compatible by this CLI. The low-level world JSON uses a top-level
+The profile records the choice as `torn_writes: true|false`; each disk report
+carries the numeric policy (512-byte sectors, survival probability 0.5) under
+`disk.fault_model`. Replay restores this policy from the retained profile; there
+is no replay override or environment variable. The low-level world JSON uses a top-level
 `disk_loss` object, for example
 `{"sector_bytes": 512, "survival_probability": 0.5}`. Unknown or non-object
 parameters are rejected.
@@ -333,10 +329,11 @@ This is a semantic choice with no environment override. Counter time advances
 with retired guest branches; PV compute between exits costs no virtual time,
 with progress charged at guest exits, syscalls and clock reads. The same seed
 under the two models produces different identities and retained manifests.
-The semantic profile records `timebase` only for PV, preserving existing counter
-identity bytes and hashes. Replay reads the recorded choice, accepts no timebase
-override, and refuses unknown recorded values or a backend with a different
-timebase, even with `--vmm`. Bundles preserve the choice.
+The semantic profile records it as `clock`: `{"counter": PROFILE}` with the
+branch counter profile, or `"pv"`, which carries no counter. Replay reads the
+recorded choice, accepts no timebase override, and refuses a backend with a
+different timebase, even with `--vmm`; a manifest with an unknown value does
+not decode. Bundles preserve the choice.
 The VMM report is checked against it; reports from older engines without a
 timebase field mean counter. Run/replay and inspect print `timebase: VALUE`.
 `inspect --json` exposes the semantic profile and, when present, the VMM's
@@ -362,11 +359,9 @@ uses page disarm and avoids PIT mode port writes.
 The VMM report includes `machines[].pio_total`: all KVM PIO exits across incarnations, including
 `0x52c` yields and rolled-back exits, outside witnesses. The existing `pio` count
 excludes yields.
-The requested semantic parameter is retained
-as `page_timer: true` only when enabled. Replay restores it without an override.
-Timer jitter uses the existing seeded stream. This changes enabled-run timing
-and witnesses; omission preserves the existing identity encoding for the same
-engine and kernel inputs.
+The profile records `page_timer: true|false`. Replay restores it without an override.
+Timer jitter uses the existing seeded stream. Enabling it changes run timing
+and witnesses.
 Checkpoint parent identities also bind the page timer only when enabled,
 preventing checkpoint reuse across timer modes while preserving feature-off hashes.
 This composes with deferred TX's `+deferred-tx` timebase suffix: all four option
@@ -580,9 +575,9 @@ delivery, slice boundaries and halt, so suppressed kicks do not stall queues.
 Without negotiation, the existing NO_INTERRUPT/NO_NOTIFY path is retained.
 
 `x-seedbox.machine.deferred_tx: true` (off by default) enables deferred TX; the raw
-VMM accepts `--deferred-tx`. This is a semantic option: enabling it records
-`deferred_tx=true` in the profile and changes packet timing and run identity.
-Off omits the parameter and retains the behavior at `13b7f85`, including legacy
+VMM accepts `--deferred-tx`. This is a semantic option: the profile records
+`deferred_tx: true|false`, and enabling it changes packet timing and run identity.
+Off retains the behavior at `13b7f85`, including legacy
 kick-driven TX. Replay uses the retained setting with no override, including
 when changing engines. The engine report declares the setting; an older report
 without it means off. This change builds a new engine hash in either mode.

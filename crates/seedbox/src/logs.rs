@@ -117,7 +117,7 @@ impl Reader {
                 let record_bytes = RECORD_BYTES as u64;
                 if size < header
                     || size > header + record_bytes * MAX_CHUNKS as u64
-                    || (size - header) % record_bytes != 0
+                    || !(size - header).is_multiple_of(record_bytes)
                 {
                     return Err(bad(
                         directory,

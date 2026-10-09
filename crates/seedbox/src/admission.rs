@@ -84,23 +84,9 @@ pub fn required_policy() -> RequiredPolicy {
     }
 }
 
+/// The ABI and channel are fixed by the profile's type; memory needs a range.
 pub fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
-    crate::vmm::recorded_counter(profile)?;
-    crate::vmm::recorded_deferred_tx(profile)?;
-    let policy = required_policy();
-    for (name, value) in [
-        ("guest_abi", &policy.guest_abi),
-        ("control_channel", &policy.control_channel),
-    ] {
-        if profile.semantic_parameters.get(name) != Some(value) {
-            return Err(Error::Integrity(format!("unsupported {name}")));
-        }
-    }
-    let memory = profile
-        .semantic_parameters
-        .get("memory_mb")
-        .and_then(|value| value.parse::<u32>().ok());
-    if memory.is_none_or(|value| !(64..=65536).contains(&value)) {
+    if !(64..=65536).contains(&profile.semantic_parameters.memory_mb) {
         return Err(Error::Integrity(
             "admitted profile requires memory_mb in 64..65536".into(),
         ));
@@ -593,10 +579,10 @@ mod cleanup_tests {
         impl ExecutionBackend for Refused {
             fn profile(&self) -> ExecutionProfile {
                 ExecutionProfile {
-                    backend: "fixture".into(),
+                    backend: Backend::Other("fixture".into()),
                     engine: ContentDigest::of(b"synthetic"),
                     witness_mode: WitnessMode::Exits,
-                    semantic_parameters: BTreeMap::new(),
+                    semantic_parameters: SemanticParameters::new(512),
                 }
             }
             fn preflight(&self, _: Option<&Path>) -> Result<()> {
