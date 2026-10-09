@@ -66,7 +66,6 @@ jobs:
             crates/seedbox-vmm -> target
             crates/seedbox-arm64 -> target
           cache-bin: false
-          cache-on-failure: true
       - name: Build and root guest assets from the checkout
         run: |
           nix build .#guestKernel .#runtimeArchive --out-link "$RUNNER_TEMP/pv-assets"

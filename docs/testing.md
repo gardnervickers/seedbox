@@ -134,7 +134,8 @@ collected toward a 5 GiB store before saving (live roots can exceed this target)
 The cache is saved before tests so failed tests do not discard expensive builds.
 Rust caching uses the Nix-selected compiler and all three workspaces, retaining
 compiled dependencies while pruning workspace binaries and incremental outputs.
-It saves dependency progress even after test failures. Source commits do not
+It saves only successful builds so canceled or incomplete builds cannot occupy
+an immutable cache key. Source commits do not
 create a fresh full-target cache each time. Cache hits are recorded in the job
 summary. GitHub's branch-scoped cache isolation keeps PR caches out of main.
 The repository retains its existing 10 GB cache eviction limit; diagnostic
