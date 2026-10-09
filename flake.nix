@@ -13,7 +13,6 @@
             SEEDBOX_TC = "${pkgs.iproute2}/bin/tc";
             SEEDBOX_BUSYBOX = "${pkgs.pkgsStatic.busybox}/bin/busybox";
             SEEDBOX_MKE2FS = "${pkgs.pkgsStatic.e2fsprogs.bin}/bin/mke2fs";
-            SEEDBOX_BUSYBOX_SOURCE = "${pkgs.pkgsStatic.busybox.src}";
             SEEDBOX_E2FSPROGS_SOURCE = "${pkgs.pkgsStatic.e2fsprogs.src}";
             SEEDBOX_MUSL_SOURCE = "${pkgs.pkgsStatic.stdenv.cc.libc.src}";
           };
@@ -29,8 +28,7 @@
               cpio gzip curl jq python3 gnumake bc bison flex perl
               docker-client podman
             ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-              elfutils elfutils.dev openssl.dev pkgsStatic.stdenv.cc iproute2 go
-              skopeo umoci util-linux
+              elfutils elfutils.dev openssl.dev pkgsStatic.stdenv.cc iproute2 go util-linux
             ];
           } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux linuxEnvironment);
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
@@ -44,7 +42,7 @@
           networkTools = pkgs.iproute2;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           # Name outputs explicitly so selecting helpers never imports the kernel recipe.
-          inherit (import ./nix/runtime.nix { inherit pkgs; }) runtimeAssets preparationImage runtimeArchive runtimeSources;
+          inherit (import ./nix/runtime.nix { inherit pkgs; }) runtimeAssets runtimeArchive runtimeSources;
           inherit (import ./nix/kernels.nix { inherit pkgs; }) guestKernel guestKernelArchive guestKernelSources;
         }
         );

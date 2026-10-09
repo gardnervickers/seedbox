@@ -5,7 +5,6 @@
     "tools/runtime/inputs.json",
     "tools/runtime/package.py",
     "tools/runtime/build-assets.sh",
-    "tools/runtime/filesystem.py",
     "tools/linux-runtime/package.py",
     "guest/build-compose.sh",
     "guest/compose-init.c",

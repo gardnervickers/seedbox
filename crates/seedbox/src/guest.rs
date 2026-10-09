@@ -164,14 +164,8 @@ fn list(output: &mut Vec<u8>, items: &[String]) -> Result<()> {
     Ok(())
 }
 
-pub fn build_initramfs(
-    rootfs: &Path,
-    init: &Path,
-    busybox: &Path,
-    recipe: &[u8],
-    output: &Path,
-) -> Result<()> {
-    build_initramfs_with(rootfs, init, busybox, None, recipe, output)
+pub fn build_initramfs(rootfs: &Path, init: &Path, recipe: &[u8], output: &Path) -> Result<()> {
+    build_initramfs_with(rootfs, init, None, recipe, output)
 }
 
 /// As `build_initramfs`, also packaging `mke2fs` for a machine whose
@@ -179,7 +173,6 @@ pub fn build_initramfs(
 pub fn build_initramfs_with(
     rootfs: &Path,
     init: &Path,
-    busybox: &Path,
     mke2fs: Option<&Path>,
     recipe: &[u8],
     output: &Path,
@@ -187,7 +180,6 @@ pub fn build_initramfs_with(
     let mut archive = Newc::new(fs::File::create(output)?);
     archive.owned("seedbox", 0o040755, &[])?;
     archive.owned("init", 0o100755, &fs::read(init)?)?;
-    archive.owned("seedbox/busybox", 0o100755, &fs::read(busybox)?)?;
     if let Some(mke2fs) = mke2fs {
         archive.owned("seedbox/mke2fs", 0o100755, &fs::read(mke2fs)?)?;
     }
@@ -201,7 +193,6 @@ pub fn build_initramfs_with(
 pub fn build_initramfs_from_tar(
     rootfs: &Path,
     init: &Path,
-    busybox: &Path,
     mke2fs: Option<&Path>,
     recipe: &[u8],
     output: &Path,
@@ -209,7 +200,6 @@ pub fn build_initramfs_from_tar(
     let mut archive = Newc::new(fs::File::create(output)?);
     archive.owned("seedbox", 0o040755, &[])?;
     archive.owned("init", 0o100755, &fs::read(init)?)?;
-    archive.owned("seedbox/busybox", 0o100755, &fs::read(busybox)?)?;
     if let Some(path) = mke2fs {
         archive.owned("seedbox/mke2fs", 0o100755, &fs::read(path)?)?;
     }

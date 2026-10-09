@@ -21,9 +21,13 @@ tar = "0.4"
 walkdir = "2"
 flate2 = "1"
 xattr = "1"
+bollard = { version = "0.21", features = ["buildkit", "chrono"] }
+futures-util = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }
+globset = "0.4"
+tokio = { version = "1", features = ["rt", "time", "fs", "macros"] }
 libc.workspace = true
 signal-hook = "0.3"
-ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 seedbox-vmm = { path = "../seedbox-vmm" }

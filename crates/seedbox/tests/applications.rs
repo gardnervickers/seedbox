@@ -17,11 +17,6 @@ fn invoke(cli: &Path, directory: &Path, name: &str, args: &[&str]) -> Result<Str
         .stderr(log);
     if args.first() != Some(&"diff") {
         command.arg("--state").arg(directory.join("state"));
-        // Native timestamp control is Linux-only; Mac uses container preparation.
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        if args.first() == Some(&"run") {
-            command.args(["--build-epoch", "0"]);
-        }
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         if let Some(cpu) = std::env::var_os("SEEDBOX_TEST_CPU") {
             command.arg("--cpu").arg(cpu);

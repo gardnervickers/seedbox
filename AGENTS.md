@@ -9,35 +9,16 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
 - `crates/seedbox` is the default package: `cargo run -- <command>` runs the CLI.
   Use `cargo run --release -- <command>` or the release executable for guest runs;
   the bundled engine uses the CLI build profile.
-- Linux x86-64 and Apple Silicon application builds use `cargo build --release`
-  inside `nix develop`. Cargo builds only the native CLI and signs the Mac
-  executable with the Hypervisor entitlement. Guest assets are never built or
-  downloaded by Cargo. `nix/runtime.nix` owns `runtimeAssets`, `preparationImage`,
-  `runtimeArchive` and `runtimeSources`; `nix/kernels.nix` builds kernels separately.
-  Native Linux CI builds/publishes both architectures when their declared input
-  paths change. Releases use ordinary CI run labels; Cargo does not hash sources
-  or embed release identifiers. CLI/application changes and kernel-only changes
-  must not rebuild helpers. Kernel metadata lives in
-  `kernel/source.json`. The optional legacy `SEEDBOX_LINUX_RUNTIME_BUNDLE` build
-  input still embeds only guest kernel/static helpers plus notices/provenance.
-  Runtime extraction remains bounded and private. Run/prepare/explore fetch
-  the latest published guest assets on a cache miss, with progress and verified
-  atomic caching. Cache hits require no HTTP or version admission.
-  `--kernel` and `--runtime-assets` (and their environment path overrides) bypass
-  their respective downloads; manual native Linux Nix builds are documented in
-  `tools/runtime/README.md`. The CLI owns HTTP configuration, credentials, cache
-  locations and platform/default selection; library callers supply explicit inputs.
-  Doctor selects only the cached or explicit kernel and never downloads, creates
-  state or prepares images. Replay uses retained bytes and never calls the
-  downloader, a compiler or container engine. Release runs ignore legacy kernel
-  artifact-directory searches; those remain for unbundled development builds.
-  Explicit `--build-epoch` retains native Podman preparation with released
-  guest assets.
-- Runtime preparation uses a Docker/Podman endpoint and a Linux filesystem-tools
-  container, with no second Seedbox executable. Native Mac application profiles
-  use `arm64-world-v1` with their actual guest inputs and diagnostic HVF host
-  observations. CLI platform selection lives in `cli/backends.rs`; the library
-  receives explicit inputs and cancellation.
+- Build the native CLI with `cargo build --release`; guest assets are built
+  explicitly with `bash tools/build-assets.sh`. Linux uses Nix; Mac uses a
+  Docker-compatible Linux build container. Assets occupy one slot per architecture
+  in the OS temporary directory. Release builds embed the static guest helpers.
+  Seedbox never starts an engine daemon or automatically downloads guest assets. CLI lookup owns environment access;
+  library callers supply paths and cancellation explicitly.
+- Application images are built/pulled/exported using Bollard through the user's
+  Docker-compatible engine socket. The CLI resolves connections; library callers
+  supply an explicit client. The engine owns build caching and layer application.
+  Preparation never starts application containers. Replay never contacts the engine.
 - `crates/seedbox-vmm` is Linux-only and deliberately **not** a workspace member.
   It is its own workspace with its own `Cargo.lock`, because cargo unifies
   dependency features across one build. The public CLI links its library only
@@ -258,8 +239,8 @@ deliberately change one.
 - Use `Error::Setup` for a problem the user can fix (a missing file, a missing
   tool, the wrong host, a permission). It prints without a category prefix.
   Its message starts lowercase, names the path, flag or value involved, and
-  says how to fix it: `--kernel /x/bzImage: not found`, or `skopeo not found;
-  install it or enter nix develop`.
+  says how to fix it: `--kernel /x/bzImage: not found`, or `guest assets missing;
+  run bash tools/build-assets.sh`.
 - Never let a bare `io::Error` from a user-supplied path or a spawned program
   reach the user. Check the path first (`existing`), or add context as
   `oci::spawn_error` does.

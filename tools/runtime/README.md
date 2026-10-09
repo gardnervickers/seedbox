@@ -1,74 +1,50 @@
-# Guest helper releases
+# Build guest assets
 
-`cargo build --release` compiles the native CLI and signs it on Mac. It never
-starts a container, invokes Nix or builds Linux helpers. Native Linux CI builds
-those helpers separately through `nix/runtime.nix`:
+From the repository root:
 
-- `runtimeAssets`: static supervisor, BusyBox, mke2fs and license notices.
-- `preparationImage`: Skopeo, umoci, Python and tar for Linux filesystem handling.
-- `runtimeArchive`: both outputs in one ordinary `.tar.gz` release asset.
-- `runtimeSources`: the helper recipe, locked Nix inputs and upstream helper sources.
+```sh
+bash tools/build-assets.sh
+```
 
-The filesystem-tools image contains no Seedbox executable. It runs only during
-application preparation, through the user's Docker/Podman endpoint. The native
-CLI owns configuration, validation, identity and boot archive assembly.
+On Linux, this uses Nix directly. On Apple Silicon macOS, start a
+Docker-compatible Linux engine such as Podman first. The script runs Nix in a
+throwaway Linux build container. Seedbox uses the engine API for application images; Cargo never invokes it.
+Use `SEEDBOX_ASSET_BUILDER=podman` or `docker` to choose one explicitly.
 
-## Download and cache
+The command builds the patched kernel, static supervisor and mke2fs.
+It installs `kernel` and `runtime.tar.gz` under
+`/tmp/seedbox-UID/ARCH` (override the parent directory with `SEEDBOX_ASSET_DIR`).
+The directory is private to your user. Rebuilds replace these two files rather
+than retaining a version history. `cargo build --release` embeds the helper
+archive in Seedbox; the archive is no longer needed to run that executable.
+Seedbox extracts its embedded helpers into a private per-invocation temporary
+directory and removes that extraction when finished. Only the kernel remains
+a separate runtime file.
+Nix and the container engine retain their own ordinary build/image storage.
 
-The [Guest assets workflow](../../.github/workflows/kernels.yml) builds native
-ARM64 and x86-64 archives. Pull requests upload temporary artifacts; pushes to
-`main` publish `seedbox-runtime-aarch64.tar.gz`, `seedbox-runtime-x86_64.tar.gz`,
-corresponding helper source and checksums. Both builds must succeed before
-publication. Failed draft uploads can resume; published assets are never replaced.
+The first build needs public source downloads, but no private GitHub credentials.
+If the OS clears the temporary assets, rerun the command. Runtime commands never
+build or download missing guest assets.
 
-`tools/runtime/inputs.json` lists helper and filesystem-tool build inputs. CI
-checks changed paths and publishes `runtime-<CI run number>` when those inputs
-change. Kernel recipes, patches and configuration are separate; the actual shared
-supervisor header is an input to both builds. CLI and application changes build
-neither family. Cargo computes no source fingerprint and embeds no release ID.
+## Build outputs separately
 
-On first preparation, Seedbox selects the latest published helper release,
-announces the download on stderr and verifies GitHub's SHA-256 asset digest
-before installing it atomically. The archive cache
-is `~/Library/Caches/seedbox/assets` on Mac or `~/.cache/seedbox/assets` on Linux;
-`XDG_CACHE_HOME` overrides the parent. Each architecture has its own entry.
-Concurrent invocations share one download; interrupted transfers never become
-usable entries. Cached bytes are checked locally on reuse, without HTTP.
-The extracted tools live in a separate cache keyed by the archive checksum.
-To use newer assets, remove the architecture's download cache entry or select a
-local archive. No version or source fingerprint gates execution.
-
-Because this repository is private, downloads need `GH_TOKEN` or `GITHUB_TOKEN`
-with repository read access. Credentials are not stored in the cache or sent
-to redirected asset hosts. `--runtime-assets PATH` or `SEEDBOX_RUNTIME_ASSETS`
-selects a local archive and bypasses its download. Overrides are not restricted
-to a release hash. An invalid archive/cache reports an error before preparation.
-
-`doctor` needs only a cached or explicit kernel and never fetches helpers.
-Replay uses retained inputs and never reads helper caches or starts a container.
-
-## Build without private release access
-
-From an existing checkout on native Linux, use the same recipes as CI:
+On a native Linux builder, these are the same recipes used by the script and CI:
 
 ```sh
 nix build .#guestKernel --out-link kernel-output
 nix build .#runtimeArchive --out-link runtime-assets.tar.gz
-
-# Linux x86-64:
-./target/release/seedbox run examples/etcd --timebase pv \
-  --kernel ./kernel-output/bzImage --runtime-assets ./runtime-assets.tar.gz
 ```
 
-On ARM64 Linux the kernel output is `kernel-output/Image`. For an Apple Silicon
-Mac, build on ARM64 Linux, copy `Image` and the archive to the Mac, then run:
+Select your own outputs with `--kernel PATH` and `--runtime-assets PATH`, or
+`SEEDBOX_KERNEL` and `SEEDBOX_RUNTIME_ASSETS`. The kernel is `kernel-output/Image`
+on ARM64 and `kernel-output/bzImage` on x86-64. Match the guest architecture.
+These overrides accept locally built files without release/version admission.
 
-```sh
-./target/release/seedbox run examples/etcd \
-  --kernel ./Image --runtime-assets ./runtime-assets.tar.gz
-```
+CI can still publish guest artifacts. Automatic runtime downloads are deferred
+until public distribution is available; they are not part of the quick start.
+Replay uses its retained inputs and needs neither temporary assets nor a builder.
 
-These Nix outputs need a Linux builder. Neither command requires Seedbox release
-access; the first build still fetches public source/toolchain dependencies.
-Fully offline builds need those inputs already present. A running Docker/Podman
-engine is needed to prepare application images, including with manual assets.
+Set `SEEDBOX_BUILD_HELPERS=/path/to/runtime.tar.gz` to embed an explicit archive
+at build time. Release builds fail with the asset-build command if it is absent.
+Debug builds omit embedding for portable checks and can use the local helper
+archive or an explicit `--runtime-assets` override.

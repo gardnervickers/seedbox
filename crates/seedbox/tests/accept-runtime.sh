@@ -30,7 +30,7 @@ if test "${4:-}" = faults; then
     guest/compose-init.c -o "$output/compose-init-rejecting"
   "$SEEDBOX_STATIC_CC" -O2 -static -Wall -Wextra -Werror -DSEEDBOX_TEST_READY_DELAY_NS=4000000000ULL \
     guest/compose-init.c -o "$output/compose-init-delayed"
-  exec sudo -n env PATH="$PATH" SEEDBOX_BUSYBOX="$SEEDBOX_BUSYBOX" \
+  exec sudo -n env PATH="$PATH" \
     python3 examples/faults/run.py --seedbox "$cli" --vmm "$vmm" \
     --kernel "$kernel" --guest-init "$output/compose-init" --cpu "$cpu" \
     --state "$output/state" --output "$output" \
@@ -42,5 +42,5 @@ fi
 "$cli" init "$output/etcd" --template etcd
 # Root owns the inputs it will execute and the writable artifact store. Build
 # outputs above remain user-owned and are copied by the content store before use.
-sudo -n env PATH="$PATH" SEEDBOX_BUSYBOX="$SEEDBOX_BUSYBOX" \
+sudo -n env PATH="$PATH" \
   bash crates/seedbox/tests/runtime-cases.sh "$cli" "$vmm" "$kernel" "$cpu" "$output" "${4:-}"

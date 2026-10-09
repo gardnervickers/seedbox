@@ -1,35 +1,14 @@
-//! Actual cancellable OCI preparation path with transport executables, no image build.
-#![cfg(unix)]
+//! Native preparation retains immutable inputs and honors cancellation.
 use seedbox::{
     config,
     execution::{CancellationToken, ExecutionProfile, PreparationBackend, WitnessMode},
-    oci::OciTools,
+    oci::{ImageTransport, ImportedImage, RootFilesystem},
     preparation::{OciPreparer, PreparationContext},
     store::{ContentDigest, ContentStore},
     Error,
 };
-use std::{
-    collections::BTreeMap,
-    fs,
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
-    time::{Duration, Instant},
-};
-fn script(root: &Path, name: &str, body: &str) -> PathBuf {
-    let path = root.join(name);
-    fs::write(
-        &path,
-        format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo fixture-v1; exit 0; fi\n{body}\n"),
-    )
-    .unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-    path
-}
-fn fixture(
-    root: &Path,
-    skopeo: PathBuf,
-    umoci: PathBuf,
-) -> (OciPreparer, config::Simulation, ContentStore) {
+use std::{collections::BTreeMap, fs, path::Path};
+fn fixture(root: &Path) -> (OciPreparer, config::Simulation, ContentStore) {
     let kernel = root.join("kernel");
     let engine = root.join("engine");
     let helper = root.join("helper");
@@ -47,219 +26,96 @@ fn fixture(
         semantic_parameters: BTreeMap::from([("memory_mb".into(), "1024".into())]),
     };
     let preparer = OciPreparer {
-        tools: OciTools {
-            skopeo,
-            umoci,
-            docker: root.join("must-not-run"),
-            build_epoch: None,
-        },
         kernel,
         engine,
-        init: helper.clone(),
-        busybox: helper,
+        init: helper,
         mke2fs: None,
         profile,
+        docker: bollard::Docker::connect_with_http(
+            "http://127.0.0.1:9",
+            10,
+            bollard::API_DEFAULT_VERSION,
+        )
+        .unwrap(),
     };
     let simulation=config::parse("name: preparation-test\nservices:\n  app: {image: example/app}\nx-seedbox:\n  version: 1\n  seed: 10\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n",&root.join("compose.yaml"),&BTreeMap::new()).unwrap();
     (preparer, simulation, store)
 }
+
 #[test]
-fn failed_copy_retains_raw_phase_evidence_after_preparer_and_scratch_drop() {
+fn cancelled_preparation_never_imports_images() {
     let root = tempfile::tempdir().unwrap();
-    let skopeo = script(
-        root.path(),
-        "skopeo",
-        "printf 'copy failed\\377' >&2; exit 7",
-    );
-    let umoci = script(root.path(), "umoci", "exit 0");
-    let (preparer, simulation, store) = fixture(root.path(), skopeo, umoci);
-    let context =
-        PreparationContext::new(root.path().join("evidence"), CancellationToken::default())
-            .unwrap();
-    assert!(matches!(
-        preparer.prepare_cancellable(&simulation, &store, &context),
-        Err(Error::Execution(_))
-    ));
-    drop(preparer);
-    drop(context);
-    assert_eq!(
-        fs::read(root.path().join("evidence/app-copy.log")).unwrap(),
-        b"copy failed\xff"
-    );
-    let receipt: serde_json::Value =
-        serde_json::from_slice(&fs::read(root.path().join("evidence/app-copy.json")).unwrap())
-            .unwrap();
-    assert!(receipt["status"].as_str().unwrap().contains('7'));
-    assert_eq!(receipt["reaped"], true);
-    assert_eq!(receipt["output_complete"], true);
-}
-#[test]
-fn unpack_failure_retains_versions_copy_and_unpack_after_scratch_drop() {
-    let root = tempfile::tempdir().unwrap();
-    let raw = root.path().join("raw");
-    fs::create_dir(&raw).unwrap();
-    let config = br#"{"os":"linux","architecture":"amd64","config":{"Cmd":["/app"]}}"#;
-    let digest = ContentDigest::of(config);
-    fs::write(raw.join(digest.hex()), config).unwrap();
-    fs::write(raw.join("manifest.json"),serde_json::to_vec(&serde_json::json!({"schemaVersion":2,"config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":format!("sha256:{}",digest.hex()),"size":config.len()},"layers":[]})).unwrap()).unwrap();
-    let skopeo=script(root.path(),"skopeo",&format!("for arg do last=$arg; done; case \"$last\" in dir:*) out=${{last#dir:}}; mkdir -p \"$out\"; cp '{}'/manifest.json '{}'/{} \"$out\";; esac; echo transport-opaque",raw.display(),raw.display(),digest.hex()));
-    let umoci = script(
-        root.path(),
-        "umoci",
-        "printf 'unpack failure\\376' >&2; exit 9",
-    );
-    let (preparer, simulation, store) = fixture(root.path(), skopeo, umoci);
-    let context =
-        PreparationContext::new(root.path().join("evidence"), CancellationToken::default())
-            .unwrap();
-    assert!(matches!(
-        preparer.prepare_cancellable(&simulation, &store, &context),
-        Err(Error::Execution(_))
-    ));
-    drop(preparer);
-    drop(context);
-    for phase in [
-        "app-skopeo-version",
-        "app-umoci-version",
-        "app-copy",
-        "app-normalize",
-        "app-unpack",
-    ] {
-        assert!(root.path().join(format!("evidence/{phase}.json")).is_file());
-        assert!(root.path().join(format!("evidence/{phase}.log")).is_file());
-    }
-    assert_eq!(
-        fs::read(root.path().join("evidence/app-unpack.log")).unwrap(),
-        b"unpack failure\xfe"
-    );
-}
-#[test]
-fn cancelled_copy_retains_command_and_cleanup_receipts_after_drop() {
-    let root = tempfile::tempdir().unwrap();
-    let ready = root.path().join("ready");
-    let skopeo = script(
-        root.path(),
-        "skopeo",
-        &format!(
-            "echo $$ > '{}'; echo raw-cancel-diagnostic; while :; do :; done",
-            ready.display()
-        ),
-    );
-    let umoci = script(root.path(), "umoci", "exit 0");
-    let (preparer, simulation, store) = fixture(root.path(), skopeo, umoci);
+    let (preparer, simulation, store) = fixture(root.path());
     let token = CancellationToken::default();
-    let context = PreparationContext::new(root.path().join("evidence"), token.clone()).unwrap();
-    std::thread::scope(|scope| {
-        let task = scope.spawn(|| preparer.prepare_cancellable(&simulation, &store, &context));
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while fs::read_to_string(&ready)
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
-            .is_none()
-        {
-            let within_deadline = Instant::now() < deadline;
-            if !within_deadline {
-                token.cancel();
-            }
-            assert!(within_deadline);
-            std::thread::yield_now();
-        }
-        token.cancel();
-        assert!(matches!(
-            task.join().unwrap(),
-            Err(Error::PreparationCancelled)
-        ));
-    });
-    drop(preparer);
-    drop(context);
-    assert_eq!(
-        fs::read(root.path().join("evidence/app-copy.log")).unwrap(),
-        b"raw-cancel-diagnostic\n"
-    );
-    let receipt: serde_json::Value =
-        serde_json::from_slice(&fs::read(root.path().join("evidence/app-copy.json")).unwrap())
-            .unwrap();
-    assert_eq!(receipt["cancelled"], true);
-    assert_eq!(receipt["reaped"], true);
+    token.cancel();
+    let context = PreparationContext::new(root.path().join("evidence"), token).unwrap();
+    assert!(matches!(
+        preparer.prepare_cancellable(&simulation, &store, &context),
+        Err(Error::PreparationCancelled)
+    ));
+    assert!(!context.directory.join("setup.json").exists());
 }
-
 #[test]
-fn direct_oci_preparation_refuses_invalid_profile_before_builder_admission() {
+fn invalid_profile_fails_before_image_import() {
     let root = tempfile::tempdir().unwrap();
-    let sentinel = root.path().join("tool-invoked");
-    let tool = script(
-        root.path(),
-        "sentinel",
-        &format!("touch '{}'; exit 9", sentinel.display()),
-    );
-    let (mut preparer, mut simulation, store) = fixture(root.path(), tool.clone(), tool.clone());
-    preparer.tools.docker = tool;
+    let (mut preparer, simulation, store) = fixture(root.path());
     preparer.profile.backend = "seedbox-kvm".into();
-    simulation.services.get_mut("app").unwrap().source = seedbox::config::ImageSource::Build {
-        context: root.path().to_path_buf(),
-        dockerfile: root.path().join("Dockerfile"),
-    };
-    let context =
-        PreparationContext::new(root.path().join("evidence"), CancellationToken::default())
-            .unwrap();
-    for epoch in [None, Some(0)] {
-        preparer.tools.build_epoch = epoch;
-        for result in [
-            preparer.prepare(&simulation, &store),
-            preparer.prepare_cancellable(&simulation, &store, &context),
-        ] {
-            let e = result.unwrap_err().to_string();
-            assert!(e.contains("unsupported guest_abi"), "{e}");
+    assert!(preparer
+        .prepare(&simulation, &store)
+        .unwrap_err()
+        .to_string()
+        .contains("unsupported guest_abi"));
+}
+#[test]
+fn preparation_retains_kernel_before_transport_changes_source() {
+    struct Transport<'a>(&'a Path);
+    impl ImageTransport for Transport<'_> {
+        fn import(
+            &self,
+            service: &config::Service,
+            directory: &Path,
+            store: &ContentStore,
+            _: Option<(&PreparationContext, &str)>,
+            _: seedbox::guest::Architecture,
+        ) -> seedbox::Result<ImportedImage> {
+            fs::create_dir_all(directory)?;
+            let config = br#"{"os":"linux","architecture":"amd64","config":{"Cmd":["/app"]}}"#;
+            let digest = ContentDigest::of(config);
+            fs::write(directory.join(digest.hex()), config)?;
+            fs::write(
+                directory.join("manifest.json"),
+                serde_json::to_vec(
+                    &serde_json::json!({"schemaVersion":2,"config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":format!("sha256:{}",digest.hex()),"size":config.len()},"layers":[]}),
+                )?,
+            )?;
+            let image = seedbox::oci::import_metadata(directory, service, store)?;
+            let root = directory.join("root");
+            fs::create_dir(&root)?;
+            fs::write(root.join("app"), b"application")?;
+            fs::write(self.0, b"changed")?;
+            Ok(ImportedImage {
+                image,
+                rootfs: RootFilesystem::Directory(root),
+                auxiliary: BTreeMap::new(),
+                provenance: BTreeMap::new(),
+            })
         }
     }
-    assert!(!sentinel.exists());
-    assert!(!root.path().join("evidence/builder.json").exists());
-    assert!(!root.path().join("evidence/setup.json").exists());
-}
-
-#[test]
-fn preparation_retains_one_frozen_kernel_when_transport_changes_the_source_path() {
     let root = tempfile::tempdir().unwrap();
-    let raw = root.path().join("raw");
-    fs::create_dir(&raw).unwrap();
-    let config = br#"{"os":"linux","architecture":"amd64","config":{"Cmd":["/app"]}}"#;
-    let digest = ContentDigest::of(config);
-    fs::write(raw.join(digest.hex()), config).unwrap();
-    fs::write(
-        raw.join("manifest.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "schemaVersion":2,"config":{"mediaType":"application/vnd.oci.image.config.v1+json",
-            "digest":format!("sha256:{}",digest.hex()),"size":config.len()},"layers":[]
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    // Fake transport/extraction commands, not a builder or guest execution.
-    let skopeo = script(root.path(), "skopeo", &format!(
-        "for arg do last=$arg; done; case \"$last\" in dir:*) out=${{last#dir:}}; mkdir -p \"$out\"; cp '{}'/manifest.json '{}'/{} \"$out\";; esac",
-        raw.display(), raw.display(), digest.hex()));
-    let umoci = script(root.path(), "umoci", &format!(
-        "for arg do last=$arg; done; mkdir -p \"$last/rootfs\"; printf application > \"$last/rootfs/app\"; printf changed-after-freeze > '{}'",
-        root.path().join("kernel").display()));
-    let (preparer, simulation, store) = fixture(root.path(), skopeo, umoci);
+    let (preparer, simulation, store) = fixture(root.path());
     let context =
-        PreparationContext::new(root.path().join("evidence"), CancellationToken::default())
-            .unwrap();
+        PreparationContext::new(root.path().join("evidence"), Default::default()).unwrap();
     let inputs = preparer
-        .prepare_cancellable(&simulation, &store, &context)
+        .prepare_with_transport(&simulation, &store, &context, &Transport(&preparer.kernel))
         .unwrap();
-    assert_eq!(fs::read(&preparer.kernel).unwrap(), b"changed-after-freeze");
-    assert_eq!(inputs.kernel, ContentDigest::of(b"kernel"));
+    assert_eq!(fs::read(&preparer.kernel).unwrap(), b"changed");
     assert_eq!(store.read(&inputs.kernel).unwrap(), b"kernel");
     let receipt: serde_json::Value =
-        serde_json::from_slice(&fs::read(root.path().join("evidence/setup.json")).unwrap())
-            .unwrap();
+        serde_json::from_slice(&fs::read(context.directory.join("setup.json")).unwrap()).unwrap();
     assert_eq!(
         receipt["kernel"],
-        serde_json::to_value(&inputs.kernel).unwrap()
+        serde_json::to_value(inputs.kernel).unwrap()
     );
-    assert_eq!(inputs.placement["app"], "app");
-    assert!(!root.path().join("evidence/builder.json").exists());
 }
 
 #[test]
@@ -272,7 +128,6 @@ fn preparation_records_one_epoch_after_import_and_retains_explicit_epoch() {
             directory: &Path,
             _store: &ContentStore,
             _context: Option<(&PreparationContext, &str)>,
-            _frozen: Option<&seedbox::oci::FrozenContext>,
             _architecture: seedbox::guest::Architecture,
         ) -> seedbox::Result<seedbox::oci::ImportedImage> {
             fs::create_dir_all(directory)?;
@@ -299,8 +154,7 @@ fn preparation_records_one_epoch_after_import_and_retains_explicit_epoch() {
         }
     }
     let root = tempfile::tempdir().unwrap();
-    let (mut preparer, mut simulation, store) =
-        fixture(root.path(), "unused".into(), "unused".into());
+    let (preparer, mut simulation, store) = fixture(root.path());
     simulation
         .services
         .insert("other".into(), simulation.services["app"].clone());
@@ -352,14 +206,4 @@ fn preparation_records_one_epoch_after_import_and_retains_explicit_epoch() {
             epoch
         );
     }
-    preparer.tools.build_epoch = Some(0);
-    let explicit = preparer
-        .prepare_with_transport(&simulation, &store, &context, &Transport)
-        .unwrap();
-    let again = preparer
-        .prepare_with_transport(&simulation, &store, &context, &Transport)
-        .unwrap();
-    assert_eq!(explicit.wall_clock_epoch, Some(86400));
-    assert_eq!(explicit, again);
-    assert_ne!(prepared.guests, explicit.guests);
 }

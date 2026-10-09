@@ -146,7 +146,7 @@ jobs:
         run: |
           nix build .#guestKernelSources --out-link kernel-source
           cp kernel-source dist/kernel/seedbox-kernel-source.tar.gz
-      - name: Build guest helpers and filesystem tools
+      - name: Build guest helpers
         if: needs.plan.outputs.runtime == 'true'
         run: |
           nix build ".#packages.$SYSTEM.runtimeArchive" --out-link runtime-archive
@@ -221,7 +221,7 @@ jobs:
             if (!release) {
               const contents = kind === 'kernel'
                 ? 'guest kernels, resolved configuration, ARM instruction audit'
-                : 'static guest supervisor, BusyBox, mke2fs and a Linux filesystem-tools image';
+                : 'static guest supervisor and mke2fs';
               release = (await github.rest.repos.createRelease({
                 ...context.repo,
                 tag_name: tag,
