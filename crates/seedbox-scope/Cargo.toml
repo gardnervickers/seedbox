@@ -1,0 +1,13 @@
+[package]
+name = "seedbox-scope"
+description = "Terminal viewer for faults and link traffic in a retained seedbox run."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# Reads run directories only. It depends on no seedbox crate, and none depends
+# on it, so its terminal dependencies never reach the CLI or the engine.
+[dependencies]
+serde_json.workspace = true
+clap = { version = "4", features = ["derive"] }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }

@@ -1,0 +1,938 @@
+{
+ "control_history": [],
+ "control_latency_ns": 0,
+ "counter_profile": "amd-zen",
+ "fault_error": null,
+ "faults": [
+  {
+   "action": "shape",
+   "applied_at_ns": 2500000000,
+   "detail": "handle=ac_old; in-flight frames retained",
+   "id": 1,
+   "machine": null,
+   "network_counters": {
+    "a->b": {
+     "delivered": 7404,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "a->c": {
+     "delivered": 7410,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->a": {
+     "delivered": 7410,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->c": {
+     "delivered": 7410,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->a": {
+     "delivered": 7410,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->b": {
+     "delivered": 7410,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    }
+   },
+   "request": {
+    "action": "shape",
+    "at_ns": 2500000000,
+    "deadline_ns": 2500000000,
+    "from": [
+     "a"
+    ],
+    "handle": "ac_old",
+    "id": 1,
+    "jitter_ns": 0,
+    "latency_ns": 5000000,
+    "loss_ppm": 0,
+    "to": [
+     "c"
+    ]
+   },
+   "requested_at_ns": 2500000000,
+   "status": "applied"
+  },
+  {
+   "action": "shape",
+   "applied_at_ns": 2500000000,
+   "detail": "handle=bc_old; in-flight frames retained",
+   "id": 2,
+   "machine": null,
+   "network_counters": {
+    "a->b": {
+     "delivered": 7404,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "a->c": {
+     "delivered": 7410,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->a": {
+     "delivered": 7410,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->c": {
+     "delivered": 7410,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->a": {
+     "delivered": 7410,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->b": {
+     "delivered": 7410,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    }
+   },
+   "request": {
+    "action": "shape",
+    "at_ns": 2500000000,
+    "deadline_ns": 2500000000,
+    "from": [
+     "b"
+    ],
+    "handle": "bc_old",
+    "id": 2,
+    "jitter_ns": 0,
+    "latency_ns": 5000000,
+    "loss_ppm": 0,
+    "to": [
+     "c"
+    ]
+   },
+   "requested_at_ns": 2500000000,
+   "status": "applied"
+  },
+  {
+   "action": "shape",
+   "applied_at_ns": 3000000000,
+   "detail": "handle=ac_new; in-flight frames retained",
+   "id": 3,
+   "machine": null,
+   "network_counters": {
+    "a->b": {
+     "delivered": 9401,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "a->c": {
+     "delivered": 9393,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->a": {
+     "delivered": 9408,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->c": {
+     "delivered": 9392,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->a": {
+     "delivered": 9396,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->b": {
+     "delivered": 9396,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    }
+   },
+   "request": {
+    "action": "shape",
+    "at_ns": 3000000000,
+    "deadline_ns": 3000000000,
+    "from": [
+     "a"
+    ],
+    "handle": "ac_new",
+    "id": 3,
+    "jitter_ns": 0,
+    "latency_ns": 8000000,
+    "loss_ppm": 0,
+    "to": [
+     "c"
+    ]
+   },
+   "requested_at_ns": 3000000000,
+   "status": "applied"
+  },
+  {
+   "action": "shape",
+   "applied_at_ns": 3000000000,
+   "detail": "handle=bc_new; in-flight frames retained",
+   "id": 4,
+   "machine": null,
+   "network_counters": {
+    "a->b": {
+     "delivered": 9401,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "a->c": {
+     "delivered": 9393,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->a": {
+     "delivered": 9408,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->c": {
+     "delivered": 9392,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->a": {
+     "delivered": 9396,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->b": {
+     "delivered": 9396,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    }
+   },
+   "request": {
+    "action": "shape",
+    "at_ns": 3000000000,
+    "deadline_ns": 3000000000,
+    "from": [
+     "b"
+    ],
+    "handle": "bc_new",
+    "id": 4,
+    "jitter_ns": 0,
+    "latency_ns": 8000000,
+    "loss_ppm": 0,
+    "to": [
+     "c"
+    ]
+   },
+   "requested_at_ns": 3000000000,
+   "status": "applied"
+  },
+  {
+   "action": "heal",
+   "applied_at_ns": 3500000000,
+   "detail": "handle=ac_old; prior policy revealed",
+   "id": 5,
+   "machine": null,
+   "network_counters": {
+    "a->b": {
+     "delivered": 11895,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "a->c": {
+     "delivered": 11870,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->a": {
+     "delivered": 11904,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->c": {
+     "delivered": 11869,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->a": {
+     "delivered": 11878,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->b": {
+     "delivered": 11878,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    }
+   },
+   "request": {
+    "action": "heal",
+    "at_ns": 3500000000,
+    "deadline_ns": 3500000000,
+    "handle": "ac_old",
+    "id": 5
+   },
+   "requested_at_ns": 3500000000,
+   "status": "applied"
+  },
+  {
+   "action": "heal",
+   "applied_at_ns": 3500000000,
+   "detail": "handle=bc_new; prior policy revealed",
+   "id": 6,
+   "machine": null,
+   "network_counters": {
+    "a->b": {
+     "delivered": 11895,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "a->c": {
+     "delivered": 11870,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->a": {
+     "delivered": 11904,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->c": {
+     "delivered": 11869,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->a": {
+     "delivered": 11878,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->b": {
+     "delivered": 11878,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    }
+   },
+   "request": {
+    "action": "heal",
+    "at_ns": 3500000000,
+    "deadline_ns": 3500000000,
+    "handle": "bc_new",
+    "id": 6
+   },
+   "requested_at_ns": 3500000000,
+   "status": "applied"
+  },
+  {
+   "action": "heal",
+   "applied_at_ns": 4000000000,
+   "detail": "handle=ac_new; prior policy revealed",
+   "id": 7,
+   "machine": null,
+   "network_counters": {
+    "a->b": {
+     "delivered": 14890,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "a->c": {
+     "delivered": 14860,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->a": {
+     "delivered": 14901,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->c": {
+     "delivered": 14877,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->a": {
+     "delivered": 14869,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->b": {
+     "delivered": 14869,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    }
+   },
+   "request": {
+    "action": "heal",
+    "at_ns": 4000000000,
+    "deadline_ns": 4000000000,
+    "handle": "ac_new",
+    "id": 7
+   },
+   "requested_at_ns": 4000000000,
+   "status": "applied"
+  },
+  {
+   "action": "heal",
+   "applied_at_ns": 4000000000,
+   "detail": "handle=bc_old; prior policy revealed",
+   "id": 8,
+   "machine": null,
+   "network_counters": {
+    "a->b": {
+     "delivered": 14890,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "a->c": {
+     "delivered": 14860,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->a": {
+     "delivered": 14901,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->c": {
+     "delivered": 14877,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->a": {
+     "delivered": 14869,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->b": {
+     "delivered": 14869,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    }
+   },
+   "request": {
+    "action": "heal",
+    "at_ns": 4000000000,
+    "deadline_ns": 4000000000,
+    "handle": "bc_old",
+    "id": 8
+   },
+   "requested_at_ns": 4000000000,
+   "status": "applied"
+  },
+  {
+   "action": "shape",
+   "applied_at_ns": 4000000000,
+   "detail": "handle=lossmid; in-flight frames retained",
+   "id": 9,
+   "machine": null,
+   "network_counters": {
+    "a->b": {
+     "delivered": 14890,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "a->c": {
+     "delivered": 14860,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->a": {
+     "delivered": 14901,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->c": {
+     "delivered": 14877,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->a": {
+     "delivered": 14869,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->b": {
+     "delivered": 14869,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    }
+   },
+   "request": {
+    "action": "shape",
+    "at_ns": 4000000000,
+    "deadline_ns": 4000000000,
+    "from": [
+     "c"
+    ],
+    "handle": "lossmid",
+    "id": 9,
+    "jitter_ns": 500000,
+    "latency_ns": 1000000,
+    "loss_ppm": 500000,
+    "to": [
+     "a"
+    ]
+   },
+   "requested_at_ns": 4000000000,
+   "status": "applied"
+  },
+  {
+   "action": "shape",
+   "applied_at_ns": 4000000000,
+   "detail": "handle=lossall; in-flight frames retained",
+   "id": 10,
+   "machine": null,
+   "network_counters": {
+    "a->b": {
+     "delivered": 14890,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "a->c": {
+     "delivered": 14860,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->a": {
+     "delivered": 14901,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->c": {
+     "delivered": 14877,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->a": {
+     "delivered": 14869,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->b": {
+     "delivered": 14869,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    }
+   },
+   "request": {
+    "action": "shape",
+    "at_ns": 4000000000,
+    "deadline_ns": 4000000000,
+    "from": [
+     "c"
+    ],
+    "handle": "lossall",
+    "id": 10,
+    "jitter_ns": 0,
+    "latency_ns": 1000000,
+    "loss_ppm": 1000000,
+    "to": [
+     "b"
+    ]
+   },
+   "requested_at_ns": 4000000000,
+   "status": "applied"
+  },
+  {
+   "action": "shape",
+   "applied_at_ns": 4200000000,
+   "detail": "handle=loss0; in-flight frames retained",
+   "id": 11,
+   "machine": null,
+   "network_counters": {
+    "a->b": {
+     "delivered": 17519,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "a->c": {
+     "delivered": 17549,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->a": {
+     "delivered": 17522,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->c": {
+     "delivered": 17522,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->a": {
+     "delivered": 16307,
+     "loss_dropped": 1333,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->b": {
+     "delivered": 14875,
+     "loss_dropped": 2775,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    }
+   },
+   "request": {
+    "action": "shape",
+    "at_ns": 4200000000,
+    "deadline_ns": 4200000000,
+    "from": [
+     "b"
+    ],
+    "handle": "loss0",
+    "id": 11,
+    "jitter_ns": 0,
+    "latency_ns": 1000000,
+    "loss_ppm": 0,
+    "to": [
+     "a"
+    ]
+   },
+   "requested_at_ns": 4200000000,
+   "status": "applied"
+  },
+  {
+   "action": "partition",
+   "applied_at_ns": 4300000000,
+   "detail": "handle=cut; in-flight frames retained",
+   "id": 12,
+   "machine": null,
+   "network_counters": {
+    "a->b": {
+     "delivered": 18983,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "a->c": {
+     "delivered": 19013,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->a": {
+     "delivered": 18985,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->c": {
+     "delivered": 18985,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->a": {
+     "delivered": 17056,
+     "loss_dropped": 2078,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->b": {
+     "delivered": 14875,
+     "loss_dropped": 4271,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    }
+   },
+   "request": {
+    "action": "partition",
+    "at_ns": 4300000000,
+    "deadline_ns": 4300000000,
+    "handle": "cut",
+    "id": 12,
+    "left": [
+     "c"
+    ],
+    "right": [
+     "a"
+    ]
+   },
+   "requested_at_ns": 4300000000,
+   "status": "applied"
+  },
+  {
+   "action": "heal",
+   "applied_at_ns": 4500000000,
+   "detail": "handle=cut; overlapping handles retained",
+   "id": 13,
+   "machine": null,
+   "network_counters": {
+    "a->b": {
+     "delivered": 21882,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "a->c": {
+     "delivered": 19027,
+     "partition_dropped": 2898,
+     "receiver_dropped": 0
+    },
+    "b->a": {
+     "delivered": 21883,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->c": {
+     "delivered": 21883,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->a": {
+     "delivered": 17068,
+     "loss_dropped": 2078,
+     "partition_dropped": 2898,
+     "receiver_dropped": 0
+    },
+    "c->b": {
+     "delivered": 14875,
+     "loss_dropped": 7169,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    }
+   },
+   "request": {
+    "action": "heal",
+    "at_ns": 4500000000,
+    "deadline_ns": 4500000000,
+    "handle": "cut",
+    "id": 13
+   },
+   "requested_at_ns": 4500000000,
+   "status": "applied"
+  },
+  {
+   "action": "heal",
+   "applied_at_ns": 4700000000,
+   "detail": "handle=lossmid; prior policy revealed",
+   "id": 14,
+   "machine": null,
+   "network_counters": {
+    "a->b": {
+     "delivered": 24855,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "a->c": {
+     "delivered": 21988,
+     "partition_dropped": 2898,
+     "receiver_dropped": 0
+    },
+    "b->a": {
+     "delivered": 24855,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->c": {
+     "delivered": 24855,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->a": {
+     "delivered": 18577,
+     "loss_dropped": 3631,
+     "partition_dropped": 2898,
+     "receiver_dropped": 0
+    },
+    "c->b": {
+     "delivered": 14875,
+     "loss_dropped": 10243,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    }
+   },
+   "request": {
+    "action": "heal",
+    "at_ns": 4700000000,
+    "deadline_ns": 4700000000,
+    "handle": "lossmid",
+    "id": 14
+   },
+   "requested_at_ns": 4700000000,
+   "status": "applied"
+  },
+  {
+   "action": "heal",
+   "applied_at_ns": 4700000000,
+   "detail": "handle=lossall; prior policy revealed",
+   "id": 15,
+   "machine": null,
+   "network_counters": {
+    "a->b": {
+     "delivered": 24855,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "a->c": {
+     "delivered": 21988,
+     "partition_dropped": 2898,
+     "receiver_dropped": 0
+    },
+    "b->a": {
+     "delivered": 24855,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->c": {
+     "delivered": 24855,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->a": {
+     "delivered": 18577,
+     "loss_dropped": 3631,
+     "partition_dropped": 2898,
+     "receiver_dropped": 0
+    },
+    "c->b": {
+     "delivered": 14875,
+     "loss_dropped": 10243,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    }
+   },
+   "request": {
+    "action": "heal",
+    "at_ns": 4700000000,
+    "deadline_ns": 4700000000,
+    "handle": "lossall",
+    "id": 15
+   },
+   "requested_at_ns": 4700000000,
+   "status": "applied"
+  },
+  {
+   "action": "heal",
+   "applied_at_ns": 4700000000,
+   "detail": "handle=loss0; prior policy revealed",
+   "id": 16,
+   "machine": null,
+   "network_counters": {
+    "a->b": {
+     "delivered": 24855,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "a->c": {
+     "delivered": 21988,
+     "partition_dropped": 2898,
+     "receiver_dropped": 0
+    },
+    "b->a": {
+     "delivered": 24855,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "b->c": {
+     "delivered": 24855,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    },
+    "c->a": {
+     "delivered": 18577,
+     "loss_dropped": 3631,
+     "partition_dropped": 2898,
+     "receiver_dropped": 0
+    },
+    "c->b": {
+     "delivered": 14875,
+     "loss_dropped": 10243,
+     "partition_dropped": 0,
+     "receiver_dropped": 0
+    }
+   },
+   "request": {
+    "action": "heal",
+    "at_ns": 4700000000,
+    "deadline_ns": 4700000000,
+    "handle": "loss0",
+    "id": 16
+   },
+   "requested_at_ns": 4700000000,
+   "status": "applied"
+  }
+ ],
+ "frames_delivered": 160460,
+ "frames_dropped": 19670,
+ "host_seconds": 401.597297421,
+ "in_flight_policy": "retain_send_time_decisions; cuts_dominate_shapes",
+ "kills": [],
+ "machines": [
+  {
+   "name": "a",
+   "net": {
+    "rx": 53578,
+    "rx_dropped": 0,
+    "tx": 29958
+   },
+   "state": "Exited(0)",
+   "time_ns": 6017497178
+  },
+  {
+   "name": "b",
+   "net": {
+    "rx": 49892,
+    "rx_dropped": 0,
+    "tx": 29930
+   },
+   "state": "Halted",
+   "time_ns": 5996538005
+  },
+  {
+   "name": "c",
+   "net": {
+    "rx": 56990,
+    "rx_dropped": 0,
+    "tx": 30177
+   },
+   "state": "Halted",
+   "time_ns": 5996538199
+  }
+ ],
+ "management_readiness": [],
+ "network_counters": {
+  "a->b": {
+   "delivered": 29958,
+   "partition_dropped": 0,
+   "receiver_dropped": 0
+  },
+  "a->c": {
+   "delivered": 27060,
+   "partition_dropped": 2898,
+   "receiver_dropped": 0
+  },
+  "b->a": {
+   "delivered": 29930,
+   "partition_dropped": 0,
+   "receiver_dropped": 0
+  },
+  "b->c": {
+   "delivered": 29930,
+   "partition_dropped": 0,
+   "receiver_dropped": 0
+  },
+  "c->a": {
+   "delivered": 23648,
+   "loss_dropped": 3631,
+   "partition_dropped": 2898,
+   "receiver_dropped": 0
+  },
+  "c->b": {
+   "delivered": 19934,
+   "loss_dropped": 10243,
+   "partition_dropped": 0,
+   "receiver_dropped": 0
+  }
+ },
+ "network_witness": "8cc776e656aee1385f9a07b066b0cd9fdc8a640173a292413c678a3e01f23a25",
+ "outcome": "end_machine_exited",
+ "rejected_fault_effects": [],
+ "report_version": 1,
+ "seed": 1,
+ "sim_seconds": 6.017497178,
+ "slices": 401891,
+ "speed": 0.01498390854879627,
+ "world_witness": "eb3dadeda64728ee56503cff62122fd07113297b14bb114534b772ea2933997c"
+}

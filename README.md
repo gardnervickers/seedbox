@@ -127,6 +127,7 @@ entering it, preserving named volumes and allowing `CLONE_NEWUSER`.
 | `crates/seedbox-vmm/` | KVM world engine linked into the Linux x86-64 CLI; isolated standalone workspace and lockfile for low-level fixtures |
 | `crates/seedbox-engine-core/` | Canonical deterministic policies, bounded virtio queues, shared MMIO transport, console/block/network models, the shared world coordinator and the [windowed scheduler](docs/windowed-scheduler.md) |
 | `crates/seedbox-arm64/` | ARM PV machines, native HVF application world, and isolated fixture workspace |
+| [`crates/seedbox-scope/`](crates/seedbox-scope/README.md) | Terminal viewer for a run's faults, link policies and traffic over simulated time; reads run directories only |
 | `tools/mac-runtime/` | Mac signing and platform notes |
 | `examples/` | Compose applications: etcd, Redis, [TCP faults/recovery](examples/faults/README.md), and [one-service MinIO conditional writes](examples/minio/README.md) (MinIO runtime qualification pending) |
 | `kernel/` | Guest kernel patch, config and build script (Linux 6.12.112) |
