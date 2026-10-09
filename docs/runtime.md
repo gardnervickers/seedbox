@@ -352,7 +352,7 @@ in the bytes the guest CRNG returns:
 - `x-seedbox.network.jitter` defaults to 10% of `x-seedbox.network.latency`,
   drawn from the existing `link/<a>/<b>` streams. Per-link entries in
   `network.links` keep their own explicit jitter, which defaults to zero.
-- `x-seedbox.schedule.start_stagger` defaults to 200 ms, or half of
+- `x-seedbox.schedule.start_stagger` defaults to 20 ms, or half of
   `limits.simulated_time` when that is shorter. With a nonzero stagger, a Linux
   KVM run boots every machine under the run seed and parks it at its launch
   barrier, just before its application starts. When the last machine arrives,

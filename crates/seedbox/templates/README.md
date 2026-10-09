@@ -20,7 +20,7 @@ To compare independent fresh runs, pass the same `--wall-clock-epoch SECS`
 preparation. Replay always retains the original guest clock.
 
 Seeds differ by default in timer jitter (20 µs), network jitter (10% of
-latency) and, on Linux KVM, a seeded application start stagger of up to 200 ms
+latency) and, on Linux KVM, a seeded application start stagger of up to 20 ms
 after every machine has booted. Set `x-seedbox.schedule.timer_jitter`,
 `x-seedbox.network.jitter` or `x-seedbox.schedule.start_stagger` to `0ns` to
 turn one off; replay restores the recorded values.
