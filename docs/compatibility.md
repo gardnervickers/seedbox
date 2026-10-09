@@ -102,7 +102,7 @@ The `runtime-postgres.yaml`, `runtime-nginx.yaml`, `runtime-python.yaml`,
 `runtime-jvm.yaml` and `runtime-node.yaml` projects in the same directory run
 initdb plus a SQL query, an HTTP request through nginx's ordinary stdout log,
 a Python process pool, JVM local hostname lookup and Node HTTP, respectively.
-Run those with `--memory-mb 2048` to accommodate their image archives and
+Those projects set `x-seedbox.machine.memory_mb: 2048` to accommodate their image archives and
 application heaps. The io_uring probe checks a real ring completion separately;
 a Node HTTP pass alone does not establish which libuv path was used.
 

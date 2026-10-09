@@ -62,6 +62,12 @@ impl ExecutionBackend for Executor {
     fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {
         self.backend().validate_retained(inputs)
     }
+    fn runtime_inputs<'a>(
+        &self,
+        inputs: &'a PreparedInputs,
+    ) -> Vec<&'a seedbox::store::ContentDigest> {
+        self.backend().runtime_inputs(inputs)
+    }
     fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
         eprintln!(
             "running: starting {} machines through {}",
@@ -130,9 +136,17 @@ pub fn asset_directory() -> std::path::PathBuf {
     std::env::var_os("SEEDBOX_ASSET_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
-            std::path::PathBuf::from(format!("/tmp/seedbox-{}", unsafe { libc::geteuid() }))
+            default_asset_root(unsafe { libc::geteuid() }, std::env::var_os("SUDO_UID"))
         })
         .join(std::env::consts::ARCH)
+}
+/// Assets are built as the user, so `sudo seedbox` reads the invoking user's slot.
+fn default_asset_root(euid: u32, sudo_uid: Option<std::ffi::OsString>) -> std::path::PathBuf {
+    let uid = sudo_uid
+        .filter(|_| euid == 0)
+        .and_then(|uid| uid.to_str()?.parse::<u32>().ok())
+        .unwrap_or(euid);
+    std::path::PathBuf::from(format!("/tmp/seedbox-{uid}"))
 }
 pub fn guest_assets(
     explicit: Option<std::path::PathBuf>,
@@ -225,4 +239,21 @@ pub fn container_engine() -> Result<bollard::Docker> {
     };
     connect().map_err(|error| seedbox::Error::Setup(format!(
         "cannot configure a Docker-compatible engine: {error}; start Docker or Podman and set DOCKER_HOST to its socket")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_asset_root;
+    use std::path::Path;
+
+    #[test]
+    fn sudo_reads_the_invoking_users_asset_slot() {
+        let root = |euid, sudo: Option<&str>| default_asset_root(euid, sudo.map(Into::into));
+        assert_eq!(root(1000, None), Path::new("/tmp/seedbox-1000"));
+        assert_eq!(root(0, None), Path::new("/tmp/seedbox-0"));
+        assert_eq!(root(0, Some("1000")), Path::new("/tmp/seedbox-1000"));
+        // Only root follows SUDO_UID; a malformed value keeps the effective user.
+        assert_eq!(root(1001, Some("1000")), Path::new("/tmp/seedbox-1001"));
+        assert_eq!(root(0, Some("bob")), Path::new("/tmp/seedbox-0"));
+    }
 }

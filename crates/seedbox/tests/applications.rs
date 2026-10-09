@@ -78,8 +78,6 @@ fn every_application_runs_twice_and_replays() {
                     workload.to_str().unwrap(),
                     "--timebase",
                     timebase,
-                    "--memory-mb",
-                    "2048",
                     "--full-state",
                 ];
                 let first = invoke(Path::new(&cli), &directory, "first", &run)?;

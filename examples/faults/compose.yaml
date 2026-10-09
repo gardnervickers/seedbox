@@ -11,6 +11,7 @@ services:
     command: [scenario, --control-address, "client:7001"]
 x-seedbox:
   version: 1
+  machine: {memory_mb: 512}
   seed: 1009
   limits: {simulated_time: 30s, wall_time: 10m}
   network: {latency: 1ms, jitter: 200us}

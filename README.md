@@ -43,7 +43,7 @@ hardware or permissions. Mac uses PV automatically.
 
 **The kernel is the only separate guest asset.** The release executable embeds
 its supervisor and filesystem tool. No private GitHub access or runtime guest
-build is needed. Locally built kernels live under `/tmp/seedbox-UID/ARCH`; rebuild
+build is needed. Locally built kernels live under `/tmp/seedbox-UID/ARCH` (the invoking user's UID, even under `sudo`); rebuild
 if the OS removes them. Seedbox never downloads kernels automatically.
 
 

@@ -256,7 +256,7 @@ impl OciPreparer {
                 .ok_or_else(|| Error::Integrity("OCI profile missing memory_mb".into()))?;
             let minimum = minimum_memory_mb(fs::metadata(&archive)?.len())?;
             if memory_mb < minimum {
-                return Err(Error::Execution(format!("service {name}: {memory_mb} MiB guest RAM is below the archive boot floor of {minimum} MiB; increase --memory-mb (application memory may require more)")));
+                return Err(Error::Execution(format!("service {name}: {memory_mb} MiB guest RAM is below the archive boot floor of {minimum} MiB; increase x-seedbox.machine.memory_mb (application memory may require more)")));
             }
             if let Some(context) = context {
                 context.check()?;
