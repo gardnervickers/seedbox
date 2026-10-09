@@ -1317,6 +1317,17 @@ impl Machine {
             let syscalls1 = unsafe { std::ptr::read_volatile(self.page.0.add(PAGE_SYSCALLS)) };
             let delta = clock.read(syscalls1);
             let interrupted = matches!(&exit, Err(e) if e.errno() == libc::EINTR);
+            // EXPERIMENT ONLY: sample where the guest was at each watchdog tick.
+            if interrupted {
+                let sregs = unsafe { &(*run_ptr).s.regs.sregs };
+                eprintln!(
+                    "rip-sample {} {:#x} {:#x} {}",
+                    self.world.name,
+                    unsafe { (*run_ptr).s.regs.regs.rip },
+                    sregs.cr3,
+                    sregs.cs.dpl
+                );
+            }
             let run_syscalls = syscalls1.wrapping_sub(syscalls0);
             // A watchdog interruption is not a deterministic point: the run
             // resumes without publishing, injecting or adopting anything.
