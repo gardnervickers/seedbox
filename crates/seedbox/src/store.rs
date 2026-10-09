@@ -7,7 +7,7 @@ use std::{
     collections::HashMap,
     fs,
     io::{self, Read, Write},
-    os::unix::fs::MetadataExt,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -52,6 +52,9 @@ pub struct ContentStore {
     /// Objects this process hashed, with the file identity they had then.
     /// Clones share it, so exploration workers verify each object once.
     verified: Arc<Mutex<HashMap<ContentDigest, Stamp>>>,
+    /// Shared copies made by `materialize_linked`, with the identity each had
+    /// when this process wrote it. Holding the lock serializes their creation.
+    shared: Arc<Mutex<HashMap<PathBuf, Stamp>>>,
 }
 
 /// What any write, truncate, rename over or chmod of an object changes.
@@ -82,6 +85,7 @@ impl ContentStore {
         Self {
             root: root.into(),
             verified: Arc::default(),
+            shared: Arc::default(),
         }
     }
 
@@ -214,6 +218,55 @@ impl ContentStore {
         }
         temp.persist_noclobber(&path).map_err(|e| e.error)?;
         Ok(path)
+    }
+
+    /// Like `materialize`, but copies each object once into `shared` and
+    /// hard-links that read-only copy into `directory`. Exploration attempts
+    /// use it so a batch copies its engine and images once, not per seed.
+    ///
+    /// The shared copy is reused only while both it and the store object are
+    /// unchanged since this process verified them; otherwise it is replaced
+    /// through `materialize`, which hashes again. Without hard links (another
+    /// filesystem) this falls back to a private copy.
+    pub fn materialize_linked(
+        &self,
+        digest: &ContentDigest,
+        shared: &Path,
+        directory: &Path,
+    ) -> Result<PathBuf> {
+        let source = shared.join(digest.hex());
+        let mut copies = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        let reusable = match (copies.get(&source), fs::File::open(&source)) {
+            (Some(stamp), Ok(copy)) => {
+                Stamp::of(&copy)? == *stamp && self.trusted(digest, &self.open(digest)?)?.is_some()
+            }
+            _ => false,
+        };
+        if !reusable {
+            copies.remove(&source);
+            match fs::remove_file(&source) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
+            let copy = self.materialize(digest, shared)?;
+            // Read-only for every attempt; the engine copy also needs execute.
+            fs::set_permissions(&copy, fs::Permissions::from_mode(0o500))?;
+            copies.insert(copy, Stamp::of(&fs::File::open(&source)?)?);
+        }
+        fs::create_dir_all(directory)?;
+        let path = directory.join(digest.hex());
+        match fs::hard_link(&source, &path) {
+            // Linking changes the copy's ctime; remember the new identity.
+            Ok(()) => {
+                copies.insert(source.clone(), Stamp::of(&fs::File::open(&source)?)?);
+                Ok(path)
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(e.into()),
+            Err(_) => {
+                drop(copies);
+                self.materialize(digest, directory)
+            }
+        }
     }
 }
 

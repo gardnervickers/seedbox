@@ -125,6 +125,8 @@ pub struct Orchestrator {
     pub(crate) store: ContentStore,
     pub(crate) runs: PathBuf,
     pub(crate) log_policy: LogPolicy,
+    /// Where exploration attempts share one read-only copy of each input.
+    pub(crate) shared_inputs: Option<PathBuf>,
 }
 
 impl Orchestrator {
@@ -133,6 +135,7 @@ impl Orchestrator {
             store,
             runs: runs.into(),
             log_policy: LogPolicy::default(),
+            shared_inputs: None,
         }
     }
 
@@ -325,10 +328,12 @@ impl Orchestrator {
             let mut artifacts = BTreeMap::new();
             for digest in executor.runtime_inputs(&record.identity.inputs) {
                 if !artifacts.contains_key(digest) {
-                    artifacts.insert(
-                        digest.clone(),
-                        self.store.materialize(digest, &directory.join("inputs"))?,
-                    );
+                    let inputs = directory.join("inputs");
+                    let path = match &self.shared_inputs {
+                        Some(shared) => self.store.materialize_linked(digest, shared, &inputs)?,
+                        None => self.store.materialize(digest, &inputs)?,
+                    };
+                    artifacts.insert(digest.clone(), path);
                 }
             }
             if cancellation.is_cancelled() {

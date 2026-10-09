@@ -2511,3 +2511,85 @@ fn only_the_backend_runtime_inputs_are_copied_into_an_attempt() {
         2
     );
 }
+
+#[test]
+fn materialize_linked_shares_one_copy_and_replaces_a_changed_one() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let directory = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(directory.path().join("store"));
+    let digest = store.put(b"retained guest bytes").unwrap();
+    let shared = directory.path().join("shared");
+    let a = store
+        .materialize_linked(&digest, &shared, &directory.path().join("a"))
+        .unwrap();
+    let b = store
+        .materialize_linked(&digest, &shared, &directory.path().join("b"))
+        .unwrap();
+    let copy = shared.join(digest.hex());
+    assert_eq!(
+        fs::metadata(&a).unwrap().ino(),
+        fs::metadata(&b).unwrap().ino()
+    );
+    assert_eq!(
+        fs::metadata(&copy).unwrap().ino(),
+        fs::metadata(&a).unwrap().ino()
+    );
+    assert_eq!(
+        fs::metadata(&copy).unwrap().permissions().mode() & 0o777,
+        0o500
+    );
+    // A changed shared copy is replaced, never linked again.
+    fs::set_permissions(&copy, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(&copy, b"tampered guest bytes").unwrap();
+    let c = store
+        .materialize_linked(&digest, &shared, &directory.path().join("c"))
+        .unwrap();
+    assert_eq!(fs::read(&c).unwrap(), b"retained guest bytes");
+    assert_ne!(
+        fs::metadata(&c).unwrap().ino(),
+        fs::metadata(&a).unwrap().ino()
+    );
+    // A changed store object is hashed again and fails.
+    let object = directory.path().join("store/sha256").join(digest.hex());
+    fs::write(&object, b"retained guest byteX").unwrap();
+    assert!(store
+        .materialize_linked(&digest, &shared, &directory.path().join("d"))
+        .is_err());
+}
+
+#[test]
+fn exploration_attempts_link_one_shared_copy_of_each_input() {
+    use seedbox::exploration::ExploreOptions;
+    use std::os::unix::fs::MetadataExt;
+    let fixture = Fixture::new();
+    let batch = fixture
+        .orchestrator
+        .explore(
+            &fixture.simulation,
+            ExploreOptions {
+                count: 3,
+                ..Default::default()
+            },
+            &fixture.preparer,
+            &fixture.backend,
+        )
+        .unwrap();
+    assert_eq!(batch.outcome, Outcome::Pass);
+    let shared = batch.directory.join("inputs");
+    let shared_count = fs::read_dir(&shared).unwrap().count();
+    assert!(shared_count > 0);
+    for attempt in &batch.attempts {
+        let inputs = attempt.directory.as_ref().unwrap().join("inputs");
+        let mut count = 0;
+        for entry in fs::read_dir(inputs).unwrap() {
+            let entry = entry.unwrap();
+            let copy = shared.join(entry.file_name());
+            assert_eq!(
+                entry.metadata().unwrap().ino(),
+                fs::metadata(copy).unwrap().ino()
+            );
+            count += 1;
+        }
+        assert_eq!(count, shared_count);
+    }
+}
