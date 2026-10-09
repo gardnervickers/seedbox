@@ -48,7 +48,7 @@ class SelectionTests(unittest.TestCase):
     def test_missing_privileges_cannot_select_root_tests(self):
         found = self.linux({"kvm": "", "counter": ""}, root=False)
         self.assertTrue(found["counter"])
-        self.assertTrue(found["oci"])
+        self.assertFalse(found["oci"])
         self.assertTrue(found["applications"])
         self.assertEqual(check.features_for("seedbox-vmm", "Linux", "x86_64", found), ["kvm-tests"])
 

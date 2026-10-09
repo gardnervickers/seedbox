@@ -40,9 +40,9 @@ fn initramfs_round_trip_preserves_image_files_modes_and_hardlinks() {
     let init = directory.path().join("init");
     fs::write(&init, b"helper").unwrap();
     let archive = directory.path().join("guest.cpio");
-    build_initramfs(&root, &init, &init, b"recipe", &archive).unwrap();
+    build_initramfs(&root, &init, b"recipe", &archive).unwrap();
     let archive2 = directory.path().join("repeat.cpio");
-    build_initramfs(&root, &init, &init, b"recipe", &archive2).unwrap();
+    build_initramfs(&root, &init, b"recipe", &archive2).unwrap();
     assert_eq!(fs::read(&archive).unwrap(), fs::read(&archive2).unwrap());
     let output = directory.path().join("unpacked");
     fs::create_dir(&output).unwrap();
@@ -94,14 +94,8 @@ fn unsupported_image_capabilities_are_not_silently_dropped() {
     xattr::set(&file, "user.seedbox-test", b"metadata").unwrap();
     let init = directory.path().join("init");
     fs::write(&init, b"helper").unwrap();
-    let error = build_initramfs(
-        &root,
-        &init,
-        &init,
-        b"recipe",
-        &directory.path().join("out"),
-    )
-    .unwrap_err();
+    let error =
+        build_initramfs(&root, &init, b"recipe", &directory.path().join("out")).unwrap_err();
     assert!(error.to_string().contains("extended attributes"));
 }
 
@@ -196,8 +190,7 @@ fn linux_tar_preserves_ownership_modes_hardlinks_and_symlinks_without_host_extra
     let helper = temporary.path().join("helper");
     fs::write(&helper, b"helper").unwrap();
     let output = temporary.path().join("guest.cpio");
-    seedbox::guest::build_initramfs_from_tar(&input, &helper, &helper, None, b"recipe", &output)
-        .unwrap();
+    seedbox::guest::build_initramfs_from_tar(&input, &helper, None, b"recipe", &output).unwrap();
     let bytes = fs::read(&output).unwrap();
     let mut at = 0;
     let mut entries = std::collections::BTreeMap::new();
@@ -257,7 +250,6 @@ fn linux_tar_cannot_replace_seedbox_bootstrap_or_reference_missing_hardlinks() {
         fs::write(&helper, b"helper").unwrap();
         let error = seedbox::guest::build_initramfs_from_tar(
             &input,
-            &helper,
             &helper,
             None,
             b"",
