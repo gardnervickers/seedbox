@@ -54,7 +54,6 @@ pub struct CpuidEntry {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequiredPolicy {
     pub architecture: String,
-    pub vendor: String,
     pub guest_abi: String,
     pub control_channel: String,
     pub kvm_api: i32,
@@ -67,7 +66,6 @@ pub struct RequiredPolicy {
 pub fn required_policy() -> RequiredPolicy {
     RequiredPolicy {
         architecture: "x86_64".into(),
-        vendor: "AuthenticAMD".into(),
         guest_abi: "oci-init-v1".into(),
         control_channel: "virtio-console-v1".into(),
         kvm_api: 12,
@@ -133,7 +131,6 @@ fn validate_fields(o: &CoreObservation, require_perf: bool) -> Result<()> {
     let p = required_policy();
     let checks = [
         (o.architecture == p.architecture, "architecture"),
-        (o.vendor == p.vendor, "CPU vendor"),
         (o.kvm_api == p.kvm_api, "KVM API"),
         (
             o.immediate_exit == p.immediate_exit,
@@ -305,38 +302,19 @@ fn scoped_probe<T, G>(
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod linux;
 
-pub(crate) fn observe(cpu: u32) -> Result<CoreObservation> {
+pub(crate) fn observe_counter(
+    cpu: u32,
+    counter: crate::counter::CounterProfile,
+) -> Result<CoreObservation> {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
-        linux::observe(cpu)
+        linux::observe(cpu, counter)
     }
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
     {
-        let _ = cpu;
+        let _ = (cpu, counter);
         Err(Error::Setup(
             "host admission requires Linux x86_64 KVM; use an admitted host".into(),
-        ))
-    }
-}
-
-/// Applicable readiness for explicitly unqualified execution, never AMD qualification.
-#[cfg(target_os = "linux")]
-pub(crate) fn check_unqualified(
-    cpus: impl IntoIterator<Item = u32>,
-    counter: crate::counter::CounterProfile,
-) -> Result<()> {
-    #[cfg(target_arch = "x86_64")]
-    {
-        for cpu in cpus {
-            linux::check_unqualified(cpu, counter)?;
-        }
-        Ok(())
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        let _ = (cpus, counter);
-        Err(Error::Setup(
-            "experimental execution requires x86-64 Linux KVM".into(),
         ))
     }
 }
@@ -351,7 +329,7 @@ mod cleanup_tests {
         CoreObservation {
             cpu: 8,
             architecture: p.architecture,
-            vendor: p.vendor,
+            vendor: "AuthenticAMD".into(),
             family: 25,
             model: 33,
             stepping: 0,

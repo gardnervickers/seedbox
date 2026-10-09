@@ -6,7 +6,7 @@ publish = false
 
 # Keep the standalone VMM build and its lockfile available through `cargo
 # build-vmm`. The Seedbox executable also links this library: that combined
-# build uses the root workspace's features and has its own engine identity.
+# build uses the root workspace's features and lockfile.
 [workspace]
 
 [workspace.package]
