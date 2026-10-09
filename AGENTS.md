@@ -123,18 +123,22 @@ the canonical crate; do not restore sibling source inclusion for these policies.
 Engine PRs that need host evidence go through a merge train
 ([docs/merge-train.md](docs/merge-train.md)).
 
-Run the available platform suites inside `nix develop` before committing:
+Run the suites for your platform inside `nix develop` before committing:
 
 ```sh
-bash harness/check.sh
+bash harness/check.sh                 # portable
+bash harness/check.sh linux --cpu 14  # AMD KVM host
+bash harness/check.sh mac             # Apple Silicon
 ```
 
-`bash harness/check.sh portable` compiles every feature-gated test with
-`--no-run` and executes only portable tests. It opens no KVM/HVF device and
-needs no root or registry access. Portable checks must pass before hardware
-execution. Use repeatable `--require kvm`, `--require counter`, `--require hvf`,
-`--require guests`, `--require applications` or `--require retained-run` when
-coverage must be present. `--list` shows selection without builds or execution.
+Suites are named, never auto-detected: `portable`, `linux-kvm`, `linux-counter`,
+`linux-guests`, `linux-oci`, `linux-apps`, `linux-pause`, `mac-hvf`,
+`mac-guests`, `mac-apps`, plus the `linux` and `mac` groups. `portable` compiles
+every feature-gated test with `--no-run` and executes only portable tests; it
+opens no KVM/HVF device and needs no root or registry access. It always runs
+first and must pass before hardware execution. A named suite whose host
+requirements are missing exits 2 before any build. `--list` checks requirements
+without building.
 
 See [docs/testing.md](docs/testing.md) for features, discovery and fixture inputs.
 Keep VMM engine tests compiled by default; conditional `ignore` attributes enable

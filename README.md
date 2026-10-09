@@ -132,6 +132,7 @@ entering it, preserving named volumes and allowing `CLONE_NEWUSER`.
 
 ## Contributor checks
 
-Run `nix develop --command bash harness/check.sh` for available test suites,
-or `bash harness/check.sh portable` for portable checks.
+Run `nix develop --command bash harness/check.sh` for portable checks, or name
+the platform suites to run: `bash harness/check.sh linux` on a Linux KVM host,
+`bash harness/check.sh mac` on Apple Silicon (`--help` lists every suite).
 See [Contributing](docs/contributing.md) for Linux host validation and fixtures.

@@ -639,15 +639,14 @@ retained records, serde field names, status lines and `--json` output are unchan
 
 ## Reproduce acceptance
 
-From the repository root in `nix develop`, run all available native suites:
+From the repository root in `nix develop`, name the suites to run:
 
 ```sh
-bash harness/check.sh
-bash harness/check.sh --require applications
-bash harness/check.sh --require oci
+bash harness/check.sh linux-apps linux-oci   # Linux x86-64 KVM host
+bash harness/check.sh mac-apps               # Apple Silicon
 ```
 
-See [the test matrix](testing.md) for discovery, capability features and inputs.
+See [the test matrix](testing.md) for suites, Cargo features and inputs.
 The older focused runtime diagnostics remain available:
 
 ```sh
