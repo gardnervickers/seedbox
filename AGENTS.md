@@ -139,10 +139,6 @@ timed step/phase summary format. Workspace builds use a persistent cache under
 override it with `SEEDBOX_PRECHECK_TARGET` or `CARGO_TARGET_DIR`. A revision uses
 a temporary detached worktree under `$TMPDIR`, deleted on a pass; a failure keeps it and prints
 its path. Any failed step makes the gate exit nonzero; all steps still run.
-After a Linux pre-check pass, `bash harness/host-check.sh --skip-portable REV CPU` skips fmt,
-clippy and the portable suite (including workspace tests), while retaining VMM
-build/tests and host-specific checks. A Mac pass alone does not justify the skip.
-Match the full SHA printed by both gates.
 See [contributor checks](README.md#contributor-checks).
 
 Run these before committing:
