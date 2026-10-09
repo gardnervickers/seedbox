@@ -654,9 +654,10 @@ fn retain_logs(
     Ok(())
 }
 
-/// Name the first result-changing setting where a KVM executor differs from
-/// the recorded run. The executable descriptor may differ; it only selects argv.
-/// Other mismatches are recorded as a not-comparable attempt by `execute`.
+/// Refuse, before any attempt exists, a KVM executor whose result-changing
+/// settings differ from the recorded run, naming a TX-mode difference first,
+/// then the first other one. The executable descriptor may differ; it only
+/// selects argv.
 fn drift(recorded: &ExecutionProfile, requested: &ExecutionProfile) -> Result<()> {
     if recorded.backend != Backend::Kvm {
         return Ok(());
@@ -665,8 +666,14 @@ fn drift(recorded: &ExecutionProfile, requested: &ExecutionProfile) -> Result<()
         &recorded.semantic_parameters,
         &requested.semantic_parameters,
     );
-    let Some(&first) = was.differences(now).first() else {
-        return Ok(());
+    let differences = was.differences(now);
+    let first = if differences.contains(&"deferred_tx") {
+        "deferred_tx"
+    } else {
+        let Some(&first) = differences.first() else {
+            return Ok(());
+        };
+        first
     };
     Err(Error::Integrity(match first {
         "clock" if recorded.timebase() != requested.timebase() => format!(
