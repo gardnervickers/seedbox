@@ -40,12 +40,15 @@ for sha in $SHAS; do
       echo "commit: $sha"
     } >> "$summary"
     if ! { if [ "$BUILD_KERNEL" = 1 ]; then bash kernel/build.sh; fi \
-        && cargo build --release --locked -p seedbox && cargo build-vmm; } > "$out/build.log" 2>&1; then
+        && cargo build --release --locked -p seedbox && cargo build-vmm \
+        && nix build .#runtimeArchive --out-link "$out/runtime-assets"; } > "$out/build.log" 2>&1; then
       echo "  build: FAILED (see $out/build.log)" >> "$summary"
       exit 1
     fi
     echo "  build_seconds: $(( $(date +%s) - start ))" >> "$summary"
     sb="$PWD/target/release/seedbox"
+    # Helpers built from this commit; droplets have no token for the release download.
+    export SEEDBOX_RUNTIME_ASSETS="$out/runtime-assets"
     rundir() { sed -n "s/^[A-Z_]*: //p" "$1" | head -n1; }
     status() { grep -m1 "^[A-Z_]*: " "$1" | cut -d: -f1 || echo "no status"; }
     field() { python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2]))" "$1/output/vmm.json" "$2" 2>/dev/null || echo "?"; }
