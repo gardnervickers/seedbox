@@ -94,6 +94,26 @@ class ControlTests(unittest.TestCase):
         with World(peer) as world, self.assertRaises(ProtocolError):
             world.throttle(Machine("server-vm"), 1)
 
+    def test_process_pause_and_resume_wire_and_errors(self):
+        for op in ("pause_process", "resume_process"):
+            for target, wire in (("server", {"service": "server"}),
+                                 (Machine("server-vm"), {"machine": "server-vm"})):
+                with self.subTest(op=op, target=target):
+                    peer = Peer(reply(effect_at_ns=25, replied_at_ns=35)
+                                + reply(2, ok=False, effect_at_ns=40, replied_at_ns=50,
+                                        error={"code": "invalid_state", "message": "not paused"}))
+                    with World(peer) as world:
+                        effect = getattr(world, op)(target)
+                        self.assertEqual(effect.effect_at_ns, 25)
+                        with self.assertRaises(FaultError) as failure:
+                            getattr(world, op)(target)
+                        self.assertEqual(failure.exception.code, "invalid_state")
+                    self.assertEqual(peer.requests, [
+                        {"version": 1, "id": 1, "op": op, "target": wire},
+                        {"version": 1, "id": 2, "op": op, "target": wire}])
+                    with World(Peer(b"")) as world, self.assertRaises(ValueError):
+                        getattr(world, op)("")
+
     def test_optional_response_details_do_not_relax_required_version(self):
         peer = Peer(reply(result={"now_ns": 30, "extra_result_detail": "opaque"},
                           extra_response_detail={"arbitrary": [1, None]}))

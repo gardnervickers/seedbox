@@ -27,6 +27,9 @@ static int control_parse(char *command, char **action, uint32_t *id) {
         }
         *id = (uint32_t)value;
     }
-    return strcmp(*action, "stop") && strcmp(*action, "start") ? -1 : 0;
+    static const char *const actions[] = {"stop", "start", "freeze", "thaw"};
+    for (unsigned i = 0; i < sizeof(actions) / sizeof(*actions); i++)
+        if (!strcmp(*action, actions[i])) return 0;
+    return -1;
 }
 #endif

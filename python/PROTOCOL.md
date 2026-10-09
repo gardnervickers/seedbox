@@ -20,7 +20,7 @@ x-seedbox:
 
 The control service must also be the check service, so another application cannot
 complete the run before the scenario finishes. The controller is outside the fault
-model. Stop/restart and machine lifecycle operations cannot target it, and partition
+model. Process and machine lifecycle operations cannot target it, and partition
 groups cannot contain it. Its control transport and network links
 remain available during cuts between other guests. A stopped application still
 cannot answer application requests; restart confirmation means successful exec,
@@ -91,6 +91,8 @@ Common fields are `version: 1`, `id`, and `op`. Targets are typed objects:
 | `sleep` | `duration_ns`: unsigned 64-bit nanoseconds | `{}` after simulated sleep |
 | `stop` | `target`: a typed target | `{}` after process-group termination and reap |
 | `restart` | `target`: a typed target | `{}` after successful exec of its retained launch recipe |
+| `pause_process` | `target`: a typed target | `{}` after the application's process group stops (SIGSTOP) |
+| `resume_process` | `target`: a typed target | `{}` after SIGCONT to a paused process group |
 | `pause` | `target`: a typed target | `{}` after freezing the whole machine |
 | `resume` | `target`: a typed target | `{}` after continuing a paused machine |
 | `crash` | `target`: a typed target | `{}` after destroying the machine |
@@ -109,7 +111,7 @@ Partitions cut both directions between their two groups. Each handle is
 independent: a link remains cut while any applicable handle exists. Already
 routed packets stay in flight; new sends crossing an active cut are dropped.
 Inspect returns the retained service-to-machine mapping, application lifecycle
-states (`Running`, `Stopped`, `Paused`, `Down`, or `Exited(code)`), active partition, shape and connection
+states (`Running`, `Stopped`, `Frozen`, `Paused`, `Down`, or `Exited(code)`), active partition, shape and connection
 handles and directed-link counters. It exposes simulator state, not application object memory.
 Transient CPU halt state is not an application lifecycle state. Counters include
 sends, drops and arrivals whose nominal simulated timestamps are strictly before
@@ -125,6 +127,16 @@ incarnation from the retained image. Application readiness remains the scenario'
 own check. The allowed transitions are running to paused, paused to running,
 running or paused to down, and down to running, respectively. An application
 process that is stopped still belongs to a running machine.
+
+Process pause is a process command like `stop`: the supervisor sends SIGSTOP to
+the application's process group and acknowledges once the group leader reports
+the stop. `Frozen` is not a machine state: the kernel keeps running, ACKs data
+and accepts connections into the listen backlog, so peers see requests hang
+rather than fail at the TCP layer. `resume_process` sends SIGCONT, which resumes
+the group as it is sent. Pausing a stopped or frozen application and resuming
+one that is not frozen return `invalid_state`; stop kills a frozen group and
+leaves it `Stopped`. A crash discards the frozen state with the incarnation.
+Machine pause and resume are independent of process pause. Neither uses RNG.
 
 For example:
 
@@ -326,9 +338,10 @@ A scenario can handle rejected arguments or an inactive fault handle.
 a running application or stopping an already stopped application returns
 `invalid_state`. Illegal machine lifecycle transitions also return `invalid_state`
 without creating a fault plan: pause requires a running machine, resume a paused
-machine, crash a machine that is not down, and reboot a down machine. Stop and
-restart of a paused machine also return `invalid_state`, since its supervisor
-cannot act until it resumes. Stop/restart
+machine, crash a machine that is not down, and reboot a down machine. Process
+commands (stop, restart, pause_process, resume_process) on a paused machine also
+return `invalid_state`, since its supervisor cannot act until it resumes. Process
+pause and resume share the stop/restart down and exited rules below. Stop/restart
 and pause/resume targeting a VM that has exited return `target_unavailable`;
 crash and reboot are allowed for an exited machine, subject to those transitions.
 Stop/restart targeting a down machine resolve as `target_unavailable` at admission,
@@ -359,7 +372,8 @@ It must cover scheduler lookahead and the ordinary early-delivery window.
 - `admitted_at_ns = A = T + L`: all relevant guests have reached the exact
   admission boundary; the operation can start without changing another guest's past.
 - `effect_at_ns = E`: partition/heal and pause/resume/crash/reboot take effect at
-  admission; stop/restart waits for the supervisor's correlated confirmation;
+  admission; stop/restart and process pause/resume wait for the supervisor's
+  correlated confirmation;
   sleep wakes at `A + duration_ns`.
 - `replied_at_ns = R = E + L`: response delivery is scheduled strictly at this
   time, never through the ordinary early packet-delivery window.

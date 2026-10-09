@@ -691,6 +691,14 @@ impl ExecutionBackend for VmmExecutor {
     fn preflight(&self, output: Option<&Path>) -> Result<()> {
         self.preflight_capacity(1, output)
     }
+    /// The engine runs the retained executable and reads only the kernel and
+    /// each machine's guest image; image layers stay in the store.
+    fn runtime_inputs<'a>(&self, inputs: &'a PreparedInputs) -> Vec<&'a ContentDigest> {
+        [&inputs.profile.engine, &inputs.kernel]
+            .into_iter()
+            .chain(inputs.guests.values())
+            .collect()
+    }
     fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {
         crate::admission::validate_profile(&inputs.profile)?;
         if self.counted() && recorded_counter(&inputs.profile)? != self.counter {
@@ -1150,6 +1158,12 @@ fn validate_control_history(
             Operation::Restart { target } => Action::Restart {
                 machine: resolve(&target)?,
             },
+            Operation::PauseProcess { target } => Action::PauseProcess {
+                machine: resolve(&target)?,
+            },
+            Operation::ResumeProcess { target } => Action::ResumeProcess {
+                machine: resolve(&target)?,
+            },
             Operation::Pause { target } => Action::Pause {
                 machine: resolve(&target)?,
             },
@@ -1329,9 +1343,7 @@ fn validate_control_history(
             return Err(bad());
         }
         if unavailable {
-            if !matches!(plan.action, Action::Stop { .. } | Action::Restart { .. })
-                || e.is_none_or(|e| e > plan.deadline_ns)
-            {
+            if !plan.action.is_process() || e.is_none_or(|e| e > plan.deadline_ns) {
                 return Err(bad());
             }
             expected.unavailable.insert(plan.id, e.ok_or_else(bad)?);

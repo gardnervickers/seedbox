@@ -128,14 +128,17 @@ Use `verify.py RUN --focused control-cases` to inspect this evidence separately.
 
 The lifecycle-cases scenario runs next. It is replayed with the default settings
 and again with `--undo 0 --margin 16384` (the margin is read only with undo off);
-both must MATCH. It pauses the
-whole server machine while an established connection sends a request: nothing
+both must MATCH. It first pauses only the server's process (SIGSTOP) with one
+connection established and another opened while it is frozen: both requests
+hang with no FIN or RST, and both are answered after `resume_process`. It then
+pauses the whole server machine while an established connection sends a request: nothing
 answers until resume, and then the held request is answered on the same
 connection. It crashes the server with another connection open: the peer sees
 neither FIN nor RST, only silence. After reboot the server reports a new kernel
 `boot_id` and has lost a marker file it wrote to RAM before the crash. The
-scenario also checks six `invalid_state` transitions, stop of a down machine
-returning `target_unavailable`, and `inspect()` reporting `Paused` and `Down`.
+scenario also checks seven `invalid_state` transitions, stop of a down machine
+returning `target_unavailable`, and `inspect()` reporting `Frozen`, `Paused` and
+`Down`.
 The verifier checks the applied effect times, the crashed incarnation record and
 the second boot in the server console. With all optional supervisors supplied,
 the complete matrix contains seventeen executions. Use

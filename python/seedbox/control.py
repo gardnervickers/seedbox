@@ -190,6 +190,14 @@ class World:
         """Return after successful exec; application readiness remains its own check."""
         return self._call("restart", target=_target(target))[1]
 
+    def pause_process(self, target):
+        """SIGSTOP the application's process group; its kernel keeps ACKing and accepting connections."""
+        return self._call("pause_process", target=_target(target))[1]
+
+    def resume_process(self, target):
+        """SIGCONT a process group frozen by pause_process()."""
+        return self._call("resume_process", target=_target(target))[1]
+
     def pause(self, target):
         """Freeze the target's whole machine; other machines keep running."""
         return self._call("pause", target=_target(target))[1]
