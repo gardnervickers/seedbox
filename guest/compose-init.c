@@ -491,7 +491,9 @@ static pid_t start(void) {
         if (!arguments) die("resolve application interpreter");
         size_t count = 0;
         while (arguments[count]) ++count;
-        char **instrumented = calloc(count + 8, sizeof(*instrumented));
+        /* Translator arguments, the application's own, and execv's NULL. */
+        enum { PREFIX_MAX = 8 };
+        char **instrumented = calloc(PREFIX_MAX + count + 1, sizeof(*instrumented));
         if (!instrumented) die("instrumentation arguments");
         size_t prefix = 0;
         instrumented[prefix++] = "/seedbox/progress/bin64/drrun";
@@ -510,7 +512,9 @@ static pid_t start(void) {
         instrumented[prefix++] = "-c";
         instrumented[prefix++] = "/seedbox/progress/libseedbox_progress.so";
         instrumented[prefix++] = "--";
+        if (prefix > PREFIX_MAX) die("instrumentation prefix");
         for (size_t i = 0; i < count; ++i) instrumented[i + prefix] = arguments[i];
+        instrumented[prefix + count] = NULL;
         execv(instrumented[0], instrumented);
         die("exec application");
     }

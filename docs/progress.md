@@ -41,29 +41,54 @@ exclusive monitor is cleared by every exception return into the guest, so a
 Under HVF that entry is invisible to the VMM: `hv_vcpu_run` returns only for
 guest exceptions, cancellation and the virtual timer, so a host interrupt or a
 preemption lands at a point no replay can reproduce. The failed store is
-retried, and natively the retry is invisible to the program.
+retried. A plain retry loop ends in the same registers and memory however many
+times it retried; a program that observes its own failures, such as a weak
+compare-and-swap that counts attempts or backs off, is as non-reproducible
+here as it is natively, and the rule below does not change that.
 
-Block-entry counting makes it visible. The retried block runs again, shifts the
-TLS budget, and eventually moves the `getpid` charge to a different
+Block-entry counting makes every retry visible. The retried block runs again,
+shifts the TLS budget, and eventually moves the `getpid` charge to a different
 instruction: RAM differs when only the budget moved, and the clock differs when
 a 10,000 boundary moved. Splitting a sequence across blocks is worse, because
-each block boundary is a translator exit inside the sequence.
+the first execution of each block boundary is a translator exit inside the
+sequence, and instrumentation inside the sequence stores to memory while the
+monitor is armed.
 
 The client therefore follows one rule: **a block entry that a failed exclusive
-store can reach is never counted.** On aarch64 the supervisor passes
-`-no_ldstex2cas` (DynamoRIO's compare-and-swap conversion changes ABA
-semantics and hung static musl binaries) and `-unsafe_build_ldstex`, which
-packs each exclusive sequence into one block. The client's analysis pass then
-skips the count on any block that contains an exclusive load, `ldstex` macro
-instruction, exclusive store or `clrex` unless the exclusive load is the
-block's first instruction and so the block can only be entered by starting the
-sequence. The progress charge lands on the block the sequence exits to, which
-runs exactly once per completed increment regardless of how many retries
-preceded it.
+store can reach is never counted, and nothing is inserted between a load and
+its store.** On aarch64 the supervisor passes `-no_ldstex2cas` (DynamoRIO's
+compare-and-swap conversion changes ABA semantics and hung static musl
+binaries) and `-unsafe_build_ldstex`, which packs each exclusive sequence into
+one `ldstex` macro instruction when it is at most sixteen instructions long,
+contains no PC-relative instruction and leaves a scratch register free. The
+client's analysis pass (`guest/progress/progress.c`) then decides per block:
 
-The rule does not make the retry count itself reproducible: a program that
-prints its own `STXR` failure count still differs between run and replay, as
-it does natively. It makes the charge independent of that count.
+- A block that begins with an exclusive load or an `ldstex` macro is the retry
+  target and is not counted. A block where ordinary instructions precede the
+  load is counted, because the retry jumps to the load and DynamoRIO gives
+  that target a block of its own.
+- For sequences DynamoRIO could not pack, a block that contains an exclusive
+  store or `clrex` before any load, and a block whose preceding instructions
+  arm the monitor without releasing it (an exclusive load within sixteen
+  instructions with no store, `clrex`, system call or indirect branch in
+  between), continue the sequence and are not counted either.
+- The charge lands on the block the sequence exits to, which runs exactly once
+  per completed operation regardless of how many retries preceded it.
+- A sequence that gives up before its store, such as a lock poll that reloads
+  while the lock is held, completes nothing, so no exit block runs. Unpacked,
+  the block begins with the load and ends with the backward branch, and the
+  charge goes on that branch's taken path, where the reservation is already
+  abandoned; it runs once per poll and never because of a failed store.
+  Packed, the loop spins inside the macro instruction where nothing can be
+  inserted; the client reports such a block once on stderr
+  (`seedbox progress: exclusive poll loop at ... is not charged`), because a
+  waiter in it makes no progress until something else moves the clock. The
+  usual library polls (musl, glibc, Go, outline atomics) spin on ordinary
+  loads or a `yield` outside the sequence and are charged normally.
+
+The fixtures under `guest/progress/fixtures/` exercise these shapes natively
+on an aarch64 Linux host under DynamoRIO (`run.sh`), packed and unpacked, and
+count the charges each makes.
 
 ## Reproducer
 
