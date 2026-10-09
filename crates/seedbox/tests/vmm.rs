@@ -48,6 +48,7 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
         schedule: &Schedule {
             timer_jitter_ns: 50_000,
             stop_tolerance_ns: 40_000,
+            start_stagger_ns: 0,
         },
         control: None,
         check: &Check {
@@ -126,6 +127,25 @@ fn initial_arm_launch_uses_numeric_cap_and_network_bound() {
             ..*base
         };
         assert!(vmm::world(&request).is_err());
+    });
+}
+
+#[test]
+fn start_stagger_parks_at_the_launch_barrier_under_the_run_seed() {
+    fixture(|base| {
+        assert!(vmm::world(base).unwrap().get("boot").is_none());
+        let schedule = Schedule {
+            start_stagger_ns: 200_000_000,
+            ..base.schedule.clone()
+        };
+        let request = ExecutionRequest {
+            schedule: &schedule,
+            ..*base
+        };
+        assert_eq!(
+            vmm::world(&request).unwrap()["boot"],
+            json!({"seed": 1009, "release_skew_ns": 200_000_000})
+        );
     });
 }
 

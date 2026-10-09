@@ -483,6 +483,33 @@ timebase field mean counter. Run/replay and inspect print `timebase: VALUE`.
 `inspect --json` exposes the semantic profile and, when present, the VMM's
 reported `report.timebase` through the library's serialization.
 
+### Seed diversity defaults
+
+Different seeds diverge by default in timer, frame and start timing, not only
+in the bytes the guest CRNG returns:
+
+- `x-seedbox.schedule.timer_jitter` defaults to 20 µs, drawn from the existing
+  `timer-jitter/<machine>` stream.
+- `x-seedbox.network.jitter` defaults to 10% of `x-seedbox.network.latency`,
+  drawn from the existing `link/<a>/<b>` streams. Per-link entries in
+  `network.links` keep their own explicit jitter, which defaults to zero.
+- `x-seedbox.schedule.start_stagger` defaults to 200 ms, or half of
+  `limits.simulated_time` when that is shorter. With a nonzero stagger, a Linux
+  KVM run boots every machine under the run seed and parks it at its launch
+  barrier, just before its application starts. When the last machine arrives,
+  each machine is released at that time plus an offset in `[0, stagger]` drawn
+  from `release/<machine>`, reads its own fork entropy and reseeds its kernel
+  CRNG, and the timer, link, fault and control streams start from the run seed
+  at the release (the same release as a [boot fork](../harness/worlds/README.md#boot-once-fork-per-seed)).
+  A runtime checkpoint must then be at or after the latest release. The Mac
+  backend keeps its own launch skew and ignores this setting.
+
+Setting any of the three to `0ns` restores the previous behaviour for that
+setting, and all three at zero reproduce the previous witness. The resolved
+values are part of the recorded simulation, so replay restores them; a retained
+record without `start_stagger_ns` means zero, and a zero stagger is omitted so
+older records keep their identity bytes.
+
 `run`, `prepare` and `explore` accept `--page-timer` (off by default,
 no environment override). An ABI-4 kernel arms one-shot clockevents by writing
 an absolute deadline into the shared time page, avoiding port `0x530` exits.

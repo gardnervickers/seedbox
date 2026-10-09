@@ -105,6 +105,11 @@ network lookahead. Replay uses that value and remains inside the configured
 absolute simulated-time limit.
 The native PV backend requires cooperative guest boundaries; four Go workers
 stalled in the Mac example and are not validated.
+Seeds differ by default in timer jitter (20 µs), network jitter (10% of
+latency) and, on Linux KVM, a seeded application start stagger of up to 200 ms
+after every machine has booted. Set `x-seedbox.schedule.timer_jitter`,
+`x-seedbox.network.jitter` or `x-seedbox.schedule.start_stagger` to `0ns` to
+turn one off; replay restores the recorded values.
 `--torn-writes` opts into seeded partial survival of unflushed 512-byte disk
 sectors on machine crash (off by default). It is part of run identity and replay
 restores it automatically. It applies only to retained disks; this template

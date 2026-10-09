@@ -117,7 +117,25 @@ pub struct Limits {
 pub struct Schedule {
     pub timer_jitter_ns: u64,
     pub stop_tolerance_ns: u64,
+    /// Seeded launch stagger: each machine starts its application up to this
+    /// long after the last machine reaches its launch barrier. A retained
+    /// record without it means 0, and 0 is omitted so such records keep their
+    /// identity.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub start_stagger_ns: u64,
 }
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+/// Default `x-seedbox.schedule.timer_jitter`.
+pub const DEFAULT_TIMER_JITTER_NS: u64 = 20_000;
+/// Default `x-seedbox.schedule.start_stagger`, or half of
+/// `limits.simulated_time` when that is shorter.
+pub const DEFAULT_START_STAGGER_NS: u64 = 200_000_000;
+/// Default `x-seedbox.network.jitter`, as a fraction of global latency.
+pub const DEFAULT_NETWORK_JITTER_DIVISOR: u64 = 10;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -464,11 +482,13 @@ pub fn parse_for_architecture(
         if let Some(v) = net.get("latency") {
             network.latency_ns = duration(v, "$.x-seedbox.network.latency", false)?;
         }
-        if let Some(v) = net.get("jitter") {
-            network.jitter_ns = duration(v, "$.x-seedbox.network.jitter", true)?;
-        }
         (network.bandwidth_bps, network.queue_bound_ns) = bandwidth(net, "$.x-seedbox.network")?;
     }
+    // Seeds diverge in frame timing by default; an explicit 0 turns it off.
+    network.jitter_ns = match ext.get("network").and_then(|v| v.get("jitter")) {
+        Some(v) => duration(v, "$.x-seedbox.network.jitter", true)?,
+        None => network.latency_ns / DEFAULT_NETWORK_JITTER_DIVISOR,
+    };
     if network.jitter_ns >= network.latency_ns {
         return invalid("$.x-seedbox.network.jitter", "must be less than latency");
     }
@@ -544,12 +564,17 @@ pub fn parse_for_architecture(
             });
         }
     }
-    let mut schedule = Schedule::default();
+    let mut schedule = Schedule {
+        timer_jitter_ns: DEFAULT_TIMER_JITTER_NS,
+        stop_tolerance_ns: 0,
+        // A very short simulation keeps most of its time after the release.
+        start_stagger_ns: DEFAULT_START_STAGGER_NS.min(limits.simulated_time_ns / 2),
+    };
     if let Some(raw) = ext.get("schedule") {
         let options = fields(
             raw,
             "$.x-seedbox.schedule",
-            &["timer_jitter", "stop_tolerance"],
+            &["timer_jitter", "stop_tolerance", "start_stagger"],
         )?;
         if let Some(v) = options.get("timer_jitter") {
             schedule.timer_jitter_ns = duration(v, "$.x-seedbox.schedule.timer_jitter", true)?;
@@ -557,6 +582,15 @@ pub fn parse_for_architecture(
         if let Some(v) = options.get("stop_tolerance") {
             schedule.stop_tolerance_ns = duration(v, "$.x-seedbox.schedule.stop_tolerance", true)?;
         }
+        if let Some(v) = options.get("start_stagger") {
+            schedule.start_stagger_ns = duration(v, "$.x-seedbox.schedule.start_stagger", true)?;
+        }
+    }
+    if schedule.start_stagger_ns >= limits.simulated_time_ns {
+        return invalid(
+            "$.x-seedbox.schedule.start_stagger",
+            "must be less than limits.simulated_time",
+        );
     }
     reject_static_faults(ext.get("faults"))?;
     let control = ext

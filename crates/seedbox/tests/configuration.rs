@@ -23,7 +23,14 @@ fn validates_and_normalizes_the_authoring_subset() {
 
 #[test]
 fn schedule_controls_are_explicit_semantic_durations() {
-    assert_eq!(parse(BASE).unwrap().schedule, config::Schedule::default());
+    assert_eq!(
+        parse(BASE).unwrap().schedule,
+        config::Schedule {
+            timer_jitter_ns: config::DEFAULT_TIMER_JITTER_NS,
+            stop_tolerance_ns: 0,
+            start_stagger_ns: config::DEFAULT_START_STAGGER_NS,
+        }
+    );
     let yaml = BASE.replace(
         "  version: 1",
         "  version: 1\n  schedule: {timer_jitter: 1ms, stop_tolerance: 200us}",
@@ -31,11 +38,48 @@ fn schedule_controls_are_explicit_semantic_durations() {
     let schedule = parse(&yaml).unwrap().schedule;
     assert_eq!(schedule.timer_jitter_ns, 1_000_000);
     assert_eq!(schedule.stop_tolerance_ns, 200_000);
+    assert_eq!(schedule.start_stagger_ns, config::DEFAULT_START_STAGGER_NS);
     assert!(parse(&yaml.replace("timer_jitter: 1ms", "timer_jitter: -1ms")).is_err());
     assert!(parse(&yaml.replace("stop_tolerance:", "unknown:"))
         .unwrap_err()
         .to_string()
         .contains("$.x-seedbox.schedule.unknown"));
+}
+
+#[test]
+fn seed_diversity_defaults_and_explicit_zeros() {
+    let unset = BASE.replace("  network: {latency: 1ms, jitter: 200us}\n", "");
+    let sim = parse(&unset).unwrap();
+    assert_eq!(sim.network.jitter_ns, 100_000);
+    assert_eq!(sim.schedule.timer_jitter_ns, 20_000);
+    assert_eq!(sim.schedule.start_stagger_ns, 200_000_000);
+    let latency = unset.replace("  version: 1", "  version: 1\n  network: {latency: 5ms}");
+    assert_eq!(parse(&latency).unwrap().network.jitter_ns, 500_000);
+    let zeros = unset.replace(
+        "  version: 1",
+        "  version: 1\n  network: {jitter: 0ns}\n  schedule: {timer_jitter: 0ns, start_stagger: 0ns}",
+    );
+    let sim = parse(&zeros).unwrap();
+    assert_eq!(sim.network.jitter_ns, 0);
+    assert_eq!(sim.schedule, config::Schedule::default());
+    // Zero is omitted, so records made before the stagger keep their bytes.
+    let bytes = serde_json::to_value(&sim.schedule).unwrap();
+    assert_eq!(
+        bytes,
+        serde_json::json!({"timer_jitter_ns": 0, "stop_tolerance_ns": 0})
+    );
+    let old: config::Schedule =
+        serde_json::from_value(serde_json::json!({"timer_jitter_ns": 5, "stop_tolerance_ns": 0}))
+            .unwrap();
+    assert_eq!(old.start_stagger_ns, 0);
+    let late = unset.replace(
+        "  version: 1",
+        "  version: 1\n  schedule: {start_stagger: 120s}",
+    );
+    assert!(parse(&late)
+        .unwrap_err()
+        .to_string()
+        .contains("$.x-seedbox.schedule.start_stagger"));
 }
 
 #[test]

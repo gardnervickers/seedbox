@@ -845,6 +845,15 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
             None => json!({"sector_bytes": 512, "survival_probability": 0.5}),
         };
     }
+    // A start stagger boots every machine under the run seed, parks it at its
+    // launch barrier and releases each one up to the stagger later, drawn
+    // from its release/<machine> stream. Zero keeps the unparked cold run.
+    if request.schedule.start_stagger_ns > 0 {
+        world["boot"] = json!({
+            "seed": request.seed,
+            "release_skew_ns": request.schedule.start_stagger_ns,
+        });
+    }
     if let Some(checkpoint) = checkpoint_metadata(request, &world)? {
         world["checkpoint"] = checkpoint;
     }

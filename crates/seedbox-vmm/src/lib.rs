@@ -543,7 +543,12 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
         Vec::new()
     };
     if !checkpoint_times.is_empty() {
-        if cfg["boot"].is_object() {
+        // A barrier boot under one seed is a staggered cold run, so it can
+        // take checkpoints after its release. Time forks and boot seeds other
+        // than the run seed fork the world and cannot.
+        if cfg["boot"].is_object()
+            && (!cfg["boot"]["fork_at_ns"].is_null() || cfg["boot"]["seed"].as_u64() != Some(seed))
+        {
             return Err("runtime checkpoints cannot mix with boot forks".into());
         }
         if options.trace {
@@ -757,8 +762,49 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
         slices: 0,
         machines,
     };
-    if !forked {
-        let kills = arm_seed(&mut world, &cfg, &names, seed, 0)?;
+    if !forked || !checkpoint_times.is_empty() {
+        let mut launch = Value::Null;
+        let kills = if forked {
+            // Staggered cold run: boot, park every machine at its barrier and
+            // release under the run seed; checkpoints come after the release.
+            let started = Instant::now();
+            let boot_run = world_windowed::Run {
+                cfg: &cfg,
+                duration,
+                end_on: &end_on,
+                fork: Some(None),
+                checkpoint: None,
+                require_barrier: true,
+            };
+            simulate_windowed(&mut world, &boot_run, options, &mut host_control)?;
+            let barrier_ns = world
+                .machines
+                .iter()
+                .map(|m| m.world.time)
+                .max()
+                .unwrap_or(0);
+            let boot_host_seconds = started.elapsed().as_secs_f64();
+            let (kills, reseed) = release(&mut world, &cfg, &names, seed, release_skew)?;
+            let released_ns = world
+                .machines
+                .iter()
+                .map(|m| m.world.time)
+                .max()
+                .unwrap_or(0);
+            if let Some(&at) = checkpoint_times.iter().find(|&&at| at < released_ns) {
+                return Err(format!(
+                    "checkpoint at {at} ns is before the launch release at {released_ns} ns; choose a later checkpoint"
+                ));
+            }
+            launch = json!({
+                "seed": boot_seed, "barrier_ns": barrier_ns, "fork_at_ns": null,
+                "release_skew_ns": release_skew, "boot_host_seconds": boot_host_seconds,
+                "forked": false, "reseed": reseed,
+            });
+            kills
+        } else {
+            arm_seed(&mut world, &cfg, &names, seed, 0)?
+        };
         if !checkpoint_times.is_empty() {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;
             let engine = format!(
@@ -855,6 +901,9 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
                     r["checkpoint"] = json!({"at_ns":at,"branch_seed":branch_seed,"parent_identity":parent,
                         "branch_identity":identity});
                     r["checkpoint_reseed"] = json!(reseed);
+                    if !launch.is_null() {
+                        r["boot"] = launch.clone();
+                    }
                     reports.push(r);
                 }
             }
