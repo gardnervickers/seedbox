@@ -61,7 +61,7 @@ class Session:
         self.channel.close()
 
 
-def run(address, no_faults=False):
+def run(address, no_faults=False, batch=None):
     errors = []
     def rejected(operation, code):
         try:
