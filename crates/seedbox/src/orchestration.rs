@@ -303,7 +303,7 @@ impl Orchestrator {
         baseline: Option<&RunRecord>,
         allow_engine_change: bool,
     ) -> Result<Run> {
-        let run_id = self.store.put(&serde_json::to_vec(&identity)?)?;
+        let run_id = self.store.put_unsynced(&serde_json::to_vec(&identity)?)?;
         fs::create_dir_all(&self.runs)?;
         let directory = tempfile::Builder::new()
             .prefix(&format!("{}-", &run_id.hex()[..16]))
@@ -661,7 +661,9 @@ fn retain_logs(
                     ),
                 );
             } else {
-                record.logs.insert(relative, store.put_file(&path)?);
+                record
+                    .logs
+                    .insert(relative, store.put_file_unsynced(&path)?);
                 *retained_bytes += size;
             }
         } else {
