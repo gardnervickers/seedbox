@@ -653,6 +653,27 @@ fn invalid_shape_values_and_sides_receive_correlated_invalid_request_without_eff
         ("bandwidth_bps", json!(0)),
         ("bandwidth_bps", json!(1.5)),
         ("queue_bound_ns", json!(10)),
+        ("network_faults", json!({"duplicate_ppm":1_000_001})),
+        (
+            "network_faults",
+            json!({"reorder_ppm":1,"reorder_delay_ns":0}),
+        ),
+        (
+            "network_faults",
+            json!({"burst_loss_ppm":1,"burst_length":0}),
+        ),
+        (
+            "network_faults",
+            json!({"latency_spike_ppm":1,"latency_spike_ns":0}),
+        ),
+        ("network_faults", json!({"tcp_reset_ppm":1_000_001})),
+        ("network_faults", json!({"duplicate_ppm":true})),
+        ("network_faults", json!({"duplicate_ppm":0.5})),
+        ("network_faults", json!({"extra":1})),
+        (
+            "network_faults",
+            json!({"reorder_ppm":1,"reorder_delay_ns":u64::MAX}),
+        ),
         ("latency_ns", json!(3_600_000_000_001u64)),
         ("from", json!([])),
         ("to", json!([{"service":"client"}])),
@@ -673,6 +694,80 @@ fn invalid_shape_values_and_sides_receive_correlated_invalid_request_without_eff
         assert!(reply.contains("invalid_request"), "{reply}");
         assert!(f.active_handles().is_empty());
         assert!(f.log.is_empty());
+    }
+}
+
+#[test]
+fn each_network_fault_is_dynamic_directed_healable_and_reports_its_actual_evidence() {
+    for (settings, counter) in [
+        (
+            json!({"reorder_ppm":1_000_000,"reorder_delay_ns":100}),
+            "reordered",
+        ),
+        (json!({"duplicate_ppm":1_000_000}), "duplicated"),
+        (
+            json!({"burst_loss_ppm":1_000_000,"burst_length":3}),
+            "burst_dropped",
+        ),
+        (
+            json!({"latency_spike_ppm":1_000_000,"latency_spike_ns":100}),
+            "spiked",
+        ),
+        (json!({"tcp_reset_ppm":1_000_000}), "tcp_reset"),
+    ] {
+        let mut c = control();
+        let mut f = faults::Faults::new(
+            vec![],
+            vec!["scenario".into(), "client".into(), "server".into()],
+        )
+        .unwrap();
+        request(&mut c,1,100,json!({"version":1,"id":1,"op":"shape","from":[{"service":"client"}],"to":[{"service":"server"}],"latency_ns":10,"jitter_ns":0,"loss_ppm":0,"network_faults":settings})).unwrap();
+        assert!(f.links.layers.is_empty());
+        c.apply_boundary(&mut f, 120).unwrap();
+        f.apply_due(120);
+        c.observe_faults(&f, 120).unwrap();
+        c.response(140).unwrap();
+        c.mark_delivered(140).unwrap();
+        assert_eq!(f.log[0]["network_fault_counts"][counter], 0);
+        let mut frame = vec![0; 55];
+        frame[12..14].copy_from_slice(&[8, 0]);
+        frame[14] = 0x45;
+        frame[16..18].copy_from_slice(&41u16.to_be_bytes());
+        frame[23] = 6;
+        frame[34..38].copy_from_slice(&[0x0f, 0xa0, 0, 80]);
+        frame[46] = 0x50;
+        frame[47] = 0x18;
+        assert_eq!(
+            f.route(2, 1, 150, &frame, false),
+            links::Outcome::Deliver(151)
+        );
+        for n in 0..3 {
+            let outcome = f.route(1, 2, 150 + n, &frame, false);
+            if let links::Outcome::Deliver(at) = outcome {
+                f.deliveries(1, 2, at, &frame);
+            }
+        }
+        request(
+            &mut c,
+            2,
+            200,
+            json!({"version":1,"id":2,"op":"heal","handle":"p1"}),
+        )
+        .unwrap();
+        c.apply_boundary(&mut f, 220).unwrap();
+        f.apply_due(220);
+        c.observe_faults(&f, 220).unwrap();
+        c.response(240).unwrap();
+        let counts = &c.log.last().unwrap()["response"]["result"]["network_fault_counts"];
+        assert_eq!(counts["matched"], 3);
+        assert_eq!(counts[counter], 3);
+        assert_eq!(f.log[0]["network_fault_counts"], *counts);
+        assert_eq!(f.log[1]["network_fault_counts"], *counts);
+        assert!(f.active_handles().is_empty());
+        let links::Outcome::Deliver(at) = f.route(1, 2, 250, &frame, false) else {
+            panic!("healed send lost")
+        };
+        assert_eq!(f.deliveries(1, 2, at, &frame), vec![(251, frame)]);
     }
 }
 

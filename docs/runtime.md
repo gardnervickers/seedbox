@@ -915,6 +915,25 @@ departure clocks, per-pair and live-layer queue evidence and retained use marker
 With bandwidth absent, no extension bytes, counters or events are added; the
 existing feature-off link/network/world witnesses remain unchanged.
 
+Dynamic shapes additionally accept opt-in packet reorder, duplication, burst
+loss, latency spikes and TCP reset injection through Python's `world.shape`.
+`world.heal` releases each layer and returns `network_fault_counts`; the complete
+wire schema, draw order and socket-reset limits are documented in
+[the protocol](../python/PROTOCOL.md#dynamic-network-impairments).
+Each fault has its own seed-derived stream, sampled only while active. Bursts
+retain per-layer/per-direction remaining length. Reorder and spike delays sit
+outside the base FIFO clock; duplication adds one receive-side copy a nanosecond
+later. Reset replaces an eligible IPv4 TCP frame with a checksummed RST at its
+simulated deadline. No host timing enters a decision. Snapshots retain streams,
+burst state and already queued deliveries; changed-seed branches reseed only
+future samples. A tagged network-fault witness extension is retained after
+healing and is absent when no new fault has been used. The existing loss/jitter
+streams, ordering and feature-off witnesses are unchanged.
+
+`harness/acceptance/workloads/network-faults.yaml` exercises runtime activation
+and healing, checks actual packet receipts and socket effects, and reconnects
+after healing. Run and replay it through the public CLI on a Linux KVM host.
+
 The network seed-diversity audit still finds zero default jitter and loss.
 `link/<from>/<to>` and `link-loss/<from>/<to>` each advance once per non-cut
 candidate, but zero jitter/loss makes their decisions seed-independent for an

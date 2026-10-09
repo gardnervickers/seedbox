@@ -1980,12 +1980,34 @@ impl Machine {
     /// Each u64 is the first 8 SHA-256 bytes interpreted little-endian.
     /// Evidence only: reads RAM without changing it or consuming RNG draws.
     pub fn page_hashes(&mut self) -> Vec<u8> {
-        let mut out = Vec::new();
-        for page in self.memory().chunks(4096) {
-            let hash=u64::from_le_bytes(Sha256::digest(page)[..8].try_into().unwrap());
-            out.extend_from_slice(&hash.to_le_bytes());
-        }
-        out
+        ram_page_hashes(self.memory())
+    }
+}
+
+fn ram_page_hashes(memory: &[u8]) -> Vec<u8> {
+    let zero = [0u8; 4096];
+    let zero_hash = Sha256::digest(zero);
+    let mut out = Vec::with_capacity(memory.len().div_ceil(4096) * 8);
+    for page in memory.chunks(4096) {
+        // Verify the bytes, rather than inferring zeroes from a dirty log.
+        // A short final page has a different digest even when it is all zero.
+        let hash = if page == zero { zero_hash } else { Sha256::digest(page) };
+        out.extend_from_slice(&hash[..8]);
+    }
+    out
+}
+
+#[test]
+fn ram_page_hashes_match_full_hashes_for_zero_changed_and_short_pages() {
+    let mut memory = vec![0u8; 4096 * 5 + 17];
+    for changed in [false, true, false] {
+        memory[4096] = u8::from(changed);
+        memory[4096 * 4 - 1] = u8::from(changed);
+        let before = memory.clone();
+        let expected: Vec<u8> = memory.chunks(4096)
+            .flat_map(|page| Sha256::digest(page)[..8].to_vec()).collect();
+        assert_eq!(ram_page_hashes(&memory), expected);
+        assert_eq!(memory, before);
     }
 }
 
@@ -2360,9 +2382,9 @@ mod io_boundary_tests {
         let kvm=Kvm::new().unwrap();
         let mut counter=Counter::new().unwrap();
         let mut want=None;
-        // A 4096 margin leaves more than 128 branches after a landing with any
+        // A 4096 margin leaves more than 32 branches after a landing with any
         // plausible skid, so that run must refine at least once.
-        for undo in [0,16,256,1024,4096] {
+        for undo in [0,16,32,64,128,256,1024,4096] {
             let mut m=loop_probe(&kvm,false,undo);
             // Increment a RAM word on every branch. A refinement that kept
             // registers but lost RAM would count some iterations twice.

@@ -1269,6 +1269,7 @@ fn validate_control_history(
                 loss_ppm,
                 bandwidth_bps,
                 queue_bound_ns,
+                network_faults,
             } => {
                 let handle = if response {
                     &metadata["result"]["handle"]
@@ -1286,6 +1287,7 @@ fn validate_control_history(
                     || loss_ppm > 1_000_000
                     || bandwidth_bps == Some(0)
                     || (queue_bound_ns.is_some() && bandwidth_bps.is_none())
+                    || network_faults.validate(latency_ns, jitter_ns).is_err()
                 {
                     return Err(bad());
                 }
@@ -1307,6 +1309,7 @@ fn validate_control_history(
                     loss_ppm,
                     bandwidth_bps,
                     queue_bound_ns,
+                    network_faults,
                 }
             }
             Operation::DropConnection { connection } => {

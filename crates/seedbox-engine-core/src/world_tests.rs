@@ -2,6 +2,44 @@ use super::*;
 use crate::world_mock::*;
 
 #[test]
+fn duplicate_receiver_rejection_does_not_erase_an_accepted_copys_fifo_reservation() {
+    for down in [false, true] {
+        let mut w = world(&["a", "b"]);
+        w.faults.append(serde_json::from_value(json!({"id":1,"at_ns":0,"deadline_ns":0,"action":"shape","handle":"s","from":["a"],"to":["b"],"latency_ns":10,"jitter_ns":0,"loss_ppm":0,"network_faults":{"duplicate_ppm":1_000_000}})).unwrap()).unwrap();
+        w.faults.apply_due(0);
+        if down {
+            // The original meets the dead NIC; its copy reaches the next
+            // lifecycle boundary and must remain queued for that transition.
+            w.machines[1].down = true;
+            w.faults
+                .append(seedbox_control::Plan {
+                    id: 0,
+                    at_ns: 16,
+                    deadline_ns: 16,
+                    action: seedbox_control::Action::Reboot {
+                        machine: "b".into(),
+                    },
+                })
+                .unwrap();
+        } else {
+            // The original takes the final paused slot, then its copy drops.
+            w.machines[1].paused = true;
+            w.paused_ingress[1] = PAUSED_INGRESS_FRAMES - 1;
+        }
+        let mut frame = vec![0; 60];
+        frame[5] = 1;
+        w.route(0, 5, frame);
+        assert_eq!(w.dropped, 1);
+        assert_eq!(w.events[1].len(), 1);
+        assert_eq!(
+            w.events[1].keys().next().unwrap().0,
+            if down { 16 } else { 15 }
+        );
+        assert_eq!(w.faults.links.last[&(0, 1)], 15);
+    }
+}
+
+#[test]
 fn queue_drops_count_at_send_time_and_receiver_rejection_still_uses_bandwidth() {
     for down in [false, true] {
         let mut w = world(&["a", "b"]);

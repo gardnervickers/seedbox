@@ -161,8 +161,9 @@ impl Faults {
                     }
                 }
             }
-            Action::Shape {handle, from, to, latency_ns, jitter_ns, loss_ppm, bandwidth_bps, queue_bound_ns} => {
+            Action::Shape {handle, from, to, latency_ns, jitter_ns, loss_ppm, bandwidth_bps, queue_bound_ns, network_faults} => {
                 Policy {latency_ns:*latency_ns, jitter_ns:*jitter_ns, loss_ppm:*loss_ppm, bandwidth_bps:*bandwidth_bps, queue_bound_ns:*queue_bound_ns}.validate(self.links.global.latency_ns)?;
+                network_faults.validate(*latency_ns,*jitter_ns)?;
                 if handle.is_empty() || from.is_empty() || to.is_empty() { return Err("empty fault handle/shape side".into()); }
                 let mut members = BTreeSet::new();
                 let mut sides = Vec::new();
@@ -305,12 +306,26 @@ impl Faults {
         });
         if drop {self.links.selected_drop(src,dst);return crate::links::Outcome::Lost;}
         let outcome = self.links.decide(src,dst,send,frame.len(),cut);
+        self.record_link_counts(src,dst);
+        outcome
+    }
+    pub fn deliveries(&mut self, src: usize, dst: usize, at: u64, frame: &[u8]) -> Vec<(u64,Vec<u8>)> {
+        let deliveries = self.links.deliveries((src,dst),at,frame);
+        if deliveries[0].1 != frame && deliveries[0].1.get(47) == Some(&0x14) {
+            self.connections.observe(src,dst,&deliveries[0].1);
+        }
+        self.record_link_counts(src,dst);
+        deliveries
+    }
+    fn record_link_counts(&mut self, src: usize, dst: usize) {
         if let Some((&id, layer)) = self.links.layers.iter().rev().find(|(_,l)|l.pairs.contains(&(src,dst))) {
             if layer.policy.bandwidth_bps.is_some() {
                 self.log[id as usize-1]["queue_counts"] = json!(layer.queue_counts);
             }
+            if !layer.network_faults.is_off() {
+                self.log[id as usize-1]["network_fault_counts"] = json!(layer.network_counts);
+            }
         }
-        outcome
     }
     pub fn blocked(&self, from: usize, to: usize) -> bool {
         self.cuts.contains_key(&(from, to))
@@ -473,10 +488,11 @@ impl Faults {
                             );
                             self.changed_network.push(i);
                         }
-                        Action::Shape {handle, latency_ns, jitter_ns, loss_ppm, bandwidth_bps, queue_bound_ns, ..} => {
+                        Action::Shape {handle, latency_ns, jitter_ns, loss_ppm, bandwidth_bps, queue_bound_ns, network_faults, ..} => {
                             if self.active_handles().contains(&handle) { self.fail(i,"duplicate active handle".into()); continue; }
-                            if let Err(error) = self.links.shape(id, handle.clone(), self.entries[i].pairs.clone(), Policy {latency_ns,jitter_ns,loss_ppm,bandwidth_bps,queue_bound_ns}) { self.fail(i,error); continue; }
+                            if let Err(error) = self.links.shape_with_faults(id, handle.clone(), self.entries[i].pairs.clone(), Policy {latency_ns,jitter_ns,loss_ppm,bandwidth_bps,queue_bound_ns}, network_faults) { self.fail(i,error); continue; }
                             if bandwidth_bps.is_some() { self.log[i]["queue_counts"] = json!(crate::links::QueueCounts::default()); }
+                            if !network_faults.is_off() { self.log[i]["network_fault_counts"] = json!(crate::network_faults::Counts::default()); }
                             self.applied(i,now,format!("handle={handle}; in-flight frames retained"));
                             self.changed_network.push(i);
                         }
@@ -493,8 +509,10 @@ impl Faults {
                                 continue;
                             }
                             let queue_counts = self.links.layers.values().find(|l|l.handle==handle && l.policy.bandwidth_bps.is_some()).map(|l|l.queue_counts);
+                            let network_counts = self.links.layers.values().find(|l|l.handle==handle && !l.network_faults.is_off()).map(|l|l.network_counts);
                             if self.links.heal(&handle) {
                                 if let Some(counts) = queue_counts { self.log[i]["queue_counts"] = json!(counts); }
+                                if let Some(counts) = network_counts { self.log[i]["network_fault_counts"] = json!(counts); }
                                 self.applied(i,now,format!("handle={handle}; prior policy revealed"));
                                 self.changed_network.push(i);
                                 continue;

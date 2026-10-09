@@ -96,10 +96,10 @@ Common fields are `version: 1`, `id`, and `op`. Targets are typed objects:
 | `crash` | `target`: a typed target | `{}` after destroying the machine |
 | `reboot` | `target`: a typed target | `{}` after booting a crashed machine from its retained image |
 | `partition` | `left`, `right`: nonempty, disjoint arrays of typed targets | `{"handle":"opaque value"}` |
-| `shape` | `from`, `to`: nonempty disjoint typed-target arrays; `latency_ns`, `jitter_ns`, `loss_ppm`: integers; optional `bandwidth_bps`, `queue_bound_ns` | `{"handle":"opaque value"}` |
+| `shape` | `from`, `to`: nonempty disjoint typed-target arrays; `latency_ns`, `jitter_ns`, `loss_ppm`: integers; optional `bandwidth_bps`, `queue_bound_ns`, `network_faults` below | `{"handle":"opaque value"}` |
 | `connections` | `from`, `to`: distinct typed targets; `after`: optional unsigned incarnation cursor (default 0) | `connections`: up to 32 directional records; `next_after`: last returned incarnation (or input cursor) |
 | `drop_connection` | `connection`: one exact discovery record | `{"handle":"opaque value"}` after arming selected loss |
-| `heal` | `handle`: a previously returned handle | `{}` for a link or partition handle; `{"matched": N, "dropped": N}` for a connection handle |
+| `heal` | `handle`: a previously returned handle | `{}` for a plain link or partition; `queue_counts` for bandwidth; `network_fault_counts` for impairments; `{"matched": N, "dropped": N}` for a connection handle |
 | `inspect` | None | `services`, `machines`, `active_handles`, `network_counters`; `triggers` only after an arm |
 | `arm_trigger` | `source`: typed target; `marker`: 1..=256 byte integers; `match_timeout_ns`: positive u64; `fault`: typed trigger fault below | `{"trigger_id": N}`; also `handle` for a partition |
 | `cancel_trigger` | `trigger_id`: previously returned positive ID | `{}` after cancellation at admission |
@@ -176,6 +176,96 @@ delay includes proposed departures of tail-dropped frames. The shape and heal
 fault rows retain the same evidence, including explicit zeros for an unused
 shape. The Python API returns the result object for bandwidth shapes and the
 existing effect timestamp for unlimited shapes.
+
+### Dynamic network impairments
+
+Every impairment is optional on a `shape` layer and is released with its handle.
+The complete policy of the newest matching shape wins, including these fields;
+overlapping handles can be healed in either order. A newer plain shape temporarily
+masks an older impairment. Healing reveals the older layer, including its suspended
+burst state. Already scheduled frames, copies and resets survive healing.
+
+The wire request adds a strict `network_faults` object. Omitted fields default to
+zero; probabilities are integer parts per million in `[0, 1000000]`:
+
+| Wire field | Python `world.shape` keyword | Meaning |
+| --- | --- | --- |
+| `reorder_ppm` | `reorder_ppm` | Chance to hold a surviving frame for an additional seeded delay |
+| `reorder_delay_ns` | `reorder_delay` | Maximum extra delay; sample uniformly from 1 through this bound |
+| `duplicate_ppm` | `duplicate_ppm` | Chance to inject one extra receive-side copy one nanosecond after the original |
+| `burst_loss_ppm` | `burst_loss_ppm` | Chance for a healthy direction to start a loss burst |
+| `burst_length` | `burst_length` | Number of consecutive eligible candidates dropped, including the starting candidate |
+| `latency_spike_ppm` | `latency_spike_ppm` | Chance to add a fixed latency spike to a surviving frame |
+| `latency_spike_ns` | `latency_spike` | Extra spike delay in nanoseconds |
+| `tcp_reset_ppm` | `tcp_reset_ppm` | Chance to replace an eligible TCP segment with a RST in that direction |
+
+An active reorder, burst or spike requires a positive bound, length or delay.
+Latency plus jitter plus the maximum active reorder and spike delays must fit
+within one hour. Python rejects invalid local values before sending; runtime
+admission and fault-plan compilation validate the same bounds.
+
+For example, all calls below take effect during execution and return a healable
+`Shape`. Delays are integer nanoseconds:
+
+```python
+reorder = world.shape(["client"], ["server"], latency=1_000_000,
+                      reorder_ppm=500_000, reorder_delay=100_000_000)
+counts = world.heal(reorder)["network_fault_counts"]
+duplicate = world.shape(["client"], ["server"], latency=1_000_000,
+                        duplicate_ppm=100_000)
+world.heal(duplicate)
+burst = world.shape(["client"], ["server"], latency=1_000_000,
+                    burst_loss_ppm=100_000, burst_length=4)
+world.heal(burst)
+spike = world.shape(["client"], ["server"], latency=1_000_000,
+                    latency_spike_ppm=100_000, latency_spike=50_000_000)
+world.heal(spike)
+reset = world.shape(["server"], ["client"], latency=1_000_000,
+                    tcp_reset_ppm=1_000_000)
+world.heal(reset)
+```
+
+Cuts and selected connection loss dominate all new faults. Ordinary loss/jitter
+draws occur next, in their historical order, even when jitter or loss is zero.
+Survivors reach burst loss, then bandwidth admission and the base FIFO arrival.
+The burst stream draws only outside an existing burst; cuts, selected loss,
+ordinary loss and masked layers do not advance a burst. Burst drops reserve
+neither departure nor arrival clocks. Admitted frames sample reorder, spike,
+eligible reset, then duplication from independent named streams. Reorder uses
+a second draw for its delay only when selected. Inactive faults draw nothing.
+The five domains are `link-reorder/FROM/TO`, `link-duplicate/FROM/TO`,
+`link-burst-loss/FROM/TO`, `link-latency-spike/FROM/TO` and
+`link-tcp-reset/FROM/TO`. Checkpoint branches use the existing identity-derived
+domain prefix. Snapshots retain stream counters and burst state.
+
+Extra delays sit outside the base FIFO clock, so later frames can overtake a
+delayed frame, even across healing. Copies are receive-side injection, with no
+second serialization charge or legacy RNG draw. Both copies undergo normal
+receiver lifecycle/backlog admission and contribute to delivered/drop counters.
+All scheduled deadlines respect the global lookahead; no fault uses host time.
+
+Reset supports untagged unicast Ethernet carrying unfragmented IPv4 TCP with
+valid header lengths and nonzero ports. Only ACK-bearing, non-SYN/non-RST
+segments are eligible. It constructs minimal IPv4/TCP RST+ACK headers with
+the same addresses, ports, sequence and acknowledgement and correct checksums;
+options and payload are removed. The reset replaces that direction's frame at
+its deterministic simulated delivery deadline. Unsupported traffic is unchanged
+and consumes no reset draw. The guest TCP stack still validates the sequence
+against its receive window; reset evidence means a RST was scheduled, and the
+workload must check the socket effect. A reset does not prevent reconnection.
+
+Healing returns `network_fault_counts` with `matched`, `reordered`, `duplicated`,
+`burst_dropped`, `spiked`, `tcp_reset` and `delayed_max_ns`. `matched` counts
+candidates after cuts, selected loss and ordinary loss; subsequent burst/queue
+drops are included. The remaining counters record selected injections before
+receiver admission; `reordered` does not prove receipt order changed.
+`delayed_max_ns` is the largest combined extra delay. Fault rows retain the same
+counts, including zeros for unused layers. Python returns the result dictionary
+for these shapes, including both count objects when bandwidth is also enabled.
+The guest-owned `harness/acceptance/workloads/network-faults.yaml` checks receipt
+overtaking, actual copies and consecutive losses, a latency spike, a socket reset,
+and successful exchanges after each heal. Run it and replay the retained run to
+require `MATCH`.
 
 Connection discovery and selection take effect at the exact admission barrier,
 including frames sent before it and excluding equal-time sends. Discovery records
