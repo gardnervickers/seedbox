@@ -39,6 +39,14 @@
         };
     in {
       devShells = nixpkgs.lib.genAttrs systems shell;
+      nixosConfigurations.pv-runner = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        specialArgs = {
+          inherit nixpkgs;
+          developmentShells = shell "x86_64-linux";
+        };
+        modules = [ ./nix/pv-runner.nix ];
+      };
       packages = nixpkgs.lib.genAttrs systems (system:
         let pkgs = import nixpkgs { inherit system; }; in {
           networkTools = pkgs.iproute2;

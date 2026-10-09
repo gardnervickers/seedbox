@@ -1,0 +1,24 @@
+name: PV cleanup health
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 * * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  health:
+    if: github.ref == 'refs/heads/main' && vars.PV_CI_ENABLED == 'true'
+    environment: pv-ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check external watchdog heartbeat and overdue deletion
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DO_CI_TOKEN }}
+        run: python3 tools/pv-ci/control.py health

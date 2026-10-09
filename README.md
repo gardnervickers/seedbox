@@ -129,6 +129,7 @@ entering it, preserving named volumes and allowing `CLONE_NEWUSER`.
 | `harness/` | YAML acceptance scenarios, portable checks, low-level world fixtures and their batch runner ([migration map](harness/worlds/README.md)), `msr54.py` |
 | [`tools/mac-tcg/`](tools/mac-tcg/README.md) | Experimental local Mac TCG runner and tests; separate from the production KVM backend |
 | [`tools/droplet/`](tools/droplet/README.md) | Batch PV runs and replays for several commits on a throwaway DigitalOcean droplet |
+| [`tools/pv-ci/`](tools/pv-ci/README.md) | Prepared NixOS images, ephemeral GitHub Actions PV runners and independent droplet expiration cleanup |
 
 ## Contributor checks
 
