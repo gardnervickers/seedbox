@@ -1,0 +1,137 @@
+name: PV droplet tests
+
+# Cloud control always comes from main. The requested test revision only runs
+# on the disposable worker, without cloud or runner-administration credentials.
+on:
+  workflow_dispatch:
+    inputs:
+      test_ref:
+        description: Branch or commit to test using an existing dependency image
+        default: main
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: seedbox-pv-cloud
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    if: github.ref == 'refs/heads/main' && vars.PV_CI_ENABLED == 'true'
+    environment: pv-ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      label: ${{ steps.droplet.outputs.label }}
+      startup_seconds: ${{ steps.droplet.outputs.startup_seconds }}
+      commit: ${{ steps.source.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.test_ref }}
+          path: test-source
+          persist-credentials: false
+      - id: source
+        name: Resolve test revision and dependency inputs
+        run: |
+          echo "commit=$(git -C test-source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "key=$(python3 tools/pv-ci/image-key.py test-source)" >> "$GITHUB_OUTPUT"
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with:
+          app-id: ${{ vars.PV_RUNNER_APP_ID }}
+          private-key: ${{ secrets.PV_RUNNER_APP_PRIVATE_KEY }}
+          permission-administration: write
+      - id: droplet
+        name: Boot prepared image and wait for Actions registration
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DO_CI_TOKEN }}
+          RUNNER_ADMIN_TOKEN: ${{ steps.app.outputs.token }}
+          DO_REGION: ${{ vars.DO_CI_REGION || 'nyc3' }}
+          DO_SIZE: ${{ vars.DO_CI_SIZE || 's-4vcpu-8gb-240gb-intel' }}
+          IMAGE_KEY: ${{ steps.source.outputs.key }}
+        run: |
+          python3 tools/pv-ci/control.py provision \
+            --key "$IMAGE_KEY" \
+            --tag "seedbox-pv-job-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --repo "$GITHUB_REPOSITORY" --region "$DO_REGION" --size "$DO_SIZE"
+
+  test:
+    needs: provision
+    runs-on: [self-hosted, '${{ needs.provision.outputs.label }}']
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.provision.outputs.commit }}
+          persist-credentials: false
+      - name: Record startup and runner capabilities
+        env:
+          STARTUP_SECONDS: ${{ needs.provision.outputs.startup_seconds }}
+        run: |
+          echo "Droplet create → Actions online: ${STARTUP_SECONDS}s" >> "$GITHUB_STEP_SUMMARY"
+          test -c /dev/kvm
+          test -f /etc/seedbox/kernel
+          test -f /etc/seedbox/runtime.tar.gz
+      - name: Portable prerequisites and PV application acceptance
+        run: |
+          # The exact locked nixpkgs source is resident in the image. Explicit
+          # override avoids even a flake-source download on a fresh Nix database.
+          nix develop --offline --override-input nixpkgs path:/etc/seedbox/nixpkgs \
+            --no-write-lock-file --command bash harness/check.sh linux-apps --cpu 1
+      - name: Collect runner diagnostics
+        if: always()
+        run: |
+          mkdir -p target/pv-runner-diagnostics
+          journalctl -b -u seedbox-runner --no-pager -n 2000 > target/pv-runner-diagnostics/runner-journal.log
+      - uses: actions/checkout@v7
+        if: always()
+        with:
+          ref: main
+          path: ci-control
+          persist-credentials: false
+      - name: Bound diagnostic artifact storage
+        if: always()
+        run: python3 ci-control/tools/pv-ci/artifacts.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: pv-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/pv-artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+
+  cleanup:
+    needs: [provision, test]
+    if: always() && github.ref == 'refs/heads/main'
+    environment: pv-ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Destroy this attempt's droplets and confirm absence
+        env:
+          DIGITALOCEAN_TOKEN: ${{ secrets.DO_CI_TOKEN }}
+        run: |
+          python3 tools/pv-ci/control.py cleanup \
+            --tag "seedbox-pv-job-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with:
+          app-id: ${{ vars.PV_RUNNER_APP_ID }}
+          private-key: ${{ secrets.PV_RUNNER_APP_PRIVATE_KEY }}
+          permission-administration: write
+      - name: Remove an unused runner registration
+        env:
+          RUNNER_ADMIN_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          python3 tools/pv-ci/control.py cleanup-runner --repo "$GITHUB_REPOSITORY" \
+            --tag "seedbox-pv-job-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
