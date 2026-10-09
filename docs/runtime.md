@@ -874,13 +874,14 @@ for CPU, timer, network, incarnation and static-plan semantics.
 
 `seedbox explore [COMPOSE] --seed FIRST --count COUNT` has one worker by default.
 `--workers N` (1..32) permits N simultaneous owned attempts; count defaults to 1
-and seed to the resolved Compose seed. Parallel execution rejects an explicit
+and seed to the resolved Compose seed. Linux parallel execution rejects an explicit
 `--cpu` or `SEEDBOX_CPU` before preparation. Automatic selection must reserve N
 eligible physical cores with all SMT siblings together during preflight, verify
 each core's admission and release every transient resource before preparation.
-Insufficient capacity is ERROR; there is no queue/retry on host contention. A
-library execution backend supports only one worker unless it explicitly overrides
-`preflight_workers`. Per-attempt admission and leases remain unchanged. Bounds are finite,
+Insufficient capacity is ERROR; there is no queue/retry on host contention. The
+Mac executor admits the same 1..32 range with no core reservation: each attempt
+is its own signed engine process and HVF VM. A library execution backend supports
+only one worker unless it explicitly overrides `preflight_workers`. Per-attempt admission and leases remain unchanged. Bounds are finite,
 positive and checked for inclusive u64 overflow before slow work. Runtime inputs and
 backend host admission are checked before the sole preparation; refusal retains
 batch ERROR with no prepared inputs or seed attempts. Transient admission resources
