@@ -19,7 +19,8 @@ here="$(cd "$(dirname "$0")" && pwd)"
 kernel=$(realpath "$1"); vmm=$(realpath "$2"); cpus=$3
 seed=${SEED:-7}
 out=$(mktemp -d "${TMPDIR:-/tmp}/windowed-matrix.XXXXXX")
-siblings=$(for c in ${cpus//,/ }; do cat /sys/devices/system/cpu/cpu$c/topology/thread_siblings_list; done | tr '\n' ',' | sed 's/,$//')
+# Every given CPU and its SMT siblings, expanded and deduplicated for msr54.py.
+siblings=$(cd "$here" && python3 -c 'import sys, batch; print(",".join(map(str, sorted(set().union(*(batch.siblings(int(c)) for c in sys.argv[1].split(",")))))))' "$cpus")
 msr_state="$out/msr54.json"
 SEEDBOX_MSR_STATE="$msr_state" python3 "$here/msr54.py" set "$siblings" >/dev/null
 cleanup() {
@@ -28,7 +29,6 @@ cleanup() {
 }
 trap cleanup EXIT
 bash "$here/../guest/build-initramfs.sh" "$out/window.cpio" "$here/../guest/window.init" >/dev/null
-first=${cpus%%,*}
 IFS=, read -ra cpu_list <<< "$cpus"
 
 run() { # NAME ENGINE TASKSET-CPUS [VMM ARGS...]
