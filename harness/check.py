@@ -71,7 +71,7 @@ def privileged(prefix, command, environment):
     inputs = [f"{key}={value}" for key, value in environment.items()
               if key.startswith(("SEEDBOX_TEST_", "SEEDBOX_ARM64_", "SEEDBOX_HOST_PAUSE_"))
               or key in ("SEEDBOX_KERNEL", "SEEDBOX_RUNTIME_ASSETS", "SEEDBOX_BUSYBOX",
-                         "SEEDBOX_MKE2FS", "SEEDBOX_STATIC_CC")]
+                         "SEEDBOX_MKE2FS", "SEEDBOX_STATIC_CC", "DOCKER_HOST", "SEEDBOX_ASSET_DIR")]
     return [*prefix, *inputs, *command]
 
 
@@ -86,9 +86,8 @@ def discover(system, machine, environment, privileged_probe=None, can_root=False
     linux = system == "Linux"
     if linux and machine in ("x86_64", "aarch64", "arm64"):
         found.update(privileged_probe or probe_linux())
-        tools = [name for name in ("skopeo", "umoci", "podman") if not shutil.which(name)]
+        tools = [] if environment.get("DOCKER_HOST") or any(shutil.which(name) for name in ("docker", "podman")) else ["Docker-compatible engine"]
         found["oci"] = ("CLI image-preparation tests require Linux x86-64" if machine != "x86_64" else
-                        "root or passwordless sudo is required" if not can_root else
                         "missing tools: " + ", ".join(tools) if tools else "")
         if machine == "x86_64" and not found["counter"] and not can_root:
             found["counter"] = "root or passwordless sudo is required for the leased counter suite"
@@ -113,7 +112,7 @@ def discover(system, machine, environment, privileged_probe=None, can_root=False
         found["guests"] = (native or "set SEEDBOX_ARM64_KERNEL and SEEDBOX_ARM64_INITRD"
                            if not kernel or not initrd else native)
     if linux and machine == "x86_64":
-        found["applications"] = found["kvm"] or found["oci"]
+        found["applications"] = found["kvm"] or found["oci"] or ("root or passwordless sudo is required" if not can_root else "")
     elif system == "Darwin" and machine in ("arm64", "aarch64"):
         found["applications"] = (found["hvf"] or
                                  ("Docker or Podman is required" if not any(
@@ -203,7 +202,7 @@ class Checks:
                 command = [binary, "--test-threads=1"]
                 if target == "applications":
                     command.append("--nocapture")
-                needs_root = package == "seedbox" and target in ("oci", "applications", "host_pause")
+                needs_root = package == "seedbox" and target in ("applications", "host_pause")
                 if counter:
                     command = [sys.executable, str(ROOT / "harness/check-counter.py"),
                                *(["--cpu", environment["SEEDBOX_TEST_CPU"]] if environment.get("SEEDBOX_TEST_CPU") else []),
