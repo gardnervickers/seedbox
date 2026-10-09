@@ -98,3 +98,8 @@ jobs:
           name: pv-results-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/pv-artifacts/
           retention-days: 7
+      - name: Exclude test state from the Cargo cache
+        if: always()
+        # Diagnostics have been uploaded. Rust-cache archives the target tree,
+        # so remove root-owned VM state and per-run reports before its post step.
+        run: sudo rm -rf -- target/check-reports target/pv-artifacts
