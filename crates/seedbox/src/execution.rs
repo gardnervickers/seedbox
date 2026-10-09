@@ -155,6 +155,8 @@ pub struct ExecutionRequest<'a> {
     pub network: &'a Network,
     pub schedule: &'a Schedule,
     pub control: Option<&'a crate::config::Control>,
+    /// Services that start down until the controller reboots them.
+    pub standby: &'a [String],
     pub check: &'a Check,
     pub prepared: &'a PreparedInputs,
     pub artifacts: &'a BTreeMap<ContentDigest, PathBuf>,

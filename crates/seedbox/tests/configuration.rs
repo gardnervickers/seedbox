@@ -533,3 +533,59 @@ fn named_volumes_mount_on_one_service_and_reject_binds_and_options() {
         .to_string()
         .contains("each volume lives on one machine's disk"));
 }
+
+#[test]
+fn standby_names_services_or_copies_one_under_a_new_name() {
+    let two = BASE.replace(
+        "services:\n",
+        "services:\n  etcd-1:\n    image: example/etcd:v1\n    environment: {ETCD_NAME: etcd-1}\n",
+    );
+    assert!(parse(&two).unwrap().standby.is_empty());
+    let yaml = two.replace(
+        "  version: 1",
+        "  version: 1\n  standby:\n    etcd-1:\n    etcd-4: {from: etcd-1}",
+    );
+    let sim = parse(&yaml).unwrap();
+    assert_eq!(sim.standby, ["etcd-1", "etcd-4"]);
+    assert_eq!(sim.services["etcd-4"], sim.services["etcd-1"]);
+    // A link may name a copy, since copies exist before links are checked.
+    let linked = yaml.replace(
+        "  network: {latency: 1ms, jitter: 200us}",
+        "  network:\n    latency: 1ms\n    jitter: 200us\n    links: [{from: workload, to: etcd-4, latency: 2ms}]",
+    );
+    assert_eq!(parse(&linked).unwrap().network.links[0].to, "etcd-4");
+    for (from, to, path) in [
+        (
+            "    etcd-4: {from: etcd-1}",
+            "    etcd-4: {}",
+            "$.x-seedbox.standby.etcd-4",
+        ),
+        (
+            "    etcd-4: {from: etcd-1}",
+            "    etcd-4: {from: nope}",
+            "$.x-seedbox.standby.etcd-4.from",
+        ),
+        (
+            "    etcd-4: {from: etcd-1}",
+            "    etcd-1x: {from: etcd-1, size: 2}",
+            "$.x-seedbox.standby.etcd-1x.size",
+        ),
+        (
+            "    etcd-4: {from: etcd-1}",
+            "    workload: {from: etcd-1}",
+            "$.x-seedbox.standby.workload",
+        ),
+        ("    etcd-1:\n", "    workload:\n", "$.x-seedbox.standby"),
+        (
+            "    etcd-4: {from: etcd-1}",
+            "    Etcd: {from: etcd-1}",
+            "$.x-seedbox.standby.Etcd",
+        ),
+    ] {
+        let error = parse(&yaml.replace(from, to)).unwrap_err().to_string();
+        assert!(error.contains(path), "{to}: {error}");
+    }
+    // Feature off: the retained configuration has no standby field at all.
+    let off = serde_json::to_value(parse(&two).unwrap()).unwrap();
+    assert!(off.get("standby").is_none());
+}

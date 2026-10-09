@@ -976,6 +976,24 @@ by itself: a crashed service is not an exited one. See
 [Machine pause, crash and reboot](../harness/worlds/README.md#machine-pause-crash-and-reboot)
 for CPU, timer, network, incarnation and static-plan semantics.
 
+### Standby machines
+
+`x-seedbox.standby` lists services that are prepared like any other but start
+down, so a scenario can add machines to a running world with `reboot(target)`
+and remove them with `crash(target)`:
+
+```yaml
+x-seedbox:
+  standby:
+    worker: {}             # a service declared under services
+    etcd-4: {from: etcd-1} # a copy of etcd-1 under a new name
+```
+
+A copy has its own address, `/etc/hosts` entry, machine and disk. A standby
+machine never runs and draws nothing until its first reboot. Frames sent to it
+are dropped and counted, and inspection shows `Down`. The check service can't be
+standby. Standby is not supported on arm64 yet.
+
 ## Exploration preparation
 
 `seedbox explore [COMPOSE] --seed FIRST --count COUNT` has one worker by default.

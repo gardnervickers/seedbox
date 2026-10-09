@@ -117,6 +117,11 @@ impl Faults {
         }
         Ok(f)
     }
+    /// A standby machine starts down and reports readiness when it boots.
+    pub fn start_down(&mut self, m: usize) {
+        self.life[m] = Life::Down;
+        self.ready[m] = false;
+    }
     pub fn require_readiness(&mut self) {
         self.ready.fill(false);
     }

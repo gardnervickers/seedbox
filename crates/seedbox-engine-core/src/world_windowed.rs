@@ -638,8 +638,13 @@ impl<M: WorldMachine> Coord<'_, M> {
                     }
                 }
             }
-            if until_barrier && guests.iter().all(|g| g.m.parked || g.exited_at().is_some()) {
-                if let Some(g) = guests.iter().find(|g| !g.m.parked) {
+            // Standby machines that are down never reach the barrier.
+            if until_barrier
+                && guests
+                    .iter()
+                    .all(|g| g.m.parked || g.m.down || g.exited_at().is_some())
+            {
+                if let Some(g) = guests.iter().find(|g| !g.m.parked && !g.m.down) {
                     return Err(format!("{} exited before the fork point", g.m.name));
                 }
                 self.stopped = Some("barrier");

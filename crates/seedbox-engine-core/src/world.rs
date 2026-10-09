@@ -107,6 +107,15 @@ impl MachineState {
         self.time = self.time.max(at);
         Ok(())
     }
+    /// A standby machine: built but never entered, down at time 0 with no
+    /// incarnation booted. `boot_at` starts it like a crashed machine.
+    pub fn start_down(&mut self) -> Result<(), String> {
+        if self.parked || self.paused || self.down || self.incarnation != 0 || self.time != 0 {
+            return Err(format!("{}: cannot start down here", self.name));
+        }
+        self.down = true;
+        Ok(())
+    }
     pub fn boot_at(&mut self, at: u64) -> Result<(), String> {
         if !self.down || at < self.time {
             return Err(format!("{}: cannot boot here", self.name));
@@ -403,6 +412,14 @@ impl<M: WorldMachine> World<M> {
         }
     }
     /// Common admission for direct and IPC adapters, before any execution.
+    /// Mark machine m standby: down from time 0 until a reboot boots it.
+    pub fn start_down(&mut self, m: usize) -> Result<(), String> {
+        self.check_active()?;
+        self.machines[m].start_down()?;
+        self.faults.start_down(m);
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         self.check_active()?;
         let n = self.machines.len();
@@ -868,6 +885,12 @@ pub fn arm_seed<M: WorldMachine>(
         control::Control::new(&cfg["control"], names.to_vec(), world.latency, world.early)?;
     world.faults.require_readiness();
     replay_readiness(&mut world.faults, names, &booted, world.latency)?;
+    // A standby machine that has not booted yet is still down under the new plan.
+    for (m, mach) in world.machines.iter().enumerate() {
+        if mach.down {
+            world.faults.start_down(m);
+        }
+    }
     world.faults.links.reseed(seed, names);
     world.run_seed = seed;
     let index = |name: &str| {
@@ -936,18 +959,30 @@ pub fn release<M: WorldMachine>(
     diagnostic: &mut impl FnMut(&str, u64),
 ) -> Result<(Vec<Value>, Value), String> {
     world.check_active()?;
-    let at = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
+    // Standby machines never reached the barrier; they stay down.
+    let at = world
+        .machines
+        .iter()
+        .filter(|m| !m.down)
+        .map(|m| m.time)
+        .max()
+        .unwrap_or(0);
     check_plan_after(cfg, at.saturating_add(skew))?;
     let mut reseed = serde_json::Map::new();
     for (i, mach) in world.machines.iter_mut().enumerate() {
-        let mut rng = Rng::new(seed, &format!("fork-entropy/{}", names[i]));
-        let entropy = std::array::from_fn(|_| rng.next() as u32);
-        let delay = Rng::new(seed, &format!("release/{}", names[i])).below(skew.saturating_add(1));
-        let how = mach.release(at.saturating_add(delay), entropy)?;
-        if how == Reseed::Unsupported {
-            diagnostic(&names[i], mach.abi());
+        if mach.down {
+            reseed.insert(names[i].clone(), json!("not_up"));
+        } else {
+            let mut rng = Rng::new(seed, &format!("fork-entropy/{}", names[i]));
+            let entropy = std::array::from_fn(|_| rng.next() as u32);
+            let delay =
+                Rng::new(seed, &format!("release/{}", names[i])).below(skew.saturating_add(1));
+            let how = mach.release(at.saturating_add(delay), entropy)?;
+            if how == Reseed::Unsupported {
+                diagnostic(&names[i], mach.abi());
+            }
+            reseed.insert(names[i].clone(), json!(how.as_str()));
         }
-        reseed.insert(names[i].clone(), json!(how.as_str()));
         mach.seed_timer(seed, &format!("timer-jitter/{}", names[i]))?;
         if mach.supports_speed_reseed() {
             mach.seed_speed(seed, &format!("pv-speed/{}", names[i]))?;
@@ -1036,7 +1071,7 @@ impl<M: WorldMachine> WorldSnapshot<M> {
     pub fn take(world: &mut World<M>) -> Result<Self, String> {
         world.check_active()?;
         world.validate()?;
-        if world.machines.iter().any(|m| !m.parked) {
+        if world.machines.iter().any(|m| !m.parked && !m.down) {
             return Err("boot snapshot requires all machines parked".into());
         }
         Self::capture(world, true)

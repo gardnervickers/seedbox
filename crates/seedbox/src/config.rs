@@ -25,6 +25,10 @@ pub struct Simulation {
     pub schedule: Schedule,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<Control>,
+    /// Services prepared like any other but started down; the controller
+    /// boots one with `reboot`. Absent unless used.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub standby: Vec<String>,
     pub limits: Limits,
     pub check: Check,
     pub seed: Option<u64>,
@@ -429,11 +433,13 @@ pub fn parse_for_architecture(
         "$.x-seedbox",
         &[
             "version", "seed", "limits", "network", "schedule", "faults", "control", "check",
+            "standby",
         ],
     )?;
     if get(ext, "version").as_u64() != Some(1) {
         return invalid("$.x-seedbox.version", "expected version 1");
     }
+    let standby = standby(ext.get("standby"), &mut services)?;
     let lim = fields(
         get(ext, "limits"),
         "$.x-seedbox.limits",
@@ -582,6 +588,12 @@ pub fn parse_for_architecture(
             format!("unknown service {check_service:?}"),
         );
     }
+    if standby.contains(&check_service) {
+        return invalid(
+            "$.x-seedbox.standby",
+            format!("the check service {check_service:?} cannot be standby"),
+        );
+    }
     if control.as_ref().is_some_and(|c| c.service != check_service) {
         return invalid(
             "$.x-seedbox.control.service",
@@ -613,6 +625,7 @@ pub fn parse_for_architecture(
         network,
         schedule,
         control,
+        standby,
         limits,
         check: Check {
             service: check_service,
@@ -620,6 +633,51 @@ pub fn parse_for_architecture(
         },
         seed,
     })
+}
+
+/// `x-seedbox.standby`: service name to `{}` for a declared service, or
+/// `{from: SERVICE}` to add a copy of that service under the new name. A copy
+/// is an ordinary service with its own address, machine and disk.
+fn standby(raw: Option<&Value>, services: &mut BTreeMap<String, Service>) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for (key, value) in entries(raw, "$.x-seedbox.standby")? {
+        let p = format!("$.x-seedbox.standby.{key}");
+        if !dns_label(&key) {
+            return invalid(
+                &p,
+                "service names must be lowercase DNS labels (1 to 63 characters)",
+            );
+        }
+        // `name:` with no options is the same as `name: {}`.
+        let from = if value.is_null() {
+            None
+        } else {
+            fields(value, &p, &["from"])?.get("from")
+        };
+        match from {
+            None if services.contains_key(&key) => {}
+            None => return invalid(&p, "unknown service; name a service or add from"),
+            Some(_) if services.contains_key(&key) => {
+                return invalid(&p, "a copy needs a name no service uses")
+            }
+            Some(from) => {
+                let from = text(from, &format!("{p}.from"))?;
+                let Some(service) = services.get(&from) else {
+                    return invalid(&format!("{p}.from"), format!("unknown service {from:?}"));
+                };
+                let copy = service.clone();
+                services.insert(key.clone(), copy);
+            }
+        }
+        names.push(key);
+    }
+    if services.len() > 254 {
+        return invalid(
+            "$.x-seedbox.standby",
+            "expected at most 254 services in all",
+        );
+    }
+    Ok(names)
 }
 
 fn bandwidth(fields: &Mapping, path: &str) -> Result<(Option<u64>, Option<u64>)> {

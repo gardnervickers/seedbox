@@ -141,6 +141,12 @@ the second boot in the server console. With all optional supervisors supplied,
 the complete matrix contains seventeen executions. Use
 `verify.py RUN --focused lifecycle-cases` to inspect this evidence separately.
 
+The standby case adds a copy of the lifecycle target named `spare` under
+`x-seedbox.standby` (`spare: {from: server}`). It starts down: the scenario sees
+`Down` and no answer from `spare:7000`, reboots it, talks to it, crashes it, and
+reboots it again with a new `boot_id`. Make it from a generated project with
+`python3 examples/faults/standby.py /absolute/generated-faults`.
+
 Portable tests require no KVM. Run `python3 examples/faults/portable.py` to
 launch the actual Python server and client processes, abruptly stop and restart
 the server twice, and verify healthy recovery, broken loss, and the no-restart

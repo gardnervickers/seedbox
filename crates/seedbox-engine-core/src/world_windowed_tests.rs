@@ -621,6 +621,147 @@ fn a_crash_discards_management_and_a_reboot_drops_earlier_frames() {
     assert!(w.faults.log.iter().all(|row| row["status"] == "applied"));
 }
 
+/// Times in one machine's trace (`name:kind:time`).
+fn trace_times(w: &World<Mock>, name: &str) -> Vec<u64> {
+    machine_trace(w, name)
+        .iter()
+        .map(|line| line.rsplit(':').next().unwrap().parse().unwrap())
+        .collect()
+}
+
+#[test]
+fn a_standby_machine_runs_only_after_reboot_and_can_crash_and_reboot_again() {
+    let mut w = world(&["a", "b"]);
+    w.start_down(1).unwrap();
+    plan(
+        &mut w,
+        10,
+        Action::Reboot {
+            machine: "b".into(),
+        },
+    );
+    plan(
+        &mut w,
+        20,
+        Action::Crash {
+            machine: "b".into(),
+        },
+    );
+    plan(
+        &mut w,
+        25,
+        Action::Reboot {
+            machine: "b".into(),
+        },
+    );
+    // One frame reaches b while it is still down; the other after it boots.
+    for at in [5, 14] {
+        w.schedule(
+            1,
+            at,
+            Payload::Frame {
+                from: 0,
+                bytes: vec![0; 14],
+            },
+        );
+    }
+    assert_eq!(run(&mut w, 40, None).unwrap(), "duration");
+    let b = trace_times(&w, "b");
+    assert!(!b.is_empty());
+    assert!(b.iter().all(|&t| t >= 10), "{:?}", machine_trace(&w, "b"));
+    assert!(machine_trace(&w, "b").contains(&"b:frame:14".to_string()));
+    assert_eq!((w.dropped, w.delivered), (1, 1));
+    assert_eq!(
+        w.network_snapshot(),
+        json!({"a->b":{"delivered":1,"partition_dropped":0,"receiver_dropped":1}})
+    );
+    assert_eq!(w.incarnations[1].len(), 1);
+    assert_eq!(w.incarnations[1][0]["incarnation"], 0);
+    assert_eq!(w.incarnations[1][0]["booted_at_ns"], 10);
+    assert_eq!(w.incarnations[1][0]["crashed_at_ns"], 20);
+    assert_eq!(w.machines[1].incarnation, 1);
+    assert_eq!(w.machines[1].booted_at, 25);
+    assert!(!w.machines[1].down);
+    assert_eq!(w.machines[1].time, 40);
+    assert!(w.faults.log.iter().all(|row| row["status"] == "applied"));
+    assert!(w.incarnations[0].is_empty());
+}
+
+#[test]
+fn a_standby_machine_that_never_boots_costs_nothing_and_changes_no_other_machine() {
+    let mut plain = world(&["a", "b"]);
+    let mut standby = world(&["a", "b", "c"]);
+    standby.start_down(2).unwrap();
+    for w in [&mut plain, &mut standby] {
+        w.machines[0].steps.push_back(Step::new(3, Stop::Halted));
+        w.machines[0].timer = 30;
+        w.schedule(
+            1,
+            12,
+            Payload::Frame {
+                from: 0,
+                bytes: vec![0; 14],
+            },
+        );
+    }
+    standby.schedule(
+        2,
+        12,
+        Payload::Frame {
+            from: 0,
+            bytes: vec![0; 14],
+        },
+    );
+    assert_eq!(run(&mut plain, 50, None).unwrap(), "duration");
+    assert_eq!(run(&mut standby, 50, None).unwrap(), "duration");
+    assert!(machine_trace(&standby, "c").is_empty());
+    for name in ["a", "b"] {
+        assert_eq!(machine_trace(&plain, name), machine_trace(&standby, name));
+    }
+    assert!(standby.machines[2].down);
+    assert_eq!(standby.machines[2].time, 0);
+    assert!(standby.incarnations[2].is_empty());
+    assert_eq!(standby.faults.process_state(2), "Down");
+}
+
+#[test]
+fn a_standby_machine_stays_down_through_the_barrier_snapshot_and_release() {
+    let names = vec!["a".to_owned(), "b".to_owned()];
+    let mut w = world(&["a", "b"]);
+    w.barrier = true;
+    w.machines[0].steps.push_back(Step::new(2, Stop::Barrier));
+    w.start_down(1).unwrap();
+    assert_eq!(
+        segment(&mut w, &Value::Null, 100, None, Some(None), None, true).unwrap(),
+        "barrier"
+    );
+    let snapshot = WorldSnapshot::take(&mut w).unwrap();
+    for seed in [1009, 1010] {
+        snapshot.restore(&mut w).unwrap();
+        assert!(w.machines[1].down);
+        let (_, reseed) = release(&mut w, &Value::Null, &names, seed, 0, &mut |_, _| {
+            panic!("unsupported")
+        })
+        .unwrap();
+        assert_eq!(reseed, json!({"a":"barrier","b":"not_up"}));
+        assert_eq!(w.machines[0].time, 2);
+        assert!(w.machines[1].down);
+        assert_eq!(w.faults.process_state(1), "Down");
+        plan(
+            &mut w,
+            50,
+            Action::Reboot {
+                machine: "b".into(),
+            },
+        );
+        assert_eq!(run(&mut w, 100, None).unwrap(), "duration");
+        assert!(!w.machines[1].down);
+        assert_eq!(w.machines[1].booted_at, 50);
+        assert!(trace_times(&w, "b").iter().all(|&t| t >= 50));
+        w.factory.lock().unwrap().clear();
+    }
+}
+
 #[test]
 fn a_paused_machine_holds_its_frames_and_pays_owed_io_after_resume() {
     let mut w = world(&["a", "b"]);

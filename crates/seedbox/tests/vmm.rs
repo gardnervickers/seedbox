@@ -49,6 +49,7 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
             stop_tolerance_ns: 40_000,
         },
         control: None,
+        standby: &[],
         check: &Check {
             service: "client".into(),
             exit_code: 0,
@@ -1871,4 +1872,43 @@ fn explicit_combined_cli_is_retained_with_its_actual_version() {
         profile.engine,
         ContentDigest::of(&std::fs::read(binary).unwrap())
     );
+}
+
+#[test]
+fn standby_services_mark_only_their_machines_and_never_the_workload() {
+    fixture(|request| {
+        let plain = vmm::world(request).unwrap();
+        assert!(plain["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m.get("standby").is_none()));
+        let standby = ["server".to_string()];
+        let world = vmm::world(&ExecutionRequest {
+            standby: &standby,
+            ..*request
+        })
+        .unwrap();
+        let marks: Vec<_> = world["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| (m["name"].as_str().unwrap(), m.get("standby").cloned()))
+            .collect();
+        assert_eq!(
+            marks,
+            [
+                ("client-machine", None),
+                ("server-machine", Some(json!(true)))
+            ]
+        );
+        let workload = ["client".to_string()];
+        assert!(vmm::world(&ExecutionRequest {
+            standby: &workload,
+            ..*request
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("workload machine cannot be standby"));
+    });
 }

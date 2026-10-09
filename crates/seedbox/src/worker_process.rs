@@ -464,6 +464,7 @@ mod tests {
                     stop_tolerance_ns: 40_000,
                 },
                 control: None,
+                standby: &[],
                 check: &Check {
                     service: "client".into(),
                     exit_code: 0,

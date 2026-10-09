@@ -607,6 +607,7 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
     let mut macs = Vec::new();
     let mut boots = Vec::new();
     let mut initrds: BTreeMap<String, Rc<[u8]>> = BTreeMap::new();
+    let mut standbys = Vec::new();
     for (i, mc) in cfg["machines"].as_array().unwrap().iter().enumerate() {
         let ipath = path(&mc["initrd"]).to_string_lossy().to_string();
         if !initrds.contains_key(&ipath) {
@@ -666,7 +667,26 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
             log_chunk_limit: options.log_chunk_limit,
         };
         let seed = entropy_seed(boot_seed, &format!("boot-entropy/{}", names[i]));
-        let mut mach = boot_machine(&kvm, &names[i], &boot, barrier, seed)?;
+        // A standby machine is built without the launch barrier and starts
+        // down; nothing enters it until a reboot boots it.
+        let standby = match &mc["standby"] {
+            Value::Null => false,
+            Value::Bool(b) => *b,
+            _ => return Err("machine standby must be a boolean".into()),
+        };
+        if standby
+            && (cfg["end_on_exit"].as_str() == Some(names[i].as_str())
+                || cfg["control"]["machine"].as_str() == Some(names[i].as_str()))
+        {
+            return Err(format!(
+                "{}: the controller and end_on_exit machines cannot be standby",
+                names[i]
+            ));
+        }
+        let mut mach = boot_machine(&kvm, &names[i], &boot, barrier && !standby, seed)?;
+        if standby {
+            standbys.push(i);
+        }
         boots.push(boot);
         if options.stream_console {
             mach.com1.output_file = Some(
@@ -757,6 +777,9 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
         slices: 0,
         machines,
     };
+    for &m in &standbys {
+        world.start_down(m)?;
+    }
     if !forked {
         let kills = arm_seed(&mut world, &cfg, &names, seed, 0)?;
         if !checkpoint_times.is_empty() {

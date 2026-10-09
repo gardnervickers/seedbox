@@ -833,6 +833,27 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
             "oci-init-v1 requires one service per machine".into(),
         ));
     }
+    let mut standby = BTreeSet::new();
+    for service in request.standby {
+        let machine =
+            request.prepared.placement.get(service).ok_or_else(|| {
+                Error::Integrity(format!("missing standby placement for {service}"))
+            })?;
+        if machine == workload_machine {
+            return Err(Error::Execution(
+                "the workload machine cannot be standby".into(),
+            ));
+        }
+        standby.insert(machine);
+    }
+    if !standby.is_empty()
+        && crate::engine::recorded_launch(&request.prepared.profile)?
+            == crate::engine::ExecutableKind::ArmWorld
+    {
+        return Err(Error::Execution(
+            "x-seedbox.standby is unsupported on arm64".into(),
+        ));
+    }
     let control = request.control.map(|c| -> Result<Value> {
         let machine = request.prepared.placement.get(&c.service).ok_or_else(|| Error::Execution("controller placement missing".into()))?;
         let latency_ns = control_latency(request)?;
@@ -855,6 +876,10 @@ pub fn world(request: &ExecutionRequest<'_>) -> Result<Value> {
             });
             if volumes {
                 machine["disk"] = json!({"size_mib": VOLUME_DISK_MIB});
+            }
+            // Absent unless used, so a world without standby machines is unchanged.
+            if standby.contains(name) {
+                machine["standby"] = json!(true);
             }
             Ok(machine)
         })
