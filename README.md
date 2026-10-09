@@ -297,6 +297,17 @@ without this option; deterministic execution does not require independently
 rebuilt OCI images to have identical bytes.
 
 
+Compose preparation records one `wall_clock_epoch` (Unix seconds) in the
+prepared inputs and each `SBXLAUNCH4` boot recipe. It defaults to
+the time after all image builds/imports finish; explicit `--build-epoch` also
+sets this value. The shared supervisor sets `CLOCK_REALTIME` before the launch
+barrier on x86 and arm64. Replay uses retained bytes and never samples the host
+clock. New preparations can change witnesses; replay of recorded inputs is
+unchanged. Both application kernels support unprivileged user namespaces,
+including UID/GID maps and nested mount, PID, network, IPC and UTS namespaces.
+The supervisor recursively mounts the image at the namespace root before
+entering it, preserving named volumes and allowing `CLONE_NEWUSER`.
+
 ## Layout
 
 | Path | Contents |
@@ -721,12 +732,3 @@ controls over the same seeds. The historical ABI1 timings are in
 and must not be attributed to these revised sources.
 
 See [the experimental arm64 backend quickstart](docs/arm64-backends.md#experimental-arm64-quickstart) for the isolated HVF/KVM fixture.
-
-Compose preparation records one `wall_clock_epoch` (Unix seconds) in the
-prepared inputs and each `SBXLAUNCH4` boot recipe. It defaults to
-the time after all image builds/imports finish; explicit `--build-epoch` also
-sets this value. The shared supervisor sets `CLOCK_REALTIME` before the launch
-barrier on x86 and arm64. Replay uses retained bytes and never samples the host
-clock. New preparations can change witnesses; replay of recorded inputs is
-unchanged. Both application kernels support unprivileged user namespaces,
-including UID/GID maps and nested mount, PID, network, IPC and UTS namespaces.

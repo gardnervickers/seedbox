@@ -6,6 +6,65 @@ and the runners are under `harness/`). The engine hashes below are for builds
 from that layout; a VMM built from `crates/seedbox-vmm` embeds different source
 paths and is a new engine, even though its source is unchanged.
 
+## 2026-10-08 — recorded guest epoch and unprivileged namespaces
+
+Based on main `02971ad`, this follow-up retains one preparation-time Unix epoch
+in `PreparedInputs.wall_clock_epoch` and `SBXLAUNCH4`. Explicit `--build-epoch`
+sets it instead. The shared supervisor sets `CLOCK_REALTIME` before the launch
+barrier. Historical inputs omit the new field without changing their encoding.
+The image is recursively bound and moved over the mount namespace root before
+the supervisor enters it: a plain chroot prevents Linux from creating user
+namespaces. Existing bootstrap handles and named-volume submounts survive this
+transition.
+
+On the Mac, fmt, strict all-target seedbox clippy, workspace tests (632 passed,
+5 ignored) and portable acceptance passed. Preparation tests cover a common
+epoch across services, explicit zero, retained serialization and historical
+omission; run/replay tests cover absent and recorded epochs without preparation.
+
+AMD host checks used the specified fallback SSH identity, a private worktree,
+the project Nix shell, and CPUs 14/15/30/31. Build/artifact directories and the
+Podman store were task-owned temporary directories. The x86 kernel rebuilt and
+passed `kernel/build.sh`'s config checks, including `CONFIG_USER_NS=y`. The ARM
+application kernel cross-build used the project asset shell plus its Nixpkgs
+cross compiler: a temporary build-script copy replaced only the native-host
+restriction and selected ARM objdump for the existing audit. All 108 config
+checks and the kernel/vDSO hardware counter/RNG audit passed. Native ARM/HVF
+execution remains untested.
+
+| Kernel | SHA-256 |
+| --- | --- |
+| x86 bzImage | `ce730ee5686b60168949f26cea5bc7d925b08cb4cdd36622c72debee56547232` |
+| ARM Image | `4253d5df94c73b8bc4738af6d22fc0ba25bb7902366b3ab6bc41d1908bea875d` |
+
+The static x86 supervisor and release CLI built; the ARM supervisor translation
+unit cross-compiled with `-Wall -Wextra -Werror`. Standalone Linux VMM build and
+`cargo test-vmm --features kvm-tests` passed (90 passed, 37 explicitly ignored).
+These Linux checks cannot run natively on this Mac.
+
+Both projects ran with the counter timebase, seed 172, 1024 MiB and full state.
+Both replayed to **MATCH for outcome, witness, full state and fault history**:
+
+| Project | Recorded epoch | World witness |
+| --- | --- | --- |
+| `harness/acceptance/workloads/runtime.yaml` | 1791512639 | `101b3d16a2ba5a802de7be23c4e43791b2ea36d26a979035a6d4ebd1bad737a8` |
+| `harness/acceptance/workloads/runtime-tls.yaml` | 1791512655 | `5961617b588f756ace989f0fd98bca8ddd0fbce7258c3cb90717a6f616167102` |
+
+The runtime probe passed as UID/GID 123/456, including a fresh user namespace,
+UID/GID maps, denied setgroups and nested mount/PID/network/IPC/UTS namespaces.
+Its existing named-volume write and device/IPC/limit checks also passed. This
+covers Chromium-style namespace primitives, not a full Chromium application.
+The TLS image minted its localhost certificate in the fresh preparation build;
+the guest checked its issuance was less than a day ago, trusted it with normal
+certificate/date/hostname validation and completed a client/server handshake.
+Replay required no current clock, certificate generation or image preparation.
+
+Engine SHA-256: `3a3cc80b8628f980d0c1b72e1ea4d998d38a8e5d799b8269fdec50043fd8cbc8`.
+All four final MSR readbacks matched the initial snapshot, including after the
+failed chroot diagnostic runs. Task-owned host worktrees, stores, runs, build
+and artifact directories were removed; shared engine/kernel directories were
+left intact. These scoped checks do not replace the final merge-train campaign.
+
 ## 2026-10-08 — issue #172 guest runtime batch
 
 The Linux AMD/KVM workstation ran PR #178 at `93ef5a1` (on main `b90a315`)

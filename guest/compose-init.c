@@ -621,7 +621,13 @@ int main(void) {
     directories("/sys", 0755);
     if (mount("sysfs", "/sys", "sysfs", 0, NULL)) die("mount bootstrap sys");
     management = open_management("/sys/class/virtio-ports", "/dev");
-    if (chdir("/rootfs") || chroot(".") || chdir("/")) die("enter image root");
+    /* Linux rejects CLONE_NEWUSER from a chroot. Cover the mount namespace's
+     * root with the image first, including its already-mounted named volumes;
+     * then make the process root refer to that same mount root. Bootstrap
+     * device/management handles are already retained above. */
+    if (mount("/rootfs", "/rootfs", NULL, MS_BIND|MS_REC, NULL)
+        || chdir("/rootfs") || mount(".", "/", NULL, MS_MOVE, NULL)
+        || chroot(".") || chdir("/")) die("enter image mount root");
     directories("/dev", 0755); directories("/proc", 0755); directories("/sys", 0755); directories("/tmp", 01777);
     if (mount("proc", "/proc", "proc", 0, NULL) || mount("sysfs", "/sys", "sysfs", 0, NULL)) die("mount guest filesystems");
     application_devices();

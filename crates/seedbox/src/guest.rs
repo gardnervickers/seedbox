@@ -1,7 +1,7 @@
 //! Deterministic initramfs assembly around an imported image filesystem.
 //!
 //! Image file metadata and hard links are preserved; only Seedbox-owned bootstrap
-//! files have normalized timestamps. The image runs in a chroot inside the guest.
+//! files have normalized timestamps. The image runs at the guest mount namespace root.
 
 use crate::{image::Launch, Error, Result};
 use std::{

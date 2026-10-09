@@ -252,6 +252,17 @@ arbitrary builds: pin base resolution and control external build inputs yourself
 Every original manifest, config and layer remains retained; changing a merged
 rootfs in a later layer cannot remove earlier varying input bytes.
 
+Compose preparation records one `wall_clock_epoch` (Unix seconds) in the
+prepared inputs and each `SBXLAUNCH4` boot recipe. It defaults to
+the time after all image builds/imports finish; explicit `--build-epoch` also
+sets this value. The shared supervisor sets `CLOCK_REALTIME` before the launch
+barrier on x86 and arm64. Replay uses retained bytes and never samples the host
+clock. New preparations can change witnesses; replay of recorded inputs is
+unchanged. Both application kernels support unprivileged user namespaces,
+including UID/GID maps and nested mount, PID, network, IPC and UTS namespaces.
+The supervisor recursively mounts the image at the namespace root before
+entering it, preserving named volumes and allowing `CLONE_NEWUSER`.
+
 Within one preparation call, services declaring the same frozen build source
 on the admitted native Podman path share build/import/unpack work. Each service
 still resolves its own launch overrides and packages its own guest recipe.
@@ -1241,12 +1252,3 @@ through the guest control API. Arm/cancel admission, match deadlines, future
 causal effect barriers, snapshot state and witness evidence are specified in
 [the trigger contract](triggers.md). No trigger ever armed adds no report fields,
 witness bytes or console stopping points. This changes the engine.
-
-Compose preparation records one `wall_clock_epoch` (Unix seconds) in the
-prepared inputs and each `SBXLAUNCH4` boot recipe. It defaults to
-the time after all image builds/imports finish; explicit `--build-epoch` also
-sets this value. The shared supervisor sets `CLOCK_REALTIME` before the launch
-barrier on x86 and arm64. Replay uses retained bytes and never samples the host
-clock. New preparations can change witnesses; replay of recorded inputs is
-unchanged. Both application kernels support unprivileged user namespaces,
-including UID/GID maps and nested mount, PID, network, IPC and UTS namespaces.
