@@ -52,6 +52,16 @@ static void test_cmdline(const char *path, const char *text) {
     assert(!close(fd));
 }
 int main(int argc, char **argv) {
+    struct in_addr network_ip, network_mask;
+    assert(!network_address("10.0.0.3/24", &network_ip, &network_mask));
+    assert(ntohl(network_ip.s_addr) == 0x0a000003 && ntohl(network_mask.s_addr) == 0xffffff00);
+    assert(!network_address("10.0.0.3/0", &network_ip, &network_mask) && network_mask.s_addr == 0);
+    assert(!network_address("10.0.0.3/32", &network_ip, &network_mask) && network_mask.s_addr == UINT32_MAX);
+    assert(network_address("10.0.0.3/33", &network_ip, &network_mask));
+    assert(network_address("10.0.0.3/", &network_ip, &network_mask));
+    assert(network_address("10.0.0.3/24junk", &network_ip, &network_mask));
+    assert(network_address("bad/24", &network_ip, &network_mask));
+
     if (argc > 1) {
         /* Every exec, including a restart, inherits the runtime limit. */
         struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE, &limit));

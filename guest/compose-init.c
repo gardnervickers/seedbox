@@ -5,6 +5,9 @@
  * Named volumes are the exception: they live on the machine's retained disk
  * (/dev/vda, ext4) and keep what was flushed across a machine crash. */
 #define _GNU_SOURCE
+#include <arpa/inet.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -332,13 +335,46 @@ static void application_limits(void) {
     struct rlimit limit = {.rlim_cur = 1048576, .rlim_max = 1048576};
     if (setrlimit(RLIMIT_NOFILE, &limit)) die("application nofile limit");
 }
-static void busybox(char *const args[]) {
-    pid_t pid = fork();
-    if (pid < 0) die("fork network setup");
-    if (!pid) { execv("/seedbox/busybox", args); _exit(127); }
-    int status;
-    while (waitpid(pid, &status, 0) < 0) { if (errno != EINTR) die("wait network setup"); }
-    if (!WIFEXITED(status) || WEXITSTATUS(status)) { errno = EIO; die("network setup failed"); }
+static void interface_up(int fd, const char *name) {
+    struct ifreq request = {0};
+    snprintf(request.ifr_name, sizeof(request.ifr_name), "%s", name);
+    if (ioctl(fd, SIOCGIFFLAGS, &request)) die("read guest interface flags");
+    request.ifr_flags |= IFF_UP;
+    if (ioctl(fd, SIOCSIFFLAGS, &request)) die("bring up guest interface");
+}
+static int network_address(const char *cidr, struct in_addr *address, struct in_addr *mask) {
+    char text[INET_ADDRSTRLEN + 4];
+    if (strlen(cidr) >= sizeof(text)) return -1;
+    strcpy(text, cidr);
+    char *slash = strchr(text, '/');
+    if (!slash || !slash[1]) return -1;
+    *slash++ = 0;
+    unsigned prefix = 0;
+    for (const char *p = slash; *p; p++) {
+        if (*p < '0' || *p > '9') return -1;
+        prefix = prefix * 10 + (unsigned)(*p - '0');
+        if (prefix > 32) return -1;
+    }
+    if (inet_pton(AF_INET, text, address) != 1) return -1;
+    mask->s_addr = htonl(prefix ? UINT32_MAX << (32 - prefix) : 0);
+    return 0;
+}
+static void configure_network(const char *cidr) {
+    struct in_addr address, mask;
+    if (network_address(cidr, &address, &mask)) { errno = EINVAL; die("guest IPv4 address/prefix"); }
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) die("open guest network control");
+    interface_up(fd, "lo");
+    struct ifreq request = {0};
+    snprintf(request.ifr_name, sizeof(request.ifr_name), "%s", "eth0");
+    struct sockaddr_in value = {.sin_family = AF_INET, .sin_addr = address};
+    memcpy(&request.ifr_addr, &value, sizeof(value));
+    if (ioctl(fd, SIOCSIFADDR, &request)) die("set guest IPv4 address");
+    value.sin_addr = mask;
+    memcpy(&request.ifr_netmask, &value, sizeof(value));
+    if (ioctl(fd, SIOCSIFNETMASK, &request)) die("set guest IPv4 netmask");
+    interface_up(fd, "eth0");
+    if (close(fd)) die("close guest network control");
 }
 /* ext4 on the retained disk, formatted on the machine's first boot. Fixed
  * UUID and hash seed; the disk starts zeroed, so inode tables and the journal
@@ -632,9 +668,7 @@ int main(void) {
     struct timespec wall_clock = {.tv_sec = count(), .tv_nsec = 0};
     arguments = list(); environment = list(); char **volumes = list(); char **disk_volumes = list();
     if (!arguments[0] || !*arguments[0]) { errno = EINVAL; die("empty executable"); }
-    busybox((char *const[]){"busybox", "ip", "link", "set", "lo", "up", NULL});
-    busybox((char *const[]){"busybox", "ip", "addr", "add", ip, "dev", "eth0", NULL});
-    busybox((char *const[]){"busybox", "ip", "link", "set", "eth0", "up", NULL});
+    configure_network(ip);
     mount_volumes(disk_volumes);
     directories("/sys", 0755);
     if (mount("sysfs", "/sys", "sysfs", 0, NULL)) die("mount bootstrap sys");
