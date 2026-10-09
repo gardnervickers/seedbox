@@ -13,13 +13,15 @@ directory. Every runtime input has a default, so no flags are required:
 | Runtime network impairments | off | `world.shape`: reorder, duplicate, burst loss, latency spike and TCP reset parameters |
 | Connection selectors | disabled; discover and select through the guest control API | `world.connections`, `world.drop_connection` |
 | Seed | `x-seedbox.seed` from the Compose file | `--seed` |
-| Deferred TX kicks (Linux KVM) | off; service TX as in the current engine | `--deferred-tx` (prepare/run/explore) |
+| Guest wall clock | latest `created` time in the prepared images (at least 86400) | `x-seedbox.wall_clock_epoch` (no CLI flag) |
+| Guest RAM per service | 1024 MiB | `x-seedbox.machine.memory_mb` (64..65536; Mac 64..3072) |
+| Deferred TX kicks (Linux KVM) | off; service TX as in the current engine | `x-seedbox.machine.deferred_tx: true` |
 | Runtime checkpoint (Linux KVM) | absent; ordinary execution | `--checkpoint-at-ns T --branch-seed B` (run only; B=P continues without reseeding; no environment backing) |
 | Timebase | Linux: `counter` (retired guest branches); Mac: `pv` | `--timebase` (prepare/run/explore/doctor) |
-| Page timer (Linux KVM) | off; ABI-4 clockevent stores, aimed at PV | `--page-timer` (prepare/run/explore) |
+| Page timer (Linux KVM) | off; ABI-4 clockevent stores, aimed at PV | `x-seedbox.machine.page_timer: true` |
 | Exploration count | `1` | `--count` |
 | Exploration workers | `1`, sequential execution; Mac currently requires `1` | `--workers` (1..32; Linux automatic CPU selection for parallel execution) |
-| Torn disk writes | off (drop all unflushed sectors on crash) | `--torn-writes` |
+| Torn disk writes | off (drop all unflushed sectors on crash) | `x-seedbox.disk.torn_writes: true` |
 | CPU | Linux: first free core other than CPU 0's, under the shared lease; Mac: automatic HVF scheduling | `--cpu`, `SEEDBOX_CPU` (Linux only) |
 | Guest kernel | built locally in the OS temporary directory | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | the platform engine linked into `seedbox`; runtime commands never invoke Cargo | `--vmm`, `SEEDBOX_VMM` (Linux legacy standalone engine) |
@@ -32,6 +34,16 @@ directory. Every runtime input has a default, so no flags are required:
 | Per-page RAM evidence (Linux) | off; under `--full-state`, retain `output/machines/NAME.pages` beside machine traces | existing `--full-state` |
 | Log selection | All indexed machines and both streams, with no time bounds; raw bytes on stdout (`--json` for metadata) | `logs RUN --machine NAME --stream console --since-ns N --until-ns N` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
+
+Settings that describe the simulated world live in the Compose file's
+`x-seedbox` section; flags choose only how a run executes. Every key below is
+optional and shows its non-default form:
+
+```yaml
+x-seedbox:
+  machine: {memory_mb: 2048, page_timer: true, deferred_tx: true}
+  disk: {torn_writes: true}
+```
 
 Directed baselines are optional Compose settings. For example, with `server` and
 `client` services:
@@ -98,7 +110,7 @@ fixture and x86 KVM profiles. Mac defaults use locally built Image, supervisor,
 and mke2fs, with `linux/arm64` as the image platform. `--cpu` and `--vmm`
 remain Linux-only; Mac exploration is serial.
 
-`seedbox run --torn-writes` enables seeded partial survival of unflushed
+`x-seedbox.disk.torn_writes: true` enables seeded partial survival of unflushed
 512-byte disk sectors on crash. It is recorded in run identity and replayed
 automatically. It applies to retained disks, including Compose named volumes. See [disk semantics](runtime.md#disk-crash-policy).
 
@@ -367,12 +379,12 @@ Existing files/runs are never replaced. `--max-bytes` changes the local transfer
 cap without changing run identity. See [runtime instructions](runtime.md#bundles)
 for bounds and supported formats.
 
-`run`, `prepare` and `explore` accept `--page-timer` (off by default,
-no environment override). An ABI-4 kernel arms one-shot clockevents by writing
+`x-seedbox.machine.page_timer: true` in the world file (off by default)
+enables the page timer. An ABI-4 kernel arms one-shot clockevents by writing
 an absolute deadline into the shared time page, avoiding port `0x530` exits.
 The VMM advertises the capability only after the guest announces ABI 4;
-with the flag enabled, older kernels fail at boot with a rebuild/drop-flag error.
-The flag is aimed at PV: an earlier arm lowers the clock bound and uses the same
+with the option enabled, older kernels fail at boot with a rebuild/drop-option error.
+The option is aimed at PV: an earlier arm lowers the clock bound and uses the same
 syscall budget as the VMM planner, without a prompt syscall exit. Watchdog and probe splits leave the bound, budget and plan origin untouched,
 including between the guest's arm loads and stores. A later re-arm retains an
 earlier lowered bound until a legal exit; an overdue arm retains its original
@@ -391,6 +403,6 @@ and witnesses; omission preserves the existing identity encoding for the same
 engine and kernel inputs.
 Checkpoint parent identities also bind the page timer only when enabled,
 preventing checkpoint reuse across timer modes while preserving feature-off hashes.
-This composes with deferred TX's `+deferred-tx` timebase suffix: all four flag
+This composes with deferred TX's `+deferred-tx` timebase suffix: all four option
 combinations have distinct parent and branch identities, and both off retains
 the original encoding.

@@ -400,26 +400,11 @@ struct RuntimeInputs {
     /// Static Linux mke2fs for named volumes [default: embedded guest helper].
     #[arg(long, env = "SEEDBOX_MKE2FS")]
     mke2fs: Option<PathBuf>,
-    /// Guest Unix time in seconds, clamped to the minimum supported epoch [default: host time after image preparation].
-    #[arg(long)]
-    wall_clock_epoch: Option<u32>,
-    /// Guest RAM per service, in MiB.
-    #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(64..=65536))]
-    memory_mb: u32,
     #[command(flatten)]
     clock: TimebaseArgs,
-    /// Arm clockevents through the time page (ABI 4, aimed at PV); changes run identity and results.
-    #[arg(long)]
-    page_timer: bool,
-    /// Defer virtio-net TX kicks to deterministic polls; changes run identity and results.
-    #[arg(long)]
-    deferred_tx: bool,
     /// Also record and compare every machine's RAM and registers (Linux also retains per-page hashes).
     #[arg(long)]
     full_state: bool,
-    /// Keep a seeded subset of unflushed disk sectors on crash (512-byte atomicity; off by default).
-    #[arg(long)]
-    torn_writes: bool,
 }
 
 impl RuntimeInputs {
@@ -437,11 +422,6 @@ impl RuntimeInputs {
                         .into(),
                 ));
             }
-            if self.page_timer || self.deferred_tx {
-                return Err(Error::Setup(
-                    "--page-timer and --deferred-tx require Linux KVM; omit them on Mac".into(),
-                ));
-            }
         }
         Ok(())
     }
@@ -457,6 +437,8 @@ impl RuntimeInputs {
         cancellation: &CancellationToken,
     ) -> Result<(Preparer, Executor)> {
         self.validate_platform()?;
+        validate_machine(simulation)?;
+        let machine = &simulation.machine;
         let engine = defaults::engine(self.kvm.vmm.clone())?;
         for (flag, path) in [
             ("--kernel", &self.kvm.kernel),
@@ -468,7 +450,7 @@ impl RuntimeInputs {
                 defaults::existing(flag, path.clone())?;
             }
         }
-        let _ = (scratch, simulation);
+        let _ = scratch;
         let witness = if self.full_state {
             WitnessMode::FullState
         } else {
@@ -506,29 +488,28 @@ impl RuntimeInputs {
                 &engine,
                 &kernel,
                 store,
-                self.memory_mb,
+                machine.memory_mb,
                 witness,
-                self.torn_writes,
+                simulation.disk.torn_writes,
             )?)
         };
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         let executor = {
             let executor = if self.kvm.vmm.is_some() {
-                VmmExecutor::new(&engine, store, cpu, self.memory_mb, witness, counter)?
+                VmmExecutor::new(&engine, store, cpu, machine.memory_mb, witness, counter)?
                     .with_detected_contract(store, &engine)?
             } else {
-                VmmExecutor::new_internal(&engine, store, cpu, self.memory_mb, witness, counter)?
+                VmmExecutor::new_internal(&engine, store, cpu, machine.memory_mb, witness, counter)?
             };
             Executor::Linux(
                 executor
-                    .with_torn_writes(self.torn_writes)
+                    .with_torn_writes(simulation.disk.torn_writes)
                     .with_timebase(self.clock.timebase.unwrap_or(TimebaseArg::Counter).into())
-                    .with_page_timer(self.page_timer)
-                    .with_deferred_tx(self.deferred_tx),
+                    .with_page_timer(machine.page_timer)
+                    .with_deferred_tx(machine.deferred_tx),
             )
         };
         let inputs = OciPreparer {
-            wall_clock_epoch: self.wall_clock_epoch,
             docker: backends::container_engine()?,
             kernel,
             engine,
@@ -545,6 +526,19 @@ impl RuntimeInputs {
             executor,
         ))
     }
+}
+
+/// Reject world machine options the selected platform cannot execute, before any state.
+fn validate_machine(simulation: &config::Simulation) -> Result<()> {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if simulation.machine.page_timer || simulation.machine.deferred_tx {
+        return Err(Error::Setup(
+            "x-seedbox.machine page_timer and deferred_tx require Linux KVM; remove them on Mac"
+                .into(),
+        ));
+    }
+    let _ = simulation;
+    Ok(())
 }
 
 /// Stop-placement settings: they change speed, never results.
@@ -747,6 +741,7 @@ fn run(cli: Cli) -> Result<u8> {
                 )));
             }
             let simulation = compose.load()?;
+            validate_machine(&simulation)?;
             let (store, _) = state.open()?;
             let scratch = tempfile::tempdir()?;
             let counter = CounterProfile::host().unwrap_or(CounterProfile::Zen);
@@ -793,6 +788,7 @@ fn run(cli: Cli) -> Result<u8> {
             }
             inputs.validate_platform()?;
             let simulation = compose.load()?;
+            validate_machine(&simulation)?;
             if checkpoint_at_ns.is_some_and(|t| t >= simulation.limits.simulated_time_ns) {
                 return Err(Error::Setup("--checkpoint-at-ns must be before the simulated time limit; choose an earlier checkpoint".into()));
             }
@@ -850,6 +846,7 @@ fn run(cli: Cli) -> Result<u8> {
             inputs.validate_platform()?;
             let resources = Resources::start();
             let simulation = compose.load()?;
+            validate_machine(&simulation)?;
             let cancellation = CancellationToken::default();
             let _signals = Signals::register(&cancellation)?;
             let options = ExploreOptions {

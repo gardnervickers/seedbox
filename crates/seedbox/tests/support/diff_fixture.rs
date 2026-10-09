@@ -47,7 +47,6 @@ fn fixture() -> sb::orchestration::RunRecord {
             full_state: None,
             faults: vec![],
             detail: None,
-            engine_qualification: None,
         }),
         error: None,
         logs: BTreeMap::new(),

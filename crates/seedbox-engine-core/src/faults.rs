@@ -71,6 +71,8 @@ pub enum Lifecycle {
     Resume,
     Crash,
     Reboot,
+    /// Charge CPU work at this many thousandths of the seeded speed.
+    Throttle(u64),
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Event {
@@ -88,6 +90,8 @@ pub struct Faults {
     waiting_ready: Vec<BTreeSet<u32>>,
     ready: Vec<bool>,
     stopped: Vec<bool>,
+    /// The application's process group is SIGSTOPped; its machine runs on.
+    frozen: Vec<bool>,
     life: Vec<Life>,
     /// Outstanding lifecycle requests per machine, by time: nothing may be
     /// delivered early to a machine across one of these.
@@ -96,6 +100,8 @@ pub struct Faults {
     pub readiness: Vec<Value>,
     handles: BTreeMap<String, BTreeSet<(usize, usize)>>,
     clocks: BTreeMap<String, Clock>,
+    /// Active throttle handles: machine and factor in thousandths.
+    throttles: BTreeMap<String, (usize, u64)>,
     cuts: BTreeMap<(usize, usize), usize>,
     names: Vec<String>,
     changed_network: Vec<usize>,
@@ -129,12 +135,14 @@ impl Faults {
             waiting_ready: vec![BTreeSet::new(); count],
             ready: vec![true; count],
             stopped: vec![false; count],
+            frozen: vec![false; count],
             life: vec![Life::Up; count],
             lifecycle_at: vec![BTreeSet::new(); count],
             lifecycle: vec![],
             readiness: vec![],
             handles: BTreeMap::new(),
             clocks: BTreeMap::new(),
+            throttles: BTreeMap::new(),
             cuts: BTreeMap::new(),
             names,
             changed_network: vec![],
@@ -163,10 +171,25 @@ impl Faults {
         match &plan.action {
             Action::Stop { machine }
             | Action::Restart { machine }
+            | Action::PauseProcess { machine }
+            | Action::ResumeProcess { machine }
             | Action::Pause { machine }
             | Action::Resume { machine }
             | Action::Crash { machine }
-            | Action::Reboot { machine } => {
+            | Action::Reboot { machine }
+            | Action::Throttle { machine, .. } => {
+                if let Action::Throttle {
+                    handle,
+                    factor_permille,
+                    ..
+                } = &plan.action
+                {
+                    if handle.is_empty()
+                        || !seedbox_control::THROTTLE_PERMILLE.contains(factor_permille)
+                    {
+                        return Err("invalid throttle handle/factor".into());
+                    }
+                }
                 target = Some(
                     self.names
                         .iter()
@@ -380,14 +403,24 @@ impl Faults {
             .collect();
         handles.extend(self.connections.selections.keys().cloned());
         handles.extend(self.clocks.keys().cloned());
+        handles.extend(self.throttles.keys().cloned());
         handles.sort();
         handles
+    }
+    /// The factor of machine `m`'s active throttle, if any. A rebooted
+    /// incarnation takes it on again.
+    pub fn throttle(&self, m: usize) -> Option<u64> {
+        self.throttles
+            .values()
+            .find(|(machine, _)| *machine == m)
+            .map(|(_, factor)| *factor)
     }
     pub fn process_state(&self, machine: usize) -> &'static str {
         match self.life[machine] {
             Life::Paused => "Paused",
             Life::Down => "Down",
             Life::Up if self.stopped[machine] => "Stopped",
+            Life::Up if self.frozen[machine] => "Frozen",
             Life::Up => "Running",
         }
     }
@@ -413,14 +446,21 @@ impl Faults {
         let index = self.names.iter().position(|name| name == machine)?;
         match action {
             // Down targets are admitted so process faults resolve as unavailable.
-            Action::Stop { .. } | Action::Restart { .. } if self.life[index] == Life::Down => None,
+            action if action.is_process() && self.life[index] == Life::Down => None,
             // A paused guest cannot acknowledge; its deadline would fail the run.
-            Action::Stop { .. } | Action::Restart { .. } if self.life[index] == Life::Paused => {
+            action if action.is_process() && self.life[index] == Life::Paused => {
                 Some("target machine is paused")
             }
             Action::Stop { .. } if self.stopped[index] => Some("target process is already stopped"),
             Action::Restart { .. } if !self.stopped[index] => {
                 Some("restart requires a stopped target process")
+            }
+            Action::PauseProcess { .. } if self.stopped[index] => Some("target process is stopped"),
+            Action::PauseProcess { .. } if self.frozen[index] => {
+                Some("target process is already paused")
+            }
+            Action::ResumeProcess { .. } if !self.frozen[index] => {
+                Some("target process is not paused")
             }
             Action::Pause { .. } if self.life[index] != Life::Up => {
                 Some("target machine is not running")
@@ -446,6 +486,9 @@ impl Faults {
             }
             Action::ClockDrift { .. } if self.drifting(index) => {
                 Some("target machine clock is already drifting")
+            }
+            Action::Throttle { .. } if self.throttle(index).is_some() => {
+                Some("target machine is already throttled")
             }
             _ => None,
         }
@@ -604,6 +647,7 @@ impl Faults {
         self.forget_clocks(m);
         self.ready[m] = false;
         self.stopped[m] = false;
+        self.frozen[m] = false;
     }
     /// A new incarnation boots from the recorded wall clock at the nominal rate,
     /// so no skew or drift survives on machine `m`. Settled handles stay until
@@ -626,14 +670,13 @@ impl Faults {
         })
     }
     /// The management command that asks entry `i`'s target guest for its effect.
-    fn command(&self, i: usize) -> Vec<u8> {
+    fn management_command(&self, i: usize) -> Vec<u8> {
         let e = &self.entries[i];
         let id = e.plan.id;
-        match (&e.plan.action, e.clock) {
-            (Action::Restart { .. }, _) => format!("start {id}\n"),
-            (_, Some(ClockChange::Step(step))) => format!("clock_step {id} {step}\n"),
-            (_, Some(ClockChange::Rate(rate))) => format!("clock_rate {id} {rate}\n"),
-            _ => format!("stop {id}\n"),
+        match e.clock {
+            Some(ClockChange::Step(step)) => format!("clock_step {id} {step}\n"),
+            Some(ClockChange::Rate(rate)) => format!("clock_rate {id} {rate}\n"),
+            None => format!("{} {id}\n", command(&e.plan.action)),
         }
         .into_bytes()
     }
@@ -646,7 +689,7 @@ impl Faults {
         if let Some(m) = self.entries[i].target {
             if self.ready[m] {
                 self.entries[i].dispatched = true;
-                commands.push((m, self.command(i)));
+                commands.push((m, self.management_command(i)));
             } else {
                 self.waiting_ready[m].insert(id);
             }
@@ -689,7 +732,7 @@ impl Faults {
                     if self.entries[i].status == Status::Waiting {
                         if let Some(m) = self.entries[i].target {
                             self.entries[i].dispatched = true;
-                            commands.push((m, self.command(i)));
+                            commands.push((m, self.management_command(i)));
                         }
                     }
                 }
@@ -697,14 +740,18 @@ impl Faults {
                     self.entries[i].status = Status::Waiting;
                     self.log[i]["status"] = json!("requested");
                     match self.entries[i].plan.action.clone() {
-                        Action::Stop { .. } | Action::Restart { .. }
-                            if self.entries[i]
-                                .target
-                                .is_some_and(|m| self.life[m] == Life::Down) =>
+                        action
+                            if action.is_process()
+                                && self.entries[i]
+                                    .target
+                                    .is_some_and(|m| self.life[m] == Life::Down) =>
                         {
                             self.unavailable(i, now, "target machine is down");
                         }
-                        Action::Stop { .. } | Action::Restart { .. } => {
+                        Action::Stop { .. }
+                        | Action::Restart { .. }
+                        | Action::PauseProcess { .. }
+                        | Action::ResumeProcess { .. } => {
                             self.request_effect(i, &mut commands);
                         }
                         Action::ClockSkew {
@@ -905,7 +952,39 @@ impl Faults {
                                 }
                             }
                         }
+                        Action::Throttle {
+                            handle,
+                            factor_permille,
+                            ..
+                        } => {
+                            let m = self.entries[i].target.unwrap();
+                            if self.active_handles().contains(&handle) {
+                                self.fail(i, "duplicate active handle".into());
+                                continue;
+                            }
+                            if self.throttle(m).is_some() {
+                                self.fail(i, "target machine is already throttled".into());
+                                continue;
+                            }
+                            self.throttles.insert(handle.clone(), (m, factor_permille));
+                            self.applied(
+                                i,
+                                now,
+                                format!("handle={handle}; factor_permille={factor_permille}"),
+                            );
+                            self.lifecycle
+                                .push((m, Lifecycle::Throttle(factor_permille)));
+                        }
                         Action::Heal { handle } => {
+                            if let Some((m, _)) = self.throttles.remove(&handle) {
+                                self.applied(
+                                    i,
+                                    now,
+                                    format!("handle={handle}; seeded speed restored"),
+                                );
+                                self.lifecycle.push((m, Lifecycle::Throttle(1_000)));
+                                continue;
+                            }
                             if let Some(selection) = self.connections.selections.remove(&handle) {
                                 self.log[i]["selection_counts"] = json!({"matched":selection.matched,"dropped":selection.dropped});
                                 self.applied(
@@ -1060,7 +1139,15 @@ impl Faults {
             return;
         }
         if success {
-            self.stopped[machine] = matches!(self.entries[i].plan.action, Action::Stop { .. });
+            match self.entries[i].plan.action {
+                Action::Stop { .. } => {
+                    self.stopped[machine] = true;
+                    self.frozen[machine] = false;
+                }
+                Action::PauseProcess { .. } => self.frozen[machine] = true,
+                Action::ResumeProcess { .. } => self.frozen[machine] = false,
+                _ => self.stopped[machine] = false,
+            }
             self.applied(
                 i,
                 time,
@@ -1069,6 +1156,16 @@ impl Faults {
         } else {
             self.fail(i, format!("guest rejected fault {id}"));
         }
+    }
+}
+
+/// The supervisor's management verb for a process fault.
+fn command(action: &Action) -> &'static str {
+    match action {
+        Action::Restart { .. } => "start",
+        Action::PauseProcess { .. } => "freeze",
+        Action::ResumeProcess { .. } => "thaw",
+        _ => "stop",
     }
 }
 

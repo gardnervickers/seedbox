@@ -123,57 +123,6 @@ fn checksum(bytes: &[u8]) -> u16 {
     !(sum as u16)
 }
 
-#[cfg(test)]
-mod reset_tests {
-    use super::*;
-    #[test]
-    fn reset_keeps_direction_and_sequence_removes_options_and_payload_and_has_valid_checksums() {
-        let mut frame = vec![0; 75];
-        frame[12..14].copy_from_slice(&[8, 0]);
-        frame[14] = 0x46; // IPv4 options.
-        frame[16..18].copy_from_slice(&61u16.to_be_bytes());
-        frame[22] = 64;
-        frame[23] = 6;
-        frame[26..34].copy_from_slice(&[10, 0, 0, 1, 10, 0, 0, 2]);
-        frame[38..42].copy_from_slice(&[0x0f, 0xa0, 0, 80]);
-        frame[42..46].copy_from_slice(&7u32.to_be_bytes());
-        frame[46..50].copy_from_slice(&51u32.to_be_bytes());
-        frame[50] = 0x60;
-        frame[51] = 0x18; // TCP options and data.
-        let reset = reset_frame(&frame).unwrap();
-        assert_eq!(reset.len(), 54);
-        assert_eq!(&reset[..14], &frame[..14]);
-        assert_eq!(&reset[26..34], &frame[26..34]);
-        assert_eq!(&reset[34..46], &frame[38..50]);
-        assert_eq!(&reset[46..48], &[0x50, 0x14]);
-        assert_eq!(checksum(&reset[14..34]), 0);
-        let mut pseudo = reset[26..34].to_vec();
-        pseudo.extend_from_slice(&[0, 6, 0, 20]);
-        pseudo.extend_from_slice(&reset[34..]);
-        assert_eq!(checksum(&pseudo), 0);
-        for flag in [2, 0x12, 4, 0x14, 0] {
-            let mut bad = frame.clone();
-            bad[51] = flag;
-            assert!(reset_frame(&bad).is_none());
-        }
-        for (offset, value) in [
-            (0, 1),
-            (12, 0x86),
-            (14, 0x66),
-            (20, 0x20),
-            (21, 1),
-            (23, 17),
-            (50, 0x10),
-        ] {
-            let mut bad = frame.clone();
-            bad[offset] = value;
-            assert!(reset_frame(&bad).is_none());
-        }
-        for n in 0..frame.len() {
-            assert!(reset_frame(&frame[..n]).is_none());
-        }
-    }
-}
 fn key(src: Endpoint, dst: Endpoint) -> (Tuple, usize) {
     if src < dst {
         ((src, dst), 0)
@@ -363,6 +312,58 @@ impl Connections {
             crate::links::string_hash(h, &serde_json::to_string(&s.connection).unwrap());
             h.update(s.matched.to_le_bytes());
             h.update(s.dropped.to_le_bytes());
+        }
+    }
+}
+
+#[cfg(test)]
+mod reset_tests {
+    use super::*;
+    #[test]
+    fn reset_keeps_direction_and_sequence_removes_options_and_payload_and_has_valid_checksums() {
+        let mut frame = vec![0; 75];
+        frame[12..14].copy_from_slice(&[8, 0]);
+        frame[14] = 0x46; // IPv4 options.
+        frame[16..18].copy_from_slice(&61u16.to_be_bytes());
+        frame[22] = 64;
+        frame[23] = 6;
+        frame[26..34].copy_from_slice(&[10, 0, 0, 1, 10, 0, 0, 2]);
+        frame[38..42].copy_from_slice(&[0x0f, 0xa0, 0, 80]);
+        frame[42..46].copy_from_slice(&7u32.to_be_bytes());
+        frame[46..50].copy_from_slice(&51u32.to_be_bytes());
+        frame[50] = 0x60;
+        frame[51] = 0x18; // TCP options and data.
+        let reset = reset_frame(&frame).unwrap();
+        assert_eq!(reset.len(), 54);
+        assert_eq!(&reset[..14], &frame[..14]);
+        assert_eq!(&reset[26..34], &frame[26..34]);
+        assert_eq!(&reset[34..46], &frame[38..50]);
+        assert_eq!(&reset[46..48], &[0x50, 0x14]);
+        assert_eq!(checksum(&reset[14..34]), 0);
+        let mut pseudo = reset[26..34].to_vec();
+        pseudo.extend_from_slice(&[0, 6, 0, 20]);
+        pseudo.extend_from_slice(&reset[34..]);
+        assert_eq!(checksum(&pseudo), 0);
+        for flag in [2, 0x12, 4, 0x14, 0] {
+            let mut bad = frame.clone();
+            bad[51] = flag;
+            assert!(reset_frame(&bad).is_none());
+        }
+        for (offset, value) in [
+            (0, 1),
+            (12, 0x86),
+            (14, 0x66),
+            (20, 0x20),
+            (21, 1),
+            (23, 17),
+            (50, 0x10),
+        ] {
+            let mut bad = frame.clone();
+            bad[offset] = value;
+            assert!(reset_frame(&bad).is_none());
+        }
+        for n in 0..frame.len() {
+            assert!(reset_frame(&frame[..n]).is_none());
         }
     }
 }

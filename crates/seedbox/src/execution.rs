@@ -187,6 +187,11 @@ pub trait ExecutionBackend: Send + Sync {
     fn validate_retained(&self, _inputs: &PreparedInputs) -> Result<()> {
         Ok(())
     }
+    /// The retained inputs execution reads; only these are copied into each
+    /// attempt and reach `ExecutionRequest::artifacts`. Default: all of them.
+    fn runtime_inputs<'a>(&self, inputs: &'a PreparedInputs) -> Vec<&'a ContentDigest> {
+        inputs.digests().collect()
+    }
     /// Must exactly match the recorded profile before execution can begin.
     fn profile(&self) -> ExecutionProfile;
     /// Only knobs whose witness invariance has been qualified belong here.
@@ -240,9 +245,6 @@ pub struct ExecutionReport {
     pub full_state: Option<BTreeMap<String, ContentDigest>>,
     pub faults: Vec<FaultEvent>,
     pub detail: Option<String>,
-    /// Development artifact qualification, copied from the semantic identity.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub engine_qualification: Option<String>,
 }
 
 #[cfg(test)]

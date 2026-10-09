@@ -2,12 +2,10 @@
 //! Platform adapters supply committed events and actual transmitted bytes.
 pub mod connections;
 pub mod control;
-#[allow(clippy::manual_is_multiple_of)] // Preserve the qualified sector arithmetic.
 pub mod disk;
 pub mod faults;
 pub mod links;
 pub mod network_counters;
-#[allow(clippy::should_implement_trait)] // Preserve the existing RNG API during extraction.
 pub mod rng;
 pub mod triggers;
 
@@ -26,7 +24,6 @@ pub mod virtio_network;
 pub mod pv_progress;
 
 pub mod checkpoint;
-#[allow(clippy::drain_collect)] // Preserve reference delivery collection during extraction.
 pub mod world;
 pub mod world_events;
 

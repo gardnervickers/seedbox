@@ -112,7 +112,7 @@ results and witness traces generated from main.
 
 ## Disk crash policy
 
-`run` and `prepare` accept `--torn-writes` (off by default). Off retains the
+`x-seedbox.disk.torn_writes: true` enables torn writes (off by default). Off retains the
 `flush-stable/drop-all-unflushed/v1` model: crashes drop all unflushed sectors.
 The omitted setting adds no profile or world JSON field and leaves the existing
 disk digest and witness inputs unchanged. Building the modified VMM still changes
@@ -229,7 +229,7 @@ seedbox=./target/release/seedbox
 
 Every input has a default; `seedbox help run` lists them with their overrides.
 On Linux, explicit flags and their `SEEDBOX_*` path overrides take precedence.
-Guest assets are looked up under `/tmp/seedbox-UID/ARCH` on both platforms. `SEEDBOX_ASSET_DIR` overrides the parent directory. The default files are `kernel` and `runtime.tar.gz`. Explicit
+Guest assets are looked up under `/tmp/seedbox-UID/ARCH` on both platforms; under `sudo`, UID is the invoking user (`SUDO_UID`), matching where `tools/build-assets.sh` wrote them. `SEEDBOX_ASSET_DIR` overrides the parent directory. The default files are `kernel` and `runtime.tar.gz`. Explicit
 `--kernel` / `SEEDBOX_KERNEL` and `--runtime-assets` / `SEEDBOX_RUNTIME_ASSETS`
 paths override them. Missing assets report the local build command. Runtime
 commands never download them automatically. CI release publishing remains
@@ -342,12 +342,12 @@ timebase field mean counter. Run/replay and inspect print `timebase: VALUE`.
 `inspect --json` exposes the semantic profile and, when present, the VMM's
 reported `report.timebase` through the library's serialization.
 
-`run`, `prepare` and `explore` accept `--page-timer` (off by default,
-no environment override). An ABI-4 kernel arms one-shot clockevents by writing
+`x-seedbox.machine.page_timer: true` in the world file (off by default)
+enables the page timer. An ABI-4 kernel arms one-shot clockevents by writing
 an absolute deadline into the shared time page, avoiding port `0x530` exits.
 The VMM advertises the capability only after the guest announces ABI 4;
-with the flag enabled, older kernels fail at boot with a rebuild/drop-flag error.
-The flag is aimed at PV: an earlier arm lowers the clock bound and uses the same
+with the option enabled, older kernels fail at boot with a rebuild/drop-option error.
+The option is aimed at PV: an earlier arm lowers the clock bound and uses the same
 syscall budget as the VMM planner, without a prompt syscall exit. Watchdog and probe splits leave the bound, budget and plan origin untouched,
 including between the guest's arm loads and stores. A later re-arm retains an
 earlier lowered bound until a legal exit; an overdue arm retains its original
@@ -369,7 +369,7 @@ and witnesses; omission preserves the existing identity encoding for the same
 engine and kernel inputs.
 Checkpoint parent identities also bind the page timer only when enabled,
 preventing checkpoint reuse across timer modes while preserving feature-off hashes.
-This composes with deferred TX's `+deferred-tx` timebase suffix: all four flag
+This composes with deferred TX's `+deferred-tx` timebase suffix: all four option
 combinations have distinct parent and branch identities, and both off retains
 the original encoding.
 
@@ -380,7 +380,7 @@ counter profile. That does not qualify additional PV hosts. The counter stop-pla
 below applies to the default counter model; PV uses its own exit-based progress.
 
 `--state` chooses the content store and attempts root (default `.seedbox`).
-`--memory-mb` defaults to 1024 MiB per service and is a semantic parameter; `--full-state` requests RAM/register
+`x-seedbox.machine.memory_mb` defaults to 1024 MiB per service and is a semantic parameter; `--full-state` requests RAM/register
 digests and retains per-page RAM hashes (format below). Preparation checks a conservative archive boot-memory floor before acquiring
 a CPU lease. Application memory can require a larger value; the etcd image failed
 to unpack at 512 MiB and passed at 1024 MiB. `--margin` and `--undo` are recorded per attempt and do not change identity.
@@ -403,8 +403,7 @@ strict hard-stop check.
 
 Engines and guest kernels are not pinned: run, explore, replay and doctor admit
 any built VMM and guest kernel, and each run records their hashes in its
-identity. An older
-record's `engine_qualification` parameter is kept as data and does not block replay.
+identity.
 
 Replay defaults to the retained engine. An explicit `--vmm NEW_BINARY`
 permits a fresh identity and witness comparison with it.
@@ -580,8 +579,8 @@ available buffers at deterministic guest stops, including slice entry after RX
 delivery, slice boundaries and halt, so suppressed kicks do not stall queues.
 Without negotiation, the existing NO_INTERRUPT/NO_NOTIFY path is retained.
 
-`prepare`, `run` and `explore` accept `--deferred-tx` (off by default), also
-accepted by the raw VMM. This is a semantic option: enabling it records
+`x-seedbox.machine.deferred_tx: true` (off by default) enables deferred TX; the raw
+VMM accepts `--deferred-tx`. This is a semantic option: enabling it records
 `deferred_tx=true` in the profile and changes packet timing and run identity.
 Off omits the parameter and retains the behavior at `13b7f85`, including legacy
 kick-driven TX. Replay uses the retained setting with no override, including
@@ -1110,11 +1109,18 @@ witness bytes or console stopping points. This changes the engine.
 Preparation records one wall_clock_epoch after image builds/imports finish.
 The SBXLAUNCH4 recipe carries it to the supervisor, which sets CLOCK_REALTIME
 before the launch barrier on x86 and ARM64. Replay uses the retained value.
-New preparations may have different wall-clock epochs and witnesses. Use
-`--wall-clock-epoch SECS` on prepare, run, or explore to give independent runs
-the same guest Unix time. Values below 86400 (the minimum supported Unix epoch) are clamped to
-86400. This changes guest results, has no environment override,
-and does not alter image-layer timestamps. Replay always uses the retained epoch.
+`x-seedbox.wall_clock_epoch` in the Compose file sets it: an integer number of
+Unix seconds in [86400, 4294967295], because Linux cannot set a wall clock
+earlier than the guest's uptime; any other value is a
+`$.x-seedbox.wall_clock_epoch` validation error. Otherwise it is the latest
+RFC 3339 `created` time in any prepared image's config or history, and at least
+86400. Builders stamp those times after each step, so a certificate minted
+during a build is already valid. Preparation never samples the host clock, so
+independent fresh runs of the same images start at the same guest Unix time and
+can be compared directly; rebuilt images can change the epoch and witnesses.
+The epoch is a simulation parameter, so it has no CLI flag or environment
+override, and it does not alter image-layer timestamps. Replay always uses the
+retained epoch.
 Both application kernels support unprivileged user namespaces. The supervisor
 recursively mounts the image at the namespace root before entering it, preserving
 named volumes and allowing CLONE_NEWUSER.

@@ -323,7 +323,7 @@ impl Orchestrator {
             fs::create_dir(&output)?;
             executor.preflight(Some(&output))?;
             let mut artifacts = BTreeMap::new();
-            for digest in record.identity.inputs.digests() {
+            for digest in executor.runtime_inputs(&record.identity.inputs) {
                 if !artifacts.contains_key(digest) {
                     artifacts.insert(
                         digest.clone(),
@@ -340,7 +340,6 @@ impl Orchestrator {
                     full_state: None,
                     faults: vec![],
                     detail: Some("cancelled before execution".into()),
-                    engine_qualification: None,
                 });
             }
             let start = Instant::now();
@@ -369,14 +368,7 @@ impl Orchestrator {
             Ok(report)
         })();
         match execution {
-            Ok(mut report) => {
-                report.engine_qualification = record
-                    .identity
-                    .inputs
-                    .profile
-                    .semantic_parameters
-                    .get(crate::admission::ENGINE_QUALIFICATION)
-                    .cloned();
+            Ok(report) => {
                 match classify(&record.identity, &report) {
                     Ok(outcome) => record.outcome = outcome,
                     Err(error) => {

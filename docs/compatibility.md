@@ -87,8 +87,8 @@ common syscalls remain separate work.
 Each VM exposes one CPU. Seastar applications such as ScyllaDB and Redpanda
 need `--smp 1`; DPDK must select only guest CPU 0. JVM GC, tokio worker counts
 and Go parallelism reflect that CPU count. Real SMP remains out of scope.
-The shared supervisor now applies a recorded preparation-time wall-clock epoch
-on both architectures. User namespaces are enabled in both application configs.
+The shared supervisor now applies a recorded wall-clock epoch, derived from the
+prepared images or set by `x-seedbox.wall_clock_epoch`, on both architectures. User namespaces are enabled in both application configs.
 CPU feature baselines and cross-host replay remain unproven.
 
 `seedbox run harness/acceptance/workloads/runtime.yaml` exercises the actual
@@ -102,7 +102,7 @@ The `runtime-postgres.yaml`, `runtime-nginx.yaml`, `runtime-python.yaml`,
 `runtime-jvm.yaml` and `runtime-node.yaml` projects in the same directory run
 initdb plus a SQL query, an HTTP request through nginx's ordinary stdout log,
 a Python process pool, JVM local hostname lookup and Node HTTP, respectively.
-Run those with `--memory-mb 2048` to accommodate their image archives and
+Those projects set `x-seedbox.machine.memory_mb: 2048` to accommodate their image archives and
 application heaps. The io_uring probe checks a real ring completion separately;
 a Node HTTP pass alone does not establish which libuv path was used.
 

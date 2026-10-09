@@ -590,6 +590,22 @@ static int set_clock_rate(int64_t ppb) {
     adjustment.freq = (rest * 65536 + (rest < 0 ? -500 : 500)) / 1000;
     return SEEDBOX_ADJTIMEX(&adjustment) < 0 ? -1 : 0;
 }
+/* SIGSTOP the application's process group, as a debugger or GC pause would;
+ * its kernel keeps ACKing and accepting connections. Confirm once the group
+ * leader reports the stop, leaving any exit for supervise() to reap. */
+static int freeze(pid_t *child) {
+    if (*child <= 0) { errno = EINVAL; return -1; }
+    if (kill(-*child, SIGSTOP)) return -1;
+    siginfo_t info = {0};
+    while (waitid(P_PID, *child, &info, WSTOPPED|WEXITED|WNOWAIT) < 0) { if (errno != EINTR) return -1; }
+    if (info.si_code != CLD_STOPPED) { errno = ESRCH; return -1; }
+    return 0;
+}
+/* SIGCONT resumes the stopped group as it is sent; there is nothing to wait for. */
+static int thaw(pid_t *child) {
+    if (*child <= 0) { errno = EINVAL; return -1; }
+    return kill(-*child, SIGCONT);
+}
 static void control(char *command, pid_t *child) {
     if (!strncmp(command, "SBX_REPLY1 ", 11)) {
         char *payload = command + 11, *end; errno = 0;
@@ -607,6 +623,8 @@ static void control(char *command, pid_t *child) {
     if (!strcmp(action, "clock_step")) success = step_wall_clock(step) == 0;
     else if (!strcmp(action, "clock_rate")) success = set_clock_rate(step) == 0;
     else if (!strcmp(action, "stop")) success = stop(child) == 0;
+    else if (!strcmp(action, "freeze")) success = freeze(child) == 0;
+    else if (!strcmp(action, "thaw")) success = thaw(child) == 0;
     else if (*child < 0) { *child = start(); success = *child > 0; }
     if (!id && !success) { errno = EINVAL; die("invalid legacy management action/state"); }
     acknowledge(action, id, success);

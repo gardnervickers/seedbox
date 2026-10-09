@@ -28,6 +28,8 @@ impl Rng {
     pub fn counter(&self) -> u64 {
         self.counter
     }
+    // The draw is infallible, so this is not `Iterator::next`.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> u64 {
         let mut h = Sha256::new();
         h.update(self.key);

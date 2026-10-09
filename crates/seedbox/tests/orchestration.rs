@@ -145,7 +145,6 @@ impl Fixture {
                 full_state: None,
                 faults: vec![],
                 detail: None,
-                engine_qualification: None,
             },
             calls: AtomicUsize::new(0),
             fail: false,
@@ -2444,4 +2443,71 @@ fn deferred_tx_is_semantic_only_when_on_and_replay_cannot_switch_modes() {
         }
     }
     assert_ne!(ids[0], ids[1]);
+}
+
+#[test]
+fn materialize_trusts_only_unchanged_objects_this_store_hashed() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(directory.path().join("store"));
+    let digest = store.put(b"retained guest bytes").unwrap();
+    let object = directory.path().join("store/sha256").join(digest.hex());
+    // Hashed by put, so this copy skips the hash and keeps the bytes.
+    let copy = store
+        .materialize(&digest, &directory.path().join("a"))
+        .unwrap();
+    assert_eq!(fs::read(copy).unwrap(), b"retained guest bytes");
+    // A same-length rewrite changes the object's ctime, so it is hashed again.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::write(&object, b"corrupted guest bytes").unwrap();
+    fs::write(&object, b"retained guest byteX").unwrap();
+    let bad = directory.path().join("b");
+    assert!(store.materialize(&digest, &bad).is_err());
+    assert_eq!(fs::read_dir(bad).unwrap().count(), 0);
+    // A new store (another process) never trusts an earlier verification.
+    fs::write(&object, b"retained guest bytes").unwrap();
+    let fresh = ContentStore::new(directory.path().join("store"));
+    fs::write(&object, b"retained guest byteX").unwrap();
+    assert!(fresh
+        .materialize(&digest, &directory.path().join("c"))
+        .is_err());
+}
+
+#[test]
+fn only_the_backend_runtime_inputs_are_copied_into_an_attempt() {
+    struct Selective<'a>(&'a Fixture);
+    impl ExecutionBackend for Selective<'_> {
+        fn profile(&self) -> ExecutionProfile {
+            self.0.backend.profile()
+        }
+        fn performance_parameters(&self) -> BTreeMap<String, String> {
+            self.0.backend.performance_parameters()
+        }
+        fn runtime_inputs<'a>(&self, inputs: &'a PreparedInputs) -> Vec<&'a ContentDigest> {
+            vec![&inputs.profile.engine, &inputs.kernel]
+        }
+        fn execute(&self, request: ExecutionRequest<'_>) -> Result<ExecutionReport> {
+            let inputs = &self.0.preparer.inputs;
+            assert_eq!(request.artifacts.keys().collect::<Vec<_>>(), {
+                let mut keys = vec![&inputs.profile.engine, &inputs.kernel];
+                keys.sort();
+                keys
+            });
+            self.0.backend.execute(request)
+        }
+    }
+    let fixture = Fixture::new();
+    let run = fixture
+        .orchestrator
+        .run(
+            &fixture.simulation,
+            RunOptions::default(),
+            &fixture.preparer,
+            &Selective(&fixture),
+        )
+        .unwrap();
+    assert_eq!(run.record.outcome, Outcome::Pass);
+    assert_eq!(
+        fs::read_dir(run.directory.join("inputs")).unwrap().count(),
+        2
+    );
 }

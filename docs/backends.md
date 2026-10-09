@@ -10,7 +10,7 @@ CLI / Rust caller
     Orchestrator::run(simulation, options, preparer, executor)
         PreparationBackend::prepare -> PreparedInputs + retained content
         write INCOMPLETE manifest
-        verify and materialize all declared inputs
+        verify and materialize the inputs the executor reads
         ExecutionBackend::execute -> ExecutionReport + output files
         classify, retain logs, finalize manifest
 
@@ -21,7 +21,18 @@ CLI / Rust caller
 ```
 
 The initial manifest is persisted before verification/materialization so
-preflight errors can also be recorded. Preparation precedes the initial manifest;
+preflight errors can also be recorded.
+
+`ExecutionBackend::runtime_inputs` names the retained inputs execution reads
+(by default all of them); only those are copied into the attempt's `inputs/`
+and passed as `ExecutionRequest::artifacts`. The KVM backend reads the engine,
+kernel and guest images, so image layers stay in the store. Each copy is
+verified against its digest. An object this process already hashed, whose
+device, inode, size, mtime and ctime are unchanged since, is cloned
+(copy-on-write where the filesystem supports `FICLONE`) or copied in the kernel
+without hashing again; a new process hashes every object once. The copies are
+execution scratch and are not synced: a host crash leaves the attempt
+INCOMPLETE, and replay materializes again from the store. Preparation precedes the initial manifest;
 until it finishes there is no resolved run identity.
 
 ## Preparation ownership

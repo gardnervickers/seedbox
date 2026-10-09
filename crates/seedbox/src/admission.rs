@@ -76,9 +76,6 @@ pub fn required_policy() -> RequiredPolicy {
     }
 }
 
-/// Older runs recorded this marker in their identity; it is carried as data only.
-pub const ENGINE_QUALIFICATION: &str = "engine_qualification";
-
 pub fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
     crate::vmm::recorded_counter(profile)?;
     crate::vmm::recorded_deferred_tx(profile)?;

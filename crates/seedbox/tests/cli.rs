@@ -388,7 +388,6 @@ fn bad_values_are_usage_errors() {
     for (args, expected) in [
         (&["run", "--margin", "0"][..], "positive branch count"),
         (&["run", "--undo", "999999999"], "not in 0..=262144"),
-        (&["run", "--memory-mb", "1"], "not in 64..=65536"),
         (&["run", "--cpu", "5000"], "not in 0..1024"),
         (
             &["init", "x", "--template", "bogus"],
@@ -757,7 +756,6 @@ fn old_records_stay_inspectable_and_transferable() {
             full_state: None,
             faults: vec![],
             detail: None,
-            engine_qualification: None,
         }),
         error: None,
         logs: BTreeMap::new(),
@@ -1775,29 +1773,30 @@ fn logs_help_is_portable_and_has_no_runtime_options() {
 }
 
 #[test]
-fn torn_writes_is_opt_in_presence_only_and_replay_uses_the_recorded_policy() {
+fn simulation_parameters_are_world_options_not_flags() {
     let directory = tempfile::tempdir().unwrap();
-    for command in ["run", "prepare"] {
+    for command in ["run", "prepare", "explore", "replay"] {
         let help = seedbox(&["help", command], directory.path());
         assert!(help.status.success());
         let help = String::from_utf8_lossy(&help.stdout);
-        assert!(help.contains("--torn-writes"));
-        assert!(help.contains("off by default"));
-        assert!(!help.contains("SEEDBOX_TORN_WRITES"));
-        let mut args = vec![command, "--torn-writes"];
-        if command == "prepare" {
-            args.extend(["--output", "out.json"]);
+        for flag in [
+            &["--memory-mb", "2048"][..],
+            &["--page-timer"],
+            &["--deferred-tx"],
+            &["--torn-writes"],
+        ] {
+            assert!(!help.contains(flag[0]), "{command} help lists {}", flag[0]);
+            let mut args = vec![command, "."];
+            args.extend_from_slice(flag);
+            let output = seedbox(&args, directory.path());
+            assert_eq!(output.status.code(), Some(2));
+            assert!(
+                stderr(&output).contains(&format!("unexpected argument '{}'", flag[0])),
+                "{}",
+                stderr(&output)
+            );
         }
-        let output = seedbox(&args, directory.path());
-        assert_eq!(output.status.code(), Some(2));
-        assert_eq!(stderr(&output), "error: no Compose file found; searched:\n  ./compose.yaml\n  ./compose.yml\n  ./docker-compose.yaml\n  ./docker-compose.yml\npass the file path directly\n");
-        let output = seedbox(&[command, "--torn-writes=false"], directory.path());
-        assert_eq!(output.status.code(), Some(2));
-        assert!(stderr(&output).contains("--torn-writes"));
     }
-    let output = seedbox(&["replay", "run", "--torn-writes"], directory.path());
-    assert_eq!(output.status.code(), Some(2));
-    assert!(stderr(&output).contains("unexpected argument '--torn-writes'"));
 }
 
 #[test]
@@ -2014,70 +2013,33 @@ fn mac_counter_timebase_is_rejected_before_preparation() {
 fn mac_linux_only_runtime_modes_fail_before_state_or_preparation() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("compose.yaml"), "name: mac-modes\nservices:\n  app:\n    image: busybox:1.37.0\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app, exit_code: 0}\n").unwrap();
-    for (args, expected) in [
-        (
-            vec!["run", ".", "--page-timer"],
-            "error: --page-timer and --deferred-tx require Linux KVM; omit them on Mac\n",
-        ),
-        (
-            vec!["run", ".", "--deferred-tx"],
-            "error: --page-timer and --deferred-tx require Linux KVM; omit them on Mac\n",
-        ),
-        (
-            vec!["run", ".", "--checkpoint-at-ns", "1", "--branch-seed", "2"],
-            "error: --checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac\n",
-        ),
-    ] {
+    for (args, expected) in [(
+        vec!["run", ".", "--checkpoint-at-ns", "1", "--branch-seed", "2"],
+        "error: --checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac\n",
+    )] {
         let output = seedbox(&args, directory.path());
         assert_eq!(output.status.code(), Some(2));
         assert_eq!(stderr(&output), expected);
         assert!(output.stdout.is_empty());
         assert!(!directory.path().join(".seedbox").exists());
     }
-}
-
-#[test]
-fn page_timer_is_an_opt_in_runtime_flag_and_replay_accepts_no_override() {
-    let directory = tempfile::tempdir().unwrap();
-    for command in ["prepare", "run", "explore"] {
-        let output = seedbox(&[command, "--help"], directory.path());
-        assert!(output.status.success());
-        let help = String::from_utf8_lossy(&output.stdout);
-        assert!(help.contains("--page-timer"));
-        let output = seedbox(&[command, "no-such.yaml", "--page-timer"], directory.path());
-        assert_eq!(output.status.code(), Some(2));
-        assert!(!stderr(&output).contains("unexpected argument '--page-timer'"));
-    }
-    let output = seedbox(&["replay", ".", "--page-timer"], directory.path());
-    assert_eq!(output.status.code(), Some(2));
-    assert!(stderr(&output).contains("unexpected argument '--page-timer'"));
-}
-
-#[test]
-fn deferred_tx_help_is_presence_only_and_replay_uses_the_recorded_mode() {
-    let directory = tempfile::tempdir().unwrap();
-    for command in ["run", "prepare", "explore"] {
-        let help = seedbox(&["help", command], directory.path());
-        assert!(help.status.success());
-        assert!(String::from_utf8_lossy(&help.stdout).contains("--deferred-tx"));
-        let mut args = vec![command, "no-such.yaml", "--deferred-tx"];
-        if command == "prepare" {
-            args.extend(["--output", "prepared"]);
+    for option in ["page_timer", "deferred_tx"] {
+        fs::write(directory.path().join("compose.yaml"), format!("name: mac-modes\nservices:\n  app:\n    image: busybox:1.37.0\nx-seedbox:\n  version: 1\n  seed: 1\n  machine: {{{option}: true}}\n  limits: {{simulated_time: 1s, wall_time: 1m}}\n  check: {{service: app, exit_code: 0}}\n")).unwrap();
+        for command in ["run", "explore"] {
+            let output = seedbox(&[command, "."], directory.path());
+            assert_eq!(output.status.code(), Some(2));
+            assert_eq!(
+                stderr(&output),
+                "error: x-seedbox.machine page_timer and deferred_tx require Linux KVM; remove them on Mac\n"
+            );
+            assert!(!directory.path().join(".seedbox").exists());
         }
-        let output = seedbox(&args, directory.path());
-        assert_eq!(output.status.code(), Some(2));
-        let expected = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-            "error: --page-timer and --deferred-tx require Linux KVM; omit them on Mac\n"
-        } else {
-            "error: Compose file no-such.yaml: not found\n"
-        };
-        assert_eq!(stderr(&output), expected);
     }
-    let help = seedbox(&["help", "replay"], directory.path());
-    assert!(!String::from_utf8_lossy(&help.stdout).contains("--deferred-tx"));
-    let output = seedbox(&["replay", ".", "--deferred-tx"], directory.path());
-    assert_eq!(output.status.code(), Some(2));
-    assert!(stderr(&output).contains("unexpected argument '--deferred-tx'"));
+}
+
+#[test]
+fn replay_rejects_an_unknown_recorded_deferred_tx_mode() {
+    let directory = tempfile::tempdir().unwrap();
     timebase_record(directory.path(), None);
     let mut record = seedbox::orchestration::inspect(directory.path()).unwrap();
     record
@@ -2180,10 +2142,10 @@ fn invalid_local_runtime_archive_has_path_context_without_downloads_or_tools() {
 }
 
 #[test]
-fn removed_builder_flags_fail_before_preparation() {
+fn removed_preparation_flags_fail_before_preparation() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("compose.yaml"), "name: source-build\nservices:\n  client: {build: ./missing}\nx-seedbox:\n  version: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: client}\n").unwrap();
-    for flag in ["--builder", "--build-epoch"] {
+    for flag in ["--builder", "--build-epoch", "--wall-clock-epoch"] {
         let output = seedbox(&["run", flag, "value"], directory.path());
         assert!(stderr(&output).contains("unexpected argument"));
     }
@@ -2200,39 +2162,4 @@ fn omitted_run_subcommand_accepts_the_same_kernel_and_compose_arguments() {
     assert_eq!(explicit.status.code(), shorthand.status.code());
     assert_eq!(stderr(&explicit), stderr(&shorthand));
     assert_eq!(stderr(&shorthand), "error: --kernel missing: not found\n");
-}
-
-#[test]
-fn wall_clock_epoch_is_a_preparation_only_result_parameter() {
-    let directory = tempfile::tempdir().unwrap();
-    assert!(seedbox(&["init", "demo"], directory.path())
-        .status
-        .success());
-    let project = directory.path().join("demo");
-    for command in ["prepare", "run", "explore"] {
-        let help = seedbox(&["help", command], directory.path());
-        let help = String::from_utf8_lossy(&help.stdout);
-        assert!(help.contains("--wall-clock-epoch"), "{help}");
-        assert!(!help.contains("SEEDBOX_WALL_CLOCK_EPOCH"));
-        for value in ["-1", "4294967296", "tomorrow"] {
-            let output = seedbox(&[command, "--wall-clock-epoch", value], directory.path());
-            assert_eq!(output.status.code(), Some(2));
-            assert!(
-                stderr(&output).contains("--wall-clock-epoch")
-                    || stderr(&output).contains("unexpected argument '-1'")
-            );
-        }
-        for value in ["0", "1800000000", "4294967295"] {
-            let mut args = vec![command, "--wall-clock-epoch", value, "--kernel", "missing"];
-            if command == "prepare" {
-                args.extend(["--output", "prepared.json"]);
-            }
-            let output = seedbox(&args, &project);
-            assert_eq!(stderr(&output), "error: --kernel missing: not found\n");
-        }
-    }
-    for command in ["doctor", "replay"] {
-        let help = seedbox(&["help", command], directory.path());
-        assert!(!String::from_utf8_lossy(&help.stdout).contains("--wall-clock-epoch"));
-    }
 }

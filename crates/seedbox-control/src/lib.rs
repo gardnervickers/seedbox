@@ -120,6 +120,12 @@ pub enum Operation {
     Restart {
         target: Target,
     },
+    PauseProcess {
+        target: Target,
+    },
+    ResumeProcess {
+        target: Target,
+    },
     Pause {
         target: Target,
     },
@@ -164,6 +170,12 @@ pub enum Operation {
         rate_ppb: Option<i64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_rate_ppb: Option<u64>,
+    },
+    /// Charge the machine's simulated CPU work `factor_permille / 1000` times
+    /// its seeded cost until healed.
+    Throttle {
+        target: Target,
+        factor_permille: u64,
     },
     Heal {
         handle: String,
@@ -259,6 +271,14 @@ pub enum Action {
     Restart {
         machine: String,
     },
+    /// SIGSTOP the application's process group; its kernel keeps running.
+    PauseProcess {
+        machine: String,
+    },
+    /// SIGCONT a process group frozen by `PauseProcess`.
+    ResumeProcess {
+        machine: String,
+    },
     Partition {
         handle: String,
         left: Vec<String>,
@@ -307,6 +327,12 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_rate_ppb: Option<u64>,
     },
+    /// Scale the machine's seeded CPU cost until the handle is healed.
+    Throttle {
+        handle: String,
+        machine: String,
+        factor_permille: u64,
+    },
     /// Freeze the machine's CPU and devices; the world goes on.
     Pause {
         machine: String,
@@ -330,11 +356,14 @@ impl Action {
             Self::DropConnection { .. } => "drop_connection",
             Self::Stop { .. } => "stop",
             Self::Restart { .. } => "restart",
+            Self::PauseProcess { .. } => "pause_process",
+            Self::ResumeProcess { .. } => "resume_process",
             Self::Partition { .. } => "partition",
             Self::Shape { .. } => "shape",
             Self::Heal { .. } => "heal",
             Self::ClockSkew { .. } => "clock_skew",
             Self::ClockDrift { .. } => "clock_drift",
+            Self::Throttle { .. } => "throttle",
             Self::Pause { .. } => "pause",
             Self::Resume { .. } => "resume",
             Self::Crash { .. } => "crash",
@@ -345,14 +374,27 @@ impl Action {
         match self {
             Self::Stop { machine }
             | Self::Restart { machine }
+            | Self::PauseProcess { machine }
+            | Self::ResumeProcess { machine }
             | Self::Pause { machine }
             | Self::Resume { machine }
             | Self::Crash { machine }
             | Self::Reboot { machine }
             | Self::ClockSkew { machine, .. }
-            | Self::ClockDrift { machine, .. } => Some(machine),
+            | Self::ClockDrift { machine, .. }
+            | Self::Throttle { machine, .. } => Some(machine),
             _ => None,
         }
+    }
+    /// Effects the target's supervisor carries out and acknowledges.
+    pub fn is_process(&self) -> bool {
+        matches!(
+            self,
+            Self::Stop { .. }
+                | Self::Restart { .. }
+                | Self::PauseProcess { .. }
+                | Self::ResumeProcess { .. }
+        )
     }
 }
 /// Exactly one of a fixed nonzero offset or a seeded positive bound, each
@@ -383,6 +425,10 @@ pub fn validate_clock_drift(
         )),
     }
 }
+
+/// Throttle factors, in thousandths: from unchanged to a thousand times slower.
+pub const THROTTLE_PERMILLE: std::ops::RangeInclusive<u64> = 1_000..=1_000_000;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Plan {
     pub id: u32,
@@ -409,7 +455,14 @@ mod tests {
         }
         let r:Request=serde_json::from_str(r#"{"version":1,"id":1,"op":"partition","left":[{"service":"c"}],"right":[{"machine":"s"}]}"#).unwrap();
         assert!(matches!(r.operation, Operation::Partition { .. }));
-        for op in ["pause", "resume", "crash", "reboot"] {
+        for op in [
+            "pause",
+            "resume",
+            "crash",
+            "reboot",
+            "pause_process",
+            "resume_process",
+        ] {
             for target in [Target::Service("s".into()), Target::Machine("m".into())] {
                 let wire = serde_json::json!({"version":1,"id":1,"op":op,"target":target});
                 let request: Request = serde_json::from_value(wire.clone()).unwrap();

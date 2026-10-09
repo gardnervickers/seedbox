@@ -28,6 +28,56 @@ pub struct Simulation {
     pub limits: Limits,
     pub check: Check,
     pub seed: Option<u64>,
+    /// Guest CLOCK_REALTIME at launch, in Unix seconds; None derives it from
+    /// the prepared images' build times.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock_epoch: Option<u32>,
+    #[serde(default, skip_serializing_if = "MachineOptions::is_default")]
+    pub machine: MachineOptions,
+    #[serde(default, skip_serializing_if = "DiskOptions::is_default")]
+    pub disk: DiskOptions,
+}
+
+/// Guest machine settings shared by every service; they change run identity and results.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineOptions {
+    /// Guest RAM per service, in MiB.
+    pub memory_mb: u32,
+    /// Arm clockevents through the time page (ABI 4, aimed at PV; Linux KVM only).
+    pub page_timer: bool,
+    /// Defer virtio-net TX kicks to deterministic polls (Linux KVM only).
+    pub deferred_tx: bool,
+}
+
+impl Default for MachineOptions {
+    fn default() -> Self {
+        Self {
+            memory_mb: 1024,
+            page_timer: false,
+            deferred_tx: false,
+        }
+    }
+}
+
+impl MachineOptions {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Disk crash semantics; they change run identity and results.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiskOptions {
+    /// Keep a seeded subset of unflushed 512-byte sectors on crash.
+    pub torn_writes: bool,
+}
+
+impl DiskOptions {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -428,7 +478,17 @@ pub fn parse_for_architecture(
         get(top, "x-seedbox"),
         "$.x-seedbox",
         &[
-            "version", "seed", "limits", "network", "schedule", "faults", "control", "check",
+            "version",
+            "seed",
+            "wall_clock_epoch",
+            "limits",
+            "network",
+            "schedule",
+            "faults",
+            "control",
+            "check",
+            "machine",
+            "disk",
         ],
     )?;
     if get(ext, "version").as_u64() != Some(1) {
@@ -558,6 +618,38 @@ pub fn parse_for_architecture(
             schedule.stop_tolerance_ns = duration(v, "$.x-seedbox.schedule.stop_tolerance", true)?;
         }
     }
+    let mut machine = MachineOptions::default();
+    if let Some(raw) = ext.get("machine") {
+        let options = fields(
+            raw,
+            "$.x-seedbox.machine",
+            &["memory_mb", "page_timer", "deferred_tx"],
+        )?;
+        if let Some(v) = options.get("memory_mb") {
+            machine.memory_mb =
+                v.as_u64()
+                    .filter(|n| (64..=65536).contains(n))
+                    .ok_or_else(|| {
+                        validation(
+                            "$.x-seedbox.machine.memory_mb",
+                            "expected an integer in [64, 65536]",
+                        )
+                    })? as u32;
+        }
+        if let Some(v) = options.get("page_timer") {
+            machine.page_timer = boolean(v, "$.x-seedbox.machine.page_timer")?;
+        }
+        if let Some(v) = options.get("deferred_tx") {
+            machine.deferred_tx = boolean(v, "$.x-seedbox.machine.deferred_tx")?;
+        }
+    }
+    let mut disk = DiskOptions::default();
+    if let Some(raw) = ext.get("disk") {
+        let options = fields(raw, "$.x-seedbox.disk", &["torn_writes"])?;
+        if let Some(v) = options.get("torn_writes") {
+            disk.torn_writes = boolean(v, "$.x-seedbox.disk.torn_writes")?;
+        }
+    }
     reject_static_faults(ext.get("faults"))?;
     let control = ext
         .get("control")
@@ -605,6 +697,24 @@ pub fn parse_for_architecture(
             })
         })
         .transpose()?;
+    let wall_clock_epoch = ext
+        .get("wall_clock_epoch")
+        .map(|v| {
+            v.as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|n| *n >= crate::guest::MIN_WALL_CLOCK_EPOCH)
+                .ok_or_else(|| {
+                    validation(
+                        "$.x-seedbox.wall_clock_epoch",
+                        &format!(
+                            "expected Unix seconds in [{}, {}]",
+                            crate::guest::MIN_WALL_CLOCK_EPOCH,
+                            u32::MAX
+                        ),
+                    )
+                })
+        })
+        .transpose()?;
     Ok(Simulation {
         name,
         source: source.to_owned(),
@@ -619,7 +729,16 @@ pub fn parse_for_architecture(
             exit_code,
         },
         seed,
+        wall_clock_epoch,
+        machine,
+        disk,
     })
+}
+
+fn boolean(value: &Value, path: &str) -> Result<bool> {
+    value
+        .as_bool()
+        .ok_or_else(|| validation(path, "expected true or false"))
 }
 
 fn bandwidth(fields: &Mapping, path: &str) -> Result<(Option<u64>, Option<u64>)> {

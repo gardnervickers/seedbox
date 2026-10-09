@@ -15,6 +15,8 @@ Run output names the retained directory. Use `seedbox replay RUN` to reproduce
 it, `seedbox inspect RUN` for a summary, or `seedbox logs RUN` for guest output.
 Replay needs neither the engine nor the original source files or kernel.
 
-To compare independent fresh runs, pass the same `--wall-clock-epoch SECS`
-(Unix seconds) to each run. Otherwise guest time starts at host time after image
-preparation. Replay always retains the original guest clock.
+Guest time starts at the latest build time recorded in the prepared images, so
+independent fresh runs of the same images start at the same time and can be
+compared directly. Set `x-seedbox.wall_clock_epoch` (Unix seconds, at least
+86400) in the Compose file to choose the start time. Replay always retains the
+original guest clock.

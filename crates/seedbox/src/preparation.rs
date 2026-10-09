@@ -20,8 +20,6 @@ pub struct OciPreparer {
     pub mke2fs: Option<PathBuf>,
     pub profile: ExecutionProfile,
     pub docker: bollard::Docker,
-    /// Explicit guest Unix time; None samples host time after image preparation.
-    pub wall_clock_epoch: Option<u32>,
 }
 
 pub use crate::preparation_command::PreparationContext;
@@ -207,17 +205,27 @@ impl OciPreparer {
             }
             launches.push((name, service, mounts, imported));
         }
-        // Sample once after image builds: certificates minted during preparation
-        // must already be valid when applications start. Replay retains this value.
-        let wall_clock_epoch = match self.wall_clock_epoch {
-            Some(epoch) => epoch.max(crate::guest::MIN_WALL_CLOCK_EPOCH),
-            None => u32::try_from(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|error| Error::Setup(format!("prepare wall clock: {error}")))?
-                    .as_secs(),
-            )
-            .map_err(|_| Error::Setup("prepare wall clock exceeds supported Unix epoch".into()))?,
+        // The guest clock starts at the Compose file's x-seedbox.wall_clock_epoch,
+        // or else at the latest build time recorded in any prepared image, so
+        // certificates minted during a build are already valid and the same
+        // images always start at the same time. Linux cannot set a time earlier
+        // than guest uptime, so the derived value is at least one day.
+        let wall_clock_epoch = match simulation.wall_clock_epoch {
+            Some(epoch) => epoch,
+            None => {
+                let mut latest = i64::from(crate::guest::MIN_WALL_CLOCK_EPOCH);
+                for (_, _, _, imported) in &launches {
+                    let config = store.read(&imported.image.config)?;
+                    if let Some(created) = crate::oci::image_created_epoch(&config)? {
+                        latest = latest.max(created);
+                    }
+                }
+                u32::try_from(latest).map_err(|_| {
+                    Error::Integrity(
+                        "image created time exceeds the supported wall-clock epoch; set x-seedbox.wall_clock_epoch".into(),
+                    )
+                })?
+            }
         };
         for (name, service, mounts, imported) in launches {
             let recipe = launch_recipe(
@@ -248,7 +256,7 @@ impl OciPreparer {
                 .ok_or_else(|| Error::Integrity("OCI profile missing memory_mb".into()))?;
             let minimum = minimum_memory_mb(fs::metadata(&archive)?.len())?;
             if memory_mb < minimum {
-                return Err(Error::Execution(format!("service {name}: {memory_mb} MiB guest RAM is below the archive boot floor of {minimum} MiB; increase --memory-mb (application memory may require more)")));
+                return Err(Error::Execution(format!("service {name}: {memory_mb} MiB guest RAM is below the archive boot floor of {minimum} MiB; increase x-seedbox.machine.memory_mb (application memory may require more)")));
             }
             if let Some(context) = context {
                 context.check()?;

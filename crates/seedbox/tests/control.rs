@@ -2,7 +2,6 @@
 mod management_uart;
 use seedbox_engine_core::{control, faults, links};
 #[allow(dead_code)]
-#[allow(clippy::manual_div_ceil)]
 #[path = "../../seedbox-vmm/src/devices.rs"]
 mod devices;
 use serde_json::json;
@@ -1313,4 +1312,219 @@ fn unsupported_operations_reply_without_planning_handles_or_faults() {
         let pending = c.pending.as_ref().unwrap();
         assert_eq!(pending.result["handle"], "p1");
     }
+}
+
+/// One RPC at `id * 100` with no supervisor effect; returns the response and
+/// the lifecycle transitions its admission applied.
+fn throttle_call(
+    c: &mut control::Control,
+    f: &mut faults::Faults,
+    id: u32,
+    mut body: serde_json::Value,
+) -> (serde_json::Value, Vec<(usize, faults::Lifecycle)>) {
+    let t = u64::from(id) * 100;
+    body["version"] = json!(1);
+    body["id"] = json!(id);
+    request(c, id, t, body).unwrap();
+    c.apply_boundary(f, t + 20).unwrap();
+    f.apply_due(t + 20);
+    c.observe_faults(f, t + 20).unwrap();
+    c.apply_boundary(f, t + 40).unwrap();
+    c.mark_delivered(t + 40).unwrap();
+    (
+        c.log.last().unwrap()["response"].clone(),
+        f.take_lifecycle(),
+    )
+}
+
+#[test]
+fn throttle_is_a_healable_admission_effect_with_one_handle_per_machine() {
+    let mut c = control();
+    let mut f = faults::Faults::new(vec![], names()).unwrap();
+    for factor in [999, 1_000_001] {
+        let (response, _) = throttle_call(
+            &mut c,
+            &mut f,
+            1 + u32::from(factor > 1000),
+            json!({"op":"throttle","target":{"service":"server"},"factor_permille":factor}),
+        );
+        assert_eq!(response["error"]["code"], "invalid_request");
+    }
+    let (response, lifecycle) = throttle_call(
+        &mut c,
+        &mut f,
+        3,
+        json!({"op":"throttle","target":{"service":"server"},"factor_permille":4000}),
+    );
+    assert_eq!(response["result"]["handle"], "p1");
+    assert_eq!(response["effect_at_ns"], response["admitted_at_ns"]);
+    assert_eq!(lifecycle, vec![(2, faults::Lifecycle::Throttle(4000))]);
+    assert_eq!(f.throttle(2), Some(4000));
+    assert_eq!(f.active_handles(), vec!["p1"]);
+    assert_eq!(f.log[0]["action"], "throttle");
+    let (response, lifecycle) = throttle_call(
+        &mut c,
+        &mut f,
+        4,
+        json!({"op":"throttle","target":{"machine":"server"},"factor_permille":2000}),
+    );
+    assert_eq!(response["error"]["code"], "invalid_state");
+    assert_eq!(
+        response["error"]["message"],
+        "target machine is already throttled"
+    );
+    assert!(lifecycle.is_empty());
+    let (response, lifecycle) =
+        throttle_call(&mut c, &mut f, 5, json!({"op":"heal","handle":"p1"}));
+    assert_eq!(response["ok"], true);
+    assert_eq!(lifecycle, vec![(2, faults::Lifecycle::Throttle(1000))]);
+    assert_eq!(f.throttle(2), None);
+    assert!(f.active_handles().is_empty());
+    let (response, _) = throttle_call(
+        &mut c,
+        &mut f,
+        6,
+        json!({"op":"throttle","target":{"service":"scenario"},"factor_permille":2000}),
+    );
+    assert_eq!(
+        response["error"]["message"],
+        "controller is outside failure model"
+    );
+    assert!(c.error.is_none() && f.error.is_none());
+}
+
+/// One process-fault RPC on `server`. `ack` answers the dispatched supervisor
+/// command; `None` expects an admission error and no fault.
+fn process_call(
+    c: &mut control::Control,
+    f: &mut faults::Faults,
+    id: u32,
+    op: &str,
+    ack: Option<&str>,
+) -> serde_json::Value {
+    let t = u64::from(id) * 100;
+    request(
+        c,
+        id,
+        t,
+        json!({"version":1,"id":id,"op":op,"target":{"service":"server"}}),
+    )
+    .unwrap();
+    c.apply_boundary(f, t + 20).unwrap();
+    let mut reply = t + 40;
+    if let Some(verb) = ack {
+        let fault = f.log.len() as u32;
+        assert_eq!(
+            f.apply_due(t + 20),
+            vec![(2, format!("{verb} {fault}\n").into_bytes())]
+        );
+        f.effect(2, fault, t + 25, true);
+        c.observe_faults(f, t + 25).unwrap();
+        reply = t + 45;
+    }
+    c.apply_boundary(f, reply).unwrap();
+    c.mark_delivered(reply).unwrap();
+    c.log.last().unwrap()["response"].clone()
+}
+
+#[test]
+fn process_pause_freezes_and_thaws_through_the_supervisor() {
+    let mut c = control();
+    let mut f = faults::Faults::new(vec![], names()).unwrap();
+    let rejected = |response: serde_json::Value, message: &str| {
+        assert_eq!(response["error"]["code"], "invalid_state");
+        assert_eq!(response["error"]["message"], message);
+    };
+    rejected(
+        process_call(&mut c, &mut f, 1, "resume_process", None),
+        "target process is not paused",
+    );
+    assert!(f.log.is_empty());
+    let paused = process_call(&mut c, &mut f, 2, "pause_process", Some("freeze"));
+    assert_eq!(paused["ok"], true);
+    assert_eq!(paused["effect_at_ns"], 225); // The supervisor's ACK, not admission.
+    assert_eq!(f.process_state(2), "Frozen");
+    assert_eq!(
+        f.plan(1).unwrap().action,
+        seedbox_control::Action::PauseProcess {
+            machine: "server".into()
+        }
+    );
+    assert_eq!(f.log[0]["action"], "pause_process");
+    rejected(
+        process_call(&mut c, &mut f, 3, "pause_process", None),
+        "target process is already paused",
+    );
+    rejected(
+        process_call(&mut c, &mut f, 4, "restart", None),
+        "restart requires a stopped target process",
+    );
+    process_call(&mut c, &mut f, 5, "resume_process", Some("thaw"));
+    assert_eq!(f.process_state(2), "Running");
+    // Stop kills a frozen group; the stopped process is no longer frozen.
+    process_call(&mut c, &mut f, 6, "pause_process", Some("freeze"));
+    process_call(&mut c, &mut f, 7, "stop", Some("stop"));
+    assert_eq!(f.process_state(2), "Stopped");
+    rejected(
+        process_call(&mut c, &mut f, 8, "pause_process", None),
+        "target process is stopped",
+    );
+    rejected(
+        process_call(&mut c, &mut f, 9, "resume_process", None),
+        "target process is not paused",
+    );
+    process_call(&mut c, &mut f, 10, "restart", Some("start"));
+    assert_eq!(f.process_state(2), "Running");
+    assert!(complete(&c) && f.error.is_none());
+    let controller = request(
+        &mut c,
+        11,
+        1100,
+        json!({"version":1,"id":11,"op":"pause_process","target":{"service":"scenario"}}),
+    );
+    assert!(controller.is_ok());
+    c.apply_boundary(&mut f, 1120).unwrap();
+    assert_eq!(
+        c.pending.as_ref().unwrap().error.as_deref(),
+        Some("controller is outside failure model")
+    );
+}
+
+#[test]
+fn process_pause_follows_machine_lifecycle() {
+    let mut f = faults::Faults::new(vec![], names()).unwrap();
+    let plan = |id: u32, action: &str| {
+        serde_json::from_value::<seedbox_control::Plan>(
+            json!({"id":id,"at_ns":id * 10,"deadline_ns":id * 10 + 5,"action":action,"machine":"server"}),
+        )
+        .unwrap()
+    };
+    let pause = plan(1, "pause_process");
+    assert!(f.admission_error(&pause.action).is_none());
+    f.append(pause).unwrap();
+    f.apply_due(10);
+    f.effect(2, 1, 12, true);
+    assert_eq!(f.process_state(2), "Frozen");
+    // A frozen process still runs on a machine that can be paused and resumed.
+    for (id, action, state) in [(2, "pause", "Paused"), (3, "resume", "Frozen")] {
+        f.append(plan(id, action)).unwrap();
+        f.apply_due(u64::from(id) * 10);
+        assert_eq!(f.process_state(2), state);
+    }
+    assert_eq!(
+        f.admission_error(&plan(4, "pause").action),
+        None,
+        "machine pause is independent of process pause"
+    );
+    // A crash takes the frozen process with it; the reboot starts unfrozen.
+    for (id, action) in [(4, "crash"), (5, "reboot")] {
+        f.append(plan(id, action)).unwrap();
+        f.apply_due(u64::from(id) * 10);
+    }
+    assert_eq!(f.process_state(2), "Running");
+    assert_eq!(
+        f.admission_error(&plan(6, "resume_process").action),
+        Some("target process is not paused")
+    );
+    assert!(f.error.is_none());
 }
