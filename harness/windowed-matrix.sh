@@ -19,7 +19,6 @@ seed=${SEED:-7}
 out=$(mktemp -d "${TMPDIR:-/tmp}/windowed-matrix.XXXXXX")
 trap 'rm -rf "$out"' EXIT
 bash "$here/../guest/build-initramfs.sh" "$out/window.cpio" "$here/../guest/window.init" >/dev/null
-first=${cpus%%,*}
 IFS=, read -ra cpu_list <<< "$cpus"
 
 run() { # NAME ENGINE TASKSET-CPUS [VMM ARGS...]

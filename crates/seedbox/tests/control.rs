@@ -1,9 +1,4 @@
-#[path = "../../seedbox-vmm/src/management_uart.rs"]
-mod management_uart;
 use seedbox_engine_core::{control, faults, links};
-#[allow(dead_code)]
-#[path = "../../seedbox-vmm/src/devices.rs"]
-mod devices;
 use serde_json::json;
 fn names() -> Vec<String> {
     vec!["scenario".into(), "client".into(), "server".into()]
@@ -219,36 +214,6 @@ fn rejected_or_missing_real_process_effect_is_fatal() {
 }
 
 #[test]
-fn actual_uart_divisor_bytes_do_not_contaminate_committed_request_frames() {
-    let mut uart = devices::Uart::default();
-    let mut framer = control::ManagementFramer::default();
-    management_uart::write(&mut framer, &mut uart, 3, 0x80).unwrap();
-    // Base-register writes while DLAB is set never reach the RPC wire.
-    for byte in b"SBX_RPC1 99 1 bad\n" {
-        assert!(management_uart::write(&mut framer, &mut uart, 0, *byte)
-            .unwrap()
-            .is_none());
-    }
-    assert!(uart.out.is_empty());
-    management_uart::write(&mut framer, &mut uart, 3, 3).unwrap();
-    for byte in b"SEEDBOX_EFFECT id=1\n" {
-        assert!(management_uart::write(&mut framer, &mut uart, 0, *byte)
-            .unwrap()
-            .is_none());
-    }
-    let line = b"SBX_RPC1 1 1 {\"version\":1,\"id\":1,\"op\":\"now\"}";
-    for byte in line {
-        assert!(management_uart::write(&mut framer, &mut uart, 0, *byte)
-            .unwrap()
-            .is_none());
-    }
-    assert_eq!(
-        management_uart::write(&mut framer, &mut uart, 0, b'\n').unwrap(),
-        Some(line.to_vec())
-    );
-}
-
-#[test]
 fn pending_sleep_admission_and_effect_at_world_cutoff_are_retained_without_error() {
     for before_admission in [true, false] {
         let mut c = control();
@@ -300,7 +265,7 @@ fn pending_sleep_admission_and_effect_at_world_cutoff_are_retained_without_error
     assert!(f.error.is_none());
     assert_eq!(c.log[0]["fault_id"], 1);
     assert_eq!(c.log[0]["plan"]["deadline_ns"], 5_000_000_120_u64);
-    assert_eq!(f.log[0]["status"], "requested");
+    assert_eq!(f.log[0].json()["status"], "requested");
 }
 #[test]
 fn typed_argument_rejections_are_correlated_and_recoverable() {
@@ -561,7 +526,7 @@ fn target_exit_after_admission_is_recoverable_only_while_effect_is_outstanding()
         assert_eq!(row["fault_id"], id);
         assert_eq!(row["response"]["error"]["code"], "target_unavailable");
         assert_eq!(row["response"]["effect_at_ns"], t + 30);
-        assert_eq!(f.log[id as usize - 1]["status"], "unavailable");
+        assert_eq!(f.log[id as usize - 1].json()["status"], "unavailable");
         assert!(complete(&c) && f.error.is_none());
     }
     // An exit after the acknowledgement, or after a guest failure, keeps its result.
@@ -726,7 +691,7 @@ fn each_network_fault_is_dynamic_directed_healable_and_reports_its_actual_eviden
         c.observe_faults(&f, 120).unwrap();
         c.response(140).unwrap();
         c.mark_delivered(140).unwrap();
-        assert_eq!(f.log[0]["network_fault_counts"][counter], 0);
+        assert_eq!(f.log[0].json()["network_fault_counts"][counter], 0);
         let mut frame = vec![0; 55];
         frame[12..14].copy_from_slice(&[8, 0]);
         frame[14] = 0x45;
@@ -759,8 +724,8 @@ fn each_network_fault_is_dynamic_directed_healable_and_reports_its_actual_eviden
         let counts = &c.log.last().unwrap()["response"]["result"]["network_fault_counts"];
         assert_eq!(counts["matched"], 3);
         assert_eq!(counts[counter], 3);
-        assert_eq!(f.log[0]["network_fault_counts"], *counts);
-        assert_eq!(f.log[1]["network_fault_counts"], *counts);
+        assert_eq!(f.log[0].json()["network_fault_counts"], *counts);
+        assert_eq!(f.log[1].json()["network_fault_counts"], *counts);
         assert!(f.active_handles().is_empty());
         let links::Outcome::Deliver(at) = f.route(1, 2, 250, &frame, false) else {
             panic!("healed send lost")
@@ -808,8 +773,8 @@ fn bandwidth_shape_admission_and_heal_return_actual_queue_evidence() {
     let reply = &c.log.last().unwrap()["response"];
     let counts = json!({"matched":2,"queue_dropped":1,"delayed_max_ns":24_000_000});
     assert_eq!(reply["result"]["queue_counts"], counts);
-    assert_eq!(f.log[0]["queue_counts"], counts);
-    assert_eq!(f.log[1]["queue_counts"], counts);
+    assert_eq!(f.log[0].json()["queue_counts"], counts);
+    assert_eq!(f.log[1].json()["queue_counts"], counts);
     assert_eq!(f.links.policy((1, 2)).bandwidth_bps, None);
 }
 
@@ -1361,7 +1326,7 @@ fn throttle_is_a_healable_admission_effect_with_one_handle_per_machine() {
     assert_eq!(lifecycle, vec![(2, faults::Lifecycle::Throttle(4000))]);
     assert_eq!(f.throttle(2), Some(4000));
     assert_eq!(f.active_handles(), vec!["p1"]);
-    assert_eq!(f.log[0]["action"], "throttle");
+    assert_eq!(f.log[0].json()["action"], "throttle");
     let (response, lifecycle) = throttle_call(
         &mut c,
         &mut f,
@@ -1450,7 +1415,7 @@ fn process_pause_freezes_and_thaws_through_the_supervisor() {
             machine: "server".into()
         }
     );
-    assert_eq!(f.log[0]["action"], "pause_process");
+    assert_eq!(f.log[0].json()["action"], "pause_process");
     rejected(
         process_call(&mut c, &mut f, 3, "pause_process", None),
         "target process is already paused",

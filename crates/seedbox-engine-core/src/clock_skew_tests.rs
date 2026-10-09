@@ -57,8 +57,8 @@ fn fixed_skew_steps_the_guest_and_heal_steps_it_back() {
     );
     f.effect(1, 1, 12, true);
     assert_eq!(f.outcome(1).unwrap().0, Status::Applied(12));
-    assert_eq!(f.log[0]["offset_ns"], -1_500_000_001i64);
-    assert!(f.log[0]["detail"]
+    assert_eq!(f.log[0].json()["offset_ns"], -1_500_000_001i64);
+    assert!(f.log[0].json()["detail"]
         .as_str()
         .unwrap()
         .contains("stepped by -1500000001 ns"));
@@ -69,7 +69,7 @@ fn fixed_skew_steps_the_guest_and_heal_steps_it_back() {
     assert_eq!(f.active_handles(), ["k"]);
     f.effect(1, 2, 25, true);
     assert_eq!(f.outcome(2).unwrap().0, Status::Applied(25));
-    assert_eq!(f.log[1]["offset_ns"], 1_500_000_001i64);
+    assert_eq!(f.log[1].json()["offset_ns"], 1_500_000_001i64);
     assert!(f.active_handles().is_empty());
     assert!(f.error.is_none() && f.rejected_effects.is_empty());
 }
@@ -83,8 +83,8 @@ fn seeded_skews_draw_per_machine_streams_within_bounds_only_when_used() {
         let offsets: Vec<i64> = f
             .log
             .iter()
-            .filter(|row| row["action"] == "clock_skew")
-            .map(|row| row["offset_ns"].as_i64().unwrap())
+            .filter(|row| row.action == "clock_skew")
+            .map(|row| row.offset_ns.unwrap())
             .collect();
         (commands.len(), offsets)
     };
@@ -172,7 +172,7 @@ fn crash_resolves_pending_skews_and_ends_active_ones() {
     assert_eq!(f.active_handles(), ["k"]);
     assert!(f.apply_due(30).is_empty());
     assert_eq!(f.outcome(3).unwrap().0, Status::Applied(30));
-    assert!(f.log[2]["detail"]
+    assert!(f.log[2].json()["detail"]
         .as_str()
         .unwrap()
         .contains("ended with its machine incarnation"));
@@ -241,7 +241,13 @@ fn rejections_fail_and_admission_follows_machine_life() {
         )],
     );
     f.apply_due(10);
-    assert!(f.log[0]["offset_ns"].as_i64().unwrap().unsigned_abs() <= MAX_CLOCK_OFFSET_NS);
+    assert!(
+        f.log[0].json()["offset_ns"]
+            .as_i64()
+            .unwrap()
+            .unsigned_abs()
+            <= MAX_CLOCK_OFFSET_NS
+    );
 }
 
 #[test]
@@ -282,7 +288,7 @@ fn control_returns_handle_then_offset_and_heal_waits_for_the_guest() {
         json!({"version":1,"id":1,"op":"clock_skew","target":{"service":"svc"},"max_offset_ns":1000}),
     );
     assert_eq!(commands.len(), 1);
-    let offset = f.log[0]["offset_ns"].as_i64().unwrap();
+    let offset = f.log[0].json()["offset_ns"].as_i64().unwrap();
     assert_eq!(
         commands[0],
         (1, format!("clock_step 1 {offset}\n").into_bytes())

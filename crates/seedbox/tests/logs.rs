@@ -25,9 +25,16 @@ mod fixtures {
         chunk_index(records)
     }
 }
-#[allow(dead_code)]
-#[path = "../../seedbox-vmm/src/log_index.rs"]
-mod producer;
+use seedbox_engine_core::log_index as producer;
+
+/// Index records as `[time, incarnation, order, offset, length]` rows.
+fn rows(index: &producer::Index) -> Vec<[u64; 5]> {
+    index
+        .records
+        .iter()
+        .map(|r| [r.time_ns, r.incarnation, r.order, r.offset, r.length])
+        .collect()
+}
 
 #[test]
 fn binary_preservation_filters_equal_time_and_incarnations() {
@@ -101,6 +108,39 @@ fn binary_preservation_filters_equal_time_and_incarnations() {
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&encoded).unwrap()["bytes_hex"],
         "00ff"
+    );
+}
+
+#[test]
+fn whole_report_writers_keep_the_cli_bytes() {
+    let tmp = tempfile::tempdir().unwrap();
+    fixtures::make(tmp.path());
+    let mut reader = Reader::open(tmp.path(), &Filter::default()).unwrap();
+    let mut raw = Vec::new();
+    reader.write_raw(&mut raw).unwrap();
+    assert_eq!(raw, b"\0\xff\xfeA\nB");
+    // The document the CLI assembled by hand before `write_json` existed.
+    let mut expected = format!(
+        "{{\n  \"status\": {},\n  \"omissions\": {},\n  \"chunks\": [\n",
+        serde_json::to_string(&reader.report.status).unwrap(),
+        serde_json::to_string_pretty(&reader.report.omissions).unwrap()
+    )
+    .into_bytes();
+    let count = reader.report.chunks.len();
+    for index in 0..count {
+        expected.extend_from_slice(b"    ");
+        reader.write_chunk_json(index, &mut expected).unwrap();
+        if index + 1 < count {
+            expected.push(b',');
+        }
+        expected.push(b'\n');
+    }
+    expected.extend_from_slice(b"  ]\n}\n");
+    let mut json = Vec::new();
+    reader.write_json(&mut json).unwrap();
+    assert_eq!(
+        String::from_utf8(json).unwrap(),
+        String::from_utf8(expected).unwrap()
     );
 }
 
@@ -296,7 +336,7 @@ fn one_mib_of_byte_exits_coalesces_into_slice_ranges_and_round_trips() {
     assert_eq!(order, 256);
     let encoded = std::fs::read(index_path).unwrap();
     assert_eq!(encoded.len(), 8 + 256 * 40);
-    for (i, chunk) in index.records.iter().enumerate() {
+    for (i, chunk) in rows(&index).iter().enumerate() {
         let offset = i as u64 * 4096;
         assert_eq!(*chunk, [offset + 1, 0, i as u64, offset, 4096]);
     }
@@ -357,7 +397,7 @@ fn coalescing_preserves_stream_switches_incarnations_slice_boundaries_and_cap() 
     console.capture(101, 12, 1, &mut order);
     console.capture(102, 13, 1, &mut order);
     assert_eq!(
-        console.records,
+        rows(&console),
         [
             [10, 0, 0, 0, 3],
             [11, 0, 2, 3, 1],
@@ -365,7 +405,7 @@ fn coalescing_preserves_stream_switches_incarnations_slice_boundaries_and_cap() 
             [11, 1, 4, 5, 95],
         ]
     );
-    assert_eq!(mgmt.records, [[11, 0, 1, 0, 1]]);
+    assert_eq!(rows(&mgmt), [[11, 0, 1, 0, 1]]);
     assert_eq!(console.seen, 102);
     assert_eq!(order, 7);
 
@@ -375,7 +415,7 @@ fn coalescing_preserves_stream_switches_incarnations_slice_boundaries_and_cap() 
     other.capture(1, 14, 1, &mut order);
     mgmt.capture(2, 14, 1, &mut order);
     other.capture(2, 14, 1, &mut order);
-    assert_eq!(other.records, [[14, 1, 7, 0, 1], [14, 1, 9, 1, 1]]);
+    assert_eq!(rows(&other), [[14, 1, 7, 0, 1], [14, 1, 9, 1, 1]]);
 }
 
 #[test]

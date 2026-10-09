@@ -24,7 +24,7 @@ fn duplicate_receiver_rejection_does_not_erase_an_accepted_copys_fifo_reservatio
         } else {
             // The original takes the final paused slot, then its copy drops.
             w.machines[1].paused = true;
-            w.paused_ingress[1] = PAUSED_INGRESS_FRAMES - 1;
+            w.paused_ingress[1] = crate::world_events::PAUSED_INGRESS_FRAMES - 1;
         }
         let mut frame = vec![0; 60];
         frame[5] = 1;
@@ -55,7 +55,10 @@ fn queue_drops_count_at_send_time_and_receiver_rejection_still_uses_bandwidth() 
         w.route(0, 5, frame.clone());
         w.route(0, 5, frame);
         assert_eq!(w.dropped, if down { 2 } else { 1 });
-        assert_eq!(w.link_counts[&(0, 1)][4], 1);
+        assert_eq!(
+            w.link_counts[&(0, 1)][crate::network_counters::QUEUE_DROPPED],
+            1
+        );
         assert_eq!(w.faults.links.last_depart[&(0, 1)], 17);
         assert_eq!(
             w.faults.links.last.get(&(0, 1)),
@@ -503,7 +506,7 @@ fn control_then_trigger_then_fault_at_equal_time() {
     assert_eq!(w.control.log[0]["delivered_at_ns"], 100);
     assert_eq!(w.control.triggers.records[0].fault_id, Some(2));
     assert_eq!(w.faults.active_handles(), ["scheduled", "trigger"]);
-    assert!(w.faults.log.iter().all(|row| row["applied_at_ns"] == 50));
+    assert!(w.faults.log.iter().all(|row| row.applied_at_ns == Some(50)));
 }
 #[test]
 fn equal_time_control_allocates_fault_before_trigger() {
@@ -531,7 +534,7 @@ fn equal_time_control_allocates_fault_before_trigger() {
     assert_eq!(w.control.log[0]["fault_id"], 2);
     assert_eq!(w.control.triggers.records[0].fault_id, Some(3));
     assert_eq!(w.faults.log.len(), 3);
-    assert!(w.faults.log.iter().all(|row| row["applied_at_ns"] == 50));
+    assert!(w.faults.log.iter().all(|row| row.applied_at_ns == Some(50)));
 }
 #[test]
 fn pending_error_still_delivers_strict_reply_before_stopping() {
@@ -818,7 +821,7 @@ fn runtime_checkpoint_precedes_exact_time_fault_and_preserves_active_plan() {
         .unwrap(),
         "checkpoint"
     );
-    assert_eq!(w.faults.log[0]["status"], "unrequested");
+    assert_eq!(w.faults.log[0].json()["status"], "unrequested");
     assert!(!w.faults.blocked(0, 1));
     let saved = WorldSnapshot::take_checkpoint(&mut w).unwrap();
     for _ in 0..2 {

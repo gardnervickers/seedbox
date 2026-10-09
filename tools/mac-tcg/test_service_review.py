@@ -42,7 +42,7 @@ int main(void) {
             def fail(value, stream, **kwargs):
                 stream.write('{partial')
                 raise OSError('simulated disk failure')
-            with patch('service_process.json.dump', side_effect=fail), self.assertRaises(OSError):
+            with patch('run.json.dump', side_effect=fail), self.assertRaises(OSError):
                 save(path, {'new': 2})
             self.assertEqual(json.loads(path.read_text()), {'old': 1})
 

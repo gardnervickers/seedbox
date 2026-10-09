@@ -2,16 +2,16 @@ use seedbox_engine_core::{faults, links};
 // Exercise the host fixture's JSON through the actual portable VMM modules.
 
 use links::{Links, Outcome, Policy};
-use serde_json::Value;
+use seedbox_engine_core::world_config::WorldConfig;
 
 fn fixture(text: &str) -> faults::Faults {
-    let world: Value = serde_json::from_str(text).unwrap();
+    let world: WorldConfig = serde_json::from_str(text).unwrap();
     let names = ["a", "b", "c"]
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let links = Links::from_config(1, &names, &world["network"]).unwrap();
-    faults::Faults::with_links(world["faults"].as_array().unwrap().clone(), names, links).unwrap()
+    let links = Links::from_network(1, &names, &world.network.unwrap_or_default()).unwrap();
+    faults::Faults::with_plans(world.faults, names, links).unwrap()
 }
 
 #[test]
@@ -101,7 +101,7 @@ fn full_world_window_45_reveals_lossmid_after_cut_heal_and_bounds_nominal_arriva
     );
     assert!(f.error.is_none());
     assert_eq!(f.log.len(), 16);
-    for (i, log) in f.log.iter().enumerate() {
+    for (i, log) in f.log.iter().map(faults::FaultRow::json).enumerate() {
         assert_eq!(log["id"], i + 1);
         assert_eq!(log["status"], "applied");
         assert_eq!(log["applied_at_ns"], log["requested_at_ns"]);
@@ -137,7 +137,7 @@ fn short_world_applies_the_same_ordered_faults_and_exposes_at_least_300_lossmid_
     assert!(exposed >= 300);
     assert!(f.error.is_none());
     assert_eq!(f.log.len(), 16);
-    for (i, log) in f.log.iter().enumerate() {
+    for (i, log) in f.log.iter().map(faults::FaultRow::json).enumerate() {
         assert_eq!(log["id"], i + 1);
         assert_eq!(log["status"], "applied");
         assert_eq!(log["applied_at_ns"], log["requested_at_ns"]);

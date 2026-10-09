@@ -1,5 +1,6 @@
 //! Host execution control, checked only between world slices. No guest state.
 
+use seedbox_engine_core::host_control::{INVALID, MAX_DATAGRAM, PAUSE, PAUSED, RESUME, RUNNING};
 use std::{
     io,
     os::unix::net::UnixDatagram,
@@ -30,7 +31,7 @@ impl HostControl {
         loop {
             // Bound each drain so senders cannot indefinitely hold a running world.
             for _ in 0..64 {
-                let mut bytes = [0u8; 32];
+                let mut bytes = [0u8; MAX_DATAGRAM];
                 let (size, peer) = match self.socket.recv_from(&mut bytes) {
                     Ok(message) => message,
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -40,16 +41,16 @@ impl HostControl {
                 let Some(peer) = peer.as_pathname() else {
                     continue;
                 };
-                let reply: &[u8] = match &bytes[..size] {
-                    b"pause" => {
+                let reply = match &bytes[..size] {
+                    PAUSE => {
                         self.paused = true;
-                        b"paused"
+                        PAUSED
                     }
-                    b"resume" => {
+                    RESUME => {
                         self.paused = false;
-                        b"running"
+                        RUNNING
                     }
-                    _ => b"invalid",
+                    _ => INVALID,
                 };
                 // A disappearing requester must never fail the guest execution.
                 let _ = self.socket.send_to(reply, peer);

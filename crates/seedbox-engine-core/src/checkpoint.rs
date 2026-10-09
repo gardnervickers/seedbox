@@ -1,21 +1,20 @@
 //! Semantic checkpoint selection and branch identity. No host state or RNG draws.
-use serde_json::Value;
+use crate::world_config::WorldConfig;
 use sha2::{Digest, Sha256};
+use std::path::Path;
 
-pub fn times(list: &str, duration: u64) -> Result<Vec<u64>, String> {
-    let mut times = Vec::new();
-    for text in list.split(',') {
-        let t = text
-            .parse::<u64>()
-            .map_err(|_| "--checkpoint-at-ns must be comma-separated unsigned nanoseconds")?;
-        if t >= duration || times.last().is_some_and(|last| *last >= t) {
+/// Check runtime checkpoint times: strictly increasing and before `duration`.
+pub fn check_times(times: &[u64], duration: u64) -> Result<(), String> {
+    let mut last = None;
+    for &t in times {
+        if t >= duration || last.is_some_and(|last| last >= t) {
             return Err(
                 "--checkpoint-at-ns must be strictly increasing and before duration_ns".into(),
             );
         }
-        times.push(t);
+        last = Some(t);
     }
-    Ok(times)
+    Ok(())
 }
 
 pub fn branch_identity(parent: &str, at: u64, seed: u64) -> String {
@@ -30,25 +29,28 @@ pub fn branch_identity(parent: &str, at: u64, seed: u64) -> String {
 /// Replace artifact paths with their bytes' hashes: relocation is not semantic.
 /// Performance settings and output paths live outside the world config.
 /// Deferred TX and the page timer are semantic, so both bind the parent.
+///
+/// The CLI and the engine both hash the typed world document, without its
+/// `checkpoint`, so they agree whatever the document's bytes on disk.
+///
+/// `engine` is the engine executable's digest. Binding a compiled binary
+/// means a rebuild changes the identity; whether to keep it is the
+/// checkpoint design's decision, not this function's.
 pub fn parent_identity(
-    cfg: &Value,
+    cfg: &WorldConfig,
     seed: u64,
     engine: &str,
     deferred_tx: bool,
     page_timer: bool,
-    mut digest: impl FnMut(&str) -> Result<String, String>,
+    mut digest: impl FnMut(&Path) -> Result<String, String>,
 ) -> Result<String, String> {
     let mut cfg = cfg.clone();
-    cfg.as_object_mut()
-        .ok_or("config must be an object")?
-        .remove("checkpoint");
-    let kernel = cfg["kernel"].as_str().ok_or("kernel required")?;
-    cfg["kernel"] = Value::String(digest(kernel)?);
-    for m in cfg["machines"].as_array_mut().ok_or("machines required")? {
-        let initrd = m["initrd"].as_str().ok_or("initrd required")?;
-        m["initrd"] = Value::String(digest(initrd)?);
-        if let Some(path) = m["disk"]["image"].as_str() {
-            m["disk"]["image"] = Value::String(digest(path)?);
+    cfg.checkpoint = None;
+    cfg.kernel = digest(&cfg.kernel)?.into();
+    for m in &mut cfg.machines {
+        m.initrd = digest(&m.initrd)?.into();
+        if let Some(image) = m.disk.as_mut().and_then(|d| d.image.as_mut()) {
+            *image = digest(image)?.into();
         }
     }
     let mut h = Sha256::new();
@@ -68,22 +70,28 @@ pub fn parent_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+
+    fn world(kernel: &str, initrd: &str, image: &str) -> WorldConfig {
+        serde_json::from_value(serde_json::json!({"kernel":kernel,
+            "machines":[{"name":"a","initrd":initrd,"disk":{"image":image}}]}))
+        .unwrap()
+    }
 
     #[test]
-    fn times_reject_invalid_duplicate_reversed_and_duration_boundaries() {
-        assert_eq!(times("0,5,9", 10).unwrap(), vec![0, 5, 9]);
-        for bad in ["", "-1", "5,5", "9,5", "10", "5,", "18446744073709551616"] {
-            assert!(times(bad, 10).is_err(), "{bad}");
+    fn times_reject_duplicate_reversed_and_duration_boundaries() {
+        check_times(&[0, 5, 9], 10).unwrap();
+        check_times(&[], 10).unwrap();
+        for bad in [&[5, 5][..], &[9, 5], &[10]] {
+            assert!(check_times(bad, 10).is_err(), "{bad:?}");
         }
     }
 
     #[test]
     fn identity_binds_parent_time_seed_and_content_not_paths() {
-        let cfg = json!({"kernel":"a", "machines":[{"initrd":"b","disk":{"image":"c"}}]});
-        let content = |_: &str| Ok("content".into());
+        let cfg = world("a", "b", "c");
+        let content = |_: &Path| Ok("content".into());
         let parent = parent_identity(&cfg, 7, "engine", false, false, content).unwrap();
-        let moved = json!({"kernel":"x", "machines":[{"initrd":"y","disk":{"image":"z"}}]});
+        let moved = world("x", "y", "z");
         assert_eq!(
             parent,
             parent_identity(&moved, 7, "engine", false, false, content).unwrap()
@@ -119,8 +127,8 @@ mod tests {
 
     #[test]
     fn deferred_tx_and_page_timer_bind_distinct_parents() {
-        let cfg = json!({"kernel":"a", "machines":[{"initrd":"b","disk":{"image":"c"}}]});
-        let content = |_: &str| Ok("content".into());
+        let cfg = world("a", "b", "c");
+        let content = |_: &Path| Ok("content".into());
         let mut parents = std::collections::BTreeSet::new();
         let mut branches = std::collections::BTreeSet::new();
         for page_timer in [false, true] {

@@ -22,6 +22,7 @@ mod host;
 pub mod host_control;
 pub mod image;
 mod image_archive;
+mod limits;
 pub mod logs;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod mac;
@@ -61,6 +62,17 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Prefix an error with what was being done, in one of `Error`'s categories:
+/// `.context(Error::Setup, path.display())` reads as `"{path}: {error}"`.
+pub(crate) trait Context<T> {
+    fn context(self, category: fn(String) -> Error, context: impl std::fmt::Display) -> Result<T>;
+}
+impl<T, E: std::fmt::Display> Context<T> for std::result::Result<T, E> {
+    fn context(self, category: fn(String) -> Error, context: impl std::fmt::Display) -> Result<T> {
+        self.map_err(|error| category(format!("{context}: {error}")))
+    }
+}
 
 pub(crate) fn invalid<T>(path: &str, message: impl Into<String>) -> Result<T> {
     Err(Error::Validation {

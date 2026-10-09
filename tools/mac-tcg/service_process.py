@@ -1,27 +1,12 @@
 """Bounded process lifetime and crash-visible accounting (caller holds flock)."""
 import contextlib
-import json
 import os
 from pathlib import Path
 import signal
 import subprocess
-import tempfile
 import time
 
-
-def save(path, value):
-    """Replace a complete JSON document; failed writes preserve the old file."""
-    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
-    try:
-        with os.fdopen(fd, "w") as stream:
-            json.dump(value, stream, indent=2, sort_keys=True)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(temporary)
+from run import save
 
 
 def execute(command, prefix, budget_path, budget, seed, timeout):

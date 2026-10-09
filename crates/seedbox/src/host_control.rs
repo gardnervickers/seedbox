@@ -1,6 +1,7 @@
 //! Pause the host's whole world without sending an in-guest control request.
 
 use crate::{Error, Result};
+use seedbox_engine_core::host_control::{MAX_DATAGRAM, PAUSE, PAUSED, RESUME, RUNNING};
 use std::{fs, os::unix::net::UnixDatagram, path::Path, time::Duration};
 
 const REFERENCE: &str = "host-control";
@@ -41,16 +42,16 @@ pub fn set_paused(run: &Path, paused: bool) -> Result<Status> {
         .set_nonblocking(true)
         .map_err(|e| failure(&e.to_string()))?;
     socket
-        .send(if paused { b"pause" } else { b"resume" })
+        .send(if paused { PAUSE } else { RESUME })
         .map_err(|_| failure("not available or request queue full"))?;
     socket
         .set_nonblocking(false)
         .map_err(|e| failure(&e.to_string()))?;
-    let mut reply = [0; 32];
+    let mut reply = [0; MAX_DATAGRAM];
     let size = socket.recv(&mut reply).map_err(|_| {
         failure("no boundary acknowledgement within 5s (request may still take effect)")
     })?;
-    let expected: &[u8] = if paused { b"paused" } else { b"running" };
+    let expected = if paused { PAUSED } else { RUNNING };
     if &reply[..size] != expected {
         return Err(failure("invalid boundary acknowledgement"));
     }

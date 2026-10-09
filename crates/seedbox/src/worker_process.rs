@@ -8,7 +8,9 @@ use crate::{
     host_control::Endpoint,
     Error, Result,
 };
+use seedbox_engine_core::launch::{Performance, WorkerRequest};
 use std::{
+    collections::BTreeMap,
     fs,
     io::Read,
     os::fd::AsRawFd,
@@ -110,6 +112,26 @@ pub(crate) fn incomplete(reason: StopReason) -> ExecutionReport {
     }
 }
 
+/// The x86 worker's performance settings from a run's recorded performance
+/// parameters (`SEEDBOX_WATCHDOG_MS`); absent ones take defaults.
+pub(crate) fn launch_performance(parameters: &BTreeMap<String, String>) -> Result<Performance> {
+    let mut performance = Performance::default();
+    for (key, value) in parameters {
+        let invalid = || Error::Integrity(format!("invalid performance parameter {key}={value}"));
+        match key.as_str() {
+            "SEEDBOX_WATCHDOG_MS" => {
+                performance.watchdog_ms = value
+                    .parse()
+                    .ok()
+                    .filter(|ms| *ms != 0)
+                    .ok_or_else(invalid)?
+            }
+            _ => return Err(invalid()),
+        }
+    }
+    Ok(performance)
+}
+
 pub(crate) struct WorkerLaunch {
     pub(crate) command: Command,
     engine: PathBuf,
@@ -117,6 +139,9 @@ pub(crate) struct WorkerLaunch {
     endpoint: Endpoint,
     spawn_fix: &'static str,
 }
+
+/// Launch request beside `world.json` in the run output; the x86 worker reads it.
+pub(crate) const WORKER_REQUEST_FILE: &str = "worker-request.json";
 
 impl WorkerLaunch {
     pub(crate) fn prepare(request: &ExecutionRequest<'_>) -> Result<Self> {
@@ -150,31 +175,44 @@ impl WorkerLaunch {
             .checked_mul(2)
             .filter(|count| *count != 0)
             .ok_or_else(|| Error::Integrity("execution requires prepared machines".into()))?;
+        let out = request.output.join(crate::vmm::MACHINE_OUTPUT_DIR);
+        let console_limit = 1024 * 1024 * 1024 / streams;
+        let digest = request.prepared.profile.witness_mode == WitnessMode::FullState;
+        if kind == ExecutableKind::ArmWorld {
+            // The ARM world keeps its own flag contract.
+            command
+                .arg("--config")
+                .arg(&world)
+                .arg("--seed")
+                .arg(request.seed.to_string())
+                .arg("--out")
+                .arg(&out)
+                .arg("--host-control")
+                .arg(endpoint.socket())
+                .arg("--console-limit")
+                .arg(console_limit.to_string());
+            if digest {
+                command.arg("--digest");
+            }
+        } else {
+            let mut worker = WorkerRequest::new(world, request.seed, out);
+            worker.digest = digest;
+            worker.host_control = Some(endpoint.socket());
+            worker.console_limit = Some(console_limit);
+            // Bound observation metadata to at most 40 MiB across all streams.
+            worker.log_chunk_limit = Some((1_048_576 / streams).min(65_536));
+            worker.stream_console = true;
+            worker.features = crate::vmm::recorded_features(&request.prepared.profile)?;
+            worker.performance = launch_performance(request.performance_parameters)?;
+            let path = request.output.join(WORKER_REQUEST_FILE);
+            fs::write(&path, serde_json::to_vec_pretty(&worker)?)?;
+            command.arg("--request").arg(path);
+        }
         command
-            .arg("--config")
-            .arg(&world)
-            .arg("--seed")
-            .arg(request.seed.to_string())
-            .arg("--out")
-            .arg(request.output.join(crate::vmm::MACHINE_OUTPUT_DIR))
-            .arg("--host-control")
-            .arg(endpoint.socket())
-            .arg("--console-limit")
-            .arg((1024 * 1024 * 1024 / streams).to_string())
             .env_clear()
             .stdout(fs::File::create(&report)?)
             .stderr(fs::File::create(request.output.join("vmm.stderr"))?)
             .process_group(0);
-        if kind != ExecutableKind::ArmWorld {
-            command
-                .arg("--stream-console")
-                // Bound observation metadata to at most 40 MiB across all streams.
-                .arg("--log-chunk-limit")
-                .arg((1_048_576 / streams).min(65_536).to_string());
-        }
-        if request.prepared.profile.witness_mode == WitnessMode::FullState {
-            command.arg("--digest");
-        }
         Ok(Self {
             command,
             engine: engine.clone(),
@@ -235,8 +273,8 @@ impl RunningWorker {
             }
             std::thread::sleep(Duration::from_millis(10));
         })();
-        // Cleanup failure takes precedence over any apparent result. Drop keeps
-        // retrying until the host adapter can safely release its guard.
+        // Cleanup failure takes precedence over any apparent result. Drop
+        // retries for about a second before reporting a failure.
         self.process.stop()?;
         completion
     }
@@ -303,12 +341,18 @@ impl OwnedProcess {
         Ok(())
     }
 }
+/// How long `Drop` retries a failing stop before reporting it.
+const DROP_STOP_ATTEMPTS: u32 = 100;
+
 impl Drop for OwnedProcess {
     fn drop(&mut self) {
-        while self.0.is_some() {
-            if let Err(error) = self.stop() {
-                eprintln!("seedbox: waiting for engine cleanup: {error}");
-                std::thread::sleep(Duration::from_millis(10));
+        for attempt in 1..=DROP_STOP_ATTEMPTS {
+            match self.stop() {
+                Ok(()) => return,
+                Err(error) if attempt == DROP_STOP_ATTEMPTS => {
+                    eprintln!("seedbox: engine cleanup: {error}");
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
             }
         }
     }
@@ -373,22 +417,12 @@ mod tests {
     fn prepared_launch_uses_recorded_dispatch_and_retention_limits() {
         use crate::{
             config::{Check, Limits, Network, Schedule},
-            execution::{ExecutionProfile, PreparedInputs},
+            execution::{Backend, ExecutionProfile, PreparedInputs, SemanticParameters},
             store::ContentDigest,
         };
         use std::collections::BTreeMap;
-        let internal = BTreeMap::from([
-            (
-                "engine_executable_kind".into(),
-                crate::engine::INTERNAL_WORKER_V1.into(),
-            ),
-            ("simulator_version".into(), "0.1.0-dev.1".into()),
-            ("host_os".into(), "linux".into()),
-            ("host_arch".into(), "x86_64".into()),
-            ("guest_arch".into(), "x86_64".into()),
-            ("engine_backend".into(), "kvm".into()),
-            ("engine_timebase".into(), "pv-v1".into()),
-        ]);
+        let internal =
+            crate::engine::kvm_descriptor(ExecutableKind::InternalWorker, "0.1.0-dev.1".into());
         for kind in [
             ExecutableKind::Standalone,
             ExecutableKind::InternalWorker,
@@ -398,12 +432,12 @@ mod tests {
             let engine = directory.path().join("retained-engine");
             fs::write(&engine, b"never execute this fixture").unwrap();
             let hash = ContentDigest::of(b"retained input");
-            let mut semantic_parameters = match kind {
-                ExecutableKind::Standalone => BTreeMap::new(),
-                ExecutableKind::InternalWorker => internal.clone(),
-                ExecutableKind::ArmWorld => crate::engine::arm_parameters(),
+            let mut semantic_parameters = SemanticParameters::new(512);
+            semantic_parameters.engine = match kind {
+                ExecutableKind::Standalone => None,
+                ExecutableKind::InternalWorker => Some(internal.clone()),
+                ExecutableKind::ArmWorld => Some(crate::engine::arm_descriptor()),
             };
-            semantic_parameters.insert("memory_mb".into(), "512".into());
             let prepared = PreparedInputs {
                 wall_clock_epoch: None,
                 kernel: hash.clone(),
@@ -418,11 +452,10 @@ mod tests {
                 ]),
                 profile: ExecutionProfile {
                     backend: if kind == ExecutableKind::ArmWorld {
-                        "seedbox-hvf"
+                        Backend::Hvf
                     } else {
-                        "seedbox-kvm"
-                    }
-                    .into(),
+                        Backend::Kvm
+                    },
                     engine: hash.clone(),
                     witness_mode: WitnessMode::FullState,
                     semantic_parameters,
@@ -458,7 +491,10 @@ mod tests {
                 artifacts: &artifacts,
                 output: directory.path(),
                 cancellation: &CancellationToken::default(),
-                performance_parameters: &BTreeMap::new(),
+                performance_parameters: &BTreeMap::from([(
+                    "SEEDBOX_WATCHDOG_MS".into(),
+                    "50".into(),
+                )]),
             };
             let original = serde_json::to_vec(&prepared.profile).unwrap();
             let launch = WorkerLaunch::prepare(&request).unwrap();
@@ -471,42 +507,72 @@ mod tests {
             let dispatch: &[&str] = match kind {
                 ExecutableKind::Standalone => &[],
                 ExecutableKind::InternalWorker => &["__engine", crate::engine::INTERNAL_WORKER_V1],
-                ExecutableKind::ArmWorld => &["__engine", "arm64-world-v1"],
+                ExecutableKind::ArmWorld => &["__engine", crate::engine::ARM_WORLD_V1],
             };
             assert_eq!(&args[..dispatch.len()], dispatch);
-            let option = |flag| {
-                args.iter()
-                    .position(|arg| *arg == flag)
-                    .map(|i| args[i + 1])
-            };
-            assert!(!args.contains(&"--timebase"));
-            assert_eq!(
-                option("--out"),
-                Some(
-                    directory
-                        .path()
-                        .join(crate::vmm::MACHINE_OUTPUT_DIR)
-                        .to_str()
-                        .unwrap()
-                )
-            );
-            assert_eq!(option("--console-limit"), Some("268435456"));
-            assert_eq!(
-                option("--log-chunk-limit"),
-                if kind == ExecutableKind::ArmWorld {
-                    None
-                } else {
-                    Some("65536")
-                }
-            );
-            assert_eq!(
-                args.contains(&"--stream-console"),
-                kind != ExecutableKind::ArmWorld
-            );
-            assert!(args.contains(&"--digest"));
+            let out = directory.path().join(crate::vmm::MACHINE_OUTPUT_DIR);
+            if kind == ExecutableKind::ArmWorld {
+                let world = directory.path().join("world.json");
+                let socket = launch.endpoint.socket();
+                let expected = [
+                    "--config",
+                    world.to_str().unwrap(),
+                    "--seed",
+                    "1009",
+                    "--out",
+                    out.to_str().unwrap(),
+                    "--host-control",
+                    socket.to_str().unwrap(),
+                    "--console-limit",
+                    "268435456",
+                    "--digest",
+                ];
+                assert_eq!(&args[dispatch.len()..], expected);
+            } else {
+                let path = directory.path().join(WORKER_REQUEST_FILE);
+                assert_eq!(
+                    &args[dispatch.len()..],
+                    ["--request", path.to_str().unwrap()]
+                );
+                let worker: WorkerRequest =
+                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                let mut expected =
+                    WorkerRequest::new(directory.path().join("world.json"), 1009, out);
+                expected.digest = true;
+                expected.host_control = Some(launch.endpoint.socket());
+                expected.console_limit = Some(268435456);
+                expected.log_chunk_limit = Some(65536);
+                expected.stream_console = true;
+                expected.performance.watchdog_ms = 50;
+                assert_eq!(worker, expected);
+            }
             assert_eq!(serde_json::to_vec(&prepared.profile).unwrap(), original);
             drop(launch);
             assert!(!directory.path().join("host-control").exists());
+        }
+    }
+
+    #[test]
+    fn recorded_performance_parameters_decode_strictly() {
+        let decode = |pairs: &[(&str, &str)]| {
+            launch_performance(
+                &pairs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            )
+        };
+        assert_eq!(decode(&[]).unwrap(), Performance::default());
+        assert_eq!(
+            decode(&[("SEEDBOX_WATCHDOG_MS", "50")]).unwrap(),
+            Performance { watchdog_ms: 50 }
+        );
+        for bad in [
+            ("SEEDBOX_WATCHDOG_MS", "0"),
+            ("SEEDBOX_WATCHDOG_MS", "fast"),
+            ("SEEDBOX_MARGIN", "64"),
+        ] {
+            assert!(decode(&[bad]).is_err(), "{bad:?}");
         }
     }
 

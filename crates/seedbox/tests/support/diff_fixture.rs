@@ -18,10 +18,10 @@ fn fixture() -> sb::orchestration::RunRecord {
             placement: BTreeMap::from([("workload".into(), "workload".into())]),
             guests: BTreeMap::from([("workload".into(), digest.clone())]),
             profile: ExecutionProfile {
-                backend: "seedbox-kvm".into(),
+                backend: Backend::Kvm,
                 engine: digest.clone(),
                 witness_mode: WitnessMode::Exits,
-                semantic_parameters: BTreeMap::from([("memory_mb".into(), "512".into())]),
+                semantic_parameters: SemanticParameters::new(512),
             },
             auxiliary: BTreeMap::new(),
             provenance: BTreeMap::new(),

@@ -1,12 +1,16 @@
 //! Directed, send-time link decisions. No host, device or scheduler dependencies.
 use crate::network_faults::{self, Counts, Streams};
 use crate::rng::Rng;
-use seedbox_control::NetworkFaults;
+use crate::world_config::NetworkConfig;
+use seedbox_control::{NetworkFaults, MAX_LINK_DELAY_NS, MAX_PPM};
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub type Pair = (usize, usize);
+/// Global link latency when the network config names none: one millisecond.
+pub const DEFAULT_LATENCY_NS: u64 = 1_000_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Policy {
     pub latency_ns: u64,
@@ -37,14 +41,19 @@ impl Policy {
         if self
             .latency_ns
             .checked_add(self.jitter_ns)
-            .is_none_or(|n| n > 3_600_000_000_000)
+            .is_none_or(|n| n > MAX_LINK_DELAY_NS)
         {
             return Err("latency_ns + jitter_ns exceeds one hour".into());
         }
-        if self.loss_ppm > 1_000_000 {
-            return Err("loss_ppm exceeds 1000000".into());
+        if self.loss_ppm > MAX_PPM {
+            return Err(format!("loss_ppm exceeds {MAX_PPM}"));
         }
         self.validate_bandwidth()
+    }
+    /// A shape layer's policy and impairments, checked against the global floor.
+    pub fn validate_shape(self, floor: u64, network_faults: &NetworkFaults) -> Result<(), String> {
+        self.validate(floor)?;
+        network_faults.validate(self.latency_ns, self.jitter_ns)
     }
 }
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, serde::Serialize)]
@@ -111,7 +120,7 @@ impl Links {
     ) -> Result<Self, String> {
         // Preserve the existing global setting's bounds. The one-hour cap is
         // for overrides and shape layers; the whole-run floor is unchanged.
-        if global.jitter_ns >= global.latency_ns || global.loss_ppm > 1_000_000 {
+        if global.jitter_ns >= global.latency_ns || global.loss_ppm > MAX_PPM {
             return Err("invalid global link policy".into());
         }
         global.validate_bandwidth()?;
@@ -141,61 +150,47 @@ impl Links {
         links.reseed(seed, names);
         Ok(links)
     }
+    /// Build from a world document's `network` object held as JSON; `null`
+    /// takes every default.
     pub fn from_config(seed: u64, names: &[String], net: &Value) -> Result<Self, String> {
-        let latency_ns = net
-            .get("latency_ns")
-            .map(|v| v.as_u64().ok_or("invalid network.latency_ns"))
-            .transpose()?
-            .unwrap_or(1_000_000);
-        let jitter_ns = net
-            .get("jitter_ns")
-            .map(|v| v.as_u64().ok_or("invalid network.jitter_ns"))
-            .transpose()?
-            .unwrap_or(0);
+        let net = if net.is_null() {
+            NetworkConfig::default()
+        } else {
+            NetworkConfig::deserialize(net).map_err(|e| format!("network: {e}"))?
+        };
+        Self::from_network(seed, names, &net)
+    }
+    /// Build from a world's network policy and baseline link overrides.
+    pub fn from_network(seed: u64, names: &[String], net: &NetworkConfig) -> Result<Self, String> {
         let global = Policy {
-            latency_ns,
-            jitter_ns,
+            latency_ns: net.latency_ns,
+            jitter_ns: net.jitter_ns,
             loss_ppm: 0,
-            bandwidth_bps: optional_u64(net, "bandwidth_bps")?,
-            queue_bound_ns: optional_u64(net, "queue_bound_ns")?,
+            bandwidth_bps: net.bandwidth_bps,
+            queue_bound_ns: net.queue_bound_ns,
         };
         let mut baselines = BTreeMap::new();
-        if let Some(raw) = net.get("links") {
-            for (i, link) in raw
-                .as_array()
-                .ok_or("network.links must be a list")?
-                .iter()
-                .enumerate()
-            {
-                let parse = || -> Result<(Pair, Policy), String> {
-                    let index = |key| {
-                        names
-                            .iter()
-                            .position(|n| Some(n.as_str()) == link[key].as_str())
-                            .ok_or("unknown link machine")
-                    };
-                    let policy = Policy {
-                        latency_ns: link["latency_ns"].as_u64().ok_or("latency_ns required")?,
-                        jitter_ns: link
-                            .get("jitter_ns")
-                            .map(|v| v.as_u64().ok_or("invalid jitter_ns"))
-                            .transpose()?
-                            .unwrap_or(0),
-                        loss_ppm: link
-                            .get("loss_ppm")
-                            .map(|v| v.as_u64().ok_or("invalid loss_ppm"))
-                            .transpose()?
-                            .unwrap_or(0),
-                        bandwidth_bps: optional_u64(link, "bandwidth_bps")?,
-                        queue_bound_ns: optional_u64(link, "queue_bound_ns")?,
-                    };
-                    policy.validate(global.latency_ns)?;
-                    Ok(((index("from")?, index("to")?), policy))
+        for (i, link) in net.links.iter().enumerate() {
+            let parse = || -> Result<(Pair, Policy), String> {
+                let index = |name: &str| {
+                    names
+                        .iter()
+                        .position(|n| n == name)
+                        .ok_or("unknown link machine")
                 };
-                let (pair, policy) = parse().map_err(|e| format!("network.links[{i}]: {e}"))?;
-                if baselines.insert(pair, policy).is_some() {
-                    return Err(format!("network.links[{i}]: duplicate pair"));
-                }
+                let policy = Policy {
+                    latency_ns: link.latency_ns,
+                    jitter_ns: link.jitter_ns,
+                    loss_ppm: link.loss_ppm,
+                    bandwidth_bps: link.bandwidth_bps,
+                    queue_bound_ns: link.queue_bound_ns,
+                };
+                policy.validate(global.latency_ns)?;
+                Ok(((index(&link.from)?, index(&link.to)?), policy))
+            };
+            let (pair, policy) = parse().map_err(|e| format!("network.links[{i}]: {e}"))?;
+            if baselines.insert(pair, policy).is_some() {
+                return Err(format!("network.links[{i}]: duplicate pair"));
             }
         }
         Self::new(seed, names, global, baselines)
@@ -249,9 +244,15 @@ impl Links {
     /// Advance both named streams for deterministic diagnostics and acceptance.
     #[doc(hidden)]
     pub fn stream_sample(&mut self, pair: Pair) -> (u64, u64) {
+        self.draw(pair)
+    }
+    /// The next loss and jitter draws of `pair`. Every ordered pair of
+    /// distinct machines has both streams from the last reseed.
+    fn draw(&mut self, pair: Pair) -> (u64, u64) {
+        let stream = "a link stream per machine pair";
         (
-            self.loss.get_mut(&pair).unwrap().next(),
-            self.jitter.get_mut(&pair).unwrap().next(),
+            self.loss.get_mut(&pair).expect(stream).next(),
+            self.jitter.get_mut(&pair).expect(stream).next(),
         )
     }
     /// The run has baseline overrides or has applied a shape layer.
@@ -284,8 +285,7 @@ impl Links {
         policy: Policy,
         network_faults: NetworkFaults,
     ) -> Result<(), String> {
-        policy.validate(self.global.latency_ns)?;
-        network_faults.validate(policy.latency_ns, policy.jitter_ns)?;
+        policy.validate_shape(self.global.latency_ns, &network_faults)?;
         if self.layers.contains_key(&id) || self.layers.values().any(|l| l.handle == handle) {
             return Err("duplicate active shape".into());
         }
@@ -316,8 +316,7 @@ impl Links {
     }
     /// A selected non-cut candidate consumes both draws without advancing FIFO.
     pub fn selected_drop(&mut self, src: usize, dst: usize) {
-        self.loss.get_mut(&(src, dst)).unwrap().next();
-        self.jitter.get_mut(&(src, dst)).unwrap().next();
+        self.draw((src, dst));
     }
     pub fn decide(
         &mut self,
@@ -332,10 +331,9 @@ impl Links {
         }
         let pair = (src, dst);
         let policy = self.policy(pair);
-        let loss = self.loss.get_mut(&pair).unwrap().next();
-        let jitter = self.jitter.get_mut(&pair).unwrap().next();
+        let (loss, jitter) = self.draw(pair);
         let jitter = ((jitter as u128 * (policy.jitter_ns as u128 + 1)) >> 64) as u64;
-        if (loss as u128) * 1_000_000 < (policy.loss_ppm as u128) << 64 {
+        if (loss as u128) * u128::from(MAX_PPM) < (policy.loss_ppm as u128) << 64 {
             return Outcome::Lost;
         }
         // Existing loss/jitter draws precede every new stream. Bursts reserve
@@ -569,12 +567,6 @@ impl Links {
             }
         }
     }
-}
-fn optional_u64(value: &Value, key: &str) -> Result<Option<u64>, String> {
-    value
-        .get(key)
-        .map(|v| v.as_u64().ok_or_else(|| format!("invalid {key}")))
-        .transpose()
 }
 pub fn pair_hash(h: &mut Sha256, (a, b): Pair) {
     h.update((a as u64).to_le_bytes());

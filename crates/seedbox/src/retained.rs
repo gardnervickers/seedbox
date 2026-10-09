@@ -1,12 +1,13 @@
 //! Manifest-declared, checksum-verified offline evidence.
-use crate::{orchestration::RunRecord, Error, Result};
+use crate::{orchestration::RunRecord, store::ContentDigest, Error, Result};
 use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     io::{Read, Seek},
     path::{Component, Path},
 };
-fn bad(command: &str, path: &Path, error: impl std::fmt::Display) -> Error {
+/// An unusable retained run, named by the offline command that read it.
+pub(crate) fn bad(command: &str, path: &Path, error: impl std::fmt::Display) -> Error {
     Error::Setup(format!(
         "{command} {}: {error}; use an intact retained run directory (import bundles first)",
         path.display()
@@ -63,7 +64,7 @@ pub(crate) fn log(
         }
         hash.update(&buffer[..n]);
     }
-    if format!("{:x}", hash.finalize()) != digest.hex() {
+    if ContentDigest::finish(hash) != *digest {
         return Err(bad(command, &path, "evidence checksum mismatch"));
     }
     file.rewind().map_err(|e| bad(command, &path, e))?;

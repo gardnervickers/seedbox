@@ -48,7 +48,8 @@ fn simulate_windowed(
     boundary: &mut dyn FnMut() -> Result<()>,
 ) -> Result<(&'static str, Value)> {
     if machine_workers <= 1 {
-        return world_windowed::simulate(world, run, Duration::ZERO, boundary);
+        return world_windowed::simulate(world, run, Duration::ZERO, boundary)
+            .map(|(outcome, scheduler)| (outcome.as_str(), scheduler));
     }
     world_windowed::simulate_parallel(
         world,
@@ -60,6 +61,7 @@ fn simulate_windowed(
         |_| Ok(()),
         boundary,
     )
+    .map(|(outcome, scheduler)| (outcome.as_str(), scheduler))
 }
 #[derive(Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -255,10 +257,9 @@ pub fn run(options: &Options) -> Result<Value> {
     // ordinary duration or end-machine exit into a failed fork.
     let bootstrap = if initial_barrier {
         let launch = world_windowed::Run {
-            cfg: &raw_config,
             duration: cfg.duration_ns,
-            end_on: &end_on,
-            fork: Some(None),
+            end_on: end_on.as_deref(),
+            fork: Some(world_windowed::Fork::Barrier),
             checkpoint: None,
             require_barrier: false,
         };
@@ -272,9 +273,8 @@ pub fn run(options: &Options) -> Result<Value> {
         None
     };
     let main = world_windowed::Run {
-        cfg: &raw_config,
         duration: cfg.duration_ns,
-        end_on: &end_on,
+        end_on: end_on.as_deref(),
         fork: None,
         checkpoint: None,
         require_barrier: true,

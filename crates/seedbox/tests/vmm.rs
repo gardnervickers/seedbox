@@ -1,11 +1,26 @@
+#![recursion_limit = "256"]
+
 use seedbox::{
     config::{Check, Limits, Network, Schedule},
     execution::*,
     store::ContentDigest,
     vmm,
 };
+use seedbox_engine_core::checkpoint as checkpoint_protocol;
+use seedbox_engine_core::report::EngineReport;
+use seedbox_engine_core::world_config::WorldConfig;
 use serde_json::json;
 use std::{collections::BTreeMap, path::Path};
+
+/// The world document as JSON, as the engine reads it.
+fn world_json(request: &ExecutionRequest<'_>) -> seedbox::Result<serde_json::Value> {
+    vmm::world(request).map(|world| serde_json::to_value(world).unwrap())
+}
+
+/// A world document as the engine deserializes it.
+fn typed(world: &serde_json::Value) -> WorldConfig {
+    serde_json::from_value(world.clone()).unwrap()
+}
 
 fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
     let hash = ContentDigest::of(b"retained input");
@@ -22,10 +37,10 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
             ("client-machine".into(), hash.clone()),
         ]),
         profile: ExecutionProfile {
-            backend: "seedbox-kvm".into(),
+            backend: Backend::Kvm,
             engine: hash.clone(),
             witness_mode: WitnessMode::FullState,
-            semantic_parameters: BTreeMap::from([("memory_mb".into(), "512".into())]),
+            semantic_parameters: SemanticParameters::new(512),
         },
         auxiliary: BTreeMap::new(),
         provenance: BTreeMap::new(),
@@ -63,69 +78,70 @@ fn fixture(test: impl FnOnce(&ExecutionRequest<'_>)) {
     test(&request);
 }
 
+/// An x86 machine row with every diagnostic at zero.
+fn machine_row(name: &str, exit: Option<u8>) -> serde_json::Value {
+    let hash = ContentDigest::of(b"witness");
+    json!({"name":name,"state":"Running","time_ns":0,"guest_exit_code":exit,"guest_init_error":null,
+        "infrastructure_error":false,"witness":hash,"state_digest":hash,"state_digest_parts":null,
+        "pending_io":null,"crashed_incarnations":[],"incarnation":0,"booted_at_ns":0,
+        "exits":0,"pio":0,"pio_total":0,"mmio":0,"halts":0,"irqs":0,"window_exits":0,"eintr":0,
+        "run_ms":0.0,"stalls":0,"yields":0,"yield_stops":0,
+        "shadow":{"synced_pages":0,"restored_pages":0},
+        "kvm_ms_by_exit":{},"kvm_n_by_exit":[],"control_channel":null,"net":null,"disk":null,
+        "timer":{"writes":0,"overdue":0,"overdue_max_ns":0,"overdue_syscalls_max":0,"guest_clock_skew":{}},
+        "syscalls":0,"syscall_ns":0,"time_ns_by_cause":{}})
+}
+
+/// A complete engine report whose workload exited 0.
 fn report() -> serde_json::Value {
     let hash = ContentDigest::of(b"witness");
-    json!({"report_version":1,"seed":1009,"outcome":"end_machine_exited","world_witness":hash,"machines":[
-        {"name":"client-machine","guest_exit_code":0,"guest_init_error":null,"infrastructure_error":false,"state_digest":hash},
-        {"name":"server-machine","guest_exit_code":null,"guest_init_error":null,"infrastructure_error":false,"state_digest":hash}
-    ]})
+    json!({"report_version":1,"seed":1009,"deferred_tx":false,
+        "outcome":"end_machine_exited","world_witness":hash,
+        "faults":[],"fault_error":null,"control_history":[],"control_latency_ns":0,
+        "sim_seconds":0.0,"host_seconds":0.0,"speed":null,"slices":0,"frames_delivered":0,
+        "frames_dropped":0,"network_counters":{},"network_witness":hash,"kills":[],
+        "rejected_fault_effects":[],"management_readiness":[],"in_flight_policy":"",
+        "scheduler":null,
+        "machines":[machine_row("client-machine", Some(0)), machine_row("server-machine", None)]})
+}
+
+#[test]
+fn the_report_fixture_is_an_engine_report() {
+    let report: EngineReport = serde_json::from_value(report()).unwrap();
+    assert_eq!(serde_json::to_value(&report).unwrap(), self::report());
 }
 
 #[test]
 fn initial_arm_launch_uses_numeric_cap_and_network_bound() {
     fixture(|base| {
-        assert!(vmm::world(base).unwrap().get("launch_skew_ns").is_none());
+        assert!(world_json(base).unwrap().get("launch_skew_ns").is_none());
         let mut prepared = base.prepared.clone();
-        prepared.profile.backend = "seedbox-hvf".into();
-        prepared
-            .profile
-            .semantic_parameters
-            .extend(seedbox::engine::arm_parameters());
-        // Old ARM profiles keep their original world config for replay.
+        prepared.profile.backend = Backend::Hvf;
+        prepared.profile.semantic_parameters.engine = Some(seedbox::engine::arm_descriptor());
         let request = ExecutionRequest {
             prepared: &prepared,
             ..*base
         };
-        assert!(vmm::world(&request)
+        assert!(world_json(&request)
             .unwrap()
             .get("launch_skew_ns")
             .is_none());
-        prepared.profile.semantic_parameters.extend([
-            ("arm_launch_policy".into(), "seeded-barrier-v1".into()),
-            ("arm_launch_max_skew_ns".into(), "1000000".into()),
-        ]);
-        let request = ExecutionRequest {
-            prepared: &prepared,
-            ..*base
-        };
-        assert_eq!(vmm::world(&request).unwrap()["launch_skew_ns"], 80_000);
-        prepared
-            .profile
-            .semantic_parameters
-            .remove("arm_launch_policy");
-        let request = ExecutionRequest {
-            prepared: &prepared,
-            ..*base
-        };
-        assert_eq!(vmm::world(&request).unwrap()["launch_skew_ns"], 80_000);
-        prepared
-            .profile
-            .semantic_parameters
-            .insert("arm_launch_max_skew_ns".into(), "0".into());
-        let request = ExecutionRequest {
-            prepared: &prepared,
-            ..*base
-        };
-        assert_eq!(vmm::world(&request).unwrap()["launch_skew_ns"], 0);
-        prepared
-            .profile
-            .semantic_parameters
-            .insert("arm_launch_max_skew_ns".into(), "NaN".into());
-        let request = ExecutionRequest {
-            prepared: &prepared,
-            ..*base
-        };
-        assert!(vmm::world(&request).is_err());
+        for (cap, expected) in [(1_000_000, 80_000), (0, 0)] {
+            prepared.profile.semantic_parameters.hvf = Some(HvfParameters {
+                boot_policy: String::new(),
+                entropy_policy: String::new(),
+                device_policy: String::new(),
+                host_release: String::new(),
+                cpu_features: String::new(),
+                guest_kernel: ContentDigest::of(b"kernel"),
+                launch_max_skew_ns: cap,
+            });
+            let request = ExecutionRequest {
+                prepared: &prepared,
+                ..*base
+            };
+            assert_eq!(world_json(&request).unwrap()["launch_skew_ns"], expected);
+        }
     });
 }
 
@@ -152,7 +168,7 @@ fn current_parts_accept_text_events_and_validate_digests() {
 #[test]
 fn world_uses_verified_artifacts_and_explicit_placement() {
     fixture(|request| {
-        let world = vmm::world(request).unwrap();
+        let world = world_json(request).unwrap();
         assert_eq!(world["end_on_exit"], "client-machine");
         assert_eq!(world["kernel"], "/verified/retained-input");
         assert_eq!(world["machines"][0]["initrd"], "/verified/retained-input");
@@ -186,26 +202,22 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
                 },
             },
         );
-        let world = vmm::world(&ExecutionRequest {
+        let world = world_json(&ExecutionRequest {
             prepared: &prepared,
             ..*request
         })
         .unwrap();
-        prepared
-            .profile
-            .semantic_parameters
-            .insert("checkpoint_at_ns".into(), "500".into());
-        prepared
-            .profile
-            .semantic_parameters
-            .insert("checkpoint_branch_seed".into(), "42".into());
-        let checkpoint_world = vmm::world(&ExecutionRequest {
+        prepared.profile.semantic_parameters.checkpoint = Some(Checkpoint {
+            at_ns: 500,
+            branch_seed: 42,
+        });
+        let checkpoint_world = world_json(&ExecutionRequest {
             prepared: &prepared,
             ..*request
         })
         .unwrap();
         let parent = checkpoint_protocol::parent_identity(
-            &checkpoint_world,
+            &typed(&checkpoint_world),
             request.seed,
             prepared.profile.engine.hex(),
             false,
@@ -216,7 +228,7 @@ fn world_uses_verified_artifacts_and_explicit_placement() {
         assert_eq!(checkpoint_world["checkpoint"]["parent_identity"], parent);
         assert_eq!(checkpoint_world["machines"], world["machines"]);
         prepared.images.clear();
-        let without_volume = vmm::world(&ExecutionRequest {
+        let without_volume = world_json(&ExecutionRequest {
             prepared: &prepared,
             ..*request
         })
@@ -294,7 +306,7 @@ fn runtime_requests_resolve_placement_and_reports_validate_rpc_causality() {
             control: Some(&c),
             ..*base
         };
-        let w = vmm::world(&request).unwrap();
+        let w = world_json(&request).unwrap();
         assert_eq!(w["control"]["machine"], "client-machine");
         let latency = w["control"]["latency_ns"].as_u64().unwrap();
         let t = 10_000_000;
@@ -305,7 +317,7 @@ fn runtime_requests_resolve_placement_and_reports_validate_rpc_causality() {
         let plan = json!({"id":1,"at_ns":a,"deadline_ns":a+5_000_000_000,"action":"stop","machine":"server-machine"});
         let mut raw = report();
         raw["control_latency_ns"] = json!(latency);
-        raw["control_history"] = json!([{"relay_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":{},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":e,"replied_at_ns":reply},"delivered_at_ns":reply}]);
+        raw["control_history"] = json!([{"relay_id":1,"session_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":{},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":e,"replied_at_ns":reply},"delivered_at_ns":reply}]);
         raw["faults"] = json!([{"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":e,"action":"stop","machine":"server-machine","status":"applied","detail":"reaped"}]);
         assert_eq!(
             vmm::report(&serde_json::to_vec(&raw).unwrap(), &request)
@@ -345,7 +357,7 @@ fn runtime_report_rejects_impossible_sleep_and_now_metadata() {
             control: Some(&c),
             ..*base
         };
-        let l = vmm::world(&request).unwrap()["control"]["latency_ns"]
+        let l = world_json(&request).unwrap()["control"]["latency_ns"]
             .as_u64()
             .unwrap();
         for op in ["now", "sleep"] {
@@ -360,7 +372,7 @@ fn runtime_report_rejects_impossible_sleep_and_now_metadata() {
             }
             let mut raw = report();
             raw["control_latency_ns"] = json!(l);
-            raw["control_history"] = json!([{"relay_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":if op=="now"{json!({"now_ns":e})}else{json!({})},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":e,"replied_at_ns":reply},"delivered_at_ns":reply}]);
+            raw["control_history"] = json!([{"relay_id":1,"session_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":if op=="now"{json!({"now_ns":e})}else{json!({})},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":e,"replied_at_ns":reply},"delivered_at_ns":reply}]);
             assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
             raw["control_history"][0]["response"]["effect_at_ns"] = json!(e + 1);
             raw["control_history"][0]["response"]["replied_at_ns"] = json!(reply + 1);
@@ -380,7 +392,7 @@ fn pending_rpc_at_world_cutoff_preserves_timeout_and_workload_failure() {
             control: Some(&control),
             ..*base
         };
-        let l = vmm::world(&request).unwrap()["control"]["latency_ns"]
+        let l = world_json(&request).unwrap()["control"]["latency_ns"]
             .as_u64()
             .unwrap();
         let t = 10_000_000;
@@ -388,7 +400,7 @@ fn pending_rpc_at_world_cutoff_preserves_timeout_and_workload_failure() {
         let plan = json!({"id":1,"at_ns":a,"deadline_ns":a+5_000_000_000u64,"action":"stop","machine":"server-machine"});
         let mut raw = report();
         raw["control_latency_ns"] = json!(l);
-        raw["control_history"] = json!([{"relay_id":1,"request":{"version":1,"id":1,"op":"stop","target":{"service":"server"}},"status":"cut_off","requested_at_ns":t,"admitted_at_ns":a,"admitted_done":true,"effect_at_ns":null,"replied_at_ns":null,"cut_off_at_ns":1_000_000_000,"fault_id":1,"plan":plan}]);
+        raw["control_history"] = json!([{"relay_id":1,"session_id":1,"request":{"version":1,"id":1,"op":"stop","target":{"service":"server"}},"status":"cut_off","requested_at_ns":t,"admitted_at_ns":a,"admitted_done":true,"effect_at_ns":null,"replied_at_ns":null,"cut_off_at_ns":1_000_000_000,"fault_id":1,"plan":plan}]);
         raw["faults"] = json!([{"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":null,"action":"stop","machine":"server-machine","status":"requested","detail":"awaiting readiness"}]);
         raw["outcome"] = json!("duration");
         assert_eq!(
@@ -433,7 +445,7 @@ fn process_target_exit_after_admission_is_a_recoverable_unavailable_fault() {
             control: Some(&control),
             ..*base
         };
-        let l = vmm::world(&request).unwrap()["control"]["latency_ns"]
+        let l = world_json(&request).unwrap()["control"]["latency_ns"]
             .as_u64()
             .unwrap();
         let t = 10_000_000;
@@ -546,7 +558,7 @@ fn in_flight_reply_at_world_cutoff_keeps_outcome_even_when_other_clock_is_later(
             control: Some(&control),
             ..*base
         };
-        let l = vmm::world(&request).unwrap()["control"]["latency_ns"]
+        let l = world_json(&request).unwrap()["control"]["latency_ns"]
             .as_u64()
             .unwrap();
         let t = 10_000_000;
@@ -583,7 +595,7 @@ fn transcript_correlates_global_relay_and_connection_local_ids() {
             control: Some(&control),
             ..*base
         };
-        let l = vmm::world(&request).unwrap()["control"]["latency_ns"]
+        let l = world_json(&request).unwrap()["control"]["latency_ns"]
             .as_u64()
             .unwrap();
         let mut raw = report();
@@ -617,7 +629,7 @@ fn typed_network_plan_preserves_targets_without_attributing_check_service() {
             prepared: &prepared,
             ..*base
         };
-        let l = vmm::world(&request).unwrap()["control"]["latency_ns"]
+        let l = world_json(&request).unwrap()["control"]["latency_ns"]
             .as_u64()
             .unwrap();
         let t = 10_000_000;
@@ -629,7 +641,7 @@ fn typed_network_plan_preserves_targets_without_attributing_check_service() {
         let mut peer = raw["machines"][1].clone();
         peer["name"] = json!("peer-machine");
         raw["machines"].as_array_mut().unwrap().push(peer);
-        raw["control_history"] = json!([{"relay_id":1,"request":{"version":1,"id":1,"op":"partition","left":[{"service":"server"}],"right":[{"service":"peer"}]},"response":{"version":1,"id":1,"ok":true,"result":{"handle":"p1"},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":a,"replied_at_ns":reply},"delivered_at_ns":reply}]);
+        raw["control_history"] = json!([{"relay_id":1,"session_id":1,"request":{"version":1,"id":1,"op":"partition","left":[{"service":"server"}],"right":[{"service":"peer"}]},"response":{"version":1,"id":1,"ok":true,"result":{"handle":"p1"},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":a,"replied_at_ns":reply},"delivered_at_ns":reply}]);
         raw["faults"] = json!([{"request":plan,"id":1,"requested_at_ns":a,"applied_at_ns":a,"action":"partition","machine":null,"status":"applied","detail":"partition p1"}]);
         let parsed = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
         assert!(parsed.faults[0].service.is_empty());
@@ -653,7 +665,7 @@ fn typed_network_plan_preserves_targets_without_attributing_check_service() {
 #[test]
 fn baseline_links_resolve_service_names_to_prepared_machines() {
     fixture(|base| {
-        assert!(vmm::world(base).unwrap()["network"].get("links").is_none());
+        assert!(world_json(base).unwrap()["network"].get("links").is_none());
         let mut network = base.network.clone();
         network.links.push(seedbox::config::Link {
             from: "server".into(),
@@ -669,14 +681,14 @@ fn baseline_links_resolve_service_names_to_prepared_machines() {
             ..*base
         };
         assert_eq!(
-            vmm::world(&request).unwrap()["network"]["links"],
+            world_json(&request).unwrap()["network"]["links"],
             json!([{"from":"server-machine","to":"client-machine","latency_ns":200_000,"jitter_ns":10_000,"loss_ppm":500_000}])
         );
         network.bandwidth_bps = Some(10_000_000);
         network.queue_bound_ns = Some(20_000_000);
         network.links[0].bandwidth_bps = Some(1_000_000);
         network.links[0].queue_bound_ns = Some(12_000_000);
-        let world = vmm::world(&ExecutionRequest {
+        let world = world_json(&ExecutionRequest {
             network: &network,
             ..*base
         })
@@ -686,7 +698,7 @@ fn baseline_links_resolve_service_names_to_prepared_machines() {
         assert_eq!(world["network"]["links"][0]["bandwidth_bps"], 1_000_000);
         assert_eq!(world["network"]["links"][0]["queue_bound_ns"], 12_000_000);
         network.links[0].from = "missing".into();
-        assert!(vmm::world(&ExecutionRequest {
+        assert!(world_json(&ExecutionRequest {
             network: &network,
             ..*base
         })
@@ -719,18 +731,21 @@ fn shape_transcripts_validate_handle_timing_absolute_policy_and_directed_sides()
             control: Some(&control),
             ..*base
         };
-        let latency = vmm::world(&request).unwrap()["control"]["latency_ns"]
+        let latency = world_json(&request).unwrap()["control"]["latency_ns"]
             .as_u64()
             .unwrap();
         let t = 10_000_000;
         let a = t + latency;
         let reply = a + latency;
         let mut raw = report();
-        raw["machines"].as_array_mut().unwrap().push(json!({"name":"scenario-machine","guest_exit_code":0,"guest_init_error":null,"infrastructure_error":false,"state_digest":hash}));
+        raw["machines"]
+            .as_array_mut()
+            .unwrap()
+            .push(machine_row("scenario-machine", Some(0)));
         raw["control_latency_ns"] = json!(latency);
         let call = json!({"version":1,"id":1,"op":"shape","from":[{"service":"server"}],"to":[{"service":"client"}],"latency_ns":200_000,"jitter_ns":10_000,"loss_ppm":500_000});
         let plan = json!({"id":1,"at_ns":a,"deadline_ns":a+5_000_000_000,"action":"shape","handle":"p1","from":["server-machine"],"to":["client-machine"],"latency_ns":200_000,"jitter_ns":10_000,"loss_ppm":500_000});
-        raw["control_history"] = json!([{"relay_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":{"handle":"p1"},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":a,"replied_at_ns":reply},"delivered_at_ns":reply}]);
+        raw["control_history"] = json!([{"relay_id":1,"session_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":{"handle":"p1"},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":a,"replied_at_ns":reply},"delivered_at_ns":reply}]);
         raw["faults"] = json!([{"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":a,"action":"shape","machine":null,"status":"applied","detail":"handle=p1"}]);
         let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
         assert_eq!(result.faults[0].action, "shape");
@@ -818,7 +833,7 @@ fn clock_skew_transcripts_bind_handle_offset_bounds_and_guest_effect_times() {
             control: Some(&control),
             ..*base
         };
-        let latency = vmm::world(&request).unwrap()["control"]["latency_ns"]
+        let latency = world_json(&request).unwrap()["control"]["latency_ns"]
             .as_u64()
             .unwrap();
         let t = 10_000_000;
@@ -829,15 +844,18 @@ fn clock_skew_transcripts_bind_handle_offset_bounds_and_guest_effect_times() {
         let a2 = t2 + latency;
         let e2 = a2 + 2_000;
         let mut raw = report();
-        raw["machines"].as_array_mut().unwrap().push(json!({"name":"scenario-machine","guest_exit_code":0,"guest_init_error":null,"infrastructure_error":false,"state_digest":hash}));
+        raw["machines"]
+            .as_array_mut()
+            .unwrap()
+            .push(machine_row("scenario-machine", Some(0)));
         raw["control_latency_ns"] = json!(latency);
         let call = json!({"version":1,"id":1,"op":"clock_skew","target":{"service":"server"},"max_offset_ns":1_000_000_000});
         let heal = json!({"version":1,"id":2,"op":"heal","handle":"p1"});
         let plan = json!({"id":1,"at_ns":a,"deadline_ns":a+5_000_000_000u64,"action":"clock_skew","handle":"p1","machine":"server-machine","max_offset_ns":1_000_000_000});
         let heal_plan = json!({"id":2,"at_ns":a2,"deadline_ns":a2+5_000_000_000u64,"action":"heal","handle":"p1"});
         raw["control_history"] = json!([
-            {"relay_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":{"handle":"p1","offset_ns":-12345},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":e,"replied_at_ns":e+latency},"delivered_at_ns":e+latency},
-            {"relay_id":2,"request":heal,"response":{"version":1,"id":2,"ok":true,"result":{},"requested_at_ns":t2,"admitted_at_ns":a2,"effect_at_ns":e2,"replied_at_ns":e2+latency},"delivered_at_ns":e2+latency}
+            {"relay_id":1,"session_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":{"handle":"p1","offset_ns":-12345},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":e,"replied_at_ns":e+latency},"delivered_at_ns":e+latency},
+            {"relay_id":2,"session_id":1,"request":heal,"response":{"version":1,"id":2,"ok":true,"result":{},"requested_at_ns":t2,"admitted_at_ns":a2,"effect_at_ns":e2,"replied_at_ns":e2+latency},"delivered_at_ns":e2+latency}
         ]);
         raw["faults"] = json!([
             {"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":e,"action":"clock_skew","machine":"server-machine","status":"applied","detail":"handle=p1; guest wall clock stepped by -12345 ns","offset_ns":-12345},
@@ -911,7 +929,7 @@ fn clock_drift_transcripts_bind_handle_rate_bounds_and_guest_effect_times() {
             control: Some(&control),
             ..*base
         };
-        let latency = vmm::world(&request).unwrap()["control"]["latency_ns"]
+        let latency = world_json(&request).unwrap()["control"]["latency_ns"]
             .as_u64()
             .unwrap();
         let t = 10_000_000;
@@ -921,15 +939,18 @@ fn clock_drift_transcripts_bind_handle_rate_bounds_and_guest_effect_times() {
         let a2 = t2 + latency;
         let e2 = a2 + 2_000;
         let mut raw = report();
-        raw["machines"].as_array_mut().unwrap().push(json!({"name":"scenario-machine","guest_exit_code":0,"guest_init_error":null,"infrastructure_error":false,"state_digest":hash}));
+        raw["machines"]
+            .as_array_mut()
+            .unwrap()
+            .push(machine_row("scenario-machine", Some(0)));
         raw["control_latency_ns"] = json!(latency);
         let call = json!({"version":1,"id":1,"op":"clock_drift","target":{"service":"server"},"max_rate_ppb":1_000_000});
         let heal = json!({"version":1,"id":2,"op":"heal","handle":"p1"});
         let plan = json!({"id":1,"at_ns":a,"deadline_ns":a+5_000_000_000u64,"action":"clock_drift","handle":"p1","machine":"server-machine","max_rate_ppb":1_000_000});
         let heal_plan = json!({"id":2,"at_ns":a2,"deadline_ns":a2+5_000_000_000u64,"action":"heal","handle":"p1"});
         raw["control_history"] = json!([
-            {"relay_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":{"handle":"p1","rate_ppb":-4321},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":e,"replied_at_ns":e+latency},"delivered_at_ns":e+latency},
-            {"relay_id":2,"request":heal,"response":{"version":1,"id":2,"ok":true,"result":{},"requested_at_ns":t2,"admitted_at_ns":a2,"effect_at_ns":e2,"replied_at_ns":e2+latency},"delivered_at_ns":e2+latency}
+            {"relay_id":1,"session_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":{"handle":"p1","rate_ppb":-4321},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":e,"replied_at_ns":e+latency},"delivered_at_ns":e+latency},
+            {"relay_id":2,"session_id":1,"request":heal,"response":{"version":1,"id":2,"ok":true,"result":{},"requested_at_ns":t2,"admitted_at_ns":a2,"effect_at_ns":e2,"replied_at_ns":e2+latency},"delivered_at_ns":e2+latency}
         ]);
         raw["faults"] = json!([
             {"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":e,"action":"clock_drift","machine":"server-machine","status":"applied","detail":"handle=p1; guest clock rate set to -4321 ppb","rate_ppb":-4321},
@@ -982,7 +1003,7 @@ fn connection_selector_transcripts_bind_exact_machine_tuple_incarnation_and_time
             control: Some(&control),
             ..*base
         };
-        let latency = vmm::world(&request).unwrap()["control"]["latency_ns"]
+        let latency = world_json(&request).unwrap()["control"]["latency_ns"]
             .as_u64()
             .unwrap();
         let t = 10_000_000;
@@ -990,11 +1011,14 @@ fn connection_selector_transcripts_bind_exact_machine_tuple_incarnation_and_time
         let reply = a + latency;
         let connection = json!({"from":"server-machine","to":"client-machine","src_addr":"10.0.0.2","dst_addr":"10.0.0.1","src_port":80,"dst_port":4000,"incarnation":7});
         let mut raw = report();
-        raw["machines"].as_array_mut().unwrap().push(json!({"name":"scenario-machine","guest_exit_code":0,"guest_init_error":null,"infrastructure_error":false,"state_digest":hash}));
+        raw["machines"]
+            .as_array_mut()
+            .unwrap()
+            .push(machine_row("scenario-machine", Some(0)));
         raw["control_latency_ns"] = json!(latency);
         let call = json!({"version":1,"id":1,"op":"drop_connection","connection":connection});
         let plan = json!({"id":1,"at_ns":a,"deadline_ns":a+5_000_000_000,"action":"drop_connection","handle":"p1","connection":connection});
-        raw["control_history"] = json!([{"relay_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":{"handle":"p1"},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":a,"replied_at_ns":reply},"delivered_at_ns":reply}]);
+        raw["control_history"] = json!([{"relay_id":1,"session_id":1,"request":call,"response":{"version":1,"id":1,"ok":true,"result":{"handle":"p1"},"requested_at_ns":t,"admitted_at_ns":a,"effect_at_ns":a,"replied_at_ns":reply},"delivered_at_ns":reply}]);
         raw["faults"] = json!([{"id":1,"request":plan,"requested_at_ns":a,"applied_at_ns":a,"action":"drop_connection","machine":null,"status":"applied","detail":"armed","selection_counts":{"matched":0,"dropped":0}}]);
         let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).unwrap();
         assert_eq!(result.faults[0].action, "drop_connection");
@@ -1052,7 +1076,7 @@ fn machine_lifecycle_transcripts_attribute_services_and_require_admission_effect
             control: Some(&control),
             ..*base
         };
-        let l = vmm::world(&request).unwrap()["control"]["latency_ns"]
+        let l = world_json(&request).unwrap()["control"]["latency_ns"]
             .as_u64()
             .unwrap();
         let mut raw = report();
@@ -1124,7 +1148,7 @@ fn lifecycle_invalid_state_and_exited_pause_resume_are_recoverable_without_fault
             control: Some(&control),
             ..*base
         };
-        let l = vmm::world(&request).unwrap()["control"]["latency_ns"]
+        let l = world_json(&request).unwrap()["control"]["latency_ns"]
             .as_u64()
             .unwrap();
         for (op, code) in [
@@ -1181,7 +1205,7 @@ fn unavailable_process_fault_requires_exact_crash_evidence_in_its_window() {
             control: Some(&control),
             ..*base
         };
-        let l = vmm::world(&request).unwrap()["control"]["latency_ns"]
+        let l = world_json(&request).unwrap()["control"]["latency_ns"]
             .as_u64()
             .unwrap();
         let mut raw = report();
@@ -1240,7 +1264,7 @@ fn unavailable_at_admission_requires_prior_crash_without_intervening_reboot() {
             control: Some(&control),
             ..*base
         };
-        let l = vmm::world(&request).unwrap()["control"]["latency_ns"]
+        let l = world_json(&request).unwrap()["control"]["latency_ns"]
             .as_u64()
             .unwrap();
         let parse =
@@ -1292,7 +1316,7 @@ fn committed_trigger_reports_correlate_arms_effects_cancellation_and_cutoff() {
             control: Some(&c),
             ..*base
         };
-        let latency = vmm::world(&request).unwrap()["control"]["latency_ns"]
+        let latency = world_json(&request).unwrap()["control"]["latency_ns"]
             .as_u64()
             .unwrap();
         let arm = 100 + latency;
@@ -1461,49 +1485,30 @@ fn torn_writes_are_recorded_replayed_and_omitted_when_disabled() {
     let store = ContentStore::new(dir.path().join("objects"));
     let executor = vmm::VmmExecutor::new(&engine, &store, None, 512, WitnessMode::Exits).unwrap();
     let original = executor.profile();
-    // Off adds nothing; the host policy parameters #83 records stay as they are.
-    assert!(!original
-        .semantic_parameters
-        .contains_key("disk_loss_sector_bytes"));
-    assert_eq!(original.semantic_parameters["memory_mb"], "512");
-    let encoded = serde_json::to_vec(&original).unwrap();
-    assert!(!vmm::recorded_torn_writes(&original).unwrap());
-    assert_eq!(
-        serde_json::to_vec(&executor.clone().with_torn_writes(false).profile()).unwrap(),
-        encoded
-    );
+    assert!(!original.semantic_parameters.torn_writes);
+    assert_eq!(original.semantic_parameters.memory_mb, 512);
+    assert_eq!(executor.clone().with_torn_writes(false).profile(), original);
     let enabled = executor.clone().with_torn_writes(true);
     let recorded: ExecutionProfile =
         serde_json::from_slice(&serde_json::to_vec(&enabled.profile()).unwrap()).unwrap();
+    assert!(recorded.semantic_parameters.torn_writes);
+    assert_ne!(recorded, original);
     assert_eq!(
-        recorded.semantic_parameters["disk_loss_sector_bytes"],
-        "512"
-    );
-    assert_eq!(
-        recorded.semantic_parameters["disk_loss_survival_probability"],
-        "0.5"
-    );
-    assert_ne!(serde_json::to_vec(&recorded).unwrap(), encoded);
-    let replay = executor
-        .clone()
-        .with_torn_writes(vmm::recorded_torn_writes(&recorded).unwrap());
-    assert_eq!(replay.profile(), recorded);
-    assert_eq!(
-        replay.performance_parameters(),
+        enabled.performance_parameters(),
         executor.performance_parameters()
     );
     assert_eq!(enabled.with_torn_writes(false).profile(), original);
 
     fixture(|base| {
-        let original_world = vmm::world(base).unwrap();
+        let original_world = world_json(base).unwrap();
         assert!(original_world.get("disk_loss").is_none());
         let mut prepared = base.prepared.clone();
-        prepared.profile = recorded;
+        prepared.profile.semantic_parameters.torn_writes = true;
         let request = ExecutionRequest {
             prepared: &prepared,
             ..*base
         };
-        let mut world = vmm::world(&request).unwrap();
+        let mut world = world_json(&request).unwrap();
         assert_eq!(
             world.as_object_mut().unwrap().remove("disk_loss"),
             Some(json!({
@@ -1515,52 +1520,31 @@ fn torn_writes_are_recorded_replayed_and_omitted_when_disabled() {
             serde_json::to_vec(&world).unwrap(),
             serde_json::to_vec(&original_world).unwrap()
         );
-        prepared
-            .profile
-            .semantic_parameters
-            .insert("disk_loss_survival_probability".into(), "2.0".into());
-        assert!(vmm::recorded_torn_writes(&prepared.profile)
-            .unwrap_err()
-            .to_string()
-            .contains("unknown disk loss parameters"));
-        let request = ExecutionRequest {
-            prepared: &prepared,
-            ..*base
-        };
-        assert!(vmm::world(&request).is_err());
-
-        let mut legacy = original.clone();
-        legacy.semantic_parameters.insert(
-            "disk_loss".into(),
-            "flush-stable/seeded-latest-sector-512-half/disk-loss-machine-incarnation/v1".into(),
-        );
-        let error = vmm::recorded_torn_writes(&legacy).unwrap_err().to_string();
-        assert!(error.contains("legacy disk_loss semantic parameter"));
+        // The disk model of older identities is not part of this format.
+        let mut legacy = serde_json::to_value(&original).unwrap();
+        legacy["semantic_parameters"]["disk_loss_survival_probability"] = "2.0".into();
+        assert!(serde_json::from_value::<ExecutionProfile>(legacy).is_err());
     });
 }
 
 #[test]
-fn deferred_tx_report_must_match_semantic_parameter_and_legacy_reports_mean_off() {
+fn deferred_tx_report_must_match_semantic_parameter() {
     fixture(|base| {
         for enabled in [false, true] {
             let mut prepared = base.prepared.clone();
-            if enabled {
-                prepared
-                    .profile
-                    .semantic_parameters
-                    .insert("deferred_tx".into(), "true".into());
-            }
+            prepared.profile.semantic_parameters.deferred_tx = enabled;
             let request = ExecutionRequest {
                 prepared: &prepared,
                 ..*base
             };
             for reported in [None, Some(false), Some(true)] {
                 let mut raw = report();
-                if let Some(reported) = reported {
-                    raw["deferred_tx"] = json!(reported);
+                match reported {
+                    Some(reported) => raw["deferred_tx"] = json!(reported),
+                    None => drop(raw.as_object_mut().unwrap().remove("deferred_tx")),
                 }
                 let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request);
-                assert_eq!(result.is_ok(), reported.unwrap_or(false) == enabled);
+                assert_eq!(result.is_ok(), reported == Some(enabled));
             }
         }
     });
@@ -1569,27 +1553,25 @@ fn deferred_tx_report_must_match_semantic_parameter_and_legacy_reports_mean_off(
 #[test]
 fn checkpoint_semantics_bind_parent_and_report_and_fail_closed() {
     fixture(|base| {
-        assert!(vmm::world(base).unwrap().get("checkpoint").is_none());
+        assert!(world_json(base).unwrap().get("checkpoint").is_none());
         let mut inputs = base.prepared.clone();
-        inputs
-            .profile
-            .semantic_parameters
-            .insert("checkpoint_at_ns".into(), "500".into());
-        assert!(vmm::recorded_checkpoint(&inputs.profile).is_err());
-        inputs
-            .profile
-            .semantic_parameters
-            .insert("checkpoint_branch_seed".into(), "42".into());
+        let mut json = serde_json::to_value(&inputs.profile).unwrap();
+        json["semantic_parameters"]["checkpoint"] = json!({"at_ns": 500});
+        assert!(serde_json::from_value::<ExecutionProfile>(json).is_err());
+        inputs.profile.semantic_parameters.checkpoint = Some(Checkpoint {
+            at_ns: 500,
+            branch_seed: 42,
+        });
         let request = ExecutionRequest {
             prepared: &inputs,
             ..*base
         };
-        let checkpoint = vmm::world(&request).unwrap()["checkpoint"].clone();
+        let checkpoint = world_json(&request).unwrap()["checkpoint"].clone();
         assert_eq!(checkpoint["at_ns"], 500);
         assert_eq!(checkpoint["branch_seed"], 42);
         assert_eq!(
             checkpoint["branch_identity"],
-            checkpoint_protocol::branch_identity(
+            seedbox_engine_core::checkpoint::branch_identity(
                 checkpoint["parent_identity"].as_str().unwrap(),
                 500,
                 42
@@ -1601,47 +1583,35 @@ fn checkpoint_semantics_bind_parent_and_report_and_fail_closed() {
         assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_ok());
         raw["checkpoint"]["branch_seed"] = json!(43);
         assert!(vmm::report(&serde_json::to_vec(&raw).unwrap(), &request).is_err());
-        inputs
-            .profile
-            .semantic_parameters
-            .insert("checkpoint_at_ns".into(), "0500".into());
-        assert!(vmm::recorded_checkpoint(&inputs.profile).is_err());
+        let mut json = serde_json::to_value(&inputs.profile).unwrap();
+        json["semantic_parameters"]["checkpoint"]["at_ns"] = "0500".into();
+        assert!(serde_json::from_value::<ExecutionProfile>(json).is_err());
     });
 }
-
-// Run the engine's pure protocol tests on Darwin as well as Linux.
-#[path = "../../seedbox-engine-core/src/checkpoint.rs"]
-mod checkpoint_protocol;
 
 #[test]
 fn checkpoint_timer_and_tx_modes_bind_cli_and_engine_metadata() {
     fixture(|base| {
-        let timebase = "pv";
         let mut inputs = Vec::new();
         let mut worlds = Vec::new();
         for (page_timer, deferred_tx) in
             [(false, false), (true, false), (false, true), (true, true)]
         {
             let mut prepared = base.prepared.clone();
-            prepared.profile.semantic_parameters.extend([
-                ("checkpoint_at_ns".into(), "500".into()),
-                ("checkpoint_branch_seed".into(), "42".into()),
-            ]);
-            for (key, enabled) in [("page_timer", page_timer), ("deferred_tx", deferred_tx)] {
-                if enabled {
-                    prepared
-                        .profile
-                        .semantic_parameters
-                        .insert(key.into(), "true".into());
-                }
-            }
-            let world = vmm::world(&ExecutionRequest {
+            let parameters = &mut prepared.profile.semantic_parameters;
+            parameters.checkpoint = Some(Checkpoint {
+                at_ns: 500,
+                branch_seed: 42,
+            });
+            parameters.page_timer = page_timer;
+            parameters.deferred_tx = deferred_tx;
+            let world = world_json(&ExecutionRequest {
                 prepared: &prepared,
                 ..*base
             })
             .unwrap();
             let engine_parent = checkpoint_protocol::parent_identity(
-                &world,
+                &typed(&world),
                 base.seed,
                 prepared.profile.engine.hex(),
                 deferred_tx,
@@ -1658,16 +1628,13 @@ fn checkpoint_timer_and_tx_modes_bind_cli_and_engine_metadata() {
                 .iter()
                 .map(|world| world["checkpoint"][field].as_str().unwrap())
                 .collect();
-            assert_eq!(ids.len(), 4, "{timebase} {field}");
+            assert_eq!(ids.len(), 4, "{field}");
         }
         for (i, prepared) in inputs.iter().enumerate() {
             let request = ExecutionRequest { prepared, ..*base };
             for (j, world) in worlds.iter().enumerate() {
                 let mut raw = report();
-                raw["deferred_tx"] = json!(prepared
-                    .profile
-                    .semantic_parameters
-                    .contains_key("deferred_tx"));
+                raw["deferred_tx"] = json!(prepared.profile.semantic_parameters.deferred_tx);
                 raw["checkpoint"] = world["checkpoint"].clone();
                 let result = vmm::report(&serde_json::to_vec(&raw).unwrap(), &request);
                 if i == j {
@@ -1681,16 +1648,10 @@ fn checkpoint_timer_and_tx_modes_bind_cli_and_engine_metadata() {
             }
         }
         let mut restored_off = inputs.pop().unwrap();
-        restored_off
-            .profile
-            .semantic_parameters
-            .remove("page_timer");
-        restored_off
-            .profile
-            .semantic_parameters
-            .remove("deferred_tx");
+        restored_off.profile.semantic_parameters.page_timer = false;
+        restored_off.profile.semantic_parameters.deferred_tx = false;
         assert_eq!(
-            vmm::world(&ExecutionRequest {
+            world_json(&ExecutionRequest {
                 prepared: &restored_off,
                 ..*base
             })
@@ -1708,29 +1669,18 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
         std::fs::write(&input, b"retained input").unwrap();
         let mut artifacts = BTreeMap::from([(ContentDigest::of(b"retained input"), input)]);
         let mut inputs = base.prepared.clone();
-        inputs
-            .profile
-            .semantic_parameters
-            .insert("checkpoint_at_ns".into(), "500".into());
-        inputs
-            .profile
-            .semantic_parameters
-            .insert("checkpoint_branch_seed".into(), "42".into());
-        let ordinary = vmm::world(&ExecutionRequest {
+        inputs.profile.semantic_parameters.checkpoint = Some(Checkpoint {
+            at_ns: 500,
+            branch_seed: 42,
+        });
+        let ordinary = world_json(&ExecutionRequest {
             prepared: &inputs,
             artifacts: &artifacts,
             ..*base
         })
         .unwrap();
-        inputs
-            .profile
-            .semantic_parameters
-            .insert("disk_loss_sector_bytes".into(), "512".into());
-        inputs
-            .profile
-            .semantic_parameters
-            .insert("disk_loss_survival_probability".into(), "0.5".into());
-        let cfg = vmm::world(&ExecutionRequest {
+        inputs.profile.semantic_parameters.torn_writes = true;
+        let cfg = world_json(&ExecutionRequest {
             prepared: &inputs,
             artifacts: &artifacts,
             ..*base
@@ -1741,7 +1691,7 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
             ordinary["checkpoint"]["parent_identity"]
         );
         let parent = checkpoint_protocol::parent_identity(
-            &cfg,
+            &typed(&cfg),
             base.seed,
             inputs.profile.engine.hex(),
             false,
@@ -1757,18 +1707,15 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
         let mut deferred_worlds = Vec::new();
         {
             let mut deferred_inputs = inputs.clone();
-            deferred_inputs
-                .profile
-                .semantic_parameters
-                .insert("deferred_tx".into(), "true".into());
-            let deferred_world = vmm::world(&ExecutionRequest {
+            deferred_inputs.profile.semantic_parameters.deferred_tx = true;
+            let deferred_world = world_json(&ExecutionRequest {
                 prepared: &deferred_inputs,
                 artifacts: &artifacts,
                 ..*base
             })
             .unwrap();
             let deferred_parent = checkpoint_protocol::parent_identity(
-                &deferred_world,
+                &typed(&deferred_world),
                 base.seed,
                 inputs.profile.engine.hex(),
                 true,
@@ -1798,7 +1745,7 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
         std::fs::copy(artifacts.values().next().unwrap(), &relocated).unwrap();
         *artifacts.values_mut().next().unwrap() = relocated;
         for (deferred_inputs, original) in deferred_worlds {
-            let moved = vmm::world(&ExecutionRequest {
+            let moved = world_json(&ExecutionRequest {
                 prepared: &deferred_inputs,
                 artifacts: &artifacts,
                 ..*base
@@ -1806,15 +1753,11 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
             .unwrap();
             assert_eq!(moved["checkpoint"], original["checkpoint"]);
         }
-        inputs
-            .profile
-            .semantic_parameters
-            .insert("checkpoint_at_ns".into(), "600".into());
-        inputs
-            .profile
-            .semantic_parameters
-            .insert("checkpoint_branch_seed".into(), "43".into());
-        let moved = vmm::world(&ExecutionRequest {
+        inputs.profile.semantic_parameters.checkpoint = Some(Checkpoint {
+            at_ns: 600,
+            branch_seed: 43,
+        });
+        let moved = world_json(&ExecutionRequest {
             prepared: &inputs,
             artifacts: &artifacts,
             ..*base
@@ -1826,7 +1769,7 @@ fn cli_and_engine_checkpoint_parents_match_from_content_after_relocation() {
             cfg["checkpoint"]["branch_identity"]
         );
         inputs.profile.engine = ContentDigest::of(b"another engine");
-        let changed = vmm::world(&ExecutionRequest {
+        let changed = world_json(&ExecutionRequest {
             prepared: &inputs,
             artifacts: &artifacts,
             ..*base
@@ -1851,13 +1794,14 @@ fn explicit_combined_cli_is_retained_with_its_actual_version() {
     let executor =
         vmm::VmmExecutor::new_detected(binary, &store, None, 512, WitnessMode::Exits).unwrap();
     let profile = executor.profile();
+    let descriptor = profile.semantic_parameters.engine.as_ref().unwrap();
     assert_eq!(
-        profile.semantic_parameters["simulator_version"],
+        descriptor.simulator_version,
         version.trim().strip_prefix("seedbox ").unwrap()
     );
     assert_eq!(
-        profile.semantic_parameters["engine_executable_kind"],
-        seedbox::engine::INTERNAL_WORKER_V1
+        descriptor.kind,
+        seedbox::engine::ExecutableKind::InternalWorker
     );
     assert_eq!(
         profile.engine,

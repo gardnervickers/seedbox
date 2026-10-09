@@ -1,40 +1,44 @@
 [package]
 name = "seedbox-vmm"
-version = "0.1.0"
-edition = "2021"
-publish = false
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
 
 # Keep the standalone VMM build and its lockfile available through `cargo
 # build-vmm`. The Seedbox executable also links this library: that combined
 # build uses the root workspace's features and lockfile.
 [workspace]
 
+# Mirror the root workspace's inherited keys and shared dependency versions.
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 publish = false
 
 [workspace.dependencies]
-sha2 = "0.10"
+clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
+libc = "0.2"
 serde_json = "1"
+sha2 = "0.10"
 
 [dependencies]
 seedbox-engine-core = { package = "seedbox-vmm-engine-core", path = "engine-core" }
 # Keep standalone dependency metadata relative to this workspace while sharing
 # the protocol source with Seedbox. See control/Cargo.toml for package isolation.
 seedbox-control = { package = "seedbox-vmm-control", path = "control" }
+# The standalone binary's flags (src/main.rs); the library parses no arguments.
+clap.workspace = true
 kvm-ioctls = "=0.25.0"
 kvm-bindings = { version = "=0.14.1", features = ["fam-wrappers"] }
-libc = "0.2"
-serde = { workspace = true }
-serde_json = "1"
-sha2 = "0.10"
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "instr_info"] }
 
 [features]
 # Hardware tests compile by default; features enable their execution.
-# Counter tests share one contract across AMD and Intel, under a core lease.
 kvm-tests = []
 guest-tests = ["kvm-tests"]
 

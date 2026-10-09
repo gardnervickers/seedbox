@@ -1,6 +1,6 @@
 //! Embedded or caller-supplied guest helpers, extracted privately and removed on drop.
 include!(concat!(env!("OUT_DIR"), "/guest-helpers.rs"));
-use crate::{Error, Result};
+use crate::{limits::exceeds, Error, Result};
 use std::{
     fs,
     io::Read,
@@ -8,6 +8,8 @@ use std::{
 };
 
 const REQUIRED: [&str; 4] = ["compose-init", "mke2fs", "NOTICE.txt", "progress.tar"];
+const ARCHIVE_LIMIT: u64 = 512 << 20;
+const UNPACKED_LIMIT: u64 = 2 << 30;
 #[derive(Clone, Debug)]
 pub struct Runtime {
     pub root: PathBuf,
@@ -15,18 +17,20 @@ pub struct Runtime {
 }
 impl Runtime {
     pub fn from_archive(path: &Path) -> Result<Self> {
-        if fs::metadata(path)?.len() > 512 << 20 {
-            return Err(Error::Integrity(
-                "compressed runtime exceeds 512 MiB".into(),
-            ));
+        if fs::metadata(path)?.len() > ARCHIVE_LIMIT {
+            return Err(Error::Integrity(exceeds(
+                "compressed runtime",
+                ARCHIVE_LIMIT,
+            )));
         }
         Self::from_reader(fs::File::open(path)?)
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() > 512 << 20 {
-            return Err(Error::Integrity(
-                "compressed runtime exceeds 512 MiB".into(),
-            ));
+        if bytes.len() as u64 > ARCHIVE_LIMIT {
+            return Err(Error::Integrity(exceeds(
+                "compressed runtime",
+                ARCHIVE_LIMIT,
+            )));
         }
         Self::from_reader(bytes)
     }
@@ -51,8 +55,8 @@ impl Runtime {
             }
             size = size
                 .checked_add(entry.size())
-                .filter(|size| *size <= 2 << 30)
-                .ok_or_else(|| Error::Integrity("runtime exceeds 2 GiB".into()))?;
+                .filter(|size| *size <= UNPACKED_LIMIT)
+                .ok_or_else(|| Error::Integrity(exceeds("runtime", UNPACKED_LIMIT)))?;
             entry.unpack(stage.path().join(name))?;
         }
         for name in REQUIRED {

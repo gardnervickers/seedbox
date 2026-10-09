@@ -22,9 +22,8 @@ fn world() -> World {
         timer_jitter: 0,
         exact_timer_ppm: 0,
         console_limit: None,
-        page_timer: false,
+        features: MachineFeatures::default(),
         log_chunk_limit: None,
-        deferred_tx: false,
     };
     let names = vec!["a".to_string(), "b".to_string()];
     let machines = names
@@ -111,16 +110,7 @@ fn runtime_checkpoint_getrandom_and_urandom_repeat_and_diverge() {
     w.lookahead = 1_000_000;
     w.latency = 1_000_000;
     assert_eq!(
-        simulate_to(
-            &mut w,
-            &json!({}),
-            duration,
-            &None,
-            None,
-            Some(at),
-            &mut None
-        )
-        .unwrap(),
+        simulate_to(&mut w, duration, &None, None, Some(at), &mut None).unwrap(),
         "checkpoint"
     );
     for m in &w.machines {
@@ -141,7 +131,7 @@ fn runtime_checkpoint_getrandom_and_urandom_repeat_and_diverge() {
         )
         .unwrap();
         assert!(report.iter().all(|r| r["reseed"] == "time_page"));
-        simulate(&mut w, &json!({}), duration, &None, None, &mut None).unwrap();
+        simulate(&mut w, duration, &None, None, &mut None).unwrap();
         outputs.push(
             w.machines
                 .iter()

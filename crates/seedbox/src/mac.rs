@@ -10,7 +10,9 @@ use seedbox_arm64::{
 };
 use std::{collections::BTreeMap, fs, path::Path};
 
-const TIMEBASE: &str = "arm64-pv-world-v1";
+const BOOT_POLICY: &str = "image-reservation/archive-aligned/final-dtb-v1";
+const ENTROPY_POLICY: &str = "sha256-domain-u64-seed-v1";
+const DEVICE_POLICY: &str = "net-console-optional-block/supervisor-pid1-v1";
 
 #[derive(Clone, Debug)]
 pub struct MacExecutor {
@@ -88,37 +90,28 @@ impl MacExecutor {
         }
         validate_kernel(kernel, memory_mb)?;
         let kernel = crate::admission::file_digest(kernel)?;
-        let mut parameters = crate::engine::arm_parameters();
-        parameters.extend(observe()?);
-        parameters.extend(BTreeMap::from([
-            ("guest_abi".into(), "oci-init-v1".into()),
-            ("control_channel".into(), "virtio-console-v1".into()),
-            ("memory_mb".into(), memory_mb.to_string()),
-            (
-                "arm_boot_policy".into(),
-                "image-reservation/archive-aligned/final-dtb-v1".into(),
-            ),
-            (
-                "arm_entropy_policy".into(),
-                "sha256-domain-u64-seed-v1".into(),
-            ),
-            (
-                "arm_device_policy".into(),
-                "net-console-optional-block/supervisor-pid1-v1".into(),
-            ),
-            ("hvf_guest_kernel".into(), kernel.hex().into()),
-            (
-                "arm_launch_max_skew_ns".into(),
-                crate::engine::ARM_LAUNCH_MAX_SKEW_NS.to_string(),
-            ),
-        ]));
-        if torn_writes {
-            parameters.insert("disk_loss_sector_bytes".into(), "512".into());
-            parameters.insert("disk_loss_survival_probability".into(), "0.5".into());
-        }
+        let mut host = observe()?;
+        let mut inventory = |key: &str| {
+            host.remove(key)
+                .ok_or_else(|| Error::Setup(format!("HVF host inventory: missing {key}")))
+        };
+        let parameters = SemanticParameters {
+            torn_writes,
+            engine: Some(crate::engine::arm_descriptor()),
+            hvf: Some(HvfParameters {
+                boot_policy: BOOT_POLICY.into(),
+                entropy_policy: ENTROPY_POLICY.into(),
+                device_policy: DEVICE_POLICY.into(),
+                host_release: inventory("hvf_host_release")?,
+                cpu_features: inventory("hvf_cpu_features")?,
+                guest_kernel: kernel,
+                launch_max_skew_ns: crate::engine::ARM_LAUNCH_MAX_SKEW_NS,
+            }),
+            ..SemanticParameters::new(memory_mb)
+        };
         Ok(Self {
             profile: ExecutionProfile {
-                backend: "seedbox-hvf".into(),
+                backend: crate::execution::Backend::Hvf,
                 engine: store.put_file(engine)?,
                 witness_mode,
                 semantic_parameters: parameters,
@@ -170,49 +163,24 @@ fn validate_kernel(kernel: &Path, memory_mb: u32) -> Result<()> {
     Ok(())
 }
 fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
-    if profile.backend != "seedbox-hvf"
-        || crate::engine::recorded_launch(profile)? != crate::engine::ExecutableKind::ArmWorld
+    let p = &profile.semantic_parameters;
+    if profile.backend != crate::execution::Backend::Hvf
+        || p.launch() != crate::engine::ExecutableKind::ArmWorld
     {
         return Err(Error::Integrity(
             "retained HVF application profile is missing its world descriptor".into(),
         ));
     }
-    crate::engine::arm_launch_skew(profile, 1)?;
-    let p = &profile.semantic_parameters;
-    for (key, value) in [
-        ("guest_abi", "oci-init-v1"),
-        ("control_channel", "virtio-console-v1"),
-    ] {
-        if p.get(key).map(String::as_str) != Some(value) {
-            return Err(Error::Integrity(format!(
-                "retained HVF profile missing or unsupported {key}"
-            )));
-        }
+    if p.hvf.is_none() {
+        return Err(Error::Integrity(
+            "retained HVF profile missing its HVF parameters".into(),
+        ));
     }
-    match p.get("timebase").map(String::as_str) {
-        Some("pv") => {}
-        _ => {
-            return Err(Error::Integrity(
-                "retained HVF profile has invalid timebase".into(),
-            ))
-        }
-    }
-    let memory = p
-        .get("memory_mb")
-        .and_then(|v| v.parse::<u32>().ok())
-        .filter(|m| (64..=3072).contains(m));
-    if memory.is_none() {
+    if !(64..=3072).contains(&p.memory_mb) {
         return Err(Error::Integrity(
             "retained HVF profile has invalid memory_mb".into(),
         ));
     }
-    ContentDigest::try_from(
-        p.get("hvf_guest_kernel")
-            .ok_or_else(|| {
-                Error::Integrity("retained HVF profile missing hvf_guest_kernel".into())
-            })?
-            .clone(),
-    )?;
     Ok(())
 }
 impl ExecutionBackend for MacExecutor {
@@ -246,9 +214,10 @@ impl ExecutionBackend for MacExecutor {
         if inputs
             .profile
             .semantic_parameters
-            .get("hvf_guest_kernel")
-            .map(String::as_str)
-            != Some(inputs.kernel.hex())
+            .hvf
+            .as_ref()
+            .map(|hvf| &hvf.guest_kernel)
+            != Some(&inputs.kernel)
         {
             return Err(Error::Integrity("retained HVF kernel hash mismatch".into()));
         }
@@ -274,7 +243,7 @@ impl ExecutionBackend for MacExecutor {
 
 pub(crate) fn validate_report(bytes: &[u8], request: &ExecutionRequest<'_>) -> Result<()> {
     let report: serde_json::Value = serde_json::from_slice(bytes)?;
-    if report["timebase"] != TIMEBASE {
+    if report["timebase"] != crate::engine::ARM_REPORT_TIMEBASE {
         return Err(Error::Integrity(
             "HVF report missing application timebase".into(),
         ));
@@ -285,7 +254,7 @@ pub(crate) fn validate_report(bytes: &[u8], request: &ExecutionRequest<'_>) -> R
             .network
             .latency_ns
             .saturating_sub(request.network.jitter_ns),
-    )?;
+    );
     validate_initial_launch(
         &report,
         launch_skew,
@@ -298,11 +267,7 @@ pub(crate) fn validate_report(bytes: &[u8], request: &ExecutionRequest<'_>) -> R
         .get(&request.prepared.kernel)
         .ok_or_else(|| Error::Integrity("missing retained kernel".into()))?;
     let kernel = fs::read(kernel_path)?;
-    let memory = request.prepared.profile.semantic_parameters["memory_mb"]
-        .parse::<u64>()
-        .map_err(|_| Error::Integrity("invalid retained ARM memory".into()))?
-        * 1024
-        * 1024;
+    let memory = u64::from(request.prepared.profile.semantic_parameters.memory_mb) * 1024 * 1024;
     let mut remaining: std::collections::BTreeSet<_> =
         request.prepared.guests.keys().map(String::as_str).collect();
     for row in report["machines"]
@@ -497,32 +462,23 @@ fn validate_initial_launch<'a>(
 mod process_tests {
     use super::*;
     fn profile() -> ExecutionProfile {
-        let mut parameters = crate::engine::arm_parameters();
-        for (name, value) in [
-            ("hvf_host_release", "test-release"),
-            ("guest_abi", "oci-init-v1"),
-            ("control_channel", "virtio-console-v1"),
-            ("memory_mb", "512"),
-            (
-                "arm_boot_policy",
-                "image-reservation/archive-aligned/final-dtb-v1",
-            ),
-            ("arm_entropy_policy", "sha256-domain-u64-seed-v1"),
-            (
-                "arm_device_policy",
-                "net-console-optional-block/supervisor-pid1-v1",
-            ),
-        ] {
-            parameters.insert(name.into(), value.into());
-        }
-        for name in ["hvf_cpu_features", "hvf_guest_kernel"] {
-            parameters.insert(name.into(), ContentDigest::of(name.as_bytes()).hex().into());
-        }
         ExecutionProfile {
-            backend: "seedbox-hvf".into(),
+            backend: crate::execution::Backend::Hvf,
             engine: ContentDigest::of(b"engine"),
             witness_mode: WitnessMode::FullState,
-            semantic_parameters: parameters,
+            semantic_parameters: SemanticParameters {
+                engine: Some(crate::engine::arm_descriptor()),
+                hvf: Some(HvfParameters {
+                    boot_policy: BOOT_POLICY.into(),
+                    entropy_policy: ENTROPY_POLICY.into(),
+                    device_policy: DEVICE_POLICY.into(),
+                    host_release: "test-release".into(),
+                    cpu_features: ContentDigest::of(b"hvf_cpu_features").hex().into(),
+                    guest_kernel: ContentDigest::of(b"hvf_guest_kernel"),
+                    launch_max_skew_ns: crate::engine::ARM_LAUNCH_MAX_SKEW_NS,
+                }),
+                ..SemanticParameters::new(512)
+            },
         }
     }
     #[test]
@@ -586,36 +542,38 @@ mod process_tests {
     fn retained_application_validates_required_inputs_and_ignores_host_metadata() {
         let complete = profile();
         validate_profile(&complete).expect("complete profile");
-        for key in [
-            "hvf_host_policy",
-            "hvf_host_release",
-            "hvf_cpu_features",
-            "arm_boot_policy",
-            "arm_entropy_policy",
-            "arm_device_policy",
+        let mut descriptive = complete.clone();
+        let hvf = descriptive.semantic_parameters.hvf.as_mut().unwrap();
+        for value in [
+            &mut hvf.host_release,
+            &mut hvf.cpu_features,
+            &mut hvf.boot_policy,
+            &mut hvf.entropy_policy,
+            &mut hvf.device_policy,
         ] {
-            let mut descriptive = complete.clone();
-            descriptive
-                .semantic_parameters
-                .insert(key.into(), "unknown-development-value".into());
-            validate_profile(&descriptive).unwrap();
-            descriptive.semantic_parameters.remove(key);
-            validate_profile(&descriptive).unwrap();
+            *value = "unknown-development-value".into();
         }
+        validate_profile(&descriptive).unwrap();
+        let mut large = complete.clone();
+        large.semantic_parameters.memory_mb = 4096;
+        let mut kvm = complete.clone();
+        kvm.backend = crate::execution::Backend::Kvm;
+        let mut missing = complete.clone();
+        missing.semantic_parameters.hvf = None;
+        for wrong in [large, kvm, missing] {
+            assert!(validate_profile(&wrong).is_err(), "{wrong:?}");
+        }
+        let mut json = serde_json::to_value(&complete).unwrap();
         for (key, value) in [
-            ("timebase", "invalid"),
-            ("memory_mb", "4096"),
-            ("memory_mb", "NaN"),
-            ("hvf_guest_kernel", "not-a-hash"),
-            ("guest_abi", "unknown"),
+            ("memory_mb", serde_json::json!("NaN")),
+            ("guest_abi", serde_json::json!("unknown")),
         ] {
-            let mut wrong = complete.clone();
-            wrong.semantic_parameters.insert(key.into(), value.into());
-            assert!(validate_profile(&wrong).is_err(), "{key}");
+            json["semantic_parameters"][key] = value;
+            assert!(serde_json::from_value::<ExecutionProfile>(json.clone()).is_err());
         }
-        let mut missing = complete;
-        missing.semantic_parameters.remove("hvf_guest_kernel");
-        assert!(validate_profile(&missing).is_err());
+        let mut json = serde_json::to_value(&complete).unwrap();
+        json["semantic_parameters"]["hvf"]["guest_kernel"] = "not-a-hash".into();
+        assert!(serde_json::from_value::<ExecutionProfile>(json).is_err());
     }
     #[test]
     fn retained_constructor_preserves_descriptive_metadata() {
@@ -623,8 +581,7 @@ mod process_tests {
         let engine = temp.path().join("engine");
         fs::write(&engine, b"new executable").expect("engine");
         let store = ContentStore::new(temp.path().join("objects"));
-        let mut previous = profile();
-        previous.semantic_parameters.remove("hvf_host_policy");
+        let previous = profile();
         let executor =
             MacExecutor::from_retained(&engine, &store, previous.clone()).expect("retain");
         assert_eq!(

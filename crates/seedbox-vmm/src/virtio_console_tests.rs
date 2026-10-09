@@ -1,7 +1,5 @@
-// Exercise the actual portable device implementation without requiring KVM.
-#[path = "../../seedbox-vmm/src/virtio_console.rs"]
-mod virtio_console;
-use virtio_console::VirtioConsole;
+//! The KVM virtio console adapter, exercised without KVM.
+use crate::virtio_console::{self, VirtioConsole};
 
 struct Guest {
     device: VirtioConsole,

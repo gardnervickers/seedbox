@@ -363,11 +363,9 @@ yields) and world slice boundaries, after the
 exit clock is accounted. A halted machine wakes from the adopted deadline
 (including its seeded jitter), never from a raw page store. One-shot stop/restart
 uses page disarm and avoids PIT mode port writes.
-The requested semantic parameter is retained
-as `page_timer: true` only when enabled. Replay restores it without an override.
-Timer jitter uses the existing seeded stream. This changes enabled-run timing
-and witnesses; omission preserves the existing identity encoding for the same
-engine and kernel inputs.
+The profile records `page_timer: true|false`. Replay restores it without an override.
+Timer jitter uses the existing seeded stream. Enabling it changes run timing
+and witnesses.
 Checkpoint parent identities also bind the page timer only when enabled,
 preventing checkpoint reuse across timer modes while preserving feature-off hashes.
 This composes with deferred TX's `+deferred-tx` identity suffix: all four option

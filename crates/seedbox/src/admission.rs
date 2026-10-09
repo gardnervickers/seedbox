@@ -1,6 +1,8 @@
 //! Host readiness: the KVM capabilities the engine needs on this core. It does
 //! not pin CPU vendors, models, microcode, CPUID, engines or kernels.
-use crate::{execution::ExecutionProfile, store::ContentDigest, Error, Result};
+use crate::{
+    execution::ExecutionProfile, limits::Size, store::ContentDigest, Context, Error, Result,
+};
 use serde::{Deserialize, Serialize};
 use std::{io::Read, path::Path};
 
@@ -11,35 +13,38 @@ pub fn check_kvm_access() -> Result<()> {
 }
 
 /// Bound input hashing before any OCI preparation or host state changes.
+const RUNTIME_INPUT_LIMIT: u64 = 256 * 1024 * 1024;
+
 pub fn file_digest(path: &Path) -> Result<ContentDigest> {
     use sha2::{Digest, Sha256};
-    let error = |e: std::io::Error| Error::Setup(format!("runtime input {}: {e}", path.display()));
-    let mut file = std::fs::File::open(path).map_err(error)?;
-    if file.metadata().map_err(error)?.len() > 256 * 1024 * 1024 {
-        return Err(Error::Setup(format!(
-            "runtime input {}: exceeds 256 MiB",
-            path.display()
-        )));
+    let input = || format!("runtime input {}", path.display());
+    let too_large = || {
+        Error::Setup(format!(
+            "{}: exceeds {}",
+            input(),
+            Size(RUNTIME_INPUT_LIMIT)
+        ))
+    };
+    let mut file = std::fs::File::open(path).context(Error::Setup, input())?;
+    if file.metadata().context(Error::Setup, input())?.len() > RUNTIME_INPUT_LIMIT {
+        return Err(too_large());
     }
     crate::store::file_digest_with(&mut file, |file| {
         let mut hash = Sha256::new();
         let mut data = [0; 65536];
         let mut total = 0;
         loop {
-            let n = file.read(&mut data).map_err(error)?;
+            let n = file.read(&mut data).context(Error::Setup, input())?;
             if n == 0 {
                 break;
             }
             total += n;
-            if total > 256 * 1024 * 1024 {
-                return Err(Error::Setup(format!(
-                    "runtime input {}: exceeds 256 MiB",
-                    path.display()
-                )));
+            if total as u64 > RUNTIME_INPUT_LIMIT {
+                return Err(too_large());
             }
             hash.update(&data[..n]);
         }
-        ContentDigest::try_from(format!("{:x}", hash.finalize()))
+        Ok(ContentDigest::finish(hash))
     })
 }
 
@@ -80,22 +85,9 @@ pub fn required_policy() -> RequiredPolicy {
     }
 }
 
+/// The ABI and channel are fixed by the profile's type; memory needs a range.
 pub fn validate_profile(profile: &ExecutionProfile) -> Result<()> {
-    crate::vmm::recorded_deferred_tx(profile)?;
-    let policy = required_policy();
-    for (name, value) in [
-        ("guest_abi", &policy.guest_abi),
-        ("control_channel", &policy.control_channel),
-    ] {
-        if profile.semantic_parameters.get(name) != Some(value) {
-            return Err(Error::Integrity(format!("unsupported {name}")));
-        }
-    }
-    let memory = profile
-        .semantic_parameters
-        .get("memory_mb")
-        .and_then(|value| value.parse::<u32>().ok());
-    if memory.is_none_or(|value| !(64..=65536).contains(&value)) {
+    if !(64..=65536).contains(&profile.semantic_parameters.memory_mb) {
         return Err(Error::Integrity(
             "admitted profile requires memory_mb in 64..65536".into(),
         ));
@@ -389,10 +381,10 @@ mod cleanup_tests {
         impl ExecutionBackend for Refused {
             fn profile(&self) -> ExecutionProfile {
                 ExecutionProfile {
-                    backend: "fixture".into(),
+                    backend: Backend::Other("fixture".into()),
                     engine: ContentDigest::of(b"synthetic"),
                     witness_mode: WitnessMode::Exits,
-                    semantic_parameters: BTreeMap::new(),
+                    semantic_parameters: SemanticParameters::new(512),
                 }
             }
             fn preflight(&self, _: Option<&Path>) -> Result<()> {
