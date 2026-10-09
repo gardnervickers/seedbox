@@ -5,7 +5,7 @@ machine you are on; the runner never selects tests by probing the host.
 
 ```sh
 nix develop --command bash harness/check.sh   # portable (the default)
-bash harness/check.sh linux-kvm               # any Linux KVM host, including droplets
+bash harness/check.sh linux-kvm               # any Linux KVM host, including GitHub-hosted Ubuntu runners
 bash harness/check.sh linux --cpu 14          # the AMD host
 bash harness/check.sh mac                     # Apple Silicon
 bash harness/check.sh linux-counter --list    # check requirements, build nothing
@@ -117,3 +117,32 @@ the maintained suite.
 To check a different revision, check it out in a Git worktree and run the same
 command there. Low-level standalone world campaigns remain separate diagnostic
 tools, documented in `harness/worlds/README.md`.
+
+## Hosted PV CI
+
+The PV tests workflow runs `linux-apps` (including portable prerequisites) on
+GitHub-hosted `ubuntu-24.04` for pull requests, main pushes, and manual dispatch.
+It checks KVM VM creation before building and uses the runner Docker engine.
+Nix store and Cargo dependencies/build outputs are cached in GitHub Actions;
+guest assets are built explicitly from the checkout. Cold caches require downloads
+and builds. Jobs time out after 100 minutes and superseded runs are canceled.
+No cloud account, self-hosted runner, PMU, or external cleanup service is needed.
+
+The Nix cache key covers the locked toolchain and all kernel/helper recipes.
+The development shell and guest assets are GC-rooted; unreferenced Nix paths are
+collected toward a 5 GiB store before saving (live roots can exceed this target).
+The cache is saved before tests so failed tests do not discard expensive builds.
+Rust caching uses the Nix-selected compiler and all three workspaces, retaining
+compiled dependencies while pruning workspace binaries and incremental outputs.
+It saves only successful builds so canceled or incomplete builds cannot occupy
+an immutable cache key. Source commits do not
+create a fresh full-target cache each time. Cache hits are recorded in the job
+summary. GitHub's branch-scoped cache isolation keeps PR caches out of main.
+The repository retains its existing 10 GB cache eviction limit; diagnostic
+artifacts are capped at 64 MiB per run and expire after seven days.
+CI disables Cargo debug information and incremental compilation to keep the three
+workspace builds within hosted-runner disk limits. It also removes preinstalled
+Android, .NET and Swift SDKs that Seedbox does not use before building.
+The separate Guest assets workflow also caches Nix builds per architecture and
+recipe, so repeated PR updates reuse kernels and helpers instead of rebuilding
+them. Its x86 job can also restore the PV job's Nix cache when available.

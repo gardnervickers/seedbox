@@ -287,8 +287,8 @@ images or executes guests. Compatibility readiness is not replay qualification.
   the old run's.
 - The default `counter` timebase needs an AMD Zen KVM host with guest perf
   counting. `--timebase pv` needs only KVM, so it also runs on cloud VMs with
-  nested KVM and no PMU; `tools/droplet/pv-run.sh` runs batched PV checks on a
-  throwaway DigitalOcean droplet.
+  nested KVM and no PMU. `.github/workflows/pv-tests.yml` runs PV checks on
+  GitHub-hosted Ubuntu x86-64 runners.
 - `crates/seedbox-vmm` builds only on Linux x86-64, so a Mac pre-check covers
   none of it. A VMM change needs `cargo build-vmm` and
   `cargo test-vmm --features kvm-tests` on a Linux KVM host. Without the

@@ -1216,11 +1216,7 @@ pub fn drain_machine_messages<M: WorldMachine>(
             world.faults.target_exited(id, m, world.machines[m].time);
         }
     }
-    for (at, line) in world.machines[m]
-        .control_requests
-        .drain(..)
-        .collect::<Vec<_>>()
-    {
+    for (at, line) in std::mem::take(&mut world.machines[m].control_requests) {
         if until_barrier {
             return Err(format!(
                 "{}: runtime control request at {at} ns, before the fork point; fork earlier (boot.fork_at_ns)",

@@ -2021,16 +2021,15 @@ fn mac_counter_timebase_is_rejected_before_preparation() {
 fn mac_linux_only_runtime_modes_fail_before_state_or_preparation() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("compose.yaml"), "name: mac-modes\nservices:\n  app:\n    image: busybox:1.37.0\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app, exit_code: 0}\n").unwrap();
-    for (args, expected) in [(
-        vec!["run", ".", "--checkpoint-at-ns", "1", "--branch-seed", "2"],
-        "error: --checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac\n",
-    )] {
-        let output = seedbox(&args, directory.path());
-        assert_eq!(output.status.code(), Some(2));
-        assert_eq!(stderr(&output), expected);
-        assert!(output.stdout.is_empty());
-        assert!(!directory.path().join(".seedbox").exists());
-    }
+    let args = ["run", ".", "--checkpoint-at-ns", "1", "--branch-seed", "2"];
+    let output = seedbox(&args, directory.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        stderr(&output),
+        "error: --checkpoint-at-ns and --branch-seed require Linux KVM; omit them on Mac\n"
+    );
+    assert!(output.stdout.is_empty());
+    assert!(!directory.path().join(".seedbox").exists());
     for option in ["page_timer", "deferred_tx"] {
         fs::write(directory.path().join("compose.yaml"), format!("name: mac-modes\nservices:\n  app:\n    image: busybox:1.37.0\nx-seedbox:\n  version: 1\n  seed: 1\n  machine: {{{option}: true}}\n  limits: {{simulated_time: 1s, wall_time: 1m}}\n  check: {{service: app, exit_code: 0}}\n")).unwrap();
         for command in ["run", "explore"] {

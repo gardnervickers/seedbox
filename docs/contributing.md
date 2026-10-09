@@ -19,7 +19,7 @@ Run tests from the project Nix shell by naming the platform suites you want:
 
 ```sh
 nix develop --command bash harness/check.sh   # portable (the default)
-bash harness/check.sh linux-kvm               # any Linux KVM host, including droplets
+bash harness/check.sh linux-kvm               # any Linux KVM host, including GitHub-hosted Ubuntu runners
 bash harness/check.sh linux --cpu 14          # the AMD host
 bash harness/check.sh mac                     # Apple Silicon
 bash harness/check.sh linux-counter --list    # check requirements, build nothing
