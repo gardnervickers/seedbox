@@ -113,10 +113,10 @@ impl WorldMachine for Machine {
         Ok(())
     }
     fn supports_throttle(&self) -> bool {
-        self.pv_clock
+        self.features.pv()
     }
     fn throttle(&mut self, factor_permille: u64) -> Result<(), String> {
-        if !self.pv_clock {
+        if !self.features.pv() {
             return Err("throttle needs the pv timebase".into());
         }
         self.throttle_permille = Some(factor_permille);

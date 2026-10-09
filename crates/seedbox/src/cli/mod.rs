@@ -586,16 +586,18 @@ fn validate_machine(simulation: &config::Simulation) -> Result<()> {
 #[command(next_help_heading = "Performance (never changes results)")]
 struct Performance {
     /// PMU approach and stepping distance in branches: a count or `adaptive`.
-    #[arg(long, default_value = "adaptive", value_parser = parse_margin)]
+    #[arg(long, default_value = launch::ADAPTIVE_MARGIN, value_parser = parse_margin)]
     margin: String,
     /// Initial undo margin in branches; 0 disables undo.
-    #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u64).range(0..=1 << 18))]
+    #[arg(long, default_value_t = launch::DEFAULT_UNDO_MARGIN, value_parser = clap::value_parser!(u64).range(0..=1 << 18))]
     undo: u64,
 }
 
+use seedbox_engine_core::launch;
+
 fn parse_margin(value: &str) -> std::result::Result<String, String> {
     match value.parse::<u64>() {
-        _ if value == "adaptive" => Ok(value.into()),
+        _ if value == launch::ADAPTIVE_MARGIN => Ok(value.into()),
         Ok(branches) if branches > 0 => Ok(value.into()),
         _ => Err("expected `adaptive` or a positive branch count".into()),
     }

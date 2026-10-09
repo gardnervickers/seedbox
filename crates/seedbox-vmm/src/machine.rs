@@ -17,6 +17,7 @@ use crate::virtio_console::VirtioConsole;
 use crate::virtio_net::{ReceiveOutcome, VirtioNet};
 use kvm_bindings::*;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
+use seedbox_engine_core::launch::MachineFeatures;
 use sha2::{Digest, Sha256};
 use std::os::fd::AsRawFd;
 use std::time::Instant;
@@ -135,10 +136,16 @@ pub struct BootSpec<'a> {
     pub undo_margin: u64,
     /// The guest parks at its launch barrier until the world releases it.
     pub barrier: bool,
-    /// The machine runs under the PV clock timebase (no host perf counter).
-    pub pv_clock: bool,
-    pub page_timer: bool,
+    pub features: MachineFeatures,
 }
+
+/// A PV machine with no other features, for tests.
+#[cfg(test)]
+pub(crate) const PV: MachineFeatures = MachineFeatures {
+    timebase: seedbox_engine_core::launch::Timebase::Pv,
+    page_timer: false,
+    deferred_tx: false,
+};
 
 #[cfg(test)]
 impl<'a> BootSpec<'a> {
@@ -157,8 +164,7 @@ impl<'a> BootSpec<'a> {
             disk: None,
             undo_margin: 0,
             barrier: false,
-            pv_clock: false,
-            page_timer: false,
+            features: MachineFeatures::default(),
         }
     }
 }
@@ -562,8 +568,9 @@ pub struct Machine {
     /// Per-seed words the guest reads after its release.
     entropy: [u32; ENTROPY_WORDS],
     entropy_read: usize,
-    pub(crate) pv_clock: bool,
-    page_timer_requested: bool,
+    /// Fixed for the machine's life; `features.page_timer` is what was
+    /// requested, `page_timer.enabled` whether the guest accepted it.
+    pub(crate) features: MachineFeatures,
     /// The MSR list a fork snapshot saves.
     msrs: Msrs,
     pub stats: Stats,
@@ -633,7 +640,7 @@ impl Machine {
     pub fn new(kvm: &Kvm, name: &str, spec: &BootSpec) -> Result<Self, String> {
         // The PV clock needs no counter, so no host PMU; the
         // profile is then never consulted.
-        let profile = if spec.pv_clock {
+        let profile = if spec.features.pv() {
             &crate::profile::ZEN
         } else {
             crate::profile::host()?
@@ -657,7 +664,7 @@ impl Machine {
         }
         let mut mem = Mapping::new(mem_size)?;
         let mut page = TimePage::new()?;
-        if spec.pv_clock {
+        if spec.features.pv() {
             page.set(PAGE_PV_CLOCK, 1);
         }
         let m = mem.as_mut_slice();
@@ -756,7 +763,11 @@ impl Machine {
             ..Default::default()
         })
         .map_err(|e| e.to_string())?;
-        let net = spec.mac.map(VirtioNet::new);
+        let net = spec.mac.map(|mac| {
+            let mut net = VirtioNet::new(mac);
+            net.set_deferred_tx(spec.features.deferred_tx);
+            net
+        });
         let msrs = crate::undo::msr_list(kvm, &vcpu)?;
         let undo = if spec.undo_margin > 0 {
             let mut u = Undo::new(kvm, &vcpu, mem_size)?;
@@ -819,12 +830,11 @@ impl Machine {
             barrier: spec.barrier,
             entropy: [0; ENTROPY_WORDS],
             entropy_read: 0,
-            pv_clock: spec.pv_clock,
-            page_timer_requested: spec.page_timer,
+            features: spec.features,
             msrs,
             stats: Stats::default(),
             // A PV clock run can never share a witness with a counter run.
-            witness: if spec.pv_clock {
+            witness: if spec.features.pv() {
                 Sha256::new_with_prefix(b"timebase=pv")
             } else {
                 Sha256::new()
@@ -1070,8 +1080,7 @@ impl Machine {
             adaptive_margin: _,
             undo_margin: _,
             barrier: _,
-            pv_clock: _,
-            page_timer_requested: _,
+            features: _,
             // Host execution state, reset by `restore`, or none at a fork point.
             stepping: _,
             sync_regs_ready: _,
@@ -1454,7 +1463,7 @@ impl Machine {
     }
 
     fn enable_page_timer(&mut self) {
-        if self.page_timer_requested && self.abi >= ABI_PAGE_TIMER {
+        if self.features.page_timer && self.abi >= ABI_PAGE_TIMER {
             self.page_set(PAGE_TIMER_DEADLINE, TIMER_DISARMED);
             self.page_set(PAGE_CAPABILITIES, CAP_PAGE_TIMER);
             self.page_timer.enabled = true;
@@ -2032,7 +2041,7 @@ impl Machine {
     /// return before the next loop iteration synchronizes the page.
     fn adopt_exit_clock(&mut self, hard: u64) -> Result<(), String> {
         let exit_time = self.checked_page_time(hard)?;
-        if self.pv_clock || self.page_timer.enabled {
+        if self.features.pv() || self.page_timer.enabled {
             // In particular HLT must adopt at its full exit time, not
             // at a watchdog landing's partial syscall-only time. A
             // stop that left the guest's clock ahead of ours could be
@@ -2054,7 +2063,7 @@ impl Machine {
         // PV clock only: 1 means the guest's clock would pass
         // the bound we published (`soft`); it waits for time to
         // move, so move it there.
-        if v == 1 && self.pv_clock {
+        if v == 1 && self.features.pv() {
             let bound = if self.page_timer.enabled {
                 self.page_get(PAGE_BOUND).min(soft)
             } else {
@@ -2227,13 +2236,13 @@ impl Machine {
                 self.world.name
             ));
         }
-        if self.pv_clock && self.page_get(PAGE_PV_CLOCK) != 2 {
+        if self.features.pv() && self.page_get(PAGE_PV_CLOCK) != 2 {
             return Err(format!(
                 "{}: the guest kernel lacks PV clock support; rebuild it from kernel/ for the pv timebase",
                 self.world.name
             ));
         }
-        if self.page_timer_requested && self.abi < ABI_PAGE_TIMER {
+        if self.features.page_timer && self.abi < ABI_PAGE_TIMER {
             return Err("the guest kernel lacks page timer support; rebuild it from kernel/ or drop --page-timer".into());
         }
         self.enable_page_timer();
@@ -2265,7 +2274,7 @@ impl Machine {
             s.timer_write_syscalls_max = s.timer_write_syscalls_max.max(run_syscalls);
             // PV only, so counter witnesses don't move:
             // deliver the due tick before the write.
-            if self.pv_clock {
+            if self.features.pv() {
                 self.expire_timers()?;
             }
         }
@@ -2680,7 +2689,7 @@ mod net_poll_tests {
                 kernel.extend(code);
                 let spec = BootSpec {
                     mac: Some([2, 0, 0, 0, 0, 1]),
-                    pv_clock: true,
+                    features: PV,
                     ..BootSpec::test(&kernel)
                 };
                 let mut m = Machine::new(&kvm, "net-poll", &spec).unwrap();
@@ -2789,7 +2798,7 @@ mod net_poll_tests {
             kernel[0x1f1] = 1;
             kernel.extend(code);
             let spec = BootSpec {
-                pv_clock: true,
+                features: PV,
                 ..BootSpec::test(&kernel)
             };
             let mut m = Machine::new(&kvm, "pv-stop", &spec).unwrap();
@@ -2851,8 +2860,11 @@ mod net_poll_tests {
                 kernel.extend(code);
                 let spec = BootSpec {
                     mac: Some([2, 0, 0, 0, 0, 1]),
-                    pv_clock: true,
-                    page_timer,
+                    features: MachineFeatures {
+                        timebase: seedbox_engine_core::launch::Timebase::Pv,
+                        page_timer,
+                        ..MachineFeatures::default()
+                    },
                     ..BootSpec::test(&kernel)
                 };
                 let mut m = Machine::new(&kvm, "tx-spin", &spec).unwrap();
@@ -3224,7 +3236,10 @@ mod io_boundary_tests {
             kernel.extend(&code);
             let spec = BootSpec {
                 undo_margin: undo,
-                page_timer: true,
+                features: MachineFeatures {
+                    page_timer: true,
+                    ..MachineFeatures::default()
+                },
                 ..BootSpec::test(&kernel)
             };
             let mut m = Machine::new(&kvm, "page-rearm", &spec).unwrap();
@@ -3539,7 +3554,7 @@ mod fork_tests {
         let mut m = probe_machine(&kvm, 256, false);
         for requested in [false, true] {
             for abi in 0..=ABI_PAGE_TIMER {
-                m.page_timer_requested = requested;
+                m.features.page_timer = requested;
                 m.abi = abi;
                 m.page_timer = PageTimer::new();
                 m.page_set(PAGE_TIMER_DEADLINE, 0);
@@ -4080,7 +4095,7 @@ mod fork_tests {
     fn runtime_checkpoint_restores_pv_fields_and_seeded_syscall_cost() {
         let kvm = Kvm::new().unwrap();
         let mut m = probe_machine(&kvm, 0, false);
-        m.pv_clock = true;
+        m.features.timebase = seedbox_engine_core::launch::Timebase::Pv;
         m.syscall_ns = 937;
         m.abi = ABI_PAGE_RESEED;
         for i in 6..14 {

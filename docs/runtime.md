@@ -408,8 +408,8 @@ identity.
 Replay defaults to the retained engine. An explicit `--vmm NEW_BINARY`
 permits a fresh identity and witness comparison with it.
 The replacement is probed once for its launch contract: a combined Seedbox CLI
-uses its internal worker entrypoint, while a standalone VMM receives worker flags
-directly. The new run retains that contract; ordinary replay uses it without
+uses its internal worker entrypoint, while a standalone VMM is started directly.
+Both read the same JSON launch request, `output/worker-request.json`. The new run retains that contract; ordinary replay uses it without
 probing. Memory, clock, fault and other simulation settings remain unchanged.
 Replay does not require registry access, a builder, or the original Compose files.
 
@@ -564,6 +564,9 @@ preparation explicitly. Unknown users, missing executables or shared libraries,
 and unsupported guest syscalls are compatibility failures, never workload PASS.
 
 `output/world.json` is generated execution input, not user-authored configuration.
+`output/worker-request.json` is the x86 engine's launch request: the world path,
+seed, output limits, the recorded timebase, page-timer and deferred-TX features,
+and the `--margin`/`--undo` performance settings.
 `output/vmm.json` contains the engine report; `output/vmm.stderr` and streamed
 `output/machines/*.console` / `*.mgmt` files preserve diagnostics on cancellation
 and timeouts. Serial output is capped at 1 GiB total divided equally between the

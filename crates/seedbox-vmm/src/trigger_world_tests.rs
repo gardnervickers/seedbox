@@ -22,8 +22,7 @@ fn boot(marker: u8, undo: u64) -> BootInputs {
         mac: None,
         control_channel: false,
         disk: None,
-        pv_clock: false,
-        page_timer: false,
+        features: MachineFeatures::default(),
         undo_margin: undo,
         tolerance: 0,
         timer_jitter: 0,
@@ -31,7 +30,6 @@ fn boot(marker: u8, undo: u64) -> BootInputs {
         margin: None,
         console_limit: None,
         log_chunk_limit: None,
-        deferred_tx: false,
     }
 }
 fn world(undo: u64, reverse: bool) -> World {

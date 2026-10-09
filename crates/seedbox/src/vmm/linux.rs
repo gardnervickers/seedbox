@@ -19,9 +19,8 @@ pub(super) fn execute(
     }
     let timebase = recorded_timebase(&backend.profile)?;
     use crate::worker_process::{incomplete, WorkerLaunch};
+    // Performance values travel in the launch request; the environment stays cleared.
     let mut launch = WorkerLaunch::prepare(&request)?;
-    // Performance values are explicit; hidden process settings stay cleared.
-    launch.command.envs(request.performance_parameters);
 
     if request.cancellation.is_cancelled() {
         return Ok(incomplete(

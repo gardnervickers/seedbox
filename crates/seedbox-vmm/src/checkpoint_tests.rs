@@ -23,10 +23,8 @@ fn world(undo: u64) -> World {
         exact_timer_ppm: 0,
         margin: None,
         console_limit: None,
-        pv_clock: false,
-        page_timer: false,
+        features: MachineFeatures::default(),
         log_chunk_limit: None,
-        deferred_tx: false,
     };
     let names = vec!["a".to_string(), "b".to_string()];
     let faults = boot_faults(
