@@ -394,4 +394,3 @@ preventing checkpoint reuse across timer modes while preserving feature-off hash
 This composes with deferred TX's `+deferred-tx` timebase suffix: all four flag
 combinations have distinct parent and branch identities, and both off retains
 the original encoding.
-
