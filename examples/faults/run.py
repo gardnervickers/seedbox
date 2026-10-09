@@ -210,7 +210,7 @@ def main():
     if a.delayed_guest_init:
         focused_projects(projects)
     common = ["--kernel", a.kernel, "--vmm", a.vmm, "--guest-init", a.guest_init,
-              "--cpu", str(a.cpu), "--state", a.state, "--memory-mb", "512", "--margin", a.margin]
+              "--cpu", str(a.cpu), "--state", a.state, "--margin", a.margin]
     evidence = RUN_EVIDENCE
     for variant, status, faulted in (("fixed", "PASS", True), ("broken", "FAIL", True), ("broken-no-faults", "PASS", False)):
         run = execute([a.seedbox, "run", str(projects / variant / "compose.yaml"), *common], 0 if status == "PASS" else 1)

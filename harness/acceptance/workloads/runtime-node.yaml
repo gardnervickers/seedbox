@@ -9,6 +9,7 @@ configs:
   driver: {file: ../driver/runtime_node.js}
 x-seedbox:
   version: 1
+  machine: {memory_mb: 2048}
   seed: 172
   limits: {simulated_time: 60s, wall_time: 15m}
   check: {service: node, exit_code: 0}
