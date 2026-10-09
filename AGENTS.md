@@ -14,14 +14,15 @@ machines on KVM. Read [README.md](README.md) first; it has the layout table.
   executable with the Hypervisor entitlement. Guest assets are never built or
   downloaded by Cargo. `nix/runtime.nix` owns `runtimeAssets`, `preparationImage`,
   `runtimeArchive` and `runtimeSources`; `nix/kernels.nix` builds kernels separately.
-  Native Linux CI builds/publishes both architectures, with independent input
-  hashes from `tools/runtime/inputs.json` and `kernel/inputs.json`. Keep Cargo's
-  framing aligned with both `release.py` scripts. CLI/application changes and
-  kernel-only changes must not rebuild helpers. Kernel metadata lives in
+  Native Linux CI builds/publishes both architectures when their declared input
+  paths change. Releases use ordinary CI run labels; Cargo does not hash sources
+  or embed release identifiers. CLI/application changes and kernel-only changes
+  must not rebuild helpers. Kernel metadata lives in
   `kernel/source.json`. The optional legacy `SEEDBOX_LINUX_RUNTIME_BUNDLE` build
   input still embeds only guest kernel/static helpers plus notices/provenance.
   Runtime extraction remains bounded and private. Run/prepare/explore fetch
-  missing private release assets with progress and verified atomic caching.
+  the latest published guest assets on a cache miss, with progress and verified
+  atomic caching. Cache hits require no HTTP or version admission.
   `--kernel` and `--runtime-assets` (and their environment path overrides) bypass
   their respective downloads; manual native Linux Nix builds are documented in
   `tools/runtime/README.md`. The CLI owns HTTP configuration, credentials, cache

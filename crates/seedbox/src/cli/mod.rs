@@ -391,7 +391,7 @@ struct KvmInputs {
 struct RuntimeInputs {
     #[command(flatten)]
     kvm: KvmInputs,
-    /// Guest helper archive [default: download once and cache].
+    /// Guest helper archive [default: download the latest release once and cache].
     #[arg(long, env = "SEEDBOX_RUNTIME_ASSETS")]
     runtime_assets: Option<PathBuf>,
     /// Static guest supervisor [default: released helper, then the copy built into this binary].

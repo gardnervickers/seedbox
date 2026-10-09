@@ -3,7 +3,6 @@
     "flake.lock",
     "nix/runtime.nix",
     "tools/runtime/inputs.json",
-    "tools/runtime/release.py",
     "tools/runtime/package.py",
     "tools/runtime/build-assets.sh",
     "tools/runtime/filesystem.py",

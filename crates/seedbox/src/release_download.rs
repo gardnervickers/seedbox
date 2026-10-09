@@ -1,4 +1,4 @@
-//! Lazy downloads of independently released kernels and guest assets. The CLI
+//! Lazy downloads of the latest published kernels and guest assets. The CLI
 //! supplies HTTP configuration, credentials, cache location, cancellation and
 //! progress; replay never calls this module.
 use crate::{execution::CancellationToken, store::ContentDigest, Error, Result};
@@ -11,21 +11,12 @@ use std::{
     time::Duration,
 };
 
-pub const KERNEL_RELEASE: &str = env!("SEEDBOX_KERNEL_RELEASE");
-pub const RUNTIME_RELEASE: &str = env!("SEEDBOX_RUNTIME_RELEASE");
-
 #[derive(Clone, Copy)]
 pub enum ReleaseAsset {
     Kernel,
     Runtime,
 }
 impl ReleaseAsset {
-    fn release(self) -> &'static str {
-        match self {
-            Self::Kernel => KERNEL_RELEASE,
-            Self::Runtime => RUNTIME_RELEASE,
-        }
-    }
     fn kind(self) -> &'static str {
         match self {
             Self::Kernel => "kernel",
@@ -61,9 +52,6 @@ impl ReleaseAsset {
             Self::Kernel => 128 << 20,
             Self::Runtime => 512 << 20,
         }
-    }
-    fn tag(self) -> String {
-        format!("{}-{}", self.kind(), self.release())
     }
     fn asset_name(self, architecture: &str) -> String {
         match self {
@@ -125,7 +113,7 @@ impl ReleaseDownload {
         cache: &Path,
         architecture: &str,
     ) -> Result<Option<PathBuf>> {
-        let root = cache.join(asset.release()).join(architecture).join("ready");
+        let root = cache.join(architecture).join("ready");
         lookup_ready(asset, &root, architecture)
     }
 
@@ -134,11 +122,7 @@ impl ReleaseDownload {
             Error::Setup(format!(
                 "{} is not cached at {}; run seedbox run to download it, or pass {}",
                 asset.description(),
-                cache
-                    .join(asset.release())
-                    .join(architecture)
-                    .join("ready")
-                    .display(),
+                cache.join(architecture).join("ready").display(),
                 asset.remedy()
             ))
         })
@@ -158,7 +142,7 @@ impl ReleaseDownload {
                 self.asset.remedy()
             )));
         }
-        let parent = cache.join(self.asset.release()).join(architecture);
+        let parent = cache.join(architecture);
         self.ensure_in(&parent, architecture, cancellation, &progress).map_err(|error| match error {
             Error::Io(error) => Error::Setup(format!("{} cache {}: {error}; check directory permissions or set XDG_CACHE_HOME to a writable directory", self.asset.kind(), parent.display())),
             other => other,
@@ -209,30 +193,12 @@ impl ReleaseDownload {
             ));
             return Ok(path);
         }
-        let tag = self.asset.tag();
         progress(&format!(
-            "downloading {architecture} {} from github.com/{REPOSITORY} ({tag})",
+            "downloading latest {architecture} {} from github.com/{REPOSITORY}",
             self.asset.description()
         ));
-        let mut response = self.get(
-            &format!("/repos/{REPOSITORY}/releases/tags/{tag}"),
-            "application/vnd.github+json",
-        )?;
-        let metadata = read_limited(response.body_mut().as_reader(), MAX_METADATA, cancellation)
-            .map_err(|error| download_error(self.asset, error))?;
-        let release: Release = serde_json::from_slice(&metadata).map_err(|error| {
-            Error::Setup(format!(
-                "invalid {} release metadata from GitHub: {error}; check the Guest assets workflow",
-                self.asset.kind()
-            ))
-        })?;
-        if release.tag_name != tag || release.draft {
-            return Err(Error::Setup(format!(
-                "{} release {tag} is not published; check the Guest assets workflow or pass {}",
-                self.asset.kind(),
-                self.asset.remedy()
-            )));
-        }
+        let release = self.latest_release(cancellation)?;
+        let tag = &release.tag_name;
         let name = self.asset.asset_name(architecture);
         let mut assets = release.assets.iter().filter(|asset| asset.name == name);
         let asset = assets.next().ok_or_else(|| {
@@ -275,7 +241,7 @@ impl ReleaseDownload {
         fs::write(
             stage.path().join(self.asset.metadata()),
             serde_json::to_vec(&CachedAsset {
-                release: self.asset.release().into(),
+                release: release.tag_name.clone(),
                 architecture: architecture.into(),
                 size,
                 sha256: actual,
@@ -292,6 +258,39 @@ impl ReleaseDownload {
         Ok(path)
     }
 
+    fn latest_release(&self, cancellation: &CancellationToken) -> Result<Release> {
+        let prefix = format!("{}-", self.asset.kind());
+        let mut page = 1;
+        loop {
+            let mut response = self.get(
+                &format!("/repos/{REPOSITORY}/releases?per_page=20&page={page}"),
+                "application/vnd.github+json",
+            )?;
+            let metadata =
+                read_limited(response.body_mut().as_reader(), MAX_METADATA, cancellation)
+                    .map_err(|error| download_error(self.asset, error))?;
+            let releases: Vec<Release> = serde_json::from_slice(&metadata).map_err(|error| {
+                Error::Setup(format!(
+                    "invalid release metadata from GitHub: {error}; check the Guest assets workflow"
+                ))
+            })?;
+            let count = releases.len();
+            if let Some(release) = releases
+                .into_iter()
+                .find(|release| !release.draft && release.tag_name.starts_with(&prefix))
+            {
+                return Ok(release);
+            }
+            if count < 20 {
+                return Err(Error::Setup(format!(
+                    "no published {} release on github.com/{REPOSITORY}; check the Guest assets workflow or pass {}",
+                    self.asset.kind(), self.asset.remedy()
+                )));
+            }
+            page += 1;
+        }
+    }
+
     fn get(&self, path: &str, accept: &str) -> Result<ureq::http::Response<ureq::Body>> {
         let mut request = self
             .agent
@@ -303,7 +302,7 @@ impl ReleaseDownload {
         }
         request.call().map_err(|error| match error {
             ureq::Error::StatusCode(code @ (401 | 403 | 404)) => Error::Setup(format!(
-                "{} download from github.com/{REPOSITORY} failed (HTTP {code}); this repository is private: set GH_TOKEN or GITHUB_TOKEN with read access, check that {} has been published by the Guest assets workflow, or pass {}", self.asset.kind(), self.asset.tag(), self.asset.remedy()
+                "{} download from github.com/{REPOSITORY} failed (HTTP {code}); this repository is private: set GH_TOKEN or GITHUB_TOKEN with read access, check the Guest assets workflow for a published release, or pass {}", self.asset.kind(), self.asset.remedy()
             )),
             other => Error::Setup(format!("{} download from GitHub failed: {other}; check your network connection and retry, or pass {}", self.asset.kind(), self.asset.remedy())),
         })
@@ -404,14 +403,13 @@ fn cached(asset: ReleaseAsset, root: &Path, architecture: &str) -> Result<PathBu
         std::io::sink(),
         &CancellationToken::default(),
     )?;
-    if record.release != asset.release()
-        || record.architecture != architecture
+    if record.architecture != architecture
         || size == 0
         || size != record.size
         || sha256 != record.sha256
     {
         return Err(Error::Integrity(
-            "cached asset digest or identity differs".into(),
+            "cached asset size, architecture or digest differs".into(),
         ));
     }
     Ok(root.join(asset.filename()))
@@ -427,27 +425,46 @@ mod tests {
     };
 
     // Serve the GitHub release protocol locally; no test credentials or network.
-    const RELEASE_ID: &str = KERNEL_RELEASE;
-
     fn server(
         asset: ReleaseAsset,
         kernel: &[u8],
         expected: &[u8],
         status: u16,
     ) -> (ReleaseDownload, thread::JoinHandle<Vec<String>>) {
+        server_with_pages(asset, kernel, expected, status, false)
+    }
+
+    fn server_with_pages(
+        asset: ReleaseAsset,
+        kernel: &[u8],
+        expected: &[u8],
+        status: u16,
+        paginate: bool,
+    ) -> (ReleaseDownload, thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let kernel = kernel.to_vec();
         let metadata = serde_json::json!({
-            "tag_name": asset.tag(), "draft": false,
+            "tag_name": format!("{}-123", asset.kind()), "draft": false,
             "assets": [{"id": 7, "name": asset.asset_name("aarch64"), "size": expected.len(),
                 "digest": format!("sha256:{}", ContentDigest::of(expected).hex())}]
-        })
+        });
+        let metadata = serde_json::json!([
+            {"tag_name": "v0.1.0", "draft": false, "assets": []},
+            {"tag_name": format!("{}-124", asset.kind()), "draft": true, "assets": []},
+            metadata
+        ])
         .to_string()
         .into_bytes();
+        let first_page = serde_json::to_vec(&vec![
+            serde_json::json!({"tag_name": "v0.1.0", "draft": false, "assets": []});
+            20
+        ])
+        .unwrap();
         let worker = thread::spawn(move || {
             let mut requests = Vec::new();
-            for index in 0..if status == 200 { 2 } else { 1 } {
+            let metadata_index = usize::from(paginate);
+            for index in 0..if status == 200 { metadata_index + 2 } else { 1 } {
                 let (mut connection, _) = listener.accept().unwrap();
                 connection
                     .set_read_timeout(Some(Duration::from_secs(5)))
@@ -459,7 +476,13 @@ mod tests {
                     request.push(byte[0]);
                 }
                 requests.push(String::from_utf8(request).unwrap());
-                let body = if index == 0 { &metadata } else { &kernel };
+                let body = if paginate && index == 0 {
+                    &first_page
+                } else if index == metadata_index {
+                    &metadata
+                } else {
+                    &kernel
+                };
                 write!(
                     connection,
                     "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -493,7 +516,7 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"guest kernel");
         let requests = server.join().unwrap();
         assert!(requests[0].starts_with(&format!(
-            "GET /repos/{REPOSITORY}/releases/tags/kernel-{RELEASE_ID} "
+            "GET /repos/{REPOSITORY}/releases?per_page=20&page=1 "
         )));
         assert!(requests[1].starts_with(&format!("GET /repos/{REPOSITORY}/releases/assets/7 ")));
         assert!(requests.iter().all(|s| s
@@ -511,7 +534,7 @@ mod tests {
             path
         );
         let messages = messages.into_inner().unwrap();
-        assert!(messages[0].starts_with("downloading aarch64 guest kernel"));
+        assert!(messages[0].starts_with("downloading latest aarch64 guest kernel"));
         assert!(messages
             .last()
             .unwrap()
@@ -521,6 +544,20 @@ mod tests {
                 .unwrap()
                 .contains("test-credential")
         );
+    }
+
+    #[test]
+    fn newest_guest_release_is_found_after_unrelated_release_pages() {
+        let directory = tempfile::tempdir().unwrap();
+        let (downloader, server) =
+            server_with_pages(ReleaseAsset::Kernel, b"kernel", b"kernel", 200, true);
+        let path = downloader
+            .ensure(directory.path(), "aarch64", &Default::default(), |_| {})
+            .unwrap();
+        let requests = server.join().unwrap();
+        assert!(requests[0].contains("per_page=20&page=1"));
+        assert!(requests[1].contains("per_page=20&page=2"));
+        assert_eq!(fs::read(path).unwrap(), b"kernel");
     }
 
     #[test]
@@ -554,7 +591,7 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("SHA-256 differs"));
         server.join().unwrap();
-        let parent = directory.path().join(RELEASE_ID).join("aarch64");
+        let parent = directory.path().join("aarch64");
         assert!(!parent.join("ready").exists());
         assert_eq!(fs::read_dir(parent).unwrap().count(), 1); // only the lock
     }
@@ -622,16 +659,6 @@ mod tests {
     }
 
     #[test]
-    fn cargo_and_actions_identify_exactly_the_same_kernel_inputs() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let output = std::process::Command::new("python3")
-            .arg(root.join("kernel/release.py"))
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), RELEASE_ID);
-    }
-    #[test]
     fn runtime_archive_uses_its_own_release_cache_and_authentication() {
         let directory = tempfile::tempdir().unwrap();
         let (downloader, server) = server(
@@ -641,33 +668,35 @@ mod tests {
             200,
         );
         let path = downloader
-            .ensure(directory.path(), "aarch64", &Default::default(), |_| {})
+            .ensure(
+                &directory.path().join("assets"),
+                "aarch64",
+                &Default::default(),
+                |_| {},
+            )
             .unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"runtime archive");
         assert_eq!(path.file_name().unwrap(), "runtime.tar.gz");
         let requests = server.join().unwrap();
-        assert!(requests[0].contains(&format!("/releases/tags/runtime-{RUNTIME_RELEASE}")));
+        assert!(requests[0].contains("/releases?per_page=20&page=1"));
         assert!(requests.iter().all(|request| request
             .to_ascii_lowercase()
             .contains("authorization: bearer test-credential")));
         assert_eq!(
-            ReleaseDownload::cached(ReleaseAsset::Runtime, directory.path(), "aarch64").unwrap(),
+            ReleaseDownload::cached(
+                ReleaseAsset::Runtime,
+                &directory.path().join("assets"),
+                "aarch64"
+            )
+            .unwrap(),
             path
         );
-        assert!(
-            ReleaseDownload::lookup(ReleaseAsset::Kernel, directory.path(), "aarch64")
-                .unwrap()
-                .is_none()
-        );
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let output = std::process::Command::new("python3")
-            .arg(root.join("tools/runtime/release.py"))
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        assert_eq!(
-            String::from_utf8(output.stdout).unwrap().trim(),
-            RUNTIME_RELEASE
-        );
+        assert!(ReleaseDownload::lookup(
+            ReleaseAsset::Kernel,
+            &directory.path().join("kernels"),
+            "aarch64"
+        )
+        .unwrap()
+        .is_none());
     }
 }

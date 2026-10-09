@@ -33,19 +33,16 @@ fn mac_rejects_linux_cpu_options_before_preparation_or_state_creation() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("compose.yaml"), "name: mac-options\nservices:\n  app: {image: example/app}\nx-seedbox:\n  version: 1\n  seed: 1\n  limits: {simulated_time: 1s, wall_time: 1m}\n  check: {service: app}\n").unwrap();
     for command in ["run", "explore", "doctor"] {
-        for flags in [&["--cpu", "1"][..]] {
-            let mut args = vec![command];
-            args.extend(flags);
-            let output = seedbox(&args, directory.path());
-            assert_eq!(output.status.code(), Some(2), "{args:?}");
-            assert!(output.stdout.is_empty(), "{args:?}");
-            assert_eq!(
-                stderr(&output),
-                "error: --cpu requires Linux KVM; omit it on Mac\n",
-                "{args:?}"
-            );
-            assert!(!directory.path().join(".seedbox").exists(), "{args:?}");
-        }
+        let args = [command, "--cpu", "1"];
+        let output = seedbox(&args, directory.path());
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert_eq!(
+            stderr(&output),
+            "error: --cpu requires Linux KVM; omit it on Mac\n",
+            "{args:?}"
+        );
+        assert!(!directory.path().join(".seedbox").exists(), "{args:?}");
     }
 }
 
@@ -966,10 +963,7 @@ fn doctor_uses_kernel_cache_without_credentials_download_or_state() {
         } else {
             root.join("Library/Caches")
         };
-        let ready = cache
-            .join("seedbox/kernels")
-            .join(seedbox::release_download::KERNEL_RELEASE)
-            .join("aarch64/ready");
+        let ready = cache.join("seedbox/kernels").join("aarch64/ready");
         let run = || {
             let mut command = Command::new(env!("CARGO_BIN_EXE_seedbox"));
             command

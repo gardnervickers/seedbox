@@ -46,21 +46,49 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          fetch-depth: 0
       - id: inputs
-        name: Identify kernel and helper inputs independently
+        name: Select changed asset recipes
+        env:
+          ASSET_RUN_ID: ${{ github.run_id }}
         run: |
-          echo "kernel=kernel-$(python3 kernel/release.py)" >> "$GITHUB_OUTPUT"
-          echo "runtime=runtime-$(python3 tools/runtime/release.py)" >> "$GITHUB_OUTPUT"
+          python3 - <<'PYTHON'
+          import json, os, pathlib, subprocess
+          event = json.loads(pathlib.Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+          base = (event['pull_request']['base']['sha']
+                  if 'pull_request' in event else event.get('before'))
+          force = os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch' or not base or set(base) == {'0'}
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for kind, manifest in [('kernel', 'kernel/inputs.json'), ('runtime', 'tools/runtime/inputs.json')]:
+                  groups = json.loads(pathlib.Path(manifest).read_text())
+                  paths = sorted({name for group in groups.values() for name in group})
+                  paths += ['flake.nix', '.github/workflows/kernels.yml']
+                  changed = force
+                  if not force:
+                      result = subprocess.run(['git', 'diff', '--quiet', base, 'HEAD', '--', *paths])
+                      if result.returncode not in (0, 1):
+                          raise SystemExit(result.returncode)
+                      changed = result.returncode == 1
+                  output.write(f'{kind}={kind}-{os.environ["ASSET_RUN_ID"]}\n')
+                  output.write(f'{kind}_changed={str(changed).lower()}\n')
+          PYTHON
       - id: release
-        name: Reuse published assets
+        name: Skip unchanged recipes and completed reruns
         uses: actions/github-script@v9
         env:
           KERNEL_TAG: ${{ steps.inputs.outputs.kernel }}
           RUNTIME_TAG: ${{ steps.inputs.outputs.runtime }}
+          KERNEL_CHANGED: ${{ steps.inputs.outputs.kernel_changed }}
+          RUNTIME_CHANGED: ${{ steps.inputs.outputs.runtime_changed }}
         with:
           script: |
             const releases = [];
             for (const kind of ['kernel', 'runtime']) {
+              if (process.env[`${kind.toUpperCase()}_CHANGED`] !== 'true') {
+                core.setOutput(kind, false);
+                core.info(`${kind}: no asset inputs changed`);
+                continue;
+              }
               const tag = process.env[`${kind.toUpperCase()}_TAG`];
               let published = false;
               try {
@@ -197,8 +225,8 @@ jobs:
                 ...context.repo,
                 tag_name: tag,
                 target_commitish: context.sha,
-                name: `Guest ${kind === 'kernel' ? 'kernels' : 'helpers'} ${tag.split('-')[1].slice(0, 12)}`,
-                body: `Built from ${context.sha}. Contains native ARM64 and x86-64 ${contents}, licenses, checksums and corresponding source. The tag identifies build inputs; it does not qualify or restrict runtime overrides.`,
+                name: `Guest ${kind === 'kernel' ? 'kernels' : 'helpers'} ${tag.split('-')[1]}`,
+                body: `Built from ${context.sha}. Contains native ARM64 and x86-64 ${contents}, licenses, checksums and corresponding source. Release labels identify CI runs; runtime overrides remain unrestricted.`,
                 draft: true,
                 prerelease: true,
                 make_latest: 'false'

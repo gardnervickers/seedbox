@@ -2,7 +2,6 @@
   "common": [
     "flake.lock",
     "kernel/inputs.json",
-    "kernel/release.py",
     "kernel/source.json",
     "nix/kernels.nix"
   ],

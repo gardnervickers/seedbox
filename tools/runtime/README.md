@@ -21,20 +21,22 @@ ARM64 and x86-64 archives. Pull requests upload temporary artifacts; pushes to
 corresponding helper source and checksums. Both builds must succeed before
 publication. Failed draft uploads can resume; published assets are never replaced.
 
-`tools/runtime/inputs.json` lists the helper sources, filesystem-tool recipe and
-locked Nix inputs. Cargo and CI hash the same files to select `runtime-<SHA256>`.
-An existing release skips helper builds. Kernel recipes, patches and configuration
-are excluded; changes to the actual shared supervisor header still count.
-Kernel releases have their own independent input list. Changes to application
-images, CLI code or documentation rebuild neither family of assets.
+`tools/runtime/inputs.json` lists helper and filesystem-tool build inputs. CI
+checks changed paths and publishes `runtime-<CI run number>` when those inputs
+change. Kernel recipes, patches and configuration are separate; the actual shared
+supervisor header is an input to both builds. CLI and application changes build
+neither family. Cargo computes no source fingerprint and embeds no release ID.
 
-On first preparation, Seedbox announces the download on stderr and verifies
-GitHub's SHA-256 asset digest before installing it atomically. The archive cache
+On first preparation, Seedbox selects the latest published helper release,
+announces the download on stderr and verifies GitHub's SHA-256 asset digest
+before installing it atomically. The archive cache
 is `~/Library/Caches/seedbox/assets` on Mac or `~/.cache/seedbox/assets` on Linux;
-`XDG_CACHE_HOME` overrides the parent. Each recipe and architecture has its own
-entry. Concurrent invocations share one download; interrupted transfers never
-become usable entries. Cached bytes are checked locally on reuse, without HTTP.
-The extracted tools live in a separate content-addressed `seedbox/runtime` cache.
+`XDG_CACHE_HOME` overrides the parent. Each architecture has its own entry.
+Concurrent invocations share one download; interrupted transfers never become
+usable entries. Cached bytes are checked locally on reuse, without HTTP.
+The extracted tools live in a separate cache keyed by the archive checksum.
+To use newer assets, remove the architecture's download cache entry or select a
+local archive. No version or source fingerprint gates execution.
 
 Because this repository is private, downloads need `GH_TOKEN` or `GITHUB_TOKEN`
 with repository read access. Credentials are not stored in the cache or sent

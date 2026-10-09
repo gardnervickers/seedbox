@@ -1,4 +1,4 @@
-//! Identify released guest assets and embed the native development supervisor.
+//! Select released guest assets and embed the native development supervisor.
 //! Release builds never download or compile guest assets. Unbundled
 //! Linux development builds retain the musl supervisor fallback, whose user/group
 //! lookups must work without NSS modules.
@@ -27,18 +27,6 @@ fn main() {
                 .display()
         );
     }
-    release_id(
-        &root,
-        "kernel/inputs.json",
-        b"seedbox-kernel-v1\0",
-        "SEEDBOX_KERNEL_RELEASE",
-    );
-    release_id(
-        &root,
-        "tools/runtime/inputs.json",
-        b"seedbox-runtime-v1\0",
-        "SEEDBOX_RUNTIME_RELEASE",
-    );
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
         && env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64")
     {
@@ -147,26 +135,4 @@ fn on_path(name: &str) -> Option<PathBuf> {
     env::split_paths(&env::var_os("PATH")?)
         .map(|directory| directory.join(name))
         .find(|path| path.is_file())
-}
-
-/// The distribution address follows source inputs, never the host or Git HEAD.
-/// Keep this framing identical to the release scripts (checked by portable tests).
-fn release_id(root: &Path, manifest: &str, domain: &[u8], variable: &str) {
-    use sha2::{Digest, Sha256};
-    let groups: std::collections::BTreeMap<String, Vec<String>> = serde_json::from_slice(
-        &std::fs::read(root.join(manifest)).expect("release input manifest"),
-    )
-    .expect("release input groups");
-    let names: std::collections::BTreeSet<_> = groups.into_values().flatten().collect();
-    let mut hash = Sha256::new();
-    hash.update(domain);
-    for name in names {
-        println!("cargo::rerun-if-changed={}", root.join(&name).display());
-        let content = std::fs::read(root.join(&name)).expect("release recipe input");
-        hash.update(name.as_bytes());
-        hash.update([0]);
-        hash.update((content.len() as u64).to_be_bytes());
-        hash.update(content);
-    }
-    println!("cargo::rustc-env={variable}={:x}", hash.finalize());
 }

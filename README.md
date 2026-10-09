@@ -38,14 +38,17 @@ cargo build --release
 The release build compiles the native CLI and signs it on Mac. It needs no
 container engine and builds no Linux guest assets. On the first `run`, `explore`
 or `prepare`, Seedbox announces downloads of its guest kernel and helper archive
-from GitHub Releases, verifies their SHA-256 digests and caches them. Later calls
-reuse the cached bytes without contacting GitHub. Caches live under
+from the latest guest releases on GitHub, verifies their SHA-256 digests and
+caches them. Later calls reuse the cached bytes without contacting GitHub. Caches live under
 `~/Library/Caches/seedbox` on Mac or `~/.cache/seedbox` on Linux;
 `XDG_CACHE_HOME` overrides the parent directory. Explicit `--kernel` and
 `--runtime-assets` paths bypass their respective downloads.
 
 Native Linux CI builds the kernel and helpers independently, only when their
-source inputs change. CLI and application changes reuse existing releases.
+input paths change. Releases use CI run labels, with no source fingerprints or
+compiled-in asset versions. CLI and application changes reuse existing releases.
+To use newer guest assets, remove the relevant architecture cache entry or pass
+a local asset path.
 Because this repository is private, the first downloads need `GH_TOKEN` or
 `GITHUB_TOKEN` with repository read access. Without that access, build on Linux
 with `nix build .#guestKernel` and `nix build .#runtimeArchive`, then select those
@@ -87,9 +90,9 @@ directory. Every runtime input has a default, so no flags are required:
 | Exploration workers | `1`, sequential execution; Mac currently requires `1` | `--workers` (1..32; Linux automatic CPU selection for parallel execution) |
 | Torn disk writes | off (drop all unflushed sectors on crash) | `--torn-writes` |
 | CPU | Linux: first free core other than CPU 0's, under the shared lease; Mac: automatic HVF scheduling | `--cpu`, `SEEDBOX_CPU` (Linux only) |
-| Guest kernel | downloaded once from the matching kernel release, then cached; unbundled Linux development builds retain artifact-directory searches | `--kernel`, `SEEDBOX_KERNEL` |
+| Guest kernel | downloaded once from the latest kernel release, then cached; unbundled Linux development builds retain artifact-directory searches | `--kernel`, `SEEDBOX_KERNEL` |
 | VMM | the platform engine linked into `seedbox`; runtime commands never invoke Cargo | `--vmm`, `SEEDBOX_VMM` (Linux legacy standalone engine) |
-| Guest helper archive | downloaded once from the matching helper release, then cached | `--runtime-assets`, `SEEDBOX_RUNTIME_ASSETS` |
+| Guest helper archive | downloaded once from the latest helper release, then cached | `--runtime-assets`, `SEEDBOX_RUNTIME_ASSETS` |
 | Guest supervisor | from the helper archive; Linux development builds also have a compiled-in musl fallback | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | BusyBox | from the helper archive; Linux development builds search static tools on `PATH` | `--busybox`, `SEEDBOX_BUSYBOX` |
 | mke2fs (only for named volumes) | from the helper archive; Linux development builds search static tools on `PATH` | `--mke2fs`, `SEEDBOX_MKE2FS` |
@@ -150,12 +153,7 @@ admitted, and each run records their hashes.
 The host checks are the KVM and perf capabilities the engine needs; CPU model,
 microcode and CPUID are not pinned.
 
-`seedbox --version` reports the simulator version. Development builds identify
-their source commit as `0.1.0-dev+COMMIT`, with `.dirty` for staged or unstaged
-tracked changes. Missing or malformed source revisions report `-dev+unknown`. Only
-a checkout with no tracked changes at a matching release tag uses the release
-label. The label does not grant runtime qualification. Untracked build inputs
-remain covered by retained hashes. New runs retain the complete
+`seedbox --version` reports the package version. New runs retain the complete
 `seedbox` executable and its worker protocol; replay launches those
 retained bytes even after the installed CLI is upgraded. The executable hash is
 an internal integrity reference, so equal version labels never substitute for

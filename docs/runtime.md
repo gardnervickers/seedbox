@@ -202,18 +202,12 @@ exact bytes retained for replay.
 Native execution and witness equivalence still need host evidence. Apple Silicon
 also supports the native development ARM Compose backend described below.
 
-Development versions carry the Git source commit (`0.1.0-dev+COMMIT`) and a
-`.dirty` suffix for staged or unstaged tracked changes. Missing or malformed source revisions
-report `-dev+unknown`; a matching release tag with no tracked changes
-is required for a release label. Untracked build inputs remain covered by
-retained hashes. This readable label does not replace exact retained bytes or
-qualify a new runtime. The Mac maintainer build propagates source provenance into
-its exported Linux helper without copying Git history.
+The simulator version is the package version. Replay uses its retained inputs.
 
-The `seedbox` build embeds the static guest supervisor from `guest/compose-init.c`,
-compiled with the shell's musl compiler (`SEEDBOX_STATIC_CC`, or `musl-gcc`).
-Without one it still builds, and `run`/`prepare` require `--guest-init`, for
-example the output of `bash guest/build-compose.sh FILE`.
+Release builds fetch the guest supervisor with the helper archive on first use.
+Unbundled Linux development builds embed `guest/compose-init.c` using the shell's
+musl compiler (`SEEDBOX_STATIC_CC`, or `musl-gcc`). Without one they require
+`--guest-init`, for example the output of `bash guest/build-compose.sh FILE`.
 
 Preparation requires `skopeo`, `umoci`, and a Docker-compatible builder (the shell
 supplies Podman). Rootful unpacking preserves image ownership and modes. Run on

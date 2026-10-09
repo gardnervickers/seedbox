@@ -29,8 +29,8 @@ cached or explicit kernel and performs no download. See
 [kernel releases](../../kernel/README.md) and
 [guest assets](../runtime/README.md), including the manual Linux build fallback.
 
-The kernel and helper recipes have independent release identities. Kernel patch
-changes reuse the helpers; helper changes reuse the kernel. Application and CLI
+CI builds kernels and helpers independently when their input paths change.
+Kernel patch changes reuse helpers; helper changes reuse the kernel. Application and CLI
 changes rebuild neither. Debug builds support portable development and readers;
 use the release executable for application runs.
 

@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 while IFS= read -r script; do
   bash -n "$script"
 done < <(git ls-files '*.sh' ':!:research/**')
-tests=(test_msr54 test_scenarios test_mac_check test_linux_runtime test_runtime_linker test_runtime_package test_kernel_release)
+tests=(test_msr54 test_scenarios test_mac_check test_linux_runtime test_runtime_build test_runtime_linker test_runtime_package)
 if [[ $(uname -s) == Linux ]]; then tests+=(test_batch); fi
 (cd harness/tests && python3 -m unittest -q "${tests[@]}")
 (cd python && python3 -m unittest discover -s tests -q)
