@@ -9,8 +9,9 @@ checkpoints. The legacy loop (`world::simulate`) remains in `engine-core`
 only because the arm64 backend still calls it; nothing on x86 does.
 `vmm.json` names the scheduler under `scheduler.name`. There is no flag to
 choose. `--machine-workers N` and `--machine-cpus` set the thread count and
-pinning (performance only); the `seedbox` CLI does not pass them yet, so
-CLI runs are windowed on one thread.
+pinning (performance only). They are fields of the worker launch request
+(`seedbox_engine_core::launch::WorkerRequest`), but the `seedbox` CLI leaves
+them at their defaults, so CLI runs are windowed on one thread.
 
 The question this prototype answers: can several machines of one world run
 concurrently, with results identical for any worker count, and does that
@@ -124,7 +125,8 @@ the VMM pinned by `taskset`, workers pinned with `--machine-cpus` to CPUs
 
 All windowed runs of a timebase agree on world, network and full-state
 witnesses, guest output, machine times and the committed end. That includes
-"reversed", which has `SEEDBOX_WINDOWED_SKEW_US=300` delaying machine `i`
+"reversed", which has `SEEDBOX_WINDOWED_SKEW_US=300` (a debug setting both
+the standalone VMM and the CLI's internal worker read) delaying machine `i`
 by `(4 - i) × 300 µs` per run. Machines moved between pool threads up to
 1,651 times per run. The two-guest variant agrees the same way across 1
 and 2 workers and reversed order (PV: 0.43 s serial, 0.23 s with two
@@ -266,7 +268,8 @@ It works for any `WorldMachine`; the parallel path needs `M: Send`.
 
 1. **CLI.** `--machine-workers N` is performance-only and
    overridable on replay. The executor leases `N` SMT-protected cores for
-   the counter timebase, or any `N` CPUs for PV, and passes `--machine-cpus`.
+   the counter timebase, or any `N` CPUs for PV, and sets `machine_cpus` in
+   the launch request.
    Neither can be combined with `explore --workers > 1` or with the
    unsupported features. Update help, README, runtime docs and the project
    template.

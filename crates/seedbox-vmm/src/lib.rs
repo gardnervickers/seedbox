@@ -34,7 +34,6 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -43,47 +42,7 @@ thread_local! {
     static CONSOLE_TRACE: Cell<Option<ConsoleTraceCallback>> = const { Cell::new(None) };
 }
 
-/// Performance choices and optional diagnostics; they do not change guest results.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PerformanceOptions {
-    pub undo_margin: u64,
-    /// None selects the adaptive stepping margin.
-    pub margin: Option<u64>,
-    pub pv_watchdog_ms: u64,
-    /// Windowed scheduler testing only: delay machine i's runs by
-    /// (machines - i) times this many microseconds, so later machines finish first.
-    pub windowed_skew_us: u64,
-}
-
-impl Default for PerformanceOptions {
-    fn default() -> Self {
-        Self {
-            undo_margin: 256,
-            margin: None,
-            pv_watchdog_ms: 20,
-            windowed_skew_us: 0,
-        }
-    }
-}
-
-impl PerformanceOptions {
-    /// Interpret values supplied by the process boundary, without reading its environment.
-    pub fn parse(undo: Option<&str>, margin: Option<&str>) -> Result<Self, String> {
-        let undo_margin = match undo {
-            None => 256,
-            Some(m) => m.parse().map_err(|e| format!("SEEDBOX_UNDO: {e}"))?,
-        };
-        let margin = match margin {
-            Some("adaptive") | None => None,
-            Some(m) => Some(m.parse().map_err(|e| format!("margin: {e}"))?),
-        };
-        Ok(Self {
-            undo_margin,
-            margin,
-            ..Self::default()
-        })
-    }
-}
+pub use seedbox_engine_core::launch::{MachineFeatures, Performance, Timebase, WorkerRequest};
 
 /// One console line observed at the host diagnostic boundary.
 pub struct ConsoleTrace<'a> {
@@ -93,108 +52,67 @@ pub struct ConsoleTrace<'a> {
     pub line: &'a [u8],
 }
 
-pub type ConsoleTraceCallback = for<'a> fn(ConsoleTrace<'a>);
-
-/// Explicit inputs to a world worker. Argument and environment acquisition belong to its caller.
-#[derive(Clone, Debug)]
-pub struct WorkerOptions {
-    pub config: PathBuf,
-    pub seed: u64,
-    /// Further seeds released from the same booted world after `seed`.
-    pub fork_seeds: Vec<u64>,
-    pub out: PathBuf,
-    pub digest: bool,
-    pub host_control: Option<PathBuf>,
-    pub console_limit: Option<usize>,
-    pub log_chunk_limit: Option<usize>,
-    pub pv_clock: bool,
-    pub page_timer: bool,
-    pub deferred_tx: bool,
-    pub checkpoint_at_ns: Option<String>,
-    pub stream_console: bool,
-    pub trace: bool,
-    pub performance: PerformanceOptions,
-    pub console_trace: Option<ConsoleTraceCallback>,
-    /// Machine threads for the windowed scheduler (performance only;
-    /// docs/windowed-scheduler.md).
-    pub machine_workers: usize,
-    /// One CPU per machine thread, in thread order (performance only).
-    pub machine_cpus: Vec<usize>,
+impl std::fmt::Display for ConsoleTrace<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[host {:.3}s guest {:.6}s br {}] {}",
+            self.host_seconds,
+            self.guest_seconds,
+            self.branches,
+            String::from_utf8_lossy(self.line)
+        )
+    }
 }
 
-impl WorkerOptions {
-    /// Parse the standalone worker's existing flag protocol from caller-supplied arguments.
-    pub fn from_args(args: &[String], performance: PerformanceOptions) -> Result<Self, String> {
-        let config = arg(args, "--config").ok_or("--config required")?.into();
-        let seed = arg(args, "--seed")
-            .ok_or("--seed required")?
-            .parse()
-            .map_err(|e| format!("seed: {e}"))?;
-        let mut fork_seeds = Vec::new();
-        if let Some(list) = arg(args, "--fork-seeds") {
-            for s in list.split(',') {
-                fork_seeds.push(s.parse().map_err(|e| format!("--fork-seeds: {e}"))?);
-            }
-        }
-        let out = arg(args, "--out").ok_or("--out required")?.into();
-        let console_limit = arg(args, "--console-limit")
-            .map(|limit| {
-                limit
-                    .parse::<usize>()
-                    .map_err(|error| format!("console limit: {error}"))
-            })
-            .transpose()?;
-        let pv_clock = match arg(args, "--timebase").as_deref() {
-            None | Some("counter") => false,
-            Some("pv") => true,
-            Some(other) => return Err(format!("--timebase {other}: expected counter or pv")),
+pub type ConsoleTraceCallback = for<'a> fn(ConsoleTrace<'a>);
+
+/// The console trace a worker main installs for `SEEDBOX_TRACE_CONSOLE`.
+pub fn print_console_trace(trace: ConsoleTrace<'_>) {
+    eprintln!("{trace}");
+}
+
+/// Debug-only worker settings from the environment. They never change results.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DebugEnv {
+    /// `SEEDBOX_PV_WATCHDOG_MS`: the PV spin watchdog period.
+    pub pv_watchdog_ms: Option<u64>,
+    /// `SEEDBOX_WINDOWED_SKEW_US`: reversed-completion testing delay.
+    pub windowed_skew_us: Option<u64>,
+    /// `SEEDBOX_TRACE_CONSOLE`: print each guest console line with its times.
+    pub trace_console: bool,
+}
+
+impl DebugEnv {
+    /// Read the settings through `get`, the worker main's environment lookup.
+    pub fn from_env(get: impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<Self, String> {
+        let number = |name: &str| -> Result<Option<u64>, String> {
+            get(name)
+                .map(|value| {
+                    value
+                        .to_str()
+                        .and_then(|v| v.parse().ok())
+                        .ok_or_else(|| format!("{name}: expected an unsigned integer"))
+                })
+                .transpose()
         };
-        let log_chunk_limit = arg(args, "--log-chunk-limit")
-            .map(|v| v.parse::<usize>())
-            .transpose()
-            .map_err(|e| e.to_string())?;
-        let checkpoint_at_ns = arg(args, "--checkpoint-at-ns");
-        if args.iter().any(|a| a == "--checkpoint-at-ns") && checkpoint_at_ns.is_none() {
-            return Err("--checkpoint-at-ns requires comma-separated unsigned nanoseconds".into());
-        }
-        let machine_workers = match arg(args, "--machine-workers") {
-            None => 1,
-            Some(n) => n
-                .parse()
-                .ok()
-                .filter(|n| (1..=64).contains(n))
-                .ok_or("--machine-workers: use 1..64")?,
-        };
-        let machine_cpus: Vec<usize> = match arg(args, "--machine-cpus") {
-            None => Vec::new(),
-            Some(list) => list
-                .split(',')
-                .map(|c| c.parse().map_err(|e| format!("--machine-cpus: {e}")))
-                .collect::<Result<_, _>>()?,
-        };
-        if !machine_cpus.is_empty() && machine_cpus.len() != machine_workers {
-            return Err("--machine-cpus: give one CPU per machine worker".into());
-        }
         Ok(Self {
-            config,
-            seed,
-            fork_seeds,
-            out,
-            pv_clock,
-            log_chunk_limit,
-            checkpoint_at_ns,
-            machine_workers,
-            machine_cpus,
-            page_timer: args.iter().any(|a| a == "--page-timer"),
-            deferred_tx: args.iter().any(|a| a == "--deferred-tx"),
-            digest: args.iter().any(|a| a == "--digest"),
-            host_control: arg(args, "--host-control").map(PathBuf::from),
-            console_limit,
-            stream_console: args.iter().any(|a| a == "--stream-console"),
-            trace: args.iter().any(|a| a == "--trace"),
-            performance,
-            console_trace: None,
+            pv_watchdog_ms: number("SEEDBOX_PV_WATCHDOG_MS")?,
+            windowed_skew_us: number("SEEDBOX_WINDOWED_SKEW_US")?,
+            trace_console: get("SEEDBOX_TRACE_CONSOLE").is_some(),
         })
+    }
+
+    /// Apply the settings to `request`; returns the console trace to install.
+    pub fn apply(self, request: &mut WorkerRequest) -> Option<ConsoleTraceCallback> {
+        if let Some(ms) = self.pv_watchdog_ms {
+            request.performance.pv_watchdog_ms = ms;
+        }
+        if let Some(us) = self.windowed_skew_us {
+            request.performance.windowed_skew_us = us;
+        }
+        self.trace_console
+            .then_some(print_console_trace as ConsoleTraceCallback)
     }
 }
 
@@ -229,10 +147,22 @@ pub enum Clock {
 }
 
 impl Clock {
-    fn name(&self) -> &'static str {
+    /// Open the clock for `timebase` on the calling thread: the counter
+    /// counts that thread's guest execution, and the PV watchdog that
+    /// thread's CPU time after `watchdog_ms` (performance only).
+    fn open(timebase: Timebase, watchdog_ms: u64) -> Result<Self, String> {
+        Ok(match timebase {
+            Timebase::Pv => Clock::Pv(PvClock::new(std::time::Duration::from_millis(
+                watchdog_ms.max(1),
+            ))?),
+            Timebase::Counter => Clock::Counter(Counter::new()?),
+        })
+    }
+
+    fn timebase(&self) -> Timebase {
         match self {
-            Clock::Counter(_) => "counter",
-            Clock::Pv(_) => "pv",
+            Clock::Counter(_) => Timebase::Counter,
+            Clock::Pv(_) => Timebase::Pv,
         }
     }
 }
@@ -258,10 +188,7 @@ pub struct BootInputs {
     /// A fixed stepping margin; None adapts it.
     margin: Option<u64>,
     console_limit: Option<usize>,
-    /// The machine runs under the PV clock timebase.
-    pv_clock: bool,
-    page_timer: bool,
-    deferred_tx: bool,
+    features: MachineFeatures,
     log_chunk_limit: Option<usize>,
 }
 
@@ -324,13 +251,9 @@ fn boot_machine(
         disk: b.disk.clone(),
         undo_margin: b.undo_margin,
         barrier,
-        pv_clock: b.pv_clock,
-        page_timer: b.page_timer,
+        features: b.features,
     };
     let mut mach = Machine::new(kvm, name, &spec)?;
-    if let Some(net) = mach.net.as_mut() {
-        net.set_deferred_tx(b.deferred_tx);
-    }
     mach.com1.output_limit = b.console_limit;
     mach.com2.output_limit = b.console_limit;
     mach.com1.chunks.limit = b.log_chunk_limit;
@@ -358,7 +281,7 @@ type WorldSnapshot = world_core::WorldSnapshot<Machine>;
 fn simulate_windowed(
     world: &mut World,
     run: &world_windowed::Run,
-    options: &WorkerOptions,
+    request: &WorkerRequest,
     host_control: &mut Option<host_control::HostControl>,
 ) -> Result<(&'static str, Value), String> {
     let mut boundary = || {
@@ -369,18 +292,17 @@ fn simulate_windowed(
         }
         Ok(())
     };
-    let skew = std::time::Duration::from_micros(options.performance.windowed_skew_us);
-    if options.machine_workers <= 1 {
+    let skew = std::time::Duration::from_micros(request.performance.windowed_skew_us);
+    if request.machine_workers <= 1 {
         return world_windowed::simulate(world, run, skew, &mut boundary)
             .map(|(outcome, evidence)| (outcome.as_str(), evidence));
     }
-    // Each pool thread opens its own clock: the counter counts that thread's
-    // guest execution, and the PV watchdog that thread's CPU time.
-    let pv = matches!(world.clock, Clock::Pv(_));
-    let watchdog = std::time::Duration::from_millis(options.performance.pv_watchdog_ms.max(1));
-    let cpus = &options.machine_cpus;
+    // Each pool thread opens its own clock.
+    let timebase = world.clock.timebase();
+    let watchdog_ms = request.performance.pv_watchdog_ms;
+    let cpus = &request.machine_cpus;
     let workers = world_windowed::Workers {
-        count: options.machine_workers,
+        count: request.machine_workers,
         skew,
     };
     world_windowed::simulate_parallel(
@@ -391,11 +313,7 @@ fn simulate_windowed(
             if let Some(&cpu) = cpus.get(w) {
                 pin(cpu)?;
             }
-            Ok(if pv {
-                Clock::Pv(PvClock::new(watchdog)?)
-            } else {
-                Clock::Counter(Counter::new()?)
-            })
+            Clock::open(timebase, watchdog_ms)
         },
         &mut boundary,
     )
@@ -432,27 +350,8 @@ fn simulate_to(
         checkpoint,
         require_barrier: true,
     };
-    let options = WorkerOptions {
-        config: PathBuf::new(),
-        seed: 0,
-        fork_seeds: vec![],
-        out: PathBuf::new(),
-        digest: false,
-        host_control: None,
-        console_limit: None,
-        log_chunk_limit: None,
-        pv_clock: false,
-        page_timer: false,
-        deferred_tx: false,
-        checkpoint_at_ns: None,
-        stream_console: false,
-        trace: false,
-        performance: PerformanceOptions::default(),
-        console_trace: None,
-        machine_workers: 1,
-        machine_cpus: vec![],
-    };
-    simulate_windowed(world, &run, &options, host_control).map(|(word, _)| word)
+    let request = WorkerRequest::new(Default::default(), 0, Default::default());
+    simulate_windowed(world, &run, &request, host_control).map(|(word, _)| word)
 }
 
 /// Pin the calling thread to one CPU.
@@ -485,26 +384,23 @@ fn release(
     })
 }
 
-fn arg(args: &[String], name: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == name)
-        .and_then(|i| args.get(i + 1).cloned())
-}
-
 /// Execute a world and return its engine report; the caller owns stdout, stderr and exit status.
-pub fn run(options: &WorkerOptions) -> Result<Value, String> {
+/// `console_trace` receives each guest console line while the world runs.
+pub fn run(
+    options: &WorkerRequest,
+    console_trace: Option<ConsoleTraceCallback>,
+) -> Result<Value, String> {
+    options.validate()?;
     START.with(|_| ());
     let _console_trace =
-        ConsoleTraceGuard(CONSOLE_TRACE.with(|trace| trace.replace(options.console_trace)));
+        ConsoleTraceGuard(CONSOLE_TRACE.with(|trace| trace.replace(console_trace)));
     let config_path = &options.config;
     let seed = options.seed;
     let mut seeds = vec![seed];
     seeds.extend_from_slice(&options.fork_seeds);
     let out = options.out.to_string_lossy().into_owned();
     let digest = options.digest;
-    let pv_clock = options.pv_clock;
-    let page_timer = options.page_timer;
-    let deferred_tx = options.deferred_tx;
+    let features = options.features;
     // Undo-able precise stops (performance only): initial final margin, 0 = off.
     let undo_margin = options.performance.undo_margin;
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
@@ -524,12 +420,12 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
     let kernel = std::fs::read(path(&cfg["kernel"])).map_err(|e| format!("kernel: {e}"))?;
     let mem = cfg["mem_mb"].as_u64().unwrap_or(512) as usize * 1024 * 1024;
     let duration = cfg["duration_ns"].as_u64().unwrap_or(60_000_000_000);
-    let checkpoint_list = &options.checkpoint_at_ns;
-    let checkpoint_times = if let Some(list) = checkpoint_list.as_deref() {
+    let checkpoint_times = if !options.checkpoint_at_ns.is_empty() {
         if !cfg["checkpoint"].is_null() {
             return Err("--checkpoint-at-ns cannot override config.checkpoint".into());
         }
-        checkpoint::times(list, duration)?
+        checkpoint::check_times(&options.checkpoint_at_ns, duration)?;
+        options.checkpoint_at_ns.clone()
     } else if !cfg["checkpoint"].is_null() {
         let t = cfg["checkpoint"]["at_ns"]
             .as_u64()
@@ -540,7 +436,8 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
         if !options.fork_seeds.is_empty() {
             return Err("--fork-seeds cannot override config.checkpoint".into());
         }
-        checkpoint::times(&t.to_string(), duration)?
+        checkpoint::check_times(&[t], duration)?;
+        vec![t]
     } else {
         Vec::new()
     };
@@ -672,9 +569,7 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
             exact_timer_ppm: cfg["exact_timer_ppm"].as_u64().unwrap_or(0),
             margin,
             console_limit,
-            pv_clock,
-            page_timer,
-            deferred_tx,
+            features,
             log_chunk_limit: options.log_chunk_limit,
         };
         let seed = entropy_seed(boot_seed, &format!("boot-entropy/{}", names[i]));
@@ -705,14 +600,7 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
     let net = &cfg["network"];
     let latency = net["latency_ns"].as_u64().unwrap_or(1_000_000);
     let early = (latency / 2).min(cfg["stop_tolerance_ns"].as_u64().unwrap_or(0));
-    let clock = if pv_clock {
-        // Host CPU time a run may go without an exit before it is checked
-        // for a spin (performance only).
-        let ms = options.performance.pv_watchdog_ms;
-        Clock::Pv(PvClock::new(std::time::Duration::from_millis(ms.max(1)))?)
-    } else {
-        Clock::Counter(Counter::new()?)
-    };
+    let clock = Clock::open(features.timebase, options.performance.pv_watchdog_ms)?;
     let mut world = World {
         failure: None,
         factory: kvm,
@@ -756,13 +644,14 @@ pub fn run(options: &WorkerOptions) -> Result<Value, String> {
                 "{:x}",
                 Sha256::digest(std::fs::read(exe).map_err(|e| e.to_string())?)
             );
-            let identity_timebase = checkpoint::identity_timebase(world.clock.name(), deferred_tx);
+            let identity_timebase =
+                checkpoint::identity_timebase(world.clock.timebase().name(), features.deferred_tx);
             let parent = checkpoint::parent_identity(
                 &cfg,
                 seed,
                 &engine,
                 &identity_timebase,
-                page_timer,
+                features.page_timer,
                 |p| {
                     std::fs::read(base.join(p))
                         .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
@@ -1133,8 +1022,8 @@ fn report(
     let mut result = json!({
         "report_version": 1,
         "seed": seed,
-        "timebase": world.clock.name(),
-        "deferred_tx": world.boot.iter().any(|b| b.deferred_tx),
+        "timebase": world.clock.timebase().name(),
+        "deferred_tx": world.boot.iter().any(|b| b.features.deferred_tx),
         "counter_profile": match world.clock { Clock::Counter(_) => Some(profile::host()?.name), Clock::Pv(_) => None },
         "outcome": outcome,
         "sim_seconds": sim_ns as f64 / 1e9,
@@ -1277,196 +1166,54 @@ mod trigger_world_tests;
 #[cfg(test)]
 mod worker_options_tests {
     use super::*;
-
-    fn args(values: &[&str]) -> Vec<String> {
-        values.iter().map(|s| (*s).to_owned()).collect()
-    }
+    use std::ffi::OsString;
 
     #[test]
-    fn worker_flags_preserve_the_standalone_protocol() {
-        let performance = PerformanceOptions::parse(Some("0"), Some("64")).unwrap();
-        let options = WorkerOptions::from_args(
-            &args(&[
-                "seedbox-vmm",
-                "--config",
-                "world.json",
-                "--seed",
-                "7",
-                "--out",
-                "output",
-                "--fork-seeds",
-                "8,9",
-                "--digest",
-                "--host-control",
-                "control.sock",
-                "--console-limit",
-                "123",
-                "--log-chunk-limit",
-                "456",
-                "--timebase",
-                "pv",
-                "--stream-console",
-                "--trace",
-                "--page-timer",
-                "--deferred-tx",
-                "--checkpoint-at-ns",
-                "100,200",
-            ]),
-            performance,
-        )
-        .unwrap();
-        assert_eq!(options.config, PathBuf::from("world.json"));
-        assert_eq!(options.seed, 7);
-        assert_eq!(options.fork_seeds, vec![8, 9]);
-        assert_eq!(options.out, PathBuf::from("output"));
-        assert_eq!(options.host_control, Some(PathBuf::from("control.sock")));
-        assert_eq!(options.console_limit, Some(123));
-        assert_eq!(options.log_chunk_limit, Some(456));
-        assert!(options.pv_clock && options.page_timer && options.deferred_tx);
-        assert_eq!(options.checkpoint_at_ns.as_deref(), Some("100,200"));
-        assert!(options.digest && options.stream_console && options.trace);
-        assert_eq!(options.performance, performance);
-        assert!(options.console_trace.is_none());
-    }
-
-    #[test]
-    fn performance_values_are_explicit_and_keep_their_defaults() {
-        assert_eq!(
-            PerformanceOptions::parse(None, None).unwrap(),
-            PerformanceOptions::default()
-        );
-        assert_eq!(
-            PerformanceOptions::parse(Some("256"), Some("adaptive")).unwrap(),
-            PerformanceOptions::default()
-        );
-        assert!(PerformanceOptions::parse(Some("invalid"), None)
-            .unwrap_err()
-            .starts_with("SEEDBOX_UNDO: "));
-        assert!(PerformanceOptions::parse(None, Some("invalid"))
-            .unwrap_err()
-            .starts_with("margin: "));
-    }
-
-    #[test]
-    fn worker_flag_errors_keep_their_existing_wording() {
-        let performance = PerformanceOptions::default();
-        assert_eq!(
-            WorkerOptions::from_args(&[], performance).unwrap_err(),
-            "--config required"
-        );
-        assert_eq!(
-            WorkerOptions::from_args(
-                &args(&[
-                    "--config",
-                    "world.json",
-                    "--seed",
-                    "7",
-                    "--out",
-                    "output",
-                    "--checkpoint-at-ns"
-                ]),
-                performance
-            )
-            .unwrap_err(),
-            "--checkpoint-at-ns requires comma-separated unsigned nanoseconds"
-        );
-        assert_eq!(
-            WorkerOptions::from_args(&args(&["--config", "world.json"]), performance).unwrap_err(),
-            "--seed required"
-        );
-        assert!(WorkerOptions::from_args(
-            &args(&["--config", "world.json", "--seed", "invalid"]),
-            performance
-        )
-        .unwrap_err()
-        .starts_with("seed: "));
-        assert_eq!(
-            WorkerOptions::from_args(
-                &args(&["--config", "world.json", "--seed", "7"]),
-                performance
-            )
-            .unwrap_err(),
-            "--out required"
-        );
-        assert!(WorkerOptions::from_args(
-            &args(&[
-                "--config",
-                "world.json",
-                "--seed",
-                "7",
-                "--out",
-                "output",
-                "--fork-seeds",
-                "8,invalid"
-            ]),
-            performance
-        )
-        .unwrap_err()
-        .starts_with("--fork-seeds: "));
-        assert!(WorkerOptions::from_args(
-            &args(&[
-                "--config",
-                "world.json",
-                "--seed",
-                "7",
-                "--out",
-                "output",
-                "--console-limit",
-                "invalid"
-            ]),
-            performance
-        )
-        .unwrap_err()
-        .starts_with("console limit: "));
-    }
-
-    #[test]
-    fn machine_workers_are_performance_settings() {
-        let performance = PerformanceOptions::default();
-        let base = ["--config", "world.json", "--seed", "7", "--out", "output"];
-        let with = |extra: &[&str]| {
-            WorkerOptions::from_args(&args(&[&base[..], extra].concat()), performance)
+    fn debug_env_is_read_once_and_applied_to_the_request() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| OsString::from(value))
+            }
         };
-        let o = with(&[]).unwrap();
-        assert_eq!((o.machine_workers, o.machine_cpus.as_slice()), (1, &[][..]));
-        let o = with(&["--machine-workers", "4", "--machine-cpus", "4,5,6,7"]).unwrap();
+        let none = DebugEnv::from_env(env(&[])).unwrap();
+        assert_eq!(none, DebugEnv::default());
+        let mut request = WorkerRequest::new("w".into(), 0, "o".into());
+        assert!(none.apply(&mut request).is_none());
+        assert_eq!(request.performance, Performance::default());
+        let debug = DebugEnv::from_env(env(&[
+            ("SEEDBOX_PV_WATCHDOG_MS", "5"),
+            ("SEEDBOX_WINDOWED_SKEW_US", "300"),
+            ("SEEDBOX_TRACE_CONSOLE", ""),
+        ]))
+        .unwrap();
+        assert!(debug.apply(&mut request).is_some());
         assert_eq!(
-            (o.machine_workers, o.machine_cpus.as_slice()),
-            (4, &[4, 5, 6, 7][..])
+            (
+                request.performance.pv_watchdog_ms,
+                request.performance.windowed_skew_us
+            ),
+            (5, 300)
         );
         assert_eq!(
-            with(&["--machine-workers", "0"]).unwrap_err(),
-            "--machine-workers: use 1..64"
-        );
-        assert_eq!(
-            with(&["--machine-workers", "2", "--machine-cpus", "4,5,6"]).unwrap_err(),
-            "--machine-cpus: give one CPU per machine worker"
+            DebugEnv::from_env(env(&[("SEEDBOX_WINDOWED_SKEW_US", "x")])).unwrap_err(),
+            "SEEDBOX_WINDOWED_SKEW_US: expected an unsigned integer"
         );
     }
 
     #[test]
-    fn worker_timebase_defaults_to_counter_and_accepts_pv() {
-        let base = args(&["--config", "world.json", "--seed", "7", "--out", "output"]);
-        assert!(
-            !WorkerOptions::from_args(&base, PerformanceOptions::default())
-                .unwrap()
-                .pv_clock
-        );
-        for (value, pv) in [("counter", false), ("pv", true)] {
-            let mut argv = base.clone();
-            argv.extend(args(&["--timebase", value]));
-            assert_eq!(
-                WorkerOptions::from_args(&argv, PerformanceOptions::default())
-                    .unwrap()
-                    .pv_clock,
-                pv
-            );
-        }
-        let mut argv = base;
-        argv.extend(args(&["--timebase", "bad"]));
+    fn console_trace_lines_keep_their_format() {
+        let trace = ConsoleTrace {
+            host_seconds: 1.5,
+            guest_seconds: 0.25,
+            branches: 7,
+            line: b"hello",
+        };
         assert_eq!(
-            WorkerOptions::from_args(&argv, PerformanceOptions::default()).unwrap_err(),
-            "--timebase bad: expected counter or pv"
+            trace.to_string(),
+            "[host 1.500s guest 0.250000s br 7] hello"
         );
     }
 

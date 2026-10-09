@@ -123,7 +123,7 @@ fn internal_dispatch_rejects_missing_and_unknown_contracts_before_cli_state_setu
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
-fn internal_worker_requires_config_without_state_or_external_tools() {
+fn internal_worker_requires_a_request_without_state_or_external_tools() {
     use std::os::unix::fs::PermissionsExt;
 
     let directory = tempfile::tempdir().unwrap();
@@ -156,7 +156,7 @@ fn internal_worker_requires_config_without_state_or_external_tools() {
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert!(output.stdout.is_empty());
     assert!(
-        stderr(&output).contains("--config required"),
+        stderr(&output).contains("internal world worker requires --request PATH"),
         "{}",
         stderr(&output)
     );

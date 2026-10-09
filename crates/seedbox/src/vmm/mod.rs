@@ -55,6 +55,15 @@ struct AdmissionProbe {
     result: Result<()>,
 }
 
+/// Recorded performance parameters before `--margin`/`--undo` apply.
+fn default_performance() -> BTreeMap<String, String> {
+    use seedbox_engine_core::launch::{ADAPTIVE_MARGIN, DEFAULT_UNDO_MARGIN};
+    BTreeMap::from([
+        ("SEEDBOX_MARGIN".into(), ADAPTIVE_MARGIN.into()),
+        ("SEEDBOX_UNDO".into(), DEFAULT_UNDO_MARGIN.to_string()),
+    ])
+}
+
 impl VmmExecutor {
     /// Detect the launch contract of an explicitly supplied executable.
     pub fn new_detected(
@@ -145,10 +154,7 @@ impl VmmExecutor {
             cpu,
             counter,
             profile,
-            performance: BTreeMap::from([
-                ("SEEDBOX_MARGIN".into(), "adaptive".into()),
-                ("SEEDBOX_UNDO".into(), "256".into()),
-            ]),
+            performance: default_performance(),
             admission: Default::default(),
         })
     }
@@ -205,10 +211,7 @@ impl VmmExecutor {
                 witness_mode,
                 semantic_parameters,
             },
-            performance: BTreeMap::from([
-                ("SEEDBOX_MARGIN".into(), "adaptive".into()),
-                ("SEEDBOX_UNDO".into(), "256".into()),
-            ]),
+            performance: default_performance(),
         })
     }
 
@@ -556,7 +559,8 @@ fn with_capacity<T>(
     check(&reservations)
 }
 
-/// Build the retained executable's launch contract without consulting the host.
+/// The retained executable and its recorded dispatch, without consulting the host.
+/// Run settings follow in its launch request (`worker_process`).
 pub(crate) fn engine_command(
     engine: &Path,
     profile: &ExecutionProfile,
@@ -569,20 +573,20 @@ pub(crate) fn engine_command(
         }
         crate::engine::ExecutableKind::ArmWorld => {
             command.args(["__engine", "arm64-world-v1"]);
-            return Ok(command);
         }
     }
-    let timebase = recorded_timebase(profile)?;
-    if timebase != Timebase::Counter {
-        command.arg("--timebase").arg(timebase.name());
-    }
-    if recorded_page_timer(profile) {
-        command.arg("--page-timer");
-    }
-    if recorded_deferred_tx(profile)? {
-        command.arg("--deferred-tx");
-    }
     Ok(command)
+}
+
+/// The run-shaping machine features a profile records, as the x86 worker takes them.
+pub(crate) fn recorded_features(
+    profile: &ExecutionProfile,
+) -> Result<seedbox_engine_core::launch::MachineFeatures> {
+    Ok(seedbox_engine_core::launch::MachineFeatures {
+        timebase: recorded_timebase(profile)?,
+        page_timer: recorded_page_timer(profile),
+        deferred_tx: recorded_deferred_tx(profile)?,
+    })
 }
 
 /// Missing page timer means the legacy port transport.

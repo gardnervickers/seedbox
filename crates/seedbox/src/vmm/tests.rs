@@ -134,14 +134,15 @@ fn explicit_override_uses_replacement_contract_in_both_directions() {
             .unwrap()
             .get_args()
             .collect::<Vec<_>>(),
-        [
-            "__engine",
-            crate::engine::INTERNAL_WORKER_V1,
-            "--timebase",
-            "pv",
-            "--page-timer",
-            "--deferred-tx"
-        ]
+        ["__engine", crate::engine::INTERNAL_WORKER_V1]
+    );
+    assert_eq!(
+        recorded_features(&combined.profile).unwrap(),
+        seedbox_engine_core::launch::MachineFeatures {
+            timebase: Timebase::Pv,
+            page_timer: true,
+            deferred_tx: true,
+        }
     );
     assert!(recorded_torn_writes(&combined.profile).unwrap());
     let standalone = VmmExecutor::from_override(
@@ -157,8 +158,8 @@ fn explicit_override_uses_replacement_contract_in_both_directions() {
         engine_command(Path::new("engine"), &standalone.profile)
             .unwrap()
             .get_args()
-            .collect::<Vec<_>>(),
-        ["--timebase", "pv", "--page-timer", "--deferred-tx"]
+            .count(),
+        0
     );
     // Explicit fresh runs perform the same detection; retained replay does not.
     let detected = VmmExecutor::new_detected(
@@ -215,12 +216,19 @@ fn retained_worker_launch_preserves_timer_and_deferred_tx_options() {
         if internal {
             expected.extend(["__engine", crate::engine::INTERNAL_WORKER_V1]);
         }
-        expected.extend(["--timebase", "pv", "--page-timer", "--deferred-tx"]);
         assert_eq!(command.get_args().collect::<Vec<_>>(), expected);
+        assert_eq!(
+            recorded_features(&retained).unwrap(),
+            seedbox_engine_core::launch::MachineFeatures {
+                timebase: Timebase::Pv,
+                page_timer: true,
+                deferred_tx: true,
+            }
+        );
         profile
             .semantic_parameters
             .insert("deferred_tx".into(), "false".into());
-        assert!(engine_command(Path::new("retained-engine"), &profile).is_err());
+        assert!(recorded_features(&profile).is_err());
     }
 }
 
@@ -288,34 +296,14 @@ fn counter_and_pv_retain_identity_and_replay_through_worker_contract() {
             VmmExecutor::from_retained(&executable, &store, retained, Some(8), CounterProfile::Zen)
                 .unwrap();
         assert_eq!(serde_json::to_vec(&replay.profile).unwrap(), bytes);
-        let expected = if timebase == Timebase::Pv {
-            vec!["__engine", INTERNAL_WORKER_V1, "--timebase", "pv"]
-        } else {
-            vec!["__engine", INTERNAL_WORKER_V1]
-        };
         for profile in [&executor.profile, &replay.profile] {
             let command = engine_command(&executable, profile).unwrap();
             assert_eq!(command.get_program(), executable.as_os_str());
-            assert_eq!(command.get_args().collect::<Vec<_>>(), expected);
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-            {
-                let mut args = vec!["seedbox".to_owned()];
-                args.extend(
-                    command
-                        .get_args()
-                        .skip(2)
-                        .map(|arg| arg.to_str().unwrap().to_owned()),
-                );
-                args.extend(
-                    ["--config", "world.json", "--seed", "7", "--out", "output"].map(str::to_owned),
-                );
-                let options = seedbox_vmm::WorkerOptions::from_args(
-                    &args,
-                    seedbox_vmm::PerformanceOptions::default(),
-                )
-                .unwrap();
-                assert_eq!(options.pv_clock, timebase == Timebase::Pv);
-            }
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                ["__engine", INTERNAL_WORKER_V1]
+            );
+            assert_eq!(recorded_features(profile).unwrap().timebase, timebase);
         }
         profiles.push(executor.profile);
     }

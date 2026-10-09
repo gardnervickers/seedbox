@@ -63,7 +63,8 @@ precise-stop rollback window (default 256; 0 disables it). `--margin` selects th
 PMU approach and stepping distance when undo is off (default `adaptive`). Neither
 setting decides where a stop lands: the first natural exit at or after the soft
 target and below the hard target, otherwise an exact count at the hard target. The
-low-level batch runner uses `SEEDBOX_UNDO` and `SEEDBOX_MARGIN` for the same settings.
+standalone `seedbox-vmm` takes them as `--undo`/`--margin` or `SEEDBOX_UNDO`/`SEEDBOX_MARGIN`,
+which the low-level batch runner sets.
 
 A PMU overshoot aborts an execution. A separate invocation can use a larger
 margin; the failed evidence remains. Charged timer-port accesses apply their

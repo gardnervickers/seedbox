@@ -2,20 +2,18 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-pub fn times(list: &str, duration: u64) -> Result<Vec<u64>, String> {
-    let mut times = Vec::new();
-    for text in list.split(',') {
-        let t = text
-            .parse::<u64>()
-            .map_err(|_| "--checkpoint-at-ns must be comma-separated unsigned nanoseconds")?;
-        if t >= duration || times.last().is_some_and(|last| *last >= t) {
+/// Check runtime checkpoint times: strictly increasing and before `duration`.
+pub fn check_times(times: &[u64], duration: u64) -> Result<(), String> {
+    let mut last = None;
+    for &t in times {
+        if t >= duration || last.is_some_and(|last| last >= t) {
             return Err(
                 "--checkpoint-at-ns must be strictly increasing and before duration_ns".into(),
             );
         }
-        times.push(t);
+        last = Some(t);
     }
-    Ok(times)
+    Ok(())
 }
 
 pub fn branch_identity(parent: &str, at: u64, seed: u64) -> String {
@@ -78,10 +76,11 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn times_reject_invalid_duplicate_reversed_and_duration_boundaries() {
-        assert_eq!(times("0,5,9", 10).unwrap(), vec![0, 5, 9]);
-        for bad in ["", "-1", "5,5", "9,5", "10", "5,", "18446744073709551616"] {
-            assert!(times(bad, 10).is_err(), "{bad}");
+    fn times_reject_duplicate_reversed_and_duration_boundaries() {
+        check_times(&[0, 5, 9], 10).unwrap();
+        check_times(&[], 10).unwrap();
+        for bad in [&[5, 5][..], &[9, 5], &[10]] {
+            assert!(check_times(bad, 10).is_err(), "{bad:?}");
         }
     }
 

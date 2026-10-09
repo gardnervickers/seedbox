@@ -116,8 +116,9 @@ the canonical crate; do not restore sibling source inclusion for these policies.
   Reformatting, moving code and changing build flags are ordinary changes;
   run `cargo fmt` on the VMM like any other crate.
 - The linked CLI uses the root lockfile and records an explicit internal-worker
-  contract; historical profiles without it retain the standalone launch
-  contract. Platform/version metadata never gates development replay.
+  contract; profiles without it start a standalone `seedbox-vmm`. Both read one
+  JSON launch request (`seedbox_engine_core::launch::WorkerRequest`, written as
+  `output/worker-request.json`); the standalone VMM also builds it from its flags. Platform/version metadata never gates development replay.
 
 ## Checks
 

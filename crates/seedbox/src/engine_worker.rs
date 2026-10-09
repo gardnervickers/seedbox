@@ -116,47 +116,28 @@ fn error(message: &str) -> ExitCode {
     ExitCode::from(2)
 }
 
+/// The x86 world worker takes `--request PATH`, the launch request JSON the
+/// CLI wrote beside the world, and prints the engine report on stdout.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-fn world_worker(executable: OsString, args: Vec<OsString>) -> ExitCode {
-    fn run(executable: OsString, args: Vec<OsString>) -> Result<(), String> {
-        let args = std::iter::once(executable)
-            .chain(args)
-            .map(|arg| {
-                arg.into_string()
-                    .map_err(|_| "worker argument is not UTF-8".to_owned())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let undo = std::env::var("SEEDBOX_UNDO").ok();
-        let margin = std::env::var("SEEDBOX_MARGIN").ok();
-        let performance =
-            seedbox_vmm::PerformanceOptions::parse(undo.as_deref(), margin.as_deref())?;
-        let mut options = seedbox_vmm::WorkerOptions::from_args(&args, performance)?;
-        if options.pv_clock {
-            if let Ok(value) = std::env::var("SEEDBOX_PV_WATCHDOG_MS") {
-                options.performance.pv_watchdog_ms = value
-                    .parse()
-                    .map_err(|e| format!("SEEDBOX_PV_WATCHDOG_MS: {e}"))?;
-            }
-        }
-        if std::env::var_os("SEEDBOX_TRACE_CONSOLE").is_some() {
-            options.console_trace = Some(|trace| {
-                eprintln!(
-                    "[host {:.3}s guest {:.6}s br {}] {}",
-                    trace.host_seconds,
-                    trace.guest_seconds,
-                    trace.branches,
-                    String::from_utf8_lossy(trace.line)
-                );
-            });
-        }
-        let report = seedbox_vmm::run(&options)?;
+fn world_worker(_: OsString, args: Vec<OsString>) -> ExitCode {
+    fn run(args: Vec<OsString>) -> Result<(), String> {
+        let path = match <[OsString; 2]>::try_from(args) {
+            Ok([flag, path]) if flag == "--request" => std::path::PathBuf::from(path),
+            _ => return Err("internal world worker requires --request PATH".into()),
+        };
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut request: seedbox_vmm::WorkerRequest =
+            serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        let trace =
+            seedbox_vmm::DebugEnv::from_env(|name| std::env::var_os(name))?.apply(&mut request);
+        let report = seedbox_vmm::run(&request, trace)?;
         println!(
             "{}",
             serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?
         );
         Ok(())
     }
-    match run(executable, args) {
+    match run(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("error: {message}");

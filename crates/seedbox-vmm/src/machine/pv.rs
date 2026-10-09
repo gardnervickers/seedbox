@@ -430,7 +430,7 @@ mod tests {
                 code.extend_from_slice(&(abi as u32).to_le_bytes());
                 code.extend_from_slice(&[0xba, 0x28, 0x05, 0, 0, 0xef, 0xf4]);
                 let mut m = machine(&kvm, &code, 0);
-                m.page_timer_requested = requested;
+                m.features.page_timer = requested;
                 m.page_set(super::super::PAGE_PV_CLOCK, 2);
                 m.pic.set_masks(0xffff);
                 let mut clock = PvClock::new(Duration::from_secs(10)).unwrap();
@@ -454,7 +454,7 @@ mod tests {
         kernel.extend(code);
         let spec = BootSpec {
             undo_margin: undo,
-            pv_clock: true,
+            features: super::super::PV,
             ..BootSpec::test(&kernel)
         };
         let mut m = Machine::new(kvm, "pv-probe", &spec).unwrap();
@@ -485,7 +485,7 @@ mod tests {
         code.extend_from_slice(&[0xba, 0x2c, 0x05, 0, 0, 0xb0, 1, 0xee, 0xf4]);
         for watchdog in [Duration::from_secs(10), Duration::from_micros(100)] {
             let mut m = machine(&kvm, &code, 0);
-            m.page_timer_requested = true;
+            m.features.page_timer = true;
             m.abi = super::super::ABI_PAGE_TIMER;
             m.enable_page_timer();
             m.pic.set_masks(0xffff); // Retain IRQ0 rather than entering an absent IDT.
@@ -516,7 +516,7 @@ mod tests {
     fn a_throttle_and_its_heal_charge_from_the_next_legal_plan() {
         let kvm = Kvm::new().unwrap();
         let mut m = machine(&kvm, &[0xf4], 0);
-        m.page_timer_requested = true;
+        m.features.page_timer = true;
         m.abi = super::super::ABI_PAGE_TIMER;
         m.enable_page_timer();
         m.syscall_ns = 937;
@@ -545,7 +545,7 @@ mod tests {
     fn watchdog_plans_do_not_adopt_expire_or_draw_page_timer_latency() {
         let kvm = Kvm::new().unwrap();
         let mut m = machine(&kvm, &[0xf4], 0);
-        m.page_timer_requested = true;
+        m.features.page_timer = true;
         m.abi = super::super::ABI_PAGE_TIMER;
         m.enable_page_timer();
         m.pit.program_deadline(Some(10000));
@@ -635,7 +635,7 @@ mod tests {
                 (Duration::from_micros(200), 256),
             ] {
                 let mut m = machine(&kvm, &code, undo);
-                m.page_timer_requested = true;
+                m.features.page_timer = true;
                 m.abi = super::super::ABI_PAGE_TIMER;
                 m.enable_page_timer();
                 m.pit.program_deadline(old);
@@ -726,7 +726,7 @@ mod tests {
             (Duration::from_micros(700), 256),
         ] {
             let mut m = machine(&kvm, &code, undo);
-            m.page_timer_requested = true;
+            m.features.page_timer = true;
             m.abi = super::super::ABI_PAGE_TIMER;
             m.enable_page_timer();
             m.pic.set_masks(0xffff);
