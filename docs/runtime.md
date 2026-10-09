@@ -366,9 +366,13 @@ and [the kernel contract](../kernel/README.md#build-without-private-release-acce
 for both architecture outputs and Mac usage. Helpers use an independent
 release identified by `tools/runtime/inputs.json`; kernel-only changes reuse it.
 
-Caches live under `~/Library/Caches/seedbox/kernels` on Mac and
-`~/.cache/seedbox/kernels` on Linux, or `$XDG_CACHE_HOME/seedbox/kernels` when set.
-Helper archives use the sibling `assets` directory and extracted tools use `runtime`.
+Caches live under `~/Library/Caches/seedbox/kernels/sbxlaunch4` on Mac and
+`~/.cache/seedbox/kernels/sbxlaunch4` on Linux, or under `$XDG_CACHE_HOME/seedbox`
+when set. Helper archives use `assets/sbxlaunch4` and extracted tools use `runtime`.
+The last directory is the boot-recipe format this build writes: a build with a new
+format downloads again rather than reusing older guest assets. If the latest helper
+release's supervisor predates that format, the run stops with an error and drops the
+downloaded helper and kernel, so a later run retries once newer assets are published.
 An explicit `--runtime-assets` or `SEEDBOX_RUNTIME_ASSETS` bypasses helper downloads.
 `doctor` looks up the cached or explicit kernel without downloading, creating
 cache/run state or performing OCI preparation. If the cache is empty, its error

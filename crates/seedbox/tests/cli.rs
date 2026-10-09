@@ -964,7 +964,9 @@ fn doctor_uses_kernel_cache_without_credentials_download_or_state() {
         } else {
             root.join("Library/Caches")
         };
-        let ready = cache.join("seedbox/kernels").join("aarch64/ready");
+        let ready = cache
+            .join("seedbox/kernels/sbxlaunch4")
+            .join("aarch64/ready");
         let run = || {
             let mut command = Command::new(env!("CARGO_BIN_EXE_seedbox"));
             command

@@ -39,7 +39,10 @@ The release build compiles the native CLI and signs it on Mac. It needs no
 container engine and builds no Linux guest assets. On the first `run`, `explore`
 or `prepare`, Seedbox announces downloads of its guest kernel and helper archive
 from the latest guest releases on GitHub, verifies their SHA-256 digests and
-caches them. Later calls reuse the cached bytes without contacting GitHub. Caches live under
+caches them. Later calls reuse the cached bytes without contacting GitHub. Caches are
+kept per boot-recipe format (currently `sbxlaunch4`), so a build that writes a new
+format downloads again; if the latest release still predates it, the run stops with
+an error and discards that download. Caches live under
 `~/Library/Caches/seedbox` on Mac or `~/.cache/seedbox` on Linux;
 `XDG_CACHE_HOME` overrides the parent directory. Explicit `--kernel` and
 `--runtime-assets` paths bypass their respective downloads.
