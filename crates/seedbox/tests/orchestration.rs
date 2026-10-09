@@ -2639,3 +2639,26 @@ fn put_file_of_a_retained_object_reads_it_without_rewriting_it() {
         .put_file(&source)
         .is_err());
 }
+
+#[test]
+fn a_runtime_input_is_hashed_again_after_it_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("engine");
+    fs::write(&source, b"first engine").unwrap();
+    let first = seedbox::admission::file_digest(&source).unwrap();
+    assert_eq!(seedbox::admission::file_digest(&source).unwrap(), first);
+    let store = ContentStore::new(directory.path().join("store"));
+    assert_eq!(store.put_file(&source).unwrap(), first);
+    // Rewritten in place, and replaced by a new file under the same name.
+    fs::write(&source, b"second engine bytes").unwrap();
+    let second = seedbox::admission::file_digest(&source).unwrap();
+    assert_eq!(second, ContentDigest::of(b"second engine bytes"));
+    assert_eq!(store.put_file(&source).unwrap(), second);
+    let replacement = directory.path().join("replacement");
+    fs::write(&replacement, b"third").unwrap();
+    fs::rename(&replacement, &source).unwrap();
+    assert_eq!(
+        seedbox::admission::file_digest(&source).unwrap(),
+        ContentDigest::of(b"third")
+    );
+}

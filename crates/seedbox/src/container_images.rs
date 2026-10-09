@@ -274,7 +274,9 @@ impl ImageTransport for ContainerTransport {
         let config_digest = store.put(&config_bytes)?;
         let raw = directory.join("metadata");
         fs::create_dir(&raw)?;
-        store.materialize(&layer, &raw)?;
+        // The exported filesystem is scratch in this directory; link it rather
+        // than copying it back out of the store.
+        fs::hard_link(&rootfs, raw.join(layer.hex()))?;
         store.materialize(&config_digest, &raw)?;
         fs::write(
             raw.join("manifest.json"),
