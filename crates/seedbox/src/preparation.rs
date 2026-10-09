@@ -1,6 +1,7 @@
 //! OCI-backed preparation. Runtime binaries are explicit inputs, so library
 //! callers do not depend on CLI environment or a particular checkout layout.
 
+use crate::limits::read_bounded;
 use crate::{
     config::Simulation,
     execution::{ExecutionProfile, PreparationBackend, PreparedInputs},
@@ -8,7 +9,9 @@ use crate::{
     store::ContentStore,
     Error, Result,
 };
-use std::{collections::BTreeMap, fs, io::Read, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::PathBuf};
+
+const CONFIG_LIMIT: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct OciPreparer {
@@ -136,13 +139,12 @@ impl OciPreparer {
         }
         let mut configs = BTreeMap::new();
         for (name, path) in &simulation.configs {
-            let mut data = Vec::new();
-            fs::File::open(path)?
-                .take(16 * 1024 * 1024 + 1)
-                .read_to_end(&mut data)?;
-            if data.len() > 16 * 1024 * 1024 {
-                return Err(Error::Execution(format!("config {name} exceeds 16 MiB")));
-            }
+            let data = read_bounded(
+                fs::File::open(path)?,
+                CONFIG_LIMIT,
+                format_args!("config {name}"),
+            )
+            .map_err(|e| e.or_too_large(Error::Execution))?;
             auxiliary.insert(format!("config/{name}"), store.put(&data)?);
             configs.insert(name, data);
         }

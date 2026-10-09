@@ -23,6 +23,7 @@ mod host;
 pub mod host_control;
 pub mod image;
 mod image_archive;
+mod limits;
 pub mod logs;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub mod mac;

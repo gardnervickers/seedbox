@@ -1,6 +1,7 @@
 //! Transfer one retained attempt without preparation or executing its contents.
 use crate::{
     execution::CancellationToken,
+    limits::{exceeds, read_bounded},
     orchestration::{inspect_bytes, Run, RunRecord},
     store::{ContentDigest, ContentStore},
     Error, Result,
@@ -163,14 +164,7 @@ fn validate_log_name(name: &str) -> Result<()> {
     Ok(())
 }
 fn bounded_file(path: &Path) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    fs::File::open(path)?
-        .take(MAX_METADATA + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_METADATA {
-        return Err(bad("manifest exceeds 8 MiB"));
-    }
-    Ok(bytes)
+    read_bounded(fs::File::open(path)?, MAX_METADATA, "manifest").map_err(|e| e.or_too_large(bad))
 }
 fn header(name: &str, size: u64) -> Result<[u8; 512]> {
     let mut h = tar::Header::new_ustar();
@@ -240,7 +234,7 @@ pub fn export(
     };
     let metadata = serde_json::to_vec(&envelope)?;
     if metadata.len() as u64 > MAX_METADATA {
-        return Err(bad("envelope exceeds 8 MiB"));
+        return Err(bad(exceeds("envelope", MAX_METADATA)));
     }
     let parent = destination
         .parent()
@@ -311,7 +305,7 @@ fn read_padding(input: &mut impl Read, size: u64) -> Result<()> {
 fn metadata(input: &mut impl Read, name: &str) -> Result<Vec<u8>> {
     let size = read_header(input, name)?;
     if size > MAX_METADATA {
-        return Err(bad(format!("{name} exceeds 8 MiB")));
+        return Err(bad(exceeds(name, MAX_METADATA)));
     }
     let mut bytes = vec![0; size as usize];
     input.read_exact(&mut bytes)?;

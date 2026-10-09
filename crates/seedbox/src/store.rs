@@ -1,6 +1,6 @@
 //! Verified local content store. A digest alone is never proof of retention.
 
-use crate::{Error, Result};
+use crate::{limits::read_bounded, Error, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -119,13 +119,13 @@ impl ContentStore {
         // Convenience for small metadata only. File artifacts must use copy_to
         // or materialize; don't accidentally allocate a guest image in RAM.
         const LIMIT: u64 = 8 * 1024 * 1024;
-        let mut bytes = Vec::new();
-        self.open(digest)?.take(LIMIT + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > LIMIT {
-            return Err(Error::Integrity(
-                "artifact exceeds 8 MiB metadata read limit; use copy_to/materialize".into(),
-            ));
-        }
+        let bytes = read_bounded(self.open(digest)?, LIMIT, "artifact").map_err(|e| {
+            e.or_too_large(|message| {
+                Error::Integrity(format!(
+                    "{message} metadata read limit; use copy_to/materialize"
+                ))
+            })
+        })?;
         if ContentDigest::of(&bytes) != *digest {
             return Err(Error::Integrity(format!("hash mismatch: {}", digest.hex())));
         }

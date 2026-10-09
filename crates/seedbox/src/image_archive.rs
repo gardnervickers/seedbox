@@ -1,5 +1,5 @@
 //! Merge image-owned layers without mounting or extracting guest filesystem paths.
-use crate::{execution::CancellationToken, Error, Result};
+use crate::{execution::CancellationToken, limits::exceeds, Error, Result};
 use std::{
     collections::BTreeSet,
     fs,
@@ -7,6 +7,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 const LIMIT: u64 = 4 << 30;
+const METADATA_LIMIT: u64 = 4 << 20;
 fn error(message: impl std::fmt::Display) -> Error {
     Error::Setup(format!("image archive: {message}"))
 }
@@ -112,8 +113,8 @@ pub(crate) fn merge(
             return Err(error(format!("missing member {}", name.display())));
         }
         let file = fs::File::open(directory.join(name))?;
-        if file.metadata()?.len() > 4 << 20 {
-            return Err(error("image metadata exceeds 4 MiB"));
+        if file.metadata()?.len() > METADATA_LIMIT {
+            return Err(error(exceeds("image metadata", METADATA_LIMIT)));
         }
         Ok(serde_json::from_reader(file)?)
     };

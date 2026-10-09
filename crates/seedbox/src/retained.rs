@@ -6,7 +6,8 @@ use std::{
     io::{Read, Seek},
     path::{Component, Path},
 };
-fn bad(command: &str, path: &Path, error: impl std::fmt::Display) -> Error {
+/// An unusable retained run, named by the offline command that read it.
+pub(crate) fn bad(command: &str, path: &Path, error: impl std::fmt::Display) -> Error {
     Error::Setup(format!(
         "{command} {}: {error}; use an intact retained run directory (import bundles first)",
         path.display()

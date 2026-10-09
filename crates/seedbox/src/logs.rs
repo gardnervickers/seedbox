@@ -73,10 +73,7 @@ pub struct Reader {
     directory: PathBuf,
 }
 fn bad(directory: &Path, message: impl std::fmt::Display) -> Error {
-    Error::Setup(format!(
-        "logs {}: {message}; use an intact retained run directory (import bundles first)",
-        directory.display()
-    ))
+    retained::bad("logs", directory, message)
 }
 impl Reader {
     pub fn open(directory: &Path, filter: &Filter) -> Result<Self> {
