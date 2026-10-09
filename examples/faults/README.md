@@ -52,8 +52,8 @@ build context acquires the SDK during generation. The Python controller is in
 `workload/scenario.py`; the protocol used by the independent client is separate
 from the fault RPC protocol.
 
-Run all cases and effect-error controls from `nix develop` on the qualified
-Linux host:
+Run all cases and effect-error controls from `nix develop` on a Linux KVM
+host:
 
 ```sh
 bash crates/seedbox/tests/accept-runtime.sh /absolute/bzImage 14 /absolute/fault-evidence faults
@@ -61,9 +61,9 @@ bash crates/seedbox/tests/accept-runtime.sh /absolute/bzImage 14 /absolute/fault
 
 The evidence output must be fresh. The harness writes its report and command logs
 incrementally, preserving completed evidence if a later case fails. The
-[acceptance record](ACCEPTANCE.md) identifies the qualified binaries, retained
-outcomes, replay witnesses and review results. Each engine revision needs its
-own live acceptance; older records remain archived separately.
+[acceptance record](ACCEPTANCE.md) identifies the binaries, retained outcomes,
+replay witnesses and review results it was run with. Older records remain
+archived separately.
 
 To invoke the harness directly after building the CLI, VMM, and guest supervisor:
 

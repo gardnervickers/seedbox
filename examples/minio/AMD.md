@@ -1,19 +1,19 @@
-# AMD KVM qualification checklist
+# AMD KVM acceptance checklist
 
-Run from this committed checkout in the project development shell, on the qualified AMD host as an authorized operator. Select an available physical core/SMT pair under the normal shared lease; `CPU` below is the chosen logical CPU, not a reservation of any historical lane. Preserve other workloads. Use the accepted exact CLI, VMM, kernel, supervisor, static BusyBox and project-native Podman. Do not rebuild an engine or kernel to bypass qualification, repin, increase memory/deadlines or silently retry failed worlds.
+Run from this committed checkout in the project development shell, on an AMD Zen KVM host as an authorized operator. Select an available physical core/SMT pair under the normal shared lease; `CPU` below is the chosen logical CPU, not a reservation of any historical lane. Preserve other workloads. Use one CLI, VMM, kernel, supervisor, static BusyBox and project-native Podman for every step. Do not increase memory/deadlines or silently retry failed worlds.
 
-If a Linux source build is needed, the existing aliases are `cargo build --release`, `cargo build-vmm` and `cargo test-vmm`; use them only for the intended accepted revision. The checklist supplies already qualified artifacts explicitly and uses no qualification bypass flags. `doctor` compatibility is a prerequisite observation, not replay qualification.
+If a Linux source build is needed, the existing aliases are `cargo build --release`, `cargo build-vmm` and `cargo test-vmm`; build the revision under test. The checklist passes the artifacts explicitly. `doctor` checks host compatibility only; replay MATCH is the determinism check.
 
 ## Stage and validate
 
-Bind these paths and the selected CPU to the actual accepted artifacts; use fresh writable evidence/input/project directories. Record revision, artifact hashes, host/profile observations, full command logs and elapsed times, and verify CPU/MSR/lease cleanup after each guest job. Stop on uncertain cleanup. Preparation happens in each `run`; there is no standalone prepared-input adapter. Retain each run's complete OCI/config/layers/archives/provenance, even if variants rebuild differently.
+Bind these paths and the selected CPU to the artifacts under test; use fresh writable evidence/input/project directories. Record revision, artifact hashes, host/profile observations, full command logs and elapsed times, and verify CPU/MSR/lease cleanup after each guest job. Stop on uncertain cleanup. Preparation happens in each `run`; there is no standalone prepared-input adapter. Retain each run's complete OCI/config/layers/archives/provenance, even if variants rebuild differently.
 
 ```bash
 set -euo pipefail
-SEEDBOX=/absolute/qualified/seedbox
-VMM=/absolute/qualified/seedbox-vmm
-KERNEL=/absolute/qualified/bzImage
-GUEST_INIT=/absolute/qualified/guest-init
+SEEDBOX=/absolute/seedbox
+VMM=/absolute/seedbox-vmm
+KERNEL=/absolute/bzImage
+GUEST_INIT=/absolute/guest-init
 BUSYBOX=/absolute/static-linux-amd64/busybox
 BUILDER=/absolute/project-native/podman
 CPU=8  # Replace with the currently available admitted lane.

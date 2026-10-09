@@ -13,8 +13,8 @@ the fix. This page keeps the parts that guide day-to-day decisions. The current
 [runtime](runtime.md) supports Compose/OCI run and replay, seeded scheduling,
 and a Python scenario API for scoped network and process faults. The
 [acceptance record](acceptance.md) states what has been tested; the
-[backend contract](backends.md#qualification-and-capability-limits) states the
-remaining qualification limits. Builder plugins, broader faults and topology,
+[backend contract](backends.md#capability-limits) states the
+remaining capability limits. Builder plugins, broader faults and topology,
 exploration, portable bundles, snapshots, reverse debugging and `verify`
 remain future work tracked in issue #25.
 
@@ -50,7 +50,7 @@ interpret them.
    Seedbox adds simulated duration (an estimate of real elapsed time including
    injected latency), per-link traffic and drops, faults applied and host cost.
 6. **A failure is an artifact.** A content-addressed bundle reproduces the run
-   exactly on any qualified host, against the build that failed.
+   exactly on a capable host, against the retained build that failed.
 7. **Narrow, don't shrink.** Protocol-free rules prune faults that can't matter,
    and parallel counterfactual runs mark the rest as likely necessary or
    inconclusive. Shrinking is out of reach: runs are chaotic.

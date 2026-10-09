@@ -128,22 +128,19 @@ These contracts and local fixture tests are not evidence of Linux hardware or
 guest qualification. The orchestration test backend lives only under `tests/`;
 it is never offered as a production execution option.
 
-## Qualification and capability limits
+## Capability limits
 
 [Draft format and runtime scope](compatibility.md) separates readable artifacts
-from execution admission and lists version-bound evidence. V0 reader/writer and
-release compatibility promises remain undecided pending qualification.
+from execution and lists version-bound evidence. Reader/writer compatibility
+promises remain undecided.
 
-The tested production profile is Linux/KVM on the AMD Ryzen 5950X workstation,
-with the Zen SpeculativeLockMap workaround verified for the leased cores and
-SMT siblings. Guest kernel, supervisor, engine and semantic settings are run
-identity inputs. Host kernel/microcode changes or a new CPU need fresh
-qualification; same-seed equality across hosts is not established. The versioned
-host admission and drift refusal implemented for
-[issue #5](https://github.com/gardnervickers/seedbox/issues/5) add capability/input
-checks and lock-held revalidation. Their Linux collection and the new profile
-still require actual acceptance; source checks do not qualify them. Matching the
-full policy on another machine admits compatibility, not cross-host determinism.
+The tested profile is Linux/KVM on the AMD Ryzen 5950X workstation, with the Zen
+SpeculativeLockMap workaround verified for the leased cores and SMT siblings.
+Guest kernel, supervisor, engine and semantic settings are run identity inputs.
+Host admission checks only the capabilities the engine needs (an AMD x86-64 CPU
+with the required KVM and perf support for the `counter` timebase; KVM alone for
+`--timebase pv`). It is not a pin list: a host that passes it can run, but
+same-seed equality across hosts is not established.
 
 Clock and entropy evidence admits the tested workloads, not arbitrary Linux
 images or JVM/JIT programs. Broader instruction, CPU-feature, clock and entropy
