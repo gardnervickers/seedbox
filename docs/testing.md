@@ -127,3 +127,15 @@ Nix store and Cargo dependencies/build outputs are cached in GitHub Actions;
 guest assets are built explicitly from the checkout. Cold caches require downloads
 and builds. Jobs time out after 100 minutes and superseded runs are canceled.
 No cloud account, self-hosted runner, PMU, or external cleanup service is needed.
+
+The Nix cache key covers the locked toolchain and all kernel/helper recipes.
+The development shell and guest assets are GC-rooted; unreferenced Nix paths are
+collected toward a 5 GiB store before saving (live roots can exceed this target).
+The cache is saved before tests so failed tests do not discard expensive builds.
+Rust caching uses the Nix-selected compiler and all three workspaces, retaining
+compiled dependencies while pruning workspace binaries and incremental outputs.
+It saves dependency progress even after test failures. Source commits do not
+create a fresh full-target cache each time. Cache hits are recorded in the job
+summary. GitHub's branch-scoped cache isolation keeps PR caches out of main.
+The repository retains its existing 10 GB cache eviction limit; diagnostic
+artifacts are capped at 64 MiB per run and expire after seven days.
