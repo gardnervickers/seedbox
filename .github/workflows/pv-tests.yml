@@ -54,7 +54,7 @@ jobs:
           DIGITALOCEAN_TOKEN: ${{ secrets.DO_CI_TOKEN }}
           RUNNER_ADMIN_TOKEN: ${{ steps.app.outputs.token }}
           DO_REGION: ${{ vars.DO_CI_REGION || 'nyc3' }}
-          DO_SIZE: ${{ vars.DO_CI_SIZE || 's-4vcpu-8gb-240gb-intel' }}
+          DO_SIZE: ${{ vars.DO_CI_SIZE || 's-4vcpu-8gb-amd' }}
           IMAGE_KEY: ${{ steps.source.outputs.key }}
         run: |
           python3 tools/pv-ci/control.py provision \
