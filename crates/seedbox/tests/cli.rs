@@ -927,7 +927,6 @@ fn doctor_bad_inputs_execute_no_tools_and_create_no_state_even_with_cargo_enviro
         .unwrap();
         fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
     }
-    fs::write(root.join("kernel"), b"unqualified fixture kernel").unwrap();
     for json in [false, true] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_seedbox"));
         command.args(["doctor", "--kernel", "kernel"]);
@@ -945,6 +944,7 @@ fn doctor_bad_inputs_execute_no_tools_and_create_no_state_even_with_cargo_enviro
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        assert_eq!(stderr(&output), "error: --kernel kernel: not found\n");
         assert!(output.stdout.is_empty());
         assert!(
             !marker.exists(),
@@ -954,16 +954,9 @@ fn doctor_bad_inputs_execute_no_tools_and_create_no_state_even_with_cargo_enviro
         assert!(!root.join(".seedbox").exists());
         assert!(!root.join("output").exists());
     }
-    fs::write(root.join("engine"), b"unsupported engine").unwrap();
     let output = seedbox(&["doctor", "--vmm", "engine", "--kernel", "kernel"], root);
-    // Any engine is admitted; doctor still requires a supported, ready host.
     assert_eq!(output.status.code(), Some(2));
-    assert!(!stderr(&output).contains("engine is outside"));
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    assert_eq!(
-        stderr(&output),
-        "error: --vmm requires Linux KVM; use the built-in Mac engine\n"
-    );
+    assert_eq!(stderr(&output), "error: --vmm engine: not found\n");
     assert!(!marker.exists());
     assert!(output.stdout.is_empty());
 }

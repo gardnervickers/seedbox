@@ -1098,7 +1098,7 @@ impl Machine {
 
     // Adoption is an observable effect: call only at a legal exit or a world
     // boundary, after accounting for that point's guest clock progress. Never
-    // call from the clock's prepare or a watchdog/probe landing.
+    // call from the clock's prepare or a watchdog landing.
     fn sync_page_timer(&mut self) -> Result<(), String> {
         if !self.page_timer.enabled {
             return Ok(());
@@ -1225,8 +1225,7 @@ impl Machine {
     ) -> Result<Stop, String> {
         // Invariant: entered at a deterministic point. Guest-visible state (time
         // page, interrupts, timer expiry) changes only at deterministic points:
-        // natural exits and proven spin cycles, never at watchdog landings or
-        // intermediate probe steps.
+        // natural exits, never at watchdog landings.
         let deferred = self.net.as_ref().is_some_and(|n| n.deferred_tx());
         let poll_end = crate::virtio_net::poll_limit(self.world.time, limit, deferred);
         // A new polling deadline is exact. The world's early-stop allowance
@@ -1262,7 +1261,7 @@ impl Machine {
                 self.sync_page_timer()?;
                 self.expire_timers()?;
                 // Also runs on slice entry after world RX delivery. Never poll
-                // at watchdog landings or intermediate probe steps.
+                // at watchdog landings.
                 if self.poll_net(frames, self.world.time >= slice_end)? {
                     self.note_skew(Site::Sent);
                     return Ok(Stop::Sent);
@@ -2264,7 +2263,8 @@ mod fork_tests {
         let kvm = Kvm::new().unwrap();
         for abi in 0..ABI_PAGE_RESEED {
             let mut m = probe_machine(&kvm, false);
-            assert!((6..14).all(|i| m.page_get(i) == 0), "fresh boot, ABI {abi}");
+            assert_eq!(m.page_get(PAGE_PV_CLOCK), 1, "fresh boot, ABI {abi}");
+            assert!((7..14).all(|i| m.page_get(i) == 0), "fresh boot, ABI {abi}");
             for i in 6..14 {
                 m.page_set(i, 100 + i as u64);
             }
@@ -2299,7 +2299,8 @@ mod fork_tests {
         let kvm = Kvm::new().unwrap();
         for barrier in [false, true] {
             let mut m = probe_machine(&kvm, barrier);
-            assert!((6..14).all(|i| m.page_get(i) == 0), "fresh boot");
+            assert_eq!(m.page_get(PAGE_PV_CLOCK), 1, "fresh boot");
+            assert!((7..14).all(|i| m.page_get(i) == 0), "fresh boot");
             m.abi = ABI_PAGE_RESEED;
             for i in 0..14 {
                 m.page_set(i, 100 + i as u64);

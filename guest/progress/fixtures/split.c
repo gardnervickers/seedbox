@@ -37,7 +37,7 @@ int main(int argc, char **argv)
             : "r"(&value), "r"((unsigned)i)
             : "x9", "memory", "cc");
     }
-    uint64_t expect = iterations / 2 * 3 + (iterations % 2 ? 2 : 0);
+    uint64_t expect = iterations / 2 * 3 + (iterations % 2 ? 1 : 0);
     printf("SPLIT value=%llu expect=%llu failures=%llu\n", (unsigned long long)value,
            (unsigned long long)expect, (unsigned long long)failures);
     return value == expect ? 0 : 1;

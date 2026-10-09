@@ -32,63 +32,77 @@ until the world's wall-time limit; the host watchdog (`--watchdog-ms`)
 interrupts such a run to report on stderr where the guest is stuck, then
 resumes it, so it changes only how soon the report appears, never a result.
 
-## ARM exclusive sequences
+## ARM limitations and partial mitigation
 
-ARM atomics in musl, glibc, Go and V8 are `LDXR`/`STXR` sequences (LSE is
-exposed to the guest but libraries still ship the LL/SC paths). The local
-exclusive monitor is cleared by every exception return into the guest, so a
-`STXR` fails whenever the host entered the VM between the load and the store.
-Under HVF that entry is invisible to the VMM: `hv_vcpu_run` returns only for
-guest exceptions, cancellation and the virtual timer, so a host interrupt or a
-preemption lands at a point no replay can reproduce. The failed store is
-retried. A plain retry loop ends in the same registers and memory however many
-times it retried; a program that observes its own failures, such as a weak
-compare-and-swap that counts attempts or backs off, is as non-reproducible
-here as it is natively, and the rule below does not change that.
+**General ARM determinism is not established.** A single guest CPU does not
+prevent host interruptions from causing spurious `STXR` failures. An application
+can observe those failures directly through an LL/SC retry counter, weak CAS or
+backoff. Even an otherwise invisible retry can change the client's TLS budget
+and the placement of progress charges. The translator's own code and kernel
+LL/SC sequences also remain outside the client's coverage.
 
-Block-entry counting makes every retry visible. The retried block runs again,
-shifts the TLS budget, and eventually moves the `getpid` charge to a different
-instruction: RAM differs when only the budget moved, and the clock differs when
-a 10,000 boundary moved. Splitting a sequence across blocks is worse, because
-the first execution of each block boundary is a translator exit inside the
-sequence, and instrumentation inside the sequence stores to memory while the
-monitor is armed.
+The supervisor uses `-no_ldstex2cas -unsafe_build_ldstex`. Packing keeps supported
+exclusive sequences together and reduces instrumentation-induced failures.
+DynamoRIO cannot pack every sequence: PC-relative instructions, long regions and
+register pressure can prevent it. Its alternative exclusive-to-CAS conversion
+remains disabled because of correctness problems described below.
 
-The client therefore follows one rule: **a block entry that a failed exclusive
-store can reach is never counted, and nothing is inserted between a load and
-its store.** On aarch64 the supervisor passes `-no_ldstex2cas` (DynamoRIO's
-compare-and-swap conversion changes ABA semantics and hung static musl
-binaries) and `-unsafe_build_ldstex`, which packs each exclusive sequence into
-one `ldstex` macro instruction when it is at most sixteen instructions long,
-contains no PC-relative instruction and leaves a scratch register free. The
-client's analysis pass (`guest/progress/progress.c`) then decides per block:
+The client applies a limited, block-local mitigation:
 
-- A block that begins with an exclusive load or an `ldstex` macro is the retry
-  target and is not counted. A block where ordinary instructions precede the
-  load is counted, because the retry jumps to the load and DynamoRIO gives
-  that target a block of its own.
-- For sequences DynamoRIO could not pack, a block that contains an exclusive
-  store or `clrex` before any load, and a block whose preceding instructions
-  arm the monitor without releasing it (an exclusive load within sixteen
-  instructions with no store, `clrex`, system call or indirect branch in
-  between), continue the sequence and are not counted either.
-- The charge lands on the block the sequence exits to, which runs exactly once
-  per completed operation regardless of how many retries preceded it.
-- A sequence that gives up before its store, such as a lock poll that reloads
-  while the lock is held, completes nothing, so no exit block runs. Unpacked,
-  the block begins with the load and ends with the backward branch, and the
-  charge goes on that branch's taken path, where the reservation is already
-  abandoned; it runs once per poll and never because of a failed store.
-  Packed, the loop spins inside the macro instruction where nothing can be
-  inserted; the client reports such a block once on stderr
-  (`seedbox progress: exclusive poll loop at ... is not charged`), because a
-  waiter in it makes no progress until something else moves the clock. The
-  usual library polls (musl, glibc, Go, outline atomics) spin on ordinary
-  loads or a `yield` outside the sequence and are charged normally.
+- It skips the entry charge when a block starts with an exclusive load or a
+  packed `ldstex` instruction, or contains a store-exclusive or `CLREX` before
+  any exclusive load. Ordinary successor blocks retain their entry charge.
+- If an unpacked load-starting block branches backward before any exclusive
+  store, it charges the taken branch. That allows simple abandoned-reservation
+  polls to advance time.
+- A packed poll may loop internally without a charge. The client reports
+  recognized cases on stderr, but cannot make the owner wake on virtual time.
 
-The fixtures under `guest/progress/fixtures/` exercise these shapes natively
-on an aarch64 Linux host under DynamoRIO (`run.sh`), packed and unpacked, and
-count the charges each makes.
+This is not a control-flow proof. An intermediate block in a split sequence,
+retry work outside the recognized blocks, or a different retry target can still
+change accounting or insert instrumentation inside a reservation. Looking back
+sixteen adjacent instructions cannot establish the incoming control flow, so
+that heuristic has been removed. Neither a successful workload nor equal syscall
+counts proves these cases safe. A loop outside progress coverage can stall until
+the wall-time limit; the diagnostic watchdog does not advance guest time.
+
+The fixtures under `guest/progress/fixtures/` are native ARM Linux diagnostics
+for packed/unpacked polls, split sequences and observable weak-CAS failures.
+They do not assert replay determinism. In particular, their native owner thread
+can wake on host time even when a Seedbox guest owner would remain asleep.
+
+## Independent ARM follow-up
+
+Tracked in [#241](https://github.com/gardnervickers/seedbox/issues/241).
+
+Two concrete DynamoRIO 11.3.0-1 conversion problems have been reproduced on
+Apple Silicon using minimal static ARM programs:
+
+1. For an overlapping load such as `LDAXR W3, [X3]`, the converter saves the
+   reservation address after the load overwrites X3. Static musl's exit lock
+   uses this shape and retries forever. Saving the address before the load
+   fixes the minimal reproducer and lets the static-musl program finish. A
+   same-compiler rebuild without the patch still hangs.
+2. After a successful store-exclusive, a second store-exclusive without a new
+   load must fail. The converter can reuse its saved reservation and succeed.
+   The minimal test passes natively and fails under stock conversion.
+
+The first repair is small and confirmed; it is not a general determinism fix.
+Value comparison alone also cannot represent reservation loss across a guest
+interrupt or an ABA write. A software reservation must be consumed, honor
+`CLREX`, and be invalidated at the relevant guest exception and scheduling
+boundaries. Checking an epoch before a CAS has a race if the guest switches
+between the check and the store. The eventual commit operation must close that
+race, preserve fault behavior and memory ordering, and hide host retries from
+both the application and the progress budget.
+
+Controlling the guest kernel gives us places to implement that contract without
+translating the entire kernel. A kernel exception/return hook plus a protected
+commit sequence is a candidate, not yet a validated design. Linux 6.12.112 also
+contains explicit LL/SC in `arch/arm64/include/asm/futex.h`, including bounded
+retries that can return `-EAGAIN`; enabling LSE alone does not replace that inline
+assembly. Kernel coverage and translator-internal atomics need separate audits.
+No application-specific flags or environment changes are an acceptable fix.
 
 ## Reproducer
 
@@ -116,7 +130,7 @@ int main(void) {
 ```
 
 Measured on an Apple Silicon host, one guest CPU, 1 GiB, seed 1009, before the
-counting rule above:
+earlier counting mitigation:
 
 | Execution | Run failures | Replay failures | Replay |
 | --- | ---: | ---: | --- |
@@ -126,10 +140,9 @@ counting rule above:
 
 Both runs reached 100,000,000. The split-block pair differed at the same
 virtual time (37,377,816 ns), so the difference is observable guest behaviour,
-and the native pair shows the host interruptions, not the translator, as the
-source of the failures. Packing removed the deterministic failures that block
-boundaries added; the counting rule removes the dependence on the remaining,
-host-caused ones.
+and the native pair establishes that observable failures also occur without
+the translator. Packing greatly reduced failures in this example. These
+measurements do not establish deterministic accounting for arbitrary sequences.
 
 Other Mac controls from the same series, with unmodified Node 22 Alpine where
 Node is named:
@@ -143,6 +156,9 @@ Node is named:
 | Ordinary Node, empty DynamoRIO translation | Full-state MATCH |
 | Ordinary Node with the counting client, before the rule | Application PASS, replay MISMATCH (RAM, sometimes clock) |
 | Default exclusive-to-CAS conversion | Did not finish before the 90-second wall limit |
+
+These are historical controls from the prototype, not validation of every
+subsequent client revision. Current PR checks are reported separately.
 
 ## x86 evidence
 

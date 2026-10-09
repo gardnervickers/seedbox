@@ -164,6 +164,7 @@ struct Evidence {
     record: RunRecord,
     machines: BTreeMap<String, Machine>,
     world: Option<ContentDigest>,
+    legacy_samples: bool,
 }
 
 #[derive(Deserialize)]
@@ -190,6 +191,13 @@ fn load(directory: &Path) -> Result<Evidence> {
         orchestration::inspect(directory).map_err(|e| bad(&directory.join("manifest.json"), e))?;
     let mut world = record.report.as_ref().and_then(|r| r.witness.clone());
     let mut machines = BTreeMap::new();
+    let parameters = &record.identity.inputs.profile.semantic_parameters;
+    let mut legacy_samples = record.identity.inputs.profile.backend == "seedbox-kvm"
+        && (parameters
+            .get("engine_timebase")
+            .is_some_and(|v| v == "counter-pv-v1")
+            || (parameters.contains_key("timebase")
+                && parameters.get("engine_timebase").map(String::as_str) != Some("pv-v1")));
     if let Some(file) = log(directory, &record, "vmm.json")? {
         let path = directory.join("output/vmm.json");
         // The engine report is metadata, not an arbitrarily large trace.
@@ -213,6 +221,7 @@ fn load(directory: &Path) -> Result<Evidence> {
         if header.report_version != if arm_world { 2 } else { 1 } {
             return Err(bad(&path, "unsupported VMM report version"));
         }
+        legacy_samples |= !arm_world && header.timebase.is_some();
         if arm_world {
             if header.timebase.as_deref() != Some("arm64-pv-world-v1") {
                 return Err(bad(
@@ -255,6 +264,7 @@ fn load(directory: &Path) -> Result<Evidence> {
         record,
         machines,
         world,
+        legacy_samples,
     })
 }
 
@@ -492,16 +502,20 @@ pub(crate) fn witness_log(machine: &str) -> String {
 /// Engine witness-log entry: little-endian u64 time_ns, records, witness prefix.
 const SAMPLE_BYTES: usize = 24;
 
-fn next_sample(reader: &mut impl Read) -> std::io::Result<Option<WitnessSample>> {
-    let mut entry = [0; SAMPLE_BYTES];
+fn next_sample(reader: &mut impl Read, legacy: bool) -> std::io::Result<Option<WitnessSample>> {
+    let mut buffer = [0; 32];
+    let entry = &mut buffer[..if legacy { 32 } else { SAMPLE_BYTES }];
     let mut filled = 0;
-    while filled < SAMPLE_BYTES {
+    while filled < entry.len() {
         match reader.read(&mut entry[filled..])? {
             0 if filled == 0 => return Ok(None),
             0 => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("witness log length is not a multiple of {SAMPLE_BYTES} bytes"),
+                    format!(
+                        "witness log length is not a multiple of {} bytes",
+                        entry.len()
+                    ),
                 ))
             }
             n => filled += n,
@@ -510,22 +524,28 @@ fn next_sample(reader: &mut impl Read) -> std::io::Result<Option<WitnessSample>>
     let field = |i: usize| u64::from_le_bytes(entry[i * 8..i * 8 + 8].try_into().unwrap());
     Ok(Some(WitnessSample {
         time_ns: field(0),
-        records: field(1),
-        witness: format!("{:016x}", field(2)),
+        records: field(if legacy { 2 } else { 1 }),
+        witness: format!("{:016x}", field(if legacy { 3 } else { 2 })),
     }))
 }
 
 /// Compare two witness logs in lockstep. Logs are fully read so a corrupt
 /// tail is reported even after the first difference.
-fn compare_logs(machine: &str, a: impl Read, b: impl Read) -> Result<Option<Divergence>> {
+fn compare_logs(
+    machine: &str,
+    a: impl Read,
+    b: impl Read,
+    legacy_a: bool,
+    legacy_b: bool,
+) -> Result<Option<Divergence>> {
     let mut a = BufReader::new(a);
     let mut b = BufReader::new(b);
     let mut last = None;
     let mut first = None;
     let mut sample = 0;
     loop {
-        let x = next_sample(&mut a)?;
-        let y = next_sample(&mut b)?;
+        let x = next_sample(&mut a, legacy_a)?;
+        let y = next_sample(&mut b, legacy_b)?;
         if x.is_none() && y.is_none() {
             return Ok(first);
         }
@@ -570,8 +590,9 @@ fn divergence(a: &Path, left: &Evidence, b: &Path, right: &Evidence) -> Result<L
         let name = witness_log(machine);
         match (log(a, &left.record, &name)?, log(b, &right.record, &name)?) {
             (Some(x), Some(y)) => {
-                if let Some(d) = compare_logs(machine, x, y)
-                    .map_err(|e| bad(a, format!("{name} compared with {}: {e}", b.display())))?
+                if let Some(d) =
+                    compare_logs(machine, x, y, left.legacy_samples, right.legacy_samples)
+                        .map_err(|e| bad(a, format!("{name} compared with {}: {e}", b.display())))?
                 {
                     found.push(d);
                 }
@@ -722,12 +743,16 @@ fn next_trace(reader: &mut impl BufRead) -> Result<Option<Record>> {
     let invalid = || {
         Error::Integrity("invalid trace record: expected kind time_ns extra(hex) rip(hex)".into())
     };
-    if fields.len() != 4 || fields[0].len() != 1 {
+    if !matches!(fields.len(), 4 | 5) || fields[0].len() != 1 {
         return Err(invalid());
     }
-    let time_ns = fields[1].parse::<u64>().map_err(|_| invalid())?;
-    let extra = u64::from_str_radix(fields[2], 16).map_err(|_| invalid())?;
-    let rip = u64::from_str_radix(fields[3], 16).map_err(|_| invalid())?;
+    let offset = usize::from(fields.len() == 5);
+    if offset != 0 {
+        fields[1].parse::<u64>().map_err(|_| invalid())?;
+    }
+    let time_ns = fields[1 + offset].parse::<u64>().map_err(|_| invalid())?;
+    let extra = u64::from_str_radix(fields[2 + offset], 16).map_err(|_| invalid())?;
+    let rip = u64::from_str_radix(fields[3 + offset], 16).map_err(|_| invalid())?;
     Ok(Some(Record {
         time_ns: Some(time_ns),
         kind: fields[0].into(),
@@ -1193,20 +1218,123 @@ mod tests {
     fn witness_logs_report_first_differing_sample_and_validate_remainder() {
         let a = witness_log_bytes(&[[0, 1, 7], [1_000_050, 9, 8], [2_000_000, 20, 9]]);
         let b = witness_log_bytes(&[[0, 1, 7], [1_000_050, 9, 8], [2_000_000, 20, 10]]);
-        assert!(compare_logs("m", &a[..], &a[..]).unwrap().is_none());
-        let d = compare_logs("m", &a[..], &b[..]).unwrap().unwrap();
+        assert!(compare_logs("m", &a[..], &a[..], false, false)
+            .unwrap()
+            .is_none());
+        let d = compare_logs("m", &a[..], &b[..], false, false)
+            .unwrap()
+            .unwrap();
         assert_eq!(d.sample, 3);
         assert_eq!(d.last_match, Some(sample(1_000_050, 9, 8)));
         assert_eq!(d.a, Some(sample(2_000_000, 20, 9)));
         assert_eq!(d.b.unwrap().witness, "000000000000000a");
         // A log that ends early differs at its end; a first sample can differ.
-        let d = compare_logs("m", &a[..], &b[..48]).unwrap().unwrap();
+        let d = compare_logs("m", &a[..], &b[..48], false, false)
+            .unwrap()
+            .unwrap();
         assert_eq!((d.sample, d.b), (3, None));
-        let d = compare_logs("m", &b[24..], &a[..]).unwrap().unwrap();
+        let d = compare_logs("m", &b[24..], &a[..], false, false)
+            .unwrap()
+            .unwrap();
         assert_eq!((d.sample, d.last_match), (1, None));
         // A torn entry is an error even after the first difference.
-        assert!(compare_logs("m", &a[..], &b[..71]).is_err());
-        assert!(compare_logs("m", &b[..], &a[..71]).is_err());
+        assert!(compare_logs("m", &a[..], &b[..71], false, false).is_err());
+        assert!(compare_logs("m", &b[..], &a[..71], false, false).is_err());
+    }
+
+    #[test]
+    fn legacy_witness_samples_and_traces_remain_readable() {
+        // Three old samples total 96 bytes, also a multiple of the new size:
+        // byte length alone cannot select the encoding.
+        let legacy: Vec<u8> = [[0u64, 0, 1, 7], [1_000_000, 2, 9, 8], [2_000_000, 3, 20, 9]]
+            .into_iter()
+            .flatten()
+            .flat_map(u64::to_le_bytes)
+            .collect();
+        let current = witness_log_bytes(&[[0, 1, 7], [1_000_000, 9, 8], [2_000_000, 20, 9]]);
+        assert!(compare_logs("m", &legacy[..], &current[..], true, false)
+            .unwrap()
+            .is_none());
+        assert!(compare_logs("m", &legacy[..95], &current[..], true, false).is_err());
+        assert!(trace_diff("m", &b"I 99 2 3 4\n"[..], &b"I 2 3 4\n"[..])
+            .unwrap()
+            .is_none());
+        assert!(trace_diff("m", &b"I bad 2 3 4\n"[..], &b"I 2 3 4\n"[..]).is_err());
+    }
+
+    #[test]
+    fn replacement_worker_uses_current_samples_with_historical_clock_parameter() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record = fixture();
+        record
+            .identity
+            .inputs
+            .profile
+            .semantic_parameters
+            .insert("engine_timebase".into(), "pv-v1".into());
+        record
+            .identity
+            .inputs
+            .profile
+            .semantic_parameters
+            .insert("timebase".into(), "pv".into());
+        let bytes = witness_log_bytes(&[[0, 1, 7]]);
+        write_fixture_logs(
+            dir.path(),
+            &mut record,
+            Some(&raw_report()),
+            &[("machines/workload.witness-log", Some(&bytes))],
+        );
+        assert!(!load(dir.path()).unwrap().legacy_samples);
+        assert_eq!(diff(dir.path(), dir.path()).unwrap().status, Status::Match);
+    }
+
+    #[test]
+    fn arm_descriptive_metadata_cannot_select_legacy_x86_samples() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record = arm_fixture();
+        record
+            .identity
+            .inputs
+            .profile
+            .semantic_parameters
+            .insert("engine_timebase".into(), "counter-pv-v1".into());
+        record
+            .identity
+            .inputs
+            .profile
+            .semantic_parameters
+            .insert("timebase".into(), "pv".into());
+        let mut report = raw_report();
+        report["report_version"] = 2.into();
+        report["timebase"] = "arm64-pv-world-v1".into();
+        write_fixture(dir.path(), &mut record, Some(&report), None);
+        assert!(!load(dir.path()).unwrap().legacy_samples);
+    }
+
+    #[test]
+    fn diff_uses_retained_report_to_decode_legacy_samples() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes: Vec<u8> = [0u64, 17, 1, 7]
+            .into_iter()
+            .flat_map(u64::to_le_bytes)
+            .collect();
+        let mut report = raw_report();
+        report["timebase"] = "pv".into();
+        for side in ["a", "b"] {
+            write_fixture_logs(
+                &dir.path().join(side),
+                &mut fixture(),
+                Some(&report),
+                &[("machines/workload.witness-log", Some(&bytes))],
+            );
+        }
+        assert_eq!(
+            diff(&dir.path().join("a"), &dir.path().join("b"))
+                .unwrap()
+                .status,
+            Status::Match
+        );
     }
 
     #[test]

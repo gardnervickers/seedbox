@@ -99,15 +99,13 @@ keep file descriptors open through cleanup, and do not unlink the lock files. A
 Rust executor uses these same files and advisory locks; a separate
 `/run` namespace would not coordinate with the existing supervisor.
 
-The current supervisor owns/reaps its VMM process groups, creates a private snapshot
-directory while holding the lease, and uses `msr54.py` for exclusive snapshots,
-all-or-nothing setup and readback-verified restoration. Keep the lease held until
-owned processes have stopped and restoration has been attempted; preserve a failed
-restoration snapshot and report infrastructure failure. Honor normal errors and
-catchable signals. `host.rs` implements the protocol for the Rust executor;
-fixture tests and hardware acceptance cover contention, catchable interruption,
-and exact register restoration. The current VMM is a single-process engine;
-all other hardware entrypoints must adopt this same protocol before sharing cores.
+The current supervisor owns and reaps its VMM process groups while holding the
+CPU lease. Keep the lease until all owned processes have stopped; honor normal
+errors and catchable signals. `host.rs` implements the same lock protocol for
+the Rust executor. PV execution does not modify host MSRs or acquire a perf
+counter. The historical `seedbox-msr-cpu-<N>.lock` names remain so older and newer
+supervisors still coordinate. All hardware entrypoints must use these locks
+before sharing cores.
 
 The versioned VMM report provides `guest_exit_code`, `guest_init_error`, and
 `infrastructure_error`. The OCI supervisor reports application completion through

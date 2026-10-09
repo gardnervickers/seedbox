@@ -6,7 +6,8 @@ timer and scheduler boundaries with application locks held. The hook preserves
 interrupt masking and does not schedule or acquire locks. It is inactive before
 PV activation. The decompressor, setup code and userspace
 vDSO retain raw PAUSE. Handwritten assembly and userspace runtime internals are
-not covered; cycle detection remains available. This changes the new kernel's
+not covered; an uncovered loop can stall virtual time until the wall-time
+limit. The watchdog reports the stall without advancing time. This changes the new kernel's
 PV execution semantics; old runs continue using their retained kernel.
 
 The `Guest assets` GitHub Actions workflow builds native ARM64 and x86-64 Linux

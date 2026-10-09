@@ -478,6 +478,21 @@ pub(crate) fn engine_command(
             return Ok(command);
         }
     }
+    // Older retained workers defaulted to counter and need their recorded PV
+    // selection explicitly. New profiles omit this legacy semantic parameter.
+    if profile
+        .semantic_parameters
+        .get("timebase")
+        .map(String::as_str)
+        == Some("pv")
+        && profile
+            .semantic_parameters
+            .get("engine_timebase")
+            .map(String::as_str)
+            != Some("pv-v1")
+    {
+        command.args(["--timebase", "pv"]);
+    }
     if recorded_page_timer(profile) {
         command.arg("--page-timer");
     }
@@ -693,13 +708,8 @@ fn checkpoint_metadata(request: &ExecutionRequest<'_>, world: &Value) -> Result<
             "checkpoint time must be before the simulated time limit".into(),
         ));
     }
-    let parent = checkpoint::parent_identity(
-        world,
-        request.seed,
-        request.prepared.profile.engine.hex(),
-        recorded_deferred_tx(&request.prepared.profile)?,
-        recorded_page_timer(&request.prepared.profile),
-        |path| {
+    let parent =
+        checkpoint_parent_identity(world, request.seed, &request.prepared.profile, |path| {
             request
                 .artifacts
                 .iter()
@@ -710,13 +720,72 @@ fn checkpoint_metadata(request: &ExecutionRequest<'_>, world: &Value) -> Result<
                         .map(|_| digest.hex().to_owned())
                 })
                 .ok_or_else(|| format!("checkpoint artifact {path} is not verified"))
-        },
-    )
-    .map_err(Error::Integrity)?;
+        })
+        .map_err(Error::Integrity)?;
     Ok(Some(
         json!({"at_ns":at,"branch_seed":seed,"parent_identity":parent,
         "branch_identity":checkpoint::branch_identity(&parent,at,seed)}),
     ))
+}
+
+// Historical workers recompute this v2 hash and reject a supplied v3 parent.
+// Keep their wire projection here, outside the current engine's checkpoint model.
+fn checkpoint_parent_identity(
+    world: &Value,
+    seed: u64,
+    profile: &ExecutionProfile,
+    mut digest: impl FnMut(&str) -> std::result::Result<String, String>,
+) -> std::result::Result<String, String> {
+    let deferred = recorded_deferred_tx(profile).map_err(|e| e.to_string())?;
+    let page_timer = recorded_page_timer(profile);
+    let parameters = &profile.semantic_parameters;
+    let legacy = parameters
+        .get("engine_timebase")
+        .is_some_and(|v| v == "counter-pv-v1")
+        || (parameters.contains_key("timebase")
+            && parameters.get("engine_timebase").map(String::as_str) != Some("pv-v1"));
+    if !legacy {
+        return checkpoint::parent_identity(
+            world,
+            seed,
+            profile.engine.hex(),
+            deferred,
+            page_timer,
+            digest,
+        );
+    }
+    let mut cfg = world.clone();
+    cfg.as_object_mut()
+        .ok_or("config must be an object")?
+        .remove("checkpoint");
+    let kernel = cfg["kernel"].as_str().ok_or("kernel required")?;
+    cfg["kernel"] = Value::String(digest(kernel)?);
+    for machine in cfg["machines"].as_array_mut().ok_or("machines required")? {
+        let initrd = machine["initrd"].as_str().ok_or("initrd required")?;
+        machine["initrd"] = Value::String(digest(initrd)?);
+        if let Some(path) = machine["disk"]["image"].as_str() {
+            machine["disk"]["image"] = Value::String(digest(path)?);
+        }
+    }
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"seedbox-world-parent-v2\0");
+    hash.update(profile.engine.hex().as_bytes());
+    hash.update(
+        parameters
+            .get("timebase")
+            .map_or("counter", String::as_str)
+            .as_bytes(),
+    );
+    if deferred {
+        hash.update(b"+deferred-tx");
+    }
+    hash.update(seed.to_le_bytes());
+    hash.update(serde_json::to_vec(&cfg).map_err(|e| e.to_string())?);
+    if page_timer {
+        hash.update(b"\0page_timer=true");
+    }
+    Ok(format!("{:x}", hash.finalize()))
 }
 
 #[derive(Deserialize)]
@@ -1993,6 +2062,43 @@ mod doctor_tests {
     }
 
     #[test]
+    fn retained_legacy_pv_worker_keeps_its_explicit_clock_selection() {
+        let executor = VmmExecutor::from_engine_digest(
+            ContentDigest::of(b"engine"),
+            None,
+            512,
+            WitnessMode::Exits,
+        )
+        .unwrap();
+        for internal in [false, true] {
+            let mut profile = executor.profile.clone();
+            if internal {
+                profile.semantic_parameters.insert(
+                    "engine_executable_kind".into(),
+                    crate::engine::INTERNAL_WORKER_V1.into(),
+                );
+            }
+            profile
+                .semantic_parameters
+                .insert("timebase".into(), "pv".into());
+            let command = engine_command(Path::new("retained-engine"), &profile).unwrap();
+            let mut expected = Vec::new();
+            if internal {
+                expected.extend(["__engine", crate::engine::INTERNAL_WORKER_V1]);
+            }
+            expected.extend(["--timebase", "pv"]);
+            assert_eq!(command.get_args().collect::<Vec<_>>(), expected);
+            // An explicit override can carry historical semantics while the
+            // replacement worker advertises the new single-clock contract.
+            profile
+                .semantic_parameters
+                .insert("engine_timebase".into(), "pv-v1".into());
+            let command = engine_command(Path::new("replacement-engine"), &profile).unwrap();
+            assert!(!command.get_args().any(|arg| arg == "--timebase"));
+        }
+    }
+
+    #[test]
     fn internal_profile_retains_identity_and_replays_through_worker_contract() {
         use crate::engine::{recorded_launch, ExecutableKind, INTERNAL_WORKER_V1};
         let temporary = tempfile::tempdir().unwrap();
@@ -2200,6 +2306,85 @@ mod doctor_tests {
             raw_cpuid: Vec::new(),
         }
     }
+    #[test]
+    fn retained_checkpoint_parent_matches_historical_worker_hashes() {
+        let world = json!({"kernel":"a", "machines":[{"initrd":"b","disk":{"image":"c"}}], "checkpoint":{"ignored":true}});
+        let executor = VmmExecutor::from_engine_digest(
+            ContentDigest::of(b"engine"),
+            None,
+            512,
+            WitnessMode::Exits,
+        )
+        .unwrap();
+        for (mode, deferred, page_timer, expected) in [
+            (
+                "counter",
+                false,
+                false,
+                "1487c3360a389bee6e453486fda7a8de4bf2c643659f6b856891dc1d127976f9",
+            ),
+            (
+                "pv",
+                false,
+                false,
+                "6da129410ac7ea4f19d0d24c65a04991477146857a216a26f46bf19a023bc88c",
+            ),
+            (
+                "pv",
+                true,
+                false,
+                "e5f032f66cbddb9bab8fa27ec9405cfdd728f7351398d702ac8a25e55c9de20b",
+            ),
+            (
+                "pv",
+                true,
+                true,
+                "1542240885e94d4c32921c8615f715c3061261a6cad94a9db0607dc17e532d6e",
+            ),
+        ] {
+            let mut profile = executor.profile.clone();
+            profile
+                .semantic_parameters
+                .insert("engine_timebase".into(), "counter-pv-v1".into());
+            // Historical counter profiles recorded their clock by omission.
+            if mode == "pv" {
+                profile
+                    .semantic_parameters
+                    .insert("timebase".into(), mode.into());
+            }
+            if deferred {
+                profile
+                    .semantic_parameters
+                    .insert("deferred_tx".into(), "true".into());
+            }
+            if page_timer {
+                profile
+                    .semantic_parameters
+                    .insert("page_timer".into(), "true".into());
+            }
+            let digest = |_: &str| Ok("content".to_owned());
+            assert_eq!(
+                checkpoint_parent_identity(&world, 7, &profile, digest).unwrap(),
+                expected
+            );
+            profile
+                .semantic_parameters
+                .insert("engine_timebase".into(), "pv-v1".into());
+            assert_eq!(
+                checkpoint_parent_identity(&world, 7, &profile, digest).unwrap(),
+                checkpoint::parent_identity(
+                    &world,
+                    7,
+                    profile.engine.hex(),
+                    deferred,
+                    page_timer,
+                    digest
+                )
+                .unwrap()
+            );
+        }
+    }
+
     #[test]
     fn replay_reconstructs_checkpoint_profile_without_performance_changes() {
         let ordinary = VmmExecutor::from_engine_digest(

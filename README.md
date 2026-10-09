@@ -39,7 +39,8 @@ Seedbox finds your Docker or Podman socket, builds the example's workload oracle
 with the engine's normal cache, prepares the images, and runs the Linux guests.
 Progress appears on stderr. Set `DOCKER_HOST` if your engine uses a custom socket.
 Application progress comes from automatic binary instrumentation on both
-platforms; see [automatic progress](docs/progress.md).
+platforms. ARM exclusive-store retries can still cause replay mismatches or
+stalled progress; see [automatic progress and its limitations](docs/progress.md).
 
 On Linux, `--watchdog-ms 200` raises the host CPU interval (default 20 ms)
 after which a guest that makes no exits is interrupted so the engine can
@@ -131,7 +132,7 @@ entering it, preserving named volumes and allowing `CLONE_NEWUSER`.
 | `kernel/` | Guest kernel patch, config and build script (Linux 6.12.112) |
 | `guest/` | Generic OCI guest supervisor plus low-level guest fixtures and builders |
 | `docs/` | [Vision](docs/vision.md), [runtime instructions](docs/runtime.md), [backends](docs/backends.md), [acceptance record](docs/acceptance.md) |
-| `harness/` | YAML acceptance scenarios, portable checks, low-level world fixtures and their batch runner ([migration map](harness/worlds/README.md)), `msr54.py` |
+| `harness/` | YAML acceptance scenarios, portable checks, low-level world fixtures and their batch runner ([migration map](harness/worlds/README.md)) |
 | [`tools/mac-tcg/`](tools/mac-tcg/README.md) | Experimental local Mac TCG runner and tests; separate from the production KVM backend |
 
 ## Contributor checks

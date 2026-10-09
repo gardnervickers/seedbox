@@ -354,12 +354,12 @@ an absolute deadline into the shared time page, avoiding port `0x530` exits.
 The VMM advertises the capability only after the guest announces ABI 4;
 with the option enabled, older kernels fail at boot with a rebuild/drop-option error.
 The option is aimed at PV: an earlier arm lowers the clock bound and uses the same
-syscall budget as the VMM planner, without a prompt syscall exit. Watchdog and probe splits leave the bound, budget and plan origin untouched,
+syscall budget as the VMM planner, without a prompt syscall exit. Watchdog interruptions leave the bound, budget and plan origin untouched,
 including between the guest's arm loads and stores. A later re-arm retains an
 earlier lowered bound until a legal exit; an overdue arm retains its original
 `syscalls0 + 1` target. These splits never adopt the page word, expire timers
 or draw jitter. Adoption happens only at legal exits (including HLT and PV
-yields), canonical spin-idle landings and world slice boundaries, after the
+yields) and world slice boundaries, after the
 exit clock is accounted. A halted machine wakes from the adopted deadline
 (including its seeded jitter), never from a raw page store. One-shot stop/restart
 uses page disarm and avoids PIT mode port writes.

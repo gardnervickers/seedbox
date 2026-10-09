@@ -153,10 +153,9 @@ CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/cluster-fixed.json n
 Use a fresh output prefix for every invocation. The example CPU is the lane
 used for this investigation, not a requirement of the shared tooling. Check
 host topology and other jobs before choosing cores; keep SMT siblings unused
-by other workloads during measurements. `batch.sh` uses `harness/msr54.py`, keeps
-an invocation-specific snapshot, and restores the assigned cores after its
-children have finished. Do not reuse the historical fixed-CPU research runner
-for new fixture runs.
+by other workloads during measurements. `batch.sh` holds CPU/SMT leases until
+its children have finished; PV execution does not modify host MSRs. Do not
+reuse the historical fixed-CPU research runner for new fixture runs.
 
 `single-vm-controls.json` exercises packet isolation and directionality;
 `single-vm-sanity.json` plants a missing acknowledgement to check the checker;

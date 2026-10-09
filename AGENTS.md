@@ -287,6 +287,9 @@ images or executes guests. Compatibility readiness is not replay qualification.
 - There is one engine mode: PV time with automatic application progress
   from binary instrumentation (`docs/progress.md`). Do not require
   application-specific flags or environment overrides to make replay succeed.
+  ARM exclusive-store retries and uncovered polling loops remain known
+  limitations tracked in `docs/progress.md`; the accounting mitigation is not
+  a general determinism fix.
   `.github/workflows/pv-tests.yml` runs its checks on GitHub-hosted Ubuntu
   x86-64 runners.
 - `crates/seedbox-vmm` builds only on Linux x86-64, so a Mac pre-check covers

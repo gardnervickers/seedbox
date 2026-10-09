@@ -1,93 +1,18 @@
 /* Automatic application progress, including shared libraries and JIT code.
- * Each thread charges one PV syscall before every 10,000th translated block.
+ * Each thread charges one PV syscall per 10,000 counted block entries.
  * The budget is part of execution semantics, not a performance setting.
  *
- * Why AArch64 atomics need special care
- * -------------------------------------
+ * On AArch64, host interruptions can make exclusive stores fail even with
+ * one guest CPU. Counting their retries can change the budget and clock.
+ * Packing supported sequences and skipping their load/store blocks reduces
+ * this effect for simple retry loops. Unpacked polls that branch back before
+ * a store are charged on that branch so they can advance virtual time.
  *
- * ARM has no single atomic read-modify-write instruction in the code that
- * musl, glibc, Go and V8 ship. An atomic increment is a short sequence:
- *
- *     retry:  ldxr  x0, [x1]        ; load and arm the "exclusive monitor"
- *             add   x0, x0, #1
- *             stxr  w2, x0, [x1]     ; store only if the monitor is still armed
- *             cbnz  w2, retry        ; otherwise try again
- *
- * The monitor is disarmed by any exception return into the guest. On real
- * hardware that happens on interrupts and context switches; under a
- * hypervisor it also happens every time the host takes the CPU away and
- * gives it back, for example to service a host interrupt. The VMM never
- * learns about those entries (hv_vcpu_run only returns for guest exceptions,
- * cancellation and the virtual timer), so a run and its replay see the
- * monitor disarmed at different moments and the stxr fails a different
- * number of times in each.
- *
- * For a plain retry loop like the one above that is harmless: when the loop
- * finally succeeds the registers and memory look exactly as if the first
- * attempt had worked. (A program can observe a failure when it chooses to,
- * for example a weak compare-and-swap that counts attempts or backs off, and
- * such a program is as non-reproducible here as it is natively.)
- *
- * This client would make every retry visible. We count block entries, and
- * each retry jumps back to the block that starts the sequence. If that entry
- * were counted, a run with three retries would spend three more units of
- * budget than a replay with none. That shifts the point where the budget
- * reaches zero and the getpid charge is issued. Two consequences follow:
- *
- *   - the budget value itself lives in memory (raw TLS), so RAM differs
- *     between run and replay even if nothing else does;
- *   - once the shift crosses a 10,000 boundary, the progress charge moves to
- *     a different instruction, and the guest clock differs too.
- *
- * Splitting a sequence across several blocks is even worse: the first
- * execution of every block boundary inside the sequence is a translator
- * exit that disarms the monitor by itself, and any instrumentation inside
- * the sequence stores to memory while the monitor is armed, which an
- * implementation may treat as a reason to disarm it.
- *
- * The rule
- * --------
- *
- * Never count a block entry that a failed store-exclusive can reach, and
- * never place instructions between the load and the store. Concretely:
- *
- *   1. The supervisor runs DynamoRIO with -unsafe_build_ldstex, so each
- *      sequence is packed into one block as a single "ldstex" macro
- *      instruction, and with -no_ldstex2cas, because DynamoRIO's other
- *      option (rewriting the sequence into a compare-and-swap) changes ABA
- *      semantics and hangs static musl binaries.
- *   2. analyze() below marks a block as "not counted" when it begins with an
- *      exclusive load or a packed ldstex, since that block is the retry
- *      target. For the sequences DynamoRIO could not pack (more than
- *      sixteen instructions, a PC-relative instruction inside, or every
- *      scratch register in use) it also leaves uncounted any block that
- *      continues a sequence: one that contains a store-exclusive or clrex
- *      before any load, and one whose preceding instructions arm the
- *      monitor without releasing it. Instrumentation is never placed inside
- *      a sequence.
- *   3. The progress count lands on the block the sequence exits to. That
- *      block runs exactly once per completed atomic operation, however many
- *      retries preceded it, so the budget and the charge no longer depend on
- *      host timing.
- *   4. A sequence that gives up before its store, for instance a spinlock
- *      that reloads while the lock is held, re-enters the load without
- *      completing anything, so no exit block runs. When DynamoRIO could not
- *      pack it, the block begins with the load and ends with that backward
- *      branch, and the charge is placed on the branch's taken path: the
- *      reservation is abandoned there, so nothing can fail because of it,
- *      and the path runs once per poll, never because of a failed store.
- *      When DynamoRIO did pack it, the loop spins inside the macro
- *      instruction where nothing can be inserted; analyze() reports such a
- *      block on stderr once, because a waiter in it makes no progress until
- *      something else moves the clock.
- *
- * A block where ordinary instructions precede the exclusive load is still
- * counted: the retry jumps to the load, not to the block start, so DynamoRIO
- * gives the retry target a block of its own, and that one is not counted.
- *
- * The retry count itself is still not reproducible (a program that prints
- * its own stxr failure count differs between run and replay, as it does
- * natively). The rule only makes progress accounting independent of it.
+ * This is a partial mitigation, not a control-flow or determinism proof:
+ * split sequences, retry paths outside these blocks, application-visible
+ * failures and the translator's own atomics remain exposed. Packed polls
+ * can also stall without a progress charge. See docs/progress.md for the
+ * limitations and the independent exclusive-monitor follow-up.
  */
 #include "dr_api.h"
 #include "drmgr.h"
@@ -130,35 +55,6 @@ static void thread_init(void *context)
 enum { CHARGE_ENTRY = 1, CHARGE_ABANDON = 2 };
 
 #ifdef AARCH64
-/* DynamoRIO packs at most this many instructions into one ldstex block. */
-#define SEQUENCE_WINDOW 16
-
-/* Whether the instructions before `pc` arm the monitor without releasing it:
- * an exclusive load within the window with no exclusive store, clrex, system
- * call or indirect branch between it and `pc`. A block that starts there
- * continues a sequence DynamoRIO could not pack. */
-static bool continues_sequence(void *context, app_pc pc)
-{
-    bool inside = false;
-    instr_t instr;
-    instr_init(context, &instr);
-    for (int k = 1; k <= SEQUENCE_WINDOW; ++k) {
-        app_pc at = pc - 4 * k;
-        instr_reset(context, &instr);
-        if (!dr_memory_is_readable(at, 4) || decode(context, at, &instr) == NULL)
-            break;
-        if (instr_is_exclusive_store(&instr) || instr_get_opcode(&instr) == OP_clrex ||
-            instr_is_syscall(&instr) || instr_is_mbr(&instr))
-            break;
-        if (instr_is_exclusive_load(&instr)) {
-            inside = true;
-            break;
-        }
-    }
-    instr_free(context, &instr);
-    return inside;
-}
-
 /* Whether a packed sequence branches back to its load before its store: a
  * poll loop that spins inside the macro instruction while it waits, where
  * nothing can be charged. */
@@ -217,14 +113,12 @@ static dr_emit_flags_t analyze(void *context, void *tag, instrlist_t *block,
     ptr_uint_t charge = CHARGE_ENTRY;
 #ifdef AARCH64
     instr_t *first = instrlist_first_app(block);
-    bool exclusive = false;
     for (instr_t *i = first; i; i = instr_get_next_app(i)) {
         int opcode = instr_get_opcode(i);
         if (opcode == OP_ldstex) {
             /* First: the retry target of a packed sequence. Otherwise the
              * sequence is entered and retried inside this block, below the
              * entry charge. */
-            exclusive = true;
             if (i == first)
                 charge = 0;
             if (packed_spins_before_store(context, i))
@@ -237,19 +131,15 @@ static dr_emit_flags_t analyze(void *context, void *tag, instrlist_t *block,
              * Otherwise ordinary instructions precede the load, the retry
              * jumps to the load, and DynamoRIO gives that target a block of
              * its own. */
-            exclusive = true;
             if (i == first)
                 charge = abandons_sequence(block, first) ? CHARGE_ABANDON : 0;
             break;
         }
         if (instr_is_exclusive_store(i) || opcode == OP_clrex) {
             charge = 0; /* resumes a sequence split across blocks */
-            exclusive = true;
             break;
         }
     }
-    if (!exclusive && first != NULL && continues_sequence(context, instr_get_app_pc(first)))
-        charge = 0; /* inside a split sequence, between its load and store */
 #endif
     *user = (void *)charge;
     return DR_EMIT_DEFAULT;

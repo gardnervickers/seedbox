@@ -60,7 +60,7 @@ Capture covers the following state from current main:
 | State | Capture and continuation |
 | --- | --- |
 | Machines/devices | RAM, vCPU registers/MSRs/events, full shared page, PIC/PIT, UARTs, virtio network/control/block queues, entropy words/cursor, pending charged I/O, timer RNG, clocks and witness accumulators. |
-| PV clock (#85, #89, #113) | Full page captures PV enable/ack, bound and syscall target, as well as the original fields and fork entropy. `MachineSnapshot.syscall_ns` retains the sampled per-machine speed across fresh-VM restore; forks do not resample it. Spin probes finish inside `run_until`; capture refuses an active probe. The completed probe's idle state is captured in the machine. Watchdog phase/backoff and KVM-run scratch affect host performance only and reset at restore; `prepare`/`start` overwrite remaining progress and syscall baseline before guest entry. |
+| PV clock (#85, #89, #113) | Full page captures PV enable/ack, bound and syscall target, as well as the original fields and fork entropy. `MachineSnapshot.syscall_ns` retains the sampled per-machine speed across fresh-VM restore; forks do not resample it. Watchdog interruptions only report diagnostics and resume the existing plan; they never establish a legal clock boundary. KVM-run scratch affects host performance only and resets at restore; `prepare`/`start` overwrite remaining progress and syscall baseline before guest entry. |
 | Triggers (#109) | The full `Control` clone carries arm order, KMP failure tables, partial prefix/seen/reset counts, match/effect deadlines, cancellations, statuses and evidence. The committed byte slot is drained before capture. Machine `observe_console` is restored and scheduled trigger boundaries constrain the checkpoint stop. |
 | Directed links (#97) | The full `Faults.links` clone carries baselines, active layers, FIFO arrival and serialization departure history, optional queue evidence, use markers and both RNG positions. Changed-seed forks replace future loss/jitter streams only; in-flight packets retain send-time decisions. |
 | Connection selectors (#106) | `Faults.connections` carries TCP tuples/incarnations, SYN/FIN/closed state, next-ID/eviction counters, live selections, matched/dropped counts and witness-use marker. Selections are not rediscovered at restore. |
@@ -329,7 +329,10 @@ Guest time is a PV clock that advances at guest exits, syscalls and clock
 reads, with automatic binary instrumentation for application progress: the
 client charges progress every 10,000 translated block entries per thread,
 including shared libraries and JIT code, without recompiling applications.
-See [automatic progress](progress.md).
+ARM exclusive-store retries can still change application state and progress
+accounting, and uncovered polling loops can stall virtual time. The current
+mitigation does not provide general ARM determinism. See
+[automatic progress](progress.md) for coverage and the follow-up investigation.
 
 `x-seedbox.machine.page_timer: true` in the world file (off by default)
 enables the page timer. An ABI-4 kernel arms one-shot clockevents by writing
@@ -337,12 +340,12 @@ an absolute deadline into the shared time page, avoiding port `0x530` exits.
 The VMM advertises the capability only after the guest announces ABI 4;
 with the option enabled, older kernels fail at boot with a rebuild/drop-option error.
 The option is aimed at PV: an earlier arm lowers the clock bound and uses the same
-syscall budget as the VMM planner, without a prompt syscall exit. Watchdog and probe splits leave the bound, budget and plan origin untouched,
+syscall budget as the VMM planner, without a prompt syscall exit. Watchdog interruptions leave the bound, budget and plan origin untouched,
 including between the guest's arm loads and stores. A later re-arm retains an
 earlier lowered bound until a legal exit; an overdue arm retains its original
 `syscalls0 + 1` target. These splits never adopt the page word, expire timers
 or draw jitter. Adoption happens only at legal exits (including HLT and PV
-yields), canonical spin-idle landings and world slice boundaries, after the
+yields) and world slice boundaries, after the
 exit clock is accounted. A halted machine wakes from the adopted deadline
 (including its seeded jitter), never from a raw page store. One-shot stop/restart
 uses page disarm and avoids PIT mode port writes.

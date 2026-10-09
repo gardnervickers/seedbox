@@ -37,7 +37,7 @@ edit("arch/x86/kernel/Makefile", "obj-y\t\t\t+= ebda.o\n", "obj-y\t\t\t+= ebda.o
 # Kernel relaxation loops make bounded PV progress even without a syscall or
 # clock read. Keep userspace vDSO and boot/decompressor PAUSE instructions raw.
 # Hook rep_nop as well as cpu_relax callers; inline assembly PAUSE elsewhere
-# remains outside this coverage and is not a reason to remove cycle detection.
+# remains outside this coverage and can stall without another progress source.
 edit(
     "arch/x86/include/asm/vdso/processor.h",
     "/* REP NOP (PAUSE) is a good thing to insert into busy-wait loops. */",
