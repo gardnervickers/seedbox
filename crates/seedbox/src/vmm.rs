@@ -718,6 +718,14 @@ impl ExecutionBackend for VmmExecutor {
     fn preflight(&self, output: Option<&Path>) -> Result<()> {
         self.preflight_capacity(1, output)
     }
+    /// The engine runs the retained executable and reads only the kernel and
+    /// each machine's guest image; image layers stay in the store.
+    fn runtime_inputs<'a>(&self, inputs: &'a PreparedInputs) -> Vec<&'a ContentDigest> {
+        [&inputs.profile.engine, &inputs.kernel]
+            .into_iter()
+            .chain(inputs.guests.values())
+            .collect()
+    }
     fn validate_retained(&self, inputs: &PreparedInputs) -> Result<()> {
         crate::admission::validate_profile(&inputs.profile)?;
         if self.counted() && recorded_counter(&inputs.profile)? != self.counter {

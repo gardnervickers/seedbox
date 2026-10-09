@@ -488,7 +488,7 @@ impl Pending {
         validate_inputs(&self.record.identity, executor)?;
         fs::create_dir(&self.output)?;
         executor.preflight(Some(&self.output))?;
-        for digest in self.record.identity.inputs.digests() {
+        for digest in executor.runtime_inputs(&self.record.identity.inputs) {
             if !self.artifacts.contains_key(digest) {
                 self.artifacts.insert(
                     digest.clone(),
