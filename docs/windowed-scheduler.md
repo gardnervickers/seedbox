@@ -1,6 +1,6 @@
 # Windowed scheduler
 
-Status: the x86 world scheduler, unqualified. `seedbox-engine-core` holds
+Status: the x86 world scheduler. `seedbox-engine-core` holds
 the planner and executors (`src/window/`) and the adapter over the shared
 world (`src/world_windowed.rs`), generic over `WorldMachine`. The x86 VMM
 runs every world through it: static worlds, faults, runtime control,

@@ -93,8 +93,7 @@ commitment; structural host validation is not independent application evidence.
 When no trigger has ever been armed, the matcher has no boundary, machines do
 not add console stops, no trigger key is emitted by inspect/report, and no
 trigger bytes enter the witness. Existing results and witness inputs retain
-their exact representation. Engine identity and existing host performance
-measurements are naturally separate from deterministic result bytes.
+their exact representation.
 
 ## KVM tests
 

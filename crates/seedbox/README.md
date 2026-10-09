@@ -150,7 +150,7 @@ semantic execution profile, explicit service-to-machine placement, auxiliary inp
 hashes, and source/build provenance. Changing an identity input produces a new identity.
 Performance settings returned by `ExecutionBackend::performance_parameters` are
 recorded per attempt and passed explicitly to execution, but excluded from identity
-and profile matching. Only settings with qualified witness invariance belong there
+and profile matching. Only settings that never change the witness belong there
 (e.g. `SEEDBOX_MARGIN` and `SEEDBOX_UNDO`). Each execution receives a distinct
 attempt directory even when its identity is the same. Source paths remain as
 provenance in the manifest; the executor receives verified private artifact copies
@@ -267,7 +267,7 @@ No control configuration preserves the prior no-control serialization/witness pa
 The low-level kernel/network and one-VM fixtures retain their own inputs and
 batch runner. Application acceptance uses direct YAML runs; the old application
 campaign runner has been removed. Multi-core dispatch, whole-machine persistent
-storage, and broad guest image qualification are separate work. The supported Compose path runs one service per VM with
+storage, and broad guest image coverage are separate work. The supported Compose path runs one service per VM with
 explicit host/runtime inputs and RAM-backed storage.
 
 ## Retained run bundles
@@ -277,5 +277,5 @@ content closure without preparation or execution. Import returns an ordinary
 `orchestration::Run` for inspect/replay, preserves original metadata and opaque
 retained logs, and keeps capture omissions explicit. It publishes into fresh run
 storage using bounded, verified streaming and no-follow filesystem operations.
-See the [runtime bundle contract](../../docs/runtime.md#bundles) for format/limits
-and qualification boundaries.
+See the [runtime bundle contract](../../docs/runtime.md#bundles) for format and
+limits.

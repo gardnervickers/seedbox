@@ -147,7 +147,7 @@ host seconds, and for forked seeds the restored page count and restore time.
 ## RDRAND and RDSEED
 
 The engine hides both from CPUID, but AMD SVM cannot intercept them
-([backends.md](../../docs/backends.md#qualification-and-capability-limits)).
+([backends.md](../../docs/backends.md#capability-limits)).
 Build `rdrand.cpio` from `guest/rdrand.init` with `guest/rdrandprobe.c` at
 `bin/rdrandprobe`. `rdrand.json` must print `cpuid: rdrand=0 rdseed=0` and
 `not offered` for both, and two runs of one seed must give the same
@@ -291,7 +291,7 @@ runs retain this policy as `disk_loss_sector_bytes` and
 as each disk's `fault_model`. See
 [the full contract](../../docs/runtime.md#disk-crash-policy).
 
-On the qualified Linux host, run the fixture with repeated and distinct seeds:
+On a Linux KVM host, run the fixture with repeated and distinct seeds:
 
 ```sh
 CPU0=14 SEEDBOX_TIMEOUT=120 harness/batch.sh harness/worlds/disk-ext4-torn.json disk-ext4-torn "1009 1009 1010 1011" --digest --trace

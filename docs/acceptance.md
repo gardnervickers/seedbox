@@ -333,8 +333,9 @@ sudo -n target/debug/seedbox replay \
   --allow-engine-change --undo 256 --margin adaptive
 ```
 
-The explicit `--vmm` requires `--allow-engine-change`; in this diagnostic the
-VMM hash is unchanged.
+At the time, an explicit `--vmm` required `--allow-engine-change`; in this
+diagnostic the VMM hash is unchanged. #187 removed that flag: `--vmm` alone now
+selects the engine.
 
 ## 2026-10-06 — direct CLI acceptance scenarios
 
