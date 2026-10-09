@@ -43,16 +43,17 @@ def run():
         ready("server:7000")
         assert state(world, "spare") == "Down"
         assert unreachable("spare:7000")
-        world.reboot("spare")
+        booted = world.reboot("spare")
+        print(f"STANDBY_FIRST_BOOT effect_at_ns={booted.effect_at_ns}", flush=True)
         ready("spare:7000")
-        first = boot("spare")
+        first = boot("spare:7000")
         assert state(world, "spare") == "Running"
         world.crash("spare")
         assert state(world, "spare") == "Down"
         assert unreachable("spare:7000")
         world.reboot("spare")
         ready("spare:7000")
-        second = boot("spare")
+        second = boot("spare:7000")
         assert first != second
         ready("server:7000")
     print("STANDBY_RESULT " + json.dumps({"boots": 2, "fresh_boot": True}), flush=True)
