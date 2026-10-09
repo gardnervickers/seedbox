@@ -330,7 +330,7 @@ fn copy_hash(
         remaining -= count as u64;
     }
     options.check()?;
-    ContentDigest::try_from(format!("{:x}", hash.finalize()))
+    Ok(ContentDigest::finish(hash))
 }
 /// Import without preparation or execution. Publish the complete attempt last.
 pub fn import(bundle: &Path, state: &Path, options: &Options) -> Result<Run> {

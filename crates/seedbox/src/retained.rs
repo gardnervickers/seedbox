@@ -1,5 +1,5 @@
 //! Manifest-declared, checksum-verified offline evidence.
-use crate::{orchestration::RunRecord, Error, Result};
+use crate::{orchestration::RunRecord, store::ContentDigest, Error, Result};
 use sha2::{Digest, Sha256};
 use std::{
     fs::File,
@@ -64,7 +64,7 @@ pub(crate) fn log(
         }
         hash.update(&buffer[..n]);
     }
-    if format!("{:x}", hash.finalize()) != digest.hex() {
+    if ContentDigest::finish(hash) != *digest {
         return Err(bad(command, &path, "evidence checksum mismatch"));
     }
     file.rewind().map_err(|e| bad(command, &path, e))?;

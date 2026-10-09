@@ -1,6 +1,8 @@
 //! Host readiness: the KVM and perf capabilities the engine needs on this core.
 //! It does not pin CPU models, microcode, CPUID, engines or kernels.
-use crate::{execution::ExecutionProfile, limits::Size, store::ContentDigest, Error, Result};
+use crate::{
+    execution::ExecutionProfile, limits::Size, store::ContentDigest, Context, Error, Result,
+};
 use serde::{Deserialize, Serialize};
 use std::{io::Read, path::Path};
 
@@ -15,15 +17,18 @@ const RUNTIME_INPUT_LIMIT: u64 = 256 * 1024 * 1024;
 
 pub fn file_digest(path: &Path) -> Result<ContentDigest> {
     use sha2::{Digest, Sha256};
-    let mut file = std::fs::File::open(path)
-        .map_err(|e| Error::Setup(format!("runtime input {}: {e}", path.display())))?;
+    let mut file = std::fs::File::open(path).context(
+        Error::Setup,
+        format_args!("runtime input {}", path.display()),
+    )?;
     let mut hash = Sha256::new();
     let mut data = [0; 65536];
     let mut total = 0;
     loop {
-        let n = file
-            .read(&mut data)
-            .map_err(|e| Error::Setup(format!("runtime input {}: {e}", path.display())))?;
+        let n = file.read(&mut data).context(
+            Error::Setup,
+            format_args!("runtime input {}", path.display()),
+        )?;
         if n == 0 {
             break;
         }
@@ -37,7 +42,7 @@ pub fn file_digest(path: &Path) -> Result<ContentDigest> {
         }
         hash.update(&data[..n]);
     }
-    ContentDigest::try_from(format!("{:x}", hash.finalize()))
+    Ok(ContentDigest::finish(hash))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

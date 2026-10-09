@@ -1,6 +1,6 @@
 //! Docker build contexts: preserve source metadata, honor the selected ignore
 //! file, never follow host symlinks, and stream a bounded tar to the engine.
-use crate::{Error, Result};
+use crate::{Context, Error, Result};
 use std::{fs, path::Path};
 struct Rule {
     matcher: globset::GlobMatcher,
@@ -46,7 +46,10 @@ fn rules(text: &str) -> Result<Vec<Rule>> {
             .literal_separator(true)
             .backslash_escape(true)
             .build()
-            .map_err(|error| Error::Setup(format!(".dockerignore pattern {pattern}: {error}")))?
+            .context(
+                Error::Setup,
+                format_args!(".dockerignore pattern {pattern}"),
+            )?
             .compile_matcher();
         let include_prefix = pattern
             .split('/')
@@ -118,8 +121,10 @@ pub(crate) fn archive(
         })
     {
         check()?;
-        let entry = entry
-            .map_err(|error| Error::Setup(format!("build context {}: {error}", root.display())))?;
+        let entry = entry.context(
+            Error::Setup,
+            format_args!("build context {}", root.display()),
+        )?;
         let path = entry.path();
         let name = path
             .strip_prefix(root)

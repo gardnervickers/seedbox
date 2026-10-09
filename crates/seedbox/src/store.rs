@@ -1,6 +1,6 @@
 //! Verified local content store. A digest alone is never proof of retention.
 
-use crate::{limits::read_bounded, Error, Result};
+use crate::{limits::read_bounded, Context, Error, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -19,6 +19,10 @@ pub struct ContentDigest(String);
 impl ContentDigest {
     pub fn of(bytes: &[u8]) -> Self {
         Self(format!("{:x}", Sha256::digest(bytes)))
+    }
+    /// The digest of everything fed to a streaming hasher.
+    pub(crate) fn finish(hash: Sha256) -> Self {
+        Self(format!("{:x}", hash.finalize()))
     }
     pub fn hex(&self) -> &str {
         &self.0
@@ -134,8 +138,8 @@ impl ContentStore {
 
     /// Size of a regular retained object, for bounded streaming containers.
     pub fn size(&self, digest: &ContentDigest) -> Result<u64> {
-        let metadata = fs::symlink_metadata(self.path(digest))
-            .map_err(|e| Error::Integrity(format!("{}: {e}", digest.hex())))?;
+        let metadata =
+            fs::symlink_metadata(self.path(digest)).context(Error::Integrity, digest.hex())?;
         if !metadata.is_file() {
             return Err(Error::Integrity(format!(
                 "{}: object is not a regular file",
@@ -146,8 +150,7 @@ impl ContentStore {
     }
 
     fn open(&self, digest: &ContentDigest) -> Result<fs::File> {
-        fs::File::open(self.path(digest))
-            .map_err(|e| Error::Integrity(format!("{}: {e}", digest.hex())))
+        fs::File::open(self.path(digest)).context(Error::Integrity, digest.hex())
     }
 
     pub fn verify(&self, digest: &ContentDigest) -> Result<()> {
@@ -254,5 +257,5 @@ fn transfer(input: &mut impl Read, output: &mut impl Write) -> Result<ContentDig
         hash.update(&buffer[..count]);
         output.write_all(&buffer[..count])?;
     }
-    Ok(ContentDigest(format!("{:x}", hash.finalize())))
+    Ok(ContentDigest::finish(hash))
 }

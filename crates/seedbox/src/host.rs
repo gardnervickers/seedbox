@@ -122,7 +122,8 @@ fn try_locks(cpus: &BTreeSet<u32>, directory: &Path) -> Result<Option<Vec<File>>
 
 #[cfg(target_os = "linux")]
 fn sysfs(path: &str) -> Result<String> {
-    fs::read_to_string(path).map_err(|error| Error::Setup(format!("{path}: {error}")))
+    use crate::Context;
+    fs::read_to_string(path).context(Error::Setup, path)
 }
 
 #[cfg(target_os = "linux")]
