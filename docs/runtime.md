@@ -267,8 +267,7 @@ service name, raises soft/hard `nofile` to 1048576 before each exec, and sets
 the retained binary launch recipe; replay uses that recipe and its retained
 supervisor rather than preparing it again. See
 [guest runtime facilities](compatibility.md#guest-runtime-facilities) for
-kernel features and remaining gaps. This setup does not change the wall-clock
-epoch; `--build-epoch` still controls image build timestamps only.
+kernel features and remaining gaps. The recorded wall-clock epoch is described below.
 
 Each prepared application release is a captured input closure. Same-version
 deterministic execution and replay use its exact retained bytes, seed and
@@ -1242,3 +1241,12 @@ through the guest control API. Arm/cancel admission, match deadlines, future
 causal effect barriers, snapshot state and witness evidence are specified in
 [the trigger contract](triggers.md). No trigger ever armed adds no report fields,
 witness bytes or console stopping points. This changes the engine.
+
+Compose preparation records one `wall_clock_epoch` (Unix seconds) in the
+prepared inputs and each `SBXLAUNCH4` boot recipe. It defaults to
+the time after all image builds/imports finish; explicit `--build-epoch` also
+sets this value. The shared supervisor sets `CLOCK_REALTIME` before the launch
+barrier on x86 and arm64. Replay uses retained bytes and never samples the host
+clock. New preparations can change witnesses; replay of recorded inputs is
+unchanged. Both application kernels support unprivileged user namespaces,
+including UID/GID maps and nested mount, PID, network, IPC and UTS namespaces.

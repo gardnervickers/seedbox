@@ -335,3 +335,12 @@ only when enabled. Replay uses the recorded mode without an override.
 Raw `output/vmm.json` reports doorbells, TX packets polled at boundaries and
 mean/max upper bounds on publish-to-pickup delay. These bounds start at the
 previous empty-ring observation; ordinary guest RAM stores are not timestamped.
+
+Compose preparation records one `wall_clock_epoch` (Unix seconds) in the
+prepared inputs and each `SBXLAUNCH4` boot recipe. It defaults to
+the time after all image builds/imports finish; explicit `--build-epoch` also
+sets this value. The shared supervisor sets `CLOCK_REALTIME` before the launch
+barrier on x86 and arm64. Replay uses retained bytes and never samples the host
+clock. New preparations can change witnesses; replay of recorded inputs is
+unchanged. Both application kernels support unprivileged user namespaces,
+including UID/GID maps and nested mount, PID, network, IPC and UTS namespaces.

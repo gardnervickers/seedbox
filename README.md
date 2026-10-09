@@ -96,7 +96,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Guest supervisor | from the helper archive; Linux development builds also have a compiled-in musl fallback | `--guest-init`, `SEEDBOX_GUEST_INIT` |
 | BusyBox | from the helper archive; Linux development builds search static tools on `PATH` | `--busybox`, `SEEDBOX_BUSYBOX` |
 | mke2fs (only for named volumes) | from the helper archive; Linux development builds search static tools on `PATH` | `--mke2fs`, `SEEDBOX_MKE2FS` |
-| Build epoch | absent; preserve the builder's ordinary timestamp policy | `--build-epoch` (prepare/run/explore; no environment backing) |
+| Build epoch | absent; preserve build timestamps and set guest clock to preparation time | `--build-epoch` (prepare/run/explore; no environment backing) |
 | Engine and guest kernel | any built engine and kernel are admitted; the run records their hashes | `--vmm`, `--kernel` |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
 | Diff inputs | Two required retained run directories; no runtime inputs or state lookup | positional `RUN_A RUN_B` |
@@ -721,3 +721,12 @@ controls over the same seeds. The historical ABI1 timings are in
 and must not be attributed to these revised sources.
 
 See [the experimental arm64 backend quickstart](docs/arm64-backends.md#experimental-arm64-quickstart) for the isolated HVF/KVM fixture.
+
+Compose preparation records one `wall_clock_epoch` (Unix seconds) in the
+prepared inputs and each `SBXLAUNCH4` boot recipe. It defaults to
+the time after all image builds/imports finish; explicit `--build-epoch` also
+sets this value. The shared supervisor sets `CLOCK_REALTIME` before the launch
+barrier on x86 and arm64. Replay uses retained bytes and never samples the host
+clock. New preparations can change witnesses; replay of recorded inputs is
+unchanged. Both application kernels support unprivileged user namespaces,
+including UID/GID maps and nested mount, PID, network, IPC and UTS namespaces.

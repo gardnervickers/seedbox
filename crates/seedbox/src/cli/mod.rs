@@ -661,7 +661,7 @@ impl RuntimeInputs {
 #[derive(Args, Clone, Copy)]
 #[command(next_help_heading = "Preparation")]
 struct BuildOptions {
-    /// Clamp new build-layer timestamps to this Unix epoch (qualified native Podman only) [default: absent].
+    /// Set the guest wall-clock epoch and clamp new build-layer timestamps (native Podman only) [default: preparation time for guest clock].
     #[arg(long, allow_hyphen_values = true, value_parser = clap::value_parser!(u32))]
     build_epoch: Option<u32>,
 }

@@ -608,9 +608,10 @@ int main(void) {
     recipe_fd = open("/seedbox/launch.bin", O_RDONLY|O_CLOEXEC);
     if (recipe_fd < 0) die("launch recipe");
     char magic[10]; read_exact(magic, sizeof(magic));
-    if (memcmp(magic, "SBXLAUNCH3", 10)) { errno = EINVAL; die("launch version"); }
+    if (memcmp(magic, "SBXLAUNCH4", 10)) { errno = EINVAL; die("launch version"); }
     char *ip = text(), *hosts = text(), *hostname = text(); user = text(); working_dir = text();
     uint32_t max_map_count = count();
+    struct timespec wall_clock = {.tv_sec = count(), .tv_nsec = 0};
     arguments = list(); environment = list(); char **volumes = list(); char **disk_volumes = list();
     if (!arguments[0] || !*arguments[0]) { errno = EINVAL; die("empty executable"); }
     busybox((char *const[]){"busybox", "ip", "link", "set", "lo", "up", NULL});
@@ -641,6 +642,7 @@ int main(void) {
     relay_socket("/proc/cmdline", "/run/seedbox/control.sock");
     /* Everything before this point is fixed by the boot seed; the application
      * starts after the world is released under the run seed. */
+    if (clock_settime(CLOCK_REALTIME, &wall_clock)) die("set recorded wall clock");
     if (seedbox_launch_barrier("/proc/cmdline", "/dev/urandom")) die("launch barrier");
     watch_children();
     pid_t child = start();

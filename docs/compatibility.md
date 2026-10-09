@@ -81,20 +81,21 @@ namespaces, UNIX98 ptys, seccomp and seccomp filters. **io_uring stays enabled**
 the old x86 `n IO_URING` request never survived Kconfig resolution without
 `EXPERT`, so removing it preserves the existing io_uring behavior. The equally
 ineffective `n HPET_TIMER` request is removed too. These features do not imply
-complete Chromium or user-namespace sandbox support. Network feature alignment,
-user namespaces and less common syscalls remain separate work.
+complete Chromium application support. Network feature alignment and less
+common syscalls remain separate work.
 
 Each VM exposes one CPU. Seastar applications such as ScyllaDB and Redpanda
 need `--smp 1`; DPDK must select only guest CPU 0. JVM GC, tokio worker counts
 and Go parallelism reflect that CPU count. Real SMP remains out of scope.
-Wall-clock epochs still differ between architectures; a recorded shared epoch
-and TLS certificates minted after the current boot epoch need issue #172's
-follow-up. CPU feature baselines and cross-host replay remain unproven.
+The shared supervisor now applies a recorded preparation-time wall-clock epoch
+on both architectures. User namespaces are enabled in both application configs.
+CPU feature baselines and cross-host replay remain unproven.
 
 `seedbox run harness/acceptance/workloads/runtime.yaml` exercises the actual
 interfaces as a non-root image user: devices, ptys, POSIX and SysV IPC,
 hostname resolution, limits, the sysctl, a named volume, an io_uring NOP and a
-seccomp allow filter. Replay its retained run to check `MATCH`. This is a
+seccomp allow filter, plus unprivileged UID/GID mapping and nested namespaces.
+Replay its retained run to check `MATCH`. This is a
 focused interface smoke test; application acceptance remains version-bound.
 
 The `runtime-postgres.yaml`, `runtime-nginx.yaml`, `runtime-python.yaml`,

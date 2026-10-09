@@ -420,6 +420,7 @@ mod tests {
             }
             semantic_parameters.insert("memory_mb".into(), "512".into());
             let prepared = PreparedInputs {
+                wall_clock_epoch: None,
                 kernel: hash.clone(),
                 images: BTreeMap::new(),
                 placement: BTreeMap::from([

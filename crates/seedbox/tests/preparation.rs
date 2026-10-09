@@ -261,3 +261,105 @@ fn preparation_retains_one_frozen_kernel_when_transport_changes_the_source_path(
     assert_eq!(inputs.placement["app"], "app");
     assert!(!root.path().join("evidence/builder.json").exists());
 }
+
+#[test]
+fn preparation_records_one_epoch_after_import_and_retains_explicit_epoch() {
+    struct Transport;
+    impl seedbox::oci::ImageTransport for Transport {
+        fn import(
+            &self,
+            _service: &seedbox::config::Service,
+            directory: &Path,
+            _store: &ContentStore,
+            _context: Option<(&PreparationContext, &str)>,
+            _frozen: Option<&seedbox::oci::FrozenContext>,
+            _architecture: seedbox::guest::Architecture,
+        ) -> seedbox::Result<seedbox::oci::ImportedImage> {
+            fs::create_dir_all(directory)?;
+            fs::File::open(directory)?
+                .set_times(fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH))?;
+            Ok(seedbox::oci::ImportedImage {
+                image: seedbox::execution::PreparedImage {
+                    manifest: ContentDigest::of(b"manifest"),
+                    config: ContentDigest::of(b"config"),
+                    layers: vec![],
+                    launch: seedbox::image::Launch {
+                        argv: vec!["/app".into()],
+                        environment: BTreeMap::new(),
+                        working_dir: "/".into(),
+                        user: "".into(),
+                        volumes: vec![],
+                        disk_volumes: vec![],
+                    },
+                },
+                rootfs: seedbox::oci::RootFilesystem::Directory(directory.into()),
+                auxiliary: BTreeMap::new(),
+                provenance: BTreeMap::new(),
+            })
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let (mut preparer, mut simulation, store) =
+        fixture(root.path(), "unused".into(), "unused".into());
+    simulation
+        .services
+        .insert("other".into(), simulation.services["app"].clone());
+    let context =
+        PreparationContext::new(root.path().join("evidence"), CancellationToken::default())
+            .unwrap();
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    };
+    let before = now();
+    let prepared = preparer
+        .prepare_with_transport(&simulation, &store, &context, &Transport)
+        .unwrap();
+    let epoch = u64::from(prepared.wall_clock_epoch.unwrap());
+    assert!((before..=now()).contains(&epoch));
+    let json = serde_json::to_vec(&prepared).unwrap();
+    let retained: seedbox::execution::PreparedInputs = serde_json::from_slice(&json).unwrap();
+    assert_eq!(retained, prepared);
+    let mut historical = serde_json::to_value(&prepared).unwrap();
+    historical
+        .as_object_mut()
+        .unwrap()
+        .remove("wall_clock_epoch");
+    let historical: seedbox::execution::PreparedInputs =
+        serde_json::from_value(historical).unwrap();
+    assert_eq!(historical.wall_clock_epoch, None);
+    assert!(!serde_json::to_value(historical)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .contains_key("wall_clock_epoch"));
+    for digest in prepared.guests.values() {
+        let archive = store.read(digest).unwrap();
+        let start = archive
+            .windows(10)
+            .position(|bytes| bytes == b"SBXLAUNCH4")
+            .unwrap();
+        let mut cursor = start + 10;
+        for _ in 0..5 {
+            let size = u32::from_le_bytes(archive[cursor..cursor + 4].try_into().unwrap()) as usize;
+            cursor += 4 + size;
+        }
+        cursor += 4; // max_map_count
+        assert_eq!(
+            u32::from_le_bytes(archive[cursor..cursor + 4].try_into().unwrap()) as u64,
+            epoch
+        );
+    }
+    preparer.tools.build_epoch = Some(0);
+    let explicit = preparer
+        .prepare_with_transport(&simulation, &store, &context, &Transport)
+        .unwrap();
+    let again = preparer
+        .prepare_with_transport(&simulation, &store, &context, &Transport)
+        .unwrap();
+    assert_eq!(explicit.wall_clock_epoch, Some(0));
+    assert_eq!(explicit, again);
+    assert_ne!(prepared.guests, explicit.guests);
+}

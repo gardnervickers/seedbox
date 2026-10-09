@@ -12,6 +12,7 @@ fn fixture() -> sb::orchestration::RunRecord {
         seed: 0,
         configuration,
         inputs: PreparedInputs {
+            wall_clock_epoch: None,
             kernel: digest.clone(),
             images: BTreeMap::new(),
             placement: BTreeMap::from([("workload".into(), "workload".into())]),

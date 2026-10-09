@@ -73,6 +73,10 @@ pub struct PreparedImage {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreparedInputs {
+    /// Guest CLOCK_REALTIME at the launch barrier, sampled once during preparation.
+    /// Historical prepared inputs omit this and retain their original boot bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock_epoch: Option<u32>,
     pub kernel: ContentDigest,
     pub images: BTreeMap<String, PreparedImage>,
     /// Every service maps to one machine; services may share a machine.

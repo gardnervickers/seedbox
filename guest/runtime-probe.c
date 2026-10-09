@@ -11,6 +11,8 @@
 #include <mqueue.h>
 #include <netdb.h>
 #include <semaphore.h>
+#include <sched.h>
+#include <sys/wait.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,6 +50,35 @@ static void io_uring_nop(void) {
     assert(!munmap(entries, entries_size));
     if (!shared) assert(!munmap(cq, cq_size));
     assert(!munmap(sq, sq_size) && !close(fd));
+}
+static void namespace_map(const char *path, const char *value) {
+    int fd = open(path, O_WRONLY); assert(fd >= 0);
+    assert(write(fd, value, strlen(value)) == (ssize_t)strlen(value));
+    assert(!close(fd));
+}
+static void user_namespace(void) {
+    uid_t uid = getuid(); gid_t gid = getgid();
+    assert(uid != 0);
+    pid_t child = fork(); assert(child >= 0);
+    if (!child) {
+        assert(!unshare(CLONE_NEWUSER));
+        char mapping[64];
+        namespace_map("/proc/self/setgroups", "deny\n");
+        snprintf(mapping, sizeof(mapping), "0 %u 1\n", uid);
+        namespace_map("/proc/self/uid_map", mapping);
+        snprintf(mapping, sizeof(mapping), "0 %u 1\n", gid);
+        namespace_map("/proc/self/gid_map", mapping);
+        assert(getuid() == 0 && getgid() == 0);
+        // Chromium's namespace sandbox needs these after entering a user NS.
+        assert(!unshare(CLONE_NEWNS|CLONE_NEWPID|CLONE_NEWNET|CLONE_NEWIPC|CLONE_NEWUTS));
+        pid_t inner = fork(); assert(inner >= 0);
+        if (!inner) { assert(getpid() == 1); _exit(0); }
+        int status; assert(waitpid(inner, &status, 0) == inner);
+        assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        _exit(0);
+    }
+    int status; assert(waitpid(child, &status, 0) == child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
 int main(int argc, char **argv) {
     assert(argc == 2);
@@ -121,6 +152,7 @@ int main(int argc, char **argv) {
     assert(!fclose(file));
     fd = open("/data/probe", O_WRONLY|O_CREAT|O_TRUNC, 0600); assert(fd >= 0);
     assert(write(fd, "disk", 4) == 4 && !fsync(fd) && !close(fd));
+    user_namespace();
     io_uring_nop();
     assert(!prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0));
     struct sock_filter allow = BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW);
