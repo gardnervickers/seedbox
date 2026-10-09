@@ -995,42 +995,106 @@ impl Machine {
             u.fork_point(&self._vm, self.mem.as_slice())?;
         }
         let page = self.page.copy();
+        // Name every field, so one added to `Machine` must be either saved
+        // here or listed as outside a snapshot.
+        let Machine {
+            world,
+            branches,
+            pending_io,
+            tsc_latch,
+            guest_exit_code,
+            guest_init_error,
+            pic,
+            pit,
+            rtc_index,
+            com1,
+            com2,
+            log_order,
+            management_framer,
+            net,
+            channel,
+            blk,
+            control_dma_bytes,
+            control_tx_bytes,
+            pv,
+            abi,
+            page_timer,
+            armed_wake,
+            pit_exact,
+            syscall_ns,
+            throttle_permille,
+            timer_rng,
+            margin,
+            fm,
+            entropy,
+            entropy_read,
+            stats,
+            witness,
+            // Saved above: RAM, the time page, the vCPU and the undo stats.
+            mem: _,
+            page: _,
+            vcpu: _,
+            undo: _,
+            // Fixed for the machine's life.
+            profile: _,
+            _vm: _,
+            msrs: _,
+            exact_timer_ppm: _,
+            tolerance: _,
+            timer_jitter: _,
+            adaptive_margin: _,
+            undo_margin: _,
+            barrier: _,
+            pv_clock: _,
+            page_timer_requested: _,
+            // Host execution state, reset by `restore`, or none at a fork point.
+            stepping: _,
+            sync_regs_ready: _,
+            #[cfg(test)]
+                require_io_checkpoint: _,
+            planner: _,
+            last_plan: _,
+            pv_progress: _,
+            step_started: _,
+            // The trace spans every fork.
+            trace: _,
+        } = self;
         Ok(MachineSnapshot {
             ram,
             page,
             cpu,
-            world: self.world.clone(),
-            branches: self.branches,
-            tsc_latch: self.tsc_latch,
-            pending_io: self.pending_io.clone(),
-            timer_rng: self.timer_rng.clone(),
-            entropy: self.entropy,
-            entropy_read: self.entropy_read,
-            guest_exit_code: self.guest_exit_code,
-            guest_init_error: self.guest_init_error,
-            pic: self.pic.clone(),
-            pit: self.pit.clone(),
-            rtc_index: self.rtc_index,
-            com1: self.com1.snapshot(),
-            com2: self.com2.snapshot(),
-            log_order: self.log_order,
-            management_framer: self.management_framer.clone(),
-            net: self.net.clone(),
-            channel: self.channel.clone(),
-            blk: self.blk.clone(),
-            control_dma_bytes: self.control_dma_bytes,
-            control_tx_bytes: self.control_tx_bytes,
-            pv: self.pv,
-            syscall_ns: self.syscall_ns,
-            throttle_permille: self.throttle_permille,
-            abi: self.abi,
-            page_timer: self.page_timer,
-            armed_wake: self.armed_wake,
-            pit_exact: self.pit_exact,
-            margin: self.margin,
-            fm: self.fm,
-            stats: self.stats.clone(),
-            witness: self.witness.clone(),
+            world: world.clone(),
+            branches: *branches,
+            tsc_latch: *tsc_latch,
+            pending_io: pending_io.clone(),
+            timer_rng: timer_rng.clone(),
+            entropy: *entropy,
+            entropy_read: *entropy_read,
+            guest_exit_code: *guest_exit_code,
+            guest_init_error: *guest_init_error,
+            pic: pic.clone(),
+            pit: pit.clone(),
+            rtc_index: *rtc_index,
+            com1: com1.snapshot(),
+            com2: com2.snapshot(),
+            log_order: *log_order,
+            management_framer: management_framer.clone(),
+            net: net.clone(),
+            channel: channel.clone(),
+            blk: blk.clone(),
+            control_dma_bytes: *control_dma_bytes,
+            control_tx_bytes: *control_tx_bytes,
+            pv: *pv,
+            syscall_ns: *syscall_ns,
+            throttle_permille: *throttle_permille,
+            abi: *abi,
+            page_timer: *page_timer,
+            armed_wake: *armed_wake,
+            pit_exact: *pit_exact,
+            margin: *margin,
+            fm: *fm,
+            stats: stats.clone(),
+            witness: witness.clone(),
             undo_stats,
         })
     }
@@ -1079,39 +1143,79 @@ impl Machine {
         run.s.regs.regs = regs;
         run.s.regs.sregs = sregs;
         self.sync_regs_ready = true;
-        self.world = s.world.clone();
-        self.branches = s.branches;
-        self.tsc_latch = s.tsc_latch;
-        self.pending_io = s.pending_io.clone();
-        self.timer_rng = s.timer_rng.clone();
-        self.guest_exit_code = s.guest_exit_code;
-        self.guest_init_error = s.guest_init_error;
-        self.pic = s.pic.clone();
-        self.pit = s.pit.clone();
-        self.rtc_index = s.rtc_index;
-        self.com1.restore(&s.com1);
-        self.com2.restore(&s.com2);
-        self.log_order = s.log_order;
+        // Name every field, so none of the snapshot can be left behind.
+        let MachineSnapshot {
+            world,
+            branches,
+            tsc_latch,
+            pending_io,
+            timer_rng,
+            guest_exit_code,
+            guest_init_error,
+            pic,
+            pit,
+            rtc_index,
+            com1,
+            com2,
+            log_order,
+            management_framer,
+            net,
+            channel,
+            blk,
+            control_dma_bytes,
+            control_tx_bytes,
+            pv,
+            syscall_ns,
+            throttle_permille,
+            abi,
+            page_timer,
+            armed_wake,
+            pit_exact,
+            margin,
+            fm,
+            entropy,
+            entropy_read,
+            stats,
+            witness,
+            // Restored above.
+            ram: _,
+            page: _,
+            cpu: _,
+            undo_stats: _,
+        } = s;
+        self.world = world.clone();
+        self.branches = *branches;
+        self.tsc_latch = *tsc_latch;
+        self.pending_io = pending_io.clone();
+        self.timer_rng = timer_rng.clone();
+        self.guest_exit_code = *guest_exit_code;
+        self.guest_init_error = *guest_init_error;
+        self.pic = pic.clone();
+        self.pit = pit.clone();
+        self.rtc_index = *rtc_index;
+        self.com1.restore(com1);
+        self.com2.restore(com2);
+        self.log_order = *log_order;
         self.world.clear_effects();
-        self.management_framer = s.management_framer.clone();
-        self.net = s.net.clone();
-        self.channel = s.channel.clone();
-        self.blk = s.blk.clone();
-        self.control_dma_bytes = s.control_dma_bytes;
-        self.control_tx_bytes = s.control_tx_bytes;
-        self.pv = s.pv;
-        self.syscall_ns = s.syscall_ns;
-        self.throttle_permille = s.throttle_permille;
-        self.abi = s.abi;
-        self.page_timer = s.page_timer;
-        self.armed_wake = s.armed_wake;
-        self.pit_exact = s.pit_exact;
-        self.margin = s.margin;
-        self.fm = s.fm;
-        self.entropy = s.entropy;
-        self.entropy_read = s.entropy_read;
-        self.stats = s.stats.clone();
-        self.witness = s.witness.clone();
+        self.management_framer = management_framer.clone();
+        self.net = net.clone();
+        self.channel = channel.clone();
+        self.blk = blk.clone();
+        self.control_dma_bytes = *control_dma_bytes;
+        self.control_tx_bytes = *control_tx_bytes;
+        self.pv = *pv;
+        self.syscall_ns = *syscall_ns;
+        self.throttle_permille = *throttle_permille;
+        self.abi = *abi;
+        self.page_timer = *page_timer;
+        self.armed_wake = *armed_wake;
+        self.pit_exact = *pit_exact;
+        self.margin = *margin;
+        self.fm = *fm;
+        self.entropy = *entropy;
+        self.entropy_read = *entropy_read;
+        self.stats = stats.clone();
+        self.witness = witness.clone();
         Ok(pages)
     }
 
