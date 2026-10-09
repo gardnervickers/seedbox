@@ -487,7 +487,11 @@ impl RuntimeInputs {
                 ));
             }
             let _ = (counter, scratch, simulation);
-            let runtime = backends::container_runtime(self.runtime_assets.clone(), cancellation)?;
+            let runtime = backends::container_runtime(
+                self.runtime_assets.clone(),
+                self.guest_init.is_some(),
+                cancellation,
+            )?;
             let resolve = |flag, explicit: &Option<PathBuf>, name| match explicit {
                 Some(path) => defaults::existing(flag, path.clone()),
                 None => Ok(runtime.input(name)),
@@ -536,8 +540,11 @@ impl RuntimeInputs {
             .with_page_timer(self.page_timer)
             .with_deferred_tx(self.deferred_tx);
             if backends::released_assets() || self.runtime_assets.is_some() {
-                let runtime =
-                    backends::container_runtime(self.runtime_assets.clone(), cancellation)?;
+                let runtime = backends::container_runtime(
+                    self.runtime_assets.clone(),
+                    self.guest_init.is_some(),
+                    cancellation,
+                )?;
                 let resolve = |flag, explicit: &Option<PathBuf>, name| match explicit {
                     Some(path) => defaults::existing(flag, path.clone()),
                     None => Ok(runtime.input(name)),

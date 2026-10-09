@@ -149,8 +149,10 @@ fn cache_home() -> Result<std::path::PathBuf> {
     Ok(cache.join("seedbox"))
 }
 
+/// `explicit_init` skips the supervisor check: the archive's copy is unused.
 pub fn container_runtime(
     explicit: Option<std::path::PathBuf>,
+    explicit_init: bool,
     cancellation: &CancellationToken,
 ) -> Result<seedbox::container_runtime::Runtime> {
     use seedbox::release_download::ReleaseAsset;
@@ -173,7 +175,7 @@ pub fn container_runtime(
                 )),
                 other => other,
             })?;
-    if !speaks_launch_format(&runtime.input("compose-init"))? {
+    if !explicit_init && !speaks_launch_format(&runtime.input("compose-init"))? {
         let magic = String::from_utf8_lossy(seedbox::guest::LAUNCH_MAGIC);
         if explicit_assets {
             return Err(seedbox::Error::Setup(format!(
