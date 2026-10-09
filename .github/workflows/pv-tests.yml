@@ -19,10 +19,19 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     timeout-minutes: 100
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - name: Reclaim unused hosted SDK space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift
+          df -h /
       - name: Verify usable KVM before building
         run: |
           sudo chmod a+rw /dev/kvm

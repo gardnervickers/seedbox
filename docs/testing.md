@@ -139,3 +139,6 @@ create a fresh full-target cache each time. Cache hits are recorded in the job
 summary. GitHub's branch-scoped cache isolation keeps PR caches out of main.
 The repository retains its existing 10 GB cache eviction limit; diagnostic
 artifacts are capped at 64 MiB per run and expire after seven days.
+CI disables Cargo debug information and incremental compilation to keep the three
+workspace builds within hosted-runner disk limits. It also removes preinstalled
+Android, .NET and Swift SDKs that Seedbox does not use before building.
