@@ -507,6 +507,11 @@ static pid_t start(void) {
         char **instrumented = calloc(PREFIX_MAX + count + 1, sizeof(*instrumented));
         if (!instrumented) die("instrumentation arguments");
         size_t prefix = 0;
+        /* EXPERIMENT ONLY: run natively, without the progress client. */
+        for (size_t i = 0; i < count; ++i) instrumented[i] = arguments[i];
+        instrumented[count] = NULL;
+        execv(instrumented[0], instrumented);
+        die("exec application");
         instrumented[prefix++] = "/seedbox/progress/bin64/drrun";
         instrumented[prefix++] = "-opt_speed";
         instrumented[prefix++] = "-disable_traces";
