@@ -1138,7 +1138,6 @@ fn report(
             "step_ms": s.step_ns as f64 / 1e6, "run_ms": s.run_ns as f64 / 1e6,
             "skid_max": s.skid_max, "skid_count": s.skids.len(), "final_margin": mach.margin,
             "skid_p50": skid_p50, "skid_p99": skid_p99, "yields": s.yields, "yield_stops": s.yield_stops,
-            "soft_misses": s.soft_misses, "soft_misses_clean": s.soft_misses_clean, "soft_undos": s.soft_undos,
             "undo": mach.undo.as_ref().map(|u| json!({
                 "checkpoints": u.stats.checkpoints, "rollbacks": u.stats.rollbacks,
                 "synced_pages": u.stats.synced_pages, "restored_pages": u.stats.restored_pages,

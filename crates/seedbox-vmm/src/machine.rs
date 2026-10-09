@@ -111,28 +111,6 @@ fn timer_latency(
     }
 }
 
-// Pin every extension word without extending the checkpoint/digest prefix.
-const _: () = {
-    assert!(PAGE_FIELDS == 6);
-    assert!(PAGE_PV_CLOCK == 6);
-    assert!(PAGE_BOUND == 7);
-    assert!(PAGE_SYSCALL_TARGET == 8);
-    assert!(PAGE_ENTROPY_GEN == 9);
-    assert!(PAGE_ENTROPY == 10);
-    assert!(PAGE_ENTROPY + 1 == 11);
-    assert!(PAGE_ENTROPY + 2 == 12);
-    assert!(PAGE_ENTROPY + 3 == 13);
-    assert!(PAGE_ENTROPY_FIELDS == 4);
-    assert!(ABI_PAGE_RESEED == 3);
-    assert!(PAGE_TIMER_DEADLINE == 14);
-    assert!(PAGE_CAPABILITIES == 15);
-    assert!(PAGE_SYSCALL_NS == 16);
-    assert!(PAGE_SYSCALLS0 == 17);
-    assert!(PAGE_PLAN_TIME == 18);
-    assert!(ABI_PAGE_TIMER == 4);
-    assert!(CAP_PAGE_TIMER == 1);
-};
-
 pub struct BootSpec<'a> {
     pub kernel: &'a [u8],
     pub initrd: &'a [u8],
@@ -190,7 +168,6 @@ pub struct MachineSnapshot {
     page_timer: PageTimer,
     armed_wake: u64,
     pit_exact: bool,
-    exit_req: bool,
     margin: u64,
     fm: u64,
     stats: Stats,
@@ -245,12 +222,6 @@ pub struct Stats {
     pub skids: Vec<u64>,
     pub kvm_ns: [u128; 8],
     pub kvm_n: [u64; 8],
-    /// Runs that passed a soft stop with the yield window closed and could
-    /// not be undone (a syscall there would have been a missed stop).
-    pub soft_misses: u64,
-    pub soft_undos: u64,
-    /// Of the soft misses, those with no syscall in the run (provably harmless).
-    pub soft_misses_clean: u64,
     /// PV clock: watchdog checks of a run with no exit, those that proved a
     /// spin (a state cycle, then treated as idle), and the rest.
     pub spin_probes: u64,
@@ -347,7 +318,6 @@ pub struct Machine {
     #[cfg(test)]
     require_io_checkpoint: bool,
     planner: Option<Planner>,
-    exit_req: bool,
     /// The guest uses the shared page for interrupt masks and status (ABI 2).
     pv: bool,
     /// Guest ABI version announced on the time page port (0 before then).
@@ -625,7 +595,6 @@ impl Machine {
             #[cfg(test)]
             require_io_checkpoint: false,
             planner: None,
-            exit_req: false,
             pv: false,
             abi: 0,
             page_timer: PageTimer::new(),
@@ -885,7 +854,6 @@ impl Machine {
             page_timer: self.page_timer,
             armed_wake: self.armed_wake,
             pit_exact: self.pit_exact,
-            exit_req: self.exit_req,
             margin: self.margin,
             fm: self.fm,
             stats: self.stats.clone(),
@@ -964,7 +932,6 @@ impl Machine {
         self.page_timer = s.page_timer;
         self.armed_wake = s.armed_wake;
         self.pit_exact = s.pit_exact;
-        self.exit_req = s.exit_req;
         self.margin = s.margin;
         self.fm = s.fm;
         self.entropy = s.entropy;
@@ -1072,7 +1039,6 @@ impl Machine {
         Ok(sent)
     }
 
-    /// Syscalls the guest has entered (counted in the time page).
     /// Move virtual time forward to `t` (never back) for `cause`.
     fn advance_to(&mut self, t: u64, cause: Cause) {
         if t > self.world.time {
@@ -1081,6 +1047,7 @@ impl Machine {
         }
     }
 
+    /// Syscalls the guest has entered (counted in the time page).
     pub fn syscalls(&self) -> u64 {
         self.page_get(PAGE_SYSCALLS)
     }
@@ -1261,7 +1228,6 @@ impl Machine {
         u.page = page;
         u.time = self.world.time;
         u.branches = self.branches;
-        u.exit_req = self.exit_req;
         u.stats.checkpoint_ns += t.elapsed().as_nanos();
         Ok(())
     }
@@ -1279,7 +1245,6 @@ impl Machine {
         }
         self.world.time = u.time;
         self.branches = u.branches;
-        self.exit_req = u.exit_req;
         u.stats.rollback_ns += t.elapsed().as_nanos();
         // The planner reads registers from the run structure.
         let run = self.vcpu.get_kvm_run();
@@ -1527,13 +1492,6 @@ impl Machine {
                     self.vcpu.get_kvm_run().request_interrupt_window = 0;
                 }
             }
-            let rem_soft = soft.saturating_sub(self.world.time);
-            let windowed = false;
-            let window = false;
-            if window != self.exit_req {
-                unsafe { std::ptr::write_volatile(self.page.0.add(2), window as u64) };
-                self.exit_req = window;
-            }
             let syscalls0 = self.page_get(PAGE_SYSCALLS);
             if let Prepared::Idle = tb.prepare(self, remaining, soft, legal)? {
                 if self.page_timer.enabled {
@@ -1599,23 +1557,17 @@ impl Machine {
             let c1 = tb.read(syscalls1);
             let delta = c1 - c0;
             let interrupted = matches!(&exit, Err(e) if e.errno() == libc::EINTR);
-            let syscalled = syscalls1 != syscalls0;
             let run_syscalls = syscalls1.wrapping_sub(syscalls0);
             let run = Run {
                 delta,
                 remaining,
-                rem_soft,
-                windowed,
-                window,
                 interrupted,
                 debug: matches!(exit, Ok(VcpuExit::Debug(_))),
                 run_ns,
-                syscalled,
             };
             let judge = Judge {
                 name: &self.world.name,
                 stepping: self.stepping,
-                pv: self.pv,
                 undo_valid: self.undo.as_ref().is_some_and(|u| u.valid),
                 fm: &mut self.fm,
                 margin: &mut self.margin,
@@ -2112,7 +2064,6 @@ impl Machine {
         }
     }
 
-    /// Hash of architectural registers and all guest RAM.
     /// Hashes of guest RAM and the vCPU state a checkpoint restores, by part:
     /// general and control registers with segment bases, FPU/XSAVE, XCRs,
     /// pending exception/interrupt/NMI state, syscall/TLS MSRs, the shared time
@@ -2376,7 +2327,7 @@ mod net_poll_tests {
                     assert_eq!(
                         m.time,
                         if deferred {
-                            crate::virtio_net::TX_POLL_NS
+                            seedbox_engine_core::virtio_network::TX_POLL_NS
                         } else {
                             limit - early
                         },

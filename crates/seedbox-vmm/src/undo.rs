@@ -194,7 +194,6 @@ pub struct Undo {
     pub timer_deadline: Option<u64>,
     pub time: u64,
     pub branches: u64,
-    pub exit_req: bool,
     pub stats: UndoStats,
 }
 
@@ -232,7 +231,6 @@ impl Undo {
             timer_deadline: None,
             time: 0,
             branches: 0,
-            exit_req: false,
             stats: UndoStats::default(),
         })
     }

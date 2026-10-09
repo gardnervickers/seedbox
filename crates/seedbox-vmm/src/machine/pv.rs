@@ -93,11 +93,6 @@ impl PvClock {
         })
     }
 
-    /// Probes are per machine: `Machine::snapshot` refuses one inside a probe.
-    pub fn checkpoint_boundary(&self) -> Result<(), String> {
-        Ok(())
-    }
-
     /// Recreate host-only watchdog scratch after restoring a machine;
     /// `Machine::restore` resets the machine's own progress state.
     pub fn restore_boundary(&mut self) -> Result<(), String> {

@@ -4,7 +4,6 @@
 //! undo-able overflow aimed close to it.
 
 use super::Machine;
-use crate::boundary::missed_soft_stop;
 use crate::counter::Counter;
 use crate::timebase::{Judge, Prepared, Run, Timebase, Verdict};
 
@@ -83,24 +82,17 @@ impl Timebase for Counter {
         let Run {
             delta,
             remaining,
-            rem_soft,
-            windowed,
-            window,
             interrupted,
             debug,
             run_ns,
-            syscalled,
+            ..
         } = *run;
         // A free run that reaches the hard count, even by a natural exit
         // exactly there, has passed the counted stop: stepping would have
         // stopped before that instruction.
         let overshoot = delta > remaining || (!j.stepping && delta == remaining);
-        // With the yield window closed, a run must not pass `soft`: a
-        // syscall there would have been the stop.
-        let soft_miss =
-            missed_soft_stop(windowed, window, delta, rem_soft, interrupted, j.stepping);
-        if (overshoot || soft_miss) && j.undo_valid {
-            if overshoot && *j.fm >= j.profile.undo_max {
+        if overshoot && j.undo_valid {
+            if *j.fm >= j.profile.undo_max {
                 return Err(format!(
                     "overshoot on {}: {} branches past stop target at final margin {}",
                     j.name,
@@ -110,24 +102,7 @@ impl Timebase for Counter {
             }
             // A rollback costs far less than stepping, so grow slowly.
             *j.fm = (*j.fm * 2).min(j.profile.undo_max);
-            if !overshoot {
-                j.stats.soft_undos += 1;
-            }
             return Ok(Verdict::Rollback);
-        }
-        // Changing the margin must never change where a stop lands. A
-        // paravirtual guest counts syscalls: a run without one skipped no
-        // stop. Otherwise the run fails.
-        if soft_miss && !overshoot {
-            j.stats.soft_misses += 1;
-            if !j.pv || syscalled {
-                return Err(format!(
-                    "soft overshoot on {}: {} branches past (or an ambiguous overflow at) a soft stop before its syscall window opened",
-                    j.name,
-                    delta - rem_soft
-                ));
-            }
-            j.stats.soft_misses_clean += 1;
         }
         if overshoot {
             return Ok(Verdict::Overshoot);

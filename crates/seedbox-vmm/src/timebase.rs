@@ -23,24 +23,17 @@ pub struct Run {
     pub delta: u64,
     /// Progress left to the hard stop when the run started.
     pub remaining: u64,
-    /// Progress left to the soft stop when the run started.
-    pub rem_soft: u64,
-    pub windowed: bool,
-    pub window: bool,
     /// KVM_RUN returned EINTR (an overflow signal).
     pub interrupted: bool,
     /// The exit was a debug (breakpoint) exit.
     pub debug: bool,
     pub run_ns: u128,
-    /// The guest made a syscall during the run.
-    pub syscalled: bool,
 }
 
 /// Machine state a timebase may read or update while the exit is still held.
 pub struct Judge<'a> {
     pub name: &'a str,
     pub stepping: bool,
-    pub pv: bool,
     pub undo_valid: bool,
     pub fm: &'a mut u64,
     pub margin: &'a mut u64,

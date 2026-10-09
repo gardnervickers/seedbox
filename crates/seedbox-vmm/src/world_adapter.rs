@@ -65,10 +65,9 @@ impl WorldMachine for Machine {
     fn crash_observations(&self) -> serde_json::Value {
         serde_json::json!({"pio_total":self.stats.kvm_n[2],"net":self.net.as_ref().map(|n|n.report())})
     }
-    fn checkpoint_boundary(clock: &Self::Clock) -> Result<(), String> {
-        if let Clock::Pv(clock) = clock {
-            clock.checkpoint_boundary()?;
-        }
+    /// Clocks hold no checkpoint state: PV probes are per machine, and
+    /// `Machine::snapshot` refuses one inside a probe.
+    fn checkpoint_boundary(_: &Self::Clock) -> Result<(), String> {
         Ok(())
     }
     fn restore_boundary(clock: &mut Self::Clock) -> Result<(), String> {
