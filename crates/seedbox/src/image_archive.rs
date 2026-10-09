@@ -23,7 +23,7 @@ fn relative(path: &Path) -> Result<PathBuf> {
     Ok(result)
 }
 struct Output<'a> {
-    file: fs::File,
+    file: std::io::BufWriter<fs::File>,
     remaining: u64,
     cancellation: &'a CancellationToken,
 }
@@ -58,7 +58,7 @@ pub(crate) fn merge(
 ) -> Result<serde_json::Value> {
     fs::create_dir(directory)?;
     let mut names = BTreeSet::new();
-    let mut archive = tar::Archive::new(fs::File::open(input)?);
+    let mut archive = tar::Archive::new(std::io::BufReader::new(fs::File::open(input)?));
     let mut total = 0u64;
     // Only the image archive envelope is extracted. Its members are metadata
     // and opaque layer blobs; layer entries never become host filesystem paths.
@@ -144,7 +144,7 @@ pub(crate) fn merge(
         })
         .collect::<Result<Vec<_>>>()?;
     let mut sink = Output {
-        file: fs::File::create(output)?,
+        file: std::io::BufWriter::new(fs::File::create(output)?),
         remaining: LIMIT,
         cancellation,
     };
@@ -305,7 +305,7 @@ mod tests {
     fn output_stops_at_limit_and_on_cancellation() {
         let token = CancellationToken::default();
         let mut output = Output {
-            file: tempfile::tempfile().unwrap(),
+            file: std::io::BufWriter::new(tempfile::tempfile().unwrap()),
             remaining: 3,
             cancellation: &token,
         };
@@ -315,7 +315,8 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("exceeds"));
-        assert_eq!(output.file.metadata().unwrap().len(), 3);
+        output.flush().unwrap();
+        assert_eq!(output.file.get_ref().metadata().unwrap().len(), 3);
         token.cancel();
         assert!(output
             .write_all(b"d")

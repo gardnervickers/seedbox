@@ -142,7 +142,7 @@ enum Command {
         /// Number of consecutive seeds to execute.
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..))]
         count: u64,
-        /// Maximum active attempts; Mac supports only 1. Omit --cpu for Linux parallel execution.
+        /// Maximum active attempts. Omit --cpu for Linux parallel execution.
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=32))]
         workers: u32,
         /// Print exactly one exploration report as JSON.
@@ -930,11 +930,6 @@ fn explore(
     if options.workers > 1 && cpu.cpu.is_some() {
         return Err(Error::Setup("--workers: parallel exploration requires automatic core selection; omit --cpu and SEEDBOX_CPU".into()));
     }
-    if MAC && options.workers > 1 {
-        return Err(Error::Setup(
-            "--workers: Mac exploration supports one worker; use --workers 1 or omit it".into(),
-        ));
-    }
     cpu.reject_on_mac()?;
     let (store, orchestrator) = state.open()?;
     let cancellation = options.cancellation.clone();
@@ -1133,6 +1128,10 @@ fn compare(run_a: &Path, run_b: &Path, json: bool) -> Result<u8> {
                 diagnostics::ram_pages(&machine.machine, pages);
             }
         }
+        output::field("divergence", serde_json::to_string(&comparison.divergence)?);
+        if let Some(divergence) = &comparison.divergence {
+            diagnostics::divergence(divergence);
+        }
         output::field(
             "first record",
             serde_json::to_string(&comparison.first_record)?,
@@ -1237,6 +1236,7 @@ fn report(run: &orchestration::Run) -> u8 {
     if let Some(replay) = &run.record.replay {
         output::field("replay", output::word(&replay.status));
         diagnostics::replay_pages(replay);
+        diagnostics::replay_divergence(replay);
         return match replay.status {
             ReplayStatus::Match => 0,
             ReplayStatus::Mismatch => 1,

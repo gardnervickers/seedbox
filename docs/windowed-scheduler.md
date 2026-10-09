@@ -1,16 +1,19 @@
 # Windowed scheduler
 
-Status: the x86 world scheduler. `seedbox-engine-core` holds
+Status: the world scheduler on both backends. `seedbox-engine-core` holds
 the planner and executors (`src/window/`) and the adapter over the shared
 world (`src/world_windowed.rs`), generic over `WorldMachine`. The x86 VMM
 runs every world through it: static worlds, faults, runtime control,
 console triggers, scenario input, `kill_restart`, boot forks and runtime
-checkpoints. The legacy loop (`world::simulate`) remains in `engine-core`
-only because the arm64 backend still calls it; nothing on x86 does.
-`vmm.json` names the scheduler under `scheduler.name`. There is no flag to
-choose. `--machine-workers N` and `--machine-cpus` set the thread count and
-pinning (performance only). They are fields of the worker launch request
-(`seedbox_engine_core::launch::WorkerRequest`), but the `seedbox` CLI leaves
+checkpoints. The arm64 world (`seedbox-arm64/src/application/world.rs`)
+runs its launch barrier and main segment through it too; each ARM machine
+is a stopped worker process, so the pool threads carry no clock. The legacy
+loop (`world::simulate`) remains in `engine-core` only for its tests; no
+backend calls it. `vmm.json` names the scheduler under `scheduler.name`.
+There is no flag to choose. `--machine-workers N` (both engines) and
+`--machine-cpus` (x86) set the thread count and pinning (performance only).
+On x86 they are fields of the worker launch request
+(`seedbox_engine_core::launch::WorkerRequest`); the `seedbox` CLI leaves
 them at their defaults, so CLI runs are windowed on one thread.
 
 The question this prototype answers: can several machines of one world run
@@ -281,7 +284,27 @@ It works for any `WorldMachine`; the parallel path needs `M: Send`.
    near `B` would cut stepping further but change scheduler semantics.
 5. **Real workload.** Run the four-machine etcd Compose workload through
    `seedbox run` / `seedbox replay` once the CLI passes the flags.
-6. **arm64.** The adapter is generic and now covers everything the legacy
-   loop did, so the arm64 backend can call `world_windowed::simulate` with a
-   `Run` in place of `world::simulate` / `simulate_launch`, after which the
-   legacy loop can go. The parallel path also needs its machine to be `Send`.
+6. **Legacy loop.** With arm64 on the windowed scheduler, `world::simulate`
+   and `simulate_launch` have no backend caller; move their remaining tests
+   onto the windowed adapter and delete the loop.
+
+## arm64
+
+The arm64 world calls `world_windowed::simulate` (one thread) or
+`simulate_parallel` (`--machine-workers N`, 1..64) for its launch segment
+(`fork: Some(None)`, `require_barrier: false`) and its main segment. `ArmMachine`
+is `Send`: its console and management captures sit behind `Arc<Mutex<_>>`,
+shared only between a machine and its crash successor, and its transcript is
+its own. Each machine hashes the slice horizons it was given and the causal
+events it reported, in its own order; the world witness combines those
+per-machine digests in machine order (`seedbox-arm64-world-witness-v2`). That
+replaced the old world-wide chain hashed in execution order, which is why
+arm64 witnesses changed once with this port and why they no longer depend on
+which thread ran a machine or when a round finished.
+
+Measured on an M-series Mac (14 cores), `harness/acceptance/workloads/mac-capabilities.yaml`
+(3 machines), engine run directly on the retained world with `--machine-workers`
+1, 2, 4 and 4 again: identical `world_witness`, `network_witness`,
+`horizon_witness`, per-machine witnesses and state digests, 163 rounds each,
+with 343, 353 and 361 migrations on 2, 4 and 4 workers. A CLI `run` with
+`--full-state` followed by `replay` reports MATCH.

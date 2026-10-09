@@ -176,7 +176,7 @@ pub fn build_initramfs_with(
     recipe: &[u8],
     output: &Path,
 ) -> Result<()> {
-    let mut archive = Newc::new(fs::File::create(output)?);
+    let mut archive = Newc::new(io::BufWriter::new(fs::File::create(output)?));
     archive.owned("seedbox", 0o040755, &[])?;
     archive.owned("init", 0o100755, &fs::read(init)?)?;
     if let Some(mke2fs) = mke2fs {
@@ -196,7 +196,7 @@ pub fn build_initramfs_from_tar(
     recipe: &[u8],
     output: &Path,
 ) -> Result<()> {
-    let mut archive = Newc::new(fs::File::create(output)?);
+    let mut archive = Newc::new(io::BufWriter::new(fs::File::create(output)?));
     archive.owned("seedbox", 0o040755, &[])?;
     archive.owned("init", 0o100755, &fs::read(init)?)?;
     if let Some(path) = mke2fs {
@@ -389,7 +389,7 @@ impl<W: Write> Newc<W> {
         // emits sorted tar entries with each hard-link target preceding its links.
         let mut links = BTreeMap::<String, u32>::new();
         let mut seen = std::collections::BTreeSet::new();
-        for entry in tar::Archive::new(fs::File::open(path)?).entries()? {
+        for entry in tar::Archive::new(io::BufReader::new(fs::File::open(path)?)).entries()? {
             let entry = entry?;
             let key = name(entry.path()?.into_owned())?;
             if !seen.insert(key.clone()) {
@@ -405,7 +405,7 @@ impl<W: Write> Newc<W> {
             }
         }
         let mut inodes = BTreeMap::new();
-        for entry in tar::Archive::new(fs::File::open(path)?).entries()? {
+        for entry in tar::Archive::new(io::BufReader::new(fs::File::open(path)?)).entries()? {
             let mut entry = entry?;
             let key = name(entry.path()?.into_owned())?;
             let header = entry.header();

@@ -458,6 +458,30 @@ impl HistoryCheck<'_> {
                     max_offset_ns,
                 }
             }
+            Operation::ClockDrift {
+                target,
+                rate_ppb,
+                max_rate_ppb,
+            } => {
+                // An unavailable reply keeps its allocated handle in the error.
+                let handle = match (&row.response, unavailable) {
+                    (Some(reply), true) => reply.error.as_ref().and_then(|e| e.handle.as_deref()),
+                    _ => row.planned_handle(),
+                }
+                .ok_or_else(bad)?
+                .to_owned();
+                if handle.is_empty()
+                    || seedbox_control::validate_clock_drift(rate_ppb, max_rate_ppb).is_err()
+                {
+                    return Err(bad());
+                }
+                Action::ClockDrift {
+                    handle,
+                    machine: self.resolve(&target)?,
+                    rate_ppb,
+                    max_rate_ppb,
+                }
+            }
             Operation::Throttle {
                 target,
                 factor_permille,
@@ -537,13 +561,16 @@ impl HistoryCheck<'_> {
                 return Err(bad());
             }
         }
-        if let Action::ClockSkew { handle, .. } = &plan.action {
+        if let Action::ClockSkew { handle, .. } | Action::ClockDrift { handle, .. } = &plan.action {
             self.clocks.insert(handle.clone());
         }
         let expected = &mut self.expected;
         if unavailable {
             if !(plan.action.is_process()
-                || matches!(plan.action, Action::ClockSkew { .. } | Action::Heal { .. }))
+                || matches!(
+                    plan.action,
+                    Action::ClockSkew { .. } | Action::ClockDrift { .. } | Action::Heal { .. }
+                ))
                 || e.is_none_or(|e| e > plan.deadline_ns)
             {
                 return Err(bad());

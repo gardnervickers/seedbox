@@ -55,6 +55,9 @@ pub struct FaultRow {
     pub offset_ns: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none", serialize_with = "sorted")]
     pub queue_counts: Option<QueueCounts>,
+    /// The clock rate error asked of the guest, in parts per billion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_ppb: Option<i64>,
     /// The plan as requested, a sorted-key object.
     pub request: Value,
     pub requested_at_ns: u64,
@@ -94,11 +97,18 @@ struct Entry {
     status: Status,
     dispatched: bool,
     dispatch_at: Option<u64>,
-    /// The wall-clock step this entry asks its target guest to make.
-    clock_step: Option<i64>,
+    /// The clock change this entry asks its target guest to make.
+    clock: Option<ClockChange>,
 }
-/// A clock skew handle: the guest has been asked to step its wall clock by
-/// `offset`, has done so, is stepping it back, or lost the skew in a crash.
+/// A guest clock change: a wall-clock step in nanoseconds, or the absolute
+/// rate error of the system clock in parts per billion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClockChange {
+    Step(i64),
+    Rate(i64),
+}
+/// A clock skew or drift handle: the guest has been asked to make its change,
+/// has done so, is undoing it, or lost it in a crash.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClockState {
     Pending,
@@ -109,8 +119,16 @@ enum ClockState {
 #[derive(Clone, Copy, Debug)]
 struct Clock {
     machine: usize,
-    offset: i64,
+    change: ClockChange,
     state: ClockState,
+}
+impl Clock {
+    fn unsettled(&self) -> &'static str {
+        match self.change {
+            ClockChange::Step(_) => "clock skew is not settled",
+            ClockChange::Rate(_) => "clock drift is not settled",
+        }
+    }
 }
 /// Whole-machine lifecycle. A paused machine keeps its VM and executes
 /// nothing; a down machine has no VM until it reboots.
@@ -333,6 +351,23 @@ impl Faults {
                 }
                 target = Some(self.machine_index(machine, "unknown fault machine")?);
             }
+            Action::ClockDrift {
+                handle,
+                machine,
+                rate_ppb,
+                max_rate_ppb,
+            } => {
+                seedbox_control::validate_clock_drift(*rate_ppb, *max_rate_ppb)?;
+                if handle.is_empty() {
+                    return Err("empty fault handle".into());
+                }
+                target = Some(
+                    self.names
+                        .iter()
+                        .position(|n| n == machine)
+                        .ok_or("unknown fault machine")?,
+                );
+            }
         }
         Ok(Entry {
             plan,
@@ -341,7 +376,7 @@ impl Faults {
             status: Status::Scheduled,
             dispatched: false,
             dispatch_at: None,
-            clock_step: None,
+            clock: None,
         })
     }
     pub fn append(&mut self, mut plan: Plan) -> Result<u32, String> {
@@ -365,6 +400,7 @@ impl Faults {
             network_fault_counts: None,
             offset_ns: None,
             queue_counts: None,
+            rate_ppb: None,
             request: json!(entry.plan),
             requested_at_ns: entry.plan.at_ns,
             selection_counts: None,
@@ -452,7 +488,7 @@ impl Faults {
         if let Action::Heal { handle } = action {
             let clock = self.clocks.get(handle)?;
             return match clock.state {
-                ClockState::Pending | ClockState::Healing => Some("clock skew is not settled"),
+                ClockState::Pending | ClockState::Healing => Some(clock.unsettled()),
                 ClockState::Active if self.life[clock.machine] == Life::Paused => {
                     Some("target machine is paused")
                 }
@@ -498,11 +534,18 @@ impl Faults {
             Action::Reboot { .. } if self.life[index] != Life::Down => {
                 Some("target machine is not down")
             }
-            Action::ClockSkew { .. } if self.life[index] == Life::Down => {
+            Action::ClockSkew { .. } | Action::ClockDrift { .. }
+                if self.life[index] == Life::Down =>
+            {
                 Some("target machine is down")
             }
-            Action::ClockSkew { .. } if self.life[index] == Life::Paused => {
+            Action::ClockSkew { .. } | Action::ClockDrift { .. }
+                if self.life[index] == Life::Paused =>
+            {
                 Some("target machine is paused")
+            }
+            Action::ClockDrift { .. } if self.drifting(index) => {
+                Some("target machine clock is already drifting")
             }
             Action::Throttle { .. } if self.throttle(index).is_some() => {
                 Some("target machine is already throttled")
@@ -664,9 +707,9 @@ impl Faults {
         self.stopped[m] = false;
         self.frozen[m] = false;
     }
-    /// A new incarnation boots from the recorded wall clock, so no skew survives
-    /// on machine `m`. Settled handles stay until healed; unsettled ones were
-    /// resolved as unavailable with their entries.
+    /// A new incarnation boots from the recorded wall clock at the nominal rate,
+    /// so no skew or drift survives on machine `m`. Settled handles stay until
+    /// healed; unsettled ones were resolved as unavailable with their entries.
     fn forget_clocks(&mut self, m: usize) {
         self.clocks.retain(|_, c| {
             c.machine != m || c.state == ClockState::Active || c.state == ClockState::Lost
@@ -675,12 +718,22 @@ impl Faults {
             c.state = ClockState::Lost;
         }
     }
+    /// Whether machine `m` has a drift that has not ended with its incarnation;
+    /// a machine runs at one rate, so drifts do not stack.
+    fn drifting(&self, m: usize) -> bool {
+        self.clocks.values().any(|c| {
+            c.machine == m
+                && matches!(c.change, ClockChange::Rate(_))
+                && c.state != ClockState::Lost
+        })
+    }
     /// The management command that asks entry `i`'s target guest for its effect.
     fn management_command(&self, i: usize) -> Vec<u8> {
         let e = &self.entries[i];
         let id = e.plan.id;
-        match e.clock_step {
-            Some(step) => format!("clock_step {id} {step}\n"),
+        match e.clock {
+            Some(ClockChange::Step(step)) => format!("clock_step {id} {step}\n"),
+            Some(ClockChange::Rate(rate)) => format!("clock_rate {id} {rate}\n"),
             None => format!("{} {id}\n", command(&e.plan.action)),
         }
         .into_bytes()
@@ -773,6 +826,12 @@ impl Faults {
                 max_offset_ns,
                 ..
             } => self.apply_clock_skew(i, handle, offset_ns, max_offset_ns, commands),
+            Action::ClockDrift {
+                handle,
+                rate_ppb,
+                max_rate_ppb,
+                ..
+            } => self.apply_clock_drift(i, handle, rate_ppb, max_rate_ppb, commands),
             Action::Partition { handle, .. } => self.apply_partition(i, now, handle),
             action @ Action::Shape { .. } => self.apply_shape(i, now, &action),
             Action::DropConnection { handle, connection } => {
@@ -821,11 +880,49 @@ impl Faults {
             handle,
             Clock {
                 machine: m,
-                offset,
+                change: ClockChange::Step(offset),
                 state: ClockState::Pending,
             },
         );
-        self.entries[i].clock_step = Some(offset);
+        self.entries[i].clock = Some(ClockChange::Step(offset));
+        self.request_effect(i, commands);
+    }
+    fn apply_clock_drift(
+        &mut self,
+        i: usize,
+        handle: String,
+        rate_ppb: Option<i64>,
+        max_rate_ppb: Option<u64>,
+        commands: &mut Commands,
+    ) {
+        if self.active_handles().contains(&handle) {
+            return self.fail(i, "duplicate active handle".into());
+        }
+        let m = self.entries[i].target.expect("a clock drift has a target");
+        if self.life[m] == Life::Down {
+            return self.fail(i, "clock_drift of a down machine".into());
+        }
+        if self.drifting(m) {
+            return self.fail(i, "clock_drift of an already drifting machine".into());
+        }
+        // Draw only for a seeded drift, at this boundary.
+        let rate = match (rate_ppb, max_rate_ppb) {
+            (Some(rate), _) => rate,
+            (None, max) => match self.links.clock_offset(m, max.unwrap_or(0)) {
+                Ok(rate) => rate,
+                Err(error) => return self.fail(i, error),
+            },
+        };
+        self.log[i].rate_ppb = Some(rate);
+        self.clocks.insert(
+            handle,
+            Clock {
+                machine: m,
+                change: ClockChange::Rate(rate),
+                state: ClockState::Pending,
+            },
+        );
+        self.entries[i].clock = Some(ClockChange::Rate(rate));
         self.request_effect(i, commands);
     }
     fn apply_partition(&mut self, i: usize, now: u64, handle: String) {
@@ -901,23 +998,37 @@ impl Faults {
         let clock = self.clocks[&handle];
         match clock.state {
             ClockState::Pending | ClockState::Healing => {
-                self.fail(i, "clock skew is not settled".into());
+                self.fail(i, clock.unsettled().into());
             }
             ClockState::Lost => {
                 self.clocks.remove(&handle);
+                let what = match clock.change {
+                    ClockChange::Step(_) => "skew",
+                    ClockChange::Rate(_) => "drift",
+                };
                 self.applied(
                     i,
                     now,
-                    format!("handle={handle}; skew ended with its machine incarnation"),
+                    format!("handle={handle}; {what} ended with its machine incarnation"),
                 );
             }
             ClockState::Active => {
                 if let Some(c) = self.clocks.get_mut(&handle) {
                     c.state = ClockState::Healing;
                 }
-                self.log[i].offset_ns = Some(-clock.offset);
+                // Undo the change: step back, or restore the nominal rate.
+                let undo = match clock.change {
+                    ClockChange::Step(offset) => {
+                        self.log[i].offset_ns = Some(-offset);
+                        ClockChange::Step(-offset)
+                    }
+                    ClockChange::Rate(_) => {
+                        self.log[i].rate_ppb = Some(0);
+                        ClockChange::Rate(0)
+                    }
+                };
                 self.entries[i].target = Some(clock.machine);
-                self.entries[i].clock_step = Some(-clock.offset);
+                self.entries[i].clock = Some(undo);
                 self.request_effect(i, commands);
             }
         }
@@ -1050,23 +1161,27 @@ impl Faults {
             return;
         }
         let clock_handle = match &self.entries[i].plan.action {
-            Action::ClockSkew { handle, .. } | Action::Heal { handle } => Some(handle.clone()),
+            Action::ClockSkew { handle, .. }
+            | Action::ClockDrift { handle, .. }
+            | Action::Heal { handle } => Some(handle.clone()),
             _ => None,
         };
         if let Some(handle) = clock_handle {
             let healing = matches!(self.entries[i].plan.action, Action::Heal { .. });
             if success {
-                let step = self.entries[i].clock_step.unwrap_or(0);
+                let detail = match self.entries[i].clock {
+                    Some(ClockChange::Rate(rate)) => format!("guest clock rate set to {rate} ppb"),
+                    Some(ClockChange::Step(step)) => {
+                        format!("guest wall clock stepped by {step} ns")
+                    }
+                    None => "guest wall clock stepped by 0 ns".into(),
+                };
                 if healing {
                     self.clocks.remove(&handle);
                 } else if let Some(clock) = self.clocks.get_mut(&handle) {
                     clock.state = ClockState::Active;
                 }
-                self.applied(
-                    i,
-                    time,
-                    format!("handle={handle}; guest wall clock stepped by {step} ns"),
-                );
+                self.applied(i, time, format!("handle={handle}; {detail}"));
             } else {
                 if healing {
                     if let Some(clock) = self.clocks.get_mut(&handle) {
@@ -1285,6 +1400,7 @@ mod link_tests {
                 queue_dropped: 1,
                 delayed_max_ns: 9,
             }),
+            rate_ppb: None,
             request: json!({"id": 2, "action": "shape"}),
             requested_at_ns: 7,
             selection_counts: Some(SelectionCounts {
@@ -1327,3 +1443,7 @@ mod link_tests {
 #[cfg(test)]
 #[path = "clock_skew_tests.rs"]
 mod clock_skew_tests;
+
+#[cfg(test)]
+#[path = "clock_drift_tests.rs"]
+mod clock_drift_tests;

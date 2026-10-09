@@ -6,13 +6,17 @@ use super::{
 use crate::{
     control::Control, faults::Faults, links::Links, network_counters::NetworkCounters, Result,
 };
-use seedbox_engine_core::world::{self as world_core, Payload, WorldMachine};
+use seedbox_engine_core::{
+    world::{self as world_core, Payload, WorldMachine},
+    world_windowed,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 pub const CONTRACT: &str = "arm64-world-v1";
@@ -29,6 +33,35 @@ pub struct Options {
     pub full_state: bool,
     pub host_control: Option<PathBuf>,
     pub console_limit: usize,
+    /// Machine threads under the windowed scheduler; a performance setting
+    /// that never changes results. 1 runs every machine on this thread.
+    pub machine_workers: usize,
+}
+
+/// One segment of the run under the windowed scheduler. Every machine is
+/// its own stopped worker process, so the pool threads need no clock: the
+/// adapter's clock is `()`.
+fn simulate_windowed(
+    world: &mut world_core::World<ArmMachine>,
+    run: &world_windowed::Run,
+    machine_workers: usize,
+    boundary: &mut dyn FnMut() -> Result<()>,
+) -> Result<(&'static str, Value)> {
+    if machine_workers <= 1 {
+        return world_windowed::simulate(world, run, Duration::ZERO, boundary)
+            .map(|(outcome, scheduler)| (outcome.as_str(), scheduler));
+    }
+    world_windowed::simulate_parallel(
+        world,
+        run,
+        world_windowed::Workers {
+            count: machine_workers,
+            skew: Duration::ZERO,
+        },
+        |_| Ok(()),
+        boundary,
+    )
+    .map(|(outcome, scheduler)| (outcome.as_str(), scheduler))
 }
 #[derive(Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -172,7 +205,6 @@ pub fn run(options: &Options) -> Result<Value> {
         )?);
         boots.push(boot);
     }
-    let transcript = factory.transcript.clone();
     let mut world = world_core::World {
         machines,
         factory,
@@ -221,18 +253,33 @@ pub fn run(options: &Options) -> Result<Value> {
             "barrier_ns": null, "release_ns": null, "release_times": {}
         })
     });
+    // Boot initial guests to their launch barriers without converting an
+    // ordinary duration or end-machine exit into a failed fork.
     let bootstrap = if initial_barrier {
-        Some(world_core::simulate_launch(
+        let launch = world_windowed::Run {
+            duration: cfg.duration_ns,
+            end_on: end_on.as_deref(),
+            fork: Some(world_windowed::Fork::Barrier),
+            checkpoint: None,
+            require_barrier: false,
+        };
+        Some(simulate_windowed(
             &mut world,
-            &raw_config,
-            cfg.duration_ns,
-            &end_on,
+            &launch,
+            options.machine_workers,
             &mut boundary,
         )?)
     } else {
         None
     };
-    let outcome = if let Some(stopped) = bootstrap.filter(|s| *s != "barrier") {
+    let main = world_windowed::Run {
+        duration: cfg.duration_ns,
+        end_on: end_on.as_deref(),
+        fork: None,
+        checkpoint: None,
+        require_barrier: true,
+    };
+    let (outcome, scheduler) = if let Some(stopped) = bootstrap.filter(|(s, _)| *s != "barrier") {
         stopped
     } else if let Some(skew) = cfg.launch_skew_ns {
         let at = world.machines.iter().map(|m| m.time).max().unwrap_or(0);
@@ -268,34 +315,29 @@ pub fn run(options: &Options) -> Result<Value> {
                 "policy": LAUNCH_POLICY, "max_skew_ns": skew, "released": true,
                 "barrier_ns": at, "release_ns": release_at, "release_times": release_times
             }));
-            world_core::simulate(
-                &mut world,
-                &raw_config,
-                cfg.duration_ns,
-                &end_on,
-                None,
-                &mut boundary,
-            )?
+            simulate_windowed(&mut world, &main, options.machine_workers, &mut boundary)?
         } else {
             // The duration is absolute: never move a release or extend a run
             // to make room for initial launch, including the exact endpoint.
-            "duration"
+            ("duration", Value::Null)
         }
     } else {
-        world_core::simulate(
-            &mut world,
-            &raw_config,
-            cfg.duration_ns,
-            &end_on,
-            None,
-            &mut boundary,
-        )?
+        simulate_windowed(&mut world, &main, options.machine_workers, &mut boundary)?
     };
     world.finish(outcome, cfg.duration_ns, &Some(cfg.end_on_exit.clone()))?;
-    let mut hash = Sha256::new_with_prefix(b"seedbox-arm64-world-witness-v1\0");
-    let horizons = format!("{:x}", transcript.borrow().horizons.clone().finalize());
+    let mut hash = Sha256::new_with_prefix(b"seedbox-arm64-world-witness-v2\0");
+    // Each machine's transcript in machine order: independent of the thread
+    // that ran it and of round timing.
+    let mut horizon_hash = Sha256::new_with_prefix(b"seedbox-arm64-world-horizons-v2\0");
+    let mut event_hash = Sha256::new_with_prefix(b"seedbox-arm64-world-events-v2\0");
+    for m in &world.machines {
+        let transcript = m.transcript();
+        horizon_hash.update(transcript.horizons.clone().finalize());
+        event_hash.update(transcript.events.clone().finalize());
+    }
+    let horizons = format!("{:x}", horizon_hash.finalize());
     hash.update(horizons.as_bytes());
-    hash.update(transcript.borrow().events.clone().finalize());
+    hash.update(event_hash.finalize());
     let mut rows = Vec::new();
     for m in &mut world.machines {
         let evidence = m.evidence()?;
@@ -382,6 +424,9 @@ pub fn run(options: &Options) -> Result<Value> {
         "slices":world.slices});
     if let Some(launch) = initial_launch {
         report["initial_launch"] = launch;
+    }
+    if !scheduler.is_null() {
+        report["scheduler"] = scheduler;
     }
     if let Some(evidence) = trigger_evidence {
         report["triggers"] = evidence;

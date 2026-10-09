@@ -174,6 +174,27 @@ int main(int argc, char **argv) {
     }
     char rejected[] = "clock_step 9 -9000000000000000"; control(rejected, &child);
     n=read(sockets[1],buffer,sizeof(buffer)-1); assert(n>0); buffer[n]=0; assert(strstr(buffer,"SEEDBOX_FAILURE id=9 action=clock_step"));
+    /* A clock rate is one absolute ADJ_TICK|ADJ_FREQUENCY: whole 100 ppm tick
+     * steps (USER_HZ 100) plus a remainder of at most 50 ppm in scaled ppm. */
+    struct { const char *command; long tick, freq; } clock_rates[] = {
+        {"clock_rate 10 100000000", 11000, 0}, {"clock_rate 11 -100000000", 9000, 0},
+        {"clock_rate 12 150000", 10002, -50 * 65536}, {"clock_rate 13 -149999", 9999, -49999L * 65536 / 1000},
+        {"clock_rate 14 1", 10000, 66}, {"clock_rate 15 0", 10000, 0}};
+    assert(sysconf(_SC_CLK_TCK) == 100);
+    for (unsigned i = 0; i < sizeof(clock_rates)/sizeof(*clock_rates); i++) {
+        char command[64]; strcpy(command, clock_rates[i].command);
+        int before = adjustments;
+        control(command, &child); assert(child < 0 && adjustments == before + 1);
+        assert(last_adjustment.modes == (ADJ_TICK | ADJ_FREQUENCY));
+        assert(last_adjustment.tick == clock_rates[i].tick && last_adjustment.freq == clock_rates[i].freq);
+        n=read(sockets[1],buffer,sizeof(buffer)-1); assert(n>0); buffer[n]=0;
+        char expected[64]; snprintf(expected, sizeof(expected), "SEEDBOX_EFFECT id=%u action=clock_rate", 10 + i);
+        assert(strstr(buffer, expected));
+    }
+    /* Past the kernel's reach the guest refuses without calling adjtimex. */
+    int before = adjustments;
+    char too_fast[] = "clock_rate 16 1000000001"; control(too_fast, &child); assert(adjustments == before);
+    n=read(sockets[1],buffer,sizeof(buffer)-1); assert(n>0); buffer[n]=0; assert(strstr(buffer,"SEEDBOX_FAILURE id=16 action=clock_rate"));
     /* The public RPC socket is created only from an exact authoritative boot
      * token; image environment entries cannot enable it on other guests. */
     char directory[] = "/tmp/seedbox-relay-XXXXXX"; assert(mkdtemp(directory));

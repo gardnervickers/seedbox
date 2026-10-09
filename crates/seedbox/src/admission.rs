@@ -17,32 +17,35 @@ const RUNTIME_INPUT_LIMIT: u64 = 256 * 1024 * 1024;
 
 pub fn file_digest(path: &Path) -> Result<ContentDigest> {
     use sha2::{Digest, Sha256};
-    let mut file = std::fs::File::open(path).context(
-        Error::Setup,
-        format_args!("runtime input {}", path.display()),
-    )?;
-    let mut hash = Sha256::new();
-    let mut data = [0; 65536];
-    let mut total = 0;
-    loop {
-        let n = file.read(&mut data).context(
-            Error::Setup,
-            format_args!("runtime input {}", path.display()),
-        )?;
-        if n == 0 {
-            break;
-        }
-        total += n;
-        if total as u64 > RUNTIME_INPUT_LIMIT {
-            return Err(Error::Setup(format!(
-                "runtime input {}: exceeds {}",
-                path.display(),
-                Size(RUNTIME_INPUT_LIMIT)
-            )));
-        }
-        hash.update(&data[..n]);
+    let input = || format!("runtime input {}", path.display());
+    let too_large = || {
+        Error::Setup(format!(
+            "{}: exceeds {}",
+            input(),
+            Size(RUNTIME_INPUT_LIMIT)
+        ))
+    };
+    let mut file = std::fs::File::open(path).context(Error::Setup, input())?;
+    if file.metadata().context(Error::Setup, input())?.len() > RUNTIME_INPUT_LIMIT {
+        return Err(too_large());
     }
-    Ok(ContentDigest::finish(hash))
+    crate::store::file_digest_with(&mut file, |file| {
+        let mut hash = Sha256::new();
+        let mut data = [0; 65536];
+        let mut total = 0;
+        loop {
+            let n = file.read(&mut data).context(Error::Setup, input())?;
+            if n == 0 {
+                break;
+            }
+            total += n;
+            if total as u64 > RUNTIME_INPUT_LIMIT {
+                return Err(too_large());
+            }
+            hash.update(&data[..n]);
+        }
+        Ok(ContentDigest::finish(hash))
+    })
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

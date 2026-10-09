@@ -49,7 +49,7 @@ fn mac_rejects_linux_cpu_options_before_preparation_or_state_creation() {
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
-fn mac_explore_rejects_multiple_workers_before_state_or_runtime_setup() {
+fn mac_explore_accepts_multiple_workers_and_rejects_out_of_range_before_state() {
     let directory = tempfile::tempdir().unwrap();
     assert!(seedbox(&["init", "demo"], directory.path())
         .status
@@ -58,19 +58,27 @@ fn mac_explore_rejects_multiple_workers_before_state_or_runtime_setup() {
 
     let help = seedbox(&["help", "explore"], &project);
     assert!(help.status.success());
-    assert!(String::from_utf8_lossy(&help.stdout).contains(
-        "Maximum active attempts; Mac supports only 1. Omit --cpu for Linux parallel execution"
-    ));
-    assert!(String::from_utf8_lossy(&help.stdout).contains("[default: 1]"));
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(help.contains("Maximum active attempts. Omit --cpu for Linux parallel execution"));
+    assert!(!help.contains("Mac supports only 1"));
+    assert!(help.contains("[default: 1]"));
 
-    let output = seedbox_with(&["explore", "--workers", "2"], &project, None);
+    let output = seedbox_with(&["explore", "--workers", "33"], &project, None);
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
-    assert_eq!(
-        stderr(&output),
-        "error: --workers: Mac exploration supports one worker; use --workers 1 or omit it\n"
-    );
+    assert!(stderr(&output).contains("--workers"));
     assert!(!project.join(".seedbox").exists());
+
+    // Several workers pass argument checks like one does; the next refusal is
+    // the missing kernel, before any runtime setup.
+    let output = seedbox_with(&["explore", "--workers", "4"], &project, None);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(
+        stderr(&output).starts_with("error: --kernel "),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]

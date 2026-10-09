@@ -6,6 +6,9 @@ pub const MAX_CLOCK_OFFSET_NS: u64 = 365 * 86_400 * 1_000_000_000;
 pub const MAX_PPM: u64 = 1_000_000;
 /// Largest total delay a link policy or shape may add to a frame: one hour.
 pub const MAX_LINK_DELAY_NS: u64 = 3_600_000_000_000;
+/// Largest clock rate error, fixed or seeded, in either direction: 10% (in
+/// parts per billion). Linux slews at most about 10% through `adjtimex`.
+pub const MAX_CLOCK_RATE_PPB: u64 = 100_000_000;
 
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, num::NonZeroU32};
@@ -163,6 +166,14 @@ pub enum Operation {
         offset_ns: Option<i64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_offset_ns: Option<u64>,
+    },
+    /// Make one machine's clock run fast or slow by a fixed or seeded rate.
+    ClockDrift {
+        target: Target,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rate_ppb: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_rate_ppb: Option<u64>,
     },
     /// Charge the machine's simulated CPU work `factor_permille / 1000` times
     /// its seeded cost until healed.
@@ -357,6 +368,20 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_offset_ns: Option<u64>,
     },
+    /// Run the machine's system clock `rate_ppb` parts per billion fast (or
+    /// slow if negative), or at a rate drawn uniformly from
+    /// [-max_rate_ppb, max_rate_ppb] on the machine's `clock/<machine>`
+    /// stream. Realtime and monotonic time drift together, as with a real
+    /// oscillator error; the raw monotonic clock and the virtual TSC keep the
+    /// simulated rate. Heal restores the nominal rate.
+    ClockDrift {
+        handle: String,
+        machine: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rate_ppb: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_rate_ppb: Option<u64>,
+    },
     /// Scale the machine's seeded CPU cost until the handle is healed.
     Throttle {
         handle: String,
@@ -392,6 +417,7 @@ impl Action {
             Self::Shape { .. } => "shape",
             Self::Heal { .. } => "heal",
             Self::ClockSkew { .. } => "clock_skew",
+            Self::ClockDrift { .. } => "clock_drift",
             Self::Throttle { .. } => "throttle",
             Self::Pause { .. } => "pause",
             Self::Resume { .. } => "resume",
@@ -410,6 +436,7 @@ impl Action {
             | Self::Crash { machine }
             | Self::Reboot { machine }
             | Self::ClockSkew { machine, .. }
+            | Self::ClockDrift { machine, .. }
             | Self::Throttle { machine, .. } => Some(machine),
             _ => None,
         }
@@ -443,6 +470,20 @@ pub fn validate_clock_skew(
         (None, Some(m)) if m != 0 && m <= MAX_CLOCK_OFFSET_NS => Ok(()),
         _ => Err(format!(
             "clock_skew needs exactly one of a nonzero offset_ns or a positive max_offset_ns, each at most {MAX_CLOCK_OFFSET_NS}"
+        )),
+    }
+}
+/// Exactly one of a fixed nonzero rate or a seeded positive bound, each
+/// within [`MAX_CLOCK_RATE_PPB`].
+pub fn validate_clock_drift(
+    rate_ppb: Option<i64>,
+    max_rate_ppb: Option<u64>,
+) -> Result<(), String> {
+    match (rate_ppb, max_rate_ppb) {
+        (Some(r), None) if r != 0 && r.unsigned_abs() <= MAX_CLOCK_RATE_PPB => Ok(()),
+        (None, Some(m)) if m != 0 && m <= MAX_CLOCK_RATE_PPB => Ok(()),
+        _ => Err(format!(
+            "clock_drift needs exactly one of a nonzero rate_ppb or a positive max_rate_ppb, each at most {MAX_CLOCK_RATE_PPB}"
         )),
     }
 }

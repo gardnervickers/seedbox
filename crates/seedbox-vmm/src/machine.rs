@@ -15,6 +15,7 @@ use crate::undo::{Undo, UndoStats, VcpuState};
 use crate::virtio_blk::VirtioBlk;
 use crate::virtio_console::VirtioConsole;
 use crate::virtio_net::{ReceiveOutcome, VirtioNet};
+use crate::witness_log::WitnessLog;
 use kvm_bindings::*;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 use seedbox_engine_core::launch::MachineFeatures;
@@ -240,6 +241,7 @@ pub struct MachineSnapshot {
     fm: u64,
     stats: Stats,
     witness: Sha256,
+    witness_log: WitnessLog,
     undo_stats: Option<UndoStats>,
 }
 
@@ -289,6 +291,14 @@ impl Mapping {
 
     pub(crate) fn len(&self) -> usize {
         self.size
+    }
+
+    /// Ask for transparent huge pages: fewer, larger host faults while the
+    /// guest touches fresh RAM. The guest sees the same zeroed memory; only
+    /// host paging changes.
+    pub(crate) fn advise_huge_pages(&self) {
+        // SAFETY: advice on this mapping's own range; it changes no contents.
+        unsafe { libc::madvise(self.ptr.cast(), self.size, libc::MADV_HUGEPAGE) };
     }
 
     /// The host address, for registering the mapping with KVM.
@@ -580,6 +590,8 @@ pub struct Machine {
     msrs: Msrs,
     pub stats: Stats,
     pub witness: Sha256,
+    /// Periodic witness samples; diagnostic only, never hashed.
+    pub witness_log: WitnessLog,
     pub trace: Option<std::io::BufWriter<std::fs::File>>,
 }
 
@@ -668,6 +680,7 @@ impl Machine {
             return Err("kernel does not fit".into());
         }
         let mut mem = Mapping::new(mem_size)?;
+        mem.advise_huge_pages();
         let mut page = TimePage::new()?;
         if spec.features.pv() {
             page.set(PAGE_PV_CLOCK, 1);
@@ -844,6 +857,7 @@ impl Machine {
             } else {
                 Sha256::new()
             },
+            witness_log: WitnessLog::default(),
             trace: None,
         })
     }
@@ -873,6 +887,8 @@ impl Machine {
         self.witness.update(self.branches.to_le_bytes());
         self.witness.update(self.world.time.to_le_bytes());
         self.witness.update(extra.to_le_bytes());
+        self.witness_log
+            .record(self.world.time, self.branches, &self.witness);
     }
 
     /// Earliest internal event (timer) for a halted machine.
@@ -983,6 +999,7 @@ impl Machine {
         }
         self.log_order = old.log_order;
         self.trace = old.trace.take();
+        self.witness_log = std::mem::take(&mut old.witness_log);
         // The same machine: under the PV clock it keeps its speed, or members
         // restarted together would run in lockstep again.
         self.syscall_ns = old.syscall_ns;
@@ -1072,6 +1089,7 @@ impl Machine {
             entropy_read,
             stats,
             witness,
+            witness_log,
             // Saved above: RAM, the time page, the vCPU and the undo stats.
             mem: _,
             page: _,
@@ -1136,6 +1154,7 @@ impl Machine {
             fm: *fm,
             stats: stats.clone(),
             witness: witness.clone(),
+            witness_log: witness_log.clone(),
             undo_stats,
         })
     }
@@ -1218,6 +1237,7 @@ impl Machine {
             entropy_read,
             stats,
             witness,
+            witness_log,
             // Restored above.
             ram: _,
             page: _,
@@ -1257,6 +1277,7 @@ impl Machine {
         self.entropy_read = *entropy_read;
         self.stats = stats.clone();
         self.witness = witness.clone();
+        self.witness_log = witness_log.clone();
         Ok(pages)
     }
 
@@ -3011,6 +3032,7 @@ mod io_boundary_tests {
                         m.state_digest().unwrap().0,
                         m.time,
                         m.branches,
+                        m.witness_log.clone(),
                     )
                 };
                 let want = finish(&mut m, &mut counter);

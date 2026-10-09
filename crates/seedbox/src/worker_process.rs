@@ -150,7 +150,11 @@ impl WorkerLaunch {
             .artifacts
             .get(&request.prepared.profile.engine)
             .ok_or_else(|| Error::Integrity("missing retained engine executable".into()))?;
-        fs::set_permissions(engine, fs::Permissions::from_mode(0o500))?;
+        // A shared exploration copy is already 0500; chmod would change its
+        // ctime and make the store replace it for every attempt.
+        if fs::metadata(engine)?.permissions().mode() & 0o7777 != 0o500 {
+            fs::set_permissions(engine, fs::Permissions::from_mode(0o500))?;
+        }
         let world = request.output.join("world.json");
         fs::write(
             &world,

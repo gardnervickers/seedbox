@@ -20,7 +20,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Timebase | Linux: `counter` (retired guest branches); Mac: `pv` | `--timebase` (prepare/run/explore/doctor) |
 | Page timer (Linux KVM) | off; ABI-4 clockevent stores, aimed at PV | `x-seedbox.machine.page_timer: true` |
 | Exploration count | `1` | `--count` |
-| Exploration workers | `1`, sequential execution; Mac currently requires `1` | `--workers` (1..32; Linux automatic CPU selection for parallel execution) |
+| Exploration workers | `1`, sequential execution | `--workers` (1..32; Linux reserves one physical core per worker, Mac lets HVF schedule) |
 | Torn disk writes | off (drop all unflushed sectors on crash) | `x-seedbox.disk.torn_writes: true` |
 | CPU | Linux: first free core other than CPU 0's, under the shared lease; Mac: automatic HVF scheduling | `--cpu`, `SEEDBOX_CPU` (Linux only) |
 | Guest kernel | built locally in the OS temporary directory | `--kernel`, `SEEDBOX_KERNEL` |
@@ -31,6 +31,7 @@ directory. Every runtime input has a default, so no flags are required:
 | Engine and guest kernel | any built engine and kernel are admitted; the run records their hashes | `--vmm`, `--kernel` |
 | State | `.seedbox/` | `--state`, `SEEDBOX_STATE` |
 | Diff inputs | Two required retained run directories; no runtime inputs or state lookup | positional `RUN_A RUN_B` |
+| Witness log (Linux) | always; retain `output/machines/NAME.witness-log` for diff and replay to locate the first diverging 1 ms interval | none |
 | Per-page RAM evidence (Linux) | off; under `--full-state`, retain `output/machines/NAME.pages` beside machine traces | existing `--full-state` |
 | Log selection | All indexed machines and both streams, with no time bounds; raw bytes on stdout (`--json` for metadata) | `logs RUN --machine NAME --stream console --since-ns N --until-ns N` |
 | Bundle transfer cap | 32 GiB each for unique objects and materialized logs | `--max-bytes` |
@@ -175,11 +176,12 @@ for state coverage, engine-only multiple checkpoints/branches and unverified KVM
 `seedbox explore [COMPOSE] --seed FIRST --count COUNT` runs consecutive seeds
 with one worker by default, preparing the complete input closure once. Compose
 defaults to `.`, the first seed to the Compose seed, and count to 1.
-`--workers N` (1..32) permits at most N owned attempts at once; parallel exploration
-requires automatic CPU selection, so omit `--cpu` and `SEEDBOX_CPU`. Before
-preparation, the executor must be able to reserve and admit N distinct eligible
-physical cores together, including their SMT siblings; insufficient capacity is
-ERROR. Those transient reservations are released before OCI work. Each running
+`--workers N` (1..32) permits at most N owned attempts at once; on Linux, parallel
+exploration requires automatic CPU selection, so omit `--cpu` and `SEEDBOX_CPU`.
+Before preparation, the Linux executor must be able to reserve and admit N
+distinct eligible physical cores together, including their SMT siblings;
+insufficient capacity is ERROR. The Mac executor reserves nothing: each attempt
+is its own engine process and HVF VM, scheduled by the host. Those transient reservations are released before OCI work. Each running
 world still owns its ordinary core/sibling lease. Contention afterward is an
 infrastructure error, with no retry or waiting-for-capacity policy. Empty/overflowing ranges fail
 before state creation or preparation. Immutable runtime inputs and host admission are

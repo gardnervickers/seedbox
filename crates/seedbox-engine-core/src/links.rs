@@ -100,8 +100,8 @@ pub struct Links {
     jitter: BTreeMap<Pair, Rng>,
     network_streams: Streams,
     network_used: bool,
-    /// Per-machine `clock/<machine>` streams for seeded clock skew; drawn
-    /// only when a seeded skew is applied.
+    /// Per-machine `clock/<machine>` streams for seeded clock skew and drift;
+    /// drawn only when a seeded skew or drift is applied.
     clock: BTreeMap<usize, Rng>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -230,7 +230,8 @@ impl Links {
             }
         }
     }
-    /// A wall-clock offset drawn uniformly from [-max, max] on machine `m`'s stream.
+    /// A signed clock offset (ns) or rate (ppb) drawn uniformly from
+    /// [-max, max] on machine `m`'s stream.
     pub fn clock_offset(&mut self, m: usize, max: u64) -> Result<i64, String> {
         let span = max
             .checked_mul(2)

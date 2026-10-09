@@ -174,6 +174,11 @@ container is created, so engine-injected files never enter the guest filesystem.
 The retained image
 manifest describes this flattened filesystem snapshot, not the original registry
 layers. Replay uses the snapshot and never contacts the engine.
+The content store records which snapshot each engine produced for an
+immutable image ID, so a later preparation by the same Seedbox engine reuses
+that snapshot instead of exporting and merging the image again. Builds and
+pulls still go through the engine. A record whose objects are missing is
+ignored; the image is exported again.
 
 Exported Linux ownership, modes, links and case-sensitive paths are processed as
 archive metadata without extracting guest paths on the host. Unsupported extended
@@ -477,6 +482,27 @@ Execution outcome, report, errors and omission metadata are also compared.
 Attempt names, replay ancestry, performance parameters, engine performance counters,
 host timings and arbitrary console/log contents do not determine MATCH.
 
+Every x86 run writes `output/machines/NAME.witness-log`: periodic samples of the
+machine's running exit witness. The first witness record at or after each 1 ms
+boundary of the machine's simulated time is sampled, plus a final sample at the
+end, so idle intervals add nothing. Each entry is 32 bytes of little-endian `u64`:
+`time_ns`, `branches`, `records` (witness records so far, one per trace line) and
+the first eight bytes of the running witness. Sampling reads the witness without
+feeding it, so witnesses, state digests and replay verdicts are unchanged.
+Snapshots, forks, checkpoints and crash restarts carry the log with the witness.
+The log follows the ordinary retention policy and is excluded from run identity.
+
+When both runs retain witness logs, diff compares them entry by entry and reports
+the earliest differing interval across machines as `divergence`: the machine,
+the one-based `sample`, the `last_match` sample (null when the first differs) and
+each side's sample (null when that log ended first). The first differing exit
+lies after `last_match` and at or before the earlier differing sample, by records
+and simulated time. A differing log makes the comparison DIFFERENT. A log on only
+one side is an evidence difference; none on either side (older engines, ARM) is a
+limitation. Plain diff prints `divergence: <json>` and a readable summary on
+stderr. A MISMATCH replay records the same evidence under `replay.divergence`
+and prints the summary on stderr; it never changes the replay verdict.
+
 When both runs retain `machines/NAME.trace`, diff compares the existing engine
 records (`kind branches time_ns extra(hex) rip(hex)`) in order for each machine.
 An inserted/deleted record is reported at the first positional mismatch, including
@@ -637,15 +663,14 @@ retained records, serde field names, status lines and `--json` output are unchan
 
 ## Reproduce acceptance
 
-From the repository root in `nix develop`, run all available native suites:
+From the repository root in `nix develop`, name the suites to run:
 
 ```sh
-bash harness/check.sh
-bash harness/check.sh --require applications
-bash harness/check.sh --require oci
+bash harness/check.sh linux-apps linux-oci   # Linux x86-64 KVM host
+bash harness/check.sh mac-apps               # Apple Silicon
 ```
 
-See [the test matrix](testing.md) for discovery, capability features and inputs.
+See [the test matrix](testing.md) for suites, Cargo features and inputs.
 The older focused runtime diagnostics remain available:
 
 ```sh
@@ -815,8 +840,16 @@ applies the step with `adjtimex(ADJ_SETOFFSET)` and acknowledges it like a
 process fault; monotonic time and the virtual TSC never move. The fault row
 records the applied `offset_ns`, so offsets are part of the world witness.
 Runs without clock skew draw nothing new and keep their witnesses. See
-[the protocol](../python/PROTOCOL.md#clock-skew). Clock rate (drift) is not yet
-modeled.
+[the protocol](../python/PROTOCOL.md#clock-skew).
+
+`world.clock_drift(target, ppb=..., max_ppb=...)` makes a machine's clock run
+fast or slow by a fixed rate error, or one drawn from `[-max_ppb, max_ppb]` on
+the same `clock/<machine>` stream, up to 10%. The supervisor sets the kernel's
+NTP tick and frequency with `adjtimex`, so realtime, monotonic and boot time
+(and the timers on them) drift together while `CLOCK_MONOTONIC_RAW`, the TSC
+and simulated time do not. One drift per machine at a time; heal restores the
+nominal rate and the fault row records `rate_ppb`. Runs without drift draw
+nothing new. See [the protocol](../python/PROTOCOL.md#clock-drift).
 
 The network seed-diversity audit still finds zero default jitter and loss.
 `link/<from>/<to>` and `link-loss/<from>/<to>` each advance once per non-cut
@@ -872,13 +905,14 @@ for CPU, timer, network, incarnation and static-plan semantics.
 
 `seedbox explore [COMPOSE] --seed FIRST --count COUNT` has one worker by default.
 `--workers N` (1..32) permits N simultaneous owned attempts; count defaults to 1
-and seed to the resolved Compose seed. Parallel execution rejects an explicit
+and seed to the resolved Compose seed. Linux parallel execution rejects an explicit
 `--cpu` or `SEEDBOX_CPU` before preparation. Automatic selection must reserve N
 eligible physical cores with all SMT siblings together during preflight, verify
 each core's admission and release every transient resource before preparation.
-Insufficient capacity is ERROR; there is no queue/retry on host contention. A
-library execution backend supports only one worker unless it explicitly overrides
-`preflight_workers`. Per-attempt admission and leases remain unchanged. Bounds are finite,
+Insufficient capacity is ERROR; there is no queue/retry on host contention. The
+Mac executor admits the same 1..32 range with no core reservation: each attempt
+is its own signed engine process and HVF VM. A library execution backend supports
+only one worker unless it explicitly overrides `preflight_workers`. Per-attempt admission and leases remain unchanged. Bounds are finite,
 positive and checked for inclusive u64 overflow before slow work. Runtime inputs and
 backend host admission are checked before the sole preparation; refusal retains
 batch ERROR with no prepared inputs or seed attempts. Transient admission resources
