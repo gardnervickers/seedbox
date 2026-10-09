@@ -757,7 +757,6 @@ fn old_records_stay_inspectable_and_transferable() {
             full_state: None,
             faults: vec![],
             detail: None,
-            engine_qualification: None,
         }),
         error: None,
         logs: BTreeMap::new(),

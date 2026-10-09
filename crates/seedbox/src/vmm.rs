@@ -1844,7 +1844,6 @@ fn checked_report(raw: VmmReport, request: &ExecutionRequest<'_>) -> Result<Exec
         witness: Some(raw.world_witness),
         full_state,
         faults,
-        engine_qualification: None,
         detail: fault_failure.or_else(|| {
             infrastructure_error
                 .map(|machine| format!("machine {} failed in guest bootstrap or VMM", machine.name))
@@ -1992,7 +1991,7 @@ mod doctor_tests {
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
-    fn internal_doctor_reports_simulator_version_without_new_qualification() {
+    fn internal_doctor_reports_simulator_version() {
         let temporary = tempfile::tempdir().unwrap();
         let executable = temporary.path().join("worker");
         std::fs::write(&executable, b"combined executable").unwrap();
@@ -2021,10 +2020,6 @@ mod doctor_tests {
             report.simulator_version.as_deref(),
             Some(crate::engine::SIMULATOR_VERSION)
         );
-        assert!(serde_json::to_value(report)
-            .unwrap()
-            .get("engine_qualification")
-            .is_none());
     }
 
     #[test]
@@ -2043,10 +2038,6 @@ mod doctor_tests {
         .unwrap()
         .profile;
         profile.semantic_parameters.remove("host_policy");
-        profile.semantic_parameters.insert(
-            crate::admission::ENGINE_QUALIFICATION.into(),
-            "dev-unpinned".into(),
-        );
         let before = serde_json::to_vec(&profile).unwrap();
         let executor =
             VmmExecutor::from_retained(&executable, &store, profile, None, CounterProfile::Zen)
@@ -2540,19 +2531,13 @@ mod doctor_tests {
                 inputs.profile.engine, engine,
                 "the run records the engine it used"
             );
-            assert!(!inputs
+            backend.validate_retained(&inputs).unwrap();
+            // Older runs carry policy bindings; they are only data now.
+            let mut marked = inputs.clone();
+            marked
                 .profile
                 .semantic_parameters
-                .contains_key(crate::admission::ENGINE_QUALIFICATION));
-            backend.validate_retained(&inputs).unwrap();
-            // Older runs carry a dev marker and policy bindings; both are only data now.
-            let mut marked = inputs.clone();
-            for key in [crate::admission::ENGINE_QUALIFICATION, "host_policy"] {
-                marked
-                    .profile
-                    .semantic_parameters
-                    .insert(key.into(), "anything".into());
-            }
+                .insert("host_policy".into(), "anything".into());
             backend.validate_retained(&marked).unwrap();
             for key in ["guest_abi", "control_channel", "memory_mb"] {
                 let mut wrong = inputs.clone();
@@ -2573,7 +2558,6 @@ mod doctor_tests {
                 )
                 .unwrap();
             let json = serde_json::to_value(report).unwrap();
-            assert!(json["engine_qualification"].is_null());
             assert!(json.get("simulator_version").is_none());
             assert!(json.get("qualified").is_none());
         }

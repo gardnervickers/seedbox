@@ -128,7 +128,7 @@ pub struct Pit {
 }
 
 fn ticks_to_ns(ticks: u64) -> u64 {
-    ((ticks as u128 * 1_000_000_000 + PIT_HZ - 1) / PIT_HZ) as u64
+    (ticks as u128 * 1_000_000_000).div_ceil(PIT_HZ) as u64
 }
 
 impl Pit {
