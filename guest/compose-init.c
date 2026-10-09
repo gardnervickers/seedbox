@@ -25,13 +25,14 @@
 #endif
 #include "control.h"
 #include "barrier.h"
-#include "environment.h"
+#include "progress-launch.h"
 #include <sys/mount.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/timex.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -320,19 +321,30 @@ static void application_hostname(const char *hostname, const char *hosts) {
     /* Preparation already includes this service's address and name. */
     write_file("/etc/hosts", hosts, strlen(hosts), 0644);
 }
-static void application_sysctls(uint32_t max_map_count) {
-    char value[16];
-    int size = snprintf(value, sizeof(value), "%u\n", max_map_count);
-    int fd = open("/proc/sys/vm/max_map_count", O_WRONLY|O_CLOEXEC);
-    if (fd < 0) die("open vm.max_map_count");
+/* Docker's default nofile limit, which applications see unchanged. */
+#define APPLICATION_NOFILE 1048576
+/* DynamoRIO reserves this many descriptors at the top of the range for itself
+ * (its -steal_fds default) and reports the limit minus them to the
+ * application, so the real limit sits that much higher. */
+#define INSTRUMENTATION_FDS 96
+static void write_sysctl(const char *path, unsigned long value) {
+    char text[32];
+    int size = snprintf(text, sizeof(text), "%lu\n", value);
+    int fd = open(path, O_WRONLY|O_CLOEXEC);
+    if (fd < 0) die(path);
     /* proc sysctls are kernel interfaces, not config files: no chmod/chown. */
     ssize_t written;
-    do { written = write(fd, value, (size_t)size); } while (written < 0 && errno == EINTR);
-    if (written != size) { if (written >= 0) errno = EIO; die("write vm.max_map_count"); }
-    if (close(fd)) die("close vm.max_map_count");
+    do { written = write(fd, text, (size_t)size); } while (written < 0 && errno == EINTR);
+    if (written != size) { if (written >= 0) errno = EIO; die(path); }
+    if (close(fd)) die(path);
+}
+static void application_sysctls(uint32_t max_map_count) {
+    write_sysctl("/proc/sys/vm/max_map_count", max_map_count);
+    write_sysctl("/proc/sys/fs/nr_open", APPLICATION_NOFILE + INSTRUMENTATION_FDS);
 }
 static void application_limits(void) {
-    struct rlimit limit = {.rlim_cur = 1048576, .rlim_max = 1048576};
+    struct rlimit limit = {.rlim_cur = APPLICATION_NOFILE + INSTRUMENTATION_FDS,
+                           .rlim_max = APPLICATION_NOFILE + INSTRUMENTATION_FDS};
     if (setrlimit(RLIMIT_NOFILE, &limit)) die("application nofile limit");
 }
 static void interface_up(int fd, const char *name) {
@@ -486,7 +498,33 @@ static pid_t start(void) {
         application_limits();
         credentials();
         environ = environment;
-        execvp(arguments[0], arguments);
+        arguments = seedbox_script_arguments(arguments);
+        if (!arguments) die("resolve application interpreter");
+        size_t count = 0;
+        while (arguments[count]) ++count;
+        /* Translator arguments, the application's own, and execv's NULL. */
+        enum { PREFIX_MAX = 8 };
+        char **instrumented = calloc(PREFIX_MAX + count + 1, sizeof(*instrumented));
+        if (!instrumented) die("instrumentation arguments");
+        size_t prefix = 0;
+        instrumented[prefix++] = "/seedbox/progress/bin64/drrun";
+        instrumented[prefix++] = "-opt_speed";
+        instrumented[prefix++] = "-disable_traces";
+#if defined(__aarch64__)
+        /* Pack supported exclusive sequences to reduce instrumentation-induced
+         * retries. This does not hide every retry or make ARM deterministic;
+         * see docs/progress.md. DynamoRIO 11.3's CAS conversion also hangs in
+         * static musl's exit locks, so it remains disabled pending repair. */
+        instrumented[prefix++] = "-no_ldstex2cas";
+        instrumented[prefix++] = "-unsafe_build_ldstex";
+#endif
+        instrumented[prefix++] = "-c";
+        instrumented[prefix++] = "/seedbox/progress/libseedbox_progress.so";
+        instrumented[prefix++] = "--";
+        if (prefix > PREFIX_MAX) die("instrumentation prefix");
+        for (size_t i = 0; i < count; ++i) instrumented[i + prefix] = arguments[i];
+        instrumented[prefix + count] = NULL;
+        execv(instrumented[0], instrumented);
         die("exec application");
     }
     close(launch_error[1]);
@@ -555,6 +593,40 @@ static int stop(pid_t *child) {
     while (waitpid(-group, &status, 0) >= 0 || errno == EINTR) {}
     return errno == ECHILD ? 0 : -1;
 }
+/* Test builds replace the privileged clock adjustment. */
+#ifndef SEEDBOX_ADJTIMEX
+#define SEEDBOX_ADJTIMEX adjtimex
+#endif
+/* Step CLOCK_REALTIME by a signed offset in one kernel operation. The
+ * timekeeper moves only the wall-to-monotonic offset, so monotonic and boot
+ * time, the TSC and pending relative timers are unaffected; absolute
+ * CLOCK_REALTIME timers are re-evaluated by the kernel. */
+static int step_wall_clock(int64_t ns) {
+    struct timex adjustment = {.modes = ADJ_SETOFFSET | ADJ_NANO};
+    adjustment.time.tv_sec = ns / 1000000000;
+    adjustment.time.tv_usec = ns % 1000000000;
+    if (adjustment.time.tv_usec < 0) { adjustment.time.tv_usec += 1000000000; adjustment.time.tv_sec--; }
+    return SEEDBOX_ADJTIMEX(&adjustment) < 0 ? -1 : 0;
+}
+/* Run the system clock `ppb` parts per billion fast (slow if negative), like
+ * an oscillator error. The NTP tick length scales CLOCK_REALTIME, MONOTONIC
+ * and BOOTTIME together; MONOTONIC_RAW, the TSC and the simulated time base
+ * keep their rate. ADJ_TICK moves in steps of one microsecond per USER_HZ
+ * tick and ADJ_FREQUENCY covers the remainder, so the result is absolute:
+ * zero restores the nominal rate. */
+static int set_clock_rate(int64_t ppb) {
+    if (ppb > 1000000000 || ppb < -1000000000) { errno = EINVAL; return -1; }
+    long hz = sysconf(_SC_CLK_TCK);
+    if (hz <= 0 || 1000000 % hz) { errno = EINVAL; return -1; }
+    int64_t nominal = 1000000 / hz, per_tick = 1000000000 / nominal;
+    int64_t ticks = (ppb + (ppb < 0 ? -per_tick : per_tick) / 2) / per_tick;
+    int64_t rest = ppb - ticks * per_tick;
+    struct timex adjustment = {.modes = ADJ_TICK | ADJ_FREQUENCY};
+    adjustment.tick = nominal + ticks;
+    /* freq is parts per million with a 16-bit fraction. */
+    adjustment.freq = (rest * 65536 + (rest < 0 ? -500 : 500)) / 1000;
+    return SEEDBOX_ADJTIMEX(&adjustment) < 0 ? -1 : 0;
+}
 /* SIGSTOP the application's process group, as a debugger or GC pause would;
  * its kernel keeps ACKing and accepting connections. Confirm once the group
  * leader reports the stop, leaving any exit for supervise() to reap. */
@@ -582,10 +654,12 @@ static void control(char *command, pid_t *child) {
         send_all(control_client, end + 1, strlen(end + 1)); send_all(control_client, "\n", 1); waiting_relay = 0;
         return;
     }
-    char *action; uint32_t id;
-    if (control_parse(command, &action, &id)) { errno = EINVAL; die("invalid management command"); }
+    char *action; uint32_t id; int64_t step;
+    if (control_parse(command, &action, &id, &step)) { errno = EINVAL; die("invalid management command"); }
     int success = 0;
-    if (!strcmp(action, "stop")) success = stop(child) == 0;
+    if (!strcmp(action, "clock_step")) success = step_wall_clock(step) == 0;
+    else if (!strcmp(action, "clock_rate")) success = set_clock_rate(step) == 0;
+    else if (!strcmp(action, "stop")) success = stop(child) == 0;
     else if (!strcmp(action, "freeze")) success = freeze(child) == 0;
     else if (!strcmp(action, "thaw")) success = thaw(child) == 0;
     else if (*child < 0) { *child = start(); success = *child > 0; }
@@ -673,6 +747,11 @@ int main(void) {
     directories("/sys", 0755);
     if (mount("sysfs", "/sys", "sysfs", 0, NULL)) die("mount bootstrap sys");
     management = open_management("/sys/class/virtio-ports", "/dev");
+    plain_path("/rootfs/seedbox/progress");
+    directories("/rootfs/seedbox/progress", 0755);
+    if (mount("/seedbox/progress", "/rootfs/seedbox/progress", NULL, MS_BIND, NULL)
+        || mount(NULL, "/rootfs/seedbox/progress", NULL,
+                 MS_BIND|MS_REMOUNT|MS_RDONLY|MS_NOSUID|MS_NODEV, NULL)) die("mount progress runtime");
     /* Linux rejects CLONE_NEWUSER from a chroot. Cover the mount namespace's
      * root with the image first, including its already-mounted named volumes;
      * then make the process root refer to that same mount root. Bootstrap
@@ -683,7 +762,6 @@ int main(void) {
     directories("/dev", 0755); directories("/proc", 0755); directories("/sys", 0755); directories("/tmp", 01777);
     if (mount("proc", "/proc", "proc", 0, NULL) || mount("sysfs", "/sys", "sysfs", 0, NULL)) die("mount guest filesystems");
     application_devices();
-    if (seedbox_default_gomaxprocs(&environment, sysconf(_SC_NPROCESSORS_ONLN))) die("online CPU environment");
     application_hostname(hostname, hosts);
     application_sysctls(max_map_count);
     for (char **volume = volumes; *volume; volume++) directories(*volume, 0755);

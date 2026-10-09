@@ -127,6 +127,13 @@ jobs:
       - uses: cachix/install-nix-action@v31
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: guest-assets-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**', 'kernel/**', 'kernel-arm64/**', 'guest/**', 'tools/runtime/**') }}
+          restore-prefixes-first-match: |
+            guest-assets-${{ runner.os }}-${{ runner.arch }}-
+            pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-
+          gc-max-store-size: 5G
       - name: Build kernel and diagnostics
         if: needs.plan.outputs.kernel == 'true'
         env:

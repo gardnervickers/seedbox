@@ -34,6 +34,27 @@ shutil.copy(here / "seedbox.c", src / "arch/x86/kernel/seedbox.c")
 shutil.copy(here / "seedbox.h", src / "arch/x86/include/asm/seedbox.h")
 edit("arch/x86/kernel/Makefile", "obj-y\t\t\t+= ebda.o\n", "obj-y\t\t\t+= ebda.o\nobj-y\t\t\t+= seedbox.o\n")
 
+# Kernel relaxation loops make bounded PV progress even without a syscall or
+# clock read. Keep userspace vDSO and boot/decompressor PAUSE instructions raw.
+# Hook rep_nop as well as cpu_relax callers; inline assembly PAUSE elsewhere
+# remains outside this coverage and can stall without another progress source.
+edit(
+    "arch/x86/include/asm/vdso/processor.h",
+    "/* REP NOP (PAUSE) is a good thing to insert into busy-wait loops. */",
+    "#if !defined(BUILD_VDSO) && !defined(__DISABLE_EXPORTS) && !defined(_SETUP)\n"
+    "extern void seedbox_cpu_relax(void);\n"
+    "#endif\n\n"
+    "/* REP NOP (PAUSE) is a good thing to insert into busy-wait loops. */",
+)
+edit(
+    "arch/x86/include/asm/vdso/processor.h",
+    '\tasm volatile("rep; nop" ::: "memory");\n',
+    '\tasm volatile("rep; nop" ::: "memory");\n'
+    "#if !defined(BUILD_VDSO) && !defined(__DISABLE_EXPORTS) && !defined(_SETUP)\n"
+    "\tseedbox_cpu_relax();\n"
+    "#endif\n",
+)
+
 # Kernel TSC reads return VMM-published virtual time. The vDSO and the boot
 # decompressor keep the raw instruction (user mode traps via CR4.TSD).
 edit(
@@ -219,4 +240,52 @@ append(
     "\t}\n"
     "\tlocal_irq_restore(flags);\n}\n",
 )
+# Normalize only the YMM component after a successful task-state
+# save. An absent component has zero architectural contents, regardless of
+# stale bytes left by init optimization. A present all-zero component has the
+# same meaning. Keep every nonzero component and every other feature intact.
+edit(
+    "arch/x86/kernel/fpu/xstate.h",
+    "static inline void os_xsave(struct fpstate *fpstate)",
+    "void seedbox_canonicalize_ymm(struct fpstate *fpstate);\n\n"
+    "static inline void os_xsave(struct fpstate *fpstate)",
+)
+edit(
+    "arch/x86/kernel/fpu/xstate.h",
+    "\tXSTATE_XSAVE(&fpstate->regs.xsave, lmask, hmask, err);\n\n"
+    "\t/* We should never fault when copying to a kernel buffer: */\n"
+    "\tWARN_ON_FPU(err);\n",
+    "\tXSTATE_XSAVE(&fpstate->regs.xsave, lmask, hmask, err);\n\n"
+    "\t/* We should never fault when copying to a kernel buffer: */\n"
+    "\tWARN_ON_FPU(err);\n"
+    "\tif (!err)\n\t\tseedbox_canonicalize_ymm(fpstate);\n",
+)
+anchor = "\treturn (void *)xsave + xfeature_get_offset(xcomp_bv, xfeature_nr);\n}\n"
+edit(
+    "arch/x86/kernel/fpu/xstate.c",
+    anchor,
+    anchor + """
+/* Seedbox: XINUSE may describe zero YMM state as either present or absent.
+ * Canonicalize the saved representation, without changing register values.
+ * Use the raw address because an absent component's storage can be stale.
+ * This task-save hook does not cover signal frames or application XSAVE.
+ */
+void seedbox_canonicalize_ymm(struct fpstate *fpstate)
+{
+	struct xregs_state *xsave = &fpstate->regs.xsave;
+	void *ymm;
+
+	if (!(fpstate->xfeatures & XFEATURE_MASK_YMM))
+		return;
+	ymm = __raw_xsave_addr(xsave, XFEATURE_YMM);
+	if (!ymm)
+		return;
+	if (!(xsave->header.xfeatures & XFEATURE_MASK_YMM))
+		memset(ymm, 0, xstate_sizes[XFEATURE_YMM]);
+	else if (!memchr_inv(ymm, 0, xstate_sizes[XFEATURE_YMM]))
+		xsave->header.xfeatures &= ~XFEATURE_MASK_YMM;
+}
+""",
+)
+
 print("seedbox guest changes applied")

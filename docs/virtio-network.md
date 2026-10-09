@@ -78,7 +78,7 @@ live suppression flags, event thresholds and full-ring offsets, index wrap,
 notification-free polls, deferred-TX bounds and pickup diagnostics. The earlier
 valid-traffic differential established the bounded-validation checkpoint; the
 subsequent suppression changes intentionally add flag/event DMA journal entries.
-Machine-level KVM execution and undo remain Linux merge-train checks; portable
+Machine-level KVM execution remains a Linux merge-train check; portable
 device tests do not claim that host evidence.
 
 ## Shared model

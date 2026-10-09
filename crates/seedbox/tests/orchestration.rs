@@ -132,10 +132,9 @@ impl Fixture {
         };
         let backend = Backend {
             profile,
-            performance: BTreeMap::from([("SEEDBOX_UNDO".into(), "256".into())]),
+            performance: BTreeMap::from([("SEEDBOX_WATCHDOG_MS".into(), "20".into())]),
             extra_logs: BTreeMap::new(),
             report: ExecutionReport {
-                timebase: None,
                 reason: StopReason::Completed,
                 workload_exit: Some(WorkloadExit {
                     service: "workload".into(),
@@ -584,6 +583,26 @@ fn concurrent_runs_share_content_but_never_output_directories() {
 }
 
 #[test]
+fn unsynced_put_replaces_an_object_a_host_crash_truncated() {
+    // Unsynced objects can survive a host crash renamed into place but empty
+    // or short. The same bytes put again must not fail on that object forever.
+    let directory = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(directory.path());
+    let bytes = b"{\"identity\":1}";
+    let digest = store.put_unsynced(bytes).unwrap();
+    let object = directory.path().join("sha256").join(digest.hex());
+    std::fs::write(&object, b"").unwrap();
+    assert!(store.verify(&digest).is_err());
+    assert_eq!(store.put_unsynced(bytes).unwrap(), digest);
+    store.verify(&digest).unwrap();
+    std::fs::write(&object, b"").unwrap();
+    let file = directory.path().join("log");
+    std::fs::write(&file, bytes).unwrap();
+    assert_eq!(store.put_file_unsynced(&file).unwrap(), digest);
+    store.verify(&digest).unwrap();
+}
+
+#[test]
 fn content_store_never_silently_repairs_corruption_or_accepts_path_digests() {
     let directory = tempfile::tempdir().unwrap();
     let store = ContentStore::new(directory.path());
@@ -665,7 +684,7 @@ fn performance_changes_are_recorded_without_changing_identity_or_bypassing_compa
     fixture
         .backend
         .performance
-        .insert("SEEDBOX_UNDO".into(), "16".into());
+        .insert("SEEDBOX_WATCHDOG_MS".into(), "200".into());
     let replay = fixture.replay(&first);
     assert_eq!(replay.record.run_id, first.record.run_id);
     assert_ne!(
@@ -1300,15 +1319,8 @@ fn actual_vmm_admission_rejects_an_invalid_retained_profile_before_execution() {
     let engine = fixture.directory.path().join("retained-engine");
     fs::write(&engine, b"fixture engine").unwrap();
     let store = ContentStore::new(fixture.directory.path().join("store"));
-    let executor = seedbox::vmm::VmmExecutor::new(
-        &engine,
-        &store,
-        None,
-        512,
-        WitnessMode::Exits,
-        seedbox::counter::CounterProfile::Zen,
-    )
-    .unwrap();
+    let executor =
+        seedbox::vmm::VmmExecutor::new(&engine, &store, None, 512, WitnessMode::Exits).unwrap();
     for allow_engine_change in [false, true] {
         let rejected = fixture
             .orchestrator
@@ -2048,7 +2060,6 @@ fn worker_capacity_and_serial_default_refuse_before_preparation_and_bounds_are_l
         Some(4),
         512,
         WitnessMode::Exits,
-        seedbox::counter::CounterProfile::Zen,
     )
     .unwrap();
     assert!(executor
@@ -2176,16 +2187,13 @@ fn checkpoint_identity_replays_retained_semantics() {
 }
 
 #[test]
-fn timebase_changes_identity_while_default_counter_preserves_legacy_bytes() {
-    use seedbox::{
-        counter::CounterProfile,
-        vmm::{self, VmmExecutor},
-    };
+fn kvm_executor_profile_records_no_timebase_and_matches_legacy_identity_bytes() {
+    use seedbox::vmm::VmmExecutor;
     let mut f = Fixture::new();
     let store = ContentStore::new(f.directory.path().join("store"));
     let engine = f.directory.path().join("engine");
     fs::write(&engine, b"fixture engine").unwrap();
-    // The exact pre-timebase profile: no timebase parameter in its identity.
+    // The exact profile of a run with no mode parameters in its identity.
     let legacy = ExecutionProfile {
         backend: "seedbox-kvm".into(),
         engine: f.backend.profile.engine.clone(),
@@ -2199,160 +2207,36 @@ fn timebase_changes_identity_while_default_counter_preserves_legacy_bytes() {
     f.backend.profile = legacy.clone();
     f.preparer.inputs.profile = legacy;
     let before = f.run();
-    let executor = VmmExecutor::new(
-        &engine,
-        &store,
-        None,
-        1024,
-        WitnessMode::Exits,
-        CounterProfile::Zen,
-    )
-    .unwrap();
+    let executor = VmmExecutor::new(&engine, &store, None, 1024, WitnessMode::Exits).unwrap();
     assert_eq!(executor.profile(), before.record.identity.inputs.profile);
-    for executor in [
-        executor.clone(),
-        executor.clone().with_timebase(Timebase::Counter),
-    ] {
-        f.backend.profile = executor.profile();
-        f.preparer.inputs.profile = executor.profile();
-        let counter = f.run();
-        assert_eq!(counter.record.run_id, before.record.run_id);
-        assert_eq!(
-            serde_json::to_vec(&counter.record.identity).unwrap(),
-            serde_json::to_vec(&before.record.identity).unwrap()
-        );
-        assert!(!counter
-            .record
-            .identity
-            .inputs
-            .profile
-            .semantic_parameters
-            .contains_key("timebase"));
-        assert_eq!(
-            vmm::recorded_timebase(&counter.record.identity.inputs.profile).unwrap(),
-            Timebase::Counter
-        );
-    }
-    let pv = executor.with_timebase(Timebase::Pv);
-    f.backend.profile = pv.profile();
-    f.preparer.inputs.profile = pv.profile();
+    assert!(!executor
+        .profile()
+        .semantic_parameters
+        .contains_key("timebase"));
+    f.backend.profile = executor.profile();
+    f.preparer.inputs.profile = executor.profile();
     let run = f.run();
-    assert_eq!(run.record.identity.seed, before.record.identity.seed);
-    assert_ne!(run.record.run_id, before.record.run_id);
-    assert_ne!(
-        fs::read(run.directory.join("manifest.json")).unwrap(),
-        fs::read(before.directory.join("manifest.json")).unwrap()
-    );
+    assert_eq!(run.record.run_id, before.record.run_id);
     assert_eq!(
-        inspect(&run.directory)
-            .unwrap()
-            .identity
-            .inputs
-            .profile
-            .semantic_parameters["timebase"],
-        "pv"
+        serde_json::to_vec(&run.record.identity).unwrap(),
+        serde_json::to_vec(&before.record.identity).unwrap()
     );
-    // Old counter reports omit the field; adding it must not change replay comparison.
-    let counter = pv.clone().with_timebase(Timebase::Counter);
-    f.backend.profile = counter.profile();
-    f.backend.report.timebase = Some(Timebase::Counter);
     let replay = f
         .orchestrator
         .replay(&before.directory, &f.backend, &CancellationToken::default())
         .unwrap();
     assert_eq!(replay.record.replay.unwrap().status, ReplayStatus::Match);
     assert_eq!(replay.record.run_id, before.record.run_id);
-    // Switching back removes the parameter, restoring the original profile.
-    assert_eq!(
-        pv.with_timebase(Timebase::Counter).profile(),
-        before.record.identity.inputs.profile
-    );
-}
-
-#[test]
-fn replay_refuses_timebase_drift_and_unknown_values_before_execution() {
-    for (recorded, requested) in [
-        ("pv", "counter"),
-        ("counter", "pv"),
-        ("future", "counter"),
-        ("pv", "future"),
-    ] {
-        let mut f = Fixture::new();
-        f.backend.profile.backend = "seedbox-kvm".into();
-        if recorded != "counter" {
-            f.backend
-                .profile
-                .semantic_parameters
-                .insert("timebase".into(), recorded.into());
-        }
-        f.preparer.inputs.profile = f.backend.profile.clone();
-        let run = f.run();
-        f.backend.profile.semantic_parameters.remove("timebase");
-        if requested != "counter" {
-            f.backend
-                .profile
-                .semantic_parameters
-                .insert("timebase".into(), requested.into());
-        }
-        for allow_engine_change in [false, true] {
-            let error = f
-                .orchestrator
-                .replay_with_options(
-                    &run.directory,
-                    &f.backend,
-                    ReplayOptions {
-                        allow_engine_change,
-                        ..Default::default()
-                    },
-                )
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains("--timebase"), "{error}");
-            if recorded != "future" && requested != "future" {
-                assert!(
-                    error.contains(&format!("executor timebase {requested}")),
-                    "{error}"
-                );
-                assert!(!error.contains("replay --timebase"), "{error}");
-            }
-            assert!(
-                error.contains(if recorded == "future" || requested == "future" {
-                    "future"
-                } else {
-                    requested
-                }),
-                "{error}"
-            );
-            assert_eq!(f.backend.calls.load(Ordering::SeqCst), 1);
-            assert_eq!(
-                fs::read_dir(f.directory.path().join("runs"))
-                    .unwrap()
-                    .count(),
-                1
-            );
-        }
-    }
 }
 
 #[test]
 fn page_timer_is_recorded_only_when_enabled_and_replays_from_the_profile() {
-    use seedbox::{
-        counter::CounterProfile,
-        vmm::{recorded_page_timer, VmmExecutor},
-    };
+    use seedbox::vmm::{recorded_page_timer, VmmExecutor};
     let mut f = Fixture::new();
     let store = ContentStore::new(f.directory.path().join("store"));
     let engine = f.directory.path().join("engine");
     fs::write(&engine, b"fixture engine").unwrap();
-    let executor = VmmExecutor::new(
-        &engine,
-        &store,
-        None,
-        1024,
-        WitnessMode::Exits,
-        CounterProfile::Zen,
-    )
-    .unwrap();
+    let executor = VmmExecutor::new(&engine, &store, None, 1024, WitnessMode::Exits).unwrap();
     f.backend.profile = executor.profile();
     f.preparer.inputs.profile = executor.profile();
     let before = f.run();
@@ -2394,20 +2278,12 @@ fn page_timer_is_recorded_only_when_enabled_and_replays_from_the_profile() {
 
 #[test]
 fn deferred_tx_is_semantic_only_when_on_and_replay_cannot_switch_modes() {
-    use seedbox::{counter::CounterProfile, vmm::VmmExecutor};
+    use seedbox::vmm::VmmExecutor;
     let mut f = Fixture::new();
     let store = ContentStore::new(f.directory.path().join("store"));
     let engine = f.directory.path().join("engine");
     fs::write(&engine, b"fixture engine").unwrap();
-    let off = VmmExecutor::new(
-        &engine,
-        &store,
-        None,
-        1024,
-        WitnessMode::Exits,
-        CounterProfile::Zen,
-    )
-    .unwrap();
+    let off = VmmExecutor::new(&engine, &store, None, 1024, WitnessMode::Exits).unwrap();
     assert_eq!(off.profile(), off.clone().with_deferred_tx(false).profile());
     let on = off.clone().with_deferred_tx(true);
     assert_eq!(on.profile().semantic_parameters["deferred_tx"], "true");
@@ -2509,5 +2385,136 @@ fn only_the_backend_runtime_inputs_are_copied_into_an_attempt() {
     assert_eq!(
         fs::read_dir(run.directory.join("inputs")).unwrap().count(),
         2
+    );
+}
+
+#[test]
+fn materialize_linked_shares_one_copy_and_replaces_a_changed_one() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let directory = tempfile::tempdir().unwrap();
+    let store = ContentStore::new(directory.path().join("store"));
+    let digest = store.put(b"retained guest bytes").unwrap();
+    let shared = directory.path().join("shared");
+    let a = store
+        .materialize_linked(&digest, &shared, &directory.path().join("a"))
+        .unwrap();
+    let b = store
+        .materialize_linked(&digest, &shared, &directory.path().join("b"))
+        .unwrap();
+    let copy = shared.join(digest.hex());
+    assert_eq!(
+        fs::metadata(&a).unwrap().ino(),
+        fs::metadata(&b).unwrap().ino()
+    );
+    assert_eq!(
+        fs::metadata(&copy).unwrap().ino(),
+        fs::metadata(&a).unwrap().ino()
+    );
+    assert_eq!(
+        fs::metadata(&copy).unwrap().permissions().mode() & 0o777,
+        0o500
+    );
+    // A changed shared copy is replaced, never linked again.
+    fs::set_permissions(&copy, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(&copy, b"tampered guest bytes").unwrap();
+    let c = store
+        .materialize_linked(&digest, &shared, &directory.path().join("c"))
+        .unwrap();
+    assert_eq!(fs::read(&c).unwrap(), b"retained guest bytes");
+    assert_ne!(
+        fs::metadata(&c).unwrap().ino(),
+        fs::metadata(&a).unwrap().ino()
+    );
+    // A changed store object is hashed again and fails.
+    let object = directory.path().join("store/sha256").join(digest.hex());
+    fs::write(&object, b"retained guest byteX").unwrap();
+    assert!(store
+        .materialize_linked(&digest, &shared, &directory.path().join("d"))
+        .is_err());
+}
+
+#[test]
+fn exploration_attempts_link_one_shared_copy_of_each_input() {
+    use seedbox::exploration::ExploreOptions;
+    use std::os::unix::fs::MetadataExt;
+    let fixture = Fixture::new();
+    let batch = fixture
+        .orchestrator
+        .explore(
+            &fixture.simulation,
+            ExploreOptions {
+                count: 3,
+                ..Default::default()
+            },
+            &fixture.preparer,
+            &fixture.backend,
+        )
+        .unwrap();
+    assert_eq!(batch.outcome, Outcome::Pass);
+    let shared = batch.directory.join("inputs");
+    let shared_count = fs::read_dir(&shared).unwrap().count();
+    assert!(shared_count > 0);
+    for attempt in &batch.attempts {
+        let inputs = attempt.directory.as_ref().unwrap().join("inputs");
+        let mut count = 0;
+        for entry in fs::read_dir(inputs).unwrap() {
+            let entry = entry.unwrap();
+            let copy = shared.join(entry.file_name());
+            assert_eq!(
+                entry.metadata().unwrap().ino(),
+                fs::metadata(copy).unwrap().ino()
+            );
+            count += 1;
+        }
+        assert_eq!(count, shared_count);
+    }
+}
+
+#[test]
+fn put_file_of_a_retained_object_reads_it_without_rewriting_it() {
+    use std::os::unix::fs::MetadataExt;
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("engine");
+    fs::write(&source, b"retained engine bytes").unwrap();
+    let store = ContentStore::new(directory.path().join("store"));
+    let digest = store.put_file(&source).unwrap();
+    let object = directory.path().join("store/sha256").join(digest.hex());
+    let before = fs::metadata(&object).unwrap();
+    // Another process (a fresh store) verifies the existing object and keeps it.
+    let fresh = ContentStore::new(directory.path().join("store"));
+    assert_eq!(fresh.put_file(&source).unwrap(), digest);
+    let after = fs::metadata(&object).unwrap();
+    assert_eq!(
+        (before.ino(), before.ctime_nsec()),
+        (after.ino(), after.ctime_nsec())
+    );
+    // A corrupted existing object is never repaired or accepted.
+    fs::write(&object, b"retained engine byteX").unwrap();
+    assert!(fresh.put_file(&source).is_err());
+    assert!(ContentStore::new(directory.path().join("store"))
+        .put_file(&source)
+        .is_err());
+}
+
+#[test]
+fn a_runtime_input_is_hashed_again_after_it_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("engine");
+    fs::write(&source, b"first engine").unwrap();
+    let first = seedbox::admission::file_digest(&source).unwrap();
+    assert_eq!(seedbox::admission::file_digest(&source).unwrap(), first);
+    let store = ContentStore::new(directory.path().join("store"));
+    assert_eq!(store.put_file(&source).unwrap(), first);
+    // Rewritten in place, and replaced by a new file under the same name.
+    fs::write(&source, b"second engine bytes").unwrap();
+    let second = seedbox::admission::file_digest(&source).unwrap();
+    assert_eq!(second, ContentDigest::of(b"second engine bytes"));
+    assert_eq!(store.put_file(&source).unwrap(), second);
+    let replacement = directory.path().join("replacement");
+    fs::write(&replacement, b"third").unwrap();
+    fs::rename(&replacement, &source).unwrap();
+    assert_eq!(
+        seedbox::admission::file_digest(&source).unwrap(),
+        ContentDigest::of(b"third")
     );
 }

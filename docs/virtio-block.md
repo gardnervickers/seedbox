@@ -29,7 +29,7 @@ Readable input is captured before disk/RAM effects, preserving behavior when
 header, payload, status or used-ring spans alias. The common DMA path writes
 payload spans in order, then the status byte, used entry and used index. Every
 actual write is reported through the callback; ARM supplies a no-op and KVM
-records the exact sequence for undo.
+records the exact sequence in its dirty-range journal.
 
 A malformed later request does not roll back earlier completed requests. Their
 disk effects, queue cursors and KVM statistics remain; ARM has already asserted

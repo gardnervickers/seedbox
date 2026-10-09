@@ -13,7 +13,7 @@
 #define SEEDBOX_CAP_PAGE_TIMER	1ULL
 #define SEEDBOX_TIMER_DISARMED	(~0ULL)
 #define SEEDBOX_TSC_KHZ		1000000
-/* PV clock: virtual time one guest clock read costs (ns; 1 in the counter timebase). */
+/* Virtual time one guest clock read costs (ns). */
 #define SEEDBOX_PV_READ_NS	100
 
 #ifndef __ASSEMBLY__
@@ -34,11 +34,10 @@ struct seedbox_time_page {
 	u64 pic_imr;	/* 8259 masks, master | slave << 8 */
 	u64 net_isr;	/* virtio-mmio interrupt status: VMM sets, guest clears */
 	/*
-	 * PV clock timebase only (pv_clock set by the VMM before boot). Guest
-	 * progress is not counted: virtual time moves only at exits. The
-	 * guest exits when its clock would pass `bound` and at the syscall
-	 * that makes `syscalls` reach `syscall_target`. The kernel answers a
-	 * nonzero pv_clock by setting it to 2.
+	 * Guest progress is not counted: virtual time moves only at exits.
+	 * The guest exits when its clock would pass `bound` and at the
+	 * syscall that makes `syscalls` reach `syscall_target`. The VMM sets
+	 * pv_clock to 1 before boot; the kernel answers by setting it to 2.
 	 */
 	u64 pv_clock;
 	u64 bound;
@@ -47,17 +46,15 @@ struct seedbox_time_page {
 	u64 entropy[4];	/* 32 bytes the kernel mixes in before reseeding */
 	u64 timer_deadline;	/* guest-written absolute 1 GHz deadline, or DISARMED */
 	u64 capabilities;	/* VMM feature bits (ABI 4) */
-	u64 syscall_ns;	/* VMM plan: per-syscall cost, zero in counter mode */
+	u64 syscall_ns;	/* VMM plan: per-syscall cost */
 	u64 syscalls0;	/* VMM plan: syscall count used for syscall_target */
 	u64 plan_time;	/* VMM plan: t0 at the last deterministic publication */
 };
 
-/* Enabled at boot in the PV clock timebase; a no-op (no branch) otherwise. */
-DECLARE_STATIC_KEY_FALSE(seedbox_pv_clock);
-
 struct pt_regs;
 extern struct seedbox_time_page *seedbox_page;
 unsigned long long seedbox_rdtsc(void);
+void seedbox_cpu_relax(void);
 bool seedbox_emulate_user_tsc(struct pt_regs *regs);
 unsigned long seedbox_tsc_khz(void);
 void __init seedbox_time_init(void);
@@ -81,8 +78,7 @@ static __always_inline void seedbox_syscall_hook(void)
 		WRITE_ONCE(p->syscalls, n);
 		if (READ_ONCE(p->exit_req))
 			outl(0, SEEDBOX_PORT_YIELD);
-		else if (static_branch_unlikely(&seedbox_pv_clock) &&
-			 n >= READ_ONCE(p->syscall_target))
+		else if (n >= READ_ONCE(p->syscall_target))
 			outl(0, SEEDBOX_PORT_YIELD);
 	}
 }

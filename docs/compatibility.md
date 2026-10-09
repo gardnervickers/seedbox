@@ -29,8 +29,7 @@ checks detect corruption, not authenticity against someone rewriting the store.
 
 Inspection and transfer of an accepted format need no guest execution. Execution
 additionally requires verified input bytes and a host with the capabilities the
-recorded profile needs (for the `counter` timebase, an AMD Zen KVM host with
-guest perf counting). Replay runs the engine retained in the run directory;
+recorded profile needs (KVM or HVF access). Replay runs the engine retained in the run directory;
 records are never rewritten. Host admission checks capabilities only: #142 and
 #143 removed the engine, kernel, CPU and host-policy pins, so older records'
 extra admission parameters are kept as data and not enforced. A readable v2
@@ -70,8 +69,10 @@ named volumes before installing this layout.
 
 The hostname and `/etc/hostname` are the Compose service name, and `/etc/hosts`
 contains the service's assigned address alongside its peers. Before every exec,
-including process restart, the supervisor sets both `RLIMIT_NOFILE` limits to
-1048576 before dropping image credentials. `vm.max_map_count` defaults to
+including process restart, the supervisor sets both `RLIMIT_NOFILE` limits so
+that the application sees 1048576, before dropping image credentials. The real
+limit is 96 higher, with `fs.nr_open` raised to match: DynamoRIO reserves that
+many descriptors at the top of the range for itself and reports the rest. `vm.max_map_count` defaults to
 262144 and is recorded alongside the hostname in the retained `SBXLAUNCH3`
 launch recipe. Compose `hostname:`, `ulimits:`, and `sysctls:` overrides remain
 unsupported. `memlock` keeps its kernel default.
@@ -87,8 +88,8 @@ common syscalls remain separate work.
 Each VM exposes one CPU. Seastar applications such as ScyllaDB and Redpanda
 need `--smp 1`; DPDK must select only guest CPU 0. JVM GC, tokio worker counts
 and Go parallelism reflect that CPU count. Real SMP remains out of scope.
-The shared supervisor now applies a recorded preparation-time wall-clock epoch
-on both architectures. User namespaces are enabled in both application configs.
+The shared supervisor now applies a recorded wall-clock epoch, derived from the
+prepared images or set by `x-seedbox.wall_clock_epoch`, on both architectures. User namespaces are enabled in both application configs.
 CPU feature baselines and cross-host replay remain unproven.
 
 `seedbox run harness/acceptance/workloads/runtime.yaml` exercises the actual
@@ -98,8 +99,8 @@ seccomp allow filter, plus unprivileged UID/GID mapping and nested namespaces.
 Replay its retained run to check `MATCH`. This is a
 focused interface smoke test; application acceptance remains version-bound.
 
-The `runtime-postgres.yaml`, `runtime-nginx.yaml`, `runtime-python.yaml`,
-`runtime-jvm.yaml` and `runtime-node.yaml` projects in the same directory run
+The optional `postgres`, `nginx`, `python`, `jvm` and `node` projects in
+[`examples/runtimes`](../examples/runtimes/README.md) run
 initdb plus a SQL query, an HTTP request through nginx's ordinary stdout log,
 a Python process pool, JVM local hostname lookup and Node HTTP, respectively.
 Those projects set `x-seedbox.machine.memory_mb: 2048` to accommodate their image archives and

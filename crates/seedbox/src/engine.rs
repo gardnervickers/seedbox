@@ -71,7 +71,7 @@ pub fn internal_parameters() -> Result<BTreeMap<String, String>> {
         ("host_arch".into(), std::env::consts::ARCH.into()),
         ("guest_arch".into(), std::env::consts::ARCH.into()),
         ("engine_backend".into(), "kvm".into()),
-        ("engine_timebase".into(), "counter-pv-v1".into()),
+        ("engine_timebase".into(), "pv-v1".into()),
     ]))
 }
 

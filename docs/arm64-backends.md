@@ -141,7 +141,7 @@ rebuild handoff, full acceptance and the remaining cross-backend RAM difference.
 | --- | --- | --- |
 | `backend::Backend` | Create VM, retain/map/unmap RAM, create one vCPU, read/write architectural core and system registers, run to an owned `Stop`, complete that operation, set an SPI line, query dirty pages. All calls and destruction happen on the creating thread. | `Hvf` links Hypervisor.framework; `Kvm` uses kvm-ioctls. Host handles, file descriptors, exit structures and register IDs stay inside these modules. |
 | `machine::Machine<B>` | Own RAM, shared page, PL011, clockevent, PV clock and witness. Load Image/initrd/FDT; reconcile guest reads, perform device operations, judge timer expiry, inject while stopped, complete the exit, publish before re-entry. | Same loop for both backends. Backend selection exists only in CLI/tests. |
-| `timebase::Timebase` | `prepare` publishes time and bound; `read` reconciles guest progress; `judge` determines expiry/idle advance. The trait uses numbers and `Publication`, not a hypervisor or machine type. | `PvClock` only. A future counted timebase needs a progress-sampling/stop-planning extension; it must not silently charge host elapsed time through this interface. |
+| `timebase::Timebase` | `prepare` publishes time and bound; `read` reconciles guest progress; `judge` determines expiry/idle advance. The trait uses numbers and `Publication`, not a hypervisor or machine type. | `PvClock` only; it must not silently charge host elapsed time through this interface. |
 | `devices::MmioDevice` | Width-checked register reads/writes produce values and explicit effects. Device effects never call a host API. | PL011, shared time-page register view, and clockevent registers. Machine owns IRQ line transitions. |
 | `witness` | Canonical, versioned, little-endian semantic-exit encoding plus console and all guest RAM, including the shared page. | Host API raw structures, wall time, jitter and the two defined no-op debug completions are excluded. No RAM masks or comparison-time filtering. |
 
@@ -165,7 +165,7 @@ instruction or recording a witness event. The backend does not infer a watchdog
 cause from cancellation, and queued cancellation may return without guest entry.
 This plumbing introduces no asynchronous watchdog or ARM cycle-proof enablement.
 Run the signed native queued-cancellation check with
-`nix develop --command bash harness/check.sh --require hvf`. It copies
+`nix develop --command bash harness/check.sh mac-hvf`. It copies
 the test binary before signing, bounds each native test executable, and removes
 the signed copy afterward. Portable machine tests cover repeated interruptions
 with a pending timer and the last available semantic exit-budget slot.
@@ -182,7 +182,7 @@ The shared machine accepts zero writes to OSDLR_EL1 (`S2_0_C1_C3_4`,
 the unlocked debug state. When exposed, they are **backend-internal completions**,
 not scheduling points: complete the instruction once without reconciling or
 publishing PV time, judging timers, injecting IRQs, or recording an exit. The
-raw-stop budget and timer/counter leak checks still apply. This rule is shared
+raw-stop budget and timer leak checks still apply. This rule is shared
 by both backends and is limited to these exact zero writes; other exposed debug
 operations (including reads, nonzero writes and other encodings) remain errors.
 KVM handles debug register accesses internally, so this is not a claim that the
@@ -272,7 +272,7 @@ UART accesses and firmware calls have no extra time charge. PL011 transmission
 is synchronous; its empty TX FIFO asserts a level IRQ when enabled, and guest
 mask writes deassert it. Receive stays empty.
 
-This milestone omits syscall charging, counted stops, and fixed-point
+This milestone omits syscall charging and fixed-point
 spin detection. A guest computing forever without exits can still hang; use an
 external operator timeout. A host timeout must fail, never advance virtual time.
 The 5,000,000 raw-stop limit catches exit-producing runaway guests, including
@@ -293,10 +293,10 @@ From the project Nix shell (`nix develop`, never `path:.`):
 
 ```sh
 bash harness/check.sh portable
-bash harness/check.sh --require hvf
+bash harness/check.sh mac-hvf
 ```
 
-The default command runs every available capability. It builds the ARM test
+`mac-hvf` builds the ARM test
 executables with `hvf-tests`, then signs disposable copies and invokes all of
 them directly. It never needs an individual test name or `--ignored`.
 
@@ -305,7 +305,7 @@ them directly. It never needs an individual test name or `--ignored`.
 ```sh
 export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-hres/Image"
 export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-hres/init.cpio"
-bash harness/check.sh --require hvf --require guests
+bash harness/check.sh mac-guests
 ```
 
 The runner creates and prints a fresh report directory and enables `guest-tests`.
@@ -340,7 +340,7 @@ cargo test-arm64 --test review_yield_masked --test review_deferred_bound
 export SEEDBOX_ARM64_KERNEL="$PWD/artifacts/arm64-hres/Image"
 export SEEDBOX_ARM64_INITRD="$PWD/artifacts/arm64-hres/init.cpio"
 export SEEDBOX_ARM64_REPORT_DIR="$(mktemp -d "$PWD/artifacts/arm64-hres/kvm-acceptance.XXXXXX")"
-bash harness/check.sh --require kvm --require guests
+bash harness/check.sh linux-guests
 
 for run in 1-a 1-b 2-a 2-b; do
   crates/seedbox-arm64/target/release/seedbox-arm64 run \

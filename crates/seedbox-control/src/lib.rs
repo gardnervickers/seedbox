@@ -1,5 +1,10 @@
 //! Version-one language-neutral guest control schema. No transport or scheduler.
 pub const PROCESS_EFFECT_TIMEOUT_NS: u64 = 5_000_000_000;
+/// Largest wall-clock skew, fixed or seeded, in either direction: one year.
+pub const MAX_CLOCK_OFFSET_NS: u64 = 365 * 86_400 * 1_000_000_000;
+/// Largest clock rate error, fixed or seeded, in either direction: 10% (in
+/// parts per billion). Linux slews at most about 10% through `adjtimex`.
+pub const MAX_CLOCK_RATE_PPB: u64 = 100_000_000;
 
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, num::NonZeroU32};
@@ -150,6 +155,22 @@ pub enum Operation {
         #[serde(default, skip_serializing_if = "NetworkFaults::is_off")]
         network_faults: NetworkFaults,
     },
+    /// Step one machine's CLOCK_REALTIME by a fixed or seeded signed offset.
+    ClockSkew {
+        target: Target,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_ns: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_offset_ns: Option<u64>,
+    },
+    /// Make one machine's clock run fast or slow by a fixed or seeded rate.
+    ClockDrift {
+        target: Target,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rate_ppb: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_rate_ppb: Option<u64>,
+    },
     /// Charge the machine's simulated CPU work `factor_permille / 1000` times
     /// its seeded cost until healed.
     Throttle {
@@ -280,6 +301,32 @@ pub enum Action {
     Heal {
         handle: String,
     },
+    /// Step the machine's wall clock (CLOCK_REALTIME) by `offset_ns`, or by an
+    /// offset drawn uniformly from [-max_offset_ns, max_offset_ns] on the
+    /// machine's `clock/<machine>` stream. Monotonic time is untouched; heal
+    /// steps the clock back by the same offset.
+    ClockSkew {
+        handle: String,
+        machine: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_ns: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_offset_ns: Option<u64>,
+    },
+    /// Run the machine's system clock `rate_ppb` parts per billion fast (or
+    /// slow if negative), or at a rate drawn uniformly from
+    /// [-max_rate_ppb, max_rate_ppb] on the machine's `clock/<machine>`
+    /// stream. Realtime and monotonic time drift together, as with a real
+    /// oscillator error; the raw monotonic clock and the virtual TSC keep the
+    /// simulated rate. Heal restores the nominal rate.
+    ClockDrift {
+        handle: String,
+        machine: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rate_ppb: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_rate_ppb: Option<u64>,
+    },
     /// Scale the machine's seeded CPU cost until the handle is healed.
     Throttle {
         handle: String,
@@ -314,6 +361,8 @@ impl Action {
             Self::Partition { .. } => "partition",
             Self::Shape { .. } => "shape",
             Self::Heal { .. } => "heal",
+            Self::ClockSkew { .. } => "clock_skew",
+            Self::ClockDrift { .. } => "clock_drift",
             Self::Throttle { .. } => "throttle",
             Self::Pause { .. } => "pause",
             Self::Resume { .. } => "resume",
@@ -331,6 +380,8 @@ impl Action {
             | Self::Resume { machine }
             | Self::Crash { machine }
             | Self::Reboot { machine }
+            | Self::ClockSkew { machine, .. }
+            | Self::ClockDrift { machine, .. }
             | Self::Throttle { machine, .. } => Some(machine),
             _ => None,
         }
@@ -346,6 +397,35 @@ impl Action {
         )
     }
 }
+/// Exactly one of a fixed nonzero offset or a seeded positive bound, each
+/// within [`MAX_CLOCK_OFFSET_NS`].
+pub fn validate_clock_skew(
+    offset_ns: Option<i64>,
+    max_offset_ns: Option<u64>,
+) -> Result<(), String> {
+    match (offset_ns, max_offset_ns) {
+        (Some(o), None) if o != 0 && o.unsigned_abs() <= MAX_CLOCK_OFFSET_NS => Ok(()),
+        (None, Some(m)) if m != 0 && m <= MAX_CLOCK_OFFSET_NS => Ok(()),
+        _ => Err(format!(
+            "clock_skew needs exactly one of a nonzero offset_ns or a positive max_offset_ns, each at most {MAX_CLOCK_OFFSET_NS}"
+        )),
+    }
+}
+/// Exactly one of a fixed nonzero rate or a seeded positive bound, each
+/// within [`MAX_CLOCK_RATE_PPB`].
+pub fn validate_clock_drift(
+    rate_ppb: Option<i64>,
+    max_rate_ppb: Option<u64>,
+) -> Result<(), String> {
+    match (rate_ppb, max_rate_ppb) {
+        (Some(r), None) if r != 0 && r.unsigned_abs() <= MAX_CLOCK_RATE_PPB => Ok(()),
+        (None, Some(m)) if m != 0 && m <= MAX_CLOCK_RATE_PPB => Ok(()),
+        _ => Err(format!(
+            "clock_drift needs exactly one of a nonzero rate_ppb or a positive max_rate_ppb, each at most {MAX_CLOCK_RATE_PPB}"
+        )),
+    }
+}
+
 /// Throttle factors, in thousandths: from unchanged to a thousand times slower.
 pub const THROTTLE_PERMILLE: std::ops::RangeInclusive<u64> = 1_000..=1_000_000;
 

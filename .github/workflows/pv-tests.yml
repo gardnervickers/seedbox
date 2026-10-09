@@ -1,0 +1,105 @@
+name: PV tests
+
+on:
+  pull_request:
+    paths-ignore: ['**/*.md']
+  push:
+    branches: [main]
+    paths-ignore: ['**/*.md']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pv-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Reclaim unused hosted SDK space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift
+          df -h /
+      - name: Verify usable KVM before building
+        run: |
+          sudo chmod a+rw /dev/kvm
+          python3 - <<'PYTHON'
+          import fcntl, os
+          with open('/dev/kvm', 'rb') as kvm:
+              assert fcntl.ioctl(kvm, 0xAE00, 0) == 12, 'unsupported KVM API'
+              vm = fcntl.ioctl(kvm, 0xAE01, 0)
+              os.close(vm)
+          print('KVM VM creation succeeded')
+          PYTHON
+          docker info
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: nix-community/cache-nix-action/restore@v7
+        id: nix-cache
+        with:
+          primary-key: pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**', 'kernel/**', 'kernel-arm64/**', 'guest/**', 'tools/runtime/**', 'tools/build-assets.sh') }}
+          restore-prefixes-first-match: |
+            pv-nix-v2-${{ runner.os }}-${{ runner.arch }}-
+            pv-nix-${{ runner.os }}-${{ runner.arch }}-
+      - name: Prepare and root the Nix development environment
+        run: nix develop --profile "$RUNNER_TEMP/pv-dev" --command true
+      - uses: Swatinem/rust-cache@v2
+        id: cargo-cache
+        with:
+          key: pv-${{ hashFiles('flake.lock', 'flake.nix') }}
+          cmd-format: nix develop --command {0}
+          workspaces: |
+            . -> target
+            crates/seedbox-vmm -> target
+            crates/seedbox-arm64 -> target
+          cache-bin: false
+      - name: Build and root guest assets from the checkout
+        run: |
+          nix build .#guestKernel .#runtimeArchive --out-link "$RUNNER_TEMP/pv-assets"
+          bash tools/build-assets.sh
+      # Save expensive dependencies before tests, so a test failure does not
+      # force the next run to rebuild the kernel or download the toolchain.
+      - uses: nix-community/cache-nix-action/save@v7
+        with:
+          primary-key: ${{ steps.nix-cache.outputs.primary-key }}
+          gc-max-store-size: 5G
+      - name: Record cache results
+        env:
+          NIX_HIT: ${{ steps.nix-cache.outputs.hit }}
+          CARGO_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
+        run: |
+          {
+            echo "Nix cache restored: $NIX_HIT"
+            echo "Cargo exact cache hit: $CARGO_HIT"
+            du -sh /nix/store
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Portable prerequisites and PV application acceptance
+        run: nix develop --command bash harness/check.sh linux-apps --cpu 1
+      - name: Bound diagnostic artifact storage
+        if: always()
+        # Privileged KVM tests leave root-owned manifests and logs.
+        run: sudo python3 tools/pv-ci/artifacts.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: pv-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/pv-artifacts/
+          retention-days: 7
+      - name: Exclude test state from the Cargo cache
+        if: always()
+        # Diagnostics have been uploaded. Rust-cache archives the target tree,
+        # so remove root-owned VM state and per-run reports before its post step.
+        run: sudo rm -rf -- target/check-reports target/pv-artifacts

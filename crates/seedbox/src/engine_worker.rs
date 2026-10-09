@@ -26,6 +26,7 @@ fn arm_world(executable: OsString, args: Vec<OsString>) -> ExitCode {
         let mut host_control = None;
         let mut full_state = false;
         let mut console_limit = 1024 * 1024 * 1024;
+        let mut machine_workers = 1;
         let mut args = args.iter();
         while let Some(arg) = args.next() {
             let text = arg.to_str().ok_or("worker argument is not UTF-8")?;
@@ -64,6 +65,14 @@ fn arm_world(executable: OsString, args: Vec<OsString>) -> ExitCode {
                         .parse::<usize>()
                         .map_err(|e| format!("console limit: {e}"))?;
                 }
+                "--machine-workers" => {
+                    machine_workers = args
+                        .next()
+                        .and_then(|n| n.to_str())
+                        .and_then(|n| n.parse::<usize>().ok())
+                        .filter(|n| (1..=64).contains(n))
+                        .ok_or("--machine-workers: use 1..64")?;
+                }
                 _ => return Err(format!("unsupported ARM world argument {text}")),
             }
         }
@@ -75,6 +84,7 @@ fn arm_world(executable: OsString, args: Vec<OsString>) -> ExitCode {
             full_state,
             host_control,
             console_limit,
+            machine_workers,
         };
         let report = seedbox_arm64::application::world::run(&options)?;
         println!(
@@ -126,25 +136,19 @@ fn world_worker(executable: OsString, args: Vec<OsString>) -> ExitCode {
                     .map_err(|_| "worker argument is not UTF-8".to_owned())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let undo = std::env::var("SEEDBOX_UNDO").ok();
-        let margin = std::env::var("SEEDBOX_MARGIN").ok();
-        let performance =
-            seedbox_vmm::PerformanceOptions::parse(undo.as_deref(), margin.as_deref())?;
-        let mut options = seedbox_vmm::WorkerOptions::from_args(&args, performance)?;
-        if options.pv_clock {
-            if let Ok(value) = std::env::var("SEEDBOX_PV_WATCHDOG_MS") {
-                options.performance.pv_watchdog_ms = value
-                    .parse()
-                    .map_err(|e| format!("SEEDBOX_PV_WATCHDOG_MS: {e}"))?;
-            }
+        let mut performance = seedbox_vmm::PerformanceOptions::default();
+        if let Ok(value) = std::env::var("SEEDBOX_WATCHDOG_MS") {
+            performance.watchdog_ms = value
+                .parse()
+                .map_err(|e| format!("SEEDBOX_WATCHDOG_MS: {e}"))?;
         }
+        let mut options = seedbox_vmm::WorkerOptions::from_args(&args, performance)?;
         if std::env::var_os("SEEDBOX_TRACE_CONSOLE").is_some() {
             options.console_trace = Some(|trace| {
                 eprintln!(
-                    "[host {:.3}s guest {:.6}s br {}] {}",
+                    "[host {:.3}s guest {:.6}s] {}",
                     trace.host_seconds,
                     trace.guest_seconds,
-                    trace.branches,
                     String::from_utf8_lossy(trace.line)
                 );
             });

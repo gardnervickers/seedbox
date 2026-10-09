@@ -101,6 +101,8 @@ Common fields are `version: 1`, `id`, and `op`. Targets are typed objects:
 | `shape` | `from`, `to`: nonempty disjoint typed-target arrays; `latency_ns`, `jitter_ns`, `loss_ppm`: integers; optional `bandwidth_bps`, `queue_bound_ns`, `network_faults` below | `{"handle":"opaque value"}` |
 | `connections` | `from`, `to`: distinct typed targets; `after`: optional unsigned incarnation cursor (default 0) | `connections`: up to 32 directional records; `next_after`: last returned incarnation (or input cursor) |
 | `drop_connection` | `connection`: one exact discovery record | `{"handle":"opaque value"}` after arming selected loss |
+| `clock_skew` | `target`: a typed target; exactly one of `offset_ns` (nonzero signed integer) or `max_offset_ns` (positive integer), each at most one year | `{"handle":"opaque value","offset_ns":N}` after the guest steps its wall clock |
+| `clock_drift` | `target`: a typed target; exactly one of `rate_ppb` (nonzero signed integer) or `max_rate_ppb` (positive integer), each at most 100000000 (10%) | `{"handle":"opaque value","rate_ppb":N}` after the guest sets its clock rate |
 | `throttle` | `target`: a typed target; `factor_permille`: integer in `[1000, 1000000]` | `{"handle":"opaque value"}` |
 | `heal` | `handle`: a previously returned handle | `{}` for a plain link or partition; `queue_counts` for bandwidth; `network_fault_counts` for impairments; `{"matched": N, "dropped": N}` for a connection handle |
 | `inspect` | None | `services`, `machines`, `active_handles`, `network_counters`; `triggers` only after an arm |
@@ -189,6 +191,38 @@ delay includes proposed departures of tail-dropped frames. The shape and heal
 fault rows retain the same evidence, including explicit zeros for an unused
 shape. The Python API returns the result object for bandwidth shapes and the
 existing effect timestamp for unlimited shapes.
+
+### Clock skew
+
+`clock_skew` steps one machine's `CLOCK_REALTIME` by a signed offset. The
+supervisor applies it with one `adjtimex(ADJ_SETOFFSET)`, so monotonic and boot
+time, the TSC and relative timers are unchanged; absolute realtime timers are
+re-evaluated by the guest kernel. With `max_offset_ns` the offset is drawn
+uniformly from `[-max, max]` on the machine's `clock/<machine>` stream at the
+admission boundary, and only then; a fixed `offset_ns` draws nothing. The effect
+time is the guest's acknowledgement, like `stop`. `heal` steps the clock back by
+the same offset and also waits for the guest. A crash ends the skew (the new
+incarnation boots from the recorded wall clock), so a later heal applies at
+admission without contacting the guest. Targets must be running: a paused or
+down machine is an `invalid_state` admission error, and healing a skew that is
+not yet acknowledged is too. Python: `world.clock_skew(target, offset=None,
+max_offset=None)` returns a `ClockSkew` with `handle` and `offset_ns`.
+
+### Clock drift
+
+`clock_drift` makes one machine's system clock run `rate_ppb` parts per billion
+fast (slow if negative), like an oscillator error. The supervisor sets the rate
+with one absolute `adjtimex(ADJ_TICK|ADJ_FREQUENCY)`: whole 100 ppm tick steps
+plus a frequency remainder. `CLOCK_REALTIME`, `CLOCK_MONOTONIC` and
+`CLOCK_BOOTTIME` drift together, so timers and sleeps on the machine drift too;
+`CLOCK_MONOTONIC_RAW`, the TSC and simulated time keep the nominal rate. With
+`max_rate_ppb` the rate is drawn uniformly from `[-max, max]` on the same
+`clock/<machine>` stream as a seeded skew, at the admission boundary and only
+then; a fixed `rate_ppb` draws nothing. A machine has one drift at a time: a
+second one before the first is healed is `invalid_state`. `heal` restores the
+nominal rate and waits for the guest, and a crash ends the drift like a skew.
+Python: `world.clock_drift(target, ppb=None, max_ppb=None)` returns a
+`ClockDrift` with `handle` and `rate_ppb`.
 
 ### Dynamic network impairments
 
@@ -305,12 +339,12 @@ a reused tuple; it remains healable with its accumulated evidence.
 `throttle` makes a machine slow but alive: until its handle is healed, the
 machine's simulated CPU work costs `factor_permille / 1000` times its seeded
 speed. It takes effect at admission and shares the fault handle counter;
-`heal` restores the seeded speed and returns `{}`. Only the x86 `pv` timebase
-supports it: there each syscall is charged the machine's `syscall_ns`, already
+`heal` restores the seeded speed and returns `{}`. Only x86 supports it:
+there each syscall is charged the machine's `syscall_ns`, already
 drawn per machine from `pv-speed/<machine>` within 10% of 1000 ns, and the
 throttle multiplies that drawn value (rounding up). The draw itself is
-unchanged and the throttle adds no RNG draws. The counter timebase and ARM
-return `unsupported` without a fault.
+unchanged and the throttle adds no RNG draws. ARM returns `unsupported`
+without a fault.
 
 A machine has at most one active throttle; a second returns `invalid_state`.
 A throttle survives machine pause, and a crashed machine's next incarnation
@@ -320,8 +354,7 @@ charging at the machine's next legal plan rather than mid-arm. The factor and
 handle are fault plan entries in the retained evidence, so replay restores them.
 The Python API is `slow = world.throttle("server", 4)` (factors from 1 to 1000
 in steps of 0.001) and `world.heal(slow)`.
-`harness/acceptance/workloads/slow-machine.yaml` (run with `--timebase pv`)
-checks that a fixed amount of syscall work takes about four times as long while
+`harness/acceptance/workloads/slow-machine.yaml` checks that a fixed amount of syscall work takes about four times as long while
 throttled and returns to its earlier duration after the heal.
 
 See [connection classification](../docs/runtime.md#connection-selectors) for TCP
@@ -382,15 +415,15 @@ The caller receives the response after normal guest scheduling resumes, so its
 next instruction may execute later than `R`. A requested sleep includes the two
 RPC delivery intervals; it is a lower bound on elapsed simulated time. Admission
 and replies never derive their timestamp from host wall time or a performance
-margin. Calls whose timing extends beyond the run limit remain pending and are
+setting. Calls whose timing extends beyond the run limit remain pending and are
 recorded as `cut_off` at termination. Process commands wait for the target
 supervisor's readiness signal. If readiness arrives after admission, dispatch is
 scheduled one control-latency interval after that signal; the original deadline
 still applies.
 
 Request order, handles, effects, replies and packet counters are retained in the
-execution evidence. Performance settings such as undo margin must not change this
-history. The controller's Python source, its binding, and its image are retained
+execution evidence. Performance settings such as the watchdog interval must not
+change this history. The controller's Python source, its binding, and its image are retained
 with the run so replay executes the same inputs.
 
 ## Committed console trigger extension (development engine)
@@ -414,6 +447,6 @@ effects. `inspect.triggers` and terminal `vmm.json.triggers` contain the same
 canonical matcher/effect records, with cutoff added at termination. The world
 witness includes those records only when triggers have been used.
 
-The full [time/commitment contract and AMD controls](../docs/triggers.md) define
+The full [time/commitment contract and host controls](../docs/triggers.md) define
 tie order, snapshots, discarded candidates and charged-I/O boundaries. Plain
 console bytes do not establish an accepted PUT or any application commit.

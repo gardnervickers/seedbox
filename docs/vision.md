@@ -19,7 +19,7 @@ exploration, portable bundles, snapshots, reverse debugging and `verify`
 remain future work tracked in issue #25.
 
 The architecture stays as it is: real Linux machines on KVM, one host thread per
-world, virtual time from counted guest progress, and seeds that choose every
+world, virtual time from charged guest progress, and seeds that choose every
 scheduling, timing and fault decision.
 
 ## Division of labour
@@ -34,7 +34,12 @@ interpret them.
 ## Requirements
 
 1. **Start from what exists.** A Compose file and the repository's own build are
-   enough. Every runtime input has a default.
+   enough. Every runtime input has a default. Seedbox owns deterministic
+   execution without application-specific flags, environment overrides, source
+   changes or recompilation. Existing images keep their normal entrypoints and
+   arguments, including applications with threads, shared libraries and JIT code.
+   Runtime-specific predictability flags may help diagnose a bug, but cannot be
+   required for correctness or substitute for testing an unmodified application.
 2. **Dependencies are ordinary services.** MinIO, a mock you supply, or anything
    else runs inside the world under the seed. Seedbox doesn't ship or verify
    them. A mock can expose hook points over the transport from

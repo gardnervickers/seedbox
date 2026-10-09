@@ -277,6 +277,46 @@ impl Control {
                     connection: connection.clone(),
                 })
             }
+            Operation::ClockSkew {
+                target,
+                offset_ns,
+                max_offset_ns,
+            } => {
+                seedbox_control::validate_clock_skew(*offset_ns, *max_offset_ns)?;
+                let machine = self.target(target)?;
+                self.handles = self
+                    .handles
+                    .checked_add(1)
+                    .ok_or("fault handles exhausted")?;
+                let handle = format!("p{}", self.handles);
+                result = json!({"handle":handle});
+                Some(Action::ClockSkew {
+                    handle,
+                    machine,
+                    offset_ns: *offset_ns,
+                    max_offset_ns: *max_offset_ns,
+                })
+            }
+            Operation::ClockDrift {
+                target,
+                rate_ppb,
+                max_rate_ppb,
+            } => {
+                seedbox_control::validate_clock_drift(*rate_ppb, *max_rate_ppb)?;
+                let machine = self.target(target)?;
+                self.handles = self
+                    .handles
+                    .checked_add(1)
+                    .ok_or("fault handles exhausted")?;
+                let handle = format!("p{}", self.handles);
+                result = json!({"handle":handle});
+                Some(Action::ClockDrift {
+                    handle,
+                    machine,
+                    rate_ppb: *rate_ppb,
+                    max_rate_ppb: *max_rate_ppb,
+                })
+            }
             Operation::Throttle {
                 target,
                 factor_permille,
@@ -486,7 +526,10 @@ impl Control {
             if !p.admitted_done
                 && p.plan.as_ref().is_some_and(|plan| {
                     (plan.action.is_process()
-                        || matches!(plan.action, Action::Pause { .. } | Action::Resume { .. }))
+                        || matches!(
+                            plan.action,
+                            Action::Pause { .. } | Action::Resume { .. } | Action::ClockSkew { .. }
+                        ))
                         && plan
                             .action
                             .machine()
@@ -496,6 +539,9 @@ impl Control {
                 let message = match p.plan.as_ref().map(|plan| &plan.action) {
                     Some(Action::Pause { .. } | Action::Resume { .. }) => {
                         "target VM has exited; crash and reboot it instead"
+                    }
+                    Some(Action::ClockSkew { .. } | Action::ClockDrift { .. }) => {
+                        "target VM has exited"
                     }
                     Some(Action::PauseProcess { .. } | Action::ResumeProcess { .. }) => {
                         "target VM has exited; there is no process to pause or resume"
@@ -664,6 +710,16 @@ impl Control {
                         _ => None,
                     };
                     if let Some(at) = at {
+                        if matches!(p.operation, Some(Operation::ClockSkew { .. })) {
+                            if let Some(offset) = faults.log[id as usize - 1].get("offset_ns") {
+                                p.result["offset_ns"] = offset.clone();
+                            }
+                        }
+                        if matches!(p.operation, Some(Operation::ClockDrift { .. })) {
+                            if let Some(rate) = faults.log[id as usize - 1].get("rate_ppb") {
+                                p.result["rate_ppb"] = rate.clone();
+                            }
+                        }
                         if matches!(p.operation, Some(Operation::Heal { .. })) {
                             if let Some(counts) = faults.log[id as usize - 1].get("queue_counts") {
                                 p.result["queue_counts"] = counts.clone();
@@ -731,9 +787,18 @@ impl Control {
             p.error_code = Some("result_too_large");
         }
         if let Some(error) = p.error {
-            reply.as_object_mut().unwrap().remove("result");
+            let handle = reply
+                .as_object_mut()
+                .unwrap()
+                .remove("result")
+                .and_then(|r| r.get("handle").cloned());
             reply["ok"] = json!(false);
             reply["error"] = json!({"code":if p.fatal {"effect_failed"} else {p.error_code.unwrap_or("invalid_request")},"message":error});
+            // An unavailable effect still allocated its handle; keep it so the
+            // planned action can be reconstructed from the reply.
+            if let (Some(handle), Some("target_unavailable")) = (handle, p.error_code) {
+                reply["error"]["handle"] = handle;
+            }
             if p.fatal {
                 self.error = Some(error);
             }

@@ -15,19 +15,23 @@ pub struct OciPreparer {
     pub kernel: PathBuf,
     pub engine: PathBuf,
     pub init: PathBuf,
+    /// Architecture-specific automatic application instrumentation bundle.
+    pub progress: PathBuf,
     /// Static mke2fs, needed only when a service mounts a named volume: the
     /// guest formats its blank retained disk with it on first boot.
     pub mke2fs: Option<PathBuf>,
     pub profile: ExecutionProfile,
     pub docker: bollard::Docker,
-    /// Explicit guest Unix time; None samples host time after image preparation.
-    pub wall_clock_epoch: Option<u32>,
 }
 
 pub use crate::preparation_command::PreparationContext;
 
 impl PreparationBackend for OciPreparer {
     fn validate_runtime_inputs(&self) -> Result<()> {
+        crate::guest::validate_progress(
+            &self.progress,
+            crate::guest::Architecture::from_profile(&self.profile)?,
+        )?;
         if self.profile.backend == "seedbox-kvm" {
             crate::admission::validate_profile(&self.profile)?;
             if crate::admission::file_digest(&self.engine)? != self.profile.engine {
@@ -48,6 +52,7 @@ impl PreparationBackend for OciPreparer {
                 docker: self.docker.clone(),
                 cancellation: Default::default(),
                 progress: |_| {},
+                export_cache: Some(self.profile.engine.clone()),
             },
         )
     }
@@ -67,6 +72,7 @@ impl PreparationBackend for OciPreparer {
                 docker: self.docker.clone(),
                 cancellation: context.cancellation.clone(),
                 progress: |_| {},
+                export_cache: Some(self.profile.engine.clone()),
             },
         )
     }
@@ -125,6 +131,7 @@ impl OciPreparer {
         }
         let volumes = simulation.services.values().any(|s| !s.volumes.is_empty());
         let mut auxiliary = BTreeMap::from([("guest-init".into(), store.put_file(&self.init)?)]);
+        auxiliary.insert("guest-progress".into(), store.put_file(&self.progress)?);
         if volumes {
             let mke2fs = self.mke2fs.as_ref().ok_or_else(|| {
                 Error::Setup(
@@ -164,6 +171,11 @@ impl OciPreparer {
         let temporary = tempfile::tempdir()?;
         let init = store.materialize(&auxiliary["guest-init"], &temporary.path().join("init"))?;
         architecture.validate_elf(&init)?;
+        let progress = store.materialize(
+            &auxiliary["guest-progress"],
+            &temporary.path().join("progress.tar"),
+        )?;
+        crate::guest::validate_progress(&progress, architecture)?;
         let mke2fs = auxiliary
             .get("guest-mke2fs")
             .map(|digest| store.materialize(digest, &temporary.path().join("mke2fs")))
@@ -207,17 +219,27 @@ impl OciPreparer {
             }
             launches.push((name, service, mounts, imported));
         }
-        // Sample once after image builds: certificates minted during preparation
-        // must already be valid when applications start. Replay retains this value.
-        let wall_clock_epoch = match self.wall_clock_epoch {
-            Some(epoch) => epoch.max(crate::guest::MIN_WALL_CLOCK_EPOCH),
-            None => u32::try_from(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|error| Error::Setup(format!("prepare wall clock: {error}")))?
-                    .as_secs(),
-            )
-            .map_err(|_| Error::Setup("prepare wall clock exceeds supported Unix epoch".into()))?,
+        // The guest clock starts at the Compose file's x-seedbox.wall_clock_epoch,
+        // or else at the latest build time recorded in any prepared image, so
+        // certificates minted during a build are already valid and the same
+        // images always start at the same time. Linux cannot set a time earlier
+        // than guest uptime, so the derived value is at least one day.
+        let wall_clock_epoch = match simulation.wall_clock_epoch {
+            Some(epoch) => epoch,
+            None => {
+                let mut latest = i64::from(crate::guest::MIN_WALL_CLOCK_EPOCH);
+                for (_, _, _, imported) in &launches {
+                    let config = store.read(&imported.image.config)?;
+                    if let Some(created) = crate::oci::image_created_epoch(&config)? {
+                        latest = latest.max(created);
+                    }
+                }
+                u32::try_from(latest).map_err(|_| {
+                    Error::Integrity(
+                        "image created time exceeds the supported wall-clock epoch; set x-seedbox.wall_clock_epoch".into(),
+                    )
+                })?
+            }
         };
         for (name, service, mounts, imported) in launches {
             let recipe = launch_recipe(
@@ -234,10 +256,17 @@ impl OciPreparer {
             let mke2fs = mke2fs.as_deref().filter(|_| !service.volumes.is_empty());
             match &imported.rootfs {
                 crate::oci::RootFilesystem::Directory(root) => {
-                    build_initramfs_with(root, &init, mke2fs, &recipe, &archive)?
+                    build_initramfs_with(root, &init, mke2fs, Some(&progress), &recipe, &archive)?
                 }
                 crate::oci::RootFilesystem::Archive(root) => {
-                    crate::guest::build_initramfs_from_tar(root, &init, mke2fs, &recipe, &archive)?
+                    crate::guest::build_initramfs_from_tar(
+                        root,
+                        &init,
+                        mke2fs,
+                        Some(&progress),
+                        &recipe,
+                        &archive,
+                    )?
                 }
             }
             let memory_mb = self

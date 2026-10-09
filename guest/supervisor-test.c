@@ -1,21 +1,47 @@
 #define _GNU_SOURCE
 #include <stdint.h>
 #include <sys/resource.h>
+#include <unistd.h>
+static int application_execv(const char *path, char *const argv[]);
+#define execv application_execv
 static int application_setrlimit(int resource, const struct rlimit *limit);
 #define setrlimit application_setrlimit
 static int readiness_ioperm(unsigned long first, unsigned long count, int enabled);
 static void readiness_outl(uint32_t id, unsigned short port);
+#include <sys/timex.h>
+static int test_adjtimex(struct timex *adjustment);
+#define SEEDBOX_ADJTIMEX test_adjtimex
 #define SEEDBOX_READY_IOPERM readiness_ioperm
 #define SEEDBOX_READY_OUTL readiness_outl
 #define SEEDBOX_TEST_READY_DELAY_NS 10000000ULL
 #define SEEDBOX_SUPERVISOR_TEST
 #include "compose-init.c"
 #undef setrlimit
+#undef execv
 #include <assert.h>
 #include <sys/socket.h>
+/* Exercise supervisor process control on the host without installing the guest
+ * translator at /seedbox. Check its launch contract, then run the fixture. */
+static int application_execv(const char *path, char *const argv[]) {
+    assert(!strcmp(path, "/seedbox/progress/bin64/drrun"));
+    assert(!strcmp(argv[0], path));
+    assert(!strcmp(argv[1], "-opt_speed"));
+    assert(!strcmp(argv[2], "-disable_traces"));
+    size_t index = 3;
+#if defined(__aarch64__)
+    assert(!strcmp(argv[index++], "-no_ldstex2cas"));
+    assert(!strcmp(argv[index++], "-unsafe_build_ldstex"));
+#endif
+    assert(!strcmp(argv[index++], "-c"));
+    assert(!strcmp(argv[index++], "/seedbox/progress/libseedbox_progress.so"));
+    assert(!strcmp(argv[index++], "--"));
+    assert(argv[index]);
+    return execv(argv[index], argv + index);
+}
 static int application_setrlimit(int resource, const struct rlimit *limit) {
     assert(resource == RLIMIT_NOFILE && launch_error_fd >= 0);
-    assert(limit->rlim_cur == 1048576 && limit->rlim_max == 1048576);
+    assert(limit->rlim_cur == APPLICATION_NOFILE + INSTRUMENTATION_FDS);
+    assert(limit->rlim_max == APPLICATION_NOFILE + INSTRUMENTATION_FDS);
     /* An unprivileged host test cannot raise its inherited hard ceiling.
      * Check the requested default, then exercise inheritance within it. */
     struct rlimit allowed; assert(!getrlimit(resource, &allowed));
@@ -46,6 +72,14 @@ static void readiness_outl(uint32_t id, unsigned short port) {
     assert(id == SEEDBOX_READY_ID && port == SEEDBOX_EFFECT_PORT);
     readiness_writes = 1;
 }
+static struct timex last_adjustment;
+static int adjustments;
+static int test_adjtimex(struct timex *adjustment) {
+    last_adjustment = *adjustment; adjustments++;
+    /* Model the kernel's refusal of a wall clock before boot. */
+    if (adjustment->time.tv_sec < -1000000) { errno = EINVAL; return -1; }
+    return TIME_OK;
+}
 static void test_cmdline(const char *path, const char *text) {
     int fd = open(path, O_WRONLY|O_CREAT|O_TRUNC, 0600); assert(fd >= 0);
     assert(write(fd, text, strlen(text)) == (ssize_t)strlen(text));
@@ -65,8 +99,9 @@ int main(int argc, char **argv) {
     if (argc > 1) {
         /* Every exec, including a restart, inherits the runtime limit. */
         struct rlimit limit; assert(!getrlimit(RLIMIT_NOFILE, &limit));
-        assert(limit.rlim_cur == limit.rlim_max && limit.rlim_max <= 1048576);
+        assert(limit.rlim_cur == limit.rlim_max && limit.rlim_max <= APPLICATION_NOFILE + INSTRUMENTATION_FDS);
     }
+    if (argc > 1 && !strcmp(argv[1], "exit-now")) _exit(1);
     if (argc > 1 && !strcmp(argv[1], "exit-later")) {
         /* Launched by the supervisor: SIGCHLD must not stay blocked. */
         sigset_t mask; assert(!sigprocmask(SIG_SETMASK, NULL, &mask));
@@ -147,6 +182,43 @@ int main(int argc, char **argv) {
     char failed[]="start 4"; control(failed,&child); assert(child<0);
     n=read(sockets[1],buffer,sizeof(buffer)-1); assert(n>0); buffer[n]=0; assert(strstr(buffer,"SEEDBOX_FAILURE id=4"));
     assert(waitpid(-1,&status,WNOHANG)==-1 && errno==ECHILD);
+    /* A clock step is one ADJ_SETOFFSET with a normalized nanosecond field,
+     * acknowledged like a process effect; it leaves the process alone. */
+    struct { const char *command; long long sec, nsec; } clock_steps[] = {
+        {"clock_step 5 1500000001", 1, 500000001}, {"clock_step 6 -1", -1, 999999999},
+        {"clock_step 7 -2000000000", -2, 0}, {"clock_step 8 0", 0, 0}};
+    for (unsigned i = 0; i < sizeof(clock_steps)/sizeof(*clock_steps); i++) {
+        char command[64]; strcpy(command, clock_steps[i].command);
+        control(command, &child); assert(child < 0 && adjustments == (int)i + 1);
+        assert(last_adjustment.modes == (ADJ_SETOFFSET | ADJ_NANO));
+        assert(last_adjustment.time.tv_sec == clock_steps[i].sec && last_adjustment.time.tv_usec == clock_steps[i].nsec);
+        n=read(sockets[1],buffer,sizeof(buffer)-1); assert(n>0); buffer[n]=0;
+        char expected[64]; snprintf(expected, sizeof(expected), "SEEDBOX_EFFECT id=%u action=clock_step", 5 + i);
+        assert(strstr(buffer, expected));
+    }
+    char rejected[] = "clock_step 9 -9000000000000000"; control(rejected, &child);
+    n=read(sockets[1],buffer,sizeof(buffer)-1); assert(n>0); buffer[n]=0; assert(strstr(buffer,"SEEDBOX_FAILURE id=9 action=clock_step"));
+    /* A clock rate is one absolute ADJ_TICK|ADJ_FREQUENCY: whole 100 ppm tick
+     * steps (USER_HZ 100) plus a remainder of at most 50 ppm in scaled ppm. */
+    struct { const char *command; long tick, freq; } clock_rates[] = {
+        {"clock_rate 10 100000000", 11000, 0}, {"clock_rate 11 -100000000", 9000, 0},
+        {"clock_rate 12 150000", 10002, -50 * 65536}, {"clock_rate 13 -149999", 9999, -49999L * 65536 / 1000},
+        {"clock_rate 14 1", 10000, 66}, {"clock_rate 15 0", 10000, 0}};
+    assert(sysconf(_SC_CLK_TCK) == 100);
+    for (unsigned i = 0; i < sizeof(clock_rates)/sizeof(*clock_rates); i++) {
+        char command[64]; strcpy(command, clock_rates[i].command);
+        int before = adjustments;
+        control(command, &child); assert(child < 0 && adjustments == before + 1);
+        assert(last_adjustment.modes == (ADJ_TICK | ADJ_FREQUENCY));
+        assert(last_adjustment.tick == clock_rates[i].tick && last_adjustment.freq == clock_rates[i].freq);
+        n=read(sockets[1],buffer,sizeof(buffer)-1); assert(n>0); buffer[n]=0;
+        char expected[64]; snprintf(expected, sizeof(expected), "SEEDBOX_EFFECT id=%u action=clock_rate", 10 + i);
+        assert(strstr(buffer, expected));
+    }
+    /* Past the kernel's reach the guest refuses without calling adjtimex. */
+    int before = adjustments;
+    char too_fast[] = "clock_rate 16 1000000001"; control(too_fast, &child); assert(adjustments == before);
+    n=read(sockets[1],buffer,sizeof(buffer)-1); assert(n>0); buffer[n]=0; assert(strstr(buffer,"SEEDBOX_FAILURE id=16 action=clock_rate"));
     /* The public RPC socket is created only from an exact authoritative boot
      * token; image environment entries cannot enable it on other guests. */
     char directory[] = "/tmp/seedbox-relay-XXXXXX"; assert(mkdtemp(directory));
@@ -227,7 +299,7 @@ int main(int argc, char **argv) {
         if (!check) {
             alarm(10); close(management); management = -1;
             watch_children();
-            char *exit_later[] = {argv[0], "exit-later", NULL}, *exit_now[] = {"false", NULL};
+            char *exit_later[] = {argv[0], "exit-later", NULL}, *exit_now[] = {argv[0], "exit-now", NULL};
             arguments = later ? exit_later : exit_now;
             child = start(); assert(child > 0);
             supervise(&child);
