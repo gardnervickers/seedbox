@@ -102,6 +102,7 @@ mod engine {
             docker: engine(),
             cancellation: CancellationToken::default(),
             progress: |line| eprintln!("{line}"),
+            export_cache: None,
         }
         .import(
             service,
