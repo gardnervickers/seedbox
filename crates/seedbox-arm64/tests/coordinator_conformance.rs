@@ -89,6 +89,25 @@ with open({:?}, 'wb', buffering=0) as requests:
             .parse()
             .unwrap()
     }
+    fn wait_for_operations(&self, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let bytes = fs::read(self.path("requests")).unwrap();
+            let mut wire = bytes.as_slice();
+            let mut count = 0;
+            while let Ok(Some(_)) = worker::read_message::<worker::Request>(&mut wire) {
+                count += 1;
+            }
+            if count == expected {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "worker recorded {count} of {expected} operations"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -1101,6 +1120,9 @@ fn actual_arm_proxy_obeys_core_strict_reply_boundary_despite_fatal_control() {
     );
     assert_eq!(world.control.log[0]["delivered_at_ns"], 100);
     assert!(!world.control.has_undelivered_reply());
+    // Replies are preloaded; wait for the fixture to consume the queued requests
+    // before dropping the transport and terminating the recording process.
+    fixture.wait_for_operations(5);
     // Reaping also freezes the raw request transcript for an exact IPC-order assertion.
     let pid = fixture.pid();
     drop(world);

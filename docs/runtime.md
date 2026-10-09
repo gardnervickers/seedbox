@@ -460,7 +460,7 @@ outcome, identity, witness and all full-state digests:
 ```sh
 sudo -E env SEEDBOX_HOST_PAUSE_RUN=/path/to/full-state-run \
   SEEDBOX_HOST_PAUSE_STATE=/path/to/source-state \
-  cargo test -p seedbox --locked --test host_pause -- --ignored
+  cargo test -p seedbox --locked --features retained-run-tests --test host_pause
 ```
 
 An optional `SEEDBOX_CPU` selects the usual leased core. This test starts real guests
@@ -762,8 +762,8 @@ observations are outside the witness; raw `output/vmm.json` retains them for the
 final machine and each crashed incarnation.
 
 Focused host tests (after `cargo build-vmm` and `cargo test-vmm`) are
-`cargo test-vmm event_idx_polls_on_entry_slice_boundary_and_halt_without_kicks -- --ignored`
-and `cargo test-vmm deferred_tx_completes_a_pv_spin_without_halt_kick_or_interrupts -- --ignored`.
+`cargo test-vmm --features kvm-tests event_idx_polls_on_entry_slice_boundary_and_halt_without_kicks`
+and `cargo test-vmm --features kvm-tests deferred_tx_completes_a_pv_spin_without_halt_kick_or_interrupts`.
 The latter compares witnesses/state across two watchdog periods. The 60 s kill
 world, PV timebase, seed 4000 needs separate option-off and option-on runs and
 same-mode replays on the AMD host. Compare doorbells, host time and the pickup
@@ -781,10 +781,18 @@ retained records, serde field names, status lines and `--json` output are unchan
 
 ## Reproduce acceptance
 
-From the repository root in `nix develop`:
+From the repository root in `nix develop`, run all available native suites:
 
 ```sh
-bash crates/seedbox/tests/accept-oci.sh
+bash harness/check.sh
+bash harness/check.sh --require applications
+bash harness/check.sh --require oci
+```
+
+See [the test matrix](testing.md) for discovery, capability features and inputs.
+The older focused runtime diagnostics remain available:
+
+```sh
 bash crates/seedbox/tests/accept-runtime.sh KERNEL CPU FRESH_OUTPUT_DIRECTORY
 bash crates/seedbox/tests/accept-runtime.sh KERNEL CPU ANOTHER_FRESH_DIRECTORY lifecycle
 bash crates/seedbox/tests/accept-runtime.sh KERNEL CPU FAULT_OUTPUT_DIRECTORY faults

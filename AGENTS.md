@@ -140,29 +140,26 @@ the canonical crate; do not restore sibling source inclusion for these policies.
 Engine PRs that need host evidence go through a merge train
 ([docs/merge-train.md](docs/merge-train.md)).
 
-Portable checks must pass at the PR or merge-train head before spending AMD
-host time. `bash harness/mac-check.sh REV` is the fast pre-check for a Mac or
-any other non-KVM machine; it also works on the host. Run inside the project's
-Nix dev shell. Omit `REV` to check the current checkout, including local changes.
-The steps are fmt, clippy and `harness/acceptance.sh portable`, which includes
-workspace tests and both Python unittest suites (plus VMM tests on Linux).
-The first stdout line is `revision: FULL_SHA`, followed by the host check's
-timed step/phase summary format. Workspace builds use a persistent cache under
-`$XDG_CACHE_HOME`, or `~/Library/Caches` on macOS and `~/.cache` elsewhere;
-override it with `SEEDBOX_PRECHECK_TARGET` or `CARGO_TARGET_DIR`. A revision uses
-a temporary detached worktree under `$TMPDIR`, deleted on a pass; a failure keeps it and prints
-its path. Any failed step makes the gate exit nonzero; all steps still run.
-See [contributor checks](README.md#contributor-checks).
-
-Run these before committing:
+Run the available platform suites inside `nix develop` before committing:
 
 ```sh
-cargo fmt -p seedbox --check
-cargo clippy -p seedbox --all-targets --locked -- -D warnings
-cargo test --workspace --locked
-cargo test-vmm --features kvm-tests  # Linux; the feature needs /dev/kvm
-bash harness/acceptance.sh portable
+bash harness/check.sh
 ```
+
+`bash harness/check.sh portable` compiles every feature-gated test with
+`--no-run` and executes only portable tests. It opens no KVM/HVF device and
+needs no root or registry access. Portable checks must pass before hardware
+execution. Use repeatable `--require kvm`, `--require counter`, `--require hvf`,
+`--require guests`, `--require applications` or `--require retained-run` when
+coverage must be present. `--list` shows selection without builds or execution.
+
+See [docs/testing.md](docs/testing.md) for features, discovery and fixture inputs.
+Keep VMM engine tests compiled by default; conditional `ignore` attributes enable
+hardware execution through features. Other feature-gated tests must be built by
+the portable `--no-run` checks. Add no per-test registration lists. The runner
+builds as the current user, signs disposable HVF test copies, and uses scoped
+CPU/SMT/MSR cleanup for counted tests. Check other revisions in a Git worktree;
+do not stamp Git revisions or checkout cleanliness in the runner.
 
 The `seedbox-vmm` crate has existing clippy findings. Don't fix them in an
 unrelated change (see above).
@@ -309,4 +306,4 @@ images or executes guests. Compatibility readiness is not replay qualification.
 - `crates/seedbox-vmm` builds only on Linux x86-64, so a Mac pre-check covers
   none of it. A VMM change needs `cargo build-vmm` and
   `cargo test-vmm --features kvm-tests` on a Linux KVM host. Without the
-  feature, the KVM tests are skipped, not failed.
+  feature, KVM tests compile but remain ignored.

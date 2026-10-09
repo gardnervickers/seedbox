@@ -35,6 +35,7 @@ class BatchTests(unittest.TestCase):
             with batch.cpu_locks({14,30}, directory):
                 pass
 
+    @unittest.skipUnless(sys.platform == "linux", "Linux batch admission")
     def test_invalid_timeout_is_rejected_before_mutation(self):
         for timeout in (0, -1, float("nan"), float("inf")):
             with self.assertRaises(ValueError):

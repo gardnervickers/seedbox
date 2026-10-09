@@ -30,7 +30,7 @@
               docker-client podman
             ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               elfutils elfutils.dev openssl.dev pkgsStatic.stdenv.cc iproute2 go
-              skopeo umoci
+              skopeo umoci util-linux
             ];
           } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux linuxEnvironment);
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
