@@ -11,13 +11,13 @@ use seedbox_engine_core::world::{MachineState, Reseed, SliceRequest, State, Stop
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    cell::{Cell, RefCell},
+    cell::Cell,
     collections::BTreeMap,
     fs::File,
     io::Write,
     ops::{Deref, DerefMut},
     path::PathBuf,
-    rc::Rc,
+    sync::{Arc, Mutex},
 };
 
 // Retention limits never limit framing, device processing or witness input.
@@ -149,9 +149,21 @@ impl Captures {
         Ok(())
     }
 }
+/// One machine's slice horizons and causal events, in its own order. Each
+/// machine hashes only what it did, so the world witness does not depend on
+/// which thread ran it or when; the world combines them in machine order.
+#[derive(Clone)]
 pub(crate) struct Transcript {
     pub horizons: Sha256,
     pub events: Sha256,
+}
+impl Transcript {
+    fn new() -> Self {
+        Self {
+            horizons: Sha256::new_with_prefix(b"seedbox-arm64-machine-horizons-v1\0"),
+            events: Sha256::new_with_prefix(b"seedbox-arm64-machine-events-v1\0"),
+        }
+    }
 }
 
 /// Process and output resources; contains no world scheduling policy.
@@ -159,10 +171,10 @@ pub struct Factory {
     executable: PathBuf,
     output: PathBuf,
     names: BTreeMap<String, usize>,
-    captures: Vec<Rc<RefCell<Captures>>>,
+    /// Shared by a machine and its crash successor; only the live one writes.
+    captures: Vec<Arc<Mutex<Captures>>>,
     generation: Cell<u64>,
     full_state: bool,
-    pub(crate) transcript: Rc<RefCell<Transcript>>,
 }
 impl Factory {
     pub fn new(
@@ -192,7 +204,7 @@ impl Factory {
                 .map_err(|e| format!("console output: {e}"))?;
             let management = File::create(output.join(format!("{name}.mgmt")))
                 .map_err(|e| format!("management output: {e}"))?;
-            captures.push(Rc::new(RefCell::new(Captures {
+            captures.push(Arc::new(Mutex::new(Captures {
                 console: Capture::new(
                     console,
                     IndexFile::open(output.join(format!("{name}.console.chunks"))),
@@ -215,10 +227,6 @@ impl Factory {
             captures,
             generation: Cell::new(0),
             full_state,
-            transcript: Rc::new(RefCell::new(Transcript {
-                horizons: Sha256::new_with_prefix(b"seedbox-arm64-world-horizons-v1\0"),
-                events: Sha256::new_with_prefix(b"seedbox-arm64-world-events-v1\0"),
-            })),
         })
     }
 }
@@ -233,8 +241,8 @@ pub struct ArmMachine {
     world: MachineState,
     worker: OwnedWorker,
     physical: StoppedObservation,
-    captures: Rc<RefCell<Captures>>,
-    transcript: Rc<RefCell<Transcript>>,
+    captures: Arc<Mutex<Captures>>,
+    transcript: Transcript,
     index: usize,
     output: PathBuf,
     full_state: bool,
@@ -279,6 +287,9 @@ impl ArmMachine {
             Answer::Evidence(evidence) => Ok(evidence),
             _ => self.reject("invalid machine evidence response".into()),
         }
+    }
+    pub(crate) fn transcript(&self) -> &Transcript {
+        &self.transcript
     }
     pub(crate) fn exit(&self) -> Option<(u8, bool)> {
         if self.down {
@@ -368,7 +379,7 @@ impl WorldMachine for ArmMachine {
             worker,
             physical,
             captures: factory.captures[index].clone(),
-            transcript: factory.transcript.clone(),
+            transcript: Transcript::new(),
             index,
             output: factory.output.clone(),
             full_state: factory.full_state,
@@ -482,6 +493,8 @@ impl WorldMachine for ArmMachine {
                 .cloned()
                 .ok_or("missing stopped ARM installation observation")?;
             self.world.succeed(&old.world, at)?;
+            // The successor continues its predecessor's transcript.
+            self.transcript = old.transcript.clone();
             let disk_loss = transfer.disk_digest.as_ref().map(|_| lost_sectors);
             self.crashed = old.crashed.clone();
             self.crashed.push(json!({"incarnation":old.incarnation,"crashed_at_ns":at,"time_ns":evidence.time_ns,"witness":evidence.witness,"retired_state_digest":evidence.state_digest,"disk_lost_sectors":lost_sectors,"surviving_disk":transfer.disk_digest}));
@@ -615,7 +628,7 @@ impl WorldMachine for ArmMachine {
             let mut effects = Vec::new();
             let mut sent = Vec::new();
             let mut management = Vec::new();
-            let mut event_hash = self.transcript.borrow().events.clone();
+            let mut event_hash = self.transcript.events.clone();
             for event in &events {
                 let bytes = serde_json::to_vec(event).map_err(|e| e.to_string())?;
                 event_hash.update((self.index as u64).to_le_bytes());
@@ -686,21 +699,23 @@ impl WorldMachine for ArmMachine {
                 Ok(value) => value,
                 Err(error) => return self.reject(error),
             };
-        let capture_result = self.captures.borrow_mut().append(
-            &log_chunks,
-            &console,
-            &management,
-            self.worker.identity().incarnation,
-        );
+        let capture_result = self
+            .captures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .append(
+                &log_chunks,
+                &console,
+                &management,
+                self.worker.identity().incarnation,
+            );
         if let Err(error) = capture_result {
             return self.reject(error);
         }
-        let mut transcript = self.transcript.borrow_mut();
-        transcript
+        self.transcript
             .horizons
-            .update((self.index as u64).to_le_bytes());
-        transcript.horizons.update(request.hard_limit.to_le_bytes());
-        transcript.events = event_hash;
+            .update(request.hard_limit.to_le_bytes());
+        self.transcript.events = event_hash;
         self.framer = framer;
         self.world.time = time_ns;
         self.physical = self
@@ -724,6 +739,7 @@ impl WorldMachine for ArmMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{cell::RefCell, rc::Rc};
     fn records(bytes: &[u8]) -> Vec<[u64; 5]> {
         assert_eq!(&bytes[..8], log_capture::MAGIC);
         assert_eq!((bytes.len() - 8) % 40, 0);

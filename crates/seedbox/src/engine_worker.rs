@@ -26,6 +26,7 @@ fn arm_world(executable: OsString, args: Vec<OsString>) -> ExitCode {
         let mut host_control = None;
         let mut full_state = false;
         let mut console_limit = 1024 * 1024 * 1024;
+        let mut machine_workers = 1;
         let mut args = args.iter();
         while let Some(arg) = args.next() {
             let text = arg.to_str().ok_or("worker argument is not UTF-8")?;
@@ -64,6 +65,14 @@ fn arm_world(executable: OsString, args: Vec<OsString>) -> ExitCode {
                         .parse::<usize>()
                         .map_err(|e| format!("console limit: {e}"))?;
                 }
+                "--machine-workers" => {
+                    machine_workers = args
+                        .next()
+                        .and_then(|n| n.to_str())
+                        .and_then(|n| n.parse::<usize>().ok())
+                        .filter(|n| (1..=64).contains(n))
+                        .ok_or("--machine-workers: use 1..64")?;
+                }
                 _ => return Err(format!("unsupported ARM world argument {text}")),
             }
         }
@@ -75,6 +84,7 @@ fn arm_world(executable: OsString, args: Vec<OsString>) -> ExitCode {
             full_state,
             host_control,
             console_limit,
+            machine_workers,
         };
         let report = seedbox_arm64::application::world::run(&options)?;
         println!(

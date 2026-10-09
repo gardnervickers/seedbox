@@ -86,8 +86,10 @@ x86 runs every world through the windowed scheduler (`window/`,
 `world_windowed.rs`, [docs/windowed-scheduler.md](docs/windowed-scheduler.md)):
 the coordinator applies control, trigger and fault boundaries, lifecycle,
 forks and checkpoints between rounds, on the calling thread, from committed
-state in a fixed order. The legacy loop (`world::simulate`) stays only for
-arm64; add no x86 caller. Worker count is a performance setting.
+state in a fixed order. arm64 runs its world through the same windowed
+scheduler (`application/world.rs`), serially or on a pool; the legacy loop
+(`world::simulate`) has no backend caller and stays only for its tests. Worker
+count is a performance setting.
 A failed crash transaction poisons the retained World and terminates owned worker
 transports; retries must fail before any worker activity.
 
