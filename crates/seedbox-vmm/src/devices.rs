@@ -419,6 +419,8 @@ pub fn rtc_read(reg: u8) -> u8 {
     }
 }
 
+// crates/seedbox/tests/control.rs includes this file by path, where no
+// crate::boundary exists, so the tests compile their own copy.
 #[cfg(test)]
 #[path = "boundary.rs"]
 mod delay_boundary;

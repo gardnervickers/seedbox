@@ -1,4 +1,10 @@
 //! Stop-boundary rules independent of KVM and the host PMU.
+//!
+//! Self-contained: crates/seedbox/tests/control.rs compiles it through
+//! devices.rs by path.
+
+/// The guest kernel's one-shot timer port (kernel/seedbox.h).
+pub const PORT_TIMER: u16 = 0x530;
 
 pub fn hard_limit(limit: u64, deadline: Option<u64>, exact: bool, tolerance: u64) -> u64 {
     let pit = deadline.unwrap_or(u64::MAX);
@@ -22,7 +28,7 @@ pub fn advance_time(now: u64, ticks: u64, limit: u64) -> Result<u64, String> {
 
 /// Existing timer-port cost; execution never discards a charge at a boundary.
 pub fn io_charge(port: u16, write: bool) -> u64 {
-    if matches!(port, 0x40..=0x42 | 0x61) || (write && matches!(port, 0x43 | 0x530)) {
+    if matches!(port, 0x40..=0x42 | 0x61) || (write && matches!(port, 0x43 | PORT_TIMER)) {
         1000
     } else {
         0
@@ -97,21 +103,6 @@ impl PendingIo {
     }
 }
 
-pub fn missed_soft_stop(
-    windowed: bool,
-    window: bool,
-    delta: u64,
-    remaining: u64,
-    interrupted: bool,
-    stepping: bool,
-) -> bool {
-    // With exit_req closed, the syscall-hook branch can skip its OUT at
-    // exactly the soft count. An overflow landing there cannot establish
-    // whether the first requested yield was missed; opening the window now
-    // cannot recover it. Treat equality like the hard-stop EINTR guard.
-    windowed && !window && (delta > remaining || (interrupted && !stepping && delta == remaining))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,21 +134,6 @@ mod tests {
         assert!(advance_time(1000, 1, 1000).is_err());
         assert!(advance_time(u64::MAX, 1, u64::MAX).is_err());
         assert_eq!(hard_limit(1000, None, false, u64::MAX), 1000);
-    }
-
-    #[test]
-    fn closed_window_overflow_at_hook_branch_is_ambiguous() {
-        assert!(missed_soft_stop(true, false, 16_384, 16_384, true, false));
-        assert!(missed_soft_stop(true, false, 16_385, 16_384, true, false));
-        assert!(!missed_soft_stop(true, false, 16_383, 16_384, true, false));
-    }
-
-    #[test]
-    fn deterministic_equality_and_open_windows_remain_legal() {
-        assert!(!missed_soft_stop(true, false, 16_384, 16_384, false, false));
-        assert!(!missed_soft_stop(true, false, 16_384, 16_384, true, true));
-        assert!(!missed_soft_stop(true, true, 16_384, 16_384, true, false));
-        assert!(!missed_soft_stop(false, false, 16_384, 16_384, true, false));
     }
 
     fn pending() -> PendingIo {

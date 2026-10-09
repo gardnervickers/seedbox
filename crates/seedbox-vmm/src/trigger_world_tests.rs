@@ -38,62 +38,38 @@ fn world(undo: u64, reverse: bool) -> World {
     world_with_counter(undo, reverse, Counter::new().unwrap())
 }
 fn world_with_counter(undo: u64, reverse: bool, mut counter: Counter) -> World {
-    // main.rs reuses one counter across forks. Counter has process-lifetime
-    // ownership (no Drop); opening one per variant exhausts pinned PMU slots.
+    // main.rs reuses one counter across forks; so do these variants.
     // Disarm the previous world's overflow; counts are cumulative and each
     // KVM_RUN measures its own delta, so the counter needs no count reset.
-    counter.disarm();
-    let kvm = kvm_ioctls::Kvm::new().unwrap();
+    counter.disarm().unwrap();
     let names: Vec<String> = if reverse {
         vec!["b".into(), "a".into()]
     } else {
         vec!["a".into(), "b".into()]
     };
     let boot: Vec<_> = names.iter().map(|n| boot(n.as_bytes()[0], undo)).collect();
-    let machines = names
-        .iter()
-        .zip(&boot)
-        .map(|(n, b)| boot_machine(&kvm, n, b, false, [0; 32]).unwrap())
-        .collect();
-    World {
-        failure: None,
-        machines,
-        factory: kvm,
+    let faults = faults::Faults::with_links(
+        vec![],
+        names.clone(),
+        links::Links::from_config(1009, &names, &json!({"latency_ns":50})).unwrap(),
+    )
+    .unwrap();
+    let control = control::Control::new(
+        &json!({"machine":"a","latency_ns":50,"placement":{}}),
+        names.clone(),
+        50,
+        0,
+    )
+    .unwrap();
+    test_world(
+        names,
         boot,
-        barrier: false,
-        boot_seed: 1009,
-        run_seed: 1009,
-        branch_identity: None,
-        incarnations: vec![vec![], vec![]],
-        paused_ingress: vec![0; 2],
-        clock: Clock::Counter(counter),
-        events: vec![BTreeMap::new(); 2],
-        seq: 0,
-        lookahead: 50,
-        early: 0,
-        latency: 50,
-        partitioned: BTreeMap::new(),
-        faults: faults::Faults::with_links(
-            vec![],
-            names.clone(),
-            links::Links::from_config(1009, &names, &json!({"latency_ns":50})).unwrap(),
-        )
-        .unwrap(),
-        control: control::Control::new(
-            &json!({"machine":"a","latency_ns":50,"placement":{}}),
-            names,
-            50,
-            0,
-        )
-        .unwrap(),
-        strict_events: vec![BTreeMap::new(); 2],
-        macs: vec![[0, 0, 0, 0, 0, 1], [0, 0, 0, 0, 0, 2]],
-        dropped: 0,
-        delivered: 0,
-        link_counts: BTreeMap::new(),
-        semantic_counts: network_counters::NetworkCounters::default(),
-        slices: 0,
-    }
+        1009,
+        50,
+        Clock::Counter(counter),
+        faults,
+        control,
+    )
 }
 fn partition(handle: &str) -> Action {
     Action::Partition {
@@ -254,36 +230,30 @@ fn committed_trigger_unused_surface_preserves_witness_and_report_bytes() {
     let outcome = simulate(&mut w, &json!({}), 2000, &None, None, &mut None).unwrap();
     let out = std::env::temp_dir().join(format!("seedbox-trigger-unused-{}", std::process::id()));
     std::fs::create_dir(&out).unwrap();
-    let before = report(
-        &mut w,
+    let run = world_windowed::Run {
+        cfg: &json!({}),
+        duration: 2000,
+        end_on: &None,
+        fork: None,
+        checkpoint: None,
+        require_barrier: true,
+    };
+    let finished = || Finished {
         outcome,
-        1009,
-        &[],
-        1.0,
-        true,
-        out.to_str().unwrap(),
-        2000,
-        &None,
-    )
-    .unwrap();
+        scheduler: Value::Null,
+        seed: 1009,
+        kills: &[],
+        host_seconds: 1.0,
+        out: out.to_str().unwrap(),
+    };
+    let before = report(&mut w, &run, true, finished()).unwrap();
     w.control
         .triggers
         .committed("a", 100, b'x', 50, 100)
         .unwrap();
     w.control.triggers.reset_source("a");
     w.control.triggers.cut_off(2000);
-    let after = report(
-        &mut w,
-        outcome,
-        1009,
-        &[],
-        1.0,
-        true,
-        out.to_str().unwrap(),
-        2000,
-        &None,
-    )
-    .unwrap();
+    let after = report(&mut w, &run, true, finished()).unwrap();
     assert!(after.get("triggers").is_none());
     assert_eq!(
         serde_json::to_vec(&before).unwrap(),

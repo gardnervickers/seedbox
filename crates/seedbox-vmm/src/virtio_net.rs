@@ -1,7 +1,7 @@
 //! KVM network adapter: guest address base, DMA journal and shared device state.
 use seedbox_engine_core::virtio_mmio::{Effect, Policy as MmioPolicy, Spec, Transport};
 pub use seedbox_engine_core::virtio_network::{
-    poll_limit, Notified as WriteOutcome, Received as ReceiveOutcome, TX_POLL_NS,
+    poll_limit, Notified as WriteOutcome, Received as ReceiveOutcome,
 };
 use seedbox_engine_core::virtio_network::{Network, Policy, Stats, EVENT_IDX};
 #[derive(Clone)]
@@ -34,6 +34,7 @@ impl VirtioNet {
     pub fn deferred_tx(&self) -> bool {
         self.model.deferred_tx()
     }
+    #[cfg(test)]
     pub fn event_idx(&self) -> bool {
         self.model.event_idx(&self.transport)
     }
@@ -125,6 +126,7 @@ impl VirtioNet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use seedbox_engine_core::virtio_network::TX_POLL_NS;
     use seedbox_engine_core::virtqueue::{need_event as vring_need_event, Queue};
     const QSIZE: u16 = 256;
     const HDR: usize = 12;

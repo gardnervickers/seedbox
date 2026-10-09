@@ -3,7 +3,7 @@
 //! virtual time: retired conditional branches with exact counted stops
 //! (precise preemption), or the PV clock, where time moves only at exits.
 
-use crate::boundary::{advance_time, hard_limit, io_charge, PendingIo};
+use crate::boundary::{advance_time, hard_limit, io_charge, PendingIo, PORT_TIMER};
 #[cfg(test)]
 use crate::counter::Counter;
 use crate::devices::{rtc_read, Pic, Pit, Uart};
@@ -32,11 +32,21 @@ pub const CHANNEL_MMIO: u64 = 0xd1000000;
 pub const CHANNEL_IRQ: u8 = 6;
 pub const BLK_MMIO: u64 = 0xd000_2000;
 pub const BLK_IRQ: u8 = 7;
+/// Guest physical layout at boot (Linux x86 boot protocol).
+const ZERO_PAGE: usize = 0x10000;
+const CMDLINE_ADDR: usize = 0x20000;
+const SETUP_DATA_ADDR: usize = 0x30000;
+const BOOT_STACK: u64 = 0x90000;
+const KERNEL_ADDR: usize = 0x10_0000;
 const INITRD_ADDR: usize = 0x0800_0000;
 /// Pending interrupts are injected only when the next stop is further away
 /// than this. Part of the execution semantics: changing it changes runs.
 pub const INJECT_GUARD: u64 = 65536;
 /// Time page fields (u64 index), see kernel/seedbox.h.
+/// Virtual time the VMM publishes at each deterministic point.
+const PAGE_TSC: usize = 0;
+/// The guest clock: the last time the guest kernel read.
+const PAGE_LAST: usize = 1;
 const PAGE_SYSCALLS: usize = 3;
 const PAGE_PIC_IMR: usize = 4;
 const PAGE_NET_ISR: usize = 5;
@@ -111,28 +121,6 @@ fn timer_latency(
     }
 }
 
-// Pin every extension word without extending the checkpoint/digest prefix.
-const _: () = {
-    assert!(PAGE_FIELDS == 6);
-    assert!(PAGE_PV_CLOCK == 6);
-    assert!(PAGE_BOUND == 7);
-    assert!(PAGE_SYSCALL_TARGET == 8);
-    assert!(PAGE_ENTROPY_GEN == 9);
-    assert!(PAGE_ENTROPY == 10);
-    assert!(PAGE_ENTROPY + 1 == 11);
-    assert!(PAGE_ENTROPY + 2 == 12);
-    assert!(PAGE_ENTROPY + 3 == 13);
-    assert!(PAGE_ENTROPY_FIELDS == 4);
-    assert!(ABI_PAGE_RESEED == 3);
-    assert!(PAGE_TIMER_DEADLINE == 14);
-    assert!(PAGE_CAPABILITIES == 15);
-    assert!(PAGE_SYSCALL_NS == 16);
-    assert!(PAGE_SYSCALLS0 == 17);
-    assert!(PAGE_PLAN_TIME == 18);
-    assert!(ABI_PAGE_TIMER == 4);
-    assert!(CAP_PAGE_TIMER == 1);
-};
-
 pub struct BootSpec<'a> {
     pub kernel: &'a [u8],
     pub initrd: &'a [u8],
@@ -152,8 +140,60 @@ pub struct BootSpec<'a> {
     pub page_timer: bool,
 }
 
+#[cfg(test)]
+impl<'a> BootSpec<'a> {
+    /// A counter-timebase machine booting `kernel` (a test payload behind a
+    /// bzImage header) with no devices, no undo and the least RAM that holds
+    /// the initrd address.
+    pub(crate) fn test(kernel: &'a [u8]) -> Self {
+        Self {
+            kernel,
+            initrd: &[],
+            cmdline: String::new(),
+            mem: INITRD_ADDR + 0x100000,
+            rng_seed: [0; 32],
+            mac: None,
+            control_channel: false,
+            disk: None,
+            undo_margin: 0,
+            barrier: false,
+            pv_clock: false,
+            page_timer: false,
+        }
+    }
+}
+
+/// I/O ports of the guest kernel's time page protocol (kernel/seedbox.h).
+const PORT_TIME_LO: u16 = 0x520;
+const PORT_TIME_HI: u16 = 0x524;
+const PORT_TIME_READY: u16 = 0x528;
+const PORT_YIELD: u16 = 0x52c;
+/// Supervisor ports the guest init writes (guest/io.h, guest/control.h).
+const PORT_EXIT: u16 = 0xf4;
+const PORT_INIT_ERROR: u16 = 0xf5;
+const PORT_EFFECT: u16 = 0xf6;
+const PORT_FAILURE: u16 = 0xf7;
+/// A machine state digest and the named hashes of its parts.
+pub type StateDigest = (String, Vec<(&'static str, String)>);
+
 /// Port of the launch barrier, see guest/barrier.h.
 const BARRIER_PORT: u16 = 0xf8;
+/// Bochs-style debug console, an alias for COM1 output.
+const PORT_DEBUGCON: u16 = 0xe9;
+/// Legacy PC devices.
+const COM1: u16 = 0x3f8;
+const COM1_LAST: u16 = COM1 + 7;
+const COM2: u16 = 0x2f8;
+const COM2_LAST: u16 = COM2 + 7;
+const RTC_INDEX: u16 = 0x70;
+const RTC_DATA: u16 = 0x71;
+/// Legacy PC interrupt lines.
+const TIMER_IRQ: u8 = 0;
+const COM2_IRQ: u8 = 3;
+const COM1_IRQ: u8 = 4;
+/// KVM_INTERRUPT (linux/kvm.h): `_IOW(KVMIO, 0x86, struct kvm_interrupt)`;
+/// kvm-ioctls has no x86 wrapper for it.
+const KVM_INTERRUPT: libc::c_ulong = 0x4004_ae86;
 pub const ENTROPY_WORDS: usize = 8;
 
 /// Everything about one machine that a world fork puts back: vCPU, RAM, the
@@ -190,7 +230,6 @@ pub struct MachineSnapshot {
     page_timer: PageTimer,
     armed_wake: u64,
     pit_exact: bool,
-    exit_req: bool,
     margin: u64,
     fm: u64,
     stats: Stats,
@@ -206,23 +245,103 @@ fn page_entropy(entropy: &[u32; ENTROPY_WORDS]) -> [u64; PAGE_ENTROPY_FIELDS] {
     std::array::from_fn(|i| entropy[2 * i] as u64 | (entropy[2 * i + 1] as u64) << 32)
 }
 
-/// A raw pointer to memory its owner maps and unmaps. The owner is the only
+/// An anonymous private mapping, unmapped on drop. Its owner is its only
 /// user, so moving the owner to another thread moves the mapping with it.
-/// Only owning fields use it, so any other non-`Send` field added to a
-/// machine is still caught by the compiler.
-#[derive(Clone, Copy)]
-pub(crate) struct SendPtr<T>(pub(crate) *mut T);
-// SAFETY: see above; the pointee is reached only through its owner.
-unsafe impl<T> Send for SendPtr<T> {}
-
-/// An anonymous private mapping, unmapped on drop.
-struct Mapping {
-    ptr: SendPtr<u8>,
+pub(crate) struct Mapping {
+    ptr: *mut u8,
     size: usize,
 }
+
+// SAFETY: the mapping is reached only through its owner (`&`/`&mut` borrows
+// of the `Mapping`), never shared, so it moves between threads with it. Only
+// owning fields are `Mapping`s, so any other non-`Send` field added to a
+// machine is still caught by the compiler.
+unsafe impl Send for Mapping {}
+
+impl Mapping {
+    /// `size` zeroed bytes, reserved lazily.
+    pub(crate) fn new(size: usize) -> Result<Self, String> {
+        // SAFETY: a fresh anonymous mapping aliases no Rust object.
+        let p = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+                -1,
+                0,
+            )
+        };
+        if p == libc::MAP_FAILED {
+            return Err(format!("mmap: {}", std::io::Error::last_os_error()));
+        }
+        Ok(Self {
+            ptr: p.cast(),
+            size,
+        })
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.size
+    }
+
+    /// The host address, for registering the mapping with KVM.
+    fn host_address(&self) -> u64 {
+        self.ptr as u64
+    }
+
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        // SAFETY: `ptr` maps `size` readable bytes for the life of `self`,
+        // and the vCPU never runs while the VMM holds a borrow of guest memory.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.size) }
+    }
+
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: as in `as_slice`; `&mut self` makes the borrow unique.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.size) }
+    }
+}
+
 impl Drop for Mapping {
     fn drop(&mut self) {
-        unsafe { libc::munmap(self.ptr.0.cast(), self.size) };
+        // SAFETY: `ptr`/`size` came from `mmap` in `new` and nothing borrows
+        // the mapping once its owner drops it.
+        unsafe { libc::munmap(self.ptr.cast(), self.size) };
+    }
+}
+
+/// The time page shared with the guest kernel: u64 words (kernel/seedbox.h)
+/// that both the guest and the VMM read and write.
+struct TimePage(Mapping);
+
+impl TimePage {
+    const BYTES: usize = 4096;
+
+    fn new() -> Result<Self, String> {
+        Mapping::new(Self::BYTES).map(Self)
+    }
+
+    fn get(&self, i: usize) -> u64 {
+        assert!(i < Self::BYTES / 8);
+        // SAFETY: in bounds of the page-aligned mapping. Volatile: the guest
+        // also writes the page.
+        unsafe { std::ptr::read_volatile(self.0.ptr.cast::<u64>().add(i)) }
+    }
+
+    fn set(&mut self, i: usize, v: u64) {
+        assert!(i < Self::BYTES / 8);
+        // SAFETY: as in `get`.
+        unsafe { std::ptr::write_volatile(self.0.ptr.cast::<u64>().add(i), v) }
+    }
+
+    fn copy(&self) -> Box<[u8; Self::BYTES]> {
+        let mut page = Box::new([0u8; Self::BYTES]);
+        page.copy_from_slice(self.0.as_slice());
+        page
+    }
+
+    fn load(&mut self, bytes: &[u8; Self::BYTES]) {
+        self.0.as_mut_slice().copy_from_slice(bytes);
     }
 }
 
@@ -243,14 +362,9 @@ pub struct Stats {
     pub yields: u64,
     pub yield_stops: u64,
     pub skids: Vec<u64>,
+    /// Host time in KVM_RUN and run count, by `ExitKind`.
     pub kvm_ns: [u128; 8],
     pub kvm_n: [u64; 8],
-    /// Runs that passed a soft stop with the yield window closed and could
-    /// not be undone (a syscall there would have been a missed stop).
-    pub soft_misses: u64,
-    pub soft_undos: u64,
-    /// Of the soft misses, those with no syscall in the run (provably harmless).
-    pub soft_misses_clean: u64,
     /// PV clock: watchdog checks of a run with no exit, those that proved a
     /// spin (a state cycle, then treated as idle), and the rest.
     pub spin_probes: u64,
@@ -272,6 +386,70 @@ pub struct Stats {
     /// Guest clock (`page.last`) against VMM time at timer writes, sends
     /// and halts (`Site`).
     pub skew: [Skew; 3],
+}
+
+/// How a KVM_RUN ended, for `Stats::kvm_ns` and `Stats::kvm_n`.
+#[derive(Clone, Copy)]
+pub enum ExitKind {
+    Eintr,
+    Debug,
+    Pio,
+    Mmio,
+    Hlt,
+    Window,
+    Other,
+}
+
+impl ExitKind {
+    pub const NAMES: [&'static str; 7] =
+        ["eintr", "debug", "pio", "mmio", "hlt", "window", "other"];
+
+    fn of(exit: &Result<VcpuExit<'_>, kvm_ioctls::Error>) -> Self {
+        match exit {
+            Err(_) => Self::Eintr,
+            Ok(VcpuExit::Debug(_)) => Self::Debug,
+            Ok(VcpuExit::IoOut(..)) | Ok(VcpuExit::IoIn(..)) => Self::Pio,
+            Ok(VcpuExit::MmioRead(..)) | Ok(VcpuExit::MmioWrite(..)) => Self::Mmio,
+            Ok(VcpuExit::Hlt) => Self::Hlt,
+            Ok(VcpuExit::IrqWindowOpen) => Self::Window,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// A KVM exit, taken out of the vCPU's run structure for its handler.
+enum Exit {
+    Eintr,
+    Debug,
+    IoOut(u16, Vec<u8>),
+    IoIn(u16, ExitData),
+    MmioRead(u64, ExitData),
+    MmioWrite(u64, Vec<u8>),
+    Hlt,
+    IrqWindowOpen,
+    Shutdown,
+    /// Any other exit, as KVM's `Debug` text.
+    Unexpected(String),
+    Failed(kvm_ioctls::Error),
+}
+
+/// The response buffer of an IN or MMIO read exit, in the vCPU's kvm_run
+/// mapping, detached from the `VcpuExit` borrow of the vCPU so the exit's
+/// handler can use the whole machine.
+struct ExitData(*mut [u8]);
+
+impl ExitData {
+    fn detach(data: &mut [u8]) -> Self {
+        Self(data)
+    }
+
+    /// # Safety
+    /// The vCPU has not run since the exit, and no other reference into its
+    /// kvm_run mapping is live while the returned one is.
+    unsafe fn get(&mut self) -> &mut [u8] {
+        // SAFETY: the mapping lives as long as the vCPU; see the contract.
+        unsafe { &mut *self.0 }
+    }
 }
 
 /// Where `Stats::skew` was sampled.
@@ -319,9 +497,9 @@ pub struct Machine {
     profile: &'static CounterProfile,
     _vm: VmFd,
     vcpu: VcpuFd,
-    mem: SendPtr<u8>,
-    mem_size: usize,
-    page: SendPtr<u64>,
+    /// Guest RAM, from guest physical address 0.
+    mem: Mapping,
+    page: TimePage,
     pub branches: u64,
     pub pending_io: Option<PendingIo>,
     tsc_latch: u64,
@@ -347,7 +525,6 @@ pub struct Machine {
     #[cfg(test)]
     require_io_checkpoint: bool,
     planner: Option<Planner>,
-    exit_req: bool,
     /// The guest uses the shared page for interrupt masks and status (ABI 2).
     pv: bool,
     /// Guest ABI version announced on the time page port (0 before then).
@@ -410,23 +587,6 @@ fn put(m: &mut [u8], at: usize, v: u64, n: usize) {
     m[at..at + n].copy_from_slice(&v.to_le_bytes()[..n]);
 }
 
-pub(crate) fn map(size: usize) -> Result<*mut u8, String> {
-    let p = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            size,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
-            -1,
-            0,
-        )
-    };
-    if p == libc::MAP_FAILED {
-        return Err(format!("mmap: {}", std::io::Error::last_os_error()));
-    }
-    Ok(p.cast())
-}
-
 fn guest_cpuid(kvm: &Kvm) -> Result<CpuId, String> {
     let mut c = kvm
         .get_supported_cpuid(KVM_MAX_CPUID_ENTRIES)
@@ -482,44 +642,57 @@ impl Machine {
             return Err("KVM immediate-exit capability required for I/O completion".into());
         }
         let mem_size = spec.mem;
-        let mem = map(mem_size)?;
-        let page = map(4096)?;
-        if spec.pv_clock {
-            unsafe { std::ptr::write_volatile(page.cast::<u64>().add(PAGE_PV_CLOCK), 1) };
-        }
-        let m = unsafe { std::slice::from_raw_parts_mut(mem, mem_size) };
         let k = spec.kernel;
-        let setup = (k[0x1f1] as usize + 1) * 512;
-        m[0x100000..0x100000 + k.len() - setup].copy_from_slice(&k[setup..]);
-        let zp = 0x10000;
+        // The bzImage boot header: setup sectors, then the protected-mode kernel.
+        let setup = k
+            .get(0x1f1)
+            .map(|&sects| (sects as usize + 1) * 512)
+            .filter(|&setup| k.len() >= setup.max(0x290))
+            .ok_or("kernel: not a bzImage")?;
+        if INITRD_ADDR + spec.initrd.len() > mem_size {
+            return Err("initrd does not fit".into());
+        }
+        if KERNEL_ADDR + (k.len() - setup) > mem_size {
+            return Err("kernel does not fit".into());
+        }
+        let mut mem = Mapping::new(mem_size)?;
+        let mut page = TimePage::new()?;
+        if spec.pv_clock {
+            page.set(PAGE_PV_CLOCK, 1);
+        }
+        let m = mem.as_mut_slice();
+        m[KERNEL_ADDR..KERNEL_ADDR + k.len() - setup].copy_from_slice(&k[setup..]);
+        let zp = ZERO_PAGE;
         m[zp + 0x1f1..zp + 0x290].copy_from_slice(&k[0x1f1..0x290]);
         put(m, zp + 0x210, 0xff, 1); // type_of_loader
         put(m, zp + 0x211, 0x01, 1); // loadflags: LOADED_HIGH
         put(m, zp + 0x218, INITRD_ADDR as u64, 4);
         put(m, zp + 0x21c, spec.initrd.len() as u64, 4);
-        put(m, zp + 0x228, 0x20000, 4);
+        put(m, zp + 0x228, CMDLINE_ADDR as u64, 4);
         put(m, zp + 0x1e8, 2, 1); // e820 entries
-        for (i, (addr, size)) in [(0u64, 0x9fc00u64), (0x100000, (mem_size - 0x100000) as u64)]
-            .iter()
-            .enumerate()
+        for (i, (addr, size)) in [
+            (0u64, 0x9fc00u64),
+            (KERNEL_ADDR as u64, (mem_size - KERNEL_ADDR) as u64),
+        ]
+        .iter()
+        .enumerate()
         {
             let at = zp + 0x2d0 + i * 20;
             put(m, at, *addr, 8);
             put(m, at + 8, *size, 8);
             put(m, at + 16, 1, 4);
         }
-        put(m, zp + 0x250, 0x30000, 8); // setup_data: SETUP_RNG_SEED
-        put(m, 0x30008, 9, 4);
-        put(m, 0x3000c, 32, 4);
-        m[0x30010..0x30030].copy_from_slice(&spec.rng_seed);
+        put(m, zp + 0x250, SETUP_DATA_ADDR as u64, 8);
+        put(m, SETUP_DATA_ADDR + 8, 9, 4); // SETUP_RNG_SEED
+        put(m, SETUP_DATA_ADDR + 12, 32, 4);
+        m[SETUP_DATA_ADDR + 16..SETUP_DATA_ADDR + 48].copy_from_slice(&spec.rng_seed);
         let cmd = format!("{}\0", spec.cmdline);
-        m[0x20000..0x20000 + cmd.len()].copy_from_slice(cmd.as_bytes());
-        if INITRD_ADDR + spec.initrd.len() > mem_size {
-            return Err("initrd does not fit".into());
-        }
+        m[CMDLINE_ADDR..CMDLINE_ADDR + cmd.len()].copy_from_slice(cmd.as_bytes());
         m[INITRD_ADDR..INITRD_ADDR + spec.initrd.len()].copy_from_slice(spec.initrd);
 
         let vm = kvm.create_vm().map_err(|e| format!("create_vm: {e}"))?;
+        // SAFETY: both regions are mappings this machine owns; it keeps them
+        // until after the VM and vCPU file descriptors are closed (field order).
         unsafe {
             vm.set_user_memory_region(kvm_userspace_memory_region {
                 slot: 0,
@@ -530,15 +703,15 @@ impl Machine {
                 },
                 guest_phys_addr: 0,
                 memory_size: mem_size as u64,
-                userspace_addr: mem as u64,
+                userspace_addr: mem.host_address(),
             })
             .map_err(|e| format!("ram slot: {e}"))?;
             vm.set_user_memory_region(kvm_userspace_memory_region {
                 slot: 1,
                 flags: 0,
                 guest_phys_addr: TIME_PAGE,
-                memory_size: 4096,
-                userspace_addr: page as u64,
+                memory_size: TimePage::BYTES as u64,
+                userspace_addr: page.0.host_address(),
             })
             .map_err(|e| format!("time page slot: {e}"))?;
         }
@@ -576,9 +749,9 @@ impl Machine {
         };
         vcpu.set_sregs(&s).map_err(|e| e.to_string())?;
         vcpu.set_regs(&kvm_regs {
-            rip: 0x100000,
+            rip: KERNEL_ADDR as u64,
             rsi: zp as u64,
-            rsp: 0x90000,
+            rsp: BOOT_STACK,
             rflags: 2,
             ..Default::default()
         })
@@ -588,8 +761,8 @@ impl Machine {
         let undo = if spec.undo_margin > 0 {
             let mut u = Undo::new(kvm, &vcpu, mem_size)?;
             // Everything loaded so far was written by the VMM.
-            u.mark(0, 0x100000);
-            u.mark(0x100000, k.len() - setup);
+            u.mark(0, KERNEL_ADDR);
+            u.mark(KERNEL_ADDR, k.len() - setup);
             u.mark(INITRD_ADDR, spec.initrd.len());
             Some(Box::new(u))
         } else {
@@ -600,9 +773,8 @@ impl Machine {
             profile,
             _vm: vm,
             vcpu,
-            mem: SendPtr(mem),
-            mem_size,
-            page: SendPtr(page.cast()),
+            mem,
+            page,
             branches: 0,
             pending_io: None,
             tsc_latch: 0,
@@ -625,7 +797,6 @@ impl Machine {
             #[cfg(test)]
             require_io_checkpoint: false,
             planner: None,
-            exit_req: false,
             pv: false,
             abi: 0,
             page_timer: PageTimer::new(),
@@ -668,7 +839,7 @@ impl Machine {
     }
 
     pub fn memory(&mut self) -> &mut [u8] {
-        unsafe { std::slice::from_raw_parts_mut(self.mem.0, self.mem_size) }
+        self.mem.as_mut_slice()
     }
 
     fn record(&mut self, kind: u8, extra: u64) {
@@ -843,53 +1014,112 @@ impl Machine {
         let mut cpu = VcpuState::new(self.msrs.clone());
         cpu.save(&self.vcpu, "fork")?;
         let undo_stats = self.undo.as_ref().map(|u| u.stats.clone());
-        let ram = Mapping {
-            ptr: SendPtr(map(self.mem_size)?),
-            size: self.mem_size,
-        };
-        unsafe { std::ptr::copy_nonoverlapping(self.mem.0, ram.ptr.0, self.mem_size) };
+        let mut ram = Mapping::new(self.mem.len())?;
+        ram.as_mut_slice().copy_from_slice(self.mem.as_slice());
         if let Some(u) = self.undo.as_mut() {
-            u.fork_point(&self._vm, self.mem.0)?;
+            u.fork_point(&self._vm, self.mem.as_slice())?;
         }
-        let mut page = Box::new([0u8; 4096]);
-        unsafe { std::ptr::copy_nonoverlapping(self.page.0 as *const u8, page.as_mut_ptr(), 4096) };
+        let page = self.page.copy();
+        // Name every field, so one added to `Machine` must be either saved
+        // here or listed as outside a snapshot.
+        let Machine {
+            world,
+            branches,
+            pending_io,
+            tsc_latch,
+            guest_exit_code,
+            guest_init_error,
+            pic,
+            pit,
+            rtc_index,
+            com1,
+            com2,
+            log_order,
+            management_framer,
+            net,
+            channel,
+            blk,
+            control_dma_bytes,
+            control_tx_bytes,
+            pv,
+            abi,
+            page_timer,
+            armed_wake,
+            pit_exact,
+            syscall_ns,
+            throttle_permille,
+            timer_rng,
+            margin,
+            fm,
+            entropy,
+            entropy_read,
+            stats,
+            witness,
+            // Saved above: RAM, the time page, the vCPU and the undo stats.
+            mem: _,
+            page: _,
+            vcpu: _,
+            undo: _,
+            // Fixed for the machine's life.
+            profile: _,
+            _vm: _,
+            msrs: _,
+            exact_timer_ppm: _,
+            tolerance: _,
+            timer_jitter: _,
+            adaptive_margin: _,
+            undo_margin: _,
+            barrier: _,
+            pv_clock: _,
+            page_timer_requested: _,
+            // Host execution state, reset by `restore`, or none at a fork point.
+            stepping: _,
+            sync_regs_ready: _,
+            #[cfg(test)]
+                require_io_checkpoint: _,
+            planner: _,
+            last_plan: _,
+            pv_progress: _,
+            step_started: _,
+            // The trace spans every fork.
+            trace: _,
+        } = self;
         Ok(MachineSnapshot {
             ram,
             page,
             cpu,
-            world: self.world.clone(),
-            branches: self.branches,
-            tsc_latch: self.tsc_latch,
-            pending_io: self.pending_io.clone(),
-            timer_rng: self.timer_rng.clone(),
-            entropy: self.entropy,
-            entropy_read: self.entropy_read,
-            guest_exit_code: self.guest_exit_code,
-            guest_init_error: self.guest_init_error,
-            pic: self.pic.clone(),
-            pit: self.pit.clone(),
-            rtc_index: self.rtc_index,
-            com1: self.com1.snapshot(),
-            com2: self.com2.snapshot(),
-            log_order: self.log_order,
-            management_framer: self.management_framer.clone(),
-            net: self.net.clone(),
-            channel: self.channel.clone(),
-            blk: self.blk.clone(),
-            control_dma_bytes: self.control_dma_bytes,
-            control_tx_bytes: self.control_tx_bytes,
-            pv: self.pv,
-            syscall_ns: self.syscall_ns,
-            throttle_permille: self.throttle_permille,
-            abi: self.abi,
-            page_timer: self.page_timer,
-            armed_wake: self.armed_wake,
-            pit_exact: self.pit_exact,
-            exit_req: self.exit_req,
-            margin: self.margin,
-            fm: self.fm,
-            stats: self.stats.clone(),
-            witness: self.witness.clone(),
+            world: world.clone(),
+            branches: *branches,
+            tsc_latch: *tsc_latch,
+            pending_io: pending_io.clone(),
+            timer_rng: timer_rng.clone(),
+            entropy: *entropy,
+            entropy_read: *entropy_read,
+            guest_exit_code: *guest_exit_code,
+            guest_init_error: *guest_init_error,
+            pic: pic.clone(),
+            pit: pit.clone(),
+            rtc_index: *rtc_index,
+            com1: com1.snapshot(),
+            com2: com2.snapshot(),
+            log_order: *log_order,
+            management_framer: management_framer.clone(),
+            net: net.clone(),
+            channel: channel.clone(),
+            blk: blk.clone(),
+            control_dma_bytes: *control_dma_bytes,
+            control_tx_bytes: *control_tx_bytes,
+            pv: *pv,
+            syscall_ns: *syscall_ns,
+            throttle_permille: *throttle_permille,
+            abi: *abi,
+            page_timer: *page_timer,
+            armed_wake: *armed_wake,
+            pit_exact: *pit_exact,
+            margin: *margin,
+            fm: *fm,
+            stats: stats.clone(),
+            witness: witness.clone(),
             undo_stats,
         })
     }
@@ -909,24 +1139,25 @@ impl Machine {
             // A machine rebuilt for this restore (the run rebooted it) has
             // held no fork point yet: copy everything, then hold one here.
             Some(u) if !u.holds_fork_point() => {
-                unsafe { std::ptr::copy_nonoverlapping(s.ram.ptr.0, self.mem.0, self.mem_size) };
-                u.mark(0, self.mem_size);
-                u.fork_point(&self._vm, self.mem.0)?;
+                self.mem.as_mut_slice().copy_from_slice(s.ram.as_slice());
+                u.mark(0, self.mem.len());
+                u.fork_point(&self._vm, self.mem.as_slice())?;
                 u.stats = s.undo_stats.clone().unwrap_or_default();
-                (self.mem_size / 4096) as u64
+                (self.mem.len() / 4096) as u64
             }
             Some(u) => {
-                let pages = u.return_to_fork(&self._vm, self.mem.0, s.ram.ptr.0)?;
+                let pages =
+                    u.return_to_fork(&self._vm, self.mem.as_mut_slice(), s.ram.as_slice())?;
                 // Each seed reports its own undo work on top of the boot's.
                 u.stats = s.undo_stats.clone().unwrap_or_default();
                 pages
             }
             None => {
-                unsafe { std::ptr::copy_nonoverlapping(s.ram.ptr.0, self.mem.0, self.mem_size) };
-                (self.mem_size / 4096) as u64
+                self.mem.as_mut_slice().copy_from_slice(s.ram.as_slice());
+                (self.mem.len() / 4096) as u64
             }
         };
-        unsafe { std::ptr::copy_nonoverlapping(s.page.as_ptr(), self.page.0 as *mut u8, 4096) };
+        self.page.load(&s.page);
         let (regs, sregs) = s.cpu.restore(&self.vcpu, "fork restore")?;
         // Refresh KVM's exit outputs (interrupt flag, injection readiness and
         // the synchronized registers) from the restored state, exactly as the
@@ -937,40 +1168,79 @@ impl Machine {
         run.s.regs.regs = regs;
         run.s.regs.sregs = sregs;
         self.sync_regs_ready = true;
-        self.world = s.world.clone();
-        self.branches = s.branches;
-        self.tsc_latch = s.tsc_latch;
-        self.pending_io = s.pending_io.clone();
-        self.timer_rng = s.timer_rng.clone();
-        self.guest_exit_code = s.guest_exit_code;
-        self.guest_init_error = s.guest_init_error;
-        self.pic = s.pic.clone();
-        self.pit = s.pit.clone();
-        self.rtc_index = s.rtc_index;
-        self.com1.restore(&s.com1);
-        self.com2.restore(&s.com2);
-        self.log_order = s.log_order;
+        // Name every field, so none of the snapshot can be left behind.
+        let MachineSnapshot {
+            world,
+            branches,
+            tsc_latch,
+            pending_io,
+            timer_rng,
+            guest_exit_code,
+            guest_init_error,
+            pic,
+            pit,
+            rtc_index,
+            com1,
+            com2,
+            log_order,
+            management_framer,
+            net,
+            channel,
+            blk,
+            control_dma_bytes,
+            control_tx_bytes,
+            pv,
+            syscall_ns,
+            throttle_permille,
+            abi,
+            page_timer,
+            armed_wake,
+            pit_exact,
+            margin,
+            fm,
+            entropy,
+            entropy_read,
+            stats,
+            witness,
+            // Restored above.
+            ram: _,
+            page: _,
+            cpu: _,
+            undo_stats: _,
+        } = s;
+        self.world = world.clone();
+        self.branches = *branches;
+        self.tsc_latch = *tsc_latch;
+        self.pending_io = pending_io.clone();
+        self.timer_rng = timer_rng.clone();
+        self.guest_exit_code = *guest_exit_code;
+        self.guest_init_error = *guest_init_error;
+        self.pic = pic.clone();
+        self.pit = pit.clone();
+        self.rtc_index = *rtc_index;
+        self.com1.restore(com1);
+        self.com2.restore(com2);
+        self.log_order = *log_order;
         self.world.clear_effects();
-        self.management_framer = s.management_framer.clone();
-        self.net = s.net.clone();
-        self.channel = s.channel.clone();
-        self.blk = s.blk.clone();
-        self.control_dma_bytes = s.control_dma_bytes;
-        self.control_tx_bytes = s.control_tx_bytes;
-        self.pv = s.pv;
-        self.syscall_ns = s.syscall_ns;
-        self.throttle_permille = s.throttle_permille;
-        self.abi = s.abi;
-        self.page_timer = s.page_timer;
-        self.armed_wake = s.armed_wake;
-        self.pit_exact = s.pit_exact;
-        self.exit_req = s.exit_req;
-        self.margin = s.margin;
-        self.fm = s.fm;
-        self.entropy = s.entropy;
-        self.entropy_read = s.entropy_read;
-        self.stats = s.stats.clone();
-        self.witness = s.witness.clone();
+        self.management_framer = management_framer.clone();
+        self.net = net.clone();
+        self.channel = channel.clone();
+        self.blk = blk.clone();
+        self.control_dma_bytes = *control_dma_bytes;
+        self.control_tx_bytes = *control_tx_bytes;
+        self.pv = *pv;
+        self.syscall_ns = *syscall_ns;
+        self.throttle_permille = *throttle_permille;
+        self.abi = *abi;
+        self.page_timer = *page_timer;
+        self.armed_wake = *armed_wake;
+        self.pit_exact = *pit_exact;
+        self.margin = *margin;
+        self.fm = *fm;
+        self.entropy = *entropy;
+        self.entropy_read = *entropy_read;
+        self.stats = stats.clone();
+        self.witness = witness.clone();
         Ok(pages)
     }
 
@@ -983,18 +1253,17 @@ impl Machine {
     pub fn deliver_serial(&mut self, bytes: &[u8]) {
         self.com2.rx.extend(bytes);
         if self.com2.edge() {
-            self.pic.raise(3);
+            self.pic.raise(COM2_IRQ);
         }
     }
 
     /// Strict runtime delivery requires all bytes DMA into posted guest buffers.
     pub fn deliver_control(&mut self, bytes: &[u8]) -> Result<(), String> {
-        let memory = unsafe { std::slice::from_raw_parts_mut(self.mem.0, self.mem_size) };
         let channel = self
             .channel
             .as_mut()
             .ok_or("runtime control channel absent")?;
-        let received = channel.receive(memory, bytes)?;
+        let received = channel.receive(self.mem.as_mut_slice(), bytes)?;
         let complete = received.accepted && channel.pending_rx_bytes() == 0;
         self.take_dma();
         if received.irq {
@@ -1045,8 +1314,7 @@ impl Machine {
     }
 
     pub fn deliver_frame(&mut self, frame: &[u8]) -> Result<ReceiveOutcome, String> {
-        let (mem, size) = (self.mem.0, self.mem_size);
-        let m = unsafe { std::slice::from_raw_parts_mut(mem, size) };
+        let m = self.mem.as_mut_slice();
         let outcome = self.net.as_mut().map(|n| n.receive(m, frame)).transpose();
         self.take_dma();
         let outcome = outcome?.unwrap_or_default();
@@ -1057,11 +1325,10 @@ impl Machine {
     }
 
     fn poll_net(&mut self, frames: &mut Vec<Vec<u8>>, boundary: bool) -> Result<bool, String> {
-        let m = unsafe { std::slice::from_raw_parts_mut(self.mem.0, self.mem_size) };
         let Some(n) = self.net.as_mut() else {
             return Ok(false);
         };
-        let out = n.poll_at(m, self.world.time, boundary);
+        let out = n.poll_at(self.mem.as_mut_slice(), self.world.time, boundary);
         self.take_dma();
         let out = out?;
         if out.irq {
@@ -1072,7 +1339,6 @@ impl Machine {
         Ok(sent)
     }
 
-    /// Syscalls the guest has entered (counted in the time page).
     /// Move virtual time forward to `t` (never back) for `cause`.
     fn advance_to(&mut self, t: u64, cause: Cause) {
         if t > self.world.time {
@@ -1081,16 +1347,17 @@ impl Machine {
         }
     }
 
+    /// Syscalls the guest has entered (counted in the time page).
     pub fn syscalls(&self) -> u64 {
         self.page_get(PAGE_SYSCALLS)
     }
 
     fn page_get(&self, i: usize) -> u64 {
-        unsafe { std::ptr::read_volatile(self.page.0.add(i)) }
+        self.page.get(i)
     }
 
     fn page_set(&mut self, i: usize, v: u64) {
-        unsafe { std::ptr::write_volatile(self.page.0.add(i), v) }
+        self.page.set(i, v)
     }
 
     fn raise_net(&mut self) {
@@ -1146,16 +1413,17 @@ impl Machine {
     /// further, so vCPU state can be saved or replaced.
     fn complete_io(&mut self) -> Result<(), String> {
         self.vcpu.set_kvm_immediate_exit(1);
-        let r = self.vcpu.run().map(|e| format!("{e:?}"));
-        self.vcpu.set_kvm_immediate_exit(0);
-        match r {
+        // The exit borrows the vCPU: settle the outcome before resetting it.
+        let outcome = match self.vcpu.run() {
             Err(e) if e.errno() == libc::EINTR => Ok(()),
             Err(e) => Err(format!("{}: completing I/O: {e}", self.world.name)),
             Ok(e) => Err(format!(
-                "{}: exit while completing I/O: {e}",
+                "{}: exit while completing I/O: {e:?}",
                 self.world.name
             )),
-        }
+        };
+        self.vcpu.set_kvm_immediate_exit(0);
+        outcome
     }
 
     fn pending_io_bytes(&self) -> Vec<u8> {
@@ -1173,7 +1441,7 @@ impl Machine {
     }
 
     fn note_skew(&mut self, site: Site) {
-        let last = self.page_get(1);
+        let last = self.page_get(PAGE_LAST);
         let k = &mut self.stats.skew[site as usize];
         k.n += 1;
         if last > self.world.time {
@@ -1205,7 +1473,7 @@ impl Machine {
             &mut self.pit,
             self.world.time,
         )? {
-            self.pic.raise(0);
+            self.pic.raise(TIMER_IRQ);
         }
         timer_latency(
             &mut self.pit,
@@ -1220,7 +1488,7 @@ impl Machine {
     // Expiration consults adopted device state only, never a guest page store.
     fn expire_timers(&mut self) -> Result<(), String> {
         if self.pit.expire_through(self.world.time)? > 0 {
-            self.pic.raise(0);
+            self.pic.raise(TIMER_IRQ);
         }
         Ok(())
     }
@@ -1257,11 +1525,10 @@ impl Machine {
             .then(|| self.page_get(PAGE_TIMER_DEADLINE));
         let u = self.undo.as_mut().unwrap();
         u.timer_deadline = timer_deadline;
-        u.save(&self._vm, &self.vcpu, self.mem.0)?;
+        u.save(&self._vm, &self.vcpu, self.mem.as_slice())?;
         u.page = page;
         u.time = self.world.time;
         u.branches = self.branches;
-        u.exit_req = self.exit_req;
         u.stats.checkpoint_ns += t.elapsed().as_nanos();
         Ok(())
     }
@@ -1270,16 +1537,15 @@ impl Machine {
         let t = Instant::now();
         self.complete_io()?;
         let u = self.undo.as_mut().unwrap();
-        let (regs, sregs) = u.restore(&self._vm, &self.vcpu, self.mem.0)?;
+        let (regs, sregs) = u.restore(&self._vm, &self.vcpu, self.mem.as_mut_slice())?;
         for i in 0..PAGE_FIELDS {
-            unsafe { std::ptr::write_volatile(self.page.0.add(i), u.page[i]) };
+            self.page.set(i, u.page[i]);
         }
         if let Some(deadline) = u.timer_deadline {
-            unsafe { std::ptr::write_volatile(self.page.0.add(PAGE_TIMER_DEADLINE), deadline) };
+            self.page.set(PAGE_TIMER_DEADLINE, deadline);
         }
         self.world.time = u.time;
         self.branches = u.branches;
-        self.exit_req = u.exit_req;
         u.stats.rollback_ns += t.elapsed().as_nanos();
         // The planner reads registers from the run structure.
         let run = self.vcpu.get_kvm_run();
@@ -1290,7 +1556,7 @@ impl Machine {
     }
 
     fn checked_page_time(&self, limit: u64) -> Result<u64, String> {
-        let last = unsafe { std::ptr::read_volatile(self.page.0.add(1)) };
+        let last = self.page_get(PAGE_LAST);
         advance_time(self.world.time, last.saturating_sub(self.world.time), limit)
     }
 
@@ -1302,7 +1568,7 @@ impl Machine {
     }
 
     fn publish(&mut self) {
-        unsafe { std::ptr::write_volatile(self.page.0, self.world.time) };
+        self.page.set(PAGE_TSC, self.world.time);
     }
 
     fn set_stepping(&mut self, on: bool) -> Result<(), String> {
@@ -1327,8 +1593,7 @@ impl Machine {
                 run.s.regs.sregs = sregs;
                 self.sync_regs_ready = true;
             }
-            let mem = unsafe { std::slice::from_raw_parts(self.mem.0, self.mem_size) };
-            self.planner = Some(Planner::load(&self.vcpu, mem)?);
+            self.planner = Some(Planner::load(&self.vcpu, self.mem.as_slice())?);
         } else {
             self.vcpu
                 .set_guest_debug(&kvm_guest_debug::default())
@@ -1352,13 +1617,14 @@ impl Machine {
         self.set_stepping(true)?;
         let (r, sr) = {
             let run = self.vcpu.get_kvm_run();
+            // SAFETY: `kvm_sync_regs` is plain data; `sync_regs_ready` (set by
+            // `set_stepping` or a successful run) means KVM or the VMM filled it.
             unsafe { (run.s.regs.regs, run.s.regs.sregs) }
         };
-        let mem = unsafe { std::slice::from_raw_parts(self.mem.0, self.mem_size) };
         let planner = self.planner.as_mut().unwrap();
         planner.refresh_from(&sr);
         let (targets, capped) = planner
-            .plan_capped(mem, &r)
+            .plan_capped(self.mem.as_slice(), &r)
             .map_err(|e| format!("{}: step plan: {e}", self.world.name))?;
         Planner::arm(&self.vcpu, &targets)?;
         self.last_plan = (r.rip, targets.clone());
@@ -1375,6 +1641,8 @@ impl Machine {
     fn spin_idle(&mut self) -> Result<Stop, String> {
         let (rip, if_flag) = {
             let run = self.vcpu.get_kvm_run();
+            // SAFETY: `kvm_sync_regs` is plain data; `sync_regs_ready` (set by
+            // `set_stepping` or a successful run) means KVM or the VMM filled it.
             (unsafe { run.s.regs.regs.rip }, run.if_flag)
         };
         self.set_stepping(false)?;
@@ -1390,19 +1658,26 @@ impl Machine {
         Ok(Stop::Halted)
     }
 
-    fn inject(&mut self) {
+    fn inject(&mut self) -> Result<(), String> {
         let run = self.vcpu.get_kvm_run();
         match self.pic.pending() {
             Some(irq) if run.ready_for_interrupt_injection != 0 && run.if_flag != 0 => {
                 let vector = self.pic.take(irq);
+                // SAFETY: KVM_INTERRUPT reads one kvm_interrupt that outlives the call.
                 let rc = unsafe {
                     libc::ioctl(
                         self.vcpu.as_raw_fd(),
-                        0x4004ae86,
+                        KVM_INTERRUPT,
                         &kvm_interrupt { irq: vector },
                     )
                 };
-                assert_eq!(rc, 0, "KVM_INTERRUPT");
+                if rc != 0 {
+                    return Err(format!(
+                        "{}: KVM_INTERRUPT: {}",
+                        self.world.name,
+                        std::io::Error::last_os_error()
+                    ));
+                }
                 self.vcpu.get_kvm_run().request_interrupt_window = 0;
                 self.stats.irqs += 1;
                 self.record(b'I', vector as u64);
@@ -1410,14 +1685,15 @@ impl Machine {
             Some(_) => run.request_interrupt_window = 1,
             None => run.request_interrupt_window = 0,
         }
+        Ok(())
     }
 
     fn serial_edges(&mut self) {
         if self.com1.edge() {
-            self.pic.raise(4);
+            self.pic.raise(COM1_IRQ);
         }
         if self.com2.edge() {
-            self.pic.raise(3);
+            self.pic.raise(COM2_IRQ);
         }
     }
 
@@ -1475,37 +1751,9 @@ impl Machine {
                 }
             }
             if legal {
-                // Observable effects follow; a held checkpoint no longer
-                // describes the machine.
-                if let Some(u) = self.undo.as_mut() {
-                    u.valid = false;
+                if let Some(stop) = self.enter_deterministic_point(limit, slice_end, frames)? {
+                    return Ok(stop);
                 }
-                self.fm = self.undo_margin;
-                // Guest clock reads can advance time independently of the PMU.
-                // Check before expiring timers or accepting the slice boundary.
-                if self.page_timer.enabled {
-                    self.expire_timers()?;
-                }
-                self.sync_from_page(hard_limit(
-                    limit,
-                    self.pit.deadline,
-                    self.pit_exact,
-                    self.tolerance,
-                ))?;
-                self.sync_page_timer()?;
-                self.expire_timers()?;
-                // Also runs on slice entry after world RX delivery. Never poll
-                // at overflow landings or intermediate precision steps.
-                if self.poll_net(frames, self.world.time >= slice_end)? {
-                    self.note_skew(Site::Sent);
-                    self.set_stepping(false)?;
-                    return Ok(Stop::Sent);
-                }
-                if self.world.time >= slice_end {
-                    self.set_stepping(false)?;
-                    return Ok(Stop::Reached);
-                }
-                self.publish();
             }
             // Stop at the first natural exit at or after `soft` and below
             // `hard`, otherwise by an exact counted stop at `hard`. Two rules combine: the slice
@@ -1522,59 +1770,24 @@ impl Machine {
             // on the stepping margin, so it is deterministic.
             if legal {
                 if remaining > tb.inject_guard() {
-                    self.inject();
+                    self.inject()?;
                 } else {
                     self.vcpu.get_kvm_run().request_interrupt_window = 0;
                 }
             }
-            let rem_soft = soft.saturating_sub(self.world.time);
-            let windowed = false;
-            let window = false;
-            if window != self.exit_req {
-                unsafe { std::ptr::write_volatile(self.page.0.add(2), window as u64) };
-                self.exit_req = window;
-            }
             let syscalls0 = self.page_get(PAGE_SYSCALLS);
             if let Prepared::Idle = tb.prepare(self, remaining, soft, legal)? {
-                if self.page_timer.enabled {
-                    // A proven cycle's canonical landing is deterministic, unlike the
-                    // watchdog and intermediate probe steps that found it.
-                    self.sync_from_page(hard)?;
-                    self.sync_page_timer()?;
-                    self.expire_timers()?;
-                }
-                // A proven PV cycle is deterministic; watchdog landings are not.
-                // Complete pending TX before declaring a completion waiter idle,
-                // including with interrupts disabled or suppressed by the guest.
-                if deferred {
-                    // Device DMA must not cross a checkpoint held during the
-                    // cycle proof, just as at any other deterministic stop.
-                    if let Some(u) = self.undo.as_mut() {
-                        u.valid = false;
-                    }
-                    self.fm = self.undo_margin;
-                    self.set_stepping(false)?;
-                    let memory = unsafe { std::slice::from_raw_parts(self.mem.0, self.mem_size) };
-                    let pending = self
-                        .net
-                        .as_ref()
-                        .map(|n| n.pending_tx(memory))
-                        .transpose()?
-                        .unwrap_or(false);
-                    if self.poll_net(frames, true)? {
-                        self.note_skew(Site::Sent);
-                        return Ok(Stop::Sent);
-                    }
-                    if pending {
+                match self.idle_in_cycle(hard, deferred, frames)? {
+                    Some(stop) => return Ok(stop),
+                    None => {
                         legal = true;
                         continue;
                     }
                 }
-                return self.spin_idle();
             }
             self.vcpu.get_kvm_run().kvm_valid_regs =
                 (KVM_SYNC_X86_REGS | KVM_SYNC_X86_SREGS) as u64;
-            let c0 = tb.start(syscalls0);
+            let c0 = tb.start(syscalls0)?;
             let t_run = Instant::now();
             let run_ptr = self.vcpu.get_kvm_run() as *mut kvm_run;
             let exit = self.vcpu.run();
@@ -1584,38 +1797,24 @@ impl Machine {
                 self.sync_regs_ready = true;
             }
             let run_ns = t_run.elapsed().as_nanos();
-            let kind = match &exit {
-                Err(_) => 0,
-                Ok(VcpuExit::Debug(_)) => 1,
-                Ok(VcpuExit::IoOut(..)) | Ok(VcpuExit::IoIn(..)) => 2,
-                Ok(VcpuExit::MmioRead(..)) | Ok(VcpuExit::MmioWrite(..)) => 3,
-                Ok(VcpuExit::Hlt) => 4,
-                Ok(VcpuExit::IrqWindowOpen) => 5,
-                _ => 6,
-            };
+            let kind = ExitKind::of(&exit) as usize;
             self.stats.kvm_ns[kind] += run_ns;
             self.stats.kvm_n[kind] += 1;
-            let syscalls1 = unsafe { std::ptr::read_volatile(self.page.0.add(PAGE_SYSCALLS)) };
-            let c1 = tb.read(syscalls1);
+            let syscalls1 = self.page.get(PAGE_SYSCALLS);
+            let c1 = tb.read(syscalls1)?;
             let delta = c1 - c0;
             let interrupted = matches!(&exit, Err(e) if e.errno() == libc::EINTR);
-            let syscalled = syscalls1 != syscalls0;
             let run_syscalls = syscalls1.wrapping_sub(syscalls0);
             let run = Run {
                 delta,
                 remaining,
-                rem_soft,
-                windowed,
-                window,
                 interrupted,
                 debug: matches!(exit, Ok(VcpuExit::Debug(_))),
                 run_ns,
-                syscalled,
             };
             let judge = Judge {
                 name: &self.world.name,
                 stepping: self.stepping,
-                pv: self.pv,
                 undo_valid: self.undo.as_ref().is_some_and(|u| u.valid),
                 fm: &mut self.fm,
                 margin: &mut self.margin,
@@ -1651,478 +1850,634 @@ impl Machine {
                     ));
                 }
             }
+            // Take the exit's data out of the vCPU's run structure, so its
+            // handler can use the whole machine. IN and MMIO read responses
+            // are written back before the next KVM_RUN, the first point at
+            // which KVM reads them.
+            let exit = match exit {
+                Err(e) if e.errno() == libc::EINTR => Exit::Eintr,
+                Ok(VcpuExit::Debug(_)) => Exit::Debug,
+                Ok(VcpuExit::IoOut(port, data)) => Exit::IoOut(port, data.to_vec()),
+                Ok(VcpuExit::IoIn(port, data)) => Exit::IoIn(port, ExitData::detach(data)),
+                Ok(VcpuExit::MmioRead(addr, data)) => Exit::MmioRead(addr, ExitData::detach(data)),
+                Ok(VcpuExit::MmioWrite(addr, data)) => Exit::MmioWrite(addr, data.to_vec()),
+                Ok(VcpuExit::Hlt) => Exit::Hlt,
+                Ok(VcpuExit::IrqWindowOpen) => Exit::IrqWindowOpen,
+                Ok(VcpuExit::Shutdown) => Exit::Shutdown,
+                Ok(other) => Exit::Unexpected(format!("{other:?}")),
+                Err(e) => Exit::Failed(e),
+            };
             if T::BRANCHES {
                 self.branches += delta;
             }
             self.stats.time_by[Cause::Progress as usize] += delta;
             self.world.time += delta;
             if legal {
-                // Sent/Hlt/Exited can return before the next loop synchronizes
-                // the page. Validate guest clock progress before exit effects.
-                // The exit still borrows vcpu: use only the disjoint fields.
-                let last = unsafe { std::ptr::read_volatile(self.page.0.add(1)) };
-                let exit_time =
-                    advance_time(self.world.time, last.saturating_sub(self.world.time), hard)?;
-                if self.pv_clock || self.page_timer.enabled {
-                    // In particular HLT must adopt at its full exit time, not
-                    // at a watchdog landing's partial syscall-only time. A
-                    // stop that left the guest's clock ahead of ours could be
-                    // given a next limit below time the guest already read;
-                    // a timer armed here must count from that clock too.
-                    self.stats.time_by[Cause::ClockReads as usize] += exit_time - self.world.time;
-                    self.world.time = exit_time;
-                }
-                if self.page_timer.enabled {
-                    let word =
-                        unsafe { std::ptr::read_volatile(self.page.0.add(PAGE_TIMER_DEADLINE)) };
-                    if self
-                        .page_timer
-                        .pickup(word, &mut self.pit, self.world.time)?
-                    {
-                        self.pic.raise(0);
-                    }
-                    timer_latency(
-                        &mut self.pit,
-                        &mut self.pit_exact,
-                        self.timer_rng.as_mut(),
-                        self.timer_jitter,
-                        self.exact_timer_ppm,
-                    );
-                    if self.pit.expire_through(self.world.time)? > 0 {
-                        self.pic.raise(0);
-                    }
-                }
+                self.adopt_exit_clock(hard)?;
             }
             self.stats.exits += 1;
             if self.stepping {
                 self.stats.steps += 1;
             }
             let now = self.world.time;
-            match exit {
-                Err(e) if e.errno() == libc::EINTR => {
+            let stop = match exit {
+                Exit::Eintr => {
                     self.stats.eintr += 1;
+                    None
                 }
-                Ok(VcpuExit::Debug(_)) => {}
-                Ok(VcpuExit::IoOut(0x52c, data)) => {
-                    // Requested yield: a stop if we reached the soft target,
-                    // otherwise transparent (nothing observable happens).
-                    // PV clock only: 1 means the guest's clock would pass
-                    // the bound we published (`soft`); it waits for time to
-                    // move, so move it there.
-                    let v = data[0];
-                    if v == 1 && self.pv_clock {
-                        let bound = if self.page_timer.enabled {
-                            self.page_get(PAGE_BOUND).min(soft)
-                        } else {
-                            soft
-                        };
-                        self.advance_to(bound, Cause::ClockBound);
-                    }
-                    self.stats.yields += 1;
-                    if self.world.time >= soft {
-                        self.stats.yield_stops += 1;
-                        self.record(b'Y', v as u64);
-                    } else {
+                Exit::Debug => None,
+                Exit::IoOut(PORT_YIELD, data) => {
+                    if !self.guest_yield(data[0], soft) {
                         // A page arm can lower the clock/syscall budget below
                         // the previous soft bound. This is a legal pickup.
                         legal = self.page_timer.enabled;
                     }
+                    None
                 }
-                Ok(VcpuExit::IoOut(port, data)) => {
-                    self.stats.pio += 1;
-                    let v = data[0];
-                    let charge = io_charge(port, true);
-                    // Reserve the full cost arithmetically, without requiring
-                    // it to fit before this world's next delivery boundary.
-                    advance_time(self.world.time, charge, u64::MAX)?;
-                    let descriptor = unsafe { (*run_ptr).__bindgen_anon_1.io };
-                    let pending = if charge > 0 {
-                        Some(PendingIo::new(
-                            self.world.time,
-                            port,
-                            true,
-                            descriptor.size,
-                            descriptor.count,
-                            data.to_vec(),
-                        )?)
-                    } else {
-                        None
-                    };
-                    #[cfg(test)]
-                    if charge > 0 && self.require_io_checkpoint {
-                        assert!(
-                            self.undo.as_ref().is_some_and(|u| u.valid),
-                            "charged access must begin with the real held checkpoint"
-                        );
-                    }
-                    let after_io = self.world.time;
-                    let mut control_stop = false;
-                    let console_before = self.com1.out.len();
-                    match port {
-                        0x3f8..=0x3ff => {
-                            if port == 0x3f8 && v == b'\n' && crate::console_trace_enabled() {
-                                let line_start = self
-                                    .com1
-                                    .out
-                                    .iter()
-                                    .rposition(|&b| b == b'\n')
-                                    .map(|p| p + 1)
-                                    .unwrap_or(0);
-                                crate::emit_console_trace(
-                                    self.world.time,
-                                    self.branches,
-                                    &self.com1.out[line_start..],
-                                );
-                            }
-                            self.com1.write(port - 0x3f8, v)?
-                        }
-                        0x2f8..=0x2ff => {
-                            if self.channel.is_some() {
-                                self.com2.write(port - 0x2f8, v)?;
-                            } else if let Some(line) = crate::management_uart::write(
-                                &mut self.management_framer,
-                                &mut self.com2,
-                                port - 0x2f8,
-                                v,
-                            )? {
-                                self.world.control_requests.push((after_io, line));
-                                control_stop = true;
-                            }
-                        }
-                        0xf6 | 0xf7 => {
-                            let id = u32::from_le_bytes(
-                                data.try_into()
-                                    .map_err(|_| "fault effect must be a 32-bit I/O write")?,
-                            );
-                            self.world.fault_effects.push((id, after_io, port == 0xf6));
-                            control_stop = true;
-                        }
-                        0x20 | 0x21 | 0xa0 | 0xa1 => {
-                            self.pic.write(port, v);
-                            if self.pv {
-                                let m = self.pic.masks() as u64;
-                                self.page_set(PAGE_PIC_IMR, m);
-                            }
-                        }
-                        0x528 => {
-                            self.abi = v as u64;
-                            if self.abi < ABI_PAGE_RESEED && self.page_get(PAGE_ENTROPY_GEN) != 0 {
-                                return Err(format!(
-                                    "{}: checkpoint entropy requires guest ABI 3",
-                                    self.world.name
-                                ));
-                            }
-                            if self.pv_clock && self.page_get(PAGE_PV_CLOCK) != 2 {
-                                return Err(format!(
-                                    "{}: the guest kernel lacks PV clock support; rebuild it from kernel/ for the pv timebase",
-                                    self.world.name
-                                ));
-                            }
-                            if self.page_timer_requested && self.abi < ABI_PAGE_TIMER {
-                                return Err("the guest kernel lacks page timer support; rebuild it from kernel/ or drop --page-timer".into());
-                            }
-                            self.enable_page_timer();
-                            self.pv = v >= 2;
-                            if self.pv {
-                                self.sync_pic();
-                            }
-                        }
-                        0x40..=0x43 | 0x61 | 0x530 => {
-                            let hi = data.get(1).copied().unwrap_or(0);
-                            self.stats.timer_writes += 1;
-                            self.note_skew(Site::Timer);
-                            if let Some(d) = self.pit.deadline.filter(|&d| d <= now) {
-                                // The run that ends here can pass the deadline
-                                // (PV syscall charges, or counter tolerance).
-                                // Rewriting the PIT would drop that tick.
-                                let s = &mut self.stats;
-                                s.timer_overdue += 1;
-                                s.timer_overdue_max_ns = s.timer_overdue_max_ns.max(now - d);
-                                s.timer_write_syscalls_max =
-                                    s.timer_write_syscalls_max.max(run_syscalls);
-                                // PV only, so counter witnesses don't move:
-                                // deliver the due tick before the write.
-                                if self.pv_clock {
-                                    self.expire_timers()?;
-                                }
-                            }
-                            if port == 0x530 {
-                                let ticks = u16::from_le_bytes([v, hi]);
-                                self.pit.program(ticks, now);
-                            } else {
-                                self.pit.write(port, v, now);
-                            }
-                            // A legacy write supersedes the last page request.
-                            if self.page_timer.enabled {
-                                self.page_timer.seen = self.page_get(PAGE_TIMER_DEADLINE);
-                            }
-                            timer_latency(
-                                &mut self.pit,
-                                &mut self.pit_exact,
-                                self.timer_rng.as_mut(),
-                                self.timer_jitter,
-                                self.exact_timer_ppm,
-                            );
-                        }
-                        0x70 => self.rtc_index = v & 0x7f,
-                        0xe9 => self.com1.transmit(v)?,
-                        0xf4 => {
-                            self.guest_exit_code = Some(v);
-                            self.world.state = State::Exited(v);
-                            self.record(b'X', v as u64);
-                            self.set_stepping(false)?;
-                            return Ok(Stop::Exited);
-                        }
-                        BARRIER_PORT if self.barrier => {
-                            if self.world.parked || self.entropy_read != 0 {
-                                return Err(format!(
-                                    "{}: launch barrier reached twice",
-                                    self.world.name
-                                ));
-                            }
-                            self.world.parked = true;
-                            self.record(b'B', 0);
-                            self.set_stepping(false)?;
-                            // Finish the port write now, so the machine is
-                            // parked in a state a fork can save and restore.
-                            self.complete_io()?;
-                            return Ok(Stop::Barrier);
-                        }
-                        0xf5 => {
-                            self.guest_init_error = Some(v);
-                            self.world.state = State::Exited(v);
-                            self.record(b'E', v as u64);
-                            self.set_stepping(false)?;
-                            return Ok(Stop::Exited);
-                        }
-                        _ => {}
-                    }
-                    self.capture_output();
-                    if self.world.observe_console && self.com1.out.len() > console_before {
-                        // Judge::Rollback discarded the exit before reaching here.
-                        // Console ports have zero charge; the sink and pending KVM
-                        // response are committed once at this deterministic exit.
-                        self.world.committed_console = Some((after_io, v));
-                        control_stop = true;
-                        if let Some(u) = self.undo.as_mut() {
-                            u.valid = false;
-                        }
-                    }
-                    self.record(b'O', (port as u64) << 8 | v as u64);
-                    self.serial_edges();
-                    self.pending_io = pending;
-                    if charge > 0 {
-                        if let Some(u) = self.undo.as_mut() {
-                            u.valid = false;
-                        }
-                    }
-                    if control_stop {
-                        self.set_stepping(false)?;
-                        return Ok(Stop::Control);
-                    }
+                Exit::IoOut(port, data) => {
+                    // SAFETY: `run_ptr` is the vCPU's live kvm_run mapping, and
+                    // this is a KVM_EXIT_IO exit, so the `io` union member is set.
+                    let io = unsafe { (*run_ptr).__bindgen_anon_1.io };
+                    self.pio_out(port, &data, (io.size, io.count), now, run_syscalls)?
                 }
-                Ok(VcpuExit::IoIn(port, data)) => {
-                    self.stats.pio += 1;
-                    let charge = io_charge(port, false);
-                    advance_time(self.world.time, charge, u64::MAX)?;
-                    let descriptor = unsafe { (*run_ptr).__bindgen_anon_1.io };
-                    match port {
-                        0x520 => {
-                            let t = self.world.time.max(advance_time(self.tsc_latch, 1, hard)?);
-                            self.tsc_latch = t;
-                            self.stats.time_by[Cause::ClockReads as usize] += t - self.world.time;
-                            self.world.time = t;
-                            data.copy_from_slice(&(t as u32).to_le_bytes()[..data.len()]);
-                        }
-                        0x524 => data.copy_from_slice(
-                            &((self.tsc_latch >> 32) as u32).to_le_bytes()[..data.len()],
-                        ),
-                        BARRIER_PORT if self.barrier => {
-                            let word = self.entropy.get(self.entropy_read).copied().unwrap_or(0);
-                            self.entropy_read += 1;
-                            let len = data.len().min(4);
-                            data[..len].copy_from_slice(&word.to_le_bytes()[..len]);
-                        }
-                        _ => {
-                            let v = match port {
-                                0x3f8..=0x3ff => self.com1.read(port - 0x3f8),
-                                0x2f8..=0x2ff => self.com2.read(port - 0x2f8),
-                                0x20 | 0x21 | 0xa0 | 0xa1 => self.pic.read(port),
-                                0x40..=0x42 | 0x61 => self.pit.read(port, now),
-                                0x71 => rtc_read(self.rtc_index),
-                                _ => 0xff,
-                            };
-                            data.fill(v);
-                        }
-                    }
-                    let pending = if charge > 0 {
-                        Some(PendingIo::new(
-                            self.world.time,
-                            port,
-                            false,
-                            descriptor.size,
-                            descriptor.count,
-                            data.to_vec(),
-                        )?)
-                    } else {
-                        None
-                    };
-                    self.record(b'i', port as u64);
-                    self.serial_edges();
-                    self.pending_io = pending;
-                    if charge > 0 {
-                        if let Some(u) = self.undo.as_mut() {
-                            u.valid = false;
-                        }
-                    }
+                Exit::IoIn(port, mut out) => {
+                    // SAFETY: as for `IoOut`.
+                    let io = unsafe { (*run_ptr).__bindgen_anon_1.io };
+                    // SAFETY: no KVM_RUN since the exit (see `ExitData`).
+                    let mut data = unsafe { out.get() }.to_vec();
+                    self.pio_in(port, &mut data, (io.size, io.count), hard, now)?;
+                    // SAFETY: as above; the handler does not run the vCPU.
+                    unsafe { out.get() }.copy_from_slice(&data);
+                    None
                 }
-                Ok(VcpuExit::MmioRead(addr, data)) => {
-                    self.stats.mmio += 1;
-                    let v = if (CHANNEL_MMIO..CHANNEL_MMIO + 0x1000).contains(&addr) {
-                        self.channel
-                            .as_mut()
-                            .map(|channel| channel.read(addr - CHANNEL_MMIO))
-                            .unwrap_or(0)
-                    } else if (BLK_MMIO..BLK_MMIO + 0x1000).contains(&addr) {
-                        self.blk
-                            .as_mut()
-                            .map(|b| b.read(addr - BLK_MMIO))
-                            .unwrap_or(0)
-                    } else {
-                        match self.net.as_mut() {
-                            Some(n) if (NET_MMIO..NET_MMIO + 0x1000).contains(&addr) => {
-                                n.read(addr - NET_MMIO)
-                            }
-                            _ => 0,
-                        }
-                    };
+                Exit::MmioRead(addr, mut out) => {
+                    let v = self.mmio_read(addr);
+                    // SAFETY: no KVM_RUN since the exit (see `ExitData`).
+                    let data = unsafe { out.get() };
                     let bytes = v.to_le_bytes();
                     let len = data.len().min(4);
                     data[..len].copy_from_slice(&bytes[..len]);
                     self.record(b'r', addr);
+                    None
                 }
-                Ok(VcpuExit::MmioWrite(addr, data)) => {
-                    self.stats.mmio += 1;
-                    let mut v = [0u8; 4];
-                    let len = data.len().min(4);
-                    v[..len].copy_from_slice(&data[..len]);
-                    let v = u32::from_le_bytes(v);
-                    self.record(b'w', addr << 32 | v as u64);
-                    if (CHANNEL_MMIO..CHANNEL_MMIO + 0x1000).contains(&addr) {
-                        let memory =
-                            unsafe { std::slice::from_raw_parts_mut(self.mem.0, self.mem_size) };
-                        if let Some(channel) = self.channel.as_mut() {
-                            let output = channel.write(memory, addr - CHANNEL_MMIO, v)?;
-                            self.take_dma();
-                            if output.irq {
-                                self.pic.raise(CHANNEL_IRQ);
-                            }
-                            if self.channel_output(&output.bytes)? {
-                                self.set_stepping(false)?;
-                                return Ok(Stop::Control);
-                            }
-                        }
-                    }
-                    if (BLK_MMIO..BLK_MMIO + 0x1000).contains(&addr) {
-                        let m =
-                            unsafe { std::slice::from_raw_parts_mut(self.mem.0, self.mem_size) };
-                        if let Some(b) = self.blk.as_mut() {
-                            let done = b.write(m, addr - BLK_MMIO, v)?;
-                            self.take_dma();
-                            if done.completed > 0 {
-                                // The disk changed outside guest RAM: no rollback
-                                // may cross this point.
-                                if let Some(u) = self.undo.as_mut() {
-                                    u.valid = false;
-                                }
-                            }
-                            // Each request, in completion order: the trace shows
-                            // where every FLUSH falls among the writes.
-                            for (kind, sector, status) in done.log {
-                                self.record(
-                                    b'd',
-                                    (kind as u64) << 56 | (status as u64) << 48 | sector,
-                                );
-                            }
-                            if done.irq {
-                                self.pic.raise(BLK_IRQ);
-                            }
-                        }
-                    }
-                    if (NET_MMIO..NET_MMIO + 0x1000).contains(&addr) {
-                        let (mem, size) = (self.mem.0, self.mem_size);
-                        let m = unsafe { std::slice::from_raw_parts_mut(mem, size) };
-                        if let Some(n) = self.net.as_mut() {
-                            let out = n.write_at(
-                                m,
-                                addr - NET_MMIO,
-                                v,
-                                self.world
-                                    .time
-                                    .max(unsafe { std::ptr::read_volatile(self.page.0.add(1)) }),
-                            );
-                            self.take_dma();
-                            let out = out?;
-                            if out.irq {
-                                self.raise_net();
-                            }
-                            if !out.frames.is_empty() {
-                                frames.extend(out.frames);
-                                self.note_skew(Site::Sent);
-                                self.set_stepping(false)?;
-                                return Ok(Stop::Sent);
-                            }
-                        }
-                    }
-                }
-                Ok(VcpuExit::Hlt) => {
-                    self.stats.halts += 1;
-                    self.note_skew(Site::Halt);
-                    self.record(b'H', 0);
-                    // The world checks pending interrupts while halted.
-                    self.sync_pic();
-                    self.set_stepping(false)?;
-                    if deferred && self.poll_net(frames, true)? {
-                        self.note_skew(Site::Sent);
-                        return Ok(Stop::Sent);
-                    }
-                    if self.vcpu.get_kvm_run().if_flag == 0 {
-                        self.world.state = State::Exited(0xfe);
-                        return Ok(Stop::Exited);
-                    }
-                    // A guest may publish buffers and halt without a kick.
-                    if self.poll_net(frames, true)? {
-                        self.note_skew(Site::Sent);
-                        return Ok(Stop::Sent);
-                    }
-                    self.world.state = State::Halted;
-                    return Ok(Stop::Halted);
-                }
-                Ok(VcpuExit::IrqWindowOpen) => {
+                Exit::MmioWrite(addr, data) => self.mmio_write(addr, &data, frames)?,
+                Exit::Hlt => Some(self.halt(deferred, frames)?),
+                Exit::IrqWindowOpen => {
                     self.stats.window_exits += 1;
+                    None
                 }
-                Ok(VcpuExit::Shutdown) => {
+                Exit::Shutdown => {
                     self.world.state = State::Exited(0xff);
                     self.set_stepping(false)?;
-                    return Ok(Stop::Exited);
+                    Some(Stop::Exited)
                 }
-                Ok(other) => return Err(format!("{}: unexpected exit {other:?}", self.world.name)),
-                Err(e) => return Err(format!("{}: KVM_RUN: {e}", self.world.name)),
+                Exit::Unexpected(other) => {
+                    return Err(format!("{}: unexpected exit {other}", self.world.name))
+                }
+                Exit::Failed(e) => return Err(format!("{}: KVM_RUN: {e}", self.world.name)),
+            };
+            if let Some(stop) = stop {
+                return Ok(stop);
             }
         }
     }
 
-    /// Hash of architectural registers and all guest RAM.
+    /// The loop's work at a deterministic point, before the guest runs on:
+    /// adopt the guest clock and timer, then end the slice if it is done.
+    fn enter_deterministic_point(
+        &mut self,
+        limit: u64,
+        slice_end: u64,
+        frames: &mut Vec<Vec<u8>>,
+    ) -> Result<Option<Stop>, String> {
+        // Observable effects follow; a held checkpoint no longer
+        // describes the machine.
+        if let Some(u) = self.undo.as_mut() {
+            u.valid = false;
+        }
+        self.fm = self.undo_margin;
+        // Guest clock reads can advance time independently of the PMU.
+        // Check before expiring timers or accepting the slice boundary.
+        if self.page_timer.enabled {
+            self.expire_timers()?;
+        }
+        self.sync_from_page(hard_limit(
+            limit,
+            self.pit.deadline,
+            self.pit_exact,
+            self.tolerance,
+        ))?;
+        self.sync_page_timer()?;
+        self.expire_timers()?;
+        // Also runs on slice entry after world RX delivery. Never poll
+        // at overflow landings or intermediate precision steps.
+        if self.poll_net(frames, self.world.time >= slice_end)? {
+            self.note_skew(Site::Sent);
+            self.set_stepping(false)?;
+            return Ok(Some(Stop::Sent));
+        }
+        if self.world.time >= slice_end {
+            self.set_stepping(false)?;
+            return Ok(Some(Stop::Reached));
+        }
+        self.publish();
+        Ok(None)
+    }
+
+    /// The timebase proved a PV state cycle: the guest is idle, unless
+    /// deferred TX is pending (None: run on from a deterministic point).
+    fn idle_in_cycle(
+        &mut self,
+        hard: u64,
+        deferred: bool,
+        frames: &mut Vec<Vec<u8>>,
+    ) -> Result<Option<Stop>, String> {
+        if self.page_timer.enabled {
+            // A proven cycle's canonical landing is deterministic, unlike the
+            // watchdog and intermediate probe steps that found it.
+            self.sync_from_page(hard)?;
+            self.sync_page_timer()?;
+            self.expire_timers()?;
+        }
+        // A proven PV cycle is deterministic; watchdog landings are not.
+        // Complete pending TX before declaring a completion waiter idle,
+        // including with interrupts disabled or suppressed by the guest.
+        if deferred {
+            // Device DMA must not cross a checkpoint held during the
+            // cycle proof, just as at any other deterministic stop.
+            if let Some(u) = self.undo.as_mut() {
+                u.valid = false;
+            }
+            self.fm = self.undo_margin;
+            self.set_stepping(false)?;
+            let pending = self
+                .net
+                .as_ref()
+                .map(|n| n.pending_tx(self.mem.as_slice()))
+                .transpose()?
+                .unwrap_or(false);
+            if self.poll_net(frames, true)? {
+                self.note_skew(Site::Sent);
+                return Ok(Some(Stop::Sent));
+            }
+            if pending {
+                return Ok(None);
+            }
+        }
+        self.spin_idle().map(Some)
+    }
+
+    /// At a deterministic exit, before its effects: validate the guest
+    /// clock's progress and adopt it and the page timer. Sent/Hlt/Exited can
+    /// return before the next loop iteration synchronizes the page.
+    fn adopt_exit_clock(&mut self, hard: u64) -> Result<(), String> {
+        let exit_time = self.checked_page_time(hard)?;
+        if self.pv_clock || self.page_timer.enabled {
+            // In particular HLT must adopt at its full exit time, not
+            // at a watchdog landing's partial syscall-only time. A
+            // stop that left the guest's clock ahead of ours could be
+            // given a next limit below time the guest already read;
+            // a timer armed here must count from that clock too.
+            self.advance_to(exit_time, Cause::ClockReads);
+        }
+        if self.page_timer.enabled {
+            self.sync_page_timer()?;
+            self.expire_timers()?;
+        }
+        Ok(())
+    }
+
+    /// A requested yield (`PORT_YIELD`): a stop if it reached the soft
+    /// target, otherwise transparent (nothing observable happens). Returns
+    /// whether it reached it.
+    fn guest_yield(&mut self, v: u8, soft: u64) -> bool {
+        // PV clock only: 1 means the guest's clock would pass
+        // the bound we published (`soft`); it waits for time to
+        // move, so move it there.
+        if v == 1 && self.pv_clock {
+            let bound = if self.page_timer.enabled {
+                self.page_get(PAGE_BOUND).min(soft)
+            } else {
+                soft
+            };
+            self.advance_to(bound, Cause::ClockBound);
+        }
+        self.stats.yields += 1;
+        if self.world.time >= soft {
+            self.stats.yield_stops += 1;
+            self.record(b'Y', v as u64);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// A port write. `io` is KVM's (size, count) for the access.
+    fn pio_out(
+        &mut self,
+        port: u16,
+        data: &[u8],
+        io: (u8, u32),
+        now: u64,
+        run_syscalls: u64,
+    ) -> Result<Option<Stop>, String> {
+        self.stats.pio += 1;
+        let v = data[0];
+        let charge = io_charge(port, true);
+        // Reserve the full cost arithmetically, without requiring
+        // it to fit before this world's next delivery boundary.
+        advance_time(self.world.time, charge, u64::MAX)?;
+        let pending = if charge > 0 {
+            Some(PendingIo::new(
+                self.world.time,
+                port,
+                true,
+                io.0,
+                io.1,
+                data.to_vec(),
+            )?)
+        } else {
+            None
+        };
+        #[cfg(test)]
+        if charge > 0 && self.require_io_checkpoint {
+            assert!(
+                self.undo.as_ref().is_some_and(|u| u.valid),
+                "charged access must begin with the real held checkpoint"
+            );
+        }
+        let after_io = self.world.time;
+        let mut control_stop = false;
+        let console_before = self.com1.out.len();
+        match port {
+            COM1..=COM1_LAST => {
+                if port == COM1 && v == b'\n' && crate::console_trace_enabled() {
+                    let line_start = self
+                        .com1
+                        .out
+                        .iter()
+                        .rposition(|&b| b == b'\n')
+                        .map(|p| p + 1)
+                        .unwrap_or(0);
+                    crate::emit_console_trace(
+                        self.world.time,
+                        self.branches,
+                        &self.com1.out[line_start..],
+                    );
+                }
+                self.com1.write(port - COM1, v)?
+            }
+            COM2..=COM2_LAST => {
+                if self.channel.is_some() {
+                    self.com2.write(port - COM2, v)?;
+                } else if let Some(line) = crate::management_uart::write(
+                    &mut self.management_framer,
+                    &mut self.com2,
+                    port - COM2,
+                    v,
+                )? {
+                    self.world.control_requests.push((after_io, line));
+                    control_stop = true;
+                }
+            }
+            PORT_EFFECT | PORT_FAILURE => {
+                let id = u32::from_le_bytes(
+                    data.try_into()
+                        .map_err(|_| "fault effect must be a 32-bit I/O write")?,
+                );
+                self.world
+                    .fault_effects
+                    .push((id, after_io, port == PORT_EFFECT));
+                control_stop = true;
+            }
+            0x20 | 0x21 | 0xa0 | 0xa1 => {
+                self.pic.write(port, v);
+                if self.pv {
+                    let m = self.pic.masks() as u64;
+                    self.page_set(PAGE_PIC_IMR, m);
+                }
+            }
+            PORT_TIME_READY => self.announce_abi(v)?,
+            0x40..=0x43 | 0x61 | PORT_TIMER => {
+                let hi = data.get(1).copied().unwrap_or(0);
+                self.timer_write(port, v, hi, now, run_syscalls)?;
+            }
+            RTC_INDEX => self.rtc_index = v & 0x7f,
+            PORT_DEBUGCON => self.com1.transmit(v)?,
+            PORT_EXIT => {
+                self.guest_exit_code = Some(v);
+                self.world.state = State::Exited(v);
+                self.record(b'X', v as u64);
+                self.set_stepping(false)?;
+                return Ok(Some(Stop::Exited));
+            }
+            BARRIER_PORT if self.barrier => {
+                if self.world.parked || self.entropy_read != 0 {
+                    return Err(format!("{}: launch barrier reached twice", self.world.name));
+                }
+                self.world.parked = true;
+                self.record(b'B', 0);
+                self.set_stepping(false)?;
+                // Finish the port write now, so the machine is
+                // parked in a state a fork can save and restore.
+                self.complete_io()?;
+                return Ok(Some(Stop::Barrier));
+            }
+            PORT_INIT_ERROR => {
+                self.guest_init_error = Some(v);
+                self.world.state = State::Exited(v);
+                self.record(b'E', v as u64);
+                self.set_stepping(false)?;
+                return Ok(Some(Stop::Exited));
+            }
+            _ => {}
+        }
+        self.capture_output();
+        if self.world.observe_console && self.com1.out.len() > console_before {
+            // Judge::Rollback discarded the exit before reaching here.
+            // Console ports have zero charge; the sink and pending KVM
+            // response are committed once at this deterministic exit.
+            self.world.committed_console = Some((after_io, v));
+            control_stop = true;
+            if let Some(u) = self.undo.as_mut() {
+                u.valid = false;
+            }
+        }
+        self.record(b'O', (port as u64) << 8 | v as u64);
+        self.serial_edges();
+        self.pending_io = pending;
+        if charge > 0 {
+            if let Some(u) = self.undo.as_mut() {
+                u.valid = false;
+            }
+        }
+        if control_stop {
+            self.set_stepping(false)?;
+            return Ok(Some(Stop::Control));
+        }
+        Ok(None)
+    }
+
+    /// The guest kernel announces its ABI (`PORT_TIME_READY`).
+    fn announce_abi(&mut self, v: u8) -> Result<(), String> {
+        self.abi = v as u64;
+        if self.abi < ABI_PAGE_RESEED && self.page_get(PAGE_ENTROPY_GEN) != 0 {
+            return Err(format!(
+                "{}: checkpoint entropy requires guest ABI 3",
+                self.world.name
+            ));
+        }
+        if self.pv_clock && self.page_get(PAGE_PV_CLOCK) != 2 {
+            return Err(format!(
+                "{}: the guest kernel lacks PV clock support; rebuild it from kernel/ for the pv timebase",
+                self.world.name
+            ));
+        }
+        if self.page_timer_requested && self.abi < ABI_PAGE_TIMER {
+            return Err("the guest kernel lacks page timer support; rebuild it from kernel/ or drop --page-timer".into());
+        }
+        self.enable_page_timer();
+        self.pv = v >= 2;
+        if self.pv {
+            self.sync_pic();
+        }
+        Ok(())
+    }
+
+    /// A write to the PIT or the PV timer port.
+    fn timer_write(
+        &mut self,
+        port: u16,
+        v: u8,
+        hi: u8,
+        now: u64,
+        run_syscalls: u64,
+    ) -> Result<(), String> {
+        self.stats.timer_writes += 1;
+        self.note_skew(Site::Timer);
+        if let Some(d) = self.pit.deadline.filter(|&d| d <= now) {
+            // The run that ends here can pass the deadline
+            // (PV syscall charges, or counter tolerance).
+            // Rewriting the PIT would drop that tick.
+            let s = &mut self.stats;
+            s.timer_overdue += 1;
+            s.timer_overdue_max_ns = s.timer_overdue_max_ns.max(now - d);
+            s.timer_write_syscalls_max = s.timer_write_syscalls_max.max(run_syscalls);
+            // PV only, so counter witnesses don't move:
+            // deliver the due tick before the write.
+            if self.pv_clock {
+                self.expire_timers()?;
+            }
+        }
+        if port == PORT_TIMER {
+            let ticks = u16::from_le_bytes([v, hi]);
+            self.pit.program(ticks, now);
+        } else {
+            self.pit.write(port, v, now);
+        }
+        // A legacy write supersedes the last page request.
+        if self.page_timer.enabled {
+            self.page_timer.seen = self.page_get(PAGE_TIMER_DEADLINE);
+        }
+        timer_latency(
+            &mut self.pit,
+            &mut self.pit_exact,
+            self.timer_rng.as_mut(),
+            self.timer_jitter,
+            self.exact_timer_ppm,
+        );
+        Ok(())
+    }
+
+    /// A port read, answered in `data`. `io` is KVM's (size, count).
+    fn pio_in(
+        &mut self,
+        port: u16,
+        data: &mut [u8],
+        io: (u8, u32),
+        hard: u64,
+        now: u64,
+    ) -> Result<(), String> {
+        self.stats.pio += 1;
+        let charge = io_charge(port, false);
+        advance_time(self.world.time, charge, u64::MAX)?;
+        match port {
+            PORT_TIME_LO => {
+                let t = self.world.time.max(advance_time(self.tsc_latch, 1, hard)?);
+                self.tsc_latch = t;
+                self.advance_to(t, Cause::ClockReads);
+                data.copy_from_slice(&(t as u32).to_le_bytes()[..data.len()]);
+            }
+            PORT_TIME_HI => {
+                data.copy_from_slice(&((self.tsc_latch >> 32) as u32).to_le_bytes()[..data.len()])
+            }
+            BARRIER_PORT if self.barrier => {
+                let word = self.entropy.get(self.entropy_read).copied().unwrap_or(0);
+                self.entropy_read += 1;
+                let len = data.len().min(4);
+                data[..len].copy_from_slice(&word.to_le_bytes()[..len]);
+            }
+            _ => {
+                let v = match port {
+                    COM1..=COM1_LAST => self.com1.read(port - COM1),
+                    COM2..=COM2_LAST => self.com2.read(port - COM2),
+                    0x20 | 0x21 | 0xa0 | 0xa1 => self.pic.read(port),
+                    0x40..=0x42 | 0x61 => self.pit.read(port, now),
+                    RTC_DATA => rtc_read(self.rtc_index),
+                    _ => 0xff,
+                };
+                data.fill(v);
+            }
+        }
+        let pending = if charge > 0 {
+            Some(PendingIo::new(
+                self.world.time,
+                port,
+                false,
+                io.0,
+                io.1,
+                data.to_vec(),
+            )?)
+        } else {
+            None
+        };
+        self.record(b'i', port as u64);
+        self.serial_edges();
+        self.pending_io = pending;
+        if charge > 0 {
+            if let Some(u) = self.undo.as_mut() {
+                u.valid = false;
+            }
+        }
+        Ok(())
+    }
+
+    /// The device register value an MMIO read returns.
+    fn mmio_read(&mut self, addr: u64) -> u32 {
+        self.stats.mmio += 1;
+        if (CHANNEL_MMIO..CHANNEL_MMIO + 0x1000).contains(&addr) {
+            self.channel
+                .as_mut()
+                .map(|channel| channel.read(addr - CHANNEL_MMIO))
+                .unwrap_or(0)
+        } else if (BLK_MMIO..BLK_MMIO + 0x1000).contains(&addr) {
+            self.blk
+                .as_mut()
+                .map(|b| b.read(addr - BLK_MMIO))
+                .unwrap_or(0)
+        } else {
+            match self.net.as_mut() {
+                Some(n) if (NET_MMIO..NET_MMIO + 0x1000).contains(&addr) => n.read(addr - NET_MMIO),
+                _ => 0,
+            }
+        }
+    }
+
+    fn mmio_write(
+        &mut self,
+        addr: u64,
+        data: &[u8],
+        frames: &mut Vec<Vec<u8>>,
+    ) -> Result<Option<Stop>, String> {
+        self.stats.mmio += 1;
+        let mut v = [0u8; 4];
+        let len = data.len().min(4);
+        v[..len].copy_from_slice(&data[..len]);
+        let v = u32::from_le_bytes(v);
+        self.record(b'w', addr << 32 | v as u64);
+        if (CHANNEL_MMIO..CHANNEL_MMIO + 0x1000).contains(&addr) {
+            if let Some(channel) = self.channel.as_mut() {
+                let output = channel.write(self.mem.as_mut_slice(), addr - CHANNEL_MMIO, v)?;
+                self.take_dma();
+                if output.irq {
+                    self.pic.raise(CHANNEL_IRQ);
+                }
+                if self.channel_output(&output.bytes)? {
+                    self.set_stepping(false)?;
+                    return Ok(Some(Stop::Control));
+                }
+            }
+        }
+        if (BLK_MMIO..BLK_MMIO + 0x1000).contains(&addr) {
+            if let Some(b) = self.blk.as_mut() {
+                let done = b.write(self.mem.as_mut_slice(), addr - BLK_MMIO, v)?;
+                self.take_dma();
+                if done.completed > 0 {
+                    // The disk changed outside guest RAM: no rollback
+                    // may cross this point.
+                    if let Some(u) = self.undo.as_mut() {
+                        u.valid = false;
+                    }
+                }
+                // Each request, in completion order: the trace shows
+                // where every FLUSH falls among the writes.
+                for (kind, sector, status) in done.log {
+                    self.record(b'd', (kind as u64) << 56 | (status as u64) << 48 | sector);
+                }
+                if done.irq {
+                    self.pic.raise(BLK_IRQ);
+                }
+            }
+        }
+        if (NET_MMIO..NET_MMIO + 0x1000).contains(&addr) {
+            if let Some(n) = self.net.as_mut() {
+                let out = n.write_at(
+                    self.mem.as_mut_slice(),
+                    addr - NET_MMIO,
+                    v,
+                    self.world.time.max(self.page.get(PAGE_LAST)),
+                );
+                self.take_dma();
+                let out = out?;
+                if out.irq {
+                    self.raise_net();
+                }
+                if !out.frames.is_empty() {
+                    frames.extend(out.frames);
+                    self.note_skew(Site::Sent);
+                    self.set_stepping(false)?;
+                    return Ok(Some(Stop::Sent));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn halt(&mut self, deferred: bool, frames: &mut Vec<Vec<u8>>) -> Result<Stop, String> {
+        self.stats.halts += 1;
+        self.note_skew(Site::Halt);
+        self.record(b'H', 0);
+        // The world checks pending interrupts while halted.
+        self.sync_pic();
+        self.set_stepping(false)?;
+        if deferred && self.poll_net(frames, true)? {
+            self.note_skew(Site::Sent);
+            return Ok(Stop::Sent);
+        }
+        if self.vcpu.get_kvm_run().if_flag == 0 {
+            self.world.state = State::Exited(0xfe);
+            return Ok(Stop::Exited);
+        }
+        // A guest may publish buffers and halt without a kick.
+        if self.poll_net(frames, true)? {
+            self.note_skew(Site::Sent);
+            return Ok(Stop::Sent);
+        }
+        self.world.state = State::Halted;
+        Ok(Stop::Halted)
+    }
+
     /// Hashes of guest RAM and the vCPU state a checkpoint restores, by part:
     /// general and control registers with segment bases, FPU/XSAVE, XCRs,
     /// pending exception/interrupt/NMI state, syscall/TLS MSRs, the shared time
     /// page, RAM and any retained disk. The digest is the hash of the parts.
     /// Not covered: other MSRs, debug registers and other VMM device models.
-    pub fn state_digest(&mut self) -> (String, Vec<(&'static str, String)>) {
+    pub fn state_digest(&mut self) -> Result<StateDigest, String> {
         let hex = |h: Sha256| format!("{:x}", h.finalize());
+        let e = |part: &str, err: kvm_ioctls::Error| format!("state digest {part}: {err}");
         let mut parts = Vec::new();
-        let r = self.vcpu.get_regs().unwrap();
-        let s = self.vcpu.get_sregs().unwrap();
+        let r = self.vcpu.get_regs().map_err(|x| e("regs", x))?;
+        let s = self.vcpu.get_sregs().map_err(|x| e("sregs", x))?;
         let mut h = Sha256::new();
         for v in [
             r.rax, r.rbx, r.rcx, r.rdx, r.rsi, r.rdi, r.rsp, r.rbp, r.r8, r.r9, r.r10, r.r11,
@@ -2133,12 +2488,12 @@ impl Machine {
         }
         parts.push(("regs", hex(h)));
         let mut h = Sha256::new();
-        for w in self.vcpu.get_xsave().unwrap().region {
+        for w in self.vcpu.get_xsave().map_err(|x| e("xsave", x))?.region {
             h.update(w.to_le_bytes());
         }
         parts.push(("xsave", hex(h)));
         let mut h = Sha256::new();
-        let xcrs = self.vcpu.get_xcrs().unwrap();
+        let xcrs = self.vcpu.get_xcrs().map_err(|x| e("xcrs", x))?;
         for x in &xcrs.xcrs[..xcrs.nr_xcrs as usize] {
             h.update(x.xcr.to_le_bytes());
             h.update(x.value.to_le_bytes());
@@ -2147,21 +2502,21 @@ impl Machine {
         // Event fields count only while live: KVM keeps the last exception's
         // vector/error code and the last interrupt's vector after delivery, so
         // they differ after a rollback without any guest-visible effect.
-        let e = self.vcpu.get_vcpu_events().unwrap();
-        let exception = if e.exception.injected != 0 || e.exception.pending != 0 {
+        let ev = self.vcpu.get_vcpu_events().map_err(|x| e("events", x))?;
+        let exception = if ev.exception.injected != 0 || ev.exception.pending != 0 {
             format!(
                 "{}/{}/{}/{}/{}",
-                e.exception.injected,
-                e.exception.pending,
-                e.exception.nr,
-                e.exception.has_error_code,
-                e.exception.error_code
+                ev.exception.injected,
+                ev.exception.pending,
+                ev.exception.nr,
+                ev.exception.has_error_code,
+                ev.exception.error_code
             )
         } else {
             "none".into()
         };
-        let interrupt = if e.interrupt.injected != 0 {
-            format!("{}/{}", e.interrupt.nr, e.interrupt.soft)
+        let interrupt = if ev.interrupt.injected != 0 {
+            format!("{}/{}", ev.interrupt.nr, ev.interrupt.soft)
         } else {
             "none".into()
         };
@@ -2169,7 +2524,7 @@ impl Machine {
             "events",
             format!(
                 "exc:{exception} int:{interrupt} shadow:{} nmi:{}/{}/{}",
-                e.interrupt.shadow, e.nmi.injected, e.nmi.pending, e.nmi.masked,
+                ev.interrupt.shadow, ev.nmi.injected, ev.nmi.pending, ev.nmi.masked,
             ),
         ));
         // KERNEL_GS_BASE, STAR, LSTAR, CSTAR, SFMASK, TSC_AUX, PAT, SYSENTER_*.
@@ -2192,8 +2547,9 @@ impl Machine {
                 ..Default::default()
             })
             .collect();
-        let mut msrs = Msrs::from_entries(&entries).unwrap();
-        let n = self.vcpu.get_msrs(&mut msrs).unwrap();
+        let mut msrs =
+            Msrs::from_entries(&entries).map_err(|x| format!("state digest msrs: {x:?}"))?;
+        let n = self.vcpu.get_msrs(&mut msrs).map_err(|x| e("msrs", x))?;
         let mut h = Sha256::new();
         for m in &msrs.as_slice()[..n] {
             h.update(m.index.to_le_bytes());
@@ -2221,7 +2577,7 @@ impl Machine {
         for (_, d) in &parts {
             all.update(d.as_bytes());
         }
-        (hex(all), parts)
+        Ok((hex(all), parts))
     }
 
     /// Headerless little-endian u64 per 4 KiB guest RAM page, in PFN order.
@@ -2283,11 +2639,11 @@ mod net_poll_tests {
         ) -> Result<Prepared, String> {
             Ok(Prepared::Run)
         }
-        fn start(&mut self, _: u64) -> u64 {
-            0
+        fn start(&mut self, _: u64) -> Result<u64, String> {
+            Ok(0)
         }
-        fn read(&mut self, _: u64) -> u64 {
-            0
+        fn read(&mut self, _: u64) -> Result<u64, String> {
+            Ok(0)
         }
         fn inject_guard(&self) -> u64 {
             INJECT_GUARD
@@ -2323,24 +2679,15 @@ mod net_poll_tests {
                 kernel[0x1f1] = 1;
                 kernel.extend(code);
                 let spec = BootSpec {
-                    kernel: &kernel,
-                    initrd: &[],
-                    cmdline: String::new(),
-                    mem: INITRD_ADDR + 0x100000,
-                    rng_seed: [0; 32],
                     mac: Some([2, 0, 0, 0, 0, 1]),
-                    control_channel: false,
-                    disk: None,
-                    undo_margin: 0,
-                    barrier: false,
                     pv_clock: true,
-                    page_timer: false,
+                    ..BootSpec::test(&kernel)
                 };
                 let mut m = Machine::new(&kvm, "net-poll", &spec).unwrap();
                 let mut r = m.vcpu.get_regs().unwrap();
                 r.rflags = 0x202;
                 m.vcpu.set_regs(&r).unwrap();
-                let memory = unsafe { std::slice::from_raw_parts_mut(m.mem.0, m.mem_size) };
+                let memory = m.mem.as_mut_slice();
                 let net = m.net.as_mut().unwrap();
                 net.set_deferred_tx(deferred);
                 for (off, v) in [
@@ -2376,7 +2723,7 @@ mod net_poll_tests {
                     assert_eq!(
                         m.time,
                         if deferred {
-                            crate::virtio_net::TX_POLL_NS
+                            seedbox_engine_core::virtio_network::TX_POLL_NS
                         } else {
                             limit - early
                         },
@@ -2442,18 +2789,8 @@ mod net_poll_tests {
             kernel[0x1f1] = 1;
             kernel.extend(code);
             let spec = BootSpec {
-                kernel: &kernel,
-                initrd: &[],
-                cmdline: String::new(),
-                mem: INITRD_ADDR + 0x100000,
-                rng_seed: [0; 32],
-                mac: None,
-                control_channel: false,
-                disk: None,
-                undo_margin: 0,
-                barrier: false,
                 pv_clock: true,
-                page_timer: false,
+                ..BootSpec::test(&kernel)
             };
             let mut m = Machine::new(&kvm, "pv-stop", &spec).unwrap();
             let mut frames = Vec::new();
@@ -2513,23 +2850,15 @@ mod net_poll_tests {
                 kernel[0x1f1] = 1;
                 kernel.extend(code);
                 let spec = BootSpec {
-                    kernel: &kernel,
-                    initrd: &[],
-                    cmdline: String::new(),
-                    mem: INITRD_ADDR + 0x100000,
-                    rng_seed: [0; 32],
                     mac: Some([2, 0, 0, 0, 0, 1]),
-                    control_channel: false,
-                    disk: None,
-                    undo_margin: 0,
-                    barrier: false,
                     pv_clock: true,
                     page_timer,
+                    ..BootSpec::test(&kernel)
                 };
                 let mut m = Machine::new(&kvm, "tx-spin", &spec).unwrap();
                 m.abi = ABI_PAGE_TIMER;
                 m.enable_page_timer();
-                let memory = unsafe { std::slice::from_raw_parts_mut(m.mem.0, m.mem_size) };
+                let memory = m.mem.as_mut_slice();
                 let net = m.net.as_mut().unwrap();
                 net.set_deferred_tx(true);
                 for (off, v) in [
@@ -2566,7 +2895,7 @@ mod net_poll_tests {
                     Stop::Exited,
                     "{case}"
                 );
-                let evidence = (m.time, m.exit_witness(), m.state_digest());
+                let evidence = (m.time, m.exit_witness(), m.state_digest().unwrap());
                 if let Some(want) = &first {
                     assert_eq!(&evidence, want, "{case}");
                 } else {
@@ -2602,18 +2931,8 @@ mod io_boundary_tests {
         kernel[0x1f1] = 1;
         kernel.extend(code);
         let spec = BootSpec {
-            kernel: &kernel,
-            initrd: &[],
-            cmdline: String::new(),
-            mem: INITRD_ADDR + 0x100000,
-            rng_seed: [0; 32],
-            mac: None,
-            control_channel: false,
-            disk: None,
             undo_margin: undo,
-            barrier: false,
-            pv_clock: false,
-            page_timer: false,
+            ..BootSpec::test(&kernel)
         };
         let mut machine = Machine::new(kvm, "io-probe", &spec).unwrap();
         let mut r = machine.vcpu.get_regs().unwrap();
@@ -2648,7 +2967,12 @@ mod io_boundary_tests {
                         m.run_until(counter, 10_000, 0, &mut frames).unwrap(),
                         Stop::Halted | Stop::Exited
                     ) {}
-                    (m.exit_witness(), m.state_digest().0, m.time, m.branches)
+                    (
+                        m.exit_witness(),
+                        m.state_digest().unwrap().0,
+                        m.time,
+                        m.branches,
+                    )
                 };
                 let want = finish(&mut m, &mut counter);
                 let mut fresh = probe(&kvm, port, write, undo);
@@ -2668,15 +2992,23 @@ mod io_boundary_tests {
     fn page_capture_has_documented_format_and_preserves_ram_witness_state() {
         let kvm = Kvm::new().unwrap();
         let mut m = probe(&kvm, 0x530, true, 0);
-        let before = (m.exit_witness(), m.state_digest(), m.memory().to_vec());
+        let before = (
+            m.exit_witness(),
+            m.state_digest().unwrap(),
+            m.memory().to_vec(),
+        );
         let pages = m.page_hashes();
-        assert_eq!(pages.len(), m.mem_size / 4096 * 8);
+        assert_eq!(pages.len(), m.mem.len() / 4096 * 8);
         for (pfn, page) in before.2.chunks(4096).enumerate() {
             let hash = u64::from_le_bytes(Sha256::digest(page)[..8].try_into().unwrap());
             assert_eq!(&pages[pfn * 8..pfn * 8 + 8], &hash.to_le_bytes());
         }
         assert_eq!(
-            (m.exit_witness(), m.state_digest(), m.memory().to_vec()),
+            (
+                m.exit_witness(),
+                m.state_digest().unwrap(),
+                m.memory().to_vec()
+            ),
             before
         );
     }
@@ -2708,7 +3040,7 @@ mod io_boundary_tests {
         let clock = m.page_get(0);
         let window = m.page_get(2);
         let exits = m.stats.exits;
-        let count = counter.read_fast();
+        let count = counter.read_fast().unwrap();
         assert_eq!(
             m.run_until(counter, 750, 0, &mut frames).unwrap(),
             Stop::Reached
@@ -2728,7 +3060,7 @@ mod io_boundary_tests {
         );
         assert_eq!(m.time, 1000);
         assert_eq!(m.branches, 0);
-        assert_eq!(counter.read_fast(), count);
+        assert_eq!(counter.read_fast().unwrap(), count);
         assert!(m.pending_io.is_none());
         assert_eq!(m.stats.exits, exits);
         let complete = m.vcpu.get_regs().unwrap();
@@ -2751,14 +3083,6 @@ mod io_boundary_tests {
         );
         assert_eq!(m.branches, 1);
         assert_eq!(&m.memory()[0x80000..0x80004], &[0x78, 0x56, 0x34, 0x12]);
-    }
-
-    #[test]
-    #[ignore = "first unchanged failed case; requires exclusive leased KVM lane"]
-    fn first_case_preserves_boot_and_halts() {
-        let kvm = Kvm::new().unwrap();
-        let mut counter = Counter::new().unwrap();
-        check_port(&kvm, &mut counter, 0x40, true);
     }
 
     #[test]
@@ -2803,7 +3127,7 @@ mod io_boundary_tests {
                     assert!(m.undo.as_ref().unwrap().stats.checkpoints > 0);
                 }
                 let checkpoint_count = m.undo.as_ref().map_or(0, |u| u.stats.checkpoints);
-                let evidence = (m.exit_witness(), m.state_digest());
+                let evidence = (m.exit_witness(), m.state_digest().unwrap());
                 // Same registers/RAM, but pending response/debt must change
                 // both the terminal exit witness and the named state part.
                 let saved = m.pending_io.clone();
@@ -2814,7 +3138,7 @@ mod io_boundary_tests {
                     } else {
                         p.remaining_ns -= 1;
                     }
-                    let changed = (m.exit_witness(), m.state_digest());
+                    let changed = (m.exit_witness(), m.state_digest().unwrap());
                     assert_ne!(changed.0, evidence.0);
                     assert_ne!(changed.1 .0, evidence.1 .0);
                     for ((name, hash), (other_name, other_hash)) in
@@ -2838,7 +3162,7 @@ mod io_boundary_tests {
                     m.run_until(&mut counter, 1000, 0, &mut frames).unwrap(),
                     Stop::Reached
                 );
-                let evidence = (m.exit_witness(), m.state_digest());
+                let evidence = (m.exit_witness(), m.state_digest().unwrap());
                 if let Some(want) = &completed {
                     assert_eq!(&evidence, want, "completed undo={undo} exact={exact}");
                 } else {
@@ -2869,18 +3193,8 @@ mod io_boundary_tests {
         kernel[0x1f1] = 1;
         kernel.extend(code);
         let spec = BootSpec {
-            kernel: &kernel,
-            initrd: &[],
-            cmdline: String::new(),
-            mem: INITRD_ADDR + 0x100000,
-            rng_seed: [0; 32],
-            mac: None,
-            control_channel: false,
-            disk: None,
             undo_margin: undo,
-            barrier: false,
-            pv_clock: false,
-            page_timer: false,
+            ..BootSpec::test(&kernel)
         };
         let mut machine = Machine::new(kvm, "stop-probe", &spec).unwrap();
         let mut r = machine.vcpu.get_regs().unwrap();
@@ -2909,18 +3223,9 @@ mod io_boundary_tests {
             kernel[0x1f1] = 1;
             kernel.extend(&code);
             let spec = BootSpec {
-                kernel: &kernel,
-                initrd: &[],
-                cmdline: String::new(),
-                mem: INITRD_ADDR + 0x100000,
-                rng_seed: [0; 32],
-                mac: None,
-                control_channel: false,
-                disk: None,
                 undo_margin: undo,
-                barrier: false,
-                pv_clock: false,
                 page_timer: true,
+                ..BootSpec::test(&kernel)
             };
             let mut m = Machine::new(&kvm, "page-rearm", &spec).unwrap();
             let mut r = m.vcpu.get_regs().unwrap();
@@ -2985,7 +3290,7 @@ mod io_boundary_tests {
             let got = (
                 word(&mut m).wrapping_sub(start),
                 m.exit_witness(),
-                m.state_digest().0,
+                m.state_digest().unwrap().0,
             );
             if let Some(want) = &want {
                 assert_eq!(&got, want, "undo={undo}");
@@ -3047,7 +3352,7 @@ mod io_boundary_tests {
                     }
                 }
                 let rip = m.vcpu.get_regs().unwrap().rip;
-                let evidence = (m.time, rip, m.exit_witness(), m.state_digest().0);
+                let evidence = (m.time, rip, m.exit_witness(), m.state_digest().unwrap().0);
                 if let Some(want) = &want {
                     assert_eq!(&evidence, want, "{what}");
                 } else {
@@ -3055,49 +3360,6 @@ mod io_boundary_tests {
                 }
             }
         }
-    }
-
-    fn halt_snapshot(m: &mut Machine, stage: &str) {
-        let regs = m.vcpu.get_regs().unwrap();
-        let sregs = m.vcpu.get_sregs().unwrap();
-        let (sync, if_flag, exit_reason) = {
-            let run = m.vcpu.get_kvm_run();
-            (unsafe { run.s.regs.regs }, run.if_flag, run.exit_reason)
-        };
-        let marker = m.memory()[0x80000..0x80004].to_vec();
-        let page: Vec<_> = (0..PAGE_FIELDS).map(|i| m.page_get(i)).collect();
-        eprintln!(
-            "{}",
-            serde_json::json!({"stage":stage,"state":format!("{:?}",m.state),"guest_exit":m.guest_exit_code,"guest_init_error":m.guest_init_error,"arch":{"rip":regs.rip,"rflags":regs.rflags,"rax":regs.rax,"rdx":regs.rdx,"rsp":regs.rsp,"cr0":sregs.cr0,"cs_base":sregs.cs.base},"sync":{"rip":sync.rip,"rflags":sync.rflags,"rax":sync.rax,"rdx":sync.rdx},"run_if_flag":if_flag,"raw_run_exit_reason":exit_reason,"pending_io":m.pending_io.as_ref().map(|p|serde_json::json!({"remaining_ns":p.remaining_ns,"port":p.port,"write":p.write,"width":p.width,"count":p.count,"bytes":p.bytes})),"time_ns":m.time,"branches":m.branches,"page":page,"marker":marker,"exits":m.stats.exits,"halts":m.stats.halts,"irqs":m.stats.irqs,"kvm_exits":m.stats.kvm_n})
-        );
-    }
-
-    #[test]
-    #[ignore = "single manager-authorized diagnostic of unchanged halt case"]
-    fn diagnose_first_halt_case() {
-        let kvm = Kvm::new().unwrap();
-        let mut counter = Counter::new().unwrap();
-        let mut m = probe(&kvm, 0x40, true, 0);
-        let mut kernel = vec![0u8; 1024];
-        kernel[0x1f1] = 1;
-        kernel.extend_from_slice(&m.memory()[0x100000..0x100000 + 26]);
-        eprintln!("fixture_kernel_sha256={:x}", Sha256::digest(&kernel));
-        halt_snapshot(&mut m, "before_first_run");
-        let mut frames = Vec::new();
-        for (limit, stage) in [
-            (500, "after_partial_500"),
-            (750, "after_partial_750"),
-            (1000, "after_completion_1000"),
-        ] {
-            let stop = m.run_until(&mut counter, limit, 0, &mut frames);
-            eprintln!("limit={limit} stop={stop:?}");
-            halt_snapshot(&mut m, stage);
-            assert_eq!(stop.unwrap(), Stop::Reached);
-        }
-        let stop = m.run_until(&mut counter, 2000, 0, &mut frames);
-        eprintln!("limit=2000 stop={stop:?}");
-        halt_snapshot(&mut m, "after_final_resume");
-        assert_eq!(stop.unwrap(), Stop::Halted);
     }
 
     /// Pause with 161 ns of I/O cost owed and a periodic timer armed: while
@@ -3151,7 +3413,7 @@ mod io_boundary_tests {
             );
             assert_eq!(m.branches, 1);
             assert_eq!(&m.memory()[0x80000..0x80004], &[0x78, 0x56, 0x34, 0x12]);
-            let evidence = (m.time, m.exit_witness(), m.state_digest().0);
+            let evidence = (m.time, m.exit_witness(), m.state_digest().unwrap().0);
             if let Some(want) = &want {
                 assert_eq!(&evidence, want, "undo={undo}");
             } else {
@@ -3232,6 +3494,8 @@ mod fork_tests {
             fields.insert(name.to_string(), (index, count));
             index += count;
         }
+        assert_eq!(fields["tsc"], (PAGE_TSC, 1));
+        assert_eq!(fields["last"], (PAGE_LAST, 1));
         assert_eq!(fields["syscalls"], (PAGE_SYSCALLS, 1));
         assert_eq!(fields["pic_imr"], (PAGE_PIC_IMR, 1));
         assert_eq!(fields["net_isr"], (PAGE_NET_ISR, 1));
@@ -3256,6 +3520,16 @@ mod fork_tests {
             .parse()
             .unwrap();
         assert_eq!(abi, ABI_PAGE_TIMER);
+        for (name, port) in [
+            ("TIME_LO", PORT_TIME_LO),
+            ("TIME_HI", PORT_TIME_HI),
+            ("TIME_READY", PORT_TIME_READY),
+            ("YIELD", PORT_YIELD),
+            ("TIMER", PORT_TIMER),
+        ] {
+            let define = format!("#define SEEDBOX_PORT_{name}\t{port:#x}\t");
+            assert!(header.contains(&define), "{define}");
+        }
     }
 
     #[test]
@@ -3407,18 +3681,9 @@ mod fork_tests {
         kernel[0x1f1] = 1;
         kernel.extend(code);
         let spec = BootSpec {
-            kernel: &kernel,
-            initrd: &[],
-            cmdline: String::new(),
-            mem: INITRD_ADDR + 0x100000,
-            rng_seed: [0; 32],
-            mac: None,
-            control_channel: false,
-            disk: None,
             undo_margin: undo,
             barrier,
-            pv_clock: false,
-            page_timer: false,
+            ..BootSpec::test(&kernel)
         };
         Machine::new(kvm, "fork-probe", &spec).unwrap()
     }
@@ -3451,7 +3716,7 @@ mod fork_tests {
         assert_eq!(&m.memory()[0x81000..0x81004], &[0xad, 0xde, 0, 0]);
         (
             m.exit_witness(),
-            m.state_digest().0,
+            m.state_digest().unwrap().0,
             m.time,
             m.branches,
             m.memory()[0x80000..0x80004].to_vec(),
@@ -3543,7 +3808,12 @@ mod fork_tests {
                 m.run_until(counter, 10_000_000, 0, &mut frames).unwrap(),
                 Stop::Exited | Stop::Halted
             ) {}
-            (m.exit_witness(), m.state_digest().0, m.time, m.branches)
+            (
+                m.exit_witness(),
+                m.state_digest().unwrap().0,
+                m.time,
+                m.branches,
+            )
         };
         for undo in [0, 256] {
             let mut cold = probe_machine(&kvm, undo, false);
@@ -3603,7 +3873,7 @@ mod fork_tests {
             let pages = fresh.restore(&snapshot).unwrap();
             assert_eq!(
                 pages,
-                (fresh.mem_size / 4096) as u64,
+                (fresh.mem.len() / 4096) as u64,
                 "full copy, undo={undo}"
             );
             assert!(fresh.parked);
@@ -3618,7 +3888,7 @@ mod fork_tests {
             let pages = fresh.restore(&snapshot).unwrap();
             if undo > 0 {
                 assert!(
-                    pages < (fresh.mem_size / 4096) as u64,
+                    pages < (fresh.mem.len() / 4096) as u64,
                     "only written pages copied back"
                 );
             }
@@ -3685,7 +3955,12 @@ mod fork_tests {
                 first.1,
                 "the witness covers both incarnations"
             );
-            let evidence = (first, new.time, new.exit_witness(), new.state_digest().0);
+            let evidence = (
+                first,
+                new.time,
+                new.exit_witness(),
+                new.state_digest().unwrap().0,
+            );
             if let Some(want) = &want {
                 assert_eq!(&evidence, want, "undo={undo}");
             } else {
@@ -3889,18 +4164,8 @@ mod timed_log_tests {
         kernel[0x1f1] = 1;
         kernel.extend_from_slice(&code);
         let spec = BootSpec {
-            kernel: &kernel,
-            initrd: &[],
-            cmdline: String::new(),
-            mem: INITRD_ADDR + 0x100000,
-            rng_seed: [0; 32],
-            mac: None,
-            control_channel: false,
-            disk: None,
             undo_margin: undo,
-            barrier: false,
-            pv_clock: false,
-            page_timer: false,
+            ..BootSpec::test(&kernel)
         };
         let mut m = Machine::new(kvm, "timed", &spec).unwrap();
         let mut r = m.vcpu.get_regs().unwrap();
@@ -3939,7 +4204,7 @@ mod timed_log_tests {
                 // Reading metadata and taking a full-state digest are observation only.
                 let before = m.exit_witness();
                 if cap > 0 {
-                    let _ = m.state_digest();
+                    let _ = m.state_digest().unwrap();
                 }
                 assert_eq!(before, m.exit_witness());
                 assert_eq!(
@@ -3954,7 +4219,7 @@ mod timed_log_tests {
                 let evidence = (
                     m.time,
                     m.exit_witness(),
-                    m.state_digest().0,
+                    m.state_digest().unwrap().0,
                     m.com1.out.clone(),
                     m.com2.out.clone(),
                 );
@@ -4060,12 +4325,12 @@ mod timed_log_tests {
             }
             Ok(prepared)
         }
-        fn start(&mut self, syscalls: u64) -> u64 {
+        fn start(&mut self, syscalls: u64) -> Result<u64, String> {
             self.counter.start(syscalls)
         }
-        fn read(&mut self, _: u64) -> u64 {
+        fn read(&mut self, _: u64) -> Result<u64, String> {
             if self.first && !self.rollback {
-                self.counter.read() + 1_000_000
+                Ok(self.counter.read()? + 1_000_000)
             } else {
                 self.counter.read()
             }
@@ -4142,11 +4407,11 @@ mod committed_trigger_tests {
             }
             Ok(Prepared::Run)
         }
-        fn start(&mut self, _: u64) -> u64 {
-            0
+        fn start(&mut self, _: u64) -> Result<u64, String> {
+            Ok(0)
         }
-        fn read(&mut self, _: u64) -> u64 {
-            0
+        fn read(&mut self, _: u64) -> Result<u64, String> {
+            Ok(0)
         }
         fn inject_guard(&self) -> u64 {
             INJECT_GUARD
@@ -4168,18 +4433,8 @@ mod committed_trigger_tests {
         kernel[0x1f1] = 1;
         kernel.extend_from_slice(&[0xb0, b'A', 0xe6, 0xe9, 0xf4]);
         let spec = BootSpec {
-            kernel: &kernel,
-            initrd: &[],
-            cmdline: String::new(),
-            mem: INITRD_ADDR + 0x100000,
-            rng_seed: [0; 32],
-            mac: None,
-            control_channel: false,
-            disk: None,
             undo_margin: 256,
-            barrier: false,
-            pv_clock: false,
-            page_timer: false,
+            ..BootSpec::test(&kernel)
         };
         let mut m = Machine::new(&kvm, "source", &spec).unwrap();
         m.observe_console = true;

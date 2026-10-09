@@ -34,7 +34,7 @@
 use super::pv_plan::clock_plan;
 #[cfg(test)]
 use super::PAGE_TIMER_DEADLINE;
-use super::{map, Machine, Mapping, PAGE_BOUND, PAGE_SYSCALLS, PAGE_SYSCALL_TARGET};
+use super::{Machine, Mapping, PAGE_BOUND, PAGE_SYSCALLS, PAGE_SYSCALL_TARGET};
 use crate::timebase::{Judge, Prepared, Run, Timebase, Verdict};
 use crate::undo::VcpuState;
 use std::time::Duration;
@@ -91,11 +91,6 @@ impl PvClock {
             syscall_ns: SYSCALL_NS,
             max_false_alarms: u64::MAX,
         })
-    }
-
-    /// Probes are per machine: `Machine::snapshot` refuses one inside a probe.
-    pub fn checkpoint_boundary(&self) -> Result<(), String> {
-        Ok(())
     }
 
     /// Recreate host-only watchdog scratch after restoring a machine;
@@ -182,10 +177,12 @@ impl ProbeMachine for Machine {
         key.0
     }
     fn key(&mut self) -> Result<Key, String> {
+        // SAFETY: probes run only after `set_stepping(true)`, which fills the
+        // synchronized registers, and each landing refreshes them.
         Ok(key(&unsafe { self.vcpu.get_kvm_run().s.regs.regs }))
     }
     fn clock_marker(&self) -> u64 {
-        self.page_get(1)
+        self.page_get(super::PAGE_LAST)
     }
     fn save(&mut self) -> Result<Saved, String> {
         Saved::take(self)
@@ -246,15 +243,15 @@ impl Timebase for PvClock {
         self._watchdog.hold(m.pv_progress.hold_watchdog())?;
         prepared
     }
-    fn start(&mut self, syscalls: u64) -> u64 {
+    fn start(&mut self, syscalls: u64) -> Result<u64, String> {
         self.syscalls0 = syscalls;
-        0
+        Ok(0)
     }
 
-    fn read(&mut self, syscalls: u64) -> u64 {
-        (syscalls - self.syscalls0)
+    fn read(&mut self, syscalls: u64) -> Result<u64, String> {
+        Ok((syscalls - self.syscalls0)
             .saturating_mul(self.syscall_ns)
-            .min(self.remaining)
+            .min(self.remaining))
     }
 
     fn inject_guard(&self) -> u64 {
@@ -296,21 +293,18 @@ impl Saved {
         cpu.save(&m.vcpu, "spin check")?;
         let ram = match m.undo.as_mut() {
             Some(u) => {
-                u.sync(&m._vm, m.mem.0)?;
+                u.sync(&m._vm, m.mem.as_slice())?;
                 None
             }
             None => {
-                let ram = Mapping {
-                    ptr: super::SendPtr(map(m.mem_size)?),
-                    size: m.mem_size,
-                };
-                unsafe { std::ptr::copy_nonoverlapping(m.mem.0, ram.ptr.0, m.mem_size) };
+                let mut ram = Mapping::new(m.mem.len())?;
+                ram.as_mut_slice().copy_from_slice(m.mem.as_slice());
                 Some(ram)
             }
         };
         Ok(Self {
             cpu,
-            page: page_copy(m),
+            page: m.page.copy(),
             ram,
             written: Vec::new(),
         })
@@ -321,7 +315,7 @@ impl Saved {
     fn difference(&mut self, m: &mut Machine) -> Result<Comparison, String> {
         let mut cpu = VcpuState::new(m.msrs.clone());
         cpu.save(&m.vcpu, "spin check")?;
-        let page = page_copy(m);
+        let page = m.page.copy();
         let part = match self.cpu.differs(&cpu) {
             Some(part) => Some(part),
             None => match self.page.iter().zip(page.iter()).position(|(a, b)| a != b) {
@@ -329,12 +323,9 @@ impl Saved {
                 None => {
                     let ram = match (&self.ram, m.undo.as_mut()) {
                         (None, Some(u)) => {
-                            u.unchanged_since_sync(&m._vm, m.mem.0, &mut self.written)?
+                            u.unchanged_since_sync(&m._vm, m.mem.as_slice(), &mut self.written)?
                         }
-                        (Some(ram), _) => unsafe {
-                            std::slice::from_raw_parts(ram.ptr.0, ram.size)
-                                == std::slice::from_raw_parts(m.mem.0, m.mem_size)
-                        },
+                        (Some(ram), _) => ram.as_slice() == m.mem.as_slice(),
                         (None, None) => return Err("spin check: RAM not saved".into()),
                     };
                     (!ram).then(|| "ram".to_string())
@@ -348,12 +339,6 @@ impl Saved {
     }
 }
 
-fn page_copy(m: &Machine) -> Box<[u8; 4096]> {
-    let mut page = Box::new([0u8; 4096]);
-    unsafe { std::ptr::copy_nonoverlapping(m.page.0 as *const u8, page.as_mut_ptr(), 4096) };
-    page
-}
-
 /// A periodic signal to this thread, every `period` of its CPU time, so a
 /// KVM_RUN that makes no exit returns with EINTR.
 struct Watchdog(libc::timer_t);
@@ -363,6 +348,8 @@ extern "C" fn on_tick(_: libc::c_int) {}
 impl Watchdog {
     fn new(period: Duration) -> Result<Self, String> {
         let err = |what: &str| format!("pv watchdog {what}: {}", std::io::Error::last_os_error());
+        // SAFETY: the handler does nothing; every structure passed is zeroed
+        // or initialized here and outlives its call.
         unsafe {
             let mut sa: libc::sigaction = std::mem::zeroed();
             sa.sa_sigaction = on_tick as *const () as usize;
@@ -398,6 +385,7 @@ impl Watchdog {
 impl Watchdog {
     /// Hold back ticks on this thread (they stay pending), or let them in.
     fn hold(&self, on: bool) -> Result<(), String> {
+        // SAFETY: changes only this thread's mask, from a set built here.
         unsafe {
             let mut set: libc::sigset_t = std::mem::zeroed();
             libc::sigemptyset(&mut set);
@@ -420,6 +408,7 @@ impl Watchdog {
 
 impl Drop for Watchdog {
     fn drop(&mut self) {
+        // SAFETY: the timer `new` created; nothing uses it after drop.
         unsafe { libc::timer_delete(self.0) };
         let _ = self.hold(false);
     }
@@ -427,7 +416,7 @@ impl Drop for Watchdog {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{BootSpec, Stop, INITRD_ADDR};
+    use super::super::{BootSpec, Stop};
     use super::*;
     use kvm_ioctls::Kvm;
 
@@ -464,18 +453,9 @@ mod tests {
         kernel[0x1f1] = 1;
         kernel.extend(code);
         let spec = BootSpec {
-            kernel: &kernel,
-            initrd: &[],
-            cmdline: String::new(),
-            mem: INITRD_ADDR + 0x100000,
-            rng_seed: [0; 32],
-            mac: None,
-            control_channel: false,
-            disk: None,
             undo_margin: undo,
-            barrier: false,
             pv_clock: true,
-            page_timer: false,
+            ..BootSpec::test(&kernel)
         };
         let mut m = Machine::new(kvm, "pv-probe", &spec).unwrap();
         let mut r = m.vcpu.get_regs().unwrap();
@@ -544,8 +524,11 @@ mod tests {
         m.page_set(PAGE_SYSCALLS, 17);
         let mut charge = |m: &mut Machine, legal: bool| {
             clock.prepare(m, 1_000_000, 1_000_000, legal).unwrap();
-            clock.start(17);
-            (clock.read(27), m.page_get(super::super::PAGE_SYSCALL_NS))
+            clock.start(17).unwrap();
+            (
+                clock.read(27).unwrap(),
+                m.page_get(super::super::PAGE_SYSCALL_NS),
+            )
         };
         assert_eq!(charge(&mut m, true), (9370, 937));
         m.throttle_permille = Some(4000);
@@ -693,7 +676,7 @@ mod tests {
                 // once without entering the guest's absent interrupt handler.
                 m.wake(wake);
                 m.expire_timers().unwrap();
-                m.inject();
+                m.inject().unwrap();
                 assert_eq!(m.stats.irqs, 1);
                 assert_eq!(m.pic.pending(), None);
                 let mut rng = m.timer_rng.as_ref().unwrap().clone();
